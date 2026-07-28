@@ -3304,6 +3304,7 @@ module.exports = {
   calculateLawnOverallScore,
   lawnScoreDelta,
   lawnScoreValue,
+  resolveStressDamage,
   singleVoiceObservation,
   parseJsonObject,
   parseJsonArray,

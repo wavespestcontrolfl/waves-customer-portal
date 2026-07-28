@@ -6008,6 +6008,10 @@ function LawnAssessmentCompletionBlock({
   service,
   disabled,
   onConfirmed,
+  // Fires false while the existing-assessment lookup is in flight and true
+  // once it settles — the parent must not treat the pre-load null confirmed
+  // id as "retake pending".
+  onReady,
   // Optional on-site lawn-length (gauge) photo — captured inline next to the turf
   // photos here, but stored on the shared turf-height state (CompletionPanel owns
   // it). Only rendered when the gauge-reading capture applies (turf-height flag).
@@ -6057,7 +6061,11 @@ function LawnAssessmentCompletionBlock({
     setConfirmedId(null);
     setError("");
     onConfirmed?.(null);
-    if (!service?.id) return () => { cancelled = true; };
+    onReady?.(false);
+    if (!service?.id) {
+      onReady?.(true);
+      return () => { cancelled = true; };
+    }
 
     setLoading(true);
     adminFetch(`/admin/lawn-assessment/service/${service.id}`)
@@ -6082,7 +6090,15 @@ function LawnAssessmentCompletionBlock({
           onConfirmed?.(assessment.id);
         }
       })
-      .catch(() => {})
+      .then(() => {
+        if (!cancelled) onReady?.(true);
+      })
+      .catch(() => {
+        // The lookup learned NOTHING — report failed, never ready: the parent
+        // omits lawnAssessmentId so the server's visit-linked fallback (DB
+        // truth) still grounds any existing confirmed scores.
+        if (!cancelled) onReady?.("failed");
+      })
       .finally(() => {
         if (!cancelled) setLoading(false);
       });
@@ -6124,6 +6140,10 @@ function LawnAssessmentCompletionBlock({
   async function analyze() {
     if (!service?.customerId || photos.length === 0) return;
     setAnalyzing(true);
+    // Same suspension as the confirmation POST: the vision analysis can run
+    // long, and a report generated mid-analysis would carry an explicit-null
+    // assessment state for scores that are about to be reviewed.
+    onReady?.(false);
     setError("");
     try {
       const response = await adminFetch("/admin/lawn-assessment/assess", {
@@ -6153,12 +6173,20 @@ function LawnAssessmentCompletionBlock({
       setError(err.message || "Assessment failed");
     } finally {
       setAnalyzing(false);
+      // Settled either way: post-analysis the row is unconfirmed (or the
+      // analysis failed with photos pending) — explicit null IS the true
+      // "review outstanding" state.
+      onReady?.(true);
     }
   }
 
   async function confirm() {
     if (!result?.assessment?.id) return;
     setConfirming(true);
+    // Readiness is suspended while the confirmation POST is in flight — the
+    // parent's id is stale until it lands, and generating meanwhile would
+    // send an explicit null that suppresses the assessment being confirmed.
+    onReady?.(false);
     setError("");
     try {
       const response = await adminFetch("/admin/lawn-assessment/confirm", {
@@ -6182,8 +6210,17 @@ function LawnAssessmentCompletionBlock({
       const assessmentId = response?.assessment?.id || result.assessment.id;
       setConfirmedId(assessmentId);
       onConfirmed?.(assessmentId);
+      onReady?.(true);
     } catch (err) {
       setError(err.message || "Confirm failed");
+      // A definitive 4xx rejection means the write did NOT commit — null is
+      // the true state (retake still pending), so readiness returns true and
+      // the explicit-null payload keeps any superseded row suppressed.
+      // Ambiguous failures (network, 5xx, lost response) report failed: the
+      // write may have committed, so the server grounds from DB truth.
+      const definitiveRejection =
+        Number(err?.status) >= 400 && Number(err?.status) < 500;
+      onReady?.(definitiveRejection ? true : "failed");
     } finally {
       setConfirming(false);
     }
@@ -8665,6 +8702,10 @@ export function CompletionPanel({
   const [treatmentPlanPlannedProductIds, setTreatmentPlanPlannedProductIds] =
     useState([]);
   const [lawnAssessmentId, setLawnAssessmentId] = useState(null);
+  // False while the assessment block is still looking up the visit's existing
+  // assessment — the AI-report payload omits lawnAssessmentId until then so a
+  // pre-load null is never misread as "retake pending".
+  const [lawnAssessmentReady, setLawnAssessmentReady] = useState(false);
   const [lawnAssessmentRevision, setLawnAssessmentRevision] = useState(0);
   const [savedDraft, setSavedDraft] = useState(null);
   const [showDraftPrompt, setShowDraftPrompt] = useState(false);
@@ -10102,6 +10143,16 @@ export function CompletionPanel({
     }
     const payload = {
       scheduledServiceId: service.id || null,
+      // The CURRENTLY confirmed assessment: an id grounds exactly that row,
+      // null means a retake is pending, and the field is OMITTED while the
+      // block's existing-assessment lookup is still in flight (the server
+      // then falls back to the visit-linked row) or for non-lawn visits.
+      // Tri-state: true = lookup succeeded (send id or explicit null);
+      // "failed"/false = omit the field so the server grounds from its own
+      // visit-linked lookup (DB truth) instead of trusting a blind client.
+      ...(isLawn && lawnAssessmentReady === true
+        ? { lawnAssessmentId: lawnAssessmentId || null }
+        : {}),
       customerName: service.customerName,
       serviceType: service.serviceType,
       serviceLine: service.serviceLine || service.service_line || undefined,
@@ -10140,7 +10191,14 @@ export function CompletionPanel({
       observations.length > 0 ||
       recommendations.length > 0 ||
       Boolean(concern) ||
-      payload.pestActivityRating !== null;
+      payload.pestActivityRating !== null ||
+      // A confirmed photo-scored assessment is substantive visit detail on
+      // its own — a scores-only lawn visit can still generate.
+      Boolean(payload.lawnAssessmentId) ||
+      // The omitted-field fallback state must REACH the server — after a
+      // failed lookup the client can't know whether a visit-linked confirmed
+      // row exists; the server's validated gate decides.
+      (isLawn && lawnAssessmentReady === "failed");
     return { payload, hasReportInput };
   }
   function recordActionScope(label, scope, treatmentApplied) {
@@ -11880,8 +11938,9 @@ export function CompletionPanel({
               <Field label="Lawn assessment">
                 <LawnAssessmentCompletionBlock
                   service={service}
-                  disabled={isIncompleteVisit || submitting}
+                  disabled={isIncompleteVisit || submitting || generating}
                   onConfirmed={handleLawnAssessmentConfirmed}
+                  onReady={setLawnAssessmentReady}
                   showGaugePhoto={turfHeightFlag}
                   gaugePhoto={turfHeight.gaugePhoto}
                   onGaugePhoto={(p) => setTurfHeight((v) => ({ ...v, gaugePhoto: p }))}
@@ -12226,7 +12285,7 @@ export function CompletionPanel({
                   }
                   setGenerating(false);
                 }}
-                disabled={generating}
+                disabled={generating || (isLawn && lawnAssessmentReady === false)}
                 style={{
                   ...secondaryPill,
                   marginTop: 4,
@@ -13698,8 +13757,9 @@ export function CompletionPanel({
               <label style={labelStyle}>Lawn Assessment</label>{" "}
               <LawnAssessmentCompletionBlock
                 service={service}
-                disabled={isIncompleteVisit || submitting}
+                disabled={isIncompleteVisit || submitting || generating}
                 onConfirmed={handleLawnAssessmentConfirmed}
+                onReady={setLawnAssessmentReady}
                 showGaugePhoto={turfHeightFlag}
                 gaugePhoto={turfHeight.gaugePhoto}
                 onGaugePhoto={(p) => setTurfHeight((v) => ({ ...v, gaugePhoto: p }))}
@@ -14101,7 +14161,7 @@ export function CompletionPanel({
                 }
                 setGenerating(false);
               }}
-              disabled={generating}
+              disabled={generating || (isLawn && lawnAssessmentReady === false)}
               style={{
                 width: "100%",
                 padding: "10px 16px",

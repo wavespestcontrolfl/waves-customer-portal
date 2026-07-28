@@ -7641,7 +7641,7 @@ router.post('/generate-report', async (req, res) => {
     const crypto = require('crypto');
     const { buildReportCopyContext } = require('../services/service-report/report-copy-context');
     const {
-      scheduledServiceId, customerName, serviceType, technicianName, serviceDate, arrivalTime,
+      scheduledServiceId, lawnAssessmentId, customerName, serviceType, technicianName, serviceDate, arrivalTime,
       serviceNotes, productsApplied, products,
       areasServiced, actionsCompleted, observations, recommendations,
       customerInteraction, customerConcern, pestActivityRating, photoCount,
@@ -7662,11 +7662,33 @@ router.post('/generate-report', async (req, res) => {
     const ratingNum = Number.isInteger(pestActivityRating) ? pestActivityRating : null;
     // Same "is there enough to generate?" rule as the client (buildAiReportPayload).
     // photoCount is intentionally NOT sufficient on its own — the model can't see photos.
+    // A confirmed photo-scored lawn assessment is substantive input on its
+    // own — but only a VALIDATED one (exists, tech-confirmed, linked to the
+    // authorized visit). A stale/crafted id must not open the gate for an
+    // otherwise-empty request the grounding would later reject fail-soft.
+    let hasValidLawnAssessment = false;
+    if (scheduledServiceId && lawnAssessmentId !== null) {
+      try {
+        // Explicit id → validate that exact row. Absent field (failed client
+        // lookup / legacy caller / scores-only visit) → validate the same
+        // visit-linked row the grounding fallback will use, so the documented
+        // fallback stays reachable. Explicit null (retake pending) counts as
+        // no assessment.
+        hasValidLawnAssessment = !!(await db('lawn_assessments')
+          .where({
+            ...(lawnAssessmentId ? { id: lawnAssessmentId } : {}),
+            service_id: scheduledServiceId,
+            confirmed_by_tech: true,
+          })
+          .first('id'));
+      } catch { /* fail toward not-substantive */ }
+    }
     const hasReportInput = Boolean((serviceNotes || '').trim())
       || productsText.length > 0
       || areas.length > 0 || actions.length > 0 || obs.length > 0 || recs.length > 0
       || concernText.length > 0
-      || ratingNum !== null;
+      || ratingNum !== null
+      || hasValidLawnAssessment;
     if (!hasReportInput) return res.status(400).json({ error: 'Not enough visit detail to generate a report' });
 
     const PEST_ACTIVITY_LABELS = { 0: 'none', 1: 'very low', 2: 'low', 3: 'moderate', 4: 'high', 5: 'severe' };
@@ -7701,7 +7723,7 @@ A generic report is a failed report. Build both sections around the concrete det
 
 2. **No overpromising.** Never claim: elimination, eradication, impenetrable, guaranteed, 100%, total protection, pest-free, foolproof. Use language like: reduce activity, manage pressure, support long-term control, limit conducive conditions.
 
-3. **No invented observations.** Only reference conditions, pest types, or findings that appear in the service notes. If notes say "general pest control" with no specifics, write generally. Do not fabricate sightings.
+3. **No invented observations.** Only reference conditions, pest types, or findings that appear in the service notes. If notes say "general pest control" with no specifics, write generally. Do not fabricate sightings. ONE exception: tech-confirmed LAWN ASSESSMENT scores supplied in GROUNDING CONTEXT are verified findings for this visit — you may (and should) reference them and their deltas even when the notes do not repeat them.
 
 4. **No brand names for products.** Use active ingredient names (fipronil, bifenthrin, imidacloprid, prodiamine, etc.) or functional descriptions (non-repellent residual, insect growth regulator, pre-emergent herbicide, systemic drench). If the active ingredient is not provided in the inputs, use the functional description only.
 
@@ -7931,6 +7953,14 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
     try {
       const ctx = await buildReportCopyContext({
         customerId: groundingCustomerId,
+        // Only pass the visit linkage when the caller was authorized for
+        // service grounding (groundingCustomerId is set on that same path).
+        scheduledServiceId: groundingCustomerId ? scheduledServiceId : null,
+        // The closeout sends its CURRENT confirmation state: an id grounds
+        // exactly that row; explicit null means a retake is pending (the old
+        // confirmed row is superseded — no today section); absent (legacy
+        // caller) falls back to the visit-linked lookup.
+        lawnAssessmentId: groundingCustomerId ? lawnAssessmentId : undefined,
         serviceType: groundingServiceType,
         serviceLine: null, // derived from the server-side service type, not the body
         suppressPressureTrend: groundingSuppressPressure,
@@ -7942,6 +7972,24 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
       contextSignals = ctx.signals || {};
     } catch (ctxErr) {
       logger.warn(`[generate-report] grounding context failed: ${ctxErr.message}`);
+    }
+
+    // Scores-only requests live or die by the assessment grounding: when the
+    // validated assessment was the ONLY substantive input and the grounding
+    // load then failed (or resolved to retake-pending), there is nothing real
+    // to write from — reject instead of returning generic copy the closeout
+    // would cache as this visit's report.
+    const assessmentWasOnlyInput = hasValidLawnAssessment
+      && !(serviceNotes || '').trim()
+      && !productsText.length
+      && !areas.length && !actions.length && !obs.length && !recs.length
+      && !concernText.length
+      && ratingNum === null;
+    if (assessmentWasOnlyInput && !contextSignals.hasCurrentLawnAssessment) {
+      return res.status(503).json({
+        error: 'Lawn assessment grounding is unavailable right now — try again in a moment.',
+        code: 'lawn_assessment_grounding_unavailable',
+      });
     }
 
     // F2 (universal one-time services, ratified Q13): opt-in windowed comms
@@ -7973,6 +8021,18 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
 
     const generated = await generateReportCopyWithFallback({ systemPrompt, userMessage: fullUserMessage });
     if (!generated.ok) {
+      // Assessment-only requests carry no structured facts the deterministic
+      // fallback can echo — generic completed-service prose without the
+      // scores must not become this visit's report. Fail retryable instead.
+      if (assessmentWasOnlyInput) {
+        logger.warn('[generate-report] both AI providers missed on an assessment-only request; refusing deterministic fallback', {
+          failures: generated.failures,
+        });
+        return res.status(503).json({
+          error: 'AI report generation is temporarily unavailable. Your existing service notes were not changed.',
+          retryable: true,
+        });
+      }
       const report = buildDeterministicReportCopy({
         serviceType: groundingServiceType,
         areas,
