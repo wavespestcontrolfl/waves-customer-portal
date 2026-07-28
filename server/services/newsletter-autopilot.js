@@ -479,14 +479,20 @@ async function autoDraftFlagship() {
       actualLineup = retryLineup;
     }
   }
-  if (actualLineup.length !== safeEventIds.length) {
-    const actualPreflight = preflightDigest(actualLineup, reqs);
-    if (!actualPreflight.pass) {
+  // FINAL preflight — unconditional. Stale-ID removal/refill can thin the
+  // lineup even when the model returns every remaining id, so gating this
+  // on model-dropped ids alone would let a sub-contract lineup persist.
+  const droppedCount = safeEventIds.length - actualLineup.length;
+  const actualPreflight = preflightDigest(actualLineup, reqs);
+  if (!actualPreflight.pass) {
+    if (droppedCount > 0) {
       actualPreflight.hardFailures.unshift(
-        `Draft generation dropped ${safeEventIds.length - actualLineup.length} locked event(s) and the remaining lineup fails the quality contract`,
+        `Draft generation dropped ${droppedCount} locked event(s) and the remaining lineup fails the quality contract`,
       );
-      return skipWeek(actualPreflight);
     }
+    return skipWeek(actualPreflight);
+  }
+  if (droppedCount > 0) {
     // The count/source contract held — also re-check the PORTFOLIO
     // minimums (weekend/zone/audience/free/hero/novelty). Per the
     // selector's own publish-fewer rule these are shortfalls to SURFACE,

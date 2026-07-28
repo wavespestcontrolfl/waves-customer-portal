@@ -89,7 +89,11 @@ const isFamily = (event) => event?.family_friendly === true
   || breakdown(event).family_status === 'confirmed';
 const isParents = (event) => tags(event).has('parents_night')
   || breakdown(event).family_status === 'adults_lean';
-const isFreeish = (event) => event?.is_free === true || /\bfree\b/i.test(String(event?.price_text || ''));
+// The curated 'free' audience tag counts too — ingestion flags can be
+// incomplete and price_text may read "$0" rather than the word "free".
+const isFreeish = (event) => event?.is_free === true
+  || /\bfree\b/i.test(String(event?.price_text || ''))
+  || tags(event).has('free');
 const isNovel = (event) => NOVELTY_SET.has(String(event?.novelty_type || ''));
 const isGenericClass = (event) => (breakdown(event).penalty_flags || []).includes('generic_class');
 
