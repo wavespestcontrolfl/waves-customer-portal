@@ -1221,7 +1221,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           scheduledDate: apptDate,
           serviceType: primary.name,
           serviceId: primary.id || null,
-          primaryLinePrice: groupHasPrice ? lineBaseAmount(primary) : null,
+          // Blank-priced one-time mosquito must reach the server as null so
+          // the lot-ladder default applies — groupHasPrice would otherwise
+          // coerce it to 0 when another line in the group carries a price.
+          primaryLinePrice: (primary.service_key === 'mosquito_one_time' && !(parseFloat(primary.price) > 0))
+            ? null
+            : (groupHasPrice ? lineBaseAmount(primary) : null),
           primaryLineDiscount: primary.lineDiscount ? {
             discountId: primary.lineDiscount.id || null,
             discountName: primary.lineDiscount.name || null,

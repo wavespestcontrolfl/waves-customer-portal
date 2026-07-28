@@ -1020,6 +1020,24 @@ async function resolveLineDiscount(input, baseAmount, customer, serviceContext =
   };
 }
 
+// Lot-ladder price for a hand-scheduled one-time mosquito line (owner
+// decision 2026-07-28): compute from the customer's lot size via the pricing
+// engine; null when the customer has no usable lot size (callers fall back to
+// the catalog base_price).
+function mosquitoOneTimeLadderPrice(customer) {
+  const lotSqFt = Number(customer?.lot_sqft);
+  if (!Number.isFinite(lotSqFt) || lotSqFt <= 0) return null;
+  try {
+    const { priceOneTimeMosquito } = require('../services/pricing-engine');
+    const quote = priceOneTimeMosquito({ lotSqFt });
+    const price = Number(quote?.price);
+    return Number.isFinite(price) && price > 0 ? price : null;
+  } catch (e) {
+    logger.warn(`[schedule] mosquito ladder default failed, using catalog price: ${e.message}`);
+    return null;
+  }
+}
+
 async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, estimatedPrice, primaryLinePrice, primaryLineDiscount, serviceAddons, discountId, discountType, discountAmount, customer }) {
   if (discountType && !discountId) {
     throw httpError(400, 'discountId is required for appointment-level discounts');
@@ -1028,21 +1046,11 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
   // One-time mosquito default follows the lot-based ladder (owner decision
   // 2026-07-28) instead of the flat catalog price. An explicitly typed price
   // still wins; catalog base_price remains the fallback when the customer has
-  // no lot size on file.
+  // no lot size on file. Applied per line (primary here, add-on lines below)
+  // so a grouped booking never silently bills mosquito at $0.
   let mosquitoLadderDefault = null;
   if (serviceRecord?.service_key === 'mosquito_one_time' && primaryLinePrice == null) {
-    const lotSqFt = Number(customer?.lot_sqft);
-    if (Number.isFinite(lotSqFt) && lotSqFt > 0) {
-      try {
-        const { priceOneTimeMosquito } = require('../services/pricing-engine');
-        const quote = priceOneTimeMosquito({ lotSqFt });
-        if (Number.isFinite(Number(quote?.price)) && Number(quote.price) > 0) {
-          mosquitoLadderDefault = Number(quote.price);
-        }
-      } catch (e) {
-        logger.warn(`[schedule] mosquito ladder default failed, using catalog price: ${e.message}`);
-      }
-    }
+    mosquitoLadderDefault = mosquitoOneTimeLadderPrice(customer);
   }
   const primaryBaseFallback = mosquitoLadderDefault != null
     ? mosquitoLadderDefault
@@ -1063,10 +1071,18 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
 
   const addonLines = [];
   for (const addon of Array.isArray(serviceAddons) ? serviceAddons : []) {
-    const base = parseMoneyInput(addon.basePrice ?? addon.grossPrice ?? addon.price, `price for ${addon.name || addon.serviceName || 'add-on'}`);
+    let base = parseMoneyInput(addon.basePrice ?? addon.grossPrice ?? addon.price, `price for ${addon.name || addon.serviceName || 'add-on'}`);
     const addonService = addon.serviceId
-      ? await db('services').where({ id: addon.serviceId }).first('service_key', 'category')
+      ? await db('services').where({ id: addon.serviceId }).first('service_key', 'category', 'base_price')
       : null;
+    // Blank-priced one-time mosquito add-on lines get the same lot-ladder
+    // default as the primary (catalog base_price as the no-lot-data
+    // fallback) — a grouped booking must never silently bill mosquito at $0.
+    if (base == null && addonService?.service_key === 'mosquito_one_time') {
+      const ladder = mosquitoOneTimeLadderPrice(customer);
+      const fallback = ladder != null ? ladder : (addonService.base_price != null ? Number(addonService.base_price) : null);
+      if (fallback != null) base = parseMoneyInput(fallback, `price for ${addon.name || addon.serviceName || 'add-on'}`);
+    }
     const lineDiscount = await resolveLineDiscount(addon, base || 0, customer, {
       serviceKey: addonService?.service_key,
       serviceCategory: addonService?.category,
