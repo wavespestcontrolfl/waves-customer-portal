@@ -62,8 +62,9 @@ Everything kept through July is load-bearing. Everything dropped
 6. **Outro** — "That's the scoop, crew" + callback triad referencing the
    actual lineup + ✔️ checklist (practical + absurd: "Hydrate like it's
    your job" / "Don't underestimate the power of a funnel cake").
-7. **Sign-off** — "Catch you out there!" / "— The Waves Pest Control
-   Team 🌊" (owner decision 2026-06-11: Team form, not "Waves crew").
+7. **Sign-off** — "Catch you out there!" / "**— The Waves Team**"
+   (owner decision 2026-06-11: Team form, not "Waves crew"; shortened
+   from "— The Waves Pest Control Team" 2026-07-17).
 8. **P.S. two-branch forward joke** — "If you loved this, forward it to
    a friend who [hyper-specific persona]. If you didn't… [reverse-blame
    punchline] 🎪" — referencing this issue's events.
@@ -168,6 +169,37 @@ mature voice.
 The weekly guide's **Homeowner Minute** is where this themed energy
 lives today: same bold-facts/italic-jokes separation, biological
 urgency, optional "Hot tip:" closer, zero pitch.
+
+## The 2026-07-28 editorial overhaul (what changed around the formula)
+
+One day in July 2026 the flagship briefly shipped a "compact" format
+(official-name-first cards, no comedic devices, <900-word budget). The
+owner reversed it the same evening after seeing the render — **the
+compact format is retired; do not re-propose it** (see DECISIONS.md,
+2026-07-28 entries; `assembleWavesNewsletter` remains in the codebase
+unused). The Beehiiv formula in this guide is canonical again, with two
+additions that survived from the overhaul:
+
+- **Real event thumbnail per card, in ADDITION to the reaction GIF** —
+  rendered after the hype paragraph. The GIF stays the joke; the
+  thumbnail is the event's own art (feed- or og:image-sourced; a daily
+  backfill probes imageless events' pages). Still images only —
+  GIF-shaped urls are rejected. Standards clients cap it at 220px on
+  both axes with no upscaling; **desktop Outlook gets no thumbnail by
+  design** (Word can't aspect-fit a bounded image box) and keeps the
+  GIF + full card content.
+- **Ticket links are click-tracked** — at draft time the inline
+  event-name link and the 🔗 fact-line link both render as
+  `{{evclick:<eventId>}}` tokens; the live sender substitutes a
+  per-recipient tracking redirect, while proof/preview/archive resolve
+  them back to the direct event url. Click rates feed a bounded (±5)
+  scoring adjustment.
+
+Everything upstream of drafting also changed (100-pt curation rubric,
+8-event portfolio selection with audience/geography coverage, listwise
+re-rank, a diagnostics panel on the proof email) — none of it alters
+this guide's voice or anatomy; it changes WHICH events arrive at the
+prompt, not how they're written up.
 
 ## What the generator enforces that the human era couldn't
 
