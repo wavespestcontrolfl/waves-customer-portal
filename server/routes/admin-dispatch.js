@@ -12,6 +12,7 @@ const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-fo
 const trackTransitions = require('../services/track-transitions');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
 const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
+const { previewText, stripSchedulerAuditText } = require('../utils/visit-notes');
 const CompletionRecap = require('../services/completion-recap');
 const { buildRecapVisitContext } = require('../services/recap-visit-context');
 const CompletionAttempts = require('../services/completion-attempts');
@@ -1811,9 +1812,16 @@ router.get('/:date?', async (req, res, next) => {
     // Enrich with property preferences and last service
     const enriched = await Promise.all(services.map(async (s) => {
       const prefs = await db('property_preferences').where({ customer_id: s.customer_id }).first();
-      const lastService = await db('service_records')
+      const recentCompleted = await db('service_records')
         .where({ customer_id: s.customer_id, status: 'completed' })
-        .orderBy('service_date', 'desc').first();
+        .orderBy('service_date', 'desc').limit(12);
+      // Any-line latest keeps the "Last:" card + new-customer detection
+      // semantics; the line-scoped record feeds the service dashboard so a
+      // pest visit never shows the customer's lawn notes (multi-service
+      // customers were leaking cross-line notes into the Protocol panel).
+      const lastService = recentCompleted[0] || null;
+      const visitLine = detectServiceLine(s.service_type);
+      const lastLineService = recentCompleted.find((r) => detectServiceLine(r.service_type) === visitLine) || null;
       const statusLog = await db('job_status_history')
         .where({ job_id: s.id })
         .orderBy('transitioned_at')
@@ -1867,7 +1875,10 @@ router.get('/:date?', async (req, res, next) => {
       if (prefs?.side_gate_access) alerts.push(`Side gate: ${prefs.side_gate_access}`);
       if (prefs?.parking_notes) alerts.push(`Parking: ${prefs.parking_notes}`);
       if (prefs?.special_instructions) alerts.push(prefs.special_instructions);
-      if (s.notes) alerts.push(s.notes);
+      // Ops sessions write scheduling-audit trails into notes; those are
+      // internal and never belong on the tech-facing alerts block.
+      const displayNotes = stripSchedulerAuditText(s.notes);
+      if (displayNotes) alerts.push(displayNotes);
 
       return {
         id: s.id,
@@ -1935,7 +1946,12 @@ router.get('/:date?', async (req, res, next) => {
         propertyAlerts: alerts,
         lastServiceDate: lastService?.service_date || null,
         lastServiceType: lastService?.service_type || null,
-        lastServiceNotes: lastService?.technician_notes?.slice(0, 200) || null,
+        lastServiceNotes: previewText(stripSchedulerAuditText(lastService?.technician_notes)),
+        // Line-scoped last visit for the service dashboards (Protocol panel):
+        // null when the customer has no completed history on THIS line.
+        lastLineServiceDate: lastLineService?.service_date || null,
+        lastLineServiceType: lastLineService?.service_type || null,
+        lastLineServiceNotes: previewText(stripSchedulerAuditText(lastLineService?.technician_notes)),
         actualStartTime: s.actual_start_time,
         actualEndTime: s.actual_end_time,
         serviceTimeMinutes: s.service_time_minutes,

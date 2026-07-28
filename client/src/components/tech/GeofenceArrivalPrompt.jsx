@@ -34,6 +34,7 @@ const API = import.meta.env.VITE_API_URL || '';
 const POLL_MS = 10_000;
 const REMINDER_AUTODISMISS_MS = 5 * 60 * 1000;
 const STOP_TOAST_MS = 15_000;
+const MAX_STORM_CARDS = 2;
 
 const COLORS = {
   bg: '#1e293b',
@@ -102,7 +103,7 @@ export default function GeofenceArrivalPrompt({ onStormReview }) {
       return setTimeout(() => removeCard(n.id, { silent: true }), ms);
     });
     return () => timers.forEach(clearTimeout);
-    // eslint-disable-next-line
+     
   }, [active.length]);
 
   function removeCard(id, { silent } = {}) {
@@ -138,12 +139,33 @@ export default function GeofenceArrivalPrompt({ onStormReview }) {
 
   if (active.length === 0) return null;
 
+  // Storm cards are capped so a burst of alerts can never bury the home
+  // screen: one card per stop (newest wins when the sweep re-alerts), at
+  // most MAX_STORM_CARDS on screen, the rest summarized in one line.
+  const stormAlerts = [];
+  const stormByJob = new Map();
+  const otherCards = [];
+  for (const n of active) {
+    if (n.type !== 'storm_watch_alert') { otherCards.push(n); continue; }
+    const jobKey = n.payload?.job_id || n.id;
+    const prev = stormByJob.get(jobKey);
+    if (!prev || new Date(n.created_at || 0) > new Date(prev.created_at || 0)) {
+      stormByJob.set(jobKey, n);
+    }
+  }
+  stormAlerts.push(...[...stormByJob.values()].sort(
+    (a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0),
+  ));
+  const shownStorms = stormAlerts.slice(0, MAX_STORM_CARDS);
+  const hiddenStormCount = stormAlerts.length - shownStorms.length;
+  const cards = [...otherCards, ...shownStorms];
+
   return (
     <div style={{
       position: 'fixed', top: 12, left: 12, right: 12, zIndex: 10_000,
       display: 'flex', flexDirection: 'column', gap: 10, pointerEvents: 'none',
     }}>
-      {active.map((n) => (
+      {cards.map((n) => (
         <div key={n.id} style={{ pointerEvents: 'auto' }}>
           {n.type === 'geofence_arrival_reminder' && (
             <ReminderCard n={n} onStart={() => handleStart(n)} onDismiss={() => removeCard(n.id)} />
@@ -169,6 +191,13 @@ export default function GeofenceArrivalPrompt({ onStormReview }) {
           )}
         </div>
       ))}
+      {hiddenStormCount > 0 && (
+        <div style={{ ...cardStyle(COLORS.amber), pointerEvents: 'auto', padding: 10 }}>
+          <div style={{ fontSize: 13, color: COLORS.muted }}>
+            ⛈️ {hiddenStormCount} more storm watch{hiddenStormCount === 1 ? '' : 'es'} — they'll surface as you clear these.
+          </div>
+        </div>
+      )}
     </div>
   );
 }

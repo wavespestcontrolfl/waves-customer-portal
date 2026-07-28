@@ -4445,9 +4445,12 @@ export function ProtocolPanel({ service, onClose }) {
                     ))}
                   </div>
                 )}
-                {/* Last service notes */}
-                {service.lastServiceNotes &&
-                  stripLegacyBoilerplate(service.lastServiceNotes) && (
+                {/* Last service notes — line-scoped (lastLineServiceNotes) so a
+                    pest dashboard never shows the customer's lawn visit notes.
+                    No fallback to the any-line field: cross-line notes here
+                    were the bug, not a degraded mode. */}
+                {service.lastLineServiceNotes &&
+                  stripLegacyBoilerplate(service.lastLineServiceNotes) && (
                     <div
                       style={{
                         background: D.bg,
@@ -4472,7 +4475,7 @@ export function ProtocolPanel({ service, onClose }) {
                       <div
                         style={{ fontSize: 12, color: D.text, lineHeight: 1.5 }}
                       >
-                        {stripLegacyBoilerplate(service.lastServiceNotes)}
+                        {stripLegacyBoilerplate(service.lastLineServiceNotes)}
                       </div>{" "}
                     </div>
                   )}

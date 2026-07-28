@@ -18,7 +18,15 @@ router.get('/', async (req, res, next) => {
     const unreadOnly = req.query.unreadOnly !== 'false';
     let q = db('tech_notifications')
       .where({ technician_id: req.technicianId })
-      .whereNull('dismissed_at');
+      .whereNull('dismissed_at')
+      // Storm-watch nudges are only actionable for a couple of hours
+      // (sweep lookahead + service window). Without an age cutoff, unread
+      // alerts from earlier days pile up into a wall of cards that buries
+      // the tech home screen on the next load.
+      .where(function stormFreshness() {
+        this.whereNot({ type: 'storm_watch_alert' })
+          .orWhereRaw("created_at >= now() - interval '6 hours'");
+      });
     if (unreadOnly) q = q.where({ read: false });
     const rows = await q.orderBy('created_at', 'desc').limit(20);
     res.json({ notifications: rows.map(parseRow) });
