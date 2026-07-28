@@ -125,6 +125,53 @@ async function loadCustomer(customerId, knex) {
   }
 }
 
+// Photo-scored lawn assessment (the closeout's "Analyze lawn" flow). Only
+// tech-confirmed rows count — the raw model pass without a tech's confirm is
+// not a fact yet. Returns the assessment taken ON the service date (if any)
+// plus the most recent prior one so the copy can speak to change over time.
+const LAWN_ASSESSMENT_METRICS = [
+  ['turf_density', 'turf density'],
+  ['weed_suppression', 'weed suppression'],
+  ['color_health', 'color health'],
+  ['fungus_control', 'fungus control'],
+  ['thatch_level', 'thatch level'],
+];
+
+async function loadLawnAssessments({ customerId, serviceYmd, knex }) {
+  if (!customerId || !serviceYmd) return { today: null, prior: null };
+  try {
+    const rows = await knex('lawn_assessments')
+      .where({ customer_id: customerId, confirmed_by_tech: true })
+      .where('service_date', '<=', serviceYmd)
+      .orderBy('service_date', 'desc')
+      .limit(2)
+      .select(
+        'service_date', 'is_baseline', 'observations',
+        'turf_density', 'weed_suppression', 'color_health', 'fungus_control', 'thatch_level',
+      );
+    const today = rows[0] && toYmd(rows[0].service_date) === serviceYmd ? rows[0] : null;
+    const prior = today ? rows[1] || null : rows[0] || null;
+    return { today, prior };
+  } catch (err) {
+    logger.warn(`[report-copy-context] lawn assessment load failed: ${err.message}`);
+    return { today: null, prior: null };
+  }
+}
+
+function lawnAssessmentLine(row, prior) {
+  const parts = [];
+  for (const [key, label] of LAWN_ASSESSMENT_METRICS) {
+    const value = Number(row?.[key]);
+    if (!Number.isFinite(value)) continue;
+    const prev = Number(prior?.[key]);
+    const delta = Number.isFinite(prev) && prev !== value
+      ? ` (${value > prev ? '+' : ''}${value - prev} vs ${formatShortDate(prior.service_date)})`
+      : '';
+    parts.push(`${label} ${value}/100${delta}`);
+  }
+  return parts.join(', ');
+}
+
 // Last N completed visits on the same service line, summarized by their structured
 // findings only. Raw technician_notes are deliberately NOT loaded: they are
 // free-form and can carry tech-only secrets (gate / lockbox codes, handling notes)
@@ -302,7 +349,7 @@ async function buildReportCopyContext({
   const lng = finiteOrNull(customer?.longitude);
 
   // Fan out the independent loads concurrently; each is individually fail-soft.
-  const [priorVisits, productSafety, property, conditions, weekWeather, pressureTrend, ppConfig] = await Promise.all([
+  const [priorVisits, productSafety, property, conditions, weekWeather, pressureTrend, ppConfig, lawnAssessments] = await Promise.all([
     loadPriorVisits({ customerId, serviceLine: line, serviceType, beforeDate: serviceYmd, knex }),
     loadProductSafety(productList, knex),
     loadPropertyContext(customerId, knex),
@@ -320,6 +367,9 @@ async function buildReportCopyContext({
       }).catch(() => null)
       : Promise.resolve(null),
     loadActiveConfig(knex).catch(() => null),
+    line === 'lawn'
+      ? loadLawnAssessments({ customerId, serviceYmd, knex })
+      : Promise.resolve({ today: null, prior: null }),
   ]);
 
   // Respect the same customer-visibility gate the normal report paths use: when
@@ -360,6 +410,30 @@ async function buildReportCopyContext({
 
   if (targets.length) {
     sections.push(`TARGETS TAGGED TODAY (tech-tagged, per product — pests, weeds/diseases, or nutrition goals): ${targets.join(', ')}`);
+  }
+
+  // Photo-scored lawn assessment (tech-confirmed). Today's scores are facts
+  // about THIS visit; deltas vs the prior assessment let the copy speak to
+  // measurable change. When only a prior assessment exists, present it as
+  // history — never as today's reading.
+  if (lawnAssessments?.today) {
+    const scoreLine = lawnAssessmentLine(lawnAssessments.today, lawnAssessments.prior);
+    if (scoreLine) {
+      sections.push(
+        `LAWN ASSESSMENT (photo-scored TODAY, tech-confirmed; 0–100, higher is better${lawnAssessments.today.is_baseline ? '; baseline visit' : ''}): ${scoreLine}`,
+      );
+    }
+    const obs = cleanText(lawnAssessments.today.observations);
+    if (obs) {
+      sections.push(`LAWN ASSESSMENT OBSERVATIONS (from today's photo scoring): ${obs.length > 300 ? `${obs.slice(0, obs.lastIndexOf(' ', 300))}…` : obs}`);
+    }
+  } else if (lawnAssessments?.prior) {
+    const scoreLine = lawnAssessmentLine(lawnAssessments.prior, null);
+    if (scoreLine) {
+      sections.push(
+        `LAST LAWN ASSESSMENT (photo-scored ${formatShortDate(lawnAssessments.prior.service_date)}, tech-confirmed; 0–100, higher is better — history, NOT today's reading): ${scoreLine}`,
+      );
+    }
   }
 
   // The current visit isn't scored at generate time, so buildPressureTrendContext
@@ -443,6 +517,7 @@ async function buildReportCopyContext({
     productSafetyCount: productSafety.length,
     hasConditions: !!condLine,
     hasPressureTrend: !!pressureLine,
+    hasLawnAssessment: !!(lawnAssessments?.today || lawnAssessments?.prior),
     targets,
     monthNum,
   };
