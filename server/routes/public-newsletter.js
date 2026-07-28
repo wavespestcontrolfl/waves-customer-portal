@@ -267,15 +267,40 @@ const feedbackLimiter = rateLimit({
 // as all industry email click tracking) — then 302s to the DB-locked
 // event URL. Unknown token = untracked redirect; unknown event =
 // homepage. Never blocks the reader: any failure still redirects.
-router.get('/e/:token/:eventId', feedbackLimiter, async (req, res) => {
+// Soft per-IP budget for click ATTRIBUTION only — over budget we skip
+// the analytics write but STILL redirect (a shared scanner or NAT must
+// never turn reader links into 429 JSON; the route contract is "never
+// blocks the reader"). Bounded in-memory: the window map is cleared
+// wholesale if it ever grows unreasonably.
+const clickBudgetByIp = new Map();
+function overClickBudget(ip) {
+  const now = Date.now();
+  if (clickBudgetByIp.size > 10000) clickBudgetByIp.clear();
+  const slot = clickBudgetByIp.get(ip);
+  if (!slot || now > slot.resetAt) {
+    clickBudgetByIp.set(ip, { count: 1, resetAt: now + 60000 });
+    return false;
+  }
+  slot.count += 1;
+  return slot.count > 120;
+}
+
+router.get('/e/:token/:eventId', async (req, res) => {
   const fallback = 'https://www.wavespestcontrol.com/';
   try {
     const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     if (!uuidRe.test(req.params.eventId)) return res.redirect(302, fallback);
-    const { redirectUrl } = await recordEventClick({
-      engagementToken: String(req.params.token).slice(0, 64),
-      eventId: req.params.eventId,
-    });
+    let redirectUrl;
+    if (overClickBudget(req.ip)) {
+      // Attribution suppressed; redirect preserved.
+      const event = await db('events_raw').where({ id: req.params.eventId }).first('event_url');
+      redirectUrl = event?.event_url || fallback;
+    } else {
+      ({ redirectUrl } = await recordEventClick({
+        engagementToken: String(req.params.token).slice(0, 64),
+        eventId: req.params.eventId,
+      }));
+    }
     // Only http(s) destinations — event_url is validated at ingestion,
     // but a defensive check costs nothing on a redirect endpoint.
     const safe = /^https?:\/\//i.test(String(redirectUrl || '')) ? redirectUrl : fallback;

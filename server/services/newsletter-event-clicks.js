@@ -165,6 +165,11 @@ async function computeLearnedAdjustments(knex = db) {
       .where({ status: 'sent' })
       .where('sent_at', '>=', since)
       .whereNotNull('event_ids')
+      // Only TRACKED issues (their stored body carries evclick tokens —
+      // SendGrid substitution happens in the payload, so the persisted
+      // html keeps them). Pre-tracking sends must not read as genuine
+      // zero-click outcomes and bias adjustments by rollout timing.
+      .where('html_body', 'like', '%{{evclick:%')
       .select('id', 'event_ids');
     const appearances = [];
     for (const s of sentSends) {
