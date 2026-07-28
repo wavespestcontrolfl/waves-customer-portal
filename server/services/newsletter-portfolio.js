@@ -51,7 +51,7 @@ const MIN_NOVELTY = 1;
 
 const NOVELTY_SET = new Set([
   'one_time', 'inaugural', 'opening_weekend', 'limited_engagement',
-  'special_edition', 'series_debut', 'touring',
+  'special_edition', 'series_debut', 'touring', 'annual_signature',
 ]);
 
 const norm = (v) => String(v || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
@@ -98,11 +98,18 @@ const isGenericClass = (event) => (breakdown(event).penalty_flags || []).include
  * fiat; manually approved unscored rows sit exactly at the floor.
  */
 function effectiveScore(event) {
+  // A star is a deliberate operator override — it outranks the numeric
+  // score. Checking the score first silently stripped hero-grade (or the
+  // whole slot, for sub-floor scores) from starred-after-scoring events.
+  if (event?.admin_status === 'featured') {
+    const scored = Number(event?.editorial_score);
+    return Math.max(heroScoreFloor(), Number.isFinite(scored) ? scored : 0);
+  }
   const raw = event?.editorial_score;
   // Number(null) === 0 — an unscored row must fall through to provenance,
   // not read as a zero score.
   if (raw !== null && raw !== undefined && Number.isFinite(Number(raw))) return Number(raw);
-  return event?.admin_status === 'featured' ? heroScoreFloor() : featureScoreFloor();
+  return featureScoreFloor();
 }
 
 const isHero = (event) => effectiveScore(event) >= heroScoreFloor();
@@ -143,6 +150,13 @@ const CONSTRAINTS = [
     // Only a candidate on a NOT-yet-covered weekend day helps.
     poolTest: (c, picked) => isWeekend(c)
       && !new Set(picked.filter(isWeekend).map(etWeekday)).has(etWeekday(c)),
+    // A weekend pick on an ALREADY-DOUBLED day may be traded (the
+    // weekend-count minimum survives because the incoming candidate is
+    // itself a weekend event) — the default !test(p) barred every
+    // weekend pick and made day repair impossible on a weekend-heavy
+    // full lineup.
+    swapEligible: (p, picked) => !isWeekend(p)
+      || picked.filter((x) => isWeekend(x) && etWeekday(x) === etWeekday(p)).length > 1,
     label: `≥${MIN_WEEKEND_DAYS} distinct weekend days`,
   },
   {
@@ -287,15 +301,22 @@ function selectPortfolio(candidates, {
 
 /**
  * Rank alternates AGAINST the final resolved lineup: best floor-passing
- * candidates not already locked. Built after operator-preferred merging,
- * so a preferred event capped out of portfolio.selected can never appear
- * as both a locked event and its own replacement.
+ * candidates not already locked that are VALID one-for-one replacements —
+ * substituting the alternate for at least one locked event must respect
+ * every cap (a score-only ranking could suggest a third same-venue card).
+ * Built after operator-preferred merging, so a preferred event capped out
+ * of the selection can never appear as both locked and replacement.
  */
-function rankAlternates(candidates, finalLineupIds, count = ALTERNATE_COUNT) {
+function rankAlternates(candidates, finalLineup, count = ALTERNATE_COUNT) {
   const floor = featureScoreFloor();
-  const locked = new Set((finalLineupIds || []).map(String));
+  const lineup = (Array.isArray(finalLineup) ? finalLineup : []).filter(Boolean);
+  const locked = new Set(lineup.map((ev) => String(ev.id)));
+  const replacesSomeone = (candidate) => lineup.some((out) => capsAllow(
+    lineup.filter((ev) => ev !== out),
+    candidate,
+  ));
   return (Array.isArray(candidates) ? candidates : [])
-    .filter((c) => c && !locked.has(String(c.id)) && effectiveScore(c) >= floor)
+    .filter((c) => c && !locked.has(String(c.id)) && effectiveScore(c) >= floor && replacesSomeone(c))
     .sort((a, b) => effectiveScore(b) - effectiveScore(a))
     .slice(0, count);
 }

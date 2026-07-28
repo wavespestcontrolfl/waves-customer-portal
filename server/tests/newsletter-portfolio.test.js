@@ -175,8 +175,55 @@ describe('rankAlternates', () => {
     const nextBest = ev({ editorial_score: 84 });
     const third = ev({ editorial_score: 80 });
     const subFloor = ev({ editorial_score: 60 });
-    const alts = rankAlternates([locked, nextBest, third, subFloor], [locked.id]);
+    const alts = rankAlternates([locked, nextBest, third, subFloor], [locked]);
     expect(alts.map((a) => a.id)).toEqual([nextBest.id, third.id]);
+  });
+
+  test('an alternate must be a VALID one-for-one replacement under caps', () => {
+    // Lineup already carries two Venue-A cards; a third Venue-A candidate
+    // can only replace a Venue-A pick — which it can — but a candidate
+    // that would break caps against EVERY one-for-one substitution is out.
+    const a1 = ev({ venue_name: 'Venue A', editorial_score: 92, source_id: 's1', region_zone: 'z1' });
+    const a2 = ev({ venue_name: 'Venue A', editorial_score: 90, source_id: 's2', region_zone: 'z2' });
+    const b1 = ev({ venue_name: 'Venue B', editorial_score: 88, source_id: 's3', region_zone: 'z3' });
+    const lineup = [a1, a2, b1];
+    // Venue-A candidate: replacing a1 or a2 keeps the venue at 2 → valid.
+    const a3 = ev({ venue_name: 'Venue A', editorial_score: 85, source_id: 's4', region_zone: 'z1' });
+    expect(rankAlternates([a3], lineup).map((x) => x.id)).toEqual([a3.id]);
+    // Same-source-as-both candidate where lineup already has two picks
+    // from that source and neither can be the one swapped out without
+    // the third source pick remaining: construct a source-capped case.
+    const s1a = ev({ venue_name: 'V1', editorial_score: 92, source_id: 'dup', region_zone: 'z1' });
+    const s1b = ev({ venue_name: 'V2', editorial_score: 90, source_id: 'dup', region_zone: 'z2' });
+    const other = ev({ venue_name: 'V3', editorial_score: 88, source_id: 'x', region_zone: 'z3' });
+    const candidateDup = ev({ venue_name: 'V4', editorial_score: 87, source_id: 'dup', region_zone: 'z4' });
+    // Replacing s1a or s1b keeps 'dup' at 2 → still valid.
+    expect(rankAlternates([candidateDup], [s1a, s1b, other]).map((x) => x.id)).toEqual([candidateDup.id]);
+  });
+});
+
+describe('codex round-2 fixes', () => {
+  const { selectPortfolio: sp3, effectiveScore: eff, isNovel: nov } = require('../services/newsletter-portfolio');
+
+  test('a star OUTRANKS the numeric score — scored-then-starred is hero-grade, sub-floor stars stay in', () => {
+    expect(eff(ev({ editorial_score: 80, admin_status: 'featured' }))).toBe(88);
+    expect(eff(ev({ editorial_score: 60, admin_status: 'featured' }))).toBe(88);
+    expect(eff(ev({ editorial_score: 95, admin_status: 'featured' }))).toBe(95);
+  });
+
+  test('annual_signature counts toward novelty coverage', () => {
+    expect(nov(ev({ novelty_type: 'annual_signature' }))).toBe(true);
+  });
+
+  test('day repair can trade a redundant Friday for the only Saturday on a full lineup', () => {
+    // 10 Friday events (several doubled days), one Saturday candidate at
+    // a lower score — day diversity must still be repairable at maxCount.
+    const fridays = [...Array(10)].map((_, i) => ev({
+      editorial_score: 95 - i, start_at: DAY.fri, region_zone: `z-${i % 4}`,
+    }));
+    const saturday = ev({ editorial_score: 76, start_at: DAY.sat, region_zone: 'z-9' });
+    const result = sp3([...fridays, saturday], { targetCount: 10, maxCount: 10 });
+    expect(result.stats.weekendDays.sort()).toEqual(['Friday', 'Saturday']);
   });
 });
 

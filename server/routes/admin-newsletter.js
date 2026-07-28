@@ -882,6 +882,30 @@ router.post('/sends/:id/send', async (req, res) => {
         logger.info(`[newsletter] background send ${req.params.id} already claimed by another worker — no-op`);
         return;
       }
+      if (err.code === 'EVENT_REVERIFY_FAILED' || err.code === 'EVENT_SELECTION_INVALID') {
+        // A dead/ineligible locked event is an EDITORIAL problem, not a
+        // delivery failure: 'failed' rows can't be patched and Resume just
+        // re-runs the same pre-claim check, stranding the issue. Keep a
+        // draft editable; revert a scheduled row to draft with its stale
+        // approval state cleared (same exit as the scheduler tick).
+        logger.error(`[newsletter] background send ${req.params.id} blocked pre-claim: ${err.message}`);
+        try {
+          const reverted = await db('newsletter_sends')
+            .where({ id: req.params.id, status: 'scheduled' })
+            .update({
+              status: 'draft',
+              scheduled_for: null,
+              proof_token: null,
+              proof_sent_at: null,
+              proof_approved_at: null,
+              updated_at: new Date(),
+            });
+          if (reverted) {
+            await db('newsletter_calendar').where({ send_id: req.params.id }).update({ status: 'drafted', updated_at: new Date() });
+          }
+        } catch { /* swallow */ }
+        return;
+      }
       logger.error(`[newsletter] background send ${req.params.id} failed: ${err.message}`, { stack: err.stack });
       try {
         const flipped = await db('newsletter_sends').where({ id: req.params.id, status: 'sending' }).update({ status: 'failed' });

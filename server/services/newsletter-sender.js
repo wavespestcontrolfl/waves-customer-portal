@@ -31,7 +31,7 @@ const { grassTypeLabel, normalizeGrassType } = require('./lawn-grass-context');
 const { hasQuizToken, buildQuizSubstitutions } = require('./newsletter-quiz');
 const { hasFeedbackToken, ensureFeedbackToken, buildFeedbackSubstitutions } = require('./newsletter-feedback');
 const { isFlagshipDeliveryWindow, isCurrentFlagshipTarget } = require('./event-freshness');
-const { validateFlagshipEventSelection } = require('./newsletter-event-selection');
+const { validateFlagshipEventSelection, parseLockedEventIds } = require('./newsletter-event-selection');
 const { reverifyEvents } = require('./event-reverify');
 
 // CITY_TOKEN / GRASS_TYPE_TOKEN + their neutral defaults are defined once in
@@ -372,6 +372,25 @@ async function sendCampaign(sendId, opts = {}) {
   // seeded) reseeds the whole audience — that IS a first send, so it faces
   // the full gates: no resuming an entire issue outside the Tuesday window
   // or on a stale lineup.
+  if (opts.preclaimed && opts.existingDeliveriesOnly) {
+    // Partial resume: the freshness/cadence gates above are DELIBERATELY
+    // bypassed (a partial send must be able to finish its own issue), but
+    // the LIVE page recheck is not — retryable recipients must not receive
+    // an event that died between the first pass and recovery. Gate-off or
+    // fetch flake still passes (reverifyEvents fails open on infra).
+    const lockedIds = parseLockedEventIds(send.event_ids);
+    if (lockedIds.length) {
+      const lockedRows = await db('events_raw')
+        .whereIn('id', lockedIds)
+        .select('id', 'title', 'event_url');
+      const resumeRecheck = await reverifyEvents(lockedRows);
+      if (!resumeRecheck.ok) {
+        const err = new Error(`live page recheck failed on resume: ${resumeRecheck.failures.map((f) => `${f.title} — ${f.reason}`).join('; ')}`);
+        err.code = 'EVENT_REVERIFY_FAILED';
+        throw err;
+      }
+    }
+  }
   if (!(opts.preclaimed && opts.existingDeliveriesOnly)) {
     const eventSelection = await validateFlagshipEventSelection(send);
     if (eventSelection.flagship) {

@@ -294,7 +294,7 @@ async function autoDraftFlagship() {
   // alternates entirely (the slate is the operator's intent).
   const lineupAlternates = eligiblePreferred.length >= 5
     ? []
-    : rankAlternates(scored, lineupEvents.map((ev) => ev.id));
+    : rankAlternates(scored, lineupEvents);
   if (portfolio.unmet.length) {
     logger.info(`[newsletter-autopilot] portfolio shortfalls (publishing anyway, never padding): ${portfolio.unmet.join('; ')}`);
   }
