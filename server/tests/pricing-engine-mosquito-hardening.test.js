@@ -59,12 +59,12 @@ describe('mosquito pricing hardening', () => {
       dunkCount: 2,
     });
 
-    expect(result.pressureMultiplier).toBeCloseTo(1.656, 6);
+    expect(result.pressureMultiplier).toBeCloseTo(1.7054117647, 6);
     expect(result.recommendedProgram).toBe('monthly12');
     expect(result.selectedProgram).toBe('monthly12');
-    expect(result.perVisit).toBe(124);
-    expect(result.annual).toBe(1652);
-    expect(result.monthly).toBe(137.67);
+    expect(result.perVisit).toBe(128);
+    expect(result.annual).toBe(1700);
+    expect(result.monthly).toBe(141.67);
     expect(result.addOns.annualAddOns).toBe(164);
   });
 

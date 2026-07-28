@@ -2163,6 +2163,8 @@ export function calculateEstimate(inputs) {
       categoryOrder.indexOf(treatableCategory),
       categoryOrder.indexOf(grossLotCategory) - 1
     )];
+    const mqCategoryFloor = { SMALL: 0, QUARTER: 8000, THIRD: 12000, HALF: 18000, ACRE: 35000 };
+    const mqPricingSqFt = Math.max(treatableSqFt, mqCategoryFloor[sz] || 0);
     let pr = 1.0;
     if (treeDensity === 'HEAVY') pr += 0.15;
     else if (treeDensity === 'MODERATE') pr += 0.05;
@@ -2172,19 +2174,26 @@ export function calculateEstimate(inputs) {
     if (nearWater) pr += 0.10;
     // v1.5: irrigation creates standing water in valve boxes, low spots, overflow areas
     if (hasIrrigation) pr += 0.08;
-    if (sz === 'ACRE') pr += 0.15;
-    else if (sz === 'HALF') pr += 0.05;
+    // Continuous lot-size pressure — mirrors mosquitoLotSizePressure in
+    // server/services/pricing-engine/service-pricing.js (ramps to +0.05 by
+    // 18k and +0.15 by 35k, no boundary jumps).
+    if (mqPricingSqFt >= 35000) pr += 0.15;
+    else if (mqPricingSqFt >= 18000) pr += 0.05 + ((mqPricingSqFt - 18000) / 17000) * 0.10;
+    else if (mqPricingSqFt >= 12000) pr += ((mqPricingSqFt - 12000) / 6000) * 0.05;
     pr = Math.min(2.0, Math.round(pr * 100) / 100);
     // Mirrors server/services/pricing-engine/constants.js MOSQUITO.basePrices
     // (repriced 2026-07 to the 60%-margin band) and the server's 500-sf-step
     // interpolation between bucket anchors (interpolateMosquitoPrice in
     // service-pricing.js). Must stay in sync with the server so the previewed
     // price matches what the server actually charges.
+    // Terminal (ACRE) anchors extend past one acre at the previous segment's
+    // slope so the per-500-sf increment keeps declining into the widest lots
+    // (mirrors mosquitoRecurringAnchors: 35000 + ceil((97-86)/((86-79)/17000)/500)*500
+    // = 62000 seasonal; 35000 + ceil((86-77)/((77-73)/17000)/500)*500 = 73500 monthly).
     const mqAnchors = {
-      seasonal9: [[8000, 73], [12000, 76], [18000, 79], [35000, 86], [43560, 97]],
-      monthly12: [[8000, 66], [12000, 69], [18000, 73], [35000, 77], [43560, 86]],
+      seasonal9: [[8000, 73], [12000, 76], [18000, 79], [35000, 86], [62000, 97]],
+      monthly12: [[8000, 66], [12000, 69], [18000, 73], [35000, 77], [73500, 86]],
     };
-    const mqCategoryFloor = { SMALL: 0, QUARTER: 8000, THIRD: 12000, HALF: 18000, ACRE: 35000 };
     const mqInterp = (anchors, sqft) => {
       const stepped = Math.ceil(Math.max(0, sqft) / 500) * 500;
       if (stepped <= anchors[0][0]) return anchors[0][1];
@@ -2197,7 +2206,6 @@ export function calculateEstimate(inputs) {
       }
       return anchors[anchors.length - 1][1];
     };
-    const mqPricingSqFt = Math.max(treatableSqFt, mqCategoryFloor[sz] || 0);
     const ri = (pr >= 1.30 || nearWater || treeDensity === 'HEAVY') ? 1 : 0;
     const mt = [
       { n: 'Seasonal Mosquito Program (9 visits)', pv: Math.round(mqInterp(mqAnchors.seasonal9, mqPricingSqFt) * pr), v: 9, tier: 'seasonal9' },

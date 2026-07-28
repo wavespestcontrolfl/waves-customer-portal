@@ -2362,8 +2362,8 @@ export default function EstimateToolViewV2({
       // factors), then visits/yr -> levelized monthly.
       const mqSeasonal = form.mosquitoProgram === "seasonal9";
       const mqAnchors = mqSeasonal
-        ? [[8000, 73], [12000, 76], [18000, 79], [35000, 86], [43560, 97]]
-        : [[8000, 66], [12000, 69], [18000, 73], [35000, 77], [43560, 86]];
+        ? [[8000, 73], [12000, 76], [18000, 79], [35000, 86], [62000, 97]]
+        : [[8000, 66], [12000, 69], [18000, 73], [35000, 77], [73500, 86]];
       const mqTreatable = Math.max(0, lotSqft - (sqft || 0));
       const mqStepped = Math.ceil(mqTreatable / 500) * 500;
       let mqPerVisit = mqAnchors[mqAnchors.length - 1][1];

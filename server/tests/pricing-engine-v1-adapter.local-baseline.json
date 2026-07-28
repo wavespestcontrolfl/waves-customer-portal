@@ -385,9 +385,9 @@
     "recurring": {
       "tier": "Bronze",
       "discount": 0,
-      "annualBeforeDiscount": 1956,
-      "annualAfterDiscount": 1956,
-      "monthlyTotal": 163,
+      "annualBeforeDiscount": 1788,
+      "annualAfterDiscount": 1788,
+      "monthlyTotal": 149,
       "savings": 0,
       "serviceCount": 1
     },
@@ -397,11 +397,11 @@
       "ts": [],
       "mq": [
         {
-          "mo": 137.25,
+          "mo": 127.5,
           "recommended": false
         },
         {
-          "mo": 163,
+          "mo": 149,
           "recommended": true
         }
       ],
@@ -414,8 +414,8 @@
       "specItems": []
     },
     "totals": {
-      "year1": 1956,
-      "year2": 1956
+      "year1": 1788,
+      "year2": 1788
     }
   },
   "v1adapter_termite_bait_three_systems": {

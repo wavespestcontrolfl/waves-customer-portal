@@ -3711,13 +3711,48 @@ function interpolateMosquitoPrice(anchors, sqft) {
 }
 
 // Recurring anchors: each category's per-visit price sits at its top edge
-// (SMALL 8k / QUARTER 12k / THIRD 18k / HALF 35k); ACRE anchors at one acre
-// and holds flat beyond (over-acre pressure is handled by lot_acre factors).
+// (SMALL 8k / QUARTER 12k / THIRD 18k / HALF 35k). The terminal (ACRE) anchor
+// extends past one acre at no more than the previous segment's slope, so the
+// per-500-sf increment keeps DECLINING into the widest lots instead of
+// steepening (owner directive); the curve holds flat once the ACRE price is
+// reached. Derived from the live prices so admin-panel reprices keep the shape.
 function mosquitoRecurringAnchors(programIndex) {
-  return MOSQUITO.lotCategories.map((c) => ({
-    sqft: Number.isFinite(c.maxSqFt) ? c.maxSqFt + 1 : 43560,
-    price: MOSQUITO.basePrices[c.key][programIndex],
-  }));
+  const cats = MOSQUITO.lotCategories;
+  const anchors = cats
+    .filter((c) => Number.isFinite(c.maxSqFt))
+    .map((c) => ({ sqft: c.maxSqFt + 1, price: MOSQUITO.basePrices[c.key][programIndex] }));
+  const terminal = cats[cats.length - 1];
+  const terminalPrice = MOSQUITO.basePrices[terminal.key][programIndex];
+  const last = anchors[anchors.length - 1];
+  const prev = anchors[anchors.length - 2];
+  const prevSlope = last && prev ? (last.price - prev.price) / (last.sqft - prev.sqft) : 0;
+  const step = MOSQUITO.priceStepSqFt || 500;
+  let terminalSqFt = 43560;
+  if (last && terminalPrice > last.price && prevSlope > 0) {
+    const span = Math.ceil((terminalPrice - last.price) / prevSlope / step) * step;
+    terminalSqFt = Math.max(43560, last.sqft + span);
+  }
+  anchors.push({ sqft: terminalSqFt, price: terminalPrice });
+  return anchors;
+}
+
+// Continuous lot-size pressure: ramps up to lot_half by the HALF boundary and
+// to lot_acre by the ACRE boundary — matching the old categorical values where
+// each category began — so the customer price has no boundary jumps.
+function mosquitoLotSizePressure(sqft) {
+  const bound = (key) => {
+    const c = MOSQUITO.lotCategories.find((x) => x.key === key);
+    return c && Number.isFinite(c.maxSqFt) ? c.maxSqFt + 1 : null;
+  };
+  const rampStart = bound('QUARTER') || 12000; // ramp in across the THIRD band
+  const halfStart = bound('THIRD') || 18000;   // HALF begins where THIRD ends
+  const acreStart = bound('HALF') || 35000;    // ACRE begins where HALF ends
+  const halfFactor = MOSQUITO.pressureFactors.lot_half || 0;
+  const acreFactor = MOSQUITO.pressureFactors.lot_acre || 0;
+  if (sqft >= acreStart) return acreFactor;
+  if (sqft >= halfStart) return halfFactor + ((sqft - halfStart) / (acreStart - halfStart)) * (acreFactor - halfFactor);
+  if (sqft >= rampStart) return ((sqft - rampStart) / (halfStart - rampStart)) * halfFactor;
+  return 0;
 }
 
 function priceMosquito(property, options = {}) {
@@ -3734,6 +3769,11 @@ function priceMosquito(property, options = {}) {
   const lotCategory = categoryResolution.lotCategory;
   const basePrices = MOSQUITO.basePrices[lotCategory];
   if (!basePrices) throw new Error(`Unknown lot category: ${lotCategory}`);
+  // Interpolate on treatable sf, floored at the resolved category's lower
+  // edge so the gross-lot guardrail still lifts suspiciously-low derivations.
+  const categoryIndex = MOSQUITO.lotCategories.findIndex((c) => c.key === lotCategory);
+  const categoryFloorSqFt = categoryIndex > 0 ? MOSQUITO.lotCategories[categoryIndex - 1].maxSqFt + 1 : 0;
+  const pricingSqFt = Math.max(areaResolution.mosquitoTreatableSqFt || 0, categoryFloorSqFt);
   const waterMeta = normalizeMosquitoWaterMultiplier((modifiers || {}).mosquitoWaterMult);
   const waterMultiplier = waterMeta.waterMultiplier;
   const hasGraduatedWaterMultiplier = waterMultiplier > 1.0;
@@ -3748,8 +3788,7 @@ function priceMosquito(property, options = {}) {
   if (f.pool || f.poolCage) pressure += MOSQUITO.pressureFactors.pool;
   if (f.nearWater && !hasGraduatedWaterMultiplier) pressure += MOSQUITO.pressureFactors.nearWater;
   if (f.irrigation) pressure += MOSQUITO.pressureFactors.irrigation;
-  if (lotCategory === 'ACRE') pressure += MOSQUITO.pressureFactors.lot_acre;
-  else if (lotCategory === 'HALF') pressure += MOSQUITO.pressureFactors.lot_half;
+  pressure += mosquitoLotSizePressure(pricingSqFt);
   if (waterMultiplier && waterMultiplier !== 1.0) {
     pressure *= waterMultiplier;
   }
@@ -3770,11 +3809,6 @@ function priceMosquito(property, options = {}) {
   if (tierIndex < 0) throw new Error(`Unknown mosquito program: ${tier}`);
   const tierWasForced = !!normalizedRequestedTier && selectedProgram !== recommendedProgram;
   if (tierWasForced) recommendationReasons.push('forced_by_request');
-  // Interpolate on treatable sf, floored at the resolved category's lower
-  // edge so the gross-lot guardrail still lifts suspiciously-low derivations.
-  const categoryIndex = MOSQUITO.lotCategories.findIndex((c) => c.key === lotCategory);
-  const categoryFloorSqFt = categoryIndex > 0 ? MOSQUITO.lotCategories[categoryIndex - 1].maxSqFt + 1 : 0;
-  const pricingSqFt = Math.max(areaResolution.mosquitoTreatableSqFt || 0, categoryFloorSqFt);
   const basePrice = interpolateMosquitoPrice(mosquitoRecurringAnchors(tierIndex), pricingSqFt);
 
   const perVisit = Math.round(basePrice * pressure);

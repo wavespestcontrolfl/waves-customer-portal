@@ -139,23 +139,13 @@ exports.up = async function (knex) {
     'Mosquito reprice: recurring +10% to 60% target margin; one-time aligned ~25% under one-time pest (owner decision 2026-07-28)',
   );
 
-  // Keep the service catalog (manual-appointment price defaults) aligned with
-  // the new estimator pricing so manually added mosquito lines don't default
-  // to the old band. Max = ACRE seasonal per-visit x the 2.0 pressure cap.
-  if (await knex.schema.hasTable('services')) {
-    await knex('services').where({ service_key: 'mosquito_monthly' }).update({
-      base_price: 66,
-      price_range_min: 66,
-      price_range_max: 194,
-      updated_at: knex.fn.now(),
-    });
-    await knex('services').where({ service_key: 'mosquito_one_time' }).update({
-      base_price: 149,
-      price_range_min: 149,
-      price_range_max: 269,
-      updated_at: knex.fn.now(),
-    });
-  }
+  // NOT touched: the `services` catalog rows. `mosquito_one_time.base_price`
+  // is $250 from the deliberate 2026-07-09 owner scheduling-default batch
+  // (see 20260724130000_mosquito_config_and_catalog_parity.js), and
+  // admin-schedule.js bills hand-scheduled one-times from it; mosquito_monthly
+  // base_price was blanket-nulled 2026-07-04 with every other row. Aligning
+  // the $250 flat default with the new $149-269 ladder is flagged to the
+  // owner as its own decision.
 
   // Record the intentional pricing/baseline change.
   if (await knex.schema.hasTable('pricing_changelog')) {
@@ -191,19 +181,4 @@ exports.down = async function (knex) {
     OLD_ONE_TIME,
     'Rollback mosquito reprice 20260728200000 to the 2026-06 band',
   );
-
-  if (await knex.schema.hasTable('services')) {
-    await knex('services').where({ service_key: 'mosquito_monthly' }).update({
-      base_price: 60,
-      price_range_min: 60,
-      price_range_max: 175,
-      updated_at: knex.fn.now(),
-    });
-    await knex('services').where({ service_key: 'mosquito_one_time' }).update({
-      base_price: 99,
-      price_range_min: 99,
-      price_range_max: 269,
-      updated_at: knex.fn.now(),
-    });
-  }
 };
