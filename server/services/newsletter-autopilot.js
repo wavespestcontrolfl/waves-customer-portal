@@ -37,7 +37,11 @@ const {
   filterPreviouslyFeaturedIdentities,
   filterRepeatedDateIdentities,
 } = require('./newsletter-event-selection');
-const { selectPortfolio, rankAlternates, MAX_COUNT: MAX_PORTFOLIO } = require('./newsletter-portfolio');
+const {
+  selectPortfolio, rankAlternates, effectiveScore, unmetConstraints,
+  MAX_COUNT: MAX_PORTFOLIO,
+} = require('./newsletter-portfolio');
+const { featureScoreFloor } = require('./event-scoring');
 const { getFlagshipType } = require('../config/newsletter-types');
 
 const NEWSLETTER_TYPE = 'local-weekly-fresh-events';
@@ -275,7 +279,18 @@ async function autoDraftFlagship() {
   const byId = new Map(scored.map((ev) => [ev.id, ev]));
   // Dedupe preferred ids — a calendar row may carry duplicates (admin save
   // validates UUID/length, not uniqueness); dupes would inflate the lineup.
-  const eligiblePreferred = [...new Set(preferredEventIds.filter((id) => byId.has(id)))];
+  // The ABSOLUTE editorial floor applies to calendar picks too: `scored`
+  // still contains approved-but-sub-floor events, and both the full-slate
+  // and seeded paths would otherwise publish them. Only the explicit
+  // operator star overrides the floor (effectiveScore already grants
+  // featured rows hero grade).
+  const floorPassed = (ev) => ev.admin_status === 'featured'
+    || effectiveScore(ev) >= featureScoreFloor();
+  const rawPreferred = [...new Set(preferredEventIds.filter((id) => byId.has(id)))];
+  const eligiblePreferred = rawPreferred.filter((id) => floorPassed(byId.get(id)));
+  if (eligiblePreferred.length !== rawPreferred.length) {
+    logger.info(`[newsletter-autopilot] ${rawPreferred.length - eligiblePreferred.length} calendar pick(s) below the editorial floor excluded (star an event to override)`);
+  }
   const preferredEvents = eligiblePreferred.map((id) => byId.get(id));
 
   let lineupEvents;
@@ -472,7 +487,16 @@ async function autoDraftFlagship() {
       );
       return skipWeek(actualPreflight);
     }
-    logger.warn(`[newsletter-autopilot] proceeding with degraded ${actualLineup.length}-event lineup (still passes preflight)`);
+    // The count/source contract held — also re-check the PORTFOLIO
+    // minimums (weekend/zone/audience/free/hero/novelty). Per the
+    // selector's own publish-fewer rule these are shortfalls to SURFACE,
+    // not grounds to retire the week: they ride the preflight warnings
+    // onto the draft notification and the proof.
+    const degradedUnmet = unmetConstraints(actualLineup).map((c) => c.label);
+    if (degradedUnmet.length) {
+      preflight.warnings.push(...degradedUnmet.map((l) => `Degraded lineup shortfall: ${l}`));
+    }
+    logger.warn(`[newsletter-autopilot] proceeding with degraded ${actualLineup.length}-event lineup (passes preflight${degradedUnmet.length ? `; unmet: ${degradedUnmet.join('; ')}` : ''})`);
   }
   // Alternates must rank against what will actually persist.
   const persistedAlternates = eligiblePreferred.length >= 5

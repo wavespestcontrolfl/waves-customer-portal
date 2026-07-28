@@ -32,7 +32,7 @@ const { hasQuizToken, buildQuizSubstitutions } = require('./newsletter-quiz');
 const { hasFeedbackToken, ensureFeedbackToken, buildFeedbackSubstitutions } = require('./newsletter-feedback');
 const { isFlagshipDeliveryWindow, isCurrentFlagshipTarget } = require('./event-freshness');
 const { validateFlagshipEventSelection, parseLockedEventIds } = require('./newsletter-event-selection');
-const { reverifyEvents } = require('./event-reverify');
+const { reverifyEvents, reverifyEnabled } = require('./event-reverify');
 
 // CITY_TOKEN / GRASS_TYPE_TOKEN + their neutral defaults are defined once in
 // newsletter-draft.js (imported above) so the live-send substitution and every
@@ -378,11 +378,19 @@ async function sendCampaign(sendId, opts = {}) {
     // the LIVE page recheck is not — retryable recipients must not receive
     // an event that died between the first pass and recovery. Gate-off or
     // fetch flake still passes (reverifyEvents fails open on infra).
-    const lockedIds = parseLockedEventIds(send.event_ids);
-    if (lockedIds.length) {
+    const lockedIds = [...new Set(parseLockedEventIds(send.event_ids).map(String))];
+    if (lockedIds.length && reverifyEnabled()) {
       const lockedRows = await db('events_raw')
         .whereIn('id', lockedIds)
         .select('id', 'title', 'event_url');
+      if (lockedRows.length !== lockedIds.length) {
+        // A locked event deleted/merged since the first pass would simply
+        // vanish from the recheck — retry recipients would receive stale
+        // content for an event that no longer exists.
+        const err = new Error(`live page recheck failed on resume: ${lockedIds.length - lockedRows.length} locked event(s) no longer exist`);
+        err.code = 'EVENT_REVERIFY_FAILED';
+        throw err;
+      }
       const resumeRecheck = await reverifyEvents(lockedRows);
       if (!resumeRecheck.ok) {
         const err = new Error(`live page recheck failed on resume: ${resumeRecheck.failures.map((f) => `${f.title} — ${f.reason}`).join('; ')}`);
