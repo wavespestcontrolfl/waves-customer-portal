@@ -18,6 +18,7 @@ jest.mock('../services/email/gmail-client', () => ({
   ensureLabel: jest.fn(async () => 'Label_42'),
   getAuthClient: jest.fn(async () => null),
   listMessages: jest.fn(async () => []),
+  listAllMessages: jest.fn(async () => ({ messages: [], truncated: false })),
   getMessage: jest.fn(),
   getThread: jest.fn(),
   getMessageLabels: jest.fn(async () => ['Label_42']),
@@ -149,28 +150,15 @@ describe('handleSpam — quarantine + known-sender guard', () => {
     expect(patch.auto_action).toBe('spam_quarantined');
   });
 
-  test('AUTHENTICATED bulk spam with List-Unsubscribe gets unsubscribed before quarantine', async () => {
+  test('spam-classified mail is NEVER auto-unsubscribed, header or not (live-address harvesting)', async () => {
     setupDb();
     await handleSpam({
       ...EMAIL,
       list_unsubscribe: '<https://esp.example/unsub>',
       authentication_results: 'mx.google.com; dkim=pass header.d=seo-blaster.example',
     });
-    expect(autoUnsubscribe).toHaveBeenCalled();
-    expect(gmailClient.ensureLabel).toHaveBeenCalledWith('Quarantine');
-  });
-
-  test('an UNAUTHENTICATED List-Unsubscribe header is never followed (live-address harvesting)', async () => {
-    setupDb();
-    await handleSpam({ ...EMAIL, list_unsubscribe: '<https://esp.example/unsub>' });
     expect(autoUnsubscribe).not.toHaveBeenCalled();
     expect(gmailClient.ensureLabel).toHaveBeenCalledWith('Quarantine');
-  });
-
-  test('cold spam without the header is never unsubscribed (no live-address confirmation)', async () => {
-    setupDb();
-    await handleSpam({ ...EMAIL });
-    expect(autoUnsubscribe).not.toHaveBeenCalled();
   });
 
   test('an ambiguous Gmail label-swap failure is NON-destructive (no trash, no block)', async () => {
@@ -184,13 +172,14 @@ describe('handleSpam — quarantine + known-sender guard', () => {
     expect(patches[patches.length - 1]).toBe('spam_quarantine_failed');
   });
 
-  test('falls back to trash + immediate block when the quarantine label API fails', async () => {
+  test('EVERY quarantine failure is non-destructive — no trash, no block, marked for the digest', async () => {
     const state = setupDb();
     gmailClient.ensureLabel.mockRejectedValueOnce(new Error('labels down'));
     await handleSpam({ ...EMAIL });
-    expect(gmailClient.trashMessage).toHaveBeenCalledWith('g-1');
-    // no undo window exists on this path, so the block is immediate
-    expect(state.inserts.find((i) => i.table === 'blocked_email_senders')).toBeDefined();
+    expect(gmailClient.trashMessage).not.toHaveBeenCalled();
+    expect(state.inserts.find((i) => i.table === 'blocked_email_senders')).toBeUndefined();
+    const patches = state.updates.filter((u) => u.table === 'emails').map((u) => u.patch.auto_action);
+    expect(patches[patches.length - 1]).toBe('spam_quarantine_failed');
   });
 });
 
@@ -236,7 +225,7 @@ describe('rescueSpamFolder', () => {
 
   test('moves a known customer out of SPAM, marks important, rings the bell', async () => {
     const state = setupDb({ customers: [{ id: 'cust-1', email: 'jane@customer.example' }] });
-    gmailClient.listMessages.mockResolvedValueOnce([{ id: 'spam-1' }]);
+    gmailClient.listAllMessages.mockResolvedValueOnce({ messages: [{ id: 'spam-1' }], truncated: false });
     gmailClient.getMessage.mockResolvedValueOnce({
       from_address: 'jane@customer.example',
       from_name: 'Jane',
@@ -251,7 +240,7 @@ describe('rescueSpamFolder', () => {
 
   test('a spoofed known sender (no aligned auth) is NEVER rescued — review bell instead', async () => {
     const state = setupDb({ customers: [{ id: 'cust-1', email: 'jane@customer.example' }] });
-    gmailClient.listMessages.mockResolvedValueOnce([{ id: 'spam-3' }]);
+    gmailClient.listAllMessages.mockResolvedValueOnce({ messages: [{ id: 'spam-3' }], truncated: false });
     gmailClient.getMessage.mockResolvedValueOnce({
       from_address: 'jane@customer.example',
       from_name: 'Jane',
@@ -267,7 +256,7 @@ describe('rescueSpamFolder', () => {
 
   test('unknown senders stay in SPAM', async () => {
     setupDb();
-    gmailClient.listMessages.mockResolvedValueOnce([{ id: 'spam-2' }]);
+    gmailClient.listAllMessages.mockResolvedValueOnce({ messages: [{ id: 'spam-2' }], truncated: false });
     gmailClient.getMessage.mockResolvedValueOnce({ from_address: 'junk@blaster.example' });
     const counts = await rescueSpamFolder();
     expect(gmailClient.modifyLabels).not.toHaveBeenCalled();

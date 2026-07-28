@@ -225,7 +225,11 @@ function hasAlignedAuth(authResults, fromDomain) {
  * it gets a review notification instead of a move (spoof containment).
  */
 async function rescueSpamFolder() {
-  const messages = await gmailClient.listMessages('in:spam newer_than:2d', 50);
+  // Paginated: a junk burst must not push a buried customer email past a
+  // single-page cap. 500 ids over a 2-day window is far above observed spam
+  // volume; if it ever truncates, say so (no silent caps).
+  const { messages, truncated } = await gmailClient.listAllMessages('in:spam newer_than:2d', 500);
+  if (truncated) logger.warn('[inbox-hygiene] spam rescue hit the 500-message cap — oldest spam not scanned this pass');
   const counts = { scanned: 0, rescued: 0, customers: 0, unauthenticated: 0 };
   for (const m of messages || []) {
     counts.scanned += 1;

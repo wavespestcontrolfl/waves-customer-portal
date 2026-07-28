@@ -258,22 +258,13 @@ async function handleSpam(email) {
     logger.warn(`[email-actions] known-looking ${verdict.kind} sender FAILED authentication — quarantining as probable spoof (email ${email.id})`);
   }
 
-  // 1. Legit bulk senders get an unsubscribe BEFORE quarantine — but a
-  // List-Unsubscribe header alone is attacker-typed text (any spammer can
-  // add one to harvest live-mailbox confirmations). The unsubscribe only
-  // fires when Gmail's Authentication-Results show the mail actually
-  // authenticated as the domain it claims (same aligned-auth bar as the
-  // spam-folder rescue). Everything else quarantines silently.
-  if (email.list_unsubscribe && alignedAuth) {
-    try {
-      const { autoUnsubscribe } = require('./auto-unsubscribe');
-      await autoUnsubscribe(email);
-    } catch (e) {
-      logger.warn(`[email-actions] spam-path unsubscribe failed (email ${email.id}): ${e.message}`);
-    }
-  }
+  // NOTE: spam-classified mail is deliberately NEVER auto-unsubscribed —
+  // any harvesting spammer can present a List-Unsubscribe header (and can
+  // even SPF/DKIM-authenticate a throwaway domain), so touching their URL
+  // confirms a live mailbox. Legitimate bulk mail is the classifier's
+  // marketing_newsletter lane, whose unsubscribe workflow handles it.
 
-  // 2. Quarantine instead of instant trash — 24h undo window, swept daily
+  // Quarantine instead of instant trash — 24h undo window, swept daily
   // (inbox-hygiene). A misfire costs one label-click inside a day. The
   // persistent sender block deliberately WAITS for the sweep: blocking here
   // would keep routing the sender to Trash even after an operator restores
@@ -283,25 +274,16 @@ async function handleSpam(email) {
     await quarantineMessage(email);
     logger.info(`[email-actions] Spam quarantined (email ${email.id}); sender block deferred to sweep`);
   } catch (e) {
-    // The staged quarantine tags where it failed. An AMBIGUOUS Gmail label
-    // swap (stage 'gmail' — the mutation may have applied) must NEVER fall
-    // back to trash: quarantineMessage already withdrew the sweep stamp, so
-    // nothing destructive can happen to this message. Only provably-clean
-    // failures (label ensure / DB stamp — Gmail untouched) take the
-    // pre-quarantine trash fallback.
-    if (e.quarantineStage === 'gmail') {
-      logger.warn(`[email-actions] quarantine label swap ambiguous (email ${email.id}) — left non-destructive: ${e.message}`);
-      return;
-    }
-    logger.warn(`[email-actions] quarantine failed cleanly at ${e.quarantineStage || 'unknown'}, falling back to trash (email ${email.id}): ${e.message}`);
-    try { await gmailClient.trashMessage(email.gmail_id); } catch (e2) { /* non-critical */ }
-    const { blockSpamSender } = require('./spam-blocker');
-    await blockSpamSender(email);
-    await db('emails').where({ id: email.id }).update({
-      is_archived: true,
-      auto_action: 'spam_blocked',
-      updated_at: new Date(),
-    });
+    // EVERY quarantine failure is non-destructive: a transient label-API or
+    // DB blip must not become the one moment misclassified mail gets
+    // permanently trashed and its sender persistently blocked. The message
+    // stays wherever Gmail has it (worst case: spam sits in the inbox until
+    // the next day), marked so the sweep can never touch it and the digest
+    // can report the failure.
+    logger.warn(`[email-actions] quarantine failed at ${e.quarantineStage || 'unknown'} — left non-destructive (email ${email.id}): ${e.message}`);
+    await db('emails').where({ id: email.id })
+      .update({ auto_action: 'spam_quarantine_failed', quarantined_at: null, updated_at: new Date() })
+      .catch(() => {});
   }
 }
 

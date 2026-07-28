@@ -353,6 +353,28 @@ async function createDraft(to, subject, body, threadId = null, inReplyTo = null)
   return res.data;
 }
 
+/**
+ * Paginated message listing — walks nextPageToken up to `cap` ids so a
+ * burst of junk can't hide older matches behind a single-page limit.
+ */
+async function listAllMessages(query = '', cap = 500) {
+  const gmail = await getGmail();
+  const ids = [];
+  let pageToken;
+  while (ids.length < cap) {
+    const res = await gmail.users.messages.list({
+      userId: 'me',
+      q: query,
+      maxResults: Math.min(100, cap - ids.length),
+      pageToken,
+    });
+    ids.push(...(res.data.messages || []));
+    pageToken = res.data.nextPageToken;
+    if (!pageToken) break;
+  }
+  return { messages: ids, truncated: !!pageToken };
+}
+
 /** Live labelIds for one message — the quarantine sweep's operator-veto check. */
 async function getMessageLabels(messageId) {
   const gmail = await getGmail();
@@ -385,6 +407,7 @@ module.exports = {
   ensureLabel,
   getThread,
   getMessageLabels,
+  listAllMessages,
   modifyLabels,
   archiveMessage,
   trashMessage,
