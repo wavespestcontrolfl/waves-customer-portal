@@ -100,7 +100,7 @@ function renderAutomationStepContent({ template, htmlBody, textBody, customer, a
   const rawHtml = substitute(htmlBody || '', customer);
   const rawText = substitute(textBody || '', customer);
   const unsubscribeUrl = asmGroupId ? ASM_UNSUBSCRIBE_URL : null;
-  // Every automation renders the service chrome — "The Waves Newsletter"
+  // Every automation renders the service chrome — "Waves Newsletter"
   // header is reserved for actual newsletter sends (owner call 2026-07-10;
   // the new_lead intro was going out dressed as the newsletter). Marketing-
   // stream automations (asm_group='newsletter') stay on the marketing ASM/

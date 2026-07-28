@@ -59,7 +59,7 @@ async function sendConfirmationEmail(subscriber) {
   const html = wrapEmail({
     preheader: "One click and you're on the list.",
     heading: 'Confirm your subscription',
-    intro: `${greetingHtml} thanks for signing up for The Waves Newsletter. Click the button below to confirm your email — no other steps, you're done after this.`,
+    intro: `${greetingHtml} thanks for signing up for the Waves Newsletter. Click the button below to confirm your email — no other steps, you're done after this.`,
     ctaHref: url,
     ctaLabel: 'Confirm subscription',
     footerNote: `If you didn't sign up, ignore this email and we'll never message you again. The link expires after a single use.`,
@@ -68,7 +68,7 @@ async function sendConfirmationEmail(subscriber) {
   const text = [
     greetingText,
     '',
-    `Thanks for signing up for The Waves Newsletter. Confirm your email by visiting the link below:`,
+    `Thanks for signing up for the Waves Newsletter. Confirm your email by visiting the link below:`,
     '',
     url,
     '',
@@ -87,7 +87,7 @@ async function sendConfirmationEmail(subscriber) {
     // depending on sendgrid-mail's default (other callers should declare
     // their own identity; defaults are not policy).
     fromEmail: 'newsletter@wavespestcontrol.com',
-    fromName: 'The Waves Newsletter',
+    fromName: 'Waves Newsletter',
     subject: 'Confirm your Waves Newsletter signup',
     html,
     text,

@@ -156,3 +156,14 @@ describe('free-label parity with the portfolio classifier', () => {
     expect(deriveEventLabels({ price_text: '$25' })).not.toContain('Free');
   });
 });
+
+describe('owner v2 polish (2026-07-28 evening)', () => {
+  test('standard cards render the DB-locked event thumbnail when present', async () => {
+    const withThumb = await assembleWavesNewsletter(draftFixture({
+      events: [HERO, { ...CARD, imageUrl: 'https://img.example/broadway.jpg' }],
+    }));
+    expect(withThumb).toContain('https://img.example/broadway.jpg');
+    const withoutThumb = await assembleWavesNewsletter(draftFixture());
+    expect(withoutThumb).not.toContain('img.example/broadway');
+  });
+});

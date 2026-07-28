@@ -69,7 +69,7 @@ describe('automation runner rendering', () => {
 
     expect(rendered.html).toContain('Waves');
     expect(rendered.html).toContain('Hi Taylor');
-    expect(rendered.html).not.toContain('The Waves Newsletter');
+    expect(rendered.html).not.toContain('Waves Newsletter');
     expect(rendered.html).not.toContain('<%asm_group_unsubscribe_raw_url%>');
     expect(rendered.text).toBe('Hi Taylor, your estimate is ready.');
   });
@@ -85,7 +85,7 @@ describe('automation runner rendering', () => {
 
     // Newsletter chrome is reserved for actual newsletter sends — marketing
     // drips (new_lead/cold_lead/referral_nudge) wear the service shell.
-    expect(rendered.html).not.toContain('The Waves Newsletter');
+    expect(rendered.html).not.toContain('Waves Newsletter');
     expect(rendered.html).toContain('Hi Taylor');
     // Still a commercial email on the marketing ASM group: the visible
     // unsubscribe link must survive the wrapper swap.

@@ -210,7 +210,7 @@ function ctaButton(href, label) {
 const GLASS_LOGO_IMG = 'https://portal.wavespestcontrol.com/waves-logo-2026.png';
 
 // Edition identity by newsletter type (owner directive 2026-07-28): the
-// flagship weekly masthead is "The Waves Newsletter" — no subtitle, no
+// flagship weekly masthead is "Waves Newsletter" — no "The", no subtitle,
 // spacer under the H1 — rendered under the 2026 Waves logo. This replaces
 // the short-lived "Fresh This Week" identity (2026-07-17). The
 // beehiiv-hosted masthead IMAGE stays retired — header art must never
@@ -219,7 +219,7 @@ const GLASS_LOGO_IMG = 'https://portal.wavespestcontrol.com/waves-logo-2026.png'
 const FLAGSHIP_NEWSLETTER_TYPE = 'local-weekly-fresh-events';
 const NEWSLETTER_IDENTITIES = {
   [FLAGSHIP_NEWSLETTER_TYPE]: {
-    title: 'The Waves Newsletter',
+    title: 'Waves Newsletter',
     tagline: '',
   },
   default: { title: 'Waves Newsletter', tagline: '' },
@@ -463,7 +463,7 @@ function glassNewsletter({ body, unsubscribeUrl, preheader, footerNote, preferre
   // logo repeats small in the universal footer — that mirrors the reference
   // editions, where header art and footer brand were both fixed furniture.
   const heroBlock = `<a href="${WAVES_WEBSITE_URL}" style="text-decoration:none;display:inline-block;"><img src="${GLASS_LOGO_IMG}" alt="${identity.title}" width="72" height="72" style="display:inline-block;width:72px;height:72px;max-width:100%;border:0;" /></a>
-          <h1 style="margin:10px 0 0 0;font-family:${T.headingFont};font-size:28px;line-height:1.15;letter-spacing:-0.03em;color:${T.ink};font-weight:700;">${identity.title}</h1>${identity.tagline ? `
+          <h1 style="margin:8px 0 0 0;font-family:${T.headingFont};font-size:20px;line-height:1.2;letter-spacing:-0.02em;color:${T.ink};font-weight:700;">${identity.title}</h1>${identity.tagline ? `
           <p style="margin:6px 0 0 0;font-family:${T.font};font-size:15px;line-height:1.5;color:${T.muted};">${identity.tagline}</p>` : ''}`;
 
   const footerExtras = `${preferredSourcesLine}${unsubscribeLine}${footerNote

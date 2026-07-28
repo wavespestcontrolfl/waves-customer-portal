@@ -81,7 +81,7 @@ function formatEventBlock(events) {
  * styled metadata blocks, and per-event sections server-side.
  */
 function buildFlagshipSystemPrompt(voice, month) {
-  return `You write The Waves Newsletter — Waves Pest Control's weekly local events guide — for readers from North Port to Tampa.
+  return `You write the Waves Newsletter — Waves Pest Control's weekly local events guide — for readers from North Port to Tampa.
 
 This is NOT a corporate pest control email. It is a punchy, local, FOMO-driven weekend guide written like a friend texting "yo, here's what's actually worth doing."
 
@@ -1152,6 +1152,13 @@ async function assembleWavesNewsletter(draft) {
   // ── Standard picks ──
   for (const ev of standard) {
     const card = [];
+    // Per-event thumbnail (owner ask 2026-07-28 evening review): the
+    // DB-locked event image renders above each card when the feed
+    // supplied one — real event art, never generated, never a GIF.
+    const thumbUrl = safeUrl(ev.imageUrl);
+    if (thumbUrl) {
+      card.push(`<div style="margin:0 0 8px 0;"><img src="${thumbUrl}" alt="${escapeHtml(ev.sourceTitle || '')}" style="max-width:100%;height:auto;max-height:220px;object-fit:cover;border-radius:8px;display:block;" /></div>`);
+    }
     card.push(`<h2 style="margin:0 0 6px 0;font-size:17px;line-height:1.35;">${escapeHtml(ev.sourceTitle || '')}</h2>`);
     const meta = metaLine(ev);
     if (meta) card.push(`<p style="margin:0 0 6px 0;font-size:13px;color:${COLORS.muted};">${meta}</p>`);
