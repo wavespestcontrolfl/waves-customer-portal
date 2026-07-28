@@ -156,3 +156,38 @@ describe('free-label parity with the portfolio classifier', () => {
     expect(deriveEventLabels({ price_text: '$25' })).not.toContain('Free');
   });
 });
+
+describe('owner v2 polish (2026-07-28 evening)', () => {
+  test('standard cards render the DB-locked event thumbnail when present', async () => {
+    const withThumb = await assembleWavesNewsletter(draftFixture({
+      events: [HERO, { ...CARD, imageUrl: 'https://img.example/broadway.jpg' }],
+    }));
+    expect(withThumb).toContain('https://img.example/broadway.jpg');
+    const withoutThumb = await assembleWavesNewsletter(draftFixture());
+    expect(withoutThumb).not.toContain('img.example/broadway');
+  });
+});
+
+describe('thumbnail hardening (codex on #3030)', () => {
+  test('GIF-shaped urls are rejected as thumbnails — suffix, query param, and GIF-CDN host', async () => {
+    for (const bad of [
+      'https://img.example/loop.gif',
+      'https://img.example/image?file=promo.gif',
+      'https://img.example/image?format=gif&id=9',
+      'https://media2.giphy.com/media/abc/200.webp',
+    ]) {
+      const html = await assembleWavesNewsletter(draftFixture({
+        events: [HERO, { ...CARD, imageUrl: bad }],
+      }));
+      expect(html).not.toContain(bad.slice(20));
+    }
+  });
+
+  test('still images render with a two-axis cap plus an MSO fixed-width branch', async () => {
+    const html = await assembleWavesNewsletter(draftFixture({
+      events: [HERO, { ...CARD, imageUrl: 'https://img.example/broadway.jpg' }],
+    }));
+    expect(html).toMatch(/<img src="https:\/\/img\.example\/broadway\.jpg"[^>]*max-height:220px/);
+    expect(html).toMatch(/\[if mso\]><img src="https:\/\/img\.example\/broadway\.jpg"[^>]*width="280"/);
+  });
+});

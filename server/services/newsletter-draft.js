@@ -1183,6 +1183,21 @@ async function assembleWavesNewsletter(draft) {
   // ── Standard picks ──
   for (const ev of standard) {
     const card = [];
+    // Per-event thumbnail (owner ask 2026-07-28 evening review): the
+    // DB-locked event image renders above each card when the feed
+    // supplied one — real event art, never generated, never a GIF.
+    // Reject GIF urls — the thumbnail contract is real still event art,
+    // and safeUrl validates scheme only. Two-axis cap without upscaling
+    // for standards clients; Outlook's Word engine ignores max-* so the
+    // MSO branch gets a fixed width (height scales proportionally).
+    const thumbUrl = safeUrl(ev.imageUrl);
+    if (thumbUrl && !isLikelyGifUrl(thumbUrl)) {
+      const thumbAlt = escapeHtml(ev.sourceTitle || '');
+      card.push(`<div style="margin:0 0 8px 0;">
+<!--[if !mso]><!--><img src="${thumbUrl}" alt="${thumbAlt}" style="max-width:100%;max-height:220px;width:auto;height:auto;border-radius:8px;display:block;" /><!--<![endif]-->
+<!--[if mso]><img src="${thumbUrl}" alt="${thumbAlt}" width="280" /><![endif]-->
+</div>`);
+    }
     card.push(`<h2 style="margin:0 0 6px 0;font-size:17px;line-height:1.35;">${escapeHtml(ev.sourceTitle || '')}</h2>`);
     const meta = metaLine(ev);
     if (meta) card.push(`<p style="margin:0 0 6px 0;font-size:13px;color:${COLORS.muted};">${meta}</p>`);
