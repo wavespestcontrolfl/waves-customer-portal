@@ -83,6 +83,22 @@ function resolveEvclickDirect(body, urlById = new Map()) {
   ));
 }
 
+/**
+ * Resolve evclick tokens using the BODY's own event ids (stateless
+ * surfaces like the Compose preview have no send row to read event_ids
+ * from). Fail-open: lookup errors resolve to the homepage fallback.
+ */
+async function resolveEvclickFromBody(body, knex = db) {
+  const ids = evclickIdsInBody(body);
+  if (!ids.length) return String(body || '');
+  let urlById = new Map();
+  try {
+    const rows = await knex('events_raw').whereIn('id', ids).select('id', 'event_url');
+    urlById = new Map(rows.map((r) => [String(r.id).toLowerCase(), r.event_url || null]));
+  } catch { /* homepage fallback */ }
+  return resolveEvclickDirect(body, urlById);
+}
+
 /** Load { eventIdLower → event_url } for a send's locked + alternate ids. */
 async function eventUrlMapForSend(send, knex = db) {
   const { parseLockedEventIds } = require('./newsletter-event-selection');
@@ -146,7 +162,11 @@ async function recordEventClick({ engagementToken, eventId }, knex = db) {
 function rateAdjustment(keyClicks, keyEvents, overallRate, { cap, minEvents = MIN_CATEGORY_EVENTS } = {}) {
   if (!keyEvents || keyEvents < minEvents || !overallRate) return 0;
   const ratio = (keyClicks / keyEvents) / overallRate;
-  return Math.max(-cap, Math.min(cap, Math.round((ratio - 1) * cap)));
+  // Symmetric away-from-zero rounding — Math.round(-1.5) is -1, which
+  // would make demotions one point weaker than promotions.
+  const raw = (ratio - 1) * cap;
+  const rounded = Math.sign(raw) * Math.round(Math.abs(raw));
+  return Math.max(-cap, Math.min(cap, rounded));
 }
 
 /**
@@ -173,8 +193,12 @@ async function computeLearnedAdjustments(knex = db) {
       .select('id', 'event_ids');
     const appearances = [];
     for (const s of sentSends) {
-      for (const eventId of parseLockedEventIds(s.event_ids)) {
-        appearances.push({ sendId: String(s.id), eventId: String(eventId).toLowerCase() });
+      // Dedupe WITHIN a send — the admin save path permits duplicate
+      // event_ids while click rows are unique per (send,event), so [A,A]
+      // would depress A's rate with an appearance its recipients can
+      // never match. The same event in a DIFFERENT send counts again.
+      for (const eventId of new Set(parseLockedEventIds(s.event_ids).map((id) => String(id).toLowerCase()))) {
+        appearances.push({ sendId: String(s.id), eventId });
       }
     }
     if (!appearances.length) return { categoryAdj: new Map(), zoneAdj: new Map() };
@@ -217,17 +241,19 @@ async function computeLearnedAdjustments(knex = db) {
       return g;
     };
     const categoryAdj = new Map();
+    const thinCategories = new Set();
     for (const [k, v] of groupBy('category')) {
+      if (v.events < MIN_CATEGORY_EVENTS) thinCategories.add(k);
       categoryAdj.set(k, rateAdjustment(v.clicks, v.events, overallRate, { cap: CATEGORY_CAP }));
     }
     const zoneAdj = new Map();
     for (const [k, v] of groupBy('zone')) {
       zoneAdj.set(k, rateAdjustment(v.clicks, v.events, overallRate, { cap: ZONE_CAP }));
     }
-    return { categoryAdj, zoneAdj };
+    return { categoryAdj, zoneAdj, thinCategories };
   } catch (err) {
     logger.warn(`[newsletter-event-clicks] learning aggregation failed (no adjustment): ${err.message}`);
-    return { categoryAdj: new Map(), zoneAdj: new Map() };
+    return { categoryAdj: new Map(), zoneAdj: new Map(), thinCategories: new Set() };
   }
 }
 
@@ -236,13 +262,18 @@ async function computeLearnedAdjustments(knex = db) {
  * ±5, floor-passing scored rows only, never below the floor, stars and
  * unscored rows untouched. Pure given the adjustment maps.
  */
-function applyLearnedAdjustments(scored, { categoryAdj, zoneAdj }) {
+function applyLearnedAdjustments(scored, { categoryAdj, zoneAdj, thinCategories }) {
   if ((!categoryAdj || !categoryAdj.size) && (!zoneAdj || !zoneAdj.size)) return scored;
   const floor = featureScoreFloor();
   return scored.map((ev) => {
     const s = Number(ev.editorial_score);
     if (!Number.isFinite(s) || s < floor || ev.admin_status === 'featured') return ev;
-    const cat = categoryAdj?.get(ev.novelty_type || 'unknown') || 0;
+    const category = ev.novelty_type || 'unknown';
+    // FULL discovery protection: a thin-history (or never-seen) category
+    // is judged purely on its rubric score — the zone component must not
+    // sneak an adjustment in through the side door.
+    if (thinCategories?.has(category) || !categoryAdj?.has(category)) return ev;
+    const cat = categoryAdj?.get(category) || 0;
     const zone = zoneAdj?.get(ev.region_zone || 'unknown') || 0;
     const adj = Math.max(-TOTAL_CAP, Math.min(TOTAL_CAP, cat + zone));
     if (!adj) return ev;
@@ -261,6 +292,7 @@ module.exports = {
   evclickIdsInBody,
   buildEvclickSubstitutions,
   resolveEvclickDirect,
+  resolveEvclickFromBody,
   eventUrlMapForSend,
   recordEventClick,
   rateAdjustment,

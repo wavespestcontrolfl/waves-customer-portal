@@ -504,19 +504,27 @@ router.get('/sends/:id', async (req, res, next) => {
     // pre-migration environments just omit the field.
     let eventClicks = null;
     try {
-      const clickRows = await db('newsletter_event_clicks as c')
-        .leftJoin('events_raw as e', 'e.id', 'c.event_id')
-        .where({ 'c.send_id': req.params.id })
-        .select('c.event_id', 'c.position', 'e.title')
-        .count('* as clicks')
-        .groupBy('c.event_id', 'c.position', 'e.title')
-        .orderByRaw('c.position ASC NULLS LAST');
-      if (clickRows.length) {
-        eventClicks = clickRows.map((r) => ({
-          eventId: r.event_id,
-          title: r.title || null,
-          position: r.position,
-          clicks: Number(r.clicks),
+      // Build from the LOCKED LINEUP and left-join click counts, so a
+      // genuinely zero-click event (or a fully unclicked tracked send)
+      // shows its zeros instead of vanishing — only untracked sends
+      // (no evclick tokens in the stored body) omit the rollup.
+      const { parseLockedEventIds } = require('../services/newsletter-event-selection');
+      const lockedIds = [...new Set(parseLockedEventIds(send.event_ids).map(String))];
+      const tracked = String(send.html_body || '').includes('{{evclick:');
+      if (lockedIds.length && tracked) {
+        const clickRows = await db('newsletter_event_clicks')
+          .where({ send_id: req.params.id })
+          .select('event_id')
+          .count('* as clicks')
+          .groupBy('event_id');
+        const clicksById = new Map(clickRows.map((r) => [String(r.event_id).toLowerCase(), Number(r.clicks)]));
+        const titleRows = await db('events_raw').whereIn('id', lockedIds).select('id', 'title');
+        const titleById = new Map(titleRows.map((r) => [String(r.id).toLowerCase(), r.title]));
+        eventClicks = lockedIds.map((id, position) => ({
+          eventId: id,
+          title: titleById.get(id.toLowerCase()) || null,
+          position,
+          clicks: clicksById.get(id.toLowerCase()) || 0,
         }));
       }
     } catch { /* table not migrated yet — omit */ }
@@ -1088,8 +1096,13 @@ router.post('/preview', async (req, res) => {
     // shows the block the broadcast will carry even on hand-composed bodies.
     const { stripPersonalizationTokens } = require('../services/newsletter-draft');
     const { ensureFeedbackToken } = require('../services/newsletter-feedback');
+    // Event click tokens resolve to the DIRECT event URLs before the
+    // neutralizer's homepage fallback — the Compose preview is the
+    // surface operators review, so its links must open the real pages.
+    const { resolveEvclickFromBody } = require('../services/newsletter-event-clicks');
+    const resolvedBody = await resolveEvclickFromBody(ensureFeedbackToken({ html: htmlBody || '' }).html);
     const html = wrapNewsletter({
-      body: stripPersonalizationTokens(ensureFeedbackToken({ html: htmlBody || '' }).html),
+      body: stripPersonalizationTokens(resolvedBody),
       unsubscribeUrl: demoUrl,
       preheader: previewText ? stripPersonalizationTokens(previewText) : undefined,
       newsletterType: newsletterType || undefined,

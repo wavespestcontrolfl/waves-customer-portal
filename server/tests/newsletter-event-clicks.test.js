@@ -93,3 +93,28 @@ describe('kill switch', () => {
     expect(clickLearningEnabled()).toBe(false);
   });
 });
+
+describe('codex round-1 refinements', () => {
+  test('symmetric rounding: -1.5-grade demotions round away from zero', () => {
+    // ratio 0.5 → (0.5-1)*3 = -1.5 → -2 (not -1)
+    expect(rateAdjustment(15, 6, 5, { cap: 3 })).toBe(-2);
+    // mirror promotion: ratio 1.5 → +1.5 → +2
+    expect(rateAdjustment(45, 6, 5, { cap: 3 })).toBe(2);
+  });
+
+  test('thin-history categories are fully protected — no zone side-door', () => {
+    const scored = [{ id: 'n', editorial_score: 80, novelty_type: 'brand_new', region_zone: 'tampa', admin_status: 'approved' }];
+    const out = applyLearnedAdjustments(scored, {
+      categoryAdj: new Map([['brand_new', 0]]),
+      zoneAdj: new Map([['tampa', 2]]),
+      thinCategories: new Set(['brand_new']),
+    });
+    expect(out[0].editorial_score).toBe(80);
+    // Unknown category (never seen at all) is equally protected.
+    const unseen = applyLearnedAdjustments(
+      [{ id: 'u', editorial_score: 80, novelty_type: 'unseen', region_zone: 'tampa', admin_status: 'approved' }],
+      { categoryAdj: new Map([['touring', 1]]), zoneAdj: new Map([['tampa', 2]]), thinCategories: new Set() },
+    );
+    expect(unseen[0].editorial_score).toBe(80);
+  });
+});
