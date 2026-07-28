@@ -37,6 +37,11 @@ const {
   filterPreviouslyFeaturedIdentities,
   filterRepeatedDateIdentities,
 } = require('./newsletter-event-selection');
+const {
+  selectPortfolio, rankAlternates, effectiveScore, unmetConstraints,
+  MAX_COUNT: MAX_PORTFOLIO,
+} = require('./newsletter-portfolio');
+const { featureScoreFloor } = require('./event-scoring');
 const { getFlagshipType } = require('../config/newsletter-types');
 
 const NEWSLETTER_TYPE = 'local-weekly-fresh-events';
@@ -61,7 +66,8 @@ async function buildDigestPlan({ reference = new Date() } = {}) {
       'e.venue_name', 'e.venue_address', 'e.city', 'e.event_url', 'e.image_url',
       'e.event_type', 'e.recurrence_type', 'e.freshness_status', 'e.freshness_score',
       'e.admin_status', 'e.times_featured', 'e.last_featured_at', 'e.pulled_at', 'e.source_id',
-      'e.region_zone', 'e.family_friendly', 'e.is_free',
+      'e.region_zone', 'e.family_friendly', 'e.is_free', 'e.price_text',
+      'e.editorial_score', 'e.score_breakdown', 'e.novelty_type', 'e.audience_tags',
       's.name as source_name', 's.priority_tier as source_priority_tier',
     )
     .whereIn('e.admin_status', ['approved', 'featured'])
@@ -264,24 +270,48 @@ async function autoDraftFlagship() {
   const homeownerMinuteTopic = calendarEntry?.homeowner_minute_topic;
   const preferredEventIds = Array.isArray(calendarEntry?.event_ids) ? calendarEntry.event_ids : [];
 
-  const topEvents = scored.slice(0, 12);
+  // Portfolio selection (owner spec 2026-07-28): the lineup is the
+  // strongest COMBINATION — floor-enforced, weekend/zone/audience
+  // balanced, capped per venue/source — not the raw top-N. Calendar-
+  // curated picks still take precedence: a full operator slate is used
+  // verbatim; a partial one SEEDS the selector, so caps and coverage are
+  // enforced against the combined lineup, not just the supplement.
   const byId = new Map(scored.map((ev) => [ev.id, ev]));
   // Dedupe preferred ids — a calendar row may carry duplicates (admin save
   // validates UUID/length, not uniqueness); dupes would inflate the lineup.
-  const eligiblePreferred = [...new Set(preferredEventIds.filter((id) => byId.has(id)))];
+  // The ABSOLUTE editorial floor applies to calendar picks too: `scored`
+  // still contains approved-but-sub-floor events, and both the full-slate
+  // and seeded paths would otherwise publish them. Only the explicit
+  // operator star overrides the floor (effectiveScore already grants
+  // featured rows hero grade).
+  const floorPassed = (ev) => ev.admin_status === 'featured'
+    || effectiveScore(ev) >= featureScoreFloor();
+  const rawPreferred = [...new Set(preferredEventIds.filter((id) => byId.has(id)))];
+  const eligiblePreferred = rawPreferred.filter((id) => floorPassed(byId.get(id)));
+  if (eligiblePreferred.length !== rawPreferred.length) {
+    logger.info(`[newsletter-autopilot] ${rawPreferred.length - eligiblePreferred.length} calendar pick(s) below the editorial floor excluded (star an event to override)`);
+  }
+  const preferredEvents = eligiblePreferred.map((id) => byId.get(id));
 
   let lineupEvents;
+  let portfolio;
   if (eligiblePreferred.length >= 5) {
     // Calendar picks are all eligible — use them, in the operator's order
-    lineupEvents = eligiblePreferred.map((id) => byId.get(id));
-  } else if (eligiblePreferred.length > 0) {
-    // Some calendar picks are eligible — supplement with top-scored
-    const preferredSet = new Set(eligiblePreferred);
-    const supplement = topEvents.filter((ev) => !preferredSet.has(ev.id));
-    lineupEvents = [...eligiblePreferred.map((id) => byId.get(id)), ...supplement].slice(0, 12);
+    lineupEvents = preferredEvents;
+    portfolio = { selected: preferredEvents, unmet: [], stats: null };
   } else {
-    // No calendar picks are eligible — use top-scored
-    lineupEvents = topEvents;
+    portfolio = selectPortfolio(scored, { seeded: preferredEvents });
+    lineupEvents = portfolio.selected.slice(0, MAX_PORTFOLIO);
+  }
+  // Alternates rank against the FINAL lineup — an operator-preferred
+  // event capped out of the selection must never be stored as both a
+  // locked event and its own replacement. Operator-full slates skip
+  // alternates entirely (the slate is the operator's intent).
+  const lineupAlternates = eligiblePreferred.length >= 5
+    ? []
+    : rankAlternates(scored, lineupEvents);
+  if (portfolio.unmet.length) {
+    logger.info(`[newsletter-autopilot] portfolio shortfalls (publishing anyway, never padding): ${portfolio.unmet.join('; ')}`);
   }
 
   // 6. Preflight gate — enforce the flagship type's declared quality
@@ -291,32 +321,47 @@ async function autoDraftFlagship() {
   //    type config so they tune in one place.
   const reqs = getFlagshipType()?.sourceRequirements || {};
   const preflight = preflightDigest(lineupEvents, reqs);
-  if (!preflight.pass) {
-    const reason = preflight.hardFailures.join('; ');
+  // The selector's own shortfalls reach the OPERATOR, not just the server
+  // log — they ride the preflight warnings onto the draft notification.
+  if (portfolio.unmet.length) {
+    preflight.warnings.push(...portfolio.unmet.map((l) => `Portfolio shortfall: ${l}`));
+  }
+  // Skip-week routine, shared by the pre-generation preflight and the
+  // post-generation lineup-coverage recheck. Persists a durable 'skipped'
+  // marker (the catch-up gate only re-runs missing/'planned' weeks) and
+  // notifies the admin with an actionable report.
+  const skipWeek = async (preflightReport) => {
+    const reason = preflightReport.hardFailures.join('; ');
     logger.info(`[newsletter-autopilot] Preflight skip: ${reason}`);
-
-    // Persist a durable 'skipped' marker for this week. Without it, the
-    // preflight-skip path leaves no calendar row (or a 'planned' one), so the
-    // Monday 2PM / Tuesday 4:30AM catch-up jobs treat the week as never-attempted and re-run
-    // autoDraftFlagship — repeating the work and the skip notification — on
-    // every tick. The catch-up gate only proceeds on a missing/'planned' row,
-    // so a 'skipped' status correctly retires the week. Any operator-planned
-    // topic/event_ids on an existing row are preserved; only the status flips.
     try {
-      await db('newsletter_calendar')
-        .insert({
-          week_of: weekOf,
-          status: 'skipped',
-          target_send_at: defaultTargetSendAt(weekOf),
-          event_ids: JSON.stringify([]),
-        })
-        .onConflict('week_of')
-        .merge({ status: 'skipped', updated_at: db.fn.now() });
+      // Guarded transition: only an unlinked planned/skipped row may flip
+      // to 'skipped'. This routine now also runs AFTER nondeterministic
+      // model generation, outside the advisory lock — an unconditional
+      // merge could overwrite the 'drafted' row a concurrent runner just
+      // created and linked, killing its proof retries.
+      // Unlinked 'drafted' rows flip too — autoDraftFlagship deliberately
+      // falls through to re-draft on those, so leaving one 'drafted' would
+      // make every catch-up repeat the work, the notification, and the
+      // paid generation. Linked rows (send_id set) stay protected.
+      const flipped = await db('newsletter_calendar')
+        .where({ week_of: weekOf })
+        .whereNull('send_id')
+        .whereIn('status', ['planned', 'skipped', 'drafted'])
+        .update({ status: 'skipped', updated_at: db.fn.now() });
+      if (!flipped) {
+        await db('newsletter_calendar')
+          .insert({
+            week_of: weekOf,
+            status: 'skipped',
+            target_send_at: defaultTargetSendAt(weekOf),
+            event_ids: JSON.stringify([]),
+          })
+          .onConflict('week_of')
+          .ignore();
+      }
     } catch (e) {
       logger.warn(`[newsletter-autopilot] failed to mark week skipped: ${e.message}`);
     }
-
-    // Notify admin with an actionable report (exact counts + next actions).
     try {
       // Name the broken sources in the report — a thin eligible pool is
       // almost always upstream source rot, not an approval backlog.
@@ -328,19 +373,21 @@ async function autoDraftFlagship() {
       } catch (e) {
         logger.warn(`[newsletter-autopilot] source health fetch failed: ${e.message}`);
       }
-
       const { triggerNotification } = require('./notification-triggers');
       await triggerNotification('newsletter_autopilot_skipped', {
-        eligible: preflight.stats.eligibleCount,
+        eligible: preflightReport.stats.eligibleCount,
         reason,
-        preflight: preflight.stats,
-        report: formatPreflightReport(preflight, weekOf, sourceHealthLines),
+        preflight: preflightReport.stats,
+        report: formatPreflightReport(preflightReport, weekOf, sourceHealthLines),
       });
     } catch (e) {
       logger.warn(`[newsletter-autopilot] skip notification failed: ${e.message}`);
     }
+    return { skipped: true, reason, preflight: preflightReport.stats };
+  };
 
-    return { skipped: true, reason, preflight: preflight.stats };
+  if (!preflight.pass) {
+    return skipWeek(preflight);
   }
   if (preflight.warnings.length) {
     logger.info(`[newsletter-autopilot] Preflight warnings: ${preflight.warnings.join('; ')}`);
@@ -360,14 +407,34 @@ async function autoDraftFlagship() {
   let safeEventIds = eventIds.filter(id => typeof id === 'string' && uuidRe.test(id));
 
   // Verify selected events still exist — supplement if stale IDs reduced the count
-  const resolvedCount = await db('events_raw').whereIn('id', safeEventIds).count('* as c').first();
-  const actualCount = Number(resolvedCount?.c || 0);
-  if (actualCount < 5 && topEvents.length > 0) {
-    const supplementIds = topEvents
-      .map((ev) => ev.id)
-      .filter((id) => !safeEventIds.includes(id));
-    safeEventIds = [...safeEventIds, ...supplementIds].slice(0, 12);
-    logger.info(`[newsletter-autopilot] Supplemented events: ${actualCount} resolved, padded to ${safeEventIds.length}`);
+  // Drop locked ids whose rows disappeared between planning and now —
+  // a stale UUID left in place would pass here and then fail the final
+  // proof/delivery validation. Refill (only when thin) from the ranked
+  // alternates, the floor-passing pool built for exactly this. Operator
+  // slates larger than the portfolio cap are kept intact — only refill
+  // additions respect the cap.
+  const existingIds = new Set(
+    (await db('events_raw').whereIn('id', safeEventIds).pluck('id')).map(String),
+  );
+  const staleCount = safeEventIds.length - existingIds.size;
+  safeEventIds = safeEventIds.filter((id) => existingIds.has(String(id)));
+  if (staleCount > 0) {
+    logger.info(`[newsletter-autopilot] Dropped ${staleCount} stale locked event id(s)`);
+  }
+  if (safeEventIds.length < 5 && lineupAlternates.length > 0) {
+    const refillCandidates = lineupAlternates
+      .map((ev) => String(ev.id))
+      .filter((id) => uuidRe.test(id) && !safeEventIds.includes(id));
+    if (refillCandidates.length) {
+      const refillExisting = new Set(
+        (await db('events_raw').whereIn('id', refillCandidates).pluck('id')).map(String),
+      );
+      for (const id of refillCandidates) {
+        if (safeEventIds.length >= MAX_PORTFOLIO) break;
+        if (refillExisting.has(id)) safeEventIds.push(id);
+      }
+      logger.info(`[newsletter-autopilot] Refilled lineup to ${safeEventIds.length} from ranked alternates`);
+    }
   }
 
   // 7. Idempotency: transaction-scoped advisory lock so the dedupe check +
@@ -380,7 +447,7 @@ async function autoDraftFlagship() {
   // Paid/network work stays outside the DB transaction and advisory lock.
   // The short locked section below only dedupes + persists. Two truly
   // concurrent runners may both generate, but only one can create a row.
-  const generated = await createNewsletterDraft({
+  let generated = await createNewsletterDraft({
     prompt,
     eventIds: safeEventIds,
     homeownerMinuteTopic,
@@ -389,6 +456,86 @@ async function autoDraftFlagship() {
     issueReference: defaultTargetSendAt(weekOf),
     persist: false,
   });
+
+  // The model may return only a SUBSET of the locked ids, and
+  // persistNewsletterDraft records exactly what it returned — a
+  // preflight-passing eight-event portfolio could otherwise persist and
+  // ship as a thin, unbalanced lineup nobody re-validated. Retry the
+  // generation once on incomplete coverage; then re-run the preflight on
+  // the ACTUAL lineup and skip the week (fail closed) if it no longer
+  // holds. Alternates are recomputed against the actual lineup below.
+  // Build the actual lineup from ALL scored events keyed by the drafted
+  // ids — safeEventIds may include refilled alternates that are not in
+  // lineupEvents, and deriving from lineupEvents alone would treat every
+  // successfully-generated replacement as missing.
+  const lineupFromDraft = (g) => {
+    const drafted = new Set((g?.draft?.events || []).map((e) => String(e.eventId)));
+    return safeEventIds.filter((id) => drafted.has(String(id)))
+      .map((id) => byId.get(id))
+      .filter(Boolean);
+  };
+  let actualLineup = lineupFromDraft(generated);
+  if (actualLineup.length !== safeEventIds.length) {
+    logger.warn(`[newsletter-autopilot] draft covered ${actualLineup.length}/${safeEventIds.length} locked events — regenerating once`);
+    // The retry is best-effort: a transient generation failure must not
+    // discard a first draft that still passes the final preflight below.
+    let retry = null;
+    try {
+      retry = await createNewsletterDraft({
+        prompt,
+        eventIds: safeEventIds,
+        homeownerMinuteTopic,
+        topic,
+        newsletterType: NEWSLETTER_TYPE,
+        issueReference: defaultTargetSendAt(weekOf),
+        persist: false,
+      });
+    } catch (retryErr) {
+      logger.warn(`[newsletter-autopilot] coverage retry failed (${retryErr.message}) — keeping the first draft`);
+    }
+    const retryLineup = lineupFromDraft(retry);
+    // A PASSING retry beats a failing first draft regardless of count —
+    // a 5-event multi-source retry must not lose to a 6-event
+    // single-source first draft that would durably skip the week. Only
+    // when both share the same pass/fail result does coverage decide.
+    const firstPass = preflightDigest(actualLineup, reqs).pass;
+    const retryPass = preflightDigest(retryLineup, reqs).pass;
+    const preferRetry = (retryPass && !firstPass)
+      || (retryPass === firstPass && retryLineup.length > actualLineup.length);
+    if (preferRetry) {
+      generated = retry;
+      actualLineup = retryLineup;
+    }
+  }
+  // FINAL preflight — unconditional. Stale-ID removal/refill can thin the
+  // lineup even when the model returns every remaining id, so gating this
+  // on model-dropped ids alone would let a sub-contract lineup persist.
+  const droppedCount = safeEventIds.length - actualLineup.length;
+  const actualPreflight = preflightDigest(actualLineup, reqs);
+  if (!actualPreflight.pass) {
+    if (droppedCount > 0) {
+      actualPreflight.hardFailures.unshift(
+        `Draft generation dropped ${droppedCount} locked event(s) and the remaining lineup fails the quality contract`,
+      );
+    }
+    return skipWeek(actualPreflight);
+  }
+  if (droppedCount > 0) {
+    // The count/source contract held — also re-check the PORTFOLIO
+    // minimums (weekend/zone/audience/free/hero/novelty). Per the
+    // selector's own publish-fewer rule these are shortfalls to SURFACE,
+    // not grounds to retire the week: they ride the preflight warnings
+    // onto the draft notification and the proof.
+    const degradedUnmet = unmetConstraints(actualLineup).map((c) => c.label);
+    if (degradedUnmet.length) {
+      preflight.warnings.push(...degradedUnmet.map((l) => `Degraded lineup shortfall: ${l}`));
+    }
+    logger.warn(`[newsletter-autopilot] proceeding with degraded ${actualLineup.length}-event lineup (passes preflight${degradedUnmet.length ? `; unmet: ${degradedUnmet.join('; ')}` : ''})`);
+  }
+  // Alternates must rank against what will actually persist.
+  const persistedAlternates = eligiblePreferred.length >= 5
+    ? []
+    : rankAlternates(scored, actualLineup);
 
   let send;
   let earlyReturn = null;
@@ -430,6 +577,17 @@ async function autoDraftFlagship() {
       newsletterType: NEWSLETTER_TYPE,
       knex: trx,
     });
+
+    // Ranked alternates ride the send row for the proof diagnostics and
+    // as named replacements if a locked event dies before dispatch.
+    const alternateIds = persistedAlternates
+      .map((ev) => ev.id)
+      .filter((id) => typeof id === 'string' && uuidRe.test(id));
+    if (alternateIds.length) {
+      await trx('newsletter_sends')
+        .where({ id: send.id })
+        .update({ alternate_event_ids: JSON.stringify(alternateIds), updated_at: trx.fn.now() });
+    }
     // transaction commits → lock auto-releases
   });
 
@@ -504,7 +662,7 @@ async function autoDraftFlagship() {
     });
   }
 
-  logger.info(`[newsletter-autopilot] Draft created: sendId=${send.id}, events=${topEvents.length}`);
+  logger.info(`[newsletter-autopilot] Draft created: sendId=${send.id}, events=${actualLineup.length}`);
 
   // 10. Notify admin that a draft is ready
   try {
@@ -512,7 +670,7 @@ async function autoDraftFlagship() {
     await triggerNotification('newsletter_autopilot_draft', {
       sendId: send.id,
       subject: send.subject,
-      eventCount: topEvents.length,
+      eventCount: actualLineup.length,
       calendarWeek: weekOf,
       hadCalendarEntry: !!calendarEntry,
       preflightWarnings: preflight.warnings,
@@ -531,7 +689,7 @@ async function autoDraftFlagship() {
     logger.warn(`[newsletter-autopilot] proof send failed: ${e.message}`);
   }
 
-  return { skipped: false, sendId: send.id, eventCount: topEvents.length };
+  return { skipped: false, sendId: send.id, eventCount: actualLineup.length };
 }
 
 module.exports = { autoDraftFlagship, buildDigestPlan, preflightDigest, formatPreflightReport };
