@@ -13,8 +13,23 @@
 //
 // Dry-run by default. `--apply` (or `--apply=true`) enables the customer writes.
 //   --include-inactive   also align inactive customers
-//   --limit N            cap the number of customers processed
+//   --limit N            cap the number of customers processed (per candidate pass)
 //   --customer-id <uuid> process a single customer
+//   --enroll-no-plan     ALSO enroll "No Plan" customers who have an UPCOMING
+//                        recurring qualifying service (owner directive
+//                        2026-07-28: an upcoming recurring series means the
+//                        customer belongs on a tier — 1 family = Bronze,
+//                        2 = Silver, 3 = Gold, 4+ = Platinum). This pass sets
+//                        waveguard_tier ONLY: never monthly_rate (billing-cron
+//                        monthly-charges any active customer with
+//                        monthly_rate > 0 — per-visit customers must stay
+//                        per-visit), and never member_since / pipeline_stage /
+//                        active. Direct DB writes fire ZERO customer
+//                        communications — the membership.started email lives in
+//                        the admin PATCH route, and the customers table has no
+//                        DB triggers — which is exactly the intent here.
+//                        Commercial-sentinel customers are excluded (commercial
+//                        plans are flat and never carry a WaveGuard tier).
 //
 require('dotenv').config();
 
@@ -80,6 +95,7 @@ const APPLY = parseBooleanFlag(ARGS.apply);
 const LIMIT = ARGS.limit ? Math.max(1, Number.parseInt(ARGS.limit, 10) || 0) : null;
 const CUSTOMER_ID = ARGS['customer-id'] || null;
 const INCLUDE_INACTIVE = parseBooleanFlag(ARGS['include-inactive']);
+const ENROLL_NO_PLAN = parseBooleanFlag(ARGS['enroll-no-plan']);
 
 function moneyNumber(value) {
   const num = Number(value || 0);
@@ -186,6 +202,13 @@ function normalizeTierName(value) {
   return TIER_ORDER.find(tier => tier.toLowerCase() === text) || null;
 }
 
+// Mirrors membershipTierKey in waveguard-existing-services.js (not exported
+// there) — only used to recognize the commercial sentinel, which must never be
+// converted into a WaveGuard tier (commercial plans are flat, outside tiers).
+function tierSentinelKey(value) {
+  return String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
 function columnPresent(columns, column) {
   return !!columns[column];
 }
@@ -196,8 +219,10 @@ function setIfColumn(target, columns, column, value) {
 
 function buildCustomerUpdates(customer, detectedKeys, columns, today) {
   const updates = {};
-  // Owner policy: re-align already-enrolled WaveGuard members only; never enroll a
-  // per-visit recurring customer. Use the shared membership predicate, which rejects
+  // This pass re-aligns already-enrolled WaveGuard members only; enrolling a
+  // "No Plan" customer with upcoming recurring coverage is the separate opt-in
+  // --enroll-no-plan pass (buildNoPlanEnrollmentUpdates — owner directive
+  // 2026-07-28, tier-only). Use the shared membership predicate, which rejects
   // explicit non-member tier sentinels (none/onetime/na/...).
   if (!isMembershipCustomerRow(customer)) return updates;
   const existingRate = moneyNumber(customer.monthly_rate);
@@ -234,6 +259,25 @@ function buildCustomerUpdates(customer, detectedKeys, columns, today) {
       .reduce((sum, key) => sum + moneyNumber(SERVICE_PLANS[key]?.monthlyRate), 0);
   }
 
+  return updates;
+}
+
+// --enroll-no-plan updates: waveguard_tier ONLY, and only for a customer who
+// is NOT already a member (fail-closed via the shared membership predicate —
+// members are re-aligned by buildCustomerUpdates, never double-handled here).
+// Deliberately never sets monthly_rate (billing-cron auto-charges active
+// customers with monthly_rate > 0 — enrolling a per-visit customer into
+// autopay billing is the exact failure the old owner policy guarded against),
+// and never touches member_since / pipeline_stage / active. The 2026-07-28
+// directive is narrowly "list them under a tier", nothing more.
+function buildNoPlanEnrollmentUpdates(customer, detectedKeys, columns) {
+  const updates = {};
+  if (isMembershipCustomerRow(customer)) return updates;
+  if (tierSentinelKey(customer?.waveguard_tier) === 'commercial') return updates;
+  if (!columnPresent(columns, 'waveguard_tier')) return updates;
+  const inferredTier = inferTierFromServiceCount(uniqueServiceFamilies(detectedKeys).length);
+  if (!inferredTier) return updates;
+  updates.waveguard_tier = inferredTier;
   return updates;
 }
 
@@ -282,6 +326,53 @@ async function candidateCustomers(customerColumns) {
   }));
 }
 
+// Candidate set for --enroll-no-plan: customers who are NOT enrolled (no
+// recognized tier AND no positive monthly_rate — the complement of
+// candidateCustomers, so the two passes can never overlap) but have at least
+// one UPCOMING non-terminal scheduled service. The is_recurring EXISTS filter
+// is a cheap pre-screen; the authoritative per-row gate stays
+// serviceRowCountsTowardWaveGuard + the upcoming-date check in
+// analyzeCustomer, mirroring how the alignment pass treats its rows.
+async function noPlanCandidateCustomers(customerColumns, today) {
+  let scheduledColumns = {};
+  try {
+    scheduledColumns = await db('scheduled_services').columnInfo();
+  } catch (_err) {
+    scheduledColumns = {};
+  }
+  const hasIsRecurring = columnPresent(scheduledColumns, 'is_recurring');
+
+  let query = db('customers as c')
+    .where(function notEnrolled() {
+      this.where(function noRecognizedTier() {
+        this.whereNull('c.waveguard_tier').orWhereRaw(
+          `LOWER(c.waveguard_tier) NOT IN (${TIER_ORDER_LOWER.map(() => '?').join(', ')})`,
+          TIER_ORDER_LOWER,
+        );
+      }).andWhere(function noLegacyRate() {
+        this.whereNull('c.monthly_rate').orWhere('c.monthly_rate', '<=', 0);
+      });
+    })
+    .whereExists(function upcomingService() {
+      this.select(db.raw('1'))
+        .from('scheduled_services as s')
+        .whereRaw('s.customer_id = c.id')
+        .whereNotIn('s.status', TERMINAL_STATUSES)
+        .where('s.scheduled_date', '>=', today);
+      if (hasIsRecurring) this.where('s.is_recurring', true);
+    })
+    .orderBy('c.created_at', 'asc');
+
+  if (CUSTOMER_ID) query = query.where('c.id', CUSTOMER_ID);
+  query = customerSelect(applyCustomerFilters(query, customerColumns));
+  if (LIMIT) query = query.limit(LIMIT);
+
+  return (await query).map((customer) => ({
+    ...customer,
+    candidate_reason: 'no_plan_upcoming_recurring',
+  }));
+}
+
 async function scheduledRowsForCustomer(customerId) {
   // READ-ONLY. Join the services catalog so detectServiceKeys() sees svc.service_key /
   // svc.name for rows whose cadence lives in service_id while service_type is generic
@@ -305,7 +396,17 @@ async function scheduledRowsForCustomer(customerId) {
 
 async function analyzeCustomer(customer, customerColumns, today) {
   const rows = await scheduledRowsForCustomer(customer.id);
-  const recurringRows = rows.filter(serviceRowCountsTowardWaveGuard);
+  const enrollNoPlan = customer.candidate_reason === 'no_plan_upcoming_recurring';
+  let recurringRows = rows.filter(serviceRowCountsTowardWaveGuard);
+  if (enrollNoPlan) {
+    // The enrollment directive is keyed on UPCOMING coverage: only rows dated
+    // today or later count toward the tier, so a lapsed series (all visits in
+    // the past) never enrolls anyone.
+    recurringRows = recurringRows.filter((row) => {
+      const rowDate = dateKey(row.scheduled_date);
+      return rowDate && rowDate >= today;
+    });
+  }
   const detectedKeys = [];
   for (const row of recurringRows) {
     for (const key of detectServiceKeys(row)) {
@@ -315,7 +416,9 @@ async function analyzeCustomer(customer, customerColumns, today) {
 
   const earliestServiceDate = recurringRows.map((row) => dateKey(row.scheduled_date)).filter(Boolean).sort()[0] || null;
   const customerWithDates = { ...customer, earliest_service_date: earliestServiceDate };
-  const customerUpdates = buildCustomerUpdates(customerWithDates, detectedKeys, customerColumns, today);
+  const customerUpdates = enrollNoPlan
+    ? buildNoPlanEnrollmentUpdates(customerWithDates, detectedKeys, customerColumns)
+    : buildCustomerUpdates(customerWithDates, detectedKeys, customerColumns, today);
   const detectedFamilyKeys = uniqueServiceFamilies(detectedKeys);
   const inferredTier = inferTierFromServiceCount(detectedFamilyKeys.length);
   const currentTier = normalizeTierName(customer.waveguard_tier);
@@ -354,6 +457,7 @@ async function main() {
   const today = etDateString();
   const customerColumns = await db('customers').columnInfo();
   const customers = await candidateCustomers(customerColumns);
+  if (ENROLL_NO_PLAN) customers.push(...await noPlanCandidateCustomers(customerColumns, today));
   const repairs = [];
   const noServiceEvidence = [];
   const tierMismatches = [];
@@ -374,11 +478,13 @@ async function main() {
     checkedCustomers: customers.length,
     customersNeedingRepair: repairs.length,
     customerFieldUpdates: repairs.length,
+    noPlanEnrollments: repairs.filter((repair) => repair.customer.candidate_reason === 'no_plan_upcoming_recurring').length,
     noServiceEvidenceCount: noServiceEvidence.length,
     tierMismatchCount: tierMismatches.length,
     limit: LIMIT,
     customerId: CUSTOMER_ID,
     includeInactive: INCLUDE_INACTIVE,
+    enrollNoPlan: ENROLL_NO_PLAN,
     sample: repairs.slice(0, 20).map(summarizeRepair),
   };
 
@@ -396,6 +502,7 @@ if (require.main === module) {
 
 module.exports = {
   buildCustomerUpdates,
+  buildNoPlanEnrollmentUpdates,
   dateKey,
   detectServiceKeys,
   inferTierFromServiceCount,
