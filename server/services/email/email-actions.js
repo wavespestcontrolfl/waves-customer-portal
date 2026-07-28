@@ -311,15 +311,24 @@ async function handleSpam(email) {
 }
 
 async function handleNewsletter(email) {
-  // Reclassification re-runs auto-actions with the same row — an
-  // already-actioned newsletter must not archive/unsubscribe twice (or
-  // downgrade a confirmed unsubscribe outcome).
-  if (String(email.auto_action || '').startsWith('newsletter_')) return;
-
   // 0. Same known-sender protection as spam: an authenticated customer or
   // vendor misclassified as a newsletter is neither archived nor
   // unsubscribed.
   if (await skipIfAuthenticatedKnownSender(email, 'newsletter')) return;
+
+  // ATOMIC claim in Postgres — reclassification runs auto-actions twice
+  // with the same stale in-memory row, and a memory check can't see the
+  // first run's outcome (the second run was overwriting
+  // newsletter_unsubscribed with newsletter_archived). Only the caller that
+  // flips the row into 'newsletter_processing' acts; the final update below
+  // re-asserts the claim. This claim is also what makes the unsubscribe
+  // request effectively once-per-email — autoUnsubscribe is only reachable
+  // by the claim winner.
+  const claimed = await db('emails')
+    .where({ id: email.id })
+    .where((q) => q.whereNull('auto_action').orWhereRaw("auto_action NOT LIKE 'newsletter_%'"))
+    .update({ auto_action: 'newsletter_processing', updated_at: new Date() });
+  if (!claimed) return;
 
   // 1. Archive in Gmail
   try { await gmailClient.archiveMessage(email.gmail_id); } catch (e) { /* non-critical */ }
@@ -338,11 +347,12 @@ async function handleNewsletter(email) {
     logger.warn(`[email-actions] Unsubscribe failed (email ${email.id}): ${e.message}`);
   }
 
-  // 3. Mark in DB
+  // 3. Mark in DB — re-asserting the processing claim so only the claim
+  // winner's outcome lands.
   const newsletterAction = unsubConfirmed
     ? `newsletter_unsubscribed:${unsubMethod}`
     : (unsubMethod !== 'none' ? `newsletter_unsub_attempted:${unsubMethod}` : 'newsletter_archived');
-  await db('emails').where({ id: email.id }).update({
+  await db('emails').where({ id: email.id, auto_action: 'newsletter_processing' }).update({
     is_archived: true,
     auto_action: newsletterAction,
     updated_at: new Date(),
