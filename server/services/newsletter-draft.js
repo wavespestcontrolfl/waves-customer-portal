@@ -964,7 +964,12 @@ function deriveEventLabels(row) {
   if (tagSet.has('parents_night') || breakdown?.family_status === 'adults_lean') {
     labels.push("Parents' night");
   }
-  if (row.is_free === true || tagSet.has('free')) labels.push('Free');
+  // ONE definition of "free-ish" across the platform — the portfolio
+  // selector's classifier (is_free, the word "free" or $0 forms in
+  // price_text, the curated tag). An event that satisfied the issue's
+  // free-pick constraint must display the promised label.
+  const { isFreeish } = require('./newsletter-portfolio');
+  if (isFreeish(row)) labels.push('Free');
   if (tagSet.has('worth_the_drive')) labels.push('Worth the drive');
   return labels;
 }
