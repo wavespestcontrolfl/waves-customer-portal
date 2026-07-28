@@ -113,6 +113,10 @@ async function loadActiveRecurringServiceRows(database, customerId) {
   const selectCols = ['id', 'service_type', 'scheduled_date'];
   if (cols.estimated_price) selectCols.push('estimated_price');
   if (cols.annual_prepay_term_id) selectCols.push('annual_prepay_term_id');
+  // Carried for the gated qualifying-row filter below — additive for every
+  // other consumer of these rows.
+  if (cols.is_callback) selectCols.push('is_callback');
+  if (cols.source) selectCols.push('source');
   const hasStampedAddress = !!cols.service_address_line1;
   if (hasStampedAddress) {
     selectCols.push('service_address_line1');
@@ -140,13 +144,46 @@ async function loadActiveRecurringServiceRows(database, customerId) {
   }));
 }
 
+// With the auto-tier gate on, membership pricing evidence uses the SAME
+// authoritative predicate as tier derivation: upcoming (scheduled_date >=
+// today), not a callback, not a one-time booking source (Codex #3011 r4 P1
+// — a stale past nonterminal row in a second family must not grant a Silver
+// discount to a customer the reconciler stamped Bronze). Gate off keeps the
+// legacy all-nonterminal evidence byte-identical. scheduled_date is a pg
+// DATE column arriving as a midnight Date — read the stored calendar day
+// directly (repo DATE-column convention), never via ET conversion.
+function qualifyingRowDateKey(value) {
+  if (!value) return null;
+  if (typeof value === 'string') return value.split('T')[0];
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  return null;
+}
+
+function rowPassesGatedPricingEvidence(row, today) {
+  const rowDate = qualifyingRowDateKey(row.scheduled_date);
+  if (!rowDate || rowDate < today) return false;
+  if (row.is_callback === true || row.is_callback === 1 || row.is_callback === '1' || row.is_callback === 'true') return false;
+  // Lazy require: self-booking-plan-sync requires this module at load time,
+  // so a top-level require back at it would be a cycle.
+  const { isOneTimeBookingSource } = require('./self-booking-plan-sync');
+  if (isOneTimeBookingSource(row.source)) return false;
+  return true;
+}
+
 // Load the customer's active, recurring, WaveGuard-qualifying rows. The plan
 // gate prevents a lead/one-time buyer with a stray recurring visit from
 // receiving membership pricing.
 async function loadExistingRecurringQualifyingRows(database, customerId) {
   if (!(await isActivePlanCustomer(database, customerId))) return [];
   const rows = await loadActiveRecurringServiceRows(database, customerId);
-  return rows.filter((r) => toQualifyingKeys(r.service_type).length > 0);
+  const { isEnabled } = require('../config/feature-gates');
+  if (!isEnabled('autoWaveguardTierEnroll')) {
+    return rows.filter((r) => toQualifyingKeys(r.service_type).length > 0);
+  }
+  const { etDateString } = require('../utils/datetime-et');
+  const today = etDateString();
+  return rows.filter((r) => rowPassesGatedPricingEvidence(r, today)
+    && toQualifyingKeys(r.service_type).length > 0);
 }
 
 // Distinct qualifying service keys from a set of rows.

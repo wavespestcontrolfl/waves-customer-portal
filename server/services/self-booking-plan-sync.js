@@ -823,6 +823,23 @@ async function syncCustomerWaveGuardPlanFromScheduledServices(options = {}) {
     return enrollNoPlanCustomerTier({ database, log, customer, customerId, customerColumns, today });
   }
 
+  // A LABEL-ONLY customer (auto-stamped tier, no positive rate, label-only
+  // billing lane) stays on the tier-only realignment path on every later
+  // sync (Codex #3011 r4): routing them through the member alignment below
+  // would set active / pipeline_stage / member_since on the second sync —
+  // exactly the non-tier mutations this feature promises never to make.
+  // Real paying members (positive rate, paying lane, or legacy rate members)
+  // still get the full alignment.
+  if (
+    isEnabled('autoWaveguardTierEnroll')
+    && normalizeTierName(customer.waveguard_tier)
+    && Number(customer.monthly_rate || 0) <= 0
+    && isLabelOnlyLane(customer.billing_mode)
+  ) {
+    const realignment = await realignLabelOnlyTierCustomer({ database, log, customerId, customerColumns, today });
+    return { synced: true, labelOnly: true, ...realignment };
+  }
+
   const rows = await scheduledServiceRowsForCustomer(database, customerId);
   const recurringRows = rows.filter(serviceRowCountsTowardWaveGuard);
   // With the auto-tier gate on, the member branch uses the SAME upcoming-only
@@ -839,6 +856,7 @@ async function syncCustomerWaveGuardPlanFromScheduledServices(options = {}) {
     const rowDate = normalizeDateString(row.scheduled_date);
     if (rowDate && (!earliestServiceDate || rowDate < earliestServiceDate)) earliestServiceDate = rowDate;
     if (upcomingOnly && (!rowDate || rowDate < today)) continue;
+    if (upcomingOnly && isCommercialServiceRow(row)) continue;
     for (const key of detectWaveGuardPlanKeys(row)) {
       if (!detectedPlanKeys.includes(key)) detectedPlanKeys.push(key);
     }
@@ -889,6 +907,16 @@ async function syncCustomerWaveGuardPlanFromScheduledServices(options = {}) {
 // scripts/align-waveguard-portal-records.js. The direct customers UPDATE
 // fires zero customer communications: the membership.started email lives only
 // in the admin PATCH route and the customers table has no DB triggers.
+// Commercial service rows are NEVER auto-tier evidence, independently of the
+// customer's sentinel (Codex #3011 r4 P1): an imported commercial customer
+// whose tier is still NULL must not be stamped a residential WaveGuard tier
+// off a "Commercial Pest Control" row — commercial plans are flat and outside
+// tiers (mirrors the commercial exclusion in waveguard-existing-services'
+// toQualifyingKeys).
+function isCommercialServiceRow(row = {}) {
+  return rawTextForServiceRow(row).includes('commercial');
+}
+
 // Shared tier evidence: plan keys from UPCOMING (scheduled_date >= today)
 // recurring qualifying rows — the basis for both enrollment and demotion, so
 // the two directions can never disagree about what counts as coverage.
@@ -897,6 +925,7 @@ async function detectUpcomingRecurringPlanKeys(database, customerId, today) {
   const detectedPlanKeys = [];
   for (const row of rows) {
     if (!serviceRowCountsTowardWaveGuard(row)) continue;
+    if (isCommercialServiceRow(row)) continue;
     const rowDate = normalizeDateString(row.scheduled_date);
     if (!rowDate || rowDate < today) continue;
     for (const key of detectWaveGuardPlanKeys(row)) {
@@ -1237,6 +1266,7 @@ module.exports = {
   buildRecurringOccurrenceDates,
   detectWaveGuardPlanKeys,
   inferTierFromServiceCount,
+  isCommercialServiceRow,
   isOneTimeBookingSource,
   normalizeTierName,
   reconcileRecurringTiers,

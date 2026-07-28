@@ -8,6 +8,7 @@ const {
   buildCustomerWaveGuardAlignmentUpdates,
   buildLabelOnlyTierRealignmentUpdates,
   buildNoPlanTierEnrollmentUpdates,
+  isCommercialServiceRow,
   buildRecurringOccurrenceDates,
   detectWaveGuardPlanKeys,
   inferTierFromServiceCount,
@@ -312,6 +313,18 @@ describe('self-booking plan sync helpers', () => {
       .toEqual({});
     expect(buildNoPlanTierEnrollmentUpdates({ waveguard_tier: null, monthly_rate: null }, ['pest_control_quarterly'], { monthly_rate: {} }).updates)
       .toEqual({});
+  });
+
+  test('commercial service rows are never auto-tier evidence, whatever the sentinel', () => {
+    // An imported commercial customer whose tier is still NULL must not be
+    // stamped a residential tier off commercial rows — commercial plans are
+    // flat and outside WaveGuard tiers.
+    expect(isCommercialServiceRow({ service_type: 'Commercial Pest Control' })).toBe(true);
+    expect(isCommercialServiceRow({ service_type: 'Commercial Turf Treatment Program' })).toBe(true);
+    expect(isCommercialServiceRow({ service_type: 'Lawn Care', service_name: 'Commercial Turf Program' })).toBe(true);
+    expect(isCommercialServiceRow({ service_type: 'Quarterly Pest Control Service' })).toBe(false);
+    expect(isCommercialServiceRow({ service_type: 'Monthly Lawn Care' })).toBe(false);
+    expect(isCommercialServiceRow({})).toBe(false);
   });
 
   test('realigns a label-only customer to exactly what upcoming coverage supports', () => {

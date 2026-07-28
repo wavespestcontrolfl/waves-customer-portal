@@ -46,6 +46,7 @@ const {
   resolvePestControlRecurringPlan,
   resolveTermiteBaitRecurringPlan,
   resolveTreeShrubRecurringPlan,
+  isCommercialServiceRow,
   serviceRowCountsTowardWaveGuard,
 } = require('../services/self-booking-plan-sync');
 const { etDateString } = require('../utils/datetime-et');
@@ -391,7 +392,11 @@ async function noPlanCandidateCustomers(customerColumns, today) {
         });
       }
     })
-    .orderBy('c.created_at', 'asc');
+    // Random sampling, like the runtime reconcile (Codex #3011 r4): rows the
+    // SQL pre-screen cannot reject (recurring palm/rodent work that maps to
+    // no WaveGuard family) would otherwise pin a created_at-ordered --limit
+    // batch forever and starve valid later customers.
+    .orderByRaw('random()');
 
   if (CUSTOMER_ID) query = query.where('c.id', CUSTOMER_ID);
   query = customerSelect(applyCustomerFilters(query, customerColumns), customerColumns);
@@ -433,6 +438,11 @@ async function analyzeCustomer(customer, customerColumns, today) {
     // today or later count toward the tier, so a lapsed series (all visits in
     // the past) never enrolls anyone.
     recurringRows = recurringRows.filter((row) => {
+      // Commercial rows are never enrollment evidence, independent of the
+      // customer's sentinel — an un-sentineled commercial customer must not
+      // be stamped a residential tier (Codex #3011 r4 P1, mirrors the
+      // runtime detectUpcomingRecurringPlanKeys).
+      if (isCommercialServiceRow(row)) return false;
       const rowDate = dateKey(row.scheduled_date);
       return rowDate && rowDate >= today;
     });
