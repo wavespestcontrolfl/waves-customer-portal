@@ -104,12 +104,43 @@ async function quarantineMessage(email) {
 async function sweepQuarantine(now = new Date()) {
   const cutoff = new Date(now.getTime() - QUARANTINE_HOURS * 3600000);
   const quarantineLabelId = await gmailClient.ensureLabel(QUARANTINE_LABEL);
+  let trashed = 0;
+  let restored = 0;
+
+  // Crash recovery FIRST: 'spam_trashing' is a seconds-long claim, so any
+  // row still carrying it at sweep start is a prior run that died mid-trash.
+  // Reconcile against live Gmail state — already trashed settles (and takes
+  // its deferred sender block); not trashed reverts to quarantined so the
+  // main pass below re-evaluates it normally.
+  const stuck = await db('emails').where('auto_action', 'spam_trashing').select('id', 'gmail_id', 'from_address');
+  for (const row of stuck) {
+    try {
+      const labels = await gmailClient.getMessageLabels(row.gmail_id);
+      if (labels.includes('TRASH')) {
+        const n = await db('emails').where({ id: row.id, auto_action: 'spam_trashing' })
+          .update({ auto_action: 'spam_trashed_after_quarantine', updated_at: new Date() });
+        if (n) {
+          trashed += n;
+          try {
+            const { blockSpamSender } = require('./spam-blocker');
+            await blockSpamSender(row);
+          } catch (blockErr) {
+            logger.warn(`[inbox-hygiene] recovered-row sender block failed (email ${row.id}): ${blockErr.message}`);
+          }
+        }
+      } else {
+        await db('emails').where({ id: row.id, auto_action: 'spam_trashing' })
+          .update({ auto_action: 'spam_quarantined', updated_at: new Date() });
+      }
+    } catch (e) {
+      logger.warn(`[inbox-hygiene] stuck-claim recovery failed (email ${row.id}): ${e.message}`);
+    }
+  }
+
   const rows = await db('emails')
     .where('auto_action', 'spam_quarantined')
     .where('quarantined_at', '<', cutoff)
     .select('id', 'gmail_id', 'from_address');
-  let trashed = 0;
-  let restored = 0;
   for (const row of rows) {
     try {
       // Live-label veto check: back in INBOX or off the Quarantine label
@@ -304,8 +335,12 @@ async function reconcilePendingDrafts(now = new Date()) {
       const patch = hasDraft
         ? { draft_gmail_id: 'reconciled_existing_draft' }
         : { draft_gmail_id: null, draft_claimed_at: null };
+      // Re-assert STALENESS in the update — a concurrent draftReplyForEmail
+      // takeover refreshes draft_claimed_at, and releasing that ACTIVE claim
+      // would let another worker mint a duplicate draft mid-flight.
       const n = await db('emails')
         .where({ id: row.id, draft_gmail_id: 'pending' })
+        .where('draft_claimed_at', '<', staleCutoff)
         .update({ ...patch, updated_at: new Date() });
       if (n) counts[hasDraft ? 'settled' : 'released'] += 1;
     } catch (e) {

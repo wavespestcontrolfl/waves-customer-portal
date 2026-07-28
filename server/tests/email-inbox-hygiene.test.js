@@ -181,7 +181,7 @@ describe('sweepQuarantine', () => {
   const { sweepQuarantine } = require('../services/email/inbox-hygiene');
 
   test('claims atomically, trashes aged rows, and blocks the sender only at commit', async () => {
-    const state = setupDb({}, { emails: [[{ id: 'e-old', gmail_id: 'g-old', from_address: 'coldpitch@seo-blaster.example' }]] });
+    const state = setupDb({}, { emails: [[], [{ id: 'e-old', gmail_id: 'g-old', from_address: 'coldpitch@seo-blaster.example' }]] });
     const result = await sweepQuarantine(new Date('2026-07-28T12:00:00Z'));
     expect(gmailClient.trashMessage).toHaveBeenCalledWith('g-old');
     expect(result.trashed).toBe(1);
@@ -193,7 +193,7 @@ describe('sweepQuarantine', () => {
   });
 
   test('an operator label-restore vetoes the trash — state cleared, message kept', async () => {
-    const state = setupDb({}, { emails: [[{ id: 'e-back', gmail_id: 'g-back' }]] });
+    const state = setupDb({}, { emails: [[], [{ id: 'e-back', gmail_id: 'g-back' }]] });
     gmailClient.getMessageLabels.mockResolvedValueOnce(['INBOX']);
     const result = await sweepQuarantine(new Date('2026-07-28T12:00:00Z'));
     expect(gmailClient.trashMessage).not.toHaveBeenCalled();
@@ -204,7 +204,7 @@ describe('sweepQuarantine', () => {
   });
 
   test('a failed trash releases the claim and never aborts the sweep', async () => {
-    const state = setupDb({}, { emails: [[{ id: 'e-1', gmail_id: 'g-1' }, { id: 'e-2', gmail_id: 'g-2' }]] });
+    const state = setupDb({}, { emails: [[], [{ id: 'e-1', gmail_id: 'g-1' }, { id: 'e-2', gmail_id: 'g-2' }]] });
     gmailClient.trashMessage.mockRejectedValueOnce(new Error('gone'));
     const result = await sweepQuarantine();
     expect(result.trashed).toBe(1);
@@ -286,6 +286,33 @@ describe('collectUnansweredNudges', () => {
       : { messages: [{ labelIds: ['INBOX'], internalDate: String(new Date('2026-07-24T12:00:00Z').getTime()) }] }));
     const nudges = await collectUnansweredNudges(new Date('2026-07-28T12:00:00Z'));
     expect(nudges.map((n) => n.id)).toEqual(['e-b']);
+  });
+});
+
+describe('sweepQuarantine — stuck-claim recovery', () => {
+  const { sweepQuarantine } = require('../services/email/inbox-hygiene');
+
+  test('a crashed spam_trashing row already in TRASH settles + takes its deferred block', async () => {
+    const state = setupDb({}, { emails: [
+      [{ id: 'e-stuck', gmail_id: 'g-stuck', from_address: 'coldpitch@seo-blaster.example' }], // stuck select
+      [], // main quarantined select
+    ] });
+    gmailClient.getMessageLabels.mockResolvedValueOnce(['TRASH']);
+    const result = await sweepQuarantine(new Date('2026-07-28T12:00:00Z'));
+    expect(result.trashed).toBe(1);
+    expect(state.updates.find((u) => u.table === 'emails').patch.auto_action).toBe('spam_trashed_after_quarantine');
+    expect(state.inserts.find((i) => i.table === 'blocked_email_senders')).toBeDefined();
+  });
+
+  test('a crashed spam_trashing row NOT in TRASH reverts to quarantined', async () => {
+    const state = setupDb({}, { emails: [
+      [{ id: 'e-stuck', gmail_id: 'g-stuck', from_address: 'x@y.example' }],
+      [],
+    ] });
+    gmailClient.getMessageLabels.mockResolvedValueOnce(['Label_42']);
+    const result = await sweepQuarantine(new Date('2026-07-28T12:00:00Z'));
+    expect(result.trashed).toBe(0);
+    expect(state.updates.find((u) => u.table === 'emails').patch.auto_action).toBe('spam_quarantined');
   });
 });
 

@@ -191,10 +191,13 @@ async function autoUnsubscribe(email) {
       return { method: 'none', note: 'Unsafe unsubscribe URL refused' };
     }
     try {
-      await fetchPublicOnly(unsubUrl, {
+      const res = await fetchPublicOnly(unsubUrl, {
         method: 'GET',
         headers: { 'User-Agent': 'Mozilla/5.0' },
       });
+      // Same bar as the header path: a 4xx/5xx is a FAILED unsubscribe and
+      // must not be recorded (or digested) as success.
+      if (!res.ok) throw new Error(`unsubscribe endpoint returned ${res.status}`);
 
       await db('email_unsubscribe_log').insert({
         email_id: email.id,
