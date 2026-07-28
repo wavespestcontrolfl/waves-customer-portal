@@ -364,6 +364,42 @@ describe('sweepQuarantine — stuck-claim recovery', () => {
   });
 });
 
+describe('sweepQuarantine stale-reclass replay', () => {
+  const { sweepQuarantine } = require('../services/email/inbox-hygiene');
+
+  test('a committed non-spam verdict replays its auto-action with the STORED classification payload', async () => {
+    const emailActions = require('../services/email/email-actions');
+    const spy = jest.spyOn(emailActions, 'executeAutoAction').mockResolvedValueOnce(undefined);
+    const stored = { category: 'lead_inquiry', confidence: 0.91, extracted: { name: 'Sam', service: 'quarterly pest' } };
+    const fullRow = {
+      id: 'e-reclass',
+      gmail_id: 'g-reclass',
+      from_address: 'sam@new.example',
+      classification: 'lead_inquiry',
+      classification_confidence: 0.91,
+      quarantined_at: '2026-07-27T12:00:00Z',
+      extracted_data: JSON.stringify(stored),
+    };
+    setupDb(
+      { emails: [fullRow] },
+      { emails: [
+        [], // stuck spam_trashing select
+        [{ id: 'e-reclass', gmail_id: 'g-reclass', from_address: 'sam@new.example', quarantined_at: '2026-07-27T12:00:00Z', classification: 'lead_inquiry' }],
+        [], // stranded-cancel select
+        [], // stale blocking-claim select
+        [], // block-pending retry select
+        [], // ambiguous reconcile select
+        [], // main quarantined select
+      ] }
+    );
+    await sweepQuarantine(new Date('2026-07-28T12:00:00Z'));
+    // The stored payload — not a bare { category } — reaches the handler,
+    // so a recovered lead_inquiry keeps its extraction and confidence.
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ id: 'e-reclass' }), stored);
+    spy.mockRestore();
+  });
+});
+
 describe('reconcilePendingDrafts', () => {
   const { reconcilePendingDrafts } = require('../services/email/inbox-hygiene');
 
@@ -550,6 +586,28 @@ describe('rescueSpamFolder scan window', () => {
     expect(counts.scanned).toBe(2);
     expect(gmailClient.listAllMessages).toHaveBeenNthCalledWith(2, 'in:spam newer_than:2d', 500, { includeSpamTrash: true, pageToken: 'p2' });
     expect(state.updates.find((u) => u.table === 'email_sync_state')).toBeDefined();
+  });
+
+  test('a capped run persists the continuation epoch instead of stalling', async () => {
+    const state = setupDb({ email_sync_state: [{ id: 1, last_spam_scan_at: '2026-07-27T12:00:00Z' }] });
+    for (let i = 0; i < 20; i += 1) {
+      gmailClient.listAllMessages.mockResolvedValueOnce({ messages: [{ id: `s${i}` }], truncated: true, nextPageToken: `p${i}` });
+      gmailClient.getMessage.mockResolvedValueOnce({ from_address: 'junk@blaster.example', received_at: new Date(Date.parse('2026-07-28T00:00:00Z') - i * 3600000) });
+    }
+    await rescueSpamFolder(new Date('2026-07-28T12:00:00Z'));
+    const patch = state.updates.find((u) => u.table === 'email_sync_state').patch;
+    // Oldest scanned = 19h before midnight; +1s so a same-second sibling re-scans.
+    expect(patch.spam_scan_before_epoch).toBe(Math.floor(Date.parse('2026-07-27T05:00:00Z') / 1000) + 1);
+    expect(patch.last_spam_scan_at).toBeUndefined();
+  });
+
+  test('a continuation run partitions on before: and clears the marker when drained', async () => {
+    const state = setupDb({ email_sync_state: [{ id: 1, last_spam_scan_at: '2026-07-27T12:00:00Z', spam_scan_before_epoch: 1753000000 }] });
+    gmailClient.listAllMessages.mockResolvedValueOnce({ messages: [], truncated: false, nextPageToken: null });
+    await rescueSpamFolder(new Date('2026-07-28T12:00:00Z'));
+    expect(gmailClient.listAllMessages).toHaveBeenCalledWith('in:spam newer_than:2d before:1753000000', 500, { includeSpamTrash: true, pageToken: null });
+    const patches = state.updates.filter((u) => u.table === 'email_sync_state').map((u) => u.patch);
+    expect(patches).toEqual([{ spam_scan_before_epoch: null }]);
   });
 
   test('an undrained window (batch backstop) holds the watermark', async () => {

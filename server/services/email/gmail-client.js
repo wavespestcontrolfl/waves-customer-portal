@@ -323,6 +323,17 @@ async function getHistory(startHistoryId) {
   return { history: history.length ? history : undefined, historyId: latestHistoryId };
 }
 
+/**
+ * The mailbox's CURRENT historyId — the only safe anchor for a fresh
+ * incremental cursor after a full scan (per-message historyIds end on the
+ * oldest message and would hand the next run an unbounded backlog).
+ */
+async function getProfileHistoryId() {
+  const gmail = await getGmail();
+  const res = await gmail.users.getProfile({ userId: 'me' });
+  return res.data?.historyId || null;
+}
+
 async function isConnected() {
   const state = await db('email_sync_state').first();
   return !!(state?.refresh_token);
@@ -469,6 +480,7 @@ module.exports = {
   archiveMessage,
   trashMessage,
   getHistory,
+  getProfileHistoryId,
   isConnected,
   parseMessage,
 };

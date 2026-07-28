@@ -29,6 +29,14 @@ async function fullSync(state) {
   let lastHistoryId = null;
 
   try {
+    // Anchor the incremental cursor at the CURRENT mailbox historyId,
+    // captured BEFORE the scan. The message loop below ends on the OLDEST
+    // message (Gmail lists newest-first), and storing that stale position
+    // hands the next incremental run a backlog deep enough to re-trigger
+    // the full-resync fallback — an endless full-download loop. Changes
+    // landing DURING the scan replay through the first incremental run
+    // (upserts are idempotent).
+    const anchorHistoryId = await gmailClient.getProfileHistoryId().catch(() => null);
     const fullSyncLimit = process.env.GMAIL_FULL_SYNC_LIMIT
       ? Number.parseInt(process.env.GMAIL_FULL_SYNC_LIMIT, 10)
       : null;
@@ -47,7 +55,7 @@ async function fullSync(state) {
     }
 
     await db('email_sync_state').where('id', state.id).update({
-      last_history_id: lastHistoryId,
+      last_history_id: anchorHistoryId || lastHistoryId,
       last_sync_at: new Date(),
       errors: null,
     });

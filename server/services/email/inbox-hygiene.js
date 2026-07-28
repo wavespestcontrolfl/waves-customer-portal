@@ -206,11 +206,26 @@ async function sweepQuarantine(now = new Date()) {
           }
           // The crashed request may have died between persisting the verdict
           // and running its auto-action — replay it (handlers carry their
-          // own claims/idempotency, so a completed action no-ops).
+          // own claims/idempotency, so a completed action no-ops). The
+          // reclassify route persisted the FULL classification object into
+          // extracted_data at verdict commit — replay with that payload, not
+          // a bare { category }: handleLeadInquiry would read an empty
+          // extraction as low-confidence and park the lead for review, and
+          // vendor-invoice processing would lose its extracted fields.
           try {
             const fullRow = await db('emails').where({ id: row.id }).first();
             const { executeAutoAction } = require('./email-actions');
-            await executeAutoAction(fullRow || row, { category: row.classification });
+            let stored = null;
+            try {
+              const raw = (fullRow || row).extracted_data;
+              stored = typeof raw === 'string' ? JSON.parse(raw) : raw;
+            } catch (parseErr) { stored = null; }
+            // extracted_data can also carry vendor metadata from sync —
+            // only trust it as the classification when categories match.
+            const classification = (stored && stored.category === row.classification)
+              ? stored
+              : { category: row.classification, confidence: (fullRow || row).classification_confidence ?? null };
+            await executeAutoAction(fullRow || row, classification);
           } catch (e) {
             logger.warn(`[inbox-hygiene] stale-reclass action replay failed (email ${row.id}): ${e.message}`);
           }
@@ -488,20 +503,34 @@ async function rescueSpamFolder(now = new Date()) {
     : 30;
   const counts = { scanned: 0, rescued: 0, customers: 0, unauthenticated: 0 };
   let perMessageFailures = 0;
+  // A prior run that hit the batch backstop persisted the oldest epoch it
+  // reached — this run continues INTO the older remainder (`before:`
+  // partition) instead of re-scanning the same newest page forever (Gmail
+  // lists newest-first, and unrescued junk stays in Spam).
+  const beforeEpoch = Number(syncState?.spam_scan_before_epoch) || null;
+  const query = beforeEpoch
+    ? `in:spam newer_than:${windowDays}d before:${beforeEpoch}`
+    : `in:spam newer_than:${windowDays}d`;
   // Drain the WHOLE window in 500-id batches — a junk burst bigger than one
   // batch must not hide older buried mail behind the cap, and an undrained
   // pass must not advance the watermark (which would shrink the next window
   // past the unscanned remainder). MAX_BATCHES is a runaway backstop far
-  // above observed volume; hitting it holds the watermark and says so.
+  // above observed volume; hitting it persists the continuation epoch below
+  // so the NEXT run still makes forward progress.
   const MAX_BATCHES = 20;
   let pageToken = null;
   let undrained = false;
+  let oldestReceivedMs = null;
   for (let batch = 0; batch < MAX_BATCHES; batch += 1) {
-    const { messages, truncated, nextPageToken } = await gmailClient.listAllMessages(`in:spam newer_than:${windowDays}d`, 500, { includeSpamTrash: true, pageToken });
+    const { messages, truncated, nextPageToken } = await gmailClient.listAllMessages(query, 500, { includeSpamTrash: true, pageToken });
     for (const m of messages || []) {
       counts.scanned += 1;
       try {
         const full = await gmailClient.getMessage(m.id);
+        const receivedMs = full?.received_at ? new Date(full.received_at).getTime() : NaN;
+        if (Number.isFinite(receivedMs)) {
+          oldestReceivedMs = oldestReceivedMs === null ? receivedMs : Math.min(oldestReceivedMs, receivedMs);
+        }
         const fromAddress = full?.from_address;
         const verdict = await isKnownSender(fromAddress);
         if (!verdict.known) continue;
@@ -554,7 +583,7 @@ async function rescueSpamFolder(now = new Date()) {
     pageToken = nextPageToken;
     if (batch === MAX_BATCHES - 1) {
       undrained = true;
-      logger.warn(`[inbox-hygiene] spam rescue stopped after ${MAX_BATCHES * 500} messages — watermark held so the remainder is re-scanned next run`);
+      logger.warn(`[inbox-hygiene] spam rescue stopped after ${MAX_BATCHES * 500} messages — continuation persisted so the next run reaches the remainder`);
     }
   }
   // Every message failing is not N isolated blips — it's a systemic Gmail
@@ -562,13 +591,28 @@ async function rescueSpamFolder(now = new Date()) {
   if (counts.scanned > 0 && perMessageFailures === counts.scanned) {
     throw new Error(`spam rescue failed on all ${counts.scanned} message(s) — systemic Gmail failure`);
   }
-  // Watermark advances ONLY on a fully clean, fully drained pass — a
-  // per-message failure or an undrained window keeps the next scan wide so
-  // the missed messages are re-scanned.
-  if (syncState && perMessageFailures === 0 && !undrained) {
-    await db('email_sync_state').where('id', syncState.id)
-      .update({ last_spam_scan_at: now })
-      .catch((e) => logger.warn(`[inbox-hygiene] spam-scan watermark update failed: ${e.message}`));
+  if (syncState) {
+    if (undrained && Number.isFinite(oldestReceivedMs)) {
+      // Persist forward progress: the next run partitions on the oldest
+      // epoch reached (+1s so a same-second sibling is re-scanned rather
+      // than skipped — rescue is idempotent).
+      await db('email_sync_state').where('id', syncState.id)
+        .update({ spam_scan_before_epoch: Math.floor(oldestReceivedMs / 1000) + 1 })
+        .catch((e) => logger.warn(`[inbox-hygiene] spam-scan continuation update failed: ${e.message}`));
+    } else if (!undrained && beforeEpoch) {
+      // Partition drained — clear the continuation; the next run does a
+      // normal full-window pass (watermark still held until it completes).
+      await db('email_sync_state').where('id', syncState.id)
+        .update({ spam_scan_before_epoch: null })
+        .catch((e) => logger.warn(`[inbox-hygiene] spam-scan continuation clear failed: ${e.message}`));
+    } else if (perMessageFailures === 0 && !undrained && !beforeEpoch) {
+      // Watermark advances ONLY on a fully clean, fully drained,
+      // UNPARTITIONED pass — anything else keeps the next scan wide so
+      // missed messages are re-scanned.
+      await db('email_sync_state').where('id', syncState.id)
+        .update({ last_spam_scan_at: now })
+        .catch((e) => logger.warn(`[inbox-hygiene] spam-scan watermark update failed: ${e.message}`));
+    }
   }
   return counts;
 }
