@@ -39,7 +39,7 @@ const { dispatchWithFallback } = require('../services/llm/call');
 const CHAIN_METHODS = [
   'where', 'orWhere', 'whereRaw', 'orWhereRaw', 'whereNot', 'whereNotIn',
   'whereIn', 'whereNull', 'whereNotNull', 'whereILike', 'andWhereILike',
-  'whereBetween', 'orderBy', 'limit',
+  'whereBetween', 'whereNotExists', 'orderBy', 'limit',
 ];
 
 /** Chainable knex mock — per-table FIFO first() queues, select() resolves rows. */
@@ -49,6 +49,7 @@ function setupDb(firstResults = {}, selectResults = {}, updateResults = {}) {
   const selectQueues = Object.fromEntries(Object.entries(selectResults).map(([t, rows]) => [t, [...rows]]));
   const updateQueues = Object.fromEntries(Object.entries(updateResults).map(([t, rows]) => [t, [...rows]]));
 
+  db.raw = jest.fn((sql) => ({ __raw: sql }));
   db.mockImplementation((table) => {
     const builder = {};
     const filters = [];
@@ -63,10 +64,13 @@ function setupDb(firstResults = {}, selectResults = {}, updateResults = {}) {
       const q = firstQueues[table];
       return q && q.length ? q.shift() : null;
     });
-    builder.select = jest.fn(async () => {
+    // select() stays CHAINABLE (subqueries chain .whereRaw after it); the
+    // builder itself is thenable, resolving the per-table select queue.
+    builder.select = jest.fn(() => builder);
+    builder.then = (resolve, reject) => {
       const q = selectQueues[table];
-      return q && q.length ? q.shift() : [];
-    });
+      return Promise.resolve(q && q.length ? q.shift() : []).then(resolve, reject);
+    };
     builder.update = jest.fn(async (patch) => {
       state.updates.push({ table, patch });
       state.updateFilters.push({ table, filters: [...filters] });

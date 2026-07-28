@@ -766,9 +766,18 @@ async function draftReplyForEmail(email, { customer = null, tone = 'service' } =
   // time reclassification (which runs auto-actions twice with the same
   // object) or a concurrent worker gets here. Only the caller that flips
   // NULL → 'pending' drafts; everyone else no-ops.
+  // The claim is THREAD-scoped, not just email-scoped: two inbound messages
+  // in one conversation must produce one draft, so the claim only wins when
+  // no other email in the thread already holds one.
   let claimed = await db('emails')
     .where({ id: email.id })
     .whereNull('draft_gmail_id')
+    .whereNotExists(
+      db('emails as e2')
+        .select(db.raw('1'))
+        .whereRaw('e2.gmail_thread_id = ?', [email.gmail_thread_id])
+        .whereNotNull('e2.draft_gmail_id')
+    )
     .update({ draft_gmail_id: 'pending', draft_claimed_at: new Date(), updated_at: new Date() });
   if (!claimed) {
     // Stale-claim recovery: a crash mid-attempt leaves 'pending' forever.
@@ -783,21 +792,24 @@ async function draftReplyForEmail(email, { customer = null, tone = 'service' } =
       .where('draft_claimed_at', '<', staleCutoff)
       .update({ draft_gmail_id: 'pending', draft_claimed_at: new Date(), updated_at: new Date() });
     if (!claimed) return null;
+    // (The universal live-thread DRAFT check below reconciles a crashed
+    // attempt's existing draft before anything is created.)
+  }
+  try {
+    // Live-thread belt-and-braces on EVERY create (not just recovery): an
+    // operator- or prior-pass-authored draft already sitting in the thread
+    // means ours would be a duplicate.
     try {
       const thread = await gmailClient.getThread(email.gmail_thread_id);
-      const hasDraft = (thread?.messages || []).some((m) => (m.labelIds || []).includes('DRAFT'));
-      if (hasDraft) {
+      if ((thread?.messages || []).some((m) => (m.labelIds || []).includes('DRAFT'))) {
         await db('emails').where({ id: email.id, draft_gmail_id: 'pending' })
           .update({ draft_gmail_id: 'reconciled_existing_draft', updated_at: new Date() });
         return null;
       }
     } catch (e) {
-      // Can't prove there's no draft — release and let a later pass retry.
       await releaseDraftClaim(email.id);
       return null;
     }
-  }
-  try {
     const MODELS = require('../../config/models');
     const { dispatchWithFallback } = require('../llm/call');
     // Greeting name comes ONLY from the operator-curated customer record —
