@@ -346,6 +346,12 @@ async function createDraft(to, subject, body, threadId = null, inReplyTo = null)
   const safeSubject = encodeHeaderUtf8(subject);
   const safeInReplyTo = sanitizeHeaderValue(inReplyTo);
   if (!safeTo) throw new Error('Recipient (to) is required');
+  // Exactly ONE plain mailbox: a parsed From like "victim@x.com,
+  // attacker@y.com" must never become a draft that discloses the reply to a
+  // second address the moment the operator clicks Send.
+  if (!/^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/.test(safeTo)) {
+    throw new Error('Draft recipient must be a single plain mailbox address');
+  }
 
   const headers = [
     `From: Waves Pest Control <${fromEmail}>`,

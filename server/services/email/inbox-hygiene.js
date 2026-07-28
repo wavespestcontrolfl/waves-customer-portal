@@ -179,10 +179,11 @@ async function sweepQuarantine(now = new Date()) {
           logger.warn(`[inbox-hygiene] deferred sender block failed (email ${row.id}): ${blockErr.message}`);
         }
       } catch (trashErr) {
-        // Release the claim so tomorrow's sweep retries.
-        await db('emails')
-          .where({ id: row.id, auto_action: 'spam_trashing' })
-          .update({ auto_action: 'spam_quarantined', updated_at: new Date() });
+        // AMBIGUOUS: the trash may have committed before the error surfaced.
+        // Keep the 'spam_trashing' claim — reverting would let the next
+        // sweep read a trashed message as operator-restored and skip the
+        // deferred sender block. The stuck-claim recovery pass reconciles it
+        // against live Gmail labels tomorrow.
         throw trashErr;
       }
     } catch (e) {

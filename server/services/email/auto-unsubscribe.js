@@ -155,6 +155,16 @@ async function autoUnsubscribe(email) {
     return { method: 'none', note: 'operational sender — never unsubscribe' };
   }
 
+  // The unsubscribe URLs are sender-controlled requests — following them for
+  // mail that did not authenticate as its claimed domain hands harvesting
+  // spammers a live-mailbox signal (and a request trigger). Unauthenticated
+  // bulk mail gets archived only.
+  const { hasAlignedAuth } = require('./inbox-hygiene');
+  if (!hasAlignedAuth(email.authentication_results, domainFromAddress(email.from_address))) {
+    logger.info(`[unsubscribe] Refused: sender not authenticated (email ${email.id})`);
+    return { method: 'none', note: 'unauthenticated sender — archive only' };
+  }
+
   // Method 1: Check List-Unsubscribe header (stored in extracted_data or label_ids context)
   // We need the raw headers — check if they were stored
   const listUnsub = email.list_unsubscribe || null;

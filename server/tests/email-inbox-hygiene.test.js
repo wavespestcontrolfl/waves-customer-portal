@@ -209,14 +209,17 @@ describe('sweepQuarantine', () => {
     expect(patch.quarantined_at).toBeNull();
   });
 
-  test('a failed trash releases the claim and never aborts the sweep', async () => {
+  test('a failed trash RETAINS the ambiguous claim (stuck-claim pass reconciles) and never aborts the sweep', async () => {
     const state = setupDb({}, { emails: [[], [{ id: 'e-1', gmail_id: 'g-1' }, { id: 'e-2', gmail_id: 'g-2' }]] });
     gmailClient.trashMessage.mockRejectedValueOnce(new Error('gone'));
     const result = await sweepQuarantine();
     expect(result.trashed).toBe(1);
     expect(gmailClient.trashMessage).toHaveBeenCalledTimes(2);
     const actions = state.updates.filter((u) => u.table === 'emails').map((u) => u.patch.auto_action);
-    expect(actions).toContain('spam_quarantined'); // claim released for retry
+    // the failed row's last state is its claim — never reverted to
+    // quarantined (a committed-then-errored trash would read as restored)
+    expect(actions.filter((a) => a === 'spam_quarantined')).toHaveLength(0);
+    expect(actions.filter((a) => a === 'spam_trashing')).toHaveLength(2);
   });
 });
 
