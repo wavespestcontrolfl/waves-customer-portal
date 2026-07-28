@@ -307,13 +307,18 @@ async function isConnected() {
  * follow-up list finds the winner's label).
  */
 const labelIdCache = new Map();
+const LABEL_CACHE_TTL_MS = 15 * 60000;
 async function ensureLabel(name) {
-  if (labelIdCache.has(name)) return labelIdCache.get(name);
+  // TTL'd cache — a deleted/recreated label or a re-authed mailbox changes
+  // label ids, and a permanently cached id would 400 every quarantine call
+  // until restart.
+  const cached = labelIdCache.get(name);
+  if (cached && Date.now() - cached.at < LABEL_CACHE_TTL_MS) return cached.id;
   const gmail = await getGmail();
   const list = await gmail.users.labels.list({ userId: 'me' });
   const existing = (list.data.labels || []).find((l) => l.name === name);
   if (existing) {
-    labelIdCache.set(name, existing.id);
+    labelIdCache.set(name, { id: existing.id, at: Date.now() });
     return existing.id;
   }
   try {
@@ -321,13 +326,13 @@ async function ensureLabel(name) {
       userId: 'me',
       requestBody: { name, labelListVisibility: 'labelShow', messageListVisibility: 'show' },
     });
-    labelIdCache.set(name, created.data.id);
+    labelIdCache.set(name, { id: created.data.id, at: Date.now() });
     return created.data.id;
   } catch (e) {
     const retry = await gmail.users.labels.list({ userId: 'me' });
     const won = (retry.data.labels || []).find((l) => l.name === name);
     if (won) {
-      labelIdCache.set(name, won.id);
+      labelIdCache.set(name, { id: won.id, at: Date.now() });
       return won.id;
     }
     throw e;

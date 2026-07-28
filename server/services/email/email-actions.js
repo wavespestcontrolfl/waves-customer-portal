@@ -837,9 +837,13 @@ async function draftReplyForEmail(email, { customer = null, tone = 'service' } =
   // advisory lock on the thread id serializes concurrent workers claiming
   // DIFFERENT rows of the same thread — without it, both statements can
   // pass the NOT EXISTS and mint duplicate drafts.
-  let claimed = await db.transaction(async (trx) => {
+  // Both the fresh claim AND the same-row stale takeover run inside ONE
+  // advisory-locked transaction — a takeover outside the lock could race a
+  // newer message's claim on the same thread and mint two drafts.
+  const claimed = await db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [String(email.gmail_thread_id)]);
-    return trx('emails')
+    const staleCutoff = new Date(Date.now() - 3600000);
+    const fresh = await trx('emails')
       .where({ id: email.id })
       .whereNull('draft_gmail_id')
       .whereNotExists(
@@ -852,26 +856,21 @@ async function draftReplyForEmail(email, { customer = null, tone = 'service' } =
           .select(trx.raw('1'))
           .whereRaw('e2.gmail_thread_id = ?', [email.gmail_thread_id])
           .where('e2.draft_gmail_id', 'pending')
-          .where('e2.draft_claimed_at', '>=', new Date(Date.now() - 3600000))
+          .where('e2.draft_claimed_at', '>=', staleCutoff)
       )
       .update({ draft_gmail_id: 'pending', draft_claimed_at: new Date(), updated_at: new Date() });
-  });
-  if (!claimed) {
-    // Stale-claim recovery: a crash mid-attempt leaves 'pending' forever.
-    // Age is judged by the DEDICATED draft_claimed_at stamp — updated_at is
-    // refreshed by ordinary label/read syncs and would keep a dead claim
-    // young forever. Take over only hour-old claims, and FIRST reconcile
-    // against the live thread — if the crashed attempt already created a
-    // Gmail draft, settle as reconciled instead of minting a duplicate.
-    const staleCutoff = new Date(Date.now() - 3600000);
-    claimed = await db('emails')
+    if (fresh) return fresh;
+    // Same-row stale-claim takeover (crash recovery), judged by the
+    // DEDICATED draft_claimed_at stamp — updated_at is refreshed by
+    // ordinary label/read syncs and would keep a dead claim young forever.
+    return trx('emails')
       .where({ id: email.id, draft_gmail_id: 'pending' })
       .where('draft_claimed_at', '<', staleCutoff)
       .update({ draft_gmail_id: 'pending', draft_claimed_at: new Date(), updated_at: new Date() });
-    if (!claimed) return null;
-    // (The universal live-thread DRAFT check below reconciles a crashed
-    // attempt's existing draft before anything is created.)
-  }
+  });
+  if (!claimed) return null;
+  // (The universal live-thread DRAFT check below reconciles a crashed
+  // attempt's existing draft before anything is created.)
   try {
     // Live-thread belt-and-braces on EVERY create (not just recovery): an
     // operator- or prior-pass-authored draft already sitting in the thread
@@ -1011,8 +1010,13 @@ async function handleCustomerRequest(email, classification) {
       auto_action: 'matched_to_customer',
       updated_at: new Date(),
     });
-    // Known-customer conversation mail surfaces as important in Gmail.
-    try { await gmailClient.modifyLabels(email.gmail_id, ['IMPORTANT'], []); } catch (e) { /* non-critical */ }
+    // Gmail promotion only for ADDRESS-matched, AUTHENTICATED senders — a
+    // display-name match is attacker-typed text and must not elevate an
+    // unrelated sender's mail.
+    const { hasAlignedAuth } = require('./inbox-hygiene');
+    if (matchedByAddress && hasAlignedAuth(email.authentication_results, domainFromAddress(email.from_address))) {
+      try { await gmailClient.modifyLabels(email.gmail_id, ['IMPORTANT'], []); } catch (e) { /* non-critical */ }
+    }
   }
   // Personalization only for ADDRESS-matched customers — a display name is
   // attacker-typed, and a name-only match must not put a real customer's

@@ -181,13 +181,28 @@ async function sweepQuarantine(now = new Date()) {
     const staleReclass = await db('emails')
       .where('auto_action', 'spam_reclassifying')
       .where('updated_at', '<', claimGraceCutoff)
-      .select('id', 'gmail_id', 'quarantined_at', 'classification');
+      .select('id', 'gmail_id', 'from_address', 'quarantined_at', 'classification');
     for (const row of staleReclass) {
       // A persisted NON-spam verdict means the reclassification committed
       // its decision and died before cancellation — complete the cancel
       // instead of re-quarantining a message the operator already cleared.
       if (row.classification && row.classification !== 'spam') {
         try {
+          // Same unblock-first commit as the live route and stranded-cancel
+          // recovery — a crash between verdict and unblock must not leave
+          // the sender's Gmail filter trash-routing forever.
+          const blocked = await db('blocked_email_senders')
+            .whereRaw('LOWER(email_address) = ?', [String(row.from_address || '').toLowerCase()])
+            .where({ reason: 'spam_auto' })
+            .first();
+          if (blocked) {
+            const { unblockSender } = require('./spam-blocker');
+            const unblock = await unblockSender(blocked.id).catch((e) => ({ error: e.message }));
+            if (!unblock?.success) {
+              logger.warn(`[inbox-hygiene] stale-reclass unblock failed (email ${row.id}) — claim retained for retry`);
+              continue;
+            }
+          }
           await cancelQuarantine(row, { restoreInbox: row.classification !== 'marketing_newsletter' });
         } catch (e) {
           logger.warn(`[inbox-hygiene] stale-reclass cancel completion failed (email ${row.id}): ${e.message}`);
@@ -220,7 +235,7 @@ async function sweepQuarantine(now = new Date()) {
         'spam_quarantined', 'spam_quarantine_ambiguous', 'spam_trashing', 'spam_reclassifying',
         // trash-lane outcomes are committed spam, not stranded cancels
         // (their quarantined_at also clears at settle — this is the belt)
-        'spam_trashed_block_pending', 'spam_trashed_after_quarantine', 'spam_blocked',
+        'spam_trashed_block_pending', 'spam_trashed_blocking', 'spam_trashed_after_quarantine', 'spam_blocked',
       ])
       .select('id', 'gmail_id', 'from_address', 'classification');
     for (const row of strandedCancels) {
@@ -254,6 +269,20 @@ async function sweepQuarantine(now = new Date()) {
 
   // Retry sender blocks that failed after a successful trash on a prior
   // sweep — 'spam_trashed_block_pending' is the retryable state.
+  // Includes crashed 'spam_trashed_blocking' claims past the grace period —
+  // settleDeferredBlock re-claims from block_pending, so revert those first.
+  try {
+    const staleBlocking = await db('emails')
+      .where('auto_action', 'spam_trashed_blocking')
+      .where('updated_at', '<', claimGraceCutoff)
+      .select('id');
+    for (const row of staleBlocking) {
+      await db('emails').where({ id: row.id, auto_action: 'spam_trashed_blocking' })
+        .update({ auto_action: 'spam_trashed_block_pending', updated_at: new Date() });
+    }
+  } catch (e) {
+    logger.warn(`[inbox-hygiene] stale blocking-claim revert failed: ${e.message}`);
+  }
   const blockPending = await db('emails')
     .where('auto_action', 'spam_trashed_block_pending')
     .where('updated_at', '<', claimGraceCutoff)
@@ -370,10 +399,25 @@ async function sweepQuarantine(now = new Date()) {
  */
 async function settleDeferredBlock(row) {
   try {
-    const { blockSpamSender } = require('./spam-blocker');
-    await blockSpamSender(row);
-    await db('emails').where({ id: row.id, auto_action: 'spam_trashed_block_pending' })
-      .update({ auto_action: 'spam_trashed_after_quarantine', quarantined_at: null, updated_at: new Date() });
+    // CAS the row into a short-lived 'blocking' claim BEFORE the external
+    // Gmail filter mutation — an operator's restore+reclassify CAS
+    // (spam_reclassifying) landing first makes this a no-op instead of
+    // racing a fresh filter against their veto.
+    const claimed = await db('emails')
+      .where({ id: row.id, auto_action: 'spam_trashed_block_pending' })
+      .update({ auto_action: 'spam_trashed_blocking', updated_at: new Date() });
+    if (!claimed) return;
+    try {
+      const { blockSpamSender } = require('./spam-blocker');
+      await blockSpamSender(row);
+      await db('emails').where({ id: row.id, auto_action: 'spam_trashed_blocking' })
+        .update({ auto_action: 'spam_trashed_after_quarantine', quarantined_at: null, updated_at: new Date() });
+    } catch (blockErr) {
+      await db('emails').where({ id: row.id, auto_action: 'spam_trashed_blocking' })
+        .update({ auto_action: 'spam_trashed_block_pending', updated_at: new Date() })
+        .catch(() => {});
+      throw blockErr;
+    }
   } catch (blockErr) {
     logger.warn(`[inbox-hygiene] deferred sender block failed (email ${row.id}) — retrying next sweep: ${blockErr.message}`);
   }

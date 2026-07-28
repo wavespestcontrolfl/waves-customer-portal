@@ -217,19 +217,19 @@ describe('sweepQuarantine', () => {
   const { sweepQuarantine } = require('../services/email/inbox-hygiene');
 
   test('claims atomically, trashes aged rows, and blocks the sender only at commit', async () => {
-    const state = setupDb({}, { emails: [[], [], [], [], [], [{ id: 'e-old', gmail_id: 'g-old', from_address: 'coldpitch@seo-blaster.example' }]] });
+    const state = setupDb({}, { emails: [[], [], [], [], [], [], [{ id: 'e-old', gmail_id: 'g-old', from_address: 'coldpitch@seo-blaster.example' }]] });
     const result = await sweepQuarantine(new Date('2026-07-28T12:00:00Z'));
     expect(gmailClient.trashMessage).toHaveBeenCalledWith('g-old');
     expect(result.trashed).toBe(1);
     const actions = state.updates.filter((u) => u.table === 'emails').map((u) => u.patch.auto_action);
-    // claim BEFORE the destructive call, block-pending settle, then complete
-    expect(actions).toEqual(['spam_trashing', 'spam_trashed_block_pending', 'spam_trashed_after_quarantine']);
+    // claim → trash → block-pending settle → blocking claim → complete
+    expect(actions).toEqual(['spam_trashing', 'spam_trashed_block_pending', 'spam_trashed_blocking', 'spam_trashed_after_quarantine']);
     // the deferred persistent block lands with the commit
     expect(state.inserts.find((i) => i.table === 'blocked_email_senders')).toBeDefined();
   });
 
   test('an operator label-restore vetoes the trash — state cleared, message kept', async () => {
-    const state = setupDb({}, { emails: [[], [], [], [], [], [{ id: 'e-back', gmail_id: 'g-back' }]] });
+    const state = setupDb({}, { emails: [[], [], [], [], [], [], [{ id: 'e-back', gmail_id: 'g-back' }]] });
     gmailClient.getMessageLabels.mockResolvedValueOnce(['INBOX']);
     const result = await sweepQuarantine(new Date('2026-07-28T12:00:00Z'));
     expect(gmailClient.trashMessage).not.toHaveBeenCalled();
@@ -240,7 +240,7 @@ describe('sweepQuarantine', () => {
   });
 
   test('a failed trash RETAINS the ambiguous claim (stuck-claim pass reconciles) and never aborts the sweep', async () => {
-    const state = setupDb({}, { emails: [[], [], [], [], [], [{ id: 'e-1', gmail_id: 'g-1' }, { id: 'e-2', gmail_id: 'g-2' }]] });
+    const state = setupDb({}, { emails: [[], [], [], [], [], [], [{ id: 'e-1', gmail_id: 'g-1' }, { id: 'e-2', gmail_id: 'g-2' }]] });
     gmailClient.trashMessage.mockRejectedValueOnce(new Error('gone'));
     const result = await sweepQuarantine();
     expect(result.trashed).toBe(1);
@@ -334,6 +334,7 @@ describe('sweepQuarantine — stuck-claim recovery', () => {
       [{ id: 'e-stuck', gmail_id: 'g-stuck', from_address: 'coldpitch@seo-blaster.example' }], // stuck select
       [], // stale reclassify-claim select
       [], // stranded-cancel select
+      [], // stale blocking-claim select
       [], // block-pending retry select
       [], // ambiguous reconcile select
       [], // main quarantined select
@@ -342,13 +343,14 @@ describe('sweepQuarantine — stuck-claim recovery', () => {
     const result = await sweepQuarantine(new Date('2026-07-28T12:00:00Z'));
     expect(result.trashed).toBe(1);
     const acts = state.updates.filter((u) => u.table === 'emails').map((u) => u.patch.auto_action);
-    expect(acts).toEqual(['spam_trashed_block_pending', 'spam_trashed_after_quarantine']);
+    expect(acts).toEqual(['spam_trashed_block_pending', 'spam_trashed_blocking', 'spam_trashed_after_quarantine']);
     expect(state.inserts.find((i) => i.table === 'blocked_email_senders')).toBeDefined();
   });
 
   test('a crashed spam_trashing row NOT in TRASH reverts to quarantined', async () => {
     const state = setupDb({}, { emails: [
       [{ id: 'e-stuck', gmail_id: 'g-stuck', from_address: 'x@y.example' }],
+      [],
       [],
       [],
       [],

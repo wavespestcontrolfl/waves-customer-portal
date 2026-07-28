@@ -280,31 +280,30 @@ async function isBlocked(fromAddress) {
   // stored gmail_filter_id keeps trash-routing at GMAIL level, so the stale
   // auto-block (row + filter) is actively removed; a failed removal keeps
   // the row for the next message's retry.
-  if (isOperationalDomain(domain)) {
-    await removeStaleAutoBlock(normalized);
-    return false;
-  }
-  const isCustomer = await db('customers').whereRaw('LOWER(email) = ?', [normalized]).first();
-  if (isCustomer) {
-    await removeStaleAutoBlock(normalized);
-    return false;
-  }
-  const isOpenLead = await db('leads')
-    .whereRaw('LOWER(email) = ?', [normalized])
-    .whereNull('deleted_at')
-    .where((q) => q.whereNull('status').orWhereNotIn('status', TERMINAL_LEAD_STATUSES))
+  const exactBlocked = await db('blocked_email_senders')
+    .where('email_address', normalized)
     .first();
-  if (isOpenLead) {
-    await removeStaleAutoBlock(normalized);
+
+  const identity = isOperationalDomain(domain)
+    || !!(await db('customers').whereRaw('LOWER(email) = ?', [normalized]).first())
+    || !!(await db('leads')
+      .whereRaw('LOWER(email) = ?', [normalized])
+      .whereNull('deleted_at')
+      .where((q) => q.whereNull('status').orWhereNotIn('status', TERMINAL_LEAD_STATUSES))
+      .first());
+  if (identity) {
+    // A MANUAL exact block on a protected address is an explicit admin
+    // decision and stays honored; only stale AUTOMATIC blocks are removed.
+    if (exactBlocked && exactBlocked.reason !== 'spam_auto') {
+      await db('blocked_email_senders').where({ id: exactBlocked.id }).increment('blocked_count', 1);
+      return true;
+    }
+    if (exactBlocked) await removeStaleAutoBlock(normalized);
     return false;
   }
 
   // Exact sender blocks still outrank the vendor-DOMAIN fail-open (a domain
   // is not an identity — one bad sender at a vendor domain stays blocked).
-  const exactBlocked = await db('blocked_email_senders')
-    .where('email_address', normalized)
-    .first();
-
   if (exactBlocked) {
     await db('blocked_email_senders').where({ id: exactBlocked.id }).increment('blocked_count', 1);
     return true;
