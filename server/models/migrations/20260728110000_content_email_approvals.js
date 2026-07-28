@@ -33,6 +33,10 @@ exports.up = async function up(knex) {
     // The parsed reply decision, persisted at claim time so a crash during
     // execution can be recovered without re-reading the mailbox.
     t.string('decision', 10);
+    // Send-claim timestamp (distinct from confirmed delivery): a crash
+    // between claiming and SMTP completing leaves email_sending_at set with
+    // email_sent_at null — reclaimable after a staleness window.
+    t.timestamp('email_sending_at');
     t.timestamp('email_sent_at');
     t.text('decided_by'); // "email:<sender>" — audit, never trusted alone
     t.timestamp('decided_at');
@@ -49,6 +53,11 @@ exports.up = async function up(knex) {
     await knex.schema.createTable('content_email_approval_state', (t) => {
       t.smallint('id').primary(); // always 1
       t.bigInteger('last_uid').notNullable().defaultTo(0);
+      // IMAP UIDs are scoped to the mailbox's UIDVALIDITY — if the mailbox
+      // is replaced/regenerated (or APPROVAL_IMAP_USER changes), the cursor
+      // must reset or new replies would be skipped forever.
+      t.bigInteger('uid_validity');
+      t.string('mailbox_user', 255);
       t.timestamp('updated_at').notNullable().defaultTo(knex.fn.now());
     });
   }

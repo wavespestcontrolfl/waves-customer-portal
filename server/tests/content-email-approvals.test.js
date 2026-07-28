@@ -278,3 +278,61 @@ describe('gate + full-draft rules (Codex r2)', () => {
     expect(truncated).toBe(false);
   });
 });
+
+describe('round-3 hardening (Codex r3)', () => {
+  test('a text/plain ATTACHMENT never decides — the nested body wins', () => {
+    const raw = [
+      'Content-Type: multipart/mixed; boundary="outer"', '',
+      '--outer', 'Content-Type: multipart/alternative; boundary="inner"', '',
+      '--inner', 'Content-Type: text/plain; charset=UTF-8', '',
+      'not approved', '',
+      '--inner--', '',
+      '--outer', 'Content-Type: text/plain; name="notes.txt"',
+      'Content-Disposition: attachment; filename="notes.txt"', '',
+      'approved — attachment text must not decide', '--outer--',
+    ].join('\r\n');
+    expect(parseDecision(extractReplyText(raw))).toBe('rejected');
+  });
+
+  test('crash recovery recognizes an opened Astro PR as approved-complete (real persisted shape)', async () => {
+    const reviewQueue = require('../services/content/autonomous-review-queue');
+    reviewQueue.decideReviewItem.mockRejectedValue(new Error('run is no longer named_competitor_review'));
+    const db = require('../models/db');
+    const updates = [];
+    db.mockImplementation((table) => ({
+      where: jest.fn().mockReturnValue({
+        update: jest.fn().mockImplementation((p) => { updates.push(p); return Promise.resolve(1); }),
+        first: jest.fn().mockResolvedValue(
+          // The runner persists an opened PR as outcome=completed_pending_review
+          // with skip_reason=astro_pr_pending_merge — NOT as an outcome value.
+          table === 'autonomous_runs' ? { outcome: 'completed_pending_review', skip_reason: 'astro_pr_pending_merge' }
+            : table === 'opportunity_queue' ? { status: 'pending_review' } : null
+        ),
+        orderBy: jest.fn().mockReturnValue({ first: jest.fn().mockResolvedValue(null) }),
+      }),
+    }));
+    const row = { id: 'x', token: 'EA-deadbeef', run_id: 'r', opportunity_id: 'o', kind: 'named_competitor_review' };
+    const result = await approvals._internals.finishExecution(row, 'approved', 'owner@example.com', { recovery: true });
+    expect(result).toEqual({ executed: 'reconciled' });
+    expect(updates.at(-1)).toMatchObject({ status: 'approved' });
+  });
+
+  test('sender authentication requires the trusted receiver\'s DMARC/DKIM verdict (P0: From is spoofable)', () => {
+    const verify = approvals._internals.verifySenderAuthentication;
+    const base = (auth) => `Delivered-To: contact@wavespestcontrol.com\r\n${auth}From: Owner <owner@gmail.com>\r\nSubject: Re: [EA-deadbeef] Approve?\r\n\r\napproved\r\n`;
+    // DMARC pass aligned to the sender domain → authorized.
+    expect(verify(base('Authentication-Results: mx.google.com; spf=pass; dkim=pass header.i=@gmail.com; dmarc=pass (p=NONE) header.from=gmail.com\r\n'), 'owner@gmail.com')).toBe(true);
+    // Aligned DKIM pass alone (folded header) → authorized.
+    expect(verify(base('Authentication-Results: mx.google.com;\r\n dkim=pass header.i=@gmail.com header.s=x\r\n'), 'owner@gmail.com')).toBe(true);
+    // No Authentication-Results at all → fail closed.
+    expect(verify(base(''), 'owner@gmail.com')).toBe(false);
+    // DMARC fail → rejected.
+    expect(verify(base('Authentication-Results: mx.google.com; dmarc=fail header.from=gmail.com\r\n'), 'owner@gmail.com')).toBe(false);
+    // Pass for a DIFFERENT domain (spoofed From) → rejected.
+    expect(verify(base('Authentication-Results: mx.google.com; dmarc=pass header.from=attacker.com\r\n'), 'owner@gmail.com')).toBe(false);
+    // Attacker-embedded header with a foreign authserv-id → not trusted.
+    expect(verify(base('Authentication-Results: evil.example; dmarc=pass header.from=gmail.com\r\n'), 'owner@gmail.com')).toBe(false);
+    // Suffix-abuse: notgmail.com must not satisfy gmail.com alignment.
+    expect(verify(base('Authentication-Results: mx.google.com; dmarc=pass header.from=notgmail.com\r\n'), 'owner@gmail.com')).toBe(false);
+  });
+});

@@ -40,6 +40,7 @@ const APPROVABLE_KIND_RE = /^(named_competitor_review|trust_build_\d+_of_\d+)$/;
 const TOKEN_RE = /\bEA-[0-9a-f]{8}\b/i;
 const SWEEP_WINDOW_DAYS = 14;
 const EXECUTING_RECOVERY_MINUTES = 15;
+const SEND_CLAIM_STALE_MINUTES = 10;
 // Transient execution failures (engine advisory lock contention, timeouts,
 // connection blips) release the claim so the inbox reply retries next poll.
 const TRANSIENT_ERROR_RE = /engine[\s_-]*lock|another (?:run|publish) is in progress|publisher is busy|retry in a moment|timeout|timed out|ECONN|EAI_AGAIN|deadlock|too many connections|temporar/i;
@@ -142,18 +143,24 @@ function extractReplyText(source, depth = 0) {
   const boundaryMatch = raw.match(/boundary="?([^";\r\n]+)"?/i);
   if (boundaryMatch) {
     const parts = raw.split(`--${boundaryMatch[1]}`).slice(1);
-    // First pass: direct text/plain leaves. Second pass: recurse into
-    // nested multipart parts.
+    // Attachments never decide — a text/plain ATTACHMENT beginning with
+    // "approved" must not override the actual reply body (and a harmless
+    // attachment must not shadow it either).
+    const isAttachment = (headers) => /content-disposition:\s*attachment/i.test(headers) || /filename\s*=/i.test(headers);
+    // Pass 1: direct text/plain BODY leaves. Pass 2: recurse into nested
+    // multipart containers (the reply body in a multipart/mixed message is
+    // usually a nested multipart/alternative). Attachments are skipped in
+    // both passes.
     for (const part of parts) {
       const split = splitHeadersBody(part);
-      if (!split) continue;
+      if (!split || isAttachment(split.headers)) continue;
       if (/content-type:\s*text\/plain/i.test(split.headers)) {
         return decodePartBody(split.headers, split.body);
       }
     }
     for (const part of parts) {
       const split = splitHeadersBody(part);
-      if (!split) continue;
+      if (!split || isAttachment(split.headers)) continue;
       if (/content-type:\s*multipart\//i.test(split.headers)) {
         const nested = extractReplyText(part, depth + 1);
         if (nested && parseDecision(nested) !== null) return nested;
@@ -172,6 +179,42 @@ function extractReplyText(source, depth = 0) {
 // replying "approved" (legal/brand surface). Bounded only by a generous
 // safety cap far above any real post.
 const DRAFT_EMAIL_MAX_CHARS = 120_000;
+/**
+ * Verify the reply actually authenticated as the claimed sender. The From
+ * header is attacker-controlled RFC822 data — authorization additionally
+ * requires the RECEIVING server's Authentication-Results header to show
+ * DMARC pass (or aligned DKIM pass) for the sender's domain. Only the
+ * FIRST Authentication-Results header whose authserv-id matches the
+ * trusted receiver (Gmail prepends its own at the top; RFC 8601 receivers
+ * strip/displace foreign ones) is consulted, so an attacker-embedded fake
+ * header buried in the message cannot vouch for itself. Fail closed.
+ */
+function verifySenderAuthentication(rawSource, senderAddress) {
+  const raw = String(rawSource || '');
+  const senderDomain = String(senderAddress || '').split('@')[1]?.toLowerCase();
+  if (!senderDomain) return false;
+  const headerEndIdx = (() => {
+    const a = raw.indexOf('\r\n\r\n'); const b = raw.indexOf('\n\n');
+    if (a !== -1 && (b === -1 || a < b)) return a;
+    return b !== -1 ? b : raw.length;
+  })();
+  // Unfold header continuation lines, then take the FIRST
+  // Authentication-Results header stamped by the trusted receiver.
+  const headers = raw.slice(0, headerEndIdx).replace(/\r?\n[ \t]+/g, ' ');
+  const authserv = String(process.env.APPROVAL_AUTHSERV_ID || 'mx.google.com').toLowerCase();
+  const authLine = headers.split(/\r?\n/).find((l) => {
+    const m = l.match(/^authentication-results:\s*([^\s;]+)/i);
+    return m && m[1].toLowerCase() === authserv;
+  });
+  if (!authLine) return false;
+  const line = authLine.toLowerCase();
+  const domRe = senderDomain.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  if (new RegExp(`dmarc=pass[^;]*header\\.from=${domRe}(?:[;\\s]|$)`).test(line)) return true;
+  if (new RegExp(`dkim=pass[^;]*header\\.i=@?(?:[a-z0-9.-]+\\.)?${domRe}(?:[;\\s]|$)`).test(line)) return true;
+  if (new RegExp(`dkim=pass[^;]*header\\.d=(?:[a-z0-9.-]+\\.)?${domRe}(?:[;\\s]|$)`).test(line)) return true;
+  return false;
+}
+
 function draftPreview(run) {
   let payload = run.draft_payload;
   if (typeof payload === 'string') { try { payload = JSON.parse(payload); } catch { payload = null; } }
@@ -205,14 +248,17 @@ async function sendApprovalRequest(run, opportunity = null) {
   }
   if (!row || row.email_sent_at) return { row, skipped: row ? 'already_sent' : 'insert_failed' };
 
-  // Atomic SEND CLAIM: the runner's setImmediate hook and the ten-minute
-  // sweep can race on the same unsent row — whoever flips email_sent_at
-  // first sends; the loser sees 0 rows and backs off. A failed SMTP send
-  // releases the claim so the next cycle retries.
+  // Atomic RECOVERABLE send claim: the runner hook and the ten-minute sweep
+  // race on the same unsent row — whoever stamps email_sending_at first
+  // sends. email_sent_at is set only AFTER SMTP confirms, so a crash
+  // mid-send leaves a stale sending claim that becomes reclaimable after
+  // the staleness window instead of stranding the row forever.
+  const claimStaleBefore = new Date(Date.now() - SEND_CLAIM_STALE_MINUTES * 60_000);
   const sendClaimed = await db('content_email_approvals')
     .where({ id: row.id })
     .whereNull('email_sent_at')
-    .update({ email_sent_at: new Date(), updated_at: new Date() });
+    .where((q) => q.whereNull('email_sending_at').orWhere('email_sending_at', '<', claimStaleBefore))
+    .update({ email_sending_at: new Date(), updated_at: new Date() });
   if (!sendClaimed) return { row, skipped: 'send_claimed_elsewhere' };
 
   const email = require('../email');
@@ -250,10 +296,10 @@ async function sendApprovalRequest(run, opportunity = null) {
     replyTo: imapMailbox().user,
   });
   if (result?.ok === false) {
-    await db('content_email_approvals').where({ id: row.id }).update({ email_sent_at: null, last_error: String(result.error || 'send failed').slice(0, 500), updated_at: new Date() });
+    await db('content_email_approvals').where({ id: row.id }).update({ email_sending_at: null, last_error: String(result.error || 'send failed').slice(0, 500), updated_at: new Date() });
     return { row, sent: false, error: result.error };
   }
-  await db('content_email_approvals').where({ id: row.id }).update({ last_error: null, updated_at: new Date() });
+  await db('content_email_approvals').where({ id: row.id }).update({ email_sent_at: new Date(), last_error: null, updated_at: new Date() });
   logger.info(`[email-approvals] sent ${row.token} (${row.kind}) for run ${run.id}`);
   return { row, sent: true };
 }
@@ -343,6 +389,25 @@ async function finishExecution(row, decision, sender, { recovery = false } = {})
     // left pending_review. Reconcile from the opportunity's terminal state
     // instead of reporting a false failure to the owner.
     if (recovery && row.opportunity_id) {
+      // A named-competitor approval that opened an Astro PR deliberately
+      // leaves the OPPORTUNITY pending_review while the RUN records the
+      // terminal outcome (astro_pr_pending_merge, poller-reconciled) — so
+      // check the run first.
+      const run = row.run_id ? await db('autonomous_runs').where({ id: row.run_id }).first() : null;
+      // An opened Astro PR persists as outcome=completed_pending_review +
+      // skip_reason=astro_pr_pending_merge (the opportunity intentionally
+      // stays pending_review for the poller); a live publish lands a
+      // terminal outcome.
+      const prOpened = run?.skip_reason === 'astro_pr_pending_merge';
+      const publishedLive = /^(completed_published|done)$/.test(String(run?.outcome || ''));
+      if (decision === 'approved' && (prOpened || publishedLive)) {
+        await db('content_email_approvals').where({ id: row.id }).update({
+          status: 'approved',
+          last_error: `reconciled after crash: run ${prOpened ? 'astro_pr_pending_merge' : run.outcome}`,
+          updated_at: new Date(),
+        });
+        return { executed: 'reconciled' };
+      }
       const opp = await db('opportunity_queue').where({ id: row.opportunity_id }).first();
       const st = opp?.status;
       if (st === 'claimed' && decision === 'approved') {
@@ -424,16 +489,28 @@ async function notifyAdmin(title, body) {
   }
 }
 
-async function getCursor() {
+/**
+ * IMAP UIDs are only meaningful within one (mailbox user, UIDVALIDITY)
+ * scope. A cursor recorded against a different mailbox or a regenerated
+ * INBOX is discarded (returns null → date-based reseed) rather than
+ * silently skipping every new reply.
+ */
+async function getCursor({ uidValidity, mailboxUser }) {
   const row = await db('content_email_approval_state').where({ id: 1 }).first();
-  return row ? Number(row.last_uid) : null;
+  if (!row) return null;
+  if (String(row.mailbox_user || '') !== String(mailboxUser)
+    || String(row.uid_validity || '') !== String(uidValidity)) {
+    logger.info('[email-approvals] IMAP cursor scope changed (mailbox/UIDVALIDITY) — resetting cursor');
+    return null;
+  }
+  return Number(row.last_uid);
 }
 
-async function setCursor(uid) {
+async function setCursor(uid, { uidValidity, mailboxUser }) {
   await db('content_email_approval_state')
-    .insert({ id: 1, last_uid: uid, updated_at: new Date() })
+    .insert({ id: 1, last_uid: uid, uid_validity: String(uidValidity), mailbox_user: mailboxUser, updated_at: new Date() })
     .onConflict('id')
-    .merge({ last_uid: uid, updated_at: new Date() });
+    .merge({ last_uid: uid, uid_validity: String(uidValidity), mailbox_user: mailboxUser, updated_at: new Date() });
 }
 
 /**
@@ -483,15 +560,23 @@ async function pollReplies() {
     await client.connect();
     const lock = await client.getMailboxLock('INBOX', { readOnly: true });
     try {
-      const cursor = await getCursor();
+      const scope = { uidValidity: client.mailbox?.uidValidity, mailboxUser: mailbox.user };
+      const cursor = await getCursor(scope);
       let range;
       if (cursor === null) {
-        // First run: seed from the oldest outstanding email's send time.
+        // First run (or cursor scope reset): seed from the oldest
+        // outstanding email's send time.
         const oldest = awaiting.reduce((min, r) => (r.email_sent_at && (!min || r.email_sent_at < min) ? r.email_sent_at : min), null);
         range = { since: new Date((oldest ? new Date(oldest).getTime() : Date.now()) - 3600_000) };
       } else {
         range = `${cursor + 1}:*`;
       }
+      // PHASE 1 — drain the fetch generator completely, collecting only
+      // envelope-level candidates. ImapFlow forbids issuing another IMAP
+      // command while the fetch generator is being consumed (the outer
+      // FETCH pauses under backpressure and the nested command deadlocks),
+      // so message sources are downloaded in phase 2, after this loop ends.
+      const candidates = [];
       let maxUid = cursor || 0;
       for await (const msg of client.fetch(range, { uid: true, envelope: true }, { uid: typeof range === 'string' })) {
         if (msg.uid <= maxUid && typeof range === 'string') continue; // `${n}:*` includes n when mailbox has nothing newer
@@ -501,16 +586,33 @@ async function pollReplies() {
         if (!tokenMatch) continue;
         const row = byToken.get(tokenMatch[0].toLowerCase());
         if (!row) continue;
-        const sender = String(msg.envelope?.from?.[0]?.address || '').toLowerCase();
         // Skip our own outbound approval email (no Re:, no In-Reply-To).
         if (!/^re:/i.test(subject) && !msg.envelope?.inReplyTo) continue;
+        candidates.push({
+          uid: msg.uid,
+          row,
+          sender: String(msg.envelope?.from?.[0]?.address || '').toLowerCase(),
+        });
+      }
+      // PHASE 2 — process candidates in mailbox order, fetching each source
+      // individually now that the generator is fully drained.
+      candidates.sort((a, b) => a.uid - b.uid);
+      for (const cand of candidates) {
+        const { row, sender } = cand;
         checked++;
         if (!senders.includes(sender)) {
           logger.warn(`[email-approvals] reply for ${row.token} from unauthorized sender ${maskEmail(sender)} — ignored`);
           await notifyAdmin('Approval reply from unauthorized sender ignored', `${row.token}: a reply from ${maskEmail(sender)} was ignored. Only the configured approver address(es) may decide.`);
           continue;
         }
-        const full = await client.fetchOne(msg.uid, { source: true }, { uid: true });
+        const full = await client.fetchOne(cand.uid, { source: true }, { uid: true });
+        // Allowlist alone is spoofable (From is sender-asserted): the
+        // receiving server's DMARC/DKIM verdict must vouch for the domain.
+        if (!verifySenderAuthentication(full?.source, sender)) {
+          logger.warn(`[email-approvals] reply for ${row.token} from ${maskEmail(sender)} FAILED sender authentication (DMARC/DKIM) — ignored`);
+          await notifyAdmin('Approval reply failed authentication', `${row.token}: a reply claiming to be from ${maskEmail(sender)} did not pass DMARC/DKIM at the mail server and was ignored. If this was really you, reply again from your normal mail app (not a relay that breaks DKIM).`);
+          continue;
+        }
         const decision = parseDecision(extractReplyText(full?.source));
         if (!decision) {
           logger.info(`[email-approvals] ambiguous reply for ${row.token} from ${maskEmail(sender)} — ignored`);
@@ -529,14 +631,14 @@ async function pollReplies() {
           if (err.transient) {
             // Do NOT advance the cursor past this reply — rewind so the
             // retry re-reads it next poll.
-            maxUid = Math.min(maxUid, msg.uid - 1);
+            maxUid = Math.min(maxUid, cand.uid - 1);
             logger.warn(`[email-approvals] ${row.token}: ${err.message}`);
             break; // stop processing; cursor stays before this message
           }
           throw err;
         }
       }
-      if (maxUid > (cursor || 0)) await setCursor(maxUid);
+      if (maxUid > (cursor || 0)) await setCursor(maxUid, scope);
     } finally {
       lock.release();
     }
@@ -562,6 +664,7 @@ module.exports = {
     finishExecution,
     recoverExecutingRows,
     sweepUnnotifiedRuns,
+    verifySenderAuthentication,
     draftPreview,
     TOKEN_RE,
     TRANSIENT_ERROR_RE,
