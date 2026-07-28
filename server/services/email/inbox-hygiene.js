@@ -181,8 +181,19 @@ async function sweepQuarantine(now = new Date()) {
     const staleReclass = await db('emails')
       .where('auto_action', 'spam_reclassifying')
       .where('updated_at', '<', claimGraceCutoff)
-      .select('id', 'quarantined_at');
+      .select('id', 'gmail_id', 'quarantined_at', 'classification');
     for (const row of staleReclass) {
+      // A persisted NON-spam verdict means the reclassification committed
+      // its decision and died before cancellation — complete the cancel
+      // instead of re-quarantining a message the operator already cleared.
+      if (row.classification && row.classification !== 'spam') {
+        try {
+          await cancelQuarantine(row, { restoreInbox: row.classification !== 'marketing_newsletter' });
+        } catch (e) {
+          logger.warn(`[inbox-hygiene] stale-reclass cancel completion failed (email ${row.id}): ${e.message}`);
+        }
+        continue;
+      }
       // quarantined_at distinguishes the origin state: ambiguous rows never
       // carried the stamp, and reverting one to plain 'spam_quarantined'
       // (null stamp) would make it invisible to every recovery pass.

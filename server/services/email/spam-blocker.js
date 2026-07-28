@@ -245,6 +245,27 @@ async function unblockSender(id) {
   return { success: true, unblocked: blocked.domain || blocked.email_address };
 }
 
+/**
+ * Remove a stale spam_auto block (row + Gmail filter) for a sender who has
+ * since become an identity we protect. Best-effort: unblockSender keeps the
+ * row when the Gmail filter can't be deleted, so the next message retries.
+ */
+async function removeStaleAutoBlock(normalizedAddress) {
+  try {
+    const row = await db('blocked_email_senders')
+      .whereRaw('LOWER(email_address) = ?', [normalizedAddress])
+      .where({ reason: 'spam_auto' })
+      .first();
+    if (!row) return;
+    const result = await unblockSender(row.id);
+    if (result?.success) {
+      logger.info(`[spam-blocker] removed stale auto-block for now-protected sender ${redactEmail(normalizedAddress)}`);
+    }
+  } catch (e) {
+    logger.warn(`[spam-blocker] stale auto-block removal failed for ${redactEmail(normalizedAddress)}: ${e.message}`);
+  }
+}
+
 async function isBlocked(fromAddress) {
   if (!fromAddress) return false;
   const normalized = normalizeAddress(fromAddress);
@@ -255,16 +276,28 @@ async function isBlocked(fromAddress) {
   // sender became a customer/open lead, or before their domain joined the
   // operational set, must not keep auto-trashing their mail. (Shared
   // mailbox providers like gmail.com are NOT identity — exact blocks on
-  // those still apply below.)
-  if (isOperationalDomain(domain)) return false;
+  // those still apply below.) The DB fail-open alone is not enough: a
+  // stored gmail_filter_id keeps trash-routing at GMAIL level, so the stale
+  // auto-block (row + filter) is actively removed; a failed removal keeps
+  // the row for the next message's retry.
+  if (isOperationalDomain(domain)) {
+    await removeStaleAutoBlock(normalized);
+    return false;
+  }
   const isCustomer = await db('customers').whereRaw('LOWER(email) = ?', [normalized]).first();
-  if (isCustomer) return false;
+  if (isCustomer) {
+    await removeStaleAutoBlock(normalized);
+    return false;
+  }
   const isOpenLead = await db('leads')
     .whereRaw('LOWER(email) = ?', [normalized])
     .whereNull('deleted_at')
     .where((q) => q.whereNull('status').orWhereNotIn('status', TERMINAL_LEAD_STATUSES))
     .first();
-  if (isOpenLead) return false;
+  if (isOpenLead) {
+    await removeStaleAutoBlock(normalized);
+    return false;
+  }
 
   // Exact sender blocks still outrank the vendor-DOMAIN fail-open (a domain
   // is not an identity — one bad sender at a vendor domain stays blocked).

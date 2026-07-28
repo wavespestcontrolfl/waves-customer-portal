@@ -469,11 +469,23 @@ router.post('/message/:id/reclassify', async (req, res) => {
       if (labels.includes('TRASH')) {
         return res.status(409).json({ error: 'Message is in Gmail Trash — restore it there first, then reclassify' });
       }
+      // CAS the trashed state into the reclassification claim so the daily
+      // sweep's block-pending retry can't act on this row concurrently.
+      const trashedState = email.auto_action;
+      const claimedTrashed = await db('emails')
+        .where({ id: email.id, auto_action: trashedState })
+        .update({ auto_action: 'spam_reclassifying', updated_at: new Date() });
+      if (!claimedTrashed) {
+        return res.status(409).json({ error: 'Another process is acting on this message — retry in a moment' });
+      }
+      email.auto_action = 'spam_reclassifying';
       restoredFromTrash = true;
+      // (Revert restores the original trashed state on failure paths.)
       // The sweep's deferred sender block already fired for this row — the
       // operator's restore+reclassify vetoes it too, but the unblock only
       // COMMITS after a valid non-spam verdict (below); a failed
       // classification must leave the sender block untouched.
+      var restoredClaimOrigin = trashedState;
     }
     // quarantined_at survives a handler overwriting auto_action (it only
     // clears on a SUCCESSFUL cancel), so a failed Gmail restore stays
@@ -487,8 +499,12 @@ router.post('/message/:id/reclassify', async (req, res) => {
     // while the classifier runs. Losing the claim race → retry-soon 409.
     let claimedForReclass = false;
     let claimedFromState = null;
+    if (restoredFromTrash) {
+      claimedForReclass = true;
+      claimedFromState = typeof restoredClaimOrigin !== 'undefined' ? restoredClaimOrigin : 'spam_trashed_after_quarantine';
+    }
     const CLAIMABLE_STATES = ['spam_quarantined', 'spam_quarantine_ambiguous'];
-    if (CLAIMABLE_STATES.includes(email.auto_action || '')) {
+    if (!claimedForReclass && CLAIMABLE_STATES.includes(email.auto_action || '')) {
       claimedFromState = email.auto_action;
       const claimed = await db('emails')
         .where({ id: email.id, auto_action: claimedFromState })
@@ -498,7 +514,7 @@ router.post('/message/:id/reclassify', async (req, res) => {
       }
       claimedForReclass = true;
       email.auto_action = 'spam_reclassifying';
-    } else if ((email.auto_action || '') === 'spam_reclassifying') {
+    } else if (!claimedForReclass && (email.auto_action || '') === 'spam_reclassifying') {
       // Active claim from another request — only a STALE one (crashed call)
       // may be taken over; a live one gets a retry-soon 409 so two verdicts
       // can never race the same cancellation.
