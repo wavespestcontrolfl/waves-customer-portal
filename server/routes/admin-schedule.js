@@ -7643,13 +7643,24 @@ router.post('/generate-report', async (req, res) => {
     const ratingNum = Number.isInteger(pestActivityRating) ? pestActivityRating : null;
     // Same "is there enough to generate?" rule as the client (buildAiReportPayload).
     // photoCount is intentionally NOT sufficient on its own — the model can't see photos.
+    // A confirmed photo-scored lawn assessment is substantive input on its
+    // own — but only a VALIDATED one (exists, tech-confirmed, linked to the
+    // authorized visit). A stale/crafted id must not open the gate for an
+    // otherwise-empty request the grounding would later reject fail-soft.
+    let hasValidLawnAssessment = false;
+    if (lawnAssessmentId && scheduledServiceId) {
+      try {
+        hasValidLawnAssessment = !!(await db('lawn_assessments')
+          .where({ id: lawnAssessmentId, service_id: scheduledServiceId, confirmed_by_tech: true })
+          .first('id'));
+      } catch { /* fail toward not-substantive */ }
+    }
     const hasReportInput = Boolean((serviceNotes || '').trim())
       || productsText.length > 0
       || areas.length > 0 || actions.length > 0 || obs.length > 0 || recs.length > 0
       || concernText.length > 0
       || ratingNum !== null
-      // A confirmed photo-scored lawn assessment is substantive on its own.
-      || Boolean(lawnAssessmentId);
+      || hasValidLawnAssessment;
     if (!hasReportInput) return res.status(400).json({ error: 'Not enough visit detail to generate a report' });
 
     const PEST_ACTIVITY_LABELS = { 0: 'none', 1: 'very low', 2: 'low', 3: 'moderate', 4: 'high', 5: 'severe' };

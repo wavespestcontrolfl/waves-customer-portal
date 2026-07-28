@@ -6038,12 +6038,17 @@ function LawnAssessmentCompletionBlock({
           onConfirmed?.(assessment.id);
         }
       })
-      .catch(() => {})
+      .then(() => {
+        if (!cancelled) onReady?.(true);
+      })
+      .catch(() => {
+        // The lookup learned NOTHING — report failed, never ready: the parent
+        // omits lawnAssessmentId so the server's visit-linked fallback (DB
+        // truth) still grounds any existing confirmed scores.
+        if (!cancelled) onReady?.("failed");
+      })
       .finally(() => {
-        if (!cancelled) {
-          setLoading(false);
-          onReady?.(true);
-        }
+        if (!cancelled) setLoading(false);
       });
 
     return () => {
@@ -6118,6 +6123,10 @@ function LawnAssessmentCompletionBlock({
   async function confirm() {
     if (!result?.assessment?.id) return;
     setConfirming(true);
+    // Readiness is suspended while the confirmation POST is in flight — the
+    // parent's id is stale until it lands, and generating meanwhile would
+    // send an explicit null that suppresses the assessment being confirmed.
+    onReady?.(false);
     setError("");
     try {
       const response = await adminFetch("/admin/lawn-assessment/confirm", {
@@ -6145,6 +6154,9 @@ function LawnAssessmentCompletionBlock({
       setError(err.message || "Confirm failed");
     } finally {
       setConfirming(false);
+      // Settled either way: on failure the row is still unconfirmed, so the
+      // parent's null id is the true state.
+      onReady?.(true);
     }
   }
 
@@ -10083,7 +10095,10 @@ export function CompletionPanel({
       // null means a retake is pending, and the field is OMITTED while the
       // block's existing-assessment lookup is still in flight (the server
       // then falls back to the visit-linked row) or for non-lawn visits.
-      ...(isLawn && lawnAssessmentReady
+      // Tri-state: true = lookup succeeded (send id or explicit null);
+      // "failed"/false = omit the field so the server grounds from its own
+      // visit-linked lookup (DB truth) instead of trusting a blind client.
+      ...(isLawn && lawnAssessmentReady === true
         ? { lawnAssessmentId: lawnAssessmentId || null }
         : {}),
       customerName: service.customerName,
@@ -12476,7 +12491,7 @@ export function CompletionPanel({
                   }
                   setGenerating(false);
                 }}
-                disabled={generating || (isLawn && !lawnAssessmentReady)}
+                disabled={generating || (isLawn && lawnAssessmentReady === false)}
                 style={{
                   ...secondaryPill,
                   marginTop: 4,
@@ -14620,7 +14635,7 @@ export function CompletionPanel({
                 }
                 setGenerating(false);
               }}
-              disabled={generating || (isLawn && !lawnAssessmentReady)}
+              disabled={generating || (isLawn && lawnAssessmentReady === false)}
               style={{
                 width: "100%",
                 padding: "10px 16px",
