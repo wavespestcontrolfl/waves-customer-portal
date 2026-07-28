@@ -38,7 +38,11 @@ function makeConn(cfg = {}) {
       whereNotIn: (col, vals) => { calls.push({ table, op: 'whereNotIn', arg: { col, vals } }); return qb; },
       select: () => qb,
       first: () => Promise.resolve((t.firstQueue || []).shift() ?? null),
-      update: (patch) => { calls.push({ table, op: 'update', arg: patch }); return Promise.resolve(t.updateCount ?? 1); },
+      update: (patch) => {
+        calls.push({ table, op: 'update', arg: patch });
+        if (t.updateRejectQueue && t.updateRejectQueue.length) return Promise.reject(t.updateRejectQueue.shift());
+        return Promise.resolve(t.updateCount ?? 1);
+      },
       then: (resolve, reject) => Promise.resolve(
         t.rowsQueue ? ((t.rowsQueue.shift()) ?? []) : (t.rows || [])
       ).then(resolve, reject),
@@ -46,6 +50,9 @@ function makeConn(cfg = {}) {
     return qb;
   };
   conn.raw = (sql, bindings) => ({ __raw: sql, __bindings: bindings });
+  // Savepoint stand-in: the promoter sync wraps its guarded update in a
+  // nested transaction so a raced 23505 can't poison the caller's trx.
+  conn.transaction = (cb) => Promise.resolve(cb(conn));
   conn.__calls = calls;
   conn.__updates = (table) => calls.filter((c) => c.table === table && c.op === 'update');
   return conn;
@@ -241,7 +248,7 @@ describe('propagateCustomerNameChange', () => {
 
 const PHONE_BEFORE = { id: 'cust-1', phone: '(941) 555-1234' };
 const PHONE_AFTER = { id: 'cust-1', phone: '+19415556789' };
-const ZERO_PHONE_COUNTS = { leads: 0, estimates: 0, contracts: 0, promoters: 0, promoterSkipped: 0, bookingIntents: 0 };
+const ZERO_PHONE_COUNTS = { leads: 0, estimates: 0, contracts: 0, promoters: 0, promoterSkipped: 0, bookingIntents: 0, scheduledSms: 0 };
 
 describe('propagateCustomerPhoneChange', () => {
   test('syncs lead, estimate, contract, promoter, and booking-intent copies', async () => {
@@ -249,13 +256,16 @@ describe('propagateCustomerPhoneChange', () => {
       referral_promoters: { firstQueue: [{ id: 7, customer_phone: '9415551234' }] },
     });
     const counts = await propagateCustomerPhoneChange({ before: PHONE_BEFORE, after: PHONE_AFTER }, conn);
-    expect(counts).toEqual({ leads: 1, estimates: 1, contracts: 1, promoters: 1, promoterSkipped: 0, bookingIntents: 1 });
+    expect(counts).toEqual({ leads: 1, estimates: 1, contracts: 1, promoters: 1, promoterSkipped: 0, bookingIntents: 1, scheduledSms: 1 });
 
     expect(conn.__updates('leads')[0].arg.phone).toBe('+19415556789');
     expect(conn.__updates('estimates')[0].arg.customer_phone).toBe('+19415556789');
     expect(conn.__updates('customer_contracts')[0].arg.recipient_phone).toBe('+19415556789');
     expect(conn.__updates('referral_promoters')[0].arg.customer_phone).toBe('+19415556789');
     expect(conn.__updates('booking_intents')[0].arg.phone).toBe('+19415556789');
+    // Queued admin SMS still awaiting their cron claim retarget too — the
+    // scheduler sends to the frozen to_phone snapshot.
+    expect(conn.__updates('sms_log')[0].arg.to_phone).toBe('+19415556789');
   });
 
   test('matches copies by NANP digits, both stored spellings', async () => {
@@ -281,6 +291,24 @@ describe('propagateCustomerPhoneChange', () => {
     expect(counts.promoterSkipped).toBe(1);
     // The conflict check is INSIDE the update statement, not a separate read.
     expect(conn.__calls.some((c) => c.table === 'referral_promoters' && c.op === 'whereNotExists')).toBe(true);
+  });
+
+  test('a raced promoter unique violation is absorbed by the savepoint, not thrown at the caller', async () => {
+    // A conflict row can commit mid-statement past the NOT EXISTS guard; the
+    // 23505 must resolve to the designed skip instead of poisoning the
+    // caller's transaction (whose generic handler would misreport a
+    // phone-only edit as an address collision).
+    const conn = makeConn({
+      referral_promoters: {
+        firstQueue: [{ id: 7, customer_phone: '9415551234' }],
+        updateRejectQueue: [Object.assign(new Error('duplicate key'), { code: '23505' })],
+      },
+    });
+    const counts = await propagateCustomerPhoneChange({ before: PHONE_BEFORE, after: PHONE_AFTER }, conn);
+    expect(counts.promoters).toBe(0);
+    expect(counts.promoterSkipped).toBe(1);
+    // Everything else still synced — the edit survives.
+    expect(counts.leads).toBe(1);
   });
 
   test('no-ops on a formatting-only change (same digits)', async () => {

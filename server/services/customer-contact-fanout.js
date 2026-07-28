@@ -38,6 +38,9 @@
  *     a fan-out's call.
  *   - booking_intents.phone — the recovery SMS targets it; only rows still
  *     awaiting that touch are rewritten.
+ *   - sms_log.to_phone — admin/inbox-scheduled SMS freeze the recipient at
+ *     schedule time and the cron sends to the snapshot; not-yet-claimed
+ *     ('scheduled') rows retarget, claimed/sent rows are history.
  *
  * A snapshot is only rewritten when it still matches the customer's OLD
  * value (names compare case-insensitively with whitespace collapsed; phones
@@ -364,11 +367,11 @@ async function propagateCustomerNameChange({ before, after }, conn = db) {
  *   after  — customer row after the edit (id, phone)
  * @param {object} conn — knex connection or transaction
  * @returns counts { leads, estimates, contracts, promoters, promoterSkipped,
- *   bookingIntents } — all zero when the phone did not actually change (by
- *   NANP digit key) or the new phone does not key to 10 digits.
+ *   bookingIntents, scheduledSms } — all zero when the phone did not actually
+ *   change (by digit key) or the new phone is not a full 10-15 digit number.
  */
 async function propagateCustomerPhoneChange({ before, after }, conn = db) {
-  const counts = { leads: 0, estimates: 0, contracts: 0, promoters: 0, promoterSkipped: 0, bookingIntents: 0 };
+  const counts = { leads: 0, estimates: 0, contracts: 0, promoters: 0, promoterSkipped: 0, bookingIntents: 0, scheduledSms: 0 };
   const customerId = (after && after.id) || (before && before.id);
   const oldVariants = phoneDigitVariants(before && before.phone);
   const newPhone = cleanText(after && after.phone) || '';
@@ -421,19 +424,26 @@ async function propagateCustomerPhoneChange({ before, after }, conn = db) {
     // promoter row claiming the new number between a separate select and this
     // update can no longer force a 23505 that aborts the caller's whole edit.
     // n=0 means either a conflict or a concurrently moved own-row — both are
-    // "leave it alone". Residual: a conflict row committing mid-statement can
-    // still surface the unique violation and roll the edit back whole — same
-    // accepted rarity as the email fan-out's newsletter move (half-synced is
-    // worse).
-    const n = await conn('referral_promoters')
-      .where({ id: ownPromoter.id, customer_phone: ownPromoter.customer_phone })
-      .whereNotExists(
-        conn('referral_promoters')
-          .select(conn.raw('1'))
-          .whereRaw(`${PHONE_DIGITS_SQL('customer_phone')} IN (${newVariants.map(() => '?').join(', ')})`, newVariants)
-          .whereNot({ id: ownPromoter.id })
-      )
-      .update({ customer_phone: newPhone.slice(0, 20), updated_at: now });
+    // "leave it alone". The statement runs inside a SAVEPOINT (knex nested
+    // transaction) because a conflict row can still commit mid-statement and
+    // raise the unique violation past the guard — without the savepoint that
+    // poisons the caller's transaction, and the callers' generic 23505
+    // handlers would report a phone-only edit as an ADDRESS collision. The
+    // race resolves to the same designed outcome as the guard: skip and log.
+    let n = 0;
+    try {
+      n = await conn.transaction((sp) => sp('referral_promoters')
+        .where({ id: ownPromoter.id, customer_phone: ownPromoter.customer_phone })
+        .whereNotExists(
+          sp('referral_promoters')
+            .select(sp.raw('1'))
+            .whereRaw(`${PHONE_DIGITS_SQL('customer_phone')} IN (${newVariants.map(() => '?').join(', ')})`, newVariants)
+            .whereNot({ id: ownPromoter.id })
+        )
+        .update({ customer_phone: newPhone.slice(0, 20), updated_at: now }));
+    } catch (e) {
+      if (!e || e.code !== '23505') throw e;
+    }
     counts.promoters += n;
     if (!n) {
       // Promoter rows carry reward balances — a collision is never merged by
@@ -453,9 +463,21 @@ async function propagateCustomerPhoneChange({ before, after }, conn = db) {
       .whereNull('converted_at')
   ).update({ phone: newPhone, updated_at: now });
 
+  // Queued admin/inbox SMS freeze to_phone at schedule time and the cron
+  // sends to that snapshot (resolveScheduledRecipient re-reads the customer
+  // row ONLY for the deposit refresh_customer_phone flag) — retarget
+  // customer-linked rows still awaiting their claim. The status predicate
+  // re-asserts 'scheduled' at update time, so a concurrent cron claim
+  // ('sending', recipient already read into memory) wins; sent/failed rows
+  // are message history and stay frozen.
+  counts.scheduledSms += await matchOld('to_phone')(
+    conn('sms_log')
+      .where({ customer_id: customerId, direction: 'outbound', status: 'scheduled' })
+  ).update({ to_phone: newPhone.slice(0, 20), updated_at: now });
+
   if (Object.values(counts).some(Boolean)) {
     // Counts only — never the phone values (PII stays out of logs).
-    logger.info(`[contact-fanout] customer ${customerId} phone: synced ${counts.leads} lead(s), ${counts.estimates} estimate(s), ${counts.contracts} contract(s), ${counts.promoters} promoter(s) (${counts.promoterSkipped} skipped), ${counts.bookingIntents} booking intent(s)`);
+    logger.info(`[contact-fanout] customer ${customerId} phone: synced ${counts.leads} lead(s), ${counts.estimates} estimate(s), ${counts.contracts} contract(s), ${counts.promoters} promoter(s) (${counts.promoterSkipped} skipped), ${counts.bookingIntents} booking intent(s), ${counts.scheduledSms} scheduled SMS`);
   }
   return counts;
 }
@@ -465,7 +487,7 @@ async function propagateCustomerPhoneChange({ before, after }, conn = db) {
 // render THIS string, so the disclosure can never silently drift from the
 // service's actual side effects — extend it in the same commit that adds a
 // new synced surface.
-const CONTACT_FANOUT_DISCLOSURE = 'a name or phone change also updates every open copy still carrying the old value (leads, estimates, contracts, referral promoter, booking recovery, active automations, newsletter greeting, queued template sends)';
+const CONTACT_FANOUT_DISCLOSURE = 'a name or phone change also updates every open copy still carrying the old value (leads, estimates, contracts, referral promoter, booking recovery, active automations, newsletter greeting, queued template sends, scheduled SMS)';
 
 module.exports = {
   propagateCustomerNameChange,
