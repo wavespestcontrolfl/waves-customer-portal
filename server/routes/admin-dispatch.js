@@ -1814,11 +1814,15 @@ router.get('/:date?', async (req, res, next) => {
       const prefs = await db('property_preferences').where({ customer_id: s.customer_id }).first();
       const recentCompleted = await db('service_records')
         .where({ customer_id: s.customer_id, status: 'completed' })
-        .orderBy('service_date', 'desc').limit(12);
+        .orderBy('service_date', 'desc')
+        .limit(60)
+        .select('service_type', 'service_date', 'technician_notes');
       // Any-line latest keeps the "Last:" card + new-customer detection
       // semantics; the line-scoped record feeds the service dashboard so a
       // pest visit never shows the customer's lawn notes (multi-service
       // customers were leaking cross-line notes into the Protocol panel).
+      // 60-row window: an annual line on a customer with two monthly lines
+      // accrues ~26 other visits between same-line visits — 12 was too few.
       const lastService = recentCompleted[0] || null;
       const visitLine = detectServiceLine(s.service_type);
       const lastLineService = recentCompleted.find((r) => detectServiceLine(r.service_type) === visitLine) || null;
@@ -1946,12 +1950,16 @@ router.get('/:date?', async (req, res, next) => {
         propertyAlerts: alerts,
         lastServiceDate: lastService?.service_date || null,
         lastServiceType: lastService?.service_type || null,
-        lastServiceNotes: previewText(stripSchedulerAuditText(lastService?.technician_notes)),
+        // Technician-authored notes get the word-boundary preview only — the
+        // scheduler-audit filter is for scheduled_services.notes (where ops
+        // sessions write audit trails), and would false-positive on genuine
+        // tech prose like "No SMS sent because the phone is disconnected".
+        lastServiceNotes: previewText(lastService?.technician_notes),
         // Line-scoped last visit for the service dashboards (Protocol panel):
         // null when the customer has no completed history on THIS line.
         lastLineServiceDate: lastLineService?.service_date || null,
         lastLineServiceType: lastLineService?.service_type || null,
-        lastLineServiceNotes: previewText(stripSchedulerAuditText(lastLineService?.technician_notes)),
+        lastLineServiceNotes: previewText(lastLineService?.technician_notes),
         actualStartTime: s.actual_start_time,
         actualEndTime: s.actual_end_time,
         serviceTimeMinutes: s.service_time_minutes,

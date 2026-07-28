@@ -54,6 +54,11 @@ describe('stripSchedulerAuditText', () => {
     expect(stripSchedulerAuditText(note)).toBe('Side gate sticks — lift while opening.');
   });
 
+  test('keeps the real prefix when an audit tag shares its segment', () => {
+    const note = 'Gate code 4412; recurring_align_2026_06: moved from 2026-09-02 to 2026-08-20. No SMS sent.';
+    expect(stripSchedulerAuditText(note)).toBe('Gate code 4412');
+  });
+
   test('does not false-positive on prose containing underscores or years', () => {
     const note = 'Customer prefers service_area notes in 2026 format. Treat lanai edges.';
     expect(stripSchedulerAuditText(note)).toBe(note);

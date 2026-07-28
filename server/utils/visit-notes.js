@@ -42,15 +42,32 @@ function stripSchedulerAuditText(text) {
   // Sentence-ish segments: split on newlines and on periods followed by
   // whitespace. Keeps decimals ("+13.45") and times inside one segment.
   const segments = value.split(/(?<=\.)\s+|\n+/).map((s) => s.trim()).filter(Boolean);
-  const dropped = segments.map((s) => AUDIT_TAG_RE.test(s) || NO_SMS_RE.test(s));
+  const kept = [];
   // An audit entry reads "<what moved / what changed>. No SMS sent." — the
-  // marker sentence retroactively marks its untagged predecessor as audit
-  // text too (tagged predecessors are already dropped on their own).
-  for (let i = 0; i < segments.length; i += 1) {
-    if (NO_SMS_RE.test(segments[i]) && i > 0 && !dropped[i - 1]) dropped[i - 1] = true;
+  // marker sentence retroactively consumes its untagged predecessor too
+  // (tagged predecessors were already handled on their own).
+  let prevWasAudit = false;
+  for (const segment of segments) {
+    if (NO_SMS_RE.test(segment)) {
+      if (!prevWasAudit && kept.length) kept.pop();
+      prevWasAudit = true;
+      continue;
+    }
+    const tag = segment.match(AUDIT_TAG_RE);
+    if (tag) {
+      // A real note can share the segment with an appended audit entry
+      // ("Gate code 4412; recurring_align_2026_06: moved …") — keep the
+      // text before the tag, drop the tag onward.
+      const prefix = segment.slice(0, tag.index).replace(/[\s;,:—-]+$/, '').trim();
+      if (prefix) kept.push(prefix);
+      prevWasAudit = true;
+      continue;
+    }
+    kept.push(segment);
+    prevWasAudit = false;
   }
-  const kept = segments.filter((_, i) => !dropped[i]).join(' ').trim();
-  return kept || null;
+  const out = kept.join(' ').trim();
+  return out || null;
 }
 
 module.exports = { previewText, stripSchedulerAuditText, PREVIEW_MAX };

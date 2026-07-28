@@ -27,7 +27,7 @@
  *   timer events also drive mileage. Confirm a stop here doesn't
  *   double-write the mileage record.
  */
-import { useEffect, useState, useRef, useCallback } from 'react';
+import { useEffect, useMemo, useState, useRef, useCallback } from 'react';
 import { getAdminAuthToken } from '../../lib/adminAuth';
 
 const API = import.meta.env.VITE_API_URL || '';
@@ -96,15 +96,42 @@ export default function GeofenceArrivalPrompt({ onStormReview }) {
     return () => clearInterval(id);
   }, [poll]);
 
-  // Auto-dismiss timers per card
+  // Storm cards are capped so a burst of alerts can never bury the home
+  // screen: one card per stop (newest wins when the sweep re-alerts), at
+  // most MAX_STORM_CARDS on screen, the rest summarized in one line.
+  const { cards, hiddenStormCount } = useMemo(() => {
+    const stormByJob = new Map();
+    const otherCards = [];
+    for (const n of active) {
+      if (n.type !== 'storm_watch_alert') { otherCards.push(n); continue; }
+      const jobKey = n.payload?.job_id || n.id;
+      const prev = stormByJob.get(jobKey);
+      if (!prev || new Date(n.created_at || 0) > new Date(prev.created_at || 0)) {
+        stormByJob.set(jobKey, n);
+      }
+    }
+    const stormAlerts = [...stormByJob.values()].sort(
+      (a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0),
+    );
+    const shownStorms = stormAlerts.slice(0, MAX_STORM_CARDS);
+    return {
+      cards: [...otherCards, ...shownStorms],
+      hiddenStormCount: stormAlerts.length - shownStorms.length,
+    };
+  }, [active]);
+
+  // Auto-dismiss timers — RENDERED cards only. Storm alerts held back by the
+  // cap (or superseded by a newer alert for the same stop) must stay unread
+  // so they actually surface later; marking them read here would hide them
+  // from every future unreadOnly poll without the tech ever seeing them.
   useEffect(() => {
-    const timers = active.map((n) => {
+    const timers = cards.map((n) => {
       const ms = n.type === 'geofence_timer_stopped' ? STOP_TOAST_MS : REMINDER_AUTODISMISS_MS;
       return setTimeout(() => removeCard(n.id, { silent: true }), ms);
     });
     return () => timers.forEach(clearTimeout);
-     
-  }, [active.length]);
+
+  }, [cards]);
 
   function removeCard(id, { silent } = {}) {
     setActive((prev) => prev.filter((n) => n.id !== id));
@@ -138,27 +165,6 @@ export default function GeofenceArrivalPrompt({ onStormReview }) {
   }
 
   if (active.length === 0) return null;
-
-  // Storm cards are capped so a burst of alerts can never bury the home
-  // screen: one card per stop (newest wins when the sweep re-alerts), at
-  // most MAX_STORM_CARDS on screen, the rest summarized in one line.
-  const stormAlerts = [];
-  const stormByJob = new Map();
-  const otherCards = [];
-  for (const n of active) {
-    if (n.type !== 'storm_watch_alert') { otherCards.push(n); continue; }
-    const jobKey = n.payload?.job_id || n.id;
-    const prev = stormByJob.get(jobKey);
-    if (!prev || new Date(n.created_at || 0) > new Date(prev.created_at || 0)) {
-      stormByJob.set(jobKey, n);
-    }
-  }
-  stormAlerts.push(...[...stormByJob.values()].sort(
-    (a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0),
-  ));
-  const shownStorms = stormAlerts.slice(0, MAX_STORM_CARDS);
-  const hiddenStormCount = stormAlerts.length - shownStorms.length;
-  const cards = [...otherCards, ...shownStorms];
 
   return (
     <div style={{
