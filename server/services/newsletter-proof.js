@@ -54,12 +54,13 @@ async function buildProofDiagnosticsHtml(send, lineupEvents, scheduledFor) {
     const issueTuesday = getActiveNewsletterTuesday(scheduledFor || new Date());
     const windowStart = parseETDateTime(`${issueTuesday}T00:00:00`);
     const windowEnd = parseETDateTime(`${etDateString(addETDays(windowStart, 6))}T23:59:59`);
-    const pool = await db('events_raw')
-      .whereIn('admin_status', ['approved', 'featured'])
-      .whereNull('merged_into')
-      .where('start_at', '>=', windowStart)
-      .where('start_at', '<=', windowEnd)
-      .select('id', 'editorial_score', 'admin_status');
+    // The REAL eligible pool — same pipeline the autopilot plans from
+    // (routine/repeated/featured-history/eligibility filters applied), so
+    // the approver never sees an inflated count of usable alternatives.
+    // Lazy require: autopilot requires this module lazily, so no cycle.
+    const { buildDigestPlan } = require('./newsletter-autopilot');
+    const plan = await buildDigestPlan({ reference: scheduledFor || new Date() });
+    const pool = plan.scored || [];
     const qualifiedPool = pool.filter((r) => effectiveScore(r) >= featureScoreFloor()).length;
 
     const rejected = await db('events_raw')
@@ -77,7 +78,11 @@ async function buildProofDiagnosticsHtml(send, lineupEvents, scheduledFor) {
       const altIds = parseLockedEventIds(send?.alternate_event_ids)
         .filter((id) => !ids.includes(String(id)));
       if (altIds.length) {
-        alternates = await db('events_raw').whereIn('id', altIds).select('title', 'editorial_score');
+        const altRows = await db('events_raw').whereIn('id', altIds).select('id', 'title', 'editorial_score');
+        // whereIn does not preserve input order — rebuild in the stored
+        // RANKED order (the panel presents these as ranked).
+        const altById = new Map(altRows.map((r) => [String(r.id), r]));
+        alternates = altIds.map((id) => altById.get(String(id))).filter(Boolean);
       }
     } catch { /* omit alternates */ }
 

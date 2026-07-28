@@ -1087,7 +1087,10 @@ async function assembleWavesNewsletter(draft) {
     if (ev.location) bits.push(`📍 ${escapeHtml(ev.location)}`);
     const labels = Array.isArray(ev.labels) ? ev.labels : [];
     if (labels.length) bits.push(`<strong>${labels.map(escapeHtml).join(' · ')}</strong>`);
-    return bits.join(' &nbsp;·&nbsp; ');
+    // Ordinary spaces around the separator — the derived plain-text body
+    // strips tags but does not decode &nbsp;, so nonbreaking entities
+    // would reach text-only clients literally.
+    return bits.join(' · ');
   };
 
   const detailsLink = (ev, text = 'Details') => {

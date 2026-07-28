@@ -105,23 +105,20 @@ async function applyListwiseRerank(scored) {
     .slice(0, LISTWISE_POOL);
   if (pool.length < 4) return scored;
   try {
-     
-    const Anthropic = require('@anthropic-ai/sdk');
-    if (!process.env.ANTHROPIC_API_KEY) return scored;
+    // Cross-provider per repo policy: generated structured output goes
+    // through a named TEXT_POLICIES entry + the shared dispatcher, so an
+    // Anthropic outage fails over to OpenAI instead of silently skipping
+    // the re-rank (and only then fails open).
     const MODELS = require('../config/models');
-    const { stripThinkingBlocks } = require('./llm/deep');
-    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    const { dispatchWithFallback } = require('./llm/call');
     const lines = pool.map((ev) => `- id: ${ev.id}\n  title: ${ev.title}\n  score: ${ev.editorial_score}\n  desc: ${(ev.description || '').replace(/\s+/g, ' ').slice(0, 180)}`);
-    const response = await anthropic.messages.create({
-      model: MODELS.WORKHORSE,
-      max_tokens: 1200,
+    const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.contentDraft, {
+      maxTokens: 1200,
+      jsonMode: true,
       system: 'You are a precise, demanding local-events editor. You output strict JSON and nothing else.',
-      messages: [{
-        role: 'user',
-        content: `Rank ALL of these candidate events from the one local readers would be MOST disappointed to learn about only after it happened, down to the least. Judge reader disappointment — rarity, draw, one-time-ness — not category variety. Return STRICT JSON only: {"ranking": ["<id>", ...]} using every id exactly once.\n\n${lines.join('\n')}`,
-      }],
+      text: `Rank ALL of these candidate events from the one local readers would be MOST disappointed to learn about only after it happened, down to the least. Judge reader disappointment — rarity, draw, one-time-ness — not category variety. Return STRICT JSON only: {"ranking": ["<id>", ...]} using every id exactly once.\n\n${lines.join('\n')}`,
     });
-    const text = stripThinkingBlocks(response).content?.[0]?.text || '';
+    const text = response?.json ? JSON.stringify(response.json) : (response?.text || '');
     const ranking = parseListwiseRanking(text, pool.map((ev) => ev.id));
     // A mostly-missing ranking is noise, not signal.
     if (ranking.length < Math.ceil(pool.length / 2)) return scored;
