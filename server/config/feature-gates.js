@@ -914,10 +914,11 @@ const gates = {
   // BOTH directions: a customer with upcoming recurring qualifying services
   // on the schedule is stamped a tier automatically (1 family = Bronze,
   // 2 = Silver, 3 = Gold, 4+ = Platinum) at series-seeding time and via a
-  // nightly reconcile — and a label-only tiered customer whose upcoming
-  // recurring coverage lapses is lowered / cleared back to No Plan by the
-  // same nightly job (paying members are never auto-demoted; the
-  // cancellation/offboarding flow owns their tier). An auto-WRITER on
+  // nightly reconcile — and a label-only tiered customer is realigned to
+  // their upcoming recurring coverage by the same nightly job: raised,
+  // lowered, or cleared back to No Plan when it lapses (paying members and
+  // paid billing lanes are never auto-realigned; the cancellation/
+  // offboarding flow owns their tier). An auto-WRITER on
   // customer records that also changes future membership pricing
   // eligibility, so opt-in in EVERY environment. It writes waveguard_tier
   // ONLY (never monthly_rate / member_since / billing fields) and sends no

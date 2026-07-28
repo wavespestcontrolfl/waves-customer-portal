@@ -6,8 +6,8 @@ const {
   TERMITE_BAIT_RECURRING_PLANS,
   TREE_SHRUB_RECURRING_PLANS,
   buildCustomerWaveGuardAlignmentUpdates,
+  buildLabelOnlyTierRealignmentUpdates,
   buildNoPlanTierEnrollmentUpdates,
-  buildTierDemotionUpdates,
   buildRecurringOccurrenceDates,
   detectWaveGuardPlanKeys,
   inferTierFromServiceCount,
@@ -314,45 +314,56 @@ describe('self-booking plan sync helpers', () => {
       .toEqual({});
   });
 
-  test('demotes a label-only customer when upcoming recurring coverage shrinks or lapses', () => {
+  test('realigns a label-only customer to exactly what upcoming coverage supports', () => {
     const customerColumns = { waveguard_tier: {}, monthly_rate: {} };
     const labelOnly = { monthly_rate: null, billing_mode: null };
 
     // Silver with only one remaining family -> Bronze.
-    expect(buildTierDemotionUpdates({ ...labelOnly, waveguard_tier: 'Silver' }, ['pest_control_quarterly'], customerColumns).updates)
+    expect(buildLabelOnlyTierRealignmentUpdates({ ...labelOnly, waveguard_tier: 'Silver' }, ['pest_control_quarterly'], customerColumns).updates)
       .toEqual({ waveguard_tier: 'Bronze' });
     // Platinum down to two families -> Silver.
-    expect(buildTierDemotionUpdates({ ...labelOnly, waveguard_tier: 'Platinum' }, ['pest_control_quarterly', 'lawn_care_monthly'], customerColumns).updates)
+    expect(buildLabelOnlyTierRealignmentUpdates({ ...labelOnly, waveguard_tier: 'Platinum' }, ['pest_control_quarterly', 'lawn_care_monthly'], customerColumns).updates)
       .toEqual({ waveguard_tier: 'Silver' });
     // No upcoming recurring coverage at all -> tier cleared to No Plan.
-    expect(buildTierDemotionUpdates({ ...labelOnly, waveguard_tier: 'Bronze' }, [], customerColumns).updates)
+    expect(buildLabelOnlyTierRealignmentUpdates({ ...labelOnly, waveguard_tier: 'Bronze' }, [], customerColumns).updates)
       .toEqual({ waveguard_tier: null });
 
-    // Coverage equal to (or above) the current tier -> untouched; demotion
-    // never raises a tier.
-    expect(buildTierDemotionUpdates({ ...labelOnly, waveguard_tier: 'Bronze' }, ['pest_control_quarterly'], customerColumns).updates)
-      .toEqual({});
-    expect(buildTierDemotionUpdates({ ...labelOnly, waveguard_tier: 'Bronze' }, ['pest_control_quarterly', 'lawn_care_monthly'], customerColumns).updates)
+    // Coverage ABOVE the current label is raised too (a second family added
+    // by import/direct edit outside the booking-time hook) — Codex #3011 P2.
+    expect(buildLabelOnlyTierRealignmentUpdates({ ...labelOnly, waveguard_tier: 'Bronze' }, ['pest_control_quarterly', 'lawn_care_monthly'], customerColumns).updates)
+      .toEqual({ waveguard_tier: 'Silver' });
+    // Coverage equal to the current tier -> untouched.
+    expect(buildLabelOnlyTierRealignmentUpdates({ ...labelOnly, waveguard_tier: 'Bronze' }, ['pest_control_quarterly'], customerColumns).updates)
       .toEqual({});
   });
 
-  test('never auto-demotes paying members or unrecognized tiers', () => {
+  test('never auto-realigns paying members, paid lanes, or unrecognized tiers', () => {
     const customerColumns = { waveguard_tier: {}, monthly_rate: {} };
 
     // Positive monthly_rate = paying member — the cancellation/offboarding
     // flow owns their tier, a schedule gap must not strip it.
-    expect(buildTierDemotionUpdates({ waveguard_tier: 'Silver', monthly_rate: 129 }, [], customerColumns).updates)
+    expect(buildLabelOnlyTierRealignmentUpdates({ waveguard_tier: 'Silver', monthly_rate: 129 }, [], customerColumns).updates)
       .toEqual({});
-    // Explicit monthly_membership lane is preserved even at rate 0.
-    expect(buildTierDemotionUpdates({ waveguard_tier: 'Bronze', monthly_rate: 0, billing_mode: 'monthly_membership' }, [], customerColumns).updates)
+    // Explicit paying lanes are preserved even at rate 0 — allowlist, so
+    // monthly_membership, annual_prepay (prepaid-term lifecycle owns that
+    // state — Codex #3011 P1), per_application, and unknown future lanes all
+    // stay untouched.
+    for (const lane of ['monthly_membership', 'annual_prepay', 'per_application', 'some_future_lane']) {
+      expect(buildLabelOnlyTierRealignmentUpdates({ waveguard_tier: 'Bronze', monthly_rate: 0, billing_mode: lane }, [], customerColumns).updates)
+        .toEqual({});
+    }
+    // The label-only lanes remain realignable.
+    for (const lane of ['per_visit', 'one_time']) {
+      expect(buildLabelOnlyTierRealignmentUpdates({ waveguard_tier: 'Bronze', monthly_rate: 0, billing_mode: lane }, [], customerColumns).updates)
+        .toEqual({ waveguard_tier: null });
+    }
+    // No recognized tier (No Plan / sentinels) -> nothing to realign.
+    expect(buildLabelOnlyTierRealignmentUpdates({ waveguard_tier: null, monthly_rate: null }, [], customerColumns).updates)
       .toEqual({});
-    // No recognized tier (No Plan / sentinels) -> nothing to demote.
-    expect(buildTierDemotionUpdates({ waveguard_tier: null, monthly_rate: null }, [], customerColumns).updates)
-      .toEqual({});
-    expect(buildTierDemotionUpdates({ waveguard_tier: 'none', monthly_rate: null }, [], customerColumns).updates)
+    expect(buildLabelOnlyTierRealignmentUpdates({ waveguard_tier: 'none', monthly_rate: null }, [], customerColumns).updates)
       .toEqual({});
     // Missing waveguard_tier column (older environment) -> no mutation.
-    expect(buildTierDemotionUpdates({ waveguard_tier: 'Silver', monthly_rate: 0 }, [], { monthly_rate: {} }).updates)
+    expect(buildLabelOnlyTierRealignmentUpdates({ waveguard_tier: 'Silver', monthly_rate: 0 }, [], { monthly_rate: {} }).updates)
       .toEqual({});
   });
 

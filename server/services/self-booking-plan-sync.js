@@ -622,29 +622,41 @@ function buildNoPlanTierEnrollmentUpdates(customer, detectedPlanKeys, customerCo
   return { updates, detectedFamilyKeys, inferredTier };
 }
 
-// Downward tier alignment for LABEL-ONLY customers (owner follow-up
-// 2026-07-28: falling out of recurring coverage means falling out of the
-// tier, symmetric with enrollment). Applies ONLY to customers whose tier is
-// derived state — no positive monthly_rate and no explicit monthly_membership
-// billing lane. A PAYING member's tier is billing state owned by the
-// cancellation/offboarding flow (customer-offboarding.js already clears
-// waveguard_tier + monthly_rate on cancel); a transient schedule gap must
-// never silently strip a paying member's membership. Lowers the tier to what
-// the upcoming families still support, or clears it to NULL (No Plan) when
-// none remain. Never raises — upgrades belong to the alignment/enrollment
-// paths.
-function buildTierDemotionUpdates(customer, detectedPlanKeys, customerColumns = {}) {
+// Billing lanes whose tier may be auto-realigned from schedule evidence.
+// ALLOWLIST, not blocklist (Codex #3011 P1): every explicit paying lane —
+// monthly_membership, annual_prepay (coverage paid up front; the prepaid-term
+// lifecycle owns that state), per_application, and any future lane — is
+// excluded by default. NULL stays realignable: legacy paying members always
+// carry a positive monthly_rate, which the rate guard already excludes.
+const LABEL_ONLY_REALIGN_LANES = ['per_visit', 'one_time'];
+
+function isLabelOnlyLane(billingMode) {
+  return billingMode == null || LABEL_ONLY_REALIGN_LANES.includes(billingMode);
+}
+
+// Tier re-alignment for LABEL-ONLY customers (owner follow-up 2026-07-28:
+// the tier tracks upcoming recurring coverage in BOTH directions). Applies
+// ONLY to customers whose tier is derived state — no positive monthly_rate
+// and no explicit paying billing lane (see LABEL_ONLY_REALIGN_LANES). A
+// PAYING member's tier is billing state owned by the cancellation/
+// offboarding flow (customer-offboarding.js already clears waveguard_tier +
+// monthly_rate on cancel); a transient schedule gap must never silently
+// strip a paying member's membership. Moves the tier to exactly what the
+// upcoming families support — up (a family added by import/direct edit that
+// bypassed the booking-time sync), down (a family cancelled), or cleared to
+// NULL (No Plan) when none remain.
+function buildLabelOnlyTierRealignmentUpdates(customer, detectedPlanKeys, customerColumns = {}) {
   const updates = {};
   const detectedFamilyKeys = uniqueServiceFamilies(detectedPlanKeys);
   const inferredTier = inferTierFromServiceCount(detectedFamilyKeys.length);
   const currentTier = normalizeTierName(customer?.waveguard_tier);
   if (!currentTier) return { updates, detectedFamilyKeys, inferredTier };
   if (Number(customer?.monthly_rate || 0) > 0) return { updates, detectedFamilyKeys, inferredTier };
-  if (customer?.billing_mode === 'monthly_membership') return { updates, detectedFamilyKeys, inferredTier };
+  if (!isLabelOnlyLane(customer?.billing_mode)) return { updates, detectedFamilyKeys, inferredTier };
   if (!customerColumns.waveguard_tier) return { updates, detectedFamilyKeys, inferredTier };
   const currentRank = activeTierRank(currentTier);
   const inferredRank = inferredTier ? activeTierRank(inferredTier) : -1;
-  if (inferredRank >= currentRank) return { updates, detectedFamilyKeys, inferredTier };
+  if (inferredRank === currentRank) return { updates, detectedFamilyKeys, inferredTier };
   updates.waveguard_tier = inferredTier;
   return { updates, detectedFamilyKeys, inferredTier };
 }
@@ -883,7 +895,24 @@ async function enrollNoPlanCustomerTier({ database, log, customer, customerId, c
     return { synced: false, reason: 'no_upcoming_recurring_evidence', detectedPlanKeys };
   }
 
-  await database('customers').where({ id: customerId }).update(enrollment.updates);
+  // Compare-and-swap on the non-member snapshot (Codex #3011 P1 class): if a
+  // concurrent flow made this customer a member (estimate accept stamping a
+  // paid tier) between the read and this write, match zero rows rather than
+  // overwrite the paid tier with an inferred label.
+  let enrollWrite = database('customers').where({ id: customerId });
+  if (customer?.waveguard_tier == null) {
+    enrollWrite = enrollWrite.whereNull('waveguard_tier');
+  } else {
+    enrollWrite = enrollWrite.where('waveguard_tier', customer.waveguard_tier);
+  }
+  enrollWrite = enrollWrite.where(function notPayingRate() {
+    this.whereNull('monthly_rate').orWhere('monthly_rate', '<=', 0);
+  });
+  const enrolledCount = await enrollWrite.update(enrollment.updates);
+  if (!enrolledCount) {
+    log.info(`[self-booking-plan-sync] tier enrollment skipped for ${customerId} — customer changed since read`);
+    return { synced: false, reason: 'concurrent_change', detectedPlanKeys };
+  }
 
   // Best-effort audit row on the real pool connection (NOT `database`, which
   // may be a caller's transaction) — same rationale as the alignment path.
@@ -909,39 +938,77 @@ async function enrollNoPlanCustomerTier({ database, log, customer, customerId, c
   };
 }
 
-// Demotion executor: recompute a label-only customer's tier downward from
-// their remaining upcoming coverage. Same no-comms guarantee as enrollment —
-// a direct customers UPDATE; the membership.canceled email lives only in the
-// admin PATCH route and offboarding flow.
-async function demoteLapsedTierCustomer({ database, log, customer, customerId, customerColumns, today }) {
+// Compare-and-swap WHERE clauses for label-only tier writes (Codex #3011
+// P1): re-assert the exact snapshot fields the decision was computed from, so
+// a concurrent conversion to a paying membership (estimate accept setting
+// tier/rate/lane) or an admin tier edit between the candidate read and this
+// write matches zero rows instead of being clobbered.
+function applyLabelOnlySnapshotGuards(query, customer, customerColumns) {
+  let guarded = query;
+  if (customer?.waveguard_tier == null) {
+    guarded = guarded.whereNull('waveguard_tier');
+  } else {
+    guarded = guarded.where('waveguard_tier', customer.waveguard_tier);
+  }
+  guarded = guarded.where(function notPayingRate() {
+    this.whereNull('monthly_rate').orWhere('monthly_rate', '<=', 0);
+  });
+  if (customerColumns.billing_mode) {
+    guarded = guarded.where(function labelOnlyLane() {
+      this.whereNull('billing_mode').orWhereIn('billing_mode', LABEL_ONLY_REALIGN_LANES);
+    });
+  }
+  return guarded;
+}
+
+// Realignment executor: move a label-only customer's tier to exactly what
+// their upcoming coverage supports (up, down, or cleared). Same no-comms
+// guarantee as enrollment — a direct customers UPDATE; the membership
+// started/canceled emails live only in the admin PATCH route and the
+// offboarding flow.
+async function realignLabelOnlyTierCustomer({ database, log, customer, customerId, customerColumns, today }) {
   const detectedPlanKeys = await detectUpcomingRecurringPlanKeys(database, customerId, today);
-  const demotion = buildTierDemotionUpdates(customer, detectedPlanKeys, customerColumns);
-  if (!Object.keys(demotion.updates).length) {
-    return { demoted: false, detectedPlanKeys };
+  const realignment = buildLabelOnlyTierRealignmentUpdates(customer, detectedPlanKeys, customerColumns);
+  if (!Object.keys(realignment.updates).length) {
+    return { realigned: false, detectedPlanKeys };
   }
 
-  await database('customers').where({ id: customerId }).update(demotion.updates);
+  const updatedCount = await applyLabelOnlySnapshotGuards(
+    database('customers').where({ id: customerId }),
+    customer,
+    customerColumns,
+  ).update(realignment.updates);
+  if (!updatedCount) {
+    log.info(`[self-booking-plan-sync] tier realignment skipped for ${customerId} — customer changed since candidate read`);
+    return { realigned: false, reason: 'concurrent_change', detectedPlanKeys };
+  }
 
+  const currentRank = activeTierRank(normalizeTierName(customer?.waveguard_tier));
+  const inferredRank = realignment.inferredTier ? activeTierRank(realignment.inferredTier) : -1;
+  const raised = inferredRank > currentRank;
   void db('activity_log').insert({
     customer_id: customerId,
-    action: 'waveguard_tier_auto_lapsed',
-    description: demotion.inferredTier
-      ? `Lowered WaveGuard tier to ${demotion.inferredTier} — upcoming recurring coverage shrank`
-      : 'Cleared WaveGuard tier — no upcoming recurring services remain',
+    action: raised ? 'waveguard_tier_auto_aligned' : 'waveguard_tier_auto_lapsed',
+    description: raised
+      ? `Raised WaveGuard tier to ${realignment.inferredTier} — upcoming recurring coverage grew`
+      : (realignment.inferredTier
+        ? `Lowered WaveGuard tier to ${realignment.inferredTier} — upcoming recurring coverage shrank`
+        : 'Cleared WaveGuard tier — no upcoming recurring services remain'),
     metadata: {
       previous_tier: customer?.waveguard_tier || null,
       detected_plan_keys: detectedPlanKeys,
-      detected_family_keys: demotion.detectedFamilyKeys,
-      updates: demotion.updates,
+      detected_family_keys: realignment.detectedFamilyKeys,
+      updates: realignment.updates,
     },
-  }).catch((err) => log.warn(`[self-booking-plan-sync] tier auto-lapse activity_log insert failed: ${err.message}`));
+  }).catch((err) => log.warn(`[self-booking-plan-sync] tier realignment activity_log insert failed: ${err.message}`));
 
   return {
-    demoted: true,
+    realigned: true,
+    raised,
     detectedPlanKeys,
-    detectedFamilyKeys: demotion.detectedFamilyKeys,
-    inferredTier: demotion.inferredTier,
-    updates: demotion.updates,
+    detectedFamilyKeys: realignment.detectedFamilyKeys,
+    inferredTier: realignment.inferredTier,
+    updates: realignment.updates,
   };
 }
 
@@ -949,10 +1016,12 @@ async function demoteLapsedTierCustomer({ database, log, customer, customerId, c
 //   1. Enrollment — No-Plan customers holding upcoming recurring rows that
 //      arrived by a path outside the seeding hook (direct row edits, imports,
 //      legacy flows) get their tier stamped.
-//   2. Demotion — label-only tiered customers whose upcoming coverage shrank
-//      get lowered, or cleared to No Plan when nothing upcoming remains
-//      (cancelled/lapsed series). Paying members are excluded in SQL and
-//      re-checked in buildTierDemotionUpdates.
+//   2. Realignment — label-only tiered customers move to exactly what their
+//      upcoming coverage supports: raised (a family added outside the
+//      booking-time hook), lowered, or cleared to No Plan when nothing
+//      upcoming remains (cancelled/lapsed series). Paying members are
+//      excluded in SQL, re-checked in buildLabelOnlyTierRealignmentUpdates,
+//      and re-asserted on the UPDATE itself (compare-and-swap).
 // No-op while GATE_AUTO_WAVEGUARD_TIER is off. Bounded per pass; each
 // enrollment candidate goes through the same gated sync as the booking-time
 // hook, so the write rules (tier only, no comms) live in exactly one place.
@@ -1021,11 +1090,17 @@ async function reconcileRecurringTiers(options = {}) {
     }
   }
 
-  // Pass 2 — demotion: label-only tiered customers (no positive rate, not an
-  // explicit monthly_membership lane). Partial demotions (Silver -> Bronze)
-  // need per-customer family analysis, so SQL only narrows to the label-only
-  // tiered set and the recompute happens per candidate.
-  let demoteQuery = database('customers as c')
+  // Pass 2 — label-only realignment (both directions): tiered customers with
+  // no positive rate and a label-only billing lane. Tier moves (Silver ->
+  // Bronze on a cancel, Bronze -> Silver on an imported second family) need
+  // per-customer family analysis, so SQL only narrows to the label-only
+  // tiered set and the recompute happens per candidate. Candidates are
+  // sampled in RANDOM order (Codex #3011 P2): correctly aligned customers
+  // stay in this set forever, so a fixed created_at page would revisit the
+  // same oldest rows nightly and starve everyone past the limit — random
+  // sampling reaches every row across a handful of runs, and the primary
+  // alignment path remains the booking-time hook anyway.
+  let realignQuery = database('customers as c')
     .whereRaw(
       `LOWER(c.waveguard_tier) IN (${tiersLower.map(() => '?').join(', ')})`,
       tiersLower,
@@ -1033,7 +1108,7 @@ async function reconcileRecurringTiers(options = {}) {
     .where(function noRate() {
       this.whereNull('c.monthly_rate').orWhere('c.monthly_rate', '<=', 0);
     })
-    .orderBy('c.created_at', 'asc')
+    .orderByRaw('random()')
     .limit(Math.max(1, limit))
     .select(
       'c.id',
@@ -1042,17 +1117,18 @@ async function reconcileRecurringTiers(options = {}) {
       ...(customerColumns.billing_mode ? ['c.billing_mode'] : []),
     );
   if (customerColumns.billing_mode) {
-    demoteQuery = demoteQuery.where(function notMonthlyLane() {
-      this.whereNull('c.billing_mode').orWhere('c.billing_mode', '!=', 'monthly_membership');
+    realignQuery = realignQuery.where(function labelOnlyLane() {
+      this.whereNull('c.billing_mode').orWhereIn('c.billing_mode', LABEL_ONLY_REALIGN_LANES);
     });
   }
-  demoteQuery = applyCommonFilters(demoteQuery);
+  realignQuery = applyCommonFilters(realignQuery);
 
-  const demoteCandidates = await demoteQuery;
-  let demoted = 0;
-  for (const candidate of demoteCandidates) {
+  const realignCandidates = await realignQuery;
+  let raised = 0;
+  let lowered = 0;
+  for (const candidate of realignCandidates) {
     try {
-      const result = await demoteLapsedTierCustomer({
+      const result = await realignLabelOnlyTierCustomer({
         database,
         log,
         customer: candidate,
@@ -1060,10 +1136,13 @@ async function reconcileRecurringTiers(options = {}) {
         customerColumns,
         today,
       });
-      if (result?.demoted) demoted += 1;
+      if (result?.realigned) {
+        if (result.raised) raised += 1;
+        else lowered += 1;
+      }
     } catch (err) {
       failed += 1;
-      log.warn(`[self-booking-plan-sync] nightly tier demotion failed for ${candidate.id}: ${err.message}`);
+      log.warn(`[self-booking-plan-sync] nightly tier realignment failed for ${candidate.id}: ${err.message}`);
     }
   }
 
@@ -1071,8 +1150,9 @@ async function reconcileRecurringTiers(options = {}) {
     ok: true,
     enrollChecked: enrollCandidates.length,
     enrolled,
-    demoteChecked: demoteCandidates.length,
-    demoted,
+    realignChecked: realignCandidates.length,
+    raised,
+    lowered,
     failed,
     limit,
   };
@@ -1087,8 +1167,8 @@ module.exports = {
   TERMITE_BAIT_RECURRING_PLANS,
   TREE_SHRUB_RECURRING_PLANS,
   buildCustomerWaveGuardAlignmentUpdates,
+  buildLabelOnlyTierRealignmentUpdates,
   buildNoPlanTierEnrollmentUpdates,
-  buildTierDemotionUpdates,
   buildRecurringOccurrenceDates,
   detectWaveGuardPlanKeys,
   inferTierFromServiceCount,

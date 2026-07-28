@@ -1111,8 +1111,9 @@ httpServer.listen(PORT, () => {
         // Nightly WaveGuard auto-tier reconciliation (owner directive
         // 2026-07-28), both directions: No-Plan customers holding upcoming
         // recurring services get their tier stamped, and label-only tiered
-        // customers whose recurring coverage lapsed get lowered / cleared
-        // back to No Plan (paying members excluded — offboarding owns them).
+        // customers get realigned to their coverage — raised, lowered, or
+        // cleared back to No Plan (paying members excluded — offboarding
+        // owns them).
         // Tier only — no billing fields, no customer comms. No-op while
         // GATE_AUTO_WAVEGUARD_TIER is off (checked in-service).
         cron.schedule('30 2 * * *', async () => {

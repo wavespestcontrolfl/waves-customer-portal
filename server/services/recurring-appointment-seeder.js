@@ -708,7 +708,17 @@ async function syncCustomerTierAfterSeeding(conn, customerId) {
     const { isEnabled } = require('../config/feature-gates');
     if (!isEnabled('autoWaveguardTierEnroll')) return;
     const { syncCustomerWaveGuardPlanFromScheduledServices } = require('./self-booking-plan-sync');
-    await syncCustomerWaveGuardPlanFromScheduledServices({ database: conn, customerId });
+    // Run inside a nested transaction: when conn is a caller's transaction
+    // this becomes a SAVEPOINT, so a SQL error in the sync rolls back only
+    // the savepoint instead of poisoning the whole booking transaction — a
+    // caught JS exception does NOT un-abort a Postgres transaction, and the
+    // sync's joined-query fallback retries a query after a failure, which
+    // would otherwise hit "current transaction is aborted" and sink the
+    // booking at commit (Codex #3011 P1). On a plain pool connection this is
+    // just a short standalone transaction.
+    await conn.transaction(async (inner) => {
+      await syncCustomerWaveGuardPlanFromScheduledServices({ database: inner, customerId });
+    });
   } catch (err) {
     try {
       require('./logger').warn(`[recurring-seeder] WaveGuard tier sync failed for customer ${customerId}: ${err.message}`);

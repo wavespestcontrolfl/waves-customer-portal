@@ -450,8 +450,30 @@ async function analyzeCustomer(customer, customerColumns, today) {
 }
 
 async function applyCustomerRepair(repair) {
-  if (Object.keys(repair.customerUpdates).length) {
-    await db('customers').where({ id: repair.customer.id }).update(repair.customerUpdates);
+  if (!Object.keys(repair.customerUpdates).length) return;
+  await db('customers').where({ id: repair.customer.id }).update(repair.customerUpdates);
+
+  // Mirror the runtime enrollment path's audit trail (Codex #3011 P2): a bulk
+  // --enroll-no-plan --apply can change hundreds of membership labels, and
+  // each one must leave the same waveguard_tier_auto_enrolled activity row
+  // the booking-time sync writes. Best-effort — a missing table or failed
+  // insert never aborts the backfill.
+  if (repair.customer.candidate_reason !== 'no_plan_upcoming_recurring') return;
+  try {
+    if (!(await db.schema.hasTable('activity_log'))) return;
+    await db('activity_log').insert({
+      customer_id: repair.customer.id,
+      action: 'waveguard_tier_auto_enrolled',
+      description: `Auto-enrolled WaveGuard ${repair.customerUpdates.waveguard_tier} from upcoming recurring services (align-waveguard-portal-records --enroll-no-plan)`,
+      metadata: {
+        detected_plan_keys: repair.detectedKeys,
+        detected_family_keys: repair.detectedFamilyKeys,
+        updates: repair.customerUpdates,
+        source: 'align-waveguard-portal-records',
+      },
+    });
+  } catch (err) {
+    console.error(`activity_log insert failed for customer ${repair.customer.id}: ${err.message}`);
   }
 }
 
