@@ -3802,17 +3802,17 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         ...await actualProductBlackoutBlocks(svc, products),
       ];
       // Advisory, not a lockout (owner directive 2026-07-29: approval
-      // ceremonies removed from the closeout). With an explicit approval
-      // payload (legacy client) the record keeps approval semantics; without
-      // one it is an advisory record — never approved-by stamps, so the
-      // audit history can't present an unapproved closeout as approved.
+      // ceremonies removed from the closeout). Approval semantics require
+      // BOTH an explicit approval payload (legacy client) AND an admin
+      // actor — a tech-submitted or stale payload records as advisory, so
+      // the audit history can't present an unapproved closeout as approved.
       if (blackoutBlocks.length) {
         const mappedBlackoutBlocks = blackoutBlocks.map((block) => ({
           code: block.code,
           message: block.message,
           source: block.source || null,
         }));
-        waveguardBlackoutApproval = normalizedOfficeApproval
+        waveguardBlackoutApproval = (normalizedOfficeApproval && req.techRole === 'admin')
           ? {
             ...normalizedOfficeApproval,
             approvedByTechnicianId: req.technicianId,
@@ -3835,7 +3835,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           code: block.code,
           message: block.message,
         }));
-        waveguardNLimitApproval = normalizedNLimitApproval
+        waveguardNLimitApproval = (normalizedNLimitApproval && req.techRole === 'admin')
           ? {
             ...normalizedNLimitApproval,
             approvedByTechnicianId: req.technicianId,
@@ -3880,7 +3880,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // when an explicit approval payload arrived; otherwise the exception
       // is recorded as an advisory the audit UI must not present as approved.
       if (managerBlocks.length) {
-        waveguardManagerApproval = normalizedManagerApproval
+        waveguardManagerApproval = (normalizedManagerApproval && req.techRole === 'admin')
           ? managerApprovalSummary(normalizedManagerApproval, managerBlocks, {
             technicianId: req.technicianId,
             role: req.techRole || null,

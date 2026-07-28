@@ -8528,6 +8528,11 @@ export function CompletionPanel({
   // never saw).
   const [treatmentPlanCalibrationBlocks, setTreatmentPlanCalibrationBlocks] =
     useState([]);
+  // Ordinance restriction windows active on THIS service date (evaluated
+  // server-side against the property's real municipality rules) — drives the
+  // off-plan N/P advisory below.
+  const [treatmentPlanOrdinanceWindows, setTreatmentPlanOrdinanceWindows] =
+    useState([]);
   const [treatmentPlanAnnualN, setTreatmentPlanAnnualN] = useState(null);
   const [treatmentPlanStructuredProtocol, setTreatmentPlanStructuredProtocol] =
     useState(null);
@@ -8983,39 +8988,48 @@ export function CompletionPanel({
     .join(" ");
   // Off-plan N/P check the plan can't see: the property-gate blocks cover
   // PLANNED products only, so a tech-added fertilizer would otherwise reach
-  // completion without any blackout warning. Month-window heuristic (the
-  // SWFL summer blackout, Jun 1 – Sep 30) against the catalog's N/P
-  // analysis — advisory only; the server still evaluates the real
-  // ordinances and records the condition on the completion.
-  const blackoutWindowMonth = (() => {
-    const raw = String(
-      service.scheduledDate || service.scheduled_date || service.date || "",
-    ).split("T")[0];
-    const month = new Date(`${raw}T12:00:00`).getMonth() + 1;
-    return Number.isFinite(month) && month >= 6 && month <= 9;
-  })();
-  const npSelectedProductNames =
-    calibrationRequired &&
-    !isIncompleteVisit &&
-    blackoutWindowMonth &&
-    blackoutBlocks.length === 0
-      ? [
-          ...new Set(
-            selectedProducts
-              .map((sp) =>
-                (products || []).find(
-                  (p) => String(p.id) === String(sp.productId),
-                ),
-              )
-              .filter(
-                (row) =>
-                  Number(row?.analysis_n || 0) > 0 ||
-                  Number(row?.analysis_p || 0) > 0,
-              )
-              .map((row) => row.name)
-              .filter(Boolean),
-          ),
-        ]
+  // completion without any blackout warning. The restriction windows come
+  // from the plan payload — evaluated server-side against the property's
+  // real municipality ordinances for this service date (no client month
+  // math, no timezone handling). Advisory only; the server still records
+  // the authoritative condition on the completion.
+  const offPlanNpAdvisories =
+    calibrationRequired && !isIncompleteVisit && blackoutBlocks.length === 0
+      ? treatmentPlanOrdinanceWindows.flatMap((window) => {
+          const restricted = [];
+          if (window?.restrictedNitrogen) restricted.push("n");
+          if (window?.restrictedPhosphorus) restricted.push("p");
+          if (!restricted.length) return [];
+          const names = [
+            ...new Set(
+              selectedProducts
+                .map((sp) =>
+                  (products || []).find(
+                    (p) => String(p.id) === String(sp.productId),
+                  ),
+                )
+                .filter(
+                  (row) =>
+                    (restricted.includes("n") &&
+                      Number(row?.analysis_n || 0) > 0) ||
+                    (restricted.includes("p") &&
+                      Number(row?.analysis_p || 0) > 0),
+                )
+                .map((row) => row.name)
+                .filter(Boolean),
+            ),
+          ];
+          if (!names.length) return [];
+          const nutrient =
+            restricted.length === 2
+              ? "nitrogen/phosphorus"
+              : restricted[0] === "n"
+                ? "nitrogen"
+                : "phosphorus";
+          return [
+            `${window.jurisdictionName || "The local ordinance"} restricts ${nutrient} during this visit window — ${names.join(", ")} contains it; completion records this.`,
+          ];
+        })
       : [];
   // Non-blocking closeout advisories (owner directive 2026-07-29): the old
   // office/N-budget/manager approval ceremonies are gone — each condition is
@@ -9023,11 +9037,7 @@ export function CompletionPanel({
   // same conditions on the completion for the audit trail.
   const closeoutAdvisories = [
     ...(blackoutApprovalRequired ? [blackoutHelpText] : []),
-    ...(npSelectedProductNames.length
-      ? [
-          `${npSelectedProductNames.join(", ")} contains N/P inside the Jun 1 – Sep 30 blackout window — completion records this; verify the local ordinance.`,
-        ]
-      : []),
+    ...offPlanNpAdvisories,
     ...(nLimitApprovalRequired
       ? [[nLimitHelpText, nLimitSummaryText].filter(Boolean).join(" ")]
       : []),
@@ -9207,6 +9217,11 @@ export function CompletionPanel({
             ? data.plan.equipmentCalibration.blocks
             : []
           ).filter((block) => CALIBRATION_ADVISORY_CODES.has(block?.code)),
+        );
+        setTreatmentPlanOrdinanceWindows(
+          Array.isArray(data?.plan?.propertyGate?.activeOrdinanceWindows)
+            ? data.plan.propertyGate.activeOrdinanceWindows
+            : [],
         );
         setTreatmentPlanAnnualN(data?.plan?.propertyGate?.annualN || null);
         setTreatmentPlanStructuredProtocol(data?.plan?.protocol?.structured || null);

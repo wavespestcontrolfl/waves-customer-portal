@@ -1550,6 +1550,15 @@ async function buildPlanForService(serviceId, options = {}) {
       municipality: profile?.municipality || service.city || null,
       county: profile?.county || null,
       ordinanceStatus: ordinanceSummary.activeWindows.length ? 'restricted_window_active' : 'no_active_blackout',
+      // Restriction windows ACTIVE on this service date, so the closeout can
+      // warn about tech-added N/P products the planned-item gate never saw —
+      // evaluated here against the property's real ordinances (no client-side
+      // month heuristics).
+      activeOrdinanceWindows: ordinanceSummary.activeWindows.map((rule) => ({
+        jurisdictionName: rule.jurisdiction_name || null,
+        restrictedNitrogen: !!rule.restricted_nitrogen,
+        restrictedPhosphorus: !!rule.restricted_phosphorus,
+      })),
       annualN: {
         ...annualN,
         ledgerSource: nutrientLedger.source || null,
