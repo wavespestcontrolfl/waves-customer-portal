@@ -313,7 +313,8 @@ function hasAlignedAuth(authResults, fromDomain) {
   const aligned = (value) => value === domain || value.endsWith(`.${domain}`) || domain.endsWith(`.${value}`);
   const dkim = auth.match(/dkim=pass[^;]*/g) || [];
   for (const clause of dkim) {
-    const d = clause.match(/header\.[di]=@?([a-z0-9.-]+)/);
+    // header.i may carry a full identity (user@domain); align on the domain.
+    const d = clause.match(/header\.[di]=(?:[^@\s;]*@)?([a-z0-9.-]+)/);
     if (d && aligned(d[1])) return true;
   }
   const spf = auth.match(/spf=pass[^;]*/g) || [];
@@ -538,6 +539,7 @@ module.exports = {
   hasAlignedAuth,
   quarantineMessage,
   cancelQuarantine,
+  settleDeferredBlock,
   sweepQuarantine,
   rescueSpamFolder,
   collectUnansweredNudges,

@@ -179,12 +179,32 @@ async function blockSpamSender(email) {
     logger.warn(`[spam-blocker] Gmail filter creation failed for ${redactedFrom}: ${err.message}`);
   }
 
-  await db('blocked_email_senders').insert({
-    domain: null,
-    email_address: fromAddress,
-    gmail_filter_id: filterId,
-    reason: 'spam_auto',
-  });
+  try {
+    await db('blocked_email_senders').insert({
+      domain: null,
+      email_address: fromAddress,
+      gmail_filter_id: filterId,
+      reason: 'spam_auto',
+    });
+  } catch (insertErr) {
+    // The Gmail filter already exists but we failed to record it — roll the
+    // filter back (best effort) so a retry recreates BOTH atomically enough,
+    // instead of stacking orphaned filters no unblock can ever find.
+    if (filterId) {
+      try {
+        const gmailClient = require('./gmail-client');
+        const auth = await gmailClient.getAuthClient();
+        if (auth) {
+          const gmail = google.gmail({ version: 'v1', auth });
+          await gmail.users.settings.filters.delete({ userId: 'me', id: filterId });
+          logger.info(`[spam-blocker] rolled back unrecorded Gmail filter ${filterId}`);
+        }
+      } catch (rollbackErr) {
+        logger.warn(`[spam-blocker] filter rollback failed (${filterId}) — orphaned filter: ${rollbackErr.message}`);
+      }
+    }
+    throw insertErr;
+  }
 
   logger.info(`[spam-blocker] Blocked sender: ${redactedFrom}`);
 }
@@ -203,7 +223,15 @@ async function unblockSender(id) {
         logger.info(`[spam-blocker] Gmail filter removed: ${blocked.gmail_filter_id}`);
       }
     } catch (err) {
-      logger.warn(`[spam-blocker] Gmail filter removal failed: ${err.message}`);
+      // 404 = the filter is already gone (idempotent success); anything else
+      // means Gmail is STILL trash-routing this sender — deleting our record
+      // would report an unblock that never happened and lose the filter id.
+      const gone = err.code === 404 || err.response?.status === 404;
+      if (!gone) {
+        logger.warn(`[spam-blocker] Gmail filter removal failed — block record retained for retry: ${err.message}`);
+        return { error: 'Gmail filter removal failed — sender is still blocked; retry the unblock' };
+      }
+      logger.info(`[spam-blocker] Gmail filter already gone: ${blocked.gmail_filter_id}`);
     }
   }
 

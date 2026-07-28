@@ -441,8 +441,15 @@ router.post('/message/:id/reclassify', async (req, res) => {
       const gmailClient = require('../services/email/gmail-client');
       const labels = await gmailClient.getMessageLabels(email.gmail_id);
       if (labels.includes('TRASH')) {
-        await db('emails').where({ id: email.id, auto_action: 'spam_trashing' })
-          .update({ auto_action: 'spam_trashed_after_quarantine', updated_at: new Date() });
+        // Same settle path as the scheduled recovery: block-pending first,
+        // then the deferred sender block — skipping it here would leave the
+        // sender permanently unblocked after an inline recovery.
+        const settled = await db('emails').where({ id: email.id, auto_action: 'spam_trashing' })
+          .update({ auto_action: 'spam_trashed_block_pending', updated_at: new Date() });
+        if (settled) {
+          const { settleDeferredBlock } = require('../services/email/inbox-hygiene');
+          await settleDeferredBlock(email);
+        }
         return res.status(409).json({ error: 'Message was already trashed by the sweep — restore it from Gmail Trash first, then reclassify' });
       }
       // Never trashed — hand the row back to the quarantined state and let
