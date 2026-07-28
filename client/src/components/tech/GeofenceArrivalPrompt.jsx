@@ -120,10 +120,31 @@ export default function GeofenceArrivalPrompt({ onStormReview }) {
     };
   }, [active]);
 
-  // Auto-dismiss timers — RENDERED cards only. Storm alerts held back by the
-  // cap (or superseded by a newer alert for the same stop) must stay unread
-  // so they actually surface later; marking them read here would hide them
-  // from every future unreadOnly poll without the tech ever seeing them.
+  // Superseded same-stop storm alerts are duplicates of information the tech
+  // IS seeing (the newest card for that stop) — mark them read immediately so
+  // clearing the visible card doesn't promote each stale duplicate in turn.
+  // Alerts for OTHER stops held back by the cap stay untouched/unread.
+  useEffect(() => {
+    const newestByJob = new Map();
+    for (const n of active) {
+      if (n.type !== 'storm_watch_alert') continue;
+      const jobKey = n.payload?.job_id || n.id;
+      const prev = newestByJob.get(jobKey);
+      if (!prev || new Date(n.created_at || 0) > new Date(prev.created_at || 0)) {
+        newestByJob.set(jobKey, n);
+      }
+    }
+    for (const n of active) {
+      if (n.type !== 'storm_watch_alert') continue;
+      const jobKey = n.payload?.job_id || n.id;
+      if (newestByJob.get(jobKey)?.id !== n.id) removeCard(n.id, { silent: true });
+    }
+  }, [active]);
+
+  // Auto-dismiss timers — RENDERED cards only. Storm alerts for other stops
+  // held back by the cap must stay unread so they actually surface later;
+  // marking them read here would hide them from every future unreadOnly poll
+  // without the tech ever seeing them.
   useEffect(() => {
     const timers = cards.map((n) => {
       const ms = n.type === 'geofence_timer_stopped' ? STOP_TOAST_MS : REMINDER_AUTODISMISS_MS;

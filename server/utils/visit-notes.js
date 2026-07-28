@@ -37,6 +37,13 @@ const AUDIT_TAG_RE = /\b[a-z][a-z0-9]*(?:_[a-z0-9]+)*_\d{4}_\d{2}\s*:/;
 // prose that merely contains the phrase ("Customer has no mobile, so no
 // SMS sent; call on arrival.") must pass through untouched.
 const NO_SMS_STANDALONE_RE = /^no sms sent[.!]?$/i;
+// A standalone marker only consumes its predecessor when the predecessor
+// itself reads like a scheduler-audit entry: ops narration verbs
+// ("Clarified Dale Brush service line: …") or machine snake_case tokens.
+// A real staff note that happens to precede a marker ("Gate code changed
+// to 4412. No SMS sent.") must survive.
+const AUDIT_PREDECESSOR_RE = /^(clarified|moved|rescheduled|resched|cancelled|canceled|renamed|reverted|aligned|realigned|updated|merged|split)\b/i;
+const SNAKE_TOKEN_RE = /\b[a-z0-9]+_[a-z0-9_]+\b/;
 
 function stripSchedulerAuditText(text) {
   const value = String(text || '').trim();
@@ -50,12 +57,16 @@ function stripSchedulerAuditText(text) {
   if (!hasAuditContent) return value;
   const kept = [];
   // An audit entry reads "<what moved / what changed>. No SMS sent." — the
-  // marker sentence retroactively consumes its untagged predecessor too
-  // (tagged predecessors were already handled on their own).
+  // marker sentence retroactively consumes its predecessor, but only when
+  // that predecessor also reads like audit narration (tagged predecessors
+  // were already handled on their own).
   let prevWasAudit = false;
   for (const segment of segments) {
     if (NO_SMS_STANDALONE_RE.test(segment)) {
-      if (!prevWasAudit && kept.length) kept.pop();
+      if (!prevWasAudit && kept.length) {
+        const prev = kept[kept.length - 1];
+        if (AUDIT_PREDECESSOR_RE.test(prev) || SNAKE_TOKEN_RE.test(prev)) kept.pop();
+      }
       prevWasAudit = true;
       continue;
     }

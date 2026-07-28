@@ -59,6 +59,11 @@ describe('stripSchedulerAuditText', () => {
     expect(stripSchedulerAuditText(note)).toBe('Gate code 4412');
   });
 
+  test('a marker only consumes an audit-shaped predecessor — real notes survive', () => {
+    const note = 'Gate code changed to 4412. No SMS sent.';
+    expect(stripSchedulerAuditText(note)).toBe('Gate code changed to 4412.');
+  });
+
   test('keeps prose that merely contains the no-SMS phrase mid-sentence', () => {
     const note = 'Gate code 4412. Customer has no mobile, so no SMS sent; call on arrival.';
     expect(stripSchedulerAuditText(note)).toBe(note);

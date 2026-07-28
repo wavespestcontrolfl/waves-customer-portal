@@ -716,12 +716,15 @@ function ServiceCardV2({
             (() => {
               const cleaned = stripLegacyBoilerplate(service.lastServiceNotes);
               if (!cleaned) return null;
-              return (
-                <>
-                  — {cleaned.substring(0, 100)}
-                  {cleaned.length > 100 ? "..." : ""}
-                </>
-              );
+              // Word-boundary cut at this row's 100-char budget — a second
+              // hard substring here would reintroduce the mid-word cuts the
+              // server-side preview fixed.
+              if (cleaned.length <= 100) return <>— {cleaned}</>;
+              const cut = cleaned.slice(0, 100);
+              const lastSpace = cut.lastIndexOf(" ");
+              const head = (lastSpace > 0 ? cut.slice(0, lastSpace) : cut)
+                .replace(/[\s,;:.—-]+$/, "");
+              return <>— {head}…</>;
             })()}
         </div>
       )}

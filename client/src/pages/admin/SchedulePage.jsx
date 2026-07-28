@@ -584,6 +584,12 @@ function googleMapsUrl(address) {
 
 function detectServiceCategory(serviceType) {
   const s = (serviceType || "").toLowerCase();
+  // Tree/shrub tokens outrank lawn's fertil/weed tokens — "Tree & Shrub
+  // Fertilization" is a tree & shrub service, matching the server's
+  // detectServiceLine precedence (service-line-configs.js) so the panel's
+  // layout line agrees with the server's line-scoped fields.
+  if (s.includes("tree") || s.includes("shrub") || s.includes("palm"))
+    return "tree_shrub";
   if (
     s.includes("lawn") ||
     s.includes("turf") ||
@@ -596,8 +602,6 @@ function detectServiceCategory(serviceType) {
     s.includes("sod")
   )
     return "lawn";
-  if (s.includes("tree") || s.includes("shrub") || s.includes("palm"))
-    return "tree_shrub";
   if (s.includes("mosquito")) return "mosquito";
   if (s.includes("termite")) return "termite";
   if (

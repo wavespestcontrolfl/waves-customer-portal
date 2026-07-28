@@ -13,6 +13,7 @@ const trackTransitions = require('../services/track-transitions');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
 const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const { previewText, stripSchedulerAuditText } = require('../utils/visit-notes');
+const { loadLastServices } = require('../utils/last-line-service');
 const CompletionRecap = require('../services/completion-recap');
 const { buildRecapVisitContext } = require('../services/recap-visit-context');
 const CompletionAttempts = require('../services/completion-attempts');
@@ -1812,20 +1813,14 @@ router.get('/:date?', async (req, res, next) => {
     // Enrich with property preferences and last service
     const enriched = await Promise.all(services.map(async (s) => {
       const prefs = await db('property_preferences').where({ customer_id: s.customer_id }).first();
-      const recentCompleted = await db('service_records')
-        .where({ customer_id: s.customer_id, status: 'completed' })
-        .orderBy('service_date', 'desc')
-        .limit(60)
-        .select('service_type', 'service_date', 'technician_notes');
       // Any-line latest keeps the "Last:" card + new-customer detection
       // semantics; the line-scoped record feeds the service dashboard so a
       // pest visit never shows the customer's lawn notes (multi-service
       // customers were leaking cross-line notes into the Protocol panel).
-      // 60-row window: an annual line on a customer with two monthly lines
-      // accrues ~26 other visits between same-line visits — 12 was too few.
-      const lastService = recentCompleted[0] || null;
-      const visitLine = detectServiceLine(s.service_type);
-      const lastLineService = recentCompleted.find((r) => detectServiceLine(r.service_type) === visitLine) || null;
+      // Paged same-line search — a fixed window silently lost history for
+      // high-cadence customers (two weekly lines ≈ 104 rows between annual
+      // termite visits).
+      const { lastService, lastLineService } = await loadLastServices(db, s.customer_id, s.service_type);
       const statusLog = await db('job_status_history')
         .where({ job_id: s.id })
         .orderBy('transitioned_at')
