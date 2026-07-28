@@ -1201,7 +1201,11 @@ async function lookupPropertyFromAI(address) {
 
     const resp = await client.messages.create({
       model: MODELS.WORKHORSE,
-      max_tokens: 1536,
+      // 8192, not 1536: WORKHORSE resolves to models with adaptive thinking on
+      // by default, and max_tokens caps thinking + text TOGETHER. At 1536 the
+      // thinking spend across 5 web searches exhausted the budget before the
+      // JSON was written ("no text block in response", live 2026-07-27).
+      max_tokens: 8192,
       tools: [{
         type: 'web_search_20250305',
         name: 'web_search',
