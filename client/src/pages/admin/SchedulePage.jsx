@@ -291,42 +291,6 @@ const VISIT_OUTCOME_OPTIONS = [
   { value: "customer_concern", label: "Customer concern" },
   { value: "incomplete", label: "Incomplete" },
 ];
-const OFFICE_APPROVAL_REASONS = [
-  {
-    value: "office_approved_blackout_exception",
-    label: "Office approved exception",
-  },
-  {
-    value: "soil_test_supported_phosphorus",
-    label: "Soil test supports phosphorus",
-  },
-  {
-    value: "non_fertilizer_application_only",
-    label: "No N/P fertilizer applied",
-  },
-];
-const N_LIMIT_APPROVAL_REASONS = [
-  {
-    value: "admin_approved_n_budget_exception",
-    label: "Admin approved exception",
-  },
-  { value: "ledger_adjustment_pending", label: "Ledger adjustment pending" },
-  {
-    value: "site_specific_agronomic_need",
-    label: "Site-specific agronomic need",
-  },
-];
-const MANAGER_APPROVAL_REASONS = [
-  {
-    value: "manager_approved_protocol_exception",
-    label: "Manager approved protocol exception",
-  },
-  {
-    value: "field_conditions_documented",
-    label: "Field conditions documented",
-  },
-  { value: "label_review_completed", label: "Label / rotation reviewed" },
-];
 const MANAGER_APPROVAL_CODES = new Set([
   "off_protocol_product",
   "high_rate_application",
@@ -359,12 +323,6 @@ function rateUnitsMatch(a, b) {
   const right = normalizeRateUnit(b);
   return !!left && !!right && left === right;
 }
-const TANK_CLEANOUT_METHODS = [
-  "Triple rinse",
-  "Clean water flush",
-  "Tank cleaner flush",
-  "Dedicated tank, no residue risk",
-];
 const AREAS_BY_SERVICE = {
   pest: [
     "Perimeter",
@@ -8555,11 +8513,6 @@ export function CompletionPanel({
   const [nextVisit, setNextVisit] = useState(null);
   const [nextVisitNote, setNextVisitNote] = useState("");
   const [showNextVisitNote, setShowNextVisitNote] = useState(false);
-  const [equipmentSystemId, setEquipmentSystemId] = useState("");
-  const [calibrationId, setCalibrationId] = useState("");
-  const [equipmentCalibrations, setEquipmentCalibrations] = useState([]);
-  const [equipmentCalibrationError, setEquipmentCalibrationError] =
-    useState("");
   const [treatmentPlanBlocks, setTreatmentPlanBlocks] = useState([]);
   const [treatmentPlanAnnualN, setTreatmentPlanAnnualN] = useState(null);
   const [treatmentPlanStructuredProtocol, setTreatmentPlanStructuredProtocol] =
@@ -8596,21 +8549,9 @@ export function CompletionPanel({
   const [protocolCarrierGalPer1000, setProtocolCarrierGalPer1000] =
     useState("");
   const [treatmentPlanMixItems, setTreatmentPlanMixItems] = useState([]);
-  const [officeApprovalReasonCode, setOfficeApprovalReasonCode] = useState("");
-  const [officeApprovalNote, setOfficeApprovalNote] = useState("");
-  const [nLimitApprovalReasonCode, setNLimitApprovalReasonCode] = useState("");
-  const [nLimitApprovalNote, setNLimitApprovalNote] = useState("");
-  const [managerApprovalReasonCode, setManagerApprovalReasonCode] =
-    useState("");
-  const [managerApprovalNote, setManagerApprovalNote] = useState("");
   const [treatmentPlanProductIds, setTreatmentPlanProductIds] = useState([]);
   const [treatmentPlanPlannedProductIds, setTreatmentPlanPlannedProductIds] =
     useState([]);
-  const [tankLastProduct, setTankLastProduct] = useState("");
-  const [tankLastProductCategory, setTankLastProductCategory] = useState("");
-  const [tankCleanoutCompleted, setTankCleanoutCompleted] = useState("");
-  const [tankCleanoutMethod, setTankCleanoutMethod] = useState("");
-  const [tankCleanoutNote, setTankCleanoutNote] = useState("");
   const [lawnAssessmentId, setLawnAssessmentId] = useState(null);
   const [lawnAssessmentRevision, setLawnAssessmentRevision] = useState(0);
   const [savedDraft, setSavedDraft] = useState(null);
@@ -8908,9 +8849,6 @@ export function CompletionPanel({
   );
   const blackoutApprovalRequired =
     calibrationRequired && !isIncompleteVisit && blackoutBlocks.length > 0;
-  const blackoutCompletionBlocked =
-    blackoutApprovalRequired &&
-    (!canApproveOfficeExceptions || !officeApprovalReasonCode);
   const blackoutHelpText =
     treatmentPlanError ||
     blackoutBlocks
@@ -8923,9 +8861,6 @@ export function CompletionPanel({
   );
   const nLimitApprovalRequired =
     calibrationRequired && !isIncompleteVisit && annualNBlocks.length > 0;
-  const nLimitCompletionBlocked =
-    nLimitApprovalRequired &&
-    (!canApproveOfficeExceptions || !nLimitApprovalReasonCode);
   const nLimitHelpText =
     treatmentPlanError ||
     annualNBlocks
@@ -9028,22 +8963,23 @@ export function CompletionPanel({
     calibrationRequired &&
     !isIncompleteVisit &&
     managerApprovalBlocks.length > 0;
-  const managerApprovalCompletionBlocked =
-    managerApprovalRequired &&
-    (!canApproveOfficeExceptions || !managerApprovalReasonCode);
   const managerApprovalHelpText = managerApprovalBlocks
     .map((block) => block.message)
     .filter(Boolean)
     .join(" ");
-  const tankCleanoutRequired =
-    calibrationRequired && !isIncompleteVisit && !!equipmentSystemId;
-  const tankCleanoutCompletionBlocked =
-    tankCleanoutRequired &&
-    (!tankLastProduct.trim() ||
-      tankCleanoutCompleted !== "yes" ||
-      !tankCleanoutMethod.trim());
-  const tankCleanoutHelpText =
-    "Record the prior tank product and confirm cleanout before completing this WaveGuard lawn visit.";
+  // Non-blocking closeout advisories (owner directive 2026-07-29): the old
+  // office/N-budget/manager approval ceremonies are gone — each condition is
+  // one quiet line the tech can read and move past. The server records the
+  // same conditions on the completion for the audit trail.
+  const closeoutAdvisories = [
+    ...(blackoutApprovalRequired ? [blackoutHelpText] : []),
+    ...(nLimitApprovalRequired
+      ? [[nLimitHelpText, nLimitSummaryText].filter(Boolean).join(" ")]
+      : []),
+    ...(managerApprovalRequired && managerApprovalHelpText
+      ? [managerApprovalHelpText]
+      : []),
+  ];
   const treeShrubProductFlags = treeShrubProductFlagsClient(selectedProducts);
   const treeShrubCloseoutBlocks = treeShrubCloseoutRequired
     ? treeShrubCloseoutBlocksClient({
@@ -9062,35 +8998,21 @@ export function CompletionPanel({
     (calibrationRequired || treeShrubCloseoutRequired) && !isIncompleteVisit;
   const completionCtaLabel = submitting
     ? "Completing..."
-    : tankCleanoutCompletionBlocked
-      ? "Tank Cleanout Required"
-      : protocolActualsCompletionBlocked
-        ? !selectedProducts.length
-          ? "Products Applied Required"
-          : selectedProductsMissingActualAmount.length
-            ? "Product Actuals Required"
-            : "Inventory Blocked"
-        : blackoutCompletionBlocked
-          ? canApproveOfficeExceptions
-            ? "Office Approval Required"
-            : "Admin Approval Required"
-          : nLimitCompletionBlocked
-            ? canApproveOfficeExceptions
-              ? "N Approval Required"
-              : "Admin Approval Required"
-            : managerApprovalCompletionBlocked
-              ? canApproveOfficeExceptions
-                ? "Manager Approval Required"
-                : "Admin Approval Required"
-              : treeShrubCompletionBlocked
-                ? "Tree/Shrub Closeout Required"
-              : isIncompleteVisit
-                ? "Mark Visit Incomplete"
-                : !effectiveSendSms
-                  ? "Complete Service"
-                  : willInvoice
-                    ? "Complete & Send Invoice"
-                    : "Complete & Send Recap";
+    : protocolActualsCompletionBlocked
+      ? !selectedProducts.length
+        ? "Products Applied Required"
+        : selectedProductsMissingActualAmount.length
+          ? "Product Actuals Required"
+          : "Inventory Blocked"
+      : treeShrubCompletionBlocked
+        ? "Tree/Shrub Closeout Required"
+        : isIncompleteVisit
+          ? "Mark Visit Incomplete"
+          : !effectiveSendSms
+            ? "Complete Service"
+            : willInvoice
+              ? "Complete & Send Invoice"
+              : "Complete & Send Recap";
 
   useEffect(() => {
     const iv = setInterval(() => setElapsed(elapsedSince(onSiteTime)), 1000);
@@ -9174,7 +9096,13 @@ export function CompletionPanel({
     adminFetch(`/admin/protocols/completion-actions?${params.toString()}`)
       .then((data) => {
         if (cancelled) return;
-        setProtocolActions(Array.isArray(data.actions) ? data.actions : []);
+        const rows = Array.isArray(data.actions) ? data.actions : [];
+        // Lawn closeouts list only product-backed applications — the
+        // scout/task/expectation rows (chinch re-check, irrigation audit,
+        // soil sample) are protocol-reference material, not 30-second
+        // closeout material (owner directive 2026-07-29). The Protocols
+        // tab keeps the full row set.
+        setProtocolActions(isLawn ? rows.filter((a) => a?.product?.id) : rows);
         setProtocolActionMeta(data || null);
       })
       .catch((err) => {
@@ -9202,40 +9130,11 @@ export function CompletionPanel({
   useEffect(() => {
     if (!calibrationRequired) return;
     let cancelled = false;
-    setEquipmentCalibrationError("");
-    adminFetch("/admin/equipment-systems/calibrations")
-      .then((data) => {
-        if (cancelled) return;
-        const rows = Array.isArray(data.calibrations) ? data.calibrations : [];
-        const usableRows = rows.filter(
-          (row) => row.calibration_status === "field_verified",
-        );
-        setEquipmentCalibrations(usableRows);
-        if (!equipmentSystemId && usableRows.length === 1) {
-          setEquipmentSystemId(usableRows[0].equipment_system_id || "");
-          setCalibrationId(usableRows[0].id || "");
-        }
-      })
-      .catch((err) => {
-        if (!cancelled)
-          setEquipmentCalibrationError(
-            err.message || "Could not load equipment calibrations",
-          );
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [calibrationRequired]);
-
-  useEffect(() => {
-    if (!calibrationRequired) return;
-    let cancelled = false;
     setTreatmentPlanError("");
-    const params = new URLSearchParams();
-    if (equipmentSystemId) params.set("equipmentSystemId", equipmentSystemId);
-    if (calibrationId) params.set("calibrationId", calibrationId);
-    const suffix = params.toString() ? `?${params.toString()}` : "";
-    adminFetch(`/admin/treatment-plans/${service.id}${suffix}`)
+    // No equipment/calibration selection in the closeout any more (owner
+    // directive 2026-07-29) — the plan endpoint auto-selects the assigned
+    // rig server-side when one exists.
+    adminFetch(`/admin/treatment-plans/${service.id}`)
       .then((data) => {
         if (cancelled) return;
         const blocks =
@@ -9256,26 +9155,8 @@ export function CompletionPanel({
             ? data.plan.inventory.warnings
             : [],
         );
-        const selectedCalibration = data?.plan?.equipmentCalibration?.selected;
-        // Only auto-adopt the plan's selected calibration when it's field
-        // verified — i.e. one of the rows that actually appears in the dropdown.
-        // The plan can surface a stale, unverified calibration as `selected`
-        // (it's filtered out of the dropdown); auto-filling that would make the
-        // visit look like the tech chose equipment they can't see, defeating the
-        // calibration advisory bypass and recording an unverified system as used.
-        if (
-          !equipmentSystemId &&
-          selectedCalibration?.equipment_system_id &&
-          selectedCalibration.calibration_status === "field_verified"
-        ) {
-          setEquipmentSystemId(selectedCalibration.equipment_system_id);
-          setCalibrationId(selectedCalibration.id || "");
-        }
-        // The carrier feeds the read-only mix box, so it must track every plan
-        // fetch — equipment/calibration changes refetch with a new carrier. The
-        // old set-once-when-empty latch predates removing the carrier input;
-        // with no input left to preserve, latching would show mix amounts for
-        // the previous equipment after a calibration switch.
+        // The carrier feeds the read-only mix box; it tracks every plan
+        // fetch (the plan endpoint picks the rig server-side).
         setProtocolCarrierGalPer1000(
           data?.plan?.mixCalculator?.carrierGalPer1000
             ? String(data.plan.mixCalculator.carrierGalPer1000)
@@ -9309,13 +9190,7 @@ export function CompletionPanel({
     return () => {
       cancelled = true;
     };
-  }, [
-    calibrationRequired,
-    service.id,
-    equipmentSystemId,
-    calibrationId,
-    lawnAssessmentRevision,
-  ]);
+  }, [calibrationRequired, service.id, lawnAssessmentRevision]);
 
   useEffect(() => {
     setTreeShrubCloseout(defaultTreeShrubCloseout(service));
@@ -9357,10 +9232,6 @@ export function CompletionPanel({
       oneTimeRecapOnly ||
       reviewTiming !== "120" ||
       reviewCustomAt.trim() ||
-      tankLastProduct.trim() ||
-      tankCleanoutCompleted ||
-      tankCleanoutMethod.trim() ||
-      tankCleanoutNote.trim() ||
       JSON.stringify(treeShrubCloseout) !== JSON.stringify(defaultTreeShrubCloseout(service)) ||
       Object.keys(findingsValues).length ||
       typedActivityScore != null ||
@@ -9454,19 +9325,6 @@ export function CompletionPanel({
         chipLinesDetached,
         nextVisitNote,
         showNextVisitNote,
-        equipmentSystemId,
-        calibrationId,
-        officeApprovalReasonCode,
-        officeApprovalNote,
-        nLimitApprovalReasonCode,
-        nLimitApprovalNote,
-        managerApprovalReasonCode,
-        managerApprovalNote,
-        tankLastProduct,
-        tankLastProductCategory,
-        tankCleanoutCompleted,
-        tankCleanoutMethod,
-        tankCleanoutNote,
         treeShrubCloseout,
         // Typed specialty findings — must survive the billing-409 checkout
         // detour (the panel closes while the tech collects payment).
@@ -9524,19 +9382,6 @@ export function CompletionPanel({
     chipLinesDetached,
     nextVisitNote,
     showNextVisitNote,
-    equipmentSystemId,
-    calibrationId,
-    officeApprovalReasonCode,
-    officeApprovalNote,
-    nLimitApprovalReasonCode,
-    nLimitApprovalNote,
-    managerApprovalReasonCode,
-    managerApprovalNote,
-    tankLastProduct,
-    tankLastProductCategory,
-    tankCleanoutCompleted,
-    tankCleanoutMethod,
-    tankCleanoutNote,
     treeShrubCloseout,
     findingsValues,
     typedActivityScore,
@@ -9670,19 +9515,6 @@ export function CompletionPanel({
     setChipLinesDetached(savedDraft.chipLinesDetached === true);
     setNextVisitNote(savedDraft.nextVisitNote || "");
     setShowNextVisitNote(!!savedDraft.showNextVisitNote);
-    setEquipmentSystemId(savedDraft.equipmentSystemId || "");
-    setCalibrationId(savedDraft.calibrationId || "");
-    setOfficeApprovalReasonCode(savedDraft.officeApprovalReasonCode || "");
-    setOfficeApprovalNote(savedDraft.officeApprovalNote || "");
-    setNLimitApprovalReasonCode(savedDraft.nLimitApprovalReasonCode || "");
-    setNLimitApprovalNote(savedDraft.nLimitApprovalNote || "");
-    setManagerApprovalReasonCode(savedDraft.managerApprovalReasonCode || "");
-    setManagerApprovalNote(savedDraft.managerApprovalNote || "");
-    setTankLastProduct(savedDraft.tankLastProduct || "");
-    setTankLastProductCategory(savedDraft.tankLastProductCategory || "");
-    setTankCleanoutCompleted(savedDraft.tankCleanoutCompleted || "");
-    setTankCleanoutMethod(savedDraft.tankCleanoutMethod || "");
-    setTankCleanoutNote(savedDraft.tankCleanoutNote || "");
     setTreeShrubCloseout(
       normalizeTreeShrubCloseoutDraft(savedDraft.treeShrubCloseout, service),
     );
@@ -10381,13 +10213,6 @@ export function CompletionPanel({
       prev.includes(area) ? prev.filter((a) => a !== area) : [...prev, area],
     );
   }
-  function handleEquipmentSelect(value) {
-    setEquipmentSystemId(value);
-    const selected = equipmentCalibrations.find(
-      (c) => c.equipment_system_id === value,
-    );
-    setCalibrationId(selected?.id || "");
-  }
   async function handlePhotoSelect(e) {
     const files = Array.from(e.target.files || []);
     if (servicePhotos.length + files.length > 5) {
@@ -10437,41 +10262,6 @@ export function CompletionPanel({
     // silently drop a reading/photo. The flag is session-cached so this rarely waits.
     if (isLawn && !turfHeightFlagReady) {
       alert("Completion options are still loading — please try again in a moment.");
-      return;
-    }
-    if (calibrationAdvisory) {
-      const proceed = window.confirm(
-        `${
-          calibrationHelpText ||
-          "No field-verified calibrated equipment is selected for this WaveGuard lawn visit."
-        }\n\nComplete this visit without field-verified calibrated equipment?`,
-      );
-      if (!proceed) return;
-    }
-    if (tankCleanoutCompletionBlocked) {
-      alert(tankCleanoutHelpText);
-      return;
-    }
-    if (blackoutCompletionBlocked) {
-      alert(
-        canApproveOfficeExceptions
-          ? "Office approval is required before completing this WaveGuard lawn visit during an N/P blackout."
-          : "Admin approval is required before completing this WaveGuard lawn visit during an N/P blackout.",
-      );
-      return;
-    }
-    if (nLimitCompletionBlocked) {
-      alert(
-        "Admin approval is required before completing this WaveGuard lawn visit over the annual N budget.",
-      );
-      return;
-    }
-    if (managerApprovalCompletionBlocked) {
-      alert(
-        canApproveOfficeExceptions
-          ? "Manager approval is required before completing this WaveGuard protocol exception."
-          : "An admin must approve this WaveGuard protocol exception before completion.",
-      );
       return;
     }
     if (treeShrubCompletionBlocked) {
@@ -10756,38 +10546,10 @@ export function CompletionPanel({
         // unreviewed customer-facing copy (Codex P1).
         visitOutcome,
         reviewSuppression: reviewSuppressionReason,
-        equipmentSystemId: equipmentSystemId || null,
-        calibrationId: calibrationId || null,
-        officeApproval:
-          blackoutApprovalRequired && canApproveOfficeExceptions
-            ? {
-                reasonCode: officeApprovalReasonCode,
-                note: officeApprovalNote,
-              }
-            : null,
-        nLimitApproval:
-          nLimitApprovalRequired && canApproveOfficeExceptions
-            ? {
-                reasonCode: nLimitApprovalReasonCode,
-                note: nLimitApprovalNote,
-              }
-            : null,
-        managerApproval:
-          managerApprovalRequired && canApproveOfficeExceptions
-            ? {
-                reasonCode: managerApprovalReasonCode,
-                note: managerApprovalNote,
-              }
-            : null,
-        tankCleanout: tankCleanoutRequired
-          ? {
-              lastProductInTank: tankLastProduct,
-              lastProductCategory: tankLastProductCategory,
-              cleanoutCompleted: tankCleanoutCompleted === "yes",
-              cleanoutMethod: tankCleanoutMethod,
-              note: tankCleanoutNote,
-            }
-          : null,
+        // Equipment/calibration, tank cleanout, and the office/N/manager
+        // approval ceremonies are gone from the closeout (owner directive
+        // 2026-07-29). The server records blackout/N-budget/protocol
+        // conditions as advisories on the completion by itself.
         products: selectedProducts.map((p) => ({
           productId: p.productId,
           rate: p.rate,
@@ -11058,37 +10820,6 @@ export function CompletionPanel({
       .toLowerCase()
       .includes(productSearch.toLowerCase()),
   );
-  const selectedCalibration =
-    equipmentCalibrations.find(
-      (c) => c.equipment_system_id === equipmentSystemId,
-    ) || null;
-  const selectedCalibrationExpired =
-    !!selectedCalibration?.expires_at &&
-    new Date(selectedCalibration.expires_at).getTime() < Date.now();
-  const selectedCalibrationUnverified =
-    !!selectedCalibration &&
-    selectedCalibration.calibration_status !== "field_verified";
-  // WaveGuard calibration is advisory at completion, not a hard gate: when no
-  // field-verified calibrated equipment is on record (or the selected one is
-  // expired/unverified) the tech can still close out — calibrationId is sent as
-  // null — after acknowledging a warning, rather than being trapped on this screen.
-  const calibrationAdvisory =
-    calibrationRequired &&
-    !isIncompleteVisit &&
-    (!equipmentSystemId ||
-      selectedCalibrationExpired ||
-      selectedCalibrationUnverified);
-  const calibrationHelpText =
-    equipmentCalibrationError ||
-    (selectedCalibrationUnverified
-      ? "Selected calibration is not field verified — verify it when you can. You can still complete this visit."
-      : selectedCalibrationExpired
-      ? "Selected calibration is expired — record a new one when you can. You can still complete this visit."
-      : !equipmentSystemId && calibrationRequired
-        ? "No field-verified calibrated equipment on record. You can complete without it; calibration is recorded as none."
-        : calibrationRequired
-          ? "WaveGuard lawn visits should use field-verified calibrated spray equipment when available."
-          : "");
   function isProtocolActionSelected(action) {
     const noteText = action?.note || action?.label || action?.raw || "";
     // After an AI draft the notes are clean prose (no tagged lines), so check
@@ -11947,245 +11678,31 @@ export function CompletionPanel({
                 />
               </Field>
             )}
-            {calibrationRequired && (
-              <Field label="Equipment calibration">
-                {" "}
-                <select
-                  value={equipmentSystemId}
-                  onChange={(e) => handleEquipmentSelect(e.target.value)}
-                  disabled={isIncompleteVisit}
-                  style={mInput}
-                >
-                  {" "}
-                  <option value="">Select calibrated equipment</option>
-                  {equipmentCalibrations.map((c) => (
-                    <option key={c.id} value={c.equipment_system_id}>
-                      {c.system_name || "Equipment"} ·{" "}
-                      {c.carrier_gal_per_1000 || "—"} gal/1K
-                    </option>
-                  ))}
-                </select>{" "}
-                <div
-                  style={{
-                    marginTop: 8,
-                    fontFamily: font,
-                    fontSize: 12,
-                    color:
-                      selectedCalibrationExpired || equipmentCalibrationError
-                        ? M.err
-                        : M.ink3,
-                    lineHeight: 1.35,
-                  }}
-                >
-                  {isIncompleteVisit
-                    ? "Calibration is not required when marking a visit incomplete."
-                    : calibrationHelpText}
-                </div>{" "}
-              </Field>
-            )}
-            {tankCleanoutRequired && (
-              <Field label="Tank cleanout">
-                {" "}
-                <div
-                  style={{
-                    marginBottom: 10,
-                    fontFamily: font,
-                    fontSize: 12,
-                    color: tankCleanoutCompletionBlocked ? M.err : M.ink3,
-                    lineHeight: 1.35,
-                  }}
-                >
-                  {tankCleanoutHelpText}
-                </div>{" "}
-                <input
-                  value={tankLastProduct}
-                  onChange={(e) => setTankLastProduct(e.target.value)}
-                  placeholder="Last product in tank"
-                  style={mInput}
-                />{" "}
-                <select
-                  value={tankLastProductCategory}
-                  onChange={(e) => setTankLastProductCategory(e.target.value)}
-                  style={{ ...mInput, marginTop: 8 }}
-                >
-                  {" "}
-                  <option value="">Prior product type</option>{" "}
-                  <option value="herbicide">Herbicide / weed control</option>{" "}
-                  <option value="insecticide">Insecticide</option>{" "}
-                  <option value="fungicide">Fungicide</option>{" "}
-                  <option value="fertilizer">Fertilizer / nutrient</option>{" "}
-                  <option value="water_only">Water only</option>{" "}
-                  <option value="unknown">Unknown</option>{" "}
-                </select>{" "}
-                <select
-                  value={tankCleanoutCompleted}
-                  onChange={(e) => setTankCleanoutCompleted(e.target.value)}
-                  style={{ ...mInput, marginTop: 8 }}
-                >
-                  {" "}
-                  <option value="">Cleanout completed?</option>{" "}
-                  <option value="yes">Yes</option>{" "}
-                  <option value="no">No</option>{" "}
-                </select>{" "}
-                <select
-                  value={tankCleanoutMethod}
-                  onChange={(e) => setTankCleanoutMethod(e.target.value)}
-                  style={{ ...mInput, marginTop: 8 }}
-                >
-                  {" "}
-                  <option value="">Cleanout method</option>
-                  {TANK_CLEANOUT_METHODS.map((method) => (
-                    <option key={method} value={method}>
-                      {method}
-                    </option>
-                  ))}
-                </select>{" "}
-                <textarea
-                  value={tankCleanoutNote}
-                  onChange={(e) => setTankCleanoutNote(e.target.value)}
-                  rows={2}
-                  placeholder="Cleanout note"
-                  style={{ ...mTextarea, minHeight: 72, marginTop: 8 }}
-                />{" "}
-              </Field>
-            )}
-            {blackoutApprovalRequired && (
-              <Field label="Office approval">
-                {" "}
-                <div
-                  style={{
-                    marginBottom: 10,
-                    fontFamily: font,
-                    fontSize: 12,
-                    color: M.err,
-                    lineHeight: 1.35,
-                  }}
-                >
-                  {blackoutHelpText}{" "}
-                  {!canApproveOfficeExceptions
-                    ? "An admin must approve this exception before completion."
-                    : ""}
-                </div>
-                {canApproveOfficeExceptions && (
-                  <>
-                    {" "}
-                    <select
-                      value={officeApprovalReasonCode}
-                      onChange={(e) =>
-                        setOfficeApprovalReasonCode(e.target.value)
-                      }
-                      style={mInput}
-                    >
-                      {" "}
-                      <option value="">Select approval reason</option>
-                      {OFFICE_APPROVAL_REASONS.map((reason) => (
-                        <option key={reason.value} value={reason.value}>
-                          {reason.label}
-                        </option>
-                      ))}
-                    </select>{" "}
-                    <textarea
-                      value={officeApprovalNote}
-                      onChange={(e) => setOfficeApprovalNote(e.target.value)}
-                      rows={2}
-                      placeholder="Approval note"
-                      style={{ ...mTextarea, minHeight: 72, marginTop: 8 }}
-                    />{" "}
-                  </>
-                )}
-              </Field>
-            )}
-            {nLimitApprovalRequired && (
-              <Field label="Annual N budget">
-                {" "}
-                <div
-                  style={{
-                    marginBottom: 10,
-                    fontFamily: font,
-                    fontSize: 12,
-                    color: M.err,
-                    lineHeight: 1.35,
-                  }}
-                >
-                  {nLimitHelpText} {nLimitSummaryText}{" "}
-                  {!canApproveOfficeExceptions
-                    ? "An admin must approve this exception before completion."
-                    : ""}
-                </div>
-                {canApproveOfficeExceptions && (
-                  <>
-                    {" "}
-                    <select
-                      value={nLimitApprovalReasonCode}
-                      onChange={(e) =>
-                        setNLimitApprovalReasonCode(e.target.value)
-                      }
-                      style={mInput}
-                    >
-                      {" "}
-                      <option value="">Select approval reason</option>
-                      {N_LIMIT_APPROVAL_REASONS.map((reason) => (
-                        <option key={reason.value} value={reason.value}>
-                          {reason.label}
-                        </option>
-                      ))}
-                    </select>{" "}
-                    <textarea
-                      value={nLimitApprovalNote}
-                      onChange={(e) => setNLimitApprovalNote(e.target.value)}
-                      rows={2}
-                      placeholder="Approval note"
-                      style={{ ...mTextarea, minHeight: 72, marginTop: 8 }}
-                    />{" "}
-                  </>
-                )}
-              </Field>
-            )}
-            {managerApprovalRequired && (
-              <Field label="Manager approval">
-                {" "}
-                <div
-                  style={{
-                    marginBottom: 10,
-                    fontFamily: font,
-                    fontSize: 12,
-                    color: M.err,
-                    lineHeight: 1.35,
-                  }}
-                >
-                  {managerApprovalHelpText}{" "}
-                  {!canApproveOfficeExceptions
-                    ? "An admin must approve this exception before completion."
-                    : ""}
-                </div>
-                {canApproveOfficeExceptions && (
-                  <>
-                    {" "}
-                    <select
-                      value={managerApprovalReasonCode}
-                      onChange={(e) =>
-                        setManagerApprovalReasonCode(e.target.value)
-                      }
-                      style={mInput}
-                    >
-                      {" "}
-                      <option value="">Select approval reason</option>
-                      {MANAGER_APPROVAL_REASONS.map((reason) => (
-                        <option key={reason.value} value={reason.value}>
-                          {reason.label}
-                        </option>
-                      ))}
-                    </select>{" "}
-                    <textarea
-                      value={managerApprovalNote}
-                      onChange={(e) => setManagerApprovalNote(e.target.value)}
-                      rows={2}
-                      placeholder="Approval note"
-                      style={{ ...mTextarea, minHeight: 72, marginTop: 8 }}
-                    />{" "}
-                  </>
-                )}
-              </Field>
+            {closeoutAdvisories.length > 0 && (
+              <div
+                style={{
+                  marginBottom: 12,
+                  padding: "10px 12px",
+                  borderRadius: 10,
+                  border: `1px solid ${M.hairline}`,
+                  background: M.card,
+                }}
+              >
+                {closeoutAdvisories.map((text, i) => (
+                  <div
+                    key={i}
+                    style={{
+                      fontFamily: font,
+                      fontSize: 12,
+                      color: M.ink3,
+                      lineHeight: 1.35,
+                      marginTop: i === 0 ? 0 : 6,
+                    }}
+                  >
+                    ⚠️ {text}
+                  </div>
+                ))}
+              </div>
             )}
             {/* Technician notes */}
             <Field label="Visit outcome">
@@ -13554,10 +13071,6 @@ export function CompletionPanel({
               disabled={
                 submitting ||
                 generating ||
-                tankCleanoutCompletionBlocked ||
-                blackoutCompletionBlocked ||
-                nLimitCompletionBlocked ||
-                managerApprovalCompletionBlocked ||
                 treeShrubCompletionBlocked ||
                 protocolActualsCompletionBlocked
               }
@@ -13565,10 +13078,6 @@ export function CompletionPanel({
                 ...primaryPill,
                 opacity:
                   submitting ||
-                  tankCleanoutCompletionBlocked ||
-                  blackoutCompletionBlocked ||
-                  nLimitCompletionBlocked ||
-                  managerApprovalCompletionBlocked ||
                   treeShrubCompletionBlocked ||
                   protocolActualsCompletionBlocked
                     ? 0.5
@@ -14038,291 +13547,29 @@ export function CompletionPanel({
               )}
             </div>
           )}
-          {calibrationRequired && (
-            <div style={{ marginBottom: 20 }}>
-              {" "}
-              <label style={labelStyle}>Equipment Calibration</label>{" "}
-              <select
-                value={equipmentSystemId}
-                onChange={(e) => handleEquipmentSelect(e.target.value)}
-                disabled={isIncompleteVisit}
-                style={inputStyle}
-              >
-                {" "}
-                <option value="">Select calibrated equipment</option>
-                {equipmentCalibrations.map((c) => (
-                  <option key={c.id} value={c.equipment_system_id}>
-                    {c.system_name || "Equipment"} ·{" "}
-                    {c.carrier_gal_per_1000 || "—"} gal/1K
-                  </option>
-                ))}
-              </select>{" "}
-              <div
-                style={{
-                  fontSize: 12,
-                  color:
-                    selectedCalibrationExpired || equipmentCalibrationError
-                      ? D.red
-                      : D.muted,
-                  lineHeight: 1.4,
-                }}
-              >
-                {isIncompleteVisit
-                  ? "Calibration is not required when marking a visit incomplete."
-                  : calibrationHelpText}
-              </div>{" "}
-            </div>
-          )}
-          {tankCleanoutRequired && (
-            <div style={{ marginBottom: 20 }}>
-              {" "}
-              <label style={labelStyle}>Tank Cleanout</label>{" "}
-              <div
-                style={{
-                  fontSize: 12,
-                  color: tankCleanoutCompletionBlocked ? D.red : D.muted,
-                  lineHeight: 1.4,
-                  marginBottom: 8,
-                }}
-              >
-                {tankCleanoutHelpText}
-              </div>{" "}
-              <input
-                value={tankLastProduct}
-                onChange={(e) => setTankLastProduct(e.target.value)}
-                placeholder="Last product in tank"
-                style={inputStyle}
-              />{" "}
-              <select
-                value={tankLastProductCategory}
-                onChange={(e) => setTankLastProductCategory(e.target.value)}
-                style={{ ...inputStyle, marginTop: 8 }}
-              >
-                {" "}
-                <option value="">Prior product type</option>{" "}
-                <option value="herbicide">Herbicide / weed control</option>{" "}
-                <option value="insecticide">Insecticide</option>{" "}
-                <option value="fungicide">Fungicide</option>{" "}
-                <option value="fertilizer">Fertilizer / nutrient</option>{" "}
-                <option value="water_only">Water only</option>{" "}
-                <option value="unknown">Unknown</option>{" "}
-              </select>{" "}
-              <select
-                value={tankCleanoutCompleted}
-                onChange={(e) => setTankCleanoutCompleted(e.target.value)}
-                style={{ ...inputStyle, marginTop: 8 }}
-              >
-                {" "}
-                <option value="">Cleanout completed?</option>{" "}
-                <option value="yes">Yes</option>{" "}
-                <option value="no">No</option>{" "}
-              </select>{" "}
-              <select
-                value={tankCleanoutMethod}
-                onChange={(e) => setTankCleanoutMethod(e.target.value)}
-                style={{ ...inputStyle, marginTop: 8 }}
-              >
-                {" "}
-                <option value="">Cleanout method</option>
-                {TANK_CLEANOUT_METHODS.map((method) => (
-                  <option key={method} value={method}>
-                    {method}
-                  </option>
-                ))}
-              </select>{" "}
-              <textarea
-                value={tankCleanoutNote}
-                onChange={(e) => setTankCleanoutNote(e.target.value)}
-                rows={2}
-                placeholder="Cleanout note"
-                style={{
-                  width: "100%",
-                  background: D.input,
-                  color: D.text,
-                  border: `1px solid ${D.border}`,
-                  borderRadius: 10,
-                  padding: 12,
-                  fontSize: 14,
-                  resize: "vertical",
-                  fontFamily: "'Nunito Sans', sans-serif",
-                  boxSizing: "border-box",
-                  marginTop: 8,
-                }}
-              />{" "}
-            </div>
-          )}
-          {blackoutApprovalRequired && (
-            <div style={{ marginBottom: 20 }}>
-              {" "}
-              <label style={labelStyle}>Office Approval</label>{" "}
-              <div
-                style={{
-                  fontSize: 12,
-                  color: D.red,
-                  lineHeight: 1.4,
-                  marginBottom: 8,
-                }}
-              >
-                {blackoutHelpText}{" "}
-                {!canApproveOfficeExceptions
-                  ? "An admin must approve this exception before completion."
-                  : ""}
-              </div>
-              {canApproveOfficeExceptions && (
-                <>
-                  {" "}
-                  <select
-                    value={officeApprovalReasonCode}
-                    onChange={(e) =>
-                      setOfficeApprovalReasonCode(e.target.value)
-                    }
-                    style={inputStyle}
-                  >
-                    {" "}
-                    <option value="">Select approval reason</option>
-                    {OFFICE_APPROVAL_REASONS.map((reason) => (
-                      <option key={reason.value} value={reason.value}>
-                        {reason.label}
-                      </option>
-                    ))}
-                  </select>{" "}
-                  <textarea
-                    value={officeApprovalNote}
-                    onChange={(e) => setOfficeApprovalNote(e.target.value)}
-                    rows={2}
-                    placeholder="Approval note"
-                    style={{
-                      width: "100%",
-                      background: D.input,
-                      color: D.text,
-                      border: `1px solid ${D.border}`,
-                      borderRadius: 10,
-                      padding: 12,
-                      fontSize: 14,
-                      resize: "vertical",
-                      fontFamily: "'Nunito Sans', sans-serif",
-                      boxSizing: "border-box",
-                      marginTop: 8,
-                    }}
-                  />{" "}
-                </>
-              )}
-            </div>
-          )}
-          {nLimitApprovalRequired && (
-            <div style={{ marginBottom: 20 }}>
-              {" "}
-              <label style={labelStyle}>Annual N Budget</label>{" "}
-              <div
-                style={{
-                  fontSize: 12,
-                  color: D.red,
-                  lineHeight: 1.4,
-                  marginBottom: 8,
-                }}
-              >
-                {nLimitHelpText} {nLimitSummaryText}{" "}
-                {!canApproveOfficeExceptions
-                  ? "An admin must approve this exception before completion."
-                  : ""}
-              </div>
-              {canApproveOfficeExceptions && (
-                <>
-                  {" "}
-                  <select
-                    value={nLimitApprovalReasonCode}
-                    onChange={(e) =>
-                      setNLimitApprovalReasonCode(e.target.value)
-                    }
-                    style={inputStyle}
-                  >
-                    {" "}
-                    <option value="">Select approval reason</option>
-                    {N_LIMIT_APPROVAL_REASONS.map((reason) => (
-                      <option key={reason.value} value={reason.value}>
-                        {reason.label}
-                      </option>
-                    ))}
-                  </select>{" "}
-                  <textarea
-                    value={nLimitApprovalNote}
-                    onChange={(e) => setNLimitApprovalNote(e.target.value)}
-                    rows={2}
-                    placeholder="Approval note"
-                    style={{
-                      width: "100%",
-                      background: D.input,
-                      color: D.text,
-                      border: `1px solid ${D.border}`,
-                      borderRadius: 10,
-                      padding: 12,
-                      fontSize: 14,
-                      resize: "vertical",
-                      fontFamily: "'Nunito Sans', sans-serif",
-                      boxSizing: "border-box",
-                      marginTop: 8,
-                    }}
-                  />{" "}
-                </>
-              )}
-            </div>
-          )}
-          {managerApprovalRequired && (
-            <div style={{ marginBottom: 20 }}>
-              {" "}
-              <label style={labelStyle}>Manager Approval</label>{" "}
-              <div
-                style={{
-                  fontSize: 12,
-                  color: D.red,
-                  lineHeight: 1.4,
-                  marginBottom: 8,
-                }}
-              >
-                {managerApprovalHelpText}{" "}
-                {!canApproveOfficeExceptions
-                  ? "An admin must approve this exception before completion."
-                  : ""}
-              </div>
-              {canApproveOfficeExceptions && (
-                <>
-                  {" "}
-                  <select
-                    value={managerApprovalReasonCode}
-                    onChange={(e) =>
-                      setManagerApprovalReasonCode(e.target.value)
-                    }
-                    style={inputStyle}
-                  >
-                    {" "}
-                    <option value="">Select approval reason</option>
-                    {MANAGER_APPROVAL_REASONS.map((reason) => (
-                      <option key={reason.value} value={reason.value}>
-                        {reason.label}
-                      </option>
-                    ))}
-                  </select>{" "}
-                  <textarea
-                    value={managerApprovalNote}
-                    onChange={(e) => setManagerApprovalNote(e.target.value)}
-                    rows={2}
-                    placeholder="Approval note"
-                    style={{
-                      width: "100%",
-                      background: D.input,
-                      color: D.text,
-                      border: `1px solid ${D.border}`,
-                      borderRadius: 10,
-                      padding: 12,
-                      fontSize: 14,
-                      resize: "vertical",
-                      fontFamily: "'Nunito Sans', sans-serif",
-                      boxSizing: "border-box",
-                      marginTop: 8,
-                    }}
-                  />{" "}
-                </>
-              )}
+          {closeoutAdvisories.length > 0 && (
+            <div
+              style={{
+                marginBottom: 20,
+                padding: "10px 12px",
+                borderRadius: 8,
+                border: `1px solid ${D.border}`,
+                background: D.bg,
+              }}
+            >
+              {closeoutAdvisories.map((text, i) => (
+                <div
+                  key={i}
+                  style={{
+                    fontSize: 12,
+                    color: D.muted,
+                    lineHeight: 1.4,
+                    marginTop: i === 0 ? 0 : 6,
+                  }}
+                >
+                  ⚠️ {text}
+                </div>
+              ))}
             </div>
           )}
           {/* Visit Outcome */}
@@ -15570,10 +14817,6 @@ export function CompletionPanel({
             disabled={
               submitting ||
               generating ||
-              tankCleanoutCompletionBlocked ||
-              blackoutCompletionBlocked ||
-              nLimitCompletionBlocked ||
-              managerApprovalCompletionBlocked ||
               treeShrubCompletionBlocked ||
               protocolActualsCompletionBlocked
             }
@@ -15586,10 +14829,6 @@ export function CompletionPanel({
               height: 52,
               opacity:
                 submitting ||
-                tankCleanoutCompletionBlocked ||
-                blackoutCompletionBlocked ||
-                nLimitCompletionBlocked ||
-                managerApprovalCompletionBlocked ||
                 treeShrubCompletionBlocked ||
                 protocolActualsCompletionBlocked
                   ? 0.6

@@ -3797,19 +3797,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         ...blackoutLockoutBlocks(plan),
         ...await actualProductBlackoutBlocks(svc, products),
       ];
-      if (blackoutBlocks.length && (!normalizedOfficeApproval || req.techRole !== 'admin')) {
-        const validationErr = new Error('WaveGuard fertilizer blackout lockout');
-        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, validationErr);
-        return res.status(400).json({
-          error: 'Office approval required for fertilizer blackout',
-          code: 'waveguard_fertilizer_blackout_lockout',
-          details: blackoutBlocks.map((block) => block.message),
-          blocks: blackoutBlocks,
-        });
-      }
+      // Advisory, not a lockout (owner directive 2026-07-29: approval
+      // ceremonies removed from the closeout — the condition is still
+      // recorded on the completion for the audit trail, with whatever
+      // approval detail the client chose to send).
       if (blackoutBlocks.length) {
         waveguardBlackoutApproval = {
-          ...normalizedOfficeApproval,
+          ...(normalizedOfficeApproval || { advisory: true }),
           approvedByTechnicianId: req.technicianId,
           approvedByRole: req.techRole || null,
           approvedAt: new Date().toISOString(),
@@ -3821,20 +3815,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         };
       }
       const annualNBlocks = annualNLockoutBlocks(plan);
-      if (annualNBlocks.length && (!normalizedNLimitApproval || req.techRole !== 'admin')) {
-        const validationErr = new Error('WaveGuard annual N budget lockout');
-        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, validationErr);
-        return res.status(400).json({
-          error: 'Admin approval required for annual N budget limit',
-          code: 'waveguard_annual_n_budget_lockout',
-          details: annualNBlocks.map((block) => block.message),
-          blocks: annualNBlocks,
-          annualN: plan?.propertyGate?.annualN || null,
-        });
-      }
+      // Advisory, not a lockout (same owner directive as the blackout gate).
       if (annualNBlocks.length) {
         waveguardNLimitApproval = {
-          ...normalizedNLimitApproval,
+          ...(normalizedNLimitApproval || { advisory: true }),
           approvedByTechnicianId: req.technicianId,
           approvedByRole: req.techRole || null,
           approvedAt: new Date().toISOString(),
@@ -3867,18 +3851,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         serviceDate: serviceDateOnly(svc.scheduled_date),
       });
       const managerBlocks = managerApprovalCheck.blocks || [];
-      if (managerBlocks.length && (!normalizedManagerApproval || req.techRole !== 'admin')) {
-        const validationErr = new Error('WaveGuard manager approval lockout');
-        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, validationErr);
-        return res.status(400).json({
-          error: 'Admin approval required for WaveGuard protocol exception',
-          code: 'waveguard_manager_approval_lockout',
-          details: managerBlocks.map((block) => block.message),
-          blocks: managerBlocks,
-        });
-      }
+      // Advisory, not a lockout (same owner directive as the blackout gate).
       if (managerBlocks.length) {
-        waveguardManagerApproval = managerApprovalSummary(normalizedManagerApproval, managerBlocks, {
+        waveguardManagerApproval = managerApprovalSummary(normalizedManagerApproval || { reasonCode: null, advisory: true }, managerBlocks, {
           technicianId: req.technicianId,
           role: req.techRole || null,
         });
@@ -3908,27 +3883,20 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         waveguardCalibrationId = null;
         waveguardCalibrationCleared = true;
       }
-      // Tank cleanout attestation is required whenever we will actually persist an
-      // equipment system as used — i.e. waveguardEquipmentSystemId survived to here
-      // and the calibration was not cleared to "none". Keying off the ID we persist
-      // (rather than the raw request field) closes the gap where a backfilled, valid
-      // field-verified assignment is recorded as used by an older client / direct API
-      // with no cleanout. The earlier empty-dropdown / stale-assignment trap does not
-      // recur: those calibrations are non-field-verified, so the clear above already
-      // nulled the ID and this block is skipped.
+      // Tank cleanout is recorded whenever an equipment system is persisted as
+      // used — i.e. waveguardEquipmentSystemId survived to here and the
+      // calibration was not cleared to "none". Keyed off the ID we persist
+      // (rather than the raw request field) so a backfilled field-verified
+      // assignment still gets a cleanout record attached.
       if (waveguardEquipmentSystemId && !waveguardCalibrationCleared) {
+        // Advisory, not a lockout (owner directive 2026-07-29: the
+        // equipment/cleanout step is gone from the closeout UI). A missing
+        // cleanout record is noted on the completion instead of blocking it.
         const cleanoutBlocks = tankCleanoutLockoutBlocks(normalizedTankCleanout);
-        if (cleanoutBlocks.length) {
-          const validationErr = new Error('WaveGuard tank cleanout lockout');
-          await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, validationErr);
-          return res.status(400).json({
-            error: 'Tank cleanout record required',
-            code: 'waveguard_tank_cleanout_lockout',
-            details: cleanoutBlocks.map((block) => block.message),
-            blocks: cleanoutBlocks,
-          });
-        }
         waveguardTankCleanout = {
+          ...(cleanoutBlocks.length
+            ? { advisory: true, missing: cleanoutBlocks.map((block) => block.message) }
+            : {}),
           ...normalizedTankCleanout,
           equipmentSystemId: waveguardEquipmentSystemId || null,
           calibrationId: waveguardCalibrationId || null,
