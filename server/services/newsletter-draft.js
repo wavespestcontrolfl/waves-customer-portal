@@ -124,30 +124,29 @@ NEVER WRITE: ${voice.bannedCorporatePhrases.map(p => `"${p}"`).join(', ')}
 GIF CAPTIONS (gifCaption + introGifCaption) are their own genre: ${voice.gifCaptionRules?.maxWords || 12} words MAX, never a description of the image or the event — always a punchline. Proven shapes:
 ${(voice.gifCaptionRules?.shapes || []).map((s) => `- ${s}`).join('\n')}
 
+FORMAT (owner spec 2026-07-28 — compact, restrained, under 900 words total):
+- ONE hero (the first event provided is the hero unless a different one is clearly the week's anchor) + compact standard picks. No table of contents, no GIFs, no "Mood:" captions, no pro tips, no scoop labels, no checklists, no P.S. jokes.
+- The OFFICIAL event name leads every card (the renderer prints it from the database) — your hook follows it. Never invent a replacement headline.
+- Better events need less hype: state what is genuinely special, plainly, with at most a light touch of the voice above. If the copy is working hard to manufacture excitement, the pick was wrong.
+
 EVENT RULES:
 - Use ONLY the approved event records provided. Do NOT invent events.
-- For every event you include, copy its [eventId: ...] UUID into the "eventId" field exactly. The renderer uses this to re-pull date, time, venue, address, and ticket URL straight from the database — anything you write for those fields will be IGNORED.
-- Do NOT mention specific dollar amounts, "free admission", "no cost", "complimentary", or any ticket-price phrasing in your commentary. We never store admission in the DB, so any pricing claim you make is unverifiable and will hard-block the send.
-- Do NOT make pest-control safety or efficacy claims ("pet-safe", "child-safe", "guaranteed", "100% effective", "EPA-approved") — this is an events newsletter, not a service pitch.
-- title: a CURIOSITY-GAP headline that never uses the raw event name (it renders elsewhere). Proven formulas: question + affirmation ("...? Yes, Please" / "...? Say Less" / "...? Count Us In"), PSA framing ("PSA: You Might Meet Your New Best Friend This Weekend"), direct address ("This One's for You"), equation ("High Hair + Hot Dice = Ultimate Weekend").
-- Each event gets a unique thematic emoji (no repeats between events).
-- gifSearchTerm: 2-4 word Giphy search for a pop-culture REACTION meme (the joke), not a literal event photo. Every gifSearchTerm in the issue (including introGifTerm) must be clearly DISTINCT from the others — different verbs, moods, and meme genres, never near-synonyms of another section's term — so no two sections pull similar GIFs.
-- description: 2-4 sentences, conversational, says WHY someone would actually go. Work the event's official name (exactly as given in the record) into the prose once — the renderer turns it into the ticket link. Do NOT restate the date, venue, or URL — those render automatically.
-- scoopLabel: the lead-in for the highlights list. Rotate across events, never repeat in one issue: "Here's the scoop:", "Here's the deal:", "Here's what's going down:", "What to expect:", "Here's the rundown:", "Why it's a vibe:", "Why it's a weekend winner:", "Here's what you're walking into:".
-- highlights: 3-5 short bullets, PLAIN TEXT — no emojis, no leading bullet characters (the renderer adds the "•" marker). Vibe-only; no logistics, no prices.
-- proTip: insider tip (optional — only if genuinely useful, e.g. parking, arrive-early, what to bring). Do NOT include the words "Pro tip" — the renderer adds the label. NOT pricing or ticket logistics.
-- closingLine: punchy one-line kicker to wrap the event — bold the punch ("This is **Bradenton's Fourth of July mic drop.**").
-- linkText: short anchor text for the ticket link, rotated across events: "More info here", "Get tickets", "Grab your spot", "Full lineup", "Save your seat", "All the details".
+- For every event you include, copy its [eventId: ...] UUID into the "eventId" field exactly. The renderer re-pulls the official name, date, time, venue, address, labels, and ticket URL straight from the database — anything you write for those fields is IGNORED.
+- Do NOT mention specific dollar amounts, "free admission", "no cost", "complimentary", or any ticket-price phrasing. We never render model pricing; verified price/free labels come from the database.
+- Do NOT make pest-control safety or efficacy claims ("pet-safe", "child-safe", "guaranteed", "100% effective", "EPA-approved").
+- heroHook: 60-90 words on the ONE event most worth planning around — why it's rare, who it's for, what you'd tell a friend. No logistics (date/venue/price render from the DB).
+- heroWhy: ONE plain sentence: why this event made the cut (its specialness evidence — inaugural, touring, opening weekend, one-night-only).
+- hook (standard picks): 30-45 words. What it is and why it's worth the drive/plan. No logistics, no restated names — the official name renders directly above your hook.
 
-INTRO: greeting "Hey there!" energy — NEVER include a name or name placeholder; the renderer appends the subscriber's first name automatically. introText 2-4 sentences with a "Whether you're into X, Y, or Z" triad and a FOMO close. introGifCaption: cold-open punchline for the intro GIF (same caption genre).
+INTRO: 2-3 sentences, ~60 words max. State what is unusually good THIS week — specific, no generic hype, no "calendar chose chaos" filler unless the week genuinely earns it. NEVER include a name or name placeholder; the renderer appends the subscriber's first name automatically.
 
-HOMEOWNER MINUTE: One useful seasonal tip (pest, lawn, plants, home prep). Max ~90 words. Genuinely useful, not salesy — the brand sell in this newsletter is ZERO; this tip is the only Waves-adjacent content and it must stand on its own. Voice it like the themed issues: **bold the facts**, _italicize the jokes_, anthropomorphize the pest/plant when it lands ("that mosquito keeping you up at night? Probably a mom-to-be"), urgency biological/seasonal, never commercial. May end with a "Hot tip:" one-liner.
+COMMUNITY NOTES: If (and only if) community-notice records are provided, write ONE line each (max 2) — plain, informative, no jokes: what, when, where, the one thing to know. These are services to readers, not entertainment features.
 
-CLOSING: closingText = 1-2 short paragraphs that CALL BACK to this issue's actual events in an absurd triad ("Whether you end up juggling pineapples, dancing to swamp funk, or sobbing quietly to Schubert — we fully support your weekend choices."). closingChecklist: 3-4 short ✔️-style reminders mixing practical + absurd ("Hydrate like it's your job", "Don't underestimate the power of a funnel cake"). Do NOT include the ✔️ itself in the items — the renderer adds it.
+HOMEOWNER MINUTE: One useful seasonal tip (pest, lawn, plants, home prep). 75-100 words. Genuinely useful, not salesy — the brand sell is ZERO. **Bold the facts**, _italicize the jokes_, urgency biological/seasonal, never commercial.
+
+CLOSING: ONE short paragraph (2-3 sentences) wrapping the week — may reference this issue's actual events. No checklist, no P.S.
 
 SIGN-OFF: "${voice.signoff}"
-
-P.S. JOKE: "If you loved this, forward it to a friend who [hyper-specific persona — e.g. 'owns both a tutu *and* a folding lawn chair']. If you didn't... [reverse-blame punchline — e.g. 'blame the clown']." End with thematic emoji. Reference this issue's actual events. Do NOT write the "P.S." label itself — the renderer adds it.
 
 Return STRICT JSON (no HTML, no prose outside the JSON):
 {
@@ -155,32 +154,22 @@ Return STRICT JSON (no HTML, no prose outside the JSON):
   "selectedSubject": "string",
   "previewText": "string, 40-110 chars (punchline, not summary)",
   "greeting": "string (e.g. 'Hey there!')",
-  "introText": "string (2-4 sentences setting the week's vibe, use **bold** and _italic_ densely)",
-  "introGifTerm": "string (Giphy search for mood-setting intro GIF)",
-  "introGifCaption": "string (cold-open punchline, caption genre)",
-  "transitionLine": "string (bold rallying one-liner before events, e.g. 'Let's get into it 👇')",
+  "introText": "string (2-3 sentences, ~60 words)",
+  "hero": {
+    "eventId": "string (REQUIRED — the [eventId: ...] UUID of the hero event)",
+    "heroHook": "string (60-90 words)",
+    "heroWhy": "string (one sentence: why it made the cut)"
+  },
   "events": [
     {
-      "eventId": "string (REQUIRED — copy the [eventId: ...] UUID from the approved event verbatim)",
-      "emoji": "string (single thematic emoji)",
-      "title": "string (curiosity-gap headline, never the raw event name)",
-      "gifSearchTerm": "string (2-4 word Giphy search, pop-culture reaction meme)",
-      "gifCaption": "string (caption-genre punchline, max 12 words)",
-      "description": "string (2-4 sentences, includes the event's official name once verbatim — vibe only, no logistics)",
-      "scoopLabel": "string (rotating lead-in for highlights)",
-      "highlights": ["string (plain text, no emoji, no bullet marker)"] or null,
-      "proTip": "string or null (no 'Pro tip' prefix)",
-      "linkText": "string (rotating ticket-link anchor text)",
-      "closingLine": "string (bold punchy kicker)"
+      "eventId": "string (REQUIRED — copy the [eventId: ...] UUID verbatim; do NOT repeat the hero)",
+      "hook": "string (30-45 words)"
     }
   ],
-  "homeownerMinute": "string (the tip text, plain — no HTML)",
-  "closingEmoji": "string",
-  "closingHeading": "string (recap title, e.g. 'That's the scoop, crew')",
-  "closingText": "string (callback triad wrapping the week)",
-  "closingChecklist": ["string (3-4 short reminders, practical + absurd)"] or null,
-  "signoff": "string",
-  "ps": "string or null (no 'P.S.' prefix — the renderer adds the label)"
+  "communityNotes": ["string (one line each, max 2)"] or null,
+  "homeownerMinute": "string (75-100 words, plain — no HTML)",
+  "closingText": "string (one short paragraph)",
+  "signoff": "string"
 }`;
 }
 
@@ -851,7 +840,7 @@ function stripCommentaryUrls(value) {
 
 function sanitizeCommentaryFields(ev) {
   const out = { ...ev };
-  for (const k of ['title', 'description', 'proTip', 'closingLine', 'gifCaption', 'scoopLabel', 'linkText']) {
+  for (const k of ['title', 'description', 'proTip', 'closingLine', 'gifCaption', 'scoopLabel', 'linkText', 'hook', 'heroWhy']) {
     if (typeof out[k] === 'string') out[k] = stripCommentaryUrls(out[k]);
   }
   if (Array.isArray(out.highlights)) {
@@ -947,10 +936,52 @@ function lockEventFactsFromDb(aiEvents, dbEvents) {
       // admission deliberately omitted — events_raw does not store it,
       // so any value the model produced was unverifiable.
       admission: null,
+      // Deterministic audience labels for the compact format — derived
+      // from DB assessment fields, never model prose.
+      labels: deriveEventLabels(row),
     });
   });
 
   return { locked, dropped };
+}
+
+/**
+ * Audience label chips for the compact card format (owner spec
+ * 2026-07-28): Family / Parents' night / Free / Worth the drive.
+ * Derived ONLY from DB fields so a hallucinated label can't render.
+ */
+function deriveEventLabels(row) {
+  let eventTags = row.audience_tags;
+  if (typeof eventTags === 'string') { try { eventTags = JSON.parse(eventTags); } catch { eventTags = []; } }
+  const tagSet = new Set((Array.isArray(eventTags) ? eventTags : []).map((t) => String(t).toLowerCase()));
+  let breakdown = row.score_breakdown;
+  if (typeof breakdown === 'string') { try { breakdown = JSON.parse(breakdown); } catch { breakdown = {}; } }
+
+  const labels = [];
+  if (row.family_friendly === true || tagSet.has('family') || breakdown?.family_status === 'confirmed') {
+    labels.push('Family');
+  }
+  if (tagSet.has('parents_night') || breakdown?.family_status === 'adults_lean') {
+    labels.push("Parents' night");
+  }
+  // The customer-facing Free chip is STRICTER than the portfolio's
+  // free-ish coverage classifier: an unqualified "Free" claim renders
+  // only when the row is unambiguously all-free — the is_free flag, the
+  // curated tag, or price text that says free / $0 WITHOUT any nonzero
+  // dollar tier ("Kids $0, adults $25" gets no chip).
+  const priceText = String(row.price_text || '');
+  // Any nonzero dollar amount — integer OR fractional ("$0.50") — is a
+  // paid tier that disqualifies the unqualified Free chip.
+  const hasPaidTier = /\$\s*(?:\d*[1-9]\d*(?:\.\d+)?|\d+\.\d*[1-9]\d*)/.test(priceText);
+  const unambiguouslyFree = /\bfree\b/i.test(priceText) || /^\s*\$?\s*0+(?:\.0+)?\s*$/.test(priceText);
+  // Explicit paid pricing SUPPRESSES the chip even when a stale is_free
+  // flag or curated tag survives a later price correction — the corrected
+  // price text is the freshest signal.
+  if (!hasPaidTier && (row.is_free === true || tagSet.has('free') || unambiguouslyFree)) {
+    labels.push('Free');
+  }
+  if (tagSet.has('worth_the_drive')) labels.push('Worth the drive');
+  return labels;
 }
 
 // 🕐..🕧 — pick the clock face matching the event's ET start time, snapping
@@ -1043,6 +1074,117 @@ function markdownToHtml(text) {
     .replace(/_\*\*([^*]+)\*\*_/g, '<em><strong>$1</strong></em>')
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
     .replace(/_([^_]+)_/g, '<em>$1</em>');
+}
+
+/**
+ * Compact flagship assembler (owner spec 2026-07-28): one hero + compact
+ * standard cards, Community Notes, Homeowner Minute, short close. No TOC,
+ * no GIFs, no scoop labels, no P.S. Official event names lead every card
+ * and every fact line is DB-locked (lockEventFactsFromDb). Target: whole
+ * body under ~900 words.
+ */
+async function assembleWavesNewsletter(draft) {
+  const parts = [];
+  const events = draft.events || [];
+  const hero = events.find((ev) => ev.isHero) || events[0] || null;
+  const standard = events.filter((ev) => ev !== hero);
+
+  const metaLine = (ev) => {
+    const bits = [];
+    if (ev.dateStr) {
+      bits.push(`📅 <strong>${escapeHtml(ev.dateStr)}${ev.timeStr ? `, ${escapeHtml(ev.timeStr)}` : ''}</strong>`);
+    }
+    if (ev.location) {
+      // Include the separately-locked street address when the venue line
+      // doesn't already carry it — readers get directions without the link.
+      const loc = ev.address ? `${ev.location} (${ev.address})` : ev.location;
+      bits.push(`📍 ${escapeHtml(loc)}`);
+    }
+    const labels = Array.isArray(ev.labels) ? ev.labels : [];
+    if (labels.length) bits.push(`<strong>${labels.map(escapeHtml).join(' · ')}</strong>`);
+    // Ordinary spaces around the separator — the derived plain-text body
+    // strips tags but does not decode &nbsp;, so nonbreaking entities
+    // would reach text-only clients literally.
+    return bits.join(' · ');
+  };
+
+  const detailsLink = (ev, text = 'Details') => {
+    const url = safeUrl(ev.eventUrl);
+    if (!url) return '';
+    return `<a href="${url}" style="color:${COLORS.blue};text-decoration:underline;font-weight:600;">${escapeHtml(text)} →</a>`;
+  };
+
+  // ── Greeting + intro ──
+  if (draft.greeting) {
+    parts.push(`<p style="margin:0 0 8px 0;font-size:22px;line-height:1.4;">👋 <strong><em>${markdownToHtml(greetingWithNameToken(draft.greeting))}</em></strong></p>`);
+  }
+  if (draft.introText) {
+    parts.push(`<p style="margin:0 0 20px 0;font-size:15px;line-height:1.6;">${markdownToHtml(draft.introText)}</p>`);
+  }
+
+  // ── Hero ──
+  if (hero) {
+    const heroParts = [];
+    heroParts.push(`<p style="margin:0 0 4px 0;font-size:13px;text-transform:uppercase;letter-spacing:0.05em;color:${COLORS.muted};font-weight:600;">This week's top pick</p>`);
+    const heroImg = safeUrl(hero.imageUrl);
+    if (heroImg) {
+      heroParts.push(`<div style="margin:0 0 10px 0;"><img src="${heroImg}" alt="${escapeHtml(hero.sourceTitle || '')}" style="max-width:100%;height:auto;border-radius:10px;display:block;" /></div>`);
+    }
+    heroParts.push(`<h2 style="margin:0 0 6px 0;font-size:20px;line-height:1.35;">${escapeHtml(hero.sourceTitle || '')}</h2>`);
+    const heroMeta = metaLine(hero);
+    if (heroMeta) heroParts.push(`<p style="margin:0 0 8px 0;font-size:13px;color:${COLORS.muted};">${heroMeta}</p>`);
+    if (hero.hook) heroParts.push(`<p style="margin:0 0 8px 0;font-size:15px;line-height:1.6;">${markdownToHtml(hero.hook)}</p>`);
+    if (hero.heroWhy) heroParts.push(`<p style="margin:0 0 8px 0;font-size:14px;line-height:1.5;"><strong>Why it made the cut:</strong> ${markdownToHtml(hero.heroWhy)}</p>`);
+    const heroCta = detailsLink(hero, 'Details & tickets');
+    if (heroCta) heroParts.push(`<p style="margin:0;font-size:14px;">${heroCta}</p>`);
+    parts.push(`<div style="margin:0 0 24px 0;padding:18px 20px;background:${COLORS.cardBg};border-radius:10px;">\n${heroParts.join('\n')}\n</div>`);
+  }
+
+  // ── Standard picks ──
+  for (const ev of standard) {
+    const card = [];
+    card.push(`<h2 style="margin:0 0 6px 0;font-size:17px;line-height:1.35;">${escapeHtml(ev.sourceTitle || '')}</h2>`);
+    const meta = metaLine(ev);
+    if (meta) card.push(`<p style="margin:0 0 6px 0;font-size:13px;color:${COLORS.muted};">${meta}</p>`);
+    // The DB-locked details link renders regardless of model prose — a
+    // partially valid response must never ship a card with no way in.
+    const link = detailsLink(ev);
+    if (ev.hook) {
+      card.push(`<p style="margin:0 0 6px 0;font-size:15px;line-height:1.6;">${markdownToHtml(ev.hook)}${link ? ` ${link}` : ''}</p>`);
+    } else if (link) {
+      card.push(`<p style="margin:0 0 6px 0;font-size:14px;">${link}</p>`);
+    }
+    parts.push(`<div style="margin:0 0 20px 0;">\n${card.join('\n')}\n</div>`);
+  }
+
+  // ── Community Notes ──
+  const notes = (Array.isArray(draft.communityNotes) ? draft.communityNotes : [])
+    .filter((n) => typeof n === 'string' && n.trim())
+    .slice(0, 2);
+  if (notes.length) {
+    const noteLines = notes.map((n) => `<p style="margin:0 0 4px 0;font-size:14px;line-height:1.5;">• ${markdownToHtml(n)}</p>`);
+    parts.push(`<div style="margin:0 0 24px 0;padding:14px 18px;background:#FFF8EC;border-radius:10px;">
+<p style="margin:0 0 6px 0;font-size:13px;text-transform:uppercase;letter-spacing:0.05em;color:${COLORS.muted};font-weight:600;">Community notes</p>
+${noteLines.join('\n')}
+</div>`);
+  }
+
+  // ── Homeowner Minute ──
+  if (draft.homeownerMinute) {
+    parts.push(`<div id="homeowner-minute" style="margin:0 0 24px 0;">
+<h2 style="margin:0 0 6px 0;font-size:17px;">🏠 Homeowner Minute</h2>
+<p style="margin:0 0 8px 0;font-size:15px;line-height:1.6;">${markdownToHtml(draft.homeownerMinute)} <a href="https://www.wavespestcontrol.com/" style="color:${COLORS.blue};font-weight:600;">Schedule a visit at wavespestcontrol.com</a>.</p>
+</div>`);
+  }
+
+  // ── Close + sign-off + reaction footer ──
+  if (draft.closingText) {
+    parts.push(`<p style="margin:0 0 8px 0;font-size:15px;line-height:1.6;">${markdownToHtml(draft.closingText)}</p>`);
+  }
+  parts.push(`<p style="margin:0 0 16px 0;font-size:15px;">${escapeHtml(draft.signoff || '— The Waves Team')}</p>`);
+  parts.push(FEEDBACK_HTML_TOKEN);
+
+  return parts.join('\n\n');
 }
 
 async function assembleBeehiivNewsletter(draft) {
@@ -1323,6 +1465,8 @@ async function createNewsletterDraft({
           'e.image_url', 'e.categories', 'e.is_free', 'e.admin_status',
           'e.event_type', 'e.recurrence_type', 'e.freshness_status',
           'e.times_featured', 'e.last_featured_at', 'e.pulled_at',
+          'e.price_text', 'e.family_friendly', 'e.audience_tags',
+          'e.novelty_type', 'e.region_zone', 'e.score_breakdown',
           's.name as source_name',
         )
         .whereIn('e.id', safeIds)
@@ -1343,6 +1487,16 @@ async function createNewsletterDraft({
       approvedEvents = dedupeDigestEvents(
         historicallyNewRows.filter((event) => isEligibleForFreshDigest(event, editorialReference)),
       );
+
+      // Present events in the CALLER's order — the portfolio selector /
+      // operator ranked them (hero first), and the compact prompt makes
+      // the first event the default hero. The freshness-score DB order
+      // would silently promote an arbitrary fresh event instead.
+      const callerRank = new Map(safeIds.map((id, i) => [String(id).toLowerCase(), i]));
+      approvedEvents = [...approvedEvents].sort((a, b) => (
+        (callerRank.get(String(a.id).toLowerCase()) ?? 999)
+        - (callerRank.get(String(b.id).toLowerCase()) ?? 999)
+      ));
 
       eventBlock = formatEventBlock(approvedEvents);
     }
@@ -1385,6 +1539,24 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
   //     copied from each [eventId: ...] tag in the prompt. Events the
   //     model failed to anchor to a real eventId are dropped here so they
   //     never reach the rendered HTML.
+  // Compact-format normalization: fold the hero into the events array
+  // (hero first, deduped) so the shared factual lock anchors it too.
+  if (!isPestInsider && draft.hero && draft.hero.eventId) {
+    const heroId = String(draft.hero.eventId).toLowerCase();
+    const rest = (Array.isArray(draft.events) ? draft.events : [])
+      .filter((e) => String(e?.eventId || '').toLowerCase() !== heroId);
+    draft.events = [
+      { eventId: draft.hero.eventId, hook: draft.hero.heroHook, heroWhy: draft.hero.heroWhy, isHero: true },
+      ...rest,
+    ];
+    delete draft.hero;
+  }
+  // Community Notes have NO factual-lock pipeline yet — no notice records
+  // are fetched or supplied to the model, so anything it wrote here is
+  // invented. Force the section empty until a real sourcing pipeline
+  // exists (operator-curated notice records, locked by id like events).
+  if (!isPestInsider) draft.communityNotes = null;
+
   if (!isPestInsider && Array.isArray(draft.events) && draft.events.length > 0) {
     if (approvedEvents.length === 0) {
       // No DB pool to anchor against — every event is unverifiable.
@@ -1407,6 +1579,14 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
         `but none matched the approved eventIds. Refusing to render an empty newsletter.`
       );
     }
+    // Flagship drafts must carry a SUCCESSFULLY LOCKED hero with its hero
+    // fields — a dropped/invalid hero would otherwise silently promote a
+    // standard card (short hook, no why-line) into the top-pick box.
+    if (typeConfig?.flagship && !locked.some((ev) => ev.isHero && ev.hook && ev.heroWhy)) {
+      throw new Error(
+        'Flagship draft has no locked hero (missing, invalid eventId, or dropped by the factual lock) — refusing to render.'
+      );
+    }
     draft.events = locked;
   }
 
@@ -1416,15 +1596,21 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
   //      model authors outside the events array.
   sanitizeProseFields(draft);
 
-  // 4b. Generate hero image (runs in parallel with nothing — fire and await)
-  if ((draft.events?.length || isPestInsider) && !draft.heroImageUrl) {
+  // 4b. Generate hero image (non-flagship lanes only — the compact
+  //     flagship format uses the hero EVENT's own image, not a generated
+  //     collage, per the 2026-07-28 spec; this also ends that image spend).
+  if ((draft.events?.length || isPestInsider) && !draft.heroImageUrl && !typeConfig?.flagship) {
     draft.heroImageUrl = await generateHeroImage(draft.selectedSubject || draft.subjectVariants?.[0] || 'Waves Newsletter');
   }
 
-  // 4c. Assemble Beehiiv-quality HTML from structured data + Giphy GIFs
+  // 4c. Assemble HTML from structured data. Flagship uses the compact
+  //     2026-07-28 format; other event-carrying types keep the legacy
+  //     Beehiiv-style assembler.
   if (isPestInsider) {
     sanitizePestInsiderDraft(draft);
     draft.htmlBody = await assemblePestInsiderNewsletter(draft);
+  } else if (draft.events?.length && typeConfig?.flagship) {
+    draft.htmlBody = await assembleWavesNewsletter(draft);
   } else if (draft.events?.length) {
     draft.htmlBody = await assembleBeehiivNewsletter(draft);
   } else if (typeConfig?.flagship) {
@@ -1540,6 +1726,8 @@ module.exports = {
   markdownToHtml,
   sanitizeProseFields,
   assembleBeehiivNewsletter,
+  assembleWavesNewsletter,
+  deriveEventLabels,
   // Exported for unit testing the Beehiiv-parity render devices
   clockEmojiFor,
   // GIF dedupe (one issue never repeats a GIF)

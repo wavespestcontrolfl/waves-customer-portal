@@ -28,6 +28,96 @@ const { validateFlagshipEventSelection, parseLockedEventIds } = require('./newsl
 const { reverifyEvents } = require('./event-reverify');
 
 /**
+ * Internal diagnostics panel rendered ABOVE the recipient preview in the
+ * proof email (owner spec 2026-07-28): lineup scores and coverage, pool
+ * stats, alternates, and the top rejected candidates with reasons — so a
+ * sip-and-shop beating a convention is visible at approval time.
+ * Best-effort: any failure returns '' and never blocks the proof.
+ */
+async function buildProofDiagnosticsHtml(send, lineupEvents, scheduledFor) {
+  try {
+    const { effectiveScore, unmetConstraints, isWeekend } = require('./newsletter-portfolio');
+    const { heroScoreFloor, featureScoreFloor } = require('./event-scoring');
+    const { getActiveNewsletterTuesday } = require('./event-freshness');
+    const { parseETDateTime, addETDays, etDateString } = require('../utils/datetime-et');
+
+    const ids = (lineupEvents || []).map((e) => String(e.id));
+    if (!ids.length) return '';
+    const rows = await db('events_raw')
+      .whereIn('id', ids)
+      .select('id', 'title', 'editorial_score', 'score_breakdown', 'novelty_type',
+        'audience_tags', 'region_zone', 'city', 'family_friendly', 'is_free',
+        'price_text', 'start_at', 'venue_name', 'admin_status', 'event_url');
+    const byId = new Map(rows.map((r) => [String(r.id), r]));
+    const ordered = ids.map((id) => byId.get(id)).filter(Boolean);
+
+    const issueTuesday = getActiveNewsletterTuesday(scheduledFor || new Date());
+    const windowStart = parseETDateTime(`${issueTuesday}T00:00:00`);
+    const windowEnd = parseETDateTime(`${etDateString(addETDays(windowStart, 6))}T23:59:59`);
+    // The REAL eligible pool — same pipeline the autopilot plans from
+    // (routine/repeated/featured-history/eligibility filters applied), so
+    // the approver never sees an inflated count of usable alternatives.
+    // Lazy require: autopilot requires this module lazily, so no cycle.
+    const { buildDigestPlan } = require('./newsletter-autopilot');
+    const plan = await buildDigestPlan({ reference: scheduledFor || new Date() });
+    const pool = plan.scored || [];
+    const qualifiedPool = pool.filter((r) => effectiveScore(r) >= featureScoreFloor()).length;
+
+    const rejected = await db('events_raw')
+      .where({ admin_status: 'pending' })
+      .whereNotNull('curated_at')
+      .whereNull('merged_into')
+      .where('start_at', '>=', windowStart)
+      .where('start_at', '<=', windowEnd)
+      .orderByRaw('editorial_score DESC NULLS LAST')
+      .limit(5)
+      .select('title', 'editorial_score', 'curation_note');
+
+    let alternates = [];
+    try {
+      const altIds = parseLockedEventIds(send?.alternate_event_ids)
+        .filter((id) => !ids.includes(String(id)));
+      if (altIds.length) {
+        const altRows = await db('events_raw').whereIn('id', altIds).select('id', 'title', 'editorial_score');
+        // whereIn does not preserve input order — rebuild in the stored
+        // RANKED order (the panel presents these as ranked).
+        const altById = new Map(altRows.map((r) => [String(r.id), r]));
+        alternates = altIds.map((id) => altById.get(String(id))).filter(Boolean);
+      }
+    } catch { /* omit alternates */ }
+
+    const scores = ordered.map((r) => effectiveScore(r));
+    const unmet = unmetConstraints(ordered).map((c) => c.label);
+    const zones = [...new Set(ordered.map((r) => (r.region_zone || r.city || '')).filter(Boolean))];
+    const weekendCount = ordered.filter((r) => isWeekend(r)).length;
+    const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+    const lineupRows = ordered.map((r) => {
+      const score = effectiveScore(r);
+      const tier = r.admin_status === 'featured' ? 'STAR' : (score >= heroScoreFloor() ? 'hero' : 'feature');
+      return `<tr><td style="padding:2px 8px 2px 0;">${esc(r.title)}</td><td style="padding:2px 8px;">${score}</td><td style="padding:2px 8px;">${tier}</td><td style="padding:2px 8px;">${esc(r.region_zone || r.city || '—')}</td><td style="padding:2px 0;">${esc(r.novelty_type || '—')}</td></tr>`;
+    }).join('');
+    const rejectedRows = rejected.map((r) => `<li>${esc(r.title)} — ${r.editorial_score ?? 'unscored'}${r.curation_note ? ` (${esc(r.curation_note)})` : ''}</li>`).join('');
+    const altLine = alternates.length
+      ? alternates.map((a) => `${esc(a.title)} (${a.editorial_score ?? '—'})`).join(' · ')
+      : 'none stored';
+
+    return `<div style="margin:0 0 20px 0;padding:14px 16px;background:#EEF3F8;border:1px solid #C9D6E2;border-radius:8px;font-family:monospace;font-size:12px;line-height:1.6;color:#26364A;">
+<div style="font-weight:700;margin-bottom:6px;">INTERNAL DIAGNOSTICS — not sent to subscribers</div>
+<div style="margin-bottom:6px;">Scores shown are the STORED rubric scores; the lineup order already reflects any listwise nudge (±3, in-memory at selection time).</div>
+Selected: ${ordered.length} &nbsp;·&nbsp; Qualified pool (≥${featureScoreFloor()}): ${qualifiedPool} of ${pool.length} approved &nbsp;·&nbsp; Weekend events: ${weekendCount} &nbsp;·&nbsp; Zones: ${zones.length} (${esc(zones.join(', ') || '—')})<br/>
+Lowest selected: ${scores.length ? Math.min(...scores) : '—'} &nbsp;·&nbsp; Top: ${scores.length ? Math.max(...scores) : '—'} &nbsp;·&nbsp; Unmet: ${unmet.length ? esc(unmet.join('; ')) : 'none'}<br/>
+Alternates: ${altLine}
+<table style="margin-top:8px;border-collapse:collapse;">${lineupRows}</table>
+${rejectedRows ? `<div style="margin-top:8px;font-weight:700;">Top rejected/pending in window:</div><ul style="margin:2px 0 0 16px;padding:0;">${rejectedRows}</ul>` : ''}
+</div>`;
+  } catch (err) {
+    logger.warn(`[newsletter-proof] diagnostics build failed (omitting): ${err.message}`);
+    return '';
+  }
+}
+
+/**
  * Named replacements for a dead locked event: the ranked alternates the
  * autopilot stored on the send row (newsletter_sends.alternate_event_ids).
  * Best-effort — a lookup failure just omits the suggestion line.
@@ -376,9 +466,16 @@ async function sendNewsletterProof(sendId) {
   if (!claimed) return { skipped: true, reason: 'proof_claimed_elsewhere' };
 
   try {
+    // Internal diagnostics render between the proof banner and the
+    // recipient preview — proof email ONLY, never the list send.
+    const diagnosticsHtml = await buildProofDiagnosticsHtml(
+      send,
+      eventSelection.events,
+      calendarContext.scheduledFor,
+    );
     const { html, text } = await renderSendPreview({
       ...send,
-      html_body: proofBannerHtml(recipientCount) + (send.html_body || ''),
+      html_body: proofBannerHtml(recipientCount) + diagnosticsHtml + (send.html_body || ''),
       text_body: send.text_body ? proofBannerText(recipientCount) + send.text_body : send.text_body,
     }, to);
 

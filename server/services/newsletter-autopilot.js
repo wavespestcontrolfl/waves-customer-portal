@@ -46,6 +46,99 @@ const { getFlagshipType } = require('../config/newsletter-types');
 
 const NEWSLETTER_TYPE = 'local-weekly-fresh-events';
 
+// ── Listwise comparative re-rank (owner spec 2026-07-28, Stage 4) ────
+// Deep enough that the admission cutoff sits far below where a ±3 nudge
+// could influence an 8-slot portfolio — no sampling, no parity, no
+// permanently or temporarily shadowed boundary positions.
+const LISTWISE_POOL = 24;
+
+function listwiseRerankEnabled() {
+  return process.env.NEWSLETTER_LISTWISE_RERANK !== 'false';
+}
+
+/** Parse {ranking:[ids]} — unknown/duplicate ids dropped (fail-closed). */
+function parseListwiseRanking(text, candidateIds) {
+  const jsonMatch = String(text || '').match(/\{[\s\S]*\}/);
+  if (!jsonMatch) return [];
+  let parsed;
+  try { parsed = JSON.parse(jsonMatch[0]); } catch { return []; }
+  const known = new Set(candidateIds.map(String));
+  const seen = new Set();
+  const ranking = [];
+  for (const id of (Array.isArray(parsed.ranking) ? parsed.ranking : [])) {
+    const s = String(id);
+    if (!known.has(s) || seen.has(s)) continue;
+    seen.add(s);
+    ranking.push(s);
+  }
+  return ranking;
+}
+
+/**
+ * Deterministic nudges from the model's comparative ranking: each ranked
+ * event moves by clamp(round((scoreRank − listRank)/2), −3, +3) points,
+ * never below the feature floor and never above 100. Stars and unscored
+ * rows are untouched — the re-rank only REORDERS the qualified pool.
+ */
+function applyListwiseNudges(scored, ranking) {
+  const floor = featureScoreFloor();
+  const listPos = new Map(ranking.map((id, i) => [String(id), i]));
+  const subset = scored.filter((ev) => listPos.has(String(ev.id)));
+  const byScore = [...subset].sort((a, b) => (Number(b.editorial_score) || 0) - (Number(a.editorial_score) || 0));
+  const scoreRank = new Map(byScore.map((ev, i) => [String(ev.id), i]));
+  return scored.map((ev) => {
+    const pos = listPos.get(String(ev.id));
+    if (pos === undefined) return ev;
+    const s = Number(ev.editorial_score);
+    if (!Number.isFinite(s) || s < floor || ev.admin_status === 'featured') return ev;
+    // Symmetric away-from-zero rounding — Math.round(-0.5) is -0, so a
+    // simple round promotes without demoting on adjacent swaps.
+    const delta = (scoreRank.get(String(ev.id)) - pos) / 2;
+    const nudge = Math.max(-3, Math.min(3, Math.sign(delta) * Math.round(Math.abs(delta))));
+    if (!nudge) return ev;
+    return { ...ev, editorial_score: Math.max(floor, Math.min(100, s + nudge)), listwiseNudge: nudge };
+  });
+}
+
+async function applyListwiseRerank(scored) {
+  if (!listwiseRerankEnabled()) return scored;
+  const floor = featureScoreFloor();
+  // Boundary-banded pool: the score being CORRECTED must not solely
+  // control admission to the corrective pass — an understated event just
+  // past a pure top-18 line could never earn a positive nudge. Take the
+  // top 12 by score, then sample every other candidate from the DOUBLE-
+  // WIDTH boundary band (positions 12–23), so events as deep as ~23rd
+  // still reach the comparison. Deterministic — no RNG in the cron path.
+  const byScoreDesc = scored
+    .filter((ev) => Number.isFinite(Number(ev.editorial_score)) && Number(ev.editorial_score) >= floor)
+    .sort((a, b) => Number(b.editorial_score) - Number(a.editorial_score));
+  const pool = byScoreDesc.slice(0, LISTWISE_POOL);
+  if (pool.length < 4) return scored;
+  try {
+    // Cross-provider per repo policy: generated structured output goes
+    // through a named TEXT_POLICIES entry + the shared dispatcher, so an
+    // Anthropic outage fails over to OpenAI instead of silently skipping
+    // the re-rank (and only then fails open).
+    const MODELS = require('../config/models');
+    const { dispatchWithFallback } = require('./llm/call');
+    const lines = pool.map((ev) => `- id: ${ev.id}\n  title: ${ev.title}\n  score: ${ev.editorial_score}\n  desc: ${(ev.description || '').replace(/\s+/g, ' ').slice(0, 180)}`);
+    const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.contentDraft, {
+      maxTokens: 1200,
+      jsonMode: true,
+      system: 'You are a precise, demanding local-events editor. You output strict JSON and nothing else.',
+      text: `Rank ALL of these candidate events from the one local readers would be MOST disappointed to learn about only after it happened, down to the least. Judge reader disappointment — rarity, draw, one-time-ness — not category variety. Return STRICT JSON only: {"ranking": ["<id>", ...]} using every id exactly once.\n\n${lines.join('\n')}`,
+    });
+    const text = response?.json ? JSON.stringify(response.json) : (response?.text || '');
+    const ranking = parseListwiseRanking(text, pool.map((ev) => ev.id));
+    // A mostly-missing ranking is noise, not signal.
+    if (ranking.length < Math.ceil(pool.length / 2)) return scored;
+    return applyListwiseNudges(scored, ranking);
+  } catch (err) {
+    logger.warn(`[newsletter-autopilot] listwise re-rank failed (fail-open): ${err.message}`);
+    return scored;
+  }
+}
+
 // Lineup cap — diversity/coverage stats are measured over the events that
 // would actually appear (top-N by score), matching the draft selection.
 const LINEUP_CAP = 12;
@@ -258,7 +351,13 @@ async function autoDraftFlagship() {
 
   // 4. Build digest plan
   const plan = await buildDigestPlan();
-  const { scored } = plan;
+  const { scored: rawScored } = plan;
+  // Listwise comparative re-rank (owner spec Stage 4): one bounded model
+  // pass over the floor-passing pool asking which events readers would be
+  // most disappointed to miss — counters per-event score inflation.
+  // Nudges are computed in code (±3, never below the floor, stars
+  // untouched); kill = NEWSLETTER_LISTWISE_RERANK=false; fail-open.
+  const scored = await applyListwiseRerank(rawScored);
 
   // 5. Resolve the lineup the draft will actually use — calendar-curated
   //    event_ids (intersected with the eligible pool) take precedence over
@@ -692,4 +791,13 @@ async function autoDraftFlagship() {
   return { skipped: false, sendId: send.id, eventCount: actualLineup.length };
 }
 
-module.exports = { autoDraftFlagship, buildDigestPlan, preflightDigest, formatPreflightReport };
+module.exports = {
+  autoDraftFlagship,
+  buildDigestPlan,
+  preflightDigest,
+  formatPreflightReport,
+  // Exported for unit tests — pure listwise re-rank pieces.
+  parseListwiseRanking,
+  applyListwiseNudges,
+  listwiseRerankEnabled,
+};

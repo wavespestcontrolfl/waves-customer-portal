@@ -1193,9 +1193,23 @@ router.post('/draft-ai', aiDraftLimiter, async (req, res) => {
         // flagship draft stays DB-locked instead of inviting the model to
         // invent events.
         const plan = await buildDigestPlan({ reference: editorialReference || new Date() });
-        const { scored } = plan;
         editorialReference = editorialReference || plan.startDate;
-        resolvedEventIds = scored.slice(0, 12).map((ev) => ev.id);
+        // Portfolio-select the auto-sourced pool (floor, caps, coverage,
+        // hero-first ordering) — the raw plan is freshness-ordered, and the
+        // compact prompt treats the FIRST id as the hero, so passing it
+        // unranked would promote an arbitrary fresh event.
+        const { selectPortfolio } = require('../services/newsletter-portfolio');
+        const portfolio = selectPortfolio(plan.scored);
+        if (!portfolio.selected.length) {
+          // No candidate clears the editorial floor — falling back to the
+          // raw freshness order would draft exactly the sub-floor lineup
+          // the rubric exists to prevent. Fail actionably instead.
+          return res.status(400).json({
+            error: 'No approved events clear the editorial floor for this issue week',
+            detail: 'Approve or star floor-passing events in the Event Inbox, or pick events explicitly, then draft again.',
+          });
+        }
+        resolvedEventIds = portfolio.selected.map((ev) => ev.id);
       }
 
       if (resolvedEventIds.length === 0) {
