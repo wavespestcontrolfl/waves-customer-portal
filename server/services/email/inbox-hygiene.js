@@ -124,15 +124,10 @@ async function sweepQuarantine(now = new Date()) {
       const labels = await gmailClient.getMessageLabels(row.gmail_id);
       if (labels.includes('TRASH')) {
         const n = await db('emails').where({ id: row.id, auto_action: 'spam_trashing' })
-          .update({ auto_action: 'spam_trashed_after_quarantine', updated_at: new Date() });
+          .update({ auto_action: 'spam_trashed_block_pending', updated_at: new Date() });
         if (n) {
           trashed += n;
-          try {
-            const { blockSpamSender } = require('./spam-blocker');
-            await blockSpamSender(row);
-          } catch (blockErr) {
-            logger.warn(`[inbox-hygiene] recovered-row sender block failed (email ${row.id}): ${blockErr.message}`);
-          }
+          await settleDeferredBlock(row);
         }
       } else {
         await db('emails').where({ id: row.id, auto_action: 'spam_trashing' })
@@ -141,6 +136,16 @@ async function sweepQuarantine(now = new Date()) {
     } catch (e) {
       logger.warn(`[inbox-hygiene] stuck-claim recovery failed (email ${row.id}): ${e.message}`);
     }
+  }
+
+  // Retry sender blocks that failed after a successful trash on a prior
+  // sweep — 'spam_trashed_block_pending' is the retryable state.
+  const blockPending = await db('emails')
+    .where('auto_action', 'spam_trashed_block_pending')
+    .where('updated_at', '<', claimGraceCutoff)
+    .select('id', 'gmail_id', 'from_address');
+  for (const row of blockPending) {
+    await settleDeferredBlock(row);
   }
 
   const rows = await db('emails')
@@ -166,18 +171,14 @@ async function sweepQuarantine(now = new Date()) {
       if (!claimed) continue;
       try {
         await gmailClient.trashMessage(row.gmail_id);
+        // Settle to a BLOCK-PENDING state first; only a successful sender
+        // block completes the workflow. A transient block failure stays
+        // retryable (recovered below on the next sweep) instead of being
+        // silently marked done.
         trashed += await db('emails')
           .where({ id: row.id, auto_action: 'spam_trashing' })
-          .update({ auto_action: 'spam_trashed_after_quarantine', updated_at: new Date() });
-        // The persistent sender block lands only NOW — after the undo window
-        // elapsed with no operator veto. Blocking at quarantine time would
-        // keep trash-routing a sender whose message the operator restored.
-        try {
-          const { blockSpamSender } = require('./spam-blocker');
-          await blockSpamSender(row);
-        } catch (blockErr) {
-          logger.warn(`[inbox-hygiene] deferred sender block failed (email ${row.id}): ${blockErr.message}`);
-        }
+          .update({ auto_action: 'spam_trashed_block_pending', updated_at: new Date() });
+        await settleDeferredBlock(row);
       } catch (trashErr) {
         // AMBIGUOUS: the trash may have committed before the error surfaced.
         // Keep the 'spam_trashing' claim — reverting would let the next
@@ -192,6 +193,22 @@ async function sweepQuarantine(now = new Date()) {
   }
   if (trashed || restored) logger.info(`[inbox-hygiene] quarantine sweep: ${trashed} trashed, ${restored} operator-restored`);
   return { trashed, restored };
+}
+
+/**
+ * Complete a trashed row's deferred sender block: only a successful block
+ * settles the workflow; failure keeps 'spam_trashed_block_pending' for the
+ * next sweep's retry pass.
+ */
+async function settleDeferredBlock(row) {
+  try {
+    const { blockSpamSender } = require('./spam-blocker');
+    await blockSpamSender(row);
+    await db('emails').where({ id: row.id, auto_action: 'spam_trashed_block_pending' })
+      .update({ auto_action: 'spam_trashed_after_quarantine', updated_at: new Date() });
+  } catch (blockErr) {
+    logger.warn(`[inbox-hygiene] deferred sender block failed (email ${row.id}) — retrying next sweep: ${blockErr.message}`);
+  }
 }
 
 /**

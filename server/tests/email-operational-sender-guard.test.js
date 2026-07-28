@@ -13,9 +13,14 @@ const { autoUnsubscribe } = require('../services/email/auto-unsubscribe');
 const { isOperationalDomain, domainFromAddress } = require('../services/email/spam-blocker');
 
 describe('email shouldSkipAutoAction — operational-sender guard', () => {
-  test('an operational-LOOKING sender without aligned auth does NOT skip (spoof falls through to quarantine)', () => {
-    expect(shouldSkipAutoAction('spam', 'billing@stripe.com')).toBe(false);
+  test('an inbound operational-LOOKING sender with FAILED auth does NOT skip (spoof falls through to quarantine)', () => {
+    expect(shouldSkipAutoAction('spam', 'billing@stripe.com', 'mx.google.com; spf=fail smtp.mailfrom=attacker.example; dkim=none')).toBe(false);
     expect(shouldSkipAutoAction('spam', 'contact@wavespestcontrol.com', 'mx.google.com; spf=fail smtp.mailfrom=attacker.example')).toBe(false);
+  });
+
+  test('mail with NO trusted auth header (own DRAFT/SENT, legacy rows) keeps the unconditional skip', () => {
+    expect(shouldSkipAutoAction('spam', 'contact@wavespestcontrol.com')).toBe(true);
+    expect(shouldSkipAutoAction('marketing_newsletter', 'newsletter@wavespestcontrol.com', null)).toBe(true);
   });
 
   test('skips spam and marketing_newsletter actions for Waves senders', () => {

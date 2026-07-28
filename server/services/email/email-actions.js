@@ -18,10 +18,16 @@ const DESTRUCTIVE_CATEGORIES = new Set(['spam', 'marketing_newsletter']);
 function shouldSkipAutoAction(category, fromAddress, authResults) {
   if (!DESTRUCTIVE_CATEGORIES.has(category)) return false;
   if (!isOperationalDomain(domainFromAddress(fromAddress))) return false;
-  // The operational skip only applies when the mail actually AUTHENTICATED
-  // as the operational domain it claims — otherwise a spoofed "stripe.com"
-  // spam would be skipped untouched. Unauthenticated look-alikes fall
-  // through to the handlers, where spam quarantines them as probable spoofs.
+  // Gmail stamps EVERY inbound SMTP message with a trusted
+  // Authentication-Results header, so:
+  //   - header present → this is inbound; the skip only applies when it
+  //     ALIGNS (a spoofed "stripe.com" with spf=fail falls through to
+  //     quarantine as the spoof it is);
+  //   - header absent → not inbound SMTP: Waves-authored DRAFT/SENT mail,
+  //     API-inserted mail, or a legacy pre-capture row. Those keep the
+  //     unconditional operational skip — a misclassification must never
+  //     archive/quarantine our own outbox.
+  if (authResults == null) return true;
   const { hasAlignedAuth } = require('./inbox-hygiene');
   return hasAlignedAuth(authResults, domainFromAddress(fromAddress));
 }
