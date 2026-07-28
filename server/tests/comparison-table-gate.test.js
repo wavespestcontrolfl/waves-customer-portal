@@ -181,6 +181,15 @@ describe('comparison-table-gate', () => {
     const named = 'See [TruGreen\'s plan page](https://www.trugreen.com/plans) for details.';
     const r3 = gate.evaluate({ body: `# Guide\n\n${named}\n\n${CATEGORY_TABLE}\n\nClosing prose.` }, { namedCompetitorEnabled: true });
     expect(r3.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_IN_PROSE')).toBe(true);
+    // URL masking is bounded: punctuation glued to the URL must not extend
+    // the mask over adjacent prose (Codex r3 P1 — this failed OPEN before).
+    for (const glued of [
+      'Per https://www.trugreen.com/plans,TruGreen offers annual plans.',
+      'Per https://www.trugreen.com/plans;TruGreen offers annual plans.',
+    ]) {
+      const r4 = gate.evaluate({ body: `# Guide\n\n${glued}\n\n${CATEGORY_TABLE}\n\nClosing prose.` }, { namedCompetitorEnabled: true });
+      expect(r4.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_IN_PROSE')).toBe(true);
+    }
   });
 
   test('title-cased English phrases containing brand-like words stay clean (Codex round-5 P2)', () => {

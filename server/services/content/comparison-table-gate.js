@@ -1582,7 +1582,13 @@ function evaluateProse(draft, body, { operatorBriefText = '' } = {}) {
 // competitor and block operator-required citations. Length-preserving so
 // name-scan indices keep aligning with the original text.
 function stripLinkDestinationsForNames(s) {
-  return String(s).replace(/https?:\/\/[^\s)"'<>\]]+/gi, (u) => ' '.repeat(u.length));
+  // The class stops at whitespace, markdown/HTML delimiters, AND the prose
+  // punctuation that can sit flush against a URL (, ; | { } `) — otherwise
+  // "https://…/plans,TruGreen offers" would mask the brand name and the
+  // gate would fail OPEN. A comma/semicolon inside a real URL truncates the
+  // mask early, which errs fail-CLOSED (the visible tail can only ADD a
+  // prose mention and route to review, never hide one).
+  return String(s).replace(/https?:\/\/[^\s)"'<>\],;`|{}]+/gi, (u) => ' '.repeat(u.length));
 }
 
 // Escape a detected business name for use inside a regex, tolerating the
