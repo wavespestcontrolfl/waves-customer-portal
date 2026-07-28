@@ -1339,16 +1339,18 @@ async function assembleBeehiivNewsletter(draft) {
 
     // Real event thumbnail — in addition to the GIF, never instead of it.
     // GIF-shaped urls reject (the contract is still event art; safeUrl
-    // validates scheme only). Two-axis cap without upscaling for standards
-    // clients; Outlook's Word engine ignores max-* so the MSO branch gets
-    // a fixed width (height scales proportionally).
+    // validates scheme only). Standards clients get a two-axis cap with
+    // no upscaling. Outlook's Word engine gets NO thumbnail: it ignores
+    // max-*, and attrs force an exact box — a single width attr lets
+    // portrait art grow unboundedly tall, a single height attr lets wide
+    // art overflow the card, and both together distort. Outlook readers
+    // keep the GIF and the full card content.
     const thumbUrl = safeUrl(ev.imageUrl);
     if (thumbUrl && !isLikelyGifUrl(thumbUrl)) {
       const thumbAlt = escapeHtml(ev.title || '');
-      parts.push(`<div style="text-align:center;margin:0 0 14px 0;">
-<!--[if !mso]><!--><img src="${thumbUrl}" alt="${thumbAlt}" style="max-width:100%;max-height:220px;width:auto;height:auto;border-radius:10px;display:block;margin:0 auto;" /><!--<![endif]-->
-<!--[if mso]><img src="${thumbUrl}" alt="${thumbAlt}" width="280" /><![endif]-->
-</div>`);
+      parts.push(`<!--[if !mso]><!--><div style="text-align:center;margin:0 0 14px 0;">
+<img src="${thumbUrl}" alt="${thumbAlt}" style="max-width:100%;max-height:220px;width:auto;height:auto;border-radius:10px;display:block;margin:0 auto;" />
+</div><!--<![endif]-->`);
     }
 
     // Metadata block. date/location/address are DB-locked but originate from

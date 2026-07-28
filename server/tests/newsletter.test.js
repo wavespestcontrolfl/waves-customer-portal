@@ -1622,7 +1622,10 @@ describe('newsletter assembly — Beehiiv-parity event rendering', () => {
     }
     const jpg = await assembleBeehiivNewsletter({ selectedSubject: 'Test', events: [{ ...baseEvent }] });
     expect(jpg).toMatch(/<img src="https:\/\/cdn\.example\.com\/fin\.jpg"[^>]*max-height:220px/);
-    expect(jpg).toMatch(/\[if mso\]><img src="https:\/\/cdn\.example\.com\/fin\.jpg"[^>]*width="280"/);
+    // The whole thumbnail block is standards-clients-only: Outlook's Word
+    // engine cannot aspect-fit a bounded box, so no MSO-visible variant.
+    expect(jpg).toMatch(/<!--\[if !mso\]><!--><div[^>]*>\s*<img src="https:\/\/cdn\.example\.com\/fin\.jpg"/);
+    expect(jpg).not.toMatch(/\[if mso\]><img src="https:\/\/cdn\.example\.com\/fin\.jpg"/);
   });
 
   test('closing checklist renders ✔️ items and the sign-off defaults to the Team form', async () => {
