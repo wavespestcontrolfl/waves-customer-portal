@@ -38,7 +38,7 @@ const { dispatchWithFallback } = require('../services/llm/call');
 
 const CHAIN_METHODS = [
   'where', 'orWhere', 'whereRaw', 'orWhereRaw', 'whereNot', 'whereNotIn',
-  'whereIn', 'whereNull', 'whereNotNull', 'whereILike', 'andWhereILike',
+  'whereIn', 'whereNull', 'whereNotNull', 'orWhereNotIn', 'orWhereNull', 'whereILike', 'andWhereILike',
   'whereBetween', 'whereNotExists', 'orderBy', 'limit',
 ];
 
@@ -63,7 +63,7 @@ function setupDb(firstResults = {}, selectResults = {}, updateResults = {}) {
     const filters = [];
     for (const method of CHAIN_METHODS) {
       builder[method] = jest.fn((...args) => {
-        if (typeof args[0] === 'function') args[0].call(builder);
+        if (typeof args[0] === 'function') args[0].call(builder, builder);
         else filters.push({ method, args });
         return builder;
       });

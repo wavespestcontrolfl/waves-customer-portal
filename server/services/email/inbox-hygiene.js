@@ -35,6 +35,8 @@ const QUARANTINE_HOURS = 24;
 const NUDGE_AFTER_DAYS = 3;
 const NUDGE_WINDOW_DAYS = 10;
 const NUDGE_CATEGORIES = ['customer_request', 'scheduling', 'complaint', 'lead_inquiry'];
+// Mirrors email-actions / spam-blocker (CLOSED_STATUSES in leads-tools).
+const TERMINAL_LEAD_STATUSES = ['won', 'lost', 'disqualified', 'duplicate', 'unresponsive'];
 
 /** True when we know this sender: customer, live lead, vendor, or partner. */
 async function isKnownSender(fromAddress) {
@@ -43,7 +45,13 @@ async function isKnownSender(fromAddress) {
   if (isOperationalDomain(domainFromAddress(normalized))) return { known: true, kind: 'operational' };
   const customer = await db('customers').where('email', normalized).whereNull('deleted_at').first();
   if (customer) return { known: true, kind: 'customer', customer };
-  const lead = await db('leads').where('email', normalized).whereNull('deleted_at').first();
+  // OPEN leads only — a lost/disqualified/duplicate lead's address must not
+  // keep a spam exemption (or a spam-folder rescue) after the lead closes.
+  const lead = await db('leads')
+    .where('email', normalized)
+    .whereNull('deleted_at')
+    .where((q) => q.whereNull('status').orWhereNotIn('status', TERMINAL_LEAD_STATUSES))
+    .first();
   if (lead) return { known: true, kind: 'lead', lead };
   const domain = domainFromAddress(normalized);
   if (domain) {
@@ -314,6 +322,10 @@ async function collectUnansweredNudges(now = new Date(), limit = 5) {
   // Thread grouping happens IN SQL (latest inbound row per thread) BEFORE
   // any cap — a chatty thread or a pile of answered rows can never consume
   // the candidate window and hide other unanswered customers.
+  // The latest-inbound-per-thread pick runs over the WHOLE lookback window;
+  // the nudge age bound applies AFTER, to that latest row — otherwise a
+  // thread whose customer wrote again yesterday would be represented by an
+  // older message and nudged prematurely.
   const res = await db.raw(
     `SELECT * FROM (
        SELECT DISTINCT ON (gmail_thread_id)
@@ -321,9 +333,10 @@ async function collectUnansweredNudges(now = new Date(), limit = 5) {
        FROM emails
        WHERE classification = ANY(?)
          AND is_archived = false
-         AND received_at BETWEEN ? AND ?
+         AND received_at >= ?
        ORDER BY gmail_thread_id, received_at DESC
      ) latest_per_thread
+     WHERE received_at <= ?
      ORDER BY received_at ASC
      LIMIT 40`,
     [NUDGE_CATEGORIES, oldest, newest]

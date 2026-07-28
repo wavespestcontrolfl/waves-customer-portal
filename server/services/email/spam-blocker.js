@@ -79,6 +79,11 @@ const OPERATIONAL_EMAIL_DOMAINS = new Set([
   'rdmarina.com',
 ]);
 
+// Mirrors inbox-hygiene / email-actions (which mirror CLOSED_STATUSES in
+// intelligence-bar/leads-tools.js). Local copy — inbox-hygiene requires this
+// module, so importing from it would be circular.
+const TERMINAL_LEAD_STATUSES = ['won', 'lost', 'disqualified', 'duplicate', 'unresponsive'];
+
 function normalizeAddress(value) {
   return value ? String(value).trim().toLowerCase() : '';
 }
@@ -133,10 +138,12 @@ async function blockSpamSender(email) {
   if (isCustomer) return;
 
   // Don't block live leads either — a prospect whose first email tripped
-  // the classifier must stay reachable while the lead is open.
+  // the classifier must stay reachable while the lead is OPEN. Closed leads
+  // (lost/disqualified/duplicate/unresponsive) get no exemption.
   const isLead = await db('leads')
     .where('email', fromAddress)
     .whereNull('deleted_at')
+    .where((q) => q.whereNull('status').orWhereNotIn('status', TERMINAL_LEAD_STATUSES))
     .first();
   if (isLead) return;
 
