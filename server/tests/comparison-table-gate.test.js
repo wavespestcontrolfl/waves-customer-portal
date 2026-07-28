@@ -140,12 +140,30 @@ describe('comparison-table-gate', () => {
     // Unambiguous brand tokens only. English-word brands ("Lawn Doctor",
     // "Bug Out") are deliberately NOT signals in any casing — see the
     // competitor-facts comment; they false-block title-cased headings.
-    for (const brand of ['TruGreen', 'Mosquito Joe', 'Greenix']) {
+    // (TruGreen was promoted from signal-only to a full curated COMPETITORS
+    // record 2026-07-28 — covered by the next test instead.)
+    for (const brand of ['Mosquito Joe', 'Greenix']) {
       const t = CATEGORY_TABLE.replace('National chain', brand);
       const r = gate.evaluate(wrap(t), { namedCompetitorEnabled: true });
       expect(r.pass).toBe(false);
       expect(r.findings.some((f) => f.code === 'COMPARISON_UNKNOWN_COMPETITOR')).toBe(true);
     }
+  });
+
+  test('TruGreen is a KNOWN competitor after the 2026-07-28 promotion — never UNKNOWN, still human-reviewed', () => {
+    const cf = require('../services/content/competitor-facts');
+    const rec = cf.findCompetitor('TruGreen');
+    expect(rec?.id).toBe('trugreen');
+    expect(Object.keys(rec.attributes)).toEqual(expect.arrayContaining(['reach', 'residential_recurring', 'guarantee']));
+    for (const attr of Object.values(rec.attributes)) {
+      expect(attr.source).toMatch(/^https:\/\/www\.trugreen\.com\//);
+      expect(attr.asOf).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    }
+    // Named in a table without sourced captions: routes to review with
+    // known-competitor findings, never the UNKNOWN_COMPETITOR P0 block.
+    const t = CATEGORY_TABLE.replace('National chain', 'TruGreen');
+    const r = gate.evaluate(wrap(t), { namedCompetitorEnabled: true });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_UNKNOWN_COMPETITOR')).toBe(false);
   });
 
   test('title-cased English phrases containing brand-like words stay clean (Codex round-5 P2)', () => {
