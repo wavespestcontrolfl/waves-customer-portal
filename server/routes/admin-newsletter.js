@@ -499,6 +499,28 @@ router.get('/sends/:id', async (req, res, next) => {
       }
     }
 
+    // Event-level click rollup (owner spec 2026-07-28 PR 5): unique
+    // clickers per locked event, in lineup position order. Guarded —
+    // pre-migration environments just omit the field.
+    let eventClicks = null;
+    try {
+      const clickRows = await db('newsletter_event_clicks as c')
+        .leftJoin('events_raw as e', 'e.id', 'c.event_id')
+        .where({ 'c.send_id': req.params.id })
+        .select('c.event_id', 'c.position', 'e.title')
+        .count('* as clicks')
+        .groupBy('c.event_id', 'c.position', 'e.title')
+        .orderByRaw('c.position ASC NULLS LAST');
+      if (clickRows.length) {
+        eventClicks = clickRows.map((r) => ({
+          eventId: r.event_id,
+          title: r.title || null,
+          position: r.position,
+          clicks: Number(r.clicks),
+        }));
+      }
+    } catch { /* table not migrated yet — omit */ }
+
     // Reaction-footer rollup — 👍/😐/👎 counts plus the 👎 "what was
     // missing?" tallies. One delivery row per recipient, so these count
     // people (a changed mind overwrites, never double-counts).
@@ -531,7 +553,7 @@ router.get('/sends/:id', async (req, res, next) => {
     // an unlinked null draft stays untyped (forcing it to flagship would
     // wrongly apply the event-id/Tuesday gates on its next save).
     const flagship = await isFlagshipSend(send);
-    res.json({ send: { ...send, flagship }, deliveries, variantStats, feedback });
+    res.json({ send: { ...send, flagship }, deliveries, variantStats, feedback, eventClicks });
   } catch (err) { next(err); }
 });
 

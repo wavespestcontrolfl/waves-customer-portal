@@ -352,12 +352,19 @@ async function autoDraftFlagship() {
   // 4. Build digest plan
   const plan = await buildDigestPlan();
   const { scored: rawScored } = plan;
-  // Listwise comparative re-rank (owner spec Stage 4): one bounded model
-  // pass over the floor-passing pool asking which events readers would be
-  // most disappointed to miss — counters per-event score inflation.
-  // Nudges are computed in code (±3, never below the floor, stars
-  // untouched); kill = NEWSLETTER_LISTWISE_RERANK=false; fail-open.
-  const scored = await applyListwiseRerank(rawScored);
+  // Click-rate learning first (owner spec PR 5): the bounded ±5 learned
+  // adjustment from 8 weeks of event-level clicks refines the rubric
+  // scores (categories with thin history untouched — that IS the
+  // discovery protection); kill = NEWSLETTER_CLICK_LEARNING=false.
+  const { applyLearnedAdjustmentsFromHistory } = require('./newsletter-event-clicks');
+  const learned = await applyLearnedAdjustmentsFromHistory(rawScored);
+  // Then the listwise comparative re-rank (owner spec Stage 4): one
+  // bounded model pass over the floor-passing pool asking which events
+  // readers would be most disappointed to miss — counters per-event
+  // score inflation. Nudges are computed in code (±3, never below the
+  // floor, stars untouched); kill = NEWSLETTER_LISTWISE_RERANK=false;
+  // both fail-open.
+  const scored = await applyListwiseRerank(learned);
 
   // 5. Resolve the lineup the draft will actually use — calendar-curated
   //    event_ids (intersected with the eligible pool) take precedence over

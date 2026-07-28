@@ -594,6 +594,15 @@ async function sendCampaign(sendId, opts = {}) {
   // engagement_token so a tap lands on the right delivery row. Scanned on
   // the local copies so the send-time append above is always resolved.
   const feedbackEnabled = hasFeedbackToken(quizBody);
+  // Event click-tracking tokens ({{evclick:<eventId>}}): substituted per
+  // recipient with the tracking redirect carrying their engagement_token —
+  // same substitution mechanics as the quiz/feedback tokens. The direct
+  // event URLs are the fallback for recipients without a token.
+  const {
+    evclickIdsInBody, buildEvclickSubstitutions, eventUrlMapForSend,
+  } = require('./newsletter-event-clicks');
+  const evclickEnabled = evclickIdsInBody(quizBody).length > 0;
+  const evclickUrlById = evclickEnabled ? await eventUrlMapForSend(send) : new Map();
 
   // Split by variant so each batch uses the right subject line. When A/B is
   // off every delivery gets variant=null and we just ship one group.
@@ -643,6 +652,7 @@ async function sendCampaign(sendId, opts = {}) {
             // token (shouldn't happen post-migration) → neutral link-free render.
             ...(quizEnabled ? buildQuizSubstitutions(quizBody, { token: deliveryBySub.get(s.id)?.engagement_token }) : {}),
             ...(feedbackEnabled ? buildFeedbackSubstitutions(quizBody, { token: deliveryBySub.get(s.id)?.engagement_token }) : {}),
+            ...(evclickEnabled ? buildEvclickSubstitutions(quizBody, { token: deliveryBySub.get(s.id)?.engagement_token, urlById: evclickUrlById }) : {}),
           },
           // delivery_id rides on every SendGrid event webhook for this
           // recipient, so the handler can resolve back to the right row

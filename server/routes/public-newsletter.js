@@ -12,6 +12,9 @@ const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
 const { stripPersonalizationTokens } = require('../services/newsletter-draft');
+const {
+  resolveEvclickDirect, eventUrlMapForSend, recordEventClick,
+} = require('../services/newsletter-event-clicks');
 const logger = require('../services/logger');
 const { getPublishedPosts } = require('../services/newsletter-feed');
 const { subscribeOrResubscribe, lookupByToken, confirmByToken, EMAIL_RE } = require('../services/newsletter-subscribers');
@@ -254,6 +257,33 @@ const feedbackLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many requests. Try again in a minute.' },
+});
+
+// GET /api/public/newsletter/e/:token/:eventId
+// Event details click-through: records ONE analytics row per
+// (send, event, recipient) — dedupe is the unique constraint, so
+// scanner prefetch inflates by at most one per recipient/event,
+// uniformly across events (relative rates stay usable, same trade
+// as all industry email click tracking) — then 302s to the DB-locked
+// event URL. Unknown token = untracked redirect; unknown event =
+// homepage. Never blocks the reader: any failure still redirects.
+router.get('/e/:token/:eventId', feedbackLimiter, async (req, res) => {
+  const fallback = 'https://www.wavespestcontrol.com/';
+  try {
+    const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!uuidRe.test(req.params.eventId)) return res.redirect(302, fallback);
+    const { redirectUrl } = await recordEventClick({
+      engagementToken: String(req.params.token).slice(0, 64),
+      eventId: req.params.eventId,
+    });
+    // Only http(s) destinations — event_url is validated at ingestion,
+    // but a defensive check costs nothing on a redirect endpoint.
+    const safe = /^https?:\/\//i.test(String(redirectUrl || '')) ? redirectUrl : fallback;
+    return res.redirect(302, safe);
+  } catch (err) {
+    logger.warn(`[newsletter] event click redirect failed: ${err.message}`);
+    return res.redirect(302, fallback);
+  }
 });
 
 // GET /api/public/newsletter/feedback/:token/:reaction
@@ -571,8 +601,9 @@ router.get('/posts/by-slug/:slug', async (req, res) => {
       // Archive pages have no recipient identity — neutralize every merge tag
       // ({{greeting-name}}/{{city}}/{{grass-type}}) so readers never see a
       // literal token; city/grass fall back to their neutral defaults.
-      htmlBody: stripPersonalizationTokens(row.html_body || ''),
-      textBody: row.text_body ? stripPersonalizationTokens(row.text_body) : null,
+      // Event click tokens resolve to the DIRECT event URLs (untracked).
+      htmlBody: stripPersonalizationTokens(resolveEvclickDirect(row.html_body || '', await eventUrlMapForSend(row))),
+      textBody: row.text_body ? stripPersonalizationTokens(resolveEvclickDirect(row.text_body, await eventUrlMapForSend(row))) : null,
       sentAt: row.sent_at,
       indexability: row.indexability || 'index',
       seo: {
@@ -607,8 +638,8 @@ router.get('/posts/:id', async (req, res) => {
       subject: row.subject,
       newsletterType: row.newsletter_type || null,
       previewText: row.preview_text ? stripPersonalizationTokens(row.preview_text) : null,
-      htmlBody: stripPersonalizationTokens(row.html_body || ''),
-      textBody: row.text_body ? stripPersonalizationTokens(row.text_body) : null,
+      htmlBody: stripPersonalizationTokens(resolveEvclickDirect(row.html_body || '', await eventUrlMapForSend(row))),
+      textBody: row.text_body ? stripPersonalizationTokens(resolveEvclickDirect(row.text_body, await eventUrlMapForSend(row))) : null,
       sentAt: row.sent_at,
       indexability: row.indexability || 'index',
     });

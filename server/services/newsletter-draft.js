@@ -750,11 +750,15 @@ function stripPersonalizationTokens(content) {
   // leaf of newsletter-draft's dependency graph regardless of load order.
   const { neutralizeQuizTokens } = require('./newsletter-quiz');
   const { neutralizeFeedbackTokens } = require('./newsletter-feedback');
-  return neutralizeFeedbackTokens(neutralizeQuizTokens(
+  // Leftover evclick tokens (render paths that couldn't resolve the DB
+  // url map) fall back to the homepage — defense-in-depth; the archive
+  // and proof paths resolve them to the real event URLs first.
+  const { resolveEvclickDirect } = require('./newsletter-event-clicks');
+  return resolveEvclickDirect(neutralizeFeedbackTokens(neutralizeQuizTokens(
     stripGreetingNameToken(content)
       .split(CITY_TOKEN).join(DEFAULT_CITY_LABEL)
       .split(GRASS_TYPE_TOKEN).join(DEFAULT_GRASS_LABEL),
-  ));
+  )));
 }
 
 // Highlights bullets are plain text with a renderer-added "•" marker
@@ -1111,7 +1115,12 @@ async function assembleWavesNewsletter(draft) {
   const detailsLink = (ev, text = 'Details') => {
     const url = safeUrl(ev.eventUrl);
     if (!url) return '';
-    return `<a href="${url}" style="color:${COLORS.blue};text-decoration:underline;font-weight:600;">${escapeHtml(text)} →</a>`;
+    // Details links render as {{evclick:<eventId>}} tokens: the live
+    // sender substitutes a per-recipient tracking redirect; proof,
+    // preview, and archive resolve them back to the DIRECT event URL
+    // (newsletter-event-clicks.js) — tracking applies to real sends only.
+    const href = ev.eventId ? `{{evclick:${String(ev.eventId).toLowerCase()}}}` : url;
+    return `<a href="${href}" style="color:${COLORS.blue};text-decoration:underline;font-weight:600;">${escapeHtml(text)} →</a>`;
   };
 
   // ── Greeting + intro ──
