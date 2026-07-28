@@ -1123,9 +1123,13 @@ async function assembleWavesNewsletter(draft) {
     card.push(`<h2 style="margin:0 0 6px 0;font-size:17px;line-height:1.35;">${escapeHtml(ev.sourceTitle || '')}</h2>`);
     const meta = metaLine(ev);
     if (meta) card.push(`<p style="margin:0 0 6px 0;font-size:13px;color:${COLORS.muted};">${meta}</p>`);
+    // The DB-locked details link renders regardless of model prose — a
+    // partially valid response must never ship a card with no way in.
+    const link = detailsLink(ev);
     if (ev.hook) {
-      const link = detailsLink(ev);
       card.push(`<p style="margin:0 0 6px 0;font-size:15px;line-height:1.6;">${markdownToHtml(ev.hook)}${link ? ` ${link}` : ''}</p>`);
+    } else if (link) {
+      card.push(`<p style="margin:0 0 6px 0;font-size:14px;">${link}</p>`);
     }
     parts.push(`<div style="margin:0 0 20px 0;">\n${card.join('\n')}\n</div>`);
   }
@@ -1460,6 +1464,16 @@ async function createNewsletterDraft({
       approvedEvents = dedupeDigestEvents(
         historicallyNewRows.filter((event) => isEligibleForFreshDigest(event, editorialReference)),
       );
+
+      // Present events in the CALLER's order — the portfolio selector /
+      // operator ranked them (hero first), and the compact prompt makes
+      // the first event the default hero. The freshness-score DB order
+      // would silently promote an arbitrary fresh event instead.
+      const callerRank = new Map(safeIds.map((id, i) => [String(id).toLowerCase(), i]));
+      approvedEvents = [...approvedEvents].sort((a, b) => (
+        (callerRank.get(String(a.id).toLowerCase()) ?? 999)
+        - (callerRank.get(String(b.id).toLowerCase()) ?? 999)
+      ));
 
       eventBlock = formatEventBlock(approvedEvents);
     }
