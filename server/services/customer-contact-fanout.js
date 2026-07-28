@@ -53,8 +53,8 @@
  * transactional caller rolls the whole edit back rather than leaving the
  * record and its copies half-synced.
  *
- * Deliberately NOT fanned out: dispatch_jobs / ical_appointments (legacy
- * imports with no customer link), tax and banking customer_name columns
+ * Deliberately NOT fanned out: ical_appointments (legacy import mirror with
+ * no customer link), tax and banking customer_name columns
  * (financial audit trail), sms_messages / call_log (message history), and
  * bulk_update_customers (writing one name/phone onto many customers is not
  * a correction scenario — mirrors the email fan-out's scope).
