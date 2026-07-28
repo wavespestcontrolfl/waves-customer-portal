@@ -142,14 +142,34 @@ async function loadLawnAssessments({ customerId, scheduledServiceId, serviceYmd,
         knex,
       )
       : null;
-    const prior = await knex('lawn_assessments')
-      .where({ customer_id: customerId, confirmed_by_tech: true })
-      .where('service_date', '<', serviceYmd)
-      .orderBy('service_date', 'desc')
+    // The prior row is bounded by the linked VISIT's scheduled_date, not the
+    // assessment run date — lawn_assessments.service_date is when the photos
+    // were scored, which lands out of schedule order on backfills (mirrors
+    // the canonical prior-summary lookup in admin-lawn-assessment.js). Rows
+    // without a visit link fall back to their run date, and the current
+    // visit's own row is always excluded.
+    const prior = await knex('lawn_assessments as la')
+      .leftJoin('scheduled_services as ss', 'la.service_id', 'ss.id')
+      .where('la.customer_id', customerId)
+      .where('la.confirmed_by_tech', true)
+      .where(function priorBound() {
+        this.where('ss.scheduled_date', '<', serviceYmd)
+          .orWhere(function unlinked() {
+            this.whereNull('la.service_id').andWhere('la.service_date', '<', serviceYmd);
+          });
+      })
+      .modify((q) => {
+        if (scheduledServiceId) {
+          q.andWhere(function notThisVisit() {
+            this.whereNull('la.service_id').orWhereNot('la.service_id', scheduledServiceId);
+          });
+        }
+      })
+      .orderByRaw('COALESCE(ss.scheduled_date, la.service_date) DESC')
       .first(
-        'service_date', 'is_baseline',
-        'turf_density', 'weed_suppression', 'color_health',
-        'fungus_control', 'thatch_level', 'stress_damage',
+        'la.service_date', 'la.is_baseline',
+        'la.turf_density', 'la.weed_suppression', 'la.color_health',
+        'la.fungus_control', 'la.thatch_level', 'la.stress_damage',
       ) || null;
     return { today, prior };
   } catch (err) {

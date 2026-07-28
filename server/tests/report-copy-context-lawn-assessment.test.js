@@ -12,17 +12,24 @@ function makeKnexStub({ customers = [], linked = null, prior = null } = {}) {
   const stub = (table) => {
     calls.push(table);
     const chain = { _byServiceId: false, _priorHistory: false };
-    for (const method of ['whereIn', 'whereNull', 'whereNot', 'orWhere', 'orderBy', 'orderByRaw', 'limit', 'select', 'leftJoin', 'join', 'groupBy', 'count', 'whereRaw', 'whereBetween']) {
+    for (const method of ['whereIn', 'whereNull', 'whereNot', 'andWhere', 'orWhere', 'orWhereNot', 'orderBy', 'orderByRaw', 'limit', 'select', 'join', 'groupBy', 'count', 'whereRaw', 'whereBetween']) {
       chain[method] = () => chain;
     }
+    // The prior-history query is the one that joins scheduled_services (its
+    // bound runs on the linked visit's scheduled_date).
+    chain.leftJoin = (joined) => {
+      if (String(joined).includes('scheduled_services')) chain._priorHistory = true;
+      return chain;
+    };
+    chain.modify = (fn) => { if (typeof fn === 'function') fn(chain); return chain; };
     chain.where = (...args) => {
       if (args[0] && typeof args[0] === 'object' && 'service_id' in args[0]) chain._byServiceId = true;
-      if (args[0] === 'service_date' && args[1] === '<') chain._priorHistory = true;
       return chain;
     };
     const resolveRows = () => {
       if (table === 'customers') return customers;
-      if (table !== 'lawn_assessments') return [];
+      // The prior query aliases the table ('lawn_assessments as la').
+      if (!String(table).startsWith('lawn_assessments')) return [];
       if (chain._byServiceId) return linked ? [linked] : [];
       if (chain._priorHistory) return prior ? [prior] : [];
       return [];
