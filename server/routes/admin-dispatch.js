@@ -7123,6 +7123,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             record: {
               ...record,
               scheduled_service_id: record.scheduled_service_id || svc.id,
+              // The applied products can be the only exterior evidence
+              // (application_area) — the sync SMS normalizer needs them
+              // (codex P1 #3007 r13).
+              applications: (typeof products !== 'undefined' && Array.isArray(products)) ? products : [],
               tracedExteriorZone: await require('../services/service-report/reentry')
                 .resolveTracedExteriorZone({ scheduled_service_id: record.scheduled_service_id || svc.id }),
             },

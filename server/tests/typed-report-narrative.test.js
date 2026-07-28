@@ -174,6 +174,60 @@ test('bare "one" is a numeric claim; the partitive idiom stays exempt', () => {
   expect(ungroundedClaims('One of the treated areas will be rechecked at the next visit.', facts)).toEqual([]);
 });
 
+test('round-13 guards: activity contradiction, embedded recommendations, list cardinality, palmetto alias', async () => {
+  // (a) positive activity-level assertion contradicts a zero state without
+  // any observation verb
+  const clearedFacts = groundingFacts(roachInput({
+    typedReport: {
+      reportTypeLabel: 'Cockroach Treatment',
+      todaysResult: { headline: 'No live roach activity was observed today.', body: 'We completed the scheduled service today.', nextStep: null },
+      findings: [{ fieldKey: 'species', customerLabel: 'Target pest', customerValueLabel: 'German cockroaches', value: 'german' }],
+    },
+    activity: null,
+  }));
+  expect(ungroundedClaims('Cockroach activity was high today.', clearedFacts))
+    .toContain('contradicted_zero_state');
+
+  // (b) a recommendation EMBEDDED in the body cannot ground completed work
+  const embeddedFacts = groundingFacts(roachInput({
+    recap: 'Today we completed an inspection for your pest service.',
+    typedReport: {
+      reportTypeLabel: 'Rodent Assessment',
+      todaysResult: {
+        headline: 'Inspection completed today.',
+        body: 'We inspected the kitchen and garage areas today. Exclusion is recommended to seal the entry gaps.',
+        nextStep: 'Exclusion is recommended to seal the entry gaps.',
+      },
+      findings: [{ fieldKey: 'areas', customerLabel: 'Areas inspected', customerValueLabel: 'Kitchen, Garage', value: 'kitchen' }],
+    },
+    activity: null,
+    applications: [],
+    photos: [],
+  }));
+  expect(ungroundedClaims('We completed exclusion today.', embeddedFacts))
+    .toContain('ungrounded_action:exclusion');
+
+  // (c) list-valued findings carry cardinality — a date numeral can't
+  // inflate a room count
+  const bedroomFacts = groundingFacts(roachInput({
+    typedReport: {
+      reportTypeLabel: 'Bed Bug Treatment',
+      todaysResult: { headline: 'Bed bug treatment completed today.', body: 'We treated the bedroom today.', nextStep: null },
+      findings: [{ fieldKey: 'rooms_treated', customerLabel: 'Rooms treated', customerValueLabel: 'Bedroom', value: 'Bedroom' }],
+    },
+    activity: null,
+    applications: [],
+    photos: [],
+  }));
+  expect(ungroundedClaims('We treated 3 bedrooms today.', bedroomFacts))
+    .toContain('uncorroborated_count:3 bedrooms');
+
+  // (d) the controlled palmetto-bug alias grounds only when recorded
+  const germanFacts = groundingFacts(roachInput());
+  expect(ungroundedClaims('Palmetto bugs were observed today.', germanFacts))
+    .toContain('ungrounded_species:palmetto bugs');
+});
+
 test('one-time treatment pests ground dynamically (codex r12: flies on a moth report)', () => {
   const mothFacts = groundingFacts(roachInput({
     serviceTypeDisplay: 'One-Time Pest Treatment',

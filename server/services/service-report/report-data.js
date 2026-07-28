@@ -429,6 +429,12 @@ function treatmentScope({ service = {}, applications = [], zones = [] } = {}) {
     hasInterior: textInterior || action.hasInterior,
     hasExterior: textExterior || action.hasExterior,
     hasExplicitScope: text.trim().length > 0 || action.hasTreatment,
+    // TRUE only when a recognized interior/exterior LOCATION signal exists.
+    // Target-only text (product target names) makes hasExplicitScope true
+    // without classifying anything — the write-path defer must key on this
+    // instead, or a trace saved later can't restore the timer (codex P1
+    // #3007 r13).
+    hasLocationSignal: textInterior || textExterior || action.hasInterior || action.hasExterior,
   };
 }
 
@@ -452,7 +458,9 @@ function normalizeAdvisoryForTreatmentScope(advisory = {}, { service = {}, appli
   // unrecoverable (codex P1 #3007 r11). Explicitly non-exterior scope
   // still zeroes at write.
   if (normalized.exterior_reentry_min != null && !(scope.hasExplicitScope && scope.hasExterior)) {
-    if (!(deferUnknownExteriorZeroing && !scope.hasExplicitScope)) {
+    // Defer keys on LOCATION signals: target-only scope text is still
+    // unknown for interior/exterior purposes (codex P1 #3007 r13).
+    if (!(deferUnknownExteriorZeroing && !scope.hasLocationSignal)) {
       normalized.exterior_reentry_min = 0;
     }
   }

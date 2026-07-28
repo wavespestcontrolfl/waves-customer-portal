@@ -747,6 +747,7 @@ const DOMAIN_TERMS = [
   // ground a different species — German cockroaches recorded, "American
   // cockroaches" claimed, must reject. Each qualifier grounds only itself.
   { kind: 'species', out: /\bgerman\b/i, corpus: /\bgerman/ },
+  { kind: 'species', out: /\bpalmetto\s*bugs?\b/i, corpus: /\bpalmetto/ },
   { kind: 'species', out: /\bamerican\b/i, corpus: /\bamerican/ },
   { kind: 'species', out: /\bsmoky[-\s]?brown\b/i, corpus: /\bsmoky\s?brown/ },
   { kind: 'species', out: /\boriental\b/i, corpus: /\boriental/ },
@@ -919,7 +920,9 @@ function contradictedZeroStates(text, facts) {
     .flatMap((sentence) => sentence.split(/[,;]|\b(?:but|however|yet|although|though)\b/i));
   for (const clause of clauses) {
     if (NEGATED_SENTENCE_RE.test(clause)) continue;
-    if (!OBSERVATION_RE.test(clause)) continue;
+    // Positive ACTIVITY-level assertions ("cockroach activity was high")
+    // contradict a zero state without any observation verb (codex P1 r13).
+    if (!OBSERVATION_RE.test(clause) && !/\bactivit/i.test(clause)) continue;
     for (const term of zeroStatePests) {
       if (term.out.test(clause)) {
         problems.push('contradicted_zero_state');
@@ -936,6 +939,21 @@ function contradictedZeroStates(text, facts) {
 // baited the stations" on a visit whose Bait-replaced finding says No
 // (codex P1 #3007 r5). Pest/species/location terms keep the full corpus
 // (the label legitimately grounds the pest family).
+// Recommendation/future-work sentences are NOT completed-work evidence,
+// wherever they live — typed snapshot builders embed nextStep into the
+// body (codex P1 r13), and advisory phrasing must never ground an action
+// as performed.
+const RECOMMENDATION_SENTENCE_RE = /\b(recommend(?:ed|s)?|should|please|we\s+will|will\s+be|consider|schedule[sd]?)\b/i;
+
+function completedWorkSentence(sentence, nextStep) {
+  const trimmed = String(sentence || '').trim();
+  if (!trimmed) return false;
+  if (NEGATED_SENTENCE_RE.test(trimmed)) return false;
+  if (RECOMMENDATION_SENTENCE_RE.test(trimmed)) return false;
+  if (nextStep && String(nextStep).includes(trimmed)) return false;
+  return true;
+}
+
 function actionCorpus(facts) {
   const workFacts = {
     findings: (facts.findings || []).filter(
@@ -948,7 +966,10 @@ function actionCorpus(facts) {
     todaysResult: facts.todaysResult
       ? {
         headline: affirmativeSentences(facts.todaysResult.headline),
-        body: affirmativeSentences(facts.todaysResult.body),
+        body: String(facts.todaysResult.body || '')
+          .split(/(?<=[.!?])\s+/)
+          .filter((sentence) => completedWorkSentence(sentence, facts.todaysResult.nextStep))
+          .join(' '),
       }
       : null,
     devices: facts.devices,
@@ -1036,6 +1057,16 @@ function typedCountRoles(facts) {
     const unitMatch = /^(\d+(?:\.\d+)?)\s+([a-z][a-z\s-]*)$/i.exec(raw);
     if (unitMatch) {
       register(Number(unitMatch[1]), [...labelWords, ...unitMatch[2].toLowerCase().split(/[^a-z]+/)]);
+      return;
+    }
+    // LIST-valued findings carry an implicit cardinality (codex P1 r13):
+    // "Rooms treated: Bedroom" grounds bedroom-count 1, so "we treated 3
+    // bedrooms" can't borrow a date numeral. Negative values register
+    // nothing.
+    if (!NEGATIVE_FINDING_VALUE_RE.test(raw) && /^[a-z]/i.test(raw)) {
+      const items = raw.split(',').map((item) => item.trim()).filter(Boolean);
+      const itemWords = items.flatMap((item) => item.toLowerCase().split(/[^a-z]+/));
+      register(items.length, [...labelWords, ...itemWords]);
     }
   });
   return map;
@@ -1068,10 +1099,11 @@ function typedCountProblems(text, facts) {
 function completedWorkStrings(facts) {
   const strings = [];
   const norm = (value) => ` ${String(value).toLowerCase().replace(/[^a-z0-9]+/g, ' ')} `;
-  // nextStep excluded: recommendations are not completed work (codex P1 r11)
+  // nextStep + recommendation-shaped sentences excluded: recommendations
+  // are not completed work, even when embedded in the body (codex P1 r11/r13)
   [facts.recap, facts.todaysResult?.headline, facts.todaysResult?.body]
     .forEach((block) => String(block || '').split(/(?<=[.!?])\s+/).forEach((sentence) => {
-      if (sentence.trim() && !NEGATED_SENTENCE_RE.test(sentence)) strings.push(norm(sentence));
+      if (completedWorkSentence(sentence, facts.todaysResult?.nextStep)) strings.push(norm(sentence));
     }));
   (facts.findings || []).forEach((finding) => {
     if (!NEGATIVE_FINDING_VALUE_RE.test(String(finding.value).trim())) {
