@@ -11429,6 +11429,31 @@ export function CompletionPanel({
                         : "Report saved"}{" "}
                 for {service.customerName}
               </div>{" "}
+              {/* Advisories the completion RECORDED (blackout, N-budget
+                  incl. actual-based overruns, protocol exceptions,
+                  calibration) — the operator sees them here, not only later
+                  in Customer 360. */}
+              {Array.isArray(completionResult?.completionAdvisories) &&
+                completionResult.completionAdvisories.length > 0 && (
+                  <div
+                    style={{
+                      fontFamily: font,
+                      fontSize: 12,
+                      color: M.ink3,
+                      marginTop: 8,
+                      textAlign: "left",
+                      border: `1px solid ${M.hairline}`,
+                      borderRadius: 10,
+                      padding: "8px 10px",
+                    }}
+                  >
+                    {completionResult.completionAdvisories.map((text, i) => (
+                      <div key={i} style={{ marginTop: i === 0 ? 0 : 6 }}>
+                        ⚠️ {text}
+                      </div>
+                    ))}
+                  </div>
+                )}
               {completionResult?.typedDeliveryMode === "internal_only" && (
                 <div
                   style={{

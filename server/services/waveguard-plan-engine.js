@@ -994,12 +994,14 @@ async function getApplicableOrdinances(knex, profile, cities = {}) {
   const stamped = String(cities.stampedCity || '').trim();
   const profileCity = String(profile.municipality || '').trim();
   const customerCity = String(cities.customerCity || '').trim();
-  // Divergence needs at least one KNOWN reference city — with none on file,
-  // .every() over an empty list would call any stamped city divergent and
-  // drop a county whose blackout may genuinely apply.
-  const knownCities = [profileCity, customerCity].filter(Boolean);
-  const stampedDiverges = !!stamped && knownCities.length > 0 &&
-    knownCities.every((known) => known.toLowerCase() !== stamped.toLowerCase());
+  // The county belongs to the PROFILE, so divergence is measured against the
+  // profile's own city context (its municipality, else the customer city as
+  // its implied context): a stamped visit in a different city drops the
+  // profile county even when the CUSTOMER's city happens to match the stamp
+  // (stale-profile case). No known reference city -> keep the county.
+  const countyReferenceCity = profileCity || customerCity;
+  const stampedDiverges = !!stamped && !!countyReferenceCity &&
+    countyReferenceCity.toLowerCase() !== stamped.toLowerCase();
   const county = stampedDiverges ? '' : String(profile.county || '').trim();
   const city = stamped || profileCity || customerCity;
   if (!county && !city) return [];

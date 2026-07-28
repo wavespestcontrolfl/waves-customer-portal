@@ -513,6 +513,17 @@ function advisorySafeMessage(text) {
     .trim();
 }
 
+// Advisory messages recorded on a completion, flattened for the closeout
+// success view — the operator must see a recorded overrun/exception at
+// completion time, not only later in Customer 360.
+function completionAdvisoryMessages({ blackout, nLimit, manager, calibration }) {
+  return [blackout, nLimit, manager, calibration]
+    .filter((record) => record && record.advisory)
+    .flatMap((record) => (Array.isArray(record.blocks) ? record.blocks : []))
+    .map((block) => block && block.message)
+    .filter(Boolean);
+}
+
 function calibrationLockoutBlocks(plan) {
   const lockoutCodes = new Set([
     'missing_calibration',
@@ -898,12 +909,15 @@ async function actualProductBlackoutBlocks(svc, submittedProducts = []) {
   const stampedCity = String(svc.service_address_city || '').trim();
   const profileCity = String(profile.municipality || '').trim();
   const customerCity = String(svc.city || '').trim();
-  // Divergence needs at least one KNOWN reference city — with none on file,
-  // .every() over an empty list would call any stamped city divergent and
-  // drop a county whose blackout may genuinely apply.
-  const knownCities = [profileCity, customerCity].filter(Boolean);
-  const stampedDiverges = !!stampedCity && knownCities.length > 0 &&
-    knownCities.every((known) => known.toLowerCase() !== stampedCity.toLowerCase());
+  // The county belongs to the PROFILE, so divergence is measured against the
+  // profile's own city context (its municipality, else the customer city as
+  // its implied context): a stamped visit in a different city drops the
+  // profile county even when the CUSTOMER's city happens to match the stamp
+  // (stale-profile case: Charlotte profile, Bradenton customer+visit). No
+  // known reference city -> keep the county (can't prove divergence).
+  const countyReferenceCity = profileCity || customerCity;
+  const stampedDiverges = !!stampedCity && !!countyReferenceCity &&
+    countyReferenceCity.toLowerCase() !== stampedCity.toLowerCase();
   const county = stampedDiverges ? '' : String(profile.county || '').trim();
   const city = stampedCity || profileCity || customerCity;
   if (!county && !city) return [];
@@ -3984,12 +3998,22 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           };
       }
       const selectedCalibration = plan?.equipmentCalibration?.selected;
-      // Only adopt the plan's calibration when it's valid (no bypass). On a
-      // calibration bypass we keep whatever the tech explicitly passed (usually
-      // none) rather than recording an auto-picked, non-verified system as used.
+      // Only adopt the plan's calibration when it's valid (no bypass) AND it
+      // corresponds to something real for THIS visit: the visit's stored
+      // assignment or an explicitly submitted rig. With the equipment picker
+      // gone, the plan's global auto-pick (e.g. the sole active calibration
+      // in the DB) is a suggestion the tech never saw — recording it as used
+      // would fabricate equipment usage and overwrite the visit's assignment.
       if (selectedCalibration && !calibrationBypass) {
-        waveguardEquipmentSystemId = selectedCalibration.equipment_system_id || waveguardEquipmentSystemId;
-        waveguardCalibrationId = selectedCalibration.id || waveguardCalibrationId;
+        const selectedMatchesVisit =
+          (svc.assigned_calibration_id && String(selectedCalibration.id) === String(svc.assigned_calibration_id))
+          || (svc.assigned_equipment_system_id && String(selectedCalibration.equipment_system_id) === String(svc.assigned_equipment_system_id))
+          || (calibrationId && String(selectedCalibration.id) === String(calibrationId))
+          || (equipmentSystemId && String(selectedCalibration.equipment_system_id) === String(equipmentSystemId));
+        if (selectedMatchesVisit) {
+          waveguardEquipmentSystemId = selectedCalibration.equipment_system_id || waveguardEquipmentSystemId;
+          waveguardCalibrationId = selectedCalibration.id || waveguardCalibrationId;
+        }
       }
       // On a calibration bypass, record "none" only when the RESOLVED
       // calibration (request field from a legacy client, the service's
@@ -5625,6 +5649,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         invoiceId: null,
         invoiceTotal: null,
         completionPhotoUpload: completionPhotoUploadResult,
+        completionAdvisories: completionAdvisoryMessages({
+          blackout: waveguardBlackoutApproval,
+          nLimit: waveguardNLimitApproval,
+          manager: waveguardManagerApproval,
+          calibration: waveguardCalibrationAdvisory,
+        }),
       };
       await CompletionAttempts.markCompletionAttemptSucceeded(completionAttempt, { record, invoice: null, response: responsePayload });
       markedSucceeded = true;
@@ -8058,6 +8088,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       completionSmsType,
       completionSmsTruncated: !!finalRecordNotes.completionSmsTruncated,
       completionPhotoUpload: completionPhotoUploadResult,
+      completionAdvisories: completionAdvisoryMessages({
+        blackout: waveguardBlackoutApproval,
+        nLimit: waveguardNLimitApproval,
+        manager: waveguardManagerApproval,
+        calibration: waveguardCalibrationAdvisory,
+      }),
       ...(typedFindingsType ? {
         typedFindingsType,
         typedDeliveryMode,
