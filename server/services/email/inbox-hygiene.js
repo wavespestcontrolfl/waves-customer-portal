@@ -395,15 +395,22 @@ async function reconcilePendingDrafts(now = new Date()) {
   const rows = await db('emails')
     .where('draft_gmail_id', 'pending')
     .where('draft_claimed_at', '<', staleCutoff)
-    .select('id', 'gmail_id', 'gmail_thread_id', 'from_address', 'from_name', 'subject', 'body_text', 'snippet', 'label_ids', 'classification', 'message_id');
+    .select('id', 'gmail_id', 'gmail_thread_id', 'from_address', 'from_name', 'subject', 'body_text', 'snippet', 'label_ids', 'classification', 'message_id', 'received_at');
   const counts = { settled: 0, released: 0, redrafted: 0 };
   for (const row of rows) {
     try {
       const thread = await gmailClient.getThread(row.gmail_thread_id);
-      const hasDraft = (thread?.messages || []).some((m) => (m.labelIds || []).includes('DRAFT'));
+      const msgs = thread?.messages || [];
+      const hasDraft = msgs.some((m) => (m.labelIds || []).includes('DRAFT'));
+      // A SENT reply newer than the inbound message settles the thread —
+      // never release-and-redraft over an operator's own answer.
+      const inboundAt = new Date(row.received_at || 0).getTime();
+      const hasNewerSent = msgs.some((m) => (m.labelIds || []).includes('SENT') && Number(m.internalDate || 0) > inboundAt);
       const patch = hasDraft
         ? { draft_gmail_id: 'reconciled_existing_draft' }
-        : { draft_gmail_id: null, draft_claimed_at: null };
+        : (hasNewerSent
+          ? { draft_gmail_id: 'reconciled_replied' }
+          : { draft_gmail_id: null, draft_claimed_at: null });
       // Re-assert STALENESS in the update — a concurrent draftReplyForEmail
       // takeover refreshes draft_claimed_at, and releasing that ACTIVE claim
       // would let another worker mint a duplicate draft mid-flight.
@@ -411,13 +418,13 @@ async function reconcilePendingDrafts(now = new Date()) {
         .where({ id: row.id, draft_gmail_id: 'pending' })
         .where('draft_claimed_at', '<', staleCutoff)
         .update({ ...patch, updated_at: new Date() });
-      if (n) counts[hasDraft ? 'settled' : 'released'] += 1;
+      if (n) counts[(hasDraft || hasNewerSent) ? 'settled' : 'released'] += 1;
       // A release is only useful if something retries — classification and
       // auto-actions ran once at insert, so re-draft eligible rows here
       // (draftReplyForEmail re-claims atomically and no-ops when the gate is
       // off or the row is non-inbound). Lazy require: email-actions requires
       // this module.
-      if (n && !hasDraft && ['customer_request', 'scheduling', 'complaint'].includes(row.classification)) {
+      if (n && !hasDraft && !hasNewerSent && ['customer_request', 'scheduling', 'complaint'].includes(row.classification)) {
         try {
           const { draftReplyForEmail } = require('./email-actions');
           const customer = await db('customers').where('email', normalizeAddress(row.from_address)).first();

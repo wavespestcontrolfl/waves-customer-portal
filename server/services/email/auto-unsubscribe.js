@@ -171,6 +171,16 @@ async function autoUnsubscribe(email) {
     return { method: 'none', note: 'unauthenticated sender — archive only' };
   }
 
+  // Idempotency: classifyEmail runs executeAutoAction and the admin
+  // reclassify route runs it AGAIN — one email must never fire two live
+  // unsubscribe requests (nor let a later attempt overwrite a confirmed
+  // outcome). The attempt log is the claim record.
+  const prior = await db('email_unsubscribe_log').where({ email_id: email.id }).first();
+  if (prior) {
+    logger.info(`[unsubscribe] Skipped: attempt already recorded (email ${email.id})`);
+    return { method: 'none', confirmed: false, note: 'already attempted' };
+  }
+
   // Method 1: Check List-Unsubscribe header (stored in extracted_data or label_ids context)
   // We need the raw headers — check if they were stored
   const listUnsub = email.list_unsubscribe || null;

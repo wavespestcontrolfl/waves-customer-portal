@@ -311,6 +311,11 @@ async function handleSpam(email) {
 }
 
 async function handleNewsletter(email) {
+  // Reclassification re-runs auto-actions with the same row — an
+  // already-actioned newsletter must not archive/unsubscribe twice (or
+  // downgrade a confirmed unsubscribe outcome).
+  if (String(email.auto_action || '').startsWith('newsletter_')) return;
+
   // 0. Same known-sender protection as spam: an authenticated customer or
   // vendor misclassified as a newsletter is neither archived nor
   // unsubscribed.
@@ -854,9 +859,18 @@ async function draftReplyForEmail(email, { customer = null, tone = 'service' } =
     // means ours would be a duplicate.
     try {
       const thread = await gmailClient.getThread(email.gmail_thread_id);
-      if ((thread?.messages || []).some((m) => (m.labelIds || []).includes('DRAFT'))) {
+      const msgs = thread?.messages || [];
+      if (msgs.some((m) => (m.labelIds || []).includes('DRAFT'))) {
         await db('emails').where({ id: email.id, draft_gmail_id: 'pending' })
           .update({ draft_gmail_id: 'reconciled_existing_draft', updated_at: new Date() });
+        return null;
+      }
+      // An operator reply SENT after the inbound message settles the thread —
+      // drafting now would answer a conversation that has moved on.
+      const inboundAt = new Date(email.received_at || 0).getTime();
+      if (msgs.some((m) => (m.labelIds || []).includes('SENT') && Number(m.internalDate || 0) > inboundAt)) {
+        await db('emails').where({ id: email.id, draft_gmail_id: 'pending' })
+          .update({ draft_gmail_id: 'reconciled_replied', updated_at: new Date() });
         return null;
       }
     } catch (e) {
