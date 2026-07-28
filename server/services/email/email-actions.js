@@ -800,7 +800,11 @@ async function draftReplyForEmail(email, { customer = null, tone = 'service' } =
   try {
     const MODELS = require('../../config/models');
     const { dispatchWithFallback } = require('../llm/call');
-    const firstName = (customer?.first_name || email.from_name || '').split(' ')[0] || 'there';
+    // Greeting name comes ONLY from the operator-curated customer record —
+    // the inbound From display name is attacker-typed and this string lands
+    // in the SYSTEM channel. Sanitized to name characters either way.
+    const firstName = String(customer?.first_name || '')
+      .replace(/[^A-Za-z' -]/g, '').trim().slice(0, 40) || 'there';
     // Constraints ride the SYSTEM channel; the attacker-controlled message
     // rides user-priority text only — inbound email must never be able to
     // out-rank the drafting rules (prompt injection).

@@ -244,6 +244,14 @@ async function rescueSpamFolder() {
         // exactly what a phish looks like. Never auto-reverse Gmail's
         // verdict; park a review notification instead.
         counts.unauthenticated += 1;
+        // Idempotent across sweeps: the same message sits in the 2-day
+        // window for two runs and retries — one review bell per Gmail id.
+        const already = await db('notifications')
+          .where('category', 'email_rescue_review')
+          .whereRaw("metadata::jsonb ->> 'gmail_message_id' = ?", [m.id])
+          .first()
+          .catch(() => null);
+        if (already) continue;
         await db('notifications').insert({
           recipient_type: 'admin',
           category: 'email_rescue_review',
@@ -251,6 +259,7 @@ async function rescueSpamFolder() {
           body: `A message claiming to be ${full.from_name || fromAddress} ("${(full.subject || '(no subject)').slice(0, 60)}") is in Gmail Spam but failed sender authentication — left in Spam. Review it in Gmail if expected.`,
           icon: '⚠️',
           link: '/admin/email',
+          metadata: JSON.stringify({ gmail_message_id: m.id }),
           created_at: new Date(),
         }).catch(() => {});
         continue;

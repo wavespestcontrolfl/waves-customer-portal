@@ -22,20 +22,38 @@ function isSafePublicUrl(rawUrl) {
   return true;
 }
 
-/** True when an IP literal is private/loopback/link-local/metadata space. */
+/**
+ * True unless the literal is a GLOBAL UNICAST address. Deny-by-default: the
+ * request only proceeds for plain public space — private, loopback,
+ * link-local, CGN, benchmarking (198.18/15), documentation, multicast
+ * (224/4, ff00::/8), reserved (240/4), site-local and every other special
+ * range all refuse.
+ */
 function isPrivateAddress(ip) {
   const v = net.isIP(ip);
   if (!v) return true; // unparseable — treat as unsafe
   const addr = ip.toLowerCase();
   if (v === 4) {
-    return /^127\./.test(addr) || /^10\./.test(addr) || /^192\.168\./.test(addr)
-      || /^169\.254\./.test(addr) || /^172\.(1[6-9]|2\d|3[01])\./.test(addr)
-      || /^0\./.test(addr) || addr === '255.255.255.255' || /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(addr);
+    const o = addr.split('.').map(Number);
+    if (o[0] === 0 || o[0] === 10 || o[0] === 127) return true;           // this-net, private, loopback
+    if (o[0] >= 224) return true;                                          // multicast + reserved + broadcast
+    if (o[0] === 100 && o[1] >= 64 && o[1] <= 127) return true;            // CGN 100.64/10
+    if (o[0] === 169 && o[1] === 254) return true;                         // link-local / metadata
+    if (o[0] === 172 && o[1] >= 16 && o[1] <= 31) return true;             // private 172.16/12
+    if (o[0] === 192 && o[1] === 168) return true;                         // private 192.168/16
+    if (o[0] === 192 && o[1] === 0 && (o[2] === 0 || o[2] === 2)) return true; // IETF special + TEST-NET-1
+    if (o[0] === 198 && (o[1] === 18 || o[1] === 19)) return true;         // benchmarking 198.18/15
+    if (o[0] === 198 && o[1] === 51 && o[2] === 100) return true;          // TEST-NET-2
+    if (o[0] === 203 && o[1] === 0 && o[2] === 113) return true;           // TEST-NET-3
+    return false;
   }
-  // IPv6: loopback, unspecified, unique-local, link-local, IPv4-mapped private
-  if (addr === '::1' || addr === '::') return true;
-  if (/^(fc|fd|fe8|fe9|fea|feb)/.test(addr)) return true;
+  // IPv6: IPv4-mapped recurses to the v4 rules; otherwise ONLY global
+  // unicast (2000::/3) passes, minus the documentation prefix — loopback,
+  // unspecified, unique-local, link-local, site-local, multicast and every
+  // other special block fail the 2000::/3 test automatically.
   if (addr.startsWith('::ffff:')) return isPrivateAddress(addr.slice(7));
+  if (!/^[23]/.test(addr)) return true;
+  if (addr.startsWith('2001:db8')) return true; // documentation
   return false;
 }
 
