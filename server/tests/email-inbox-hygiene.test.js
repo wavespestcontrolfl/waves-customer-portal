@@ -466,8 +466,9 @@ describe('draftReplyForEmail (GATE_EMAIL_AUTO_DRAFTS)', () => {
     const result = await draftReplyForEmail({ ...CUSTOMER_EMAIL });
     expect(result).toBeNull();
     expect(gmailClient.createDraft).not.toHaveBeenCalled();
-    // the claim is handed back for a future retry
+    // the claim STAYS pending — the daily reconciler is the retry mechanism
+    // (it releases and immediately re-drafts when no thread draft exists)
     const patches = state.updates.filter((u) => u.table === 'emails').map((u) => u.patch.draft_gmail_id);
-    expect(patches).toEqual(['pending', null]);
+    expect(patches).toEqual(['pending']);
   });
 });

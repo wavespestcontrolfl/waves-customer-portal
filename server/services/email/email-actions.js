@@ -860,7 +860,9 @@ async function draftReplyForEmail(email, { customer = null, tone = 'service' } =
         return null;
       }
     } catch (e) {
-      await releaseDraftClaim(email.id);
+      // Can't verify the thread — keep the claim; the daily reconciler
+      // re-checks and either settles or releases-and-redrafts.
+      logger.warn(`[email-actions] pre-create thread check failed (email ${email.id}) — claim retained: ${e.message}`);
       return null;
     }
     const MODELS = require('../../config/models');
@@ -890,7 +892,10 @@ async function draftReplyForEmail(email, { customer = null, tone = 'service' } =
       maxTokens: 400,
     });
     if (!result.ok || !result.text) {
-      await releaseDraftClaim(email.id);
+      // Transient provider failure — KEEP the claim; the daily reconciler
+      // finds no thread draft, releases, and immediately re-drafts. Clearing
+      // to NULL here would orphan the row forever (classification runs once).
+      logger.warn(`[email-actions] draft LLM produced no text (email ${email.id}) — claim retained for reconciler retry`);
       return null;
     }
     // Model output is HTML-ESCAPED before markup conversion — even a
@@ -929,7 +934,7 @@ async function draftReplyForEmail(email, { customer = null, tone = 'service' } =
       return null;
     }
     if (!draft?.id) {
-      await releaseDraftClaim(email.id);
+      logger.warn(`[email-actions] createDraft returned no id (email ${email.id}) — claim retained for reconciler retry`);
       return null;
     }
     // A Gmail draft now EXISTS — from here on the claim is never released
@@ -945,19 +950,12 @@ async function draftReplyForEmail(email, { customer = null, tone = 'service' } =
     logger.info(`[email-actions] Reply draft created for email ${email.id} (draft ${draft.id})`);
     return draft.id;
   } catch (e) {
-    // Only reached from pre-draft failures (LLM, live header fetch) — no
-    // Gmail draft exists, so handing the claim back is safe.
-    await releaseDraftClaim(email.id).catch(() => {});
-    logger.warn(`[email-actions] auto-draft failed (email ${email.id}): ${e.message}`);
+    // ALL failure paths keep the 'pending' claim — the daily reconciler is
+    // the single retry mechanism: it checks the live thread, settles if a
+    // draft exists, and otherwise releases + immediately re-drafts.
+    logger.warn(`[email-actions] auto-draft failed (email ${email.id}) — claim retained for reconciler retry: ${e.message}`);
     return null;
   }
-}
-
-// A failed draft attempt hands the claim back so the next classification
-// pass can retry — only the 'pending' placeholder is ever cleared.
-async function releaseDraftClaim(emailId) {
-  await db('emails').where({ id: emailId, draft_gmail_id: 'pending' })
-    .update({ draft_gmail_id: null, updated_at: new Date() });
 }
 
 async function handleCustomerRequest(email, classification) {
