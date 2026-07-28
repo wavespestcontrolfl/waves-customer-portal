@@ -432,7 +432,7 @@ function treatmentScope({ service = {}, applications = [], zones = [] } = {}) {
   };
 }
 
-function normalizeAdvisoryForTreatmentScope(advisory = {}, { service = {}, applications = [], zones = [] } = {}) {
+function normalizeAdvisoryForTreatmentScope(advisory = {}, { service = {}, applications = [], zones = [], deferUnknownExteriorZeroing = false } = {}) {
   const normalized = { ...parseJsonObject(advisory) };
   const scope = treatmentScope({ service, applications, zones });
 
@@ -445,8 +445,16 @@ function normalizeAdvisoryForTreatmentScope(advisory = {}, { service = {}, appli
   // no exterior row (previously both service-line default timers rendered).
   // This subsumes the old interior-only branch: explicitly-interior visits
   // have hasExterior false and zero out here the same way.
+  // WRITE-path callers set deferUnknownExteriorZeroing: an UNKNOWN scope
+  // keeps the stored duration so a treatment-zone trace saved AFTER
+  // completion can still surface the timer — the read-time normalizer
+  // (trace-aware) makes the final display call, and stored zero would be
+  // unrecoverable (codex P1 #3007 r11). Explicitly non-exterior scope
+  // still zeroes at write.
   if (normalized.exterior_reentry_min != null && !(scope.hasExplicitScope && scope.hasExterior)) {
-    normalized.exterior_reentry_min = 0;
+    if (!(deferUnknownExteriorZeroing && !scope.hasExplicitScope)) {
+      normalized.exterior_reentry_min = 0;
+    }
   }
 
   return normalized;
@@ -473,6 +481,10 @@ function buildCompletionAdvisory({ advisoryDefaults = {}, completionAreas = [], 
     // this the explicit-exterior rule would zero the dry-down timer on a
     // visit whose treatment location WAS captured (codex P1 #3007 r5).
     zones: tracedExteriorZone ? [{ label: 'Traced exterior treatment zone' }] : [],
+    // Unknown scope keeps the stored duration at write time — a trace saved
+    // after completion must still be able to surface the timer, and the
+    // read-time normalizer makes the final display decision.
+    deferUnknownExteriorZeroing: true,
   });
 }
 

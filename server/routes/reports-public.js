@@ -1429,7 +1429,15 @@ router.get('/:token/data', async (req, res, next) => {
       // 2026-07-09). Live views only: the player streams
       // /reports/:token/recap/video, meaningless in pdf/static renders.
       // Best-effort — never blocks.
-      if (mode === 'live' && service.scheduled_service_id && !v1Data.internalOnly && v1Data.serviceLine === 'pest') {
+      if (
+        mode === 'live' && service.scheduled_service_id && !v1Data.internalOnly
+        && v1Data.serviceLine === 'pest'
+        // Cockroach-family typed reports dropped the V2 perimeter story —
+        // an ALREADY-approved recap video telling it must not keep serving
+        // on permanent links either (codex P1 #3007 r11; the recap builder
+        // stopped producing new ones in r10).
+        && !require('../services/service-report/pest-report-v2').isCockroachTypedReportType(v1Data.typedReport?.type)
+      ) {
         try {
           const { getRecap } = require('../services/service-report/recap-pipeline');
           const recap = await getRecap(service.scheduled_service_id);

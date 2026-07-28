@@ -724,7 +724,8 @@ const DOMAIN_TERMS = [
   { kind: 'pest', out: /\bbees?\b/i, corpus: /\bbees?\b/ },
   { kind: 'pest', out: /\bhornets?\b/i, corpus: /\bhornet/ },
   { kind: 'pest', out: /\byellow\s*jackets?\b/i, corpus: /\byellow\s*jacket/ },
-  { kind: 'pest', out: /\bsnails?\b|\bslugs?\b/i, corpus: /\bsnail|\bslug/ },
+  { kind: 'pest', out: /\bsnails?\b/i, corpus: /\bsnail/ },
+  { kind: 'pest', out: /\bslugs?\b/i, corpus: /\bslug/ },
   { kind: 'pest', out: /\bnests?\b/i, corpus: /\bnest/ },
   // species QUALIFIERS (codex P1 #3007 r3): the family term alone must not
   // ground a different species — German cockroaches recorded, "American
@@ -765,7 +766,8 @@ const DOMAIN_TERMS = [
   { kind: 'pest', out: /\bthrips\b/i, corpus: /\bthrips/ },
   { kind: 'pest', out: /\bfusarium\b/i, corpus: /\bfusarium/ },
   { kind: 'pest', out: /\bbud\s+rot\b/i, corpus: /\bbud\s+rot/ },
-  { kind: 'pest', out: /\blethal\s+(?:bronzing|yellowing)\b/i, corpus: /\blethal\s+(?:bronzing|yellowing)/ },
+  { kind: 'pest', out: /\blethal\s+bronzing\b/i, corpus: /\blethal\s+bronzing/ },
+  { kind: 'pest', out: /\blethal\s+yellowing\b/i, corpus: /\blethal\s+yellowing/ },
   // treatment actions
   { kind: 'action', out: /\bgel\s*bait/i, corpus: /\bgel\s*bait/ },
   { kind: 'action', out: /\bbait(?:s|ed|ing)?\b/i, corpus: /\bbait/ },
@@ -786,6 +788,11 @@ const DOMAIN_TERMS = [
   { kind: 'action', out: /\bbarrier\b/i, corpus: /\bbarrier/ },
   { kind: 'action', out: /\btraps?\b|\btrapped\b|\btrapping\b/i, corpus: /\btrap/ },
   { kind: 'action', out: /\bmonitors?\b|\bmonitoring\b/i, corpus: /\bmonitor/ },
+  // generic completion verbs (codex P1 r11): 'we treated the kitchen' on an
+  // inspection-only report must find completed-work evidence
+  { kind: 'action', out: /\btreat(?:ed|ing|ments?)?\b/i, corpus: /\btreat/ },
+  { kind: 'action', out: /\bappl(?:y|ied|ying|ications?)\b/i, corpus: /\bappl/ },
+  { kind: 'action', out: /\binstall(?:ed|ing|ations?)?\b/i, corpus: /\binstall/ },
   // locations
   { kind: 'location', out: /\bkitchens?\b/i, corpus: /\bkitchen/ },
   { kind: 'location', out: /\bbath(?:room)?s?\b/i, corpus: /\bbath/ },
@@ -803,10 +810,12 @@ const DOMAIN_TERMS = [
   { kind: 'location', out: /\bdriveways?\b/i, corpus: /\bdriveway/ },
   { kind: 'location', out: /\bperimeters?\b/i, corpus: /\bperimeter/ },
   { kind: 'location', out: /\bfoundations?\b/i, corpus: /\bfoundation/ },
-  { kind: 'location', out: /\beaves\b|\bsoffits?\b/i, corpus: /\beaves\b|\bsoffit/ },
+  { kind: 'location', out: /\beaves\b/i, corpus: /\beaves\b/ },
+  { kind: 'location', out: /\bsoffits?\b/i, corpus: /\bsoffit/ },
   { kind: 'location', out: /\bdishwashers?\b/i, corpus: /\bdishwasher/ },
   { kind: 'location', out: /\brefrigerators?\b|\bfridge\b/i, corpus: /\brefrigerator|\bfridge/ },
-  { kind: 'location', out: /\bstoves?\b|\bovens?\b/i, corpus: /\bstove|\boven/ },
+  { kind: 'location', out: /\bstoves?\b/i, corpus: /\bstove/ },
+  { kind: 'location', out: /\bovens?\b/i, corpus: /\boven/ },
   { kind: 'location', out: /\bsinks?\b/i, corpus: /\bsink/ },
   { kind: 'location', out: /\bbaseboards?\b/i, corpus: /\bbaseboard/ },
   { kind: 'location', out: /\bwall\s*voids?\b/i, corpus: /\bwall\s*void/ },
@@ -917,11 +926,13 @@ function actionCorpus(facts) {
       (finding) => !NEGATIVE_FINDING_VALUE_RE.test(String(finding.value).trim()),
     ),
     recap: affirmativeSentences(facts.recap),
+    // nextStep is RECOMMENDATION copy, not completed work — "Exclusion
+    // recommended" must not ground "we completed exclusion today" (codex
+    // P1 r11). It stays in the general corpus and the mandatory-care path.
     todaysResult: facts.todaysResult
       ? {
         headline: affirmativeSentences(facts.todaysResult.headline),
         body: affirmativeSentences(facts.todaysResult.body),
-        nextStep: affirmativeSentences(facts.todaysResult.nextStep),
       }
       : null,
     devices: facts.devices,
@@ -1041,7 +1052,8 @@ function typedCountProblems(text, facts) {
 function completedWorkStrings(facts) {
   const strings = [];
   const norm = (value) => ` ${String(value).toLowerCase().replace(/[^a-z0-9]+/g, ' ')} `;
-  [facts.recap, facts.todaysResult?.headline, facts.todaysResult?.body, facts.todaysResult?.nextStep]
+  // nextStep excluded: recommendations are not completed work (codex P1 r11)
+  [facts.recap, facts.todaysResult?.headline, facts.todaysResult?.body]
     .forEach((block) => String(block || '').split(/(?<=[.!?])\s+/).forEach((sentence) => {
       if (sentence.trim() && !NEGATED_SENTENCE_RE.test(sentence)) strings.push(norm(sentence));
     }));

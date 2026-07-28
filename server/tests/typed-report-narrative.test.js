@@ -19,7 +19,9 @@ let seq = 0;
 function roachInput(overrides = {}) {
   seq += 1;
   return {
-    recap: `Your cockroach service is complete, targeting German cockroaches throughout the home. (case ${seq})`,
+    // cache-busting marker is DIGIT-FREE: a numeric case counter leaks into
+    // the grounded-number set and makes numeral assertions order-dependent
+    recap: `Your cockroach service is complete, targeting German cockroaches throughout the home. (case ${'i'.repeat(seq)})`,
     serviceTypeDisplay: 'Cockroach Control Service',
     reportTypeLabel: 'Cockroach Treatment',
     typedReport: {
@@ -170,6 +172,44 @@ test('bare "one" is a numeric claim; the partitive idiom stays exempt', () => {
   // ratified window is 10–14 days — "one day" contradicts it
   expect(ungroundedClaims('We recommend a follow-up in one day.', facts)).toContain('ungrounded_number:1');
   expect(ungroundedClaims('One of the treated areas will be rechecked at the next visit.', facts)).toEqual([]);
+});
+
+test('recommendations never ground completed work; generic verbs validated (codex r11)', () => {
+  const inspectionFacts = groundingFacts(roachInput({
+    recap: 'Today we completed an inspection for your pest service. We checked the accessible areas and noted the current conditions.',
+    typedReport: {
+      reportTypeLabel: 'Rodent Assessment',
+      todaysResult: { headline: 'Inspection completed today.', body: 'We inspected the kitchen and garage areas today.', nextStep: 'Exclusion is recommended to seal the entry gaps.' },
+      findings: [{ fieldKey: 'areas', customerLabel: 'Areas inspected', customerValueLabel: 'Kitchen, Garage', value: 'kitchen' }],
+    },
+    activity: null,
+    applications: [],
+    photos: [],
+  }));
+  // 'Exclusion recommended' must not become completed work
+  expect(ungroundedClaims('We completed exclusion today.', inspectionFacts))
+    .toContain('ungrounded_action:exclusion');
+  // generic treatment verbs need completed-work evidence too
+  expect(ungroundedClaims('We treated the kitchen today.', inspectionFacts)
+    .some((p) => p.startsWith('ungrounded_action') || p === 'unpaired_action_location')).toBe(true);
+  // the true inspection sentence passes
+  expect(ungroundedClaims('We inspected the kitchen today.', inspectionFacts)).toEqual([]);
+});
+
+test('split alternatives ground separately (codex r11: slugs vs snails, oven vs stove)', () => {
+  const snailFacts = groundingFacts(roachInput({
+    typedReport: {
+      reportTypeLabel: 'One-Time Pest Treatment',
+      todaysResult: { headline: 'Snail treatment completed today.', body: 'We treated the snail activity today.', nextStep: null },
+      findings: [{ fieldKey: 'target_pest', customerLabel: 'Target pest', customerValueLabel: 'Snails', value: 'snails' }],
+    },
+    activity: null,
+    applications: [],
+    photos: [],
+  }));
+  expect(ungroundedClaims('Snails were treated today.', snailFacts)).toEqual([]);
+  expect(ungroundedClaims('Snails and slugs were treated today.', snailFacts))
+    .toContain('ungrounded_pest:slugs');
 });
 
 test('free-text pest qualifiers ground as full phrases (codex r10: fire vs ghost ants)', () => {
