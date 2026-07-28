@@ -28,11 +28,13 @@ router.get('/', async (req, res, next) => {
           .orWhereRaw("created_at >= now() - interval '6 hours'");
       });
     if (unreadOnly) q = q.where({ read: false });
-    // Non-storm rows outrank storm alerts inside the 20-row window: a burst
-    // of storm nudges must never crowd an actionable geofence/timer prompt
-    // out of the poll result while the tech works through the capped cards.
+    // FRESH non-storm rows outrank everything inside the 20-row window: a
+    // storm burst must never crowd an actionable geofence/timer prompt out
+    // of the poll result. The priority is freshness-scoped, though — a stale
+    // backlog of ≥20 unread non-storm rows must not displace a live storm
+    // warning either, so aged rows compete with storms purely on recency.
     const rows = await q
-      .orderByRaw("CASE WHEN type = 'storm_watch_alert' THEN 1 ELSE 0 END")
+      .orderByRaw("CASE WHEN type != 'storm_watch_alert' AND created_at >= now() - interval '6 hours' THEN 0 ELSE 1 END")
       .orderBy('created_at', 'desc')
       .limit(20);
     res.json({ notifications: rows.map(parseRow) });

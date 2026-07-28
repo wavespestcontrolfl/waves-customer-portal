@@ -594,6 +594,14 @@ const PHOTO_LOOKUP_TYPE_BY_CATEGORY = {
 
 function detectServiceCategory(serviceType) {
   const s = (serviceType || "").toLowerCase();
+  // Pest-primary combined names ("Quarterly Pest + Termite Bait Station")
+  // stay pest — the companion token names a section, not the line (mirrors
+  // the server classifier's rule exactly).
+  if (
+    /\bpest\b.*\b(rodent|termite)\b/.test(s) &&
+    !/\b(lawn|turf|grass|weed|fertil|mosquito)\b/.test(s)
+  )
+    return "pest";
   // Precedence mirrors the server's detectServiceLine: explicit lawn-SURFACE
   // tokens win (the combined "Lawn + Tree & Shrub" service stays lawn), while
   // tree/shrub outranks only lawn's ambiguous treatment tokens — "Tree &
