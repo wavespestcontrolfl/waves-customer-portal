@@ -40,30 +40,67 @@ function isPrivateAddress(ip) {
 }
 
 /**
+ * One PINNED http(s) request: the socket connects to the pre-validated
+ * address via a custom `lookup`, so the DNS answer the guard checked is the
+ * DNS answer the connection uses — a rebinding attacker can't serve a public
+ * A record to the validator and a private one to the request. Host header
+ * and TLS SNI still come from the URL's hostname. Responses are truncated
+ * (nothing is read beyond status/headers + a small body drain).
+ */
+function requestPinned(urlString, { method = 'GET', headers = {}, body = null } = {}, pinnedAddress, pinnedFamily) {
+  const u = new URL(urlString);
+  const mod = u.protocol === 'https:' ? require('https') : require('http');
+  return new Promise((resolve, reject) => {
+    const req = mod.request({
+      protocol: u.protocol,
+      hostname: u.hostname,
+      port: u.port || (u.protocol === 'https:' ? 443 : 80),
+      path: `${u.pathname}${u.search}`,
+      method,
+      headers,
+      timeout: 10000,
+      lookup: (host, opts, cb) => cb(null, pinnedAddress, pinnedFamily),
+    }, (res) => {
+      res.resume(); // drain — body content is never used
+      resolve({
+        ok: res.statusCode >= 200 && res.statusCode < 300,
+        status: res.statusCode,
+        headers: { get: (name) => res.headers[String(name).toLowerCase()] ?? null },
+      });
+    });
+    req.on('timeout', () => req.destroy(new Error('unsubscribe request timeout')));
+    req.on('error', reject);
+    if (body) req.write(body);
+    req.end();
+  });
+}
+
+/**
  * SSRF-hardened fetch for UNTRUSTED, sender-controlled URLs. The header/body
  * URL check alone is not enough: a public hostname can resolve to a private
- * address, and an open redirect can bounce the request to
- * internal/metadata endpoints. Every hop (redirects included, max 3) is
- * string-validated AND DNS-resolved with every returned address required to
- * be public before any request is issued; redirects are followed manually so
- * an unvalidated hop can never fire. (DNS answers are not pinned to the
- * socket — a sub-TTL rebinding race remains theoretically possible — but no
- * hop with a private resolution is ever requested.)
+ * address, an open redirect can bounce the request to internal/metadata
+ * endpoints, and a rebinding DNS server can answer the validator and the
+ * request differently. Every hop (redirects manual, max 3) is
+ * string-validated, DNS-resolved with every address required public, and the
+ * request socket is PINNED to the validated address (requestPinned above).
  */
 async function fetchPublicOnly(rawUrl, options = {}, maxHops = 3) {
   let current = rawUrl;
   for (let hop = 0; hop < maxHops; hop += 1) {
     if (!isSafePublicUrl(current)) throw new Error(`unsafe URL refused (hop ${hop})`);
     const { hostname } = new URL(current);
-    if (!net.isIP(hostname)) {
+    let pinned;
+    if (net.isIP(hostname)) {
+      if (isPrivateAddress(hostname)) throw new Error(`private IP literal refused (hop ${hop})`);
+      pinned = { address: hostname, family: net.isIP(hostname) };
+    } else {
       const results = await dns.lookup(hostname, { all: true });
       if (!results.length || results.some((r) => isPrivateAddress(r.address))) {
         throw new Error(`private/unresolvable host refused (hop ${hop})`);
       }
-    } else if (isPrivateAddress(hostname)) {
-      throw new Error(`private IP literal refused (hop ${hop})`);
+      pinned = results[0];
     }
-    const res = await fetch(current, { ...options, redirect: 'manual' });
+    const res = await requestPinned(current, options, pinned.address, pinned.family);
     if (res.status >= 300 && res.status < 400) {
       const location = res.headers.get('location');
       if (!location) return res;

@@ -16,6 +16,7 @@ jest.mock('../services/email/gmail-client', () => ({
   archiveMessage: jest.fn(),
   modifyLabels: jest.fn(),
   ensureLabel: jest.fn(async () => 'Label_42'),
+  getAuthClient: jest.fn(async () => null),
   listMessages: jest.fn(async () => []),
   getMessage: jest.fn(),
   getThread: jest.fn(),
@@ -101,7 +102,7 @@ afterEach(() => {
 describe('handleSpam — quarantine + known-sender guard', () => {
   const { handleSpam } = require('../services/email/email-actions');
 
-  test('quarantines unknown spam (label swap, stamp) and blocks the sender — no instant trash', async () => {
+  test('quarantines unknown spam (label swap, stamp); the sender block WAITS for the sweep', async () => {
     const state = setupDb();
     await handleSpam({ ...EMAIL });
     expect(gmailClient.ensureLabel).toHaveBeenCalledWith('Quarantine');
@@ -110,6 +111,8 @@ describe('handleSpam — quarantine + known-sender guard', () => {
     const patch = state.updates.find((u) => u.table === 'emails')?.patch;
     expect(patch.auto_action).toBe('spam_quarantined');
     expect(patch.quarantined_at).toBeInstanceOf(Date);
+    // no persistent block during the undo window
+    expect(state.inserts.find((i) => i.table === 'blocked_email_senders')).toBeUndefined();
   });
 
   test('a known customer sender is never quarantined — marked important instead', async () => {
@@ -142,25 +145,29 @@ describe('handleSpam — quarantine + known-sender guard', () => {
     expect(autoUnsubscribe).not.toHaveBeenCalled();
   });
 
-  test('falls back to trash when the quarantine label API fails', async () => {
-    setupDb();
+  test('falls back to trash + immediate block when the quarantine label API fails', async () => {
+    const state = setupDb();
     gmailClient.ensureLabel.mockRejectedValueOnce(new Error('labels down'));
     await handleSpam({ ...EMAIL });
     expect(gmailClient.trashMessage).toHaveBeenCalledWith('g-1');
+    // no undo window exists on this path, so the block is immediate
+    expect(state.inserts.find((i) => i.table === 'blocked_email_senders')).toBeDefined();
   });
 });
 
 describe('sweepQuarantine', () => {
   const { sweepQuarantine } = require('../services/email/inbox-hygiene');
 
-  test('claims atomically, then trashes aged quarantined rows', async () => {
-    const state = setupDb({}, { emails: [[{ id: 'e-old', gmail_id: 'g-old' }]] });
+  test('claims atomically, trashes aged rows, and blocks the sender only at commit', async () => {
+    const state = setupDb({}, { emails: [[{ id: 'e-old', gmail_id: 'g-old', from_address: 'coldpitch@seo-blaster.example' }]] });
     const result = await sweepQuarantine(new Date('2026-07-28T12:00:00Z'));
     expect(gmailClient.trashMessage).toHaveBeenCalledWith('g-old');
     expect(result.trashed).toBe(1);
     const actions = state.updates.filter((u) => u.table === 'emails').map((u) => u.patch.auto_action);
     // claim BEFORE the destructive call, settle after
     expect(actions).toEqual(['spam_trashing', 'spam_trashed_after_quarantine']);
+    // the deferred persistent block lands with the commit
+    expect(state.inserts.find((i) => i.table === 'blocked_email_senders')).toBeDefined();
   });
 
   test('an operator label-restore vetoes the trash — state cleared, message kept', async () => {
@@ -288,11 +295,34 @@ describe('draftReplyForEmail (GATE_EMAIL_AUTO_DRAFTS)', () => {
     process.env.GATE_EMAIL_AUTO_DRAFTS = 'true';
     // claim update returns 0: another worker (or a prior classification pass)
     // already holds/held the claim, even though the in-memory row looks free.
-    setupDb({}, {}, { emails: [0] });
+    // both the NULL->pending claim and the stale-takeover lose
+    setupDb({}, {}, { emails: [0, 0] });
     const result = await draftReplyForEmail({ ...CUSTOMER_EMAIL, draft_gmail_id: null });
     expect(result).toBeNull();
     expect(dispatchWithFallback).not.toHaveBeenCalled();
     expect(gmailClient.createDraft).not.toHaveBeenCalled();
+  });
+
+  test('an ambiguous createDraft failure keeps the claim for reconcile (no duplicate on retry)', async () => {
+    process.env.GATE_EMAIL_AUTO_DRAFTS = 'true';
+    const state = setupDb();
+    gmailClient.createDraft.mockRejectedValueOnce(new Error('socket hang up'));
+    const result = await draftReplyForEmail({ ...CUSTOMER_EMAIL });
+    expect(result).toBeNull();
+    const patches = state.updates.filter((u) => u.table === 'emails').map((u) => u.patch.draft_gmail_id);
+    expect(patches).toEqual(['pending']); // claim NOT released
+  });
+
+  test('a stale pending claim reconciles against the live thread instead of duplicating', async () => {
+    process.env.GATE_EMAIL_AUTO_DRAFTS = 'true';
+    // first claim (NULL->pending) loses, stale takeover wins
+    const state = setupDb({}, {}, { emails: [0, 1, 1] });
+    gmailClient.getThread.mockResolvedValueOnce({ messages: [{ labelIds: ['DRAFT'] }] });
+    const result = await draftReplyForEmail({ ...CUSTOMER_EMAIL, draft_gmail_id: 'pending' });
+    expect(result).toBeNull();
+    expect(gmailClient.createDraft).not.toHaveBeenCalled();
+    const patches = state.updates.filter((u) => u.table === 'emails').map((u) => u.patch.draft_gmail_id);
+    expect(patches[patches.length - 1]).toBe('reconciled_existing_draft');
   });
 
   test('LLM failure degrades to no draft, never throws', async () => {

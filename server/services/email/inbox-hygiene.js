@@ -80,7 +80,7 @@ async function sweepQuarantine(now = new Date()) {
   const rows = await db('emails')
     .where('auto_action', 'spam_quarantined')
     .where('quarantined_at', '<', cutoff)
-    .select('id', 'gmail_id');
+    .select('id', 'gmail_id', 'from_address');
   let trashed = 0;
   let restored = 0;
   for (const row of rows) {
@@ -105,6 +105,15 @@ async function sweepQuarantine(now = new Date()) {
         trashed += await db('emails')
           .where({ id: row.id, auto_action: 'spam_trashing' })
           .update({ auto_action: 'spam_trashed_after_quarantine', updated_at: new Date() });
+        // The persistent sender block lands only NOW — after the undo window
+        // elapsed with no operator veto. Blocking at quarantine time would
+        // keep trash-routing a sender whose message the operator restored.
+        try {
+          const { blockSpamSender } = require('./spam-blocker');
+          await blockSpamSender(row);
+        } catch (blockErr) {
+          logger.warn(`[inbox-hygiene] deferred sender block failed (email ${row.id}): ${blockErr.message}`);
+        }
       } catch (trashErr) {
         // Release the claim so tomorrow's sweep retries.
         await db('emails')

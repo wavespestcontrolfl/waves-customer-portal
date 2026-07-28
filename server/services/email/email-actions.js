@@ -261,27 +261,27 @@ async function handleSpam(email) {
   }
 
   // 2. Quarantine instead of instant trash — 24h undo window, swept daily
-  // (inbox-hygiene). A misfire costs one label-click inside a day.
+  // (inbox-hygiene). A misfire costs one label-click inside a day. The
+  // persistent sender block deliberately WAITS for the sweep: blocking here
+  // would keep routing the sender to Trash even after an operator restores
+  // the message during the undo window. Only the fallback-trash path (label
+  // API down = no undo window exists) blocks immediately.
   try {
     await quarantineMessage(email);
+    logger.info(`[email-actions] Spam quarantined (email ${email.id}); sender block deferred to sweep`);
   } catch (e) {
     // Quarantine needs the Gmail label API; if it fails, fall back to the
     // pre-quarantine behavior rather than leaving spam in the inbox.
     logger.warn(`[email-actions] quarantine failed, falling back to trash (email ${email.id}): ${e.message}`);
     try { await gmailClient.trashMessage(email.gmail_id); } catch (e2) { /* non-critical */ }
+    const { blockSpamSender } = require('./spam-blocker');
+    await blockSpamSender(email);
     await db('emails').where({ id: email.id }).update({
       is_archived: true,
       auto_action: 'spam_blocked',
       updated_at: new Date(),
     });
   }
-
-  // 3. Block future emails from this sender (repeat mail routes straight to
-  // Trash via the sender filter — known junk needs no undo window).
-  const { blockSpamSender } = require('./spam-blocker');
-  await blockSpamSender(email);
-
-  logger.info(`[email-actions] Spam quarantined + sender blocked (email ${email.id})`);
 }
 
 async function handleNewsletter(email) {
@@ -763,11 +763,35 @@ async function draftReplyForEmail(email, { customer = null, tone = 'service' } =
   // time reclassification (which runs auto-actions twice with the same
   // object) or a concurrent worker gets here. Only the caller that flips
   // NULL → 'pending' drafts; everyone else no-ops.
-  const claimed = await db('emails')
+  let claimed = await db('emails')
     .where({ id: email.id })
     .whereNull('draft_gmail_id')
     .update({ draft_gmail_id: 'pending', updated_at: new Date() });
-  if (!claimed) return null;
+  if (!claimed) {
+    // Stale-claim recovery: a crash mid-attempt leaves 'pending' forever.
+    // Take over only hour-old claims, and FIRST reconcile against the live
+    // thread — if the crashed attempt already created a Gmail draft, settle
+    // the claim as reconciled instead of minting a duplicate.
+    const staleCutoff = new Date(Date.now() - 3600000);
+    claimed = await db('emails')
+      .where({ id: email.id, draft_gmail_id: 'pending' })
+      .where('updated_at', '<', staleCutoff)
+      .update({ draft_gmail_id: 'pending', updated_at: new Date() });
+    if (!claimed) return null;
+    try {
+      const thread = await gmailClient.getThread(email.gmail_thread_id);
+      const hasDraft = (thread?.messages || []).some((m) => (m.labelIds || []).includes('DRAFT'));
+      if (hasDraft) {
+        await db('emails').where({ id: email.id, draft_gmail_id: 'pending' })
+          .update({ draft_gmail_id: 'reconciled_existing_draft', updated_at: new Date() });
+        return null;
+      }
+    } catch (e) {
+      // Can't prove there's no draft — release and let a later pass retry.
+      await releaseDraftClaim(email.id);
+      return null;
+    }
+  }
   try {
     const MODELS = require('../../config/models');
     const { dispatchWithFallback } = require('../llm/call');
@@ -803,22 +827,41 @@ async function draftReplyForEmail(email, { customer = null, tone = 'service' } =
         inReplyTo = fresh?.message_id || null;
       } catch (e) { /* draft still lands, threading degrades */ }
     }
-    const draft = await gmailClient.createDraft(
-      email.from_address,
-      /^re:/i.test(email.subject || '') ? email.subject : `Re: ${email.subject || ''}`,
-      htmlBody,
-      email.gmail_thread_id,
-      inReplyTo
-    );
+    let draft;
+    try {
+      draft = await gmailClient.createDraft(
+        email.from_address,
+        /^re:/i.test(email.subject || '') ? email.subject : `Re: ${email.subject || ''}`,
+        htmlBody,
+        email.gmail_thread_id,
+        inReplyTo
+      );
+    } catch (createErr) {
+      // AMBIGUOUS failure — Gmail may have created the draft before the
+      // error surfaced. Keep the claim; the stale-claim reconcile pass
+      // checks the live thread and either settles or safely retries.
+      logger.warn(`[email-actions] createDraft failed ambiguously (email ${email.id}) — claim retained for reconcile: ${createErr.message}`);
+      return null;
+    }
     if (!draft?.id) {
       await releaseDraftClaim(email.id);
       return null;
     }
-    await db('emails').where({ id: email.id, draft_gmail_id: 'pending' })
-      .update({ draft_gmail_id: draft.id, updated_at: new Date() });
+    // A Gmail draft now EXISTS — from here on the claim is never released
+    // (releasing would let a retry duplicate it). A failed settle leaves
+    // 'pending'; the stale-claim recovery above reconciles it against the
+    // thread on a later pass.
+    try {
+      await db('emails').where({ id: email.id, draft_gmail_id: 'pending' })
+        .update({ draft_gmail_id: draft.id, updated_at: new Date() });
+    } catch (settleErr) {
+      logger.warn(`[email-actions] draft ${draft.id} created but settle failed (email ${email.id}) — claim retained for reconcile: ${settleErr.message}`);
+    }
     logger.info(`[email-actions] Reply draft created for email ${email.id} (draft ${draft.id})`);
     return draft.id;
   } catch (e) {
+    // Only reached from pre-draft failures (LLM, live header fetch) — no
+    // Gmail draft exists, so handing the claim back is safe.
     await releaseDraftClaim(email.id).catch(() => {});
     logger.warn(`[email-actions] auto-draft failed (email ${email.id}): ${e.message}`);
     return null;
