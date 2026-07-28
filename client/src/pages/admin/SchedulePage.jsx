@@ -594,6 +594,10 @@ const PHOTO_LOOKUP_TYPE_BY_CATEGORY = {
 
 function detectServiceCategory(serviceType) {
   const s = (serviceType || "").toLowerCase();
+  // "Palmetto" is a roach, not a palm — the word-bounded exception must run
+  // before the palm check or "Palmetto Roach Knockdown" classifies as
+  // tree_shrub (mirrors the server classifier).
+  if (/\bpalmetto\b/.test(s)) return "pest";
   // Pest-primary combined names ("Quarterly Pest + Termite Bait Station")
   // stay pest — the companion token names a section, not the line (mirrors
   // the server classifier's rule exactly).
@@ -613,7 +617,7 @@ function detectServiceCategory(serviceType) {
     s.includes("sod");
   if (
     !hasLawnSurface &&
-    (s.includes("tree") || s.includes("shrub") || s.includes("palm"))
+    (s.includes("tree") || s.includes("shrub") || /\bpalm(s)?\b/.test(s))
   )
     return "tree_shrub";
   if (
