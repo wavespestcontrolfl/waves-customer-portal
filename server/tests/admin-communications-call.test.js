@@ -31,6 +31,10 @@ jest.mock('../middleware/admin-auth', () => ({
     return next();
   },
   requireTechOrAdmin: (_req, _res, next) => next(),
+  requireAdmin: (req, res, next) =>
+    (req.techRole !== 'admin'
+      ? res.status(403).json({ error: 'Admin access required' })
+      : next()),
 }));
 jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: jest.fn(),
