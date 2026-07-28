@@ -179,9 +179,10 @@ describe('handleSpam — quarantine + known-sender guard', () => {
     await handleSpam({ ...EMAIL });
     expect(gmailClient.trashMessage).not.toHaveBeenCalled();
     expect(state.inserts.find((i) => i.table === 'blocked_email_senders')).toBeUndefined();
-    // sweep can never trash it: the quarantine stamp was withdrawn
+    // sweep can never trash it — and the AMBIGUOUS marker survives for the
+    // sweep's live-label reconciliation (never flattened to plain failed)
     const patches = state.updates.filter((u) => u.table === 'emails').map((u) => u.patch.auto_action);
-    expect(patches[patches.length - 1]).toBe('spam_quarantine_failed');
+    expect(patches[patches.length - 1]).toBe('spam_quarantine_ambiguous');
   });
 
   test('EVERY quarantine failure is non-destructive — no trash, no block, marked for the digest', async () => {

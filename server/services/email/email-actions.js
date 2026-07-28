@@ -298,9 +298,15 @@ async function handleSpam(email) {
     // the next day), marked so the sweep can never touch it and the digest
     // can report the failure.
     logger.warn(`[email-actions] quarantine failed at ${e.quarantineStage || 'unknown'} — left non-destructive (email ${email.id}): ${e.message}`);
-    await db('emails').where({ id: email.id })
-      .update({ auto_action: 'spam_quarantine_failed', quarantined_at: null, is_archived: false, updated_at: new Date() })
-      .catch(() => {});
+    // Gmail-stage failures already parked the AMBIGUOUS marker inside
+    // quarantineMessage — the sweep reconciles those against live labels.
+    // Only clean pre-mutation failures (label ensure / DB stamp) settle
+    // straight to failed + visible.
+    if (e.quarantineStage !== 'gmail') {
+      await db('emails').where({ id: email.id })
+        .update({ auto_action: 'spam_quarantine_failed', quarantined_at: null, is_archived: false, updated_at: new Date() })
+        .catch(() => {});
+    }
   }
 }
 
