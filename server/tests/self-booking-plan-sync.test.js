@@ -224,11 +224,12 @@ describe('self-booking plan sync helpers', () => {
       }),
     }));
 
-    // Since the 2026-07-28 auto-tier directive, a tier no longer implies
-    // monthly billing: without an explicit monthly_membership lane the
-    // alignment must never invent a monthly_rate (billing-cron charges any
-    // active customer with monthly_rate > 0).
-    const nullLane = buildCustomerWaveGuardAlignmentUpdates(
+    // Rate repair lanes: the legacy NULL lane keeps its pre-existing repair
+    // (a recognized member with a zeroed rate is outside billing-cron's
+    // positive-rate selection until repaired) — but an 'auto'-provenance
+    // label must never have a rate invented, and explicit non-monthly lanes
+    // never backfill (Codex #3011 r10).
+    const nullLaneLegacy = buildCustomerWaveGuardAlignmentUpdates(
       {
         waveguard_tier: 'Bronze',
         monthly_rate: 0,
@@ -239,7 +240,20 @@ describe('self-booking plan sync helpers', () => {
       customerColumns,
       '2026-06-20',
     );
-    expect(nullLane.updates).not.toHaveProperty('monthly_rate');
+    expect(nullLaneLegacy.updates).toHaveProperty('monthly_rate', 205);
+    const nullLaneAutoLabel = buildCustomerWaveGuardAlignmentUpdates(
+      {
+        waveguard_tier: 'Bronze',
+        waveguard_tier_source: 'auto',
+        monthly_rate: 0,
+        billing_mode: null,
+        member_since: '2025-01-01',
+      },
+      detected,
+      customerColumns,
+      '2026-06-20',
+    );
+    expect(nullLaneAutoLabel.updates).not.toHaveProperty('monthly_rate');
     const perVisitLane = buildCustomerWaveGuardAlignmentUpdates(
       {
         waveguard_tier: 'Bronze',

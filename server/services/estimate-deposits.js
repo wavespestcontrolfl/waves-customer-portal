@@ -165,8 +165,11 @@ async function resolveDepositPolicyForEstimate({ estimate, committedPrepayTerm =
       // LIVE provenance BEFORE honoring the frozen membershipSnapshot too
       // (Codex r9): an estimate saved after the auto-stamp freezes
       // isExistingCustomer: true, and that snapshot must not bypass the gate.
-      const { isAutoDerivedTierLabelCustomer } = require('./self-booking-plan-sync');
-      const labelOnly = await isAutoDerivedTierLabelCustomer(estimate.customer_id);
+      // Fail-CLOSED (Codex r10 P1): anything except a verified 'not_label' —
+      // including 'unknown' from a lookup error or a pre-migration schema —
+      // keeps the deposit required.
+      const { tierLabelStatus } = require('./self-booking-plan-sync');
+      const labelOnly = (await tierLabelStatus(estimate.customer_id)) !== 'not_label';
       if (labelOnly && member?.isExistingCustomer) {
         member = { ...member, isExistingCustomer: false };
       }

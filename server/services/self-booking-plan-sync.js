@@ -723,16 +723,20 @@ function buildCustomerWaveGuardAlignmentUpdates(customer, detectedPlanKeys, cust
 
   const monthlyRateEstimate = representativePlanKeys(detectedPlanKeys)
     .reduce((sum, key) => sum + Number(SELF_BOOKING_RECURRING_PLANS[key]?.monthlyRate || 0), 0);
-  // Backfill a zero/missing monthly_rate ONLY for an explicit
-  // monthly_membership billing lane. Since the 2026-07-28 auto-tier
-  // directive, holding a tier no longer implies monthly billing — inventing a
-  // rate for a NULL/per-visit lane customer would put them into billing-cron's
-  // monthly-charge pool (it selects active customers with monthly_rate > 0).
-  // Nothing currently billed changes: every monthly-billed member already has
-  // a positive rate and never reaches this branch.
+  // Backfill a zero/missing monthly_rate for the explicit monthly_membership
+  // lane, and for the legacy NULL lane ONLY when the tier is not an
+  // auto-derived label (Codex #3011 r10: the NULL-lane repair predates this
+  // PR and must keep working — a recognized legacy member with a zeroed rate
+  // is outside billing-cron's positive-rate selection until repaired — while
+  // an 'auto' label must never have a rate invented, since that would put a
+  // per-visit customer into the monthly-charge pool). Explicit non-monthly
+  // lanes (per_visit / per_application / annual_prepay / one_time) never
+  // backfill.
+  const rateBackfillLane = customer?.billing_mode === 'monthly_membership'
+    || (customer?.billing_mode == null && customer?.waveguard_tier_source !== 'auto');
   if (
     customerColumns.monthly_rate
-    && customer?.billing_mode === 'monthly_membership'
+    && rateBackfillLane
     && (!Number.isFinite(existingRate) || existingRate <= 0)
     && monthlyRateEstimate > 0
   ) {
@@ -838,19 +842,19 @@ async function syncCustomerWaveGuardPlanFromScheduledServices(options = {}) {
   }
 
   // A LABEL-ONLY customer (auto-stamped tier, no positive rate, label-only
-  // billing lane) stays on the tier-only realignment path on every later
-  // sync (Codex #3011 r4): routing them through the member alignment below
-  // would set active / pipeline_stage / member_since on the second sync —
-  // exactly the non-tier mutations this feature promises never to make.
-  // Real paying members (positive rate, paying lane, or legacy rate members)
-  // still get the full alignment.
-  if (
-    isEnabled('autoWaveguardTierEnroll')
-    && normalizeTierName(customer.waveguard_tier)
-    && customer.waveguard_tier_source === 'auto'
-    && Number(customer.monthly_rate || 0) <= 0
-    && isLabelOnlyLane(customer.billing_mode)
-  ) {
+  // billing lane) never enters the member alignment below — it would set
+  // active / pipeline_stage / member_since on the second sync, exactly the
+  // non-tier mutations this feature promises never to make (Codex #3011
+  // r4). Recognition is provenance-based and gate-INDEPENDENT (Codex r10):
+  // stored 'auto' labels persist after the kill switch flips off, and while
+  // dark they are left entirely UNTOUCHED rather than promoted to members —
+  // gate off means no auto behavior, in either direction. Real paying
+  // members (positive rate, paying lane, converted labels, legacy rate
+  // members) still get the full alignment.
+  if (isAutoDerivedTierLabelRow(customer)) {
+    if (!isEnabled('autoWaveguardTierEnroll')) {
+      return { synced: false, reason: 'auto_label_gate_off' };
+    }
     const realignment = await realignLabelOnlyTierCustomer({ database, log, customerId, customerColumns, today });
     return { synced: true, labelOnly: true, ...realignment };
   }
@@ -1060,42 +1064,35 @@ function isAutoDerivedTierLabelRow(customer = {}) {
     && isLabelOnlyLane(customer.billing_mode);
 }
 
-async function isAutoDerivedTierLabelCustomer(customerId, database = db) {
-  if (!customerId) return false;
-  try {
-    const customer = await database('customers').where({ id: customerId }).first();
-    if (!customer) return false;
-    // Provenance-gated (Codex #3011 r7 P1): only an 'auto'-stamped tier is a
-    // label. A NULL-provenance tier (legacy/unclassified member) keeps full
-    // member messaging.
-    return isAutoDerivedTierLabelRow(customer);
-  } catch {
-    return false;
-  }
-}
-
-// MESSAGING-facing variant — TRUE means "suppress the member send". Differs
-// from isAutoDerivedTierLabelCustomer in its failure direction (Codex #3011
-// r9 P1): the welcome SMS and app-intro email are optional courtesy sends
-// while the auto-tier contract is communication-silent, so when provenance
-// CANNOT be verified — lookup error, or a pre-migration schema whose
-// column-guarded enrollment stamped a tier with no source column to record
-// it — the safe outcome is a skipped courtesy message, never a false member
-// send. Uncertainty only suppresses while the auto-tier gate is on: before
-// the gate ever flips no labels exist, so messaging behaves exactly as
-// today.
-async function shouldSuppressMemberMessagingForTierLabel(customerId, database = db) {
-  if (!customerId) return false;
+// Tri-state provenance resolution — the ONE lookup every label-sensitive
+// consumer shares (Codex #3011 r10 P1: a boolean forced "unknown" to
+// impersonate one of the definite answers, and the money gates were
+// inheriting the wrong one):
+//   'label'     — the customer's tier is verifiably an auto-derived label.
+//   'not_label' — verifiably NOT a label (no tier, real member shape, or
+//                 manual/NULL provenance).
+//   'unknown'   — provenance CANNOT be verified: lookup error, or a
+//                 pre-migration schema where the column-guarded enrollment
+//                 stamps tiers with no source column to record them.
+//                 'unknown' only arises as a distinct state while the gate
+//                 is on — before the gate ever flips, no labels exist, so
+//                 unverifiable resolves to 'not_label' and every consumer
+//                 behaves exactly as today.
+// Fail directions live at the call sites: the money gates (deposit /
+// card-on-file) treat anything except 'not_label' as label — the commitment
+// gate stays required; the messaging gates do the same — the courtesy send
+// is skipped. Both err away from granting member benefits on uncertainty.
+async function tierLabelStatus(customerId, database = db) {
+  if (!customerId) return 'not_label';
+  const unverifiable = () => (isEnabled('autoWaveguardTierEnroll') ? 'unknown' : 'not_label');
   try {
     const customerColumns = await columnInfo(database, 'customers');
-    if (!customerColumns.waveguard_tier_source) {
-      return isEnabled('autoWaveguardTierEnroll');
-    }
+    if (!customerColumns.waveguard_tier_source) return unverifiable();
     const customer = await database('customers').where({ id: customerId }).first();
-    if (!customer) return false;
-    return isAutoDerivedTierLabelRow(customer);
+    if (!customer) return 'not_label';
+    return isAutoDerivedTierLabelRow(customer) ? 'label' : 'not_label';
   } catch {
-    return isEnabled('autoWaveguardTierEnroll');
+    return unverifiable();
   }
 }
 
@@ -1393,7 +1390,6 @@ module.exports = {
   buildRecurringOccurrenceDates,
   detectWaveGuardPlanKeys,
   inferTierFromServiceCount,
-  isAutoDerivedTierLabelCustomer,
   isAutoDerivedTierLabelRow,
   isCommercialServiceRow,
   isOneTimeBookingSource,
@@ -1409,7 +1405,7 @@ module.exports = {
   resolveTreeShrubRecurringPlan,
   serviceFamilyKey,
   serviceRowCountsTowardWaveGuard,
-  shouldSuppressMemberMessagingForTierLabel,
+  tierLabelStatus,
   syncCustomerWaveGuardPlanFromScheduledServices,
   uniqueServiceFamilies,
 };

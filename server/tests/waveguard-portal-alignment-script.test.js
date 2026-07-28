@@ -131,9 +131,10 @@ describe('WaveGuard portal alignment script helpers', () => {
       member_since: '2026-06-19',
     }));
 
-    // No explicit monthly_membership lane -> a tier no longer implies monthly
-    // billing, so the rate must NOT be invented (billing-cron charges any
-    // active customer with monthly_rate > 0).
+    // Legacy NULL-lane members keep their pre-existing rate repair; an
+    // 'auto'-provenance row (label, or converted label) never has a NULL-lane
+    // rate invented, and explicit non-monthly lanes never backfill
+    // (Codex #3011 r10).
     expect(buildCustomerUpdates(
       {
         active: true,
@@ -141,6 +142,33 @@ describe('WaveGuard portal alignment script helpers', () => {
         waveguard_tier: 'Bronze',
         monthly_rate: 0,
         billing_mode: null,
+        member_since: '2025-01-01',
+      },
+      ['mosquito'],
+      customerColumns,
+      '2026-06-20',
+    )).toHaveProperty('monthly_rate', 45);
+    expect(buildCustomerUpdates(
+      {
+        active: true,
+        pipeline_stage: 'active_customer',
+        waveguard_tier: 'Bronze',
+        waveguard_tier_source: 'auto',
+        monthly_rate: 0,
+        billing_mode: 'per_application',
+        member_since: '2025-01-01',
+      },
+      ['mosquito'],
+      customerColumns,
+      '2026-06-20',
+    )).not.toHaveProperty('monthly_rate');
+    expect(buildCustomerUpdates(
+      {
+        active: true,
+        pipeline_stage: 'active_customer',
+        waveguard_tier: 'Bronze',
+        monthly_rate: 0,
+        billing_mode: 'per_visit',
         member_since: '2025-01-01',
       },
       ['mosquito'],

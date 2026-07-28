@@ -107,8 +107,11 @@ async function resolveRecurringCardPolicyForEstimate({
       // an estimate saved after the auto-stamp freezes
       // isExistingCustomer: true, and that snapshot must not skip the
       // SetupIntent for a label-only customer.
-      const { isAutoDerivedTierLabelCustomer } = require('./self-booking-plan-sync');
-      const labelOnly = await isAutoDerivedTierLabelCustomer(resolvedCustomerId);
+      // Fail-CLOSED (Codex r10 P1): anything except a verified 'not_label'
+      // — including 'unknown' from a lookup error or a pre-migration schema
+      // — keeps the SetupIntent required.
+      const { tierLabelStatus } = require('./self-booking-plan-sync');
+      const labelOnly = (await tierLabelStatus(resolvedCustomerId)) !== 'not_label';
       if (labelOnly) {
         isPlanMember = false;
       } else if (!isPlanMember) {

@@ -38,6 +38,7 @@ const {
   TERMINAL_STATUSES,
   isMembershipCustomerRow,
 } = require('../services/waveguard-existing-services');
+const { isAutoDerivedTierLabelRow } = require('../services/self-booking-plan-sync');
 const {
   ONE_TIME_BOOKING_SOURCE_VALUES,
   SELF_BOOKING_RECURRING_PLANS,
@@ -228,12 +229,14 @@ function buildCustomerUpdates(customer, detectedKeys, columns, today) {
   // 2026-07-28, tier-only). Use the shared membership predicate, which rejects
   // explicit non-member tier sentinels (none/onetime/na/...).
   if (!isMembershipCustomerRow(customer)) return updates;
-  // An auto-derived label (waveguard_tier_source = 'auto') satisfies the
-  // membership predicate but is TIER-ONLY state owned by the runtime
-  // realignment — this member-repair pass must never stamp member_since,
-  // flip pipeline_stage, or reactivate off a label (Codex #3011 r9). Also
-  // excluded in candidateCustomers SQL; this is the fail-closed belt.
-  if (customer.waveguard_tier_source === 'auto') return updates;
+  // A STILL-label-only auto-derived row (auto provenance, zero rate,
+  // label-only lane) is TIER-ONLY state owned by the runtime realignment —
+  // this member-repair pass must never stamp member_since, flip
+  // pipeline_stage, or reactivate off a label (Codex #3011 r9). A CONVERTED
+  // label (paid lane or positive rate set later, provenance still 'auto') is
+  // a real member and repairs normally (Codex r10). Also narrowed in
+  // candidateCustomers SQL; this is the fail-closed belt.
+  if (isAutoDerivedTierLabelRow(customer)) return updates;
   const existingRate = moneyNumber(customer.monthly_rate);
   const inferredTier = inferTierFromServiceCount(uniqueServiceFamilies(detectedKeys).length);
   const normalizedExistingTier = normalizeTierName(customer.waveguard_tier);
@@ -263,14 +266,17 @@ function buildCustomerUpdates(customer, detectedKeys, columns, today) {
     updates.member_since = customer.earliest_service_date || dateKey(customer.created_at) || today;
   }
 
-  // Backfill a zero/missing monthly_rate ONLY for an explicit
-  // monthly_membership billing lane. Since the 2026-07-28 auto-tier directive,
-  // holding a tier no longer implies monthly billing — inventing a rate for a
-  // NULL/per-visit lane customer would put them into billing-cron's
-  // monthly-charge pool. Mirrors buildCustomerWaveGuardAlignmentUpdates.
+  // Backfill a zero/missing monthly_rate for the explicit monthly_membership
+  // lane, and for the legacy NULL lane when the tier is not an auto-derived
+  // label (Codex #3011 r10: the NULL-lane repair predates this PR and must
+  // keep working; an 'auto' label never gets a rate invented — and never
+  // reaches here anyway via the label belt above). Mirrors
+  // buildCustomerWaveGuardAlignmentUpdates.
+  const rateBackfillLane = customer.billing_mode === 'monthly_membership'
+    || (customer.billing_mode == null && customer.waveguard_tier_source !== 'auto');
   if (
     columnPresent(columns, 'monthly_rate')
-    && customer.billing_mode === 'monthly_membership'
+    && rateBackfillLane
     && existingRate <= 0
     && detectedKeys.length
   ) {
@@ -343,12 +349,23 @@ async function candidateCustomers(customerColumns) {
       ).orWhere('c.monthly_rate', '>', 0);
     })
     .orderBy('c.created_at', 'asc');
-  // Auto-derived labels are tier-only state owned by the runtime realignment
-  // — never candidates for the member-repair pass (Codex #3011 r9); the
-  // builder re-checks the same provenance as a fail-closed belt.
+  // STILL-label-only auto rows are tier-only state owned by the runtime
+  // realignment — never candidates for the member-repair pass (Codex #3011
+  // r9). Narrowed to rows still in label shape (Codex r10): a converted
+  // label (positive rate or paid lane, provenance still 'auto') is a real
+  // member and must remain repairable. The builder re-checks via
+  // isAutoDerivedTierLabelRow as the fail-closed belt.
   if (columnPresent(customerColumns, 'waveguard_tier_source')) {
-    query = query.where(function notAutoLabel() {
-      this.whereNull('c.waveguard_tier_source').orWhere('c.waveguard_tier_source', '!=', 'auto');
+    query = query.whereNot(function stillLabelOnly() {
+      this.where('c.waveguard_tier_source', 'auto')
+        .andWhere(function noRate() {
+          this.whereNull('c.monthly_rate').orWhere('c.monthly_rate', '<=', 0);
+        });
+      if (columnPresent(customerColumns, 'billing_mode')) {
+        this.andWhere(function labelLane() {
+          this.whereNull('c.billing_mode').orWhereIn('c.billing_mode', ['per_visit', 'one_time']);
+        });
+      }
     });
   }
 

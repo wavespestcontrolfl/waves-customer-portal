@@ -107,11 +107,11 @@ class AppointmentTagger {
       // An auto-derived LABEL-ONLY tier (GATE_AUTO_WAVEGUARD_TIER stamp on a
       // per-visit customer) must not satisfy this member gate — the tier
       // stamp is contractually comms-silent, and pre-gate these customers
-      // (tierless) never received the welcome. Messaging-facing variant:
-      // unverifiable provenance suppresses rather than sends (Codex #3011
-      // r9). Lazy require avoids a cycle.
-      const { shouldSuppressMemberMessagingForTierLabel } = require('./self-booking-plan-sync');
-      const labelOnly = await shouldSuppressMemberMessagingForTierLabel(service.customer_id);
+      // (tierless) never received the welcome. Fail-silent (Codex #3011 r9):
+      // unverifiable provenance ('unknown') suppresses rather than sends.
+      // Lazy require avoids a cycle.
+      const { tierLabelStatus } = require('./self-booking-plan-sync');
+      const labelOnly = (await tierLabelStatus(service.customer_id)) !== 'not_label';
       const isNewSignup = !labelOnly && await isNewRecurringSignupCandidate(service.customer_id, {
         excludeServiceId: service.id,
       });

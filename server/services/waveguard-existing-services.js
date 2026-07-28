@@ -214,7 +214,17 @@ async function loadExistingRecurringQualifyingRows(database, customerId) {
     if (!rowPassesGatedPricingEvidence(r, today)) return false;
     const joined = { ...r, ...(catalogById.get(r.id) || {}) };
     if (isCommercialServiceRow(joined) || isRodentLedServiceRow(joined)) return false;
-    return toQualifyingKeys(r.service_type).length > 0;
+    // Qualify from the JOINED identity, not service_type alone (Codex #3011
+    // r10): a stale 'Tree & Shrub Care' service_type linked to the
+    // non-qualifying palm_injection catalog service must not count as a
+    // tree_shrub family in pricing when tier derivation rejects the same
+    // row. Underscored catalog keys are normalized so toQualifyingKeys'
+    // palm/token word boundaries match; the commercial/rodent classes were
+    // already removed per-field above, so concatenation here only feeds the
+    // keyword/palm logic, which is order-independent.
+    const joinedText = [joined.service_type, joined.service_key, joined.service_name]
+      .filter(Boolean).join(' ').replace(/[_-]+/g, ' ');
+    return toQualifyingKeys(joinedText).length > 0;
   });
 }
 
