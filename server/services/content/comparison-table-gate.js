@@ -1551,6 +1551,20 @@ function evaluateProse(draft, body, { operatorBriefText = '' } = {}) {
   }
 
   let requiresHumanReview = false;
+  // Links targeting a competitor via their DESTINATION (Codex r4): tone
+  // checks read the anchor + preceding clause; an allowlisted linked
+  // competitor still routes to named-competitor review even though the
+  // blanked URL is not a prose mention.
+  for (const lk of linkedCompetitorMentions(scanText)) {
+    if (lk.inAllowlist) requiresHumanReview = true;
+    if (DISPARAGEMENT_RE.test(lk.context)) {
+      findings.push(finding('P0', 'COMPARISON_DISPARAGEMENT',
+        `A link anchored "${lk.anchor}" targets competitor "${lk.name}" via its URL with disparaging language — remove the disparagement; competitor claims live only in a sourced comparison table.`));
+    } else if (PROVIDER_NEGATIVE_RE.test(lk.context)) {
+      findings.push(finding('P1', 'COMPARISON_NEGATIVE_RELIABILITY',
+        `A link anchored "${lk.anchor}" targets competitor "${lk.name}" via its URL with a negative service-reliability claim. Routed to human review — state neutral, verifiable attributes only.`));
+    }
+  }
   for (const nm of unknown) {
     if (operatorAuthorized(nm)) {
       // The operator named this competitor in the intercept brief — route
@@ -1589,6 +1603,31 @@ function stripLinkDestinationsForNames(s) {
   // mask early, which errs fail-CLOSED (the visible tail can only ADD a
   // prose mention and route to review, never hide one).
   return String(s).replace(/https?:\/\/[^\s)"'<>\],;`|{}]+/gi, (u) => ' '.repeat(u.length));
+}
+
+// Markdown links whose DESTINATION resolves to a recognized competitor.
+// The destination is deliberately NOT a prose mention (see
+// stripLinkDestinationsForNames), but the link still TARGETS that
+// competitor — so a disparaging/negative anchor must be treated as aimed
+// at it, and a linked allowlisted competitor still routes to
+// named-competitor review. Each hit carries the anchor text plus the
+// preceding same-sentence clause (bounded ~60 chars, the proximity idiom
+// the prose scans use) so tone checks read what the link is embedded in.
+function linkedCompetitorMentions(text) {
+  const s = String(text);
+  const out = [];
+  const linkRe = /\[([^\]]*)\]\(\s*<?(https?:\/\/[^)\s>]+)/g;
+  let m;
+  while ((m = linkRe.exec(s)) !== null) {
+    const anchor = m[1] || '';
+    const urlTokens = (m[2] || '').replace(/[^a-z0-9]+/gi, ' ');
+    for (const hit of competitorFacts.findBusinessMentions(urlTokens)) {
+      const before = s.slice(Math.max(0, m.index - 60), m.index);
+      const clause = before.split(/[.!?\n]/).pop() || '';
+      out.push({ name: hit.name, inAllowlist: hit.inAllowlist, anchor, context: `${clause} ${anchor}`.trim() });
+    }
+  }
+  return out;
 }
 
 // Escape a detected business name for use inside a regex, tolerating the
@@ -2170,6 +2209,22 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
     if (m.inAllowlist) competitorInProse.add(m.name);
   }
 
+  // Links targeting a competitor via their DESTINATION: not prose mentions,
+  // but tone checks read the anchor + preceding clause, and an allowlisted
+  // linked competitor still routes to named-competitor review (Codex r4 —
+  // "[this dishonest company](https://competitor.com/…)" must not pass).
+  const linkedKnown = new Set();
+  for (const lk of linkedCompetitorMentions(scanText)) {
+    if (lk.inAllowlist) linkedKnown.add(lk.name);
+    if (DISPARAGEMENT_RE.test(lk.context)) {
+      findings.push(finding('P0', 'COMPARISON_DISPARAGEMENT',
+        `A link anchored "${lk.anchor}" targets competitor "${lk.name}" via its URL with disparaging language — remove the disparagement; competitor claims live only in the sourced comparison table.`));
+    } else if (PROVIDER_NEGATIVE_RE.test(lk.context)) {
+      findings.push(finding('P1', 'COMPARISON_NEGATIVE_RELIABILITY',
+        `A link anchored "${lk.anchor}" targets competitor "${lk.name}" via its URL with a negative service-reliability claim. Routed to human review — state neutral, verifiable attributes only.`));
+    }
+  }
+
   // Reconcile overlaps.
   for (const nm of known) unknown.delete(nm);
   for (const nm of [...unclassified]) {
@@ -2208,7 +2263,7 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   const pass = !findings.some((f) => f.severity === 'P0' || f.severity === 'P1');
   // A clean, enabled named-competitor draft still must NOT auto-publish: the
   // runner routes requiresHumanReview drafts to the approvable review queue.
-  const requiresHumanReview = pass && namedCompetitorEnabled && known.size > 0;
+  const requiresHumanReview = pass && namedCompetitorEnabled && (known.size > 0 || linkedKnown.size > 0);
   return { pass, findings, requiresHumanReview };
 }
 

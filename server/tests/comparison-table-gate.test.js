@@ -192,6 +192,31 @@ describe('comparison-table-gate', () => {
     }
   });
 
+  test('a link DESTINATION still associates its competitor for tone + review (Codex r4 P1)', () => {
+    // Disparaging anchor aimed at a competitor via the URL: P0, both paths.
+    const dis = 'Avoid [this dishonest company](https://www.trugreen.com/plans) at all costs.';
+    for (const body of [
+      `# Guide\n\n${dis}\n\n${CATEGORY_TABLE}\n\nClosing prose.`,
+      `# Guide\n\n${dis}\n\nNo table here.`,
+    ]) {
+      const r = gate.evaluate({ body }, { namedCompetitorEnabled: true });
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(true);
+      expect(r.pass).toBe(false);
+    }
+    // Negative-reliability anchor: P1, routed to review.
+    const neg = 'They are [unreliable and hard to reach](https://www.trugreen.com/contact).';
+    const rNeg = gate.evaluate({ body: `# Guide\n\n${neg}\n\n${CATEGORY_TABLE}\n\nClosing prose.` }, { namedCompetitorEnabled: true });
+    expect(rNeg.findings.some((f) => f.code === 'COMPARISON_NEGATIVE_RELIABILITY')).toBe(true);
+    // A clean citation link stays finding-free but still routes to
+    // named-competitor review — linking a competitor is never invisible.
+    const clean = 'Per [the published plan page](https://www.trugreen.com/plans), plans are annual.';
+    const rClean = gate.evaluate({ body: `# Guide\n\n${clean}\n\n${CATEGORY_TABLE}\n\nClosing prose.` }, { namedCompetitorEnabled: true });
+    expect(rClean.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
+    expect(rClean.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_IN_PROSE')).toBe(false);
+    expect(rClean.pass).toBe(true);
+    expect(rClean.requiresHumanReview).toBe(true);
+  });
+
   test('title-cased English phrases containing brand-like words stay clean (Codex round-5 P2)', () => {
     for (const body of [
       'Why Ants Bug Out After Rain. Palmetto bugs scatter when the barrier is fresh. No table.',
