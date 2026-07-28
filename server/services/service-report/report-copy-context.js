@@ -161,21 +161,24 @@ async function loadLawnAssessments({ customerId, scheduledServiceId, lawnAssessm
       );
     }
     if (today && scheduledServiceId) {
-      // Retake check for BOTH resolution branches: a newer UNCONFIRMED row on
-      // the same visit supersedes the confirmed one (whether it arrived via
-      // the omitted-field fallback or a stale-but-legitimate explicit id from
-      // another tab/device) — presenting the old scores as this visit's
-      // result would resurrect exactly what the retake discarded.
-      const newerUnconfirmed = await knex('lawn_assessments')
+      // Supersession check for BOTH resolution branches: ANY newer row on the
+      // same visit — an unconfirmed retake in progress OR a retake another
+      // tab already confirmed — supersedes the resolved row (whether it came
+      // from the omitted-field fallback or a stale-but-legitimate explicit
+      // id). Presenting the old scores as this visit's result would
+      // resurrect exactly what the retake replaced. (The fallback path
+      // already resolves the LATEST confirmed row, so this only nulls it for
+      // a genuinely in-progress retake; the explicit-id path fails toward
+      // suppression until the client refreshes.)
+      const newerAssessment = await knex('lawn_assessments')
         .where({
           customer_id: customerId,
           service_id: scheduledServiceId,
-          confirmed_by_tech: false,
         })
         .where('created_at', '>', today.created_at)
         .first('id')
         .catch(() => null);
-      if (newerUnconfirmed) today = null;
+      if (newerAssessment) today = null;
     }
     // The prior row is bounded by the linked VISIT's scheduled_date, not the
     // assessment run date — lawn_assessments.service_date is when the photos
