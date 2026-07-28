@@ -546,6 +546,17 @@ async function maybeHandleProofApproval(email) {
     const suggestion = await alternateSuggestionLine(send);
     if (suggestion) errors.push(suggestion);
     await notifyProof('newsletter_proof_blocked', { subject: send.subject, errors });
+    // Invalidate the proof claim (token-scoped, same shape as the
+    // stale-approval branch): the draft needs an event swap and a FRESH
+    // proof, but sendNewsletterProof skips any row with proof_sent_at set —
+    // leaving the claim in place would strand the whole proof workflow.
+    try {
+      await db('newsletter_sends')
+        .where({ id: send.id, proof_token: token })
+        .update({ proof_token: null, proof_sent_at: null, updated_at: new Date() });
+    } catch (clearErr) {
+      logger.error(`[newsletter-proof] failed to release proof claim after recheck failure for ${send.id}: ${clearErr.message}`);
+    }
     return true;
   }
 

@@ -306,17 +306,13 @@ async function autoDraftFlagship() {
   //    type config so they tune in one place.
   const reqs = getFlagshipType()?.sourceRequirements || {};
   const preflight = preflightDigest(lineupEvents, reqs);
-  if (!preflight.pass) {
-    const reason = preflight.hardFailures.join('; ');
+  // Skip-week routine, shared by the pre-generation preflight and the
+  // post-generation lineup-coverage recheck. Persists a durable 'skipped'
+  // marker (the catch-up gate only re-runs missing/'planned' weeks) and
+  // notifies the admin with an actionable report.
+  const skipWeek = async (preflightReport) => {
+    const reason = preflightReport.hardFailures.join('; ');
     logger.info(`[newsletter-autopilot] Preflight skip: ${reason}`);
-
-    // Persist a durable 'skipped' marker for this week. Without it, the
-    // preflight-skip path leaves no calendar row (or a 'planned' one), so the
-    // Monday 2PM / Tuesday 4:30AM catch-up jobs treat the week as never-attempted and re-run
-    // autoDraftFlagship — repeating the work and the skip notification — on
-    // every tick. The catch-up gate only proceeds on a missing/'planned' row,
-    // so a 'skipped' status correctly retires the week. Any operator-planned
-    // topic/event_ids on an existing row are preserved; only the status flips.
     try {
       await db('newsletter_calendar')
         .insert({
@@ -330,8 +326,6 @@ async function autoDraftFlagship() {
     } catch (e) {
       logger.warn(`[newsletter-autopilot] failed to mark week skipped: ${e.message}`);
     }
-
-    // Notify admin with an actionable report (exact counts + next actions).
     try {
       // Name the broken sources in the report — a thin eligible pool is
       // almost always upstream source rot, not an approval backlog.
@@ -343,19 +337,21 @@ async function autoDraftFlagship() {
       } catch (e) {
         logger.warn(`[newsletter-autopilot] source health fetch failed: ${e.message}`);
       }
-
       const { triggerNotification } = require('./notification-triggers');
       await triggerNotification('newsletter_autopilot_skipped', {
-        eligible: preflight.stats.eligibleCount,
+        eligible: preflightReport.stats.eligibleCount,
         reason,
-        preflight: preflight.stats,
-        report: formatPreflightReport(preflight, weekOf, sourceHealthLines),
+        preflight: preflightReport.stats,
+        report: formatPreflightReport(preflightReport, weekOf, sourceHealthLines),
       });
     } catch (e) {
       logger.warn(`[newsletter-autopilot] skip notification failed: ${e.message}`);
     }
+    return { skipped: true, reason, preflight: preflightReport.stats };
+  };
 
-    return { skipped: true, reason, preflight: preflight.stats };
+  if (!preflight.pass) {
+    return skipWeek(preflight);
   }
   if (preflight.warnings.length) {
     logger.info(`[newsletter-autopilot] Preflight warnings: ${preflight.warnings.join('; ')}`);
@@ -415,7 +411,7 @@ async function autoDraftFlagship() {
   // Paid/network work stays outside the DB transaction and advisory lock.
   // The short locked section below only dedupes + persists. Two truly
   // concurrent runners may both generate, but only one can create a row.
-  const generated = await createNewsletterDraft({
+  let generated = await createNewsletterDraft({
     prompt,
     eventIds: safeEventIds,
     homeownerMinuteTopic,
@@ -424,6 +420,47 @@ async function autoDraftFlagship() {
     issueReference: defaultTargetSendAt(weekOf),
     persist: false,
   });
+
+  // The model may return only a SUBSET of the locked ids, and
+  // persistNewsletterDraft records exactly what it returned — a
+  // preflight-passing eight-event portfolio could otherwise persist and
+  // ship as a thin, unbalanced lineup nobody re-validated. Retry the
+  // generation once on incomplete coverage; then re-run the preflight on
+  // the ACTUAL lineup and skip the week (fail closed) if it no longer
+  // holds. Alternates are recomputed against the actual lineup below.
+  const draftedIdSet = (g) => new Set((g?.draft?.events || []).map((e) => String(e.eventId)));
+  let actualLineup = lineupEvents.filter((ev) => draftedIdSet(generated).has(String(ev.id)));
+  if (actualLineup.length !== safeEventIds.length) {
+    logger.warn(`[newsletter-autopilot] draft covered ${actualLineup.length}/${safeEventIds.length} locked events — regenerating once`);
+    const retry = await createNewsletterDraft({
+      prompt,
+      eventIds: safeEventIds,
+      homeownerMinuteTopic,
+      topic,
+      newsletterType: NEWSLETTER_TYPE,
+      issueReference: defaultTargetSendAt(weekOf),
+      persist: false,
+    });
+    const retryLineup = lineupEvents.filter((ev) => draftedIdSet(retry).has(String(ev.id)));
+    if (retryLineup.length > actualLineup.length) {
+      generated = retry;
+      actualLineup = retryLineup;
+    }
+  }
+  if (actualLineup.length !== safeEventIds.length) {
+    const actualPreflight = preflightDigest(actualLineup, reqs);
+    if (!actualPreflight.pass) {
+      actualPreflight.hardFailures.unshift(
+        `Draft generation dropped ${safeEventIds.length - actualLineup.length} locked event(s) and the remaining lineup fails the quality contract`,
+      );
+      return skipWeek(actualPreflight);
+    }
+    logger.warn(`[newsletter-autopilot] proceeding with degraded ${actualLineup.length}-event lineup (still passes preflight)`);
+  }
+  // Alternates must rank against what will actually persist.
+  const persistedAlternates = eligiblePreferred.length >= 5
+    ? []
+    : rankAlternates(scored, actualLineup);
 
   let send;
   let earlyReturn = null;
@@ -468,7 +505,7 @@ async function autoDraftFlagship() {
 
     // Ranked alternates ride the send row for the proof diagnostics and
     // as named replacements if a locked event dies before dispatch.
-    const alternateIds = lineupAlternates
+    const alternateIds = persistedAlternates
       .map((ev) => ev.id)
       .filter((id) => typeof id === 'string' && uuidRe.test(id));
     if (alternateIds.length) {
