@@ -945,12 +945,24 @@ async function processScheduledSends() {
       if (eventSelection.flagship) {
         const now = new Date();
         const currentTarget = isCurrentFlagshipTarget(row.scheduled_for, now);
-        if (!eventSelection.valid || !currentTarget || !isFlagshipDeliveryWindow(now)) {
+        // Live recheck failures take the SAME revert-to-editable-draft
+        // exit as an invalid lineup: a generic 'failed' send can't be
+        // edited (PATCH accepts draft/scheduled only) and Resume just
+        // repeats the recheck — the week would strand with no way to
+        // apply the suggested alternate.
+        let recheckReason = null;
+        if (eventSelection.valid && currentTarget && isFlagshipDeliveryWindow(now)) {
+          const recheck = await reverifyEvents(eventSelection.events);
+          if (!recheck.ok) {
+            recheckReason = `live page recheck failed: ${recheck.failures.map((f) => `${f.title} — ${f.reason}`).join('; ')}`;
+          }
+        }
+        if (!eventSelection.valid || !currentTarget || !isFlagshipDeliveryWindow(now) || recheckReason) {
           const reason = !eventSelection.valid
             ? eventSelection.errors.join(', ')
             : !currentTarget
               ? 'scheduled_for is not the current issue Tuesday at 6:00 AM ET'
-              : 'missed the Tuesday 6:00–6:14 AM ET delivery window';
+              : (recheckReason || 'missed the Tuesday 6:00–6:14 AM ET delivery window');
           logger.error(`[newsletter-scheduler] flagship send ${row.id} blocked: ${reason}`);
           // Reverting an approved schedule INVALIDATES the approval: the
           // state the owner signed off (lineup, target Tuesday) no longer

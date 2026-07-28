@@ -125,6 +125,11 @@ describe('deadTextNearTitle (distinctive-token rule)', () => {
     expect(deadTextNearTitle('A racer event was cancelled nearby', EVENT.title)).toBe(false);
   });
 
+  test('tokens match as WHOLE words — "race" inside "bracelet" is not a hit', () => {
+    expect(deadTextNearTitle('The Bracelet Workshop has been cancelled', 'Race Expo Tampa')).toBe(false);
+    expect(deadTextNearTitle('The Tampa Race was cancelled', 'Race Expo Tampa')).toBe(true);
+  });
+
   test('postponed counts; empty titles fail open', () => {
     expect(deadTextNearTitle('Racer Creator Expo postponed to October', EVENT.title)).toBe(true);
     expect(deadTextNearTitle('everything cancelled', '')).toBe(false);

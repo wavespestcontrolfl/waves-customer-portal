@@ -82,7 +82,11 @@ function etWeekday(event) {
 
 // Weekend = Friday(5), Saturday(6), Sunday(0) in ET.
 const isWeekend = (event) => [5, 6, 0].includes(etWeekday(event));
-const isFamily = (event) => event?.family_friendly === true || tags(event).has('family');
+// family_friendly may be null at ingestion while curation confirmed the
+// fit — the persisted family_status is an equally valid signal.
+const isFamily = (event) => event?.family_friendly === true
+  || tags(event).has('family')
+  || breakdown(event).family_status === 'confirmed';
 const isParents = (event) => tags(event).has('parents_night')
   || breakdown(event).family_status === 'adults_lean';
 const isFreeish = (event) => event?.is_free === true || /\bfree\b/i.test(String(event?.price_text || ''));
@@ -121,6 +125,14 @@ function capsAllow(picked, candidate) {
   return true;
 }
 
+const zoneOf = (event) => norm(event?.region_zone || event?.city);
+
+// Each constraint may define:
+//   test(c)               — does one event satisfy it (default counting)
+//   count(picked)         — set-valued minimums (distinct days/zones)
+//   poolTest(c, picked)   — is a CANDIDATE useful for repair (defaults to test)
+//   swapEligible(p, picked) — may this PICK be traded away during repair
+//                             (defaults to !test(p))
 const CONSTRAINTS = [
   { key: 'weekend', min: MIN_WEEKEND, test: isWeekend, label: `≥${MIN_WEEKEND} Fri–Sun events` },
   {
@@ -128,13 +140,29 @@ const CONSTRAINTS = [
     min: MIN_WEEKEND_DAYS,
     count: (picked) => new Set(picked.filter(isWeekend).map(etWeekday)).size,
     test: isWeekend,
+    // Only a candidate on a NOT-yet-covered weekend day helps.
+    poolTest: (c, picked) => isWeekend(c)
+      && !new Set(picked.filter(isWeekend).map(etWeekday)).has(etWeekday(c)),
     label: `≥${MIN_WEEKEND_DAYS} distinct weekend days`,
   },
   {
     key: 'zones',
     min: MIN_ZONES,
-    count: (picked) => new Set(picked.map((p) => norm(p.region_zone || p.city)).filter(Boolean)).size,
+    count: (picked) => new Set(picked.map(zoneOf).filter(Boolean)).size,
     test: () => true,
+    // A candidate helps only when it BRINGS a new zone; a pick may be
+    // traded when losing it doesn't shrink zone coverage (its zone is
+    // redundant or missing) — with test:()=>true the default
+    // !test(p) predicate could never swap anything on a full lineup.
+    poolTest: (c, picked) => {
+      const zone = zoneOf(c);
+      return Boolean(zone) && !new Set(picked.map(zoneOf)).has(zone);
+    },
+    swapEligible: (p, picked) => {
+      const zone = zoneOf(p);
+      if (!zone) return true;
+      return picked.filter((x) => zoneOf(x) === zone).length > 1;
+    },
     label: `≥${MIN_ZONES} zones`,
   },
   { key: 'family', min: MIN_FAMILY, test: isFamily, label: `≥${MIN_FAMILY} family picks` },
@@ -198,31 +226,30 @@ function selectPortfolio(candidates, {
   for (const constraint of unmetConstraints(picked)) {
     let need = constraint.min - constraintCount(constraint, picked);
     if (need <= 0) continue;
-    const pool = qualified.filter((c) => !picked.includes(c) && constraint.test(c));
+    const poolTest = constraint.poolTest || ((c) => constraint.test(c));
+    const swapEligible = constraint.swapEligible || ((p) => !constraint.test(p));
+    const pool = qualified.filter((c) => !picked.includes(c));
     for (const candidate of pool) {
       if (need <= 0) break;
-      if (constraint.key === 'weekend_days'
-          && picked.some((p) => etWeekday(p) === etWeekday(candidate))
-          && !pool.every((c) => etWeekday(c) === etWeekday(candidate))) {
-        // For day diversity prefer a candidate on a NOT-yet-covered day.
-        const covered = new Set(picked.filter(isWeekend).map(etWeekday));
-        if (covered.has(etWeekday(candidate))) continue;
-      }
+      if (!poolTest(candidate, picked)) continue;
       if (picked.length < maxCount && capsAllow(picked, candidate)) {
         picked.push(candidate);
         need = constraint.min - constraintCount(constraint, picked);
         continue;
       }
-      // Swap: weakest pick that is neither seeded (operator intent),
-      // load-bearing, nor itself satisfying this constraint.
-      const swappable = [...picked]
+      // Swap: try EVERY tradeable pick, weakest first — the weakest pick
+      // alone may not free the candidate's saturated venue/source/zone
+      // cap even though trading a different pick would.
+      const tradeable = [...picked]
         .sort((a, b) => effectiveScore(a) - effectiveScore(b))
-        .find((p) => !seededIds.has(String(p.id)) && !constraint.test(p) && !isLoadBearing(p, picked));
-      if (!swappable) continue;
-      const trial = picked.filter((p) => p !== swappable);
-      if (!capsAllow(trial, candidate)) continue;
-      picked.length = 0;
-      picked.push(...trial, candidate);
+        .filter((p) => !seededIds.has(String(p.id)) && swapEligible(p, picked) && !isLoadBearing(p, picked));
+      for (const swappable of tradeable) {
+        const trial = picked.filter((p) => p !== swappable);
+        if (!capsAllow(trial, candidate)) continue;
+        picked.length = 0;
+        picked.push(...trial, candidate);
+        break;
+      }
       need = constraint.min - constraintCount(constraint, picked);
     }
   }

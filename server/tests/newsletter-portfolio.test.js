@@ -209,3 +209,30 @@ describe('seeded (operator) picks', () => {
     expect(result.selected.map((e) => e.id)).toContain(preferred[0].id);
   });
 });
+
+describe('codex round-1 repairs', () => {
+  const { selectPortfolio: sp2 } = require('../services/newsletter-portfolio');
+
+  test('zone repair can trade a redundant-zone pick on a FULL lineup', () => {
+    // 10 strong events across only two zones fill the lineup to max; a
+    // weaker zone-C candidate must still be able to buy in.
+    const twoZone = [...Array(10)].map((_, i) => ev({
+      editorial_score: 95 - i,
+      region_zone: i % 2 ? 'zone-a' : 'zone-b',
+      start_at: i % 2 ? DAY.fri : DAY.sat,
+    }));
+    const zoneC = ev({ editorial_score: 76, region_zone: 'zone-c', start_at: DAY.sun });
+    const result = sp2([...twoZone, zoneC], { targetCount: 10, maxCount: 10 });
+    expect(result.stats.zones).toContain('zone c');
+  });
+
+  test('family coverage counts a confirmed family_status without the tag or flag', () => {
+    const confirmedOnly = ev({
+      family_friendly: null,
+      audience_tags: [],
+      score_breakdown: { family_status: 'confirmed', penalty_flags: [] },
+    });
+    const { isFamily } = require('../services/newsletter-portfolio');
+    expect(isFamily(confirmedOnly)).toBe(true);
+  });
+});

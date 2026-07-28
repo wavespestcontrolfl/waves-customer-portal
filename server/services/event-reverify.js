@@ -232,8 +232,10 @@ function deadTextNearTitle(pageText, title) {
   while ((match = re.exec(text)) !== null) {
     const from = Math.max(0, match.index - PROXIMITY);
     const to = Math.min(text.length, match.index + PROXIMITY);
-    const windowText = text.slice(from, to);
-    const hits = words.filter((w) => windowText.includes(w)).length;
+    // WHOLE-token matching — a substring hit ('race' inside 'bracelet')
+    // must never turn an unrelated cancellation into evidence.
+    const windowTokens = new Set(text.slice(from, to).split(/[^a-z0-9]+/));
+    const hits = words.filter((w) => windowTokens.has(w)).length;
     if (hits >= required) return true;
   }
   return false;

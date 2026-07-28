@@ -34,7 +34,12 @@ const { reverifyEvents } = require('./event-reverify');
  */
 async function alternateSuggestionLine(send) {
   try {
-    const ids = parseLockedEventIds(send?.alternate_event_ids);
+    // Draft edits can promote an alternate into the locked lineup without
+    // resyncing alternate_event_ids — never suggest an event that is
+    // already locked (it would be recommended as its own replacement).
+    const locked = new Set(parseLockedEventIds(send?.event_ids).map(String));
+    const ids = parseLockedEventIds(send?.alternate_event_ids)
+      .filter((id) => !locked.has(String(id)));
     if (!ids.length) return null;
     const rows = await db('events_raw').whereIn('id', ids).select('id', 'title');
     if (!rows.length) return null;
