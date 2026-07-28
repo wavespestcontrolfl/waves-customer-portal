@@ -2180,7 +2180,10 @@ export function calculateEstimate(inputs) {
     if (mqPricingSqFt >= 35000) pr += 0.15;
     else if (mqPricingSqFt >= 18000) pr += 0.05 + ((mqPricingSqFt - 18000) / 17000) * 0.10;
     else if (mqPricingSqFt >= 12000) pr += ((mqPricingSqFt - 12000) / 6000) * 0.05;
-    pr = Math.min(2.0, Math.round(pr * 100) / 100);
+    // Full precision through the per-visit math (server parity — priceMosquito
+    // never rounds the multiplier); round only the display copy in mqMeta.
+    pr = Math.min(2.0, pr);
+    const prDisplay = Math.round(pr * 100) / 100;
     // Mirrors server/services/pricing-engine/constants.js MOSQUITO.basePrices
     // (repriced 2026-07 to the 60%-margin band) and the server's 500-sf-step
     // interpolation between bucket anchors (interpolateMosquitoPrice in
@@ -2212,7 +2215,7 @@ export function calculateEstimate(inputs) {
       { n: 'Monthly Mosquito Program (12 visits)', pv: Math.round(mqInterp(mqAnchors.monthly12, mqPricingSqFt) * pr), v: 12, tier: 'monthly12' },
     ];
     R.mq = [];
-    R.mqMeta = { pr, sz, ri, treatableSqFt, grossLotCategory };
+    R.mqMeta = { pr: prDisplay, sz, ri, treatableSqFt, grossLotCategory };
     mt.forEach((t, i) => {
       const ann = t.pv * t.v;
       const mo = Math.round(ann / 12 * 100) / 100;

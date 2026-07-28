@@ -168,6 +168,55 @@ exports.up = async function (knex) {
   }
 };
 
+// ROLLBACK CONTRACT — down() restores from the audit snapshot up() wrote, and
+// only for price keys that STILL hold the value up() applied. A key an
+// operator edited after this migration ran is left alone rather than reverted;
+// the hardcoded 2026-06 values are only a fallback when no snapshot exists.
+// down()'s own audit rows are tagged `${MIGRATION_TAG}:down` so a later
+// re-run of up()/down() never mistakes them for the up() capture.
+async function rollbackPriceKeys(knex, configKey, fallbackPrices, reason) {
+  const row = await knex('pricing_config').where({ config_key: configKey }).first();
+  if (!row) return;
+  const current = parseData(row) || {};
+  let capturedOld = null;
+  let capturedNew = null;
+  const hasAudit = await knex.schema.hasTable('pricing_config_audit');
+  if (hasAudit) {
+    const audit = await knex('pricing_config_audit')
+      .where({ config_key: configKey, changed_by: MIGRATION_TAG })
+      .orderBy('id', 'desc')
+      .first();
+    if (audit) {
+      capturedOld = audit.old_value ? JSON.parse(audit.old_value) : null;
+      capturedNew = audit.new_value ? JSON.parse(audit.new_value) : null;
+    }
+  }
+  const newData = { ...current };
+  for (const key of Object.keys(fallbackPrices)) {
+    if (capturedNew) {
+      // Skip keys an operator changed after up() ran.
+      if (JSON.stringify(current[key]) !== JSON.stringify(capturedNew[key])) continue;
+      const prior = capturedOld ? capturedOld[key] : undefined;
+      newData[key] = prior !== undefined ? prior : fallbackPrices[key];
+    } else {
+      // No snapshot (audit table absent) — best-effort 2026-06 fallback.
+      newData[key] = fallbackPrices[key];
+    }
+  }
+  await knex('pricing_config')
+    .where({ config_key: configKey })
+    .update({ data: JSON.stringify(newData), updated_at: knex.fn.now() });
+  if (hasAudit) {
+    await knex('pricing_config_audit').insert({
+      config_key: configKey,
+      old_value: JSON.stringify(current),
+      new_value: JSON.stringify(newData),
+      changed_by: `${MIGRATION_TAG}:down`,
+      reason,
+    });
+  }
+}
+
 exports.down = async function (knex) {
   if (await knex.schema.hasTable('pricing_changelog')) {
     await knex('pricing_changelog').where(CHANGELOG_IDENTITY).del();
@@ -175,10 +224,16 @@ exports.down = async function (knex) {
 
   if (!(await knex.schema.hasTable('pricing_config'))) return;
 
-  await applyPrices(
+  await rollbackPriceKeys(
     knex,
+    'mosquito_base_prices',
     OLD_RECURRING,
+    'Rollback mosquito reprice 20260728200000: restore pre-migration recurring bucket prices from audit snapshot',
+  );
+  await rollbackPriceKeys(
+    knex,
+    'onetime_mosquito',
     OLD_ONE_TIME,
-    'Rollback mosquito reprice 20260728200000 to the 2026-06 band',
+    'Rollback mosquito reprice 20260728200000: restore pre-migration one-time bucket prices from audit snapshot',
   );
 };
