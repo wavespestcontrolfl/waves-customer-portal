@@ -1,4 +1,12 @@
-# "Fresh This Week" Style Guide — the Beehiiv-Era Formula
+# The Waves Newsletter Style Guide — the Beehiiv-Era Formula
+
+> **Identity update (owner directive 2026-07-28):** the public-facing
+> masthead is now **"The Waves Newsletter"** — no subtitle. The
+> "Fresh This Week / A local weekend guide from the Waves crew" identity
+> (2026-07-17) is retired and must not resurrect. Internal keys
+> (`local-weekly-fresh-events`, `fresh_this_week`, this filename) are
+> stable and deliberately unchanged. Everything below about structure,
+> voice, and imagery still applies.
 
 Distilled from exhaustive teardowns of the shipped Beehiiv archive
 (waves-pest-newsletter.beehiiv.com), 2026-06-11. The owner's direction:
