@@ -291,6 +291,10 @@ function buildNoPlanEnrollmentUpdates(customer, detectedKeys, columns) {
   const inferredTier = inferTierFromServiceCount(uniqueServiceFamilies(detectedKeys).length);
   if (!inferredTier) return updates;
   updates.waveguard_tier = inferredTier;
+  // Provenance: mark the stamp as auto-derived so only these tiers are ever
+  // auto-realigned or excluded from member messaging (mirrors the runtime
+  // enrollment path; Codex #3011 r7 P1). Column-guarded for older envs.
+  if (columnPresent(columns, 'waveguard_tier_source')) updates.waveguard_tier_source = 'auto';
   return updates;
 }
 
@@ -315,6 +319,7 @@ function customerSelect(query, customerColumns = {}) {
     // it exists so the script still runs on older environments (its absence
     // simply keeps the monthly_rate backfill guard closed).
     ...(columnPresent(customerColumns, 'billing_mode') ? ['c.billing_mode'] : []),
+    ...(columnPresent(customerColumns, 'waveguard_tier_source') ? ['c.waveguard_tier_source'] : []),
   );
 }
 

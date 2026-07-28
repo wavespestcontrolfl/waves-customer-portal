@@ -619,6 +619,11 @@ function buildNoPlanTierEnrollmentUpdates(customer, detectedPlanKeys, customerCo
   if (tierSentinelKey(customer?.waveguard_tier) === 'commercial') return { updates, detectedFamilyKeys, inferredTier: null };
   if (!inferredTier || !customerColumns.waveguard_tier) return { updates, detectedFamilyKeys, inferredTier };
   updates.waveguard_tier = inferredTier;
+  // Provenance: only 'auto'-stamped tiers are ever auto-realigned/cleared or
+  // treated as label-only by the messaging gates (Codex #3011 r7 P1 — a
+  // legacy member's NULL-lane tier has no provenance and must stay
+  // untouchable). Column-guarded for pre-migration environments.
+  if (customerColumns.waveguard_tier_source) updates.waveguard_tier_source = 'auto';
   return { updates, detectedFamilyKeys, inferredTier };
 }
 
@@ -651,6 +656,13 @@ function buildLabelOnlyTierRealignmentUpdates(customer, detectedPlanKeys, custom
   const inferredTier = inferTierFromServiceCount(detectedFamilyKeys.length);
   const currentTier = normalizeTierName(customer?.waveguard_tier);
   if (!currentTier) return { updates, detectedFamilyKeys, inferredTier };
+  // Provenance gate (Codex #3011 r7 P1): only a tier this machinery stamped
+  // ('auto') is derived state we may move. NULL provenance is a pre-existing
+  // / unclassified tier — possibly a legitimate legacy member whose billing
+  // lane is also intentionally NULL — and must never be auto-realigned.
+  // Missing column (pre-migration environment) fail-closes the same way.
+  if (!customerColumns.waveguard_tier_source) return { updates, detectedFamilyKeys, inferredTier };
+  if (customer?.waveguard_tier_source !== 'auto') return { updates, detectedFamilyKeys, inferredTier };
   if (Number(customer?.monthly_rate || 0) > 0) return { updates, detectedFamilyKeys, inferredTier };
   if (!isLabelOnlyLane(customer?.billing_mode)) return { updates, detectedFamilyKeys, inferredTier };
   if (!customerColumns.waveguard_tier) return { updates, detectedFamilyKeys, inferredTier };
@@ -658,6 +670,8 @@ function buildLabelOnlyTierRealignmentUpdates(customer, detectedPlanKeys, custom
   const inferredRank = inferredTier ? activeTierRank(inferredTier) : -1;
   if (inferredRank === currentRank) return { updates, detectedFamilyKeys, inferredTier };
   updates.waveguard_tier = inferredTier;
+  // A cleared label loses its provenance too, so re-enrollment starts clean.
+  if (!inferredTier) updates.waveguard_tier_source = null;
   return { updates, detectedFamilyKeys, inferredTier };
 }
 
@@ -833,6 +847,7 @@ async function syncCustomerWaveGuardPlanFromScheduledServices(options = {}) {
   if (
     isEnabled('autoWaveguardTierEnroll')
     && normalizeTierName(customer.waveguard_tier)
+    && customer.waveguard_tier_source === 'auto'
     && Number(customer.monthly_rate || 0) <= 0
     && isLabelOnlyLane(customer.billing_mode)
   ) {
@@ -921,11 +936,31 @@ function isCommercialServiceRow(row = {}) {
 // coverage — the authoritative qualifier (waveguard-existing-services
 // toQualifyingKeys) returns no keys for them, but the per-family plan
 // resolvers see the word "pest" and would map them to the quarterly pest
-// plan (Codex #3011 r6 P1). Mirror the exclusion: only a pest-primary
-// combined name ("Pest & Rodent Control") counts as pest coverage.
-function isRodentLedServiceRow(row = {}) {
-  const s = rawTextForServiceRow(row);
+// plan (Codex #3011 r6 P1). Classified PER FIELD, not on concatenated text
+// (Codex r7): a generic service_type ("Pest Control") in front of a rodent
+// catalog name ("Rodent Pest Control") would otherwise read as pest-primary
+// purely from token order across fields. Underscored catalog keys
+// (rodent_general_one_time) are normalized so word boundaries match. Only a
+// pest-primary combined name WITHIN one field ("Pest & Rodent Control")
+// counts as pest coverage.
+function textIsRodentLed(value) {
+  const s = String(value || '').toLowerCase().replace(/[_-]+/g, ' ');
+  if (!s) return false;
   return /\b(rodent|rats?|mouse|mice)\b/.test(s) && !/\bpest\b.*\brodent\b/.test(s);
+}
+
+function isRodentLedServiceRow(row = {}) {
+  return [
+    row.service_type,
+    row.serviceType,
+    row.type,
+    row.service_key,
+    row.serviceKey,
+    row.service_name,
+    row.serviceName,
+    row.name,
+    row.label,
+  ].some(textIsRodentLed);
 }
 
 // Shared tier evidence: plan keys from UPCOMING (scheduled_date >= today)
@@ -1017,7 +1052,11 @@ async function isAutoDerivedTierLabelCustomer(customerId, database = db) {
   try {
     const customer = await database('customers').where({ id: customerId }).first();
     if (!customer) return false;
-    return !!normalizeTierName(customer.waveguard_tier)
+    // Provenance-gated (Codex #3011 r7 P1): only an 'auto'-stamped tier is a
+    // label. A NULL-provenance tier (legacy/unclassified member) keeps full
+    // member messaging.
+    return customer.waveguard_tier_source === 'auto'
+      && !!normalizeTierName(customer.waveguard_tier)
       && Number(customer.monthly_rate || 0) <= 0
       && isLabelOnlyLane(customer.billing_mode);
   } catch {
@@ -1058,6 +1097,9 @@ function applyLabelOnlySnapshotGuards(query, customer, customerColumns) {
     guarded = guarded.where(function labelOnlyLane() {
       this.whereNull('billing_mode').orWhereIn('billing_mode', LABEL_ONLY_REALIGN_LANES);
     });
+  }
+  if (customerColumns.waveguard_tier_source) {
+    guarded = guarded.where('waveguard_tier_source', 'auto');
   }
   return guarded;
 }
@@ -1231,7 +1273,24 @@ async function reconcileRecurringTiers(options = {}) {
   // same oldest rows nightly and starve everyone past the limit — random
   // sampling reaches every row across a handful of runs, and the primary
   // alignment path remains the booking-time hook anyway.
+  // Provenance-scoped: only 'auto'-stamped tiers are realignment candidates;
+  // without the provenance column (pre-migration) the pass is skipped
+  // entirely — a NULL-provenance tier is untouchable (Codex #3011 r7 P1).
+  if (!customerColumns.waveguard_tier_source) {
+    return {
+      ok: true,
+      enrollChecked: enrollCandidates.length,
+      enrolled,
+      realignChecked: 0,
+      raised: 0,
+      lowered: 0,
+      failed,
+      limit,
+      realignSkipped: 'no_tier_source_column',
+    };
+  }
   let realignQuery = database('customers as c')
+    .where('c.waveguard_tier_source', 'auto')
     .whereRaw(
       `LOWER(c.waveguard_tier) IN (${tiersLower.map(() => '?').join(', ')})`,
       tiersLower,

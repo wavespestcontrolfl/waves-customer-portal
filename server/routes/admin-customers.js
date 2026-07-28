@@ -2501,6 +2501,9 @@ router.post('/', requireAdmin, async (req, res, next) => {
         first_name: normalized.firstName, last_name: normalized.lastName || null, phone: normalized.phone, email: normalized.email,
         address_line1: normalized.addressLine1 || null, address_line2: normalized.addressLine2 || null, city: normalized.city || null, state: normalized.state, zip: normalized.zip || null,
         waveguard_tier: normalized.tier, monthly_rate: normalized.monthlyRate,
+        // Human-chosen tier at create: 'manual' provenance keeps the
+        // auto-tier machinery off it (migration 20260728000001).
+        waveguard_tier_source: normalized.tier ? 'manual' : null,
         member_since: etDateString(),
         referral_code: code, lead_source: normalized.leadSource,
         pipeline_stage: normalized.pipelineStage,
@@ -2682,7 +2685,16 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
     for (const [k, v] of Object.entries(fields)) {
       if (req.body[k] !== undefined) {
         // Handle empty strings for numeric/date fields
-        if (v === 'monthly_rate') { updates[v] = req.body[k] === '' ? 0 : parseFloat(req.body[k]) || 0; }
+        if (v === 'waveguard_tier') {
+          updates[v] = req.body[k];
+          // A human set (or cleared) the tier: record 'manual' provenance so
+          // the auto-tier machinery (GATE_AUTO_WAVEGUARD_TIER realignment +
+          // label-only messaging suppression) never treats an admin-chosen
+          // tier as a derived label it may move. Clearing the tier clears
+          // provenance with it. Ships with migration 20260728000001.
+          updates.waveguard_tier_source = req.body[k] ? 'manual' : null;
+        }
+        else if (v === 'monthly_rate') { updates[v] = req.body[k] === '' ? 0 : parseFloat(req.body[k]) || 0; }
         else if (v === 'next_follow_up_date') { updates[v] = req.body[k] || null; }
         else if (v === 'has_left_google_review') { updates[v] = !!req.body[k]; }
         else if (v === 'payer_id') { updates[v] = (req.body[k] === '' || req.body[k] == null) ? null : (parseInt(req.body[k], 10) || null); }
