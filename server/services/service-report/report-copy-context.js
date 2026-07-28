@@ -491,14 +491,16 @@ async function buildReportCopyContext({
     );
     if (scoreLine) {
       sections.push(
-        `LAWN ASSESSMENT (photo-scored TODAY, tech-confirmed; 0–100, higher is better${isBaseline ? '; baseline visit — no comparison to earlier visits' : ''}): ${scoreLine}`,
+        // "THIS VISIT", not "today" — office closeouts and backfills score
+        // the photos days after the visit date the report describes.
+        `LAWN ASSESSMENT (photo-scored for THIS VISIT, tech-confirmed; 0–100, higher is better${isBaseline ? '; baseline visit — no comparison to earlier visits' : ''}): ${scoreLine}`,
       );
     }
   } else if (lawnAssessments?.prior) {
     const scoreLine = lawnAssessmentLine(lawnAssessments.prior, null);
     if (scoreLine) {
       sections.push(
-        `LAST LAWN ASSESSMENT (photo-scored ${formatShortDate(lawnAssessments.prior.service_date)}, tech-confirmed; 0–100, higher is better — history, NOT today's reading): ${scoreLine}`,
+        `LAST LAWN ASSESSMENT (photo-scored ${formatShortDate(lawnAssessments.prior.service_date)}, tech-confirmed; 0–100, higher is better — history, NOT this visit's reading): ${scoreLine}`,
       );
     }
   }

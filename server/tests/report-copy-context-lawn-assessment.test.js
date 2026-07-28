@@ -71,7 +71,7 @@ describe('buildReportCopyContext lawn assessment grounding', () => {
       serviceDate: '2026-07-28',
       knex,
     });
-    expect(contextText).toContain('LAWN ASSESSMENT (photo-scored TODAY');
+    expect(contextText).toContain('LAWN ASSESSMENT (photo-scored for THIS VISIT');
     expect(contextText).toContain('turf density 72/100 (+8 vs Jun 20, 2026)');
     expect(contextText).toContain('color health 64/100 (+6 vs Jun 20, 2026)');
     // stress/damage comes from the tech-reviewed consolidated score, not the
@@ -93,8 +93,8 @@ describe('buildReportCopyContext lawn assessment grounding', () => {
       knex,
     });
     expect(contextText).toContain('LAST LAWN ASSESSMENT (photo-scored Jun 20, 2026');
-    expect(contextText).toContain('NOT today');
-    expect(contextText).not.toContain('photo-scored TODAY');
+    expect(contextText).toContain('NOT this visit');
+    expect(contextText).not.toContain('photo-scored for THIS VISIT');
   });
 
   test('a baseline visit suppresses deltas against superseded history', async () => {
@@ -149,7 +149,7 @@ describe('buildReportCopyContext lawn assessment grounding', () => {
       serviceDate: '2026-07-28',
       knex,
     });
-    expect(contextText).not.toContain('photo-scored TODAY');
+    expect(contextText).not.toContain('photo-scored for THIS VISIT');
     expect(contextText).toContain('LAST LAWN ASSESSMENT');
   });
 
@@ -163,7 +163,7 @@ describe('buildReportCopyContext lawn assessment grounding', () => {
       serviceDate: '2026-07-28',
       knex,
     });
-    expect(contextText).toContain('photo-scored TODAY');
+    expect(contextText).toContain('photo-scored for THIS VISIT');
     expect(contextText).toContain('turf density 72/100');
   });
 

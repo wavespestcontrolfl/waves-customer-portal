@@ -7647,7 +7647,9 @@ router.post('/generate-report', async (req, res) => {
       || productsText.length > 0
       || areas.length > 0 || actions.length > 0 || obs.length > 0 || recs.length > 0
       || concernText.length > 0
-      || ratingNum !== null;
+      || ratingNum !== null
+      // A confirmed photo-scored lawn assessment is substantive on its own.
+      || Boolean(lawnAssessmentId);
     if (!hasReportInput) return res.status(400).json({ error: 'Not enough visit detail to generate a report' });
 
     const PEST_ACTIVITY_LABELS = { 0: 'none', 1: 'very low', 2: 'low', 3: 'moderate', 4: 'high', 5: 'severe' };

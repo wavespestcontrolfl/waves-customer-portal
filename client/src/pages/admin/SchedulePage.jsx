@@ -10124,7 +10124,10 @@ export function CompletionPanel({
       observations.length > 0 ||
       recommendations.length > 0 ||
       Boolean(concern) ||
-      payload.pestActivityRating !== null;
+      payload.pestActivityRating !== null ||
+      // A confirmed photo-scored assessment is substantive visit detail on
+      // its own — a scores-only lawn visit can still generate.
+      Boolean(payload.lawnAssessmentId);
     return { payload, hasReportInput };
   }
   function recordActionScope(label, scope, treatmentApplied) {
@@ -12473,7 +12476,7 @@ export function CompletionPanel({
                   }
                   setGenerating(false);
                 }}
-                disabled={generating}
+                disabled={generating || (isLawn && !lawnAssessmentReady)}
                 style={{
                   ...secondaryPill,
                   marginTop: 4,
@@ -14617,7 +14620,7 @@ export function CompletionPanel({
                 }
                 setGenerating(false);
               }}
-              disabled={generating}
+              disabled={generating || (isLawn && !lawnAssessmentReady)}
               style={{
                 width: "100%",
                 padding: "10px 16px",
