@@ -21,7 +21,7 @@ const { resolveZoneRowsImageDrift } = require('../services/service-report/zone-d
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { countSegments } = require('../services/messaging/segment-counter');
-const { recordServiceProductNutrients } = require('../services/nutrient-ledger');
+const { recordServiceProductNutrients, calculateAppliedNutrients } = require('../services/nutrient-ledger');
 const { buildPlanForService, isDateInWindow } = require('../services/waveguard-plan-engine');
 const { evaluateWaveGuardManagerApprovals, managerApprovalSummary } = require('../services/waveguard-approval-engine');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/short-url');
@@ -501,6 +501,18 @@ function isWaveGuardLawnCompletion(svc) {
     && detectServiceLine(svc?.service_type) === 'lawn';
 }
 
+// Plan/approval-engine block messages predate the advisory policy and can
+// still phrase conditions as approval mandates ("manager review is required
+// before applying it", "requires manager approval"). Advisory records must
+// not persist copy that contradicts the non-blocking closeout, so soften the
+// wording before it lands in structured_notes / Customer 360.
+function advisorySafeMessage(text) {
+  return String(text || '')
+    .replace(/;\s*manager (?:review|approval) is required before applying it\.?/gi, ' — double-check before applying.')
+    .replace(/\brequires manager approval\b/gi, 'flagged for review')
+    .trim();
+}
+
 function calibrationLockoutBlocks(plan) {
   const lockoutCodes = new Set([
     'missing_calibration',
@@ -878,7 +890,9 @@ async function actualProductBlackoutBlocks(svc, submittedProducts = []) {
   if (!profile) return [];
 
   const county = String(profile.county || '').trim();
-  const city = String(profile.municipality || svc.city || '').trim();
+  // Stamped visit address first (matches the plan engine): a rental in
+  // another municipality must not inherit the primary home's ordinances.
+  const city = String(profile.municipality || svc.service_address_city || svc.city || '').trim();
   if (!county && !city) return [];
 
   let ordinanceQuery = db('municipality_ordinances').where({ active: true });
@@ -3829,9 +3843,48 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           };
       }
       const annualNBlocks = annualNLockoutBlocks(plan);
+      // The plan's annualN only reflects PLANNED items. With the hard gate
+      // gone, the tech can add or upsize nitrogen products, so recompute the
+      // projection from the SUBMITTED actuals — otherwise a ledger-crossing
+      // application would complete with no advisory and no audit record.
+      const actualAnnualNBlocks = [];
+      try {
+        const annualN = plan?.propertyGate?.annualN || null;
+        const lawnSqft = Number(plan?.propertyGate?.lawnSqft || 0);
+        const limit = Number(annualN?.limit);
+        if (Number.isFinite(limit) && limit > 0 && lawnSqft > 0 && Array.isArray(products) && products.length) {
+          const ids = [...new Set(products.map((p) => p.productId).filter(Boolean))];
+          const catalogRows = ids.length
+            ? await db('products_catalog').whereIn('id', ids).select('id', 'analysis_n', 'analysis_p', 'analysis_k')
+            : [];
+          const catalogById = new Map(catalogRows.map((row) => [String(row.id), row]));
+          let actualVisitN = 0;
+          for (const p of products) {
+            const catalog = catalogById.get(String(p.productId));
+            if (!catalog) continue;
+            const applied = calculateAppliedNutrients({
+              product: catalog,
+              amount: p.totalAmount,
+              amountUnit: p.amountUnit,
+              lawnSqft,
+            });
+            if (applied?.nAppliedPer1000) actualVisitN += applied.nAppliedPer1000;
+          }
+          const used = Number(annualN.used || 0);
+          if (actualVisitN > 0 && used + actualVisitN > limit) {
+            actualAnnualNBlocks.push({
+              code: 'actual_annual_n_budget_exceeded',
+              message: `Applied products add ${actualVisitN.toFixed(2)} lb N/1k (${(used + actualVisitN).toFixed(2)} of ${limit} lb N/1k for the year) — actuals exceed the annual N budget.`,
+            });
+          }
+        }
+      } catch (nCalcErr) {
+        logger.warn(`[complete] actual annual-N projection failed for ${svc.id}: ${nCalcErr.message}`);
+      }
+      const combinedAnnualNBlocks = [...annualNBlocks, ...actualAnnualNBlocks];
       // Advisory, not a lockout (same rules as the blackout gate above).
-      if (annualNBlocks.length) {
-        const mappedNBlocks = annualNBlocks.map((block) => ({
+      if (combinedAnnualNBlocks.length) {
+        const mappedNBlocks = combinedAnnualNBlocks.map((block) => ({
           code: block.code,
           message: block.message,
         }));
@@ -3894,7 +3947,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             recordedAt: new Date().toISOString(),
             blocks: managerBlocks.map((block) => ({
               code: block.code,
-              message: block.message,
+              message: advisorySafeMessage(block.message),
               productId: block.productId || null,
               productName: block.productName || null,
             })),

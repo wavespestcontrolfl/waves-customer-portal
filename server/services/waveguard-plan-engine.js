@@ -1296,7 +1296,9 @@ async function buildPlanForService(serviceId, options = {}) {
   const substitutions = await getAppointmentSubstitutions(knex, service.id, products);
   const latestAssessment = await getLatestAssessment(knex, service.customer_id);
   const stressFlags = latestAssessment?.stress_flags || {};
-  const ordinances = await getApplicableOrdinances(knex, profile, service.city);
+  // Stamped visit address first — a rental in another municipality must not
+  // inherit the primary home's ordinance set.
+  const ordinances = await getApplicableOrdinances(knex, profile, service.service_address_city || service.city);
   const activeCalibrations = await getActiveCalibrations(knex, {
     equipmentSystemId: options.equipmentSystemId || service.assigned_equipment_system_id,
     calibrationId: options.calibrationId || service.assigned_calibration_id,

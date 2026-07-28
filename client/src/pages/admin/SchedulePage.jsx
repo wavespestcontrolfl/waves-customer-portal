@@ -291,6 +291,18 @@ const VISIT_OUTCOME_OPTIONS = [
   { value: "customer_concern", label: "Customer concern" },
   { value: "incomplete", label: "Incomplete" },
 ];
+// Plan/approval-engine block messages predate the advisory policy and can
+// still phrase conditions as approval mandates. Soften them for display —
+// the closeout never blocks, so the copy must not claim review is required.
+function softenApprovalWording(text) {
+  return String(text || "")
+    .replace(
+      /;\s*manager (?:review|approval) is required before applying it\.?/gi,
+      " — double-check before applying.",
+    )
+    .replace(/\brequires manager approval\b/gi, "flagged for review")
+    .trim();
+}
 // Rig-calibration states worth a closeout advisory line. Deliberately
 // excludes 'equipment_selection_required' — with no equipment step left in
 // the closeout, "select equipment" would be permanent noise.
@@ -9010,41 +9022,35 @@ export function CompletionPanel({
   const offPlanNpAdvisories =
     calibrationRequired && !isIncompleteVisit
       ? treatmentPlanOrdinanceWindows.flatMap((window) => {
-          const restricted = [];
-          if (window?.restrictedNitrogen && !planBlackoutNutrients.has("n"))
-            restricted.push("n");
-          if (window?.restrictedPhosphorus && !planBlackoutNutrients.has("p"))
-            restricted.push("p");
-          if (!restricted.length) return [];
-          const names = [
-            ...new Set(
-              selectedProducts
-                .map((sp) =>
-                  (products || []).find(
-                    (p) => String(p.id) === String(sp.productId),
-                  ),
-                )
-                .filter(
-                  (row) =>
-                    (restricted.includes("n") &&
-                      Number(row?.analysis_n || 0) > 0) ||
-                    (restricted.includes("p") &&
-                      Number(row?.analysis_p || 0) > 0),
-                )
-                .map((row) => row.name)
-                .filter(Boolean),
-            ),
-          ];
-          if (!names.length) return [];
-          const nutrient =
-            restricted.length === 2
-              ? "nitrogen/phosphorus"
-              : restricted[0] === "n"
-                ? "nitrogen"
-                : "phosphorus";
-          return [
-            `${window.jurisdictionName || "The local ordinance"} restricts ${nutrient} during this visit window — ${names.join(", ")} contains it; completion records this.`,
-          ];
+          // One line per NUTRIENT so a both-restricted window never claims a
+          // nitrogen-only product also contains phosphorus.
+          const lines = [];
+          for (const [flagKey, short, nutrient, analysisField] of [
+            ["restrictedNitrogen", "n", "nitrogen", "analysis_n"],
+            ["restrictedPhosphorus", "p", "phosphorus", "analysis_p"],
+          ]) {
+            if (!window?.[flagKey] || planBlackoutNutrients.has(short))
+              continue;
+            const names = [
+              ...new Set(
+                selectedProducts
+                  .map((sp) =>
+                    (products || []).find(
+                      (p) => String(p.id) === String(sp.productId),
+                    ),
+                  )
+                  .filter((row) => Number(row?.[analysisField] || 0) > 0)
+                  .map((row) => row.name)
+                  .filter(Boolean),
+              ),
+            ];
+            if (names.length) {
+              lines.push(
+                `${window.jurisdictionName || "The local ordinance"} restricts ${nutrient} during this visit window — ${names.join(", ")} contains ${nutrient}; completion records this.`,
+              );
+            }
+          }
+          return lines;
         })
       : [];
   // Non-blocking closeout advisories (owner directive 2026-07-29): the old
@@ -9058,7 +9064,7 @@ export function CompletionPanel({
       ? [[nLimitHelpText, nLimitSummaryText].filter(Boolean).join(" ")]
       : []),
     ...(managerApprovalRequired && managerApprovalHelpText
-      ? [managerApprovalHelpText]
+      ? [softenApprovalWording(managerApprovalHelpText)]
       : []),
     ...(calibrationRequired && !isIncompleteVisit
       ? treatmentPlanCalibrationBlocks
