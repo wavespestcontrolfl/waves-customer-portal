@@ -2163,6 +2163,8 @@ export function calculateEstimate(inputs) {
       categoryOrder.indexOf(treatableCategory),
       categoryOrder.indexOf(grossLotCategory) - 1
     )];
+    const mqCategoryFloor = { SMALL: 0, QUARTER: 8000, THIRD: 12000, HALF: 18000, ACRE: 35000 };
+    const mqPricingSqFt = Math.max(treatableSqFt, mqCategoryFloor[sz] || 0);
     let pr = 1.0;
     if (treeDensity === 'HEAVY') pr += 0.15;
     else if (treeDensity === 'MODERATE') pr += 0.05;
@@ -2172,24 +2174,48 @@ export function calculateEstimate(inputs) {
     if (nearWater) pr += 0.10;
     // v1.5: irrigation creates standing water in valve boxes, low spots, overflow areas
     if (hasIrrigation) pr += 0.08;
-    if (sz === 'ACRE') pr += 0.15;
-    else if (sz === 'HALF') pr += 0.05;
-    pr = Math.min(2.0, Math.round(pr * 100) / 100);
-    const bp = {
-      SMALL: [105, 90],
-      QUARTER: [115, 100],
-      THIRD: [130, 115],
-      HALF: [155, 135],
-      ACRE: [195, 175],
+    // Continuous lot-size pressure — mirrors mosquitoLotSizePressure in
+    // server/services/pricing-engine/service-pricing.js (ramps to +0.05 by
+    // 18k and +0.15 by 35k, no boundary jumps).
+    if (mqPricingSqFt >= 35000) pr += 0.15;
+    else if (mqPricingSqFt >= 18000) pr += 0.05 + ((mqPricingSqFt - 18000) / 17000) * 0.10;
+    else if (mqPricingSqFt >= 12000) pr += ((mqPricingSqFt - 12000) / 6000) * 0.05;
+    // Full precision through the per-visit math (server parity — priceMosquito
+    // never rounds the multiplier); round only the display copy in mqMeta.
+    pr = Math.min(2.0, pr);
+    const prDisplay = Math.round(pr * 100) / 100;
+    // Mirrors server/services/pricing-engine/constants.js MOSQUITO.basePrices
+    // (repriced 2026-07 to the 60%-margin band) and the server's 500-sf-step
+    // interpolation between bucket anchors (interpolateMosquitoPrice in
+    // service-pricing.js). Must stay in sync with the server so the previewed
+    // price matches what the server actually charges.
+    // Terminal (ACRE) anchors extend past one acre at the previous segment's
+    // slope so the per-500-sf increment keeps declining into the widest lots
+    // (mirrors mosquitoRecurringAnchors: 35000 + ceil((97-86)/((86-79)/17000)/500)*500
+    // = 62000 seasonal; 35000 + ceil((86-77)/((77-73)/17000)/500)*500 = 73500 monthly).
+    const mqAnchors = {
+      seasonal9: [[8000, 73], [12000, 76], [18000, 79], [35000, 86], [62000, 97]],
+      monthly12: [[8000, 66], [12000, 69], [18000, 73], [35000, 77], [73500, 86]],
     };
-    const b = bp[sz] || bp.SMALL;
+    const mqInterp = (anchors, sqft) => {
+      const stepped = Math.ceil(Math.max(0, sqft) / 500) * 500;
+      if (stepped <= anchors[0][0]) return anchors[0][1];
+      for (let i = 1; i < anchors.length; i++) {
+        if (stepped <= anchors[i][0]) {
+          const [as, ap] = anchors[i - 1];
+          const [bs, bpr] = anchors[i];
+          return Math.round(ap + ((stepped - as) / (bs - as)) * (bpr - ap));
+        }
+      }
+      return anchors[anchors.length - 1][1];
+    };
     const ri = (pr >= 1.30 || nearWater || treeDensity === 'HEAVY') ? 1 : 0;
     const mt = [
-      { n: 'Seasonal Mosquito Program (9 visits)', pv: Math.round(b[0] * pr), v: 9, tier: 'seasonal9' },
-      { n: 'Monthly Mosquito Program (12 visits)', pv: Math.round(b[1] * pr), v: 12, tier: 'monthly12' },
+      { n: 'Seasonal Mosquito Program (9 visits)', pv: Math.round(mqInterp(mqAnchors.seasonal9, mqPricingSqFt) * pr), v: 9, tier: 'seasonal9' },
+      { n: 'Monthly Mosquito Program (12 visits)', pv: Math.round(mqInterp(mqAnchors.monthly12, mqPricingSqFt) * pr), v: 12, tier: 'monthly12' },
     ];
     R.mq = [];
-    R.mqMeta = { pr, sz, ri, treatableSqFt, grossLotCategory };
+    R.mqMeta = { pr: prDisplay, sz, ri, treatableSqFt, grossLotCategory };
     mt.forEach((t, i) => {
       const ann = t.pv * t.v;
       const mo = Math.round(ann / 12 * 100) / 100;
@@ -2386,16 +2412,31 @@ export function calculateEstimate(inputs) {
     const treatableSqFt = Math.max(0, Math.round(lotSqFt - footprint - estimateHardscape()));
     // Mirrors the server-authoritative one-time mosquito band
     // (server/services/pricing-engine/constants.js ONE_TIME.mosquito, repriced
-    // 2026-06 to the SW-FL single-visit market). Buckets and the over-acre
-    // increment ($40 / 10k sf over an acre) must stay in sync with the server so
-    // the previewed price matches what the server actually charges.
-    let p = 99;
-    if (treatableSqFt > 43560) p = 269 + Math.ceil((treatableSqFt - 43560) / 10000) * 40;
-    else if (treatableSqFt > 32000) p = 269;
-    else if (treatableSqFt > 24000) p = 239;
-    else if (treatableSqFt > 16000) p = 199;
-    else if (treatableSqFt > 11000) p = 159;
-    else if (treatableSqFt > 7500) p = 129;
+    // 2026-07 to ~25% under the one-time pest band) and the server's
+    // 500-sf-step interpolation between bucket anchors. Anchors and the
+    // over-acre increment ($40 / 10k sf over an acre) must stay in sync with
+    // the server so the previewed price matches what the server actually
+    // charges.
+    let p;
+    if (treatableSqFt > 43560) {
+      p = 269 + Math.ceil((treatableSqFt - 43560) / 10000) * 40;
+    } else {
+      const otAnchors = [[7500, 149], [11000, 169], [16000, 189], [24000, 209], [32000, 239], [43560, 269]];
+      const stepped = Math.ceil(Math.max(0, treatableSqFt) / 500) * 500;
+      p = otAnchors[otAnchors.length - 1][1];
+      if (stepped <= otAnchors[0][0]) {
+        p = otAnchors[0][1];
+      } else {
+        for (let i = 1; i < otAnchors.length; i++) {
+          if (stepped <= otAnchors[i][0]) {
+            const [as, ap] = otAnchors[i - 1];
+            const [bs, bp2] = otAnchors[i];
+            p = Math.round(ap + ((stepped - as) / (bs - as)) * (bp2 - ap));
+            break;
+          }
+        }
+      }
+    }
     const addOns = mosquitoStationCount * 75 + mosquitoDunkCount * 15;
     const fp = Math.round((p + addOns) * rD);
     const detailParts = [];

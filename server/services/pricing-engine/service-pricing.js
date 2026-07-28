@@ -3690,6 +3690,71 @@ function pricePalmInjection(property, options) {
 // ============================================================
 // MOSQUITO
 // ============================================================
+// Piecewise-linear price curve between bucket anchors, quantized to 500-sf
+// steps (MOSQUITO.priceStepSqFt). Anchor prices are the DB-authoritative
+// bucket prices, pinned at each bucket's top edge — so the increment added
+// per 500 sf shrinks as lots grow (drive + setup dominate visit cost, not
+// spray time) instead of flat-bucket pricing jumping at every boundary.
+function interpolateMosquitoPrice(anchors, sqft) {
+  const step = MOSQUITO.priceStepSqFt || 500;
+  const stepped = Math.ceil(Math.max(0, Number(sqft) || 0) / step) * step;
+  if (stepped <= anchors[0].sqft) return anchors[0].price;
+  for (let i = 1; i < anchors.length; i++) {
+    if (stepped <= anchors[i].sqft) {
+      const a = anchors[i - 1];
+      const b = anchors[i];
+      const t = (stepped - a.sqft) / (b.sqft - a.sqft);
+      return Math.round(a.price + t * (b.price - a.price));
+    }
+  }
+  return anchors[anchors.length - 1].price;
+}
+
+// Recurring anchors: each category's per-visit price sits at its top edge
+// (SMALL 8k / QUARTER 12k / THIRD 18k / HALF 35k). The terminal (ACRE) anchor
+// extends past one acre at no more than the previous segment's slope, so the
+// per-500-sf increment keeps DECLINING into the widest lots instead of
+// steepening (owner directive); the curve holds flat once the ACRE price is
+// reached. Derived from the live prices so admin-panel reprices keep the shape.
+function mosquitoRecurringAnchors(programIndex) {
+  const cats = MOSQUITO.lotCategories;
+  const anchors = cats
+    .filter((c) => Number.isFinite(c.maxSqFt))
+    .map((c) => ({ sqft: c.maxSqFt + 1, price: MOSQUITO.basePrices[c.key][programIndex] }));
+  const terminal = cats[cats.length - 1];
+  const terminalPrice = MOSQUITO.basePrices[terminal.key][programIndex];
+  const last = anchors[anchors.length - 1];
+  const prev = anchors[anchors.length - 2];
+  const prevSlope = last && prev ? (last.price - prev.price) / (last.sqft - prev.sqft) : 0;
+  const step = MOSQUITO.priceStepSqFt || 500;
+  let terminalSqFt = 43560;
+  if (last && terminalPrice > last.price && prevSlope > 0) {
+    const span = Math.ceil((terminalPrice - last.price) / prevSlope / step) * step;
+    terminalSqFt = Math.max(43560, last.sqft + span);
+  }
+  anchors.push({ sqft: terminalSqFt, price: terminalPrice });
+  return anchors;
+}
+
+// Continuous lot-size pressure: ramps up to lot_half by the HALF boundary and
+// to lot_acre by the ACRE boundary — matching the old categorical values where
+// each category began — so the customer price has no boundary jumps.
+function mosquitoLotSizePressure(sqft) {
+  const bound = (key) => {
+    const c = MOSQUITO.lotCategories.find((x) => x.key === key);
+    return c && Number.isFinite(c.maxSqFt) ? c.maxSqFt + 1 : null;
+  };
+  const rampStart = bound('QUARTER') || 12000; // ramp in across the THIRD band
+  const halfStart = bound('THIRD') || 18000;   // HALF begins where THIRD ends
+  const acreStart = bound('HALF') || 35000;    // ACRE begins where HALF ends
+  const halfFactor = MOSQUITO.pressureFactors.lot_half || 0;
+  const acreFactor = MOSQUITO.pressureFactors.lot_acre || 0;
+  if (sqft >= acreStart) return acreFactor;
+  if (sqft >= halfStart) return halfFactor + ((sqft - halfStart) / (acreStart - halfStart)) * (acreFactor - halfFactor);
+  if (sqft >= rampStart) return ((sqft - rampStart) / (halfStart - rampStart)) * halfFactor;
+  return 0;
+}
+
 function priceMosquito(property, options = {}) {
   const {
     tier = null,
@@ -3704,6 +3769,11 @@ function priceMosquito(property, options = {}) {
   const lotCategory = categoryResolution.lotCategory;
   const basePrices = MOSQUITO.basePrices[lotCategory];
   if (!basePrices) throw new Error(`Unknown lot category: ${lotCategory}`);
+  // Interpolate on treatable sf, floored at the resolved category's lower
+  // edge so the gross-lot guardrail still lifts suspiciously-low derivations.
+  const categoryIndex = MOSQUITO.lotCategories.findIndex((c) => c.key === lotCategory);
+  const categoryFloorSqFt = categoryIndex > 0 ? MOSQUITO.lotCategories[categoryIndex - 1].maxSqFt + 1 : 0;
+  const pricingSqFt = Math.max(areaResolution.mosquitoTreatableSqFt || 0, categoryFloorSqFt);
   const waterMeta = normalizeMosquitoWaterMultiplier((modifiers || {}).mosquitoWaterMult);
   const waterMultiplier = waterMeta.waterMultiplier;
   const hasGraduatedWaterMultiplier = waterMultiplier > 1.0;
@@ -3718,8 +3788,7 @@ function priceMosquito(property, options = {}) {
   if (f.pool || f.poolCage) pressure += MOSQUITO.pressureFactors.pool;
   if (f.nearWater && !hasGraduatedWaterMultiplier) pressure += MOSQUITO.pressureFactors.nearWater;
   if (f.irrigation) pressure += MOSQUITO.pressureFactors.irrigation;
-  if (lotCategory === 'ACRE') pressure += MOSQUITO.pressureFactors.lot_acre;
-  else if (lotCategory === 'HALF') pressure += MOSQUITO.pressureFactors.lot_half;
+  pressure += mosquitoLotSizePressure(pricingSqFt);
   if (waterMultiplier && waterMultiplier !== 1.0) {
     pressure *= waterMultiplier;
   }
@@ -3740,7 +3809,7 @@ function priceMosquito(property, options = {}) {
   if (tierIndex < 0) throw new Error(`Unknown mosquito program: ${tier}`);
   const tierWasForced = !!normalizedRequestedTier && selectedProgram !== recommendedProgram;
   if (tierWasForced) recommendationReasons.push('forced_by_request');
-  const basePrice = basePrices[tierIndex];
+  const basePrice = interpolateMosquitoPrice(mosquitoRecurringAnchors(tierIndex), pricingSqFt);
 
   const perVisit = Math.round(basePrice * pressure);
   const visits = MOSQUITO.tierVisits[selectedProgram];
@@ -3772,7 +3841,7 @@ function priceMosquito(property, options = {}) {
   const marginFloorOk = margin >= GLOBAL.MARGIN_FLOOR;
 
   const tiers = MOSQUITO.programs.map((name, idx) => {
-    const bp = basePrices[idx];
+    const bp = interpolateMosquitoPrice(mosquitoRecurringAnchors(idx), pricingSqFt);
     const pv = Math.round(bp * pressure);
     const v = MOSQUITO.tierVisits[name];
     const ann = pv * v + annualAddOns;
@@ -3831,6 +3900,7 @@ function priceMosquito(property, options = {}) {
     mosquitoTreatableSqFtConfidence: areaResolution.confidence,
     fallbackTreatableSqFt: areaResolution.fallbackTreatableSqFt,
     missingAreaData: areaResolution.missingAreaData,
+    pricingSqFt,
     basePrice, pressureMultiplier: pressure,
     pressureBeforeCap,
     perVisit, visits, annual, monthly,
@@ -4844,13 +4914,29 @@ function getOneTimeMosquitoAreaBucket(mosquitoTreatableSqFt) {
   return 'OVER_ACRE';
 }
 
+// One-time anchors: bucket prices pinned at each bucket's top edge, so the
+// price climbs in 500-sf steps between them (see interpolateMosquitoPrice)
+// instead of jumping at bucket boundaries.
+const ONE_TIME_MOSQUITO_ANCHOR_SQFT = [
+  ['SMALL', 7500],
+  ['STANDARD', 11000],
+  ['LARGE', 16000],
+  ['XL', 24000],
+  ['ESTATE', 32000],
+  ['ACRE_CLASS', 43560],
+];
+
 function getOneTimeMosquitoBase(mosquitoTreatableSqFt) {
   const sqft = Math.max(0, Math.round(Number(mosquitoTreatableSqFt) || 0));
   const areaBucket = getOneTimeMosquitoAreaBucket(sqft);
-  const base = ONE_TIME.mosquito[areaBucket] || ONE_TIME.mosquito.SMALL;
   if (areaBucket !== 'OVER_ACRE') {
-    return { areaBucket, basePrice: base, requiresManualReview: false };
+    const anchors = ONE_TIME_MOSQUITO_ANCHOR_SQFT.map(([bucket, anchorSqFt]) => ({
+      sqft: anchorSqFt,
+      price: ONE_TIME.mosquito[bucket] || ONE_TIME.mosquito.SMALL,
+    }));
+    return { areaBucket, basePrice: interpolateMosquitoPrice(anchors, sqft), requiresManualReview: false };
   }
+  const base = ONE_TIME.mosquito.OVER_ACRE || ONE_TIME.mosquito.ACRE_CLASS || ONE_TIME.mosquito.SMALL;
   const overageSqFt = Math.max(0, sqft - 43560);
   const incrementCount = Math.ceil(overageSqFt / ONE_TIME.mosquito.overAcreIncrementSqFt);
   return {
