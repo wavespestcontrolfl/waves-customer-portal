@@ -457,7 +457,7 @@ function normalizeAdvisoryForTreatmentScope(advisory = {}, { service = {}, appli
 // resolved here is what the customer sees — the report build can only zero it
 // further, never restore it. Kept as a pure helper so the scope wiring is
 // directly testable without the full /complete route harness.
-function buildCompletionAdvisory({ advisoryDefaults = {}, completionAreas = [], protocolActionScopes = [], applications = [] } = {}) {
+function buildCompletionAdvisory({ advisoryDefaults = {}, completionAreas = [], protocolActionScopes = [], applications = [], tracedExteriorZone = false } = {}) {
   return normalizeAdvisoryForTreatmentScope(advisoryDefaults, {
     service: {
       areas_serviced: completionAreas,
@@ -467,6 +467,12 @@ function buildCompletionAdvisory({ advisoryDefaults = {}, completionAreas = [], 
       },
     },
     applications,
+    // A technician-traced treatment zone is explicit exterior evidence: the
+    // trace is drawn over the property's satellite exterior. Typed T&S
+    // closeouts hide areasServiced and clear applicationArea, so without
+    // this the explicit-exterior rule would zero the dry-down timer on a
+    // visit whose treatment location WAS captured (codex P1 #3007 r5).
+    zones: tracedExteriorZone ? [{ label: 'Traced exterior treatment zone' }] : [],
   });
 }
 

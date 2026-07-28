@@ -401,12 +401,20 @@ function factNumbers(facts) {
   const consumptionAt = roleSet(s.stationsWithBaitConsumption); // "consumption observed at N stations"
   const activityAt = roleSet(s.stationsWithActivity); // "activity observed at N stations" (termite bait)
   const captureTotals = new Set(); // "N captures" — only a typed finding grounds this
+  // Typed station findings route to their ROLE, never the roster pool —
+  // "Stations with activity: 2" must not let "2 stations on the property"
+  // pass as a roster claim (codex P1 #3007 r5).
   (facts.findings || []).forEach((finding) => {
     const n = Number(String(finding.value).trim());
     if (!Number.isFinite(n)) return;
-    if (/captur/i.test(finding.label)) captureTotals.add(n);
-    else if (/check|inspect/i.test(finding.label)) checked.add(n);
-    else if (/trap|station|device/i.test(finding.label)) total.add(n);
+    const label = String(finding.label);
+    if (/captur/i.test(label)) captureTotals.add(n);
+    else if (/consum/i.test(label)) consumptionAt.add(n);
+    else if (/activit/i.test(label)) activityAt.add(n);
+    else if (/inaccess/i.test(label)) inaccessible.add(n);
+    else if (/servic/i.test(label)) serviced.add(n);
+    else if (/check|inspect/i.test(label)) checked.add(n);
+    else if (/trap|station|device|total/i.test(label)) total.add(n);
   });
   return { total, checked, serviced, inaccessible, capturesAt, consumptionAt, activityAt, captureTotals };
 }
@@ -826,11 +834,17 @@ function contradictedZeroStates(text, facts) {
   if (!ratified.length) return problems;
   const zeroStatePests = pestTerms.filter((term) => ratified.some((sentence) => term.out.test(sentence)));
   if (!zeroStatePests.length) return problems;
-  for (const sentence of String(text).split(/(?<=[.!?])\s+/)) {
-    if (NEGATED_SENTENCE_RE.test(sentence)) continue;
-    if (!OBSERVATION_RE.test(sentence)) continue;
+  // Clause scope (codex P1 #3007 r5): "No concerns were reported, but live
+  // roaches were observed" carries the contradiction in its second clause —
+  // a negator elsewhere in the sentence must not shield it.
+  const clauses = String(text)
+    .split(/(?<=[.!?])\s+/)
+    .flatMap((sentence) => sentence.split(/[,;]|\b(?:but|however|yet|although|though)\b/i));
+  for (const clause of clauses) {
+    if (NEGATED_SENTENCE_RE.test(clause)) continue;
+    if (!OBSERVATION_RE.test(clause)) continue;
     for (const term of zeroStatePests) {
-      if (term.out.test(sentence)) {
+      if (term.out.test(clause)) {
         problems.push('contradicted_zero_state');
         break;
       }
@@ -839,12 +853,39 @@ function contradictedZeroStates(text, facts) {
   return problems;
 }
 
+// ACTION terms ground only against completed-work evidence — affirmative
+// findings/ratified copy, devices, photo evidence — never the service or
+// report LABEL: "Termite Bait Station" in the title must not prove "we
+// baited the stations" on a visit whose Bait-replaced finding says No
+// (codex P1 #3007 r5). Pest/species/location terms keep the full corpus
+// (the label legitimately grounds the pest family).
+function actionCorpus(facts) {
+  const workFacts = {
+    findings: (facts.findings || []).filter(
+      (finding) => !NEGATIVE_FINDING_VALUE_RE.test(String(finding.value).trim()),
+    ),
+    recap: affirmativeSentences(facts.recap),
+    todaysResult: facts.todaysResult
+      ? {
+        headline: affirmativeSentences(facts.todaysResult.headline),
+        body: affirmativeSentences(facts.todaysResult.body),
+        nextStep: affirmativeSentences(facts.todaysResult.nextStep),
+      }
+      : null,
+    devices: facts.devices,
+    photoSummary: facts.photoSummary,
+    photoEvidence: facts.photoEvidence,
+  };
+  return ` ${JSON.stringify(workFacts).toLowerCase().replace(/[^a-z0-9]+/g, ' ')} `;
+}
+
 function ungroundedDomainTerms(text, facts) {
   const problems = [];
   const corpus = domainCorpus(facts);
+  const actions = actionCorpus(facts);
   for (const term of DOMAIN_TERMS) {
     const match = String(text).match(new RegExp(term.out.source, 'i'));
-    if (match && !term.corpus.test(corpus)) {
+    if (match && !term.corpus.test(term.kind === 'action' ? actions : corpus)) {
       problems.push(`ungrounded_${term.kind}:${match[0].toLowerCase()}`);
     }
   }
@@ -908,8 +949,12 @@ function ungroundedClaims(rawText, facts) {
   // grounded. The bare word "one" is exempt when no digit 1 was written —
   // harmless prose ("one of the traps") is not a numeric claim.
   const rawDigits = new Set(numberTokens(text));
+  // "one" is exempt only in its partitive idiom ("one of the traps") — a
+  // bare "one day"/"one treatment" is a numeric claim and validates like
+  // any digit (codex P1 #3007 r5).
+  const bareOne = /\bone\b(?!\s+of\b)/i.test(text);
   for (const token of numberTokens(normalizeWordNumbers(text))) {
-    if (token === '1' && !rawDigits.has('1')) continue;
+    if (token === '1' && !rawDigits.has('1') && !bareOne) continue;
     const grounded = allowed.has(token)
       || allowed.has(String(Number(token)))
       || token.split(/[:.,]/).every((part) => allowed.has(part) || allowed.has(String(Number(part))));

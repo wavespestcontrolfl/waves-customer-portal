@@ -120,6 +120,66 @@ test('typed count findings validate their own noun (codex r2: palms serviced)', 
   expect(ungroundedClaims('Twenty-one palms were serviced today.', palmFacts)).toContain('uncorroborated_count:21 palms');
 });
 
+test('action terms ground only on completed-work evidence, never the service label', () => {
+  const baitFacts = groundingFacts(roachInput({
+    serviceTypeDisplay: 'Termite Bait Station Monitoring',
+    reportTypeLabel: 'Termite Bait Station Check',
+    typedReport: {
+      reportTypeLabel: 'Termite Bait Station Check',
+      todaysResult: { headline: 'Stations were checked today.', body: 'We inspected the stations today.', nextStep: null },
+      findings: [
+        { fieldKey: 'species', customerLabel: 'Target pest', customerValueLabel: 'Subterranean termites', value: 'subterranean' },
+        { fieldKey: 'bait_replaced', customerLabel: 'Bait replaced', customerValueLabel: 'No', value: 'No' },
+      ],
+    },
+    activity: null,
+    stationSummary: { total: 10, checked: 10, activity: 0, serviced: 0, inaccessible: 0 },
+    stationProgram: 'termite',
+    applications: [],
+    photos: [],
+  }));
+  // the LABEL says Bait Station, but no completed-work fact says baiting happened
+  expect(ungroundedClaims('We baited the stations today.', baitFacts)).toContain('ungrounded_action:baited');
+  // typed station findings stay role-specific: activity counts can't pose as roster
+  const activityFactsTermite = groundingFacts(roachInput({
+    serviceTypeDisplay: 'Termite Bait Station Monitoring',
+    reportTypeLabel: 'Termite Bait Station Check',
+    typedReport: {
+      reportTypeLabel: 'Termite Bait Station Check',
+      todaysResult: { headline: 'Stations were checked today.', body: 'We inspected the stations today.', nextStep: null },
+      findings: [{ fieldKey: 'stations_with_activity', customerLabel: 'Stations with activity', customerValueLabel: '2', value: '2' }],
+    },
+    activity: null,
+    stationSummary: { total: 10, checked: 10, activity: 2, serviced: 0, inaccessible: 0 },
+    stationProgram: 'termite',
+    applications: [],
+    photos: [],
+  }));
+  expect(ungroundedClaims('There are 2 stations on the property.', activityFactsTermite))
+    .toContain('uncorroborated_count:2 stations');
+  expect(ungroundedClaims('Activity was observed at 2 stations.', activityFactsTermite)).toEqual([]);
+});
+
+test('bare "one" is a numeric claim; the partitive idiom stays exempt', () => {
+  const facts = groundingFacts(roachInput());
+  // ratified window is 10–14 days — "one day" contradicts it
+  expect(ungroundedClaims('We recommend a follow-up in one day.', facts)).toContain('ungrounded_number:1');
+  expect(ungroundedClaims('One of the treated areas will be rechecked at the next visit.', facts)).toEqual([]);
+});
+
+test('zero-state contradiction is evaluated per clause', () => {
+  const clearedFacts = groundingFacts(roachInput({
+    typedReport: {
+      reportTypeLabel: 'Cockroach Treatment',
+      todaysResult: { headline: 'No live roach activity was observed today.', body: 'We completed the scheduled service and monitoring today.', nextStep: null },
+      findings: [{ fieldKey: 'species', customerLabel: 'Target pest', customerValueLabel: 'German cockroaches', value: 'german' }],
+    },
+    activity: null,
+  }));
+  expect(ungroundedClaims('No concerns were reported by the customer, but live roaches were observed today.', clearedFacts))
+    .toContain('contradicted_zero_state');
+});
+
 test('zero-state polarity: negated ratified copy rejects positive observation claims', () => {
   const clearedFacts = groundingFacts(roachInput({
     typedReport: {

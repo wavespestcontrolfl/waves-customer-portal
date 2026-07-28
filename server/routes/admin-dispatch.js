@@ -4432,11 +4432,21 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                 ),
               }
               : reportConfig.advisoryDefaults;
+            // Treatment Zone Mapper trace = explicit exterior scope (the
+            // trace is drawn on the satellite exterior) — keeps the
+            // dry-down timer on typed closeouts that hide area chips.
+            let tracedExteriorZone = false;
+            try {
+              tracedExteriorZone = !!(await trx('treatment_zone_maps')
+                .where({ scheduled_service_id: svc.id })
+                .first());
+            } catch { /* table optional — scope falls back to chips/actions */ }
             const advisoryNormalized = buildCompletionAdvisory({
               advisoryDefaults: advisoryDefaultsForVisit,
               completionAreas,
               protocolActionScopes: reportProtocolActionScopes,
               applications: products || [],
+              tracedExteriorZone,
             });
             recordInsert.advisory = serializeJsonb(advisoryNormalized);
             const interiorBefore = reportConfig.advisoryDefaults?.interior_reentry_min ?? null;
