@@ -242,33 +242,38 @@ async function executeAutoAction(email, classification) {
   }
 }
 
-async function handleSpam(email) {
-  const { isKnownSender, quarantineMessage } = require('./inbox-hygiene');
-
-  // 0. Known senders (customers, live leads, vendors, partners) are never a
-  // destructive target no matter what the classifier said — but the From
-  // address is attacker-typed text, so the inbox-keep + IMPORTANT promotion
-  // additionally requires Gmail's Authentication-Results to align (same bar
-  // as the spam-folder rescue). A known-LOOKING sender without aligned auth
-  // is treated as the spoof it resembles: it quarantines below (24h window;
-  // the deferred sender block can't fire on it — blockSpamSender skips
-  // customers/leads/vendors, so the real person's future mail stays safe).
-  const { hasAlignedAuth } = require('./inbox-hygiene');
-  const { domainFromAddress } = require('./spam-blocker');
+/**
+ * Authenticated known senders (customers, live leads, vendors, partners)
+ * are never a destructive target no matter what the classifier said — the
+ * From address is attacker-typed text, so the inbox-keep + IMPORTANT
+ * promotion requires Gmail's Authentication-Results to align (same bar as
+ * the spam-folder rescue). Shared by BOTH destructive categories: a
+ * customer misclassified as a newsletter must not be archived/unsubscribed
+ * any more than one misclassified as spam may be quarantined.
+ * @returns true when the destructive action was skipped.
+ */
+async function skipIfAuthenticatedKnownSender(email, categoryLabel) {
+  const { isKnownSender, hasAlignedAuth } = require('./inbox-hygiene');
   const verdict = await isKnownSender(email.from_address);
+  if (!verdict.known) return false;
   const alignedAuth = hasAlignedAuth(email.authentication_results, domainFromAddress(email.from_address));
-  if (verdict.known && alignedAuth) {
-    try { await gmailClient.modifyLabels(email.gmail_id, ['IMPORTANT'], []); } catch (e) { /* non-critical */ }
-    await db('emails').where({ id: email.id }).update({
-      auto_action: `spam_skipped_known_${verdict.kind}`,
-      updated_at: new Date(),
-    });
-    logger.info(`[email-actions] Spam verdict overridden — authenticated known ${verdict.kind} (email ${email.id})`);
-    return;
+  if (!alignedAuth) {
+    logger.warn(`[email-actions] known-looking ${verdict.kind} sender FAILED authentication (${categoryLabel}, email ${email.id})`);
+    return false;
   }
-  if (verdict.known) {
-    logger.warn(`[email-actions] known-looking ${verdict.kind} sender FAILED authentication — quarantining as probable spoof (email ${email.id})`);
-  }
+  try { await gmailClient.modifyLabels(email.gmail_id, ['IMPORTANT'], []); } catch (e) { /* non-critical */ }
+  await db('emails').where({ id: email.id }).update({
+    auto_action: `${categoryLabel}_skipped_known_${verdict.kind}`,
+    updated_at: new Date(),
+  });
+  logger.info(`[email-actions] ${categoryLabel} verdict overridden — authenticated known ${verdict.kind} (email ${email.id})`);
+  return true;
+}
+
+async function handleSpam(email) {
+  const { quarantineMessage } = require('./inbox-hygiene');
+
+  if (await skipIfAuthenticatedKnownSender(email, 'spam')) return;
 
   // NOTE: spam-classified mail is deliberately NEVER auto-unsubscribed —
   // any harvesting spammer can present a List-Unsubscribe header (and can
@@ -300,6 +305,11 @@ async function handleSpam(email) {
 }
 
 async function handleNewsletter(email) {
+  // 0. Same known-sender protection as spam: an authenticated customer or
+  // vendor misclassified as a newsletter is neither archived nor
+  // unsubscribed.
+  if (await skipIfAuthenticatedKnownSender(email, 'newsletter')) return;
+
   // 1. Archive in Gmail
   try { await gmailClient.archiveMessage(email.gmail_id); } catch (e) { /* non-critical */ }
 
@@ -781,6 +791,15 @@ function emailAutoDraftsEnabled() {
 
 async function draftReplyForEmail(email, { customer = null, tone = 'service' } = {}) {
   if (!emailAutoDraftsEnabled()) return null;
+  // INBOUND mail only: the sync ingests the whole mailbox, so Waves-authored
+  // SENT/DRAFT rows (and anything from our own address) can reach the
+  // drafting categories — drafting a reply to our own reply would loop.
+  let labels = email.label_ids;
+  if (typeof labels === 'string') { try { labels = JSON.parse(labels); } catch { labels = []; } }
+  labels = Array.isArray(labels) ? labels : [];
+  if (labels.includes('SENT') || labels.includes('DRAFT')) return null;
+  const ownAddress = normalizeAddress(process.env.GMAIL_USER_EMAIL || 'contact@wavespestcontrol.com');
+  if (normalizeAddress(email.from_address) === ownAddress) return null;
   // ATOMIC idempotency claim in Postgres — the in-memory row is stale by the
   // time reclassification (which runs auto-actions twice with the same
   // object) or a concurrent worker gets here. Only the caller that flips

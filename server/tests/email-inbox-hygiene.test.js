@@ -195,6 +195,23 @@ describe('handleSpam — quarantine + known-sender guard', () => {
   });
 });
 
+describe('handleNewsletter — known-sender guard', () => {
+  const { executeAutoAction } = require('../services/email/email-actions');
+
+  test('an authenticated known customer misclassified as newsletter is neither archived nor unsubscribed', async () => {
+    const state = setupDb({ customers: [{ id: 'cust-1', email: 'jane@customer.example' }] });
+    await executeAutoAction({
+      ...EMAIL,
+      from_address: 'jane@customer.example',
+      authentication_results: 'mx.google.com; dkim=pass header.d=customer.example',
+    }, { category: 'marketing_newsletter' });
+    expect(gmailClient.archiveMessage).not.toHaveBeenCalled();
+    expect(autoUnsubscribe).not.toHaveBeenCalled();
+    expect(state.updates.find((u) => u.table === 'emails').patch.auto_action)
+      .toBe('newsletter_skipped_known_customer');
+  });
+});
+
 describe('sweepQuarantine', () => {
   const { sweepQuarantine } = require('../services/email/inbox-hygiene');
 
@@ -369,6 +386,15 @@ describe('draftReplyForEmail (GATE_EMAIL_AUTO_DRAFTS)', () => {
     body_text: 'Can you come Friday instead of Monday?',
     message_id: '<inbound-123@mail.example>',
   };
+
+  test('SENT/DRAFT (own-authored) rows never draft — no reply-to-self loops', async () => {
+    process.env.GATE_EMAIL_AUTO_DRAFTS = 'true';
+    setupDb();
+    expect(await draftReplyForEmail({ ...CUSTOMER_EMAIL, label_ids: JSON.stringify(['SENT']) })).toBeNull();
+    expect(await draftReplyForEmail({ ...CUSTOMER_EMAIL, from_address: 'contact@wavespestcontrol.com' })).toBeNull();
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
+    expect(gmailClient.createDraft).not.toHaveBeenCalled();
+  });
 
   test('gate off → no draft, no LLM call', async () => {
     setupDb();

@@ -2465,7 +2465,10 @@ function initScheduledJobs() {
 
       const leads = emails.filter(e => e.auto_action && e.auto_action.includes('lead_created')).length;
       const invoices = emails.filter(e => e.classification === 'vendor_invoice').length;
-      const spam = emails.filter(e => e.classification === 'spam').length;
+      // Actual quarantine-lane outcomes only — a known-sender skip or a
+      // failed quarantine left the message available and must not be
+      // digested as handled.
+      const spam = emails.filter(e => /^spam_(quarantined|trashing|trashed|blocked)/.test(e.auto_action || '')).length;
       const invoiceAmounts = emails
         .filter(e => e.classification === 'vendor_invoice' && e.extracted_data)
         .reduce((sum, e) => {
