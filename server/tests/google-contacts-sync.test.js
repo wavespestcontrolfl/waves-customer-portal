@@ -358,7 +358,8 @@ describe('runContactsSync', () => {
     const counts = await runContactsSync({ gapMs: 0 });
     expect(counts.failed).toBe(1);
     const marker = state.updates.find((u) => u.table === 'customers');
-    expect(marker.patch.google_contact_id).toBe('pending_create_recovery');
+    // Marker carries the create-time search identity for later recovery.
+    expect(marker.patch.google_contact_id).toBe('pending_create_recovery::jane%40customer.example');
     expect(marker.patch.google_contact_synced_at).toBeInstanceOf(Date);
   });
 
@@ -413,10 +414,11 @@ describe('runContactsSync', () => {
     mockPeopleApi.people.createContact.mockRejectedValueOnce(new Error('socket hang up'));
     const counts = await runContactsSync({ gapMs: 0 });
     expect(counts.failed).toBe(1);
-    // The marker CARRIES the dead id so a successful recovery can repoint
-    // every sharer off it.
-    const marker = state.updates.find((u) => u.patch.google_contact_id === 'pending_create_recovery:people/dead');
+    // The marker CARRIES the dead id (sharer repoint) and the create-time
+    // search identity (merge-scramble-proof recovery).
+    const marker = state.updates.find((u) => String(u.patch.google_contact_id || '').startsWith('pending_create_recovery:people/dead'));
     expect(marker).toBeDefined();
+    expect(marker.patch.google_contact_id).toBe('pending_create_recovery:people/dead:jane%40customer.example');
   });
 
   test('a scope error from the pre-create SEARCH still reports contacts_scope_missing', async () => {
@@ -561,6 +563,54 @@ describe('runContactsSync', () => {
     // Watermark pushed to cutoff-minus-a-day: retries tomorrow, not every tick.
     const rotate = state.updates.find((u) => u.table === 'customers' && u.patch.google_contact_synced_at instanceof Date);
     expect(rotate.patch.google_contact_synced_at).toEqual(new Date('2026-07-22T12:00:00Z'));
+  });
+
+  test('a 409 etag conflict is retryable — the row is not parked', async () => {
+    const state = setupDb({ customers: [{ ...CUSTOMER, google_contact_id: 'people/abc' }] });
+    const err = new Error('precondition failed');
+    err.code = 409;
+    mockPeopleApi.people.get.mockRejectedValueOnce(err);
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(counts.failed).toBe(1);
+    expect(state.updates).toEqual([]);
+  });
+
+  test('tombstone recovery searches by the MARKER identity, surviving merge-scrambled PII', async () => {
+    const state = setupDb({
+      customersSelects: [[], [{
+        id: 'c-merged', google_contact_id: 'pending_create_recovery::original%40x.example',
+        google_contact_synced_at: '2026-07-01T00:00:00Z',
+        first_name: 'Merged', last_name: '', email: 'scrambled+dedupe@x.invalid', phone: null,
+      }], []],
+      leadsSelects: [[], [], []],
+    });
+    mockPeopleApi.people.searchContacts.mockImplementation(async ({ query }) => {
+      if (query === 'original@x.example') {
+        return { data: { results: [{ person: { resourceName: 'people/orphan', clientData: [{ key: 'waves_row', value: 'customers:c-merged' }] } }] } };
+      }
+      return { data: { results: [] } };
+    });
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(counts.retired).toBe(1);
+    // Found by the ORIGINAL identity, not the scrambled row values.
+    expect(mockPeopleApi.people.deleteContact).toHaveBeenCalledWith({ resourceName: 'people/orphan' });
+    expect(state.updates.find((u) => u.table === 'customers').patch).toEqual({ google_contact_id: null, google_contact_synced_at: null });
+  });
+
+  test('account siblings aggregate ALL live property addresses onto the shared contact', async () => {
+    setupDb({
+      customers: [{ ...CUSTOMER, id: 'c-2', account_id: 'acct-1', google_contact_id: 'people/acct' }],
+      customersSelects: [[{ ...CUSTOMER, id: 'c-2', account_id: 'acct-1', google_contact_id: 'people/acct' }],
+        [{ address_line1: '1 Palm Way', address_line2: null, city: 'Parrish', state: 'FL', zip: '34219' },
+          { address_line1: '2 Oak St', address_line2: null, city: 'Venice', state: 'FL', zip: '34285' }], [], []],
+      leadsSelects: [[], [], []],
+    });
+    mockPeopleApi.people.get.mockResolvedValueOnce({ data: { etag: 'e1', metadata: { sources: [] }, memberships: [] } });
+    mockPeopleApi.people.updateContact.mockResolvedValueOnce({ data: { resourceName: 'people/acct' } });
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(counts.synced).toBe(1);
+    const sent = mockPeopleApi.people.updateContact.mock.calls[0][0].requestBody.addresses;
+    expect(sent.map((a) => a.streetAddress)).toEqual(['1 Palm Way', '2 Oak St']);
   });
 
   test('scope-missing aborts WITHOUT stamping — rows retry after the one-time re-consent', async () => {

@@ -53,11 +53,29 @@ const WRITE_GAP_MS = 800;
 const PENDING_CREATE = 'pending_create_recovery';
 const RECOVERY_GRACE_MS = 3600000;
 
-/** Marker may carry the prior (dead) resource id: 'pending_create_recovery:people/x'. */
+/**
+ * Marker format: 'pending_create_recovery[:priorId[:encodedSearchKey]]'.
+ * priorId = the dead resource the replacement was for (sharer repoint);
+ * searchKey = the identity used AT CREATE TIME — a later merge can scramble
+ * the row's email/phone (customer-dedupe), and recovery must search Google
+ * by what the orphan actually contains, not the scrambled values.
+ */
 const isPendingMarker = (v) => typeof v === 'string' && v.startsWith(PENDING_CREATE);
-const pendingMarkerFor = (priorId) => (priorId ? `${PENDING_CREATE}:${priorId}` : PENDING_CREATE);
-const priorIdFromMarker = (v) => (isPendingMarker(v) && v.length > PENDING_CREATE.length + 1
-  ? v.slice(PENDING_CREATE.length + 1) : null);
+const pendingMarkerFor = (priorId, searchKey) => `${PENDING_CREATE}:${priorId || ''}:${encodeURIComponent(searchKey || '')}`;
+const priorIdFromMarker = (v) => {
+  if (!isPendingMarker(v)) return null;
+  const parts = v.split(':');
+  // resource names look like 'people/x' — no ':' inside.
+  return parts[1] || null;
+};
+const searchKeyFromMarker = (v) => {
+  if (!isPendingMarker(v)) return null;
+  const parts = v.split(':');
+  return parts[2] ? decodeURIComponent(parts[2]) : null;
+};
+const rowSearchKey = (row) => String(row.email || '').trim().toLowerCase()
+  || String(row.phone || '').trim()
+  || `${String(row.first_name || '').trim()} ${String(row.last_name || '').trim()}`.trim();
 
 const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
 
@@ -78,7 +96,10 @@ function isGone(err) {
  */
 function isRetryable4xx(err) {
   const status = err?.code || err?.response?.status;
-  if (status === 408 || status === 429) return true;
+  // 401 (auth refresh), 408/429 (throttling), 409/412 (etag/precondition
+  // conflicts) all recover on their own — only payload-validation
+  // rejections are deterministic enough to park.
+  if (status === 401 || status === 408 || status === 409 || status === 412 || status === 429) return true;
   const msg = String(err?.response?.data?.error?.message || err?.message || '');
   const reason = String(err?.response?.data?.error?.status || '');
   return status === 403 && /rate|quota|exhaust/i.test(`${msg} ${reason}`);
@@ -111,13 +132,15 @@ function contactBodyFor(row, kind, table) {
   };
   if (email) body.emailAddresses = [{ value: email }];
   if (phone) body.phoneNumbers = [{ value: phone }];
-  if (kind === 'customer' && row.address_line1) {
-    body.addresses = [{
-      streetAddress: [row.address_line1, row.address_line2].filter(Boolean).join(', '),
-      city: row.city || '',
-      region: row.state || 'FL',
-      postalCode: row.zip || '',
-    }];
+  const addressRows = row.__accountAddresses
+    || (kind === 'customer' && row.address_line1 ? [row] : []);
+  if (addressRows.length) {
+    body.addresses = addressRows.map((a) => ({
+      streetAddress: [a.address_line1, a.address_line2].filter(Boolean).join(', '),
+      city: a.city || '',
+      region: a.state || 'FL',
+      postalCode: a.zip || '',
+    }));
   }
   return body;
 }
@@ -192,13 +215,10 @@ async function contactInUseElsewhere(resourceName, exceptTable, exceptId) {
  * Best-effort — search-index lag can miss a seconds-old contact; the tag
  * makes the NEXT pass reconcile it.
  */
-async function findExistingContact(people, row, tag) {
-  const email = String(row.email || '').trim().toLowerCase();
-  const phone = String(row.phone || '').trim();
-  // Name-only leads are searchable by name — a missing email/phone must
-  // not make recovery skip the orphan check entirely.
-  const name = `${String(row.first_name || '').trim()} ${String(row.last_name || '').trim()}`.trim();
-  const query = email || phone || name;
+async function findExistingContact(people, row, tag, { queryOverride = null } = {}) {
+  // queryOverride = the CREATE-TIME identity from a recovery marker — the
+  // row's current values may have been scrambled by a merge since.
+  const query = queryOverride || rowSearchKey(row);
   if (!query) return null;
   try {
     // Documented People API behavior: searchContacts serves a lagging
@@ -235,11 +255,11 @@ async function findExistingContact(people, row, tag) {
  * predates this pass (an exact-email search hit can be an
  * operator-authored contact).
  */
-async function upsertContact(people, table, row, kind, gapMs, { pendingRecovery = false, attemptAt = null } = {}) {
+async function upsertContact(people, table, row, kind, gapMs, { pendingRecovery = false, attemptAt = null, markerSearchKey = null } = {}) {
   const body = contactBodyFor(row, kind, table);
   let resourceName = row.google_contact_id;
   if (!resourceName) {
-    resourceName = await findExistingContact(people, row, rowTag(table, row));
+    resourceName = await findExistingContact(people, row, rowTag(table, row), { queryOverride: markerSearchKey });
     if (!resourceName && pendingRecovery) {
       // A prior create was ambiguous. The tag search found nothing, but
       // search indexing lags — inside the grace window that absence is NOT
@@ -302,7 +322,10 @@ async function upsertContact(people, table, row, kind, gapMs, { pendingRecovery 
           q.whereNull('google_contact_id');
           if (row.google_contact_id) q.orWhere('google_contact_id', row.google_contact_id);
         })
-        .update({ google_contact_id: pendingMarkerFor(row.google_contact_id), google_contact_synced_at: new Date() })
+        .update({
+          google_contact_id: pendingMarkerFor(row.google_contact_id, markerSearchKey || rowSearchKey(row)),
+          google_contact_synced_at: new Date(),
+        })
         .catch(() => {});
     }
     throw createErr;
@@ -340,7 +363,8 @@ async function resolveLeadOwnership(row) {
   // Name-only leads have NO safe identity key — an empty predicate group
   // would match ANY contact-holding lead and adopt (then overwrite) an
   // unrelated person's contact. They always mint their own.
-  if (!email && !phone) return {};
+  const phoneDigits = phone.replace(/\D/g, '').slice(-10);
+  if (!email && phoneDigits.length < 7) return {};
   const sibling = await db('leads')
     .whereNot('id', row.id)
     .whereNull('deleted_at')
@@ -348,7 +372,11 @@ async function resolveLeadOwnership(row) {
     .whereNot('google_contact_id', 'like', `${PENDING_CREATE}%`)
     .where((q) => {
       if (email) q.orWhereRaw('LOWER(email) = ?', [email]);
-      if (phone) q.orWhere('phone', phone);
+      // Writers preserve source formatting ('+1 (941) 555-0100' vs
+      // '9415550100') — compare on the last ten digits, not raw text.
+      if (phoneDigits.length >= 7) {
+        q.orWhereRaw("RIGHT(regexp_replace(phone, '\\D', '', 'g'), 10) = ?", [phoneDigits]);
+      }
     })
     .first();
   if (sibling?.google_contact_id) return { adoptContactId: sibling.google_contact_id };
@@ -415,6 +443,7 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
       const pendingRecovery = isPendingMarker(row.google_contact_id);
       const recoveryAttemptAt = pendingRecovery ? row.google_contact_synced_at : null;
       const markerPriorId = pendingRecovery ? priorIdFromMarker(row.google_contact_id) : null;
+      const markerSearchKey = pendingRecovery ? searchKeyFromMarker(row.google_contact_id) : null;
       if (pendingRecovery) row.google_contact_id = null;
       // Name-only LEADS still sync (the repo permits leads with only a
       // contact name; the every-lead contract includes them). Customers
@@ -490,6 +519,24 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
           .first();
         if (accountSibling?.google_contact_id) row.google_contact_id = accountSibling.google_contact_id;
       }
+      if (kind === 'customer' && row.account_id) {
+        // Multi-property accounts share ONE contact — pushing only the
+        // current row's address made each sibling sync overwrite the last
+        // (addresses are in the update mask). Aggregate every live
+        // property address, stably ordered, so all siblings write the same
+        // set.
+        try {
+          const props = await db('customers')
+            .where('account_id', row.account_id)
+            .whereNull('deleted_at')
+            .whereNotNull('address_line1')
+            .orderBy('id', 'asc')
+            .select('address_line1', 'address_line2', 'city', 'state', 'zip');
+          if (props.length) row.__accountAddresses = props.slice(0, 8);
+        } catch (e) {
+          logger.warn(`[contacts-sync] account address aggregation failed: ${safeErr(e)}`);
+        }
+      }
       if (kind === 'customer' && !row.google_contact_id) {
         // Insertion order must not matter: a live LEAD with this email may
         // have minted the contact before the customer row existed — adopt
@@ -507,7 +554,7 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
         }
       }
       const priorContactId = row.google_contact_id;
-      const { resourceName, created } = await upsertContact(people, table, row, kind, gapMs, { pendingRecovery, attemptAt: recoveryAttemptAt });
+      const { resourceName, created } = await upsertContact(people, table, row, kind, gapMs, { pendingRecovery, attemptAt: recoveryAttemptAt, markerSearchKey });
       const compensateFreshCreate = async () => {
         if (!(created && resourceName)) return;
         try {
@@ -522,7 +569,7 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
               q.whereNull('google_contact_id');
               if (priorContactId) q.orWhere('google_contact_id', priorContactId);
             })
-            .update({ google_contact_id: pendingMarkerFor(priorContactId), google_contact_synced_at: new Date() })
+            .update({ google_contact_id: pendingMarkerFor(priorContactId, rowSearchKey(row)), google_contact_synced_at: new Date() })
             .catch(() => {});
         }
       };
@@ -619,7 +666,11 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
           const attemptedMs = row.google_contact_synced_at ? new Date(row.google_contact_synced_at).getTime() : 0;
           if (Date.now() - attemptedMs < RECOVERY_GRACE_MS) continue;
           try {
-            const orphan = await findExistingContact(people, row, rowTag(table, row));
+            // Search by the CREATE-TIME identity when the marker stored one
+            // — a merge may have scrambled this row's email/phone since,
+            // and the orphan still carries the original values.
+            const storedKey = searchKeyFromMarker(row.google_contact_id);
+            const orphan = await findExistingContact(people, row, rowTag(table, row), { queryOverride: storedKey });
             if (orphan) {
               await deleteContact(people, orphan);
               await sleep(gapMs);
