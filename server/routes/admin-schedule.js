@@ -3375,6 +3375,10 @@ router.post('/', requireAdmin, async (req, res, next) => {
           // count / booked cadence) so on payment the term attaches + stamps
           // the rows this request just created instead of seeding duplicates.
           annualPrepayCoverage: bookingBillingTermEffective === 'prepay_annual' ? annualPrepayCoverage : null,
+          // Program-agreement start date: only when the booked series IS the
+          // termite service (a pest/lawn booking on a multi-service estimate
+          // must not become the termite program start).
+          agreementStartDate: /termite/i.test(String(serviceType || '')) ? dateOnly(scheduledDate) : null,
         });
         estimateAutoAccepted = true;
         if (bookingBillingTermEffective === 'prepay_annual') {
@@ -3414,6 +3418,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
               adminUserId: req.technicianId || null,
               source: 'verbal_yes_booking',
               billingTerm: 'standard',
+              agreementStartDate: /termite/i.test(String(serviceType || '')) ? dateOnly(scheduledDate) : null,
             });
             estimateAutoAccepted = true;
             downgradedAfterOverlapRace = true;
