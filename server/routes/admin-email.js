@@ -592,7 +592,16 @@ router.post('/message/:id/reclassify', async (req, res) => {
         await executeAutoAction(email, classification);
       }
     } else {
-      await executeAutoAction(email, classification);
+      // The handler's failure must NOT flow into the commit below — clearing
+      // the claim/quarantine over an action that never ran would strip the
+      // stale-reclass sweep of its only retry marker. Revert the claim and
+      // surface a retryable error instead (the persisted verdict is
+      // re-derived on retry; handlers are idempotent).
+      const actionOutcome = await executeAutoAction(email, classification);
+      if (!actionOutcome?.ok) {
+        await revertReclassClaim();
+        return res.status(502).json({ error: 'Reclassified, but the follow-up action failed — quarantine kept; run reclassify again to retry it' });
+      }
     }
 
     // A successful NON-spam verdict on a quarantined row is the operator

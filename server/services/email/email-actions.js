@@ -239,7 +239,13 @@ async function executeAutoAction(email, classification) {
     }
   } catch (err) {
     logger.error(`[email-actions] Auto-action failed for ${email.id} (${classification.category}): ${err.message}`);
+    // Callers that clear recovery state on success (reclassify commit, the
+    // sweep's stale-reclass replay) MUST see the failure — swallowing it
+    // here while returning normally made them cancel the quarantine claim
+    // and report success over an action that never ran.
+    return { ok: false, error: err.message };
   }
+  return { ok: true };
 }
 
 /**

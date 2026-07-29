@@ -26,7 +26,6 @@ async function syncEmails() {
 async function fullSync(state) {
   logger.info('[email-sync] Starting full sync (first run)');
   let newEmails = 0;
-  let lastHistoryId = null;
 
   try {
     // Anchor the incremental cursor at the CURRENT mailbox historyId,
@@ -49,7 +48,6 @@ async function fullSync(state) {
         const parsed = await gmailClient.getMessage(msg.id);
         const inserted = await upsertEmail(parsed);
         if (inserted) newEmails++;
-        if (parsed.historyId) lastHistoryId = parsed.historyId;
       } catch (err) {
         // 404 = deleted mid-scan (benign). Anything else means this message
         // is NOT stored, and it predates the pre-scan anchor — no future
@@ -60,23 +58,29 @@ async function fullSync(state) {
       }
     }
 
-    if (failedMessages > 0) {
+    if (failedMessages > 0 || !anchorHistoryId) {
       // Withhold the cursor so the next 2-minute run re-runs the full sync
-      // (upserts are idempotent) — anchoring past a missed message would
-      // drop it from the portal permanently.
+      // (upserts are idempotent). Anchoring past a missed message would
+      // drop it from the portal permanently — and there is NO safe fallback
+      // anchor when getProfile failed: the last iterated message is the
+      // OLDEST one, and a cursor that old re-triggers the expired-history
+      // full resync in a loop.
+      const why = failedMessages > 0
+        ? `${failedMessages} message(s) failed`
+        : 'no current history anchor (getProfile failed)';
       await db('email_sync_state').where('id', state.id).update({
-        errors: `full sync incomplete: ${failedMessages} message(s) failed — retrying next run`,
+        errors: `full sync incomplete: ${why} — retrying next run`,
         last_sync_at: new Date(),
       });
       if (newEmails > 0) {
         await db('email_sync_state').where('id', state.id).increment('emails_synced', newEmails);
       }
-      logger.warn(`[email-sync] Full sync incomplete (${failedMessages} failure(s)) — cursor withheld for retry`);
+      logger.warn(`[email-sync] Full sync incomplete (${why}) — cursor withheld for retry`);
       return { newEmails, fullSync: true, retry: true };
     }
 
     await db('email_sync_state').where('id', state.id).update({
-      last_history_id: anchorHistoryId || lastHistoryId,
+      last_history_id: anchorHistoryId,
       last_sync_at: new Date(),
       errors: null,
     });

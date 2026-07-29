@@ -189,6 +189,18 @@ async function sweepQuarantine(now = new Date()) {
       // instead of re-quarantining a message the operator already cleared.
       if (row.classification && row.classification !== 'spam') {
         try {
+          // Atomically CLAIM the stale row for recovery before acting — an
+          // admin retry's stale takeover CASes on the same staleness
+          // predicate, so exactly one side wins (the loser's update matches
+          // zero rows) and the replay can never run concurrently with the
+          // route's own re-execution (duplicate leads, racing cancels). A
+          // crash after this refresh re-ages past the grace window and the
+          // next sweep retries.
+          const recoveryClaimed = await db('emails')
+            .where({ id: row.id, auto_action: 'spam_reclassifying' })
+            .where('updated_at', '<', claimGraceCutoff)
+            .update({ auto_action: 'spam_reclassifying', updated_at: new Date() });
+          if (!recoveryClaimed) continue;
           // Same unblock-first commit as the live route and stranded-cancel
           // recovery — a crash between verdict and unblock must not leave
           // the sender's Gmail filter trash-routing forever.
@@ -225,9 +237,18 @@ async function sweepQuarantine(now = new Date()) {
             const classification = (stored && stored.category === row.classification)
               ? stored
               : { category: row.classification, confidence: (fullRow || row).classification_confidence ?? null };
-            await executeAutoAction(fullRow || row, classification);
+            // A failed replay RETAINS the claim (skip the cancel below) —
+            // clearing the quarantine over an action that never ran would
+            // strip this sweep of its only retry marker. The refreshed
+            // claim re-ages past the grace window for the next sweep.
+            const outcome = await executeAutoAction(fullRow || row, classification);
+            if (!outcome?.ok) {
+              logger.warn(`[inbox-hygiene] stale-reclass action replay failed (email ${row.id}) — claim retained for retry: ${outcome?.error || 'unknown'}`);
+              continue;
+            }
           } catch (e) {
-            logger.warn(`[inbox-hygiene] stale-reclass action replay failed (email ${row.id}): ${e.message}`);
+            logger.warn(`[inbox-hygiene] stale-reclass action replay failed (email ${row.id}) — claim retained for retry: ${e.message}`);
+            continue;
           }
           await cancelQuarantine(row, { restoreInbox: row.classification !== 'marketing_newsletter' });
         } catch (e) {
@@ -237,8 +258,11 @@ async function sweepQuarantine(now = new Date()) {
       }
       // quarantined_at distinguishes the origin state: ambiguous rows never
       // carried the stamp, and reverting one to plain 'spam_quarantined'
-      // (null stamp) would make it invisible to every recovery pass.
+      // (null stamp) would make it invisible to every recovery pass. The
+      // staleness predicate keeps this CAS off an admin takeover that
+      // refreshed the claim between our select and this write.
       await db('emails').where({ id: row.id, auto_action: 'spam_reclassifying' })
+        .where('updated_at', '<', claimGraceCutoff)
         .update({
           auto_action: row.quarantined_at ? 'spam_quarantined' : 'spam_quarantine_ambiguous',
           updated_at: new Date(),
@@ -770,8 +794,10 @@ async function reconcilePendingDrafts(now = new Date()) {
   for (const row of staleNewsletters) {
     try {
       const { executeAutoAction } = require('./email-actions');
-      await executeAutoAction(row, { category: 'marketing_newsletter' });
-      counts.newslettersRecovered = (counts.newslettersRecovered || 0) + 1;
+      const outcome = await executeAutoAction(row, { category: 'marketing_newsletter' });
+      // Count only real recoveries — a failed handler leaves the stale
+      // claim for the next reconcile pass.
+      if (outcome?.ok) counts.newslettersRecovered = (counts.newslettersRecovered || 0) + 1;
     } catch (e) {
       logger.warn(`[inbox-hygiene] stale newsletter claim recovery failed (email ${row.id}): ${e.message}`);
     }

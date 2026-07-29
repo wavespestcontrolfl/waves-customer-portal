@@ -369,7 +369,7 @@ describe('sweepQuarantine stale-reclass replay', () => {
 
   test('a committed non-spam verdict replays its auto-action with the STORED classification payload', async () => {
     const emailActions = require('../services/email/email-actions');
-    const spy = jest.spyOn(emailActions, 'executeAutoAction').mockResolvedValueOnce(undefined);
+    const spy = jest.spyOn(emailActions, 'executeAutoAction').mockResolvedValueOnce({ ok: true });
     const stored = { category: 'lead_inquiry', confidence: 0.91, extracted: { name: 'Sam', service: 'quarterly pest' } };
     const fullRow = {
       id: 'e-reclass',
@@ -396,6 +396,47 @@ describe('sweepQuarantine stale-reclass replay', () => {
     // The stored payload — not a bare { category } — reaches the handler,
     // so a recovered lead_inquiry keeps its extraction and confidence.
     expect(spy).toHaveBeenCalledWith(expect.objectContaining({ id: 'e-reclass' }), stored);
+    // Replay succeeded → the cancel completed (Gmail label restore ran).
+    expect(gmailClient.modifyLabels).toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  test('losing the recovery-claim CAS to an admin takeover skips the replay entirely', async () => {
+    const emailActions = require('../services/email/email-actions');
+    const spy = jest.spyOn(emailActions, 'executeAutoAction');
+    setupDb(
+      {},
+      { emails: [
+        [], // stuck spam_trashing select
+        [{ id: 'e-reclass', gmail_id: 'g-reclass', from_address: 'sam@new.example', quarantined_at: null, classification: 'lead_inquiry' }],
+        [], [], [], [], [],
+      ] },
+      // The recovery-claim CAS matches zero rows — the admin route's own
+      // stale takeover refreshed the claim first.
+      { emails: [0] }
+    );
+    await sweepQuarantine(new Date('2026-07-28T12:00:00Z'));
+    expect(spy).not.toHaveBeenCalled();
+    expect(gmailClient.modifyLabels).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  test('a failed replay retains the claim — quarantine is NOT cancelled', async () => {
+    const emailActions = require('../services/email/email-actions');
+    const spy = jest.spyOn(emailActions, 'executeAutoAction').mockResolvedValueOnce({ ok: false, error: 'db down' });
+    setupDb(
+      { emails: [{ id: 'e-reclass', gmail_id: 'g-reclass', from_address: 'sam@new.example', classification: 'lead_inquiry', extracted_data: null }] },
+      { emails: [
+        [],
+        [{ id: 'e-reclass', gmail_id: 'g-reclass', from_address: 'sam@new.example', quarantined_at: '2026-07-27T12:00:00Z', classification: 'lead_inquiry' }],
+        [], [], [], [], [],
+      ] }
+    );
+    await sweepQuarantine(new Date('2026-07-28T12:00:00Z'));
+    expect(spy).toHaveBeenCalled();
+    // cancelQuarantine never ran — the claim (refreshed by the CAS) stays
+    // as the retry marker for the next sweep.
+    expect(gmailClient.modifyLabels).not.toHaveBeenCalled();
     spy.mockRestore();
   });
 });
