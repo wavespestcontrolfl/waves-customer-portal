@@ -73,6 +73,18 @@ const searchKeyFromMarker = (v) => {
   const parts = v.split(':');
   return parts[2] ? decodeURIComponent(parts[2]) : null;
 };
+/**
+ * Retirement marker: 'pending_retire_recovery:people/x'. Written in place of
+ * the pointer BEFORE the external delete — a crash mid-retirement leaves a
+ * durable record of WHICH contact still needs deleting instead of an
+ * orphaned contact with a nulled pointer.
+ */
+const PENDING_RETIRE = 'pending_retire_recovery';
+const isRetireMarker = (v) => typeof v === 'string' && v.startsWith(PENDING_RETIRE);
+const retireMarkerFor = (resourceId) => `${PENDING_RETIRE}:${resourceId}`;
+const retireIdFromMarker = (v) => (isRetireMarker(v) && v.length > PENDING_RETIRE.length + 1
+  ? v.slice(PENDING_RETIRE.length + 1) : null);
+
 const rowSearchKey = (row) => String(row.email || '').trim().toLowerCase()
   || String(row.phone || '').trim()
   || `${String(row.first_name || '').trim()} ${String(row.last_name || '').trim()}`.trim();
@@ -366,7 +378,8 @@ async function resolveLeadOwnership(row) {
     .whereNot('id', row.id)
     .whereNull('deleted_at')
     .whereNotNull('google_contact_id')
-    .whereNot('google_contact_id', 'like', `${PENDING_CREATE}%`);
+    .whereNot('google_contact_id', 'like', `${PENDING_CREATE}%`)
+    .whereNot('google_contact_id', 'like', `${PENDING_RETIRE}%`);
   // Email equality is the strong identity — adopt directly.
   if (email) {
     const emailSibling = await siblingBase().whereRaw('LOWER(email) = ?', [email]).first();
@@ -376,15 +389,24 @@ async function resolveLeadOwnership(row) {
   // lead ingestion deliberately keeps separate leads on household/business
   // numbers (see lead-from-extraction's name-conflict guard).
   if (phoneDigits.length >= 7) {
+    const nameOf = (r) => `${String(r.first_name || '').trim()} ${String(r.last_name || '').trim()}`.trim().toLowerCase();
+    const rowName = nameOf(row);
+    // Compatibility lives IN the query so a household number with several
+    // people's contacts still finds the COMPATIBLE sibling instead of
+    // giving up on whichever arbitrary row came first.
     const phoneSibling = await siblingBase()
       .whereRaw("RIGHT(regexp_replace(phone, '\\D', '', 'g'), 10) = ?", [phoneDigits])
+      .where((q) => {
+        if (email) q.whereRaw("(email IS NULL OR TRIM(email) = '' OR LOWER(TRIM(email)) = ?)", [email]);
+        if (rowName) q.whereRaw("(TRIM(CONCAT_WS(' ', first_name, last_name)) = '' OR LOWER(TRIM(CONCAT_WS(' ', first_name, last_name))) = ?)", [rowName]);
+      })
       .select('id', 'google_contact_id', 'email', 'first_name', 'last_name')
       .first();
     if (phoneSibling?.google_contact_id) {
+      // Defense-in-depth re-check of the same compatibility rules.
       const sibEmail = String(phoneSibling.email || '').trim().toLowerCase();
-      const nameOf = (r) => `${String(r.first_name || '').trim()} ${String(r.last_name || '').trim()}`.trim().toLowerCase();
       const emailsDisagree = !!(email && sibEmail && sibEmail !== email);
-      const namesConflict = !!(nameOf(row) && nameOf(phoneSibling) && nameOf(row) !== nameOf(phoneSibling));
+      const namesConflict = !!(rowName && nameOf(phoneSibling) && rowName !== nameOf(phoneSibling));
       if (!emailsDisagree && !namesConflict) return { adoptContactId: phoneSibling.google_contact_id };
     }
   }
@@ -448,6 +470,24 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
       // Ambiguous-create marker: not a real resource name. Cleared here so
       // NOTHING below (transfer, delete, update) treats it as one; the
       // create path gets the recovery context instead.
+      if (isRetireMarker(row.google_contact_id)) {
+        // A crashed retirement whose row was RESTORED: finish deleting the
+        // marked contact (it was unshared and mid-retirement), then mint a
+        // fresh one for the live row. A failed delete keeps the marker.
+        const retiring = retireIdFromMarker(row.google_contact_id);
+        try {
+          if (retiring) await deleteContact(people, retiring);
+          row.google_contact_id = null;
+        } catch (retireErr) {
+          if (isScopeError(retireErr)) {
+            counts.blocked = 'contacts_scope_missing';
+            return counts;
+          }
+          counts.failed += 1;
+          logger.warn(`[contacts-sync] crashed-retire cleanup failed (${table} ${row.id}) — marker retained: ${safeErr(retireErr)}`);
+          continue;
+        }
+      }
       const pendingRecovery = isPendingMarker(row.google_contact_id);
       const recoveryAttemptAt = pendingRecovery ? row.google_contact_synced_at : null;
       const markerPriorId = pendingRecovery ? priorIdFromMarker(row.google_contact_id) : null;
@@ -553,6 +593,7 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
           .whereNull('deleted_at')
           .whereNotNull('google_contact_id')
           .whereNot('google_contact_id', 'like', `${PENDING_CREATE}%`)
+    .whereNot('google_contact_id', 'like', `${PENDING_RETIRE}%`)
           .first();
         if (accountSibling?.google_contact_id) row.google_contact_id = accountSibling.google_contact_id;
       }
@@ -571,7 +612,12 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
             .select('address_line1', 'address_line2', 'city', 'state', 'zip');
           if (props.length) row.__accountAddresses = props.slice(0, 8);
         } catch (e) {
-          logger.warn(`[contacts-sync] account address aggregation failed: ${safeErr(e)}`);
+          // Publishing a KNOWN-incomplete shared contact would strip the
+          // sibling addresses (the update mask replaces the whole list) —
+          // defer the row instead.
+          counts.failed += 1;
+          logger.warn(`[contacts-sync] account address aggregation failed (${table} ${row.id}) — row deferred: ${safeErr(e)}`);
+          continue;
         }
       }
       if (kind === 'customer' && !row.google_contact_id) {
@@ -585,6 +631,7 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
             .whereNull('deleted_at')
             .whereNotNull('google_contact_id')
             .whereNot('google_contact_id', 'like', `${PENDING_CREATE}%`)
+    .whereNot('google_contact_id', 'like', `${PENDING_RETIRE}%`)
             .whereRaw('LOWER(email) = ?', [customerEmail])
             .first();
           if (leadOwner?.google_contact_id) row.google_contact_id = leadOwner.google_contact_id;
@@ -632,8 +679,10 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
         logger.info(`[contacts-sync] stamp vetoed by a concurrent edit (${table} ${row.id}) — re-syncing next run`);
         continue;
       }
-      const repointFrom = priorContactId || markerPriorId;
-      if ((created || pendingRecovery) && repointFrom && repointFrom !== resourceName) {
+      // During recovery the row's prior id IS the recovered resource — the
+      // dead contact every sharer still holds is the one the MARKER kept.
+      const repointFrom = pendingRecovery ? markerPriorId : (created ? priorContactId : null);
+      if (repointFrom && repointFrom !== resourceName) {
         // 404-recreate (or a RECOVERED replacement create — the marker
         // preserved the dead id) of a possibly SHARED contact: repoint
         // every live row still holding the dead resource name, or
@@ -696,14 +745,36 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
     }
     for (const row of tombstones) {
       try {
+        if (isRetireMarker(row.google_contact_id)) {
+          // A retirement that crashed between marker and delete — finish
+          // it. The claim below guards against a restore racing this batch.
+          const retiringId = retireIdFromMarker(row.google_contact_id);
+          const reclaimed = await db(table).where({ id: row.id, google_contact_id: row.google_contact_id })
+            .whereNotNull('deleted_at')
+            .update({ updated_at: new Date() });
+          if (!reclaimed) continue; // restored — the main lane's handler owns it now
+          if (retiringId) {
+            await deleteContact(people, retiringId);
+            await sleep(gapMs);
+          }
+          await db(table).where({ id: row.id }).update({ google_contact_id: null, google_contact_synced_at: null });
+          counts.retired += 1;
+          continue;
+        }
         if (isPendingMarker(row.google_contact_id)) {
           // Resolve the ambiguous create BEFORE dropping the only marker —
           // a create that actually committed would otherwise orphan the
           // deleted row's PII in Google forever. Inside the grace window
           // (or on an inconclusive search) the marker is kept for a later
-          // pass.
+          // pass. CLAIM first (same live-row guard as the normal path): a
+          // restore racing this batch must not have its contact searched
+          // out and deleted from under it.
           const attemptedMs = row.google_contact_synced_at ? new Date(row.google_contact_synced_at).getTime() : 0;
           if (Date.now() - attemptedMs < RECOVERY_GRACE_MS) continue;
+          const markerClaimed = await db(table).where({ id: row.id, google_contact_id: row.google_contact_id })
+            .whereNotNull('deleted_at')
+            .update({ updated_at: new Date() });
+          if (!markerClaimed) continue; // restored — main-lane recovery owns it
           try {
             // Search by the CREATE-TIME identity when the marker stored one
             // — a merge may have scrambled this row's email/phone since,
@@ -722,26 +793,25 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
           counts.retired += 1;
           continue;
         }
-        // CLAIM the retirement first, conditioned on the row STILL being
-        // deleted — an admin restore racing this batch keeps its contact
-        // (the stale snapshot must not delete it out from under them). The
-        // cleared watermark makes a restored row stale so it re-mints.
-        const claimed = await db(table).where({ id: row.id })
-          .whereNotNull('deleted_at')
-          .update({ google_contact_id: null, google_contact_synced_at: null });
-        if (!claimed) continue; // restored mid-batch — leave the contact alone
-        if (!(await contactInUseElsewhere(row.google_contact_id, table, row.id))) {
-          try {
-            await deleteContact(people, row.google_contact_id);
-          } catch (delErr) {
-            // Put the pointer back so a later pass retries the deletion.
-            await db(table).where({ id: row.id })
-              .update({ google_contact_id: row.google_contact_id })
-              .catch(() => {});
-            throw delErr;
-          }
+        const inUse = await contactInUseElsewhere(row.google_contact_id, table, row.id);
+        if (!inUse) {
+          // Durable retirement: swap the pointer for a RETIRE marker under
+          // the live-row guard (an admin restore racing this batch keeps
+          // its contact), THEN delete externally, THEN clear. A crash at
+          // any point leaves either the pointer or the marker — never an
+          // orphaned contact behind a nulled row.
+          const claimed = await db(table).where({ id: row.id, google_contact_id: row.google_contact_id })
+            .whereNotNull('deleted_at')
+            .update({ google_contact_id: retireMarkerFor(row.google_contact_id), google_contact_synced_at: null });
+          if (!claimed) continue; // restored mid-batch — leave the contact alone
+          await deleteContact(people, row.google_contact_id);
           await sleep(gapMs);
+          await db(table).where({ id: row.id }).update({ google_contact_id: null });
         } else {
+          const claimed = await db(table).where({ id: row.id })
+            .whereNotNull('deleted_at')
+            .update({ google_contact_id: null, google_contact_synced_at: null });
+          if (!claimed) continue; // restored mid-batch — leave the contact alone
           // SHARED contact: released, not deleted — but it may still carry
           // THIS retired row's PII/tag if it was the last pushed source.
           // Requeue one surviving owner so its next main-lane pass
@@ -784,6 +854,7 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
       .whereNull('deleted_at')
       .whereNotNull('google_contact_id')
       .whereNot('google_contact_id', 'like', `${PENDING_CREATE}%`)
+    .whereNot('google_contact_id', 'like', `${PENDING_RETIRE}%`)
       // Source-CURRENT rows only — a stale row (e.g. a converted lead
       // waiting behind the main-pass cap) must go through the main lane's
       // ownership/cleanup, not a direct re-push.
@@ -798,6 +869,7 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
         .whereNull('deleted_at')
         .whereNotNull('google_contact_id')
         .whereNot('google_contact_id', 'like', `${PENDING_CREATE}%`)
+    .whereNot('google_contact_id', 'like', `${PENDING_RETIRE}%`)
         .whereRaw('updated_at <= google_contact_synced_at')
         .where('google_contact_synced_at', '<', verifyCutoff)
         .orderBy('google_contact_synced_at', 'asc')
@@ -823,7 +895,9 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
             .select('address_line1', 'address_line2', 'city', 'state', 'zip');
           if (props.length) row.__accountAddresses = props.slice(0, 8);
         } catch (e) {
-          logger.warn(`[contacts-sync] account address aggregation failed: ${safeErr(e)}`);
+          counts.failed += 1;
+          logger.warn(`[contacts-sync] account address aggregation failed (verify ${table} ${row.id}) — row deferred: ${safeErr(e)}`);
+          continue;
         }
       }
       if (kind === 'lead') {
@@ -891,9 +965,16 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
       counts.failed += 1;
       // Rotate instead of pinning the oldest slots every tick: push the
       // watermark to cutoff-minus-one-day (still unverified, retries
-      // tomorrow) under the same unchanged-row guard.
+      // tomorrow) under the same unchanged-row guard. NEVER rotate a row
+      // whose failure just wrote a pending marker — its watermark is the
+      // recovery ATTEMPT TIME, and backdating it would fake out the
+      // search-lag grace window.
       await db(table).where({ id: row.id })
         .whereRaw("date_trunc('milliseconds', updated_at) <= ?", [row.updated_at])
+        .where((q) => {
+          q.whereNull('google_contact_id')
+            .orWhereRaw('google_contact_id NOT LIKE ?', [`${PENDING_CREATE}%`]);
+        })
         .update({ google_contact_synced_at: new Date(now.getTime() - (VERIFY_AFTER_DAYS - 1) * 86400000) })
         .catch(() => {});
       logger.warn(`[contacts-sync] verification failed for ${table} ${row.id}: ${safeErr(err)}`);

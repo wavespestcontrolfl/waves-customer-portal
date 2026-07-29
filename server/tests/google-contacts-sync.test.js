@@ -272,9 +272,11 @@ describe('runContactsSync', () => {
     const counts = await runContactsSync({ gapMs: 0 });
     expect(counts.retired).toBe(1);
     expect(mockPeopleApi.people.deleteContact).toHaveBeenCalledWith({ resourceName: 'people/loser' });
-    // Watermark clears too — a restore (deleted_at flip only) finds the
-    // row stale and re-mints the contact.
-    expect(state.updates.find((u) => u.table === 'customers').patch).toEqual({ google_contact_id: null, google_contact_synced_at: null });
+    // Durable retirement: pointer → RETIRE marker → external delete →
+    // clear. A crash at any point leaves a recoverable record.
+    const patches = state.updates.filter((u) => u.table === 'customers').map((u) => u.patch);
+    expect(patches[0]).toEqual({ google_contact_id: 'pending_retire_recovery:people/loser', google_contact_synced_at: null });
+    expect(patches[patches.length - 1]).toEqual({ google_contact_id: null });
   });
 
   test('verification lane re-pushes long-unverified rows — external drift heals', async () => {
@@ -447,9 +449,11 @@ describe('runContactsSync', () => {
     const counts = await runContactsSync({ gapMs: 0 });
     expect(counts.retired).toBe(1);
     // The committed-but-unrecorded contact was found by tag and deleted —
-    // no deleted-customer PII left serving from Google.
+    // no deleted-customer PII left serving from Google. (The first update
+    // is the restore-race claim's updated_at bump.)
     expect(mockPeopleApi.people.deleteContact).toHaveBeenCalledWith({ resourceName: 'people/orphan' });
-    expect(state.updates.find((u) => u.table === 'customers').patch).toEqual({ google_contact_id: null, google_contact_synced_at: null });
+    expect(state.updates.find((u) => u.table === 'customers' && 'google_contact_id' in u.patch).patch)
+      .toEqual({ google_contact_id: null, google_contact_synced_at: null });
   });
 
   test('a deterministic Google rejection PARKS the row instead of pinning the batch', async () => {
@@ -600,7 +604,8 @@ describe('runContactsSync', () => {
     expect(counts.retired).toBe(1);
     // Found by the ORIGINAL identity, not the scrambled row values.
     expect(mockPeopleApi.people.deleteContact).toHaveBeenCalledWith({ resourceName: 'people/orphan' });
-    expect(state.updates.find((u) => u.table === 'customers').patch).toEqual({ google_contact_id: null, google_contact_synced_at: null });
+    expect(state.updates.find((u) => u.table === 'customers' && 'google_contact_id' in u.patch).patch)
+      .toEqual({ google_contact_id: null, google_contact_synced_at: null });
   });
 
   test('account siblings aggregate ALL live property addresses onto the shared contact', async () => {
@@ -667,6 +672,36 @@ describe('runContactsSync', () => {
     // marker being stamped away over a live contact.
     expect(state.updates.find((u) => u.table === 'customers').patch).toEqual({ google_contact_id: 'people/orphan' });
     expect(state.updates.find((u) => u.table === 'leads').patch.google_contact_id).toBeNull();
+  });
+
+  test('a crashed retirement (retire marker) is completed by the next tombstone pass', async () => {
+    const state = setupDb({
+      customersSelects: [[], [{ id: 'c-dead', google_contact_id: 'pending_retire_recovery:people/ghost', google_contact_synced_at: null, first_name: 'G', last_name: '', email: null, phone: null }], []],
+      leadsSelects: [[], [], []],
+    });
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(counts.retired).toBe(1);
+    expect(mockPeopleApi.people.deleteContact).toHaveBeenCalledWith({ resourceName: 'people/ghost' });
+    const clear = state.updates.find((u) => u.table === 'customers' && 'google_contact_id' in u.patch);
+    expect(clear.patch).toEqual({ google_contact_id: null, google_contact_synced_at: null });
+  });
+
+  test('recovered replacements repoint sharers from the MARKER dead id', async () => {
+    const state = setupDb({
+      customers: [{ ...CUSTOMER, google_contact_id: 'pending_create_recovery:people/dead:jane%40customer.example', google_contact_synced_at: '2026-07-01T00:00:00Z' }],
+    });
+    mockPeopleApi.people.searchContacts.mockImplementation(async ({ query }) => (
+      query === 'jane@customer.example'
+        ? { data: { results: [{ person: { resourceName: 'people/reborn', clientData: [{ key: 'waves_row', value: 'customers:c-1' }] } }] } }
+        : { data: { results: [] } }
+    ));
+    mockPeopleApi.people.get.mockResolvedValueOnce({ data: { etag: 'e1', metadata: { sources: [] }, memberships: [] } });
+    mockPeopleApi.people.updateContact.mockResolvedValueOnce({ data: { resourceName: 'people/reborn' } });
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(counts.synced).toBe(1);
+    // Sharers of the DEAD id (kept by the marker) converge on the recovery.
+    const repoints = state.updates.filter((u) => u.patch.google_contact_id === 'people/reborn' && !u.patch.google_contact_synced_at);
+    expect(repoints.map((u) => u.table).sort()).toEqual(['customers', 'leads']);
   });
 
   test('scope-missing aborts WITHOUT stamping — rows retry after the one-time re-consent', async () => {
