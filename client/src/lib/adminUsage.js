@@ -46,6 +46,15 @@ const DEDUPE_MS = 30000;
 // Without this, every legacy redirect route logs a phantom page and steals
 // the attribution of a core destination.
 const REDIRECT_SETTLE_MS = 800;
+// Pages that emit their own AUTHORITATIVE leaf beacon after mount
+// (currently only Settings). Their raw route beacon settles longer: the
+// page chunk is lazy-loaded, and on a cold load the authoritative beacon
+// can arrive well after 800ms — flushing the raw one first would record a
+// duplicate untabbed row (or an invalid deep-link tab) that the page's
+// beacon was supposed to supersede (Codex #2961 r12). Any page that
+// adopts authoritative beacons must be listed here.
+const SELF_REPORTING_PAGES = new Set(['settings']);
+const SELF_REPORT_SETTLE_MS = 5000;
 
 let pendingSource = null; // { source, ts }
 let lastLogged = null; // { key, ts }
@@ -276,10 +285,23 @@ export function trackAdminPageView({ pathname, search, authoritative = false } =
   pendingSource = null;
   hasLoggedThisSession = true;
 
+  // A pending beacon that has outlived the redirect window is a REAL dwell
+  // (only possible under the longer self-reporting settle) — a navigation
+  // to a DIFFERENT page must flush it, not swallow it. Same-page arrivals
+  // (the authoritative refinement) still replace it at any age.
+  if (pendingBeacon) {
+    const samePage = pendingBeacon.body.pageKey === norm.pageKey
+      && pendingBeacon.body.path === norm.path;
+    if (!samePage && now - pendingBeacon.queuedAt > REDIRECT_SETTLE_MS) {
+      flushPendingBeacon();
+    }
+  }
+
   if (pendingTimer) clearTimeout(pendingTimer);
   pendingBeacon = {
     key,
     authoritative,
+    queuedAt: now,
     token, // flush drops the beacon if the signed-in token changed meanwhile
     body: {
       pageKey: norm.pageKey,
@@ -288,7 +310,12 @@ export function trackAdminPageView({ pathname, search, authoritative = false } =
       source,
     },
   };
-  pendingTimer = setTimeout(flushPendingBeacon, REDIRECT_SETTLE_MS);
+  pendingTimer = setTimeout(
+    flushPendingBeacon,
+    !authoritative && SELF_REPORTING_PAGES.has(norm.pageKey)
+      ? SELF_REPORT_SETTLE_MS
+      : REDIRECT_SETTLE_MS,
+  );
 }
 
 /** Test-only: reset module state between cases. */

@@ -132,9 +132,10 @@ describe('trackAdminPageView', () => {
     localStorage.clear();
   });
 
-  // Beacons settle for ~800ms so redirect chains collapse — flush the timer
-  // to observe the send.
-  const settle = () => vi.advanceTimersByTime(900);
+  // Beacons settle for ~800ms (5s on self-reporting pages like Settings,
+  // whose lazy chunk must get a chance to refine the raw beacon) — advance
+  // past the longest window to observe the send.
+  const settle = () => vi.advanceTimersByTime(5100);
 
   function lastBody() {
     const [, opts] = fetchMock.mock.calls.at(-1);
@@ -253,6 +254,33 @@ describe('trackAdminPageView', () => {
       tab: 'general',
       source: 'sidebar',
     });
+  });
+
+  it("a slow-loading Settings chunk still refines the raw beacon (lazy-chunk race)", () => {
+    // Layout's raw beacon fires on route change; the lazy Settings chunk
+    // mounts 1s later — past the 800ms redirect window but inside the
+    // self-reporting window — and must still supersede into ONE row.
+    trackAdminPageView({ pathname: '/admin/settings', search: '' });
+    vi.advanceTimersByTime(900);
+    expect(fetchMock).not.toHaveBeenCalled(); // still settling (5s window)
+    trackAdminPageView({
+      pathname: '/admin/settings',
+      search: '?tab=general',
+      authoritative: true,
+    });
+    settle();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(lastBody().tab).toBe('general');
+  });
+
+  it('a real dwell on a self-reporting page is flushed, not swallowed, by later navigation', () => {
+    trackAdminPageView({ pathname: '/admin/settings', search: '' });
+    vi.advanceTimersByTime(2000); // genuine dwell, chunk never refined (edge)
+    trackAdminPageView({ pathname: '/admin/dashboard', search: '' });
+    settle();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).pageKey).toBe('settings');
+    expect(lastBody().pageKey).toBe('dashboard');
   });
 
   it('flushes the pending beacon on pagehide so the last view is not lost', () => {

@@ -322,7 +322,7 @@ export default function SettingsPage() {
                   height: 36,
                   padding: "0 14px",
                   borderRadius: 6,
-                  fontSize: 12,
+                  fontSize: 14,
                   fontWeight: 700,
                   textTransform: "uppercase",
                   letterSpacing: "0.04em",
