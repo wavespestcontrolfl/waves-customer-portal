@@ -89,7 +89,7 @@ afterEach(() => {
 const CUSTOMER = {
   id: 'c-1', first_name: 'Jane', last_name: 'Customer', email: 'jane@customer.example',
   phone: '9415550100', address_line1: '1 Palm Way', city: 'Parrish', state: 'FL', zip: '34219',
-  google_contact_id: null, updated_at: '2026-07-28T12:00:00Z',
+  google_contact_id: null, account_id: null, updated_at: '2026-07-28T12:00:00Z',
 };
 const BASE_COUNTS = { synced: 0, skipped: 0, failed: 0, retired: 0, verified: 0, blocked: null };
 
@@ -274,7 +274,7 @@ describe('runContactsSync', () => {
   });
 
   test('verification lane re-pushes long-unverified rows — external drift heals', async () => {
-    const staleVerified = { ...CUSTOMER, google_contact_id: 'people/drifted', google_contact_synced_at: '2026-07-01T00:00:00Z' };
+    const staleVerified = { ...CUSTOMER, updated_at: '2026-06-30T00:00:00Z', google_contact_id: 'people/drifted', google_contact_synced_at: '2026-07-01T00:00:00Z' };
     const verifyState = setupDb({
       customersSelects: [[], [], [staleVerified]],
       leadsSelects: [[], [], []],
@@ -294,7 +294,7 @@ describe('runContactsSync', () => {
   });
 
   test('a thrown verification stamp compensates the fresh 404-replacement', async () => {
-    const staleVerified = { ...CUSTOMER, google_contact_id: 'people/drifted', google_contact_synced_at: '2026-07-01T00:00:00Z' };
+    const staleVerified = { ...CUSTOMER, updated_at: '2026-06-30T00:00:00Z', google_contact_id: 'people/drifted', google_contact_synced_at: '2026-07-01T00:00:00Z' };
     setupDb({
       customersSelects: [[], [], [staleVerified]],
       leadsSelects: [[], [], []],
@@ -309,6 +309,72 @@ describe('runContactsSync', () => {
     expect(counts.failed).toBe(1);
     // The replacement is rolled back — retries can't leak one per pass.
     expect(mockPeopleApi.people.deleteContact).toHaveBeenCalledWith({ resourceName: 'people/reborn' });
+  });
+
+  test('a multi-property account adopts ONE contact across its customer rows', async () => {
+    setupDb({
+      customers: [{ ...CUSTOMER, id: 'c-2', account_id: 'acct-1' }],
+      firstResults: { customers: [{ id: 'c-1', google_contact_id: 'people/acct' }] },
+    });
+    mockPeopleApi.people.get.mockResolvedValueOnce({ data: { etag: 'e1', metadata: { sources: [] }, memberships: [] } });
+    mockPeopleApi.people.updateContact.mockResolvedValueOnce({ data: { resourceName: 'people/acct' } });
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(counts.synced).toBe(1);
+    expect(mockPeopleApi.people.createContact).not.toHaveBeenCalled();
+    expect(mockPeopleApi.people.updateContact.mock.calls[0][0].resourceName).toBe('people/acct');
+  });
+
+  test('a lead whose identity DIVERGED from its shared contact releases it and mints its own', async () => {
+    setupDb({
+      leads: [{ id: 'l-2', first_name: 'Newname', email: 'different@new.example', phone: '9415550199', customer_id: null, google_contact_id: 'people/shared', updated_at: '2026-07-28T11:00:00Z' }],
+      // ownership probe: no customer match, no sibling match; in-use check:
+      // customers → null, leads → the OTHER lead still referencing it.
+      firstResults: { customers: [null, null], leads: [null, { id: 'l-1' }] },
+    });
+    mockPeopleApi.people.createContact.mockResolvedValueOnce({ data: { resourceName: 'people/own' } });
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(counts.synced).toBe(1);
+    // The sibling's contact was never updated with the new identity...
+    expect(mockPeopleApi.people.updateContact).not.toHaveBeenCalled();
+    // ...this lead minted its own instead.
+    expect(mockPeopleApi.people.createContact).toHaveBeenCalled();
+  });
+
+  test('an inconclusive orphan search DEFERS creation instead of risking a duplicate', async () => {
+    setupDb({ customers: [CUSTOMER] });
+    mockPeopleApi.people.searchContacts.mockRejectedValueOnce(new Error('search down'));
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(counts.failed).toBe(1);
+    expect(mockPeopleApi.people.createContact).not.toHaveBeenCalled();
+  });
+
+  test('an ambiguous createContact failure marks the row for conclusive-search recovery', async () => {
+    const state = setupDb({ customers: [CUSTOMER] });
+    mockPeopleApi.people.createContact.mockRejectedValueOnce(new Error('socket hang up'));
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(counts.failed).toBe(1);
+    const marker = state.updates.find((u) => u.table === 'customers');
+    expect(marker.patch.google_contact_id).toBe('pending_create_recovery');
+    expect(marker.patch.google_contact_synced_at).toBeInstanceOf(Date);
+  });
+
+  test('recovery inside the index-lag grace window defers even on a conclusively empty search', async () => {
+    setupDb({ customers: [{ ...CUSTOMER, google_contact_id: 'pending_create_recovery', google_contact_synced_at: new Date() }] });
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(counts.failed).toBe(1);
+    expect(mockPeopleApi.people.createContact).not.toHaveBeenCalled();
+  });
+
+  test('recovery past the grace window adopts the found orphan by tag', async () => {
+    setupDb({ customers: [{ ...CUSTOMER, google_contact_id: 'pending_create_recovery', google_contact_synced_at: '2026-07-01T00:00:00Z' }] });
+    mockPeopleApi.people.searchContacts.mockResolvedValueOnce({ data: { results: [
+      { person: { resourceName: 'people/orphan', clientData: [{ key: 'waves_row', value: 'customers:c-1' }] } },
+    ] } });
+    mockPeopleApi.people.get.mockResolvedValueOnce({ data: { etag: 'e1', metadata: { sources: [] }, memberships: [] } });
+    mockPeopleApi.people.updateContact.mockResolvedValueOnce({ data: { resourceName: 'people/orphan' } });
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(counts.synced).toBe(1);
+    expect(mockPeopleApi.people.createContact).not.toHaveBeenCalled();
   });
 
   test('scope-missing aborts WITHOUT stamping — rows retry after the one-time re-consent', async () => {
