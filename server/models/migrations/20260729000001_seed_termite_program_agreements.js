@@ -151,40 +151,15 @@ exports.up = async function up(knex) {
   }
 };
 
-exports.down = async function down(knex) {
-  // Reverse ONLY what up() positively created: the version-1 row matching
-  // each seed's exact title, and the template row only when nothing else
-  // (admin-authored versions, signed-contract references) remains attached.
-  // The admin editor can add versions after seeding, and up() tolerates a
-  // pre-existing template — a wholesale delete would destroy rows this
-  // migration never created.
-  const hasTemplates = await knex.schema.hasTable('document_templates');
-  if (!hasTemplates) return;
-  for (const seed of DEFAULT_TEMPLATES) {
-    const template = await knex('document_templates').where({ template_key: seed.template_key }).first();
-    if (!template) continue;
-    const seedVersion = await knex('document_template_versions')
-      .where({ template_id: template.id, version_number: 1, title: seed.title })
-      .first();
-    if (seedVersion) {
-      if (template.active_version_id === seedVersion.id) {
-        await knex('document_templates').where({ id: template.id }).update({
-          active_version_id: null,
-          updated_at: knex.fn.now(),
-        });
-      }
-      await knex('document_template_versions').where({ id: seedVersion.id }).del();
-    }
-    const remainingVersions = await knex('document_template_versions')
-      .where({ template_id: template.id })
-      .first('id');
-    const referencingContracts = await knex('customer_contracts')
-      .where({ document_template_id: template.id })
-      .first('id');
-    if (!remainingVersions && !referencingContracts) {
-      await knex('document_templates').where({ id: template.id }).del();
-    }
-  }
+exports.down = async function down() {
+  // Deliberate no-op (same posture as 20260726000004): these are CONTENT
+  // seeds into an admin-managed library. up() tolerates pre-existing
+  // templates and the admin editor can author new versions after seeding,
+  // so no rollback can reliably distinguish migration-created rows from
+  // admin-owned ones — and customer_contracts references the versions via
+  // ON DELETE SET NULL, so a wrong delete would also damage signed-contract
+  // provenance. Removing or retiring these templates is an admin-editor
+  // operation (set status archived), not a schema rollback.
 };
 
 exports.DEFAULT_TEMPLATES = DEFAULT_TEMPLATES;

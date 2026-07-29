@@ -267,6 +267,18 @@ describe('classifyExistingAgreement', () => {
     expect(classifyExistingAgreement(openRow({ share_token_expires_at: new Date(Date.now() - 1000).toISOString() }), estimate)).toBe('ignore');
   });
 
+  test('address form variants classify as the SAME property (St vs Street)', () => {
+    const row = openRow({
+      document_variables_snapshot: JSON.stringify({ estimate: { id: 'est-0', address: '123 Perimeter Way, Bradenton FL' } }),
+    });
+    const variant = { id: 'est-1', address: '123 Perimeter WAY Bradenton, FL' };
+    expect(classifyExistingAgreement(row, variant)).toBe('supersede');
+    const stRow = openRow({
+      document_variables_snapshot: JSON.stringify({ estimate: { id: 'est-0', address: '400 Main Street, Venice FL' } }),
+    });
+    expect(classifyExistingAgreement(stRow, { id: 'est-1', address: '400 Main St, Venice FL' })).toBe('supersede');
+  });
+
   test('an open agreement for a DIFFERENT property is ignored (multi-property customers)', () => {
     const row = openRow({
       document_variables_snapshot: JSON.stringify({ estimate: { id: 'est-9', address: '400 Other St, Venice FL' } }),

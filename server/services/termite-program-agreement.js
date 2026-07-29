@@ -259,8 +259,26 @@ function buildTermiteProgramAgreementValues(estimate = {}, estData = null, { sta
   };
 }
 
+// Canonical-enough address comparison for same-property classification:
+// lowercase, strip punctuation, and map the common USPS suffix/directional
+// spellings so '123 Main Street' and '123 Main St' classify as the SAME
+// property (a miss here could leave a stale-priced agreement live).
+const ADDRESS_TOKEN_MAP = {
+  street: 'st', avenue: 'ave', drive: 'dr', road: 'rd', boulevard: 'blvd',
+  lane: 'ln', court: 'ct', circle: 'cir', place: 'pl', terrace: 'ter',
+  parkway: 'pkwy', highway: 'hwy', trail: 'trl', way: 'way', loop: 'loop',
+  north: 'n', south: 's', east: 'e', west: 'w',
+  apartment: 'apt', suite: 'ste', unit: 'unit',
+};
 function normalizeAddress(value) {
-  return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((token) => ADDRESS_TOKEN_MAP[token] || token)
+    .join(' ');
 }
 
 // Classify an existing contract row against the accepted estimate:
@@ -351,6 +369,16 @@ async function isAnnualPrepayAccept(estimate, billingTerm, conn = db) {
 // into the caller (acceptance must not fail because agreement prep did);
 // failures are retryable via reconcileTermiteProgramAgreements. Returns a
 // small result object for logging/tests.
+// notifyAdmin returns null (not a throw) when its insert fails; every bell
+// in this flow is a required handoff, so ring twice before conceding and
+// leave an error-level trail when both attempts miss.
+async function ringAdminBell(NotificationService, args, context) {
+  let bell = await NotificationService.notifyAdmin(...args);
+  if (!bell) bell = await NotificationService.notifyAdmin(...args);
+  if (!bell) logger.error(`[termite-agreement] admin bell failed twice — ${context}`);
+  return !!bell;
+}
+
 async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = {}, notifyOnUnresolved = true, billingTerm = null }) {
   try {
     if (!estimate || !customerId) return { ok: false, skipped: 'missing_inputs' };
@@ -373,12 +401,12 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       // which would contradict the annual-prepay invoice. Park it for
       // manual preparation with accurate terms.
       if (notifyOnUnresolved) {
-        await NotificationService.notifyAdmin(
+        await ringAdminBell(NotificationService, [
           'estimate',
           'Termite agreement needs manual prep (annual prepay)',
           `${estimate.customer_name || 'Customer'} accepted a termite estimate on annual prepay — the standard program agreement states per-application billing, so prepare the agreement manually with the prepay terms.`,
           { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId } },
-        );
+        ], `manual-prep (annual prepay) for estimate ${estimate.id}`);
       }
       return { ok: false, skipped: 'annual_prepay' };
     }
@@ -392,12 +420,12 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       // (The reconciliation sweep passes notifyOnUnresolved=false so the
       // original accept-time bell isn't re-rung daily.)
       if (notifyOnUnresolved) {
-        await NotificationService.notifyAdmin(
+        await ringAdminBell(NotificationService, [
           'estimate',
           'Termite agreement needs manual prep',
           `${estimate.customer_name || 'Customer'} accepted a termite estimate, but the program agreement couldn't be prefilled from the estimate figures. Prepare and send it from the document library.`,
           { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId } },
-        );
+        ], `manual-prep (figures unresolved) for estimate ${estimate.id}`);
       }
       return { ok: false, skipped: 'figures_unresolved' };
     }
@@ -436,10 +464,12 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       return { ok: false, skipped: 'unresolved_variables' };
     }
 
-    // Addressless estimates share the CUSTOMER-level key: two concurrent
-    // addressless accepts must contend for the same lock (their property
-    // can't be distinguished, so only one open draft may exist).
-    const dedupeLockKey = `termite-agreement:${customerId}:${normalizeAddress(estimate.address) || 'customer'}`;
+    // CUSTOMER-level lock: address text can vary in form between two
+    // estimates for the same property, so per-address keys could let
+    // concurrent preps for one customer proceed in parallel. Volume is a
+    // handful of accepts a day — the coarser key costs nothing and makes
+    // the one-open-draft-per-property invariant race-free.
+    const dedupeLockKey = `termite-agreement:${customerId}`;
     const contract = await db.transaction(async (trx) => {
       // Serialize per customer+property: concurrent accept/reconciliation
       // workers (multi-pod cron) must not both observe "no row" and insert
@@ -538,11 +568,7 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       `${estimate.customer_name || 'Customer'} accepted the ${prepared.ownership === 'rent' ? 'rented-stations' : 'purchased-stations'} termite program — the agreement is ${autosent ? 'on its way for e-signature' : 'prefilled and ready to send from the document library'}.`,
       { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId, contractId: contract.id } },
     ];
-    let bell = await NotificationService.notifyAdmin(...bellArgs);
-    if (!bell) bell = await NotificationService.notifyAdmin(...bellArgs);
-    if (!bell) {
-      logger.error(`[termite-agreement] admin bell failed twice for contract ${contract.id} (estimate ${estimate.id}) — draft is in the open document-requests queue`);
-    }
+    await ringAdminBell(NotificationService, bellArgs, `drafted bell for contract ${contract.id} (estimate ${estimate.id}) — draft remains in the open document-requests queue`);
 
     return { ok: true, contractId: contract.id, templateKey: prepared.templateKey, autosent };
   } catch (err) {
