@@ -1324,23 +1324,49 @@ router.post('/recording-status', async (req, res) => {
       // Twilio sent on this webhook. Skip auto-processing entirely if
       // we couldn't attach the recording to any row above.
       //
-      // 10-minute delay (PR #467): Twilio's recording-status:completed
-      // fires before the MP3 is reliably fetchable from their CDN, so the
-      // auth'd download in the processor can 404 or return a partial
-      // buffer and Gemini gets garbage. Empirically ~10 min is the
-      // propagation window where the download stabilizes. The 5-min
-      // processAllPending cron in scheduler.js is the restart-safe
-      // backstop if this in-memory timer is lost — it applies the same
-      // age gate, so it will not fire ahead of the window.
+      // Two timers (PR #467 + verified-download follow-up): Twilio's
+      // recording-status:completed fires before the MP3 is reliably
+      // fetchable from their CDN — an early download can 404 or return a
+      // partial buffer. The EARLY timer (default 2 min) is safe because the
+      // processor now verifies the downloaded bytes against the recording's
+      // known duration and defers (releases its claim untouched) when the
+      // audio isn't fully propagated; most recordings are ready well before
+      // 10 minutes, so this cuts typical transcript latency by ~8 min. The
+      // 10-minute timer stays as the second attempt for recordings the
+      // early pass deferred, and the 5-min processAllPending cron in
+      // scheduler.js remains the restart-safe backstop if these in-memory
+      // timers are lost (deploys wipe them — it happened to the first
+      // post-cutover call on 2026-07-28).
       if (matchedSid) {
         queueVoiceMessageSync(matchedSid);
         try {
           const processor = require('../services/call-recording-processor');
-          setTimeout(async () => {
+          const earlyDelayMs = Number(process.env.CALL_PROC_EARLY_PROCESS_DELAY_MS) || 2 * 60 * 1000;
+          const fallbackDelayMs = 10 * 60 * 1000;
+          const attempt = async (label) => {
             try {
-              await processor.processRecording(matchedSid);
-            } catch (e) { logger.error(`Auto-process recording failed: ${e.message}`); }
-          }, 10 * 60 * 1000);
+              return await processor.processRecording(matchedSid);
+            } catch (e) {
+              logger.error(`Auto-process recording failed (${label}): ${e.message}`);
+              return null;
+            }
+          };
+          // The fallback timer is chained on the EARLY attempt's outcome, not
+          // scheduled unconditionally: once the early pass reaches ANY result
+          // other than a not-ready deferral, re-invoking processRecording at
+          // 10 min would re-claim non-'processed' terminal rows (voicemail,
+          // spam) and repeat transcription/extraction (Codex #3037 round-2
+          // P2). Deferral or error → schedule the second attempt for the
+          // remainder of the original 10-minute window. If the process
+          // restarts and both in-memory timers are lost, the 5-min cron is
+          // still the backstop, unchanged.
+          setTimeout(async () => {
+            const result = await attempt('early');
+            const needsFallback = !result || result.reason === 'recording_not_ready';
+            if (needsFallback) {
+              setTimeout(() => attempt('fallback'), Math.max(fallbackDelayMs - earlyDelayMs, 60 * 1000));
+            }
+          }, earlyDelayMs);
         } catch (e) { logger.error(`Recording auto-process setup failed: ${e.message}`); }
       }
     }
