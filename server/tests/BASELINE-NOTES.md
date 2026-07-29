@@ -441,10 +441,10 @@ Implication: the DB value was a dead/cosmetic field. The reconciliation cleaned 
 
 v1 Case 4 (`zone_d_quarterly_pest_bahia_basic`) was unchanged, but `v2_zone_d_quarterly_pest_bahia` moved +$38.88 (+3.4%) despite identical-shape inputs. Not a reconciliation bug — the two engines have genuinely different read paths:
 
-- **v1 engine** reads `PEST.frequencyDiscounts.v1 = { quarterly: 1.00, bimonthly: 0.92, monthly: 0.85 }` from `constants.js`. The DB keys `pest_frequency.{monthly, bimonthly, quarterly}` sync to `.v1` and did NOT drift.
-- **v2 engine** reads `PEST.frequencyDiscounts.v2 = { quarterly: 1.00, bimonthly: 0.88, monthly: 0.78 }` from `constants.js`. The DB keys `pest_frequency.{v2_monthly, v2_bimonthly}` sync to `.v2` and DID drift.
+- **v1 engine** reads `PEST.frequencyDiscounts.v1 = { quarterly: 1.00, bimonthly: 0.85, monthly: 0.70 }` from `constants.js`.
+- **v2 engine** reads `PEST.frequencyDiscounts.v2 = { quarterly: 1.00, bimonthly: 0.88, monthly: 0.78 }` from `constants.js`.
 
-Same conceptual value — "frequency discount multiplier" — read from two different config shapes by two different engines. v2 exercises the drifted path for this fixture; v1 does not.
+**CORRECTION (audit 2026-07-28): the `pest_frequency` pricing_config row does NOT sync to either curve.** No code outside migrations/tests reads that config key — `db-bridge.js` only VALIDATES `PEST.frequencyDiscounts` (both curves in (0,1]) and never writes it; the cadence curve is code-authoritative BY DESIGN (#2966). The earlier claim here that the DB keys "sync to .v1/.v2" was wrong, and the v1 values quoted (0.92/0.85) were the inert DB row's values, not the constants'. The row itself was removed by migration `20260729...drop_inert_pest_frequency_row` so the admin Pricing Logic panel stops offering a no-op editor.
 
 **Resolution: Session 11 (v2 retirement) will consolidate these read paths.** Until then, v1 and v2 can respond differently to identical fixtures on pest-frequency changes. When diagnosing future pest-frequency regressions, check *which* engine is serving the fixture and *which* frequency key it reads.
 

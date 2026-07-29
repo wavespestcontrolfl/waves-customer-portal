@@ -14,6 +14,7 @@ const {
   normalizeContactEmail,
 } = require('./lead-estimate-link');
 const { clearEstimatePricingCache } = require('./estimate-pricing-cache');
+const { resolveStoredPestPricingVersion } = require('./estimate-pricing-bundle-utils');
 const { recordPreSendRevision } = require('./estimate-learning');
 const { inferEstimateServiceInterest } = require('./estimate-service-lines');
 const logger = require('./logger');
@@ -592,18 +593,13 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
     // so future replays are stamped at the source.
     if (v1Input?.services?.pest && typeof v1Input.services.pest === 'object'
       && !v1Input.services.pest.version) {
-      const storedRoot = estimateResultRoot(estimateData);
-      // Agent drafts store their prior priced output as RAW engineResult
-      // lineItems (not the mapped result shape) — a pre-stamp agent draft
-      // must also read as a replay of its sold curve (codex #2966 r8 P1).
-      const storedPestLine = (storedRoot?.recurring?.services || [])
-        .find((svc) => svc?.service === 'pest_control')
-        || storedRoot?.results?.pest
-        || (estimateData?.engineResult?.lineItems || [])
-          .find((li) => li?.service === 'pest_control')
-        || null;
-      if (storedPestLine) {
-        v1Input.services.pest.version = storedPestLine.pricingVersion === 'v2' ? 'v2' : 'v1';
+      // Shared with the public read path (estimate-public extractEngineInputs)
+      // so save-time and view-time replays resolve the same curve from the
+      // same stored-result evidence — incl. raw agent-draft engineResult
+      // lineItems (codex #2966 r8 P1).
+      const resolvedVersion = resolveStoredPestPricingVersion(estimateData);
+      if (resolvedVersion) {
+        v1Input.services.pest.version = resolvedVersion;
       }
     }
     const v1 = generateEstimate(v1Input);

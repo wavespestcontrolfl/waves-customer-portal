@@ -1406,6 +1406,7 @@ export function calculateEstimate(inputs) {
     poolCageSize,
     hasLargeDriveway,
     indoor,
+    attachedGarage,
     shrubDensity,
     treeDensity,
     landscapeComplexity,
@@ -1848,6 +1849,9 @@ export function calculateEstimate(inputs) {
   if (indoor) addMod('pest', 'Indoor treatment: +$15/visit', 15, 'up');
   else addMod('pest', 'Exterior only: $0/visit', 0, 'info');
 
+  // Attached garage (server mirror: PEST.additionalAdjustments.attachedGarage)
+  if (attachedGarage) addMod('pest', 'Attached garage: +$5/visit', 5, 'up');
+
   // Urgency
   if (urgency === 'SOON') addMod('one-time', `Urgency (Soon): +25%`, 25, 'up');
   else if (urgency === 'URGENT') addMod('one-time', `Urgency (Emergency): +50%`, 50, 'up');
@@ -1876,6 +1880,7 @@ export function calculateEstimate(inputs) {
     else if (landscapeComplexity === 'SIMPLE') adj -= 5;
     if (nearWater && nearWater !== 'NONE' && nearWater !== 'NO' && nearWater !== false) adj += 3;
     if (indoor) adj += 15;
+    if (attachedGarage) adj += 5;
     return adj + propTypeAdj;
   };
   const initialRoachPrice = (type, fpEff, standalone = false) => {
