@@ -1358,10 +1358,15 @@ function stripLiveOnlyScheduleFields(data) {
 function shouldAddNoActivityFinding({ service = {}, structured = {}, protocol = {} } = {}) {
   const visitOutcome = String(protocol.visitOutcome || service.visit_outcome || service.status || 'completed').toLowerCase();
   const concernText = structuredCustomerConcern(structured);
+  // A positive activity rating recorded at completion means SOMETHING was
+  // seen — synthesizing "all zones clear" beside it re-creates the exact
+  // contradiction the insert guard now prevents (codex P1 #3043 r2).
+  const rating = Number(service.client_pest_rating);
   return visitOutcome === 'completed'
     && !(protocol.observations || []).length
     && !(protocol.recommendations || []).length
-    && !concernText;
+    && !concernText
+    && !(Number.isFinite(rating) && rating > 0);
 }
 
 function findingSeverityForObservation(text) {
@@ -2135,6 +2140,30 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     detail: finding.detail || '',
     recommendation: finding.recommendation || '',
   }));
+
+  // Render-time honesty pass for PERSISTED no-activity rows: older completions
+  // could stamp "All inspected zones were clear…" even when the homeowner
+  // reported something during the visit (the insert guard now suppresses these
+  // going forward, but stored rows are permanent). When a customer concern is
+  // on record, soften the absolute claim so the report never tells a customer
+  // "all clear" right after they flagged something (John Kelleher audit
+  // 2026-07-29). PEST ONLY — other lines have their own no-activity copy, and
+  // the softened sentence must not claim treatment or a scheduled follow-up
+  // the record doesn't evidence (codex P2 #3043 ×2).
+  if (serviceLine === 'pest') {
+    const renderConcern = structuredCustomerConcern(structured);
+    if (renderConcern) {
+      for (const finding of findings) {
+        if (finding.category === 'no_activity') {
+          // Title AND detail (r2), in NEUTRAL wording (r3): the concern may
+          // be about service or access ("please avoid the herb garden"), so
+          // the copy must not characterize it as a pest sighting.
+          finding.title = 'No pest activity confirmed this visit';
+          finding.detail = 'Inspected areas showed no confirmed pest activity. The note you shared with us is recorded on this visit’s report.';
+        }
+      }
+    }
+  }
 
   for (const observation of protocol.observations) {
     if (findings.some((finding) => finding.title.toLowerCase() === observation.toLowerCase())) continue;
@@ -3227,6 +3256,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // 'recap' for the completion recap — lets response wrappers (Pest V2
     // hero) surface the reviewed copy without re-parsing the notes.
     summarySource: visitSummarySource,
+    // Customer concern captured at completion — feeds the pest V2 "what you
+    // flagged" card (reports-public passes it to buildPestReportV2). Lawn and
+    // tree & shrub already consume it inside their own V2 builders.
+    customerConcern: structuredCustomerConcern(structured),
     customerInteraction: service.customer_interaction || structured.customerInteraction || null,
     serviceAreas: areaLabels,
     measurements: {

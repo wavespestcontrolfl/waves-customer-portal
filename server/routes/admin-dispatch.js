@@ -246,11 +246,16 @@ function shouldInsertNoActivityFinding({
   observations = [],
   recommendations = [],
   concernText = '',
+  activityScore = null,
 } = {}) {
   return visitOutcome === 'completed'
     && !observations.length
     && !recommendations.length
-    && !String(concernText || '').trim();
+    && !String(concernText || '').trim()
+    // A non-zero activity rating means SOMETHING was seen — stamping "All
+    // inspected zones were clear of pest activity" beside a 2/5 rating made
+    // the report contradict itself (John Kelleher audit 2026-07-29).
+    && !(Number.isFinite(Number(activityScore)) && Number(activityScore) > 0);
 }
 
 // Whether a completion should produce a service-report EMAIL, decoupled from
@@ -4749,6 +4754,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             observations: reportObservations,
             recommendations: reportRecommendations,
             concernText,
+            // Recurring pest closeouts carry the rating as clientPestRating;
+            // activityScore only arrives on typed completions (which are
+            // already excluded above) — without the client rating the guard
+            // never fired on ordinary visits (codex P1 #3043).
+            activityScore: activityScore ?? clientPestRating,
           })
         ) {
           await trx('service_findings').insert({

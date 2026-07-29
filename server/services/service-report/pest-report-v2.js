@@ -132,6 +132,31 @@ function buildSupportingMetric({ pestPressure, activity }) {
   return null;
 }
 
+// "What you flagged" — the homeowner's reported concern gets its own
+// acknowledged card (John Kelleher audit 2026-07-29: a mud-wasp nest the
+// customer reported was buried in a summary clause while the findings card
+// said "all clear"; the lawn report has carried this pattern for a month).
+// PROVENANCE: customerConcernText is what the customer SAID — the copy
+// acknowledges and records it, and never asserts an inspection result,
+// completed action, or scheduled follow-up the record doesn't evidence
+// (codex P2 #3043). The QUOTE itself is NOT run through the banned-copy
+// denylist: that list polices OUR claims ("infestation", "guaranteed"), and
+// a homeowner who wrote "I think we have an infestation" is exactly who
+// needs acknowledgment — the quote is customer-attributed, rendered in
+// quotation marks, and the card's own copy stays deterministic (codex P2
+// #3043 r3; matches the lawn concern card, which quotes the customer raw).
+function buildCustomerConcernCard(concernText) {
+  const concern = String(concernText || '').replace(/\s+/g, ' ').trim();
+  if (!concern) return null;
+  const quoted = concern.length > 220 ? `${concern.slice(0, 217).trim()}…` : concern;
+  return {
+    headline: 'What you flagged',
+    concern: quoted,
+    body: 'You reported this during your visit. It’s recorded on this report so it stays on our radar.',
+    nextStep: 'Text us if it changes or gets worse — we’ll pick it up from there.',
+  };
+}
+
 function buildAiSummary(personality) {
   const straight = personality?.variants?.straight;
   if (!straight) return null;
@@ -191,6 +216,7 @@ function buildPestReportV2({
   activity = null,
   forecast = null,
   technicianReport = null,
+  customerConcern = null,
 } = {}) {
   if (!premiumExperience) return null;
   const defenseStatus = premiumExperience.propertyDefenseStatus;
@@ -213,6 +239,9 @@ function buildPestReportV2({
     ? { headline: null, body: technicianCopy }
     : null;
   const forecastCard = buildForecast(forecast);
+  // buildCustomerConcernCard screens the concern text itself (banned-copy
+  // guard) — an unscreenable concern drops the card rather than the report.
+  const concernCard = buildCustomerConcernCard(customerConcern);
 
   // Nothing meaningful to show → don't render an empty V2 shell.
   if (!defense && !primaryMove && !bugFiles.length && !supportingMetric && !forecastCard) {
@@ -232,6 +261,7 @@ function buildPestReportV2({
     supportingMetric,
     defense,
     primaryMove,
+    customerConcern: concernCard,
     bugFiles,
     pressureReceipt: premiumExperience.pressureReceipt || null,
     weatherCall: premiumExperience.weatherCall || null,
@@ -266,18 +296,21 @@ function pestReportV2PdfSignature(service = {}) {
     const data = typeof service.service_data === 'string'
       ? JSON.parse(service.service_data)
       : service.service_data;
-    if (isCockroachTypedReportType(data?.typedReportSnapshot?.type)) return '-roachtyped1';
+    if (isCockroachTypedReportType(data?.typedReportSnapshot?.type)) return '-roachtyped2';
   } catch { /* fall through to the line suffix */ }
-  // 'b' = the typed-activity composition (owner ruling 2026-07-14): typed
-  // pest PDFs now render the ActivityCard alongside the dashboard, so PDFs
-  // cached under '-pestv2' would keep hiding the gauge/chart/progress chip
-  // on permanent links (codex P2). Bump this suffix whenever the pest-line
-  // report COMPOSITION changes — each pest PDF re-renders once on next view.
-  return '-pestv2b';
+  // 'c' = the trust-fix composition (codex P2 #3043): the customer-concern
+  // card, softened no-activity copy, facts-only weather, and property-gated
+  // defense rows change what a pest PDF renders — PDFs cached under
+  // '-pestv2b' would keep serving the old composition on permanent links.
+  // ('b' was the typed-activity composition, owner ruling 2026-07-14.)
+  // Bump this suffix whenever the pest-line report COMPOSITION changes —
+  // each pest PDF re-renders once on next view.
+  return '-pestv2c';
 }
 
 module.exports = {
   buildPestReportV2,
+  buildCustomerConcernCard,
   pestReportV2PdfSignature,
   isCockroachTypedReportType,
   // exported for tests

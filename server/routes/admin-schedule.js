@@ -7596,6 +7596,21 @@ function reportCopyCacheSet(key, value) {
 function reportCopyRejection(report) {
   const text = String(report || '').trim();
   if (!text) return 'empty';
+  // The prompt forbids quoting the internal 0–5 activity rating as a number
+  // ("2/5") — the customer report shows its own pressure gauge on a different
+  // scale and a second number reads as a contradiction. The prompt instruction
+  // alone is soft; a model that echoes the numeric RATING is rejected and
+  // regenerated. Scoped to rating language, and a fraction that is a
+  // DENOMINATOR of counted things ("2/5 bait stations", "4/5 zones") is not a
+  // rating even when 'activity' appears earlier in the sentence
+  // (codex P2 #3043 r2+r3).
+  const COUNT_NOUN_AFTER = /^\s*(?:bait|monitoring|interior|exterior|treated|serviced)?\s*(?:stations?|traps?|zones?|areas?|placements?|devices?|monitors?|stops?|visits?|rooms?|sides?)\b/i;
+  const ratingRe = /\b(?:rated?|rating|activity(?:\s+(?:level|was|is))?)\b[^.\n]{0,40}?\b[0-5]\s*\/\s*5\b|\b[0-5]\s*\/\s*5\b(?=\s*(?:rating|scale))/gi;
+  let ratingMatch;
+  while ((ratingMatch = ratingRe.exec(text)) !== null) {
+    const after = text.slice(ratingMatch.index + ratingMatch[0].length);
+    if (!COUNT_NOUN_AFTER.test(after)) return 'numeric_rating';
+  }
   const banned = ActivityIndicators.findBannedCustomerCopy(text);
   return banned.length ? `banned:${banned.join(',')}` : null;
 }
@@ -7839,7 +7854,7 @@ A generic report is a failed report. Build both sections around the concrete det
 
 9. **Active ingredients come only from Products applied.** Never infer an active ingredient or product from an action label or area (e.g. "Exterior perimeter band" does not imply bifenthrin). If Products applied is empty, use functional descriptions only.
 
-10. **Pest activity rating** is 0–5 (0 = none … 5 = severe). Reflect it honestly in WHAT WE FOUND when present; a 0 means no visible activity noted — do not imply a problem. Never invent a rating that wasn't provided.
+10. **Pest activity rating** is 0–5 (0 = none … 5 = severe). Reflect it honestly in WHAT WE FOUND when present; a 0 means no visible activity noted — do not imply a problem. Never invent a rating that wasn't provided. **Describe the rating in words only ("light activity", "no visible activity") — never quote the number ("2/5").** The customer report displays its own pest-pressure gauge on a different scale, and a second number beside it reads as the report contradicting itself.
 
 11. **No invented tenure or timeframes.** Never state how long someone has been a customer, how many visits they've had, or "X years/seasons" unless that number is explicitly provided. Do not default to stock recovery windows like "7–14 days" or "10–14 days" — give a timeframe only when a specific product or the grounding context justifies one, and make it fit the situation.
 

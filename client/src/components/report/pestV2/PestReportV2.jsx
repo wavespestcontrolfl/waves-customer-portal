@@ -587,6 +587,24 @@ export function PestPrimaryMove({ primaryMove }) {
   );
 }
 
+// ── Customer concern: "we looked into what you flagged" ─────────────────────────
+// The homeowner's reported concern gets an acknowledged card instead of a
+// buried summary clause (owner audit 2026-07-29). The concern renders as the
+// customer's own words in a quote; the response copy is deterministic.
+export function PestCustomerConcern({ concern }) {
+  if (!concern?.concern) return null;
+  return (
+    <section data-glass="card" style={{ ...card, borderLeft: `4px solid ${COLORS.glassNavy}` }}>
+      <div data-gt="eyebrow" style={eyebrow}>{concern.headline || 'We looked into what you flagged'}</div>
+      <p style={{ fontSize: 15, color: TEXT, lineHeight: 1.5, margin: '0 0 6px', fontStyle: 'italic' }}>
+        “{concern.concern}”
+      </p>
+      {concern.body ? <p style={{ fontSize: 14, color: BODY, lineHeight: 1.5, margin: '0 0 4px' }}>{concern.body}</p> : null}
+      {concern.nextStep ? <p style={{ fontSize: 14, color: MUTED, lineHeight: 1.5, margin: 0 }}>{concern.nextStep}</p> : null}
+    </section>
+  );
+}
+
 // ── Receipt: the running record ("Since starting WaveGuard") ─────────────────────
 export function PestReceipt({ receipt }) {
   if (!receipt?.stats?.length) return null;
