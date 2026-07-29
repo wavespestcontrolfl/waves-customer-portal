@@ -426,9 +426,13 @@ function initScheduledJobs() {
   // starred contacts in the operator's Google account (owner directive
   // 2026-07-28, hands-off). Row-level staleness predicate = incremental
   // pass AND reconcile in one; capped per run under the People API write
-  // budget, backlog drains across runs. Until the owner's one-time contacts
-  // re-consent the run reports blocked and touches nothing.
+  // budget, backlog drains across runs. DOUBLE-GATED: GATE_CONTACTS_SYNC
+  // (explicit owner opt-in, default OFF everywhere — this cron writes into
+  // the LIVE Google account and preview/dev servers carry real Gmail
+  // credentials) AND the one-time contacts-scope re-consent; either missing
+  // means the run reports blocked and touches nothing.
   cron.schedule('*/10 * * * *', async () => {
+    if (process.env.GATE_CONTACTS_SYNC !== 'true') return;
     try {
       await runExclusive('google-contacts-sync', async () => {
         const result = await require('./google-contacts-sync').runContactsSync();

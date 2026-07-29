@@ -2785,7 +2785,10 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           // moved, stranding them.
           const lockedBefore = await trx('customers').where({ id: req.params.id }).forUpdate().first() || before;
           const lockedAfter = { ...lockedBefore, ...updates };
-          await trx('customers').where({ id: req.params.id }).update(updates);
+          // updated_at stamped explicitly — knex timestamps have no ON
+          // UPDATE trigger, and downstream incremental consumers (Google
+          // Contacts sync) key re-syncs off this column.
+          await trx('customers').where({ id: req.params.id }).update({ ...updates, updated_at: new Date() });
           if (addressChanged) {
             await require('../services/customer-properties').syncPrimaryAddress(lockedAfter, trx);
             // Open leads/estimates snapshot the address at creation and never

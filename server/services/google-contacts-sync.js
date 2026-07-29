@@ -10,20 +10,24 @@
  * incremental pass AND the reconcile — no per-insert hooks across the seven
  * lead-creation sites, no global watermark to corrupt.
  *
- * Rules:
- * - Rows without an email AND without a phone are stamped synced (nothing
- *   to publish; an edit that adds contact info re-queues them via
- *   updated_at).
- * - A lead that converted (customer_id set) or whose email matches a live
- *   customer is stamped WITHOUT its own contact — the customer row owns the
- *   contact. A lead sharing email/phone with a sibling lead that already
- *   holds a contact ADOPTS that contact instead of minting a duplicate.
- * - The stored refresh token may predate the contacts scope: a
- *   scope-insufficiency error aborts the run WITHOUT stamping anything and
- *   reports { blocked } so the scheduler logs it — rows sync after the
- *   owner's one-time re-consent.
+ * Safety model:
+ * - GATE_CONTACTS_SYNC (default OFF everywhere) — this service WRITES into
+ *   the operator's live Google account, and preview/dev environments carry
+ *   real Gmail credentials; only prod, explicitly flipped by the owner,
+ *   may run it.
+ * - All stamps are CONDITIONAL on the row's selected updated_at — an edit
+ *   racing the sync loses the stamp and the row re-syncs next run instead
+ *   of freezing a stale snapshot.
+ * - Creation is recoverable: contacts carry a waves_row clientData tag, a
+ *   pre-create search adopts a match (lost-response replay), and a failed
+ *   DB stamp rolls the fresh contact back (compensating delete).
+ * - One person, one contact: converted leads TRANSFER their contact to the
+ *   customer row (or delete the duplicate); repeat-inquiry leads adopt the
+ *   sibling lead's contact; rows stripped of all contact info get their
+ *   Google contact deleted, not orphaned.
  * - People API write budget is ~90/min — writes are throttled and each run
- *   is capped; the backlog drains across runs.
+ *   is capped, with capacity RESERVED for leads so a fresh inquiry never
+ *   waits behind the historical customer backfill.
  */
 const { google } = require('googleapis');
 const db = require('../models/db');
@@ -31,6 +35,7 @@ const logger = require('./logger');
 const gmailClient = require('./email/gmail-client');
 
 const RUN_CAP = 60; // rows per run — under the People API write budget
+const LEAD_RESERVE = 15; // slots leads always get, even mid-backfill
 const WRITE_GAP_MS = 800;
 
 const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
@@ -41,20 +46,26 @@ function isScopeError(err) {
   return status === 403 && /insufficient|scope|permission/i.test(msg);
 }
 
-function contactBodyFor(row, kind) {
+function isGone(err) {
+  return err?.code === 404 || err?.response?.status === 404;
+}
+
+const rowTag = (table, row) => `${table}:${row.id}`;
+
+function contactBodyFor(row, kind, table) {
+  const email = String(row.email || '').trim();
+  const phone = String(row.phone || '').trim();
   const body = {
     names: [{
-      givenName: String(row.first_name || '').slice(0, 60) || (kind === 'lead' ? 'Lead' : 'Customer'),
-      familyName: String(row.last_name || '').slice(0, 60),
+      givenName: String(row.first_name || '').trim().slice(0, 60) || (kind === 'lead' ? 'Lead' : 'Customer'),
+      familyName: String(row.last_name || '').trim().slice(0, 60),
     }],
-    // Starred + myContacts — the "flagged important" the owner asked for.
-    memberships: [
-      { contactGroupMembership: { contactGroupResourceName: 'contactGroups/myContacts' } },
-      { contactGroupMembership: { contactGroupResourceName: 'contactGroups/starred' } },
-    ],
+    // Stable source pointer — the pre-create reconcile finds a contact this
+    // row already minted even when the create response was lost.
+    clientData: [{ key: 'waves_row', value: rowTag(table, row) }],
   };
-  if (row.email) body.emailAddresses = [{ value: String(row.email).trim() }];
-  if (row.phone) body.phoneNumbers = [{ value: String(row.phone).trim() }];
+  if (email) body.emailAddresses = [{ value: email }];
+  if (phone) body.phoneNumbers = [{ value: phone }];
   if (kind === 'customer' && row.address_line1) {
     body.addresses = [{
       streetAddress: [row.address_line1, row.address_line2].filter(Boolean).join(', '),
@@ -66,53 +77,124 @@ function contactBodyFor(row, kind) {
   return body;
 }
 
-const PERSON_FIELDS = 'names,emailAddresses,phoneNumbers,addresses,memberships';
+const WAVES_GROUPS = ['contactGroups/myContacts', 'contactGroups/starred'];
+const UPDATE_FIELDS = 'names,emailAddresses,phoneNumbers,addresses,memberships,clientData';
+const CREATE_READ_FIELDS = 'names,metadata';
 
-async function upsertContact(people, row, kind, gapMs) {
-  const body = contactBodyFor(row, kind);
-  if (row.google_contact_id) {
+/**
+ * Merge memberships: everything the operator already has on the contact stays;
+ * ours (myContacts + starred) are ensured. Replacing the list wholesale
+ * would strip operator-managed labels on every sync.
+ */
+function mergedMemberships(current) {
+  const existing = (current || [])
+    .filter((m) => m.contactGroupMembership?.contactGroupResourceName)
+    .map((m) => ({ contactGroupMembership: { contactGroupResourceName: m.contactGroupMembership.contactGroupResourceName } }));
+  const have = new Set(existing.map((m) => m.contactGroupMembership.contactGroupResourceName));
+  for (const g of WAVES_GROUPS) {
+    if (!have.has(g)) existing.push({ contactGroupMembership: { contactGroupResourceName: g } });
+  }
+  return existing;
+}
+
+/** Conditional stamp — no-ops (0 rows) when an edit raced this pass. */
+async function stampIfUnchanged(table, row, patch) {
+  return db(table)
+    .where({ id: row.id })
+    .where('updated_at', row.updated_at)
+    .update({ ...patch, google_contact_synced_at: new Date() });
+}
+
+/**
+ * Adopt a contact this row (or a lost create) already minted: search by
+ * email/phone and match the waves_row tag or an exact email. Best-effort —
+ * search-index lag can miss a seconds-old contact; the clientData tag makes
+ * the NEXT pass reconcile it.
+ */
+async function findExistingContact(people, row, tag) {
+  const email = String(row.email || '').trim().toLowerCase();
+  const phone = String(row.phone || '').trim();
+  const query = email || phone;
+  if (!query) return null;
+  try {
+    const res = await people.people.searchContacts({
+      query,
+      pageSize: 10,
+      readMask: 'metadata,clientData,emailAddresses',
+    });
+    const match = (res.data.results || []).map((r) => r.person).find((p) => (
+      (p?.clientData || []).some((c) => c.key === 'waves_row' && c.value === tag)
+      || (email && (p?.emailAddresses || []).some((e) => String(e.value || '').trim().toLowerCase() === email))
+    ));
+    return match?.resourceName || null;
+  } catch (e) {
+    return null; // search is an optimization — creation still proceeds
+  }
+}
+
+async function upsertContact(people, table, row, kind, gapMs) {
+  const body = contactBodyFor(row, kind, table);
+  let resourceName = row.google_contact_id;
+  if (!resourceName) {
+    resourceName = await findExistingContact(people, row, rowTag(table, row));
+  }
+  if (resourceName) {
     try {
-      // updateContact needs the CURRENT etag — fetch, then update.
+      // updateContact needs the CURRENT etag; memberships are merged from
+      // the live contact so operator labels survive.
       const current = await people.people.get({
-        resourceName: row.google_contact_id,
-        personFields: 'metadata',
+        resourceName,
+        personFields: 'metadata,memberships',
       });
       await sleep(gapMs);
       const updated = await people.people.updateContact({
-        resourceName: row.google_contact_id,
-        updatePersonFields: PERSON_FIELDS,
-        requestBody: { ...body, etag: current.data.etag },
+        resourceName,
+        updatePersonFields: UPDATE_FIELDS,
+        requestBody: {
+          ...body,
+          memberships: mergedMemberships(current.data.memberships),
+          etag: current.data.etag,
+        },
       });
-      return updated.data.resourceName || row.google_contact_id;
+      return updated.data.resourceName || resourceName;
     } catch (err) {
-      const gone = err.code === 404 || err.response?.status === 404;
-      if (!gone) throw err;
+      if (!isGone(err)) throw err;
       // Contact deleted on the Google side — fall through and recreate.
     }
   }
   const created = await people.people.createContact({
-    personFields: PERSON_FIELDS,
-    requestBody: body,
+    personFields: CREATE_READ_FIELDS,
+    requestBody: { ...body, memberships: WAVES_GROUPS.map((g) => ({ contactGroupMembership: { contactGroupResourceName: g } })) },
   });
   return created.data.resourceName || null;
 }
 
+/** Delete tolerating already-gone. */
+async function deleteContact(people, resourceName) {
+  try {
+    await people.people.deleteContact({ resourceName });
+  } catch (err) {
+    if (!isGone(err)) throw err;
+  }
+}
+
 /**
- * A lead must not mint a contact that already exists for the same person:
+ * A lead must not own a contact that belongs to the same person elsewhere:
  * converted leads and customer-email matches defer to the customer row
- * entirely; a sibling lead (same email or phone) that already holds a
- * contact is ADOPTED so repeat inquiries update one contact.
+ * (TRANSFERRING an already-minted contact); a sibling lead (same email or
+ * phone) that already holds a contact is adopted so repeat inquiries update
+ * one contact.
  */
 async function resolveLeadOwnership(row) {
   const email = String(row.email || '').trim().toLowerCase();
   const phone = String(row.phone || '').trim();
-  if (row.customer_id) return { deferToCustomer: true };
+  if (row.customer_id) return { deferToCustomer: true, customerId: row.customer_id };
   if (email) {
     const customer = await db('customers')
       .whereRaw('LOWER(email) = ?', [email])
       .whereNull('deleted_at')
       .first();
-    if (customer) return { deferToCustomer: true };
+    if (customer) return { deferToCustomer: true, customerId: customer.id };
   }
   const sibling = await db('leads')
     .whereNot('id', row.id)
@@ -126,13 +208,22 @@ async function resolveLeadOwnership(row) {
   return {};
 }
 
+const SYNC_COLUMNS = ['id', 'first_name', 'last_name', 'email', 'phone', 'google_contact_id', 'updated_at'];
+
 /**
  * One incremental pass. Returns { synced, skipped, failed, blocked } —
- * blocked is set (and NOTHING is stamped) when auth is missing or the token
- * lacks the contacts scope.
+ * blocked is set (and NOTHING is stamped) when the gate is off, auth is
+ * missing, or the token lacks the contacts scope.
  */
 async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS } = {}) {
   const counts = { synced: 0, skipped: 0, failed: 0, blocked: null };
+  // External-writer gate: preview/dev servers carry real Gmail credentials
+  // and cron defaults on outside production — without an explicit owner
+  // opt-in this would write copied dev data into the LIVE Google account.
+  if (process.env.GATE_CONTACTS_SYNC !== 'true') {
+    counts.blocked = 'gate_off';
+    return counts;
+  }
   const auth = await gmailClient.getAuthClient();
   if (!auth) {
     counts.blocked = 'gmail_not_connected';
@@ -144,44 +235,59 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS } = {}) {
     this.whereNull('google_contact_synced_at')
       .orWhereRaw('updated_at > google_contact_synced_at');
   };
+  // Newest-first + a reserved lead lane: a fresh inquiry lands in Contacts
+  // on the next run even while the historical customer backfill drains
+  // (processed rows leave the predicate, so nothing starves).
   const customers = await db('customers')
     .whereNull('deleted_at')
     .where(stale)
-    .orderBy('updated_at', 'asc')
-    .limit(cap)
-    .select('id', 'first_name', 'last_name', 'email', 'phone',
-      'address_line1', 'address_line2', 'city', 'state', 'zip',
-      'google_contact_id');
+    .orderBy('updated_at', 'desc')
+    .limit(Math.max(0, cap - LEAD_RESERVE))
+    .select(...SYNC_COLUMNS, 'address_line1', 'address_line2', 'city', 'state', 'zip');
   const leadRoom = Math.max(0, cap - customers.length);
   const leads = leadRoom === 0 ? [] : await db('leads')
     .whereNull('deleted_at')
     .where(stale)
-    .orderBy('updated_at', 'asc')
+    .orderBy('updated_at', 'desc')
     .limit(leadRoom)
-    .select('id', 'first_name', 'last_name', 'email', 'phone',
-      'customer_id', 'google_contact_id');
+    .select(...SYNC_COLUMNS, 'customer_id');
 
   const work = [
-    ...customers.map((row) => ({ table: 'customers', kind: 'customer', row })),
     ...leads.map((row) => ({ table: 'leads', kind: 'lead', row })),
+    ...customers.map((row) => ({ table: 'customers', kind: 'customer', row })),
   ];
 
   for (const { table, kind, row } of work) {
     try {
       const hasContactInfo = !!(String(row.email || '').trim() || String(row.phone || '').trim());
       if (!hasContactInfo) {
-        // Nothing publishable — stamp synced; adding contact info later
-        // re-queues the row through updated_at.
-        await db(table).where({ id: row.id })
-          .update({ google_contact_synced_at: new Date() });
+        // Nothing publishable. A contact minted earlier must not keep
+        // serving data the source row no longer contains — delete it.
+        if (row.google_contact_id) {
+          await deleteContact(people, row.google_contact_id);
+          await sleep(gapMs);
+        }
+        await stampIfUnchanged(table, row, { google_contact_id: null });
         counts.skipped += 1;
         continue;
       }
       if (kind === 'lead') {
         const ownership = await resolveLeadOwnership(row);
         if (ownership.deferToCustomer) {
-          await db(table).where({ id: row.id })
-            .update({ google_contact_synced_at: new Date() });
+          // The customer row OWNS the contact. Transfer one this lead
+          // already minted; if the customer already has its own, the
+          // lead's is a duplicate — remove it.
+          if (row.google_contact_id) {
+            const transferred = await db('customers')
+              .where({ id: ownership.customerId })
+              .whereNull('google_contact_id')
+              .update({ google_contact_id: row.google_contact_id });
+            if (!transferred) {
+              await deleteContact(people, row.google_contact_id);
+              await sleep(gapMs);
+            }
+          }
+          await stampIfUnchanged(table, row, { google_contact_id: null });
           counts.skipped += 1;
           continue;
         }
@@ -189,11 +295,18 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS } = {}) {
           row.google_contact_id = ownership.adoptContactId;
         }
       }
-      const resourceName = await upsertContact(people, row, kind, gapMs);
-      await db(table).where({ id: row.id }).update({
-        google_contact_id: resourceName,
-        google_contact_synced_at: new Date(),
-      });
+      const hadContactId = row.google_contact_id;
+      const resourceName = await upsertContact(people, table, row, kind, gapMs);
+      try {
+        await stampIfUnchanged(table, row, { google_contact_id: resourceName });
+      } catch (stampErr) {
+        // The row didn't record the contact — a FRESH create would leak a
+        // duplicate on retry; roll it back (adopted/updated contacts stay).
+        if (!hadContactId && resourceName) {
+          await deleteContact(people, resourceName).catch(() => {});
+        }
+        throw stampErr;
+      }
       counts.synced += 1;
       await sleep(gapMs);
     } catch (err) {
