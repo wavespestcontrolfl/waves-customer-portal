@@ -35,6 +35,14 @@ describe('extractImageUrl', () => {
     expect(extractImageUrl(`<meta property="og:image" content="${huge}">`, PAGE)).toBeNull();
   });
 
+  test('walks the whole og:image array — a GIF/malformed first entry does not hide a valid later image', () => {
+    const html = [
+      '<meta property="og:image" content="https://cdn.example/anim.gif">',
+      '<meta property="og:image" content="https://cdn.example/poster.jpg">',
+    ].join('\n');
+    expect(extractImageUrl(html, PAGE)).toBe('https://cdn.example/poster.jpg');
+  });
+
   test('GIF-shaped urls are rejected — the thumbnail contract is still event art', () => {
     expect(extractImageUrl('<meta property="og:image" content="https://cdn.example/loop.gif">', PAGE))
       .toBeNull();

@@ -54,18 +54,21 @@ function extractImageUrl(html, pageUrl) {
     /<meta[^>]+content=["']([^"']+)["'][^>]*name=["']twitter:image["']/i,
   ];
   for (const re of patterns) {
-    const m = head.match(re);
-    if (!m) continue;
-    let candidate = m[1].trim();
-    try {
-      candidate = new URL(candidate, pageUrl).toString();
-    } catch {
-      continue;
+    // A page may declare several og:image tags (an image array) — walk
+    // every match of this pattern before falling back to the next one,
+    // so one malformed/GIF first entry doesn't hide a valid later image.
+    for (const m of head.matchAll(new RegExp(re.source, 'gi'))) {
+      let candidate = m[1].trim();
+      try {
+        candidate = new URL(candidate, pageUrl).toString();
+      } catch {
+        continue;
+      }
+      if (!/^https?:\/\//i.test(candidate)) continue;
+      if (candidate.length > MAX_URL_LEN) continue; // truncating a url breaks it — skip
+      if (isLikelyGifUrl(candidate)) continue;
+      return candidate;
     }
-    if (!/^https?:\/\//i.test(candidate)) continue;
-    if (candidate.length > MAX_URL_LEN) continue; // truncating a url breaks it — skip
-    if (isLikelyGifUrl(candidate)) continue;
-    return candidate;
   }
   return null;
 }
