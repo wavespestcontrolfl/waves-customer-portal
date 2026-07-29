@@ -2789,6 +2789,21 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           // UPDATE trigger, and downstream incremental consumers (Google
           // Contacts sync) key re-syncs off this column.
           await trx('customers').where({ id: req.params.id }).update({ ...updates, updated_at: new Date() });
+          {
+            // Identity corrections propagate to the CANONICAL account row —
+            // the shared Google contact publishes customer_accounts values,
+            // so an edit that stays on the property copy would be
+            // republished over with the stale account identity.
+            const identityPatch = {};
+            for (const f of ['first_name', 'last_name', 'email', 'phone']) {
+              if (updates[f] !== undefined) identityPatch[f] = updates[f];
+            }
+            if (Object.keys(identityPatch).length && lockedBefore.account_id) {
+              await trx('customer_accounts')
+                .where({ id: lockedBefore.account_id })
+                .update({ ...identityPatch, updated_at: new Date() });
+            }
+          }
           if (addressChanged) {
             await require('../services/customer-properties').syncPrimaryAddress(lockedAfter, trx);
             // Open leads/estimates snapshot the address at creation and never

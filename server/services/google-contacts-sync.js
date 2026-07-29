@@ -503,6 +503,11 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
         const retiring = retireIdFromMarker(row.google_contact_id);
         try {
           if (retiring) await deleteContact(people, retiring);
+          // Persist the clear — the DB must not keep a retire marker the
+          // downstream recovery-marker conditionals can't match, or an
+          // ambiguous create right after this could orphan its contact.
+          await db(table).where({ id: row.id, google_contact_id: row.google_contact_id })
+            .update({ google_contact_id: null });
           row.google_contact_id = null;
         } catch (retireErr) {
           if (isScopeError(retireErr)) {
@@ -573,24 +578,44 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
           // refreshed either way so the customer's own pass in THIS run
           // updates the right contact instead of minting another.
           if (row.google_contact_id) {
-            const transferred = await db('customers')
-              .where({ id: ownership.customerId })
-              .whereNull('google_contact_id')
-              .update({ google_contact_id: row.google_contact_id });
+            // The destination CUSTOMER may already be covered — by its own
+            // contact OR by its ACCOUNT's (another property row): a naive
+            // whereNull transfer would hand a multi-property account a
+            // second contact.
+            const freshCustomer = await db('customers').where({ id: ownership.customerId }).first();
+            let existingContact = freshCustomer?.google_contact_id || null;
+            if (!existingContact && freshCustomer?.account_id) {
+              const accSibling = await db('customers')
+                .whereNot('id', ownership.customerId)
+                .where('account_id', freshCustomer.account_id)
+                .whereNull('deleted_at')
+                .whereNotNull('google_contact_id')
+                .whereNot('google_contact_id', 'like', `${PENDING_CREATE}%`)
+                .whereNot('google_contact_id', 'like', `${PENDING_RETIRE}%`)
+                .first();
+              if (accSibling?.google_contact_id) {
+                existingContact = accSibling.google_contact_id;
+                // The customer row adopts the ACCOUNT's contact...
+                await db('customers').where({ id: ownership.customerId })
+                  .whereNull('google_contact_id')
+                  .update({ google_contact_id: existingContact });
+              }
+            }
             const queued = customerById.get(ownership.customerId);
-            if (transferred) {
-              if (queued && !queued.google_contact_id) queued.google_contact_id = row.google_contact_id;
-            } else {
-              const freshCustomer = await db('customers').where({ id: ownership.customerId }).first();
-              const customerContact = freshCustomer?.google_contact_id || null;
-              if (queued && customerContact) queued.google_contact_id = customerContact;
-              // The lead's contact is a duplicate ONLY if the customer owns
-              // a different one and no other live row shares the lead's.
-              if (customerContact && customerContact !== row.google_contact_id
+            if (existingContact) {
+              if (queued && !queued.google_contact_id) queued.google_contact_id = existingContact;
+              // ...and the lead's contact is a duplicate (unless shared).
+              if (existingContact !== row.google_contact_id
                 && !(await contactInUseElsewhere(row.google_contact_id, table, row.id))) {
                 await deleteContact(people, row.google_contact_id);
                 await sleep(gapMs);
               }
+            } else {
+              const transferred = await db('customers')
+                .where({ id: ownership.customerId })
+                .whereNull('google_contact_id')
+                .update({ google_contact_id: row.google_contact_id });
+              if (transferred && queued && !queued.google_contact_id) queued.google_contact_id = row.google_contact_id;
             }
           }
           await stampIfUnchanged(table, row, { google_contact_id: null });
@@ -731,8 +756,12 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
             // adoption probes. If even that fails, the run reports failed
             // so job health surfaces it.
             try {
+              // Dead id cleared WITH the requeue — the adoption probes skip
+              // rows holding a non-null pointer, and the replacement's tag
+              // belongs to the creating sharer, so a stranded dead id could
+              // never self-resolve.
               await db(t).where('google_contact_id', repointFrom)
-                .update({ google_contact_synced_at: null });
+                .update({ google_contact_id: null, google_contact_synced_at: null });
               logger.warn(`[contacts-sync] sharer repoint failed on ${t} — sharers requeued for adoption: ${safeErr(repointErr)}`);
             } catch (requeueErr) {
               counts.failed += 1;
@@ -789,6 +818,9 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
         .limit(TOMBSTONE_SLOTS)
         .select('id', 'google_contact_id', 'google_contact_synced_at', 'first_name', 'last_name', 'email', 'phone');
     } catch (e) {
+      // A silent query failure would leave deleted rows' PII in Google
+      // while job health reports green — mark the run failed.
+      counts.failed += 1;
       logger.warn(`[contacts-sync] tombstone query failed for ${table}: ${safeErr(e)}`);
     }
     for (const row of tombstones) {
@@ -856,14 +888,12 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
           await sleep(gapMs);
           await db(table).where({ id: row.id }).update({ google_contact_id: null });
         } else {
-          const claimed = await db(table).where({ id: row.id })
-            .whereNotNull('deleted_at')
-            .update({ google_contact_id: null, google_contact_synced_at: null });
-          if (!claimed) continue; // restored mid-batch — leave the contact alone
           // SHARED contact: released, not deleted — but it may still carry
           // THIS retired row's PII/tag if it was the last pushed source.
-          // Requeue one surviving owner so its next main-lane pass
-          // re-pushes the live identity over the deceased row's.
+          // Requeue a surviving owner FIRST: releasing the tombstone
+          // pointer before a failed requeue would leave nobody holding
+          // retry state for the scrub (a requeue failure throws → the
+          // rotation catch retries this tombstone with its pointer intact).
           for (const t of ['customers', 'leads']) {
             const survivor = await db(t)
               .where('google_contact_id', row.google_contact_id)
@@ -874,6 +904,10 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
               break;
             }
           }
+          const claimed = await db(table).where({ id: row.id })
+            .whereNotNull('deleted_at')
+            .update({ google_contact_id: null, google_contact_synced_at: null });
+          if (!claimed) continue; // restored mid-batch — leave the contact alone
         }
         counts.retired += 1;
       } catch (err) {
@@ -1014,7 +1048,7 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
             } catch (repointErr) {
               try {
                 await db(t).where('google_contact_id', priorContactId)
-                  .update({ google_contact_synced_at: null });
+                  .update({ google_contact_id: null, google_contact_synced_at: null });
                 logger.warn(`[contacts-sync] sharer repoint failed on ${t} — sharers requeued for adoption: ${safeErr(repointErr)}`);
               } catch (requeueErr) {
                 counts.failed += 1;

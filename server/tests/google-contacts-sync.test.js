@@ -57,7 +57,9 @@ function setupDb({
     }
     builder.then = (resolve, reject) => {
       const q = selectQueues[table];
-      return Promise.resolve(q && q.length ? q.shift() : []).then(resolve, reject);
+      const v = q && q.length ? q.shift() : [];
+      if (v instanceof Error) return Promise.reject(v).then(resolve, reject);
+      return Promise.resolve(v).then(resolve, reject);
     };
     builder.first = jest.fn(async () => {
       const q = firstQueues[table];
@@ -796,7 +798,50 @@ describe('runContactsSync', () => {
     // The stranded sharers were requeued (synced_at cleared) so adoption
     // re-resolves them to the replacement.
     const requeue = state.updates.filter((u) => u.table === 'customers').map((u) => u.patch);
-    expect(requeue).toContainEqual({ google_contact_synced_at: null });
+    expect(requeue).toContainEqual({ google_contact_id: null, google_contact_synced_at: null });
+  });
+
+  test('a converted lead never gives a multi-property ACCOUNT a second contact', async () => {
+    const state = setupDb({
+      leads: [{ id: 'l-1', first_name: 'Jane', email: 'jane@x.example', phone: null, customer_id: 'c-1', google_contact_id: 'people/lead1', updated_at: '2026-07-28T11:00:00Z' }],
+      firstResults: {
+        // live-link → fresh read (row null but has account) → account
+        // sibling holds the contact → in-use probe for the lead's dup
+        customers: [{ id: 'c-1' }, { id: 'c-1', account_id: 'acct-1', google_contact_id: null }, { id: 'c-9', google_contact_id: 'people/acct' }, null],
+        leads: [null],
+      },
+    });
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(counts.skipped).toBe(1);
+    // The customer adopted the ACCOUNT's contact...
+    expect(state.updates.find((u) => u.table === 'customers').patch).toEqual({ google_contact_id: 'people/acct' });
+    // ...and the lead's duplicate was retired, not transferred.
+    expect(mockPeopleApi.people.deleteContact).toHaveBeenCalledWith({ resourceName: 'people/lead1' });
+  });
+
+  test('a failed tombstone QUERY marks the run failed — job health cannot stay green', async () => {
+    setupDb({
+      customersSelects: [[], new Error('db down'), []],
+      leadsSelects: [[], [], []],
+    });
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(counts.failed).toBeGreaterThanOrEqual(1);
+  });
+
+  test('a failed survivor requeue keeps the tombstone pointer for retry', async () => {
+    const state = setupDb({
+      customersSelects: [[], [{ id: 'c-dead', google_contact_id: 'people/shared', google_contact_synced_at: '2026-07-01T00:00:00Z', first_name: 'Gone', last_name: '', email: 'gone@x.example', phone: null }], []],
+      leadsSelects: [[], [], []],
+      firstResults: { customers: [null, null], leads: [{ id: 'l-9' }, { id: 'l-9' }] },
+      updateResults: { leads: [new Error('db blip')] },
+    });
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(counts.retired).toBe(0);
+    expect(counts.failed).toBe(1);
+    // Pointer intact — no customers patch released it; the rotation bump
+    // retries this tombstone later.
+    expect(state.updates.find((u) => u.table === 'customers' && u.patch.google_contact_id === null)).toBeUndefined();
+    expect(state.updates.find((u) => u.table === 'customers' && u.patch.updated_at instanceof Date)).toBeDefined();
   });
 
   test('scope-missing aborts WITHOUT stamping — rows retry after the one-time re-consent', async () => {
