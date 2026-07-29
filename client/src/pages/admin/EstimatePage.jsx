@@ -1496,7 +1496,11 @@ function EstimateToolView() {
       if (ep.poolCageSize && ep.poolCageSize !== "NONE")
         upd.poolCageSize = ep.poolCageSize;
       if (ep.largeDriveway) upd.hasLargeDriveway = "YES";
-      if (ep.hasAttachedGarage) upd.hasAttachedGarage = "YES";
+      // detectAttachedGarage always returns a boolean — assign BOTH outcomes
+      // so a prior property's YES can never survive into the next lookup and
+      // bill its $5/visit against the wrong home (hook P0 on #3040 r3).
+      if (typeof ep.hasAttachedGarage === "boolean")
+        upd.hasAttachedGarage = ep.hasAttachedGarage ? "YES" : "NO";
       if (ep.shrubDensity) upd.shrubDensity = ep.shrubDensity;
       if (ep.treeDensity) upd.treeDensity = ep.treeDensity;
       if (ep.landscapeComplexity)
@@ -2050,7 +2054,10 @@ function EstimateToolView() {
           ? "manual"
           : profile.storiesSource;
         profile.hasLargeDriveway = form.hasLargeDriveway === "YES";
-        profile.hasAttachedGarage = form.hasAttachedGarage === "YES";
+        // Server key: translateV2CallToV1Input forwards `attachedGarage`
+        // (property-lookup-v2), not hasAttachedGarage — the wrong key would
+        // silently drop the $5/visit adjustment on the authoritative path.
+        profile.attachedGarage = form.hasAttachedGarage === "YES";
         profile.shrubDensity = form.shrubDensity || profile.shrubDensity;
         profile.treeDensity = form.treeDensity || profile.treeDensity;
         profile.landscapeComplexity =

@@ -128,6 +128,32 @@ describe('stampPestCurveVersion (draft persistence)', () => {
   });
 });
 
+describe('attached-garage adjustment reaches the authoritative path (codex #3040 r2 P1)', () => {
+  const { translateV2CallToV1Input } = require('../routes/property-lookup-v2');
+  const { generateEstimate } = require('../services/pricing-engine');
+
+  const profileWith = (attachedGarage) => ({
+    homeSqFt: 2000,
+    lotSqFt: 8000,
+    stories: 1,
+    propertyType: 'single_family',
+    attachedGarage,
+  });
+
+  test('adapter forwards profile.attachedGarage into the engine input', () => {
+    const v1 = translateV2CallToV1Input(profileWith(true), [{ service: 'pest_control', frequency: 'quarterly' }], {});
+    expect(v1.attachedGarage).toBe(true);
+  });
+
+  test('engine prices the +$5/visit adjustment from the forwarded flag', () => {
+    const services = { pest: { frequency: 'quarterly' } };
+    const withGarage = generateEstimate({ ...profileWith(true), services });
+    const withoutGarage = generateEstimate({ ...profileWith(false), services });
+    const pest = (r) => (r.lineItems || []).find((li) => li.service === 'pest_control');
+    expect(pest(withGarage).perApp - pest(withoutGarage).perApp).toBe(5);
+  });
+});
+
 describe('mirrored-section labels (lawn card must not wear pest visit counts)', () => {
   const baseFrequency = { key: 'bi_monthly', label: 'Bi-monthly (6 visits)' };
   const lawnRow = { displayPrice: 78.67, perTreatment: 78.67, visitsPerYear: 9 };
