@@ -435,9 +435,11 @@ export function startSprayEngine({
 // presentation only, so closing the sheet mid-spray can never lose a trace.
 // Lawn variant (owner 2026-07-28): a lawn is treated as an AREA, not a
 // perimeter barrier — the spray-mist band read wrong on lawn reports. Bake a
-// clean outline of the treated lawn instead: soft outer glow, crisp line, and
-// a light interior wash when the trace closes. The customer report animates
-// the pulse; this is the settled frame that lands in the snapshot.
+// clean outline of the treated lawn instead: soft outer glow + crisp line.
+// Deliberately NO interior fill: the traced loop commonly wraps the whole
+// yard with the house inside it, and a filled polygon would permanently
+// shade the roof as "treated turf" in the snapshot (codex P1 #3038 r3).
+// The customer report animates the pulse; this is the settled frame.
 export function buildOutlineAccum({ width, height, points, closed, color }) {
   const rgb = hexToRgb(color);
   const accum = document.createElement('canvas');
@@ -453,11 +455,6 @@ export function buildOutlineAccum({ width, height, points, closed, color }) {
   };
   ctx.lineJoin = 'round';
   ctx.lineCap = 'round';
-  if (closed && points.length > 2) {
-    trace();
-    ctx.fillStyle = rgba(rgb, 0.12);
-    ctx.fill();
-  }
   trace();
   ctx.strokeStyle = rgba(rgb, 0.3);
   ctx.lineWidth = 14;

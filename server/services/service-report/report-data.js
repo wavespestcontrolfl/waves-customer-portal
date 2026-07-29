@@ -1862,16 +1862,13 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db) {
       photosFor(initialRow.id),
       photosFor(assessment.id),
     ]);
-    // The primary save path (admin-lawn-assessment) records the capture
-    // location in photo_type and leaves zone unset — key on either, ignoring
-    // the non-locational photo_type values, so zone matching actually engages
-    // for those rows (codex P1 #3038).
-    const zoneKey = (p) => {
-      const zone = String(p?.zone || '').trim().toLowerCase();
-      if (zone) return zone;
-      const type = String(p?.photo_type || '').trim().toLowerCase();
-      return ['', 'general', 'best', 'other', 'misc'].includes(type) ? '' : type;
-    };
+    // Only an explicitly recorded zone is a location claim. photo_type looks
+    // locational ('front_yard') but the primary save path synthesizes it from
+    // UPLOAD ORDER (admin-lawn-assessment.js — i===0 → 'front_yard'), so
+    // keying on it would falsely pair two arbitrary first-selected photos as
+    // the same area (codex P1 #3038 r3). Photos without real zones fall back
+    // to best-vs-best, same as before this change.
+    const zoneKey = (p) => String(p?.zone || '').trim().toLowerCase();
     let beforePhoto = null;
     let afterPhoto = null;
     for (const candidate of beforeCandidates) {

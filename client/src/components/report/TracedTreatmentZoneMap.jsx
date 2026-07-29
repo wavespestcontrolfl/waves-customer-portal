@@ -83,17 +83,13 @@ export default function TracedTreatmentZoneMap({ traced, live = true, variant = 
                 0%, 100% { opacity: 1; }
                 50% { opacity: 0.45; }
               }
-              @keyframes outlineFillPulse {
-                0%, 100% { opacity: 0.6; }
-                50% { opacity: 0.2; }
-              }
               .treated-outline-line { animation: outlineDraw 2.4s ease-in-out both; }
               .treated-outline-pulse { animation: outlinePulse 3.6s ease-in-out 2.4s infinite; }
-              .treated-outline-fill { animation: outlineFillPulse 3.6s ease-in-out 2.4s infinite; }
             `}</style>
-            {traced.closedLoop && lawnCapture && (
-              <path className="treated-outline-fill" d={pathD} fill="#2FA89D" fillOpacity="0.18" stroke="none" />
-            )}
+            {/* NO interior fill — the loop commonly wraps the yard with the
+                house inside it, and a filled polygon would shade the roof as
+                treated turf (codex P1 #3038 r3). The boundary + pulse carry
+                the treated-area story. */}
             <g className="treated-outline-pulse">
               <path
                 className="treated-outline-line"

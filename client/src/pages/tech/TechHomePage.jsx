@@ -51,6 +51,7 @@ import ServiceRecapModal from '../../components/ServiceRecapModal';
 import TechRecapCapture from './TechRecapCapture';
 import TechServicePhotosModal from '../../components/tech/TechServicePhotosModal';
 import TechTreatmentZoneModal from '../../components/tech/TechTreatmentZoneModal';
+import { detectServiceCategory } from '../../lib/service-colors';
 import TechTimeTrackingCard from '../../components/tech/TechTimeTrackingCard';
 import FieldLeadModal from '../../components/tech/FieldLeadModal';
 import VisualNotesPanel from '../../components/tech/VisualNotesPanel';
@@ -774,7 +775,10 @@ export default function TechHomePage() {
           lat={zoneTarget.lat}
           lng={zoneTarget.lng}
           onClose={() => setZoneTarget(null)}
-          lawnMode={/lawn|turf/i.test(String(zoneTarget.service_type || zoneTarget.serviceType || ''))}
+          /* Shared category detection (mirrors server service-normalizer) —
+             a bare lawn|turf regex missed lawn jobs like Weed Control and
+             Dethatching (codex P1 #3038 r3). */
+          lawnMode={detectServiceCategory(zoneTarget.service_type || zoneTarget.serviceType) === 'lawn'}
         />
       )}
 
