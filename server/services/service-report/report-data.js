@@ -1358,10 +1358,15 @@ function stripLiveOnlyScheduleFields(data) {
 function shouldAddNoActivityFinding({ service = {}, structured = {}, protocol = {} } = {}) {
   const visitOutcome = String(protocol.visitOutcome || service.visit_outcome || service.status || 'completed').toLowerCase();
   const concernText = structuredCustomerConcern(structured);
+  // A positive activity rating recorded at completion means SOMETHING was
+  // seen — synthesizing "all zones clear" beside it re-creates the exact
+  // contradiction the insert guard now prevents (codex P1 #3043 r2).
+  const rating = Number(service.client_pest_rating);
   return visitOutcome === 'completed'
     && !(protocol.observations || []).length
     && !(protocol.recommendations || []).length
-    && !concernText;
+    && !concernText
+    && !(Number.isFinite(rating) && rating > 0);
 }
 
 function findingSeverityForObservation(text) {
@@ -2150,6 +2155,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     if (renderConcern) {
       for (const finding of findings) {
         if (finding.category === 'no_activity') {
+          // Title AND detail: a "No activity observed this visit" headline
+          // above softened body copy still contradicts the reported concern
+          // (codex P2 #3043 r2).
+          finding.title = 'No confirmed activity beyond what you reported';
           finding.detail = 'No pest activity was confirmed beyond what you reported — what you flagged is noted on this visit’s record.';
         }
       }

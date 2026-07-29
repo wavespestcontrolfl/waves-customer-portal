@@ -7599,9 +7599,12 @@ function reportCopyRejection(report) {
   // The prompt forbids quoting the internal 0–5 activity rating as a number
   // ("2/5") — the customer report shows its own pressure gauge on a different
   // scale and a second number reads as a contradiction. The prompt instruction
-  // alone is soft; a model that echoes the numeric form is rejected and
-  // regenerated (codex P2 #3043).
-  if (/\b[0-5]\s*\/\s*5\b/.test(text)) return 'numeric_rating';
+  // alone is soft; a model that echoes the numeric RATING is rejected and
+  // regenerated. Scoped to rating language — a legitimate count like "2/5
+  // bait stations" must not burn the provider retries (codex P2 #3043 r2).
+  if (/\b(?:rated?|rating|activity(?:\s+(?:level|was|is))?)\b[^.\n]{0,40}?\b[0-5]\s*\/\s*5\b|\b[0-5]\s*\/\s*5\b(?=\s*(?:rating|scale|activity))/i.test(text)) {
+    return 'numeric_rating';
+  }
   const banned = ActivityIndicators.findBannedCustomerCopy(text);
   return banned.length ? `banned:${banned.join(',')}` : null;
 }

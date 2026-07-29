@@ -462,10 +462,17 @@ function pestKeysFromRows(findings = [], applications = []) {
     if (text.includes('german roach')) found.add('german_roach');
     if (text.includes('spider')) found.add('spider');
   }
-  // The generic 'ant' card next to 'ghost_ant' is a near-duplicate (both are
-  // built from overlapping ant targets) — keep the specific dossier only
-  // (John Kelleher audit 2026-07-29).
-  if (found.has('ghost_ant')) found.delete('ant');
+  // The generic 'ant' card next to 'ghost_ant' is a near-duplicate when both
+  // came only from a product's TARGET list (one application tagged for several
+  // ant species). But a distinct generic-ant FINDING (e.g. a fire-ant mound)
+  // is its own evidence — collapsing it would fold that finding into the
+  // ghost-ant card and mislabel it (codex P2 #3043 r2). Collapse only when no
+  // non-ghost ant finding exists.
+  const hasNonGhostAntFinding = findings.some((finding) => {
+    const text = `${finding.title} ${finding.detail}`.toLowerCase();
+    return text.includes('ant') && !text.includes('ghost ant');
+  });
+  if (found.has('ghost_ant') && !hasNonGhostAntFinding) found.delete('ant');
   return [...found].filter((key) => PEST_DOSSIERS[key]).slice(0, 3);
 }
 
