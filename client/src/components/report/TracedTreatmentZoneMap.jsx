@@ -61,7 +61,11 @@ export default function TracedTreatmentZoneMap({ traced, live = true, variant = 
         <img
           className="traced-zone-image"
           src={traced.snapshotUrl}
-          alt="Satellite photo of the property with the treated perimeter highlighted"
+          alt={outline
+            ? (lawnCapture
+              ? 'Satellite photo of the property with the treated lawn area outlined'
+              : 'Satellite photo of the property with the technician-traced service area outlined')
+            : 'Satellite photo of the property with the treated perimeter highlighted'}
         />
         {sprayLive && pathD && outline && (
           <svg

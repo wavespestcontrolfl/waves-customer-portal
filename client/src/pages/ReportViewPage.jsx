@@ -876,7 +876,15 @@ function applicationPurpose(app = {}, serviceLine = 'pest') {
 function applicationPurposeCopy(app = {}, serviceLine = 'pest') {
   const purpose = applicationPurpose(app, serviceLine);
   if (purpose === 'Targeted weed treatment') return 'Applied where visible weed pressure or service notes called for targeted control.';
-  if (purpose === 'Lawn insect control') return 'Applied to protect the turf from lawn-damaging insects like chinch bugs and grubs, where activity, history, or seasonal pressure called for it.';
+  if (purpose === 'Lawn insect control') {
+    // Name only the RECORDED targets — a hardcoded "chinch bugs and grubs"
+    // example could describe an off-target use or imply unsupported history
+    // when the application was tagged for something else (codex P2 #3038 r4).
+    const insectTargets = (Array.isArray(app.targets) ? app.targets : []).map((t) => String(t || '').trim()).filter(Boolean);
+    return insectTargets.length
+      ? `Applied to protect the turf from ${insectTargets.join(', ').toLowerCase()}, where activity, history, or seasonal pressure called for it.`
+      : 'Applied to protect the turf from lawn-damaging insects where activity, history, or seasonal pressure called for it.';
+  }
   if (purpose === 'Weed prevention application') return 'Applied to stop new weeds before they sprout, ahead of the season when they spread fastest.';
   if (purpose === 'Fungus control application') return 'Applied to support turf health where fungus pressure or seasonal conditions called for protection.';
   if (purpose === 'Lawn nutrient application') return 'Used to support turf density, color, and recovery within the documented lawn program.';
