@@ -1021,11 +1021,10 @@ async function resolveLineDiscount(input, baseAmount, customer, serviceContext =
 }
 
 // Default price for a hand-scheduled one-time mosquito line (owner decision
-// 2026-07-28). With a usable lot size the engine ladder prices it over
-// TREATABLE area (lot minus the saved home footprint — customers.property_sqft
-// carries homeSqFt in practice, see public-quote.js:538 — matching the
-// estimate path). Without lot data the Service Library catalog base controls
-// the amount (edits there must keep working); recurring-plan members keep the
+// 2026-07-28). With a usable lot size the engine ladder prices it over the
+// GROSS lot (no footprint source exists on the customer row — see inline
+// note). Without lot data the Service Library catalog base controls the
+// amount (edits there must keep working); recurring-plan members keep the
 // engine's canonical one-time perk in both cases — membership derived via the
 // file's one predicate (hasMembership) so tier sentinels stay in one place.
 // Returns null when the caller's own catalog fallback should apply as-is.
@@ -1035,10 +1034,14 @@ function mosquitoOneTimeDefaultPrice(customer, catalogBasePrice = null) {
   if (Number.isFinite(lotSqFt) && lotSqFt > 0) {
     try {
       const { priceOneTimeMosquito } = require('../services/pricing-engine');
-      const footprintSqFt = Number(customer?.property_sqft);
-      const property = { lotSqFt };
-      if (Number.isFinite(footprintSqFt) && footprintSqFt > 0) property.footprintSqFt = footprintSqFt;
-      const quote = priceOneTimeMosquito(property, { isRecurringCustomer });
+      // Gross lot only: the customer row has no footprint source —
+      // customers.property_sqft is treated LAWN area by arbitration contract
+      // (source-arbitration.js: "deliberately NOT a home-sqft source") and
+      // must never be subtracted as a footprint. Hand-scheduled pricing may
+      // therefore sit one step above the estimate path for the same
+      // property; the estimate path stays the precise one and the operator
+      // can always override the price.
+      const quote = priceOneTimeMosquito({ lotSqFt }, { isRecurringCustomer });
       const price = Number(quote?.price);
       if (Number.isFinite(price) && price > 0) return price;
     } catch (e) {
@@ -1053,11 +1056,12 @@ function mosquitoOneTimeDefaultPrice(customer, catalogBasePrice = null) {
   return rate > 0 ? Math.round(base * (1 - rate)) : null;
 }
 
-// GET /mosquito-onetime-quote?customerId= — live lot-ladder default for the
-// create-appointment modal, computed by the same helper the booking path uses
-// (post-syncConstantsFromDB, so admin pricing-config edits are reflected
-// immediately). price is null when the customer has no usable lot size; the
-// client falls back to the catalog base price, same as booking.
+// GET /mosquito-onetime-quote?customerId= — live default for the
+// create-appointment modal, computed by the same helper + catalog row the
+// booking path uses (post-syncConstantsFromDB, so admin pricing-config AND
+// Service Library edits are reflected immediately). Always answers with the
+// authoritative amount booking will stamp — never the client's cached line
+// price (estimate-loaded lines carry the estimate's quoted price there).
 // requireAdmin: the create-appointment modal is an office surface (POST '/'
 // is requireAdmin too), and tech tokens must not be able to probe arbitrary
 // customer ids for lot-size/price data outside their assignment scope.
@@ -1069,16 +1073,18 @@ router.get('/mosquito-onetime-quote', requireAdmin, async (req, res, next) => {
     }
     const customer = await db('customers')
       .where({ id: customerId })
-      .first('id', 'lot_sqft', 'property_sqft', 'waveguard_tier', 'monthly_rate');
+      .first('id', 'lot_sqft', 'waveguard_tier', 'monthly_rate');
     if (!customer) throw httpError(404, 'Customer not found');
     const catalogRow = await db('services')
       .where({ service_key: 'mosquito_one_time' })
       .first('base_price')
       .catch(() => null);
-    const price = mosquitoOneTimeDefaultPrice(customer, catalogRow?.base_price);
-    // price null = the plain catalog base applies as-is; the client shows its
-    // own catalog value for that case, matching what booking will stamp.
-    res.json({ price, source: price != null ? 'engine_default' : null });
+    const computed = mosquitoOneTimeDefaultPrice(customer, catalogRow?.base_price);
+    const catalogBase = Number(catalogRow?.base_price);
+    const price = computed != null
+      ? computed
+      : (Number.isFinite(catalogBase) && catalogBase > 0 ? Math.round(catalogBase * 100) / 100 : null);
+    res.json({ price, source: computed != null ? 'engine_default' : (price != null ? 'catalog_base' : null) });
   } catch (err) { next(err); }
 });
 

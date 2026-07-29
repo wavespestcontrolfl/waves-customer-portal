@@ -119,20 +119,17 @@ describe('hand-scheduled one-time mosquito lot-ladder default', () => {
     expect(pricing.finalPrice).toBe(expected + 150);
   });
 
-  test('saved home footprint is deducted before the ladder applies (estimate-path parity)', async () => {
+  test('treated-lawn property_sqft is NEVER subtracted as a footprint (arbitration contract)', async () => {
     const lotSqFt = 12000;
-    const footprintSqFt = 2000;
     const pricing = await buildAppointmentPricing({
       serviceRecord: mosquitoService,
       estimatedPrice: null,
       primaryLinePrice: null,
       serviceAddons: [],
-      customer: { id: 'customer-1', lot_sqft: lotSqFt, property_sqft: footprintSqFt },
+      customer: { id: 'customer-1', lot_sqft: lotSqFt, property_sqft: 8000 },
     });
 
-    const expected = priceOneTimeMosquito({ lotSqFt, footprintSqFt }).price;
-    expect(expected).toBeLessThan(priceOneTimeMosquito({ lotSqFt }).price);
-    expect(pricing.finalPrice).toBe(expected);
+    expect(pricing.finalPrice).toBe(priceOneTimeMosquito({ lotSqFt }).price);
   });
 
   test('recurring-plan member with no lot data gets the perk applied to the catalog base', async () => {
