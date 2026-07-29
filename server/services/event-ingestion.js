@@ -92,6 +92,16 @@ function revivalResetFields() {
     audience_tags: db.raw(`CASE WHEN ${REVIVAL_COND} THEN NULL ELSE events_raw.audience_tags END`, { etMidnight }),
     novelty_type: db.raw(`CASE WHEN ${REVIVAL_COND} THEN NULL ELSE events_raw.novelty_type END`, { etMidnight }),
     editorial_evidence: db.raw(`CASE WHEN ${REVIVAL_COND} THEN NULL ELSE events_raw.editorial_evidence END`, { etMidnight }),
+    // Image handling (og:image backfill contract, event-image-backfill.js):
+    // a feed that HAS an image always wins, but a feed null must not
+    // clobber a backfilled value — EXCEPT on revival, where the old
+    // occurrence's poster would be stale art for the new occurrence, so
+    // the feed value (even null) is taken verbatim and the row re-probes.
+    image_url: db.raw(`CASE WHEN ${REVIVAL_COND} THEN EXCLUDED.image_url ELSE COALESCE(EXCLUDED.image_url, events_raw.image_url) END`, { etMidnight }),
+    // Re-open the probe backoff when the occurrence revives OR the event
+    // url itself changed (the old page's failed probe says nothing about
+    // the new page).
+    image_backfill_attempted_at: db.raw(`CASE WHEN (${REVIVAL_COND}) OR (events_raw.event_url IS DISTINCT FROM EXCLUDED.event_url) THEN NULL ELSE events_raw.image_backfill_attempted_at END`, { etMidnight }),
   };
 }
 
@@ -345,10 +355,6 @@ async function pullRssSource(source) {
         start_at: start,
         city,
         event_url: eventUrl,
-        // Feed image wins when the feed HAS one; a null must not clobber a
-        // value the og:image backfill (event-image-backfill.js) filled —
-        // its 7-day attempt backoff would leave the row imageless for days.
-        image_url: db.raw('COALESCE(EXCLUDED.image_url, events_raw.image_url)'),
         categories,
         pulled_at: db.fn.now(),
         updated_at: db.fn.now(),
@@ -640,8 +646,6 @@ async function upsertExtractedEvents(source, claudeEvents, opts = {}) {
         venue_name: row.venue_name,
         city: row.city,
         event_url: row.event_url,
-        // Same backfill-preservation rule as the RSS upsert above.
-        image_url: db.raw('COALESCE(EXCLUDED.image_url, events_raw.image_url)'),
         pulled_at: db.fn.now(),
         updated_at: db.fn.now(),
         ...revivalResetFields(),

@@ -1383,8 +1383,10 @@ function initScheduledJobs() {
   cron.schedule('30 5 * * *', async () => {
     logger.info('Running: Newsletter event image backfill');
     try {
+      // runExclusive: deploy-overlap instances would each select the same
+      // unstamped batch and double the outbound fetches.
       const EventImageBackfill = require('./event-image-backfill');
-      await EventImageBackfill.backfillBatch();
+      await runExclusive('event-image-backfill', () => EventImageBackfill.backfillBatch());
     } catch (err) {
       logger.error(`Event image backfill failed: ${err.message}`);
     }

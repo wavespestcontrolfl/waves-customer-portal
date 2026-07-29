@@ -43,6 +43,24 @@ describe('extractImageUrl', () => {
     expect(extractImageUrl(html, PAGE)).toBe('https://cdn.example/poster.jpg');
   });
 
+  test('document order wins across attribute layouts; twitter:image never outranks og:image', () => {
+    const html = [
+      '<meta content="https://cdn.example/first.jpg" property="og:image">',
+      '<meta property="og:image" content="https://cdn.example/second.jpg">',
+    ].join('\n');
+    expect(extractImageUrl(html, PAGE)).toBe('https://cdn.example/first.jpg');
+    const twFirst = [
+      '<meta name="twitter:image" content="https://cdn.example/tw.jpg">',
+      '<meta property="og:image" content="https://cdn.example/og.jpg">',
+    ].join('\n');
+    expect(extractImageUrl(twFirst, PAGE)).toBe('https://cdn.example/og.jpg');
+  });
+
+  test('entity-escaped query separators decode before storage (signed CDN urls survive)', () => {
+    const html = '<meta property="og:image" content="https://cdn.example/p.jpg?width=1200&amp;signature=abc">';
+    expect(extractImageUrl(html, PAGE)).toBe('https://cdn.example/p.jpg?width=1200&signature=abc');
+  });
+
   test('GIF-shaped urls are rejected — the thumbnail contract is still event art', () => {
     expect(extractImageUrl('<meta property="og:image" content="https://cdn.example/loop.gif">', PAGE))
       .toBeNull();
@@ -83,6 +101,7 @@ function knexStub(rows) {
       select: () => chain,
       whereNull: (col) => { chain._nullGuards.push(col); return chain; },
       whereNotNull: () => chain,
+      whereNotExists: () => chain,
       whereIn: () => chain,
       where: (arg) => { if (arg && typeof arg === 'object' && arg.id) chain._wheres.push(arg.id); return chain; },
       orderByRaw: () => chain,

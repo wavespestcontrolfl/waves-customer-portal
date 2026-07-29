@@ -45,30 +45,44 @@ function backfillEnabled() {
  * page url. Returns null unless the result is a plausible still-image
  * http(s) url that fits the column.
  */
+// HTML attribute values arrive entity-escaped (&amp; in signed CDN query
+// strings is the common case) — decode before URL resolution or the
+// stored request carries an `amp;`-prefixed parameter and breaks.
+function decodeEntities(value) {
+  return String(value)
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCodePoint(parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_, dec) => String.fromCodePoint(parseInt(dec, 10)))
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&apos;/gi, "'");
+}
+
 function extractImageUrl(html, pageUrl) {
   const head = String(html || '');
-  const patterns = [
-    /<meta[^>]+property=["']og:image["'][^>]*content=["']([^"']+)["']/i,
-    /<meta[^>]+content=["']([^"']+)["'][^>]*property=["']og:image["']/i,
-    /<meta[^>]+name=["']twitter:image["'][^>]*content=["']([^"']+)["']/i,
-    /<meta[^>]+content=["']([^"']+)["'][^>]*name=["']twitter:image["']/i,
-  ];
-  for (const re of patterns) {
-    // A page may declare several og:image tags (an image array) — walk
-    // every match of this pattern before falling back to the next one,
-    // so one malformed/GIF first entry doesn't hide a valid later image.
-    for (const m of head.matchAll(new RegExp(re.source, 'gi'))) {
-      let candidate = m[1].trim();
-      try {
-        candidate = new URL(candidate, pageUrl).toString();
-      } catch {
-        continue;
-      }
-      if (!/^https?:\/\//i.test(candidate)) continue;
-      if (candidate.length > MAX_URL_LEN) continue; // truncating a url breaks it — skip
-      if (isLikelyGifUrl(candidate)) continue;
-      return candidate;
+  // Walk <meta> tags in DOCUMENT order and bucket by kind, so a page's
+  // og:image array keeps its declared priority regardless of how each
+  // tag orders its attributes; twitter:image is only a fallback bucket.
+  const og = [];
+  const twitter = [];
+  for (const [tag] of head.matchAll(/<meta\b[^>]*>/gi)) {
+    const contentMatch = tag.match(/content=["']([^"']+)["']/i);
+    if (!contentMatch) continue;
+    if (/property=["']og:image(?::secure_url)?["']/i.test(tag)) og.push(contentMatch[1]);
+    else if (/name=["']twitter:image["']/i.test(tag)) twitter.push(contentMatch[1]);
+  }
+  for (const rawCandidate of [...og, ...twitter]) {
+    let candidate = decodeEntities(rawCandidate.trim());
+    try {
+      candidate = new URL(candidate, pageUrl).toString();
+    } catch {
+      continue;
     }
+    if (!/^https?:\/\//i.test(candidate)) continue;
+    if (candidate.length > MAX_URL_LEN) continue; // truncating a url breaks it — skip
+    if (isLikelyGifUrl(candidate)) continue;
+    return candidate;
   }
   return null;
 }
@@ -113,6 +127,16 @@ async function backfillBatch({ limit = MAX_BATCH, lookup, get, knex = db } = {})
     .select('id', 'title', 'event_url')
     .whereNull('image_url')
     .whereNotNull('event_url')
+    // Article-mode extraction assigns one roundup article's url to every
+    // event it mentions (and deliberately leaves their images null — the
+    // article art is ambiguous). Probing a shared url would stamp the
+    // SAME article og:image onto all of them, so shared urls are skipped.
+    .whereNotExists(function sharedUrl() {
+      this.select(knex.raw('1'))
+        .from('events_raw as dup')
+        .whereRaw('dup.event_url = events_raw.event_url')
+        .whereRaw('dup.id <> events_raw.id');
+    })
     .whereIn('admin_status', ['pending', 'approved', 'featured'])
     .whereNull('merged_into')
     .where((q) => q.whereNull('freshness_status').orWhereNotIn('freshness_status', ['expired', 'stale_recurring']))
