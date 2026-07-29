@@ -7,9 +7,10 @@ const {
   PURCHASE_TEMPLATE_KEY,
   RENTAL_TEMPLATE_KEY,
   START_DATE_FALLBACK,
-  agreementBlocksNewPrep,
   buildTermiteProgramAgreementValues,
+  classifyExistingAgreement,
   collectTermiteFacts,
+  estimateMayDiscount,
   systemLabelFor,
 } = require('../services/termite-program-agreement');
 const { DEFAULT_TEMPLATES } = require('../models/migrations/20260729000001_seed_termite_program_agreements');
@@ -35,7 +36,7 @@ function ownedEstData() {
     inputs: { services: { termite: { system: 'trelona', monitoringTier: 'basic' } } },
     result: {
       lineItems: [
-        { service: 'termite_bait', monthly: 24, perApp: 72, ownership: 'own', installation: { price: 610 } },
+        { service: 'termite_bait', monthly: 24, perApp: 72, annual: 288, visitsPerYear: 4, ownership: 'own', installation: { price: 610 } },
         { service: 'termite_bond', monthly: 18, perApp: 54 },
       ],
     },
@@ -47,7 +48,7 @@ function rentedEstData() {
     inputs: { services: { termite: { system: 'trelona', monitoringTier: 'basic', ownership: 'rent' } } },
     result: {
       lineItems: [
-        { service: 'termite_bait', monthly: 24, perApp: 72, ownership: 'rent', installation: { price: 0 } },
+        { service: 'termite_bait', monthly: 24, perApp: 72, annual: 288, visitsPerYear: 4, ownership: 'rent', installation: { price: 0 } },
         { service: 'termite_station_rental', monthly: 10.33, perApp: 31 },
       ],
     },
@@ -186,7 +187,45 @@ describe('program start date', () => {
   });
 });
 
-describe('agreementBlocksNewPrep', () => {
+describe('discounted accepts never print gross figures (pre-push P0)', () => {
+  test('gross mapper figures + a discounting WaveGuard tier fail closed', () => {
+    const data = {
+      results: { tmBait: { selectedSystem: 'trelona', ai: null, ti: 610, monMonthly: 34 } },
+      recurring: { services: [{ name: 'Termite Bait', perTreatment: 102 }] },
+    };
+    expect(buildTermiteProgramAgreementValues({ waveguard_tier: 'Gold' }, data)).toBeNull();
+    // Bronze/no tier: gross == net, safe to print.
+    expect(buildTermiteProgramAgreementValues({ waveguard_tier: 'Bronze' }, data)).not.toBeNull();
+    expect(buildTermiteProgramAgreementValues({}, data)).not.toBeNull();
+  });
+
+  test('engine final-annual figures are NET and print even under a tier (discounted value)', () => {
+    const data = {
+      inputs: { services: { termite: { system: 'trelona' } } },
+      result: {
+        lineItems: [{
+          service: 'termite_bait', perApp: 102, annual: 408, annualAfterDiscount: 346.8, visitsPerYear: 4,
+          installation: { price: 639 },
+        }],
+      },
+    };
+    const prepared = buildTermiteProgramAgreementValues({ waveguard_tier: 'Gold' }, data);
+    expect(prepared).not.toBeNull();
+    expect(prepared.values.program.per_application).toBe('$86.70'); // 346.80 / 4 — the Gold price, not the gross $102
+  });
+
+  test('manual discount on the estimate also fails gross figures closed', () => {
+    const data = {
+      manualDiscount: { amount: 50 },
+      recurring: { services: [{ name: 'Termite Bait', perTreatment: 72 }] },
+      results: { tmBait: { ti: 610, monMonthly: 24 } },
+    };
+    expect(estimateMayDiscount({}, data)).toBe(true);
+    expect(buildTermiteProgramAgreementValues({}, data)).toBeNull();
+  });
+});
+
+describe('classifyExistingAgreement', () => {
   const estimate = { id: 'est-1', address: '123 Perimeter Way, Bradenton FL' };
   const openRow = (over = {}) => ({
     status: 'sent',
@@ -195,36 +234,43 @@ describe('agreementBlocksNewPrep', () => {
     ...over,
   });
 
-  test('open request for the same property blocks', () => {
-    expect(agreementBlocksNewPrep(openRow(), estimate)).toBe(true);
+  test('open request for the SAME estimate blocks', () => {
+    expect(classifyExistingAgreement(openRow(), estimate)).toBe('blocks');
   });
 
-  test("workflow's literal 'expired' status never blocks a fresh prep", () => {
-    expect(agreementBlocksNewPrep(openRow({ status: 'expired' }), estimate)).toBe(false);
+  test('open request for the same property from a DIFFERENT estimate supersedes (stale prices must not survive)', () => {
+    const row = openRow({
+      document_variables_snapshot: JSON.stringify({ estimate: { id: 'est-0', address: '123 Perimeter Way, Bradenton FL' } }),
+    });
+    expect(classifyExistingAgreement(row, estimate)).toBe('supersede');
   });
 
-  test('signed/cancelled/voided rows never block (re-accept gets a fresh document)', () => {
+  test("workflow's literal 'expired' status is ignored (fresh prep allowed)", () => {
+    expect(classifyExistingAgreement(openRow({ status: 'expired' }), estimate)).toBe('ignore');
+  });
+
+  test('signed/cancelled/voided/declined rows are ignored (re-accept gets a fresh document)', () => {
     for (const status of ['signed', 'cancelled', 'voided', 'declined']) {
-      expect(agreementBlocksNewPrep(openRow({ status }), estimate)).toBe(false);
+      expect(classifyExistingAgreement(openRow({ status }), estimate)).toBe('ignore');
     }
   });
 
-  test('a past share-token expiry unblocks even in an open status', () => {
-    expect(agreementBlocksNewPrep(openRow({ share_token_expires_at: new Date(Date.now() - 1000).toISOString() }), estimate)).toBe(false);
+  test('a past share-token expiry is ignored even in an open status', () => {
+    expect(classifyExistingAgreement(openRow({ share_token_expires_at: new Date(Date.now() - 1000).toISOString() }), estimate)).toBe('ignore');
   });
 
-  test('an open agreement for a DIFFERENT property does not block (multi-property customers)', () => {
+  test('an open agreement for a DIFFERENT property is ignored (multi-property customers)', () => {
     const row = openRow({
       document_variables_snapshot: JSON.stringify({ estimate: { id: 'est-9', address: '400 Other St, Venice FL' } }),
     });
-    expect(agreementBlocksNewPrep(row, estimate)).toBe(false);
+    expect(classifyExistingAgreement(row, estimate)).toBe('ignore');
   });
 
   test('matching estimate id blocks regardless of address text', () => {
     const row = openRow({
       document_variables_snapshot: JSON.stringify({ estimate: { id: 'est-1', address: 'totally different text' } }),
     });
-    expect(agreementBlocksNewPrep(row, estimate)).toBe(true);
+    expect(classifyExistingAgreement(row, estimate)).toBe('blocks');
   });
 });
 

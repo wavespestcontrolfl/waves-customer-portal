@@ -85,12 +85,28 @@ function systemLabelFor(system) {
 // estimate-service-details' ownership walker.
 function collectTermiteFacts(estData) {
   const facts = {
-    hasProgram: false, ownership: 'own', perApp: null, installPrice: null, rentalPerApp: null, system: null,
+    hasProgram: false,
+    ownership: 'own',
+    perApp: null,
+    // Whether perApp is the FINAL customer price. Mapper rows persist
+    // PRE-discount figures by design (v1-legacy-mapper), so a gross figure
+    // is only safe when no WaveGuard/manual discount applies — the builder
+    // fails closed otherwise (pre-push P0: the signed agreement must never
+    // state a higher price than the accepted invoice).
+    perAppIsNet: false,
+    installPrice: null,
+    rentalPerApp: null,
+    system: null,
   };
   if (!estData || typeof estData !== 'object') return facts;
 
-  const takePerApp = (value) => {
-    if (facts.perApp == null && Number.isFinite(Number(value)) && Number(value) > 0) facts.perApp = Number(value);
+  const takePerApp = (value, { net = false } = {}) => {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n <= 0) return;
+    if (facts.perApp == null || (net && !facts.perAppIsNet)) {
+      facts.perApp = n;
+      facts.perAppIsNet = net || facts.perAppIsNet;
+    }
   };
   const takeInstall = (value) => {
     if (facts.installPrice == null && Number.isFinite(Number(value)) && Number(value) > 0) facts.installPrice = Number(value);
@@ -112,6 +128,14 @@ function collectTermiteFacts(estData) {
 
     if (key === 'termite_bait' || (!key && /termite bait/.test(name))) {
       facts.hasProgram = true;
+      // Raw engine lines carry the FINAL discounted annual (same ladder the
+      // comparison sheet uses: manualFinalAnnual ?? annualAfterDiscount ??
+      // annual) — the authoritative net per-application source.
+      const finalAnnual = Number(node.manualFinalAnnual ?? node.annualAfterDiscount ?? node.annual);
+      const visits = Number(node.visitsPerYear ?? node.visits) || 4;
+      if (Number.isFinite(finalAnnual) && finalAnnual > 0) {
+        takePerApp(Math.round((finalAnnual / visits) * 100) / 100, { net: true });
+      }
       takePerApp(node.perApp);
       takePerApp(node.perTreatment);
       takeInstall(node.installation?.price);
@@ -156,13 +180,28 @@ function collectTermiteFacts(estData) {
   return facts;
 }
 
+// A discount can change the customer's real per-application price below the
+// gross mapper figures: any WaveGuard tier above Bronze, or a manual
+// discount recorded on the estimate.
+function estimateMayDiscount(estimate = {}, estData = null) {
+  const tier = String(estimate.waveguard_tier || '').toLowerCase();
+  if (['silver', 'gold', 'platinum'].includes(tier)) return true;
+  const data = estData || parseEstimateData(estimate.estimate_data) || {};
+  return !!(data.manualDiscount || data.manual_discount || data.result?.manualDiscount);
+}
+
 // Build the template values for the matching ownership variant, or null when
 // the required figures can't be resolved (fail-closed — see header).
 // startDateLabel comes from the accepted/booked first visit when one exists;
 // otherwise the merge field says the start is confirmed at installation.
 function buildTermiteProgramAgreementValues(estimate = {}, estData = null, { startDateLabel = null } = {}) {
-  const facts = collectTermiteFacts(estData || parseEstimateData(estimate.estimate_data));
+  const data = estData || parseEstimateData(estimate.estimate_data);
+  const facts = collectTermiteFacts(data);
   if (!facts.hasProgram) return null;
+
+  // Pre-discount figure + a discount in play = the agreement could state a
+  // higher price than the accepted invoice. Fail closed to manual prep.
+  if (!facts.perAppIsNet && estimateMayDiscount(estimate, data)) return null;
 
   const perApplication = money(facts.perApp);
   if (!perApplication) return null;
@@ -207,37 +246,44 @@ function normalizeAddress(value) {
   return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 }
 
-// Does this existing contract row block a fresh prep for the accepted
-// estimate? Only when it is genuinely open AND covers the same property (or
-// the same estimate). Multi-property customers get one agreement per covered
-// structure; expired/cancelled/declined/voided/signed rows never block.
-function agreementBlocksNewPrep(row, estimate, now = new Date()) {
-  if (!row) return false;
+// Classify an existing contract row against the accepted estimate:
+//  'blocks'    — open request for THIS estimate; nothing to do.
+//  'supersede' — open request for the same property from a DIFFERENT
+//                estimate: its figures are stale, so it is cancelled and a
+//                fresh agreement drafted (pre-push P0: a revised accept must
+//                never leave the old-priced legal draft as the live one).
+//  'ignore'    — terminal/expired, or a different property.
+function classifyExistingAgreement(row, estimate, now = new Date()) {
+  if (!row) return 'ignore';
   const status = String(row.status || '').toLowerCase();
-  if (!OPEN_STATUSES.includes(status)) return false;
-  if (row.share_token_expires_at && new Date(row.share_token_expires_at) < now) return false;
+  if (!OPEN_STATUSES.includes(status)) return 'ignore';
+  if (row.share_token_expires_at && new Date(row.share_token_expires_at) < now) return 'ignore';
 
   let snapshot = row.document_variables_snapshot;
   if (typeof snapshot === 'string') {
     try { snapshot = JSON.parse(snapshot); } catch { snapshot = null; }
   }
   const snapEstimateId = snapshot?.estimate?.id || null;
-  if (snapEstimateId && estimate?.id && String(snapEstimateId) === String(estimate.id)) return true;
+  if (snapEstimateId && estimate?.id && String(snapEstimateId) === String(estimate.id)) return 'blocks';
 
   const snapAddress = normalizeAddress(snapshot?.estimate?.address || snapshot?.customer?.address);
   const acceptedAddress = normalizeAddress(estimate?.address);
-  if (!snapAddress || !acceptedAddress) return true; // can't prove a different property — don't duplicate
-  return snapAddress === acceptedAddress;
+  if (!snapAddress || !acceptedAddress) return 'supersede'; // same customer, unprovable property — one open draft max
+  return snapAddress === acceptedAddress ? 'supersede' : 'ignore';
 }
 
-async function existingBlockingProgramAgreement(customerId, estimate, conn = db) {
-  const rows = await conn('customer_contracts')
+async function openProgramAgreements(customerId, conn = db) {
+  return conn('customer_contracts')
     .where({ customer_id: customerId, contract_type: 'document_template' })
     .whereIn('document_template_key', PROGRAM_TEMPLATE_KEYS)
     .whereIn('status', OPEN_STATUSES)
-    .select('id', 'status', 'share_token_expires_at', 'document_variables_snapshot');
+    .select('id', 'customer_id', 'status', 'share_token_expires_at', 'document_variables_snapshot');
+}
+
+async function existingBlockingProgramAgreement(customerId, estimate, conn = db) {
+  const rows = await openProgramAgreements(customerId, conn);
   const now = new Date();
-  return rows.find((row) => agreementBlocksNewPrep(row, estimate, now)) || null;
+  return rows.find((row) => classifyExistingAgreement(row, estimate, now) === 'blocks') || null;
 }
 
 // First upcoming non-cancelled visit booked from this estimate — the honest
@@ -246,7 +292,10 @@ async function scheduledStartDateLabel(estimateId, conn = db) {
   try {
     const row = await conn('scheduled_services')
       .where({ source_estimate_id: estimateId })
-      .whereNotIn('status', ['cancelled'])
+      .whereNotIn('status', ['cancelled', 'skipped'])
+      // Multi-service accepts book pest/lawn visits from the same estimate —
+      // only the termite installation/service anchors the PROGRAM start.
+      .whereRaw("LOWER(service_type) LIKE '%termite%'")
       .orderBy('scheduled_date', 'asc')
       .first('scheduled_date');
     if (!row?.scheduled_date) return null;
@@ -369,8 +418,29 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       // duplicate drafts — the advisory xact lock + in-transaction re-check
       // make the dedupe atomic (pre-push P1).
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [dedupeLockKey]);
-      const blocked = await existingBlockingProgramAgreement(customerId, estimate, trx);
-      if (blocked) return null;
+      const openRows = await openProgramAgreements(customerId, trx);
+      const nowTs = new Date();
+      if (openRows.some((r) => classifyExistingAgreement(r, estimate, nowTs) === 'blocks')) return null;
+      // A revised estimate accepted for the same property supersedes the
+      // older open draft — cancel it so exactly one live agreement exists
+      // and it carries the ACCEPTED figures.
+      const stale = openRows.filter((r) => classifyExistingAgreement(r, estimate, nowTs) === 'supersede');
+      for (const staleRow of stale) {
+        await trx('customer_contracts').where({ id: staleRow.id }).update({
+          status: 'cancelled',
+          cancelled_at: nowTs,
+          cancelled_reason: 'Superseded by a newer accepted termite estimate',
+          updated_at: nowTs,
+        });
+        await trx('customer_contract_events').insert({
+          contract_id: staleRow.id,
+          customer_id: customerId,
+          event_type: 'cancelled',
+          actor_type: 'system',
+          actor_id: null,
+          metadata: JSON.stringify({ reason: 'superseded', supersededByEstimateId: estimate.id }),
+        });
+      }
       const [row] = await trx('customer_contracts').insert({
         customer_id: customer.id,
         created_by: null,
@@ -485,9 +555,10 @@ module.exports = {
   RENTAL_TEMPLATE_KEY,
   PROGRAM_TEMPLATE_KEYS,
   START_DATE_FALLBACK,
-  agreementBlocksNewPrep,
   buildTermiteProgramAgreementValues,
+  classifyExistingAgreement,
   collectTermiteFacts,
+  estimateMayDiscount,
   maybeCreateTermiteProgramAgreement,
   reconcileTermiteProgramAgreements,
   systemLabelFor,
