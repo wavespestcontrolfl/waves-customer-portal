@@ -562,14 +562,24 @@ export default function TechTreatmentZoneModal({
               >
                 Close loop
               </button>
+              {/* A lawn OUTLINE is an area claim — it needs a closed loop of
+                  3+ points before it can be set; an open 2-point line would
+                  save captureMode 'lawn' and read as a treated lawn area on
+                  the report (codex P2 #3038). Perimeter mode keeps its
+                  open-path spray behavior. */}
               <button
-                style={btnStyle('primary', points.length < 2)}
-                disabled={points.length < 2}
+                style={btnStyle('primary', lawnMode ? (points.length < 3 || !closed) : points.length < 2)}
+                disabled={lawnMode ? (points.length < 3 || !closed) : points.length < 2}
                 onClick={() => setStep('play')}
               >
                 {lawnMode ? 'Set outline' : 'Play spray'}
               </button>
             </div>
+            {lawnMode && points.length >= 3 && !closed && (
+              <p style={{ margin: '8px 0 0', fontSize: smallText, color: T.muted }}>
+                Tap Close loop to finish the lawn outline.
+              </p>
+            )}
           </>
         )}
 

@@ -120,8 +120,15 @@ async function saveTreatmentZoneMap({
     address: address ? String(address).slice(0, 300) : null,
     snapshot_s3_key: snapshotKey || existing?.snapshot_s3_key || null,
     // 'lawn' (turf outline) vs 'perimeter' (building spray trace) — anything
-    // else stores NULL, same as legacy rows (codex P1 #3038).
-    capture_mode: ['lawn', 'perimeter'].includes(captureMode) ? captureMode : null,
+    // else stores NULL, same as legacy rows (codex P1 #3038). 'lawn' is an
+    // AREA claim: only a closed loop of 3+ points qualifies; an open trace
+    // downgrades to unlabeled so the report never presents a line as the
+    // treated lawn area (codex P2 #3038, mirrors the client gate).
+    capture_mode: (() => {
+      const mode = ['lawn', 'perimeter'].includes(captureMode) ? captureMode : null;
+      if (mode === 'lawn' && (!closedLoop || points.length < 3)) return null;
+      return mode;
+    })(),
     updated_at: knex.fn.now(),
   };
 
