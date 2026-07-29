@@ -10107,6 +10107,20 @@ router.put('/:token/accept', async (req, res, next) => {
       }
     } catch (e) { logger.error(`[notifications] Estimate accepted notification failed: ${e.message}`); }
 
+    // Termite bait accepts prep the signable program agreement (draft +
+    // admin bell; customer send only behind
+    // GATE_TERMITE_PROGRAM_AGREEMENT_AUTOSEND). The service never throws
+    // and skips silently for non-termite estimates. Re-read the row so the
+    // agreement prefills from the ACCEPTED figures written above, not the
+    // pre-accept snapshot in memory.
+    if (customerId) {
+      try {
+        const { maybeCreateTermiteProgramAgreement } = require('../services/termite-program-agreement');
+        const acceptedRow = await db('estimates').where({ id: estimate.id }).first();
+        await maybeCreateTermiteProgramAgreement({ estimate: acceptedRow || estimate, customerId, req });
+      } catch (e) { logger.error(`[termite-agreement] accept hook failed: ${e.message}`); }
+    }
+
     // Customer-facing accepts should get the same admin phone workflow as a
     // quote request: call Adam from a Waves number during business hours, then
     // auto-bridge to the customer when the leadAutoBridge gate is enabled.
