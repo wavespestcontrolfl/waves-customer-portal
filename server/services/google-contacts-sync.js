@@ -121,6 +121,19 @@ async function stampIfUnchanged(table, row, patch) {
     .update({ ...patch, google_contact_synced_at: db.raw('updated_at') });
 }
 
+/**
+ * Verification stamp: same raced-edit guard as stampIfUnchanged, but the
+ * watermark advances to the CHECK time — copying the unchanged updated_at
+ * back would leave the row eligible again immediately and pin the lane to
+ * the same oldest rows forever.
+ */
+async function stampVerified(table, row, resourceName, now) {
+  return db(table)
+    .where({ id: row.id })
+    .whereRaw("date_trunc('milliseconds', updated_at) <= ?", [row.updated_at])
+    .update({ google_contact_id: resourceName, google_contact_synced_at: now });
+}
+
 /** True when another LIVE row still references this Google contact. */
 async function contactInUseElsewhere(resourceName, exceptTable, exceptId) {
   for (const table of ['customers', 'leads']) {
@@ -191,6 +204,9 @@ async function upsertContact(people, table, row, kind, gapMs) {
         requestBody: {
           ...body,
           memberships: mergedMemberships(current.data.memberships),
+          // The People API REQUIRES the contact source metadata (with its
+          // etag) on updates — omitting it 400s every update.
+          metadata: current.data.metadata,
           etag: current.data.etag,
         },
       });
@@ -408,7 +424,10 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
           await deleteContact(people, row.google_contact_id);
           await sleep(gapMs);
         }
-        await db(table).where({ id: row.id }).update({ google_contact_id: null });
+        // The watermark clears WITH the pointer — a later restore
+        // (deleted_at flip only, not a contact-field change) must find the
+        // row stale so the restored customer gets a contact again.
+        await db(table).where({ id: row.id }).update({ google_contact_id: null, google_contact_synced_at: null });
         counts.retired += 1;
       } catch (err) {
         if (isScopeError(err)) { counts.blocked = 'contacts_scope_missing'; return counts; }
@@ -450,9 +469,18 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
   for (const { table, kind, row } of verifyRows) {
     try {
       const { resourceName, created } = await upsertContact(people, table, row, kind, gapMs);
-      const stamped = await stampIfUnchanged(table, row, { google_contact_id: resourceName });
+      let stamped = 0;
+      try {
+        stamped = await stampVerified(table, row, resourceName, now);
+      } catch (stampErr) {
+        // Same fresh-create compensation as the main lane — a 404-recreate
+        // whose stamp threw would otherwise leak a replacement per retry.
+        if (created && resourceName) {
+          await deleteContact(people, resourceName).catch(() => {});
+        }
+        throw stampErr;
+      }
       if (!stamped && created && resourceName) {
-        // Same raced-stamp compensation as the main lane.
         await deleteContact(people, resourceName).catch(() => {});
       }
       if (stamped) counts.verified += 1;

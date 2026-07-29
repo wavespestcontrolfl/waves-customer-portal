@@ -132,13 +132,16 @@ describe('runContactsSync', () => {
     setupDb({ customers: [{ ...CUSTOMER, google_contact_id: 'people/abc' }] });
     mockPeopleApi.people.get.mockResolvedValueOnce({ data: {
       etag: 'e1',
+      metadata: { sources: [{ type: 'CONTACT', id: 'abc', etag: 'se1' }] },
       memberships: [{ contactGroupMembership: { contactGroupResourceName: 'contactGroups/vipCustomLabel' } }],
     } });
     mockPeopleApi.people.updateContact.mockResolvedValueOnce({ data: { resourceName: 'people/abc' } });
     await runContactsSync({ gapMs: 0 });
-    const sent = mockPeopleApi.people.updateContact.mock.calls[0][0].requestBody.memberships
-      .map((m) => m.contactGroupMembership.contactGroupResourceName);
-    expect(sent).toEqual(['contactGroups/vipCustomLabel', 'contactGroups/myContacts', 'contactGroups/starred']);
+    const sentBody = mockPeopleApi.people.updateContact.mock.calls[0][0].requestBody;
+    expect(sentBody.memberships.map((m) => m.contactGroupMembership.contactGroupResourceName))
+      .toEqual(['contactGroups/vipCustomLabel', 'contactGroups/myContacts', 'contactGroups/starred']);
+    // The People API 400s updates that omit the fetched source metadata.
+    expect(sentBody.metadata).toEqual({ sources: [{ type: 'CONTACT', id: 'abc', etag: 'se1' }] });
   });
 
   test('a converted lead TRANSFERS its contact and refreshes the in-run customer snapshot', async () => {
@@ -265,12 +268,14 @@ describe('runContactsSync', () => {
     const counts = await runContactsSync({ gapMs: 0 });
     expect(counts.retired).toBe(1);
     expect(mockPeopleApi.people.deleteContact).toHaveBeenCalledWith({ resourceName: 'people/loser' });
-    expect(state.updates.find((u) => u.table === 'customers').patch).toEqual({ google_contact_id: null });
+    // Watermark clears too — a restore (deleted_at flip only) finds the
+    // row stale and re-mints the contact.
+    expect(state.updates.find((u) => u.table === 'customers').patch).toEqual({ google_contact_id: null, google_contact_synced_at: null });
   });
 
   test('verification lane re-pushes long-unverified rows — external drift heals', async () => {
     const staleVerified = { ...CUSTOMER, google_contact_id: 'people/drifted', google_contact_synced_at: '2026-07-01T00:00:00Z' };
-    setupDb({
+    const verifyState = setupDb({
       customersSelects: [[], [], [staleVerified]],
       leadsSelects: [[], [], []],
     });
@@ -282,6 +287,28 @@ describe('runContactsSync', () => {
     const counts = await runContactsSync({ gapMs: 0, now: new Date('2026-07-28T12:00:00Z') });
     expect(counts.verified).toBe(1);
     expect(mockPeopleApi.people.createContact).toHaveBeenCalled();
+    // The watermark advances to the CHECK time — writing the old
+    // updated_at back would pin the lane to the same oldest rows forever.
+    const patch = verifyState.updates.find((u) => u.table === 'customers').patch;
+    expect(patch.google_contact_synced_at).toEqual(new Date('2026-07-28T12:00:00Z'));
+  });
+
+  test('a thrown verification stamp compensates the fresh 404-replacement', async () => {
+    const staleVerified = { ...CUSTOMER, google_contact_id: 'people/drifted', google_contact_synced_at: '2026-07-01T00:00:00Z' };
+    setupDb({
+      customersSelects: [[], [], [staleVerified]],
+      leadsSelects: [[], [], []],
+      updateResults: { customers: [new Error('db down')] },
+    });
+    const err = new Error('not found');
+    err.code = 404;
+    mockPeopleApi.people.get.mockRejectedValueOnce(err);
+    mockPeopleApi.people.createContact.mockResolvedValueOnce({ data: { resourceName: 'people/reborn' } });
+    const counts = await runContactsSync({ gapMs: 0, now: new Date('2026-07-28T12:00:00Z') });
+    expect(counts.verified).toBe(0);
+    expect(counts.failed).toBe(1);
+    // The replacement is rolled back — retries can't leak one per pass.
+    expect(mockPeopleApi.people.deleteContact).toHaveBeenCalledWith({ resourceName: 'people/reborn' });
   });
 
   test('scope-missing aborts WITHOUT stamping — rows retry after the one-time re-consent', async () => {
