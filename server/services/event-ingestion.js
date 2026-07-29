@@ -97,7 +97,11 @@ function revivalResetFields() {
     // clobber a backfilled value — EXCEPT on revival, where the old
     // occurrence's poster would be stale art for the new occurrence, so
     // the feed value (even null) is taken verbatim and the row re-probes.
-    image_url: db.raw(`CASE WHEN ${REVIVAL_COND} THEN EXCLUDED.image_url ELSE COALESCE(EXCLUDED.image_url, events_raw.image_url) END`, { etMidnight }),
+    // The url-change condition mirrors the attempt-stamp reset below: an
+    // image sourced from the OLD page is presumed stale once the url
+    // moves, so the feed value is taken verbatim (null clears it) and
+    // the re-opened backoff lets the new page be probed.
+    image_url: db.raw(`CASE WHEN (${REVIVAL_COND}) OR (events_raw.event_url IS DISTINCT FROM EXCLUDED.event_url) THEN EXCLUDED.image_url ELSE COALESCE(EXCLUDED.image_url, events_raw.image_url) END`, { etMidnight }),
     // Re-open the probe backoff when the occurrence revives OR the event
     // url itself changed (the old page's failed probe says nothing about
     // the new page).

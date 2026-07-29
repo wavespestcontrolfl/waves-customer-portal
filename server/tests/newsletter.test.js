@@ -498,11 +498,15 @@ describe('event ingestion revivalResetFields — past→future re-date clears fr
     // curation_note) AND the six structured-assessment columns (2026-07-28
     // rubric) — a revived occurrence starts clean, so a later missing or
     // malformed reassessment can never leave a prior occurrence's score
-    // attached. All nullable, all safe to set in the ON CONFLICT update.
+    // attached. The image pair (og:image backfill contract, 2026-07-28:
+    // feed wins / null preserves backfill / revival or url change takes
+    // the feed value verbatim and re-opens the probe backoff) rides the
+    // same merge. All nullable, all safe to set in the ON CONFLICT update.
     expect(Object.keys(f).sort()).toEqual([
       'audience_tags', 'curated_at', 'curation_note', 'editorial_evidence',
-      'editorial_score', 'freshness_revival_pending', 'normalized_at',
-      'novelty_type', 'rejection_codes', 'score_breakdown',
+      'editorial_score', 'freshness_revival_pending', 'image_backfill_attempted_at',
+      'image_url', 'normalized_at', 'novelty_type', 'rejection_codes',
+      'score_breakdown',
     ]);
   });
 

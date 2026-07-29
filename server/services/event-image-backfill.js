@@ -131,11 +131,15 @@ async function backfillBatch({ limit = MAX_BATCH, lookup, get, knex = db } = {})
     // event it mentions (and deliberately leaves their images null — the
     // article art is ambiguous). Probing a shared url would stamp the
     // SAME article og:image onto all of them, so shared urls are skipped.
+    // Merged losers keep their event_url — only ACTIVE rows signal the
+    // article-roundup ambiguity; a survivor sharing a url with its own
+    // merged duplicate is still a genuine detail page.
     .whereNotExists(function sharedUrl() {
       this.select(knex.raw('1'))
         .from('events_raw as dup')
         .whereRaw('dup.event_url = events_raw.event_url')
-        .whereRaw('dup.id <> events_raw.id');
+        .whereRaw('dup.id <> events_raw.id')
+        .whereRaw('dup.merged_into IS NULL');
     })
     .whereIn('admin_status', ['pending', 'approved', 'featured'])
     .whereNull('merged_into')
