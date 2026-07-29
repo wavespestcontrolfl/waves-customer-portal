@@ -1254,6 +1254,28 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       setTimeout(() => setToast(''), 2800);
       return;
     }
+    // Revalidate a cached quote at the moment of booking: lot data or the
+    // live pricing config may have changed while the modal sat open, and the
+    // POST recalculates server-side — the operator must confirm the amount
+    // that will actually be stamped.
+    if (services.some((s) => isOneTimeMosquitoLine(s) && !lineHasEnteredPrice(s))) {
+      try {
+        const fresh = await adminFetch(`/admin/schedule/mosquito-onetime-quote?customerId=${encodeURIComponent(selectedCustomer.id)}`);
+        const freshPrice = fresh?.price != null ? Number(fresh.price) : null;
+        if (freshPrice !== mosquitoQuote?.price) {
+          setMosquitoQuote({ customerId: selectedCustomer.id, status: 'ready', price: freshPrice });
+          setToast('The lot-based mosquito price changed — totals updated, review and submit again');
+          setTimeout(() => setToast(''), 3200);
+          return;
+        }
+      } catch {
+        mosquitoQuoteReqRef.current = null;
+        setMosquitoQuote(null);
+        setToast('Could not re-verify the mosquito price — retrying; submit again in a moment or enter a price');
+        setTimeout(() => setToast(''), 3200);
+        return;
+      }
+    }
     setSaving(true);
     const groups = groupServicesForAppointmentSubmit(services);
     const results = [];
