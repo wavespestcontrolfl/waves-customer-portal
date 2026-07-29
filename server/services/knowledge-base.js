@@ -626,7 +626,15 @@ Flag if: outdated regulations, incorrect chemical rates, expired certifications,
       // never existed in the engine; audit 2026-07-28). Values here now move
       // with pricing_config / admin edits on the next KB sync, no code edit.
       const pricingEngine = require('./pricing-engine');
-      await pricingEngine.syncConstantsFromDB(db);
+      // syncConstantsFromDB reports failure by RETURNING false (it restores
+      // defaults/cached constants instead of throwing) — a failed sync must
+      // not overwrite the KB doc with values that may not match pricing_config
+      // (codex P2 on #3040). Keep the previous snapshot and let the next sync
+      // refresh it.
+      const pricingSyncOk = await pricingEngine.syncConstantsFromDB(db);
+      if (pricingSyncOk === false) {
+        throw new Error('live pricing sync unavailable — keeping previous snapshot');
+      }
       const { PEST, PROPERTY_TYPE_ADJ, WAVEGUARD, LAWN_TIERS, LAWN_PRICING_V2 } = pricingEngine.constants;
       const signed = (n) => (n > 0 ? `+$${n}` : n < 0 ? `-$${Math.abs(n)}` : '$0');
       const adj = PEST.additionalAdjustments || {};
