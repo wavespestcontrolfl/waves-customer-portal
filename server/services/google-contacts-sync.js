@@ -182,8 +182,8 @@ function contactBodyFor(row, kind, table) {
     // row already minted even when the create response was lost.
     clientData: [{ key: 'waves_row', value: rowTag(table, row) }],
   };
-  if (email) body.emailAddresses = [{ value: email }];
-  if (phone) body.phoneNumbers = [{ value: phone }];
+  if (email) body.emailAddresses = [{ value: email, type: WAVES_FIELD_TYPE }];
+  if (phone) body.phoneNumbers = [{ value: phone, type: WAVES_FIELD_TYPE }];
   const addressRows = row.__accountAddresses
     || (kind === 'customer' && row.address_line1 ? [row] : []);
   if (addressRows.length) {
@@ -192,6 +192,7 @@ function contactBodyFor(row, kind, table) {
       city: a.city || '',
       region: a.state || 'FL',
       postalCode: a.zip || '',
+      type: WAVES_FIELD_TYPE,
     }));
   }
   return body;
@@ -215,9 +216,15 @@ const CREATE_READ_FIELDS = 'names,metadata';
  * operator-added one, so clearing a canonical field demotes its old value
  * to a preserved secondary rather than removing it from Google.
  */
+const WAVES_FIELD_TYPE = 'Waves CRM';
 function mergeValueLists(ours, existing, keyFn) {
   const ourKeys = new Set((ours || []).map(keyFn).filter(Boolean));
   const preserved = (existing || []).filter((e) => {
+    // Entries WE published carry the Waves type — when they leave our
+    // canonical set (retired property address, changed email) they must
+    // drop, not accumulate as fake operator data. Untyped/other-typed
+    // entries are genuinely operator-added and survive.
+    if (e?.type === WAVES_FIELD_TYPE) return false;
     const k = keyFn(e);
     return k && !ourKeys.has(k);
   });
@@ -257,20 +264,14 @@ function mergedMemberships(current) {
  * unraced row stamps exactly (updated_at > synced_at goes false); a raced
  * edit fails the ms-truncated comparison and re-syncs next run.
  */
-async function stampIfUnchanged(table, row, patch) {
-  const q = db(table)
-    .where({ id: row.id });
+/** Raced-edit guards shared by the stamps and rejection parking. */
+function applyStampGuards(q, row) {
   if (row.updated_at_us) {
-    // Exact µs token — a same-millisecond raced edit differs here and
-    // vetoes the stamp.
     q.whereRaw("to_char(updated_at, 'YYYY-MM-DD HH24:MI:SS.US') = ?", [row.updated_at_us]);
   } else {
     q.whereRaw("date_trunc('milliseconds', updated_at) <= ?", [row.updated_at]);
   }
   if (row.__canonicalIdentity?.id) {
-    // The published payload came from the account row read earlier — an
-    // account edit racing this pass must veto the stamp the same way a row
-    // edit does, or the fresher canonical values would never re-publish.
     if (row.__canonicalIdentity.updated_at_us) {
       q.whereRaw(
         "NOT EXISTS (SELECT 1 FROM customer_accounts ca WHERE ca.id = ? AND to_char(ca.updated_at, 'YYYY-MM-DD HH24:MI:SS.US') <> ?)",
@@ -283,6 +284,11 @@ async function stampIfUnchanged(table, row, patch) {
       );
     }
   }
+  return q;
+}
+
+async function stampIfUnchanged(table, row, patch) {
+  const q = applyStampGuards(db(table).where({ id: row.id }), row);
   // GREATEST(updated_at, now()) — DB-side clock, skew-free: the watermark
   // must also cover the ACCOUNT staleness clause (ca.updated_at compares
   // against it), and copying updated_at alone would loop account-stale rows
@@ -297,29 +303,7 @@ async function stampIfUnchanged(table, row, patch) {
  * the same oldest rows forever.
  */
 async function stampVerified(table, row, resourceName, now) {
-  const q = db(table).where({ id: row.id });
-  if (row.updated_at_us) {
-    q.whereRaw("to_char(updated_at, 'YYYY-MM-DD HH24:MI:SS.US') = ?", [row.updated_at_us]);
-  } else {
-    q.whereRaw("date_trunc('milliseconds', updated_at) <= ?", [row.updated_at]);
-  }
-  // Same canonical-account raced-edit guard as stampIfUnchanged — an
-  // account identity edit between the canonical read and this stamp must
-  // veto it, or advancing synced_at to `now` would hide the change from
-  // the account-staleness predicate.
-  if (row.__canonicalIdentity?.id) {
-    if (row.__canonicalIdentity.updated_at_us) {
-      q.whereRaw(
-        "NOT EXISTS (SELECT 1 FROM customer_accounts ca WHERE ca.id = ? AND to_char(ca.updated_at, 'YYYY-MM-DD HH24:MI:SS.US') <> ?)",
-        [row.__canonicalIdentity.id, row.__canonicalIdentity.updated_at_us],
-      );
-    } else {
-      q.whereRaw(
-        "NOT EXISTS (SELECT 1 FROM customer_accounts ca WHERE ca.id = ? AND date_trunc('milliseconds', ca.updated_at) > ?)",
-        [row.__canonicalIdentity.id, row.__canonicalIdentity.updated_at],
-      );
-    }
-  }
+  const q = applyStampGuards(db(table).where({ id: row.id }), row);
   return q.update({ google_contact_id: resourceName, google_contact_synced_at: now });
 }
 
@@ -401,7 +385,11 @@ async function findExistingContact(people, row, tag, { queryOverride = null, req
 async function upsertContact(people, table, row, kind, gapMs, { markerSearchKey = null, markerPriorId = null } = {}) {
   const body = contactBodyFor(row, kind, table);
   let resourceName = row.google_contact_id;
-  if (!resourceName) {
+  if (!resourceName && !row.__releasedShared) {
+    // A row that just RELEASED a shared contact must mint its own — the
+    // released contact may still carry this row's stale waves_row tag (we
+    // were the last to push it), and tag adoption would re-seize the other
+    // person's contact.
     resourceName = await findExistingContact(people, row, rowTag(table, row), { queryOverride: markerSearchKey });
   }
   for (let attempt = 0; resourceName && attempt < 2; attempt += 1) {
@@ -814,8 +802,43 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
           // The contact is SHARED but this lead's identity no longer
           // matches any sibling (the ownership probe found none) — an
           // update would overwrite the OTHER person's contact. Release the
-          // shared id; this row mints its own contact below.
+          // shared id; this row mints its own contact below (tag adoption
+          // bypassed: the released contact may still carry OUR stale tag).
+          const releasedId = row.google_contact_id;
           row.google_contact_id = null;
+          row.__releasedShared = true;
+          // Best-effort: hand the released contact's waves_row tag to a
+          // surviving owner so future tag searches resolve to THEM.
+          try {
+            let survivorTag = null;
+            for (const t of ['customers', 'leads']) {
+              const survivor = await db(t)
+                .where('google_contact_id', releasedId)
+                .whereNull('deleted_at')
+                .whereNot(t === table ? 'id' : 'id', t === table ? row.id : '00000000-0000-0000-0000-000000000000')
+                .first();
+              if (survivor) { survivorTag = `${t}:${survivor.id}`; break; }
+            }
+            if (survivorTag) {
+              const current = await people.people.get({ resourceName: releasedId, personFields: 'metadata,clientData' });
+              await sleep(gapMs);
+              await people.people.updateContact({
+                resourceName: releasedId,
+                updatePersonFields: 'clientData',
+                requestBody: {
+                  clientData: mergedClientData(current.data.clientData, survivorTag),
+                  metadata: current.data.metadata,
+                  etag: current.data.etag,
+                },
+              });
+              await sleep(gapMs);
+            }
+          } catch (retagErr) {
+            // Residual: a stale tag on the released contact. Bounded — the
+            // release flag already blocks THIS row's re-adoption, and the
+            // survivor's own passes update by resource id, not tag.
+            logger.warn(`[contacts-sync] released-contact retag failed: ${safeErr(retagErr)}`);
+          }
         }
       }
       if (kind === 'customer' && row.account_id && (!row.google_contact_id || row.__recoveredFresh)) {
@@ -1005,10 +1028,11 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
         // the row (watermark stamped current) — any contact-field edit
         // re-queues it via the touch triggers, and rows holding a contact
         // retry through the weekly verification lane.
-        // Same unchanged-row guard as the stamps: a correction racing the
-        // rejected request must re-queue, not get parked over.
-        await db(table).where({ id: row.id })
-          .whereRaw("date_trunc('milliseconds', updated_at) <= ?", [row.updated_at])
+        // Same raced-edit guards as the stamps (row µs token AND canonical
+        // account timestamp): a correction racing the rejected request —
+        // on either the row or its account — must re-queue, not get
+        // parked over.
+        await applyStampGuards(db(table).where({ id: row.id }), row)
           .update({ google_contact_synced_at: new Date() })
           .catch(() => {});
         logger.warn(`[contacts-sync] ${table} ${row.id} parked after deterministic rejection (${safeErr(err)}) — an edit re-queues it`);

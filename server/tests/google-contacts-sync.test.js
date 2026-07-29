@@ -132,7 +132,7 @@ describe('runContactsSync', () => {
     await runContactsSync({ gapMs: 0 });
     const body = mockPeopleApi.people.createContact.mock.calls[0][0].requestBody;
     expect(body.emailAddresses).toBeUndefined();
-    expect(body.phoneNumbers).toEqual([{ value: '9415550100' }]);
+    expect(body.phoneNumbers).toEqual([{ value: '9415550100', type: 'Waves CRM' }]);
   });
 
   test('updates merge memberships — operator-added groups survive the sync', async () => {
@@ -728,7 +728,7 @@ describe('runContactsSync', () => {
     await runContactsSync({ gapMs: 0 });
     const body = mockPeopleApi.people.updateContact.mock.calls[0][0].requestBody;
     expect(body.names[0].givenName).toBe('Canonical');
-    expect(body.emailAddresses).toEqual([{ value: 'canon@x.example' }]);
+    expect(body.emailAddresses).toEqual([{ value: 'canon@x.example', type: 'Waves CRM' }]);
   });
 
   test('batched sharers of a dead resource create ONE replacement, not one each', async () => {
@@ -867,7 +867,7 @@ describe('runContactsSync', () => {
     const body = mockPeopleApi.people.updateContact.mock.calls[0][0].requestBody;
     // The property row's stale email does NOT resurrect the cleared value.
     expect(body.emailAddresses || []).toEqual([]);
-    expect(body.phoneNumbers).toEqual([{ value: '9415550100' }]);
+    expect(body.phoneNumbers).toEqual([{ value: '9415550100', type: 'Waves CRM' }]);
   });
 
   test('revoked Google credentials BLOCK the run — no rows parked, job health sees it', async () => {
@@ -1003,6 +1003,54 @@ describe('runContactsSync', () => {
     // No stamp either — the row's own edit re-queues it with data intact.
     expect(state.updates).toEqual([]);
     expect(counts.skipped).toBe(0);
+  });
+
+  test('a RETIRED property address drops from the shared contact (Waves-typed, not operator data)', async () => {
+    setupDb({ customers: [{ ...CUSTOMER, google_contact_id: 'people/abc' }] });
+    mockPeopleApi.people.get.mockResolvedValueOnce({ data: {
+      etag: 'e1',
+      metadata: { sources: [] },
+      memberships: [],
+      addresses: [
+        { streetAddress: '1 Palm Way', postalCode: '34219', type: 'Waves CRM' },
+        { streetAddress: '7 Retired Ct', postalCode: '34285', type: 'Waves CRM' },
+        { streetAddress: '5 Operator Ln', postalCode: '34220' },
+      ],
+    } });
+    mockPeopleApi.people.updateContact.mockResolvedValueOnce({ data: { resourceName: 'people/abc' } });
+    await runContactsSync({ gapMs: 0 });
+    const sent = mockPeopleApi.people.updateContact.mock.calls[0][0].requestBody.addresses.map((a) => a.streetAddress);
+    // Waves-typed stale address dropped; operator-added address preserved.
+    expect(sent).toContain('1 Palm Way');
+    expect(sent).toContain('5 Operator Ln');
+    expect(sent).not.toContain('7 Retired Ct');
+  });
+
+  test('a released shared contact is NEVER re-adopted via our stale tag — a fresh contact minted', async () => {
+    setupDb({
+      leads: [{ id: 'l-2', first_name: 'Newname', email: 'different@new.example', phone: '9415550199', customer_id: null, google_contact_id: 'people/shared', updated_at: '2026-07-28T11:00:00Z' }],
+      // ownership probes miss; in-use finds the sibling; survivor probe
+      // finds the sibling again (retag target)
+      firstResults: { customers: [null, null, null], leads: [null, null, { id: 'l-1' }, { id: 'l-1' }] },
+    });
+    // A tag search WOULD have matched the released contact (stale tag).
+    mockPeopleApi.people.searchContacts.mockImplementation(async ({ query }) => (
+      query === ''
+        ? { data: {} }
+        : { data: { results: [{ person: { resourceName: 'people/shared', clientData: [{ key: 'waves_row', value: 'leads:l-2' }] } }] } }
+    ));
+    // retag get + update on the released contact
+    mockPeopleApi.people.get.mockResolvedValueOnce({ data: { etag: 'e1', metadata: { sources: [] }, clientData: [{ key: 'waves_row', value: 'leads:l-2' }] } });
+    mockPeopleApi.people.updateContact.mockResolvedValueOnce({ data: { resourceName: 'people/shared' } });
+    mockPeopleApi.people.createContact.mockResolvedValueOnce({ data: { resourceName: 'people/own' } });
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(counts.synced).toBe(1);
+    // Adoption bypassed — a fresh contact was minted...
+    expect(mockPeopleApi.people.createContact).toHaveBeenCalledTimes(1);
+    // ...and the released contact's tag handed to the surviving owner.
+    const retag = mockPeopleApi.people.updateContact.mock.calls[0][0];
+    expect(retag.resourceName).toBe('people/shared');
+    expect(retag.requestBody.clientData).toEqual([{ key: 'waves_row', value: 'leads:l-1' }]);
   });
 
   test('scope-missing aborts WITHOUT stamping — rows retry after the one-time re-consent', async () => {
