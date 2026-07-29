@@ -774,6 +774,7 @@ export default function TechHomePage() {
           lat={zoneTarget.lat}
           lng={zoneTarget.lng}
           onClose={() => setZoneTarget(null)}
+          lawnMode={/lawn|turf/i.test(String(zoneTarget.service_type || zoneTarget.serviceType || ''))}
         />
       )}
 

@@ -680,6 +680,7 @@ router.post('/:id/treatment-zone', upload.single('snapshot'), async (req, res, n
       zoom: payload.zoom,
       address: payload.address,
       snapshotPngBuffer: req.file?.buffer || null,
+      captureMode: payload.captureMode,
     });
 
     logger.info(

@@ -299,6 +299,10 @@ export default function TechTreatmentZoneModal({
         lng: center.lng,
         zoom,
         address: address || null,
+        // Discriminates the outline workflow from the perimeter spray trace —
+        // the report only labels a trace "treated lawn area" when it was
+        // actually captured as one (codex P1 #3038).
+        captureMode: lawnMode ? 'lawn' : 'perimeter',
       }));
       const token = getAdminAuthToken();
       const res = await fetch(`${API}/api/tech/services/${serviceId}/treatment-zone`, {

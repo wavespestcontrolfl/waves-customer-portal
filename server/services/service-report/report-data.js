@@ -1862,7 +1862,16 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db) {
       photosFor(initialRow.id),
       photosFor(assessment.id),
     ]);
-    const zoneKey = (p) => String(p?.zone || '').trim().toLowerCase();
+    // The primary save path (admin-lawn-assessment) records the capture
+    // location in photo_type and leaves zone unset — key on either, ignoring
+    // the non-locational photo_type values, so zone matching actually engages
+    // for those rows (codex P1 #3038).
+    const zoneKey = (p) => {
+      const zone = String(p?.zone || '').trim().toLowerCase();
+      if (zone) return zone;
+      const type = String(p?.photo_type || '').trim().toLowerCase();
+      return ['', 'general', 'best', 'other', 'misc'].includes(type) ? '' : type;
+    };
     let beforePhoto = null;
     let afterPhoto = null;
     for (const candidate of beforeCandidates) {
@@ -2425,6 +2434,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
             linearFt: numberOrNull(tracedRow.linear_ft),
             closedLoop: Boolean(tracedRow.closed_loop),
             capturedAt: tracedRow.updated_at || tracedRow.created_at || null,
+            // 'lawn' | 'perimeter' | null (legacy rows predate the column) —
+            // the client only claims "treated lawn area" for rows actually
+            // captured by the lawn outline workflow (codex P1 #3038).
+            captureMode: tracedRow.capture_mode || null,
             label: 'Treated perimeter traced on-site by your technician.',
             // Traced path in snapshot pixel space (1280x960) so the report
             // can REPLAY the spray application the tech saw (owner

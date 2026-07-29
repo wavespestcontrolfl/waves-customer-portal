@@ -35,11 +35,18 @@ export default function TracedTreatmentZoneMap({ traced, live = true, variant = 
 
   if (!traced?.snapshotUrl) return null;
   const outline = variant === 'outline';
+  // Only traces CAPTURED by the lawn outline workflow may claim "treated lawn
+  // area" — legacy rows predate capture_mode and may be building-perimeter
+  // traces, so they keep a neutral caption and skip the interior wash while
+  // still getting the calmer outline presentation (codex P1 #3038).
+  const lawnCapture = traced.captureMode === 'lawn';
   // No linear-ft figure in the customer caption (owner 2026-07-21). The
   // server label speaks perimeter language — the outline variant tells the
   // area story instead.
   const caption = outline
-    ? 'Treated lawn area outlined on-site by your technician.'
+    ? (lawnCapture
+      ? 'Treated lawn area outlined on-site by your technician.'
+      : 'Service area traced on-site by your technician.')
     : (traced.label || 'Treated perimeter traced on-site by your technician.');
   const pathD = canReplay
     ? `M ${points.map((p) => `${Math.round(p.x)} ${Math.round(p.y)}`).join(' L ')}${traced.closedLoop ? ' Z' : ''}`
@@ -84,7 +91,7 @@ export default function TracedTreatmentZoneMap({ traced, live = true, variant = 
               .treated-outline-pulse { animation: outlinePulse 3.6s ease-in-out 2.4s infinite; }
               .treated-outline-fill { animation: outlineFillPulse 3.6s ease-in-out 2.4s infinite; }
             `}</style>
-            {traced.closedLoop && (
+            {traced.closedLoop && lawnCapture && (
               <path className="treated-outline-fill" d={pathD} fill="#2FA89D" fillOpacity="0.18" stroke="none" />
             )}
             <g className="treated-outline-pulse">

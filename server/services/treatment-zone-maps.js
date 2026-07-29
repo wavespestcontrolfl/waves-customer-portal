@@ -73,6 +73,7 @@ async function saveTreatmentZoneMap({
   zoom = null,
   address = null,
   snapshotPngBuffer = null,
+  captureMode = null,
   knex = db,
 }) {
   if (!scheduledServiceId) throw operationalError('scheduledServiceId is required');
@@ -118,6 +119,9 @@ async function saveTreatmentZoneMap({
     zoom: finiteOrNull(zoom),
     address: address ? String(address).slice(0, 300) : null,
     snapshot_s3_key: snapshotKey || existing?.snapshot_s3_key || null,
+    // 'lawn' (turf outline) vs 'perimeter' (building spray trace) — anything
+    // else stores NULL, same as legacy rows (codex P1 #3038).
+    capture_mode: ['lawn', 'perimeter'].includes(captureMode) ? captureMode : null,
     updated_at: knex.fn.now(),
   };
 

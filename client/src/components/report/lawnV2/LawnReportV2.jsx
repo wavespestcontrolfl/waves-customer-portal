@@ -504,7 +504,7 @@ export function VisualDiagnosisCards({ categories = [] }) {
             <details key={c.key} open={print} style={{ border: `1px solid ${BORDER}`, borderLeft: `4px solid ${meta.color}`, borderRadius: 12, background: CARD }}>
               <summary style={{ cursor: 'pointer', listStyle: 'none', WebkitTapHighlightColor: 'transparent' }}>
                 {headerRow}
-                <div style={{ borderTop: `1px solid ${BORDER}`, padding: '9px 14px', fontSize: 13.5, fontWeight: 700, color: MUTED }}>
+                <div style={{ borderTop: `1px solid ${BORDER}`, padding: '9px 14px', fontSize: 14, fontWeight: 700, color: MUTED }}>
                   What this means
                   {/* listStyle:none removes the native disclosure triangle —
                       keep a visible expand affordance in its place. */}
@@ -635,7 +635,7 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
       {aftercare && aftercare.watering ? (
         <div className="lawn-callout-after" style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${BORDER}`, fontSize: 14.5, color: BODY, lineHeight: 1.5 }}>
           <strong style={{ color: TEXT }}>After today’s visit:</strong> {aftercare.watering}
-          {aftercare.reentry ? <div style={{ marginTop: 4, fontSize: 13.5, color: MUTED }}>{aftercare.reentry}</div> : null}
+          {aftercare.reentry ? <div style={{ marginTop: 4, fontSize: 14, color: MUTED }}>{aftercare.reentry}</div> : null}
         </div>
       ) : null}
       {/* No usable irrigation schedule on file → a real CTA (not a text link)

@@ -621,7 +621,10 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   // above target the report tells the customer to EASE BACK on irrigation, and a
   // bare "give the lawn a normal watering" instruction two cards later reads like a
   // contradiction. Name the exception explicitly so both instructions survive.
-  if (aftercare.waterInRequired === true && (effectiveWaterStatus === 'surplus' || overwatering)) {
+  // SURPLUS only: an overwatering photo signal can coexist with a deficit weekly
+  // balance, where the insight says to ADD water — "return to the reduced
+  // schedule" would reintroduce the contradiction (codex P1 #3038).
+  if (aftercare.waterInRequired === true && effectiveWaterStatus === 'surplus') {
     aftercare.watering += ' This one watering-in is the exception to easing back on irrigation — after it, return to the reduced schedule.';
   }
 

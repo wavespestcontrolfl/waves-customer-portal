@@ -7845,6 +7845,13 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           transform: none;
           box-shadow: none;
         }
+        /* Very narrow phones (320-374px): even slimmed 2-up columns can't hold
+           the nowrap button labels — fall back to a single column there only.
+           The extra .report-action-bar specificity outranks the 760px block's
+           2-up rule regardless of source order (codex P2 #3038). */
+        @media (max-width: 374px) {
+          .report-action-bar .report-action-buttons { grid-template-columns: 1fr; }
+        }
         @media (max-width: 760px) {
           .sr-top-inner { align-items: center; flex-direction: row; }
           .sr-actions { width: 100%; justify-content: stretch; }
@@ -7852,8 +7859,12 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           .sr-shell { padding: 16px 16px 36px; }
           .report-action-bar { padding: 16px; }
           /* Keep the 2×2 grid on phones — four stacked full-width buttons made
-             the utility bar a full screen tall (audit 2026-07-28). */
+             the utility bar a full screen tall (audit 2026-07-28). Slimmer
+             button padding so "Download PDF" / "Portal Login" fit a half-width
+             column (the doc buttons are nowrap — codex P2 #3038). */
           .report-action-buttons { grid-template-columns: 1fr 1fr; gap: 10px; }
+          .report-action-buttons > a,
+          .report-action-buttons > button { padding-left: 10px; padding-right: 10px; }
           .service-status-main,
           .readiness-card-header { flex-direction: column; }
           .sr-pressure { justify-self: stretch; }
