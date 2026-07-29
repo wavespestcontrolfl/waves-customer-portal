@@ -77,10 +77,16 @@ describe('normalizeAdminPath', () => {
 });
 
 describe('safeTab', () => {
-  it('accepts short slugs from ?tab= and falls back to ?area=', () => {
+  it('accepts short slugs from ?tab= and falls back to ?area=, ?view=, ?section=', () => {
     expect(safeTab('?tab=leads')).toBe('leads');
     expect(safeTab('?area=strategy')).toBe('strategy');
     expect(safeTab('?tab=Leads')).toBe('leads');
+    // Customers switches subviews with ?view=, Pricing with ?section= —
+    // both are rendered-subview signals, not PII (Codex r8).
+    expect(safeTab('?view=health')).toBe('health');
+    expect(safeTab('?section=reality')).toBe('reality');
+    // Precedence: the highest-priority present key decides.
+    expect(safeTab('?view=health&tab=directory')).toBe('directory');
     // Hyphenated Settings leaf keys are valid tab slugs (Codex r3 claimed
     // otherwise — encode the counterexamples).
     expect(safeTab('?tab=service-reports')).toBe('service-reports');

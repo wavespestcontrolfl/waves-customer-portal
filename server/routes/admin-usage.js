@@ -24,7 +24,10 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 // Strict shapes — reject anything that isn't an obvious route slug. The
 // client normalizes before sending; this is the backstop.
 const PAGE_KEY_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
-const PATH_RE = /^\/admin(?:\/[a-zA-Z0-9:_-]+){0,6}$/;
+// Applied AFTER stripIdSegments: every stored segment must be the exact
+// ':id' placeholder or a lowercase route slug. An arbitrary colon segment
+// (':john-smith') is NOT a placeholder and must not pass (Codex #2961 r8).
+const PATH_RE = /^\/admin(?:\/(?::id|[a-z0-9]+(?:-[a-z0-9]+)*)){0,6}$/;
 // Tabs are route-structure words: letter-first, lowercase, hyphenated.
 // Digits-only ('5551234567') and underscore values ('john_smith') are not
 // tabs anywhere in this app — reject them so a crafted ?tab= link followed
@@ -104,6 +107,15 @@ router.post('/track', async (req, res, next) => {
       cleanPath = stripIdSegments(path);
       if (!cleanPath || !PATH_RE.test(cleanPath)) {
         return res.status(400).json({ error: 'Invalid path' });
+      }
+      // pageKey must agree with the sanitized path — otherwise a mismatched
+      // payload ('alice-smith' + a customers path) could smuggle a
+      // name-shaped key into the rankings despite the path being clean
+      // (Codex #2961 r8). Mirrors the client: key = first path segment,
+      // 'dashboard' for bare /admin.
+      const derivedKey = cleanPath.split('/').filter(Boolean)[1] || 'dashboard';
+      if (pageKey !== derivedKey) {
+        return res.status(400).json({ error: 'pageKey does not match path' });
       }
     }
     if (tab != null && (typeof tab !== 'string' || !TAB_RE.test(tab))) {

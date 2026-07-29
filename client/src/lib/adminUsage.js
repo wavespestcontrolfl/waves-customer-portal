@@ -101,10 +101,14 @@ export function normalizeAdminPath(pathname) {
   return { pageKey, path };
 }
 
-/** Extract the active tab slug from a query string. Reads `tab` (most pages)
- *  and falls back to `area` (pricing-logic / knowledge hubs). Anything that
- *  doesn't look like a short slug is dropped — a uuid or search text never
+/** Extract the active subview slug from a query string. Admin pages use a
+ *  small set of keys for their rendered subview — `tab` (most pages),
+ *  `area` (pricing-logic / knowledge hubs), `view` (customers), `section`
+ *  (pricing) — checked in that precedence order. Anything that doesn't
+ *  look like a short slug is dropped — a uuid or search text never
  *  qualifies. */
+const TAB_QUERY_KEYS = ['tab', 'area', 'view', 'section'];
+
 export function safeTab(search) {
   let params;
   try {
@@ -112,10 +116,13 @@ export function safeTab(search) {
   } catch {
     return null;
   }
-  const raw = params.get('tab') || params.get('area');
-  if (!raw) return null;
-  const tab = raw.toLowerCase();
-  return TAB_RE.test(tab) ? tab : null;
+  for (const key of TAB_QUERY_KEYS) {
+    const raw = params.get(key);
+    if (!raw) continue;
+    const tab = raw.toLowerCase();
+    return TAB_RE.test(tab) ? tab : null;
+  }
+  return null;
 }
 
 function flushPendingBeacon() {

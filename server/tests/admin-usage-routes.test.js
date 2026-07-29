@@ -194,6 +194,10 @@ describe('admin usage: POST /track', () => {
       res = await post({ pageKey: 'design-system', path: '/admin/_design-system/flags' });
       expect(res.status).toBe(204);
       expect(chain.calls.insert.path).toBe('/admin/design-system/flags');
+      // Bare /admin agrees with the 'dashboard' key (mirrors the client).
+      res = await post({ pageKey: 'dashboard', path: '/admin' });
+      expect(res.status).toBe(204);
+      expect(chain.calls.insert.path).toBe('/admin');
     });
   });
 
@@ -218,6 +222,8 @@ describe('admin usage: POST /track', () => {
     ['numeric pageKey', { pageKey: '12345' }],
     ['path with query string', { pageKey: 'leads', path: '/admin/leads?source_name=x' }],
     ['path outside /admin', { pageKey: 'leads', path: '/tech/route' }],
+    ['pageKey/path mismatch (name-shaped key)', { pageKey: 'alice-smith', path: '/admin/customers/:id' }],
+    ['arbitrary colon placeholder in path', { pageKey: 'customers', path: '/admin/customers/:john-smith' }],
     ['tab with spaces', { pageKey: 'leads', tab: 'my search' }],
     ['digits-only tab (phone-shaped)', { pageKey: 'leads', tab: '5551234567' }],
     ['underscore tab (name-shaped)', { pageKey: 'leads', tab: 'john_smith' }],
