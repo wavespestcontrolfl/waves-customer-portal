@@ -140,6 +140,7 @@ describe('runContactsSync', () => {
     mockPeopleApi.people.get.mockResolvedValueOnce({ data: {
       etag: 'e1',
       metadata: { sources: [{ type: 'CONTACT', id: 'abc', etag: 'se1' }] },
+      clientData: [{ key: 'other_integration', value: 'keep-me' }, { key: 'waves_row', value: 'customers:old' }],
       memberships: [{ contactGroupMembership: { contactGroupResourceName: 'contactGroups/vipCustomLabel' } }],
     } });
     mockPeopleApi.people.updateContact.mockResolvedValueOnce({ data: { resourceName: 'people/abc' } });
@@ -149,6 +150,11 @@ describe('runContactsSync', () => {
       .toEqual(['contactGroups/vipCustomLabel', 'contactGroups/myContacts', 'contactGroups/starred']);
     // The People API 400s updates that omit the fetched source metadata.
     expect(sentBody.metadata).toEqual({ sources: [{ type: 'CONTACT', id: 'abc', etag: 'se1' }] });
+    // Foreign clientData survives; only the waves_row key is replaced.
+    expect(sentBody.clientData).toEqual([
+      { key: 'other_integration', value: 'keep-me' },
+      { key: 'waves_row', value: 'customers:c-1' },
+    ]);
   });
 
   test('a converted lead TRANSFERS its contact and refreshes the in-run customer snapshot', async () => {
@@ -860,7 +866,7 @@ describe('runContactsSync', () => {
     await runContactsSync({ gapMs: 0 });
     const body = mockPeopleApi.people.updateContact.mock.calls[0][0].requestBody;
     // The property row's stale email does NOT resurrect the cleared value.
-    expect(body.emailAddresses).toBeUndefined();
+    expect(body.emailAddresses || []).toEqual([]);
     expect(body.phoneNumbers).toEqual([{ value: '9415550100' }]);
   });
 
@@ -930,6 +936,49 @@ describe('runContactsSync', () => {
     expect(mockPeopleApi.people.deleteContact).toHaveBeenCalledWith({ resourceName: 'people/orphan' });
     expect(mockPeopleApi.people.updateContact.mock.calls[0][0].resourceName).toBe('people/established');
     expect(mockPeopleApi.people.createContact).not.toHaveBeenCalled();
+  });
+
+  test('a FULL (truncated) search defers RECOVERY but not first-time creation', async () => {
+    // First-time create: no lost contact to find — truncation must not pin
+    // the lane; creation proceeds.
+    setupDb({ customers: [{ ...CUSTOMER }] });
+    const fullSet = { data: { results: Array.from({ length: 30 }, (_, i) => ({ person: { resourceName: `people/x${i}` } })) } };
+    mockPeopleApi.people.searchContacts.mockImplementation(async ({ query }) => (query === '' ? { data: {} } : fullSet));
+    mockPeopleApi.people.createContact.mockResolvedValueOnce({ data: { resourceName: 'people/new' } });
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(counts.synced).toBe(1);
+    expect(mockPeopleApi.people.createContact).toHaveBeenCalledTimes(1);
+
+    // Recovery (pending marker): truncation IS inconclusive — defers.
+    jest.clearAllMocks();
+    require('googleapis').google.people.mockImplementation(() => mockPeopleApi);
+    require('../services/email/gmail-client').getAuthClient.mockImplementation(async () => ({}));
+    mockPeopleApi.people.deleteContact.mockImplementation(async () => ({}));
+    process.env.GATE_CONTACTS_SYNC = 'true';
+    setupDb({ customers: [{ ...CUSTOMER, google_contact_id: 'pending_create_recovery::jane%40customer.example', google_contact_synced_at: '2026-07-01T00:00:00Z' }] });
+    mockPeopleApi.people.searchContacts.mockImplementation(async ({ query }) => (query === '' ? { data: {} } : fullSet));
+    const counts2 = await runContactsSync({ gapMs: 0 });
+    expect(counts2.failed).toBe(1);
+    expect(mockPeopleApi.people.createContact).not.toHaveBeenCalled();
+  });
+
+  test('updates PRESERVE operator-added secondary emails/phones/addresses', async () => {
+    setupDb({ customers: [{ ...CUSTOMER, google_contact_id: 'people/abc' }] });
+    mockPeopleApi.people.get.mockResolvedValueOnce({ data: {
+      etag: 'e1',
+      metadata: { sources: [] },
+      memberships: [],
+      emailAddresses: [{ value: 'jane@customer.example' }, { value: 'work@customer.example' }],
+      phoneNumbers: [{ value: '(941) 555-0100' }, { value: '941-555-0199' }],
+      addresses: [{ streetAddress: '1 Palm Way', postalCode: '34219' }, { streetAddress: '99 Cabin Rd', postalCode: '34285' }],
+    } });
+    mockPeopleApi.people.updateContact.mockResolvedValueOnce({ data: { resourceName: 'people/abc' } });
+    await runContactsSync({ gapMs: 0 });
+    const body = mockPeopleApi.people.updateContact.mock.calls[0][0].requestBody;
+    // Ours lead; operator-added extras survive; identical values dedupe.
+    expect(body.emailAddresses.map((e) => e.value)).toEqual(['jane@customer.example', 'work@customer.example']);
+    expect(body.phoneNumbers.map((e) => e.value)).toEqual(['9415550100', '941-555-0199']);
+    expect(body.addresses.some((a) => a.streetAddress === '99 Cabin Rd')).toBe(true);
   });
 
   test('scope-missing aborts WITHOUT stamping — rows retry after the one-time re-consent', async () => {

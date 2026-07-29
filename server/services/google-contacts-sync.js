@@ -191,6 +191,38 @@ const CREATE_READ_FIELDS = 'names,metadata';
  * stays; ours (myContacts + starred) are ensured. Replacing the list
  * wholesale would strip operator-managed labels on every sync.
  */
+/**
+ * Merge multi-valued fields: OUR values lead (canonical identity), values
+ * the operator added directly in Google Contacts survive. The update mask
+ * replaces these fields wholesale, so sending only ours deleted secondary
+ * emails/phones/addresses every sync. Residual trade-off: a value we
+ * ourselves published historically is indistinguishable from an
+ * operator-added one, so clearing a canonical field demotes its old value
+ * to a preserved secondary rather than removing it from Google.
+ */
+function mergeValueLists(ours, existing, keyFn) {
+  const ourKeys = new Set((ours || []).map(keyFn).filter(Boolean));
+  const preserved = (existing || []).filter((e) => {
+    const k = keyFn(e);
+    return k && !ourKeys.has(k);
+  });
+  return [...(ours || []), ...preserved];
+}
+const emailValueKey = (e) => String(e?.value || '').trim().toLowerCase();
+const phoneValueKey = (e) => String(e?.value || '').replace(/\D/g, '').slice(-10);
+const addressValueKey = (a) => `${String(a?.streetAddress || '').trim().toLowerCase()}|${String(a?.postalCode || '').trim()}`;
+
+/**
+ * Merge clientData: entries owned by OTHER integrations survive; only the
+ * Waves waves_row key is replaced. The update mask includes clientData, so
+ * sending only our entry would silently delete everyone else's linkage
+ * metadata.
+ */
+function mergedClientData(current, tagValue) {
+  const others = (current || []).filter((c) => c && c.key !== 'waves_row');
+  return [...others, { key: 'waves_row', value: tagValue }];
+}
+
 function mergedMemberships(current) {
   const existing = (current || [])
     .filter((m) => m.contactGroupMembership?.contactGroupResourceName)
@@ -256,6 +288,23 @@ async function stampVerified(table, row, resourceName, now) {
   } else {
     q.whereRaw("date_trunc('milliseconds', updated_at) <= ?", [row.updated_at]);
   }
+  // Same canonical-account raced-edit guard as stampIfUnchanged — an
+  // account identity edit between the canonical read and this stamp must
+  // veto it, or advancing synced_at to `now` would hide the change from
+  // the account-staleness predicate.
+  if (row.__canonicalIdentity?.id) {
+    if (row.__canonicalIdentity.updated_at_us) {
+      q.whereRaw(
+        "NOT EXISTS (SELECT 1 FROM customer_accounts ca WHERE ca.id = ? AND to_char(ca.updated_at, 'YYYY-MM-DD HH24:MI:SS.US') <> ?)",
+        [row.__canonicalIdentity.id, row.__canonicalIdentity.updated_at_us],
+      );
+    } else {
+      q.whereRaw(
+        "NOT EXISTS (SELECT 1 FROM customer_accounts ca WHERE ca.id = ? AND date_trunc('milliseconds', ca.updated_at) > ?)",
+        [row.__canonicalIdentity.id, row.__canonicalIdentity.updated_at],
+      );
+    }
+  }
   return q.update({ google_contact_id: resourceName, google_contact_synced_at: now });
 }
 
@@ -281,7 +330,7 @@ async function contactInUseElsewhere(resourceName, exceptTable, exceptId) {
  * Best-effort — search-index lag can miss a seconds-old contact; the tag
  * makes the NEXT pass reconcile it.
  */
-async function findExistingContact(people, row, tag, { queryOverride = null } = {}) {
+async function findExistingContact(people, row, tag, { queryOverride = null, requireConclusive = false } = {}) {
   // queryOverride = the CREATE-TIME identity from a recovery marker — the
   // row's current values may have been scrambled by a merge since.
   const query = queryOverride || rowSearchKey(row);
@@ -295,13 +344,25 @@ async function findExistingContact(people, row, tag, { queryOverride = null } = 
     await people.people.searchContacts({ query: '', pageSize: 1, readMask: 'names' });
     const res = await people.people.searchContacts({
       query,
-      pageSize: 10,
+      pageSize: 30, // searchContacts maximum — no pagination exists
       readMask: 'metadata,clientData,emailAddresses',
     });
-    const match = (res.data.results || []).map((r) => r.person).find((p) => (
+    const results = res.data.results || [];
+    const match = results.map((r) => r.person).find((p) => (
       (p?.clientData || []).some((c) => c.key === 'waves_row' && c.value === tag)
     ));
-    return match?.resourceName || null;
+    if (match?.resourceName) return match.resourceName;
+    if (results.length >= 30 && requireConclusive) {
+      // A FULL result set is a truncated one — absence of the tag among
+      // the first 30 hits is not proof no tagged contact exists. Only
+      // RECOVERY decisions demand that proof; a first-time create with a
+      // common name has no lost contact to find, and deferring it forever
+      // would pin the newest-first lane.
+      const truncated = new Error('identity search truncated — inconclusive');
+      truncated.searchInconclusive = true;
+      throw truncated;
+    }
+    return null;
   } catch (e) {
     // Scope and AUTH errors keep their classification — the run must
     // surface the actionable blocked status, not N generic row failures.
@@ -333,7 +394,7 @@ async function upsertContact(people, table, row, kind, gapMs, { markerSearchKey 
       // the live contact so operator labels survive.
       const current = await people.people.get({
         resourceName,
-        personFields: 'metadata,memberships',
+        personFields: 'metadata,memberships,clientData,emailAddresses,phoneNumbers,addresses',
       });
       await sleep(gapMs);
       const updated = await people.people.updateContact({
@@ -341,6 +402,12 @@ async function upsertContact(people, table, row, kind, gapMs, { markerSearchKey 
         updatePersonFields: UPDATE_FIELDS,
         requestBody: {
           ...body,
+          // Operator-added values survive; ours lead. names stay
+          // canonical-authoritative (single-valued identity).
+          emailAddresses: mergeValueLists(body.emailAddresses, current.data.emailAddresses, emailValueKey),
+          phoneNumbers: mergeValueLists(body.phoneNumbers, current.data.phoneNumbers, phoneValueKey),
+          addresses: mergeValueLists(body.addresses, current.data.addresses, addressValueKey),
+          clientData: mergedClientData(current.data.clientData, rowTag(table, row)),
           memberships: mergedMemberships(current.data.memberships),
           // The People API REQUIRES the contact source metadata (with its
           // etag) on updates — omitting it 400s every update.
@@ -356,7 +423,7 @@ async function upsertContact(people, table, row, kind, gapMs, { markerSearchKey 
       // (lost response, partial sharer repoint) and creating again would
       // duplicate. Found → retry the update against the replacement.
       const deadId = resourceName;
-      const replacement = await findExistingContact(people, row, rowTag(table, row), { queryOverride: markerSearchKey });
+      const replacement = await findExistingContact(people, row, rowTag(table, row), { queryOverride: markerSearchKey, requireConclusive: true });
       if (!replacement || replacement === deadId) {
         // A SHARER's replacement may be mid-recovery: its ambiguous-create
         // marker carries this dead id. Racing it would mint a parallel
@@ -610,7 +677,7 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
         const attemptedMs = recoveryAttemptAt ? new Date(recoveryAttemptAt).getTime() : 0;
         const pastGrace = Date.now() - attemptedMs >= RECOVERY_GRACE_MS;
         try {
-          const recovered = await findExistingContact(people, row, rowTag(table, row), { queryOverride: markerSearchKey });
+          const recovered = await findExistingContact(people, row, rowTag(table, row), { queryOverride: markerSearchKey, requireConclusive: true });
           if (recovered) {
             row.google_contact_id = recovered;
             // The orphan may have LOST the race: a sibling/account row can
@@ -979,7 +1046,7 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
             // — a merge may have scrambled this row's email/phone since,
             // and the orphan still carries the original values.
             const storedKey = searchKeyFromMarker(row.google_contact_id);
-            const orphan = await findExistingContact(people, row, rowTag(table, row), { queryOverride: storedKey });
+            const orphan = await findExistingContact(people, row, rowTag(table, row), { queryOverride: storedKey, requireConclusive: true });
             if (orphan) {
               const stillDeleted = await db(table).where({ id: row.id }).whereNotNull('deleted_at').first();
               if (!stillDeleted) continue;

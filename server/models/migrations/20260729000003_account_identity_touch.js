@@ -19,6 +19,30 @@ exports.up = async function up(knex) {
   // Remove the earlier reverse fan-out if a prior deploy created it.
   await knex.raw('DROP TRIGGER IF EXISTS customer_accounts_identity_touch ON customer_accounts');
   await knex.raw('DROP FUNCTION IF EXISTS touch_linked_customers_on_account_identity()');
+  // BACKFILL before the trigger goes live: identity edits made after the
+  // account layer landed went to customers ONLY (the old admin path), so
+  // account rows can hold obsolete identities that the sync would publish
+  // as canonical. Reconcile each account from its most recently updated
+  // LIVE customer; only rows that actually differ are touched.
+  await knex.raw(`
+    UPDATE customer_accounts ca SET
+      first_name = c.first_name,
+      last_name  = c.last_name,
+      email      = c.email,
+      phone      = c.phone,
+      updated_at = now()
+    FROM (
+      SELECT DISTINCT ON (account_id) account_id, first_name, last_name, email, phone
+      FROM customers
+      WHERE account_id IS NOT NULL AND deleted_at IS NULL
+      ORDER BY account_id, updated_at DESC
+    ) c
+    WHERE ca.id = c.account_id
+      AND (ca.first_name IS DISTINCT FROM c.first_name
+        OR ca.last_name IS DISTINCT FROM c.last_name
+        OR ca.email IS DISTINCT FROM c.email
+        OR ca.phone IS DISTINCT FROM c.phone)
+  `);
   await knex.raw(`
     CREATE OR REPLACE FUNCTION propagate_customer_identity_to_account() RETURNS trigger AS $$
     BEGIN
