@@ -1020,12 +1020,91 @@ async function resolveLineDiscount(input, baseAmount, customer, serviceContext =
   };
 }
 
+// Default price for a hand-scheduled one-time mosquito line (owner decision
+// 2026-07-28). With a usable lot size the engine ladder prices it over the
+// GROSS lot (no footprint source exists on the customer row — see inline
+// note). Without lot data the Service Library catalog base controls the
+// amount (edits there must keep working); recurring-plan members keep the
+// engine's canonical one-time perk in both cases — membership derived via the
+// file's one predicate (hasMembership) so tier sentinels stay in one place.
+// Returns null when the caller's own catalog fallback should apply as-is.
+function mosquitoOneTimeDefaultPrice(customer, catalogBasePrice = null) {
+  const isRecurringCustomer = hasMembership(customer || {});
+  const lotSqFt = Number(customer?.lot_sqft);
+  if (Number.isFinite(lotSqFt) && lotSqFt > 0) {
+    try {
+      const { priceOneTimeMosquito } = require('../services/pricing-engine');
+      // Gross lot only: the customer row has no footprint source —
+      // customers.property_sqft is treated LAWN area by arbitration contract
+      // (source-arbitration.js: "deliberately NOT a home-sqft source") and
+      // must never be subtracted as a footprint. Hand-scheduled pricing may
+      // therefore sit one step above the estimate path for the same
+      // property; the estimate path stays the precise one and the operator
+      // can always override the price.
+      const quote = priceOneTimeMosquito({ lotSqFt }, { isRecurringCustomer });
+      const price = Number(quote?.price);
+      if (Number.isFinite(price) && price > 0) return price;
+    } catch (e) {
+      logger.warn(`[schedule] mosquito ladder default failed, using catalog price: ${e.message}`);
+    }
+  }
+  const base = Number(catalogBasePrice);
+  if (!Number.isFinite(base) || base <= 0) return null;
+  if (!isRecurringCustomer) return null;
+  const { WAVEGUARD } = require('../services/pricing-engine/constants');
+  const rate = Number(WAVEGUARD?.recurringCustomerOneTimePerk) || 0;
+  return rate > 0 ? Math.round(base * (1 - rate)) : null;
+}
+
+// GET /mosquito-onetime-quote?customerId= — live default for the
+// create-appointment modal, computed by the same helper + catalog row the
+// booking path uses (post-syncConstantsFromDB, so admin pricing-config AND
+// Service Library edits are reflected immediately). Always answers with the
+// authoritative amount booking will stamp — never the client's cached line
+// price (estimate-loaded lines carry the estimate's quoted price there).
+// requireAdmin: the create-appointment modal is an office surface (POST '/'
+// is requireAdmin too), and tech tokens must not be able to probe arbitrary
+// customer ids for lot-size/price data outside their assignment scope.
+router.get('/mosquito-onetime-quote', requireAdmin, async (req, res, next) => {
+  try {
+    const customerId = String(req.query.customerId || '').trim();
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(customerId)) {
+      throw httpError(400, 'customerId must be a valid customer id');
+    }
+    const customer = await db('customers')
+      .where({ id: customerId })
+      .first('id', 'lot_sqft', 'waveguard_tier', 'monthly_rate');
+    if (!customer) throw httpError(404, 'Customer not found');
+    const catalogRow = await db('services')
+      .where({ service_key: 'mosquito_one_time' })
+      .first('base_price')
+      .catch(() => null);
+    const computed = mosquitoOneTimeDefaultPrice(customer, catalogRow?.base_price);
+    const catalogBase = Number(catalogRow?.base_price);
+    const price = computed != null
+      ? computed
+      : (Number.isFinite(catalogBase) && catalogBase > 0 ? Math.round(catalogBase * 100) / 100 : null);
+    res.json({ price, source: computed != null ? 'engine_default' : (price != null ? 'catalog_base' : null) });
+  } catch (err) { next(err); }
+});
+
 async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, estimatedPrice, primaryLinePrice, primaryLineDiscount, serviceAddons, discountId, discountType, discountAmount, customer }) {
   if (discountType && !discountId) {
     throw httpError(400, 'discountId is required for appointment-level discounts');
   }
 
-  const primaryBaseFallback = serviceRecord?.base_price != null ? serviceRecord.base_price : estimatedPrice;
+  // One-time mosquito default follows the lot-based ladder (owner decision
+  // 2026-07-28) instead of the flat catalog price. An explicitly typed price
+  // still wins; catalog base_price remains the fallback when the customer has
+  // no lot size on file. Applied per line (primary here, add-on lines below)
+  // so a grouped booking never silently bills mosquito at $0.
+  let mosquitoLadderDefault = null;
+  if (serviceRecord?.service_key === 'mosquito_one_time' && primaryLinePrice == null) {
+    mosquitoLadderDefault = mosquitoOneTimeDefaultPrice(customer, serviceRecord?.base_price);
+  }
+  const primaryBaseFallback = mosquitoLadderDefault != null
+    ? mosquitoLadderDefault
+    : (serviceRecord?.base_price != null ? serviceRecord.base_price : estimatedPrice);
   const primaryBase = parseMoneyInput(primaryLinePrice ?? primaryBaseFallback, 'primaryLinePrice');
   const primaryDiscount = await resolveLineDiscount(primaryLineDiscount, primaryBase || 0, customer, {
     serviceKey: serviceRecord?.service_key,
@@ -1042,10 +1121,18 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
 
   const addonLines = [];
   for (const addon of Array.isArray(serviceAddons) ? serviceAddons : []) {
-    const base = parseMoneyInput(addon.basePrice ?? addon.grossPrice ?? addon.price, `price for ${addon.name || addon.serviceName || 'add-on'}`);
+    let base = parseMoneyInput(addon.basePrice ?? addon.grossPrice ?? addon.price, `price for ${addon.name || addon.serviceName || 'add-on'}`);
     const addonService = addon.serviceId
-      ? await db('services').where({ id: addon.serviceId }).first('service_key', 'category')
+      ? await db('services').where({ id: addon.serviceId }).first('service_key', 'category', 'base_price')
       : null;
+    // Blank-priced one-time mosquito add-on lines get the same lot-ladder
+    // default as the primary (catalog base_price as the no-lot-data
+    // fallback) — a grouped booking must never silently bill mosquito at $0.
+    if (base == null && addonService?.service_key === 'mosquito_one_time') {
+      const ladder = mosquitoOneTimeDefaultPrice(customer, addonService.base_price);
+      const fallback = ladder != null ? ladder : (addonService.base_price != null ? Number(addonService.base_price) : null);
+      if (fallback != null) base = parseMoneyInput(fallback, `price for ${addon.name || addon.serviceName || 'add-on'}`);
+    }
     const lineDiscount = await resolveLineDiscount(addon, base || 0, customer, {
       serviceKey: addonService?.service_key,
       serviceCategory: addonService?.category,
