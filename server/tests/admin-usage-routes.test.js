@@ -185,6 +185,24 @@ describe('admin usage: POST /track', () => {
       res = await post({ pageKey: 'customers', path: '/admin/customers/new' });
       expect(res.status).toBe(204);
       expect(chain.calls.insert.path).toBe('/admin/customers/new');
+      // customers/duplicates is a real page (App.jsx), not a record slug.
+      res = await post({ pageKey: 'customers', path: '/admin/customers/duplicates' });
+      expect(res.status).toBe(204);
+      expect(chain.calls.insert.path).toBe('/admin/customers/duplicates');
+    });
+  });
+
+  test('accepts hyphenated tab slugs (Settings leaf keys)', async () => {
+    const chain = makeChain();
+    db.mockImplementation(() => chain);
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/usage/track`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pageKey: 'settings', path: '/admin/settings', tab: 'service-reports' }),
+      });
+      expect(res.status).toBe(204);
+      expect(chain.calls.insert.tab).toBe('service-reports');
     });
   });
 

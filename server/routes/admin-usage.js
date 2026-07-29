@@ -53,7 +53,7 @@ const ROUTE_WORD_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 // identifiers ('/admin/customers/acme') that are shape-indistinguishable
 // from route words.
 const ENTITY_ROUTES = new Set(['customers', 'estimates', 'invoices', 'leads', 'calls', 'technicians', 'requests']);
-const ENTITY_STATIC_SUBPAGES = new Set(['new', 'import', 'map', 'directory', 'kanban', 'search', 'settings']);
+const ENTITY_STATIC_SUBPAGES = new Set(['new', 'import', 'map', 'directory', 'kanban', 'search', 'settings', 'duplicates']);
 
 /** '/admin/customers/8f14…e9b1/notes' → '/admin/customers/:id/notes'.
  *  Returns null when the path isn't rooted at /admin. */

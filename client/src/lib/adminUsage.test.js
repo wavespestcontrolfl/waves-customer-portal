@@ -43,6 +43,22 @@ describe('normalizeAdminPath', () => {
     });
   });
 
+  it('collapses record slugs after entity routes but keeps their static subpages', () => {
+    expect(normalizeAdminPath('/admin/customers/acme')).toEqual({
+      pageKey: 'customers',
+      path: '/admin/customers/:id',
+    });
+    expect(normalizeAdminPath('/admin/customers/John_Smith')).toEqual({
+      pageKey: 'customers',
+      path: '/admin/customers/:id',
+    });
+    // customers/duplicates is a real page (App.jsx), not a record slug.
+    expect(normalizeAdminPath('/admin/customers/duplicates')).toEqual({
+      pageKey: 'customers',
+      path: '/admin/customers/duplicates',
+    });
+  });
+
   it('returns null off /admin and for non-slug first segments', () => {
     expect(normalizeAdminPath('/tech/protocols')).toBeNull();
     expect(normalizeAdminPath('/administrator')).toBeNull();
@@ -55,6 +71,12 @@ describe('safeTab', () => {
     expect(safeTab('?tab=leads')).toBe('leads');
     expect(safeTab('?area=strategy')).toBe('strategy');
     expect(safeTab('?tab=Leads')).toBe('leads');
+    // Hyphenated Settings leaf keys are valid tab slugs (Codex r3 claimed
+    // otherwise — encode the counterexamples).
+    expect(safeTab('?tab=service-reports')).toBe('service-reports');
+    expect(safeTab('?tab=blackout-days')).toBe('blackout-days');
+    expect(safeTab('?tab=kpi-targets')).toBe('kpi-targets');
+    expect(safeTab('?tab=operating-costs')).toBe('operating-costs');
   });
 
   it('drops anything that is not a short slug', () => {

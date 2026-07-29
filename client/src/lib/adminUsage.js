@@ -64,7 +64,7 @@ export function markUsageSource(source) {
 // is the authoritative privacy backstop.
 const ROUTE_WORD_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const ENTITY_ROUTES = new Set(['customers', 'estimates', 'invoices', 'leads', 'calls', 'technicians', 'requests']);
-const ENTITY_STATIC_SUBPAGES = new Set(['new', 'import', 'map', 'directory', 'kanban', 'search', 'settings']);
+const ENTITY_STATIC_SUBPAGES = new Set(['new', 'import', 'map', 'directory', 'kanban', 'search', 'settings', 'duplicates']);
 
 export function normalizeAdminPath(pathname) {
   if (typeof pathname !== 'string' || !/^\/admin(\/|$)/.test(pathname)) return null;
