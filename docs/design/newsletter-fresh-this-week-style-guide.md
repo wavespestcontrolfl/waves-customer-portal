@@ -182,18 +182,22 @@ additions that survived from the overhaul:
 
 - **Real event thumbnail per card, in ADDITION to the reaction GIF** —
   rendered after the hype paragraph. The GIF stays the joke; the
-  thumbnail is the event's own art (feed- or og:image-sourced; a daily
-  backfill probes imageless events' pages). Still images only —
-  GIF-shaped urls are rejected. Standards clients cap it at 220px on
-  both axes with no upscaling; **desktop Outlook gets no thumbnail by
-  design** (Word can't aspect-fit a bounded image box) and keeps the
-  GIF + full card content.
-- **Ticket links are click-tracked** — at draft time the inline
-  event-name link and the 🔗 fact-line link both render as
-  `{{evclick:<eventId>}}` tokens; the live sender substitutes a
-  per-recipient tracking redirect, while proof/preview/archive resolve
-  them back to the direct event url. Click rates feed a bounded (±5)
-  scoring adjustment.
+  thumbnail is the event's own art (feed-supplied, or filled by the
+  daily og:image backfill of imageless events' pages added in #3036).
+  Still images only — GIF-shaped urls are rejected. Standards clients
+  cap height at 220px and bound width to the card (`max-width:100%`),
+  with no upscaling of small art; **desktop Outlook gets no thumbnail
+  by design** (Word can't aspect-fit a bounded image box) and keeps
+  the GIF + full card content.
+- **Ticket links are click-tracked** — at draft time ticket links
+  render as `{{evclick:<eventId>}}` tokens; the live sender substitutes
+  a per-recipient tracking redirect, while proof/preview/archive
+  resolve them back to the direct event url. The 🔗 fact-line link
+  always carries the token; the inline event-name link is conditional —
+  it only renders when the hype paragraph contains the official name
+  verbatim (prompt-encouraged, not validator-enforced), so a paraphrase
+  means the fact-line link is that card's only ticket link. Click rates
+  feed a bounded (±5) scoring adjustment.
 
 Everything upstream of drafting also changed (100-pt curation rubric,
 8-event portfolio selection with audience/geography coverage, listwise
