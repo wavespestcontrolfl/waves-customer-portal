@@ -25,12 +25,20 @@ function makeKnexStub({ customers = [], linked = null, prior = null } = {}) {
     chain.where = (...args) => {
       if (args[0] && typeof args[0] === 'object' && 'service_id' in args[0]) chain._byServiceId = true;
       if (args[0] && typeof args[0] === 'object' && 'id' in args[0]) chain._byId = true;
+      // The supersession probe (loadLawnAssessments: "any NEWER row on the
+      // same visit") filters on created_at. The stub models a visit with no
+      // newer retake, so that probe must resolve EMPTY — without this flag it
+      // returned the linked row itself, the code read it as an in-progress
+      // retake, and every "today" test failed even though the real SQL
+      // (strictly-newer created_at) behaves correctly.
+      if (args[0] === 'created_at') chain._newerCheck = true;
       return chain;
     };
     const resolveRows = () => {
       if (table === 'customers') return customers;
       // The prior query aliases the table ('lawn_assessments as la').
       if (!String(table).startsWith('lawn_assessments')) return [];
+      if (chain._newerCheck) return [];
       if (chain._byId) return linked ? [linked] : [];
       if (chain._byServiceId) return linked ? [linked] : [];
       if (chain._priorHistory) return prior ? [prior] : [];

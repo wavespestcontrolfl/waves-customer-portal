@@ -23,11 +23,19 @@ export const CATEGORY_COLORS = {
 
 export function detectServiceCategory(serviceType) {
   const s = String(serviceType || '').toLowerCase();
+  // Mirror server/utils/service-normalizer.js precedence (codex P2 #3038 r4):
+  // tree & shrub names that also mention fertilization/weeds ("Tree & Shrub
+  // Fertilization") are still tree & shrub — lawn wins only on an actual
+  // lawn-surface token. Without this guard the /fertil|weed/ line below
+  // classified those visits as lawn, diverging from the server.
+  const treeToken = /tree|shrub|ornamental|palm|arborjet/.test(s);
+  const lawnSurfaceToken = /lawn|turf|sod|dethatch|top\s*dress|aerat/.test(s);
+  if (treeToken && !lawnSurfaceToken && !/mosquito|termite|wdo/.test(s)) return 'tree';
   if (/lawn|turf|fertil|weed|dethatch|aerat|sod|top\s*dress/.test(s)) return 'lawn';
   if (/mosquito/.test(s)) return 'mosquito';
   if (/termite|wdo|bora|termidor|trelona/.test(s)) return 'termite';
   if (/rodent|rat|mouse|mice/.test(s)) return 'rodent';
-  if (/tree|shrub|palm|arborjet/.test(s)) return 'tree';
+  if (/tree|shrub|palm|arborjet|ornamental/.test(s)) return 'tree';
   if (/inspect|assessment|consultation|estimat/.test(s)) return 'inspection';
   return 'pest';
 }

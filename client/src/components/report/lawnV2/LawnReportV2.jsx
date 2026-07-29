@@ -253,7 +253,7 @@ export function LawnSnapshotHero({ snapshot = {} }) {
             <p style={{ fontSize: 14, color: BODY, lineHeight: 1.5, margin: '0 0 6px' }}>{scoreExplanation}</p>
           ) : null}
           {todaysFocus.length ? (
-            <div style={{ fontSize: 13.5, color: MUTED, lineHeight: 1.5 }}>
+            <div style={{ fontSize: 14, color: MUTED, lineHeight: 1.5 }}>
               <strong style={{ color: BODY }}>Today&apos;s focus:</strong> {todaysFocus.join(' · ')}
             </div>
           ) : null}
@@ -314,7 +314,7 @@ export function LawnFollowUpCard({ followUp = null }) {
           <div style={{ fontFamily: FONTS.heading, fontWeight: 800, fontSize: 15.5, color: TEXT }}>{followUp.headline || 'Follow-up already planned'}</div>
           {followUp.reason ? <p style={{ margin: '4px 0 0', fontSize: 14, color: BODY, lineHeight: 1.5 }}>{followUp.reason}</p> : null}
           {followUp.customerAction ? (
-            <p style={{ margin: '8px 0 0', fontSize: 13.5, color: BODY, lineHeight: 1.5 }}>
+            <p style={{ margin: '8px 0 0', fontSize: 14.5, color: BODY, lineHeight: 1.5 }}>
               <strong style={{ color: TEXT }}>Your part:</strong> {followUp.customerAction}
             </p>
           ) : null}
@@ -468,39 +468,55 @@ export function VisualDiagnosisCards({ categories = [] }) {
           const pct = known ? Math.max(4, Math.min(100, toScore(c.score))) : 0;
           const detail = CATEGORY_DETAIL[c.key];
           const sawValue = c.explanation || (known ? null : 'Not clearly visible in today’s photos.');
-          return (
-            <div key={c.key} style={{ border: `1px solid ${BORDER}`, borderLeft: `4px solid ${meta.color}`, borderRadius: 12, background: CARD }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '12px 14px' }}>
-                <div style={{ flex: 'none' }}>
-                  <ScoreRing value={c.score} status={status} size={54} stroke={6} />
+          // Header row — the visual read: ring + label + status pill + score bar.
+          // alignItems flex-start + flex:none on the pill so a two-line label
+          // ("Stress / Damage Signals" at phone widths) doesn't shove the pill
+          // out of alignment (owner iPhone report 2026-07-28).
+          const headerRow = (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '12px 14px' }}>
+              <div style={{ flex: 'none' }}>
+                <ScoreRing value={c.score} status={status} size={54} stroke={6} />
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8 }}>
+                  <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, color: TEXT, lineHeight: 1.15 }}>{c.label}</div>
+                  <div style={{ flex: 'none' }}><StatusPill status={status} small /></div>
                 </div>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
-                    <div style={{ fontFamily: FONTS.heading, fontWeight: 700, fontSize: 15, color: TEXT, lineHeight: 1.15 }}>{c.label}</div>
-                    <StatusPill status={status} small />
-                  </div>
-                  {/* score bar — the primary visual read of where this sits 0–100 */}
-                  <div style={{ marginTop: 10, height: 7, borderRadius: 999, background: '#F1EEE6', overflow: 'hidden' }}>
-                    {known ? <div style={{ width: mounted ? `${pct}%` : '0%', height: '100%', background: meta.color, borderRadius: 999, transition: `width 0.8s cubic-bezier(0.34,1.56,0.64,1) ${0.15 + i * 0.09}s` }} /> : null}
-                  </div>
+                {/* score bar — the primary visual read of where this sits 0–100 */}
+                <div style={{ marginTop: 10, height: 7, borderRadius: 999, background: '#F1EEE6', overflow: 'hidden' }}>
+                  {known ? <div style={{ width: mounted ? `${pct}%` : '0%', height: '100%', background: meta.color, borderRadius: 999, transition: `width 0.8s cubic-bezier(0.34,1.56,0.64,1) ${0.15 + i * 0.09}s` }} /> : null}
                 </div>
               </div>
-              {detail ? (
-                <details open={print} style={{ borderTop: `1px solid ${BORDER}`, padding: '9px 14px' }}>
-                  <summary style={{ cursor: 'pointer', fontSize: 12.5, fontWeight: 700, color: MUTED, listStyle: 'none' }}>
-                    What this means
-                    {/* listStyle:none removes the native disclosure triangle —
-                        keep a visible expand affordance in its place. */}
-                    <span aria-hidden="true" style={{ marginLeft: 6, fontSize: 10 }}>▾</span>
-                  </summary>
-                  <div style={{ display: 'grid', gap: 8, marginTop: 8 }}>
-                    {sawValue ? <InsightLine label="What we saw" value={sawValue} strong /> : null}
-                    <InsightLine label="What this measures" value={detail.measures} />
-                    <InsightLine label="What affects it" value={detail.affects} />
-                  </div>
-                </details>
-              ) : null}
             </div>
+          );
+          if (!detail) {
+            return (
+              <div key={c.key} style={{ border: `1px solid ${BORDER}`, borderLeft: `4px solid ${meta.color}`, borderRadius: 12, background: CARD }}>
+                {headerRow}
+              </div>
+            );
+          }
+          // The whole row is the toggle: the card title says "Tap a row for
+          // details", but only the small "What this means" line used to be
+          // tappable — on a phone the row read as broken (owner iPhone report
+          // 2026-07-28). The summary now wraps the full header.
+          return (
+            <details key={c.key} open={print} style={{ border: `1px solid ${BORDER}`, borderLeft: `4px solid ${meta.color}`, borderRadius: 12, background: CARD }}>
+              <summary style={{ cursor: 'pointer', listStyle: 'none', WebkitTapHighlightColor: 'transparent' }}>
+                {headerRow}
+                <div style={{ borderTop: `1px solid ${BORDER}`, padding: '9px 14px', fontSize: 14, fontWeight: 700, color: MUTED }}>
+                  What this means
+                  {/* listStyle:none removes the native disclosure triangle —
+                      keep a visible expand affordance in its place. */}
+                  <span aria-hidden="true" style={{ marginLeft: 6, fontSize: 10 }}>▾</span>
+                </div>
+              </summary>
+              <div style={{ display: 'grid', gap: 8, padding: '2px 14px 12px' }}>
+                {sawValue ? <InsightLine label="What we saw" value={sawValue} strong /> : null}
+                <InsightLine label="What this measures" value={detail.measures} />
+                <InsightLine label="What affects it" value={detail.affects} />
+              </div>
+            </details>
           );
         })}
       </div>
@@ -553,7 +569,7 @@ export function LawnInsightCards({ insights = [], limit = 3 }) {
 
 function InsightLine({ label, value, strong }) {
   return (
-    <div style={{ fontSize: 13.5, lineHeight: 1.5, color: strong ? TEXT : BODY }}>
+    <div style={{ fontSize: 14.5, lineHeight: 1.5, color: strong ? TEXT : BODY }}>
       <span style={{ fontWeight: 700, color: COLORS.glassNavy }}>{label}: </span>
       {value}
     </div>
@@ -617,9 +633,9 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
       ) : null}
       {/* Watering after today, from the product label (or a safe default). */}
       {aftercare && aftercare.watering ? (
-        <div className="lawn-callout-after" style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${BORDER}`, fontSize: 13.5, color: BODY, lineHeight: 1.5 }}>
+        <div className="lawn-callout-after" style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${BORDER}`, fontSize: 14.5, color: BODY, lineHeight: 1.5 }}>
           <strong style={{ color: TEXT }}>After today’s visit:</strong> {aftercare.watering}
-          {aftercare.reentry ? <div style={{ marginTop: 4, fontSize: 12.5, color: MUTED }}>{aftercare.reentry}</div> : null}
+          {aftercare.reentry ? <div style={{ marginTop: 4, fontSize: 14, color: MUTED }}>{aftercare.reentry}</div> : null}
         </div>
       ) : null}
       {/* No usable irrigation schedule on file → a real CTA (not a text link)
@@ -631,7 +647,7 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
       {!water.scheduleOnFile && irrigationHref ? (
         <div className="lawn-water-cta" style={{ marginTop: 14, padding: '13px 15px', background: COLORS.sand, border: `1px solid ${BORDER}`, borderRadius: 12 }}>
           <div style={{ fontFamily: FONTS.heading, fontWeight: 800, fontSize: 14.5, color: TEXT }}>Get a water reading built for your lawn</div>
-          <div style={{ fontSize: 13.5, color: BODY, lineHeight: 1.5, margin: '4px 0 11px' }}>
+          <div style={{ fontSize: 14, color: BODY, lineHeight: 1.5, margin: '4px 0 11px' }}>
             We’re estimating right now because we don’t have your watering schedule yet. Add it once and every report is tailored to exactly what your lawn gets.
           </div>
           <a
@@ -803,7 +819,7 @@ export function LawnTreatmentCard({ treatment = {} }) {
                   {p.name}
                   {p.activeIngredient ? <span style={{ fontWeight: 500, color: MUTED, fontSize: 12.5 }}> · {p.activeIngredient}</span> : null}
                 </div>
-                {p.whatItDoes ? <div style={{ fontSize: 13.5, color: BODY, lineHeight: 1.5, marginTop: 2 }}>{p.whatItDoes}</div> : null}
+                {p.whatItDoes ? <div style={{ fontSize: 14.5, color: BODY, lineHeight: 1.5, marginTop: 2 }}>{p.whatItDoes}</div> : null}
                 {(p.targets && p.targets.length) || p.area ? (
                   <div style={{ fontSize: 12, color: MUTED, marginTop: 4 }}>
                     {p.targets && p.targets.length ? `Targets: ${p.targets.join(', ')}` : ''}
@@ -920,6 +936,11 @@ export function LawnProgressionSlider({ frames = [], note = null }) {
   const [pos, setPos] = useState(50);
   const ref = useRef(null);
   const dragging = useRef(false);
+  // rAF-throttled position writes: a state set per pointermove re-rendered the
+  // whole card every few ms and read as lag on phones (owner 2026-07-28).
+  const pendingPos = useRef(50);
+  const rafId = useRef(0);
+  useEffect(() => () => cancelAnimationFrame(rafId.current), []);
   if (pics.length < 2) return null;
 
   const before = pics[0];
@@ -934,7 +955,13 @@ export function LawnProgressionSlider({ frames = [], note = null }) {
     const el = ref.current;
     if (!el) return;
     const r = el.getBoundingClientRect();
-    setPos(Math.max(0, Math.min(100, ((clientX - r.left) / r.width) * 100)));
+    pendingPos.current = Math.max(0, Math.min(100, ((clientX - r.left) / r.width) * 100));
+    if (!rafId.current) {
+      rafId.current = requestAnimationFrame(() => {
+        rafId.current = 0;
+        setPos(pendingPos.current);
+      });
+    }
   };
   const onDown = (e) => { dragging.current = true; try { ref.current.setPointerCapture(e.pointerId); } catch (err) { /* noop */ } setFromX(e.clientX); };
   const onMove = (e) => { if (dragging.current) setFromX(e.clientX); };
@@ -968,6 +995,7 @@ export function LawnProgressionSlider({ frames = [], note = null }) {
           onPointerDown={onDown}
           onPointerMove={onMove}
           onPointerUp={onUp}
+          onPointerCancel={onUp}
           onPointerLeave={onUp}
           onKeyDown={(e) => {
             if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
@@ -979,7 +1007,13 @@ export function LawnProgressionSlider({ frames = [], note = null }) {
               e.preventDefault(); setPos(100);
             }
           }}
-          style={{ position: 'relative', height: H, borderRadius: 12, overflow: 'hidden', border: `1px solid ${BORDER}`, cursor: 'ew-resize', touchAction: 'none', userSelect: 'none' }}
+          /* touchAction pan-y (not none): 'none' hijacked vertical swipes over
+             the full-width photo, so the PAGE stopped scrolling and the whole
+             slider felt broken on phones (owner 2026-07-28). pan-y keeps page
+             scroll; a horizontal drag still drives the divider, and the
+             browser fires pointercancel (handled above) when it claims the
+             gesture for scrolling. */
+          style={{ position: 'relative', height: H, borderRadius: 12, overflow: 'hidden', border: `1px solid ${BORDER}`, cursor: 'ew-resize', touchAction: 'pan-y', userSelect: 'none' }}
         >
           {/* AFTER (latest) is the base layer */}
           <img src={after.url} alt="Now" draggable={false} style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover' }} />

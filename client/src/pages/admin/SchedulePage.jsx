@@ -12307,7 +12307,7 @@ export function CompletionPanel({
                   onClick={() => setZoneMapOpen(true)}
                   style={secondaryPill}
                 >
-                  Trace where we sprayed
+                  {isLawn ? "Outline the treated lawn" : "Trace where we sprayed"}
                 </button>
                 {zoneMapOpen && (
                   <TechTreatmentZoneModal
@@ -12319,10 +12319,13 @@ export function CompletionPanel({
                     onClose={() => setZoneMapOpen(false)}
                     onSaved={applyTracedTreatmentZone}
                     appearance="light"
+                    lawnMode={isLawn}
                   />
                 )}
                 <span style={{ fontSize: 13, color: "var(--muted, #667085)", marginLeft: 10 }}>
-                  Auto-trace the perimeter on the satellite photo — it renders as the spray map on the customer report.
+                  {isLawn
+                    ? "Auto-trace the lawn on the satellite photo — it renders as a highlighted treated-area outline on the customer report."
+                    : "Auto-trace the perimeter on the satellite photo — it renders as the spray map on the customer report."}
                 </span>
               </Field>
             )}

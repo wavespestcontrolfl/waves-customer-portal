@@ -546,8 +546,11 @@ function buildWeatherCallContext({ record } = {}) {
   let headline = 'Weather call';
   let body = 'Conditions were documented at application time for this service record.';
   if (Number.isFinite(rain) && rain > 0.25) {
+    // Facts only — this context sees recorded weather, not treatment
+    // decisions, so it must not claim the technician changed products or
+    // timing because of the rain (codex P2 #3038).
     headline = 'Recent rainfall noted.';
-    body = 'Recent rainfall was considered during application decisions.';
+    body = 'Measurable rain fell in the 24 hours before this visit and is part of today’s service record.';
   } else if (Number.isFinite(wind) && wind > 15) {
     headline = 'Wind was elevated.';
     body = 'Treatment decisions were adjusted to match label and site conditions.';
