@@ -14,14 +14,14 @@ const CONFIG_KEY = 'pest_frequency';
 const MIGRATION_TAG = 'migration:20260729000000';
 const UP_REASON = 'Removed inert pest_frequency row — no reader exists; cadence curve is code-authoritative (#2966). Admin edits to this row silently no-opped (audit 2026-07-28).';
 
-// Seed shape from 20260414000026, used only if the audit trail is missing on
-// rollback. v2_* keys reflect the staged-then-live v2 curve values the prod
-// row actually carried at deletion time.
-const FALLBACK_ROW = {
+// Row metadata (from seed 20260414000026) used when down() re-inserts the
+// row up() deleted. The DATA always comes from up()'s audit capture —
+// down() is a no-op when no capture exists, so a rollback in an environment
+// where the row was already absent never invents configuration.
+const ROW_METADATA = {
   name: 'Pest Frequency Discounts',
   category: 'pest',
   sort_order: 5,
-  data: { quarterly: 1.0, bimonthly: 0.92, monthly: 0.85, v2_bimonthly: 0.88, v2_monthly: 0.78 },
 };
 
 exports.up = async function up(knex) {
@@ -45,22 +45,24 @@ exports.down = async function down(knex) {
   if (!(await knex.schema.hasTable('pricing_config'))) return;
   const existing = await knex('pricing_config').where({ config_key: CONFIG_KEY }).first();
   if (existing) return;
-  // Restore the exact deleted data from the audit trail when available.
-  let data = FALLBACK_ROW.data;
-  if (await knex.schema.hasTable('pricing_config_audit')) {
-    const audit = await knex('pricing_config_audit')
-      .where({ config_key: CONFIG_KEY, changed_by: MIGRATION_TAG })
-      .orderBy('id', 'desc')
-      .first();
-    if (audit?.old_value) {
-      try { data = JSON.parse(audit.old_value); } catch { /* keep fallback */ }
-    }
-  }
+  // Restore ONLY what up() actually deleted: the audit row it wrote is the
+  // deletion marker AND the data source. No marker (row was already absent
+  // before up(), or the audit table doesn't exist) → rollback is a no-op —
+  // never re-create the misleading no-op editor from a hardcoded seed
+  // (codex #3040 r2 P2).
+  if (!(await knex.schema.hasTable('pricing_config_audit'))) return;
+  const audit = await knex('pricing_config_audit')
+    .where({ config_key: CONFIG_KEY, changed_by: MIGRATION_TAG })
+    .orderBy('id', 'desc')
+    .first();
+  if (!audit?.old_value) return;
+  let data;
+  try { data = JSON.parse(audit.old_value); } catch { return; }
   await knex('pricing_config').insert({
     config_key: CONFIG_KEY,
-    name: FALLBACK_ROW.name,
-    category: FALLBACK_ROW.category,
-    sort_order: FALLBACK_ROW.sort_order,
+    name: ROW_METADATA.name,
+    category: ROW_METADATA.category,
+    sort_order: ROW_METADATA.sort_order,
     data: JSON.stringify(data),
   });
   if (await knex.schema.hasTable('pricing_config_audit')) {

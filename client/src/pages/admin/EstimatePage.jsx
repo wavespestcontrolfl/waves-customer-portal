@@ -814,6 +814,7 @@ function EstimateToolView() {
     hasPoolCage: "NO",
     poolCageSize: "MEDIUM",
     hasLargeDriveway: "NO",
+    hasAttachedGarage: "NO",
     shrubDensity: "MODERATE",
     treeDensity: "MODERATE",
     landscapeComplexity: "MODERATE",
@@ -1495,6 +1496,7 @@ function EstimateToolView() {
       if (ep.poolCageSize && ep.poolCageSize !== "NONE")
         upd.poolCageSize = ep.poolCageSize;
       if (ep.largeDriveway) upd.hasLargeDriveway = "YES";
+      if (ep.hasAttachedGarage) upd.hasAttachedGarage = "YES";
       if (ep.shrubDensity) upd.shrubDensity = ep.shrubDensity;
       if (ep.treeDensity) upd.treeDensity = ep.treeDensity;
       if (ep.landscapeComplexity)
@@ -2048,6 +2050,7 @@ function EstimateToolView() {
           ? "manual"
           : profile.storiesSource;
         profile.hasLargeDriveway = form.hasLargeDriveway === "YES";
+        profile.hasAttachedGarage = form.hasAttachedGarage === "YES";
         profile.shrubDensity = form.shrubDensity || profile.shrubDensity;
         profile.treeDensity = form.treeDensity || profile.treeDensity;
         profile.landscapeComplexity =
@@ -2234,6 +2237,7 @@ function EstimateToolView() {
       hasPool: yesNo(form.hasPool),
       hasPoolCage: yesNo(form.hasPoolCage),
       hasLargeDriveway: yesNo(form.hasLargeDriveway),
+      attachedGarage: yesNo(form.hasAttachedGarage),
       nearWater: yesNo(form.nearWater),
       isAfterHours: yesNo(form.isAfterHours),
       isRecurringCustomer: yesNo(form.isRecurringCustomer),
@@ -2408,6 +2412,7 @@ function EstimateToolView() {
       hasPoolCage: "NO",
       poolCageSize: "MEDIUM",
       hasLargeDriveway: "NO",
+      hasAttachedGarage: "NO",
       nearWater: "NO",
       shrubDensity: "MODERATE",
       treeDensity: "MODERATE",
@@ -2659,6 +2664,7 @@ function EstimateToolView() {
                       hasPoolCage: "NO",
                       poolCageSize: "MEDIUM",
                       hasLargeDriveway: "NO",
+                      hasAttachedGarage: "NO",
                       shrubDensity: "MODERATE",
                       treeDensity: "MODERATE",
                       landscapeComplexity: "MODERATE",
