@@ -198,6 +198,10 @@ export default function SettingsPage() {
   const tabRef = useRef(initialTab);
 
   const selectTab = (leafKey) => {
+    // Clicking the already-active leaf (or its parent group) changes
+    // nothing rendered — record nothing, matching the shell's no-op
+    // guards, or idle re-clicks inflate the leaf counts.
+    if (leafKey === tab) return;
     setTab(leafKey);
     tabRef.current = leafKey;
     trackAdminPageView({

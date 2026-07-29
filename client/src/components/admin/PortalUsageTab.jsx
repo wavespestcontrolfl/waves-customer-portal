@@ -50,7 +50,11 @@ const EXTRA_LABELS = {
 };
 
 function buildLabelMap() {
-  const map = { ...EXTRA_LABELS };
+  // Null prototype: page keys are server-validated slugs but include words
+  // like 'constructor' — an inherited Object.prototype member must never
+  // win over the prettifySlug fallback (same class as the server's
+  // null-proto summary accumulators).
+  const map = Object.assign(Object.create(null), EXTRA_LABELS);
   for (const item of Object.values(ADMIN_NAV_ITEMS)) {
     const segment = String(item.path || "")
       .split("?")[0]
