@@ -237,6 +237,14 @@ export default function SettingsPage() {
     if (qp && VALID_TABS.includes(qp)) {
       setTab(qp);
       tabRef.current = qp;
+    } else {
+      // A REAL query-string change that removed (or mangled) ?tab= is a
+      // navigation to the Settings root — reset to the default leaf, or
+      // the previously rendered panel (e.g. Portal Usage) survives a
+      // sidebar click to /admin/settings and the beacon records the stale
+      // leaf (Codex #2961 r10).
+      setTab("general");
+      tabRef.current = "general";
     }
     if (isMobile && !qp) return;
     trackAdminPageView({
