@@ -379,7 +379,7 @@ async function ringAdminBell(NotificationService, args, context) {
   return !!bell;
 }
 
-async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = {}, notifyOnUnresolved = true, billingTerm = null }) {
+async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = {}, notifyOnUnresolved = true, billingTerm = null, startDateLabel: startDateLabelOverride = null }) {
   try {
     if (!estimate || !customerId) return { ok: false, skipped: 'missing_inputs' };
     // One-time acceptances keep their termite snapshots but did NOT accept
@@ -411,7 +411,12 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       return { ok: false, skipped: 'annual_prepay' };
     }
 
-    const startDateLabel = estimate.id ? await scheduledStartDateLabel(estimate.id) : null;
+    // The admin scheduling flow books the visit BEFORE the rows are linked
+    // to the estimate (linkCreatedRowsToEstimate runs after acceptance), so
+    // it passes the booked termite date explicitly — the DB lookup would
+    // race the linking and permanently snapshot the fallback label.
+    const startDateLabel = startDateLabelOverride
+      || (estimate.id ? await scheduledStartDateLabel(estimate.id) : null);
     const prepared = buildTermiteProgramAgreementValues(estimate, estData, { startDateLabel });
 
     if (!prepared) {

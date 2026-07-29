@@ -295,6 +295,11 @@ async function markEstimateManuallyAccepted({
   // service_type so the coverage match (serviceMatchesCoverage) finds the
   // booked rows. Ignored for standard accepts and when not supplied.
   annualPrepayCoverage = null,
+  // Booked first TERMITE visit date (YYYY-MM-DD) when acceptance happens
+  // inside the scheduling flow — the created rows aren't linked to the
+  // estimate yet at downstream time, so the program-agreement start date
+  // must be handed in rather than looked up. Null = lookup/fallback.
+  agreementStartDate = null,
   database = db,
   leadLinkService = { markLinkedLeadEstimateAccepted },
   estimateConverter = EstimateConverter,
@@ -683,7 +688,9 @@ async function markEstimateManuallyAccepted({
       if (agreementCustomerId) {
         try {
           const { maybeCreateTermiteProgramAgreement } = require('./termite-program-agreement');
-          void maybeCreateTermiteProgramAgreement({ estimate: acceptedEstimate, customerId: agreementCustomerId, billingTerm: normalizedBillingTerm })
+          const { formatDisplayDate } = require('../utils/date-only');
+          const agreementStartLabel = agreementStartDate ? (formatDisplayDate(agreementStartDate, { fallback: '' }) || null) : null;
+          void maybeCreateTermiteProgramAgreement({ estimate: acceptedEstimate, customerId: agreementCustomerId, billingTerm: normalizedBillingTerm, startDateLabel: agreementStartLabel })
             .catch((err) => logger.warn(`[estimate-manual-acceptance] termite agreement prep failed for estimate ${acceptedEstimate.id}: ${err.message}`));
         } catch (err) {
           logger.warn(`[estimate-manual-acceptance] termite agreement prep setup failed for estimate ${acceptedEstimate.id}: ${err.message}`);
