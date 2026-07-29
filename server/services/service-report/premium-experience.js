@@ -364,6 +364,15 @@ function buildPropertyDefenseStatusContext({ record, findings = [], applications
   const hasFrontEntry = findingText.some((text) => text.includes('front') || text.includes('entry') || text.includes('threshold'));
   const hasLanaiActivity = findingText.some((text) => text.includes('lanai') && !text.includes('clear'));
   const hasPoolActivity = findingText.some((text) => text.includes('pool') && !text.includes('clear'));
+  // Lanai / pool rows only render when THIS property gives us a signal they
+  // exist (a zone or finding mentions them). A templated "Pool equipment pad —
+  // clear" on a home with no pool reads like someone else's report
+  // (John Kelleher audit 2026-07-29).
+  const allZoneText = zones.map((zone) => `${zone.label || ''} ${zone.letter || ''}`.toLowerCase()).join(' ');
+  const lanaiOnProperty = hasLanaiActivity || allZoneText.includes('lanai') || allZoneText.includes('patio')
+    || findingText.some((text) => text.includes('lanai'));
+  const poolOnProperty = hasPoolActivity || allZoneText.includes('pool')
+    || findingText.some((text) => text.includes('pool'));
   const highAction = findings.some((finding) => ['critical', 'high'].includes(finding.severity) && finding.recommendation);
   const anyRecommendation = findings.some((finding) => finding.recommendation);
   const lowPressure = Number.isFinite(pressure) && pressure < 2;
@@ -388,20 +397,20 @@ function buildPropertyDefenseStatusContext({ record, findings = [], applications
       detail: hasFrontEntry ? 'Activity or a recommendation was documented near the entry.' : 'No active entry finding was documented.',
       sourceKeys: findings.filter((finding) => /front|entry|threshold/i.test(`${finding.title} ${finding.detail}`)).map((finding) => `finding:${finding.id}`),
     },
-    {
+    ...(lanaiOnProperty ? [{
       key: 'lanai',
       label: 'Lanai',
       status: hasLanaiActivity ? 'watched' : 'clear',
       detail: hasLanaiActivity ? 'Lanai activity was documented.' : 'No lanai activity was documented.',
       sourceKeys: findings.filter((finding) => /lanai/i.test(`${finding.title} ${finding.detail}`)).map((finding) => `finding:${finding.id}`),
-    },
-    {
+    }] : []),
+    ...(poolOnProperty ? [{
       key: 'pool_equipment_pad',
       label: 'Pool equipment pad',
       status: hasPoolActivity ? 'watched' : 'clear',
       detail: hasPoolActivity ? 'Pool equipment area activity was documented.' : 'No pool equipment pad activity was documented.',
       sourceKeys: findings.filter((finding) => /pool/i.test(`${finding.title} ${finding.detail}`)).map((finding) => `finding:${finding.id}`),
-    },
+    }] : []),
     {
       key: 'pressure',
       label: 'Pressure',
@@ -453,6 +462,10 @@ function pestKeysFromRows(findings = [], applications = []) {
     if (text.includes('german roach')) found.add('german_roach');
     if (text.includes('spider')) found.add('spider');
   }
+  // The generic 'ant' card next to 'ghost_ant' is a near-duplicate (both are
+  // built from overlapping ant targets) — keep the specific dossier only
+  // (John Kelleher audit 2026-07-29).
+  if (found.has('ghost_ant')) found.delete('ant');
   return [...found].filter((key) => PEST_DOSSIERS[key]).slice(0, 3);
 }
 
@@ -469,9 +482,14 @@ function buildBugFilesContext({ findings = [], applications = [], zones = [], pr
     ));
     const firstFinding = relatedFindings[0];
     const zone = firstFinding?.zoneId ? zoneById.get(String(firstFinding.zoneId)) : null;
-    const where = zone
-      ? `${zone.letter} · ${zone.label}`
-      : firstFinding?.title || 'Documented service area';
+    // "Where seen" is a SIGHTING claim — it renders only when a real finding
+    // backs it. Target-derived cards (no finding) used to say "Documented
+    // service area", which presented what a product COVERS as something that
+    // was observed (John Kelleher audit 2026-07-29; same targets-vs-found
+    // rule as the lawn narrative). whatWeDid already tells the coverage story.
+    const where = firstFinding
+      ? (zone ? `${zone.letter} · ${zone.label}` : firstFinding.title)
+      : null;
 
     return {
       pestKey,
@@ -480,7 +498,7 @@ function buildBugFilesContext({ findings = [], applications = [], zones = [], pr
         label: dossier.label,
         confirmedByTech: Boolean(firstFinding),
       },
-      whereSeen: sourceBacked(where, firstFinding ? [`finding:${firstFinding.id}`] : []),
+      whereSeen: where ? sourceBacked(where, [`finding:${firstFinding.id}`]) : null,
       whyItMatters: sourceBacked(dossier.whyItMatters, ['pest_dossier']),
       whatWeDid: sourceBacked(
         relatedApps.length
@@ -552,11 +570,14 @@ function buildWeatherCallContext({ record } = {}) {
     headline = 'Recent rainfall noted.';
     body = 'Measurable rain fell in the 24 hours before this visit and is part of today’s service record.';
   } else if (Number.isFinite(wind) && wind > 15) {
+    // Facts only — this context sees recorded weather, not treatment
+    // decisions, so it must not claim adjustments were made (same rule as
+    // the rain branch; codex P2 #3038 flagged the invented-decision copy).
     headline = 'Wind was elevated.';
-    body = 'Treatment decisions were adjusted to match label and site conditions.';
+    body = 'Elevated wind was recorded at application time and noted with today’s service record.';
   } else if (Number.isFinite(wind) && wind > 10) {
     headline = 'Wind noted during service.';
-    body = 'Wind was elevated, so application decisions were adjusted to site conditions.';
+    body = 'A breezy window was recorded during the service and noted with today’s record.';
   } else if ((!Number.isFinite(rain) || rain <= 0.1) && (!Number.isFinite(wind) || wind <= 10)) {
     headline = 'Good treatment window.';
     body = 'Low rainfall and moderate wind supported exterior application.';

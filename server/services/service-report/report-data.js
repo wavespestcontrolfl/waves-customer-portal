@@ -2136,6 +2136,24 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     recommendation: finding.recommendation || '',
   }));
 
+  // Render-time honesty pass for PERSISTED no-activity rows: older completions
+  // could stamp "All inspected zones were clear…" even when the homeowner
+  // reported something during the visit (the insert guard now suppresses these
+  // going forward, but stored rows are permanent). When a customer concern is
+  // on record, soften the absolute claim so the report never tells a customer
+  // "all clear" right after they flagged something (John Kelleher audit
+  // 2026-07-29).
+  {
+    const renderConcern = structuredCustomerConcern(structured);
+    if (renderConcern) {
+      for (const finding of findings) {
+        if (finding.category === 'no_activity') {
+          finding.detail = 'No confirmed pest activity was found beyond what you reported — we treated preventively and will follow up on what you flagged at the next visit.';
+        }
+      }
+    }
+  }
+
   for (const observation of protocol.observations) {
     if (findings.some((finding) => finding.title.toLowerCase() === observation.toLowerCase())) continue;
     findings.push({
@@ -3227,6 +3245,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // 'recap' for the completion recap — lets response wrappers (Pest V2
     // hero) surface the reviewed copy without re-parsing the notes.
     summarySource: visitSummarySource,
+    // Customer concern captured at completion — feeds the pest V2 "what you
+    // flagged" card (reports-public passes it to buildPestReportV2). Lawn and
+    // tree & shrub already consume it inside their own V2 builders.
+    customerConcern: structuredCustomerConcern(structured),
     customerInteraction: service.customer_interaction || structured.customerInteraction || null,
     serviceAreas: areaLabels,
     measurements: {

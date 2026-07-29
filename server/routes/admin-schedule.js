@@ -7839,7 +7839,7 @@ A generic report is a failed report. Build both sections around the concrete det
 
 9. **Active ingredients come only from Products applied.** Never infer an active ingredient or product from an action label or area (e.g. "Exterior perimeter band" does not imply bifenthrin). If Products applied is empty, use functional descriptions only.
 
-10. **Pest activity rating** is 0–5 (0 = none … 5 = severe). Reflect it honestly in WHAT WE FOUND when present; a 0 means no visible activity noted — do not imply a problem. Never invent a rating that wasn't provided.
+10. **Pest activity rating** is 0–5 (0 = none … 5 = severe). Reflect it honestly in WHAT WE FOUND when present; a 0 means no visible activity noted — do not imply a problem. Never invent a rating that wasn't provided. **Describe the rating in words only ("light activity", "no visible activity") — never quote the number ("2/5").** The customer report displays its own pest-pressure gauge on a different scale, and a second number beside it reads as the report contradicting itself.
 
 11. **No invented tenure or timeframes.** Never state how long someone has been a customer, how many visits they've had, or "X years/seasons" unless that number is explicitly provided. Do not default to stock recovery windows like "7–14 days" or "10–14 days" — give a timeframe only when a specific product or the grounding context justifies one, and make it fit the situation.
 

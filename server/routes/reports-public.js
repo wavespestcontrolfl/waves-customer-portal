@@ -377,6 +377,10 @@ async function buildServiceReportV1ResponseData(service, token, { mode = 'live',
         technicianReport: !data.typedReport && data.summarySource === 'technician_report'
           ? data.summary
           : null,
+        // Homeowner-reported concern → the "We looked into what you flagged"
+        // card, so what the customer told the tech never disappears into a
+        // summary clause (John Kelleher audit 2026-07-29).
+        customerConcern: data.customerConcern || null,
       });
       if (pestReportV2) data.pestReportV2 = pestReportV2;
     } catch { /* best-effort — never block the report */ }

@@ -132,6 +132,24 @@ function buildSupportingMetric({ pestPressure, activity }) {
   return null;
 }
 
+// "We looked into what you flagged" — the homeowner's reported concern gets
+// its own acknowledged card (John Kelleher audit 2026-07-29: a mud-wasp nest
+// the customer reported was buried in a summary clause while the findings
+// card said "all clear"; the lawn report has carried this card for a month).
+// Deterministic copy; concern text is shown as a quote, never asserted as a
+// confirmed technician finding.
+function buildCustomerConcernCard(concernText) {
+  const concern = String(concernText || '').trim();
+  if (!concern) return null;
+  const quoted = concern.length > 220 ? `${concern.slice(0, 217).trim()}…` : concern;
+  return {
+    headline: 'We looked into what you flagged',
+    concern: quoted,
+    body: 'Your technician checked it during today’s visit, and it’s tracked on this report so it isn’t lost between visits.',
+    nextStep: 'We’ll follow up at your next service — text us before then if it changes or gets worse.',
+  };
+}
+
 function buildAiSummary(personality) {
   const straight = personality?.variants?.straight;
   if (!straight) return null;
@@ -191,6 +209,7 @@ function buildPestReportV2({
   activity = null,
   forecast = null,
   technicianReport = null,
+  customerConcern = null,
 } = {}) {
   if (!premiumExperience) return null;
   const defenseStatus = premiumExperience.propertyDefenseStatus;
@@ -213,6 +232,12 @@ function buildPestReportV2({
     ? { headline: null, body: technicianCopy }
     : null;
   const forecastCard = buildForecast(forecast);
+  const rawConcernCard = buildCustomerConcernCard(customerConcern);
+  // Concern text is homeowner input — screen it like every other customer
+  // string; an unscreenable concern drops the card rather than the report.
+  const concernCard = rawConcernCard && validateCustomerCopy(rawConcernCard.concern)
+    ? rawConcernCard
+    : null;
 
   // Nothing meaningful to show → don't render an empty V2 shell.
   if (!defense && !primaryMove && !bugFiles.length && !supportingMetric && !forecastCard) {
@@ -232,6 +257,7 @@ function buildPestReportV2({
     supportingMetric,
     defense,
     primaryMove,
+    customerConcern: concernCard,
     bugFiles,
     pressureReceipt: premiumExperience.pressureReceipt || null,
     weatherCall: premiumExperience.weatherCall || null,
