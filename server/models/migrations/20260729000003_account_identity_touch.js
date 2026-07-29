@@ -40,6 +40,10 @@ exports.up = async function up(knex) {
     CREATE TRIGGER customers_identity_propagate AFTER UPDATE ON customers
     FOR EACH ROW
     WHEN (NEW.account_id IS NOT NULL
+      -- Live rows only: dedupe retirement scrambles the loser's phone/email
+      -- in the same update that sets deleted_at — those sentinel values
+      -- must never overwrite the shared canonical identity.
+      AND NEW.deleted_at IS NULL
       AND (OLD.email IS DISTINCT FROM NEW.email OR OLD.phone IS DISTINCT FROM NEW.phone
         OR OLD.first_name IS DISTINCT FROM NEW.first_name OR OLD.last_name IS DISTINCT FROM NEW.last_name))
     EXECUTE FUNCTION propagate_customer_identity_to_account();

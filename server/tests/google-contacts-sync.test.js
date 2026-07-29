@@ -899,6 +899,39 @@ describe('runContactsSync', () => {
     expect(mockPeopleApi.people.createContact).not.toHaveBeenCalled();
   });
 
+  test('an auth failure inside the SEARCH still blocks the run', async () => {
+    setupDb({ customers: [{ ...CUSTOMER }] });
+    const err = new Error('invalid_grant');
+    err.code = 400;
+    err.response = { data: { error: 'invalid_grant' } };
+    mockPeopleApi.people.searchContacts.mockRejectedValue(err);
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(counts.blocked).toBe('google_auth_failed');
+    expect(mockPeopleApi.people.createContact).not.toHaveBeenCalled();
+  });
+
+  test('a recovered orphan DEFERS to an established sibling contact', async () => {
+    setupDb({
+      leads: [{ id: 'l-p', first_name: 'Sam', email: 'sam@new.example', phone: null, customer_id: null, google_contact_id: 'pending_create_recovery::sam%40new.example', google_contact_synced_at: '2026-07-01T00:00:00Z', updated_at: '2026-07-28T11:00:00Z' }],
+      // ownership: no customer match; sibling EMAIL match owns the
+      // established contact; in-use probe for the orphan: none share it
+      firstResults: { customers: [null, null], leads: [{ id: 'l-1', google_contact_id: 'people/established' }, null] },
+    });
+    mockPeopleApi.people.searchContacts.mockImplementation(async ({ query }) => (
+      query === 'sam@new.example'
+        ? { data: { results: [{ person: { resourceName: 'people/orphan', clientData: [{ key: 'waves_row', value: 'leads:l-p' }] } }] } }
+        : { data: { results: [] } }
+    ));
+    mockPeopleApi.people.get.mockResolvedValueOnce({ data: { etag: 'e1', metadata: { sources: [] }, memberships: [] } });
+    mockPeopleApi.people.updateContact.mockResolvedValueOnce({ data: { resourceName: 'people/established' } });
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(counts.synced).toBe(1);
+    // The orphan lost the race — deleted, and the sibling's contact wins.
+    expect(mockPeopleApi.people.deleteContact).toHaveBeenCalledWith({ resourceName: 'people/orphan' });
+    expect(mockPeopleApi.people.updateContact.mock.calls[0][0].resourceName).toBe('people/established');
+    expect(mockPeopleApi.people.createContact).not.toHaveBeenCalled();
+  });
+
   test('scope-missing aborts WITHOUT stamping — rows retry after the one-time re-consent', async () => {
     const state = setupDb({ customers: [{ ...CUSTOMER }] });
     const err = new Error('Request had insufficient authentication scopes.');

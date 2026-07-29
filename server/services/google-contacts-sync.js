@@ -212,16 +212,29 @@ function mergedMemberships(current) {
  */
 async function stampIfUnchanged(table, row, patch) {
   const q = db(table)
-    .where({ id: row.id })
-    .whereRaw("date_trunc('milliseconds', updated_at) <= ?", [row.updated_at]);
+    .where({ id: row.id });
+  if (row.updated_at_us) {
+    // Exact µs token — a same-millisecond raced edit differs here and
+    // vetoes the stamp.
+    q.whereRaw("to_char(updated_at, 'YYYY-MM-DD HH24:MI:SS.US') = ?", [row.updated_at_us]);
+  } else {
+    q.whereRaw("date_trunc('milliseconds', updated_at) <= ?", [row.updated_at]);
+  }
   if (row.__canonicalIdentity?.id) {
     // The published payload came from the account row read earlier — an
     // account edit racing this pass must veto the stamp the same way a row
     // edit does, or the fresher canonical values would never re-publish.
-    q.whereRaw(
-      "NOT EXISTS (SELECT 1 FROM customer_accounts ca WHERE ca.id = ? AND date_trunc('milliseconds', ca.updated_at) > ?)",
-      [row.__canonicalIdentity.id, row.__canonicalIdentity.updated_at],
-    );
+    if (row.__canonicalIdentity.updated_at_us) {
+      q.whereRaw(
+        "NOT EXISTS (SELECT 1 FROM customer_accounts ca WHERE ca.id = ? AND to_char(ca.updated_at, 'YYYY-MM-DD HH24:MI:SS.US') <> ?)",
+        [row.__canonicalIdentity.id, row.__canonicalIdentity.updated_at_us],
+      );
+    } else {
+      q.whereRaw(
+        "NOT EXISTS (SELECT 1 FROM customer_accounts ca WHERE ca.id = ? AND date_trunc('milliseconds', ca.updated_at) > ?)",
+        [row.__canonicalIdentity.id, row.__canonicalIdentity.updated_at],
+      );
+    }
   }
   // GREATEST(updated_at, now()) — DB-side clock, skew-free: the watermark
   // must also cover the ACCOUNT staleness clause (ca.updated_at compares
@@ -237,10 +250,13 @@ async function stampIfUnchanged(table, row, patch) {
  * the same oldest rows forever.
  */
 async function stampVerified(table, row, resourceName, now) {
-  return db(table)
-    .where({ id: row.id })
-    .whereRaw("date_trunc('milliseconds', updated_at) <= ?", [row.updated_at])
-    .update({ google_contact_id: resourceName, google_contact_synced_at: now });
+  const q = db(table).where({ id: row.id });
+  if (row.updated_at_us) {
+    q.whereRaw("to_char(updated_at, 'YYYY-MM-DD HH24:MI:SS.US') = ?", [row.updated_at_us]);
+  } else {
+    q.whereRaw("date_trunc('milliseconds', updated_at) <= ?", [row.updated_at]);
+  }
+  return q.update({ google_contact_id: resourceName, google_contact_synced_at: now });
 }
 
 /** True when another LIVE row still references this Google contact. */
@@ -287,9 +303,9 @@ async function findExistingContact(people, row, tag, { queryOverride = null } = 
     ));
     return match?.resourceName || null;
   } catch (e) {
-    // Scope errors keep their classification — the run must surface the
-    // actionable re-consent status, not N generic row failures.
-    if (isScopeError(e)) throw e;
+    // Scope and AUTH errors keep their classification — the run must
+    // surface the actionable blocked status, not N generic row failures.
+    if (isScopeError(e) || isAuthError(e)) throw e;
     // Any other INCONCLUSIVE search must defer creation — creating past a
     // failed orphan check is how duplicates leak. The row retries next run.
     const err = new Error('contact search inconclusive — creation deferred');
@@ -483,6 +499,10 @@ async function resolveLeadOwnership(row) {
 }
 
 const SYNC_COLUMNS = ['id', 'first_name', 'last_name', 'email', 'phone', 'google_contact_id', 'updated_at'];
+// Microsecond-precision concurrency token: node-postgres Dates are
+// millisecond-truncated, so a same-millisecond raced edit would pass a
+// ms-level guard and get stamped over. Selected as text, compared as text.
+const US_TOKEN = "to_char(updated_at, 'YYYY-MM-DD HH24:MI:SS.US') as updated_at_us";
 
 /**
  * One incremental pass. Returns { synced, skipped, failed, retired,
@@ -528,14 +548,14 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
     })
     .orderBy('updated_at', 'desc')
     .limit(Math.max(0, cap - LEAD_RESERVE))
-    .select(...SYNC_COLUMNS, 'account_id', 'address_line1', 'address_line2', 'city', 'state', 'zip');
+    .select(...SYNC_COLUMNS, db.raw(US_TOKEN), 'account_id', 'address_line1', 'address_line2', 'city', 'state', 'zip');
   const leadRoom = Math.max(0, cap - customers.length);
   const leads = leadRoom === 0 ? [] : await db('leads')
     .whereNull('deleted_at')
     .where(stale)
     .orderBy('updated_at', 'desc')
     .limit(leadRoom)
-    .select(...SYNC_COLUMNS, 'customer_id');
+    .select(...SYNC_COLUMNS, db.raw(US_TOKEN), 'customer_id');
   const customerById = new Map(customers.map((c) => [c.id, c]));
 
   const work = [
@@ -593,6 +613,11 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
           const recovered = await findExistingContact(people, row, rowTag(table, row), { queryOverride: markerSearchKey });
           if (recovered) {
             row.google_contact_id = recovered;
+            // The orphan may have LOST the race: a sibling/account row can
+            // have minted the established contact while this one was
+            // pending — the ownership blocks below reconcile (retire the
+            // orphan, adopt theirs) instead of keeping both forever.
+            row.__recoveredFresh = true;
           } else if (!pastGrace) {
             counts.failed += 1;
             logger.info(`[contacts-sync] pending-create recovery deferred inside the grace window (${table} ${row.id})`);
@@ -680,6 +705,15 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
         }
         if (ownership.adoptContactId && !row.google_contact_id) {
           row.google_contact_id = ownership.adoptContactId;
+        } else if (row.__recoveredFresh && ownership.adoptContactId
+          && ownership.adoptContactId !== row.google_contact_id) {
+          // Recovered orphan vs an established sibling contact: the
+          // sibling's wins; the orphan is retired (unless shared).
+          if (!(await contactInUseElsewhere(row.google_contact_id, table, row.id))) {
+            await deleteContact(people, row.google_contact_id);
+            await sleep(gapMs);
+          }
+          row.google_contact_id = ownership.adoptContactId;
         } else if (row.google_contact_id && !ownership.adoptContactId
           && (await contactInUseElsewhere(row.google_contact_id, table, row.id))) {
           // The contact is SHARED but this lead's identity no longer
@@ -689,7 +723,7 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
           row.google_contact_id = null;
         }
       }
-      if (kind === 'customer' && !row.google_contact_id && row.account_id) {
+      if (kind === 'customer' && row.account_id && (!row.google_contact_id || row.__recoveredFresh)) {
         // One contact per ACCOUNT: multi-property accounts own several
         // customer rows BY DESIGN (dup email/phone constraints removed in
         // 20260504000008) — adopt the account's existing contact instead
@@ -702,7 +736,16 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
           .whereNot('google_contact_id', 'like', `${PENDING_CREATE}%`)
     .whereNot('google_contact_id', 'like', `${PENDING_RETIRE}%`)
           .first();
-        if (accountSibling?.google_contact_id) row.google_contact_id = accountSibling.google_contact_id;
+        const accountContact = accountSibling?.google_contact_id || null;
+        if (accountContact && accountContact !== row.google_contact_id) {
+          if (row.google_contact_id
+            && !(await contactInUseElsewhere(row.google_contact_id, table, row.id))) {
+            // Recovered orphan vs the account's established contact.
+            await deleteContact(people, row.google_contact_id);
+            await sleep(gapMs);
+          }
+          row.google_contact_id = accountContact;
+        }
       }
       if (kind === 'customer' && row.account_id) {
         // Multi-property accounts share ONE contact — pushing only the
@@ -720,7 +763,10 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
           if (props.length) row.__accountAddresses = props.slice(0, 8);
           // Canonical identity: the customer_accounts row IS the person;
           // property rows are copies that can drift.
-          const account = await db('customer_accounts').where({ id: row.account_id }).first();
+          const account = await db('customer_accounts')
+            .where({ id: row.account_id })
+            .select('*', db.raw(US_TOKEN))
+            .first();
           if (account) row.__canonicalIdentity = account;
         } catch (e) {
           // Publishing a KNOWN-incomplete shared contact would strip the
@@ -731,7 +777,7 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
           continue;
         }
       }
-      if (kind === 'customer' && !row.google_contact_id) {
+      if (kind === 'customer' && (!row.google_contact_id || row.__recoveredFresh)) {
         // Insertion order must not matter: a live LEAD with this email may
         // have minted the contact before the customer row existed — adopt
         // it (the lead's row keeps its shared pointer; the in-use guard
@@ -745,7 +791,15 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
     .whereNot('google_contact_id', 'like', `${PENDING_RETIRE}%`)
             .whereRaw('LOWER(email) = ?', [customerEmail])
             .first();
-          if (leadOwner?.google_contact_id) row.google_contact_id = leadOwner.google_contact_id;
+          const leadContact = leadOwner?.google_contact_id || null;
+          if (leadContact && leadContact !== row.google_contact_id) {
+            if (row.google_contact_id
+              && !(await contactInUseElsewhere(row.google_contact_id, table, row.id))) {
+              await deleteContact(people, row.google_contact_id);
+              await sleep(gapMs);
+            }
+            row.google_contact_id = leadContact;
+          }
         }
       }
       const priorContactId = row.google_contact_id;
@@ -934,7 +988,11 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
             }
           } catch (searchErr) {
             if (isScopeError(searchErr)) { counts.blocked = 'contacts_scope_missing'; return counts; }
-            continue; // inconclusive — keep the marker
+            if (isAuthError(searchErr)) { counts.blocked = 'google_auth_failed'; return counts; }
+            // Inconclusive — keep the marker, but the stalled retirement
+            // must show in job health.
+            counts.failed += 1;
+            continue;
           }
           await db(table).where({ id: row.id }).update({ google_contact_id: null, google_contact_synced_at: null });
           counts.retired += 1;
@@ -1019,7 +1077,7 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
       .where('google_contact_synced_at', '<', verifyCutoff)
       .orderBy('google_contact_synced_at', 'asc')
       .limit(Math.max(1, VERIFY_SLOTS - 2))
-      .select(...SYNC_COLUMNS, 'account_id', 'address_line1', 'address_line2', 'city', 'state', 'zip');
+      .select(...SYNC_COLUMNS, db.raw(US_TOKEN), 'account_id', 'address_line1', 'address_line2', 'city', 'state', 'zip');
     verifyRows.push(...vc.map((row) => ({ table: 'customers', kind: 'customer', row })));
     if (verifyRows.length < VERIFY_SLOTS) {
       const vl = await db('leads')
@@ -1031,7 +1089,7 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
         .where('google_contact_synced_at', '<', verifyCutoff)
         .orderBy('google_contact_synced_at', 'asc')
         .limit(VERIFY_SLOTS - verifyRows.length)
-        .select(...SYNC_COLUMNS, 'customer_id');
+        .select(...SYNC_COLUMNS, db.raw(US_TOKEN), 'customer_id');
       verifyRows.push(...vl.map((row) => ({ table: 'leads', kind: 'lead', row })));
     }
   } catch (e) {
@@ -1056,7 +1114,10 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
           if (props.length) row.__accountAddresses = props.slice(0, 8);
           // Canonical identity: the customer_accounts row IS the person;
           // property rows are copies that can drift.
-          const account = await db('customer_accounts').where({ id: row.account_id }).first();
+          const account = await db('customer_accounts')
+            .where({ id: row.account_id })
+            .select('*', db.raw(US_TOKEN))
+            .first();
           if (account) row.__canonicalIdentity = account;
         } catch (e) {
           counts.failed += 1;
