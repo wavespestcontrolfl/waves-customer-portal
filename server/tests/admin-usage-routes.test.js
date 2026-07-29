@@ -171,6 +171,20 @@ describe('admin usage: POST /track', () => {
       res = await post({ pageKey: 'pricing-reality-check', path: '/admin/pricing-reality-check' });
       expect(res.status).toBe(204);
       expect(chain.calls.insert.path).toBe('/admin/pricing-reality-check');
+      // Slug-like NAMES are identifiers regardless of length (Codex r3):
+      // mixed case / underscores are never route structure…
+      res = await post({ pageKey: 'customers', path: '/admin/customers/John_Smith' });
+      expect(res.status).toBe(204);
+      expect(chain.calls.insert.path).toBe('/admin/customers/:id');
+      // …and the segment after an entity list route is an identifier even
+      // when it is shape-indistinguishable from a route word…
+      res = await post({ pageKey: 'customers', path: '/admin/customers/acme' });
+      expect(res.status).toBe(204);
+      expect(chain.calls.insert.path).toBe('/admin/customers/:id');
+      // …while that route's known static subpages stay intact.
+      res = await post({ pageKey: 'customers', path: '/admin/customers/new' });
+      expect(res.status).toBe(204);
+      expect(chain.calls.insert.path).toBe('/admin/customers/new');
     });
   });
 

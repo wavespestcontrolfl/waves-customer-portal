@@ -57,12 +57,28 @@ export function markUsageSource(source) {
 
 /** '/admin/customers/8f3…e2/notes' → { pageKey: 'customers',
  *  path: '/admin/customers/:id/notes' }. Returns null off /admin. */
+// Route STRUCTURE is lowercase slug words; anything else is an identifier
+// regardless of length ('John_Smith'). The segment after an entity list
+// route is an identifier unless it's a known static subpage ('acme' after
+// /customers). Mirrored server-side in routes/admin-usage.js — the server
+// is the authoritative privacy backstop.
+const ROUTE_WORD_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+const ENTITY_ROUTES = new Set(['customers', 'estimates', 'invoices', 'leads', 'calls', 'technicians', 'requests']);
+const ENTITY_STATIC_SUBPAGES = new Set(['new', 'import', 'map', 'directory', 'kanban', 'search', 'settings']);
+
 export function normalizeAdminPath(pathname) {
   if (typeof pathname !== 'string' || !/^\/admin(\/|$)/.test(pathname)) return null;
   const segments = pathname.split('/').filter(Boolean).slice(1); // drop 'admin'
-  const normalized = segments.map((seg) => (
-    UUID_RE.test(seg) || NUMERIC_RE.test(seg) || OPAQUE_RE.test(seg) ? ':id' : seg
-  ));
+  const normalized = segments.map((seg, i, arr) => {
+    if (UUID_RE.test(seg) || NUMERIC_RE.test(seg) || OPAQUE_RE.test(seg)) return ':id';
+    // Malformed segments stay as-is (the length/shape guards downstream
+    // drop the beacon) — mirroring the server backstop.
+    if (!/^[A-Za-z0-9_-]+$/.test(seg)) return seg;
+    if (!ROUTE_WORD_RE.test(seg)) return ':id';
+    const prev = i > 0 ? arr[i - 1] : null;
+    if (prev && ENTITY_ROUTES.has(prev) && !ENTITY_STATIC_SUBPAGES.has(seg)) return ':id';
+    return seg;
+  });
   const first = normalized[0] || 'dashboard';
   const pageKey = first.toLowerCase();
   if (!PAGE_KEY_RE.test(pageKey)) return null;

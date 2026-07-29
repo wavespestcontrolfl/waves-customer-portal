@@ -43,12 +43,35 @@ function isIdSegment(seg) {
   return UUID_SEGMENT_RE.test(seg) || NUMERIC_SEGMENT_RE.test(seg) || OPAQUE_SEGMENT_RE.test(seg);
 }
 
+// Route STRUCTURE is lowercase slug words. Any segment that isn't (mixed
+// case, underscores — 'John_Smith') is an identifier, whatever its length:
+// the privacy backstop must hold against a regressed/hostile client, not
+// just against the shapes our own client produces (Codex #2961 r3).
+const ROUTE_WORD_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+// Entity list routes whose next segment is a record identifier unless it is
+// one of that route's known static subpages — catches short lowercase
+// identifiers ('/admin/customers/acme') that are shape-indistinguishable
+// from route words.
+const ENTITY_ROUTES = new Set(['customers', 'estimates', 'invoices', 'leads', 'calls', 'technicians', 'requests']);
+const ENTITY_STATIC_SUBPAGES = new Set(['new', 'import', 'map', 'directory', 'kanban', 'search', 'settings']);
+
 /** '/admin/customers/8f14…e9b1/notes' → '/admin/customers/:id/notes'.
  *  Returns null when the path isn't rooted at /admin. */
 function stripIdSegments(path) {
   const segments = path.split('/').filter(Boolean);
   if (segments[0] !== 'admin') return null;
-  const rest = segments.slice(1).map((seg) => (isIdSegment(seg) ? ':id' : seg));
+  const rest = segments.slice(1).map((seg, i, arr) => {
+    if (seg === ':id') return seg; // already normalized by the client
+    if (isIdSegment(seg)) return ':id';
+    // Malformed segments ('leads?x=1') stay AS-IS so PATH_RE still rejects
+    // the beacon — collapsing them to ':id' would launder junk into a
+    // valid-looking path.
+    if (!/^[A-Za-z0-9_-]+$/.test(seg)) return seg;
+    if (!ROUTE_WORD_RE.test(seg)) return ':id'; // 'John_Smith', 'Acme' — not route structure
+    const prev = i > 0 ? arr[i - 1] : null;
+    if (prev && ENTITY_ROUTES.has(prev) && !ENTITY_STATIC_SUBPAGES.has(seg)) return ':id'; // 'acme'
+    return seg;
+  });
   return `/admin${rest.length ? `/${rest.join('/')}` : ''}`;
 }
 
