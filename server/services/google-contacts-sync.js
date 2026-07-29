@@ -59,6 +59,17 @@ function isGone(err) {
   return err?.code === 404 || err?.response?.status === 404;
 }
 
+/**
+ * PII-safe error rendering: Google validation errors can echo the submitted
+ * email/phone/address back in message text — log status/reason codes only
+ * (AGENTS.md non-card PII logging rule).
+ */
+function safeErr(err) {
+  const status = err?.code || err?.response?.status || '';
+  const reason = err?.response?.data?.error?.status || err?.name || 'Error';
+  return `${reason}${status ? ` (${status})` : ''}`;
+}
+
 const rowTag = (table, row) => `${table}:${row.id}`;
 
 function contactBodyFor(row, kind, table) {
@@ -400,7 +411,7 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
         return counts;
       }
       counts.failed += 1;
-      logger.warn(`[contacts-sync] sync failed for ${table} ${row.id}: ${err.message}`);
+      logger.warn(`[contacts-sync] sync failed for ${table} ${row.id}: ${safeErr(err)}`);
     }
   }
 
@@ -416,7 +427,7 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
         .limit(TOMBSTONE_SLOTS)
         .select('id', 'google_contact_id');
     } catch (e) {
-      logger.warn(`[contacts-sync] tombstone query failed for ${table}: ${e.message}`);
+      logger.warn(`[contacts-sync] tombstone query failed for ${table}: ${safeErr(e)}`);
     }
     for (const row of tombstones) {
       try {
@@ -432,7 +443,7 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
       } catch (err) {
         if (isScopeError(err)) { counts.blocked = 'contacts_scope_missing'; return counts; }
         counts.failed += 1;
-        logger.warn(`[contacts-sync] tombstone retire failed for ${table} ${row.id}: ${err.message}`);
+        logger.warn(`[contacts-sync] tombstone retire failed for ${table} ${row.id}: ${safeErr(err)}`);
       }
     }
   }
@@ -464,7 +475,7 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
       verifyRows.push(...vl.map((row) => ({ table: 'leads', kind: 'lead', row })));
     }
   } catch (e) {
-    logger.warn(`[contacts-sync] verification query failed: ${e.message}`);
+    logger.warn(`[contacts-sync] verification query failed: ${safeErr(e)}`);
   }
   for (const { table, kind, row } of verifyRows) {
     try {
@@ -488,7 +499,7 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
     } catch (err) {
       if (isScopeError(err)) { counts.blocked = 'contacts_scope_missing'; return counts; }
       counts.failed += 1;
-      logger.warn(`[contacts-sync] verification failed for ${table} ${row.id}: ${err.message}`);
+      logger.warn(`[contacts-sync] verification failed for ${table} ${row.id}: ${safeErr(err)}`);
     }
   }
 
