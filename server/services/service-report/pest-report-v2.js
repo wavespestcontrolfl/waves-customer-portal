@@ -139,13 +139,16 @@ function buildSupportingMetric({ pestPressure, activity }) {
 // PROVENANCE: customerConcernText is what the customer SAID — the copy
 // acknowledges and records it, and never asserts an inspection result,
 // completed action, or scheduled follow-up the record doesn't evidence
-// (codex P2 #3043). Concern text is screened here so every caller gets the
-// same guarantee; an unscreenable concern drops the card, not the report.
+// (codex P2 #3043). The QUOTE itself is NOT run through the banned-copy
+// denylist: that list polices OUR claims ("infestation", "guaranteed"), and
+// a homeowner who wrote "I think we have an infestation" is exactly who
+// needs acknowledgment — the quote is customer-attributed, rendered in
+// quotation marks, and the card's own copy stays deterministic (codex P2
+// #3043 r3; matches the lawn concern card, which quotes the customer raw).
 function buildCustomerConcernCard(concernText) {
-  const concern = String(concernText || '').trim();
+  const concern = String(concernText || '').replace(/\s+/g, ' ').trim();
   if (!concern) return null;
   const quoted = concern.length > 220 ? `${concern.slice(0, 217).trim()}…` : concern;
-  if (!validateCustomerCopy(quoted)) return null;
   return {
     headline: 'What you flagged',
     concern: quoted,

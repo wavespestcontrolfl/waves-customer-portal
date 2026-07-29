@@ -2155,11 +2155,11 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     if (renderConcern) {
       for (const finding of findings) {
         if (finding.category === 'no_activity') {
-          // Title AND detail: a "No activity observed this visit" headline
-          // above softened body copy still contradicts the reported concern
-          // (codex P2 #3043 r2).
-          finding.title = 'No confirmed activity beyond what you reported';
-          finding.detail = 'No pest activity was confirmed beyond what you reported — what you flagged is noted on this visit’s record.';
+          // Title AND detail (r2), in NEUTRAL wording (r3): the concern may
+          // be about service or access ("please avoid the herb garden"), so
+          // the copy must not characterize it as a pest sighting.
+          finding.title = 'No pest activity confirmed this visit';
+          finding.detail = 'Inspected areas showed no confirmed pest activity. The note you shared with us is recorded on this visit’s report.';
         }
       }
     }

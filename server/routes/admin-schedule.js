@@ -7600,10 +7600,16 @@ function reportCopyRejection(report) {
   // ("2/5") — the customer report shows its own pressure gauge on a different
   // scale and a second number reads as a contradiction. The prompt instruction
   // alone is soft; a model that echoes the numeric RATING is rejected and
-  // regenerated. Scoped to rating language — a legitimate count like "2/5
-  // bait stations" must not burn the provider retries (codex P2 #3043 r2).
-  if (/\b(?:rated?|rating|activity(?:\s+(?:level|was|is))?)\b[^.\n]{0,40}?\b[0-5]\s*\/\s*5\b|\b[0-5]\s*\/\s*5\b(?=\s*(?:rating|scale|activity))/i.test(text)) {
-    return 'numeric_rating';
+  // regenerated. Scoped to rating language, and a fraction that is a
+  // DENOMINATOR of counted things ("2/5 bait stations", "4/5 zones") is not a
+  // rating even when 'activity' appears earlier in the sentence
+  // (codex P2 #3043 r2+r3).
+  const COUNT_NOUN_AFTER = /^\s*(?:bait|monitoring|interior|exterior|treated|serviced)?\s*(?:stations?|traps?|zones?|areas?|placements?|devices?|monitors?|stops?|visits?|rooms?|sides?)\b/i;
+  const ratingRe = /\b(?:rated?|rating|activity(?:\s+(?:level|was|is))?)\b[^.\n]{0,40}?\b[0-5]\s*\/\s*5\b|\b[0-5]\s*\/\s*5\b(?=\s*(?:rating|scale))/gi;
+  let ratingMatch;
+  while ((ratingMatch = ratingRe.exec(text)) !== null) {
+    const after = text.slice(ratingMatch.index + ratingMatch[0].length);
+    if (!COUNT_NOUN_AFTER.test(after)) return 'numeric_rating';
   }
   const banned = ActivityIndicators.findBannedCustomerCopy(text);
   return banned.length ? `banned:${banned.join(',')}` : null;

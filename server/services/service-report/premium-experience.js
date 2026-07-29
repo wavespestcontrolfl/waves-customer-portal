@@ -365,10 +365,15 @@ function buildPropertyDefenseStatusContext({ record, findings = [], applications
   const hasLanaiActivity = findingText.some((text) => text.includes('lanai') && !text.includes('clear'));
   const hasPoolActivity = findingText.some((text) => text.includes('pool') && !text.includes('clear'));
   // Lanai / pool rows only render when THIS property gives us a signal they
-  // exist (a zone or finding mentions them). A templated "Pool equipment pad —
-  // clear" on a home with no pool reads like someone else's report
+  // exist (a zone, finding, or a recorded application AREA mentions them —
+  // legacy properties may have no zone rows while today's application
+  // explicitly says 'Lanai'; codex P2 #3043 r3). A templated "Pool equipment
+  // pad — clear" on a home with no pool reads like someone else's report
   // (John Kelleher audit 2026-07-29).
-  const allZoneText = zones.map((zone) => `${zone.label || ''} ${zone.letter || ''}`.toLowerCase()).join(' ');
+  const appAreaText = applications
+    .map((app) => `${app.applicationArea || app.application_area || ''}`.toLowerCase())
+    .join(' ');
+  const allZoneText = `${zones.map((zone) => `${zone.label || ''} ${zone.letter || ''}`.toLowerCase()).join(' ')} ${appAreaText}`;
   const lanaiOnProperty = hasLanaiActivity || allZoneText.includes('lanai') || allZoneText.includes('patio')
     || findingText.some((text) => text.includes('lanai'));
   const poolOnProperty = hasPoolActivity || allZoneText.includes('pool')
@@ -456,21 +461,23 @@ function pestKeysFromRows(findings = [], applications = []) {
   }
   for (const finding of findings) {
     const text = `${finding.title} ${finding.detail}`.toLowerCase();
-    if (text.includes('ghost ant')) found.add('ghost_ant');
-    else if (text.includes('ant')) found.add('ant');
+    // WORD match, not substring — "plant debris", "significant" and
+    // "important" all contain 'ant' (codex P2 #3043 r3).
+    if (/\bghost ants?\b/.test(text)) found.add('ghost_ant');
+    else if (/\bants?\b/.test(text)) found.add('ant');
     if (text.includes('american roach') || text.includes('palmetto')) found.add('american_roach');
     if (text.includes('german roach')) found.add('german_roach');
-    if (text.includes('spider')) found.add('spider');
+    if (/\bspiders?\b/.test(text)) found.add('spider');
   }
   // The generic 'ant' card next to 'ghost_ant' is a near-duplicate when both
   // came only from a product's TARGET list (one application tagged for several
   // ant species). But a distinct generic-ant FINDING (e.g. a fire-ant mound)
   // is its own evidence — collapsing it would fold that finding into the
   // ghost-ant card and mislabel it (codex P2 #3043 r2). Collapse only when no
-  // non-ghost ant finding exists.
+  // non-ghost ant finding exists (word-matched, r3).
   const hasNonGhostAntFinding = findings.some((finding) => {
     const text = `${finding.title} ${finding.detail}`.toLowerCase();
-    return text.includes('ant') && !text.includes('ghost ant');
+    return /\bants?\b/.test(text) && !/\bghost ants?\b/.test(text);
   });
   if (found.has('ghost_ant') && !hasNonGhostAntFinding) found.delete('ant');
   return [...found].filter((key) => PEST_DOSSIERS[key]).slice(0, 3);
@@ -481,8 +488,17 @@ function buildBugFilesContext({ findings = [], applications = [], zones = [], pr
   return pestKeysFromRows(findings, applications).map((pestKey) => {
     const dossier = PEST_DOSSIERS[pestKey];
     const relatedFindings = findings.filter((finding) => {
-      const text = normalizeKey(`${finding.title} ${finding.detail}`);
-      return text.includes(pestKey) || (pestKey.includes('ant') && text.includes('ant')) || (pestKey.includes('roach') && text.includes('roach'));
+      const raw = `${finding.title} ${finding.detail}`.toLowerCase();
+      const text = normalizeKey(raw);
+      // Species-aware WORD matching — the old substring test related any
+      // finding containing 'ant' (incl. "plant debris") to every ant dossier
+      // and could label an unrelated finding as this pest's location
+      // (codex P2 #3043 r3).
+      if (text.includes(pestKey)) return true;
+      if (pestKey === 'ghost_ant') return /\bghost ants?\b/.test(raw);
+      if (pestKey === 'ant') return /\bants?\b/.test(raw) && !/\bghost ants?\b/.test(raw);
+      if (pestKey.includes('roach')) return /\broach(es)?\b|\bpalmetto\b/.test(raw);
+      return false;
     });
     const relatedApps = applications.filter((app) => (
       (app.targets || []).some((target) => target === pestKey || (pestKey.includes('ant') && target.includes('ant')))
