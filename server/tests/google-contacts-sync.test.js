@@ -154,6 +154,8 @@ describe('runContactsSync', () => {
     const state = setupDb({
       customers: [queuedCustomer],
       leads: [{ id: 'l-1', first_name: 'Jane', email: 'jane2@customer.example', phone: null, customer_id: 'c-1', google_contact_id: 'people/lead1', updated_at: '2026-07-28T11:00:00Z' }],
+      // live-customer link check
+      firstResults: { customers: [{ id: 'c-1' }] },
     });
     mockPeopleApi.people.get.mockResolvedValueOnce({ data: { etag: 'e1', memberships: [] } });
     mockPeopleApi.people.updateContact.mockResolvedValueOnce({ data: { resourceName: 'people/lead1' } });
@@ -175,7 +177,8 @@ describe('runContactsSync', () => {
     setupDb({
       leads: [{ id: 'l-1', first_name: 'Jane', email: 'jane@customer.example', phone: null, customer_id: 'c-1', google_contact_id: 'people/dup', updated_at: '2026-07-28T11:00:00Z' }],
       updateResults: { customers: [0] }, // whereNull(google_contact_id) matches nothing
-      firstResults: { customers: [{ id: 'c-1', google_contact_id: 'people/cust' }] }, // fresh re-read
+      // live-link check, then the fresh re-read after the transfer miss
+      firstResults: { customers: [{ id: 'c-1' }, { id: 'c-1', google_contact_id: 'people/cust' }] },
     });
     const counts = await runContactsSync({ gapMs: 0 });
     expect(counts.skipped).toBe(1);
@@ -328,9 +331,10 @@ describe('runContactsSync', () => {
   test('a lead whose identity DIVERGED from its shared contact releases it and mints its own', async () => {
     setupDb({
       leads: [{ id: 'l-2', first_name: 'Newname', email: 'different@new.example', phone: '9415550199', customer_id: null, google_contact_id: 'people/shared', updated_at: '2026-07-28T11:00:00Z' }],
-      // ownership probe: no customer match, no sibling match; in-use check:
-      // customers → null, leads → the OTHER lead still referencing it.
-      firstResults: { customers: [null, null], leads: [null, { id: 'l-1' }] },
+      // ownership probes (customer email, sibling email, sibling phone) all
+      // miss; in-use check: customers → null, leads → the OTHER lead still
+      // referencing it.
+      firstResults: { customers: [null, null], leads: [null, null, { id: 'l-1' }] },
     });
     mockPeopleApi.people.createContact.mockResolvedValueOnce({ data: { resourceName: 'people/own' } });
     const counts = await runContactsSync({ gapMs: 0 });
@@ -481,6 +485,8 @@ describe('runContactsSync', () => {
         id: 'l-old', first_name: 'Old', email: 'old@x.example', phone: null, customer_id: 'c-1',
         google_contact_id: 'people/shared', updated_at: '2026-06-30T00:00:00Z', google_contact_synced_at: '2026-07-01T00:00:00Z',
       }]],
+      // live-customer link check → defer (non-owner)
+      firstResults: { customers: [{ id: 'c-1' }] },
     });
     const counts = await runContactsSync({ gapMs: 0, now: new Date('2026-07-28T12:00:00Z') });
     // Watermark advanced, contact untouched — the OWNER's verification
@@ -611,6 +617,56 @@ describe('runContactsSync', () => {
     expect(counts.synced).toBe(1);
     const sent = mockPeopleApi.people.updateContact.mock.calls[0][0].requestBody.addresses;
     expect(sent.map((a) => a.streetAddress)).toEqual(['1 Palm Way', '2 Oak St']);
+  });
+
+  test('a DANGLING customer_id does not defer — the lead keeps normal ownership', async () => {
+    setupDb({
+      leads: [{ id: 'l-d', first_name: 'Dana', email: 'dana@x.example', phone: null, customer_id: 'c-gone', google_contact_id: null, updated_at: '2026-07-28T11:00:00Z' }],
+      // live-link check → null (deleted/dangling); email customer probe →
+      // null; email sibling probe → null
+      firstResults: { customers: [null, null], leads: [null] },
+    });
+    mockPeopleApi.people.createContact.mockResolvedValueOnce({ data: { resourceName: 'people/dana' } });
+    const counts = await runContactsSync({ gapMs: 0 });
+    // Synced as its own contact instead of being stamped null into oblivion.
+    expect(counts.synced).toBe(1);
+    expect(mockPeopleApi.people.createContact).toHaveBeenCalled();
+  });
+
+  test('a shared PHONE with conflicting identity never merges two people', async () => {
+    setupDb({
+      leads: [{ id: 'l-2', first_name: 'Bob', last_name: 'Renter', email: 'bob@x.example', phone: '9415550100', customer_id: null, google_contact_id: null, updated_at: '2026-07-28T11:00:00Z' }],
+      // customer probe null; email sibling null; phone sibling = DIFFERENT
+      // person (household number, other email + name)
+      firstResults: {
+        customers: [null],
+        leads: [null, { id: 'l-1', google_contact_id: 'people/alice', email: 'alice@x.example', first_name: 'Alice', last_name: 'Owner' }],
+      },
+    });
+    mockPeopleApi.people.createContact.mockResolvedValueOnce({ data: { resourceName: 'people/bob' } });
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(counts.synced).toBe(1);
+    // Alice's contact was never adopted or overwritten.
+    expect(mockPeopleApi.people.updateContact).not.toHaveBeenCalled();
+    expect(mockPeopleApi.people.createContact).toHaveBeenCalled();
+  });
+
+  test('a pending create on a CONVERTED lead is recovered and TRANSFERRED, never erased', async () => {
+    const state = setupDb({
+      leads: [{ id: 'l-p', first_name: 'Jane', email: 'jane@x.example', phone: null, customer_id: 'c-1', google_contact_id: 'pending_create_recovery::jane%40x.example', google_contact_synced_at: '2026-07-01T00:00:00Z', updated_at: '2026-07-28T11:00:00Z' }],
+      firstResults: { customers: [{ id: 'c-1' }] },
+    });
+    mockPeopleApi.people.searchContacts.mockImplementation(async ({ query }) => (
+      query === 'jane@x.example'
+        ? { data: { results: [{ person: { resourceName: 'people/orphan', clientData: [{ key: 'waves_row', value: 'leads:l-p' }] } }] } }
+        : { data: { results: [] } }
+    ));
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(counts.skipped).toBe(1);
+    // The recovered orphan TRANSFERRED to the customer instead of the
+    // marker being stamped away over a live contact.
+    expect(state.updates.find((u) => u.table === 'customers').patch).toEqual({ google_contact_id: 'people/orphan' });
+    expect(state.updates.find((u) => u.table === 'leads').patch.google_contact_id).toBeNull();
   });
 
   test('scope-missing aborts WITHOUT stamping — rows retry after the one-time re-consent', async () => {

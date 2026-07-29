@@ -255,22 +255,11 @@ async function findExistingContact(people, row, tag, { queryOverride = null } = 
  * predates this pass (an exact-email search hit can be an
  * operator-authored contact).
  */
-async function upsertContact(people, table, row, kind, gapMs, { pendingRecovery = false, attemptAt = null, markerSearchKey = null } = {}) {
+async function upsertContact(people, table, row, kind, gapMs, { markerSearchKey = null } = {}) {
   const body = contactBodyFor(row, kind, table);
   let resourceName = row.google_contact_id;
   if (!resourceName) {
     resourceName = await findExistingContact(people, row, rowTag(table, row), { queryOverride: markerSearchKey });
-    if (!resourceName && pendingRecovery) {
-      // A prior create was ambiguous. The tag search found nothing, but
-      // search indexing lags — inside the grace window that absence is NOT
-      // proof, so defer; past it, a conclusive empty search may create.
-      const attemptedMs = attemptAt ? new Date(attemptAt).getTime() : 0;
-      if (Date.now() - attemptedMs < RECOVERY_GRACE_MS) {
-        const err = new Error('lost-create recovery deferred — search index grace window');
-        err.searchInconclusive = true;
-        throw err;
-      }
-    }
   }
   if (resourceName) {
     try {
@@ -352,7 +341,15 @@ async function deleteContact(people, resourceName) {
 async function resolveLeadOwnership(row) {
   const email = String(row.email || '').trim().toLowerCase();
   const phone = String(row.phone || '').trim();
-  if (row.customer_id) return { deferToCustomer: true, customerId: row.customer_id };
+  if (row.customer_id) {
+    // leads.customer_id has no FK — a dangling or tombstoned link must not
+    // defer the lead into oblivion (stamped null, contact orphaned).
+    const linked = await db('customers')
+      .where({ id: row.customer_id })
+      .whereNull('deleted_at')
+      .first();
+    if (linked) return { deferToCustomer: true, customerId: linked.id };
+  }
   if (email) {
     const customer = await db('customers')
       .whereRaw('LOWER(email) = ?', [email])
@@ -365,21 +362,32 @@ async function resolveLeadOwnership(row) {
   // unrelated person's contact. They always mint their own.
   const phoneDigits = phone.replace(/\D/g, '').slice(-10);
   if (!email && phoneDigits.length < 7) return {};
-  const sibling = await db('leads')
+  const siblingBase = () => db('leads')
     .whereNot('id', row.id)
     .whereNull('deleted_at')
     .whereNotNull('google_contact_id')
-    .whereNot('google_contact_id', 'like', `${PENDING_CREATE}%`)
-    .where((q) => {
-      if (email) q.orWhereRaw('LOWER(email) = ?', [email]);
-      // Writers preserve source formatting ('+1 (941) 555-0100' vs
-      // '9415550100') — compare on the last ten digits, not raw text.
-      if (phoneDigits.length >= 7) {
-        q.orWhereRaw("RIGHT(regexp_replace(phone, '\\D', '', 'g'), 10) = ?", [phoneDigits]);
-      }
-    })
-    .first();
-  if (sibling?.google_contact_id) return { adoptContactId: sibling.google_contact_id };
+    .whereNot('google_contact_id', 'like', `${PENDING_CREATE}%`);
+  // Email equality is the strong identity — adopt directly.
+  if (email) {
+    const emailSibling = await siblingBase().whereRaw('LOWER(email) = ?', [email]).first();
+    if (emailSibling?.google_contact_id) return { adoptContactId: emailSibling.google_contact_id };
+  }
+  // A shared phone alone is NOT identity when stronger fields disagree —
+  // lead ingestion deliberately keeps separate leads on household/business
+  // numbers (see lead-from-extraction's name-conflict guard).
+  if (phoneDigits.length >= 7) {
+    const phoneSibling = await siblingBase()
+      .whereRaw("RIGHT(regexp_replace(phone, '\\D', '', 'g'), 10) = ?", [phoneDigits])
+      .select('id', 'google_contact_id', 'email', 'first_name', 'last_name')
+      .first();
+    if (phoneSibling?.google_contact_id) {
+      const sibEmail = String(phoneSibling.email || '').trim().toLowerCase();
+      const nameOf = (r) => `${String(r.first_name || '').trim()} ${String(r.last_name || '').trim()}`.trim().toLowerCase();
+      const emailsDisagree = !!(email && sibEmail && sibEmail !== email);
+      const namesConflict = !!(nameOf(row) && nameOf(phoneSibling) && nameOf(row) !== nameOf(phoneSibling));
+      if (!emailsDisagree && !namesConflict) return { adoptContactId: phoneSibling.google_contact_id };
+    }
+  }
   return {};
 }
 
@@ -444,7 +452,36 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
       const recoveryAttemptAt = pendingRecovery ? row.google_contact_synced_at : null;
       const markerPriorId = pendingRecovery ? priorIdFromMarker(row.google_contact_id) : null;
       const markerSearchKey = pendingRecovery ? searchKeyFromMarker(row.google_contact_id) : null;
-      if (pendingRecovery) row.google_contact_id = null;
+      if (pendingRecovery) {
+        row.google_contact_id = null;
+        // Resolve the maybe-committed create BEFORE any shortcut (defer,
+        // no-info, adoption) can erase the marker — an orphan would keep
+        // its PII while a duplicate gets minted elsewhere. Found → the row
+        // proceeds as the contact's owner (defer then TRANSFERS it,
+        // no-info deletes it); conclusively absent past grace → proceeds
+        // clean; otherwise the marker stays for a later pass.
+        const attemptedMs = recoveryAttemptAt ? new Date(recoveryAttemptAt).getTime() : 0;
+        const pastGrace = Date.now() - attemptedMs >= RECOVERY_GRACE_MS;
+        try {
+          const recovered = await findExistingContact(people, row, rowTag(table, row), { queryOverride: markerSearchKey });
+          if (recovered) {
+            row.google_contact_id = recovered;
+          } else if (!pastGrace) {
+            counts.failed += 1;
+            logger.info(`[contacts-sync] pending-create recovery deferred inside the grace window (${table} ${row.id})`);
+            continue;
+          }
+        } catch (searchErr) {
+          if (isScopeError(searchErr)) {
+            counts.blocked = 'contacts_scope_missing';
+            logger.warn('[contacts-sync] People API scope missing — waiting on one-time owner re-consent at the admin Gmail auth URL');
+            return counts;
+          }
+          counts.failed += 1;
+          logger.warn(`[contacts-sync] pending-create recovery search inconclusive (${table} ${row.id}) — marker retained`);
+          continue;
+        }
+      }
       // Name-only LEADS still sync (the repo permits leads with only a
       // contact name; the every-lead contract includes them). Customers
       // always carry a phone by schema.
@@ -554,7 +591,9 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
         }
       }
       const priorContactId = row.google_contact_id;
-      const { resourceName, created } = await upsertContact(people, table, row, kind, gapMs, { pendingRecovery, attemptAt: recoveryAttemptAt, markerSearchKey });
+      // Recovery was resolved above — upsert sees either the recovered
+      // resource (update path) or a clean row (search+create path).
+      const { resourceName, created } = await upsertContact(people, table, row, kind, gapMs, { markerSearchKey });
       const compensateFreshCreate = async () => {
         if (!(created && resourceName)) return;
         try {
@@ -771,6 +810,22 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
   }
   for (const { table, kind, row } of verifyRows) {
     try {
+      if (kind === 'customer' && row.account_id) {
+        // Same account-address aggregation as the main lane — a verify
+        // push with only this row's address would strip the siblings'
+        // (addresses are in the update mask).
+        try {
+          const props = await db('customers')
+            .where('account_id', row.account_id)
+            .whereNull('deleted_at')
+            .whereNotNull('address_line1')
+            .orderBy('id', 'asc')
+            .select('address_line1', 'address_line2', 'city', 'state', 'zip');
+          if (props.length) row.__accountAddresses = props.slice(0, 8);
+        } catch (e) {
+          logger.warn(`[contacts-sync] account address aggregation failed: ${safeErr(e)}`);
+        }
+      }
       if (kind === 'lead') {
         // Ownership rules apply here too: a NON-OWNER lead (converted, or
         // sharing a contact whose identity it no longer matches) must not
@@ -788,19 +843,34 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
       }
       const priorContactId = row.google_contact_id;
       const { resourceName, created } = await upsertContact(people, table, row, kind, gapMs);
+      const compensateVerifyCreate = async () => {
+        if (!(created && resourceName)) return;
+        try {
+          await deleteContact(people, resourceName);
+        } catch (delErr) {
+          // Inconclusive compensation — durable marker (with the dead
+          // prior id + this row's identity) so recovery can find either
+          // the replacement or its sharers instead of minting a third.
+          await db(table).where({ id: row.id })
+            .where((q) => {
+              q.whereNull('google_contact_id');
+              if (priorContactId) q.orWhere('google_contact_id', priorContactId);
+            })
+            .update({ google_contact_id: pendingMarkerFor(priorContactId, rowSearchKey(row)), google_contact_synced_at: new Date() })
+            .catch(() => {});
+        }
+      };
       let stamped = 0;
       try {
         stamped = await stampVerified(table, row, resourceName, now);
       } catch (stampErr) {
         // Same fresh-create compensation as the main lane — a 404-recreate
         // whose stamp threw would otherwise leak a replacement per retry.
-        if (created && resourceName) {
-          await deleteContact(people, resourceName).catch(() => {});
-        }
+        await compensateVerifyCreate();
         throw stampErr;
       }
-      if (!stamped && created && resourceName) {
-        await deleteContact(people, resourceName).catch(() => {});
+      if (!stamped) {
+        await compensateVerifyCreate();
       }
       if (stamped) {
         // Repoint sharers only AFTER the stamp holds — repointing first
