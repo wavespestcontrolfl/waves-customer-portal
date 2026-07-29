@@ -3340,8 +3340,16 @@ async function transcribeRecordingPrimary(mp3Url, opts = {}, bufferRef = {}) {
     // (starving the sweep on dead URLs, Codex #3037 P2) or block a partial
     // recording that is still better transcribed than dropped.
     const callCreatedMs = opts.call?.created_at ? new Date(opts.call.created_at).getTime() : null;
-    const withinPropagationWindow = Number.isFinite(callCreatedMs)
-      && (Date.now() - callCreatedMs) < NOT_READY_MAX_AGE_MS;
+    // Anchor the window at call END (created_at + duration), not call start —
+    // the recording only exists once the call ends, so an hour-long call
+    // anchored at creation would already be outside the window when the
+    // recording-completed webhook fires and would never get verification
+    // (Codex #3037 round-2 P2).
+    const callEndMs = Number.isFinite(callCreatedMs)
+      ? callCreatedMs + recordingDurationSeconds(opts.call || {}) * 1000
+      : null;
+    const withinPropagationWindow = Number.isFinite(callEndMs)
+      && (Date.now() - callEndMs) < NOT_READY_MAX_AGE_MS;
     let audioBuffer;
     try {
       audioBuffer = await downloadRecording(mp3Url, {

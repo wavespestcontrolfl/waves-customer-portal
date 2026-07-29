@@ -1342,13 +1342,31 @@ router.post('/recording-status', async (req, res) => {
         try {
           const processor = require('../services/call-recording-processor');
           const earlyDelayMs = Number(process.env.CALL_PROC_EARLY_PROCESS_DELAY_MS) || 2 * 60 * 1000;
+          const fallbackDelayMs = 10 * 60 * 1000;
           const attempt = async (label) => {
             try {
-              await processor.processRecording(matchedSid);
-            } catch (e) { logger.error(`Auto-process recording failed (${label}): ${e.message}`); }
+              return await processor.processRecording(matchedSid);
+            } catch (e) {
+              logger.error(`Auto-process recording failed (${label}): ${e.message}`);
+              return null;
+            }
           };
-          setTimeout(() => attempt('early'), earlyDelayMs);
-          setTimeout(() => attempt('fallback'), 10 * 60 * 1000);
+          // The fallback timer is chained on the EARLY attempt's outcome, not
+          // scheduled unconditionally: once the early pass reaches ANY result
+          // other than a not-ready deferral, re-invoking processRecording at
+          // 10 min would re-claim non-'processed' terminal rows (voicemail,
+          // spam) and repeat transcription/extraction (Codex #3037 round-2
+          // P2). Deferral or error → schedule the second attempt for the
+          // remainder of the original 10-minute window. If the process
+          // restarts and both in-memory timers are lost, the 5-min cron is
+          // still the backstop, unchanged.
+          setTimeout(async () => {
+            const result = await attempt('early');
+            const needsFallback = !result || result.reason === 'recording_not_ready';
+            if (needsFallback) {
+              setTimeout(() => attempt('fallback'), Math.max(fallbackDelayMs - earlyDelayMs, 60 * 1000));
+            }
+          }, earlyDelayMs);
         } catch (e) { logger.error(`Recording auto-process setup failed: ${e.message}`); }
       }
     }
