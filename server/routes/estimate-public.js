@@ -10117,7 +10117,7 @@ router.put('/:token/accept', async (req, res, next) => {
       try {
         const { maybeCreateTermiteProgramAgreement } = require('../services/termite-program-agreement');
         const acceptedRow = await db('estimates').where({ id: estimate.id }).first();
-        await maybeCreateTermiteProgramAgreement({ estimate: acceptedRow || estimate, customerId, req });
+        await maybeCreateTermiteProgramAgreement({ estimate: acceptedRow || estimate, customerId, req, billingTerm });
       } catch (e) { logger.error(`[termite-agreement] accept hook failed: ${e.message}`); }
     }
 

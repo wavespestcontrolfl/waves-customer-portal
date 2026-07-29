@@ -683,7 +683,7 @@ async function markEstimateManuallyAccepted({
       if (agreementCustomerId) {
         try {
           const { maybeCreateTermiteProgramAgreement } = require('./termite-program-agreement');
-          void maybeCreateTermiteProgramAgreement({ estimate: acceptedEstimate, customerId: agreementCustomerId })
+          void maybeCreateTermiteProgramAgreement({ estimate: acceptedEstimate, customerId: agreementCustomerId, billingTerm: normalizedBillingTerm })
             .catch((err) => logger.warn(`[estimate-manual-acceptance] termite agreement prep failed for estimate ${acceptedEstimate.id}: ${err.message}`));
         } catch (err) {
           logger.warn(`[estimate-manual-acceptance] termite agreement prep setup failed for estimate ${acceptedEstimate.id}: ${err.message}`);

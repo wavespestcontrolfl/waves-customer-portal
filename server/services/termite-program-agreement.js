@@ -29,6 +29,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { formatDisplayDate } = require('../utils/date-only');
 
 const PURCHASE_TEMPLATE_KEY = 'service_agreement.termite_bait_program_purchase';
 const RENTAL_TEMPLATE_KEY = 'service_agreement.termite_bait_program_rental';
@@ -249,13 +250,28 @@ async function scheduledStartDateLabel(estimateId, conn = db) {
       .orderBy('scheduled_date', 'asc')
       .first('scheduled_date');
     if (!row?.scheduled_date) return null;
-    const date = new Date(row.scheduled_date);
-    if (Number.isNaN(date.getTime())) return null;
-    return date.toLocaleDateString('en-US', {
-      month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York',
-    });
+    // scheduled_date is a pg DATE (hydrates as UTC midnight) — the repo's
+    // date-only formatter renders the stored calendar day, never the prior
+    // ET day.
+    return formatDisplayDate(row.scheduled_date, { fallback: '' }) || null;
   } catch {
     return null;
+  }
+}
+
+// Annual-prepay accepts are billed as one annual invoice, but the seeded
+// templates state per-application billing — a signable contract must not
+// contradict the invoice the customer just received (pre-push P0). Detected
+// from the accepting flow's explicit billingTerm when passed, plus the
+// durable annual_prepay_terms record for reconciliation and missed paths.
+async function isAnnualPrepayAccept(estimate, billingTerm, conn = db) {
+  if (String(billingTerm || '').toLowerCase() === 'prepay_annual') return true;
+  if (!estimate?.id) return false;
+  try {
+    const term = await conn('annual_prepay_terms').where({ source_estimate_id: estimate.id }).first('id');
+    return !!term;
+  } catch {
+    return false;
   }
 }
 
@@ -263,7 +279,7 @@ async function scheduledStartDateLabel(estimateId, conn = db) {
 // into the caller (acceptance must not fail because agreement prep did);
 // failures are retryable via reconcileTermiteProgramAgreements. Returns a
 // small result object for logging/tests.
-async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = {}, notifyOnUnresolved = true }) {
+async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = {}, notifyOnUnresolved = true, billingTerm = null }) {
   try {
     if (!estimate || !customerId) return { ok: false, skipped: 'missing_inputs' };
     // One-time acceptances keep their termite snapshots but did NOT accept
@@ -277,6 +293,21 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
     if (!facts.hasProgram) return { ok: true, skipped: 'no_termite_program' };
 
     const NotificationService = require('./notification-service');
+
+    if (await isAnnualPrepayAccept(estimate, billingTerm)) {
+      // Fail closed: the seeded wording states per-application billing,
+      // which would contradict the annual-prepay invoice. Park it for
+      // manual preparation with accurate terms.
+      if (notifyOnUnresolved) {
+        await NotificationService.notifyAdmin(
+          'estimate',
+          'Termite agreement needs manual prep (annual prepay)',
+          `${estimate.customer_name || 'Customer'} accepted a termite estimate on annual prepay — the standard program agreement states per-application billing, so prepare the agreement manually with the prepay terms.`,
+          { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId } },
+        );
+      }
+      return { ok: false, skipped: 'annual_prepay' };
+    }
 
     const startDateLabel = estimate.id ? await scheduledStartDateLabel(estimate.id) : null;
     const prepared = buildTermiteProgramAgreementValues(estimate, estData, { startDateLabel });
@@ -331,7 +362,15 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       return { ok: false, skipped: 'unresolved_variables' };
     }
 
+    const dedupeLockKey = `termite-agreement:${customerId}:${normalizeAddress(estimate.address) || estimate.id}`;
     const contract = await db.transaction(async (trx) => {
+      // Serialize per customer+property: concurrent accept/reconciliation
+      // workers (multi-pod cron) must not both observe "no row" and insert
+      // duplicate drafts — the advisory xact lock + in-transaction re-check
+      // make the dedupe atomic (pre-push P1).
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [dedupeLockKey]);
+      const blocked = await existingBlockingProgramAgreement(customerId, estimate, trx);
+      if (blocked) return null;
       const [row] = await trx('customer_contracts').insert({
         customer_id: customer.id,
         created_by: null,
@@ -363,6 +402,10 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       });
       return row;
     });
+    if (!contract) {
+      const winner = await existingBlockingProgramAgreement(customerId, estimate);
+      return { ok: true, skipped: 'already_exists', contractId: winner?.id || null };
+    }
 
     let autosent = false;
     if (autosendGateOn()) {
@@ -408,6 +451,17 @@ async function reconcileTermiteProgramAgreements({ sinceDays = 21, limit = 25 } 
       builder.whereNull('accepted_service_mode').orWhereNot('accepted_service_mode', 'one_time');
     })
     .whereRaw("estimate_data::text ILIKE '%termite%'")
+    // Estimates whose agreement already exists must not occupy the work
+    // window — otherwise the newest N covered rows starve older failed
+    // accepts forever (pre-push P1). Snapshot estimate.id is stamped by
+    // every prep this service performs.
+    .whereNotExists(function alreadyPrepped() {
+      this.select(db.raw('1'))
+        .from('customer_contracts as cc')
+        .whereRaw('cc.customer_id = estimates.customer_id')
+        .whereIn('cc.document_template_key', PROGRAM_TEMPLATE_KEYS)
+        .whereRaw("cc.document_variables_snapshot->'estimate'->>'id' = estimates.id::text");
+    })
     .orderBy('accepted_at', 'desc')
     .limit(limit)
     .select('*');
