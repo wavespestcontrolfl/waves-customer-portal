@@ -632,10 +632,18 @@ router.post('/message/:id/reclassify', async (req, res) => {
       }
       if (wasQuarantined) {
         const { cancelQuarantine } = require('../services/email/inbox-hygiene');
-        // marketing_newsletter's own handler already archived the message —
-        // restoring INBOX would undo the new category's intended state, so
-        // only the quarantine label + sweep stamp are cleared for it.
-        await cancelQuarantine(email, { restoreInbox: classification.category !== 'marketing_newsletter' });
+        // marketing_newsletter's own handler archives the message — but
+        // ONLY when it actually ran: an authenticated known sender is
+        // deliberately NOT archived (newsletter_skipped_known_*), and
+        // restoreInbox:false on a skipped row would strand that protected
+        // message in All Mail. Decide from what the handler recorded, not
+        // the category alone.
+        let restoreInbox = true;
+        if (classification.category === 'marketing_newsletter') {
+          const postAction = await db('emails').where({ id: email.id }).first();
+          restoreInbox = !/^newsletter_(unsubscribed|unsub_attempted|archived|processing)/.test(postAction?.auto_action || '');
+        }
+        await cancelQuarantine(email, { restoreInbox });
       }
     }
 

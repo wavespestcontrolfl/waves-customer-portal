@@ -250,7 +250,15 @@ async function sweepQuarantine(now = new Date()) {
             logger.warn(`[inbox-hygiene] stale-reclass action replay failed (email ${row.id}) — claim retained for retry: ${e.message}`);
             continue;
           }
-          await cancelQuarantine(row, { restoreInbox: row.classification !== 'marketing_newsletter' });
+          // Same handler-outcome-based restore decision as the live route:
+          // a newsletter verdict whose handler SKIPPED (authenticated known
+          // sender) must go back to the inbox, not strand in All Mail.
+          let restoreInbox = true;
+          if (row.classification === 'marketing_newsletter') {
+            const postAction = await db('emails').where({ id: row.id }).first();
+            restoreInbox = !/^newsletter_(unsubscribed|unsub_attempted|archived|processing)/.test(postAction?.auto_action || '');
+          }
+          await cancelQuarantine(row, { restoreInbox });
         } catch (e) {
           logger.warn(`[inbox-hygiene] stale-reclass cancel completion failed (email ${row.id}): ${e.message}`);
         }

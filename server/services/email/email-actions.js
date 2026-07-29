@@ -208,7 +208,9 @@ async function executeAutoAction(email, classification) {
         updated_at: new Date(),
       });
       logger.info(`[email-actions] Skipped ${classification.category} auto-action for operational sender (email ${email.id})`);
-      return;
+      // An intentional skip IS the action succeeding — callers gating
+      // commits on the outcome must not read it as a retryable failure.
+      return { ok: true, skipped: true };
     }
     switch (classification.category) {
       case 'spam':
@@ -966,6 +968,28 @@ async function draftReplyForEmail(email, { customer = null, tone = 'service' } =
         const fresh = await gmailClient.getMessage(email.gmail_id);
         inReplyTo = fresh?.message_id || null;
       } catch (e) { /* draft still lands, threading degrades */ }
+    }
+    // The LLM call above takes seconds — re-check the LIVE thread before
+    // creating anything: an operator draft or reply that appeared
+    // mid-generation makes ours a duplicate over stale state.
+    try {
+      const recheck = await gmailClient.getThread(email.gmail_thread_id);
+      const recheckMsgs = recheck?.messages || [];
+      if (recheckMsgs.some((m) => (m.labelIds || []).includes('DRAFT'))) {
+        await db('emails').where({ id: email.id, draft_gmail_id: 'pending' })
+          .update({ draft_gmail_id: 'reconciled_existing_draft', updated_at: new Date() });
+        return null;
+      }
+      const recheckInboundAt = new Date(email.received_at || 0).getTime();
+      if (recheckMsgs.some((m) => (m.labelIds || []).includes('SENT') && Number(m.internalDate || 0) > recheckInboundAt)) {
+        await db('emails').where({ id: email.id, draft_gmail_id: 'pending' })
+          .update({ draft_gmail_id: 'reconciled_replied', updated_at: new Date() });
+        return null;
+      }
+    } catch (e) {
+      // Can't verify — keep the claim; the daily reconciler settles it.
+      logger.warn(`[email-actions] post-LLM thread re-check failed (email ${email.id}) — claim retained: ${e.message}`);
+      return null;
     }
     // Reply-To (validated to a single plain mailbox at parse time) beats
     // From — relayed mail (contact forms, ticketing) carries the actionable

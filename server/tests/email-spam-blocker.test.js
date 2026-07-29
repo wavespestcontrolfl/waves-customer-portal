@@ -1,4 +1,6 @@
-jest.mock('googleapis', () => ({ google: {} }));
+jest.mock('googleapis', () => ({
+  google: { gmail: jest.fn(() => ({ users: { settings: { filters: { delete: jest.fn(async () => ({})) } } } })) },
+}));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/email/gmail-client', () => ({
   getAuthClient: jest.fn(async () => null),
@@ -107,15 +109,19 @@ describe('email spam blocker safety helpers', () => {
 describe('stale auto-block removal (sender became a customer)', () => {
   const gmailClient = require('../services/email/gmail-client');
 
-  const mockTables = ({ del }) => {
+  const mockTables = ({ del, blockRow = {}, syncTrashed = [] }) => {
     db.mockImplementation((table) => {
       if (table === 'blocked_email_senders') {
         const chain = {
           where: jest.fn(() => chain),
           whereRaw: jest.fn(() => chain),
-          first: jest.fn(async () => ({ id: 'b1', reason: 'spam_auto', email_address: 'cust@x.example', gmail_filter_id: null })),
+          first: jest.fn(async () => ({ id: 'b1', reason: 'spam_auto', email_address: 'cust@x.example', gmail_filter_id: 'f-1', created_at: '2026-07-01T00:00:00Z', ...blockRow })),
           del,
         };
+        return chain;
+      }
+      if (table === 'emails') {
+        const chain = { where: jest.fn(() => chain), whereRaw: jest.fn(() => chain), select: jest.fn(async () => syncTrashed) };
         return chain;
       }
       if (table === 'customers') {
@@ -132,23 +138,39 @@ describe('stale auto-block removal (sender became a customer)', () => {
 
   beforeEach(() => jest.clearAllMocks());
 
-  test('successful removal recovers ALL buried mail, then deletes the row', async () => {
+  test('successful removal recovers ALL block-buried mail, then deletes the row', async () => {
     const del = jest.fn(async () => 1);
-    mockTables({ del });
+    mockTables({ del, syncTrashed: [{ gmail_id: 'm-db-1' }] });
+    gmailClient.getAuthClient.mockResolvedValueOnce({});
     gmailClient.listAllMessages.mockResolvedValueOnce({ messages: [{ id: 'm-old-1' }, { id: 'm-old-2' }], truncated: false });
     gmailClient.getMessageLabels.mockResolvedValue(['TRASH']);
 
     await expect(isBlocked('cust@x.example', { gmailId: 'm-trigger' })).resolves.toBe(false);
-    // The Trash search covers earlier burials, not just the triggering message.
+    // Search is SCOPED to the block's lifetime — nothing older can be its burial.
+    expect(gmailClient.listAllMessages.mock.calls[0][0]).toMatch(/^in:trash from:cust@x\.example after:\d+$/);
+    // Recovery covers sync-trashed rows AND filter burials, not just the trigger.
     expect(gmailClient.modifyLabels.mock.calls.map((c) => c[0]).sort())
-      .toEqual(['m-old-1', 'm-old-2', 'm-trigger']);
-    expect(gmailClient.modifyLabels).toHaveBeenCalledWith('m-old-1', ['INBOX'], ['TRASH']);
+      .toEqual(['m-db-1', 'm-old-1', 'm-old-2', 'm-trigger']);
+    expect(del).toHaveBeenCalled();
+  });
+
+  test('a filterless block never bulk-searches Trash — only recorded burials recover', async () => {
+    const del = jest.fn(async () => 1);
+    mockTables({ del, blockRow: { gmail_filter_id: null }, syncTrashed: [{ gmail_id: 'm-db-1' }] });
+    gmailClient.getMessageLabels.mockResolvedValue(['TRASH']);
+
+    await expect(isBlocked('cust@x.example', { gmailId: 'm-trigger' })).resolves.toBe(false);
+    // No filter ever existed — an unscoped search would resurrect
+    // operator-deleted mail unrelated to the block.
+    expect(gmailClient.listAllMessages).not.toHaveBeenCalled();
+    expect(gmailClient.modifyLabels.mock.calls.map((c) => c[0]).sort()).toEqual(['m-db-1', 'm-trigger']);
     expect(del).toHaveBeenCalled();
   });
 
   test('recovery failure keeps the block row as the retry token', async () => {
     const del = jest.fn(async () => 1);
     mockTables({ del });
+    gmailClient.getAuthClient.mockResolvedValueOnce({});
     gmailClient.listAllMessages.mockRejectedValueOnce(new Error('gmail down'));
 
     // Identity still wins for THIS message's classification…
@@ -161,6 +183,7 @@ describe('stale auto-block removal (sender became a customer)', () => {
   test('a truncated Trash search recovers a page but KEEPS the row for the next pass', async () => {
     const del = jest.fn(async () => 1);
     mockTables({ del });
+    gmailClient.getAuthClient.mockResolvedValueOnce({});
     gmailClient.listAllMessages.mockResolvedValueOnce({ messages: [{ id: 'm-1' }, { id: 'm-2' }], truncated: true });
     gmailClient.getMessageLabels.mockResolvedValue(['TRASH']);
 
@@ -219,6 +242,10 @@ describe('stale auto-block removal (sender became a customer)', () => {
           first: jest.fn(async () => ({ id: 'b1', reason: 'spam_auto', email_address: 'cust@x.example', gmail_filter_id: null })),
           del,
         };
+        return chain;
+      }
+      if (table === 'emails') {
+        const chain = { where: jest.fn(() => chain), whereRaw: jest.fn(() => chain), select: jest.fn(async () => []) };
         return chain;
       }
       if (table === 'customers') {

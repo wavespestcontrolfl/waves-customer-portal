@@ -283,13 +283,36 @@ async function removeStaleAutoBlock(normalizedAddress, { untrashGmailId = null }
         }
       }
     }
-    // 2. Recover everything the filter buried. A failure here keeps the row
-    //    even though the filter is gone (step 1 tolerates the resulting 404).
-    const { messages: buried, truncated } = await gmailClient.listAllMessages(
-      `in:trash from:${normalizedAddress} newer_than:30d`, 100, { includeSpamTrash: true }
-    );
-    const ids = new Set((buried || []).map((m) => m.id));
+    // 2. Recover what the BLOCK buried — nothing else. Two precise sources:
+    //    (a) rows this sync itself trashed ('blocked_sender_trashed') —
+    //        these exist filter or no filter, since a DB-level block
+    //        trashes each arriving message;
+    //    (b) when a Gmail FILTER existed, a Trash search scoped to the
+    //        block's lifetime (after: created_at) — filter burials during
+    //        a sync outage leave no DB row. An unscoped from: search would
+    //        resurrect operator-deleted mail predating the block, and a
+    //        filterless block can't have buried anything sync didn't record.
+    //    A failure here keeps the row even though the filter is gone
+    //    (step 1 tolerates the resulting 404).
+    const ids = new Set();
     if (untrashGmailId) ids.add(untrashGmailId);
+    const syncTrashed = await db('emails')
+      .whereRaw('LOWER(from_address) = ?', [normalizedAddress])
+      .where('auto_action', 'blocked_sender_trashed')
+      .select('gmail_id');
+    for (const r of syncTrashed || []) if (r.gmail_id) ids.add(r.gmail_id);
+    let truncated = false;
+    if (row.gmail_filter_id) {
+      const afterEpoch = row.created_at
+        ? Math.floor(new Date(row.created_at).getTime() / 1000) - 1
+        : null;
+      const query = afterEpoch !== null
+        ? `in:trash from:${normalizedAddress} after:${afterEpoch}`
+        : `in:trash from:${normalizedAddress} newer_than:30d`;
+      const searched = await gmailClient.listAllMessages(query, 100, { includeSpamTrash: true });
+      for (const m of searched.messages || []) ids.add(m.id);
+      truncated = !!searched.truncated;
+    }
     let recovered = 0;
     for (const id of ids) {
       const labels = await gmailClient.getMessageLabels(id);
