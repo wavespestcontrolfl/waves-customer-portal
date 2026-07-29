@@ -208,9 +208,7 @@ describe('runContactsSync', () => {
 
   test('pre-create search adopts a contact from a LOST create response (waves_row tag)', async () => {
     setupDb({ customers: [{ ...CUSTOMER }] });
-    mockPeopleApi.people.searchContacts.mockResolvedValueOnce({ data: { results: [
-      { person: { resourceName: 'people/lost', clientData: [{ key: 'waves_row', value: 'customers:c-1' }] } },
-    ] } });
+    mockPeopleApi.people.searchContacts.mockImplementation(async ({ query }) => (query === '' ? { data: {} } : { data: { results: [{ person: { resourceName: 'people/lost', clientData: [{ key: 'waves_row', value: 'customers:c-1' }] } }] } }));
     mockPeopleApi.people.get.mockResolvedValueOnce({ data: { etag: 'e1', memberships: [] } });
     mockPeopleApi.people.updateContact.mockResolvedValueOnce({ data: { resourceName: 'people/lost' } });
     const counts = await runContactsSync({ gapMs: 0 });
@@ -233,9 +231,7 @@ describe('runContactsSync', () => {
     setupDb({ customers: [{ ...CUSTOMER }] });
     // Same email, but no waves_row tag — could be an operator's own contact;
     // adopting it would overwrite it and expose it to the delete paths.
-    mockPeopleApi.people.searchContacts.mockResolvedValueOnce({ data: { results: [
-      { person: { resourceName: 'people/operator', emailAddresses: [{ value: 'jane@customer.example' }] } },
-    ] } });
+    mockPeopleApi.people.searchContacts.mockImplementation(async ({ query }) => (query === '' ? { data: {} } : { data: { results: [{ person: { resourceName: 'people/operator', emailAddresses: [{ value: 'jane@customer.example' }] } }] } }));
     mockPeopleApi.people.createContact.mockResolvedValueOnce({ data: { resourceName: 'people/fresh' } });
     const counts = await runContactsSync({ gapMs: 0 });
     expect(counts.synced).toBe(1);
@@ -303,8 +299,7 @@ describe('runContactsSync', () => {
     setupDb({
       customersSelects: [[], [], [staleVerified]],
       leadsSelects: [[], [], []],
-      // slot 1 = sharer repoint (succeeds), slot 2 = the stamp (throws)
-      updateResults: { customers: [1, new Error('db down')] },
+      updateResults: { customers: [new Error('db down')] },
     });
     const err = new Error('not found');
     err.code = 404;
@@ -348,7 +343,10 @@ describe('runContactsSync', () => {
 
   test('an inconclusive orphan search DEFERS creation instead of risking a duplicate', async () => {
     setupDb({ customers: [{ ...CUSTOMER }] });
-    mockPeopleApi.people.searchContacts.mockRejectedValueOnce(new Error('search down'));
+    mockPeopleApi.people.searchContacts.mockImplementation(async ({ query }) => {
+      if (query === '') return { data: {} };
+      throw new Error('search down');
+    });
     const counts = await runContactsSync({ gapMs: 0 });
     expect(counts.failed).toBe(1);
     expect(mockPeopleApi.people.createContact).not.toHaveBeenCalled();
@@ -373,9 +371,7 @@ describe('runContactsSync', () => {
 
   test('recovery past the grace window adopts the found orphan by tag', async () => {
     setupDb({ customers: [{ ...CUSTOMER, google_contact_id: 'pending_create_recovery', google_contact_synced_at: '2026-07-01T00:00:00Z' }] });
-    mockPeopleApi.people.searchContacts.mockResolvedValueOnce({ data: { results: [
-      { person: { resourceName: 'people/orphan', clientData: [{ key: 'waves_row', value: 'customers:c-1' }] } },
-    ] } });
+    mockPeopleApi.people.searchContacts.mockImplementation(async ({ query }) => (query === '' ? { data: {} } : { data: { results: [{ person: { resourceName: 'people/orphan', clientData: [{ key: 'waves_row', value: 'customers:c-1' }] } }] } }));
     mockPeopleApi.people.get.mockResolvedValueOnce({ data: { etag: 'e1', metadata: { sources: [] }, memberships: [] } });
     mockPeopleApi.people.updateContact.mockResolvedValueOnce({ data: { resourceName: 'people/orphan' } });
     const counts = await runContactsSync({ gapMs: 0 });
@@ -425,7 +421,10 @@ describe('runContactsSync', () => {
     setupDb({ customers: [{ ...CUSTOMER }] });
     const err = new Error('Request had insufficient authentication scopes.');
     err.code = 403;
-    mockPeopleApi.people.searchContacts.mockRejectedValueOnce(err);
+    mockPeopleApi.people.searchContacts.mockImplementation(async ({ query }) => {
+      if (query === '') return { data: {} };
+      throw err;
+    });
     const counts = await runContactsSync({ gapMs: 0 });
     expect(counts.blocked).toBe('contacts_scope_missing');
     expect(mockPeopleApi.people.createContact).not.toHaveBeenCalled();
@@ -436,9 +435,7 @@ describe('runContactsSync', () => {
       customersSelects: [[], [{ id: 'c-dead', google_contact_id: 'pending_create_recovery', google_contact_synced_at: '2026-07-01T00:00:00Z', first_name: 'Jane', last_name: 'X', email: 'jane@customer.example', phone: null }], []],
       leadsSelects: [[], [], []],
     });
-    mockPeopleApi.people.searchContacts.mockResolvedValueOnce({ data: { results: [
-      { person: { resourceName: 'people/orphan', clientData: [{ key: 'waves_row', value: 'customers:c-dead' }] } },
-    ] } });
+    mockPeopleApi.people.searchContacts.mockImplementation(async ({ query }) => (query === '' ? { data: {} } : { data: { results: [{ person: { resourceName: 'people/orphan', clientData: [{ key: 'waves_row', value: 'customers:c-dead' }] } }] } }));
     const counts = await runContactsSync({ gapMs: 0 });
     expect(counts.retired).toBe(1);
     // The committed-but-unrecorded contact was found by tag and deleted —
@@ -459,6 +456,52 @@ describe('runContactsSync', () => {
     // for a definitive rejection; a contact-field edit re-queues it.
     expect(park.patch.google_contact_synced_at).toBeInstanceOf(Date);
     expect(park.patch.google_contact_id).toBeUndefined();
+  });
+
+  test('a 429 rate limit is RETRYABLE — the row is neither parked nor marked', async () => {
+    const state = setupDb({ customers: [{ ...CUSTOMER }] });
+    const err = new Error('Rate limit exceeded');
+    err.code = 429;
+    mockPeopleApi.people.createContact.mockRejectedValueOnce(err);
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(counts.failed).toBe(1);
+    // No park, no recovery marker — the row stays stale and retries after
+    // the quota recovers.
+    expect(state.updates).toEqual([]);
+  });
+
+  test('verification never lets a NON-OWNER lead overwrite the shared contact', async () => {
+    const state = setupDb({
+      customersSelects: [[], [], []],
+      leadsSelects: [[], [], [{
+        id: 'l-old', first_name: 'Old', email: 'old@x.example', phone: null, customer_id: 'c-1',
+        google_contact_id: 'people/shared', updated_at: '2026-06-30T00:00:00Z', google_contact_synced_at: '2026-07-01T00:00:00Z',
+      }]],
+    });
+    const counts = await runContactsSync({ gapMs: 0, now: new Date('2026-07-28T12:00:00Z') });
+    // Watermark advanced, contact untouched — the OWNER's verification
+    // maintains it.
+    expect(counts.verified).toBe(1);
+    expect(mockPeopleApi.people.get).not.toHaveBeenCalled();
+    expect(mockPeopleApi.people.updateContact).not.toHaveBeenCalled();
+    expect(state.updates.find((u) => u.table === 'leads').patch.google_contact_synced_at).toEqual(new Date('2026-07-28T12:00:00Z'));
+  });
+
+  test('retiring a shared contact requeues a surviving owner to scrub the dead row PII', async () => {
+    const state = setupDb({
+      customersSelects: [[], [{ id: 'c-dead', google_contact_id: 'people/shared', google_contact_synced_at: '2026-07-01T00:00:00Z', first_name: 'Gone', last_name: '', email: 'gone@x.example', phone: null }], []],
+      leadsSelects: [[], [], []],
+      // in-use probe: customers → null, leads → sharer; survivor probe:
+      // customers → null, leads → sharer
+      firstResults: { customers: [null, null], leads: [{ id: 'l-9' }, { id: 'l-9' }] },
+    });
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(counts.retired).toBe(1);
+    expect(mockPeopleApi.people.deleteContact).not.toHaveBeenCalled();
+    // The survivor is requeued so its next main-lane pass re-pushes the
+    // LIVE identity over the retired row's PII/tag.
+    expect(state.updates.find((u) => u.table === 'leads').patch).toEqual({ google_contact_synced_at: null });
+    expect(state.updates.find((u) => u.table === 'customers').patch).toEqual({ google_contact_id: null, google_contact_synced_at: null });
   });
 
   test('scope-missing aborts WITHOUT stamping — rows retry after the one-time re-consent', async () => {

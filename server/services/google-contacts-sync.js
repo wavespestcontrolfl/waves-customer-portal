@@ -66,6 +66,19 @@ function isGone(err) {
 }
 
 /**
+ * Retryable 4xx: throttling and quota exhaustion recover on their own —
+ * parking those rows would strand them (a new row with no contact never
+ * re-enters any lane without an edit).
+ */
+function isRetryable4xx(err) {
+  const status = err?.code || err?.response?.status;
+  if (status === 408 || status === 429) return true;
+  const msg = String(err?.response?.data?.error?.message || err?.message || '');
+  const reason = String(err?.response?.data?.error?.status || '');
+  return status === 403 && /rate|quota|exhaust/i.test(`${msg} ${reason}`);
+}
+
+/**
  * PII-safe error rendering: Google validation errors can echo the submitted
  * email/phone/address back in message text — log status/reason codes only
  * (AGENTS.md non-card PII logging rule).
@@ -179,6 +192,10 @@ async function findExistingContact(people, row, tag) {
   const query = email || phone;
   if (!query) return null;
   try {
+    // Documented People API behavior: searchContacts serves a lagging
+    // cache until an empty-query WARMUP primes it — skipping this makes
+    // an empty result meaningless for duplicate-recovery decisions.
+    await people.people.searchContacts({ query: '', pageSize: 1, readMask: 'names' }).catch(() => {});
     const res = await people.people.searchContacts({
       query,
       pageSize: 10,
@@ -518,7 +535,8 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
       }
       counts.failed += 1;
       const failStatus = err?.code || err?.response?.status;
-      if (typeof failStatus === 'number' && failStatus >= 400 && failStatus < 500 && !err.searchInconclusive) {
+      if (typeof failStatus === 'number' && failStatus >= 400 && failStatus < 500
+        && !isRetryable4xx(err) && !err.searchInconclusive) {
         // Deterministic rejection (validation etc.): retrying every tick
         // would pin the newest-first batch and starve the backfill. Park
         // the row (watermark stamped current) — any contact-field edit
@@ -575,6 +593,21 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
         if (!(await contactInUseElsewhere(row.google_contact_id, table, row.id))) {
           await deleteContact(people, row.google_contact_id);
           await sleep(gapMs);
+        } else {
+          // SHARED contact: released, not deleted — but it may still carry
+          // THIS retired row's PII/tag if it was the last pushed source.
+          // Requeue one surviving owner so its next main-lane pass
+          // re-pushes the live identity over the deceased row's.
+          for (const t of ['customers', 'leads']) {
+            const survivor = await db(t)
+              .where('google_contact_id', row.google_contact_id)
+              .whereNull('deleted_at')
+              .first();
+            if (survivor) {
+              await db(t).where({ id: survivor.id }).update({ google_contact_synced_at: null });
+              break;
+            }
+          }
         }
         // The watermark clears WITH the pointer — a later restore
         // (deleted_at flip only, not a contact-field change) must find the
@@ -597,6 +630,9 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
   const verifyCutoff = new Date(now.getTime() - VERIFY_AFTER_DAYS * 86400000);
   const verifyRows = [];
   try {
+    // Leads keep a reserved verification slot for the same reason the main
+    // lane reserves them — a large customer corpus must not monopolize the
+    // budget and leave broken lead contacts unrepaired forever.
     const vc = await db('customers')
       .whereNull('deleted_at')
       .whereNotNull('google_contact_id')
@@ -607,7 +643,7 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
       .whereRaw('updated_at <= google_contact_synced_at')
       .where('google_contact_synced_at', '<', verifyCutoff)
       .orderBy('google_contact_synced_at', 'asc')
-      .limit(VERIFY_SLOTS)
+      .limit(Math.max(1, VERIFY_SLOTS - 2))
       .select(...SYNC_COLUMNS, 'account_id', 'address_line1', 'address_line2', 'city', 'state', 'zip');
     verifyRows.push(...vc.map((row) => ({ table: 'customers', kind: 'customer', row })));
     if (verifyRows.length < VERIFY_SLOTS) {
@@ -627,15 +663,23 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
   }
   for (const { table, kind, row } of verifyRows) {
     try {
-      const priorContactId = row.google_contact_id;
-      const { resourceName, created } = await upsertContact(people, table, row, kind, gapMs);
-      if (created && priorContactId && priorContactId !== resourceName) {
-        for (const t of ['customers', 'leads']) {
-          await db(t).where('google_contact_id', priorContactId)
-            .update({ google_contact_id: resourceName })
-            .catch((e) => logger.warn(`[contacts-sync] sharer repoint failed on ${t}: ${safeErr(e)}`));
+      if (kind === 'lead') {
+        // Ownership rules apply here too: a NON-OWNER lead (converted, or
+        // sharing a contact whose identity it no longer matches) must not
+        // re-push its snapshot over the owner's — advance its watermark
+        // and leave the contact to the owner's verification.
+        const ownership = await resolveLeadOwnership(row);
+        const sharedElsewhere = await contactInUseElsewhere(row.google_contact_id, table, row.id);
+        const nonOwner = ownership.deferToCustomer
+          || (sharedElsewhere && ownership.adoptContactId !== row.google_contact_id);
+        if (nonOwner) {
+          const advanced = await stampVerified(table, row, row.google_contact_id, now);
+          if (advanced) counts.verified += 1;
+          continue;
         }
       }
+      const priorContactId = row.google_contact_id;
+      const { resourceName, created } = await upsertContact(people, table, row, kind, gapMs);
       let stamped = 0;
       try {
         stamped = await stampVerified(table, row, resourceName, now);
@@ -650,7 +694,19 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
       if (!stamped && created && resourceName) {
         await deleteContact(people, resourceName).catch(() => {});
       }
-      if (stamped) counts.verified += 1;
+      if (stamped) {
+        // Repoint sharers only AFTER the stamp holds — repointing first
+        // and then compensating a vetoed stamp would leave every sharer
+        // aimed at a deleted replacement.
+        if (created && priorContactId && priorContactId !== resourceName) {
+          for (const t of ['customers', 'leads']) {
+            await db(t).where('google_contact_id', priorContactId)
+              .update({ google_contact_id: resourceName })
+              .catch((e) => logger.warn(`[contacts-sync] sharer repoint failed on ${t}: ${safeErr(e)}`));
+          }
+        }
+        counts.verified += 1;
+      }
       await sleep(gapMs);
     } catch (err) {
       if (isScopeError(err)) { counts.blocked = 'contacts_scope_missing'; return counts; }
