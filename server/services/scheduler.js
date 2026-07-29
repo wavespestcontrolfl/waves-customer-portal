@@ -436,8 +436,15 @@ function initScheduledJobs() {
     try {
       await runExclusive('google-contacts-sync', async () => {
         const result = await require('./google-contacts-sync').runContactsSync();
-        if (result.blocked === 'contacts_scope_missing') {
-          logger.warn('[contacts-sync] blocked — owner re-consent pending (admin Gmail auth URL)');
+        // Once the owner has flipped the gate, a blocked run (missing
+        // consent, disconnected Gmail) or per-row failures are a real
+        // outage — THROW so runExclusive/job-health records the tick as
+        // failed instead of a silent success.
+        if (result.blocked) {
+          throw new Error(`contacts sync blocked: ${result.blocked}${result.blocked === 'contacts_scope_missing' ? ' — owner re-consent pending at the admin Gmail auth URL' : ''}`);
+        }
+        if (result.failed) {
+          throw new Error(`contacts sync: ${result.failed} row(s) failed — retrying next run`);
         }
       });
     } catch (err) {
