@@ -224,12 +224,15 @@ describe('admin usage: POST /track', () => {
     ['path outside /admin', { pageKey: 'leads', path: '/tech/route' }],
     ['pageKey/path mismatch (name-shaped key)', { pageKey: 'alice-smith', path: '/admin/customers/:id' }],
     ['arbitrary colon placeholder in path', { pageKey: 'customers', path: '/admin/customers/:john-smith' }],
-    ['tab with spaces', { pageKey: 'leads', tab: 'my search' }],
-    ['digits-only tab (phone-shaped)', { pageKey: 'leads', tab: '5551234567' }],
-    ['underscore tab (name-shaped)', { pageKey: 'leads', tab: 'john_smith' }],
-    ['unknown source', { pageKey: 'leads', source: 'carrier-pigeon' }],
-    ['unknown eventType', { pageKey: 'leads', eventType: 'click' }],
+    ['tab with spaces', { pageKey: 'leads', path: '/admin/leads', tab: 'my search' }],
+    ['digits-only tab (phone-shaped)', { pageKey: 'leads', path: '/admin/leads', tab: '5551234567' }],
+    ['underscore tab (name-shaped)', { pageKey: 'leads', path: '/admin/leads', tab: 'john_smith' }],
+    ['unknown source', { pageKey: 'leads', path: '/admin/leads', source: 'carrier-pigeon' }],
+    ['unknown eventType', { pageKey: 'leads', path: '/admin/leads', eventType: 'click' }],
     ['missing pageKey', {}],
+    // path is REQUIRED: a path-less payload would bypass the path/key
+    // agreement check — the last route for a name-shaped key (Codex r9).
+    ['missing path (name-shaped key alone)', { pageKey: 'alice-smith' }],
   ])('rejects %s with 400 and writes nothing', async (_label, body) => {
     const chain = makeChain();
     db.mockImplementation(() => chain);

@@ -223,7 +223,16 @@ export default function SettingsPage() {
   // layout's effect (child first), so the authoritative pending beacon
   // blocks the raw one. The query-less MOBILE index renders no leaf and is
   // skipped. Codex #2961 r4+r6.
+  // Re-run only for REAL query changes: isMobile is read here (mobile-index
+  // skip), but a breakpoint crossing must not resync state from a stale URL
+  // param — after a state-only selectTab, the URL can still say ?tab=team
+  // while Portal Usage is rendered, and a resize would eject the user and
+  // record the stale leaf (Codex #2961 r9).
+  const prevSearchRef = useRef(null);
   useEffect(() => {
+    const searchStr = searchParams.toString();
+    if (prevSearchRef.current === searchStr) return;
+    prevSearchRef.current = searchStr;
     const qp = searchParams.get("tab");
     if (qp && VALID_TABS.includes(qp)) {
       setTab(qp);

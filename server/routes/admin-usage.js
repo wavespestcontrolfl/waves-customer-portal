@@ -99,24 +99,24 @@ router.post('/track', async (req, res, next) => {
     if (typeof pageKey !== 'string' || !PAGE_KEY_RE.test(pageKey) || isIdSegment(pageKey)) {
       return res.status(400).json({ error: 'Invalid pageKey' });
     }
-    let cleanPath = null;
-    if (path != null) {
-      if (typeof path !== 'string' || path.length > 160) {
-        return res.status(400).json({ error: 'Invalid path' });
-      }
-      cleanPath = stripIdSegments(path);
-      if (!cleanPath || !PATH_RE.test(cleanPath)) {
-        return res.status(400).json({ error: 'Invalid path' });
-      }
-      // pageKey must agree with the sanitized path — otherwise a mismatched
-      // payload ('alice-smith' + a customers path) could smuggle a
-      // name-shaped key into the rankings despite the path being clean
-      // (Codex #2961 r8). Mirrors the client: key = first path segment,
-      // 'dashboard' for bare /admin.
-      const derivedKey = cleanPath.split('/').filter(Boolean)[1] || 'dashboard';
-      if (pageKey !== derivedKey) {
-        return res.status(400).json({ error: 'pageKey does not match path' });
-      }
+    // path is REQUIRED: the real client always sends it, and a path-less
+    // payload would bypass the path/key agreement below — the one remaining
+    // way to smuggle a name-shaped key into the rankings (Codex #2961 r9).
+    if (typeof path !== 'string' || path.length > 160) {
+      return res.status(400).json({ error: 'Invalid path' });
+    }
+    const cleanPath = stripIdSegments(path);
+    if (!cleanPath || !PATH_RE.test(cleanPath)) {
+      return res.status(400).json({ error: 'Invalid path' });
+    }
+    // pageKey must agree with the sanitized path — otherwise a mismatched
+    // payload ('alice-smith' + a customers path) could smuggle a
+    // name-shaped key into the rankings despite the path being clean
+    // (Codex #2961 r8). Mirrors the client: key = first path segment,
+    // 'dashboard' for bare /admin.
+    const derivedKey = cleanPath.split('/').filter(Boolean)[1] || 'dashboard';
+    if (pageKey !== derivedKey) {
+      return res.status(400).json({ error: 'pageKey does not match path' });
     }
     if (tab != null && (typeof tab !== 'string' || !TAB_RE.test(tab))) {
       return res.status(400).json({ error: 'Invalid tab' });
