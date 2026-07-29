@@ -214,6 +214,8 @@ describe('admin usage: POST /track', () => {
     ['path with query string', { pageKey: 'leads', path: '/admin/leads?source_name=x' }],
     ['path outside /admin', { pageKey: 'leads', path: '/tech/route' }],
     ['tab with spaces', { pageKey: 'leads', tab: 'my search' }],
+    ['digits-only tab (phone-shaped)', { pageKey: 'leads', tab: '5551234567' }],
+    ['underscore tab (name-shaped)', { pageKey: 'leads', tab: 'john_smith' }],
     ['unknown source', { pageKey: 'leads', source: 'carrier-pigeon' }],
     ['unknown eventType', { pageKey: 'leads', eventType: 'click' }],
     ['missing pageKey', {}],
@@ -314,6 +316,34 @@ describe('admin usage: GET /summary', () => {
       for (const chain of chains.slice(0, 4)) {
         expect(chain.calls.where.find((a) => a[0] === 'technician_id')).toBeUndefined();
       }
+    });
+  });
+
+  test('prototype-key page keys cannot wedge the summary (constructor)', async () => {
+    // 'constructor' passes the slug shape; on plain-object accumulators it
+    // resolves the inherited Object constructor and .push() throws — every
+    // summary in the window would 500 (Codex r4). Null-proto maps make it
+    // just another key.
+    primeSummaryChains({
+      pages: [{ page_key: 'constructor', views: '2', active_days: '1', last_used: '2026-07-23T14:00:00.000Z' }],
+      sources: [{ page_key: 'constructor', source: 'load', views: '2' }],
+      tabs: [{ page_key: 'constructor', tab: 'general', views: '1' }],
+      totals: { views: '2', active_days: '1' },
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/usage/summary?days=7`, {
+        headers: { Authorization: 'Bearer admin' },
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.pages).toEqual([{
+        pageKey: 'constructor',
+        views: 2,
+        activeDays: 1,
+        lastUsed: '2026-07-23T14:00:00.000Z',
+        sources: { load: 2 },
+        tabs: [{ tab: 'general', views: 1 }],
+      }]);
     });
   });
 

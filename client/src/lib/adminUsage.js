@@ -26,7 +26,11 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const NUMERIC_RE = /^\d+$/;
 const OPAQUE_RE = /^(?=[A-Za-z0-9_-]*[A-Z0-9_])[A-Za-z0-9_-]{20,}$/;
 
-const TAB_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
+// Tabs are route-structure words: letter-first, lowercase, hyphenated.
+// Digits-only ('5551234567') and underscore values ('john_smith') are not
+// tabs anywhere in this app — reject them so a crafted ?tab= link can't
+// smuggle an identifier. Mirrored server-side.
+const TAB_RE = /^(?=.{1,32}$)[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 const PAGE_KEY_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
 // How long a marked navigation source stays valid before falling back to
@@ -48,6 +52,10 @@ let lastLogged = null; // { key, ts }
 let hasLoggedThisSession = false;
 let pendingBeacon = null; // { key, body }
 let pendingTimer = null;
+// Identity fingerprint: on a shared browser, a login switch must reset the
+// dedupe/session state (or B's first view is dropped by A's 30s window) and
+// drop A's still-settling beacon (or it flushes under B's token).
+let lastAuthToken = null;
 
 /** Call from a navigation control's click handler just before the SPA
  *  navigates, so the resulting page view is attributed to that control. */
@@ -149,9 +157,47 @@ export function trackAdminPageView({ pathname, search } = {}) {
   const norm = normalizeAdminPath(pathname);
   if (!norm) return;
 
+  let token;
+  try {
+    token = localStorage.getItem('waves_admin_token');
+  } catch {
+    return;
+  }
+  if (!token) return;
+  if (token !== lastAuthToken) {
+    // Signed-in identity changed (login, logout+login, user switch on a
+    // shared browser): the previous identity's pending beacon must not
+    // flush under this token, and this identity starts a fresh session
+    // (own dedupe window, first view = 'load'). pendingSource is left
+    // alone — the 3s TTL already kills stale marks, and the mark preceding
+    // this identity's FIRST track is its own click. Codex #2961 r4.
+    if (pendingTimer) clearTimeout(pendingTimer);
+    pendingTimer = null;
+    pendingBeacon = null;
+    lastLogged = null;
+    hasLoggedThisSession = false;
+    lastAuthToken = token;
+  }
+
   const tab = safeTab(search);
   const key = `${norm.pageKey}|${norm.path}|${tab || ''}`;
   const now = Date.now();
+
+  // A tab-less view never downgrades a still-settling tabbed view of the
+  // SAME page: on a query-less Settings open, the page's mount effect
+  // records the rendered leaf BEFORE the layout's route beacon fires
+  // (child effects run first), and the coarse layout beacon must refine
+  // into that row, not replace it. Codex #2961 r4.
+  if (
+    pendingBeacon
+    && !tab
+    && pendingBeacon.body.tab
+    && pendingBeacon.body.pageKey === norm.pageKey
+    && pendingBeacon.body.path === norm.path
+  ) {
+    return;
+  }
+
   if (lastLogged && lastLogged.key === key && now - lastLogged.ts < DEDUPE_MS) {
     // The navigation chain landed on an already-counted view — drop any
     // intermediate hop still settling, or it flushes as a phantom row.
@@ -203,4 +249,5 @@ export function __resetAdminUsageForTests() {
   hasLoggedThisSession = false;
   pendingBeacon = null;
   pendingTimer = null;
+  lastAuthToken = null;
 }

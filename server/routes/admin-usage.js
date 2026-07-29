@@ -25,7 +25,13 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 // client normalizes before sending; this is the backstop.
 const PAGE_KEY_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const PATH_RE = /^\/admin(?:\/[a-zA-Z0-9:_-]+){0,6}$/;
-const TAB_RE = /^[a-z0-9][a-z0-9_-]{0,31}$/;
+// Tabs are route-structure words: letter-first, lowercase, hyphenated.
+// Digits-only ('5551234567') and underscore values ('john_smith') are not
+// tabs anywhere in this app — reject them so a crafted ?tab= link followed
+// by a staff member can't smuggle an identifier (Codex #2961 r4). Residual:
+// a hyphenated lowercase word is shape-indistinguishable from a tab slug,
+// same bounded residual as path route words.
+const TAB_RE = /^(?=.{1,32}$)[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 const SOURCES = new Set(['sidebar', 'tabbar', 'more', 'palette', 'load', 'in-app']);
 const EVENT_TYPES = new Set(['page_view']);
 
@@ -175,11 +181,15 @@ router.get('/summary', async (req, res, next) => {
         : Promise.resolve(null),
     ]);
 
-    const sourcesByPage = {};
+    // Null-prototype accumulators: page_key is client-influenced, and on a
+    // plain object a key like 'constructor' resolves the INHERITED Object
+    // constructor — `||=` keeps it, `.push` throws, and every summary in
+    // the window 500s (Codex #2961 r4).
+    const sourcesByPage = Object.create(null);
     for (const r of sourceRows) {
-      (sourcesByPage[r.page_key] ||= {})[r.source] = Number(r.views);
+      (sourcesByPage[r.page_key] ||= Object.create(null))[r.source] = Number(r.views);
     }
-    const tabsByPage = {};
+    const tabsByPage = Object.create(null);
     for (const r of tabRows) {
       (tabsByPage[r.page_key] ||= []).push({ tab: r.tab, views: Number(r.views) });
     }

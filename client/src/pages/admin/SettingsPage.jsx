@@ -198,6 +198,18 @@ export default function SettingsPage() {
     trackAdminPageView({ pathname: "/admin/settings", search: `?tab=${leafKey}` });
   };
 
+  // A query-less desktop open renders a real leaf (default 'general') that
+  // the layout beacon can't see — record it so the Top-tab ranking counts
+  // normal General visits. Fires inside the lib's settle window and the
+  // layout's later tab-less beacon refines into it (never downgrades it),
+  // so this stays ONE row. The query-less MOBILE index renders no leaf and
+  // is skipped; deep-links dedupe against the layout's identical beacon.
+  // Mount-only by design (see the exhaustive-deps note above). Codex #2961 r4.
+  useEffect(() => {
+    if (isMobile && !searchParams.get("tab")) return;
+    trackAdminPageView({ pathname: "/admin/settings", search: `?tab=${initialTab}` });
+  }, []);
+
   // Mobile section links change ?tab= on the already-mounted page (the mobile
   // index and the tab panel share this route/component) — sync the param into
   // state so those taps actually switch tabs instead of leaving the prior one.

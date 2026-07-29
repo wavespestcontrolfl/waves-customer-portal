@@ -84,6 +84,10 @@ describe('safeTab', () => {
     expect(safeTab('?tab=8f14e45f-ceea-4671-9aa5-1c6ff2f3e9b1')).toBeNull();
     expect(safeTab('?source_name=Google%20LSA')).toBeNull();
     expect(safeTab('')).toBeNull();
+    // Identifier-shaped values are not tabs: digits-only (phone numbers)
+    // and underscore names never occur as tab slugs in this app.
+    expect(safeTab('?tab=5551234567')).toBeNull();
+    expect(safeTab('?tab=john_smith')).toBeNull();
   });
 });
 
@@ -182,6 +186,49 @@ describe('trackAdminPageView', () => {
     trackAdminPageView({ pathname: '/admin/dispatch', search: '?tab=schedule' });
     settle();
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('resets tracking state when the signed-in identity changes', () => {
+    trackAdminPageView({ pathname: '/admin/dispatch', search: '' });
+    settle();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // Same page, same 30s window — but a DIFFERENT staff member signed in
+    // on this shared browser. Their first view must send (fresh session,
+    // 'load'), under their own token.
+    localStorage.setItem('waves_admin_token', 'tok-b');
+    trackAdminPageView({ pathname: '/admin/dispatch', search: '' });
+    settle();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [, opts] = fetchMock.mock.calls.at(-1);
+    expect(opts.headers.Authorization).toBe('Bearer tok-b');
+    expect(lastBody().source).toBe('load');
+  });
+
+  it("drops the previous identity's still-settling beacon instead of misattributing it", () => {
+    trackAdminPageView({ pathname: '/admin/invoices', search: '' }); // A, still pending
+    localStorage.setItem('waves_admin_token', 'tok-b');
+    trackAdminPageView({ pathname: '/admin/dispatch', search: '' }); // B signs in
+    settle();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(lastBody().pageKey).toBe('dispatch');
+    expect(fetchMock.mock.calls[0][1].headers.Authorization).toBe('Bearer tok-b');
+  });
+
+  it('a tab-less beacon never downgrades a pending tabbed beacon for the same page', () => {
+    // Query-less Settings open: the page's mount effect records the rendered
+    // leaf FIRST (child effects run before parent effects), then the layout
+    // queues its coarse tab-less view — one row, leaf + source kept.
+    markUsageSource('sidebar');
+    trackAdminPageView({ pathname: '/admin/settings', search: '?tab=general' });
+    trackAdminPageView({ pathname: '/admin/settings', search: '' });
+    settle();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(lastBody()).toEqual({
+      pageKey: 'settings',
+      path: '/admin/settings',
+      tab: 'general',
+      source: 'sidebar',
+    });
   });
 
   it('flushes the pending beacon on pagehide so the last view is not lost', () => {
