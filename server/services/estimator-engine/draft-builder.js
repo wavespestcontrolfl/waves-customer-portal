@@ -232,6 +232,29 @@ function buildEngineInput({ intent, propertyFacts, context, priorQualifyingServi
   };
 }
 
+// Stamp the pest curve at the source (audit 2026-07-28): the intent schema
+// can't carry services.pest.version, so drafts persisted unstamped inputs
+// and every later replay had to re-derive the sold curve from the stored
+// result — the PUBLIC replay boundary defaulted unstamped inputs to v1,
+// rendering (and accepting) a v2-priced draft at retired v1 bi-monthly/
+// monthly prices. Persist the version the engine actually priced with so
+// replays (public ladder, accept, admin revision) are stamped without
+// inference. Pure: returns a new object when it stamps, never mutates.
+function stampPestCurveVersion(engineInputs = {}, engineResult = null) {
+  const pest = engineInputs?.services?.pest;
+  if (!pest || typeof pest !== 'object' || pest.version) return engineInputs;
+  const pricedPestLine = (engineResult?.lineItems || [])
+    .find((li) => li?.service === 'pest_control');
+  if (!pricedPestLine) return engineInputs;
+  return {
+    ...engineInputs,
+    services: {
+      ...engineInputs.services,
+      pest: { ...pest, version: pricedPestLine.pricingVersion === 'v2' ? 'v2' : 'v1' },
+    },
+  };
+}
+
 // ── Totals ────────────────────────────────────────────────────
 // Prefer the engine summary (matches the lead-webhook automation); fall back
 // to summing priced line items (commercial flat lines can sit outside the
@@ -614,7 +637,8 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
   // the public reconcile path clears only the TOP-LEVEL key on stale
   // membership snapshots, and a nested copy would keep replaying the
   // combined-tier discount after the membership lapsed.
-  const { priorQualifyingServices: _nestedPrior, ...storedEngineInputs } = engineInput || {};
+  const { priorQualifyingServices: _nestedPrior, ...unstampedEngineInputs } = engineInput || {};
+  const storedEngineInputs = stampPestCurveVersion(unstampedEngineInputs, engineResult);
 
   // Serialization: the phone advisory lock covers callers with a usable
   // number. WITHOUT one, withAutomatedEstimatePhoneLock degrades to a bare
@@ -785,6 +809,7 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
 module.exports = {
   LANES,
   buildEngineInput,
+  stampPestCurveVersion,
   deriveTotals,
   compsBand,
   calibrationWarnings,

@@ -620,29 +620,46 @@ Flag if: outdated regulations, incorrect chemical rates, expired certifications,
 
     // ── 3. PRICING ENGINE snapshot ──
     try {
+      // Rendered from the LIVE engine constants after a DB sync — pricing is
+      // DB-authoritative, and this doc's previous hardcoded copy drifted
+      // (retired v1 cadence curve, invented tree/driveway adjustments that
+      // never existed in the engine; audit 2026-07-28). Values here now move
+      // with pricing_config / admin edits on the next KB sync, no code edit.
+      const pricingEngine = require('./pricing-engine');
+      await pricingEngine.syncConstantsFromDB(db);
+      const { PEST, PROPERTY_TYPE_ADJ, WAVEGUARD, LAWN_TIERS, LAWN_PRICING_V2 } = pricingEngine.constants;
+      const signed = (n) => (n > 0 ? `+$${n}` : n < 0 ? `-$${Math.abs(n)}` : '$0');
+      const adj = PEST.additionalAdjustments || {};
+      const roachTierText = (rows) => (rows || [])
+        .map((r) => `$${r.price}`)
+        .join('/');
+      const curve = PEST.frequencyDiscounts?.v2 || {};
+      const tierPct = (t) => `${Math.round(((WAVEGUARD.tiers?.[t]?.discount) || 0) * 100)}%`;
       const pricingContent = [
         '**Pest Control Pricing**',
-        'Base price: $117/visit | Floor: $89',
+        `Base price: $${PEST.base}/visit | Floor: $${PEST.floor}`,
         '',
         'Footprint modifiers (interpolated):',
-        '800sf: -$15 | 1,200sf: -$10 | 1,500sf: -$5 | 2,000sf: $0 | 2,500sf: +$3 | 3,000sf: +$6 | 4,000sf: +$10 | 5,500sf: +$16',
+        (PEST.footprintBrackets || []).map((b) => `${b.sqft.toLocaleString()}sf: ${signed(b.adj)}`).join(' | '),
         '',
         'Property features:',
-        'Pool cage: small +$5 | medium +$8 | large +$12 | oversized +$18 | Pool (no cage): $0 | Heavy shrubs: +$6 | Moderate shrubs: $0',
-        'Heavy trees: +$6 | Moderate trees: $0 | Complex landscape: +$3',
-        'Near water: +$3 | Large driveway: +$3',
+        `Pool cage: small ${signed(adj.poolCageSmall)} | medium ${signed(adj.poolCageMedium)} | large ${signed(adj.poolCageLarge)} | oversized ${signed(adj.poolCageOversized)} | Pool (no cage): ${signed(adj.poolNoCage)}`,
+        `Shrubs: light ${signed(adj.shrubs_light)} | moderate ${signed(adj.shrubs_moderate)} | heavy ${signed(adj.shrubs_heavy)} | Landscape: simple ${signed(adj.complexity_simple)} | moderate ${signed(adj.complexity_moderate)} | complex ${signed(adj.complexity_complex)}`,
+        `Near water: ${signed(adj.nearWater)} | Indoor service: ${signed(adj.indoor)} | Attached garage: ${signed(adj.attachedGarage)}`,
         '',
-        'Property type: Townhome end -$8 | Townhome interior -$12 | Duplex -$10 | Condo ground -$18 | Condo upper -$22',
+        `Property type: Townhome end ${signed(PROPERTY_TYPE_ADJ.townhome_end)} | Townhome interior ${signed(PROPERTY_TYPE_ADJ.townhome_interior)} | Duplex ${signed(PROPERTY_TYPE_ADJ.duplex)} | Condo ground ${signed(PROPERTY_TYPE_ADJ.condo_ground)} | Condo upper ${signed(PROPERTY_TYPE_ADJ.condo_upper)}`,
         '',
-        'Frequency discounts (server): Quarterly 1.0x | Bi-Monthly 0.85x | Monthly 0.70x',
-        'Roach: recurring roach percentages are retired. Recurring pest with native roach adds Initial Native Roach Knockdown ($119/$139/$169); German adds Initial German Roach Knockdown ($169/$199/$249). These first-visit fees are not waived with annual prepay and do not receive the recurring-customer one-time discount. Standalone regular roach uses $202.50/$239/$289 by footprint | WaveGuard Membership: flat $99 (waived with annual prepay)',
+        `Per-visit cadence multipliers (v2, LIVE default): Quarterly ${curve.quarterly}x | Bi-Monthly ${curve.bimonthly}x | Monthly ${curve.monthly}x`,
+        '(v1 0.85/0.70 is RETIRED — replay-only for estimates sold under it; never quote v1 prices on new estimates)',
+        `Roach: recurring roach percentages are retired. Recurring pest with native roach adds Initial Native Roach Knockdown (${roachTierText(PEST.pestInitialRoach?.regular)}); German adds Initial German Roach Knockdown (${roachTierText(PEST.pestInitialRoach?.german)}). These first-visit fees are not waived with annual prepay and do not receive the recurring-customer one-time discount. Standalone regular roach uses ${roachTierText(PEST.pestInitialRoach?.regular_standalone)} by footprint | WaveGuard Membership: flat $${PEST.initialFee} (waived with annual prepay)`,
         '',
-        'WaveGuard tiers: Bronze 0% | Silver 10% | Gold 15% | Platinum 20%',
+        `WaveGuard tiers: Bronze ${tierPct('bronze')} | Silver ${tierPct('silver')} | Gold ${tierPct('gold')} | Platinum ${tierPct('platinum')}`,
         'Tier qualification: 1 service = Bronze | 2 = Silver | 3 = Gold | 4+ = Platinum',
         '',
         '**Lawn Care Pricing**',
-        'Track-based lookup tables (Lawn_Pricing_v4_TimeScaled)',
-        'Tracks: A (St. Augustine) | B (legacy St. Augustine alias) | C1 (Bermuda) | C2 (Zoysia) | D (Bahia)',
+        `Version: ${LAWN_PRICING_V2?.pricingVersion || 'LAWN_PRICING_V2'} — market bracket table (grass track × turf sqft × tier), DB-authoritative via lawn_pricing_brackets`,
+        `Tiers: ${Object.values(LAWN_TIERS || {}).map((t) => `${t.label}${t.hidden ? ' (retired/hidden)' : ''}`).join(' | ')}`,
+        'Tracks: St. Augustine | Bermuda | Zoysia | Bahia',
         'Turf area: fixed hardscape (800sf base + 3% excess) + complexity scoring + smoothed turf factor',
       ].join('\n');
       await upsert('pricing-engine-current', 'Pest & Lawn Pricing Engine', pricingContent, 'pricing', ['pest', 'lawn', 'modifiers']);

@@ -80,6 +80,7 @@ const {
 } = require('../constants/business');
 const {
   pricingBundleMatchesEstimateTotals,
+  resolveStoredPestPricingVersion,
 } = require('../services/estimate-pricing-bundle-utils');
 const {
   estimateDataHasUnresolvedManagerApproval,
@@ -11048,6 +11049,24 @@ function extractEngineInputs(estData) {
       floorBreachAcknowledged: opAdj.floorBreachAcknowledged === true,
     };
   }
+  // Curve provenance for unstamped pest inputs (audit 2026-07-28): agent
+  // drafts persisted engineInputs WITHOUT services.pest.version, and the
+  // ladder replay below defaults unstamped → v1 — rendering (and accepting)
+  // a v2-priced draft at retired v1 bi-monthly/monthly prices. Resolve the
+  // sold curve from the stored result exactly like the save path
+  // (admin-estimate-persistence) does; only a truly evidence-less input is
+  // left unstamped for the legacy-replay default. Clone before stamping —
+  // `out.services` still references the stored estimate_data object.
+  if (out.services?.pest && typeof out.services.pest === 'object'
+    && !out.services.pest.version) {
+    const resolvedVersion = resolveStoredPestPricingVersion(estData);
+    if (resolvedVersion) {
+      out.services = {
+        ...out.services,
+        pest: { ...out.services.pest, version: resolvedVersion },
+      };
+    }
+  }
   return out;
 }
 
@@ -15295,10 +15314,19 @@ function frequencyFromTreatmentRow(baseFrequency = {}, key, row = {}, recurringS
     || row.label
     || recurringServiceDisplayName(key)
     || 'Recurring service';
+  // Mirrored non-pest sections track the pest cadence KEY (the bundle has
+  // one selector) but must not wear the pest ladder's visit counts over
+  // their own card — "Bi-monthly (6 visits)" on a 9-application lawn
+  // program misstates the program (audit 2026-07-28). Keep the cadence
+  // word, drop the parenthetical; the card's own sub-label renders this
+  // service's real visit count from its row's visitsPerYear.
+  const selectableLabel = key === 'pest_control'
+    ? (baseFrequency.label || fallbackLabel)
+    : (String(baseFrequency.label || '').replace(/\s*\(\d+\s+visits?\)\s*$/i, '') || fallbackLabel);
   return {
     key: useSelectableCadence ? baseFrequency.key : 'recurring',
     label: useSelectableCadence
-      ? (baseFrequency.label || fallbackLabel)
+      ? selectableLabel
       : fallbackLabel,
     monthlyBase,
     monthly,
@@ -17514,11 +17542,13 @@ async function buildPricingBundleInner(estimate) {
       inputsForFrequency.services.pest = {
         ...(inputsForFrequency.services.pest || {}),
         frequency: ladder.engineFrequency,
-        // STORED-inputs replay: unstamped saved inputs predate the v2 default
-        // and must reprice on the v1 curve they were quoted with — never
+        // STORED-inputs replay: extractEngineInputs resolves unstamped
+        // inputs from the stored pest line's curve (v2-priced agent drafts
+        // replay v2; unstamped stored lines replay v1). An input still
+        // unstamped here has NO stored pest evidence — it predates the v2
+        // default, so reprice on the v1 curve it was quoted with; never
         // silently render/accept a sent bi-monthly/monthly quote at the
-        // higher v2 price (codex #2966 r2 P1). New saves stamp their priced
-        // version into engineInputs at persistence.
+        // higher v2 price (codex #2966 r2 P1).
         version: (inputsForFrequency.services.pest || {}).version || 'v1',
       };
       // The operator's below-floor acknowledgement covered ONE computed
@@ -18673,3 +18703,7 @@ module.exports.matchAcceptCustomerByPhone = matchAcceptCustomerByPhone;
 module.exports.resolveEstimateContactFields = resolveEstimateContactFields;
 module.exports.applySelectedTermiteBondToEstimateData = applySelectedTermiteBondToEstimateData;
 module.exports.attachTermiteBondSelector = attachTermiteBondSelector;
+// Test hooks (audit 2026-07-28): curve resolution for unstamped pest replays
+// and the mirrored-section label rule.
+module.exports.extractEngineInputs = extractEngineInputs;
+module.exports.frequencyFromTreatmentRow = frequencyFromTreatmentRow;
