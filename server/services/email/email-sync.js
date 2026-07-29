@@ -26,28 +26,61 @@ async function syncEmails() {
 async function fullSync(state) {
   logger.info('[email-sync] Starting full sync (first run)');
   let newEmails = 0;
-  let lastHistoryId = null;
 
   try {
+    // Anchor the incremental cursor at the CURRENT mailbox historyId,
+    // captured BEFORE the scan. The message loop below ends on the OLDEST
+    // message (Gmail lists newest-first), and storing that stale position
+    // hands the next incremental run a backlog deep enough to re-trigger
+    // the full-resync fallback — an endless full-download loop. Changes
+    // landing DURING the scan replay through the first incremental run
+    // (upserts are idempotent).
+    const anchorHistoryId = await gmailClient.getProfileHistoryId().catch(() => null);
     const fullSyncLimit = process.env.GMAIL_FULL_SYNC_LIMIT
       ? Number.parseInt(process.env.GMAIL_FULL_SYNC_LIMIT, 10)
       : null;
     const messages = await gmailClient.listMessages('', Number.isFinite(fullSyncLimit) ? fullSyncLimit : null);
     logger.info(`[email-sync] Full sync: fetching ${messages.length} messages`);
 
+    let failedMessages = 0;
     for (const msg of messages) {
       try {
         const parsed = await gmailClient.getMessage(msg.id);
         const inserted = await upsertEmail(parsed);
         if (inserted) newEmails++;
-        if (parsed.historyId) lastHistoryId = parsed.historyId;
       } catch (err) {
+        // 404 = deleted mid-scan (benign). Anything else means this message
+        // is NOT stored, and it predates the pre-scan anchor — no future
+        // incremental run would ever see it again.
+        const gone = err.code === 404 || err.response?.status === 404;
+        if (!gone) failedMessages += 1;
         logger.warn(`[email-sync] Failed to fetch message ${msg.id}: ${err.message}`);
       }
     }
 
+    if (failedMessages > 0 || !anchorHistoryId) {
+      // Withhold the cursor so the next 2-minute run re-runs the full sync
+      // (upserts are idempotent). Anchoring past a missed message would
+      // drop it from the portal permanently — and there is NO safe fallback
+      // anchor when getProfile failed: the last iterated message is the
+      // OLDEST one, and a cursor that old re-triggers the expired-history
+      // full resync in a loop.
+      const why = failedMessages > 0
+        ? `${failedMessages} message(s) failed`
+        : 'no current history anchor (getProfile failed)';
+      await db('email_sync_state').where('id', state.id).update({
+        errors: `full sync incomplete: ${why} — retrying next run`,
+        last_sync_at: new Date(),
+      });
+      if (newEmails > 0) {
+        await db('email_sync_state').where('id', state.id).increment('emails_synced', newEmails);
+      }
+      logger.warn(`[email-sync] Full sync incomplete (${why}) — cursor withheld for retry`);
+      return { newEmails, fullSync: true, retry: true };
+    }
+
     await db('email_sync_state').where('id', state.id).update({
-      last_history_id: lastHistoryId,
+      last_history_id: anchorHistoryId,
       last_sync_at: new Date(),
       errors: null,
     });
@@ -188,6 +221,18 @@ async function upsertEmail(parsed) {
     snippet: parsed.snippet,
     has_attachments: parsed.has_attachments,
     label_ids: JSON.stringify(parsed.label_ids),
+    // parseMessage has always extracted List-Unsubscribe; persisting it is
+    // what lets autoUnsubscribe's RFC 8058 one-click method actually fire.
+    list_unsubscribe: parsed.list_unsubscribe || null,
+    list_unsubscribe_post: parsed.list_unsubscribe_post || null,
+    // Message-ID threads reply drafts into the source conversation.
+    message_id: parsed.message_id || null,
+    // Validated single-mailbox Reply-To — reply drafts prefer it over a
+    // relay's no-reply From address.
+    reply_to: parsed.reply_to || null,
+    // Gmail's SPF/DKIM verdict — gates the spam-path unsubscribe and the
+    // spam-folder rescue (spoof containment).
+    authentication_results: parsed.authentication_results || null,
     received_at: parsed.received_at,
     is_read: parsed.is_read,
     is_starred: parsed.is_starred,
@@ -210,13 +255,39 @@ async function upsertEmail(parsed) {
       is_starred: parsed.is_starred,
       is_archived: !labelIds.includes('INBOX') || labelIds.includes('TRASH'),
       label_ids: JSON.stringify(labelIds),
+      // Backfill the header captures on resync — pre-migration rows would
+      // otherwise fail the authentication gates closed forever and never
+      // regain unsubscribe/threading capability.
+      list_unsubscribe: parsed.list_unsubscribe || existing.list_unsubscribe || null,
+      list_unsubscribe_post: parsed.list_unsubscribe_post || existing.list_unsubscribe_post || null,
+      message_id: parsed.message_id || existing.message_id || null,
+      reply_to: parsed.reply_to || existing.reply_to || null,
+      authentication_results: parsed.authentication_results || existing.authentication_results || null,
       updated_at: new Date(),
     });
     return false; // not new
   }
 
+  // Our own outbound — auto-drafts (GATE_EMAIL_AUTO_DRAFTS) and sent
+  // replies — lands in Gmail history like any other message. Store it
+  // archived so the thread record is complete, but NEVER classify it or
+  // run inbound automation: a generated draft must not appear in the admin
+  // inbox, burn a classifier call, or trigger handlers.
+  {
+    const outboundLabels = parsed.label_ids || [];
+    // SENT+INBOX = self-addressed (e.g. an owner control message sent from
+    // this mailbox to itself) — that IS inbound mail and stays classified.
+    if (outboundLabels.includes('DRAFT')
+      || (outboundLabels.includes('SENT') && !outboundLabels.includes('INBOX'))) {
+      emailData.is_archived = true;
+      emailData.auto_action = 'outbound_skipped';
+      const outboundInsert = await db('emails').insert(emailData).onConflict('gmail_id').ignore().returning('id');
+      return outboundInsert.length > 0;
+    }
+  }
+
   // Check blocklist before inserting — skip blocked senders
-  if (await isBlocked(parsed.from_address)) {
+  if (await isBlocked(parsed.from_address, { gmailId: parsed.gmail_id })) {
     // Auto-trash without wasting a Sonnet call
     try { await gmailClient.trashMessage(parsed.gmail_id); } catch (e) { /* non-critical */ }
     emailData.is_archived = true;

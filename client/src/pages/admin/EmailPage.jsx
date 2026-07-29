@@ -682,13 +682,13 @@ export default function EmailPage() {
               leads created
             </div>
           )}
-          {digest.spam_blocked > 0 && (
+          {(digest.spam_quarantined ?? digest.spam_blocked) > 0 && (
             <div style={{ fontSize: 12, color: D.red }}>
               {" "}
               <span style={{ fontFamily: "'JetBrains Mono', monospace" }}>
-                {digest.spam_blocked}
+                {digest.spam_quarantined ?? digest.spam_blocked}
               </span>
-              spam blocked
+              spam quarantined
             </div>
           )}
           {digest.invoices_processed > 0 && (
