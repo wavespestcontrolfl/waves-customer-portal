@@ -7,6 +7,11 @@ const SCOPES = [
   'https://www.googleapis.com/auth/gmail.modify',
   'https://www.googleapis.com/auth/gmail.send',
   'https://www.googleapis.com/auth/gmail.labels',
+  // Google Contacts sync (customers + leads → starred contacts). Added
+  // 2026-07-28 — the STORED refresh token predates this scope, so People
+  // API calls 403 until the owner re-consents once at the admin Gmail auth
+  // URL; google-contacts-sync detects that and waits without marking rows.
+  'https://www.googleapis.com/auth/contacts',
 ];
 
 function getOAuth2Client() {

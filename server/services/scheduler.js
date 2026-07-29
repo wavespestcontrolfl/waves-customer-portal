@@ -422,6 +422,25 @@ function initScheduledJobs() {
   setTimeout(smsDraftCanaryTick, 60 * 1000);
   cron.schedule('23 */6 * * *', smsDraftCanaryTick, { timezone: 'America/New_York' });
 
+  // EVERY 10 MIN — Google Contacts sync: customers + incoming leads become
+  // starred contacts in the operator's Google account (owner directive
+  // 2026-07-28, hands-off). Row-level staleness predicate = incremental
+  // pass AND reconcile in one; capped per run under the People API write
+  // budget, backlog drains across runs. Until the owner's one-time contacts
+  // re-consent the run reports blocked and touches nothing.
+  cron.schedule('*/10 * * * *', async () => {
+    try {
+      await runExclusive('google-contacts-sync', async () => {
+        const result = await require('./google-contacts-sync').runContactsSync();
+        if (result.blocked === 'contacts_scope_missing') {
+          logger.warn('[contacts-sync] blocked — owner re-consent pending (admin Gmail auth URL)');
+        }
+      });
+    } catch (err) {
+      logger.error(`[contacts-sync] tick failed: ${err.message}`);
+    }
+  });
+
   // BOOT (+90s, then EVERY 6H at :37) — booking-funnel conversion canary:
   // alerts Adam when real /book visitors keep entering the funnel but ZERO
   // bookings confirm across a whole window (the July slot_sig outage ran 8
