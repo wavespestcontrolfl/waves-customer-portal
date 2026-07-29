@@ -13,8 +13,23 @@
 //
 // Dry-run by default. `--apply` (or `--apply=true`) enables the customer writes.
 //   --include-inactive   also align inactive customers
-//   --limit N            cap the number of customers processed
+//   --limit N            cap the number of customers processed (per candidate pass)
 //   --customer-id <uuid> process a single customer
+//   --enroll-no-plan     ALSO enroll "No Plan" customers who have an UPCOMING
+//                        recurring qualifying service (owner directive
+//                        2026-07-28: an upcoming recurring series means the
+//                        customer belongs on a tier — 1 family = Bronze,
+//                        2 = Silver, 3 = Gold, 4+ = Platinum). This pass sets
+//                        waveguard_tier ONLY: never monthly_rate (billing-cron
+//                        monthly-charges any active customer with
+//                        monthly_rate > 0 — per-visit customers must stay
+//                        per-visit), and never member_since / pipeline_stage /
+//                        active. Direct DB writes fire ZERO customer
+//                        communications — the membership.started email lives in
+//                        the admin PATCH route, and the customers table has no
+//                        DB triggers — which is exactly the intent here.
+//                        Commercial-sentinel customers are excluded (commercial
+//                        plans are flat and never carry a WaveGuard tier).
 //
 require('dotenv').config();
 
@@ -23,13 +38,17 @@ const {
   TERMINAL_STATUSES,
   isMembershipCustomerRow,
 } = require('../services/waveguard-existing-services');
+const { isAutoDerivedTierLabelRow } = require('../services/self-booking-plan-sync');
 const {
+  ONE_TIME_BOOKING_SOURCE_VALUES,
   SELF_BOOKING_RECURRING_PLANS,
   resolveLawnCareRecurringPlan,
   resolveMosquitoRecurringPlan,
   resolvePestControlRecurringPlan,
   resolveTermiteBaitRecurringPlan,
   resolveTreeShrubRecurringPlan,
+  isCommercialServiceRow,
+  isRodentLedServiceRow,
   serviceRowCountsTowardWaveGuard,
 } = require('../services/self-booking-plan-sync');
 const { etDateString } = require('../utils/datetime-et');
@@ -80,6 +99,7 @@ const APPLY = parseBooleanFlag(ARGS.apply);
 const LIMIT = ARGS.limit ? Math.max(1, Number.parseInt(ARGS.limit, 10) || 0) : null;
 const CUSTOMER_ID = ARGS['customer-id'] || null;
 const INCLUDE_INACTIVE = parseBooleanFlag(ARGS['include-inactive']);
+const ENROLL_NO_PLAN = parseBooleanFlag(ARGS['enroll-no-plan']);
 
 function moneyNumber(value) {
   const num = Number(value || 0);
@@ -148,6 +168,22 @@ function detectServiceKeys(row = {}) {
   const termitePlan = resolvePlan(resolveTermiteBaitRecurringPlan);
   if (termitePlan) add(termitePlan.planKey || 'termite_bait');
 
+  // Catalog FAMILY authority (Codex #3011 r12, mirrors the runtime
+  // detectWaveGuardPlanKeys): when the catalog identity resolves to at least
+  // one family, stale service_type text must not contribute another.
+  if (catalogText) {
+    const catalogFamilies = uniqueServiceFamilies([
+      resolvePestControlRecurringPlan,
+      resolveLawnCareRecurringPlan,
+      resolveMosquitoRecurringPlan,
+      resolveTreeShrubRecurringPlan,
+      resolveTermiteBaitRecurringPlan,
+    ].map((resolver) => resolver(catalogText)?.planKey).filter(Boolean));
+    if (catalogFamilies.length) {
+      return keys.filter((key) => catalogFamilies.includes(serviceFamilyKey(key)));
+    }
+  }
+
   return keys;
 }
 
@@ -186,6 +222,13 @@ function normalizeTierName(value) {
   return TIER_ORDER.find(tier => tier.toLowerCase() === text) || null;
 }
 
+// Mirrors membershipTierKey in waveguard-existing-services.js (not exported
+// there) — only used to recognize the commercial sentinel, which must never be
+// converted into a WaveGuard tier (commercial plans are flat, outside tiers).
+function tierSentinelKey(value) {
+  return String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
 function columnPresent(columns, column) {
   return !!columns[column];
 }
@@ -196,10 +239,20 @@ function setIfColumn(target, columns, column, value) {
 
 function buildCustomerUpdates(customer, detectedKeys, columns, today) {
   const updates = {};
-  // Owner policy: re-align already-enrolled WaveGuard members only; never enroll a
-  // per-visit recurring customer. Use the shared membership predicate, which rejects
+  // This pass re-aligns already-enrolled WaveGuard members only; enrolling a
+  // "No Plan" customer with upcoming recurring coverage is the separate opt-in
+  // --enroll-no-plan pass (buildNoPlanEnrollmentUpdates — owner directive
+  // 2026-07-28, tier-only). Use the shared membership predicate, which rejects
   // explicit non-member tier sentinels (none/onetime/na/...).
   if (!isMembershipCustomerRow(customer)) return updates;
+  // A STILL-label-only auto-derived row (auto provenance, zero rate,
+  // label-only lane) is TIER-ONLY state owned by the runtime realignment —
+  // this member-repair pass must never stamp member_since, flip
+  // pipeline_stage, or reactivate off a label (Codex #3011 r9). A CONVERTED
+  // label (paid lane or positive rate set later, provenance still 'auto') is
+  // a real member and repairs normally (Codex r10). Also narrowed in
+  // candidateCustomers SQL; this is the fail-closed belt.
+  if (isAutoDerivedTierLabelRow(customer)) return updates;
   const existingRate = moneyNumber(customer.monthly_rate);
   const inferredTier = inferTierFromServiceCount(uniqueServiceFamilies(detectedKeys).length);
   const normalizedExistingTier = normalizeTierName(customer.waveguard_tier);
@@ -229,11 +282,49 @@ function buildCustomerUpdates(customer, detectedKeys, columns, today) {
     updates.member_since = customer.earliest_service_date || dateKey(customer.created_at) || today;
   }
 
-  if (columnPresent(columns, 'monthly_rate') && existingRate <= 0 && detectedKeys.length) {
+  // Backfill a zero/missing monthly_rate for the explicit monthly_membership
+  // lane, and for the legacy NULL lane when the tier is not an auto-derived
+  // label (Codex #3011 r10: the NULL-lane repair predates this PR and must
+  // keep working; an 'auto' label never gets a rate invented — and never
+  // reaches here anyway via the label belt above). Mirrors
+  // buildCustomerWaveGuardAlignmentUpdates.
+  const rateBackfillLane = customer.billing_mode === 'monthly_membership'
+    || (customer.billing_mode == null && customer.waveguard_tier_source !== 'auto');
+  if (
+    columnPresent(columns, 'monthly_rate')
+    && rateBackfillLane
+    && existingRate <= 0
+    && detectedKeys.length
+  ) {
     updates.monthly_rate = representativePlanKeys(detectedKeys)
       .reduce((sum, key) => sum + moneyNumber(SERVICE_PLANS[key]?.monthlyRate), 0);
   }
 
+  return updates;
+}
+
+// --enroll-no-plan updates: waveguard_tier ONLY, and only for a customer who
+// is NOT already a member (fail-closed via the shared membership predicate —
+// members are re-aligned by buildCustomerUpdates, never double-handled here).
+// Deliberately never sets monthly_rate (billing-cron auto-charges active
+// customers with monthly_rate > 0 — enrolling a per-visit customer into
+// autopay billing is the exact failure the old owner policy guarded against),
+// and never touches member_since / pipeline_stage / active. The 2026-07-28
+// directive is narrowly "list them under a tier", nothing more.
+function buildNoPlanEnrollmentUpdates(customer, detectedKeys, columns) {
+  const updates = {};
+  if (isMembershipCustomerRow(customer)) return updates;
+  if (tierSentinelKey(customer?.waveguard_tier) === 'commercial') return updates;
+  if (!columnPresent(columns, 'waveguard_tier')) return updates;
+  const inferredTier = inferTierFromServiceCount(uniqueServiceFamilies(detectedKeys).length);
+  if (!inferredTier) return updates;
+  // Enrollment REQUIRES persistable provenance (Codex #3011 r11 P1,
+  // mirrors the runtime builder): a tier stamped without
+  // waveguard_tier_source would surface as a NULL-provenance "member" once
+  // the migration lands. On a pre-migration schema the pass enrolls nobody.
+  if (!columnPresent(columns, 'waveguard_tier_source')) return updates;
+  updates.waveguard_tier = inferredTier;
+  updates.waveguard_tier_source = 'auto';
   return updates;
 }
 
@@ -243,7 +334,7 @@ function applyCustomerFilters(query, customerColumns) {
   return query;
 }
 
-function customerSelect(query) {
+function customerSelect(query, customerColumns = {}) {
   return query.select(
     'c.id',
     'c.first_name',
@@ -254,6 +345,11 @@ function customerSelect(query) {
     'c.pipeline_stage',
     'c.active',
     'c.created_at',
+    // billing_mode ships in migration 20260709000010 — select it only where
+    // it exists so the script still runs on older environments (its absence
+    // simply keeps the monthly_rate backfill guard closed).
+    ...(columnPresent(customerColumns, 'billing_mode') ? ['c.billing_mode'] : []),
+    ...(columnPresent(customerColumns, 'waveguard_tier_source') ? ['c.waveguard_tier_source'] : []),
   );
 }
 
@@ -271,14 +367,103 @@ async function candidateCustomers(customerColumns) {
       ).orWhere('c.monthly_rate', '>', 0);
     })
     .orderBy('c.created_at', 'asc');
+  // STILL-label-only auto rows are tier-only state owned by the runtime
+  // realignment — never candidates for the member-repair pass (Codex #3011
+  // r9). Narrowed to rows still in label shape (Codex r10): a converted
+  // label (positive rate or paid lane, provenance still 'auto') is a real
+  // member and must remain repairable. Expressed POSITIVELY, never as
+  // NOT(...) over nullable columns (Codex r11 P2): SQL three-valued logic
+  // makes NOT(source = 'auto' AND ...) evaluate to NULL — filtering out —
+  // for the NULL-provenance zero-rate legacy members this repair pass
+  // exists to fix. A row stays a candidate when ANY of these holds: no /
+  // non-auto provenance, a positive rate, or an explicit non-label lane.
+  // The builder re-checks via isAutoDerivedTierLabelRow as the belt.
+  if (columnPresent(customerColumns, 'waveguard_tier_source')) {
+    query = query.where(function notStillLabelOnly() {
+      this.whereNull('c.waveguard_tier_source')
+        .orWhere('c.waveguard_tier_source', '!=', 'auto')
+        .orWhere('c.monthly_rate', '>', 0);
+      if (columnPresent(customerColumns, 'billing_mode')) {
+        this.orWhere(function paidLane() {
+          this.whereNotNull('c.billing_mode').whereNotIn('c.billing_mode', ['per_visit', 'one_time']);
+        });
+      }
+    });
+  }
 
   if (CUSTOMER_ID) query = query.where('c.id', CUSTOMER_ID);
-  query = customerSelect(applyCustomerFilters(query, customerColumns));
+  query = customerSelect(applyCustomerFilters(query, customerColumns), customerColumns);
   if (LIMIT) query = query.limit(LIMIT);
 
   return (await query).map((customer) => ({
     ...customer,
     candidate_reason: normalizeTierName(customer.waveguard_tier) ? 'enrolled_tier' : 'enrolled_legacy_rate',
+  }));
+}
+
+// Candidate set for --enroll-no-plan: customers who are NOT enrolled (no
+// recognized tier AND no positive monthly_rate — the complement of
+// candidateCustomers, so the two passes can never overlap) but have at least
+// one UPCOMING non-terminal scheduled service. The is_recurring EXISTS filter
+// is a cheap pre-screen; the authoritative per-row gate stays
+// serviceRowCountsTowardWaveGuard + the upcoming-date check in
+// analyzeCustomer, mirroring how the alignment pass treats its rows.
+async function noPlanCandidateCustomers(customerColumns, today) {
+  let scheduledColumns = {};
+  try {
+    scheduledColumns = await db('scheduled_services').columnInfo();
+  } catch (_err) {
+    scheduledColumns = {};
+  }
+  const hasIsRecurring = columnPresent(scheduledColumns, 'is_recurring');
+
+  let query = db('customers as c')
+    .where(function notEnrolled() {
+      this.where(function noRecognizedTier() {
+        this.whereNull('c.waveguard_tier').orWhereRaw(
+          `LOWER(c.waveguard_tier) NOT IN (${TIER_ORDER_LOWER.map(() => '?').join(', ')})`,
+          TIER_ORDER_LOWER,
+        );
+      }).andWhere(function noLegacyRate() {
+        this.whereNull('c.monthly_rate').orWhere('c.monthly_rate', '<=', 0);
+      });
+    })
+    .whereExists(function upcomingService() {
+      this.select(db.raw('1'))
+        .from('scheduled_services as s')
+        .whereRaw('s.customer_id = c.id')
+        .whereNotIn('s.status', TERMINAL_STATUSES)
+        .where('s.scheduled_date', '>=', today);
+      if (hasIsRecurring) this.where('s.is_recurring', true);
+      // Mirror the runtime reconcile's pre-screen (Codex #3011 r3): rows the
+      // authoritative predicate rejects anyway (callbacks, one-time booking
+      // sources) must not admit a candidate — with --limit N and created_at
+      // ordering, such false positives would occupy every batch forever and
+      // starve valid later customers.
+      if (columnPresent(scheduledColumns, 'is_callback')) {
+        this.where(function notCallback() {
+          this.whereNull('s.is_callback').orWhere('s.is_callback', false);
+        });
+      }
+      if (columnPresent(scheduledColumns, 'source')) {
+        this.where(function notOneTimeSource() {
+          this.whereNull('s.source').orWhereNotIn('s.source', ONE_TIME_BOOKING_SOURCE_VALUES);
+        });
+      }
+    })
+    // Random sampling, like the runtime reconcile (Codex #3011 r4): rows the
+    // SQL pre-screen cannot reject (recurring palm/rodent work that maps to
+    // no WaveGuard family) would otherwise pin a created_at-ordered --limit
+    // batch forever and starve valid later customers.
+    .orderByRaw('random()');
+
+  if (CUSTOMER_ID) query = query.where('c.id', CUSTOMER_ID);
+  query = customerSelect(applyCustomerFilters(query, customerColumns), customerColumns);
+  if (LIMIT) query = query.limit(LIMIT);
+
+  return (await query).map((customer) => ({
+    ...customer,
+    candidate_reason: 'no_plan_upcoming_recurring',
   }));
 }
 
@@ -305,7 +490,23 @@ async function scheduledRowsForCustomer(customerId) {
 
 async function analyzeCustomer(customer, customerColumns, today) {
   const rows = await scheduledRowsForCustomer(customer.id);
-  const recurringRows = rows.filter(serviceRowCountsTowardWaveGuard);
+  const enrollNoPlan = customer.candidate_reason === 'no_plan_upcoming_recurring';
+  let recurringRows = rows.filter(serviceRowCountsTowardWaveGuard);
+  if (enrollNoPlan) {
+    // The enrollment directive is keyed on UPCOMING coverage: only rows dated
+    // today or later count toward the tier, so a lapsed series (all visits in
+    // the past) never enrolls anyone.
+    recurringRows = recurringRows.filter((row) => {
+      // Commercial and rodent-led rows are never enrollment evidence,
+      // independent of the customer's sentinel — an un-sentineled commercial
+      // customer must not be stamped a residential tier, and a "Rodent Pest
+      // Control" row is a rodent service, not pest coverage (Codex #3011
+      // r4/r6 P1, mirrors the runtime detectUpcomingRecurringPlanKeys).
+      if (isCommercialServiceRow(row) || isRodentLedServiceRow(row)) return false;
+      const rowDate = dateKey(row.scheduled_date);
+      return rowDate && rowDate >= today;
+    });
+  }
   const detectedKeys = [];
   for (const row of recurringRows) {
     for (const key of detectServiceKeys(row)) {
@@ -315,7 +516,9 @@ async function analyzeCustomer(customer, customerColumns, today) {
 
   const earliestServiceDate = recurringRows.map((row) => dateKey(row.scheduled_date)).filter(Boolean).sort()[0] || null;
   const customerWithDates = { ...customer, earliest_service_date: earliestServiceDate };
-  const customerUpdates = buildCustomerUpdates(customerWithDates, detectedKeys, customerColumns, today);
+  const customerUpdates = enrollNoPlan
+    ? buildNoPlanEnrollmentUpdates(customerWithDates, detectedKeys, customerColumns)
+    : buildCustomerUpdates(customerWithDates, detectedKeys, customerColumns, today);
   const detectedFamilyKeys = uniqueServiceFamilies(detectedKeys);
   const inferredTier = inferTierFromServiceCount(detectedFamilyKeys.length);
   const currentTier = normalizeTierName(customer.waveguard_tier);
@@ -333,8 +536,58 @@ async function analyzeCustomer(customer, customerColumns, today) {
 }
 
 async function applyCustomerRepair(repair) {
-  if (Object.keys(repair.customerUpdates).length) {
-    await db('customers').where({ id: repair.customer.id }).update(repair.customerUpdates);
+  if (!Object.keys(repair.customerUpdates).length) return;
+
+  const isEnrollment = repair.customer.candidate_reason === 'no_plan_upcoming_recurring';
+  let updateQuery = db('customers').where({ id: repair.customer.id });
+  if (isEnrollment) {
+    // Compare-and-swap on the read snapshot, mirroring the runtime enrollment
+    // path (Codex #3011 r2 P1): candidates were read earlier in main(), so a
+    // customer converted to a paid membership mid-run must match zero rows
+    // here — never have the conversion's tier overwritten by a stale label.
+    if (repair.customer.waveguard_tier == null) {
+      updateQuery = updateQuery.whereNull('waveguard_tier');
+    } else {
+      updateQuery = updateQuery.where('waveguard_tier', repair.customer.waveguard_tier);
+    }
+    updateQuery = updateQuery.where(function notPayingRate() {
+      this.whereNull('monthly_rate').orWhere('monthly_rate', '<=', 0);
+    });
+    if ('billing_mode' in repair.customer) {
+      if (repair.customer.billing_mode == null) {
+        updateQuery = updateQuery.whereNull('billing_mode');
+      } else {
+        updateQuery = updateQuery.where('billing_mode', repair.customer.billing_mode);
+      }
+    }
+  }
+  const updatedCount = await updateQuery.update(repair.customerUpdates);
+  if (isEnrollment && !updatedCount) {
+    console.error(`enrollment skipped for customer ${repair.customer.id} — customer changed since candidate read`);
+    return;
+  }
+
+  // Mirror the runtime enrollment path's audit trail (Codex #3011 P2): a bulk
+  // --enroll-no-plan --apply can change hundreds of membership labels, and
+  // each one must leave the same waveguard_tier_auto_enrolled activity row
+  // the booking-time sync writes. Best-effort — a missing table or failed
+  // insert never aborts the backfill.
+  if (!isEnrollment) return;
+  try {
+    if (!(await db.schema.hasTable('activity_log'))) return;
+    await db('activity_log').insert({
+      customer_id: repair.customer.id,
+      action: 'waveguard_tier_auto_enrolled',
+      description: `Auto-enrolled WaveGuard ${repair.customerUpdates.waveguard_tier} from upcoming recurring services (align-waveguard-portal-records --enroll-no-plan)`,
+      metadata: {
+        detected_plan_keys: repair.detectedKeys,
+        detected_family_keys: repair.detectedFamilyKeys,
+        updates: repair.customerUpdates,
+        source: 'align-waveguard-portal-records',
+      },
+    });
+  } catch (err) {
+    console.error(`activity_log insert failed for customer ${repair.customer.id}: ${err.message}`);
   }
 }
 
@@ -354,6 +607,7 @@ async function main() {
   const today = etDateString();
   const customerColumns = await db('customers').columnInfo();
   const customers = await candidateCustomers(customerColumns);
+  if (ENROLL_NO_PLAN) customers.push(...await noPlanCandidateCustomers(customerColumns, today));
   const repairs = [];
   const noServiceEvidence = [];
   const tierMismatches = [];
@@ -374,11 +628,13 @@ async function main() {
     checkedCustomers: customers.length,
     customersNeedingRepair: repairs.length,
     customerFieldUpdates: repairs.length,
+    noPlanEnrollments: repairs.filter((repair) => repair.customer.candidate_reason === 'no_plan_upcoming_recurring').length,
     noServiceEvidenceCount: noServiceEvidence.length,
     tierMismatchCount: tierMismatches.length,
     limit: LIMIT,
     customerId: CUSTOMER_ID,
     includeInactive: INCLUDE_INACTIVE,
+    enrollNoPlan: ENROLL_NO_PLAN,
     sample: repairs.slice(0, 20).map(summarizeRepair),
   };
 
@@ -396,6 +652,7 @@ if (require.main === module) {
 
 module.exports = {
   buildCustomerUpdates,
+  buildNoPlanEnrollmentUpdates,
   dateKey,
   detectServiceKeys,
   inferTierFromServiceCount,

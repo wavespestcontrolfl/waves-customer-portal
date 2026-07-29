@@ -34,6 +34,12 @@ const mockQualifyingRows = jest.fn(async () => []);
 jest.mock('../services/waveguard-existing-services', () => ({
   loadExistingRecurringQualifyingRows: (...a) => mockQualifyingRows(...a),
 }));
+// Label provenance defaults to a verified non-label (legacy scenarios);
+// override to 'label' / 'unknown' to assert the card gate stays required.
+const mockTierLabelStatus = jest.fn(async () => 'not_label');
+jest.mock('../services/self-booking-plan-sync', () => ({
+  tierLabelStatus: (...args) => mockTierLabelStatus(...args),
+}));
 const mockResolveForInvoice = jest.fn(async () => null);
 jest.mock('../services/payer', () => ({
   resolveForInvoice: (...a) => mockResolveForInvoice(...a),

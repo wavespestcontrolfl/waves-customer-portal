@@ -156,12 +156,29 @@ async function linkedScheduledServiceId(estimate, explicitId = null, { strict = 
 // while a wrongly granted exemption silently loses the commitment gate.
 async function resolveDepositPolicyForEstimate({ estimate, committedPrepayTerm = false, membership = null, oneTime = false, oneTimeUninvoiced = false, noVisit = false, scheduledServiceId = null, useLinkedFallback = true }) {
   let member = membership;
-  if (!member?.isExistingCustomer && estimate?.customer_id && isDepositEnforced()) {
+  if (estimate?.customer_id && isDepositEnforced()) {
     try {
-      const { loadExistingRecurringQualifyingRows } = require('./waveguard-existing-services');
-      const rows = await loadExistingRecurringQualifyingRows(db, estimate.customer_id);
-      if (Array.isArray(rows) && rows.length > 0) {
-        member = { ...(member || {}), isExistingCustomer: true };
+      // An auto-derived tier LABEL (waveguard_tier_source = 'auto': per-visit
+      // customer stamped from upcoming recurring coverage) is not an
+      // established membership billing relationship — it must not waive the
+      // acceptance-deposit commitment gate (Codex #3011 r8 P1). Checked on
+      // LIVE provenance BEFORE honoring the frozen membershipSnapshot too
+      // (Codex r9): an estimate saved after the auto-stamp freezes
+      // isExistingCustomer: true, and that snapshot must not bypass the gate.
+      // Fail-CLOSED (Codex r10 P1): anything except a verified 'not_label' —
+      // including 'unknown' from a lookup error or a pre-migration schema —
+      // keeps the deposit required.
+      const { tierLabelStatus } = require('./self-booking-plan-sync');
+      const labelOnly = (await tierLabelStatus(estimate.customer_id)) !== 'not_label';
+      if (labelOnly && member?.isExistingCustomer) {
+        member = { ...member, isExistingCustomer: false };
+      }
+      if (!member?.isExistingCustomer && !labelOnly) {
+        const { loadExistingRecurringQualifyingRows } = require('./waveguard-existing-services');
+        const rows = await loadExistingRecurringQualifyingRows(db, estimate.customer_id);
+        if (Array.isArray(rows) && rows.length > 0) {
+          member = { ...(member || {}), isExistingCustomer: true };
+        }
       }
     } catch (err) {
       logger.warn('[estimate-deposits] live plan-customer check failed — deposit stays required', { error: err.message });
@@ -993,13 +1010,29 @@ async function assessDepositFollowUpEligibility(estimateId, now = new Date()) {
 
     const { buildEstimateMembershipContext } = require('./estimate-membership-context');
     let membership = await buildEstimateMembershipContext(estimate);
-    if (!membership?.isExistingCustomer && estimate.customer_id) {
-      // Fail-closed live plan-customer check (see header comment): no catch —
-      // a lookup failure must skip the SMS, not default to "required".
-      const { loadExistingRecurringQualifyingRows } = require('./waveguard-existing-services');
-      const rows = await loadExistingRecurringQualifyingRows(db, estimate.customer_id);
-      if (Array.isArray(rows) && rows.length > 0) {
-        membership = { ...(membership || {}), isExistingCustomer: true };
+    if (estimate.customer_id) {
+      // Label provenance override, mirroring resolveDepositPolicyForEstimate
+      // (Codex #3011 r12): a label-only customer still owes the acceptance
+      // deposit, so this nudge must not be suppressed as
+      // existing_plan_customer off a frozen snapshot or the live rows.
+      // 'unknown' keeps this path's fail-closed philosophy: no text on
+      // uncertainty.
+      const { tierLabelStatus } = require('./self-booking-plan-sync');
+      const labelStatus = await tierLabelStatus(estimate.customer_id);
+      if (labelStatus === 'unknown') {
+        return { eligible: false, reason: 'label_status_unverified' };
+      }
+      if (labelStatus === 'label' && membership?.isExistingCustomer) {
+        membership = { ...membership, isExistingCustomer: false };
+      }
+      if (!membership?.isExistingCustomer && labelStatus === 'not_label') {
+        // Fail-closed live plan-customer check (see header comment): no catch —
+        // a lookup failure must skip the SMS, not default to "required".
+        const { loadExistingRecurringQualifyingRows } = require('./waveguard-existing-services');
+        const rows = await loadExistingRecurringQualifyingRows(db, estimate.customer_id);
+        if (Array.isArray(rows) && rows.length > 0) {
+          membership = { ...(membership || {}), isExistingCustomer: true };
+        }
       }
     }
     const structuralOneTime = typeof gates.isStructuralOneTimeOnlyEstimate === 'function'

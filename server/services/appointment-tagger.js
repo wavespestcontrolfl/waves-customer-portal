@@ -104,7 +104,15 @@ class AppointmentTagger {
     // in scheduled_services (2026-07-16 misfire). Idempotent via
     // sendNewRecurringWelcome.
     if (!suppressWelcome && service.waveguard_tier && service.is_recurring) {
-      const isNewSignup = await isNewRecurringSignupCandidate(service.customer_id, {
+      // An auto-derived LABEL-ONLY tier (GATE_AUTO_WAVEGUARD_TIER stamp on a
+      // per-visit customer) must not satisfy this member gate — the tier
+      // stamp is contractually comms-silent, and pre-gate these customers
+      // (tierless) never received the welcome. Fail-silent (Codex #3011 r9):
+      // unverifiable provenance ('unknown') suppresses rather than sends.
+      // Lazy require avoids a cycle.
+      const { tierLabelStatus } = require('./self-booking-plan-sync');
+      const labelOnly = (await tierLabelStatus(service.customer_id)) !== 'not_label';
+      const isNewSignup = !labelOnly && await isNewRecurringSignupCandidate(service.customer_id, {
         excludeServiceId: service.id,
       });
       if (isNewSignup) {

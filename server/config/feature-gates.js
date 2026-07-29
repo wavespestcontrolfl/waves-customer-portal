@@ -32,6 +32,7 @@
  *   GATE_CALL_REPLAY_EVAL=true  (weekly reviewed-call extraction replay eval)
  *   GATE_ADS_BUDGET_LIVE_PUSH=true (capacity cron pushes budget changes to Google Ads)
  *   GATE_BOOKING_FUNNEL_CANARY=true (alert when /book funnel entries see zero conversions)
+ *   GATE_AUTO_WAVEGUARD_TIER=true (auto-stamp/lapse WaveGuard tier from upcoming recurring coverage)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -908,6 +909,23 @@ const gates = {
   // switch: unset (or any non-'true' value) — the field is omitted from
   // every payload and the chips disappear.
   bookingRainChips: process.env.GATE_BOOKING_RAIN_CHIPS === 'true',
+
+  // WaveGuard auto-tier from recurring coverage (owner directive 2026-07-28),
+  // BOTH directions: a customer with upcoming recurring qualifying services
+  // on the schedule is stamped a tier automatically (1 family = Bronze,
+  // 2 = Silver, 3 = Gold, 4+ = Platinum) at series-seeding time and via a
+  // nightly reconcile — and a label-only tiered customer is realigned to
+  // their upcoming recurring coverage by the same nightly job: raised,
+  // lowered, or cleared back to No Plan when it lapses (paying members and
+  // paid billing lanes are never auto-realigned; the cancellation/
+  // offboarding flow owns their tier). An auto-WRITER on
+  // customer records that also changes future membership pricing
+  // eligibility, so opt-in in EVERY environment. It writes waveguard_tier
+  // ONLY (never monthly_rate / member_since / billing fields) and sends no
+  // customer communications. Kill switch: unset or any non-'true' value —
+  // booking flows and the nightly job revert to the old members-only
+  // re-alignment.
+  autoWaveguardTierEnroll: process.env.GATE_AUTO_WAVEGUARD_TIER === 'true',
 };
 
 function isEnabled(gate) {

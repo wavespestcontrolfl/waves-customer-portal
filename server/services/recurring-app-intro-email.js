@@ -54,6 +54,15 @@ async function maybeSendOnEnRoute(svc) {
     if (!['Bronze', 'Silver', 'Gold', 'Platinum'].includes(customer?.waveguard_tier)) {
       return { sent: false, skipped: true, reason: 'not_member' };
     }
+    // An auto-derived LABEL-ONLY tier (GATE_AUTO_WAVEGUARD_TIER stamp on a
+    // per-visit customer) is not membership for messaging purposes — the tier
+    // stamp is contractually comms-silent, and unverifiable provenance
+    // ('unknown') suppresses rather than sends (Codex #3011 r9/r10). Lazy
+    // require avoids a cycle.
+    const { tierLabelStatus } = require('./self-booking-plan-sync');
+    if ((await tierLabelStatus(svc.customer_id)) !== 'not_label') {
+      return { sent: false, skipped: true, reason: 'label_only_tier' };
+    }
     if (!(await isFirstVisit(svc.customer_id))) {
       return { sent: false, skipped: true, reason: 'not_first_visit' };
     }

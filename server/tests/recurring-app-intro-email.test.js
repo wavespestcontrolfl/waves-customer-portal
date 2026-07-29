@@ -17,6 +17,12 @@ jest.mock('../services/account-membership-email', () => ({
   sendAppIntro: jest.fn(async () => ({ ok: true, messageId: 'm1' })),
 }));
 jest.mock('../services/logger', () => ({ error: jest.fn(), info: jest.fn(), warn: jest.fn() }));
+// Label provenance defaults to a verified non-label (legacy scenarios);
+// override to 'label' / 'unknown' to assert the intro email is suppressed.
+const mockTierLabelStatus = jest.fn(async () => 'not_label');
+jest.mock('../services/self-booking-plan-sync', () => ({
+  tierLabelStatus: (...args) => mockTierLabelStatus(...args),
+}));
 
 const AccountMembershipEmail = require('../services/account-membership-email');
 const RecurringAppIntro = require('../services/recurring-app-intro-email');

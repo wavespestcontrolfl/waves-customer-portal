@@ -1112,6 +1112,26 @@ httpServer.listen(PORT, () => {
             logger.error(`[cron] Lifecycle email sweeps failed: ${err.message}`);
           }
         }, { timezone: 'America/New_York' });
+
+        // Nightly WaveGuard auto-tier reconciliation (owner directive
+        // 2026-07-28), both directions: No-Plan customers holding upcoming
+        // recurring services get their tier stamped, and label-only tiered
+        // customers get realigned to their coverage — raised, lowered, or
+        // cleared back to No Plan (paying members excluded — offboarding
+        // owns them).
+        // Tier only — no billing fields, no customer comms. No-op while
+        // GATE_AUTO_WAVEGUARD_TIER is off (checked in-service).
+        cron.schedule('30 2 * * *', async () => {
+          try {
+            await runExclusive('waveguard-tier-reconcile-nightly', async () => {
+              const { reconcileRecurringTiers } = require('./services/self-booking-plan-sync');
+              const result = await reconcileRecurringTiers();
+              logger.info(`[cron] WaveGuard tier reconcile: ${JSON.stringify(result)}`);
+            });
+          } catch (err) {
+            logger.error(`[cron] WaveGuard tier reconcile failed: ${err.message}`);
+          }
+        }, { timezone: 'America/New_York' });
       }
     }
   })();
