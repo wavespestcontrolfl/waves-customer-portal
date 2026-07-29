@@ -1027,11 +1027,14 @@ async function resolveLineDiscount(input, baseAmount, customer, serviceContext =
 // 15% one-time perk, same as the estimate path — membership derived via the
 // file's one predicate (hasMembership) so tier sentinels stay in one place.
 function mosquitoOneTimeLadderPrice(customer) {
-  const lotSqFt = Number(customer?.lot_sqft);
-  if (!Number.isFinite(lotSqFt) || lotSqFt <= 0) return null;
   try {
     const { priceOneTimeMosquito } = require('../services/pricing-engine');
-    const quote = priceOneTimeMosquito({ lotSqFt }, {
+    const lotSqFt = Number(customer?.lot_sqft);
+    // No usable lot size still goes through the engine (it falls back to the
+    // SMALL bucket itself) so a recurring-plan member keeps the canonical 15%
+    // one-time perk instead of being bounced to the undiscounted catalog base.
+    const property = Number.isFinite(lotSqFt) && lotSqFt > 0 ? { lotSqFt } : {};
+    const quote = priceOneTimeMosquito(property, {
       isRecurringCustomer: hasMembership(customer || {}),
     });
     const price = Number(quote?.price);

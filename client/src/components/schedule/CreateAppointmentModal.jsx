@@ -622,7 +622,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     // One-time mosquito is priced by the lot-based ladder on the server when
     // no price is typed (owner decision 2026-07-28) — leave the field empty so
     // the server computes it from the customer's lot size; typing still wins.
-    const defaultPrice = svc.service_key === 'mosquito_one_time'
+    const defaultPrice = isOneTimeMosquitoLine(svc)
       ? ''
       : (svc.priceMin || svc.base_price || '');
     const inferred = inferServiceCadence(svc);
@@ -776,6 +776,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // same dollars the server will apply against the ladder price.
   const lineDiscountAmount = (svc) => previewLineDiscount(svc?.lineDiscount, lineEffectiveBaseAmount(svc));
   const lineNetAmount = (svc) => Math.max(0, Math.round((lineBaseAmount(svc) - lineDiscountAmount(svc)) * 100) / 100);
+  // Catalog-searched lines carry `service_key`; estimate-loaded lines
+  // (applyScheduleEstimate) carry `serviceKey`. Normalize so BOTH hit the
+  // auto-pricing path — otherwise an estimate-loaded mosquito line with a
+  // cleared price would show $0 while the server stamps the ladder charge.
+  const isOneTimeMosquitoLine = (svc) => (svc?.service_key ?? svc?.serviceKey) === 'mosquito_one_time';
   // A price counts as "entered" when the field holds any finite number —
   // including an explicit 0 (a deliberate waiver). Only a genuinely blank
   // field activates the automatic lot-based mosquito price.
@@ -790,7 +795,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // order mirrors booking exactly: server lot-ladder quote, then the
   // catalog base price when the customer has no usable lot size.
   const mosquitoAutoAmount = (svc) => {
-    if (svc?.service_key !== 'mosquito_one_time' || lineHasEnteredPrice(svc)) return null;
+    if (!isOneTimeMosquitoLine(svc) || lineHasEnteredPrice(svc)) return null;
     if (mosquitoQuote?.customerId !== selectedCustomer?.id || mosquitoQuote?.status !== 'ready') {
       // Pending or failed quote: never substitute a possibly-wrong amount —
       // the hint shows the state and handleSubmit blocks until resolved.
@@ -802,7 +807,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     return Number.isFinite(catalogBase) && catalogBase > 0 ? catalogBase : null;
   };
   const mosquitoQuotePending = (svc) => (
-    svc?.service_key === 'mosquito_one_time'
+    isOneTimeMosquitoLine(svc)
     && !lineHasEnteredPrice(svc)
     && (mosquitoQuote?.customerId !== selectedCustomer?.id || mosquitoQuote?.status !== 'ready')
   );
@@ -921,22 +926,34 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // whenever a blank-priced mosquito line exists for the selected customer.
   // Works for search-selected and preselected customers alike (the server
   // loads lot size itself).
-  const hasAutoMosquitoLine = services.some((s) => s.service_key === 'mosquito_one_time' && !lineHasEnteredPrice(s));
+  const hasAutoMosquitoLine = services.some((s) => isOneTimeMosquitoLine(s) && !lineHasEnteredPrice(s));
+  // Dedupe by ref, not by the state this effect sets: setting the loading
+  // state re-runs the effect, and a cleanup-based `cancelled` flag would
+  // cancel our own in-flight request and strand the quote on 'loading'
+  // forever. Stale responses after a customer switch are ignored by the
+  // functional set matching customerId instead.
+  const mosquitoQuoteReqRef = useRef(null);
   useEffect(() => {
     const id = selectedCustomer?.id;
-    if (!id || !hasAutoMosquitoLine || mosquitoQuote?.customerId === id) return;
-    let cancelled = false;
+    if (!id || !hasAutoMosquitoLine) return;
+    if (mosquitoQuoteReqRef.current === id && mosquitoQuote?.customerId === id) return;
+    mosquitoQuoteReqRef.current = id;
     setMosquitoQuote({ customerId: id, status: 'loading', price: null });
     (async () => {
       try {
         const r = await adminFetch(`/admin/schedule/mosquito-onetime-quote?customerId=${encodeURIComponent(id)}`);
-        if (!cancelled) setMosquitoQuote({ customerId: id, status: 'ready', price: r?.price != null ? Number(r.price) : null });
+        setMosquitoQuote((prev) => (prev?.customerId === id
+          ? { customerId: id, status: 'ready', price: r?.price != null ? Number(r.price) : null }
+          : prev));
       } catch {
-        if (!cancelled) setMosquitoQuote({ customerId: id, status: 'error', price: null });
+        // Leave the ref set so a failure doesn't auto-retry in a loop; the
+        // submit handler clears both ref and state for a manual retry.
+        setMosquitoQuote((prev) => (prev?.customerId === id
+          ? { customerId: id, status: 'error', price: null }
+          : prev));
       }
     })();
-    return () => { cancelled = true; };
-  }, [selectedCustomer?.id, hasAutoMosquitoLine, mosquitoQuote?.customerId]);
+  }, [selectedCustomer?.id, hasAutoMosquitoLine, mosquitoQuote]);
 
   const doSearch = async (val) => {
     setCustomerSearch(val);
@@ -1228,6 +1245,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     // state so the fetch effect retries.
     if (services.some((s) => mosquitoQuotePending(s))) {
       if (mosquitoQuote?.status === 'error') {
+        mosquitoQuoteReqRef.current = null;
         setMosquitoQuote(null);
         setToast('Mosquito price quote failed — retrying; submit again in a moment or enter a price');
       } else {
@@ -1270,7 +1288,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           // must reach the server as 0 — the `> 0 ? : null` coercion below
           // would otherwise turn it into null and the server would stamp the
           // lot-ladder charge instead. Blank stays null so the ladder applies.
-          const preserveZero = s.service_key === 'mosquito_one_time' && lineHasEnteredPrice(s);
+          const preserveZero = isOneTimeMosquitoLine(s) && lineHasEnteredPrice(s);
           return {
             serviceId: s.id || null,
             serviceName: s.name,
@@ -1310,7 +1328,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           // the lot-ladder default applies — groupHasPrice would otherwise
           // coerce it to 0 when another line in the group carries a price. An
           // ENTERED 0 (deliberate waiver) still goes through as 0.
-          primaryLinePrice: (primary.service_key === 'mosquito_one_time' && !lineHasEnteredPrice(primary))
+          primaryLinePrice: (isOneTimeMosquitoLine(primary) && !lineHasEnteredPrice(primary))
             ? null
             : (groupHasPrice ? lineBaseAmount(primary) : null),
           primaryLineDiscount: primary.lineDiscount ? {
@@ -2011,7 +2029,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                     type="number"
                     value={svc.price ?? ''}
                     onChange={(e) => updateServicePrice(idx, e.target.value)}
-                    placeholder={svc.service_key === 'mosquito_one_time' ? 'Auto (lot-based)' : '0.00'}
+                    placeholder={isOneTimeMosquitoLine(svc) ? 'Auto (lot-based)' : '0.00'}
                     step="0.01"
                     style={{ ...inputStyle, paddingLeft: 24 }}
                   />
