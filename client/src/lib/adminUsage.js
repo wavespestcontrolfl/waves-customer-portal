@@ -108,6 +108,12 @@ export function normalizeAdminPath(pathname) {
  *  look like a short slug is dropped — a uuid or search text never
  *  qualifies. */
 const TAB_QUERY_KEYS = ['tab', 'area', 'view', 'section'];
+// Nested tab keys follow the camelCase *Tab convention (protocolTab /
+// kbTab / wikiTab) and name the DEEPEST rendered leaf — they outrank the
+// constant parent ?tab=, or switching protocolTab would dedupe into the
+// unchanging 'protocols' and vanish (Codex #2961 r11). Pattern-matched,
+// not enumerated, so future nested tabs are picked up without a registry.
+const NESTED_TAB_KEY_RE = /^[a-z][a-zA-Z]*Tab$/;
 
 export function safeTab(search) {
   let params;
@@ -115,6 +121,11 @@ export function safeTab(search) {
     params = new URLSearchParams(search || '');
   } catch {
     return null;
+  }
+  for (const [key, raw] of params) {
+    if (!NESTED_TAB_KEY_RE.test(key) || !raw) continue;
+    const tab = raw.toLowerCase();
+    return TAB_RE.test(tab) ? tab : null;
   }
   for (const key of TAB_QUERY_KEYS) {
     const raw = params.get(key);

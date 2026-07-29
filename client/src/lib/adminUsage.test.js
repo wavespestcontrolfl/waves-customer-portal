@@ -87,6 +87,14 @@ describe('safeTab', () => {
     expect(safeTab('?section=reality')).toBe('reality');
     // Precedence: the highest-priority present key decides.
     expect(safeTab('?view=health&tab=directory')).toBe('directory');
+    // Nested *Tab keys name the deepest leaf and outrank the constant
+    // parent — switching protocolTab is a real subview change even though
+    // ?tab=protocols never moves (Codex r11).
+    expect(safeTab('?tab=protocols&protocolTab=readiness')).toBe('readiness');
+    expect(safeTab('?area=base&kbTab=browse')).toBe('browse');
+    expect(safeTab('?wikiTab=field')).toBe('field');
+    // The shape gate still applies to nested values.
+    expect(safeTab('?tab=protocols&protocolTab=8f14e45f-ceea-4671-9aa5-1c6ff2f3e9b1')).toBeNull();
     // Hyphenated Settings leaf keys are valid tab slugs (Codex r3 claimed
     // otherwise — encode the counterexamples).
     expect(safeTab('?tab=service-reports')).toBe('service-reports');
