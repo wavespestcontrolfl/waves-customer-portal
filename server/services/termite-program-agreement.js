@@ -154,7 +154,16 @@ function collectTermiteFacts(estData) {
     // persisted figures for normal saved estimates.
     if ((node.monMonthly != null || node.bmo != null) && ('ai' in node || 'ti' in node)) {
       facts.hasProgram = true;
-      takeInstall(node.ti ?? node.ai);
+      // The client fallback engine stores BOTH systems' install prices on
+      // tmBait — the accepted system picks which one is the sold charge
+      // (v1 server saves null the unselected side, so this stays right
+      // there too). Never default a legacy Advance accept to the Trelona
+      // price.
+      const nodeSystem = String(node.selectedSystem || node.system || '').toLowerCase();
+      const soldInstall = nodeSystem === 'advance' ? node.ai
+        : nodeSystem === 'trelona' ? node.ti
+          : (node.ti ?? node.ai);
+      takeInstall(soldInstall);
       takeSystem(node.selectedSystem || node.system);
       const monthly = Number(node.monMonthly ?? node.bmo);
       if (facts.perApp == null && Number.isFinite(monthly) && monthly > 0) {
@@ -272,12 +281,13 @@ function classifyExistingAgreement(row, estimate, now = new Date()) {
   return snapAddress === acceptedAddress ? 'supersede' : 'ignore';
 }
 
-async function openProgramAgreements(customerId, conn = db) {
-  return conn('customer_contracts')
+async function openProgramAgreements(customerId, conn = db, { forUpdate = false } = {}) {
+  const query = conn('customer_contracts')
     .where({ customer_id: customerId, contract_type: 'document_template' })
     .whereIn('document_template_key', PROGRAM_TEMPLATE_KEYS)
     .whereIn('status', OPEN_STATUSES)
     .select('id', 'customer_id', 'status', 'share_token_expires_at', 'document_variables_snapshot');
+  return forUpdate ? query.forUpdate() : query;
 }
 
 async function existingBlockingProgramAgreement(customerId, estimate, conn = db) {
@@ -313,14 +323,19 @@ async function scheduledStartDateLabel(estimateId, conn = db) {
 // contradict the invoice the customer just received (pre-push P0). Detected
 // from the accepting flow's explicit billingTerm when passed, plus the
 // durable annual_prepay_terms record for reconciliation and missed paths.
+// Returns true / false / 'error'. 'error' means the durable prepay lookup
+// failed — the caller must fail CLOSED (skip prep, retry later via
+// reconciliation) rather than risk drafting per-application wording for an
+// annual-prepay customer.
 async function isAnnualPrepayAccept(estimate, billingTerm, conn = db) {
   if (String(billingTerm || '').toLowerCase() === 'prepay_annual') return true;
   if (!estimate?.id) return false;
   try {
     const term = await conn('annual_prepay_terms').where({ source_estimate_id: estimate.id }).first('id');
     return !!term;
-  } catch {
-    return false;
+  } catch (err) {
+    logger.warn(`[termite-agreement] annual-prepay lookup failed for estimate ${estimate.id}: ${err.message}`);
+    return 'error';
   }
 }
 
@@ -343,7 +358,9 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
 
     const NotificationService = require('./notification-service');
 
-    if (await isAnnualPrepayAccept(estimate, billingTerm)) {
+    const prepay = await isAnnualPrepayAccept(estimate, billingTerm);
+    if (prepay === 'error') return { ok: false, skipped: 'prepay_lookup_failed' };
+    if (prepay) {
       // Fail closed: the seeded wording states per-application billing,
       // which would contradict the annual-prepay invoice. Park it for
       // manual preparation with accurate terms.
@@ -411,27 +428,39 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       return { ok: false, skipped: 'unresolved_variables' };
     }
 
-    const dedupeLockKey = `termite-agreement:${customerId}:${normalizeAddress(estimate.address) || estimate.id}`;
+    // Addressless estimates share the CUSTOMER-level key: two concurrent
+    // addressless accepts must contend for the same lock (their property
+    // can't be distinguished, so only one open draft may exist).
+    const dedupeLockKey = `termite-agreement:${customerId}:${normalizeAddress(estimate.address) || 'customer'}`;
     const contract = await db.transaction(async (trx) => {
       // Serialize per customer+property: concurrent accept/reconciliation
       // workers (multi-pod cron) must not both observe "no row" and insert
       // duplicate drafts — the advisory xact lock + in-transaction re-check
       // make the dedupe atomic (pre-push P1).
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [dedupeLockKey]);
-      const openRows = await openProgramAgreements(customerId, trx);
+      // FOR UPDATE: the status re-read must be current when we cancel — a
+      // customer signing the older agreement concurrently would otherwise
+      // commit 'signed' between our unlocked read and an unconditional
+      // update, and the completed signature would be clobbered 'cancelled'.
+      const openRows = await openProgramAgreements(customerId, trx, { forUpdate: true });
       const nowTs = new Date();
       if (openRows.some((r) => classifyExistingAgreement(r, estimate, nowTs) === 'blocks')) return null;
       // A revised estimate accepted for the same property supersedes the
       // older open draft — cancel it so exactly one live agreement exists
-      // and it carries the ACCEPTED figures.
+      // and it carries the ACCEPTED figures. The cancel stays conditional
+      // on the row still being open (belt + braces with the row lock).
       const stale = openRows.filter((r) => classifyExistingAgreement(r, estimate, nowTs) === 'supersede');
       for (const staleRow of stale) {
-        await trx('customer_contracts').where({ id: staleRow.id }).update({
-          status: 'cancelled',
-          cancelled_at: nowTs,
-          cancelled_reason: 'Superseded by a newer accepted termite estimate',
-          updated_at: nowTs,
-        });
+        const cancelled = await trx('customer_contracts')
+          .where({ id: staleRow.id })
+          .whereIn('status', OPEN_STATUSES)
+          .update({
+            status: 'cancelled',
+            cancelled_at: nowTs,
+            cancelled_reason: 'Superseded by a newer accepted termite estimate',
+            updated_at: nowTs,
+          });
+        if (!cancelled) continue;
         await trx('customer_contract_events').insert({
           contract_id: staleRow.id,
           customer_id: customerId,
@@ -491,12 +520,21 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       }
     }
 
-    await NotificationService.notifyAdmin(
+    // The bell is the primary alert but not the only surface — the draft
+    // also sits in the admin open document-requests queue. notifyAdmin
+    // returns null (not a throw) on insert failure, so check and retry
+    // once; on a double miss, log at error level with the contract id.
+    const bellArgs = [
       'estimate',
       autosent ? 'Termite agreement sent for signature' : 'Termite agreement drafted',
       `${estimate.customer_name || 'Customer'} accepted the ${prepared.ownership === 'rent' ? 'rented-stations' : 'purchased-stations'} termite program — the agreement is ${autosent ? 'on its way for e-signature' : 'prefilled and ready to send from the document library'}.`,
       { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId, contractId: contract.id } },
-    );
+    ];
+    let bell = await NotificationService.notifyAdmin(...bellArgs);
+    if (!bell) bell = await NotificationService.notifyAdmin(...bellArgs);
+    if (!bell) {
+      logger.error(`[termite-agreement] admin bell failed twice for contract ${contract.id} (estimate ${estimate.id}) — draft is in the open document-requests queue`);
+    }
 
     return { ok: true, contractId: contract.id, templateKey: prepared.templateKey, autosent };
   } catch (err) {
@@ -513,39 +551,53 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
 // figures don't re-ring the accept-time bell.
 async function reconcileTermiteProgramAgreements({ sinceDays = 21, limit = 25 } = {}) {
   const cutoff = new Date(Date.now() - sinceDays * 24 * 60 * 60 * 1000);
-  const candidates = await db('estimates')
-    .where({ status: 'accepted' })
-    .whereNotNull('customer_id')
-    .where('accepted_at', '>=', cutoff)
-    .where((builder) => {
-      builder.whereNull('accepted_service_mode').orWhereNot('accepted_service_mode', 'one_time');
-    })
-    .whereRaw("estimate_data::text ILIKE '%termite%'")
-    // Estimates whose agreement already exists must not occupy the work
-    // window — otherwise the newest N covered rows starve older failed
-    // accepts forever (pre-push P1). Snapshot estimate.id is stamped by
-    // every prep this service performs.
-    .whereNotExists(function alreadyPrepped() {
-      this.select(db.raw('1'))
-        .from('customer_contracts as cc')
-        .whereRaw('cc.customer_id = estimates.customer_id')
-        .whereIn('cc.document_template_key', PROGRAM_TEMPLATE_KEYS)
-        .whereRaw("cc.document_variables_snapshot->'estimate'->>'id' = estimates.id::text");
-    })
-    .orderBy('accepted_at', 'desc')
-    .limit(limit)
-    .select('*');
+  // Keyset pagination past PERMANENT skips (annual_prepay,
+  // figures_unresolved): those rows create no contract, so a plain
+  // newest-N window would re-select them daily and starve older transient
+  // failures. `limit` caps agreements CREATED per run; scanning is bounded
+  // separately.
+  const MAX_SCANNED = 200;
+  const PAGE_SIZE = 50;
+  const results = { checked: 0, created: 0, skipped: 0, failed: 0 };
+  let beforeAcceptedAt = null;
 
-  const results = { checked: candidates.length, created: 0, skipped: 0, failed: 0 };
-  for (const estimate of candidates) {
-    const result = await maybeCreateTermiteProgramAgreement({
-      estimate,
-      customerId: estimate.customer_id,
-      notifyOnUnresolved: false,
-    });
-    if (result.ok && result.contractId && !result.skipped) results.created += 1;
-    else if (result.ok) results.skipped += 1;
-    else results.failed += 1;
+  while (results.checked < MAX_SCANNED && results.created < limit) {
+    const page = await db('estimates')
+      .where({ status: 'accepted' })
+      .whereNotNull('customer_id')
+      .where('accepted_at', '>=', cutoff)
+      .modify((q) => { if (beforeAcceptedAt) q.where('accepted_at', '<', beforeAcceptedAt); })
+      .where((builder) => {
+        builder.whereNull('accepted_service_mode').orWhereNot('accepted_service_mode', 'one_time');
+      })
+      .whereRaw("estimate_data::text ILIKE '%termite%'")
+      // Estimates whose agreement already exists never occupy the window.
+      // Snapshot estimate.id is stamped by every prep this service performs.
+      .whereNotExists(function alreadyPrepped() {
+        this.select(db.raw('1'))
+          .from('customer_contracts as cc')
+          .whereRaw('cc.customer_id = estimates.customer_id')
+          .whereIn('cc.document_template_key', PROGRAM_TEMPLATE_KEYS)
+          .whereRaw("cc.document_variables_snapshot->'estimate'->>'id' = estimates.id::text");
+      })
+      .orderBy('accepted_at', 'desc')
+      .limit(PAGE_SIZE)
+      .select('*');
+    if (!page.length) break;
+
+    for (const estimate of page) {
+      if (results.checked >= MAX_SCANNED || results.created >= limit) break;
+      results.checked += 1;
+      const result = await maybeCreateTermiteProgramAgreement({
+        estimate,
+        customerId: estimate.customer_id,
+        notifyOnUnresolved: false,
+      });
+      if (result.ok && result.contractId && !result.skipped) results.created += 1;
+      else if (result.ok) results.skipped += 1;
+      else results.failed += 1;
+    }
+    beforeAcceptedAt = page[page.length - 1].accepted_at;
   }
   return results;
 }

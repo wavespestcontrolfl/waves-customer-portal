@@ -103,6 +103,14 @@ describe('collectTermiteFacts', () => {
     }));
   });
 
+  test('client-fallback tmBait with BOTH install prices picks the ACCEPTED system (legacy Advance)', () => {
+    const facts = collectTermiteFacts({
+      results: { tmBait: { selectedSystem: 'advance', system: 'advance', ai: 639, ti: 610, monMonthly: 34, bmo: 34 } },
+    });
+    expect(facts.installPrice).toBe(639); // never the populated Trelona 610
+    expect(facts.system).toBe('advance');
+  });
+
   test('v1 rental services row by NAME marks rent and carries its perTreatment', () => {
     const facts = collectTermiteFacts({
       results: { tmBait: { selectedSystem: 'trelona', ai: null, ti: 610, monMonthly: 24 } },
