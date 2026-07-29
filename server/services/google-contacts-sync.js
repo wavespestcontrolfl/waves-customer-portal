@@ -102,6 +102,20 @@ function isGone(err) {
 }
 
 /**
+ * Revoked/expired Google credentials (invalid_grant etc.) fail EVERY row —
+ * treating them as per-row errors would park rows and slowly turn job
+ * health green while nothing syncs. They block the whole run instead, and
+ * no watermark moves.
+ */
+function isAuthError(err) {
+  const status = err?.code || err?.response?.status;
+  const raw = err?.response?.data || {};
+  const msg = `${raw.error || ''} ${raw.error_description || ''} ${err?.message || ''}`;
+  return status === 401
+    || /invalid_grant|invalid_rapt|unauthorized_client|invalid_credentials|expired or revoked/i.test(msg);
+}
+
+/**
  * Retryable 4xx: throttling and quota exhaustion recover on their own —
  * parking those rows would strand them (a new row with no contact never
  * re-enters any lane without an edit).
@@ -136,14 +150,18 @@ const rowTag = (table, row) => `${table}:${row.id}`;
 function contactBodyFor(row, kind, table) {
   // Shared ACCOUNT contacts publish the account's canonical identity — the
   // per-property row's copy can be stale, and letting whichever sibling
-  // syncs last overwrite names/email/phone made the contact flap.
+  // syncs last overwrite names/email/phone made the contact flap. Once a
+  // canonical identity is loaded its fields are authoritative INCLUDING
+  // nulls: an admin clearing the account email must not have a sibling's
+  // stale property copy republish it.
+  const hasCanonical = !!row.__canonicalIdentity;
   const identity = row.__canonicalIdentity || row;
-  const email = String(identity.email || row.email || '').trim();
-  const phone = String(identity.phone || row.phone || '').trim();
+  const email = String((hasCanonical ? identity.email : row.email) || '').trim();
+  const phone = String((hasCanonical ? identity.phone : row.phone) || '').trim();
   const body = {
     names: [{
-      givenName: String(identity.first_name || row.first_name || '').trim().slice(0, 60) || (kind === 'lead' ? 'Lead' : 'Customer'),
-      familyName: String(identity.last_name || row.last_name || '').trim().slice(0, 60),
+      givenName: String((hasCanonical ? identity.first_name : row.first_name) || '').trim().slice(0, 60) || (kind === 'lead' ? 'Lead' : 'Customer'),
+      familyName: String((hasCanonical ? identity.last_name : row.last_name) || '').trim().slice(0, 60),
     }],
     // Stable source pointer — the pre-create reconcile finds a contact this
     // row already minted even when the create response was lost.
@@ -193,10 +211,23 @@ function mergedMemberships(current) {
  * edit fails the ms-truncated comparison and re-syncs next run.
  */
 async function stampIfUnchanged(table, row, patch) {
-  return db(table)
+  const q = db(table)
     .where({ id: row.id })
-    .whereRaw("date_trunc('milliseconds', updated_at) <= ?", [row.updated_at])
-    .update({ ...patch, google_contact_synced_at: db.raw('updated_at') });
+    .whereRaw("date_trunc('milliseconds', updated_at) <= ?", [row.updated_at]);
+  if (row.__canonicalIdentity?.id) {
+    // The published payload came from the account row read earlier — an
+    // account edit racing this pass must veto the stamp the same way a row
+    // edit does, or the fresher canonical values would never re-publish.
+    q.whereRaw(
+      "NOT EXISTS (SELECT 1 FROM customer_accounts ca WHERE ca.id = ? AND date_trunc('milliseconds', ca.updated_at) > ?)",
+      [row.__canonicalIdentity.id, row.__canonicalIdentity.updated_at],
+    );
+  }
+  // GREATEST(updated_at, now()) — DB-side clock, skew-free: the watermark
+  // must also cover the ACCOUNT staleness clause (ca.updated_at compares
+  // against it), and copying updated_at alone would loop account-stale rows
+  // forever.
+  return q.update({ ...patch, google_contact_synced_at: db.raw('GREATEST(updated_at, now())') });
 }
 
 /**
@@ -308,8 +339,24 @@ async function upsertContact(people, table, row, kind, gapMs, { markerSearchKey 
       // search by OUR tag — a prior pass may already have replaced it
       // (lost response, partial sharer repoint) and creating again would
       // duplicate. Found → retry the update against the replacement.
+      const deadId = resourceName;
       const replacement = await findExistingContact(people, row, rowTag(table, row), { queryOverride: markerSearchKey });
-      resourceName = (replacement && replacement !== resourceName) ? replacement : null;
+      if (!replacement || replacement === deadId) {
+        // A SHARER's replacement may be mid-recovery: its ambiguous-create
+        // marker carries this dead id. Racing it would mint a parallel
+        // replacement — defer until that recovery resolves.
+        for (const t of ['customers', 'leads']) {
+          const carrier = await db(t)
+            .where('google_contact_id', 'like', `${PENDING_CREATE}:${deadId}:%`)
+            .first();
+          if (carrier) {
+            const deferErr = new Error('sharer replacement mid-recovery — deferring');
+            deferErr.searchInconclusive = true;
+            throw deferErr;
+          }
+        }
+      }
+      resourceName = (replacement && replacement !== deadId) ? replacement : null;
     }
   }
   let created;
@@ -469,7 +516,16 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
   // (processed rows leave the predicate, so nothing starves).
   const customers = await db('customers')
     .whereNull('deleted_at')
-    .where(stale)
+    .where((q) => {
+      stale.call(q, q);
+      // Canonical identity edits requeue linked rows via the ACCOUNT
+      // watermark — any writer, no trigger fan-out, no inverted lock
+      // order (the old accounts→customers bump could deadlock concurrent
+      // property edits).
+      q.orWhereRaw('(customers.account_id IS NOT NULL AND EXISTS ('
+        + 'SELECT 1 FROM customer_accounts ca WHERE ca.id = customers.account_id'
+        + ' AND (customers.google_contact_synced_at IS NULL OR ca.updated_at > customers.google_contact_synced_at)))');
+    })
     .orderBy('updated_at', 'desc')
     .limit(Math.max(0, cap - LEAD_RESERVE))
     .select(...SYNC_COLUMNS, 'account_id', 'address_line1', 'address_line2', 'city', 'state', 'zip');
@@ -781,6 +837,11 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
         logger.warn('[contacts-sync] People API scope missing — waiting on one-time owner re-consent at the admin Gmail auth URL');
         return counts;
       }
+      if (isAuthError(err)) {
+        counts.blocked = 'google_auth_failed';
+        logger.warn('[contacts-sync] Google credentials rejected (invalid_grant?) — run blocked; reconnect Google in admin');
+        return counts;
+      }
       counts.failed += 1;
       const failStatus = err?.code || err?.response?.status;
       if (typeof failStatus === 'number' && failStatus >= 400 && failStatus < 500
@@ -834,6 +895,10 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
             .update({ updated_at: new Date() });
           if (!reclaimed) continue; // restored — the main lane's handler owns it now
           if (retiringId) {
+            // Revalidate at the last instant — a restore between the claim
+            // and this destructive call must keep its contact.
+            const stillDeleted = await db(table).where({ id: row.id }).whereNotNull('deleted_at').first();
+            if (!stillDeleted) continue;
             await deleteContact(people, retiringId);
             await sleep(gapMs);
           }
@@ -862,6 +927,8 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
             const storedKey = searchKeyFromMarker(row.google_contact_id);
             const orphan = await findExistingContact(people, row, rowTag(table, row), { queryOverride: storedKey });
             if (orphan) {
+              const stillDeleted = await db(table).where({ id: row.id }).whereNotNull('deleted_at').first();
+              if (!stillDeleted) continue;
               await deleteContact(people, orphan);
               await sleep(gapMs);
             }
@@ -884,6 +951,13 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
             .whereNotNull('deleted_at')
             .update({ google_contact_id: retireMarkerFor(row.google_contact_id), google_contact_synced_at: null });
           if (!claimed) continue; // restored mid-batch — leave the contact alone
+          {
+            // Revalidate at the last instant before the destructive call —
+            // a restore in the claim→delete window keeps its contact (the
+            // retire marker hands recovery to the main lane).
+            const stillDeleted = await db(table).where({ id: row.id }).whereNotNull('deleted_at').first();
+            if (!stillDeleted) continue;
+          }
           await deleteContact(people, row.google_contact_id);
           await sleep(gapMs);
           await db(table).where({ id: row.id }).update({ google_contact_id: null });
@@ -912,6 +986,7 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
         counts.retired += 1;
       } catch (err) {
         if (isScopeError(err)) { counts.blocked = 'contacts_scope_missing'; return counts; }
+        if (isAuthError(err)) { counts.blocked = 'google_auth_failed'; return counts; }
         counts.failed += 1;
         // Fair rotation — the ordered query re-selects by updated_at, so
         // bumping it sends this failure to the back of the line.
@@ -960,6 +1035,9 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
       verifyRows.push(...vl.map((row) => ({ table: 'leads', kind: 'lead', row })));
     }
   } catch (e) {
+    // Same rule as the tombstone queries — a silently skipped drift-repair
+    // lane must not read as a green run.
+    counts.failed += 1;
     logger.warn(`[contacts-sync] verification query failed: ${safeErr(e)}`);
   }
   for (const { table, kind, row } of verifyRows) {
@@ -1062,6 +1140,7 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
       await sleep(gapMs);
     } catch (err) {
       if (isScopeError(err)) { counts.blocked = 'contacts_scope_missing'; return counts; }
+      if (isAuthError(err)) { counts.blocked = 'google_auth_failed'; return counts; }
       counts.failed += 1;
       // Rotate instead of pinning the oldest slots every tick: push the
       // watermark to cutoff-minus-one-day (still unverified, retries

@@ -28,7 +28,7 @@ const db = require('../models/db');
 const gmailClient = require('../services/email/gmail-client');
 const { runContactsSync } = require('../services/google-contacts-sync');
 
-const RAW_UPDATED_AT = { __raw: 'updated_at' };
+const RAW_UPDATED_AT = { __raw: 'GREATEST(updated_at, now())' };
 
 /**
  * Chainable knex mock. Select order per table: main pass, tombstone lane,
@@ -270,6 +270,8 @@ describe('runContactsSync', () => {
     const state = setupDb({
       customersSelects: [[], [{ id: 'c-dead', google_contact_id: 'people/loser' }], []],
       leadsSelects: [[], [], []],
+      // in-use probes (null, null) then the last-instant deleted_at revalidation
+      firstResults: { customers: [null, { id: 'c-dead' }], leads: [null] },
     });
     const counts = await runContactsSync({ gapMs: 0 });
     expect(counts.retired).toBe(1);
@@ -446,6 +448,7 @@ describe('runContactsSync', () => {
     const state = setupDb({
       customersSelects: [[], [{ id: 'c-dead', google_contact_id: 'pending_create_recovery', google_contact_synced_at: '2026-07-01T00:00:00Z', first_name: 'Jane', last_name: 'X', email: 'jane@customer.example', phone: null }], []],
       leadsSelects: [[], [], []],
+      firstResults: { customers: [{ id: 'c-dead' }] },
     });
     mockPeopleApi.people.searchContacts.mockImplementation(async ({ query }) => (query === '' ? { data: {} } : { data: { results: [{ person: { resourceName: 'people/orphan', clientData: [{ key: 'waves_row', value: 'customers:c-dead' }] } }] } }));
     const counts = await runContactsSync({ gapMs: 0 });
@@ -595,6 +598,8 @@ describe('runContactsSync', () => {
         first_name: 'Merged', last_name: '', email: 'scrambled+dedupe@x.invalid', phone: null,
       }], []],
       leadsSelects: [[], [], []],
+      // last-instant deleted_at revalidation before the orphan delete
+      firstResults: { customers: [{ id: 'c-merged' }] },
     });
     mockPeopleApi.people.searchContacts.mockImplementation(async ({ query }) => {
       if (query === 'original@x.example') {
@@ -680,6 +685,7 @@ describe('runContactsSync', () => {
     const state = setupDb({
       customersSelects: [[], [{ id: 'c-dead', google_contact_id: 'pending_retire_recovery:people/ghost', google_contact_synced_at: null, first_name: 'G', last_name: '', email: null, phone: null }], []],
       leadsSelects: [[], [], []],
+      firstResults: { customers: [{ id: 'c-dead' }] },
     });
     const counts = await runContactsSync({ gapMs: 0 });
     expect(counts.retired).toBe(1);
@@ -842,6 +848,55 @@ describe('runContactsSync', () => {
     // retries this tombstone later.
     expect(state.updates.find((u) => u.table === 'customers' && u.patch.google_contact_id === null)).toBeUndefined();
     expect(state.updates.find((u) => u.table === 'customers' && u.patch.updated_at instanceof Date)).toBeDefined();
+  });
+
+  test('a canonical NULL (cleared account email) is authoritative — no sibling republish', async () => {
+    setupDb({
+      customers: [{ ...CUSTOMER, id: 'c-2', account_id: 'acct-1', google_contact_id: 'people/acct' }],
+      firstResults: { customer_accounts: [{ id: 'acct-1', first_name: 'Canonical', last_name: 'Person', email: null, phone: '9415550100', updated_at: '2026-07-28T11:00:00Z' }] },
+    });
+    mockPeopleApi.people.get.mockResolvedValueOnce({ data: { etag: 'e1', metadata: { sources: [] }, memberships: [] } });
+    mockPeopleApi.people.updateContact.mockResolvedValueOnce({ data: { resourceName: 'people/acct' } });
+    await runContactsSync({ gapMs: 0 });
+    const body = mockPeopleApi.people.updateContact.mock.calls[0][0].requestBody;
+    // The property row's stale email does NOT resurrect the cleared value.
+    expect(body.emailAddresses).toBeUndefined();
+    expect(body.phoneNumbers).toEqual([{ value: '9415550100' }]);
+  });
+
+  test('revoked Google credentials BLOCK the run — no rows parked, job health sees it', async () => {
+    const state = setupDb({ customers: [{ ...CUSTOMER, google_contact_id: 'people/abc' }] });
+    const err = new Error('invalid_grant');
+    err.code = 400;
+    err.response = { data: { error: 'invalid_grant', error_description: 'Token has been expired or revoked.' } };
+    mockPeopleApi.people.get.mockRejectedValueOnce(err);
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(counts.blocked).toBe('google_auth_failed');
+    expect(state.updates).toEqual([]);
+  });
+
+  test('a failed VERIFICATION query marks the run failed', async () => {
+    setupDb({
+      customersSelects: [[], [], new Error('db down')],
+      leadsSelects: [[], [], []],
+    });
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(counts.failed).toBeGreaterThanOrEqual(1);
+  });
+
+  test('a 404-recreate DEFERS while a sharer marker carries the same dead id', async () => {
+    setupDb({
+      customers: [{ ...CUSTOMER, google_contact_id: 'people/dead', google_contact_synced_at: '2026-07-01T00:00:00Z' }],
+      // marker-carrier probe finds a sibling row mid-recovery
+      firstResults: { customers: [{ id: 'c-9', google_contact_id: 'pending_create_recovery:people/dead:x' }] },
+    });
+    const gone = new Error('not found');
+    gone.code = 404;
+    mockPeopleApi.people.get.mockRejectedValueOnce(gone);
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(counts.failed).toBe(1);
+    // No parallel replacement raced the in-flight recovery.
+    expect(mockPeopleApi.people.createContact).not.toHaveBeenCalled();
   });
 
   test('scope-missing aborts WITHOUT stamping — rows retry after the one-time re-consent', async () => {
