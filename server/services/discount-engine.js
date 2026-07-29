@@ -1,5 +1,6 @@
 const db = require('../models/db');
 const logger = require('./logger');
+const { isMembershipCustomerRow } = require('./waveguard-existing-services');
 
 // Cache tier discounts for 5 minutes to avoid repeated DB hits
 let tierCache = null;
@@ -55,6 +56,7 @@ const DiscountEngine = {
     serviceKey = null,
     serviceCategory = null,
     paymentMethod = null,
+    recurringMembershipBooking = false,
   } = {}, database = db) {
     const failures = [];
     const customerId = customer?.id || null;
@@ -69,7 +71,21 @@ const DiscountEngine = {
       } else {
         const requiredIdx = tierOrder.indexOf(discount.requires_waveguard_tier);
         const customerIdx = tierOrder.indexOf(customer?.waveguard_tier);
-        if (requiredIdx < 0 || customerIdx < requiredIdx) failures.push(`WaveGuard ${discount.requires_waveguard_tier}`);
+        // A Bronze requirement means "any WaveGuard member" (see the
+        // waveguard_member seed migration), so it is also satisfied by the
+        // canonical membership predicate (legacy members carry a
+        // monthly_rate with no tier label) or by a booking that is itself
+        // creating recurring WaveGuard coverage: the tier sync stamps the
+        // customer's tier only AFTER pricing validates, so without the
+        // booking-context flag the member discount can never be applied on
+        // the very sale that enrolls the member. Silver+ requirements stay
+        // strictly tier-based — one recurring booking says nothing about
+        // which tier the customer lands on.
+        const anyMemberFloorMet = requiredIdx === 0
+          && (recurringMembershipBooking || isMembershipCustomerRow(customer || {}));
+        if (requiredIdx < 0 || (customerIdx < requiredIdx && !anyMemberFloorMet)) {
+          failures.push(`WaveGuard ${discount.requires_waveguard_tier}`);
+        }
       }
     }
     if (discount.service_key_filter && discount.service_key_filter !== serviceKey) failures.push(`service ${discount.service_key_filter}`);

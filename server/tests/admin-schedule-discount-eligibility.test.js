@@ -12,6 +12,7 @@ jest.mock('../services/discount-engine', () => ({
 const db = require('../models/db');
 const DiscountEngine = require('../services/discount-engine');
 const {
+  bookingCreatesWaveGuardCoverage,
   buildAppointmentPricing,
   calculateVisitFinancialsForAddons,
   calculateStoredVisitFinancials,
@@ -62,8 +63,72 @@ describe('admin schedule appointment discount eligibility', () => {
         subtotal: 150,
         serviceKey: 'general_pest',
         serviceCategory: 'pest_control',
+        recurringMembershipBooking: false,
       }
     );
+  });
+
+  test('threads the recurring-membership booking context to every eligibility check', async () => {
+    const discount = {
+      id: 'discount-1',
+      name: 'WaveGuard Member Discount',
+      discount_type: 'percentage',
+      amount: 15,
+      requires_waveguard_tier: 'Bronze',
+    };
+    db.mockReturnValueOnce(discountQuery(discount));
+    DiscountEngine.manualEligibilityFailures.mockResolvedValue([]);
+
+    const pricing = await buildAppointmentPricing({
+      serviceRecord: { service_key: 'pest_general_quarterly', category: 'pest_control', base_price: 150 },
+      estimatedPrice: 150,
+      serviceAddons: [],
+      discountId: discount.id,
+      discountType: discount.discount_type,
+      customer: { id: 'customer-1', waveguard_tier: null },
+      recurringMembershipBooking: true,
+    });
+
+    expect(DiscountEngine.manualEligibilityFailures).toHaveBeenCalledWith(
+      discount,
+      expect.objectContaining({ id: 'customer-1' }),
+      expect.objectContaining({ recurringMembershipBooking: true })
+    );
+    expect(pricing.appointmentDiscount.discountDollars).toBe(22.5);
+    expect(pricing.finalPrice).toBe(127.5);
+  });
+
+  test('recognizes which bookings create WaveGuard plan coverage', () => {
+    const quarterlyPest = {
+      serviceType: 'General Pest Control',
+      serviceRecord: { service_key: 'pest_general_quarterly', name: 'Quarterly Pest Control' },
+    };
+
+    expect(bookingCreatesWaveGuardCoverage({
+      isRecurring: true, isCallback: false, ...quarterlyPest,
+    })).toBe(true);
+    // One-time bookings never enroll anyone.
+    expect(bookingCreatesWaveGuardCoverage({
+      isRecurring: false, isCallback: false, ...quarterlyPest,
+    })).toBe(false);
+    // Callbacks/re-services are free re-treatments, never plan coverage.
+    expect(bookingCreatesWaveGuardCoverage({
+      isRecurring: true, isCallback: true, ...quarterlyPest,
+    })).toBe(false);
+    // Rodent-led recurring work is not a WaveGuard plan family.
+    expect(bookingCreatesWaveGuardCoverage({
+      isRecurring: true,
+      isCallback: false,
+      serviceType: 'Rodent Trapping',
+      serviceRecord: { service_key: 'rodent_trapping', name: 'Rodent Trapping' },
+    })).toBe(false);
+    // Commercial rows are flat plans outside the residential tiers.
+    expect(bookingCreatesWaveGuardCoverage({
+      isRecurring: true,
+      isCallback: false,
+      serviceType: 'Commercial Pest Control',
+      serviceRecord: { service_key: 'commercial_pest', name: 'Commercial Pest Control' },
+    })).toBe(false);
   });
 
   test('limits a service-scoped free discount to matching lines', async () => {
