@@ -114,6 +114,9 @@ function isRetryable4xx(err) {
   if (status === 401 || status === 408 || status === 409 || status === 412 || status === 429) return true;
   const msg = String(err?.response?.data?.error?.message || err?.message || '');
   const reason = String(err?.response?.data?.error?.status || '');
+  // The People API reports a stale-etag conflict as 400 FAILED_PRECONDITION
+  // (not 409/412) — an operator editing the contact mid-sync is transient.
+  if (status === 400 && /FAILED_PRECONDITION|precondition/i.test(`${msg} ${reason}`)) return true;
   return status === 403 && /rate|quota|exhaust/i.test(`${msg} ${reason}`);
 }
 
@@ -131,12 +134,16 @@ function safeErr(err) {
 const rowTag = (table, row) => `${table}:${row.id}`;
 
 function contactBodyFor(row, kind, table) {
-  const email = String(row.email || '').trim();
-  const phone = String(row.phone || '').trim();
+  // Shared ACCOUNT contacts publish the account's canonical identity — the
+  // per-property row's copy can be stale, and letting whichever sibling
+  // syncs last overwrite names/email/phone made the contact flap.
+  const identity = row.__canonicalIdentity || row;
+  const email = String(identity.email || row.email || '').trim();
+  const phone = String(identity.phone || row.phone || '').trim();
   const body = {
     names: [{
-      givenName: String(row.first_name || '').trim().slice(0, 60) || (kind === 'lead' ? 'Lead' : 'Customer'),
-      familyName: String(row.last_name || '').trim().slice(0, 60),
+      givenName: String(identity.first_name || row.first_name || '').trim().slice(0, 60) || (kind === 'lead' ? 'Lead' : 'Customer'),
+      familyName: String(identity.last_name || row.last_name || '').trim().slice(0, 60),
     }],
     // Stable source pointer — the pre-create reconcile finds a contact this
     // row already minted even when the create response was lost.
@@ -464,6 +471,10 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
     ...leads.map((row) => ({ table: 'leads', kind: 'lead', row })),
     ...customers.map((row) => ({ table: 'customers', kind: 'customer', row })),
   ];
+  // Dead-id → replacement mapping for THIS run: rows loaded before a
+  // sharer's 404-recreate still hold the dead resource in memory; without
+  // this, each of them would 404 again and mint its own replacement.
+  const repointedThisRun = new Map();
 
   for (const { table, kind, row } of work) {
     try {
@@ -611,6 +622,10 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
             .orderBy('id', 'asc')
             .select('address_line1', 'address_line2', 'city', 'state', 'zip');
           if (props.length) row.__accountAddresses = props.slice(0, 8);
+          // Canonical identity: the customer_accounts row IS the person;
+          // property rows are copies that can drift.
+          const account = await db('customer_accounts').where({ id: row.account_id }).first();
+          if (account) row.__canonicalIdentity = account;
         } catch (e) {
           // Publishing a KNOWN-incomplete shared contact would strip the
           // sibling addresses (the update mask replaces the whole list) —
@@ -638,6 +653,9 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
         }
       }
       const priorContactId = row.google_contact_id;
+      if (row.google_contact_id && repointedThisRun.has(row.google_contact_id)) {
+        row.google_contact_id = repointedThisRun.get(row.google_contact_id);
+      }
       // Recovery was resolved above — upsert sees either the recovered
       // resource (update path) or a clean row (search+create path).
       const { resourceName, created } = await upsertContact(people, table, row, kind, gapMs, { markerSearchKey });
@@ -687,6 +705,7 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
         // preserved the dead id) of a possibly SHARED contact: repoint
         // every live row still holding the dead resource name, or
         // verification would mint one replacement per sharer.
+        repointedThisRun.set(repointFrom, resourceName);
         for (const t of ['customers', 'leads']) {
           await db(t).where('google_contact_id', repointFrom)
             .update({ google_contact_id: resourceName })
@@ -894,6 +913,10 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
             .orderBy('id', 'asc')
             .select('address_line1', 'address_line2', 'city', 'state', 'zip');
           if (props.length) row.__accountAddresses = props.slice(0, 8);
+          // Canonical identity: the customer_accounts row IS the person;
+          // property rows are copies that can drift.
+          const account = await db('customer_accounts').where({ id: row.account_id }).first();
+          if (account) row.__canonicalIdentity = account;
         } catch (e) {
           counts.failed += 1;
           logger.warn(`[contacts-sync] account address aggregation failed (verify ${table} ${row.id}) — row deferred: ${safeErr(e)}`);
@@ -914,6 +937,9 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
           if (advanced) counts.verified += 1;
           continue;
         }
+      }
+      if (row.google_contact_id && repointedThisRun.has(row.google_contact_id)) {
+        row.google_contact_id = repointedThisRun.get(row.google_contact_id);
       }
       const priorContactId = row.google_contact_id;
       const { resourceName, created } = await upsertContact(people, table, row, kind, gapMs);
@@ -951,6 +977,7 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
         // and then compensating a vetoed stamp would leave every sharer
         // aimed at a deleted replacement.
         if (created && priorContactId && priorContactId !== resourceName) {
+          repointedThisRun.set(priorContactId, resourceName);
           for (const t of ['customers', 'leads']) {
             await db(t).where('google_contact_id', priorContactId)
               .update({ google_contact_id: resourceName })

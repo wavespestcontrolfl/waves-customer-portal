@@ -704,6 +704,53 @@ describe('runContactsSync', () => {
     expect(repoints.map((u) => u.table).sort()).toEqual(['customers', 'leads']);
   });
 
+  test('account contacts publish the CANONICAL account identity, not the property row copy', async () => {
+    setupDb({
+      customers: [{ ...CUSTOMER, id: 'c-2', account_id: 'acct-1', google_contact_id: 'people/acct', first_name: 'StaleCopy' }],
+      firstResults: { customer_accounts: [{ id: 'acct-1', first_name: 'Canonical', last_name: 'Person', email: 'canon@x.example', phone: '9415550100' }] },
+    });
+    mockPeopleApi.people.get.mockResolvedValueOnce({ data: { etag: 'e1', metadata: { sources: [] }, memberships: [] } });
+    mockPeopleApi.people.updateContact.mockResolvedValueOnce({ data: { resourceName: 'people/acct' } });
+    await runContactsSync({ gapMs: 0 });
+    const body = mockPeopleApi.people.updateContact.mock.calls[0][0].requestBody;
+    expect(body.names[0].givenName).toBe('Canonical');
+    expect(body.emailAddresses).toEqual([{ value: 'canon@x.example' }]);
+  });
+
+  test('batched sharers of a dead resource create ONE replacement, not one each', async () => {
+    const dead1 = { ...CUSTOMER, id: 'c-a', google_contact_id: 'people/dead', updated_at: '2026-06-30T00:00:00Z', google_contact_synced_at: '2026-07-01T00:00:00Z' };
+    const dead2 = { ...CUSTOMER, id: 'c-b', email: 'jane2@customer.example', google_contact_id: 'people/dead', updated_at: '2026-06-30T00:00:00Z', google_contact_synced_at: '2026-07-01T00:00:00Z' };
+    setupDb({
+      customersSelects: [[], [], [dead1, dead2]],
+      leadsSelects: [[], [], []],
+    });
+    const gone = new Error('not found');
+    gone.code = 404;
+    // Row 1: get 404 → create replacement. Row 2: repointed in-memory →
+    // get succeeds on the replacement.
+    mockPeopleApi.people.get
+      .mockRejectedValueOnce(gone)
+      .mockResolvedValueOnce({ data: { etag: 'e1', metadata: { sources: [] }, memberships: [] } });
+    mockPeopleApi.people.createContact.mockResolvedValueOnce({ data: { resourceName: 'people/reborn' } });
+    mockPeopleApi.people.updateContact.mockResolvedValueOnce({ data: { resourceName: 'people/reborn' } });
+    const counts = await runContactsSync({ gapMs: 0, now: new Date('2026-07-28T12:00:00Z') });
+    expect(counts.verified).toBe(2);
+    expect(mockPeopleApi.people.createContact).toHaveBeenCalledTimes(1);
+    expect(mockPeopleApi.people.get.mock.calls[1][0].resourceName).toBe('people/reborn');
+  });
+
+  test('a 400 FAILED_PRECONDITION (stale etag) is retryable, not parked', async () => {
+    const state = setupDb({ customers: [{ ...CUSTOMER, google_contact_id: 'people/abc' }] });
+    const err = new Error('precondition check failed');
+    err.code = 400;
+    err.response = { data: { error: { status: 'FAILED_PRECONDITION', message: 'etag mismatch' } } };
+    mockPeopleApi.people.get.mockResolvedValueOnce({ data: { etag: 'stale', metadata: { sources: [] }, memberships: [] } });
+    mockPeopleApi.people.updateContact.mockRejectedValueOnce(err);
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(counts.failed).toBe(1);
+    expect(state.updates).toEqual([]);
+  });
+
   test('scope-missing aborts WITHOUT stamping — rows retry after the one-time re-consent', async () => {
     const state = setupDb({ customers: [{ ...CUSTOMER }] });
     const err = new Error('Request had insufficient authentication scopes.');
