@@ -226,8 +226,13 @@ function htmlToText(html) {
 // stored draft, so the owner must be able to read every claim before
 // replying "approved" (legal/brand surface). Bounded only by a generous
 // safety cap far above any real post.
-const DRAFT_EMAIL_MAX_CHARS = 120_000;
-const METADATA_EMAIL_MAX_CHARS = 24_000;
+// Gmail clips HTML messages around ~102KB — beyond that the owner sees a
+// "[Message clipped]" view and could approve content they never scrolled
+// to. Caps keep draft + metadata + template chrome + HTML-escape expansion
+// comfortably under the clip line; anything larger routes to the portal
+// via the truncation path (Codex r6).
+const DRAFT_EMAIL_MAX_CHARS = 60_000;
+const METADATA_EMAIL_MAX_CHARS = 12_000;
 /**
  * Verify the reply actually authenticated as the claimed sender. The From
  * header is attacker-controlled RFC822 data — authorization additionally
@@ -595,6 +600,25 @@ async function recoverExecutingRows() {
     if (!row.decision || !sender) {
       await db('content_email_approvals').where({ id: row.id })
         .update({ status: 'failed', last_error: 'executing row missing decision/sender', updated_at: new Date() });
+      continue;
+    }
+    // A named-competitor APPROVE that failed ambiguously must never be
+    // blind-retried: the astro publisher may have created its branch/PR
+    // before the timeout while the runner reverted the DB claims — a
+    // retry would open a SECOND PR (Codex r6). Reconcile from persisted
+    // state; if inconclusive, hand to a human with the dangling-PR
+    // warning. Trust-build/dismiss are pure DB transactions and keep
+    // auto-retrying.
+    const ambiguousApprove = row.kind === 'named_competitor_review'
+      && row.decision === 'approved'
+      && /^ambiguous failure/.test(String(row.last_error || ''));
+    if (ambiguousApprove) {
+      const reconciled = await reconcileFromPersistedState(row, row.decision).catch(() => null);
+      if (!reconciled) {
+        await db('content_email_approvals').where({ id: row.id })
+          .update({ status: 'failed', last_error: `${row.last_error} | not auto-retried: possible dangling publish`, updated_at: new Date() });
+        await notifyAdmin('Approval needs a manual check', `${row.token}: your approval hit an ambiguous failure mid-publish. Before re-approving in /admin/seo, check the astro repo for a dangling draft PR from this run.`);
+      }
       continue;
     }
     logger.info(`[email-approvals] recovering executing row ${row.token}`);

@@ -358,6 +358,51 @@ describe('round-5 hardening (Codex r5)', () => {
     });
     expect(truncated).toBe(true);
   });
+
+  test('an ambiguous named-competitor approve is never blind-retried by recovery (Codex r6 P1)', async () => {
+    const reviewQueue = require('../services/content/autonomous-review-queue');
+    reviewQueue.decideReviewItem.mockClear();
+    const db = require('../models/db');
+    const updates = [];
+    const staleRow = {
+      id: 'x', token: 'EA-deadbeef', run_id: 'r', opportunity_id: 'o',
+      kind: 'named_competitor_review', status: 'executing', decision: 'approved',
+      decided_by: 'email:owner@example.com', last_error: 'ambiguous failure, pending recovery: Request timed out',
+    };
+    db.mockImplementation((table) => ({
+      where: jest.fn().mockImplementation((arg) => {
+        if (table === 'content_email_approvals' && arg && arg.status === 'executing') {
+          const chain = Object.assign(Promise.resolve([staleRow]), {
+            update: jest.fn().mockResolvedValue(1),
+          });
+          chain.where = jest.fn().mockReturnValue(chain); // second .where(updated_at, <, …)
+          return chain;
+        }
+        return {
+          update: jest.fn().mockImplementation((p) => { updates.push({ table, p }); return Promise.resolve(1); }),
+          first: jest.fn().mockResolvedValue(
+            // Publish reverted: run parked again, opportunity pending_review
+            table === 'autonomous_runs' ? { outcome: 'completed_pending_review', skip_reason: 'named_competitor_review' }
+              : table === 'opportunity_queue' ? { status: 'pending_review' } : null
+          ),
+          orderBy: jest.fn().mockReturnValue({ first: jest.fn().mockResolvedValue(null) }),
+        };
+      }),
+    }));
+    await approvals._internals.recoverExecutingRows();
+    // decideReviewItem must NOT have been re-invoked (no second PR)…
+    expect(reviewQueue.decideReviewItem).not.toHaveBeenCalled();
+    // …and the row lands failed with the dangling-publish warning.
+    const failed = updates.find((u) => u.table === 'content_email_approvals' && u.p.status === 'failed');
+    expect(failed?.p.last_error).toMatch(/not auto-retried: possible dangling publish/);
+  });
+
+  test('email size caps sit under the Gmail ~102KB clip line (Codex r6)', () => {
+    const big = 'x'.repeat(70000);
+    const { body, truncated } = approvals._internals.draftPreview({ draft_payload: JSON.stringify({ title: 'T', body: big }) });
+    expect(body.length).toBeLessThanOrEqual(60000);
+    expect(truncated).toBe(true); // over-cap content routes to the portal
+  });
 });
 
 describe('gate + full-draft rules (Codex r2)', () => {
