@@ -215,8 +215,19 @@ async function upsertEmail(parsed) {
     return false; // not new
   }
 
+  // Approval-control replies ([EA-…] subjects) are exempt from blocklist
+  // trashing — a blocklisted-but-allowlisted approver's decision must
+  // never be removed from INBOX before the approval poller reads it
+  // (Codex #3024 r7). The poller's own sender allowlist + DMARC check
+  // remain the authorization gate.
+  let approvalControlEarly = false;
+  try {
+    const { isApprovalControlMessage } = require('../content/email-approvals');
+    approvalControlEarly = isApprovalControlMessage({ subject: parsed.subject });
+  } catch { /* module unavailable — fall through to normal handling */ }
+
   // Check blocklist before inserting — skip blocked senders
-  if (await isBlocked(parsed.from_address)) {
+  if (!approvalControlEarly && await isBlocked(parsed.from_address)) {
     // Auto-trash without wasting a Sonnet call
     try { await gmailClient.trashMessage(parsed.gmail_id); } catch (e) { /* non-critical */ }
     emailData.is_archived = true;

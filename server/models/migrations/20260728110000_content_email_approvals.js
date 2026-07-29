@@ -33,6 +33,11 @@ exports.up = async function up(knex) {
     // The parsed reply decision, persisted at claim time so a crash during
     // execution can be recovered without re-reading the mailbox.
     t.string('decision', 10);
+    // sha256 of the emailed draft snapshot (title|body|metadata) — an
+    // approval binds to the CONTENT the owner read, not just the run id;
+    // a payload edited after the email went out re-emails with a fresh
+    // token instead of publishing unseen content.
+    t.string('draft_sha', 64);
     // Send-claim timestamp (distinct from confirmed delivery): a crash
     // between claiming and SMTP completing leaves email_sending_at set with
     // email_sent_at null — reclaimable after a staleness window.

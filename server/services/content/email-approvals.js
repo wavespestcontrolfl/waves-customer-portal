@@ -312,6 +312,9 @@ function draftPreview(run) {
     // Approval-by-email is only valid when the owner could read EVERYTHING
     // that publishes — any truncation routes the decision to the portal.
     truncated: truncated || metadataTruncated,
+    // Content fingerprint of the FULL payload (not the capped preview):
+    // approval binds to this snapshot, not merely the run id.
+    sha: crypto.createHash('sha256').update(`${title} ${full} ${metadata || ''}`).digest('hex'),
   };
 }
 
@@ -353,7 +356,9 @@ async function sendApprovalRequest(run, opportunity = null) {
   if (!sendClaimed) return { row, skipped: 'send_claimed_elsewhere' };
 
   const email = require('../email');
-  const { title, body: draftBody, truncated, metadata } = draftPreview(run);
+  const { title, body: draftBody, truncated, metadata, sha } = draftPreview(run);
+  // Bind this request to the exact content being shown.
+  await db('content_email_approvals').where({ id: row.id }).update({ draft_sha: sha, updated_at: new Date() });
   const isCompetitor = row.kind === 'named_competitor_review';
   const senders = allowedSenders();
   const subject = `[${row.token}] Approve? ${title}`;
@@ -451,13 +456,30 @@ async function executeDecision(row, decision, sender) {
   // so a payload edited after the email went out can't slip through.
   if (decision === 'approved') {
     const run = await db('autonomous_runs').where({ id: row.run_id }).first();
-    if (run && draftPreview(run).truncated) {
+    const current = run ? draftPreview(run) : null;
+    if (current?.truncated) {
       const marker = 'oversized_approve_ignored';
       if (row.last_error !== marker) {
         await db('content_email_approvals').where({ id: row.id }).update({ last_error: marker, updated_at: new Date() });
         await notifyAdmin('Approval requires the portal', `${row.token}: this draft exceeds email size limits, so your emailed "approved" was NOT executed. Review and approve it in /admin/seo.`);
       }
       return { skipped: 'requires_portal_review' };
+    }
+    // Approval binds to the CONTENT the owner read, not just the run id:
+    // a payload that changed after the email went out must never publish
+    // off the old reply. Reset the row (fresh token + sha, unsent) so the
+    // poller re-emails the current draft; the old token stops matching.
+    if (current && row.draft_sha && current.sha !== row.draft_sha) {
+      await db('content_email_approvals').where({ id: row.id, status: 'awaiting_reply' }).update({
+        token: newToken(),
+        draft_sha: null,
+        email_sent_at: null,
+        email_sending_at: null,
+        last_error: 'draft changed after email — re-requested',
+        updated_at: new Date(),
+      });
+      await notifyAdmin('Draft changed since you were emailed', `${row.token}: the draft was modified after your approval email went out, so your reply was NOT applied. A fresh email with the current content is on its way.`);
+      return { skipped: 'draft_changed' };
     }
   }
   // Claim into a RECOVERABLE 'executing' state first (decision + sender
@@ -753,7 +775,17 @@ async function pollReplies() {
         // stale/junk and the cursor may pass them; an already-decided row
         // is a duplicate reply.
         const row = await db('content_email_approvals').whereRaw('LOWER(token) = ?', [cand.token]).first();
-        if (!row || row.status !== 'awaiting_reply' || !row.email_sent_at) continue;
+        if (!row || row.status !== 'awaiting_reply') continue;
+        if (!row.email_sent_at) {
+          // The reply references a token whose delivery is unconfirmed —
+          // SMTP may have succeeded while the confirmation write failed.
+          // HOLD the cursor here (don't advance past the reply) and stop:
+          // the next poll's resend path confirms/resends, then this reply
+          // is re-read and processed (Codex r7).
+          maxUid = Math.min(maxUid, cand.uid - 1);
+          logger.info(`[email-approvals] reply for ${row.token} arrived before send confirmation — holding cursor for next poll`);
+          break;
+        }
         checked++;
         if (!senders.includes(sender)) {
           logger.warn(`[email-approvals] reply for ${row.token} from unauthorized sender ${maskEmail(sender)} — ignored`);

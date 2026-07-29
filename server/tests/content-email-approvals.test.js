@@ -397,6 +397,38 @@ describe('round-5 hardening (Codex r5)', () => {
     expect(failed?.p.last_error).toMatch(/not auto-retried: possible dangling publish/);
   });
 
+  test('an approval binds to the emailed draft snapshot — a changed payload re-requests instead of publishing (Codex r7 P1)', async () => {
+    const reviewQueue = require('../services/content/autonomous-review-queue');
+    reviewQueue.decideReviewItem.mockClear();
+    const db = require('../models/db');
+    const updates = [];
+    db.mockImplementation((table) => ({
+      where: jest.fn().mockReturnValue({
+        update: jest.fn().mockImplementation((p) => { updates.push(p); return Promise.resolve(1); }),
+        first: jest.fn().mockResolvedValue(
+          table === 'autonomous_runs' ? { id: 'r', draft_payload: JSON.stringify({ title: 'T', body: 'EDITED after the email went out' }) } : null
+        ),
+        orderBy: jest.fn().mockReturnValue({ first: jest.fn().mockResolvedValue(null) }),
+      }),
+    }));
+    const row = { id: 'x', token: 'EA-deadbeef', run_id: 'r', opportunity_id: 'o', kind: 'named_competitor_review', draft_sha: 'sha-of-the-ORIGINAL-email', last_error: null };
+    const result = await approvals._internals.executeDecision(row, 'approved', 'owner@example.com');
+    expect(result).toEqual({ skipped: 'draft_changed' });
+    expect(reviewQueue.decideReviewItem).not.toHaveBeenCalled(); // nothing published
+    const reset = updates.find((u) => u.email_sent_at === null && u.token);
+    expect(reset).toBeTruthy(); // fresh token + unsent → re-emailed by the poller
+    expect(reset.token).not.toBe('EA-deadbeef');
+  });
+
+  test('draftPreview computes a stable content sha over the FULL payload', () => {
+    const p1 = approvals._internals.draftPreview({ draft_payload: JSON.stringify({ title: 'T', body: 'same' }) });
+    const p2 = approvals._internals.draftPreview({ draft_payload: JSON.stringify({ title: 'T', body: 'same' }) });
+    const p3 = approvals._internals.draftPreview({ draft_payload: JSON.stringify({ title: 'T', body: 'different' }) });
+    expect(p1.sha).toBe(p2.sha);
+    expect(p1.sha).not.toBe(p3.sha);
+    expect(p1.sha).toMatch(/^[0-9a-f]{64}$/);
+  });
+
   test('email size caps sit under the Gmail ~102KB clip line (Codex r6)', () => {
     const big = 'x'.repeat(70000);
     const { body, truncated } = approvals._internals.draftPreview({ draft_payload: JSON.stringify({ title: 'T', body: big }) });
