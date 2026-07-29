@@ -152,17 +152,38 @@ exports.up = async function up(knex) {
 };
 
 exports.down = async function down(knex) {
-  // Only remove the rows this migration seeds — the tables are owned by
-  // 20260601000009_document_template_library and must stay intact.
+  // Reverse ONLY what up() positively created: the version-1 row matching
+  // each seed's exact title, and the template row only when nothing else
+  // (admin-authored versions, signed-contract references) remains attached.
+  // The admin editor can add versions after seeding, and up() tolerates a
+  // pre-existing template — a wholesale delete would destroy rows this
+  // migration never created.
   const hasTemplates = await knex.schema.hasTable('document_templates');
   if (!hasTemplates) return;
-  const keys = DEFAULT_TEMPLATES.map((t) => t.template_key);
-  const templates = await knex('document_templates').whereIn('template_key', keys).select('id');
-  const ids = templates.map((t) => t.id);
-  if (ids.length) {
-    await knex('document_templates').whereIn('id', ids).update({ active_version_id: null });
-    await knex('document_template_versions').whereIn('template_id', ids).del();
-    await knex('document_templates').whereIn('id', ids).del();
+  for (const seed of DEFAULT_TEMPLATES) {
+    const template = await knex('document_templates').where({ template_key: seed.template_key }).first();
+    if (!template) continue;
+    const seedVersion = await knex('document_template_versions')
+      .where({ template_id: template.id, version_number: 1, title: seed.title })
+      .first();
+    if (seedVersion) {
+      if (template.active_version_id === seedVersion.id) {
+        await knex('document_templates').where({ id: template.id }).update({
+          active_version_id: null,
+          updated_at: knex.fn.now(),
+        });
+      }
+      await knex('document_template_versions').where({ id: seedVersion.id }).del();
+    }
+    const remainingVersions = await knex('document_template_versions')
+      .where({ template_id: template.id })
+      .first('id');
+    const referencingContracts = await knex('customer_contracts')
+      .where({ document_template_id: template.id })
+      .first('id');
+    if (!remainingVersions && !referencingContracts) {
+      await knex('document_templates').where({ id: template.id }).del();
+    }
   }
 };
 

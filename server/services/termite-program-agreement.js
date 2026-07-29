@@ -128,13 +128,21 @@ function collectTermiteFacts(estData) {
 
     if (key === 'termite_bait' || (!key && /termite bait/.test(name))) {
       facts.hasProgram = true;
-      // Raw engine lines carry the FINAL discounted annual (same ladder the
-      // comparison sheet uses: manualFinalAnnual ?? annualAfterDiscount ??
-      // annual) — the authoritative net per-application source.
-      const finalAnnual = Number(node.manualFinalAnnual ?? node.annualAfterDiscount ?? node.annual);
+      // Raw engine lines carry the FINAL discounted annual in
+      // manualFinalAnnual / annualAfterDiscount — the authoritative NET
+      // per-application sources. Plain `annual` is the GROSS figure (the
+      // discount fields are absent exactly when no discount landed OR on
+      // legacy lines that never carried them), so it must not bypass the
+      // fail-closed discount check.
       const visits = Number(node.visitsPerYear ?? node.visits) || 4;
-      if (Number.isFinite(finalAnnual) && finalAnnual > 0) {
-        takePerApp(Math.round((finalAnnual / visits) * 100) / 100, { net: true });
+      const netAnnual = Number(node.manualFinalAnnual ?? node.annualAfterDiscount);
+      if (Number.isFinite(netAnnual) && netAnnual > 0) {
+        takePerApp(Math.round((netAnnual / visits) * 100) / 100, { net: true });
+      } else {
+        const grossAnnual = Number(node.annual);
+        if (Number.isFinite(grossAnnual) && grossAnnual > 0) {
+          takePerApp(Math.round((grossAnnual / visits) * 100) / 100);
+        }
       }
       takePerApp(node.perApp);
       takePerApp(node.perTreatment);
