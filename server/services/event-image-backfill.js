@@ -159,17 +159,24 @@ async function backfillBatch({ limit = MAX_BATCH, lookup, get, knex = db } = {})
       logger.warn(`[event-image-backfill] ${row.id} fetch failed: ${err.message}`);
     }
     const now = new Date();
+    // Both updates re-assert event_url = the url we actually fetched: a
+    // concurrent ingestion run can change the url (clearing image_url and
+    // the attempt stamp) between SELECT and UPDATE, and without the guard
+    // old-page art could become the new page's poster — or the no-image
+    // stamp could re-close a backoff ingestion deliberately re-opened.
     if (imageUrl) {
       // Fill-only: re-assert NULL so a concurrent feed re-pull or admin
       // edit that set an image between SELECT and UPDATE is never clobbered.
       const updated = await knex('events_raw')
         .where({ id: row.id })
+        .where('event_url', row.event_url)
         .whereNull('image_url')
         .update({ image_url: imageUrl, image_backfill_attempted_at: now, updated_at: now });
       if (updated) filled += 1;
     } else {
       await knex('events_raw')
         .where({ id: row.id })
+        .where('event_url', row.event_url)
         .update({ image_backfill_attempted_at: now });
     }
   }

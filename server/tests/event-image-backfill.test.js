@@ -98,15 +98,20 @@ function knexStub(rows) {
     const chain = {
       _wheres: [],
       _nullGuards: [],
+      _urlGuards: [],
       select: () => chain,
       whereNull: (col) => { chain._nullGuards.push(col); return chain; },
       whereNotNull: () => chain,
       whereNotExists: () => chain,
       whereIn: () => chain,
-      where: (arg) => { if (arg && typeof arg === 'object' && arg.id) chain._wheres.push(arg.id); return chain; },
+      where: (arg, val) => {
+        if (arg && typeof arg === 'object' && arg.id) chain._wheres.push(arg.id);
+        if (arg === 'event_url') chain._urlGuards.push(val);
+        return chain;
+      },
       orderByRaw: () => chain,
       limit: async () => rows,
-      update: async (patch) => { updates.push({ id: chain._wheres[0], nullGuards: [...chain._nullGuards], patch }); return 1; },
+      update: async (patch) => { updates.push({ id: chain._wheres[0], nullGuards: [...chain._nullGuards], urlGuards: [...chain._urlGuards], patch }); return 1; },
     };
     return chain;
   };
@@ -134,6 +139,7 @@ describe('backfillBatch', () => {
     expect(knex.updates).toHaveLength(1);
     expect(knex.updates[0].id).toBe(ROW.id);
     expect(knex.updates[0].nullGuards).toContain('image_url');
+    expect(knex.updates[0].urlGuards).toContain(PAGE); // stale-fetch race guard
     expect(knex.updates[0].patch.image_url).toBe('https://cdn.example/poster.jpg');
     expect(knex.updates[0].patch.image_backfill_attempted_at).toBeInstanceOf(Date);
   });
@@ -144,6 +150,7 @@ describe('backfillBatch', () => {
     expect(result).toMatchObject({ processed: 1, filled: 0 });
     expect(knex.updates).toHaveLength(1);
     expect(knex.updates[0].patch.image_url).toBeUndefined();
+    expect(knex.updates[0].urlGuards).toContain(PAGE); // stamp also url-guarded
     expect(knex.updates[0].patch.image_backfill_attempted_at).toBeInstanceOf(Date);
   });
 });
