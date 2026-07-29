@@ -116,6 +116,21 @@ function isAuthError(err) {
 }
 
 /**
+ * The People API being disabled for the project (SERVICE_DISABLED /
+ * accessNotConfigured) is a deterministic 403 that fails EVERY row — a
+ * systemic configuration state, not a row problem. Parking rows on it would
+ * strand the whole backfill invisibly once the API is enabled.
+ */
+function isServiceDisabledError(err) {
+  const status = err?.code || err?.response?.status;
+  if (status !== 403) return false;
+  const reason = String(err?.response?.data?.error?.status || '');
+  const msg = String(err?.response?.data?.error?.message || err?.message || '');
+  const details = JSON.stringify(err?.response?.data?.error?.details || '');
+  return /SERVICE_DISABLED|accessNotConfigured|has not been used in project|is disabled/i.test(`${reason} ${msg} ${details}`);
+}
+
+/**
  * Retryable 4xx: throttling and quota exhaustion recover on their own —
  * parking those rows would strand them (a new row with no contact never
  * re-enters any lane without an edit).
@@ -364,9 +379,10 @@ async function findExistingContact(people, row, tag, { queryOverride = null, req
     }
     return null;
   } catch (e) {
-    // Scope and AUTH errors keep their classification — the run must
-    // surface the actionable blocked status, not N generic row failures.
-    if (isScopeError(e) || isAuthError(e)) throw e;
+    // Scope, AUTH, and service-disabled errors keep their classification —
+    // the run must surface the actionable blocked status, not N generic
+    // row failures.
+    if (isScopeError(e) || isAuthError(e) || isServiceDisabledError(e)) throw e;
     // Any other INCONCLUSIVE search must defer creation — creating past a
     // failed orphan check is how duplicates leak. The row retries next run.
     const err = new Error('contact search inconclusive — creation deferred');
@@ -711,6 +727,18 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
         // serving data the source row no longer contains — but a SHARED
         // contact (sibling leads) belongs to the surviving rows.
         if (row.google_contact_id && !(await contactInUseElsewhere(row.google_contact_id, table, row.id))) {
+          // Revalidate the EMPTY state at the last instant — a writer
+          // restoring contact info while this batch ran must keep the
+          // contact (operator labels/secondary data on a deleted contact
+          // are unrecoverable; the conditional stamp alone only queues a
+          // hollow recreation).
+          const fresh = await db(table).where({ id: row.id })
+            .select('email', 'phone', 'first_name', 'last_name')
+            .first();
+          const stillEmpty = !fresh
+            || !(String(fresh.email || '').trim() || String(fresh.phone || '').trim()
+              || (kind === 'lead' && `${String(fresh.first_name || '').trim()}${String(fresh.last_name || '').trim()}`));
+          if (!stillEmpty) continue; // its own edit re-queues it with data intact
           await deleteContact(people, row.google_contact_id);
           await sleep(gapMs);
         }
@@ -963,6 +991,11 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
         logger.warn('[contacts-sync] Google credentials rejected (invalid_grant?) — run blocked; reconnect Google in admin');
         return counts;
       }
+      if (isServiceDisabledError(err)) {
+        counts.blocked = 'people_api_disabled';
+        logger.warn('[contacts-sync] People API disabled for this project — run blocked; enable it in Google Cloud console');
+        return counts;
+      }
       counts.failed += 1;
       const failStatus = err?.code || err?.response?.status;
       if (typeof failStatus === 'number' && failStatus >= 400 && failStatus < 500
@@ -1056,6 +1089,7 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
           } catch (searchErr) {
             if (isScopeError(searchErr)) { counts.blocked = 'contacts_scope_missing'; return counts; }
             if (isAuthError(searchErr)) { counts.blocked = 'google_auth_failed'; return counts; }
+            if (isServiceDisabledError(searchErr)) { counts.blocked = 'people_api_disabled'; return counts; }
             // Inconclusive — keep the marker, but the stalled retirement
             // must show in job health.
             counts.failed += 1;
@@ -1112,6 +1146,7 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
       } catch (err) {
         if (isScopeError(err)) { counts.blocked = 'contacts_scope_missing'; return counts; }
         if (isAuthError(err)) { counts.blocked = 'google_auth_failed'; return counts; }
+        if (isServiceDisabledError(err)) { counts.blocked = 'people_api_disabled'; return counts; }
         counts.failed += 1;
         // Fair rotation — the ordered query re-selects by updated_at, so
         // bumping it sends this failure to the back of the line.
@@ -1269,6 +1304,7 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
     } catch (err) {
       if (isScopeError(err)) { counts.blocked = 'contacts_scope_missing'; return counts; }
       if (isAuthError(err)) { counts.blocked = 'google_auth_failed'; return counts; }
+      if (isServiceDisabledError(err)) { counts.blocked = 'people_api_disabled'; return counts; }
       counts.failed += 1;
       // Rotate instead of pinning the oldest slots every tick: push the
       // watermark to cutoff-minus-one-day (still unverified, retries

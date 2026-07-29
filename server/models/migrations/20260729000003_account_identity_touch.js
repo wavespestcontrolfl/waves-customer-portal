@@ -32,12 +32,20 @@ exports.up = async function up(knex) {
       phone      = c.phone,
       updated_at = now()
     FROM (
-      SELECT DISTINCT ON (account_id) account_id, first_name, last_name, email, phone
+      SELECT DISTINCT ON (account_id) account_id, first_name, last_name, email, phone, updated_at
       FROM customers
       WHERE account_id IS NOT NULL AND deleted_at IS NULL
       ORDER BY account_id, updated_at DESC
     ) c
     WHERE ca.id = c.account_id
+      -- Timestamp-gated: a canonical correction NEWER than every customer
+      -- copy is preserved — customers.updated_at moves for unrelated
+      -- reasons, so a stale property copy must never overwrite a fresher
+      -- account row. (Residual: per-field edit history does not exist, so
+      -- a customer row touched later for non-identity reasons still wins;
+      -- that matches the pre-account-layer reality where edits only ever
+      -- landed on customers.)
+      AND c.updated_at > ca.updated_at
       AND (ca.first_name IS DISTINCT FROM c.first_name
         OR ca.last_name IS DISTINCT FROM c.last_name
         OR ca.email IS DISTINCT FROM c.email

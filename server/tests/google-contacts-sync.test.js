@@ -981,6 +981,30 @@ describe('runContactsSync', () => {
     expect(body.addresses.some((a) => a.streetAddress === '99 Cabin Rd')).toBe(true);
   });
 
+  test('a disabled People API BLOCKS the run — no rows parked', async () => {
+    const state = setupDb({ customers: [{ ...CUSTOMER }] });
+    const err = new Error('People API has not been used in project 12345 before or it is disabled.');
+    err.code = 403;
+    err.response = { data: { error: { status: 'PERMISSION_DENIED', message: err.message, details: [{ reason: 'SERVICE_DISABLED' }] } } };
+    mockPeopleApi.people.createContact.mockRejectedValueOnce(err);
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(counts.blocked).toBe('people_api_disabled');
+    expect(state.updates).toEqual([]);
+  });
+
+  test('contact info restored mid-batch keeps its Google contact (last-instant revalidation)', async () => {
+    const state = setupDb({
+      customers: [{ ...CUSTOMER, email: null, phone: '  ', google_contact_id: 'people/keep' }],
+      // in-use probes null; revalidation finds the RESTORED phone
+      firstResults: { customers: [null, { email: null, phone: '9415550100', first_name: 'J', last_name: 'C' }], leads: [null] },
+    });
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(mockPeopleApi.people.deleteContact).not.toHaveBeenCalled();
+    // No stamp either — the row's own edit re-queues it with data intact.
+    expect(state.updates).toEqual([]);
+    expect(counts.skipped).toBe(0);
+  });
+
   test('scope-missing aborts WITHOUT stamping — rows retry after the one-time re-consent', async () => {
     const state = setupDb({ customers: [{ ...CUSTOMER }] });
     const err = new Error('Request had insufficient authentication scopes.');
