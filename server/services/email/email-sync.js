@@ -268,8 +268,19 @@ async function upsertEmail(parsed) {
     logger.error(`[email-sync] Proof-approval check failed for ${email.id}: ${err?.message || err}`);
   }
 
+  // Content-approval replies ([EA-xxxxxxxx] subjects) are control messages
+  // too: the IMAP poller owns the decision — they must never burn a
+  // classifier call or risk an auto-action archiving/answering them.
+  let approvalControl = false;
+  try {
+    const { isApprovalControlMessage } = require('../content/email-approvals');
+    approvalControl = isApprovalControlMessage(email);
+  } catch (err) {
+    logger.error(`[email-sync] Approval-control check failed for ${email.id}: ${err?.message || err}`);
+  }
+
   // Classify in background (don't block sync)
-  if (!proofHandled && (!email.classification || email.classification === 'vendor')) {
+  if (!proofHandled && !approvalControl && (!email.classification || email.classification === 'vendor')) {
     setImmediate(() => {
       (async () => {
         const { classifyEmail } = require('./email-classifier');

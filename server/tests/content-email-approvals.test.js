@@ -45,6 +45,18 @@ describe('parseDecision — first non-quoted line decides, fail-closed otherwise
     expect(parseDecision('approval pending')).toBe(null); // approved\b — "approval" must not match
   });
 
+  test('conditional approvals fail closed — only benign trailers approve (Codex r5 P1)', () => {
+    expect(parseDecision('approved, but fix the price first')).toBe(null);
+    expect(parseDecision('approved with one change')).toBe(null);
+    expect(parseDecision('approved — don’t publish yet')).toBe(null); // curly apostrophe
+    expect(parseDecision('approved if the guarantee wording is fixed')).toBe(null);
+    expect(parseDecision('approved for now')).toBe(null);
+    // Benign trailers still approve.
+    expect(parseDecision('approved, thanks!')).toBe('approved');
+    expect(parseDecision('Approved — looks good to me')).toBe('approved');
+    expect(parseDecision('approved 👍')).toBe('approved');
+  });
+
   test('a contradicted approval prefix never approves (Codex r4 P1)', () => {
     expect(parseDecision('approved? no')).toBe(null);
     expect(parseDecision('approved — actually not approved')).toBe(null);
@@ -296,6 +308,58 @@ describe('executeDecision / finishExecution — recoverable claim state machine'
   });
 });
 
+describe('round-5 hardening (Codex r5)', () => {
+  const ROW5 = { id: 'x', token: 'EA-deadbeef', run_id: 'r', opportunity_id: 'o', kind: 'named_competitor_review', last_error: null };
+
+  test('an emailed "approved" on an oversized draft is refused and routed to the portal', async () => {
+    const db = require('../models/db');
+    const updates = [];
+    const bigMeta = { frontmatter: { blob: 'y'.repeat(30000) }, title: 'T', body: 'ok' };
+    db.mockImplementation((table) => ({
+      where: jest.fn().mockReturnValue({
+        update: jest.fn().mockImplementation((p) => { updates.push(p); return Promise.resolve(1); }),
+        first: jest.fn().mockResolvedValue(table === 'autonomous_runs' ? { id: 'r', draft_payload: JSON.stringify(bigMeta) } : null),
+        orderBy: jest.fn().mockReturnValue({ first: jest.fn().mockResolvedValue(null) }),
+      }),
+    }));
+    const result = await approvals._internals.executeDecision(ROW5, 'approved', 'owner@example.com');
+    expect(result).toEqual({ skipped: 'requires_portal_review' });
+    expect(updates.every((u) => u.status === undefined)).toBe(true); // never claimed/executed
+  });
+
+  test('an unknown execution error reconciles from persisted state before failing', async () => {
+    const reviewQueue = require('../services/content/autonomous-review-queue');
+    reviewQueue.decideReviewItem.mockRejectedValue(new Error('unexpected column drift'));
+    const db = require('../models/db');
+    const updates = [];
+    db.mockImplementation((table) => ({
+      where: jest.fn().mockReturnValue({
+        update: jest.fn().mockImplementation((p) => { updates.push(p); return Promise.resolve(1); }),
+        first: jest.fn().mockResolvedValue(
+          table === 'autonomous_runs' ? { outcome: 'completed_pending_review', skip_reason: 'astro_pr_pending_merge' }
+            : table === 'opportunity_queue' ? { status: 'pending_review' } : null
+        ),
+        orderBy: jest.fn().mockReturnValue({ first: jest.fn().mockResolvedValue(null) }),
+      }),
+    }));
+    const result = await approvals._internals.finishExecution(ROW5, 'approved', 'owner@example.com');
+    expect(result).toEqual({ executed: 'reconciled' });
+    expect(updates.some((u) => u.status === 'failed')).toBe(false);
+  });
+
+  test('approval-token subjects are control messages for email-sync', () => {
+    expect(approvals.isApprovalControlMessage({ subject: 'Re: [EA-1a2b3c4d] Approve? Post' })).toBe(true);
+    expect(approvals.isApprovalControlMessage({ subject: 'Quarterly service question' })).toBe(false);
+  });
+
+  test('metadata truncation marks the whole preview truncated', () => {
+    const { truncated } = approvals._internals.draftPreview({
+      draft_payload: JSON.stringify({ title: 'T', body: 'short', frontmatter: { blob: 'z'.repeat(30000) } }),
+    });
+    expect(truncated).toBe(true);
+  });
+});
+
 describe('gate + full-draft rules (Codex r2)', () => {
   test('the feature gate requires explicit opt-in in EVERY environment', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../config/feature-gates.js'), 'utf8');
@@ -313,6 +377,36 @@ describe('gate + full-draft rules (Codex r2)', () => {
 });
 
 describe('round-3 hardening (Codex r3)', () => {
+  test('HTML-only replies keep reply boundaries — quoted instructions never force ambiguity (Codex r5 P1)', () => {
+    const raw = [
+      'Content-Type: text/html; charset=UTF-8', '',
+      '<div dir="ltr">approved</div><br><div class="gmail_quote">On Tue wrote:<blockquote>Reply with exactly one of: approved — or — not approved</blockquote></div>',
+    ].join('\r\n');
+    expect(parseDecision(extractReplyText(raw))).toBe('approved');
+    const rejectRaw = [
+      'Content-Type: text/html; charset=UTF-8', '',
+      '<div>not approved</div><blockquote>approved — or — not approved</blockquote>',
+    ].join('\r\n');
+    expect(parseDecision(extractReplyText(rejectRaw))).toBe('rejected');
+  });
+
+  test('a Content-Type name= part is an attachment even with inline/omitted disposition (Codex r5)', () => {
+    const raw = [
+      'Content-Type: multipart/mixed; boundary="o"', '',
+      '--o', 'Content-Type: text/plain; name="notes.txt"', '',
+      'approved — attachment must not decide', '',
+      '--o', 'Content-Type: multipart/alternative; boundary="i"', '',
+      '--i', 'Content-Type: text/plain', '', 'not approved', '--i--', '--o--',
+    ].join('\r\n');
+    expect(parseDecision(extractReplyText(raw))).toBe('rejected');
+  });
+
+  test('an explicit dmarc=fail is authoritative — no DKIM fallback (Codex r5 P1)', () => {
+    const verify = approvals._internals.verifySenderAuthentication;
+    const raw = 'Authentication-Results: mx.google.com; dkim=pass header.i=@mailer.example.com; dmarc=fail header.from=example.com\r\nFrom: o <o@example.com>\r\n\r\napproved\r\n';
+    expect(verify(raw, 'o@example.com')).toBe(false);
+  });
+
   test('a text/plain ATTACHMENT never decides — the nested body wins', () => {
     const raw = [
       'Content-Type: multipart/mixed; boundary="outer"', '',

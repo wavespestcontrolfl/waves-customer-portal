@@ -103,11 +103,13 @@ function escapeHtml(s) {
  * non-quoted line counts — quoted trails ("> approved") and signatures
  * never decide. Returns 'approved' | 'rejected' | null (ambiguous).
  */
-// Negation/hedge markers AFTER an "approved" prefix make the line ambiguous
-// ("approved? no", "approved — actually not approved", "approved… wait"):
-// a contradicted approval must never publish. Fail closed; the owner is
-// asked to reply again with a clean word.
-const APPROVAL_CONTRADICTION_RE = /[?]|\b(no|not|nope|don'?t|cancel|reject|hold|wait|stop|never|unless|actually)\b/i;
+// An "approved" prefix is only an approval when the REST of the line is
+// recognizably benign — punctuation plus plain acclamation. A blacklist of
+// negation words cannot enumerate every conditional ("approved, but fix
+// the price first", "approved with one change", "approved — don’t publish
+// yet"), so anything outside this whitelist is AMBIGUOUS and nothing
+// executes (Codex #3024 r5). Curly apostrophes/dashes included.
+const APPROVAL_TRAILER_RE = /^[\s,.!:;()✓👍—–-]*(?:(?:thanks?|thank you|ty|looks good(?: to me)?|lgtm|ship it|go ahead|yes|please|proceed|sounds good|perfect|great|good)[\s,.!]*)*$/i;
 
 function parseDecision(text) {
   const lines = String(text || '').split(/\r?\n/);
@@ -119,7 +121,7 @@ function parseDecision(text) {
     if (/^not[\s-]+approved\b/i.test(line)) return 'rejected';
     if (/^approved\b/i.test(line)) {
       const rest = line.replace(/^approved\b/i, '');
-      return APPROVAL_CONTRADICTION_RE.test(rest) ? null : 'approved';
+      return APPROVAL_TRAILER_RE.test(rest) ? 'approved' : null;
     }
     return null; // first substantive line says something else — fail closed
   }
@@ -131,7 +133,12 @@ function decodePartBody(headers, body) {
     try { return Buffer.from(body.replace(/\s+/g, ''), 'base64').toString('utf8'); } catch { return body; }
   }
   if (/content-transfer-encoding:\s*quoted-printable/i.test(headers)) {
-    return body.replace(/=\r?\n/g, '').replace(/=([0-9A-F]{2})/gi, (_, h) => String.fromCharCode(parseInt(h, 16)));
+    // Decode to BYTES first, then UTF-8 — per-char fromCharCode would
+    // mojibake multibyte sequences (=E2=80=94 is one em dash, not three
+    // Latin-1 characters), and mojibake in an approval trailer would
+    // force ambiguity on a clean reply.
+    const joined = body.replace(/=\r?\n/g, '').replace(/=([0-9A-F]{2})/gi, (_, h) => String.fromCharCode(parseInt(h, 16)));
+    try { return Buffer.from(joined, 'latin1').toString('utf8'); } catch { return joined; }
   }
   return body;
 }
@@ -161,7 +168,9 @@ function extractReplyText(source, depth = 0) {
     // Attachments never decide — a text/plain ATTACHMENT beginning with
     // "approved" must not override the actual reply body (and a harmless
     // attachment must not shadow it either).
-    const isAttachment = (headers) => /content-disposition:\s*attachment/i.test(headers) || /filename\s*=/i.test(headers);
+    // name= on the Content-Type also marks a named attachment even with an
+    // inline/omitted disposition (Codex r5).
+    const isAttachment = (headers) => /content-disposition:\s*attachment/i.test(headers) || /\b(?:file)?name\s*=/i.test(headers);
     // Pass 1: direct text/plain BODY leaves. Pass 2: recurse into nested
     // multipart containers (the reply body in a multipart/mixed message is
     // usually a nested multipart/alternative). Attachments are skipped in
@@ -186,7 +195,31 @@ function extractReplyText(source, depth = 0) {
   const split = splitHeadersBody(raw);
   if (!split) return raw;
   const body = decodePartBody(split.headers, split.body);
-  return body.replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ');
+  return htmlToText(body);
+}
+
+/**
+ * HTML → line-structured text for decision parsing. Quoted threads
+ * (<blockquote>, gmail_quote containers) are REMOVED — flattening them
+ * into the typed text would merge the owner's "approved" with the quoted
+ * instructions (which contain "not approved") and force ambiguity on every
+ * HTML-only reply (Codex r5). Block-level closers become newlines so the
+ * first-line rule still means the first thing the owner typed.
+ */
+function htmlToText(html) {
+  let s = String(html || '');
+  for (let i = 0; i < 5 && /<blockquote\b/i.test(s); i++) {
+    s = s.replace(/<blockquote\b[\s\S]*?<\/blockquote>/gi, ' ');
+  }
+  // Gmail wraps the quoted thread in <div class="gmail_quote">…; everything
+  // from that marker on is quoted history.
+  const gq = s.search(/<div[^>]*class="[^"]*gmail_quote/i);
+  if (gq !== -1) s = s.slice(0, gq);
+  s = s.replace(/<style[\s\S]*?<\/style>/gi, ' ');
+  s = s.replace(/<br\s*\/?>/gi, '\n').replace(/<\/(?:p|div|tr|li|h[1-6])>/gi, '\n');
+  s = s.replace(/<[^>]+>/g, ' ');
+  return s.replace(/&nbsp;/gi, ' ').replace(/&amp;/gi, '&').replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>').replace(/&quot;/gi, '"').replace(/&#0?39;/g, "'");
 }
 
 // The COMPLETE draft body — a named-competitor approval publishes the whole
@@ -194,6 +227,7 @@ function extractReplyText(source, depth = 0) {
 // replying "approved" (legal/brand surface). Bounded only by a generous
 // safety cap far above any real post.
 const DRAFT_EMAIL_MAX_CHARS = 120_000;
+const METADATA_EMAIL_MAX_CHARS = 24_000;
 /**
  * Verify the reply actually authenticated as the claimed sender. The From
  * header is attacker-controlled RFC822 data — authorization additionally
@@ -223,11 +257,25 @@ function verifySenderAuthentication(rawSource, senderAddress) {
   });
   if (!authLine) return false;
   const line = authLine.toLowerCase();
+  // An EXPLICIT DMARC failure is authoritative — the aligned-DKIM fallback
+  // exists only for receivers that report no DMARC verdict at all; letting
+  // a delegated-subdomain DKIM pass override the domain's own strict DMARC
+  // policy would defeat it (Codex r5).
+  if (/\bdmarc=fail\b/.test(line)) return false;
   const domRe = senderDomain.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   if (new RegExp(`dmarc=pass[^;]*header\\.from=${domRe}(?:[;\\s]|$)`).test(line)) return true;
   if (new RegExp(`dkim=pass[^;]*header\\.i=@?(?:[a-z0-9.-]+\\.)?${domRe}(?:[;\\s]|$)`).test(line)) return true;
   if (new RegExp(`dkim=pass[^;]*header\\.d=(?:[a-z0-9.-]+\\.)?${domRe}(?:[;\\s]|$)`).test(line)) return true;
   return false;
+}
+
+/**
+ * Recognizer for email-sync: an approval-token subject is a CONTROL
+ * message — it must never reach the classifier or its auto-actions (the
+ * IMAP poller owns decisions). Same posture as newsletter-proof traffic.
+ */
+function isApprovalControlMessage(email = {}) {
+  return TOKEN_RE.test(String(email.subject || ''));
 }
 
 function draftPreview(run) {
@@ -248,10 +296,18 @@ function draftPreview(run) {
     }
     delete meta.title; // shown separately
     if (Object.keys(meta).length) {
-      try { metadata = JSON.stringify(meta, null, 1).slice(0, 8000); } catch { metadata = null; }
+      try { metadata = JSON.stringify(meta, null, 1); } catch { metadata = null; }
     }
   }
-  return { title, body: full.slice(0, DRAFT_EMAIL_MAX_CHARS), truncated, metadata };
+  const metadataTruncated = !!metadata && metadata.length > METADATA_EMAIL_MAX_CHARS;
+  return {
+    title,
+    body: full.slice(0, DRAFT_EMAIL_MAX_CHARS),
+    metadata: metadata ? metadata.slice(0, METADATA_EMAIL_MAX_CHARS) : null,
+    // Approval-by-email is only valid when the owner could read EVERYTHING
+    // that publishes — any truncation routes the decision to the portal.
+    truncated: truncated || metadataTruncated,
+  };
 }
 
 /**
@@ -302,15 +358,16 @@ async function sendApprovalRequest(run, opportunity = null) {
     `<strong>Target:</strong> ${escapeHtml(opportunity?.query || run.action_type || '')}<br/>`,
     `<strong>Parked as:</strong> ${escapeHtml(row.kind)}</p>`,
     run.reviewer_notes ? `<p><strong>Reviewer notes:</strong> ${escapeHtml(String(run.reviewer_notes).slice(0, 600))}</p>` : '',
-    // The COMPLETE draft — approving publishes everything below, so
-    // everything below must be in front of the owner.
-    draftBody ? `<p><strong>Full draft (this exact content publishes on approval):</strong></p><blockquote style="border-left:3px solid #ccc;padding-left:10px;color:#444;white-space:pre-wrap;">${escapeHtml(draftBody)}</blockquote>` : '',
-    metadata ? `<p><strong>Metadata (also publishes — meta description, alt text, schema):</strong></p><blockquote style="border-left:3px solid #ccc;padding-left:10px;color:#666;white-space:pre-wrap;font-size:12px;">${escapeHtml(metadata)}</blockquote>` : '',
-    truncated ? '<p style="color:#b00;"><strong>Draft exceeds the email size cap — review it in /admin/seo before approving.</strong></p>' : '',
-    '<p><strong>Reply to this email</strong> (keep the subject) with exactly one of:</p>',
-    '<p style="font-size:18px;"><strong>approved</strong> &nbsp;—or—&nbsp; <strong>not approved</strong></p>',
+    // The COMPLETE draft. For named-competitor runs approval PUBLISHES this
+    // content; a trust-build approval only grants ramp credit — the label
+    // must never promise a publication that doesn't happen (Codex r5).
+    draftBody ? `<p><strong>${isCompetitor ? 'Full draft (this exact content publishes on approval):' : 'Full draft (approval grants trust-build credit — this draft does NOT publish now):'}</strong></p><blockquote style="border-left:3px solid #ccc;padding-left:10px;color:#444;white-space:pre-wrap;">${escapeHtml(draftBody)}</blockquote>` : '',
+    metadata ? `<p><strong>Metadata (${isCompetitor ? 'also publishes — ' : ''}meta description, alt text, schema):</strong></p><blockquote style="border-left:3px solid #ccc;padding-left:10px;color:#666;white-space:pre-wrap;font-size:12px;">${escapeHtml(metadata)}</blockquote>` : '',
+    truncated
+      ? '<p style="color:#b00;"><strong>This draft exceeds email size limits, so it cannot be fully shown here. Replying "approved" will NOT execute — review and decide in /admin/seo instead. ("not approved" still works.)</strong></p>'
+      : '<p><strong>Reply to this email</strong> (keep the subject) with exactly one of:</p>\n<p style="font-size:18px;"><strong>approved</strong> &nbsp;—or—&nbsp; <strong>not approved</strong></p>',
     isCompetitor ? '<p>approved → the post publishes through the normal pipeline; not approved → the draft is dismissed and the topic is closed.</p>'
-      : '<p>approved → the draft earns trust-build credit toward auto-publish; not approved → the item is dismissed.</p>',
+      : '<p>approved → the draft earns trust-build credit toward auto-publish (it does not publish now); not approved → the item is dismissed.</p>',
     senders.length
       ? `<p style="color:#666;font-size:13px;">Replies are accepted only from: ${senders.map(escapeHtml).join(', ')}.</p>`
       : '<p style="color:#b00;font-size:13px;">No approver addresses are configured (APPROVAL_ALLOWED_SENDERS) — replies cannot be processed until one is set.</p>',
@@ -382,6 +439,22 @@ async function sweepUnnotifiedRuns() {
 }
 
 async function executeDecision(row, decision, sender) {
+  // An oversized draft was never fully shown in the email, so an emailed
+  // "approved" must not publish it — the email itself says so and directs
+  // the decision to the portal. Rejection is still honored (dismissing
+  // unseen content is safe). Checked at DECISION time, not just send time,
+  // so a payload edited after the email went out can't slip through.
+  if (decision === 'approved') {
+    const run = await db('autonomous_runs').where({ id: row.run_id }).first();
+    if (run && draftPreview(run).truncated) {
+      const marker = 'oversized_approve_ignored';
+      if (row.last_error !== marker) {
+        await db('content_email_approvals').where({ id: row.id }).update({ last_error: marker, updated_at: new Date() });
+        await notifyAdmin('Approval requires the portal', `${row.token}: this draft exceeds email size limits, so your emailed "approved" was NOT executed. Review and approve it in /admin/seo.`);
+      }
+      return { skipped: 'requires_portal_review' };
+    }
+  }
   // Claim into a RECOVERABLE 'executing' state first (decision + sender
   // persisted), so a crash mid-execution is retried by the recovery sweep
   // instead of losing the owner's decision.
@@ -390,6 +463,46 @@ async function executeDecision(row, decision, sender) {
     .update({ status: 'executing', decision, decided_by: `email:${sender}`, decided_at: new Date(), updated_at: new Date() });
   if (!claimed) return { skipped: 'already_decided' };
   return finishExecution({ ...row, decision, decided_by: `email:${sender}` }, decision, sender);
+}
+
+/**
+ * Post-failure reconciliation from PERSISTED state: did the decision's side
+ * effect actually happen? Returns an outcome when the persisted run/
+ * opportunity state is conclusive, null when genuinely inconclusive.
+ * Used by crash recovery AND by unknown execution errors — an exception
+ * from decideReviewItem does not prove nothing happened (publication
+ * precedes its final bookkeeping reads/writes).
+ */
+async function reconcileFromPersistedState(row, decision) {
+  if (!row.opportunity_id) return null;
+  const run = row.run_id ? await db('autonomous_runs').where({ id: row.run_id }).first() : null;
+  const prOpened = run?.skip_reason === 'astro_pr_pending_merge';
+  const publishedLive = /^(completed_published|done)$/.test(String(run?.outcome || ''));
+  if (decision === 'approved' && (prOpened || publishedLive)) {
+    await db('content_email_approvals').where({ id: row.id }).update({
+      status: 'approved',
+      last_error: `reconciled: run ${prOpened ? 'astro_pr_pending_merge' : run.outcome}`,
+      updated_at: new Date(),
+    });
+    return { executed: 'reconciled' };
+  }
+  const opp = await db('opportunity_queue').where({ id: row.opportunity_id }).first();
+  const st = opp?.status;
+  if (st === 'claimed' && decision === 'approved') {
+    // Publish in flight (the runner's own janitor owns this transient
+    // state) — stay 'executing' and let a later sweep re-check.
+    return { skipped: 'in_flight' };
+  }
+  if (st && st !== 'pending_review') {
+    const matches = decision === 'approved' ? st === 'done' : st === 'skipped';
+    await db('content_email_approvals').where({ id: row.id }).update({
+      status: matches ? decision : 'superseded',
+      last_error: `reconciled: opportunity ${st}`,
+      updated_at: new Date(),
+    });
+    return matches ? { executed: 'reconciled' } : { skipped: 'superseded' };
+  }
+  return null; // still pending_review — the decision demonstrably did not land
 }
 
 async function finishExecution(row, decision, sender, { recovery = false } = {}) {
@@ -416,45 +529,11 @@ async function finishExecution(row, decision, sender, { recovery = false } = {})
   } catch (err) {
     const message = String(err.message || '').slice(0, 500);
     // Crash recovery replaying a decision that ALREADY committed before the
-    // process died: decideReviewItem now rejects because the opportunity
-    // left pending_review. Reconcile from the opportunity's terminal state
-    // instead of reporting a false failure to the owner.
-    if (recovery && row.opportunity_id) {
-      // A named-competitor approval that opened an Astro PR deliberately
-      // leaves the OPPORTUNITY pending_review while the RUN records the
-      // terminal outcome (astro_pr_pending_merge, poller-reconciled) — so
-      // check the run first.
-      const run = row.run_id ? await db('autonomous_runs').where({ id: row.run_id }).first() : null;
-      // An opened Astro PR persists as outcome=completed_pending_review +
-      // skip_reason=astro_pr_pending_merge (the opportunity intentionally
-      // stays pending_review for the poller); a live publish lands a
-      // terminal outcome.
-      const prOpened = run?.skip_reason === 'astro_pr_pending_merge';
-      const publishedLive = /^(completed_published|done)$/.test(String(run?.outcome || ''));
-      if (decision === 'approved' && (prOpened || publishedLive)) {
-        await db('content_email_approvals').where({ id: row.id }).update({
-          status: 'approved',
-          last_error: `reconciled after crash: run ${prOpened ? 'astro_pr_pending_merge' : run.outcome}`,
-          updated_at: new Date(),
-        });
-        return { executed: 'reconciled' };
-      }
-      const opp = await db('opportunity_queue').where({ id: row.opportunity_id }).first();
-      const st = opp?.status;
-      if (st === 'claimed' && decision === 'approved') {
-        // Publish in flight (the runner's own janitor owns this transient
-        // state) — stay 'executing' and let a later sweep re-check.
-        return { skipped: 'in_flight' };
-      }
-      if (st && st !== 'pending_review') {
-        const matches = decision === 'approved' ? st === 'done' : st === 'skipped';
-        await db('content_email_approvals').where({ id: row.id }).update({
-          status: matches ? decision : 'superseded',
-          last_error: `reconciled after crash: opportunity ${st}`,
-          updated_at: new Date(),
-        });
-        return matches ? { executed: 'reconciled' } : { skipped: 'superseded' };
-      }
+    // process died: reconcile from persisted state instead of reporting a
+    // false failure to the owner.
+    if (recovery) {
+      const reconciled = await reconcileFromPersistedState(row, decision);
+      if (reconciled) return reconciled;
     }
     const stale = err.statusCode === 409 && /changed since|newer run/i.test(message);
     if (stale) {
@@ -491,8 +570,13 @@ async function finishExecution(row, decision, sender, { recovery = false } = {})
       logger.warn(`[email-approvals] ${row.token}: ambiguous execution failure — left for recovery reconcile (${message.slice(0, 120)})`);
       return { skipped: 'ambiguous_failure_pending_recovery' };
     }
-    // Hard failure AFTER the claim: record + surface loudly — the decision
-    // is not silently lost, and the row never re-executes.
+    // Unknown error: it may have surfaced AFTER the side effect
+    // (publication precedes decideReviewItem's final bookkeeping), so
+    // check persisted state before declaring failure (Codex r5).
+    const reconciled = await reconcileFromPersistedState(row, decision).catch(() => null);
+    if (reconciled) return reconciled;
+    // Conclusively did not land: record + surface loudly — the decision is
+    // not silently lost, and the row never re-executes.
     await db('content_email_approvals').where({ id: row.id })
       .update({ status: 'failed', last_error: message, updated_at: new Date() });
     await notifyAdmin('Approval decision failed to execute', `${row.token}: your "${decision}" reply was received but execution failed (${message.slice(0, 200)}). The item is still parked — check /admin/seo.`);
@@ -698,6 +782,7 @@ module.exports = {
   sendApprovalRequest,
   notifyParkedRun,
   pollReplies,
+  isApprovalControlMessage,
   _internals: {
     parseDecision,
     extractReplyText,
@@ -711,6 +796,8 @@ module.exports = {
     recoverExecutingRows,
     sweepUnnotifiedRuns,
     verifySenderAuthentication,
+    reconcileFromPersistedState,
+    htmlToText,
     draftPreview,
     TOKEN_RE,
     SAFE_RETRY_ERROR_RE,
