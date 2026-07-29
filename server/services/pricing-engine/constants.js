@@ -249,7 +249,10 @@ const LAWN_PRICING_V2 = {
   // _SPOT_RESERVE (2026-07-17): material budgets now fund the protocol
   // spot-treatment reserves (owner-approved) — estimates stamped with the
   // prior _DENSE_35_FLOOR were priced on scheduled-only budgets.
-  pricingVersion: 'LAWN_PRICING_V2_SPOT_RESERVE',
+  // _LADDER_CAP (2026-07-29): Premium 12x bracket column retuned + runtime
+  // cap so 12x per-app never exceeds 9x per-app — estimates stamped
+  // _SPOT_RESERVE priced 12x on the pre-cap (higher, inverting) column.
+  pricingVersion: 'LAWN_PRICING_V2_LADDER_CAP',
   laborRateLoaded: 35,
   equipmentIncludedInLabor: true,
   equipmentReservePerVisit: 0,
@@ -285,54 +288,61 @@ const GRASS_TYPE_ALIASES = {
 // Base prices — credit card surcharge (up to 2.9%) applied at checkout, not baked in here.
 // Revised 2026-06-17: 35% fully loaded gross margin floor (prior 45% curve scaled
 // by 0.55/0.65 ≈ 0.846 — a floor-binding cell moves from exactly 45% to exactly 35%).
+// Premium (12x) column retuned 2026-07-29 (owner directive, pricing audit
+// 2026-07-28): the 12x per-application price must never exceed the 9x
+// per-application price at the same size — the previous column inverted the
+// ladder above ~4,100 sqft (monthly read as the most expensive cadence per
+// application on estimate cards). Rule: premium_monthly =
+// min(previous, floor(enhanced_monthly × 4/3)); small-lawn cells that
+// already sat under the cap are unchanged.
 const LAWN_BRACKETS = {
   st_augustine: [
     [3000,  r(30),  r(38),  r(47),  r(55)],
     [3500,  r(30),  r(38),  r(47),  r(58)],
     [4000,  r(30),  r(38),  r(47),  r(62)],
-    [5000,  r(30),  r(38),  r(50),  r(71)],
-    [6000,  r(30),  r(39),  r(56),  r(81)],
-    [7000,  r(32),  r(42),  r(62),  r(91)],
-    [8000,  r(35),  r(47),  r(68),  r(100)],
-    [10000, r(40),  r(54),  r(80),  r(118)],
-    [12000, r(46),  r(62),  r(92),  r(137)],
-    [15000, r(53),  r(73),  r(110), r(165)],
-    [20000, r(68),  r(91),  r(140), r(212)],
+    [5000,  r(30),  r(38),  r(50),  r(66)],
+    [6000,  r(30),  r(39),  r(56),  r(74)],
+    [7000,  r(32),  r(42),  r(62),  r(82)],
+    [8000,  r(35),  r(47),  r(68),  r(90)],
+    [10000, r(40),  r(54),  r(80),  r(106)],
+    [12000, r(46),  r(62),  r(92),  r(122)],
+    [15000, r(53),  r(73),  r(110), r(146)],
+    [20000, r(68),  r(91),  r(140), r(186)],
   ],
   bermuda: [
     [4000,  r(34), r(42),  r(51),  r(63)],
-    [5000,  r(34), r(42),  r(51),  r(73)],
-    [6000,  r(34), r(42),  r(57),  r(82)],
-    [7000,  r(34), r(43),  r(63),  r(91)],
-    [8000,  r(36), r(47),  r(69),  r(102)],
-    [10000, r(41), r(55),  r(81),  r(120)],
-    [12000, r(47), r(63),  r(94),  r(140)],
-    [15000, r(55), r(74),  r(112), r(168)],
-    [20000, r(69), r(94),  r(143), r(217)],
+    [5000,  r(34), r(42),  r(51),  r(68)],
+    [6000,  r(34), r(42),  r(57),  r(76)],
+    [7000,  r(34), r(43),  r(63),  r(84)],
+    [8000,  r(36), r(47),  r(69),  r(92)],
+    [10000, r(41), r(55),  r(81),  r(108)],
+    [12000, r(47), r(63),  r(94),  r(125)],
+    [15000, r(55), r(74),  r(112), r(149)],
+    [20000, r(69), r(94),  r(143), r(190)],
   ],
   zoysia: [
     [4000,  r(34), r(42),  r(51),  r(63)],
-    [5000,  r(34), r(42),  r(52),  r(74)],
-    [6000,  r(34), r(42),  r(58),  r(83)],
-    [7000,  r(34), r(44),  r(63),  r(93)],
-    [8000,  r(36), r(47),  r(70),  r(102)],
-    [10000, r(41), r(56),  r(82),  r(122)],
-    [12000, r(47), r(63),  r(95),  r(141)],
-    [15000, r(56), r(75),  r(113), r(171)],
-    [20000, r(70), r(95),  r(145), r(219)],
+    [5000,  r(34), r(42),  r(52),  r(69)],
+    [6000,  r(34), r(42),  r(58),  r(77)],
+    [7000,  r(34), r(44),  r(63),  r(84)],
+    [8000,  r(36), r(47),  r(70),  r(93)],
+    [10000, r(41), r(56),  r(82),  r(109)],
+    [12000, r(47), r(63),  r(95),  r(126)],
+    [15000, r(56), r(75),  r(113), r(150)],
+    [20000, r(70), r(95),  r(145), r(193)],
   ],
   bahia: [
     [3000,  r(25), r(34),  r(42),  r(51)],
     [3500,  r(25), r(34),  r(42),  r(53)],
-    [4000,  r(25), r(34),  r(42),  r(58)],
-    [5000,  r(25), r(34),  r(47),  r(66)],
-    [6000,  r(27), r(36),  r(52),  r(74)],
-    [7000,  r(30), r(39),  r(57),  r(82)],
-    [8000,  r(31), r(42),  r(62),  r(91)],
-    [10000, r(36), r(49),  r(73),  r(107)],
-    [12000, r(41), r(56),  r(83),  r(123)],
-    [15000, r(48), r(65),  r(99),  r(147)],
-    [20000, r(60), r(82),  r(125), r(189)],
+    [4000,  r(25), r(34),  r(42),  r(56)],
+    [5000,  r(25), r(34),  r(47),  r(62)],
+    [6000,  r(27), r(36),  r(52),  r(69)],
+    [7000,  r(30), r(39),  r(57),  r(76)],
+    [8000,  r(31), r(42),  r(62),  r(82)],
+    [10000, r(36), r(49),  r(73),  r(97)],
+    [12000, r(41), r(56),  r(83),  r(110)],
+    [15000, r(48), r(65),  r(99),  r(132)],
+    [20000, r(60), r(82),  r(125), r(166)],
   ],
 };
 

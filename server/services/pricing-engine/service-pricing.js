@@ -1774,7 +1774,28 @@ function resolveLawnTier(tier, lawnFreq) {
   return LAWN_TIERS[tier] ? tier : 'enhanced';
 }
 
+// Premium (12x) ladder cap (owner directive 2026-07-28): the 12x
+// per-application price must never exceed the 9x per-application price at
+// the same size — premium_monthly ≤ floor(enhanced_monthly × freq_ratio),
+// where freq_ratio = 12/9 makes the two per-app prices equal. The bracket
+// TABLE carries capped endpoint cells, but each tier interpolates and
+// rounds independently between endpoints (and extrapolates above table
+// max), so the invariant must also be enforced on the looked-up result
+// (codex #3041 r1: 4,125 sqft st_augustine rounded enhanced to $47 and
+// premium to $63 → $63/app vs $62.67/app).
 function lookupLawnBracket(lawnSqFt, tierIndex, track = 'st_augustine') {
+  const result = lookupLawnBracketUncapped(lawnSqFt, tierIndex, track);
+  if (tierIndex === LAWN_TIERS.premium.index && result.monthly > 0) {
+    const enhanced = lookupLawnBracketUncapped(lawnSqFt, LAWN_TIERS.enhanced.index, track);
+    if (enhanced.monthly > 0) {
+      const cap = Math.floor(enhanced.monthly * (LAWN_TIERS.premium.freq / LAWN_TIERS.enhanced.freq));
+      result.monthly = Math.min(result.monthly, cap);
+    }
+  }
+  return result;
+}
+
+function lookupLawnBracketUncapped(lawnSqFt, tierIndex, track = 'st_augustine') {
   const brackets = LAWN_BRACKETS[track];
   if (!brackets || !brackets.length) {
     return { monthly: 0, pricingBasis: 'TABLE_INTERPOLATION', pricingSource: 'MARKET_TABLE' };

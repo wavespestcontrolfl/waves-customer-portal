@@ -388,7 +388,9 @@ const LAWN_PRICING_V2 = {
   // _SPOT_RESERVE (2026-07-17): material budgets now fund the protocol
   // spot-treatment reserves (owner-approved) — estimates stamped with the
   // prior _DENSE_35_FLOOR were priced on scheduled-only budgets.
-  pricingVersion: 'LAWN_PRICING_V2_SPOT_RESERVE',
+  // _LADDER_CAP (2026-07-29): Premium 12x column retuned + cap so 12x
+  // per-app never exceeds 9x per-app (server mirror).
+  pricingVersion: 'LAWN_PRICING_V2_LADDER_CAP',
   laborRateLoaded: 35,
   equipmentReservePerVisit: 0,
   adminAnnualDefault: 51,
@@ -670,10 +672,10 @@ export function collectMarginReviewNotes(E) {
 // Material budgets now live in @waves/lawn-cost-floor (lawnMaterialBudget),
 // shared with the server so the table can't drift between preview and bill.
 const LAWN_PRICES = {
-  st_augustine: { name: 'St. Augustine', code: 'A', pts: [[0,30,38,47,55],[3000,30,38,47,55],[3500,30,38,47,58],[4000,30,38,47,62],[5000,30,38,50,71],[6000,30,39,56,81],[7000,32,42,62,91],[8000,35,47,68,100],[10000,40,54,80,118],[12000,46,62,92,137],[15000,53,73,110,165],[20000,68,91,140,212]] },
-  bermuda:      { name: 'Bermuda',       code: 'C1', pts: [[0,34,42,51,63],[4000,34,42,51,63],[5000,34,42,51,73],[6000,34,42,57,82],[7000,34,43,63,91],[8000,36,47,69,102],[10000,41,55,81,120],[12000,47,63,94,140],[15000,55,74,112,168],[20000,69,94,143,217]] },
-  zoysia:       { name: 'Zoysia',        code: 'C2', pts: [[0,34,42,51,63],[4000,34,42,51,63],[5000,34,42,52,74],[6000,34,42,58,83],[7000,34,44,63,93],[8000,36,47,70,102],[10000,41,56,82,122],[12000,47,63,95,141],[15000,56,75,113,171],[20000,70,95,145,219]] },
-  bahia:        { name: 'Bahia',         code: 'D', pts: [[0,25,34,42,51],[3000,25,34,42,51],[3500,25,34,42,53],[4000,25,34,42,58],[5000,25,34,47,66],[6000,27,36,52,74],[7000,30,39,57,82],[8000,31,42,62,91],[10000,36,49,73,107],[12000,41,56,83,123],[15000,48,65,99,147],[20000,60,82,125,189]] },
+  st_augustine: { name: 'St. Augustine', code: 'A', pts: [[0,30,38,47,55],[3000,30,38,47,55],[3500,30,38,47,58],[4000,30,38,47,62],[5000,30,38,50,66],[6000,30,39,56,74],[7000,32,42,62,82],[8000,35,47,68,90],[10000,40,54,80,106],[12000,46,62,92,122],[15000,53,73,110,146],[20000,68,91,140,186]] },
+  bermuda:      { name: 'Bermuda',       code: 'C1', pts: [[0,34,42,51,63],[4000,34,42,51,63],[5000,34,42,51,68],[6000,34,42,57,76],[7000,34,43,63,84],[8000,36,47,69,92],[10000,41,55,81,108],[12000,47,63,94,125],[15000,55,74,112,149],[20000,69,94,143,190]] },
+  zoysia:       { name: 'Zoysia',        code: 'C2', pts: [[0,34,42,51,63],[4000,34,42,51,63],[5000,34,42,52,69],[6000,34,42,58,77],[7000,34,44,63,84],[8000,36,47,70,93],[10000,41,56,82,109],[12000,47,63,95,126],[15000,56,75,113,150],[20000,70,95,145,193]] },
+  bahia:        { name: 'Bahia',         code: 'D', pts: [[0,25,34,42,51],[3000,25,34,42,51],[3500,25,34,42,53],[4000,25,34,42,56],[5000,25,34,47,62],[6000,27,36,52,69],[7000,30,39,57,76],[8000,31,42,62,82],[10000,36,49,73,97],[12000,41,56,83,110],[15000,48,65,99,132],[20000,60,82,125,166]] },
 };
 
 function toPositiveNumber(value) {
@@ -1325,7 +1327,22 @@ function resolveLawnFreq(freq) {
   return LAWN_FREQS.includes(parsed) ? parsed : 9;
 }
 
+// Premium (12x) ladder cap — server mirror (2026-07-29): 12x per-app never
+// exceeds 9x per-app. Table endpoints are capped, but each column rounds its
+// interpolation independently, so the cap must also apply to the looked-up
+// result (matches lookupLawnBracket in server service-pricing).
 function lawnLookup(lp, sf, freqIdx) {
+  const result = lawnLookupUncapped(lp, sf, freqIdx);
+  if (freqIdx === 3 && result.monthly > 0) {
+    const enhanced = lawnLookupUncapped(lp, sf, 2);
+    if (enhanced.monthly > 0) {
+      result.monthly = Math.min(result.monthly, Math.floor(enhanced.monthly * 12 / 9));
+    }
+  }
+  return result;
+}
+
+function lawnLookupUncapped(lp, sf, freqIdx) {
   const pts = lp.pts;
   if (sf <= pts[0][0]) return { monthly: pts[0][freqIdx + 1], pricingBasis: 'TABLE_INTERPOLATION', pricingSource: 'MARKET_TABLE' };
   if (sf > LAWN_TABLE_MAX_SQFT) {
