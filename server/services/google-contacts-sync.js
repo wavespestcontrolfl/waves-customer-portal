@@ -274,13 +274,13 @@ async function findExistingContact(people, row, tag, { queryOverride = null } = 
  * predates this pass (an exact-email search hit can be an
  * operator-authored contact).
  */
-async function upsertContact(people, table, row, kind, gapMs, { markerSearchKey = null } = {}) {
+async function upsertContact(people, table, row, kind, gapMs, { markerSearchKey = null, markerPriorId = null } = {}) {
   const body = contactBodyFor(row, kind, table);
   let resourceName = row.google_contact_id;
   if (!resourceName) {
     resourceName = await findExistingContact(people, row, rowTag(table, row), { queryOverride: markerSearchKey });
   }
-  if (resourceName) {
+  for (let attempt = 0; resourceName && attempt < 2; attempt += 1) {
     try {
       // updateContact needs the CURRENT etag; memberships are merged from
       // the live contact so operator labels survive.
@@ -304,7 +304,12 @@ async function upsertContact(people, table, row, kind, gapMs, { markerSearchKey 
       return { resourceName: updated.data.resourceName || resourceName, created: false };
     } catch (err) {
       if (!isGone(err)) throw err;
-      // Contact deleted on the Google side — fall through and recreate.
+      // Contact deleted on the Google side. Before minting a replacement,
+      // search by OUR tag — a prior pass may already have replaced it
+      // (lost response, partial sharer repoint) and creating again would
+      // duplicate. Found → retry the update against the replacement.
+      const replacement = await findExistingContact(people, row, rowTag(table, row), { queryOverride: markerSearchKey });
+      resourceName = (replacement && replacement !== resourceName) ? replacement : null;
     }
   }
   let created;
@@ -322,16 +327,19 @@ async function upsertContact(people, table, row, kind, gapMs, { markerSearchKey 
     const status = createErr?.code || createErr?.response?.status;
     const definitiveRejection = typeof status === 'number' && status >= 400 && status < 500;
     if (!definitiveRejection) {
-      // Replacement creates (404-recreate) still carry the DEAD resource
-      // name — the marker may replace it, but never a live id written by
-      // a concurrent pass.
+      // The conditional may replace: NULL, the row's known (dead) resource
+      // id, or an EXISTING marker — a repeated ambiguous recovery create
+      // must refresh the attempt timestamp (its grace window restarts) or
+      // the next pass would trust a still-lagging search. The prior dead
+      // id survives via markerPriorId.
       await db(table).where({ id: row.id })
         .where((q) => {
           q.whereNull('google_contact_id');
           if (row.google_contact_id) q.orWhere('google_contact_id', row.google_contact_id);
+          q.orWhere('google_contact_id', 'like', `${PENDING_CREATE}%`);
         })
         .update({
-          google_contact_id: pendingMarkerFor(row.google_contact_id, markerSearchKey || rowSearchKey(row)),
+          google_contact_id: pendingMarkerFor(row.google_contact_id || markerPriorId, markerSearchKey || rowSearchKey(row)),
           google_contact_synced_at: new Date(),
         })
         .catch(() => {});
@@ -402,7 +410,14 @@ async function resolveLeadOwnership(row) {
     // people's contacts still finds the COMPATIBLE sibling instead of
     // giving up on whichever arbitrary row came first.
     const phoneSibling = await siblingBase()
-      .whereRaw("RIGHT(regexp_replace(phone, '\\D', '', 'g'), 10) = ?", [phoneDigits])
+      // Suffix comparison at the ACCEPTED length in both directions — a
+      // legacy 7–9 digit local number must match its full 10-digit form.
+      .whereRaw(
+        "(RIGHT(regexp_replace(phone, '\\D', '', 'g'), ?) = ?"
+        + " OR (LENGTH(regexp_replace(phone, '\\D', '', 'g')) BETWEEN 7 AND 9"
+        + " AND RIGHT(?, LENGTH(regexp_replace(phone, '\\D', '', 'g'))) = regexp_replace(phone, '\\D', '', 'g')))",
+        [phoneDigits.length, phoneDigits, phoneDigits]
+      )
       .where((q) => {
         if (email) q.whereRaw("(email IS NULL OR TRIM(email) = '' OR LOWER(TRIM(email)) = ?)", [email]);
         if (rowName) q.whereRaw("(TRIM(CONCAT_WS(' ', first_name, last_name)) = '' OR LOWER(TRIM(CONCAT_WS(' ', first_name, last_name))) = ?)", [rowName]);
@@ -658,7 +673,7 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
       }
       // Recovery was resolved above — upsert sees either the recovered
       // resource (update path) or a clean row (search+create path).
-      const { resourceName, created } = await upsertContact(people, table, row, kind, gapMs, { markerSearchKey });
+      const { resourceName, created } = await upsertContact(people, table, row, kind, gapMs, { markerSearchKey, markerPriorId });
       const compensateFreshCreate = async () => {
         if (!(created && resourceName)) return;
         try {
@@ -707,9 +722,23 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
         // verification would mint one replacement per sharer.
         repointedThisRun.set(repointFrom, resourceName);
         for (const t of ['customers', 'leads']) {
-          await db(t).where('google_contact_id', repointFrom)
-            .update({ google_contact_id: resourceName })
-            .catch((e) => logger.warn(`[contacts-sync] sharer repoint failed on ${t}: ${safeErr(e)}`));
+          try {
+            await db(t).where('google_contact_id', repointFrom)
+              .update({ google_contact_id: resourceName });
+          } catch (repointErr) {
+            // Durable fallback: requeue the stranded sharers instead —
+            // stale rows re-resolve to the replacement through the normal
+            // adoption probes. If even that fails, the run reports failed
+            // so job health surfaces it.
+            try {
+              await db(t).where('google_contact_id', repointFrom)
+                .update({ google_contact_synced_at: null });
+              logger.warn(`[contacts-sync] sharer repoint failed on ${t} — sharers requeued for adoption: ${safeErr(repointErr)}`);
+            } catch (requeueErr) {
+              counts.failed += 1;
+              logger.warn(`[contacts-sync] sharer repoint AND requeue failed on ${t} — run marked degraded: ${safeErr(requeueErr)}`);
+            }
+          }
         }
       }
       counts.synced += 1;
@@ -979,9 +1008,19 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
         if (created && priorContactId && priorContactId !== resourceName) {
           repointedThisRun.set(priorContactId, resourceName);
           for (const t of ['customers', 'leads']) {
-            await db(t).where('google_contact_id', priorContactId)
-              .update({ google_contact_id: resourceName })
-              .catch((e) => logger.warn(`[contacts-sync] sharer repoint failed on ${t}: ${safeErr(e)}`));
+            try {
+              await db(t).where('google_contact_id', priorContactId)
+                .update({ google_contact_id: resourceName });
+            } catch (repointErr) {
+              try {
+                await db(t).where('google_contact_id', priorContactId)
+                  .update({ google_contact_synced_at: null });
+                logger.warn(`[contacts-sync] sharer repoint failed on ${t} — sharers requeued for adoption: ${safeErr(repointErr)}`);
+              } catch (requeueErr) {
+                counts.failed += 1;
+                logger.warn(`[contacts-sync] sharer repoint AND requeue failed on ${t} — run marked degraded: ${safeErr(requeueErr)}`);
+              }
+            }
           }
         }
         counts.verified += 1;

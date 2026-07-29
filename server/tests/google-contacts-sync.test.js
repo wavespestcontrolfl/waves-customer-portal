@@ -751,6 +751,54 @@ describe('runContactsSync', () => {
     expect(state.updates).toEqual([]);
   });
 
+  test('a REPEATED ambiguous recovery create refreshes the marker (prior id preserved)', async () => {
+    const state = setupDb({
+      customers: [{ ...CUSTOMER, google_contact_id: 'pending_create_recovery:people/dead:jane%40customer.example', google_contact_synced_at: '2026-07-01T00:00:00Z' }],
+    });
+    // Past-grace conclusive-empty search → create attempts → ambiguous again.
+    mockPeopleApi.people.createContact.mockRejectedValueOnce(new Error('socket hang up'));
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(counts.failed).toBe(1);
+    const marker = state.updates.find((u) => String(u.patch.google_contact_id || '').startsWith('pending_create_recovery'));
+    // Attempt timestamp refreshed (grace restarts) AND the dead id survives.
+    expect(marker.patch.google_contact_id).toBe('pending_create_recovery:people/dead:jane%40customer.example');
+    expect(marker.patch.google_contact_synced_at).toBeInstanceOf(Date);
+  });
+
+  test('a 404 adopts a PRIOR replacement by tag instead of minting another', async () => {
+    setupDb({ customers: [{ ...CUSTOMER, google_contact_id: 'people/dead', google_contact_synced_at: '2026-07-01T00:00:00Z' }] });
+    const gone = new Error('not found');
+    gone.code = 404;
+    mockPeopleApi.people.get
+      .mockRejectedValueOnce(gone)
+      .mockResolvedValueOnce({ data: { etag: 'e1', metadata: { sources: [] }, memberships: [] } });
+    mockPeopleApi.people.searchContacts.mockImplementation(async ({ query }) => (
+      query === '' ? { data: {} } : { data: { results: [{ person: { resourceName: 'people/prior-replacement', clientData: [{ key: 'waves_row', value: 'customers:c-1' }] } }] } }
+    ));
+    mockPeopleApi.people.updateContact.mockResolvedValueOnce({ data: { resourceName: 'people/prior-replacement' } });
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(counts.synced).toBe(1);
+    expect(mockPeopleApi.people.createContact).not.toHaveBeenCalled();
+  });
+
+  test('a failed sharer repoint falls back to a durable requeue of the stranded rows', async () => {
+    const state = setupDb({
+      customers: [{ ...CUSTOMER, google_contact_id: 'people/dead', google_contact_synced_at: '2026-07-01T00:00:00Z' }],
+      // stamp OK, customers repoint fails, fallback requeue succeeds
+      updateResults: { customers: [1, new Error('db blip'), 1] },
+    });
+    const gone = new Error('not found');
+    gone.code = 404;
+    mockPeopleApi.people.get.mockRejectedValueOnce(gone);
+    mockPeopleApi.people.createContact.mockResolvedValueOnce({ data: { resourceName: 'people/reborn' } });
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(counts.synced).toBe(1);
+    // The stranded sharers were requeued (synced_at cleared) so adoption
+    // re-resolves them to the replacement.
+    const requeue = state.updates.filter((u) => u.table === 'customers').map((u) => u.patch);
+    expect(requeue).toContainEqual({ google_contact_synced_at: null });
+  });
+
   test('scope-missing aborts WITHOUT stamping — rows retry after the one-time re-consent', async () => {
     const state = setupDb({ customers: [{ ...CUSTOMER }] });
     const err = new Error('Request had insufficient authentication scopes.');
