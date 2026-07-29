@@ -249,7 +249,10 @@ const LAWN_PRICING_V2 = {
   // _SPOT_RESERVE (2026-07-17): material budgets now fund the protocol
   // spot-treatment reserves (owner-approved) — estimates stamped with the
   // prior _DENSE_35_FLOOR were priced on scheduled-only budgets.
-  pricingVersion: 'LAWN_PRICING_V2_SPOT_RESERVE',
+  // _LADDER_CAP (2026-07-29): Premium 12x bracket column retuned + runtime
+  // cap so 12x per-app never exceeds 9x per-app — estimates stamped
+  // _SPOT_RESERVE priced 12x on the pre-cap (higher, inverting) column.
+  pricingVersion: 'LAWN_PRICING_V2_LADDER_CAP',
   laborRateLoaded: 35,
   equipmentIncludedInLabor: true,
   equipmentReservePerVisit: 0,

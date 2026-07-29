@@ -388,7 +388,9 @@ const LAWN_PRICING_V2 = {
   // _SPOT_RESERVE (2026-07-17): material budgets now fund the protocol
   // spot-treatment reserves (owner-approved) — estimates stamped with the
   // prior _DENSE_35_FLOOR were priced on scheduled-only budgets.
-  pricingVersion: 'LAWN_PRICING_V2_SPOT_RESERVE',
+  // _LADDER_CAP (2026-07-29): Premium 12x column retuned + cap so 12x
+  // per-app never exceeds 9x per-app (server mirror).
+  pricingVersion: 'LAWN_PRICING_V2_LADDER_CAP',
   laborRateLoaded: 35,
   equipmentReservePerVisit: 0,
   adminAnnualDefault: 51,
@@ -1325,7 +1327,22 @@ function resolveLawnFreq(freq) {
   return LAWN_FREQS.includes(parsed) ? parsed : 9;
 }
 
+// Premium (12x) ladder cap — server mirror (2026-07-29): 12x per-app never
+// exceeds 9x per-app. Table endpoints are capped, but each column rounds its
+// interpolation independently, so the cap must also apply to the looked-up
+// result (matches lookupLawnBracket in server service-pricing).
 function lawnLookup(lp, sf, freqIdx) {
+  const result = lawnLookupUncapped(lp, sf, freqIdx);
+  if (freqIdx === 3 && result.monthly > 0) {
+    const enhanced = lawnLookupUncapped(lp, sf, 2);
+    if (enhanced.monthly > 0) {
+      result.monthly = Math.min(result.monthly, Math.floor(enhanced.monthly * 12 / 9));
+    }
+  }
+  return result;
+}
+
+function lawnLookupUncapped(lp, sf, freqIdx) {
   const pts = lp.pts;
   if (sf <= pts[0][0]) return { monthly: pts[0][freqIdx + 1], pricingBasis: 'TABLE_INTERPOLATION', pricingSource: 'MARKET_TABLE' };
   if (sf > LAWN_TABLE_MAX_SQFT) {
