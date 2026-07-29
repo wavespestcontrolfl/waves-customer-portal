@@ -413,7 +413,9 @@ describe('runContactsSync', () => {
     mockPeopleApi.people.createContact.mockRejectedValueOnce(new Error('socket hang up'));
     const counts = await runContactsSync({ gapMs: 0 });
     expect(counts.failed).toBe(1);
-    const marker = state.updates.find((u) => u.patch.google_contact_id === 'pending_create_recovery');
+    // The marker CARRIES the dead id so a successful recovery can repoint
+    // every sharer off it.
+    const marker = state.updates.find((u) => u.patch.google_contact_id === 'pending_create_recovery:people/dead');
     expect(marker).toBeDefined();
   });
 
@@ -502,6 +504,63 @@ describe('runContactsSync', () => {
     // LIVE identity over the retired row's PII/tag.
     expect(state.updates.find((u) => u.table === 'leads').patch).toEqual({ google_contact_synced_at: null });
     expect(state.updates.find((u) => u.table === 'customers').patch).toEqual({ google_contact_id: null, google_contact_synced_at: null });
+  });
+
+  test('a name-only lead mints its OWN contact — never adopts via an empty identity predicate', async () => {
+    setupDb({
+      leads: [{ id: 'l-n', first_name: 'Walkup', last_name: 'Prospect', email: null, phone: '  ', customer_id: null, google_contact_id: null, updated_at: '2026-07-28T11:00:00Z' }],
+      // A contact-holding lead exists — an unguarded empty predicate group
+      // would have matched it and overwritten the unrelated person.
+      firstResults: { leads: [{ id: 'l-other', google_contact_id: 'people/stranger' }] },
+    });
+    mockPeopleApi.people.createContact.mockResolvedValueOnce({ data: { resourceName: 'people/nameonly' } });
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(counts.synced).toBe(1);
+    expect(mockPeopleApi.people.updateContact).not.toHaveBeenCalled();
+    const body = mockPeopleApi.people.createContact.mock.calls[0][0].requestBody;
+    expect(body.names[0].givenName).toBe('Walkup');
+    expect(body.emailAddresses).toBeUndefined();
+  });
+
+  test('a failed warmup is INCONCLUSIVE — creation defers', async () => {
+    setupDb({ customers: [{ ...CUSTOMER }] });
+    mockPeopleApi.people.searchContacts.mockImplementation(async ({ query }) => {
+      if (query === '') throw new Error('warmup down');
+      return { data: { results: [] } };
+    });
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(counts.failed).toBe(1);
+    expect(mockPeopleApi.people.createContact).not.toHaveBeenCalled();
+  });
+
+  test('a restore racing the tombstone batch keeps its contact (claim conditioned on deleted_at)', async () => {
+    const state = setupDb({
+      customersSelects: [[], [{ id: 'c-back', google_contact_id: 'people/keep', google_contact_synced_at: '2026-07-01T00:00:00Z', first_name: 'B', last_name: '', email: 'b@x.example', phone: null, updated_at: '2026-07-01T00:00:00Z' }], []],
+      leadsSelects: [[], [], []],
+      // The conditional claim (whereNotNull deleted_at) matches nothing —
+      // the row was restored after selection.
+      updateResults: { customers: [0] },
+    });
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(counts.retired).toBe(0);
+    expect(mockPeopleApi.people.deleteContact).not.toHaveBeenCalled();
+  });
+
+  test('a failed verification rotates its watermark instead of pinning the slot', async () => {
+    const staleVerified = { ...CUSTOMER, updated_at: '2026-06-30T00:00:00Z', google_contact_id: 'people/drifted', google_contact_synced_at: '2026-07-01T00:00:00Z' };
+    const state = setupDb({
+      customersSelects: [[], [], [staleVerified]],
+      leadsSelects: [[], [], []],
+    });
+    const err = new Error('backend error');
+    err.code = 500;
+    mockPeopleApi.people.get.mockRejectedValueOnce(err);
+    mockPeopleApi.people.createContact.mockRejectedValueOnce(err);
+    const counts = await runContactsSync({ gapMs: 0, now: new Date('2026-07-28T12:00:00Z') });
+    expect(counts.failed).toBe(1);
+    // Watermark pushed to cutoff-minus-a-day: retries tomorrow, not every tick.
+    const rotate = state.updates.find((u) => u.table === 'customers' && u.patch.google_contact_synced_at instanceof Date);
+    expect(rotate.patch.google_contact_synced_at).toEqual(new Date('2026-07-22T12:00:00Z'));
   });
 
   test('scope-missing aborts WITHOUT stamping — rows retry after the one-time re-consent', async () => {

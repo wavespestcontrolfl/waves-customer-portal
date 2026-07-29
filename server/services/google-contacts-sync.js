@@ -53,6 +53,12 @@ const WRITE_GAP_MS = 800;
 const PENDING_CREATE = 'pending_create_recovery';
 const RECOVERY_GRACE_MS = 3600000;
 
+/** Marker may carry the prior (dead) resource id: 'pending_create_recovery:people/x'. */
+const isPendingMarker = (v) => typeof v === 'string' && v.startsWith(PENDING_CREATE);
+const pendingMarkerFor = (priorId) => (priorId ? `${PENDING_CREATE}:${priorId}` : PENDING_CREATE);
+const priorIdFromMarker = (v) => (isPendingMarker(v) && v.length > PENDING_CREATE.length + 1
+  ? v.slice(PENDING_CREATE.length + 1) : null);
+
 const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
 
 function isScopeError(err) {
@@ -189,13 +195,18 @@ async function contactInUseElsewhere(resourceName, exceptTable, exceptId) {
 async function findExistingContact(people, row, tag) {
   const email = String(row.email || '').trim().toLowerCase();
   const phone = String(row.phone || '').trim();
-  const query = email || phone;
+  // Name-only leads are searchable by name — a missing email/phone must
+  // not make recovery skip the orphan check entirely.
+  const name = `${String(row.first_name || '').trim()} ${String(row.last_name || '').trim()}`.trim();
+  const query = email || phone || name;
   if (!query) return null;
   try {
     // Documented People API behavior: searchContacts serves a lagging
-    // cache until an empty-query WARMUP primes it — skipping this makes
-    // an empty result meaningless for duplicate-recovery decisions.
-    await people.people.searchContacts({ query: '', pageSize: 1, readMask: 'names' }).catch(() => {});
+    // cache until an empty-query WARMUP primes it — an empty result from
+    // an UNWARMED cache is meaningless for duplicate-recovery decisions,
+    // so a failed warmup is itself inconclusive (propagates via the catch
+    // below).
+    await people.people.searchContacts({ query: '', pageSize: 1, readMask: 'names' });
     const res = await people.people.searchContacts({
       query,
       pageSize: 10,
@@ -291,7 +302,7 @@ async function upsertContact(people, table, row, kind, gapMs, { pendingRecovery 
           q.whereNull('google_contact_id');
           if (row.google_contact_id) q.orWhere('google_contact_id', row.google_contact_id);
         })
-        .update({ google_contact_id: PENDING_CREATE, google_contact_synced_at: new Date() })
+        .update({ google_contact_id: pendingMarkerFor(row.google_contact_id), google_contact_synced_at: new Date() })
         .catch(() => {});
     }
     throw createErr;
@@ -326,11 +337,15 @@ async function resolveLeadOwnership(row) {
       .first();
     if (customer) return { deferToCustomer: true, customerId: customer.id };
   }
+  // Name-only leads have NO safe identity key — an empty predicate group
+  // would match ANY contact-holding lead and adopt (then overwrite) an
+  // unrelated person's contact. They always mint their own.
+  if (!email && !phone) return {};
   const sibling = await db('leads')
     .whereNot('id', row.id)
     .whereNull('deleted_at')
     .whereNotNull('google_contact_id')
-    .whereNot('google_contact_id', PENDING_CREATE)
+    .whereNot('google_contact_id', 'like', `${PENDING_CREATE}%`)
     .where((q) => {
       if (email) q.orWhereRaw('LOWER(email) = ?', [email]);
       if (phone) q.orWhere('phone', phone);
@@ -367,7 +382,7 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
     this.whereNull('google_contact_synced_at')
       .orWhereRaw('updated_at > google_contact_synced_at')
       // Ambiguous-create rows re-enter every pass until recovery resolves.
-      .orWhere('google_contact_id', PENDING_CREATE);
+      .orWhere('google_contact_id', 'like', `${PENDING_CREATE}%`);
   };
   // Newest-first + a reserved lead lane: a fresh inquiry lands in Contacts
   // on the next run even while the historical customer backfill drains
@@ -397,10 +412,15 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
       // Ambiguous-create marker: not a real resource name. Cleared here so
       // NOTHING below (transfer, delete, update) treats it as one; the
       // create path gets the recovery context instead.
-      const pendingRecovery = row.google_contact_id === PENDING_CREATE;
+      const pendingRecovery = isPendingMarker(row.google_contact_id);
       const recoveryAttemptAt = pendingRecovery ? row.google_contact_synced_at : null;
+      const markerPriorId = pendingRecovery ? priorIdFromMarker(row.google_contact_id) : null;
       if (pendingRecovery) row.google_contact_id = null;
-      const hasContactInfo = !!(String(row.email || '').trim() || String(row.phone || '').trim());
+      // Name-only LEADS still sync (the repo permits leads with only a
+      // contact name; the every-lead contract includes them). Customers
+      // always carry a phone by schema.
+      const hasContactInfo = !!(String(row.email || '').trim() || String(row.phone || '').trim()
+        || (kind === 'lead' && `${String(row.first_name || '').trim()}${String(row.last_name || '').trim()}`));
       if (!hasContactInfo) {
         // Nothing publishable. A contact minted earlier must not keep
         // serving data the source row no longer contains — but a SHARED
@@ -466,7 +486,7 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
           .where('account_id', row.account_id)
           .whereNull('deleted_at')
           .whereNotNull('google_contact_id')
-          .whereNot('google_contact_id', PENDING_CREATE)
+          .whereNot('google_contact_id', 'like', `${PENDING_CREATE}%`)
           .first();
         if (accountSibling?.google_contact_id) row.google_contact_id = accountSibling.google_contact_id;
       }
@@ -480,7 +500,7 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
           const leadOwner = await db('leads')
             .whereNull('deleted_at')
             .whereNotNull('google_contact_id')
-            .whereNot('google_contact_id', PENDING_CREATE)
+            .whereNot('google_contact_id', 'like', `${PENDING_CREATE}%`)
             .whereRaw('LOWER(email) = ?', [customerEmail])
             .first();
           if (leadOwner?.google_contact_id) row.google_contact_id = leadOwner.google_contact_id;
@@ -488,6 +508,24 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
       }
       const priorContactId = row.google_contact_id;
       const { resourceName, created } = await upsertContact(people, table, row, kind, gapMs, { pendingRecovery, attemptAt: recoveryAttemptAt });
+      const compensateFreshCreate = async () => {
+        if (!(created && resourceName)) return;
+        try {
+          await deleteContact(people, resourceName);
+        } catch (delErr) {
+          // The compensation itself is ambiguous — the contact may exist
+          // with NO pointer, and next tick's lagging search could miss it
+          // and mint a duplicate. Mark for the same grace-window recovery
+          // as an ambiguous create.
+          await db(table).where({ id: row.id })
+            .where((q) => {
+              q.whereNull('google_contact_id');
+              if (priorContactId) q.orWhere('google_contact_id', priorContactId);
+            })
+            .update({ google_contact_id: pendingMarkerFor(priorContactId), google_contact_synced_at: new Date() })
+            .catch(() => {});
+        }
+      };
       let stamped = 0;
       try {
         stamped = await stampIfUnchanged(table, row, { google_contact_id: resourceName });
@@ -495,9 +533,7 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
         // The row didn't record the contact — a GENUINELY fresh create
         // would leak a duplicate on retry; roll only that back (adopted or
         // updated contacts predate this pass and are never compensated).
-        if (created && resourceName) {
-          await deleteContact(people, resourceName).catch(() => {});
-        }
+        await compensateFreshCreate();
         throw stampErr;
       }
       if (!stamped) {
@@ -505,19 +541,19 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
         // an unrecorded fresh create would duplicate on the retry (search
         // indexing lags), so remove it and let the next run recreate from
         // the fresh row.
-        if (created && resourceName) {
-          await deleteContact(people, resourceName).catch(() => {});
-          await sleep(gapMs);
-        }
+        await compensateFreshCreate();
+        await sleep(gapMs);
         logger.info(`[contacts-sync] stamp vetoed by a concurrent edit (${table} ${row.id}) — re-syncing next run`);
         continue;
       }
-      if (created && priorContactId && priorContactId !== resourceName) {
-        // 404-recreate of a possibly SHARED contact: repoint every live row
-        // still holding the dead resource name, or verification would mint
-        // one replacement per sharer and break the dedup model.
+      const repointFrom = priorContactId || markerPriorId;
+      if ((created || pendingRecovery) && repointFrom && repointFrom !== resourceName) {
+        // 404-recreate (or a RECOVERED replacement create — the marker
+        // preserved the dead id) of a possibly SHARED contact: repoint
+        // every live row still holding the dead resource name, or
+        // verification would mint one replacement per sharer.
         for (const t of ['customers', 'leads']) {
-          await db(t).where('google_contact_id', priorContactId)
+          await db(t).where('google_contact_id', repointFrom)
             .update({ google_contact_id: resourceName })
             .catch((e) => logger.warn(`[contacts-sync] sharer repoint failed on ${t}: ${safeErr(e)}`));
         }
@@ -542,7 +578,10 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
         // the row (watermark stamped current) — any contact-field edit
         // re-queues it via the touch triggers, and rows holding a contact
         // retry through the weekly verification lane.
+        // Same unchanged-row guard as the stamps: a correction racing the
+        // rejected request must re-queue, not get parked over.
         await db(table).where({ id: row.id })
+          .whereRaw("date_trunc('milliseconds', updated_at) <= ?", [row.updated_at])
           .update({ google_contact_synced_at: new Date() })
           .catch(() => {});
         logger.warn(`[contacts-sync] ${table} ${row.id} parked after deterministic rejection (${safeErr(err)}) — an edit re-queues it`);
@@ -561,6 +600,9 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
       tombstones = await db(table)
         .whereNotNull('deleted_at')
         .whereNotNull('google_contact_id')
+        // Fair rotation: failed retirements bump updated_at to the back of
+        // this queue instead of monopolizing every slot forever.
+        .orderBy('updated_at', 'asc')
         .limit(TOMBSTONE_SLOTS)
         .select('id', 'google_contact_id', 'google_contact_synced_at', 'first_name', 'last_name', 'email', 'phone');
     } catch (e) {
@@ -568,7 +610,7 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
     }
     for (const row of tombstones) {
       try {
-        if (row.google_contact_id === PENDING_CREATE) {
+        if (isPendingMarker(row.google_contact_id)) {
           // Resolve the ambiguous create BEFORE dropping the only marker —
           // a create that actually committed would otherwise orphan the
           // deleted row's PII in Google forever. Inside the grace window
@@ -590,8 +632,24 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
           counts.retired += 1;
           continue;
         }
+        // CLAIM the retirement first, conditioned on the row STILL being
+        // deleted — an admin restore racing this batch keeps its contact
+        // (the stale snapshot must not delete it out from under them). The
+        // cleared watermark makes a restored row stale so it re-mints.
+        const claimed = await db(table).where({ id: row.id })
+          .whereNotNull('deleted_at')
+          .update({ google_contact_id: null, google_contact_synced_at: null });
+        if (!claimed) continue; // restored mid-batch — leave the contact alone
         if (!(await contactInUseElsewhere(row.google_contact_id, table, row.id))) {
-          await deleteContact(people, row.google_contact_id);
+          try {
+            await deleteContact(people, row.google_contact_id);
+          } catch (delErr) {
+            // Put the pointer back so a later pass retries the deletion.
+            await db(table).where({ id: row.id })
+              .update({ google_contact_id: row.google_contact_id })
+              .catch(() => {});
+            throw delErr;
+          }
           await sleep(gapMs);
         } else {
           // SHARED contact: released, not deleted — but it may still carry
@@ -609,14 +667,13 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
             }
           }
         }
-        // The watermark clears WITH the pointer — a later restore
-        // (deleted_at flip only, not a contact-field change) must find the
-        // row stale so the restored customer gets a contact again.
-        await db(table).where({ id: row.id }).update({ google_contact_id: null, google_contact_synced_at: null });
         counts.retired += 1;
       } catch (err) {
         if (isScopeError(err)) { counts.blocked = 'contacts_scope_missing'; return counts; }
         counts.failed += 1;
+        // Fair rotation — the ordered query re-selects by updated_at, so
+        // bumping it sends this failure to the back of the line.
+        await db(table).where({ id: row.id }).update({ updated_at: new Date() }).catch(() => {});
         logger.warn(`[contacts-sync] tombstone retire failed for ${table} ${row.id}: ${safeErr(err)}`);
       }
     }
@@ -636,7 +693,7 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
     const vc = await db('customers')
       .whereNull('deleted_at')
       .whereNotNull('google_contact_id')
-      .whereNot('google_contact_id', PENDING_CREATE)
+      .whereNot('google_contact_id', 'like', `${PENDING_CREATE}%`)
       // Source-CURRENT rows only — a stale row (e.g. a converted lead
       // waiting behind the main-pass cap) must go through the main lane's
       // ownership/cleanup, not a direct re-push.
@@ -650,7 +707,7 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
       const vl = await db('leads')
         .whereNull('deleted_at')
         .whereNotNull('google_contact_id')
-        .whereNot('google_contact_id', PENDING_CREATE)
+        .whereNot('google_contact_id', 'like', `${PENDING_CREATE}%`)
         .whereRaw('updated_at <= google_contact_synced_at')
         .where('google_contact_synced_at', '<', verifyCutoff)
         .orderBy('google_contact_synced_at', 'asc')
@@ -711,6 +768,13 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
     } catch (err) {
       if (isScopeError(err)) { counts.blocked = 'contacts_scope_missing'; return counts; }
       counts.failed += 1;
+      // Rotate instead of pinning the oldest slots every tick: push the
+      // watermark to cutoff-minus-one-day (still unverified, retries
+      // tomorrow) under the same unchanged-row guard.
+      await db(table).where({ id: row.id })
+        .whereRaw("date_trunc('milliseconds', updated_at) <= ?", [row.updated_at])
+        .update({ google_contact_synced_at: new Date(now.getTime() - (VERIFY_AFTER_DAYS - 1) * 86400000) })
+        .catch(() => {});
       logger.warn(`[contacts-sync] verification failed for ${table} ${row.id}: ${safeErr(err)}`);
     }
   }
