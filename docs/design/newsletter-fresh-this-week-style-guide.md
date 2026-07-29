@@ -54,17 +54,21 @@ Everything kept through July is load-bearing. Everything dropped
      venue, 🎟️ **FREE** celebrated loudly (paid: link only — never
      invent prices).
    - Rotating lead-in ("Here's the scoop:" / "Here's the deal:" /
-     "Why it's a vibe:" …) + 3–5 bullets, each opening with its own
-     thematic emoji.
+     "Why it's a vibe:" …) + 3–5 bullets. The Beehiiv archive opened
+     each bullet with a thematic emoji; the generator does NOT — plain
+     "•" bullets, no emoji (owner decision 2026-06-12), and the
+     renderer strips any leading emoji the model emits anyway.
    - Optional 👉 pro-tip line(s).
    - **Bold one-line kicker**: "This is **Bradenton's Fourth of July
      mic drop.**"
 6. **Outro** — "That's the scoop, crew" + callback triad referencing the
    actual lineup + ✔️ checklist (practical + absurd: "Hydrate like it's
    your job" / "Don't underestimate the power of a funnel cake").
-7. **Sign-off** — "Catch you out there!" / "**— The Waves Team**"
-   (owner decision 2026-06-11: Team form, not "Waves crew"; shortened
-   from "— The Waves Pest Control Team" 2026-07-17).
+7. **Sign-off** — the assembler renders a bold "**Catch you out there
+   this week.**" line, then an unbolded "— The Waves Team 🌊" (the 🌊 is
+   renderer-appended — don't type it in Compose). Owner decisions:
+   Team form, not "Waves crew" (2026-06-11); shortened from "— The
+   Waves Pest Control Team" (2026-07-17).
 8. **P.S. two-branch forward joke** — "If you loved this, forward it to
    a friend who [hyper-specific persona]. If you didn't… [reverse-blame
    punchline] 🎪" — referencing this issue's events.
@@ -181,14 +185,16 @@ unused). The Beehiiv formula in this guide is canonical again, with two
 additions that survived from the overhaul:
 
 - **Real event thumbnail per card, in ADDITION to the reaction GIF** —
-  rendered after the hype paragraph. The GIF stays the joke; the
-  thumbnail is the event's own art (feed-supplied, or filled by the
-  daily og:image backfill of imageless events' pages added in #3036).
-  Still images only — GIF-shaped urls are rejected. Standards clients
-  cap height at 220px and bound width to the card (`max-width:100%`),
-  with no upscaling of small art; **desktop Outlook gets no thumbnail
-  by design** (Word can't aspect-fit a bounded image box) and keeps
-  the GIF + full card content.
+  rendered after the hype paragraph **when the event has art**; an
+  imageless event simply renders no thumbnail (never a placeholder).
+  The GIF stays the joke; the thumbnail is the event's own art —
+  feed-supplied, or filled by the daily og:image backfill of imageless
+  events' pages (#3036). Still images only — GIF-shaped urls are
+  rejected. Standards clients cap height at 220px and bound width to
+  the card (`max-width:100%`), with no upscaling of small art;
+  **desktop Outlook gets no thumbnail by design** (Word can't
+  aspect-fit a bounded image box) and keeps the GIF + full card
+  content.
 - **Ticket links are click-tracked** — at draft time ticket links
   render as `{{evclick:<eventId>}}` tokens; the live sender substitutes
   a per-recipient tracking redirect, while proof/preview/archive
