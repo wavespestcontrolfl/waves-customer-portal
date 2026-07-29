@@ -2142,13 +2142,15 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // going forward, but stored rows are permanent). When a customer concern is
   // on record, soften the absolute claim so the report never tells a customer
   // "all clear" right after they flagged something (John Kelleher audit
-  // 2026-07-29).
-  {
+  // 2026-07-29). PEST ONLY — other lines have their own no-activity copy, and
+  // the softened sentence must not claim treatment or a scheduled follow-up
+  // the record doesn't evidence (codex P2 #3043 ×2).
+  if (serviceLine === 'pest') {
     const renderConcern = structuredCustomerConcern(structured);
     if (renderConcern) {
       for (const finding of findings) {
         if (finding.category === 'no_activity') {
-          finding.detail = 'No confirmed pest activity was found beyond what you reported — we treated preventively and will follow up on what you flagged at the next visit.';
+          finding.detail = 'No pest activity was confirmed beyond what you reported — what you flagged is noted on this visit’s record.';
         }
       }
     }

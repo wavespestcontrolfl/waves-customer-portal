@@ -350,7 +350,7 @@ async function buildServiceReportV1ResponseData(service, token, { mode = 'live',
   // Summary (narrative slot), the What-we-found tiles, and the activity
   // gauge, all of which the dashboard would otherwise suppress. The same
   // classifier drives the PDF cache suffix (pest-report-v2.js).
-  const { buildPestReportV2, isCockroachTypedReportType } = require('../services/service-report/pest-report-v2');
+  const { buildPestReportV2, buildCustomerConcernCard, isCockroachTypedReportType } = require('../services/service-report/pest-report-v2');
   if (
     process.env.PEST_REPORT_V2 === 'true'
     && data.serviceLine === 'pest'
@@ -384,6 +384,22 @@ async function buildServiceReportV1ResponseData(service, token, { mode = 'live',
       });
       if (pestReportV2) data.pestReportV2 = pestReportV2;
     } catch { /* best-effort — never block the report */ }
+  }
+
+  // Cockroach-family typed reports skip the V2 dashboard entirely, but the
+  // homeowner's reported concern deserves the same acknowledgment card there —
+  // the client renders data.customerConcernCard standalone without re-enabling
+  // the perimeter dashboard (codex P2 #3043).
+  if (
+    process.env.PEST_REPORT_V2 === 'true'
+    && data.serviceLine === 'pest'
+    && !data.pestReportV2
+    && data.customerConcern
+  ) {
+    try {
+      const card = buildCustomerConcernCard(data.customerConcern);
+      if (card) data.customerConcernCard = card;
+    } catch { /* best-effort */ }
   }
 
   // Mosquito Report V2 — yard-usability dashboard for RECURRING mosquito visits

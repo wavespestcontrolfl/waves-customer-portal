@@ -4754,7 +4754,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             observations: reportObservations,
             recommendations: reportRecommendations,
             concernText,
-            activityScore,
+            // Recurring pest closeouts carry the rating as clientPestRating;
+            // activityScore only arrives on typed completions (which are
+            // already excluded above) — without the client rating the guard
+            // never fired on ordinary visits (codex P1 #3043).
+            activityScore: activityScore ?? clientPestRating,
           })
         ) {
           await trx('service_findings').insert({

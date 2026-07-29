@@ -7,6 +7,7 @@ import LawnReportV2Section from '../components/report/lawnV2/LawnReportV2Section
 import { StationMapCard } from '../components/StationMapCard';
 import { LawnVisitTimeline, PrintContext as LawnPrintContext } from '../components/report/lawnV2/LawnReportV2';
 import PestReportV2Section from '../components/report/pestV2/PestReportV2Section';
+import { PestCustomerConcern } from '../components/report/pestV2/PestReportV2';
 import TracedTreatmentZoneMap from '../components/report/TracedTreatmentZoneMap';
 import MosquitoReportV2Section from '../components/report/mosquitoV2/MosquitoReportV2Section';
 import TreeShrubReportV2Section from '../components/report/treeShrubV2/TreeShrubReportV2Section';
@@ -8105,6 +8106,12 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             ? cleanVisitSummary(data.summary)
             : null}
         />
+
+        {/* Standalone concern acknowledgment for pest reports WITHOUT the V2
+            dashboard (cockroach-family typed reports skip it by design) — the
+            dashboard path renders the same card inside PestReportV2Section
+            (codex P2 #3043). */}
+        {data.customerConcernCard ? <PestCustomerConcern concern={data.customerConcernCard} /> : null}
 
         <RecapVideoCard recap={data.recap} token={token} />
 
