@@ -189,6 +189,11 @@ describe('admin usage: POST /track', () => {
       res = await post({ pageKey: 'customers', path: '/admin/customers/duplicates' });
       expect(res.status).toBe(204);
       expect(chain.calls.insert.path).toBe('/admin/customers/duplicates');
+      // The underscore-prefixed design-system family canonicalizes to a
+      // trackable slug (old clients may still send the raw path).
+      res = await post({ pageKey: 'design-system', path: '/admin/_design-system/flags' });
+      expect(res.status).toBe(204);
+      expect(chain.calls.insert.path).toBe('/admin/design-system/flags');
     });
   });
 

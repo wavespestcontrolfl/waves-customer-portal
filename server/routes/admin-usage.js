@@ -68,6 +68,10 @@ function stripIdSegments(path) {
   if (segments[0] !== 'admin') return null;
   const rest = segments.slice(1).map((seg, i, arr) => {
     if (seg === ':id') return seg; // already normalized by the client
+    // The one real underscore-prefixed route family (/admin/_design-system,
+    // incl. the mobile-linked flags page) canonicalizes to a trackable slug
+    // instead of reading as an identifier. Mirrors the client normalizer.
+    if (seg === '_design-system') return 'design-system';
     if (isIdSegment(seg)) return ':id';
     // Malformed segments ('leads?x=1') stay AS-IS so PATH_RE still rejects
     // the beacon — collapsing them to ':id' would launder junk into a

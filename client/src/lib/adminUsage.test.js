@@ -62,7 +62,17 @@ describe('normalizeAdminPath', () => {
   it('returns null off /admin and for non-slug first segments', () => {
     expect(normalizeAdminPath('/tech/protocols')).toBeNull();
     expect(normalizeAdminPath('/administrator')).toBeNull();
-    expect(normalizeAdminPath('/admin/_design-system')).toBeNull();
+  });
+
+  it('canonicalizes the underscore design-system routes to a trackable slug', () => {
+    expect(normalizeAdminPath('/admin/_design-system')).toEqual({
+      pageKey: 'design-system',
+      path: '/admin/design-system',
+    });
+    expect(normalizeAdminPath('/admin/_design-system/flags')).toEqual({
+      pageKey: 'design-system',
+      path: '/admin/design-system/flags',
+    });
   });
 });
 
@@ -237,6 +247,37 @@ describe('trackAdminPageView', () => {
     window.dispatchEvent(new Event('pagehide'));
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(lastBody().pageKey).toBe('invoices');
+  });
+
+  it('drops a queued beacon whose token changed before flush (cross-tab switch)', () => {
+    trackAdminPageView({ pathname: '/admin/invoices', search: '' });
+    // Another tab switches accounts — no track() call happens here before
+    // the settle timer fires. The queued view must not send under the new
+    // token.
+    localStorage.setItem('waves_admin_token', 'tok-b');
+    settle();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("an authoritative page beacon is not overridden by the layout's raw URL beacon", () => {
+    // /admin/settings?tab=typo: the page renders its validated 'general'
+    // fallback and records it authoritatively; the layout's raw 'typo'
+    // beacon for the same page must not replace it.
+    markUsageSource('sidebar');
+    trackAdminPageView({
+      pathname: '/admin/settings',
+      search: '?tab=general',
+      authoritative: true,
+    });
+    trackAdminPageView({ pathname: '/admin/settings', search: '?tab=typo' });
+    settle();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(lastBody()).toEqual({
+      pageKey: 'settings',
+      path: '/admin/settings',
+      tab: 'general',
+      source: 'sidebar',
+    });
   });
 
   it('dedupes identical consecutive views (StrictMode double-fire)', () => {

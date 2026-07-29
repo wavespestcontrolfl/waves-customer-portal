@@ -74,10 +74,17 @@ const ROUTE_WORD_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const ENTITY_ROUTES = new Set(['customers', 'estimates', 'invoices', 'leads', 'calls', 'technicians', 'requests']);
 const ENTITY_STATIC_SUBPAGES = new Set(['new', 'import', 'map', 'directory', 'kanban', 'search', 'settings', 'duplicates']);
 
+// The one real underscore-prefixed route family: /admin/_design-system(/flags)
+// hosts the design reference and the "Early feature access" flags page linked
+// from mobile Settings. Canonicalize it to a trackable slug instead of letting
+// the underscore read as an identifier (which dropped its usage entirely).
+const UNDERSCORE_ROUTE_ALIASES = { '_design-system': 'design-system' };
+
 export function normalizeAdminPath(pathname) {
   if (typeof pathname !== 'string' || !/^\/admin(\/|$)/.test(pathname)) return null;
   const segments = pathname.split('/').filter(Boolean).slice(1); // drop 'admin'
   const normalized = segments.map((seg, i, arr) => {
+    if (UNDERSCORE_ROUTE_ALIASES[seg]) return UNDERSCORE_ROUTE_ALIASES[seg];
     if (UUID_RE.test(seg) || NUMERIC_RE.test(seg) || OPAQUE_RE.test(seg)) return ':id';
     // Malformed segments stay as-is (the length/shape guards downstream
     // drop the beacon) — mirroring the server backstop.
@@ -117,7 +124,7 @@ function flushPendingBeacon() {
     pendingTimer = null;
   }
   if (!pendingBeacon) return;
-  const { key, body } = pendingBeacon;
+  const { key, body, token: queuedToken } = pendingBeacon;
   pendingBeacon = null;
 
   let token;
@@ -126,7 +133,11 @@ function flushPendingBeacon() {
   } catch {
     return;
   }
-  if (!token) return;
+  // The beacon is bound to the identity that queued it. A login switch in
+  // ANOTHER tab can change the token between queue and flush with no
+  // track() call in between — never send one identity's view under
+  // another's token; drop it instead.
+  if (!token || token !== queuedToken) return;
 
   lastLogged = { key, ts: Date.now() };
 
@@ -152,8 +163,14 @@ if (typeof window !== 'undefined') {
 /** Record one admin page view. Safe to call on every route change — dedupes
  *  identical consecutive views, collapses instant redirect chains, no-ops
  *  without an auth token, and never throws or redirects (a failed beacon
- *  must not disturb the page). */
-export function trackAdminPageView({ pathname, search } = {}) {
+ *  must not disturb the page).
+ *
+ *  `authoritative: true` marks a beacon emitted by the PAGE about what it
+ *  actually rendered (e.g. SettingsPage's validated leaf). Within the
+ *  settle window it wins over the layout's raw-URL beacon for the same
+ *  page — so an invalid deep link (?tab=typo) records the rendered
+ *  fallback, never a tab the user did not see. */
+export function trackAdminPageView({ pathname, search, authoritative = false } = {}) {
   const norm = normalizeAdminPath(pathname);
   if (!norm) return;
 
@@ -183,11 +200,24 @@ export function trackAdminPageView({ pathname, search } = {}) {
   const key = `${norm.pageKey}|${norm.path}|${tab || ''}`;
   const now = Date.now();
 
-  // A tab-less view never downgrades a still-settling tabbed view of the
-  // SAME page: on a query-less Settings open, the page's mount effect
-  // records the rendered leaf BEFORE the layout's route beacon fires
-  // (child effects run first), and the coarse layout beacon must refine
-  // into that row, not replace it. Codex #2961 r4.
+  // A page-emitted (authoritative) beacon describes what actually RENDERED;
+  // the layout's raw-URL beacon for the same page never overrides it inside
+  // the settle window (?tab=typo must not beat the rendered fallback).
+  if (
+    pendingBeacon
+    && pendingBeacon.authoritative
+    && !authoritative
+    && pendingBeacon.body.pageKey === norm.pageKey
+    && pendingBeacon.body.path === norm.path
+  ) {
+    return;
+  }
+
+  // Likewise a tab-less view never downgrades a still-settling tabbed view
+  // of the SAME page: on a query-less Settings open, the page's mount
+  // effect records the rendered leaf BEFORE the layout's route beacon
+  // fires (child effects run first), and the coarse layout beacon must
+  // refine into that row, not replace it. Codex #2961 r4.
   if (
     pendingBeacon
     && !tab
@@ -231,6 +261,8 @@ export function trackAdminPageView({ pathname, search } = {}) {
   if (pendingTimer) clearTimeout(pendingTimer);
   pendingBeacon = {
     key,
+    authoritative,
+    token, // flush drops the beacon if the signed-in token changed meanwhile
     body: {
       pageKey: norm.pageKey,
       path: norm.path,

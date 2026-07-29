@@ -195,7 +195,11 @@ export default function SettingsPage() {
   // overlap (same key → dropped). Codex #2961 r2.
   const selectTab = (leafKey) => {
     setTab(leafKey);
-    trackAdminPageView({ pathname: "/admin/settings", search: `?tab=${leafKey}` });
+    trackAdminPageView({
+      pathname: "/admin/settings",
+      search: `?tab=${leafKey}`,
+      authoritative: true,
+    });
   };
 
   // A query-less desktop open renders a real leaf (default 'general') that
@@ -207,7 +211,14 @@ export default function SettingsPage() {
   // Mount-only by design (see the exhaustive-deps note above). Codex #2961 r4.
   useEffect(() => {
     if (isMobile && !searchParams.get("tab")) return;
-    trackAdminPageView({ pathname: "/admin/settings", search: `?tab=${initialTab}` });
+    // authoritative: this is the leaf that actually RENDERED (VALID_TABS
+    // fallback applied) — the layout's raw ?tab= beacon must not override
+    // it with a typo'd value the user never saw.
+    trackAdminPageView({
+      pathname: "/admin/settings",
+      search: `?tab=${initialTab}`,
+      authoritative: true,
+    });
   }, []);
 
   // Mobile section links change ?tab= on the already-mounted page (the mobile

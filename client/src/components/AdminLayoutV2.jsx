@@ -448,7 +448,13 @@ export default function AdminLayoutV2() {
                     aria-current={isActive ? "page" : undefined}
                     onClick={(e) => {
                       if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
-                      markUsageSource("sidebar");
+                      // A true no-op re-tap (already exactly at this URL, no
+                      // query to strip) triggers no route change, so no
+                      // beacon consumes the mark — don't leave a stale one
+                      // for the next unmarked navigation to inherit.
+                      if (!(location.pathname === path && !location.search)) {
+                        markUsageSource("sidebar");
+                      }
                       if (location.pathname === path || location.pathname.startsWith(path + "/")) {
                         e.preventDefault();
                         navigate(path);
@@ -636,7 +642,11 @@ export default function AdminLayoutV2() {
                   to={path}
                   onClick={(e) => {
                     if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
-                    markUsageSource("tabbar");
+                    // Same stale-mark guard as the sidebar: a no-op re-tap
+                    // fires no route change and must not leave a mark.
+                    if (!(location.pathname === path && !location.search)) {
+                      markUsageSource("tabbar");
+                    }
                     if (location.pathname === path || location.pathname.startsWith(path + "/")) {
                       e.preventDefault();
                       navigate(path);
