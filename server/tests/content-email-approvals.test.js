@@ -347,9 +347,27 @@ describe('round-5 hardening (Codex r5)', () => {
     expect(updates.some((u) => u.status === 'failed')).toBe(false);
   });
 
-  test('approval-token subjects are control messages for email-sync', () => {
-    expect(approvals.isApprovalControlMessage({ subject: 'Re: [EA-1a2b3c4d] Approve? Post' })).toBe(true);
-    expect(approvals.isApprovalControlMessage({ subject: 'Quarterly service question' })).toBe(false);
+  test('approval-token subjects are control messages ONLY when the token is live (Codex r8)', async () => {
+    const db = require('../models/db');
+    const mkDb = (row) => db.mockImplementation(() => ({
+      whereRaw: jest.fn().mockReturnValue({
+        whereIn: jest.fn().mockReturnValue({ first: jest.fn().mockResolvedValue(row) }),
+      }),
+    }));
+    mkDb({ id: 'x' }); // live token
+    await expect(approvals.isApprovalControlMessage({ subject: 'Re: [EA-1a2b3c4d] Approve? Post' })).resolves.toBe(true);
+    mkDb(null); // token-shaped but unknown — a blocked sender earns no bypass
+    await expect(approvals.isApprovalControlMessage({ subject: 'Re: [EA-deadbeef] spam' })).resolves.toBe(false);
+    await expect(approvals.isApprovalControlMessage({ subject: 'Quarterly service question' })).resolves.toBe(false);
+  });
+
+  test('an HTML-only multipart/alternative reply resolves its direct text/html leaf (Codex r8)', () => {
+    const raw = [
+      'Content-Type: multipart/alternative; boundary="b"', '',
+      '--b', 'Content-Type: text/html; charset=UTF-8', '',
+      '<div>not approved</div><blockquote>approved — or — not approved</blockquote>', '--b--',
+    ].join('\r\n');
+    expect(parseDecision(extractReplyText(raw))).toBe('rejected');
   });
 
   test('metadata truncation marks the whole preview truncated', () => {
@@ -418,6 +436,34 @@ describe('round-5 hardening (Codex r5)', () => {
     const reset = updates.find((u) => u.email_sent_at === null && u.token);
     expect(reset).toBeTruthy(); // fresh token + unsent → re-emailed by the poller
     expect(reset.token).not.toBe('EA-deadbeef');
+  });
+
+  test('a resend that rebinds a CHANGED draft rotates the token — a delivered-but-unconfirmed old email dies with it (Codex r8 P1)', async () => {
+    const db = require('../models/db');
+    const email = require('../services/email');
+    email.send = jest.fn().mockResolvedValue({ ok: true });
+    const gates = require('../config/feature-gates');
+    const gateSpy = jest.spyOn(gates, 'isEnabled').mockReturnValue(true);
+    const updates = [];
+    const row = { id: 'x', token: 'EA-oldtoken1', run_id: 'r', opportunity_id: 'o', kind: 'named_competitor_review', email_sent_at: null, email_sending_at: null, draft_sha: 'sha-of-DELIVERED-draft-A' };
+    db.mockImplementation((table) => ({
+      where: jest.fn().mockReturnValue({
+        first: jest.fn().mockResolvedValue(table === 'content_email_approvals' ? row : null),
+        whereNull: jest.fn().mockReturnValue({
+          where: jest.fn().mockReturnValue({ update: jest.fn().mockImplementation((p) => { updates.push(p); return Promise.resolve(1); }) }),
+        }),
+        update: jest.fn().mockImplementation((p) => { updates.push(p); return Promise.resolve(1); }),
+      }),
+      insert: jest.fn().mockReturnValue({ onConflict: jest.fn().mockReturnValue({ ignore: jest.fn().mockReturnValue({ returning: jest.fn().mockResolvedValue([row]) }) }) }),
+    }));
+    try {
+      await approvals.sendApprovalRequest({ id: 'r', skip_reason: 'named_competitor_review', opportunity_id: 'o', draft_payload: JSON.stringify({ title: 'T', body: 'EDITED draft B' }) });
+      const rebind = updates.find((u) => u.draft_sha && u.token);
+      expect(rebind).toBeTruthy();
+      expect(rebind.token).not.toBe('EA-oldtoken1');
+    } finally {
+      gateSpy.mockRestore();
+    }
   });
 
   test('draftPreview computes a stable content sha over the FULL payload', () => {

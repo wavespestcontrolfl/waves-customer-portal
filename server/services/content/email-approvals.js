@@ -191,6 +191,16 @@ function extractReplyText(source, depth = 0) {
         if (nested) return nested;
       }
     }
+    // Pass 3: a DIRECT text/html leaf (HTML-only multipart/alternative, or
+    // an HTML reply with attachments in multipart/mixed) — converted with
+    // quote-boundary structure preserved (Codex r8).
+    for (const part of parts) {
+      const split = splitHeadersBody(part);
+      if (!split || isAttachment(split.headers)) continue;
+      if (/content-type:\s*text\/html/i.test(split.headers)) {
+        return htmlToText(decodePartBody(split.headers, split.body));
+      }
+    }
   }
   const split = splitHeadersBody(raw);
   if (!split) return raw;
@@ -278,9 +288,24 @@ function verifySenderAuthentication(rawSource, senderAddress) {
  * Recognizer for email-sync: an approval-token subject is a CONTROL
  * message — it must never reach the classifier or its auto-actions (the
  * IMAP poller owns decisions). Same posture as newsletter-proof traffic.
+ * The token must belong to a LIVE approval (awaiting/executing): a blocked
+ * sender crafting a token-shaped subject must not earn a blocklist bypass
+ * off the regex alone (Codex r8).
  */
-function isApprovalControlMessage(email = {}) {
-  return TOKEN_RE.test(String(email.subject || ''));
+async function isApprovalControlMessage(email = {}) {
+  const m = String(email.subject || '').match(TOKEN_RE);
+  if (!m) return false;
+  try {
+    const row = await db('content_email_approvals')
+      .whereRaw('LOWER(token) = ?', [m[0].toLowerCase()])
+      .whereIn('status', ['awaiting_reply', 'executing'])
+      .first();
+    return !!row;
+  } catch {
+    // Table unavailable (fresh migration window): err on the safe side of
+    // NOT granting bypasses.
+    return false;
+  }
 }
 
 function draftPreview(run) {
@@ -357,8 +382,20 @@ async function sendApprovalRequest(run, opportunity = null) {
 
   const email = require('../email');
   const { title, body: draftBody, truncated, metadata, sha } = draftPreview(run);
-  // Bind this request to the exact content being shown.
-  await db('content_email_approvals').where({ id: row.id }).update({ draft_sha: sha, updated_at: new Date() });
+  // Bind this request to the exact content being shown. If a PRIOR send
+  // attempt bound a DIFFERENT snapshot (SMTP may have delivered it even
+  // though the confirmation write was lost), the old token must die with
+  // it — otherwise a reply to the delivered draft-A email would approve
+  // the edited draft B under the same token (Codex r8).
+  const rebindingChangedDraft = row.draft_sha && row.draft_sha !== sha;
+  if (rebindingChangedDraft) {
+    row.token = newToken();
+  }
+  await db('content_email_approvals').where({ id: row.id }).update({
+    draft_sha: sha,
+    ...(rebindingChangedDraft ? { token: row.token } : {}),
+    updated_at: new Date(),
+  });
   const isCompetitor = row.kind === 'named_competitor_review';
   const senders = allowedSenders();
   const subject = `[${row.token}] Approve? ${title}`;

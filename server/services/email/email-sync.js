@@ -223,7 +223,7 @@ async function upsertEmail(parsed) {
   let approvalControlEarly = false;
   try {
     const { isApprovalControlMessage } = require('../content/email-approvals');
-    approvalControlEarly = isApprovalControlMessage({ subject: parsed.subject });
+    approvalControlEarly = await isApprovalControlMessage({ subject: parsed.subject });
   } catch { /* module unavailable — fall through to normal handling */ }
 
   // Check blocklist before inserting — skip blocked senders
@@ -285,7 +285,7 @@ async function upsertEmail(parsed) {
   let approvalControl = false;
   try {
     const { isApprovalControlMessage } = require('../content/email-approvals');
-    approvalControl = isApprovalControlMessage(email);
+    approvalControl = await isApprovalControlMessage(email);
   } catch (err) {
     logger.error(`[email-sync] Approval-control check failed for ${email.id}: ${err?.message || err}`);
   }
