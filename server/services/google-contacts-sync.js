@@ -189,8 +189,11 @@ async function findExistingContact(people, row, tag) {
     ));
     return match?.resourceName || null;
   } catch (e) {
-    // An INCONCLUSIVE search must defer creation — creating past a failed
-    // orphan check is how duplicates leak. The row retries next run.
+    // Scope errors keep their classification — the run must surface the
+    // actionable re-consent status, not N generic row failures.
+    if (isScopeError(e)) throw e;
+    // Any other INCONCLUSIVE search must defer creation — creating past a
+    // failed orphan check is how duplicates leak. The row retries next run.
     const err = new Error('contact search inconclusive — creation deferred');
     err.searchInconclusive = true;
     throw err;
@@ -263,7 +266,14 @@ async function upsertContact(people, table, row, kind, gapMs, { pendingRecovery 
     const status = createErr?.code || createErr?.response?.status;
     const definitiveRejection = typeof status === 'number' && status >= 400 && status < 500;
     if (!definitiveRejection) {
-      await db(table).where({ id: row.id }).whereNull('google_contact_id')
+      // Replacement creates (404-recreate) still carry the DEAD resource
+      // name — the marker may replace it, but never a live id written by
+      // a concurrent pass.
+      await db(table).where({ id: row.id })
+        .where((q) => {
+          q.whereNull('google_contact_id');
+          if (row.google_contact_id) q.orWhere('google_contact_id', row.google_contact_id);
+        })
         .update({ google_contact_id: PENDING_CREATE, google_contact_synced_at: new Date() })
         .catch(() => {});
     }
@@ -443,6 +453,23 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
           .first();
         if (accountSibling?.google_contact_id) row.google_contact_id = accountSibling.google_contact_id;
       }
+      if (kind === 'customer' && !row.google_contact_id) {
+        // Insertion order must not matter: a live LEAD with this email may
+        // have minted the contact before the customer row existed — adopt
+        // it (the lead's row keeps its shared pointer; the in-use guard
+        // protects it from deletion).
+        const customerEmail = String(row.email || '').trim().toLowerCase();
+        if (customerEmail) {
+          const leadOwner = await db('leads')
+            .whereNull('deleted_at')
+            .whereNotNull('google_contact_id')
+            .whereNot('google_contact_id', PENDING_CREATE)
+            .whereRaw('LOWER(email) = ?', [customerEmail])
+            .first();
+          if (leadOwner?.google_contact_id) row.google_contact_id = leadOwner.google_contact_id;
+        }
+      }
+      const priorContactId = row.google_contact_id;
       const { resourceName, created } = await upsertContact(people, table, row, kind, gapMs, { pendingRecovery, attemptAt: recoveryAttemptAt });
       let stamped = 0;
       try {
@@ -468,6 +495,16 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
         logger.info(`[contacts-sync] stamp vetoed by a concurrent edit (${table} ${row.id}) — re-syncing next run`);
         continue;
       }
+      if (created && priorContactId && priorContactId !== resourceName) {
+        // 404-recreate of a possibly SHARED contact: repoint every live row
+        // still holding the dead resource name, or verification would mint
+        // one replacement per sharer and break the dedup model.
+        for (const t of ['customers', 'leads']) {
+          await db(t).where('google_contact_id', priorContactId)
+            .update({ google_contact_id: resourceName })
+            .catch((e) => logger.warn(`[contacts-sync] sharer repoint failed on ${t}: ${safeErr(e)}`));
+        }
+      }
       counts.synced += 1;
       await sleep(gapMs);
     } catch (err) {
@@ -480,7 +517,20 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
         return counts;
       }
       counts.failed += 1;
-      logger.warn(`[contacts-sync] sync failed for ${table} ${row.id}: ${safeErr(err)}`);
+      const failStatus = err?.code || err?.response?.status;
+      if (typeof failStatus === 'number' && failStatus >= 400 && failStatus < 500 && !err.searchInconclusive) {
+        // Deterministic rejection (validation etc.): retrying every tick
+        // would pin the newest-first batch and starve the backfill. Park
+        // the row (watermark stamped current) — any contact-field edit
+        // re-queues it via the touch triggers, and rows holding a contact
+        // retry through the weekly verification lane.
+        await db(table).where({ id: row.id })
+          .update({ google_contact_synced_at: new Date() })
+          .catch(() => {});
+        logger.warn(`[contacts-sync] ${table} ${row.id} parked after deterministic rejection (${safeErr(err)}) — an edit re-queues it`);
+      } else {
+        logger.warn(`[contacts-sync] sync failed for ${table} ${row.id}: ${safeErr(err)}`);
+      }
     }
   }
 
@@ -494,15 +544,30 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
         .whereNotNull('deleted_at')
         .whereNotNull('google_contact_id')
         .limit(TOMBSTONE_SLOTS)
-        .select('id', 'google_contact_id');
+        .select('id', 'google_contact_id', 'google_contact_synced_at', 'first_name', 'last_name', 'email', 'phone');
     } catch (e) {
       logger.warn(`[contacts-sync] tombstone query failed for ${table}: ${safeErr(e)}`);
     }
     for (const row of tombstones) {
       try {
         if (row.google_contact_id === PENDING_CREATE) {
-          // Ambiguous-create marker on a retired row — nothing verifiable
-          // to delete; clear the marker and watermark.
+          // Resolve the ambiguous create BEFORE dropping the only marker —
+          // a create that actually committed would otherwise orphan the
+          // deleted row's PII in Google forever. Inside the grace window
+          // (or on an inconclusive search) the marker is kept for a later
+          // pass.
+          const attemptedMs = row.google_contact_synced_at ? new Date(row.google_contact_synced_at).getTime() : 0;
+          if (Date.now() - attemptedMs < RECOVERY_GRACE_MS) continue;
+          try {
+            const orphan = await findExistingContact(people, row, rowTag(table, row));
+            if (orphan) {
+              await deleteContact(people, orphan);
+              await sleep(gapMs);
+            }
+          } catch (searchErr) {
+            if (isScopeError(searchErr)) { counts.blocked = 'contacts_scope_missing'; return counts; }
+            continue; // inconclusive — keep the marker
+          }
           await db(table).where({ id: row.id }).update({ google_contact_id: null, google_contact_synced_at: null });
           counts.retired += 1;
           continue;
@@ -562,7 +627,15 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
   }
   for (const { table, kind, row } of verifyRows) {
     try {
+      const priorContactId = row.google_contact_id;
       const { resourceName, created } = await upsertContact(people, table, row, kind, gapMs);
+      if (created && priorContactId && priorContactId !== resourceName) {
+        for (const t of ['customers', 'leads']) {
+          await db(t).where('google_contact_id', priorContactId)
+            .update({ google_contact_id: resourceName })
+            .catch((e) => logger.warn(`[contacts-sync] sharer repoint failed on ${t}: ${safeErr(e)}`));
+        }
+      }
       let stamped = 0;
       try {
         stamped = await stampVerified(table, row, resourceName, now);

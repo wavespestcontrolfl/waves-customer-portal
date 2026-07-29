@@ -78,13 +78,18 @@ function setupDb({
   return state;
 }
 
-beforeEach(() => { process.env.GATE_CONTACTS_SYNC = 'true'; });
-afterEach(() => {
-  jest.clearAllMocks();
+beforeEach(() => {
+  // FULL reset (clearAllMocks leaves unconsumed mockResolvedValueOnce
+  // queues behind, leaking one test's staged responses into the next),
+  // then re-prime the standing defaults.
+  jest.resetAllMocks();
+  process.env.GATE_CONTACTS_SYNC = 'true';
+  gmailClient.getAuthClient.mockImplementation(async () => ({}));
+  require('googleapis').google.people.mockImplementation(() => mockPeopleApi);
   mockPeopleApi.people.searchContacts.mockImplementation(async () => ({ data: { results: [] } }));
   mockPeopleApi.people.deleteContact.mockImplementation(async () => ({}));
-  delete process.env.GATE_CONTACTS_SYNC;
 });
+afterEach(() => { delete process.env.GATE_CONTACTS_SYNC; });
 
 const CUSTOMER = {
   id: 'c-1', first_name: 'Jane', last_name: 'Customer', email: 'jane@customer.example',
@@ -96,7 +101,7 @@ const BASE_COUNTS = { synced: 0, skipped: 0, failed: 0, retired: 0, verified: 0,
 describe('runContactsSync', () => {
   test('the external-writer gate defaults OFF — nothing runs without the owner opt-in', async () => {
     delete process.env.GATE_CONTACTS_SYNC;
-    setupDb({ customers: [CUSTOMER] });
+    setupDb({ customers: [{ ...CUSTOMER }] });
     const counts = await runContactsSync({ gapMs: 0 });
     expect(counts.blocked).toBe('gate_off');
     expect(gmailClient.getAuthClient).not.toHaveBeenCalled();
@@ -104,7 +109,7 @@ describe('runContactsSync', () => {
   });
 
   test('creates a starred, source-tagged contact and stamps synced_at from the COLUMN, not a JS Date', async () => {
-    const state = setupDb({ customers: [CUSTOMER] });
+    const state = setupDb({ customers: [{ ...CUSTOMER }] });
     mockPeopleApi.people.createContact.mockResolvedValueOnce({ data: { resourceName: 'people/abc' } });
     const counts = await runContactsSync({ gapMs: 0 });
     expect(counts).toEqual({ ...BASE_COUNTS, synced: 1 });
@@ -202,7 +207,7 @@ describe('runContactsSync', () => {
   });
 
   test('pre-create search adopts a contact from a LOST create response (waves_row tag)', async () => {
-    setupDb({ customers: [CUSTOMER] });
+    setupDb({ customers: [{ ...CUSTOMER }] });
     mockPeopleApi.people.searchContacts.mockResolvedValueOnce({ data: { results: [
       { person: { resourceName: 'people/lost', clientData: [{ key: 'waves_row', value: 'customers:c-1' }] } },
     ] } });
@@ -215,7 +220,7 @@ describe('runContactsSync', () => {
 
   test('a failed stamp after a FRESH create rolls the contact back — no leaked duplicate', async () => {
     setupDb({
-      customers: [CUSTOMER],
+      customers: [{ ...CUSTOMER }],
       updateResults: { customers: [new Error('db down')] },
     });
     mockPeopleApi.people.createContact.mockResolvedValueOnce({ data: { resourceName: 'people/fresh' } });
@@ -225,7 +230,7 @@ describe('runContactsSync', () => {
   });
 
   test('an UNTAGGED exact-email search hit (operator-authored) is never adopted or touched', async () => {
-    setupDb({ customers: [CUSTOMER] });
+    setupDb({ customers: [{ ...CUSTOMER }] });
     // Same email, but no waves_row tag — could be an operator's own contact;
     // adopting it would overwrite it and expose it to the delete paths.
     mockPeopleApi.people.searchContacts.mockResolvedValueOnce({ data: { results: [
@@ -241,7 +246,7 @@ describe('runContactsSync', () => {
 
   test('a raced-edit stamp veto (0 rows) compensates a fresh create — no silent success', async () => {
     setupDb({
-      customers: [CUSTOMER],
+      customers: [{ ...CUSTOMER }],
       updateResults: { customers: [0] }, // concurrent edit vetoed the stamp
     });
     mockPeopleApi.people.createContact.mockResolvedValueOnce({ data: { resourceName: 'people/fresh' } });
@@ -289,7 +294,7 @@ describe('runContactsSync', () => {
     expect(mockPeopleApi.people.createContact).toHaveBeenCalled();
     // The watermark advances to the CHECK time — writing the old
     // updated_at back would pin the lane to the same oldest rows forever.
-    const patch = verifyState.updates.find((u) => u.table === 'customers').patch;
+    const patch = verifyState.updates.find((u) => u.table === 'customers' && u.patch.google_contact_synced_at).patch;
     expect(patch.google_contact_synced_at).toEqual(new Date('2026-07-28T12:00:00Z'));
   });
 
@@ -298,7 +303,8 @@ describe('runContactsSync', () => {
     setupDb({
       customersSelects: [[], [], [staleVerified]],
       leadsSelects: [[], [], []],
-      updateResults: { customers: [new Error('db down')] },
+      // slot 1 = sharer repoint (succeeds), slot 2 = the stamp (throws)
+      updateResults: { customers: [1, new Error('db down')] },
     });
     const err = new Error('not found');
     err.code = 404;
@@ -341,7 +347,7 @@ describe('runContactsSync', () => {
   });
 
   test('an inconclusive orphan search DEFERS creation instead of risking a duplicate', async () => {
-    setupDb({ customers: [CUSTOMER] });
+    setupDb({ customers: [{ ...CUSTOMER }] });
     mockPeopleApi.people.searchContacts.mockRejectedValueOnce(new Error('search down'));
     const counts = await runContactsSync({ gapMs: 0 });
     expect(counts.failed).toBe(1);
@@ -349,7 +355,7 @@ describe('runContactsSync', () => {
   });
 
   test('an ambiguous createContact failure marks the row for conclusive-search recovery', async () => {
-    const state = setupDb({ customers: [CUSTOMER] });
+    const state = setupDb({ customers: [{ ...CUSTOMER }] });
     mockPeopleApi.people.createContact.mockRejectedValueOnce(new Error('socket hang up'));
     const counts = await runContactsSync({ gapMs: 0 });
     expect(counts.failed).toBe(1);
@@ -377,8 +383,86 @@ describe('runContactsSync', () => {
     expect(mockPeopleApi.people.createContact).not.toHaveBeenCalled();
   });
 
+  test('a customer inserted AFTER a synced same-email lead adopts the lead contact', async () => {
+    setupDb({
+      customers: [{ ...CUSTOMER }],
+      firstResults: { leads: [{ id: 'l-1', google_contact_id: 'people/lead-first' }] },
+    });
+    mockPeopleApi.people.get.mockResolvedValueOnce({ data: { etag: 'e1', metadata: { sources: [] }, memberships: [] } });
+    mockPeopleApi.people.updateContact.mockResolvedValueOnce({ data: { resourceName: 'people/lead-first' } });
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(counts.synced).toBe(1);
+    // Insertion order didn't matter — no second contact minted.
+    expect(mockPeopleApi.people.createContact).not.toHaveBeenCalled();
+  });
+
+  test('a 404-recreate repoints EVERY sharer of the dead resource', async () => {
+    const state = setupDb({ customers: [{ ...CUSTOMER, google_contact_id: 'people/dead' }] });
+    const err = new Error('not found');
+    err.code = 404;
+    mockPeopleApi.people.get.mockRejectedValueOnce(err);
+    mockPeopleApi.people.createContact.mockResolvedValueOnce({ data: { resourceName: 'people/reborn' } });
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(counts.synced).toBe(1);
+    // Both tables' sharers were repointed off the dead resource.
+    const repoints = state.updates.filter((u) => u.patch.google_contact_id === 'people/reborn' && !u.patch.google_contact_synced_at);
+    expect(repoints.map((u) => u.table).sort()).toEqual(['customers', 'leads']);
+  });
+
+  test('an ambiguous REPLACEMENT create marks the row even though it held a dead id', async () => {
+    const state = setupDb({ customers: [{ ...CUSTOMER, google_contact_id: 'people/dead' }] });
+    const gone = new Error('not found');
+    gone.code = 404;
+    mockPeopleApi.people.get.mockRejectedValueOnce(gone);
+    mockPeopleApi.people.createContact.mockRejectedValueOnce(new Error('socket hang up'));
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(counts.failed).toBe(1);
+    const marker = state.updates.find((u) => u.patch.google_contact_id === 'pending_create_recovery');
+    expect(marker).toBeDefined();
+  });
+
+  test('a scope error from the pre-create SEARCH still reports contacts_scope_missing', async () => {
+    setupDb({ customers: [{ ...CUSTOMER }] });
+    const err = new Error('Request had insufficient authentication scopes.');
+    err.code = 403;
+    mockPeopleApi.people.searchContacts.mockRejectedValueOnce(err);
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(counts.blocked).toBe('contacts_scope_missing');
+    expect(mockPeopleApi.people.createContact).not.toHaveBeenCalled();
+  });
+
+  test('a tombstoned pending-create resolves the orphan BEFORE clearing the marker', async () => {
+    const state = setupDb({
+      customersSelects: [[], [{ id: 'c-dead', google_contact_id: 'pending_create_recovery', google_contact_synced_at: '2026-07-01T00:00:00Z', first_name: 'Jane', last_name: 'X', email: 'jane@customer.example', phone: null }], []],
+      leadsSelects: [[], [], []],
+    });
+    mockPeopleApi.people.searchContacts.mockResolvedValueOnce({ data: { results: [
+      { person: { resourceName: 'people/orphan', clientData: [{ key: 'waves_row', value: 'customers:c-dead' }] } },
+    ] } });
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(counts.retired).toBe(1);
+    // The committed-but-unrecorded contact was found by tag and deleted —
+    // no deleted-customer PII left serving from Google.
+    expect(mockPeopleApi.people.deleteContact).toHaveBeenCalledWith({ resourceName: 'people/orphan' });
+    expect(state.updates.find((u) => u.table === 'customers').patch).toEqual({ google_contact_id: null, google_contact_synced_at: null });
+  });
+
+  test('a deterministic Google rejection PARKS the row instead of pinning the batch', async () => {
+    const state = setupDb({ customers: [{ ...CUSTOMER }] });
+    const err = new Error('Invalid phoneNumbers');
+    err.code = 400;
+    mockPeopleApi.people.createContact.mockRejectedValueOnce(err);
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(counts.failed).toBe(1);
+    const park = state.updates.find((u) => u.table === 'customers');
+    // Watermark stamped current (row leaves the batch); no recovery marker
+    // for a definitive rejection; a contact-field edit re-queues it.
+    expect(park.patch.google_contact_synced_at).toBeInstanceOf(Date);
+    expect(park.patch.google_contact_id).toBeUndefined();
+  });
+
   test('scope-missing aborts WITHOUT stamping — rows retry after the one-time re-consent', async () => {
-    const state = setupDb({ customers: [CUSTOMER] });
+    const state = setupDb({ customers: [{ ...CUSTOMER }] });
     const err = new Error('Request had insufficient authentication scopes.');
     err.code = 403;
     mockPeopleApi.people.createContact.mockRejectedValueOnce(err);
