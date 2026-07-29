@@ -786,7 +786,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // field activates the automatic lot-based mosquito price.
   const lineHasEnteredPrice = (svc) => {
     if (svc?.price === '' || svc?.price == null) return false;
-    return Number.isFinite(parseFloat(svc.price));
+    const n = parseFloat(svc.price);
+    // Non-negative only: a negative input displays as $0 but must not count
+    // as an entered price (it would suppress the auto quote while the server
+    // stamps the ladder charge).
+    return Number.isFinite(n) && n >= 0;
   };
   // Auto (lot-based) one-time mosquito charge the server will stamp when the
   // field is left blank — quoted from the server (same helper + live
@@ -801,15 +805,17 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       // the hint shows the state and handleSubmit blocks until resolved.
       return null;
     }
-    if (Number(mosquitoQuote.price) > 0) return Number(mosquitoQuote.price);
-    // Authoritative "no usable lot size": catalog base, same as booking.
-    const catalogBase = Number(svc.base_price ?? svc.priceMin);
-    return Number.isFinite(catalogBase) && catalogBase > 0 ? catalogBase : null;
+    // The quote endpoint always answers with the authoritative amount
+    // (engine default or the CURRENT catalog base) — never substitute the
+    // line's cached base_price, which for estimate-loaded lines carries the
+    // estimate's quoted price rather than the live catalog value.
+    return Number(mosquitoQuote.price) > 0 ? Number(mosquitoQuote.price) : null;
   };
   const mosquitoQuotePending = (svc) => (
     isOneTimeMosquitoLine(svc)
     && !lineHasEnteredPrice(svc)
-    && (mosquitoQuote?.customerId !== selectedCustomer?.id || mosquitoQuote?.status !== 'ready')
+    && !!selectedCustomer?.id
+    && (mosquitoQuote?.customerId !== selectedCustomer.id || mosquitoQuote?.status !== 'ready')
   );
   const lineEffectiveBaseAmount = (svc) => (
     lineHasEnteredPrice(svc) ? lineBaseAmount(svc) : (mosquitoAutoAmount(svc) ?? 0)
