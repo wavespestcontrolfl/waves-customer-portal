@@ -96,7 +96,7 @@ function pillStyle(active) {
     border: `1px solid ${active ? D.heading : D.border}`,
     background: active ? D.heading : D.card,
     color: active ? "#FFFFFF" : D.text,
-    fontSize: 13,
+    fontSize: 14,
     fontWeight: 500,
     cursor: "pointer",
   };
@@ -235,7 +235,7 @@ export default function PortalUsageTab({ canAdmin }) {
 
       {!loading && !error && pages.length > 0 && (
         <>
-          <div style={{ fontSize: 13, color: D.muted, marginBottom: 12 }}>
+          <div style={{ fontSize: 14, color: D.muted, marginBottom: 12 }}>
             <span style={{ fontFamily: MONO }}>{data.totals.views}</span> page
             views across{" "}
             <span style={{ fontFamily: MONO }}>{data.totals.activeDays}</span>{" "}
@@ -308,7 +308,7 @@ export default function PortalUsageTab({ canAdmin }) {
                       key={h}
                       style={{
                         textAlign: i === 1 || i === 2 ? "right" : "left",
-                        fontSize: 12,
+                        fontSize: 14,
                         textTransform: "uppercase",
                         letterSpacing: "0.05em",
                         fontWeight: 500,
@@ -405,7 +405,7 @@ export default function PortalUsageTab({ canAdmin }) {
             </table>
           </div>
 
-          <p style={{ fontSize: 13, color: D.muted, marginTop: 12, maxWidth: 640 }}>
+          <p style={{ fontSize: 14, color: D.muted, marginTop: 12, maxWidth: 640 }}>
             Ranked by days used, then views — regular daily pages float to the
             top even when a one-off deep dive racks up more clicks.
           </p>

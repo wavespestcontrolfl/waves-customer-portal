@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import {
   Activity,
@@ -193,8 +193,13 @@ export default function SettingsPage() {
   // explicitly or the usage report undercounts the Settings tabs it is
   // meant to rank. Dedupe/settle in the lib absorb the ?tab= deep-link
   // overlap (same key → dropped). Codex #2961 r2.
+  // Current leaf as a ref so the query-sync effect below can report the
+  // RENDERED leaf without depending on `tab` state.
+  const tabRef = useRef(initialTab);
+
   const selectTab = (leafKey) => {
     setTab(leafKey);
+    tabRef.current = leafKey;
     trackAdminPageView({
       pathname: "/admin/settings",
       search: `?tab=${leafKey}`,
@@ -202,32 +207,31 @@ export default function SettingsPage() {
     });
   };
 
-  // A query-less desktop open renders a real leaf (default 'general') that
-  // the layout beacon can't see — record it so the Top-tab ranking counts
-  // normal General visits. Fires inside the lib's settle window and the
-  // layout's later tab-less beacon refines into it (never downgrades it),
-  // so this stays ONE row. The query-less MOBILE index renders no leaf and
-  // is skipped; deep-links dedupe against the layout's identical beacon.
-  // Mount-only by design (see the exhaustive-deps note above). Codex #2961 r4.
-  useEffect(() => {
-    if (isMobile && !searchParams.get("tab")) return;
-    // authoritative: this is the leaf that actually RENDERED (VALID_TABS
-    // fallback applied) — the layout's raw ?tab= beacon must not override
-    // it with a typo'd value the user never saw.
-    trackAdminPageView({
-      pathname: "/admin/settings",
-      search: `?tab=${initialTab}`,
-      authoritative: true,
-    });
-  }, []);
-
   // Mobile section links change ?tab= on the already-mounted page (the mobile
   // index and the tab panel share this route/component) — sync the param into
   // state so those taps actually switch tabs instead of leaving the prior one.
+  // The same effect authoritatively records the leaf that actually RENDERS
+  // after each query change (VALID_TABS fallback applied): search-only
+  // navigations (back/forward, in-app links) never remount this page, so a
+  // mount-only beacon can't cover them, and without it the layout would
+  // record a raw invalid ?tab= the user never saw. Runs on mount too —
+  // covering the query-less desktop open (default leaf) — and before the
+  // layout's effect (child first), so the authoritative pending beacon
+  // blocks the raw one. The query-less MOBILE index renders no leaf and is
+  // skipped. Codex #2961 r4+r6.
   useEffect(() => {
     const qp = searchParams.get("tab");
-    if (qp && VALID_TABS.includes(qp)) setTab(qp);
-  }, [searchParams]);
+    if (qp && VALID_TABS.includes(qp)) {
+      setTab(qp);
+      tabRef.current = qp;
+    }
+    if (isMobile && !qp) return;
+    trackAdminPageView({
+      pathname: "/admin/settings",
+      search: `?tab=${tabRef.current}`,
+      authoritative: true,
+    });
+  }, [searchParams, isMobile]);
 
   useEffect(() => {
     Promise.all([
