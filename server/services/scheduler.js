@@ -3499,6 +3499,19 @@ function initScheduledJobs() {
     } catch (err) {
       logger.error(`Document request lifecycle failed: ${err.message}`);
     }
+    // Termite program agreement reconciliation: re-prep any recently accepted
+    // termite estimate whose agreement draft failed transiently at accept
+    // time (idempotent per-property dedupe; no repeat bells for unresolved
+    // figures). Acceptance already committed — prep must be retryable.
+    try {
+      const { reconcileTermiteProgramAgreements } = require('./termite-program-agreement');
+      const recon = await reconcileTermiteProgramAgreements();
+      if (recon.created || recon.failed) {
+        logger.info(`Termite agreement reconciliation: ${recon.checked} checked, ${recon.created} created, ${recon.failed} failed`);
+      }
+    } catch (err) {
+      logger.error(`Termite agreement reconciliation failed: ${err.message}`);
+    }
   }, { timezone: 'America/New_York' });
 
   // =========================================================================

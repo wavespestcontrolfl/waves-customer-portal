@@ -10,6 +10,12 @@
 // 20260729000001) prefilled from the accepted estimate, and rings the
 // admin bell. Drafts surface in the existing open document-requests queue
 // and are sent for signature through the existing delivery routes.
+// Invoked from BOTH acceptance paths (public customer accept and
+// estimate-manual-acceptance's downstream), plus a daily reconciliation
+// sweep (scheduler, 6:10am ET document-lifecycle cron) that re-preps any
+// accepted termite estimate whose prep failed transiently — acceptance has
+// already committed by the time this runs, so failures must be retryable,
+// not best-effort.
 //
 // Sending is the only customer-facing step, and it stays owner-controlled:
 // auto-send fires ONLY when GATE_TERMITE_PROGRAM_AGREEMENT_AUTOSEND=true
@@ -27,11 +33,24 @@ const logger = require('./logger');
 const PURCHASE_TEMPLATE_KEY = 'service_agreement.termite_bait_program_purchase';
 const RENTAL_TEMPLATE_KEY = 'service_agreement.termite_bait_program_rental';
 const PROGRAM_TEMPLATE_KEYS = [PURCHASE_TEMPLATE_KEY, RENTAL_TEMPLATE_KEY];
-// Matches the delivery layer's TERMINAL_STATUSES — a cancelled/declined
-// agreement doesn't block prepping a fresh one.
-const TERMINAL_STATUSES = ['cancelled', 'declined', 'expired_final'];
 
-const SYSTEM_LABEL = 'Trelona® ATBS annual bait stations';
+// The delivery workflow's real status vocabulary: signed/cancelled/voided
+// are terminal (its TERMINAL_STATUSES), and expireDocumentRequests writes
+// the literal 'expired'. Only a genuinely OPEN request (draft/sent/viewed
+// with an unexpired — or not yet minted — share window) blocks a new prep;
+// signed agreements are historical records and a re-accept at new pricing
+// legitimately gets a fresh document.
+const OPEN_STATUSES = ['draft', 'sent', 'viewed'];
+
+// Menu is Trelona-only (owner 2026-07-28), but explicit legacy Advance
+// estimates still replay and remain acceptable — the agreement must name
+// the system the customer actually accepted, never silently rebrand it.
+const SYSTEM_LABELS = {
+  trelona: 'Trelona® ATBS annual bait stations',
+  advance: 'Advance® termite bait stations',
+};
+const GENERIC_SYSTEM_LABEL = 'in-ground termite bait stations';
+const START_DATE_FALLBACK = 'To be confirmed at installation';
 
 function autosendGateOn() {
   return ['1', 'true', 'on'].includes(String(process.env.GATE_TERMITE_PROGRAM_AGREEMENT_AUTOSEND || '').toLowerCase());
@@ -52,13 +71,32 @@ function parseEstimateData(raw) {
   try { return JSON.parse(raw); } catch { return null; }
 }
 
-// Walk the stored estimate payload for termite lines. Estimate saves carry
-// engine lineItems at estimate_data.result.lineItems (modular saves) and/or
-// estimate_data.lineItems; V1 client saves carry results.tmBait. Depth-capped
-// like estimate-service-details' ownership walker.
+function systemLabelFor(system) {
+  const key = String(system || '').toLowerCase();
+  return SYSTEM_LABELS[key] || (key ? GENERIC_SYSTEM_LABEL : SYSTEM_LABELS.trelona);
+}
+
+// Walk the stored estimate payload for termite lines across the persisted
+// shapes: raw engine lineItems ({service:'termite_bait', perApp,
+// installation.price}), the v1-legacy-mapper recurring services rows
+// ({name:'Termite Bait', perTreatment}), and the mapped results.tmBait node
+// (monMonthly/bmo + ai/ti install + selectedSystem). Depth-capped like
+// estimate-service-details' ownership walker.
 function collectTermiteFacts(estData) {
-  const facts = { hasProgram: false, ownership: 'own', perApp: null, installPrice: null, rentalPerApp: null };
+  const facts = {
+    hasProgram: false, ownership: 'own', perApp: null, installPrice: null, rentalPerApp: null, system: null,
+  };
   if (!estData || typeof estData !== 'object') return facts;
+
+  const takePerApp = (value) => {
+    if (facts.perApp == null && Number.isFinite(Number(value)) && Number(value) > 0) facts.perApp = Number(value);
+  };
+  const takeInstall = (value) => {
+    if (facts.installPrice == null && Number.isFinite(Number(value)) && Number(value) > 0) facts.installPrice = Number(value);
+  };
+  const takeSystem = (value) => {
+    if (!facts.system && value) facts.system = String(value).toLowerCase();
+  };
 
   const seen = new Set();
   const walk = (node, depth) => {
@@ -69,36 +107,49 @@ function collectTermiteFacts(estData) {
       return;
     }
     const key = String(node.service || node.key || '').toLowerCase();
-    if (key === 'termite_bait') {
+    const name = String(node.name || '').toLowerCase();
+
+    if (key === 'termite_bait' || (!key && /termite bait/.test(name))) {
       facts.hasProgram = true;
-      if (facts.perApp == null && Number.isFinite(Number(node.perApp)) && Number(node.perApp) > 0) {
-        facts.perApp = Number(node.perApp);
-      }
-      const installPrice = Number(node.installation?.price);
-      if (facts.installPrice == null && Number.isFinite(installPrice) && installPrice > 0) {
-        facts.installPrice = installPrice;
-      }
+      takePerApp(node.perApp);
+      takePerApp(node.perTreatment);
+      takeInstall(node.installation?.price);
+      takeSystem(node.selectedSystem || node.system);
       if (String(node.ownership || '').toLowerCase() === 'rent') facts.ownership = 'rent';
     }
-    if (key === 'termite_station_rental') {
+    if (key === 'termite_station_rental' || (!key && /station rental/.test(name))) {
       facts.hasProgram = true;
       facts.ownership = 'rent';
-      if (facts.rentalPerApp == null && Number.isFinite(Number(node.perApp)) && Number(node.perApp) > 0) {
-        facts.rentalPerApp = Number(node.perApp);
+      if (facts.rentalPerApp == null) {
+        const perApp = Number(node.perApp ?? node.perTreatment);
+        if (Number.isFinite(perApp) && perApp > 0) facts.rentalPerApp = perApp;
+      }
+    }
+    // Mapped results.tmBait node: no service key; carries the canonical
+    // persisted figures for normal saved estimates.
+    if ((node.monMonthly != null || node.bmo != null) && ('ai' in node || 'ti' in node)) {
+      facts.hasProgram = true;
+      takeInstall(node.ti ?? node.ai);
+      takeSystem(node.selectedSystem || node.system);
+      const monthly = Number(node.monMonthly ?? node.bmo);
+      if (facts.perApp == null && Number.isFinite(monthly) && monthly > 0) {
+        // Quarterly station check billed per application: monthly × 3.
+        facts.perApp = Math.round(monthly * 3 * 100) / 100;
       }
     }
     for (const value of Object.values(node)) walk(value, depth + 1);
   };
   walk(estData, 0);
 
-  // Engine inputs are authoritative for the selected ownership structure
-  // (the rental line proves rent; inputs can also say so directly).
+  // Engine inputs are authoritative for the selected ownership structure and
+  // system (the rental line proves rent; inputs can also say so directly).
   const termiteInputs = estData?.inputs?.services?.termite
     || estData?.engineInputs?.services?.termite
     || estData?.inputs?.services?.termite_bait
     || null;
   if (termiteInputs) {
     facts.hasProgram = true;
+    takeSystem(termiteInputs.system);
     if (String(termiteInputs.ownership || '').toLowerCase() === 'rent') facts.ownership = 'rent';
   }
   return facts;
@@ -106,23 +157,23 @@ function collectTermiteFacts(estData) {
 
 // Build the template values for the matching ownership variant, or null when
 // the required figures can't be resolved (fail-closed — see header).
-function buildTermiteProgramAgreementValues(estimate = {}, estData = null) {
+// startDateLabel comes from the accepted/booked first visit when one exists;
+// otherwise the merge field says the start is confirmed at installation.
+function buildTermiteProgramAgreementValues(estimate = {}, estData = null, { startDateLabel = null } = {}) {
   const facts = collectTermiteFacts(estData || parseEstimateData(estimate.estimate_data));
   if (!facts.hasProgram) return null;
 
   const perApplication = money(facts.perApp);
   if (!perApplication) return null;
 
-  const startDate = new Date().toLocaleDateString('en-US', {
-    month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York',
-  });
   const base = {
     program: {
-      system: SYSTEM_LABEL,
+      system: systemLabelFor(facts.system),
       per_application: perApplication,
     },
     service: { name: 'Termite Bait Station Program' },
-    agreement: { start_date: startDate },
+    agreement: { start_date: startDateLabel || START_DATE_FALLBACK },
+    estimate: { id: estimate.id || null, address: estimate.address || null },
   };
 
   if (facts.ownership === 'rent') {
@@ -151,41 +202,102 @@ function buildTermiteProgramAgreementValues(estimate = {}, estData = null) {
   };
 }
 
-async function existingOpenProgramAgreement(customerId, conn = db) {
-  return conn('customer_contracts')
-    .where({ customer_id: customerId, contract_type: 'document_template' })
-    .whereIn('document_template_key', PROGRAM_TEMPLATE_KEYS)
-    .whereNotIn('status', TERMINAL_STATUSES)
-    .first('id', 'status', 'document_template_key');
+function normalizeAddress(value) {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 }
 
-// Create the draft agreement for an accepted termite estimate. Never throws:
-// acceptance must not fail because agreement prep did. Returns a small result
-// object for logging/tests.
-async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = {} }) {
+// Does this existing contract row block a fresh prep for the accepted
+// estimate? Only when it is genuinely open AND covers the same property (or
+// the same estimate). Multi-property customers get one agreement per covered
+// structure; expired/cancelled/declined/voided/signed rows never block.
+function agreementBlocksNewPrep(row, estimate, now = new Date()) {
+  if (!row) return false;
+  const status = String(row.status || '').toLowerCase();
+  if (!OPEN_STATUSES.includes(status)) return false;
+  if (row.share_token_expires_at && new Date(row.share_token_expires_at) < now) return false;
+
+  let snapshot = row.document_variables_snapshot;
+  if (typeof snapshot === 'string') {
+    try { snapshot = JSON.parse(snapshot); } catch { snapshot = null; }
+  }
+  const snapEstimateId = snapshot?.estimate?.id || null;
+  if (snapEstimateId && estimate?.id && String(snapEstimateId) === String(estimate.id)) return true;
+
+  const snapAddress = normalizeAddress(snapshot?.estimate?.address || snapshot?.customer?.address);
+  const acceptedAddress = normalizeAddress(estimate?.address);
+  if (!snapAddress || !acceptedAddress) return true; // can't prove a different property — don't duplicate
+  return snapAddress === acceptedAddress;
+}
+
+async function existingBlockingProgramAgreement(customerId, estimate, conn = db) {
+  const rows = await conn('customer_contracts')
+    .where({ customer_id: customerId, contract_type: 'document_template' })
+    .whereIn('document_template_key', PROGRAM_TEMPLATE_KEYS)
+    .whereIn('status', OPEN_STATUSES)
+    .select('id', 'status', 'share_token_expires_at', 'document_variables_snapshot');
+  const now = new Date();
+  return rows.find((row) => agreementBlocksNewPrep(row, estimate, now)) || null;
+}
+
+// First upcoming non-cancelled visit booked from this estimate — the honest
+// program start date when acceptance also booked the installation.
+async function scheduledStartDateLabel(estimateId, conn = db) {
+  try {
+    const row = await conn('scheduled_services')
+      .where({ source_estimate_id: estimateId })
+      .whereNotIn('status', ['cancelled'])
+      .orderBy('scheduled_date', 'asc')
+      .first('scheduled_date');
+    if (!row?.scheduled_date) return null;
+    const date = new Date(row.scheduled_date);
+    if (Number.isNaN(date.getTime())) return null;
+    return date.toLocaleDateString('en-US', {
+      month: 'long', day: 'numeric', year: 'numeric', timeZone: 'America/New_York',
+    });
+  } catch {
+    return null;
+  }
+}
+
+// Create the draft agreement for an accepted termite estimate. Never throws
+// into the caller (acceptance must not fail because agreement prep did);
+// failures are retryable via reconcileTermiteProgramAgreements. Returns a
+// small result object for logging/tests.
+async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = {}, notifyOnUnresolved = true }) {
   try {
     if (!estimate || !customerId) return { ok: false, skipped: 'missing_inputs' };
+    // One-time acceptances keep their termite snapshots but did NOT accept
+    // the recurring program — no program agreement exists to sign.
+    if (String(estimate.accepted_service_mode || '').toLowerCase() === 'one_time') {
+      return { ok: true, skipped: 'one_time_accept' };
+    }
     const estData = parseEstimateData(estimate.estimate_data);
-    const prepared = buildTermiteProgramAgreementValues(estimate, estData);
 
     const facts = collectTermiteFacts(estData);
     if (!facts.hasProgram) return { ok: true, skipped: 'no_termite_program' };
 
     const NotificationService = require('./notification-service');
 
+    const startDateLabel = estimate.id ? await scheduledStartDateLabel(estimate.id) : null;
+    const prepared = buildTermiteProgramAgreementValues(estimate, estData, { startDateLabel });
+
     if (!prepared) {
       // Termite program present but figures unresolvable — park the
       // exception with the owner instead of drafting a wrong document.
-      await NotificationService.notifyAdmin(
-        'estimate',
-        'Termite agreement needs manual prep',
-        `${estimate.customer_name || 'Customer'} accepted a termite estimate, but the program agreement couldn't be prefilled from the estimate figures. Prepare and send it from the document library.`,
-        { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId } },
-      );
+      // (The reconciliation sweep passes notifyOnUnresolved=false so the
+      // original accept-time bell isn't re-rung daily.)
+      if (notifyOnUnresolved) {
+        await NotificationService.notifyAdmin(
+          'estimate',
+          'Termite agreement needs manual prep',
+          `${estimate.customer_name || 'Customer'} accepted a termite estimate, but the program agreement couldn't be prefilled from the estimate figures. Prepare and send it from the document library.`,
+          { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId } },
+        );
+      }
       return { ok: false, skipped: 'figures_unresolved' };
     }
 
-    const existing = await existingOpenProgramAgreement(customerId);
+    const existing = await existingBlockingProgramAgreement(customerId, estimate);
     if (existing) return { ok: true, skipped: 'already_exists', contractId: existing.id };
 
     const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first();
@@ -207,6 +319,12 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
     if (!template || !version) return { ok: false, skipped: 'template_missing' };
 
     const context = buildCustomerDocumentContext(customer, prepared.values);
+    // The agreement covers the ACCEPTED property, which may legitimately
+    // differ from the customer's primary address (rental/second property —
+    // see customer-address-fanout). The estimate address wins.
+    if (estimate.address) {
+      context.customer = { ...context.customer, address: estimate.address };
+    }
     const rendered = renderDocumentTemplate({ template, version, context });
     if (rendered.unresolvedVariables.length) {
       logger.warn(`[termite-agreement] unresolved variables for estimate ${estimate.id}: ${rendered.unresolvedVariables.join(', ')}`);
@@ -250,8 +368,11 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
     if (autosendGateOn()) {
       try {
         const { deliverDocumentRequestChannels } = require('./document-contract-delivery');
-        await deliverDocumentRequestChannels(contract.id, req, { channels: ['email'] });
-        autosent = true;
+        const delivery = await deliverDocumentRequestChannels(contract.id, req, { channels: ['email'] });
+        // A resolved-but-failed delivery ({ok:false} — no email, opted out,
+        // provider bounce) leaves the request in draft; the bell must say
+        // "drafted", not "sent", so the owner knows it still needs sending.
+        autosent = delivery?.ok === true;
       } catch (err) {
         logger.warn(`[termite-agreement] autosend failed for contract ${contract.id}: ${err.message}`);
       }
@@ -271,11 +392,49 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
   }
 }
 
+// Daily reconciliation (scheduler, document-lifecycle cron): re-prep any
+// recently accepted termite estimate that has no program agreement —
+// acceptance already committed, so a transient prep failure must not
+// permanently strand the customer without the promised document. Idempotent
+// via the same per-property dedupe as the accept-time path; unresolved
+// figures don't re-ring the accept-time bell.
+async function reconcileTermiteProgramAgreements({ sinceDays = 21, limit = 25 } = {}) {
+  const cutoff = new Date(Date.now() - sinceDays * 24 * 60 * 60 * 1000);
+  const candidates = await db('estimates')
+    .where({ status: 'accepted' })
+    .whereNotNull('customer_id')
+    .where('accepted_at', '>=', cutoff)
+    .where((builder) => {
+      builder.whereNull('accepted_service_mode').orWhereNot('accepted_service_mode', 'one_time');
+    })
+    .whereRaw("estimate_data::text ILIKE '%termite%'")
+    .orderBy('accepted_at', 'desc')
+    .limit(limit)
+    .select('*');
+
+  const results = { checked: candidates.length, created: 0, skipped: 0, failed: 0 };
+  for (const estimate of candidates) {
+    const result = await maybeCreateTermiteProgramAgreement({
+      estimate,
+      customerId: estimate.customer_id,
+      notifyOnUnresolved: false,
+    });
+    if (result.ok && result.contractId && !result.skipped) results.created += 1;
+    else if (result.ok) results.skipped += 1;
+    else results.failed += 1;
+  }
+  return results;
+}
+
 module.exports = {
   PURCHASE_TEMPLATE_KEY,
   RENTAL_TEMPLATE_KEY,
   PROGRAM_TEMPLATE_KEYS,
+  START_DATE_FALLBACK,
+  agreementBlocksNewPrep,
   buildTermiteProgramAgreementValues,
   collectTermiteFacts,
   maybeCreateTermiteProgramAgreement,
+  reconcileTermiteProgramAgreements,
+  systemLabelFor,
 };
