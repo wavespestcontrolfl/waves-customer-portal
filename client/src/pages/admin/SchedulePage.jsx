@@ -35,6 +35,7 @@ import { useState, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 
 import { addETDays, etDateString } from "../../lib/timezone";
+import { confirmCardHoldFeeChoice } from "../../lib/cardHoldCancel";
 import { useFeatureFlagReady } from "../../hooks/useFeatureFlag";
 import useSpeechDictation from "../../hooks/useSpeechDictation";
 import { Mic, MicOff } from "lucide-react";
@@ -1010,6 +1011,15 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     })(),
   });
   const [saving, setSaving] = useState(false);
+  // Immediate reschedule text when this save moves the visit's date or
+  // arrival time — admin chooses per save; default matches the drag-and-drop
+  // reschedule modal (no text).
+  const [notificationType, setNotificationType] = useState("none");
+  // Cancel-appointment confirm overlay.
+  const [cancelOpen, setCancelOpen] = useState(false);
+  const [cancelScope, setCancelScope] = useState("this_only");
+  const [cancelNotificationType, setCancelNotificationType] = useState("text");
+  const [cancelling, setCancelling] = useState(false);
   const [serviceGroups, setServiceGroups] = useState(EDIT_FALLBACK_SERVICES);
   const [expandedCategory, setExpandedCategory] = useState(null);
   // Which service line's picker is open: null | 'primary' | line._key
@@ -1390,6 +1400,20 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     return dates;
   };
 
+  // The reschedule-text choice only appears (and only sends) when the save
+  // actually moves the visit: a new date or a new arrival start. End-time-only
+  // resizes don't change the arrival and stay silent. A date-only visit (no
+  // arrival time picked) never offers a text — there is no arrival window to
+  // promise the customer.
+  const initialScheduledDate = service.scheduledDate
+    ? String(service.scheduledDate).split("T")[0]
+    : "";
+  const initialWindowStart = service.windowStart || "";
+  const scheduleMoved =
+    (form.scheduledDate !== initialScheduledDate ||
+      (form.windowStart || "") !== initialWindowStart) &&
+    !!form.windowStart;
+
   const handleSave = async ({ takePayment = false } = {}) => {
     setSaving(true);
     try {
@@ -1446,10 +1470,12 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             };
           })
         : undefined;
-      await adminFetch(`/admin/schedule/${service.id}/update-details`, {
+      const notifyOnMove = scheduleMoved && notificationType === "sms";
+      const result = await adminFetch(`/admin/schedule/${service.id}/update-details`, {
         method: "PUT",
         body: JSON.stringify({
           ...form,
+          notifyCustomer: notifyOnMove || undefined,
           ...(sendAddons
             ? {
                 addons: addonsPayload,
@@ -1516,11 +1542,64 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               : undefined,
         }),
       });
+      if (notifyOnMove && result?.notificationSent === false) {
+        alert(
+          `Appointment saved, but SMS notification failed: ${result.notificationError || "customer was not notified"}`,
+        );
+      }
       onSaved?.();
     } catch (e) {
       alert("Save failed: " + e.message);
     }
     setSaving(false);
+  };
+
+  // no_show is terminal on the server too (the status route 409s a
+  // no_show → cancelled transition) — don't offer a cancel that must fail.
+  const canCancelAppointment = ![
+    "completed",
+    "cancelled",
+    "skipped",
+    "no_show",
+  ].includes(String(service.status || "").toLowerCase());
+
+  const handleCancelAppointment = async () => {
+    if (cancelling) return;
+    setCancelling(true);
+    // Card-hold visits inside the late-cancel window: the fee decision comes
+    // first — backing out of it aborts the cancel entirely.
+    const { proceed, waiveCardHoldFee } = await confirmCardHoldFeeChoice(
+      service.id,
+    );
+    if (!proceed) {
+      setCancelling(false);
+      return;
+    }
+    try {
+      const result = await adminFetch(`/admin/dispatch/${service.id}/status`, {
+        method: "PUT",
+        body: JSON.stringify({
+          status: "cancelled",
+          scope: cancelScope,
+          notifyCustomer: cancelNotificationType === "text",
+          waiveCardHoldFee,
+          notes: "Cancelled from Edit appointment",
+        }),
+      });
+      if (
+        cancelNotificationType === "text" &&
+        result?.notificationSent === false
+      ) {
+        alert(
+          `Appointment cancelled, but the text failed: ${result.notificationError || "customer was not notified"}`,
+        );
+      }
+      setCancelOpen(false);
+      onSaved?.();
+    } catch (e) {
+      alert("Failed to cancel appointment: " + e.message);
+    }
+    setCancelling(false);
   };
 
   const customer = customerData?.customer || {};
@@ -1970,6 +2049,26 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             }}
           >
             {" "}
+            {canCancelAppointment && (
+              <button
+                onClick={() => setCancelOpen(true)}
+                disabled={saving || cancelling}
+                className="font-medium flex-1 md:flex-initial"
+                style={{
+                  padding: "11px 14px",
+                  borderRadius: 4,
+                  background: "#fff",
+                  color: "#C8312F",
+                  border: "1px solid #C8312F",
+                  fontSize: 13,
+                  cursor: saving || cancelling ? "wait" : "pointer",
+                  opacity: saving || cancelling ? 0.6 : 1,
+                  whiteSpace: "nowrap",
+                }}
+              >
+                Cancel appointment
+              </button>
+            )}{" "}
             <button
               onClick={() => handleSave({ takePayment: true })}
               disabled={saving}
@@ -2697,6 +2796,26 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   />{" "}
                 </div>{" "}
               </div>{" "}
+              {scheduleMoved && (
+                <div style={{ marginBottom: 14 }}>
+                  {" "}
+                  <label style={labelStyle}>Client booking notifications</label>{" "}
+                  <select
+                    value={notificationType}
+                    onChange={(e) => setNotificationType(e.target.value)}
+                    className="font-medium"
+                    style={inputStyle}
+                  >
+                    <option value="none">Don&rsquo;t send a notification</option>
+                    <option value="sms">Text message</option>
+                  </select>{" "}
+                  <div style={{ fontSize: 12, color: D.muted, marginTop: 6 }}>
+                    This save moves the appointment. This controls the
+                    immediate reschedule text; automated reminders will follow
+                    the new appointment time.
+                  </div>{" "}
+                </div>
+              )}{" "}
               <div
                 style={{
                   display: "flex",
@@ -3174,6 +3293,126 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
           </main>{" "}
         </div>{" "}
       </div>{" "}
+      {cancelOpen && (
+        <div
+          onClick={() => !cancelling && setCancelOpen(false)}
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.5)",
+            zIndex: 1100,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: 20,
+          }}
+        >
+          {" "}
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              background: "#fff",
+              borderRadius: 8,
+              padding: 24,
+              maxWidth: 460,
+              width: "100%",
+              border: `1px solid ${D.inputBorder}`,
+            }}
+          >
+            {" "}
+            <div
+              style={{
+                fontSize: 16,
+                fontWeight: 500,
+                color: "#111827",
+                marginBottom: 8,
+              }}
+            >
+              Cancel appointment
+            </div>{" "}
+            <div style={{ fontSize: 13, color: D.muted, marginBottom: 16 }}>
+              This appointment will be removed from your calendar and will
+              appear as canceled in {customerName}&rsquo;s appointment history.
+            </div>{" "}
+            {serviceHasSeries && (
+              <div style={{ marginBottom: 14 }}>
+                {" "}
+                <label style={labelStyle}>Apply changes to</label>{" "}
+                <select
+                  value={cancelScope}
+                  onChange={(e) => setCancelScope(e.target.value)}
+                  disabled={cancelling}
+                  className="font-medium"
+                  style={inputStyle}
+                >
+                  <option value="this_only">This appointment only</option>
+                  <option value="following">
+                    This and following appointments
+                  </option>
+                  <option value="series">All appointments in series</option>
+                </select>{" "}
+              </div>
+            )}{" "}
+            <div style={{ marginBottom: 18 }}>
+              {" "}
+              <label style={labelStyle}>Client booking notifications</label>{" "}
+              <select
+                value={cancelNotificationType}
+                onChange={(e) => setCancelNotificationType(e.target.value)}
+                disabled={cancelling}
+                className="font-medium"
+                style={inputStyle}
+              >
+                <option value="text">Text message (preferred)</option>
+                <option value="none">Don&rsquo;t send a notification</option>
+              </select>{" "}
+            </div>{" "}
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "flex-end",
+                gap: 8,
+                flexWrap: "wrap",
+              }}
+            >
+              {" "}
+              <button
+                onClick={() => setCancelOpen(false)}
+                disabled={cancelling}
+                className="font-medium"
+                style={{
+                  padding: "10px 14px",
+                  borderRadius: 4,
+                  background: "#fff",
+                  color: "#111827",
+                  border: `1px solid ${D.inputBorder}`,
+                  fontSize: 13,
+                  cursor: cancelling ? "wait" : "pointer",
+                }}
+              >
+                Keep appointment
+              </button>{" "}
+              <button
+                onClick={handleCancelAppointment}
+                disabled={cancelling}
+                className="font-medium"
+                style={{
+                  padding: "10px 14px",
+                  borderRadius: 4,
+                  background: "#C8312F",
+                  color: "#fff",
+                  border: "none",
+                  fontSize: 13,
+                  cursor: cancelling ? "wait" : "pointer",
+                  opacity: cancelling ? 0.6 : 1,
+                }}
+              >
+                {cancelling ? "Cancelling..." : "Cancel appointment"}
+              </button>{" "}
+            </div>{" "}
+          </div>{" "}
+        </div>
+      )}
     </div>,
     document.body,
   );
@@ -4723,6 +4962,9 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
   const [options, setOptions] = useState([]);
   const [reason, setReason] = useState("customer_request");
   const [notes, setNotes] = useState("");
+  // Immediate reschedule text — admin chooses per move ('none' | 'sms'),
+  // matching the drag-and-drop RescheduleConfirmModal's default of no text.
+  const [notificationType, setNotificationType] = useState("none");
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [showManual, setShowManual] = useState(false);
@@ -4738,6 +4980,8 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
       .catch(() => setLoading(false));
   }, [service.id]);
 
+  const notifyCustomer = notificationType === "sms";
+
   const handleReschedule = async (opt) => {
     setSending(true);
     try {
@@ -4750,11 +4994,11 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
             newWindow: opt.suggestedWindow,
             reasonCode: reason,
             reasonText: notes,
-            notifyCustomer: true,
+            notifyCustomer,
           }),
         },
       );
-      if (result?.notificationSent === false) {
+      if (notifyCustomer && result?.notificationSent === false) {
         alert(
           `Appointment moved, but SMS notification failed: ${result.notificationError || "customer was not notified"}`,
         );
@@ -4787,11 +5031,11 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
             newWindow: window,
             reasonCode: reason,
             reasonText: notes,
-            notifyCustomer: true,
+            notifyCustomer,
           }),
         },
       );
-      if (result?.notificationSent === false) {
+      if (notifyCustomer && result?.notificationSent === false) {
         alert(
           `Appointment moved, but SMS notification failed: ${result.notificationError || "customer was not notified"}`,
         );
@@ -4915,6 +5159,32 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
             placeholder="Additional context..."
             style={inputSt}
           />{" "}
+        </div>{" "}
+        <div style={{ marginBottom: 14 }}>
+          {" "}
+          <div
+            style={{
+              fontSize: 12,
+              fontWeight: 500,
+              color: D.muted,
+              marginBottom: 6,
+            }}
+          >
+            Client booking notifications
+          </div>{" "}
+          <select
+            value={notificationType}
+            onChange={(e) => setNotificationType(e.target.value)}
+            disabled={sending}
+            style={inputSt}
+          >
+            <option value="none">Don&rsquo;t send a notification</option>
+            <option value="sms">Text message</option>
+          </select>{" "}
+          <div style={{ fontSize: 12, color: D.muted, marginTop: 6 }}>
+            This controls the immediate reschedule text. Automated reminders
+            will follow the new appointment time.
+          </div>{" "}
         </div>{" "}
         <div
           style={{

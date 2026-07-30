@@ -123,6 +123,10 @@ export default function MobileAppointmentDetailSheet({
   const [savingNote, setSavingNote] = useState(false);
   const [noteSavedAt, setNoteSavedAt] = useState(null);
   const [actionBusy, setActionBusy] = useState('');
+  // Cancel confirm panel — replaces the old window.confirm so the operator
+  // always chooses whether the customer gets the cancellation text.
+  const [confirmingCancel, setConfirmingCancel] = useState(false);
+  const [cancelNotificationType, setCancelNotificationType] = useState('text');
   const [showCustomer, setShowCustomer] = useState(false);
   const [showRainOut, setShowRainOut] = useState(false);
   const [estimateSource, setEstimateSource] = useState(null);
@@ -297,7 +301,6 @@ export default function MobileAppointmentDetailSheet({
   };
 
   const cancelAppointment = async () => {
-    if (!window.confirm(`Cancel appointment for ${service.customerName || 'customer'}? This cannot be undone.`)) return;
     // Busy BEFORE the async card-hold preview — a slow preview must not
     // leave the Cancel control active for a double-tap re-entry.
     setActionBusy('cancel');
@@ -306,10 +309,18 @@ export default function MobileAppointmentDetailSheet({
     const { proceed, waiveCardHoldFee } = await confirmCardHoldFeeChoice(service.id);
     if (!proceed) { setActionBusy(''); return; }
     try {
-      await adminFetch(`/admin/dispatch/${service.id}/status`, {
+      const result = await adminFetch(`/admin/dispatch/${service.id}/status`, {
         method: 'PUT',
-        body: JSON.stringify({ status: 'cancelled', waiveCardHoldFee }),
+        body: JSON.stringify({
+          status: 'cancelled',
+          notifyCustomer: cancelNotificationType === 'text',
+          waiveCardHoldFee,
+        }),
       });
+      if (cancelNotificationType === 'text' && result?.notificationSent === false) {
+        alert(`Appointment cancelled, but the text failed: ${result.notificationError || 'customer was not notified'}`);
+      }
+      setConfirmingCancel(false);
       onCancelled?.(service);
       onClose?.();
     } catch (err) {
@@ -703,15 +714,65 @@ export default function MobileAppointmentDetailSheet({
         <section className="mt-6 border-t border-hairline border-zinc-200 pt-4 flex flex-col gap-3">
           {canCompleteService && (
             <>
-              <button
-                type="button"
-                onClick={cancelAppointment}
-                disabled={!!actionBusy}
-                className="w-full rounded-full bg-white border border-hairline border-zinc-200 text-zinc-900 font-medium u-focus-ring disabled:opacity-50"
-                style={{ padding: '14px 20px', fontSize: 16 }}
-              >
-                {actionBusy === 'cancel' ? 'Cancelling…' : 'Cancel appointment'}
-              </button>
+              {!confirmingCancel ? (
+                <button
+                  type="button"
+                  onClick={() => setConfirmingCancel(true)}
+                  disabled={!!actionBusy}
+                  className="w-full rounded-full bg-white border border-hairline border-zinc-200 text-zinc-900 font-medium u-focus-ring disabled:opacity-50"
+                  style={{ padding: '14px 20px', fontSize: 16 }}
+                >
+                  Cancel appointment
+                </button>
+              ) : (
+                <div className="rounded-md border-hairline border-zinc-200 bg-zinc-50 px-4 py-4">
+                  <div className="text-15 font-medium text-zinc-900">
+                    Cancel appointment for {service.customerName || 'this customer'}? This cannot be undone.
+                  </div>
+                  <div className="mt-4">
+                    <div className="text-13 font-medium text-zinc-900 mb-2">Client booking notifications</div>
+                    <div className="space-y-2">
+                      {[
+                        ['text', 'Text message (preferred)'],
+                        ['none', "Don't send a notification"],
+                      ].map(([value, label]) => (
+                        <label key={value} className="flex items-center gap-3 text-14 text-zinc-900">
+                          <input
+                            type="radio"
+                            name="cancel-notification-type"
+                            value={value}
+                            checked={cancelNotificationType === value}
+                            disabled={!!actionBusy}
+                            onChange={() => setCancelNotificationType(value)}
+                            className="h-4 w-4 accent-zinc-900"
+                          />
+                          <span>{label}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="mt-4 flex flex-col gap-2">
+                    <button
+                      type="button"
+                      onClick={cancelAppointment}
+                      disabled={!!actionBusy}
+                      className="w-full rounded-full bg-alert-fg text-white font-medium u-focus-ring disabled:opacity-50"
+                      style={{ padding: '14px 20px', fontSize: 16 }}
+                    >
+                      {actionBusy === 'cancel' ? 'Cancelling…' : 'Confirm cancellation'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setConfirmingCancel(false)}
+                      disabled={!!actionBusy}
+                      className="w-full rounded-full bg-white border border-hairline border-zinc-200 text-zinc-900 font-medium u-focus-ring disabled:opacity-50"
+                      style={{ padding: '14px 20px', fontSize: 16 }}
+                    >
+                      Keep appointment
+                    </button>
+                  </div>
+                </div>
+              )}
               <button
                 type="button"
                 onClick={markNoShow}

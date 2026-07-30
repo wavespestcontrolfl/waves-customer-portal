@@ -20,6 +20,7 @@ const {
   etDateString, etParts, addETDays, addETMonthsByWeekday,
   etNthWeekdayOfMonth, parseETDateTime, validScheduleDate, sameDayWindowElapsed,
   windowDurationMinutes, deriveWindowEnd,
+  formatETDay, formatETDate, formatETTime,
 } = require('../utils/datetime-et');
 const { calculateBoundedTrackingEta } = require('../services/customer-tracking-eta');
 const { customerOnAutopay } = require('../services/autopay-eligibility');
@@ -578,6 +579,120 @@ async function resetAppointmentReminderForScheduleRewrite(trx, scheduledServiceI
       reminder_24h_sent_at: null,
       updated_at: new Date(),
     });
+}
+
+// Immediate "your appointment moved" text shared by update-details and the
+// bulk reschedule action. The caller must have ALREADY resynced the visit's
+// reminder row with coverDueWindows:true so the 15-min cron can't double-text
+// in the send gap. Sends through safeSendAppointment (recipient routing,
+// opt-in holds, landline guard), quotes the 2-hour arrival window, aborts at
+// the provider handoff if the visit moved again or went terminal, and closes/
+// re-arms the covered reminder windows guarded on the pre-send snapshot.
+// Returns { sent, error }.
+async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM) {
+  const start = normalizeHHMM(startHHMM);
+  if (!start) {
+    // A date-only visit has no arrival window to promise — never fabricate
+    // the 08:00 placeholder into a customer text (windowless reminder rows
+    // are pre-closed for exactly this reason).
+    return { sent: false, error: 'No arrival time is set for this visit, so no reschedule text was sent' };
+  }
+  const AppointmentReminders = require('../services/appointment-reminders');
+  const { captureReminderGuards, rearmRescheduleReminderWindows } = require('./admin-dispatch');
+  const noticeTime = `${dateStr}T${start}`;
+  // Snapshot the just-synced reminder state BEFORE the send — the failure
+  // re-arm and the success mark below both guard on it so neither can stomp
+  // a newer reschedule that lands during a slow send.
+  const guards = await captureReminderGuards(serviceId);
+  const TERMINAL_FOR_NOTICE = ['cancelled', 'completed', 'skipped', 'no_show'];
+  let sent = false;
+  let error = null;
+  try {
+    const svc = await db('scheduled_services').where({ id: serviceId }).first('customer_id', 'service_type');
+    const customer = svc?.customer_id ? await db('customers').where({ id: svc.customer_id }).first() : null;
+    if (!customer) {
+      error = 'Customer not found';
+    } else {
+      // Fail CLOSED on an unreadable prefs row (the PREFS_UNAVAILABLE
+      // sentinel) — safeSendAppointment then treats the primary as opted
+      // out rather than texting past a possibly-stored explicit opt-out.
+      const { PREFS_UNAVAILABLE } = require('../services/customer-contact');
+      const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => PREFS_UNAVAILABLE);
+      const apptTime = parseETDateTime(noticeTime);
+      const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
+      const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
+      // Customer-facing time is ALWAYS the 2-hour arrival window from the
+      // start — never the exact start or the duration-driven window_end
+      // (owner directive; see utils/sms-time-format).
+      const timeText = formatSmsTimeRange(arrivalWindowRange(start));
+      // The reminder row's stored label is the sanitized, add-on-inclusive
+      // customer-facing one — prefer it over the raw primary service_type.
+      const reminderRow = await db('appointment_reminders')
+        .where({ scheduled_service_id: serviceId })
+        .first('service_type')
+        .catch(() => null);
+      const serviceLabel = AppointmentReminders.smsServiceLabelStored(reminderRow?.service_type || svc.service_type) || 'service';
+      sent = await AppointmentReminders.safeSendAppointment(customer, prefs || {}, async (contact) => {
+        const firstName = String(contact?.name || '').trim().split(/\s+/)[0] || customer.first_name || 'there';
+        return renderRequiredSmsTemplate('appointment_rescheduled', {
+          first_name: firstName,
+          service_type: serviceLabel,
+          day: formatETDay(apptTime),
+          date: formatETDate(apptTime),
+          time: timeText,
+        }, {
+          workflow: 'schedule_update_reschedule',
+          entity_type: 'scheduled_service',
+          entity_id: serviceId,
+        });
+      }, 'appointment_rescheduled', 'appointment_confirmation', {}, {
+        // Final recheck at the provider handoff: a concurrent move or a
+        // terminal transition (cancel/complete/skip/no-show) means this
+        // message is stale — abort; the winning writer owns the messaging.
+        preDispatchCheck: async () => {
+          const row = await db('scheduled_services').where({ id: serviceId }).first('scheduled_date', 'window_start', 'status');
+          if (!row) return { ok: false, code: 'appointment_missing', reason: 'appointment no longer exists' };
+          if (TERMINAL_FOR_NOTICE.includes(String(row.status))) {
+            return { ok: false, code: 'appointment_terminal', reason: `appointment is now ${row.status}` };
+          }
+          const stillDate = normalizeDateOnly(row.scheduled_date) === dateStr;
+          const stillStart = normalizeHHMM(row.window_start) === start;
+          return stillDate && stillStart
+            ? { ok: true }
+            : { ok: false, code: 'appointment_moved', reason: 'appointment changed again before the reschedule text was sent' };
+        },
+      });
+      if (!sent) error = 'customer was not notified (no eligible recipient, opted out, or the text was blocked)';
+    }
+  } catch (e) {
+    error = e.message;
+    logger.warn(`[schedule] reschedule notice failed for ${serviceId}: ${e.message}`);
+  }
+  if (sent) {
+    // Close the covered windows atomically guarded on the pre-send snapshot
+    // (one conditional UPDATE inside markRescheduleNoticeSent) — a newer
+    // reschedule that re-armed for its own slot makes the guarded update
+    // miss and keeps its fallback reminders. No guard snapshot → skip the
+    // mark (worst case is a redundant reminder for the slot we texted,
+    // never a silenced newer slot).
+    const guardRow = Array.isArray(guards) && guards.length ? guards[0] : null;
+    if (guardRow) {
+      await AppointmentReminders.markRescheduleNoticeSent(serviceId, {
+        guardsByServiceId: { [serviceId]: guardRow },
+      });
+    } else {
+      logger.info(`[schedule] reschedule notice sent for ${serviceId} without a guard snapshot — leaving the reminder close to the cron`);
+    }
+  } else {
+    // The covered windows must not survive a send that never happened —
+    // re-arm them (guarded) so the cron's fallback reminder still delivers
+    // the new time.
+    await rearmRescheduleReminderWindows(guards, [{
+      scheduledServiceId: serviceId,
+      appointmentTime: parseETDateTime(noticeTime),
+    }]);
+  }
+  return { sent, error };
 }
 
 // Register a reminder row for a visit spawned outside the POST create path
@@ -3875,6 +3990,10 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
 
     const updated = [];
     const failed = [];
+    // Rows whose action committed but whose requested customer text did NOT
+    // go out — returned alongside updated/failed so the operator learns the
+    // batch moved/cancelled fine but someone wasn't notified.
+    const notificationFailures = [];
 
     const { transitionJobStatus } = require('../services/job-status');
 
@@ -3907,6 +4026,9 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
               throw Object.assign(new Error('scheduledDate must be a valid YYYY-MM-DD date that is not in the past'), { isValidation: true });
             }
             let reminderSyncTime = null;
+            // The visit's real arrival start (no 08:00 fallback) — null for
+            // date-only rows, which never get an immediate text.
+            let bulkNoticeStart = null;
             let callFollowUpShiftFrom = null;
             // Collected inside the trx, applied only after a successful commit.
             let liveMoveRow = null;
@@ -4088,6 +4210,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
               const nextStart = updates.window_start || svc.window_start;
               if (nextDate && (nextDate !== prevDate || normalizeHHMM(nextStart) !== normalizeHHMM(svc.window_start))) {
                 reminderSyncTime = `${nextDate}T${normalizeHHMM(nextStart) || '08:00'}`;
+                bulkNoticeStart = normalizeHHMM(nextStart) || null;
               }
             });
             // Post-commit only: the tech_status release writes on the global
@@ -4108,20 +4231,45 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
             if (reminderSyncTime) {
               try {
                 const AppointmentReminders = require('../services/appointment-reminders');
+                // payload.notifyCustomer === true (the list view's bulk
+                // "text customers" choice) sends the immediate reschedule
+                // notice through the shared helper below — arrival-window
+                // copy, recipient routing, terminal/slot recheck, guarded
+                // mark/re-arm. Default stays the silent resync this branch
+                // always did.
+                const bulkNotify = payload?.notifyCustomer === true;
                 // handleReschedule claims a still-pending creation
                 // confirmation (its reschedule notice normally replaces
                 // it), but with sendNotification:false no notice goes
                 // out — the customer would get neither message. Re-arm
                 // the deferred confirmation afterwards; it renders the
-                // NEW date/window from the resynced reminder row.
+                // NEW date/window from the resynced reminder row. A
+                // notifying move keeps the claim — our notice IS the
+                // customer's message.
                 const reminderBefore = await db('appointment_reminders')
                   .where({ scheduled_service_id: id })
-                  .first('id', 'confirmation_sent');
-                await AppointmentReminders.handleReschedule(id, reminderSyncTime, { sendNotification: false });
-                if (reminderBefore && !reminderBefore.confirmation_sent) {
+                  .first('id', 'confirmation_sent', 'suppressed_by_sibling');
+                // A sibling-suppressed row's slot OWNER carries the customer
+                // messaging — sending here too would text the customer once
+                // per sibling for one slot. Suppressed rows move silently
+                // (by design, so not a notification failure).
+                const notifyThisRow = bulkNotify && !!reminderBefore && !reminderBefore.suppressed_by_sibling;
+                await AppointmentReminders.handleReschedule(id, reminderSyncTime, {
+                  sendNotification: false,
+                  coverDueWindows: notifyThisRow,
+                });
+                if (!notifyThisRow && reminderBefore && !reminderBefore.confirmation_sent) {
                   await db('appointment_reminders')
                     .where({ id: reminderBefore.id })
                     .update({ confirmation_sent: false, confirmation_sent_at: null });
+                }
+                if (notifyThisRow) {
+                  const notice = await sendRescheduleNoticeForVisit(id, bulkTargetDate, bulkNoticeStart);
+                  if (!notice.sent) {
+                    notificationFailures.push({ id, reason: notice.error || 'reschedule text was not sent' });
+                  }
+                } else if (bulkNotify && !reminderBefore) {
+                  notificationFailures.push({ id, reason: 'No reminder record for this visit — not texted' });
                 }
               } catch {}
             }
@@ -4171,7 +4319,18 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
             });
             try {
               const AppointmentReminders = require('../services/appointment-reminders');
-              await AppointmentReminders.handleCancellation(id);
+              // payload.notifyCustomer === false (the list view's bulk
+              // "don't text" choice) suppresses the cancellation notice;
+              // the default keeps this branch's always-notify behavior.
+              const cancelNotify = payload?.notifyCustomer !== false;
+              const outcome = cancelNotify ? {} : null;
+              await AppointmentReminders.handleCancellation(id, {
+                sendNotification: cancelNotify,
+                ...(outcome ? { outcome } : {}),
+              });
+              if (outcome && outcome.notificationSent === false) {
+                notificationFailures.push({ id, reason: outcome.notificationError || 'cancellation text was not sent' });
+              }
             } catch {}
             // Cancelling a call-booked primary pulls its pending follow-up
             // (visit 2) off the schedule too — shared with the track-
@@ -4226,6 +4385,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
       failedCount: failed.length,
       updated,
       failed,
+      notificationFailures,
     });
   } catch (err) { next(err); }
 });
@@ -4335,6 +4495,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       serviceId,
       createInvoice,
       payerId, poNumber, selfPayOverride,
+      notifyCustomer,
     } = req.body;
     const updates = {};
     let clearAddonDiscountsOnPriceEdit = false;
@@ -4805,6 +4966,11 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // Prior scheduled_date, captured inside the trx when the edit moves the
     // visit — drives the call-created follow-up shift after commit.
     let callFollowUpShiftFrom = null;
+    // The visit's NEW slot ({ date, start }), captured only when the edit
+    // actually moved the date or arrival window — drives the opt-in
+    // reschedule text after commit. start stays null for date-only visits
+    // (no fabricated 08:00 goes into a customer text).
+    let scheduleMoveForNotice = null;
 
     await db.transaction(async (trx) => {
       const recurringParentBefore = isRecurring && spawnRecurringChildren === false && recurringPattern
@@ -4887,6 +5053,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               nextDate,
               updates.window_start !== undefined ? updates.window_start : reminderBefore.window_start,
             );
+            scheduleMoveForNotice = { date: nextDate, start: nextStart || null };
           }
         }
       }
@@ -5471,11 +5638,46 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       await refreshAnnualPrepayTermsForCustomer(touched?.customer_id);
     }
 
+    // Immediate reschedule text — only when the edit actually moved the
+    // visit's date/window AND the caller explicitly opted in (the Edit
+    // appointment modal's "Client booking notifications" choice). The
+    // default stays silent so every other update-details caller keeps its
+    // existing no-SMS behavior; the resynced 72h/24h reminders still follow
+    // the new time either way.
+    let notificationSent;
+    let notificationError;
+    if (notifyCustomer === true && scheduleMoveForNotice) {
+      if (!scheduleMoveForNotice.start) {
+        // Date-only visit: there is no arrival window to promise, so the
+        // immediate text is suppressed rather than fabricating an 8 AM slot.
+        notificationSent = false;
+        notificationError = 'No arrival time is set for this visit, so no reschedule text was sent';
+      } else {
+        const AppointmentReminders = require('../services/appointment-reminders');
+        try {
+          // Cover any already-due reminder window before sending so the
+          // 15-min cron can't fire a day-before reminder in the gap between
+          // the commit above and the notice landing (same coverDueWindows
+          // contract the dispatch reschedule route uses).
+          await AppointmentReminders.handleReschedule(req.params.id, `${scheduleMoveForNotice.date}T${scheduleMoveForNotice.start}`, {
+            sendNotification: false,
+            coverDueWindows: true,
+          });
+        } catch (e) {
+          logger.warn(`[schedule/update-details] reminder cover before reschedule notice failed for ${req.params.id}: ${e.message}`);
+        }
+        const notice = await sendRescheduleNoticeForVisit(req.params.id, scheduleMoveForNotice.date, scheduleMoveForNotice.start);
+        notificationSent = notice.sent;
+        notificationError = notice.error;
+      }
+    }
+
     res.json({
       success: true,
       recurringCreated,
       assignmentScope: normalizedAssignmentScope,
       assignmentUpdatedCount: assignmentUpdatedJobIds.length,
+      ...(notificationSent !== undefined ? { notificationSent, notificationError } : {}),
     });
   } catch (err) {
     // The in-transaction duplicate-series backstop rolled the spawn back —
