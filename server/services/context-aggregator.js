@@ -47,7 +47,7 @@ const ACCESS_CODE_VALUE_RE = /\b(?:\d{3,8}|[A-Z]{2,10}|[A-Za-z]*\d[A-Za-z0-9#*]*
 // waves") can't be shape-detected — they're masked POSITIONALLY: the 1-2
 // tokens directly following the code noun (with optional is/: connector),
 // and the token directly before "is/= the … code" phrasing.
-const ACCESS_CODE_AFTER_NOUN_RE = /\b(code|pin|combo|combination|passcode|password|passphrase)\b(\s*(?:is|:|=|-)?\s*)([A-Za-z0-9#*]{2,12})(\s+[A-Za-z0-9#*]{2,12})?/gi;
+const ACCESS_CODE_AFTER_NOUN_RE = /\b(code|pin|combo|combination|passcode|password|passphrase)\b(\s*(?:is|:|=|-)?\s*)(["'\u201c\u2018]?[A-Za-z0-9#*]{2,12}["'\u201d\u2019]?)(\s+["'\u201c\u2018]?[A-Za-z0-9#*]{2,12}["'\u201d\u2019]?)?/gi;
 const ACCESS_CODE_BEFORE_NOUN_RE = /\b([A-Za-z0-9#*]{2,12})(\s+(?:is|=)\s+(?:the\s+)?[^.\n]{0,20}?\b(?:code|pin|combo|combination|passcode)\b)/gi;
 const ACCESS_CODE_STOPWORDS = new Set(['gate', 'garage', 'door', 'lockbox', 'lock', 'box', 'keypad', 'entry', 'access', 'alarm', 'pin', 'code', 'combo', 'combination', 'passcode', 'password', 'passphrase', 'is', 'the', 'a', 'an', 'use', 'tech', 'only', 'for', 'to', 'and', 'or', 'needed', 'required', 'broken', 'works', 'not', 'no', 'none', 'unknown', 'same', 'new', 'old']);
 function redactAccessCodes(text) {
@@ -69,7 +69,11 @@ function redactAccessCodes(text) {
     // Positional lowercase pass (Codex r7): the tokens adjacent to the code
     // noun are the credential regardless of casing.
     masked = masked.replace(ACCESS_CODE_AFTER_NOUN_RE, (m, noun, mid, t1, t2) => {
-      const mask = (tok) => (tok && !ACCESS_CODE_STOPWORDS.has(tok.trim().toLowerCase()) ? tok.replace(/[A-Za-z0-9#*]+/, '[redacted]') : (tok || ''));
+      const mask = (tok) => {
+        if (!tok) return '';
+        const bare = tok.trim().replace(/["'\u201c\u201d\u2018\u2019]/g, '').toLowerCase();
+        return ACCESS_CODE_STOPWORDS.has(bare) ? tok : tok.replace(/[A-Za-z0-9#*]+/, '[redacted]');
+      };
       return `${noun}${mid}${mask(t1)}${mask(t2)}`;
     });
     masked = masked.replace(ACCESS_CODE_BEFORE_NOUN_RE, (m, tok, rest) => (
@@ -133,7 +137,7 @@ class ContextAggregator {
   // pick a different (or deleted) account that shares the number.
   async getContextForCustomer(customer) {
     // Parallel data fetch
-    const [smsHistory, serviceHistory, upcomingServices, propertyPrefs, payments, interactions, complaints, reschedules, pendingEstimate, activeCancelSave, compliance, recentCalls, collectibleInvoices, lawnAssessments, cardOnFile, payerInvRows] = await Promise.all([
+    const [smsHistory, serviceHistory, upcomingServices, propertyPrefs, payments, interactions, complaints, reschedules, pendingEstimate, activeCancelSave, compliance, recentCalls, allInvoices, lawnAssessments, cardOnFile] = await Promise.all([
       db('sms_log').where({ customer_id: customer.id }).orderBy('created_at', 'desc').limit(20),
       // completed visits only (Codex r8): an 'incomplete' closeout must not
       // answer "what did you do last time" as though the work happened.
@@ -199,11 +203,6 @@ class ContextAggregator {
         .orderBy([{ column: 'is_default', order: 'desc' }, { column: 'created_at', order: 'desc' }])
         .first('card_brand', 'last_four', 'exp_month', 'exp_year', 'autopay_enabled', 'is_default', 'method_type')
         .catch(() => null),
-      // Payer-billed invoice ids (Codex r2): payments against third-party-
-      // billed invoices sit under the homeowner's customer_id — same filter
-      // billing-v2's /balance uses, so a payer's AP payment (or failure) can
-      // never read as the homeowner's own.
-      db('invoices').where({ customer_id: customer.id }).whereNotNull('payer_id').select('id').catch(() => []),
     ]);
 
     const lastService = serviceHistory[0] || null;
@@ -211,7 +210,10 @@ class ContextAggregator {
     // against a payer-billed invoice is the PAYER's even though the row sits
     // under the homeowner's customer_id — exclude those from both the
     // balance and the recent-payments facts.
-    const payerInvoiceIds = new Set((payerInvRows || []).map((r) => String(r.id)));
+    const invoiceRows = allInvoices || [];
+    const VISIBLE_INVOICE_STATUSES = new Set(['sent', 'viewed', 'overdue']);
+    const payerInvoiceIds = new Set(invoiceRows.filter((r) => r.payer_id).map((r) => String(r.id)));
+    const draftOwnInvoiceIds = new Set(invoiceRows.filter((r) => !r.payer_id && String(r.status) === 'draft').map((r) => String(r.id)));
     const paymentInvoiceId = (p) => {
       try {
         const m = typeof p.metadata === 'string' ? JSON.parse(p.metadata) : p.metadata;
@@ -228,23 +230,25 @@ class ContextAggregator {
     // attempt is NOT "Current". Invoice-linked failed attempts are excluded
     // (the invoice itself already counts — double-count guard). Superseded
     // failed attempts were collected by their retry's own row.
-    const ownInvoices = (collectibleInvoices || []).filter((inv) => !inv.payer_id);
+    const ownInvoices = invoiceRows.filter((inv) => !inv.payer_id && VISIBLE_INVOICE_STATUSES.has(String(inv.status)));
     const ownInvoiceIds = new Set(ownInvoices.map((inv) => String(inv.id)));
     const invoiceBalance = ownInvoices.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0);
     const failedStandalone = ownPayments
       .filter(p => ['failed', 'pending', 'overdue'].includes(p.status) && !p.superseded_by_payment_id)
-      // ANY invoice-linked failure is excluded (Codex r8, billing-v2 canon):
-      // the invoice lifecycle owns that money — a settled/voided invoice's
-      // old failure must not read as still owed, and a collectible one is
-      // already summed above.
-      .filter(p => !paymentInvoiceId(p))
+      // Invoice-linked failures are excluded (Codex r8, billing-v2 canon) —
+      // the invoice lifecycle owns that money — EXCEPT when the linked
+      // invoice is still a DRAFT (Codex r9, billing-v2:605-608): the visible
+      // allow-list never sums drafts, so dropping the failed
+      // completion-autopay row too would show $0 owed on a still-collectible
+      // debt.
+      .filter(p => { const invId = paymentInvoiceId(p); return !invId || draftOwnInvoiceIds.has(invId); })
       .reduce((sum, p) => sum + parseFloat(p.amount || 0), 0);
     const balance = invoiceBalance + failedStandalone;
     // Newest own invoice with a POSITIVE due (Codex r8): a fully-credited
     // newest row must not present "$0.00 due" while an older invoice carries
     // the balance.
     const openInvoice = ownInvoices.find((inv) => invoiceAmountDue(inv) > 0) || null;
-    const hasPayerBilledOpen = (collectibleInvoices || []).some((inv) => inv.payer_id);
+    const hasPayerBilledOpen = invoiceRows.some((inv) => inv.payer_id && VISIBLE_INVOICE_STATUSES.has(String(inv.status)));
     // Canonical autopay state (Codex r1): the raw autopay_enabled flag lies
     // when the default method is missing/expired/unhealthy, and a stale
     // autopay_paused_until must not read as paused — customerOnAutopay +
@@ -253,11 +257,20 @@ class ContextAggregator {
     let autopayState = null;
     try {
       const paused = isPaused(customer);
+      // next_charge_date is only real for the monthly-membership lane
+      // (Codex r9, customer-autopay canon): per-application / prepay /
+      // one-time accounts can carry a stale date the cron will never act on
+      // — advertising it would promise a charge that isn't coming.
+      let monthlyLane = false;
+      try {
+        const { resolveBillingLane } = require('./billing-lane');
+        monthlyLane = resolveBillingLane(customer).mode === 'monthly_membership';
+      } catch { monthlyLane = false; }
       autopayState = {
         on: paused ? false : await customerOnAutopay(customer),
         paused,
         pausedUntil: paused ? customer.autopay_paused_until : null,
-        nextChargeDate: customer.next_charge_date || null,
+        nextChargeDate: monthlyLane ? (customer.next_charge_date || null) : null,
       };
     } catch (err) {
       logger.warn(`[context] autopay eligibility failed for customer ${customer.id}: ${err.message}`);

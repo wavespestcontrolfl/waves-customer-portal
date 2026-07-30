@@ -574,6 +574,14 @@ describe('v10 — full-account grounding', () => {
     expect(bad).not.toContain('EPA-approved');
   });
 
+  test('sanctioned "safe once dry" wording SURVIVES the screen (codex r9)', () => {
+    const ok = buildFactsBlock({
+      summary: 'X',
+      recentCalls: [{ summary: 'The treatment is safe once dry; the technician will confirm timing.', direction: 'inbound', date: '2026-07-28T15:00:00Z' }],
+    });
+    expect(ok).toContain('safe once dry');
+  });
+
   test('unqualified safety claims drop from grounded text (codex r6)', () => {
     const block = buildFactsBlock({
       summary: 'X',

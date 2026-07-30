@@ -1984,8 +1984,38 @@ function initScheduledJobs() {
           if (claimMeta.agent_decision_id) {
             const suggest = require('./sms-suggest-mode');
             const anchorStale = await suggest.suggestionAnchorIsStale({ decisionId: claimMeta.agent_decision_id, excludeSmsLogId: msg.id });
-            if (anchorStale) {
-              const blockedReason = 'stale_agent_decision';
+            // Amount revalidation (Codex r9): the account can change between
+            // review and fire (a portal payment sends no inbound SMS, so the
+            // anchor check can't see it). Non-human-authored agent text
+            // carrying numeric amounts must still match the CURRENT
+            // authoritative billing values; unverifiable or mismatched →
+            // block + retire, same path as a stale anchor. Fail CLOSED on
+            // any error — an unknowable account state must not send figures.
+            let amountsStale = false;
+            if (!anchorStale && claimMeta.human_authored !== true && msg.customer_id) {
+              const AMOUNT_FORMS_RE = /(?:\$|\bUSD\s?)\s?\d[\d,]*(?:\.\d{1,2})?|\b\d[\d,]*(?:\.\d{1,2})?\s?(?:dollars|bucks|usd)\b/gi;
+              const bodyAmounts = (String(msg.message_body || '').match(AMOUNT_FORMS_RE) || [])
+                .map((a) => Math.round(Number(a.replace(/[^\d.]/g, '')) * 100));
+              if (bodyAmounts.length) {
+                try {
+                  const ContextAggregator = require('./context-aggregator');
+                  const customerRow = await db('customers').where({ id: msg.customer_id }).first();
+                  const ctx = customerRow ? await ContextAggregator.getContextForCustomer(customerRow) : null;
+                  const cents = (v) => Math.round(Number(v) * 100);
+                  const authorized = new Set([
+                    ctx?.billing?.outstandingBalance > 0 ? cents(ctx.billing.outstandingBalance) : null,
+                    ctx?.billing?.openInvoice?.amountDue != null ? cents(ctx.billing.openInvoice.amountDue) : null,
+                    ...((ctx?.billing?.recentPayments || []).map((p) => (p?.amount != null ? cents(p.amount) : null))),
+                  ].filter((v) => Number.isFinite(v)));
+                  amountsStale = bodyAmounts.some((a) => !authorized.has(a));
+                } catch (err) {
+                  logger.warn(`[scheduler] amount revalidation failed for scheduled sms ${msg.id}: ${err.message}; blocking send`);
+                  amountsStale = true;
+                }
+              }
+            }
+            if (anchorStale || amountsStale) {
+              const blockedReason = anchorStale ? 'stale_agent_decision' : 'stale_amount_agent_decision';
               const threadKey = String(msg.to_phone || '').replace(/\D/g, '').slice(-10) || msg.customer_id || msg.id;
               // Everything under the lock, metadata read THROUGH the trx
               // AFTER acquiring it — the cancel route can transfer parked
