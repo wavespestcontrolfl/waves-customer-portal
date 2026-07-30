@@ -55,10 +55,18 @@ describe('sms template audit transform table', () => {
   });
 
   test('rewrites preserve the exact variable set of the audited body', () => {
+    // autopay_pre_charge is the ONE deliberate variable change: the hardcoded
+    // "WaveGuard" brand became a per-customer {autopay_label} (owner ruling
+    // 2026-07-30 — the old copy misbranded non-WaveGuard monthly customers
+    // and was guard-blocked for everyone).
+    const VAR_CHANGE_EXCEPTIONS = { autopay_pre_charge: ['autopay_label', 'charge_date', 'first_name'] };
     for (const t of TRANSFORMS) {
       const before = tokens(t.expect);
       const after = tokens(t.set);
-      // reminder_24h deliberately keeps its vars identical too — no exceptions.
+      if (VAR_CHANGE_EXCEPTIONS[t.key]) {
+        expect({ key: t.key, vars: after }).toEqual({ key: t.key, vars: VAR_CHANGE_EXCEPTIONS[t.key] });
+        continue;
+      }
       expect({ key: t.key, vars: after }).toEqual({ key: t.key, vars: before });
     }
   });

@@ -14,7 +14,7 @@
  {
   "key": "reminder_24h",
   "active": true,
-  "expect": "Hello {first_name}! Your {service_type} with Waves is tomorrow. Your arrival window starts at {time}, and we’ll text you a tracking link when your technician is on the way.\n\nQuestions or need to reschedule? Reply here.\n\nReply STOP to opt out.{card_hold_policy_line}",
+  "expect": "Hello {first_name}! Your {service_type} with Waves is tomorrow. Your arrival window starts at {time}, and we\u2019ll text you a tracking link when your technician is on the way.\n\nQuestions or need to reschedule? Reply here.\n\nReply STOP to opt out.{card_hold_policy_line}",
   "set": "Hello {first_name}! Your {service_type} with Waves is tomorrow. Your arrival window starts at {time}, and we'll text you a tracking link when your technician is on the way.{card_hold_policy_line}\n\nQuestions or need to reschedule? Reply here."
  },
  {
@@ -26,7 +26,7 @@
  {
   "key": "rain_out_moved",
   "active": true,
-  "expect": "Hello {first_name} — {weather_phrase} rolled through your area, so we moved your {service_type} to {new_option}.{alt_clause}{forecast_clause}\n\nQuestions or requests? Reply to this message.\n\nReply STOP to opt out.",
+  "expect": "Hello {first_name} \u2014 {weather_phrase} rolled through your area, so we moved your {service_type} to {new_option}.{alt_clause}{forecast_clause}\n\nQuestions or requests? Reply to this message.\n\nReply STOP to opt out.",
   "set": "Hello {first_name} - {weather_phrase} rolled through your area, so we moved your {service_type} to {new_option}.{alt_clause}{forecast_clause}\n\nQuestions or requests? Reply to this message."
  },
  {
@@ -56,7 +56,7 @@
  {
   "key": "booking_abandonment_recovery",
   "active": true,
-  "expect": "Hello {first_name}! You were almost booked with Waves for {service_type} — your spot isn't reserved yet. Pick a time and you're all set: {booking_url}\n\nReply here with any questions.\n\nReply STOP to opt out.",
+  "expect": "Hello {first_name}! You were almost booked with Waves for {service_type} \u2014 your spot isn't reserved yet. Pick a time and you're all set: {booking_url}\n\nReply here with any questions.\n\nReply STOP to opt out.",
   "set": "Hello {first_name}! You were almost booked with Waves for {service_type} - your spot isn't reserved yet. Pick a time and you're all set: {booking_url}\n\nReply here with any questions.\n\nReply STOP to opt out."
  },
  {
@@ -117,7 +117,7 @@
   "key": "autopay_pre_charge",
   "active": true,
   "expect": "Hello {first_name}! Your WaveGuard auto-pay will process on {charge_date}.\n\nNeed to update your card or pause? Visit portal.wavespestcontrol.com or reply here.\n\nReply STOP to opt out.",
-  "set": "Hello {first_name}! Your WaveGuard auto-pay will process on {charge_date}.\n\nNeed to update your card or pause? Visit portal.wavespestcontrol.com or reply here."
+  "set": "Hello {first_name}! Your {autopay_label} will process on {charge_date}.\n\nNeed to update your card or pause? Visit portal.wavespestcontrol.com or reply here."
  },
  {
   "key": "autopay_card_expired",
@@ -170,13 +170,13 @@
  {
   "key": "service_complete_paid_receipt",
   "active": true,
-  "expect": "Hello {first_name}! Thanks for your payment today — ${amount}{card_line}. Your {service_type} service report is ready: {portal_url}\n\nReceipt: {receipt_url}\n\nQuestions or requests? Reply here.\n\nReply STOP to opt out.",
+  "expect": "Hello {first_name}! Thanks for your payment today \u2014 ${amount}{card_line}. Your {service_type} service report is ready: {portal_url}\n\nReceipt: {receipt_url}\n\nQuestions or requests? Reply here.\n\nReply STOP to opt out.",
   "set": "Hello {first_name}! Thanks for your payment today - ${amount}{card_line}. Your {service_type} service report is ready: {portal_url}\n\nReceipt: {receipt_url}\n\nQuestions or requests? Reply here."
  },
  {
   "key": "previsit_balance_reminder",
   "active": true,
-  "expect": "Hello {first_name}! Ahead of your {service_type} visit on {visit_date}, a quick reminder: your account has a past-due balance of ${amount}. You can take care of it here: {billing_url}\n\nAlready handled it? Thank you — no action needed.",
+  "expect": "Hello {first_name}! Ahead of your {service_type} visit on {visit_date}, a quick reminder: your account has a past-due balance of ${amount}. You can take care of it here: {billing_url}\n\nAlready handled it? Thank you \u2014 no action needed.",
   "set": "Hello {first_name}! Ahead of your {service_type} visit on {visit_date}, a quick reminder: your account has a past-due balance of ${amount}. Already handled it? Thank you - no action needed.\n\nPay here: {billing_url}"
  },
  {
@@ -200,7 +200,7 @@
  {
   "key": "estimate_followup_deposit",
   "active": true,
-  "expect": "Hello {first_name}! Your Waves appointment is almost reserved — your estimate is saved and just needs the ${deposit_amount} deposit to lock in your spot: {estimate_url}\n\nQuestions or requests? Reply here.\n\nReply STOP to opt out.",
+  "expect": "Hello {first_name}! Your Waves appointment is almost reserved \u2014 your estimate is saved and just needs the ${deposit_amount} deposit to lock in your spot: {estimate_url}\n\nQuestions or requests? Reply here.\n\nReply STOP to opt out.",
   "set": "Hello {first_name}! Your Waves appointment is almost reserved - your estimate is saved and just needs the ${deposit_amount} deposit to lock in your spot: {estimate_url}\n\nQuestions or requests? Reply here.\n\nReply STOP to opt out."
  },
  {
@@ -218,7 +218,7 @@
  {
   "key": "invoice_sent_annual_prepay",
   "active": true,
-  "expect": "Hello {first_name}! Your Waves annual prepay plan invoice is ready — it prepays {coverage_summary}.{first_visit_clause} Pay here: {pay_url}\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!\n\nReply STOP to opt out.",
+  "expect": "Hello {first_name}! Your Waves annual prepay plan invoice is ready \u2014 it prepays {coverage_summary}.{first_visit_clause} Pay here: {pay_url}\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!\n\nReply STOP to opt out.",
   "set": "Hello {first_name}! Your Waves annual prepay plan invoice is ready - it prepays {coverage_summary}.{first_visit_clause} Questions? Reply here.\n\nPay here: {pay_url}"
  },
  {
@@ -272,7 +272,7 @@
  {
   "key": "annual_prepay_payment_reminder",
   "active": true,
-  "expect": "Hello {first_name}! A quick reminder that your Waves annual prepay invoice{amount_text} is still open ahead of your first visit on {first_visit_date}. Pay here: {pay_link}\n\nIf the prepay isn’t settled before the visit, no problem — we’ll simply bill that visit individually instead. Questions? Reply to this message.\n\nReply STOP to opt out.",
+  "expect": "Hello {first_name}! A quick reminder that your Waves annual prepay invoice{amount_text} is still open ahead of your first visit on {first_visit_date}. Pay here: {pay_link}\n\nIf the prepay isn\u2019t settled before the visit, no problem \u2014 we\u2019ll simply bill that visit individually instead. Questions? Reply to this message.\n\nReply STOP to opt out.",
   "set": "Hello {first_name}! A quick reminder that your Waves annual prepay invoice{amount_text} is still open ahead of your first visit on {first_visit_date}.\n\nIf it isn't settled before the visit, no problem - we'll simply bill that visit individually instead. Questions? Reply here.\n\nPay here: {pay_link}"
  },
  {
@@ -284,7 +284,7 @@
  {
   "key": "deposit_receipt",
   "active": true,
-  "expect": "Hello {first_name}! We received your ${amount} deposit{charge_note} — it will be applied toward your first visit. Thank you for choosing Waves!\n\nQuestions or requests? Reply here. Reply STOP to opt out.",
+  "expect": "Hello {first_name}! We received your ${amount} deposit{charge_note} \u2014 it will be applied toward your first visit. Thank you for choosing Waves!\n\nQuestions or requests? Reply here. Reply STOP to opt out.",
   "set": "Hello {first_name}! We received your ${amount} deposit{charge_note} - it will be applied toward your first visit. Thank you for choosing Waves!\n\nQuestions or requests? Reply here."
  },
  {
@@ -344,13 +344,13 @@
  {
   "key": "voicemail_quote_link",
   "active": true,
-  "expect": "Hello {first_name}, it's Waves Pest Control — got your message about {service_label}. Get your quote here: {quote_url}\n\nOr reply here and we'll call you back.\n\nReply STOP to opt out.",
+  "expect": "Hello {first_name}, it's Waves Pest Control \u2014 got your message about {service_label}. Get your quote here: {quote_url}\n\nOr reply here and we'll call you back.\n\nReply STOP to opt out.",
   "set": "Hello {first_name}, it's Waves Pest Control - got your message about {service_label}. Get your quote here: {quote_url}\n\nOr reply here and we'll call you back.\n\nReply STOP to opt out."
  },
  {
   "key": "recipient_optin_request",
   "active": true,
-  "expect": "Hi {recipient_first_name} — {account_first_name} added you to receive appointment and service texts from Waves Pest Control for {property_address}. Reply YES to confirm, STOP to opt out, HELP for help. Msg frequency varies. Msg & data rates may apply.",
+  "expect": "Hi {recipient_first_name} \u2014 {account_first_name} added you to receive appointment and service texts from Waves Pest Control for {property_address}. Reply YES to confirm, STOP to opt out, HELP for help. Msg frequency varies. Msg & data rates may apply.",
   "set": "Hello {recipient_first_name}! {account_first_name} added you to receive appointment and service texts from Waves Pest Control for {property_address}.\n\nReply YES to confirm, STOP to opt out, HELP for help. Msg frequency varies. Msg & data rates may apply."
  },
  {
@@ -404,7 +404,7 @@
  {
   "key": "rain_out_moved_v2",
   "active": true,
-  "expect": "Hello {first_name} — {weather_lead}, so we moved your {service_type} to {new_option}.{better_day_clause}{alt_clause}{efficacy_clause}{forecast_clause}\n\nQuestions or requests? Reply to this message.\n\nReply STOP to opt out.",
+  "expect": "Hello {first_name} \u2014 {weather_lead}, so we moved your {service_type} to {new_option}.{better_day_clause}{alt_clause}{efficacy_clause}{forecast_clause}\n\nQuestions or requests? Reply to this message.\n\nReply STOP to opt out.",
   "set": "Hello {first_name} - {weather_lead}, so we moved your {service_type} to {new_option}.{better_day_clause}{alt_clause}{efficacy_clause}{forecast_clause}\n\nQuestions or requests? Reply to this message."
  },
  {

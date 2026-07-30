@@ -34,7 +34,7 @@ async function sendPreChargeReminders() {
     .where('monthly_rate', '>', 0)
     .where('billing_day', targetDay)
     .whereNull('deleted_at')
-    .select('id', 'first_name', 'phone', 'monthly_rate', 'autopay_paused_until');
+    .select('id', 'first_name', 'phone', 'monthly_rate', 'autopay_paused_until', 'waveguard_tier');
   // Non-monthly billing modes keep monthly_rate populated (legacy surfaces)
   // but the monthly cron never charges them (GUARD 3b) — never text a
   // reminder for a monthly charge that will not run (Codex round-2 + 5):
@@ -68,9 +68,15 @@ async function sendPreChargeReminders() {
       if (already) { skipped++; continue; }
 
       const dateStr = target.toLocaleDateString('en-US', { month: 'long', day: 'numeric', timeZone: 'America/New_York' });
+      // Plan-aware branding (owner ruling 2026-07-30): the monthly lane
+      // includes explicit monthly-membership customers WITHOUT a WaveGuard
+      // tier, so the old hardcoded "WaveGuard auto-pay" copy misbranded them
+      // — the sms-guard stopgap blocked every pre-charge text over it.
+      const { isMembershipTier } = require('./billing-lane');
+      const autopayLabel = isMembershipTier(c.waveguard_tier) ? 'WaveGuard auto-pay' : 'Waves auto-pay';
       const body = await renderSmsTemplate(
         'autopay_pre_charge',
-        { first_name: c.first_name, charge_date: dateStr },
+        { first_name: c.first_name, charge_date: dateStr, autopay_label: autopayLabel },
         { workflow: 'autopay_pre_charge', entity_type: 'customer', entity_id: c.id },
       );
       if (!body) {

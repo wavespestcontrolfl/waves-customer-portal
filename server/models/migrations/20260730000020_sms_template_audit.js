@@ -114,6 +114,23 @@ exports.up = async function up(knex) {
     }
   }
 
+  // autopay_pre_charge now renders a per-customer {autopay_label}
+  // ("WaveGuard auto-pay" for members, "Waves auto-pay" otherwise) — declare
+  // the new variable so admin edits keep validating (add-only, preserves any
+  // admin-added variables).
+  {
+    const row = await knex('sms_templates').where({ template_key: 'autopay_pre_charge' }).first('id', 'variables');
+    if (row) {
+      try {
+        const list = Array.isArray(row.variables) ? row.variables : JSON.parse(row.variables || '[]');
+        if (!list.includes('autopay_label')) {
+          list.push('autopay_label');
+          await knex('sms_templates').where({ id: row.id }).update({ variables: JSON.stringify(list), updated_at: new Date() });
+        }
+      } catch { /* unparseable metadata — leave untouched */ }
+    }
+  }
+
   // Legacy referral copy stored on referral_program_settings renders OUTSIDE
   // sms_templates (referral-engine legacy path) — GSM-normalize it too so the
   // encoding win covers referral sends. (Unifying that path into
