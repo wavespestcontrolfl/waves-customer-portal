@@ -73,6 +73,8 @@ const SELF_REPORTING_PAGES = new Set([
   'pipeline',
   'customers',
   'knowledge',
+  'equipment',
+  'dispatch',
   'service-library',
 ]);
 // NOT listed: dispatch — its URL sync-back effect rewrites ?tab= to the

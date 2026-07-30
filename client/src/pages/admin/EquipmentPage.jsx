@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { useSearchParams } from "react-router-dom";
 import { BarChart3, Beaker, Calculator, ClipboardCheck, Plus, Wrench } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import EquipmentMaintenancePage from "./EquipmentMaintenancePage";
 import EquipmentCalibrationPanel from "./EquipmentCalibrationPanel";
 
@@ -230,6 +231,11 @@ export default function EquipmentPage() {
     const nextTab = normalizeEquipmentTab(searchParams.get("tab"));
     setTab((current) => (current === nextTab ? current : nextTab));
   }, [searchParams]);
+
+  // Report the leaf that actually RENDERS: /admin/equipment falls back to
+  // 'assets' and legacy links (?tab=fleet) normalize to 'maintenance' —
+  // the raw ?tab= beacon can't see either (Codex #2961 r19).
+  useRenderedTabBeacon("/admin/equipment", tab, [searchParams]);
 
   return (
     <div style={{ maxWidth: 1300, margin: "0 auto" }}>
