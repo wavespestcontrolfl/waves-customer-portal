@@ -93,17 +93,27 @@ function findHallucinatedClaims(body, lockedPrices = [], mode = 'text') {
   // stripping the span — done above, before tag-strip — exempts exactly
   // the renderer's own field and nothing else.
   //
-  // The plain-text body has no markup, so its renderer shape
-  // ("Tickets: <price>", the facts line) is excised by string — mode
-  // 'text' only: the HTML segment's exemption is the verified span above
-  // (mode 'html'), and subject/preview scan with no exemptions at all.
+  // The plain-text body has no markup, but the renderer's facts line is
+  // immediately followed by that event's OWN {{evclick:<eventId>}} token
+  // ("Tickets & info: …"), so the text exemption binds the event/price
+  // pair too — mode 'text' only: "Tickets: <price>" excises ONLY when
+  // the same event's evclick token follows within the renderer's
+  // distance. Editing Event A's facts line to Event B's real price
+  // leaves A's token adjacent, the pair mismatches, and it blocks.
   // Boundary-bound so a locked "$25" can't hollow an invented "$250";
-  // any model prose that repeats a claim appears in the HTML segment
-  // too, where no string excision exists, and still blocks.
+  // model prose repeating a claim appears in the HTML segment too,
+  // where no text excision exists. Entries WITHOUT an eventId (bare
+  // strings — unit-test convenience; lockedPricesForSend always sets
+  // ids) excise unbound.
   if (mode === 'text') {
-    for (const norm of lockedSet) {
+    for (const entry of priceEntries) {
+      const norm = normPrice(entry.price);
+      if (!norm) continue;
       const esc = norm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      bodyText = bodyText.replace(new RegExp(`Tickets:\\s*${esc}(?![\\w])`, 'gu'), ' ');
+      const re = entry.eventId
+        ? new RegExp(`Tickets:\\s*${esc}(?![\\w])(?=[\\s\\S]{0,200}?\\{\\{evclick:${String(entry.eventId).toLowerCase()}\\}\\})`, 'gu')
+        : new RegExp(`Tickets:\\s*${esc}(?![\\w])`, 'gu');
+      bodyText = bodyText.replace(re, ' ');
     }
   }
   const seen = new Set();

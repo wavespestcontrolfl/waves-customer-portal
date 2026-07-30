@@ -1701,7 +1701,24 @@ describe('DB-locked prices vs the hallucinated-claim scan', () => {
     );
   });
 
-  test('text-segment excision: the Tickets: renderer shape passes; boundary-bound; other amounts block', () => {
+  test('text-segment excision binds the event/price pair via the adjacent evclick token', () => {
+    const A = 'a0000001-0000-4000-8000-000000000001';
+    const B = 'b0000002-0000-4000-8000-000000000002';
+    const pairs = [{ eventId: A, price: '$25' }, { eventId: B, price: '$50' }];
+    const line = (price, id) => `Friday | Venue | Tickets: ${price}\nDetails & tickets: {{evclick:${id}}}`;
+    expect(findHallucinatedClaims(line('$25', A), pairs, 'text')).toEqual([]);
+    // Event A's facts line wearing Event B's REAL price blocks — the
+    // adjacent token pins the pair.
+    expect(findHallucinatedClaims(line('$50', A), pairs, 'text')).toEqual(
+      expect.arrayContaining([expect.stringContaining('dollar amount in body')]),
+    );
+    // No adjacent token at all → no exemption.
+    expect(findHallucinatedClaims('Tickets: $25 somewhere in prose', pairs, 'text')).toEqual(
+      expect.arrayContaining([expect.stringContaining('dollar amount in body')]),
+    );
+  });
+
+  test('text-segment excision (unbound string entries — unit convenience): renderer shape passes; boundary-bound', () => {
     expect(findHallucinatedClaims('Tickets: From $25', ['From $25'])).toEqual([]);
     expect(findHallucinatedClaims('Tickets: From&nbsp;&#36;25', ['From $25'])).toEqual([]);
     // Locked $25 cannot hollow an invented $250.
@@ -1724,7 +1741,7 @@ describe('DB-locked prices vs the hallucinated-claim scan', () => {
       subject: '🎟️ From $25 in prizes this weekend',
       preview_text: 'ok',
       html_body: '<p>🎟️ <span data-db-price="a0000001-0000-4000-8000-000000000001">From $25</span></p><p>Great show.</p>',
-      text_body: 'Tickets: From $25',
+      text_body: 'Tickets: From $25\nDetails & tickets: {{evclick:a0000001-0000-4000-8000-000000000001}}',
       newsletter_type: 'local-weekly-fresh-events',
     };
     const { errors } = validateNewsletterDraft(send, { recipientCount: 5, lockedPrices: pairs });
@@ -1846,7 +1863,10 @@ describe('tiered event treatment (owner direction 2026-07-29)', () => {
     const withAddr = buildFlagshipTextBody({ events: [mk(1, { address: '123 Main St' })] });
     expect(withAddr).toContain('Venue 1, Sarasota (123 Main St)');
     // evclick token — sendCampaign substitutes both MIME parts.
-    expect(text).toContain('Tickets & info: {{evclick:a0000001-0000-4000-8000-000000000001}}');
+    expect(text).toContain('Details & tickets: {{evclick:a0000001-0000-4000-8000-000000000001}}');
+    // Text validates clean under the PAIR-BOUND text scan (facts line
+    // adjacent to its own event token).
+    expect(findHallucinatedClaims(text, [{ eventId: 'a0000001-0000-4000-8000-000000000001', price: 'From $25' }], 'text')).toEqual([]);
     expect(text).toContain("Let's get into it");
     expect(text).toContain('== That is the scoop, crew ==');
     expect(text).toContain('FREE');

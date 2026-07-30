@@ -1600,7 +1600,11 @@ function buildFlagshipTextBody(draft) {
     // Curiosity headline as the heading (matches the HTML h2); the
     // official name rides in the description prose per the prompt.
     lines.push(`== ${stripMd(ev.title) || ev.sourceTitle || ''} ==`);
-    if (ev.gifCaption) lines.push(stripMd(ev.gifCaption));
+    // Captions render only on tiers whose HTML shows a visual — the
+    // shortlist's compact HTML never renders gifCaption, so the text
+    // alternative must not either (MIME parity).
+    const tier = ev.tier || (i === 0 ? 'hero' : (i <= 2 ? 'featured' : 'quick'));
+    if (ev.gifCaption && tier !== 'quick') lines.push(stripMd(ev.gifCaption));
     if (ev.description) lines.push(stripMd(ev.description));
     // Headliner furniture serializes too — the MIME alternatives must
     // stay content-equivalent (same fields, nothing extra, nothing
@@ -1638,7 +1642,10 @@ function buildFlagshipTextBody(draft) {
     const url = safeUrl(ev.eventUrl);
     if (url) {
       const href = ev.eventId ? `{{evclick:${String(ev.eventId).toLowerCase()}}}` : url;
-      lines.push(`Tickets & info: ${href}`);
+      // "Details & tickets", NOT "Tickets & info": a FREE fact line
+      // directly above would normalize to "FREE Tickets …" and trip the
+      // claim scan's free-tickets pattern on every free event.
+      lines.push(`Details & tickets: ${href}`);
     }
     out.push(lines.join('\n'));
   }
