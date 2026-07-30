@@ -1055,3 +1055,24 @@ describe('meta contract round-6 hardening (Codex findings)', () => {
     expect(checkAuthoredMetaLength({ frontmatter: {} }).ok).toBe(true);
   });
 });
+
+describe('phone-token grammar (round-7 hardening)', () => {
+  const { checkMetaPhoneTokenPresent, checkBlogMetaContract } = require('../services/content/content-quality-gate')._internals;
+  const PAGE = { target_page_type: 'page' };
+  const LEAD = 'What summer heat does to Southwest Florida turf and how a full recovery works. ';
+
+  test('whitespace-tolerant and alias tokens satisfy the non-blog requirement', () => {
+    for (const tok of ['{{ cityPhone }}', '{{tel}}', '{{ phone }}']) {
+      const m = `Pest control in Sarasota built for the coastal pressure this season. Call ${tok} for an estimate from techs on daily local routes.`;
+      expect(checkMetaPhoneTokenPresent({ meta_description: m }, PAGE, {}).ok).toBe(true);
+    }
+  });
+
+  test('whitespace-tolerant and alias tokens are banned from blog metas', () => {
+    for (const tok of ['{{ cityPhone }}', '{{tel}}']) {
+      const r = checkBlogMetaContract({ meta_description: `${LEAD}Details at ${tok} today. Learn more.` });
+      expect(r.ok).toBe(false);
+      expect(r.reason).toBe('blog_meta_must_not_carry_phone');
+    }
+  });
+});

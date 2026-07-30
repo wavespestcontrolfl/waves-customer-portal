@@ -1758,9 +1758,11 @@ function metaTitleRewriteFinding(frontmatter, { isRefresh = false, liveMetaTitle
 // the quality gate's meta_phone_token_present + meta_length_in_bounds.
 const LITERAL_PHONE_IN_META_RE = /\(\d{3}\)\s*\d{3}[-.\s]?\d{4}|\b\d{3}[-.]\d{3}[-.]\d{4}\b/;
 function metaDescriptionContractFinding(frontmatter, { isRefresh = false, liveMetaDescription = null, targetIsBlog = false } = {}) {
-  // SALESY/SOFT-CTA definitions shared with the quality gate (single source
-  // in title-meta-spam-gate) so the two enforcement points can't drift.
-  const { SALESY_META_RE, endsWithSoftCta } = require('./title-meta-spam-gate');
+  // SALESY/SOFT-CTA/token definitions shared with the quality gate (single
+  // source in title-meta-spam-gate) so the enforcement points can't drift.
+  // PHONE_TOKEN_RE covers the publisher's full substitution grammar —
+  // whitespace-tolerant, and the phone/tel aliases render a phone too.
+  const { SALESY_META_RE, endsWithSoftCta, PHONE_TOKEN_RE } = require('./title-meta-spam-gate');
   // Runs on refresh drafts (both contracts, changed metas only) AND on any
   // caller that declares a blog target — the legacy BlogWriter/admin/
   // calendar publishAstro path runs ONLY guardrails (no supporting-blog
@@ -1771,9 +1773,13 @@ function metaDescriptionContractFinding(frontmatter, { isRefresh = false, liveMe
   const draftMeta = frontmatter?.metaDescription ?? frontmatter?.meta_description;
   if (draftMeta === undefined || !String(draftMeta).trim()) return null; // absent → publisher keeps the live value
   const draftTrim = String(draftMeta).trim();
-  if (isRefresh && liveMetaDescription != null && draftTrim === String(liveMetaDescription).trim()) return null; // unchanged → grandfathered
+  // Unchanged vs the caller-supplied live/original value → grandfathered.
+  // Refresh passes the live page's meta; remediation passes the pre-fix
+  // file's meta; publishAstro (new posts) passes NONE — a new meta is always
+  // graded in full.
+  if (liveMetaDescription != null && draftTrim === String(liveMetaDescription).trim()) return null;
   if (targetIsBlog) {
-    if (draftTrim.includes('{{cityPhone}}') || draftTrim.includes('{{phone}}') || LITERAL_PHONE_IN_META_RE.test(draftTrim)) {
+    if (PHONE_TOKEN_RE.test(draftTrim) || LITERAL_PHONE_IN_META_RE.test(draftTrim)) {
       return finding('P1', 'BLOG_META_CARRIES_PHONE', 'Blog meta descriptions never carry a phone number (owner rule 2026-07-29: informational summary + soft CTA only).');
     }
     if (SALESY_META_RE.test(draftTrim)) {
@@ -1783,7 +1789,7 @@ function metaDescriptionContractFinding(frontmatter, { isRefresh = false, liveMe
       return finding('P1', 'BLOG_META_MISSING_SOFT_CTA', 'Blog meta descriptions must END with a soft CTA like "Learn more on the Waves blog." — the last sentence, not merely a mention (owner rule 2026-07-29).');
     }
   } else {
-    if (!draftTrim.includes('{{cityPhone}}')) {
+    if (!PHONE_TOKEN_RE.test(draftTrim)) {
       return finding('P1', 'META_MISSING_PHONE_TOKEN', 'Rewritten meta description must contain the {{cityPhone}} token (owner rule 2026-07-29: every non-blog meta carries the page\'s own phone number).');
     }
     if (LITERAL_PHONE_IN_META_RE.test(draftTrim)) {

@@ -33,7 +33,7 @@
  */
 
 const { THRESHOLDS } = require('./scoring-config');
-const { evaluateTitleMetaSpam, renderMetaTokens, SALESY_META_RE, endsWithSoftCta } = require('./title-meta-spam-gate');
+const { evaluateTitleMetaSpam, renderMetaTokens, PHONE_TOKEN_RE, SALESY_META_RE, endsWithSoftCta } = require('./title-meta-spam-gate');
 const { isFaqBlockedService } = require('./content-guardrails');
 
 // Compute the achievable maximum score PER PAGE TYPE so the pass
@@ -1026,12 +1026,12 @@ const LITERAL_PHONE_IN_META_RE = /\(\d{3}\)\s*\d{3}[-.\s]?\d{4}|\b\d{3}[-.]\d{3}
 // SALESY_META_RE / SOFT_CTA_RE are shared with content-guardrails via
 // title-meta-spam-gate so the definitions can't drift.
 function pageMetaPhoneResult(m) {
-  if (!m.includes('{{cityPhone}}')) return { ok: false, reason: 'meta_missing_cityPhone_token' };
+  if (!PHONE_TOKEN_RE.test(m)) return { ok: false, reason: 'meta_missing_cityPhone_token' };
   if (LITERAL_PHONE_IN_META_RE.test(m)) return { ok: false, reason: 'literal_phone_in_meta_use_cityPhone_token' };
   return { ok: true };
 }
 function blogMetaContractResult(m) {
-  if (m.includes('{{cityPhone}}') || m.includes('{{phone}}') || LITERAL_PHONE_IN_META_RE.test(m)) {
+  if (PHONE_TOKEN_RE.test(m) || LITERAL_PHONE_IN_META_RE.test(m)) {
     return { ok: false, reason: 'blog_meta_must_not_carry_phone' };
   }
   if (SALESY_META_RE.test(m)) return { ok: false, reason: 'blog_meta_salesy' };

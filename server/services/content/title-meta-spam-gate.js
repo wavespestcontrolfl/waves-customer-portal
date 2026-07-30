@@ -163,11 +163,14 @@ function slugReason(value) {
 // the {{cityPhone}} token and never exceeds 160 rendered characters) —
 // consumed by content-quality-gate and content-guardrails so the two
 // enforcement points can never drift.
+// Token grammar mirrors the Astro publisher's remark substitution
+// (whitespace-tolerant, and phone/tel are aliases that also render a phone
+// number) — exact-string checks let "{{ cityPhone }}" or "{{tel}}" through.
+const PHONE_TOKEN_RE = /\{\{\s*(cityPhone|phone|tel)\s*\}\}/i;
 const META_TOKEN_RENDERINGS = [
-  [/\{\{cityPhone\}\}/g, '(941) 297-2606'],
-  [/\{\{phone\}\}/g, '(941) 297-2606'],
-  [/\{\{brandShort\}\}/g, 'Waves'],
-  [/\{\{brandName\}\}/g, 'Waves Pest Control'],
+  [/\{\{\s*(cityPhone|phone|tel)\s*\}\}/gi, '(941) 297-2606'],
+  [/\{\{\s*brandShort\s*\}\}/gi, 'Waves'],
+  [/\{\{\s*brandName\s*\}\}/gi, 'Waves Pest Control'],
 ];
 function renderMetaTokens(text) {
   let s = String(text || '');
@@ -209,6 +212,7 @@ function endsWithSoftCta(text) {
 module.exports = {
   evaluateTitleMetaSpam,
   renderMetaTokens,
+  PHONE_TOKEN_RE,
   SALESY_META_RE,
   SOFT_CTA_RE,
   endsWithSoftCta,

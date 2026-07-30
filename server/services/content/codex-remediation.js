@@ -419,6 +419,21 @@ async function validateFixedBlogFile(markdown, opts = {}, deps = {}) {
       allowedInternalLinks: Array.isArray(runContext.allowedInternalLinks) ? runContext.allowedInternalLinks : [],
       isRefresh: runContext.isRefresh === true,
       priorBody: typeof runContext.priorBody === 'string' ? runContext.priorBody : null,
+      // This function validates BLOG files — declare it so the blog meta
+      // contract (no phone, nothing salesy, soft-CTA ending) applies here
+      // too (owner rule 2026-07-29). liveMetaDescription = the ORIGINAL
+      // file's meta so an UNCHANGED legacy meta is grandfathered (the PR
+      // #368 lesson: grading untouched legacy fields with a
+      // stricter-than-publish gate parks every fix); a fix that REWROTE the
+      // meta gets the full contract via the whitelist path's
+      // validateRewrittenMeta as well.
+      targetIsBlog: true,
+      liveMetaDescription: typeof opts.originalMetaDescription === 'string'
+        ? opts.originalMetaDescription
+        // No original supplied → compare the meta against ITSELF (always
+        // grandfathered): callers without the original can't distinguish a
+        // rewrite from legacy, and parking legacy is the #368 failure mode.
+        : (data.meta_description ?? null),
     },
   );
   if (!guardrails.pass) {
@@ -616,6 +631,22 @@ function validateRewrittenMeta(metaDescription, factContext = null, deps = {}) {
     });
     if (!pii || pii.ok !== true) {
       return { ok: false, reason: `pii: ${(pii && pii.reason) || 'no result'}` };
+    }
+    // Blog meta contract (owner rule 2026-07-29): this validator only runs
+    // on REWRITTEN blog metas, so the full contract applies with no
+    // grandfathering — no phone (token grammar OR literal), nothing salesy,
+    // and the final sentence must be a soft CTA. Without this, the
+    // scheduler-lane remediation could commit a 115-160-char sales pitch
+    // directly (spam gate + PII were its only checks).
+    const m = String(metaDescription || '').trim();
+    if (spamGate.PHONE_TOKEN_RE.test(m) || /\(\d{3}\)\s*\d{3}[-.\s]?\d{4}|\b\d{3}[-.]\d{3}[-.]\d{4}\b/.test(m)) {
+      return { ok: false, reason: 'blog meta contract: blog_meta_must_not_carry_phone' };
+    }
+    if (spamGate.SALESY_META_RE.test(m)) {
+      return { ok: false, reason: 'blog meta contract: blog_meta_salesy' };
+    }
+    if (!spamGate.endsWithSoftCta(m)) {
+      return { ok: false, reason: 'blog meta contract: blog_meta_missing_soft_cta' };
     }
     return { ok: true };
   } catch (e) {
@@ -1258,7 +1289,12 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   // Re-run the publisher's content-safety gates on the fix before committing —
   // a fix that fails them is worse than the original finding, so park it.
   const validate = deps.validateFixedBlogFile || validateFixedBlogFile;
-  const gate = await validate(fixed, { service, factContext, operatorFaqException, guardContext }, deps);
+  // originalMetaDescription: the pre-fix file's meta, so the guardrail blog
+  // contract fires only when the fix CHANGED the meta (unchanged legacy metas
+  // stay grandfathered — the #368 lesson).
+  let originalMetaDescription;
+  try { originalMetaDescription = ((fm.parse(file.content) || {}).data || {}).meta_description; } catch (_) { originalMetaDescription = undefined; }
+  const gate = await validate(fixed, { service, factContext, operatorFaqException, guardContext, originalMetaDescription }, deps);
   if (!gate || !gate.ok) return park(db, prNumber, `fix failed content gates: ${gate && gate.reason}`, onPark, headSha);
   // A passing fix that INTRODUCES a named-competitor comparison still needs a
   // human: the merge stamps enforcing that sign-off (astro_requires_human_merge
