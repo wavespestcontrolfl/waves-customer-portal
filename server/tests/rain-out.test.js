@@ -129,17 +129,17 @@ describe('rain-out service', () => {
 
     test('fires only when the forecast supports it, with tiered wording', () => {
       expect(clause({ ...base, todayChance: 85, newChance: 20 }))
-        .toBe(' Saturday looks a lot better — just a 20% chance of rain.');
+        .toBe(' Saturday looks a lot better - just a 20% chance of rain.');
       expect(clause({ ...base, todayChance: 85, newChance: 35 }))
-        .toBe(' Saturday looks better — a 35% chance of rain.');
+        .toBe(' Saturday looks better - a 35% chance of rain.');
       // Unknown today still allows a low-chance claim about the new day.
       expect(clause({ ...base, todayChance: null, newChance: 15 }))
-        .toBe(' Saturday looks a lot better — just a 15% chance of rain.');
+        .toBe(' Saturday looks a lot better - just a 15% chance of rain.');
     });
 
     test('tomorrow is called Tomorrow', () => {
       expect(clause({ ...base, chosenDate: '2026-06-12', todayChance: 85, newChance: 10 }))
-        .toBe(' Tomorrow looks a lot better — just a 10% chance of rain.');
+        .toBe(' Tomorrow looks a lot better - just a 10% chance of rain.');
     });
 
     test('stays silent on weak or unsupported forecasts', () => {
@@ -152,17 +152,17 @@ describe('rain-out service', () => {
 
     test('hourly window chance upgrades the claim to morning/afternoon specificity', () => {
       expect(clause({ ...base, todayChance: 85, windowChance: 10, windowStart: '08:00' }))
-        .toBe(' Saturday morning looks a lot better — just a 10% chance of rain around your new time.');
+        .toBe(' Saturday morning looks a lot better - just a 10% chance of rain around your new time.');
       expect(clause({ ...base, todayChance: 85, windowChance: 35, windowStart: '13:00' }))
-        .toBe(' Saturday afternoon looks better — a 35% chance of rain around your new time.');
+        .toBe(' Saturday afternoon looks better - a 35% chance of rain around your new time.');
       expect(clause({ ...base, chosenDate: '2026-06-12', todayChance: 85, windowChance: 15, windowStart: '15:00' }))
-        .toBe(' Tomorrow afternoon looks a lot better — just a 15% chance of rain around your new time.');
+        .toBe(' Tomorrow afternoon looks a lot better - just a 15% chance of rain around your new time.');
     });
 
     test('same-day push can promise later today, with a tighter cap', () => {
       const sameDay = { ...base, isSameDay: true, chosenDate: '2026-06-11' };
       expect(clause({ ...sameDay, todayChance: 85, windowChance: 15, windowStart: '15:00' }))
-        .toBe(' Later today looks a lot better — just a 15% chance of rain around your new time.');
+        .toBe(' Later today looks a lot better - just a 15% chance of rain around your new time.');
       // Same storm system: window claims over 30% stay silent on same-day moves.
       expect(clause({ ...sameDay, todayChance: 85, windowChance: 35, windowStart: '15:00' })).toBe('');
     });
@@ -170,7 +170,7 @@ describe('rain-out service', () => {
     test('window claims still respect the today-delta rule and fall back to day-level without hourly data', () => {
       expect(clause({ ...base, todayChance: 45, windowChance: 30, windowStart: '08:00' })).toBe(''); // delta < 20
       expect(clause({ ...base, todayChance: 85, windowChance: null, newChance: 20 }))
-        .toBe(' Saturday looks a lot better — just a 20% chance of rain.'); // day-level fallback
+        .toBe(' Saturday looks a lot better - just a 20% chance of rain.'); // day-level fallback
     });
   });
 
@@ -307,7 +307,7 @@ describe('rain-out service', () => {
       expect(renderSmsTemplate.mock.calls[0][0]).toBe('rain_out_moved_v2');
       const vars = renderSmsTemplate.mock.calls[0][1];
       expect(vars.weather_lead).toBe('storms are likely today (85% chance)');
-      expect(vars.better_day_clause).toBe(' Thursday afternoon looks a lot better — just a 10% chance of rain around your new time.');
+      expect(vars.better_day_clause).toBe(' Thursday afternoon looks a lot better - just a 10% chance of rain around your new time.');
       expect(vars.efficacy_clause).toBe(''); // gate dark
       expect(getDailyRainOutlook).toHaveBeenCalledWith(27.4, -82.4);
       expect(getHourlyRainOutlook).toHaveBeenCalledWith(27.4, -82.4);

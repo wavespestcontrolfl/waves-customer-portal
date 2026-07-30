@@ -63,10 +63,21 @@ function dropStop(body) {
 // required disclosure).
 const DROP_STOP = new Set(TRANSFORMS.map((t) => t.key).filter((k) => !KEEP_STOP.has(k)));
 
+// autopay_pre_charge renders a per-customer {autopay_label} after this
+// change AND its outbound guard is retired in the same deploy — so EVERY
+// pass (snapshot swap, admin-edited fallback, post-audit rows, variants)
+// must carry the hardcoded brand into the token, or a tierless monthly
+// customer could receive the misbranded literal (Codex #3080 r3+r4). The
+// sender always supplies the variable.
+function applyPlanAwareLabel(key, body) {
+  if (key !== 'autopay_pre_charge') return body;
+  return body.replace(/WaveGuard auto-pay/g, '{autopay_label}');
+}
+
 function mechanical(key, body) {
   let next = gsmNormalize(body);
   if (DROP_STOP.has(key)) next = dropStop(next);
-  return next;
+  return applyPlanAwareLabel(key, next);
 }
 
 exports.up = async function up(knex) {
@@ -107,16 +118,7 @@ exports.up = async function up(knex) {
     for (const v of variants) {
       if (typeof v.body !== 'string') continue;
       if (v.template_key === 'secure_appointment_card' || v.template_key === 'secure_appointment_card_plans') continue;
-      let next = mechanical(v.template_key, v.body);
-      if (v.template_key === 'autopay_pre_charge') {
-        // A selected variant renders INSTEAD of the rewritten base body —
-        // carry the plan-aware label into it too, or a tierless monthly
-        // customer could receive the misbranded "WaveGuard" literal this
-        // migration exists to eliminate (the outbound guard that used to
-        // block it is retired in this same change). The sender always
-        // supplies {autopay_label}.
-        next = next.replace(/WaveGuard auto-pay/g, '{autopay_label}');
-      }
+      const next = mechanical(v.template_key, v.body);
       if (next !== v.body) {
         await knex('sms_template_variants').where({ id: v.id }).update({ body: next, updated_at: new Date() });
       }

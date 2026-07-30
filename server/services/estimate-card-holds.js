@@ -893,7 +893,7 @@ async function cardHoldReminderNote(scheduledServiceId) {
         if (tStar > Date.now()) {
           const { formatETDate, formatETTime } = require('../utils/datetime-et');
           const cutoff = new Date(tStar);
-          cutoffClause = ` — cancel free until ${formatETDate(cutoff)} at ${formatETTime(cutoff)}`;
+          cutoffClause = ` - cancel free until ${formatETDate(cutoff)} at ${formatETTime(cutoff)}`;
         }
       }
     } catch (err) {
@@ -901,7 +901,7 @@ async function cardHoldReminderNote(scheduledServiceId) {
     }
     return cutoffClause
       ? `Your card on file holds this visit${cutoffClause}. After that, a ${feeText} fee applies only if you cancel or no one is home. Rescheduling is always free.`
-      : `Your card on file holds this visit. A ${feeText} fee applies only if you cancel or no one is home — rescheduling is always free.`;
+      : `Your card on file holds this visit. A ${feeText} fee applies only if you cancel or no one is home - rescheduling is always free.`;
   } catch (err) {
     logger.warn('[estimate-card-holds] reminder policy note failed (non-fatal)', { error: err.message });
     return '';

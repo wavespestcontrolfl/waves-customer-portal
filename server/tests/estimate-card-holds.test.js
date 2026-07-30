@@ -413,7 +413,7 @@ describe('cardHoldReminderNote/Line — reminder fee-policy disclosure (spec Pha
     stubDb({ id: 'h1', no_show_fee_amount: 39, cancel_window_hours: 48, held_at: new Date(Date.now() - 240 * HOUR) });
     mockApptTime.mockResolvedValue(new Date(Date.now() + 100 * HOUR)); // cutoff = start − 48h, in the future
     const line = await cardHoldReminderLine('svc1');
-    expect(line.startsWith('\n\nYour card on file holds this visit — cancel free until ')).toBe(true);
+    expect(line.startsWith('\n\nYour card on file holds this visit - cancel free until ')).toBe(true);
     expect(line).toContain('a $39 fee applies only if you cancel or no one is home');
     expect(line).toContain('Rescheduling is always free.');
     expect(line).not.toContain('reschedule or cancel free'); // fee never attributed to reschedules
