@@ -53,6 +53,24 @@ const SYSTEM_LABELS = {
 const GENERIC_SYSTEM_LABEL = 'in-ground termite bait stations';
 const START_DATE_FALLBACK = 'To be confirmed at installation';
 
+// Has a manual-prep bell for this estimate already landed? Makes the
+// parked handoff exactly-once ACROSS paths: if the accept-time bell was
+// lost to a transient failure, the next sweep (which otherwise suppresses
+// bells) detects the absence and sends it once.
+async function manualPrepBellAlreadySent(estimateId, conn = db) {
+  if (!estimateId) return false;
+  try {
+    const row = await conn('notifications')
+      .where('recipient_type', 'admin')
+      .where('title', 'like', 'Termite agreement needs manual prep%')
+      .whereRaw("metadata->>'estimateId' = ?", [String(estimateId)])
+      .first('id');
+    return !!row;
+  } catch {
+    return true; // fail-quiet: never double-bell on a lookup error
+  }
+}
+
 function autosendGateOn() {
   return ['1', 'true', 'on'].includes(String(process.env.GATE_TERMITE_PROGRAM_AGREEMENT_AUTOSEND || '').toLowerCase());
 }
@@ -497,7 +515,7 @@ async function ringAdminBell(NotificationService, args, context) {
   return !!bell;
 }
 
-async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = {}, notifyOnUnresolved = true, billingTerm = null, startDateLabel: startDateLabelOverride = null }) {
+async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = {}, notifyOnUnresolved = true, billingTerm = null, startDateLabel: startDateLabelOverride = null, signedBlockScope = 'estimate' }) {
   try {
     if (!estimate || !customerId) return { ok: false, skipped: 'missing_inputs' };
     // One-time acceptances keep their termite snapshots but did NOT accept
@@ -513,9 +531,16 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
     const NotificationService = require('./notification-service');
 
     if (isCommercialEstimate(estimate, estData)) {
-      await retireSamePropertyOpenAgreements(customerId, estimate, await activeProgramVersionIds());
+      // Retirement failures must not swallow the operator handoff — the
+      // bell still rings and the retirement retries on the next sweep.
+      try {
+        await retireSamePropertyOpenAgreements(customerId, estimate, await activeProgramVersionIds());
+      } catch (err) {
+        logger.warn(`[termite-agreement] parked retirement failed for estimate ${estimate.id}: ${err.message}`);
+      }
       let belled = null;
-      if (notifyOnUnresolved) {
+      const shouldBellCommercial = notifyOnUnresolved || !(await manualPrepBellAlreadySent(estimate.id));
+      if (shouldBellCommercial) {
         belled = await ringAdminBell(NotificationService, [
           'estimate',
           'Termite agreement needs manual prep (commercial)',
@@ -532,9 +557,13 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       // Fail closed: the seeded wording states per-application billing,
       // which would contradict the annual-prepay invoice. Park it for
       // manual preparation with accurate terms.
-      await retireSamePropertyOpenAgreements(customerId, estimate, await activeProgramVersionIds());
+      try {
+        await retireSamePropertyOpenAgreements(customerId, estimate, await activeProgramVersionIds());
+      } catch (err) {
+        logger.warn(`[termite-agreement] parked retirement failed for estimate ${estimate.id}: ${err.message}`);
+      }
       let prepayBelled = null;
-      if (notifyOnUnresolved) {
+      if (notifyOnUnresolved || !(await manualPrepBellAlreadySent(estimate.id))) {
         prepayBelled = await ringAdminBell(NotificationService, [
           'estimate',
           'Termite agreement needs manual prep (annual prepay)',
@@ -558,9 +587,13 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       // exception with the owner instead of drafting a wrong document.
       // (The reconciliation sweep passes notifyOnUnresolved=false so the
       // original accept-time bell isn't re-rung daily.)
-      await retireSamePropertyOpenAgreements(customerId, estimate, await activeProgramVersionIds());
+      try {
+        await retireSamePropertyOpenAgreements(customerId, estimate, await activeProgramVersionIds());
+      } catch (err) {
+        logger.warn(`[termite-agreement] parked retirement failed for estimate ${estimate.id}: ${err.message}`);
+      }
       let figuresBelled = null;
-      if (notifyOnUnresolved) {
+      if (notifyOnUnresolved || !(await manualPrepBellAlreadySent(estimate.id))) {
         figuresBelled = await ringAdminBell(NotificationService, [
           'estimate',
           'Termite agreement needs manual prep',
@@ -638,12 +671,22 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
           .whereIn('document_template_key', PROGRAM_TEMPLATE_KEYS)
           .where('status', 'signed')
           .select('document_variables_snapshot');
-        const signedThisEstimate = signedRows.some((sr) => {
+        const acceptedAddress = normalizeAddress(estimate.address);
+        const signedBlocks = signedRows.some((sr) => {
           let ss = sr.document_variables_snapshot;
           if (typeof ss === 'string') { try { ss = JSON.parse(ss); } catch { ss = null; } }
-          return ss?.estimate?.id && String(ss.estimate.id) === String(estimate.id);
+          if (ss?.estimate?.id && String(ss.estimate.id) === String(estimate.id)) return true;
+          // Reconciliation callers block on same-PROPERTY signatures too (a
+          // manually issued or different-estimate replacement signed mid-
+          // sweep must not be stacked); accept-time callers keep the same-
+          // estimate scope so a genuinely new accept still gets its new
+          // document.
+          if (signedBlockScope !== 'property') return false;
+          const signedAddress = normalizeAddress(ss?.estimate?.address || ss?.customer?.address);
+          if (!signedAddress || !acceptedAddress) return true;
+          return signedAddress === acceptedAddress;
         });
-        if (signedThisEstimate) return 'signed_exists';
+        if (signedBlocks) return 'signed_exists';
       }
       // A revised estimate accepted for the same property supersedes the
       // older open draft — cancel it so exactly one live agreement exists
@@ -830,21 +873,21 @@ async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
   // that expired historically (or deliberately between two templates'
   // staggered upgrades) was already a deliberate blocker in the ordinary
   // sweep and must not be revived and autosent just because a newer
-  // template version exists. Coarse SQL prefilter on the earliest rollout,
-  // exact per-template comparison in JS.
+  // template version exists. The cutoff is applied IN SQL per template so
+  // ineligible rows never occupy the limit window (limit-before-filter
+  // would let a staggered-upgrade band starve genuine rollout casualties).
   const rolloutStarts = await activeVersionRolloutStarts();
-  const earliestRollout = rolloutStarts.size ? new Date(Math.min(...[...rolloutStarts.values()].map((d) => d.getTime()))) : null;
-  const expiredStaleCandidates = earliestRollout ? await notReprocessed(db('customer_contracts')
-    .whereIn('document_template_key', PROGRAM_TEMPLATE_KEYS)
-    .where('status', 'expired')
-    .whereNotIn('document_template_version_id', [...activeVersionIds])
-    .where('share_token_expires_at', '>=', earliestRollout))
-    .select('id', 'customer_id', 'status', 'recipient_name', 'document_variables_snapshot', 'document_template_key', 'share_token_expires_at')
-    .limit(limit) : [];
-  const expiredStale = expiredStaleCandidates.filter((row) => {
-    const cutoff = rolloutStarts.get(row.document_template_key);
-    return cutoff && row.share_token_expires_at && new Date(row.share_token_expires_at) >= cutoff;
-  });
+  const expiredStale = [];
+  for (const [templateKey, cutoff] of rolloutStarts) {
+    const rows = await notReprocessed(db('customer_contracts')
+      .where('document_template_key', templateKey)
+      .where('status', 'expired')
+      .whereNotIn('document_template_version_id', [...activeVersionIds])
+      .where('share_token_expires_at', '>=', cutoff))
+      .select('id', 'customer_id', 'status', 'recipient_name', 'document_variables_snapshot')
+      .limit(limit);
+    expiredStale.push(...rows);
+  }
 
   const NotificationService = require('./notification-service');
   const seenEstimates = new Set();
@@ -945,6 +988,7 @@ async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
       estimate,
       customerId: row.customer_id,
       notifyOnUnresolved: true,
+      signedBlockScope: 'property',
     });
     const parked = ['commercial', 'annual_prepay', 'figures_unresolved'].includes(result.skipped);
     if (result.ok && result.contractId && !result.skipped) {

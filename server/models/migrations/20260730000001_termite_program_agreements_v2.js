@@ -348,6 +348,20 @@ const TEMPLATE_V2 = [
 exports.up = async function up(knex) {
   const hasTemplates = await knex.schema.hasTable('document_templates');
   if (!hasTemplates) return;
+  // Tiny generic state table so down() can restore the ACTUAL pre-migration
+  // active version (version-number inference can pick an unapproved draft).
+  const hasState = await knex.schema.hasTable('migration_rollback_state');
+  if (!hasState) {
+    await knex.schema.createTable('migration_rollback_state', (t) => {
+      t.increments('id').primary();
+      t.string('migration_name', 200).notNullable();
+      t.string('state_key', 200).notNullable();
+      t.text('state_value');
+      t.timestamp('created_at', { useTz: true }).notNullable().defaultTo(knex.fn.now());
+      t.unique(['migration_name', 'state_key']);
+    });
+  }
+  const MIGRATION_NAME = '20260730000001_termite_program_agreements_v2';
   const seededVersionIds = [];
   for (const seed of TEMPLATE_V2) {
     const template = await knex('document_templates').where({ template_key: seed.template_key }).first();
@@ -379,6 +393,25 @@ exports.up = async function up(knex) {
     }
     if (seededVersion?.id) seededVersionIds.push(seededVersion.id);
     if (seededVersion?.id && template.active_version_id !== seededVersion.id) {
+      // Record the ACTUAL prior active version for a faithful rollback
+      // (idempotent: only the first run's value is kept).
+      const existingState = await knex('migration_rollback_state')
+        .where({ migration_name: MIGRATION_NAME, state_key: `prior_active:${seed.template_key}` })
+        .first();
+      if (!existingState) {
+        await knex('migration_rollback_state').insert({
+          migration_name: MIGRATION_NAME,
+          state_key: `prior_active:${seed.template_key}`,
+          state_value: template.active_version_id || '',
+        });
+      }
+      // Activation IS the rollout moment: the expired-recovery cutoff reads
+      // the active version's published_at, so a reused (older or never-published)
+      // matching version must carry the activation time, not its original
+      // authoring time.
+      await knex('document_template_versions').where({ id: seededVersion.id }).update({
+        published_at: knex.fn.now(),
+      });
       await knex('document_templates').where({ id: template.id }).update({
         active_version_id: seededVersion.id,
         variables: JSON.stringify(seed.variables),
@@ -472,25 +505,36 @@ exports.down = async function down(knex) {
   // Non-destructive: repoint the active version back to v1; every row stays.
   const hasTemplates = await knex.schema.hasTable('document_templates');
   if (!hasTemplates) return;
+  const MIGRATION_NAME = '20260730000001_termite_program_agreements_v2';
+  const hasState = await knex.schema.hasTable('migration_rollback_state');
   for (const seed of TEMPLATE_V2) {
     const template = await knex('document_templates').where({ template_key: seed.template_key }).first();
     if (!template) continue;
-    // Restore the LATEST version that is not this migration's seeded body —
-    // when an administrator had already published newer wording before the
-    // migration ran, rollback returns to THAT, not blindly to v1.
-    const versions = await knex('document_template_versions')
-      .where({ template_id: template.id })
-      .orderBy('version_number', 'desc');
-    const prior = versions.find((v) => v.body !== seed.body) || null;
+    // Restore the RECORDED pre-migration active version — never inferred
+    // from version numbers (that can activate an unapproved draft). No
+    // recorded state means up() never repointed this template (the approved
+    // body was already active): leave it untouched.
     // Cancelled v1 requests stay cancelled on rollback — recreating them
     // would resurrect superseded wording; the reconciliation sweep preps
     // fresh ones from whatever version is active.
-    if (prior?.id) {
-      await knex('document_templates').where({ id: template.id }).update({
-        active_version_id: prior.id,
-        updated_at: knex.fn.now(),
-      });
+    if (!hasState) continue;
+    const state = await knex('migration_rollback_state')
+      .where({ migration_name: MIGRATION_NAME, state_key: `prior_active:${seed.template_key}` })
+      .first();
+    if (!state) continue;
+    const priorId = state.state_value || null;
+    if (priorId) {
+      const priorRow = await knex('document_template_versions').where({ id: priorId }).first('id');
+      if (priorRow) {
+        await knex('document_templates').where({ id: template.id }).update({
+          active_version_id: priorId,
+          updated_at: knex.fn.now(),
+        });
+      }
     }
+    await knex('migration_rollback_state')
+      .where({ migration_name: MIGRATION_NAME, state_key: `prior_active:${seed.template_key}` })
+      .del();
   }
 };
 
