@@ -120,7 +120,9 @@ const APPROVAL_TRAILER_RE = /^[\s,.!:;()✓👍—–-]*(?:(?:thanks?|thank you|
 // actually approved") — dismissing on those would close the topic against
 // the owner's intent. Free-text REASONS ("not approved - angle too
 // aggressive") remain valid rejections (Codex r10).
-const REJECTION_REVERSAL_RE = /^[\s,.!:;—–-]*(?:yet|unless|until|if|actually|but)\b|[?]/i;
+// Scans the WHOLE trailer, not just its start — "not approved — the source
+// is wrong, but approve after fixing it" reverses at the end (Codex r11).
+const REJECTION_REVERSAL_RE = /\b(?:yet|unless|until|if|actually|but|approved?|instead|hold|wait)\b|[?]/i;
 
 function parseDecision(text) {
   const lines = String(text || '').split(/\r?\n/);
@@ -698,16 +700,17 @@ async function recoverExecutingRows() {
         .update({ status: 'failed', last_error: 'executing row missing decision/sender', updated_at: new Date() });
       continue;
     }
-    // A named-competitor APPROVE that failed ambiguously must never be
-    // blind-retried: the astro publisher may have created its branch/PR
-    // before the timeout while the runner reverted the DB claims — a
-    // retry would open a SECOND PR (Codex r6). Reconcile from persisted
-    // state; if inconclusive, hand to a human with the dangling-PR
-    // warning. Trust-build/dismiss are pure DB transactions and keep
-    // auto-retrying.
+    // A stale-executing named-competitor APPROVE must never be
+    // blind-retried, REGARDLESS of what last_error says: the astro
+    // publisher may have created its branch/PR before a crash/timeout
+    // while the runner reverted the DB claims — and a crash BEFORE the
+    // ambiguous-failure marker was written leaves last_error NULL with
+    // the same dangling-PR risk (Codex r6 + r11). Reconcile from
+    // persisted state; if inconclusive, hand to a human with the
+    // dangling-PR warning. Trust-build/dismiss are pure DB transactions
+    // and keep auto-retrying.
     const ambiguousApprove = row.kind === 'named_competitor_review'
-      && row.decision === 'approved'
-      && /^ambiguous failure/.test(String(row.last_error || ''));
+      && row.decision === 'approved';
     if (ambiguousApprove) {
       const reconciled = await reconcileFromPersistedState(row, row.decision).catch(() => null);
       if (!reconciled) {

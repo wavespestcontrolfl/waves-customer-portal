@@ -196,19 +196,23 @@ async function decideReviewItem(opportunityId, { decision, note, reviewer, expec
       }
     });
   } else if (normalizedDecision === 'dismiss') {
-    // A dismiss must not clobber a run whose approval already produced a
-    // side effect: an approved named-competitor draft with an OPEN astro PR
-    // deliberately keeps its opportunity pending_review while the run is
-    // re-parked as astro_pr_pending_merge — dismissing then would strand
-    // the PR and skip a published-in-flight item (Codex #3024 r10; the
-    // opportunity-status guard alone can't see this case).
-    if (run && (run.outcome !== 'completed_pending_review' || run.skip_reason === 'astro_pr_pending_merge')) {
-      const err = new Error('This item was already decided (a publish is in flight or completed); refresh before applying a decision');
-      err.statusCode = 409;
-      err.isOperational = true;
-      throw err;
-    }
     await db.transaction(async (trx) => {
+      // A dismiss must not clobber a run whose approval already produced a
+      // side effect: an approved named-competitor draft with an OPEN astro
+      // PR deliberately keeps its opportunity pending_review while the run
+      // is re-parked as astro_pr_pending_merge — dismissing then would
+      // strand the PR and skip a published-in-flight item. Asserted INSIDE
+      // the transaction under a row lock so a concurrent approval can't
+      // slip between a pre-read and the update (Codex #3024 r10 + r11).
+      if (run?.id) {
+        const lockedRun = await trx('autonomous_runs').where({ id: run.id }).forUpdate().first();
+        if (lockedRun && (lockedRun.outcome !== 'completed_pending_review' || lockedRun.skip_reason === 'astro_pr_pending_merge')) {
+          const err = new Error('This item was already decided (a publish is in flight or completed); refresh before applying a decision');
+          err.statusCode = 409;
+          err.isOperational = true;
+          throw err;
+        }
+      }
       await updatePendingReviewOpportunity(trx, opportunityId, {
         status: 'skipped',
         skip_reason: boundedReason(cleanNote ? `manual_dismiss:${cleanNote}` : 'manual_dismiss'),

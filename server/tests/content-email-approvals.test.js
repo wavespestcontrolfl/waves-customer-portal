@@ -377,6 +377,9 @@ describe('round-5 hardening (Codex r5)', () => {
     // Reasons remain rejections.
     expect(parseDecision('Not Approved - competitor angle too aggressive')).toBe('rejected');
     expect(parseDecision('not approved, tone it down and resend')).toBe('rejected');
+    // Reversals ANYWHERE in the trailer fail closed (Codex r11).
+    expect(parseDecision('not approved — the source is wrong, but approve after fixing it')).toBe(null);
+    expect(parseDecision('not approved for now, wait for the new pricing')).toBe(null);
   });
 
   test('an HTML-only multipart/alternative reply resolves its direct text/html leaf (Codex r8)', () => {
