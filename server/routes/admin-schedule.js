@@ -20,6 +20,7 @@ const {
   etDateString, etParts, addETDays, addETMonthsByWeekday,
   etNthWeekdayOfMonth, parseETDateTime, validScheduleDate, sameDayWindowElapsed,
   windowDurationMinutes, deriveWindowEnd,
+  formatETDay, formatETDate, formatETTime,
 } = require('../utils/datetime-et');
 const { calculateBoundedTrackingEta } = require('../services/customer-tracking-eta');
 const { customerOnAutopay } = require('../services/autopay-eligibility');
@@ -4108,17 +4109,26 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
             if (reminderSyncTime) {
               try {
                 const AppointmentReminders = require('../services/appointment-reminders');
+                // payload.notifyCustomer === true (the list view's bulk
+                // "text customers" choice) sends the immediate reschedule
+                // notice through handleReschedule itself — it renders the
+                // new time, respects notification prefs, and re-arms the
+                // fallback reminders if the send fails. Default stays the
+                // silent resync this branch always did.
+                const bulkNotify = payload?.notifyCustomer === true;
                 // handleReschedule claims a still-pending creation
                 // confirmation (its reschedule notice normally replaces
                 // it), but with sendNotification:false no notice goes
                 // out — the customer would get neither message. Re-arm
                 // the deferred confirmation afterwards; it renders the
-                // NEW date/window from the resynced reminder row.
+                // NEW date/window from the resynced reminder row. A
+                // notifying move keeps the claim — its reschedule notice
+                // IS the customer's message.
                 const reminderBefore = await db('appointment_reminders')
                   .where({ scheduled_service_id: id })
                   .first('id', 'confirmation_sent');
-                await AppointmentReminders.handleReschedule(id, reminderSyncTime, { sendNotification: false });
-                if (reminderBefore && !reminderBefore.confirmation_sent) {
+                await AppointmentReminders.handleReschedule(id, reminderSyncTime, { sendNotification: bulkNotify });
+                if (!bulkNotify && reminderBefore && !reminderBefore.confirmation_sent) {
                   await db('appointment_reminders')
                     .where({ id: reminderBefore.id })
                     .update({ confirmation_sent: false, confirmation_sent_at: null });
@@ -4171,7 +4181,12 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
             });
             try {
               const AppointmentReminders = require('../services/appointment-reminders');
-              await AppointmentReminders.handleCancellation(id);
+              // payload.notifyCustomer === false (the list view's bulk
+              // "don't text" choice) suppresses the cancellation notice;
+              // the default keeps this branch's always-notify behavior.
+              await AppointmentReminders.handleCancellation(id, {
+                sendNotification: payload?.notifyCustomer !== false,
+              });
             } catch {}
             // Cancelling a call-booked primary pulls its pending follow-up
             // (visit 2) off the schedule too — shared with the track-
@@ -4335,6 +4350,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       serviceId,
       createInvoice,
       payerId, poNumber, selfPayOverride,
+      notifyCustomer,
     } = req.body;
     const updates = {};
     let clearAddonDiscountsOnPriceEdit = false;
@@ -4805,6 +4821,10 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // Prior scheduled_date, captured inside the trx when the edit moves the
     // visit — drives the call-created follow-up shift after commit.
     let callFollowUpShiftFrom = null;
+    // ET datetime of the visit's NEW slot, captured only when the edit
+    // actually moved the date or arrival window — drives the opt-in
+    // reschedule text after commit.
+    let scheduleMoveTimeForNotice = null;
 
     await db.transaction(async (trx) => {
       const recurringParentBefore = isRecurring && spawnRecurringChildren === false && recurringPattern
@@ -4887,6 +4907,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               nextDate,
               updates.window_start !== undefined ? updates.window_start : reminderBefore.window_start,
             );
+            scheduleMoveTimeForNotice = `${nextDate}T${nextStart || '08:00'}`;
           }
         }
       }
@@ -5471,11 +5492,81 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       await refreshAnnualPrepayTermsForCustomer(touched?.customer_id);
     }
 
+    // Immediate reschedule text — only when the edit actually moved the
+    // visit's date/window AND the caller explicitly opted in (the Edit
+    // appointment modal's "Client booking notifications" choice). The
+    // default stays silent so every other update-details caller keeps its
+    // existing no-SMS behavior; the resynced 72h/24h reminders still follow
+    // the new time either way.
+    let notificationSent;
+    let notificationError;
+    if (notifyCustomer === true && scheduleMoveTimeForNotice) {
+      notificationSent = false;
+      notificationError = null;
+      const AppointmentReminders = require('../services/appointment-reminders');
+      try {
+        // Cover any already-due reminder window before sending so the 15-min
+        // cron can't fire a day-before reminder in the gap between the commit
+        // above and the notice landing (same coverDueWindows contract the
+        // dispatch reschedule route uses).
+        await AppointmentReminders.handleReschedule(req.params.id, scheduleMoveTimeForNotice, {
+          sendNotification: false,
+          coverDueWindows: true,
+        });
+      } catch (e) {
+        logger.warn(`[schedule/update-details] reminder cover before reschedule notice failed for ${req.params.id}: ${e.message}`);
+      }
+      try {
+        const svc = await db('scheduled_services')
+          .where('scheduled_services.id', req.params.id)
+          .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+          .select('scheduled_services.service_type', 'customers.first_name', 'customers.phone', 'customers.id as customer_id')
+          .first();
+        if (!svc?.phone) {
+          notificationError = 'Customer phone unavailable';
+        } else {
+          const apptTime = parseETDateTime(scheduleMoveTimeForNotice);
+          const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
+          const body = await renderRequiredSmsTemplate('appointment_rescheduled', {
+            first_name: svc.first_name || 'there',
+            service_type: svc.service_type || 'service',
+            day: formatETDay(apptTime),
+            date: formatETDate(apptTime),
+            time: formatETTime(apptTime),
+          }, {
+            workflow: 'schedule_update_reschedule',
+            entity_type: 'scheduled_service',
+            entity_id: req.params.id,
+          });
+          const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+          const msg = await sendCustomerMessage({
+            to: svc.phone,
+            body,
+            channel: 'sms',
+            audience: 'customer',
+            purpose: 'appointment',
+            customerId: svc.customer_id,
+            identityTrustLevel: 'phone_matches_customer',
+            metadata: { original_message_type: 'reschedule_confirmation' },
+          });
+          notificationSent = !(msg?.blocked || msg?.sent === false);
+          if (!notificationSent) notificationError = msg?.code || msg?.reason || 'blocked';
+          if (notificationSent) {
+            await AppointmentReminders.markRescheduleNoticeSent(req.params.id);
+          }
+        }
+      } catch (e) {
+        notificationError = e.message;
+        logger.warn(`[schedule/update-details] edit committed for ${req.params.id}, but reschedule SMS failed: ${e.message}`);
+      }
+    }
+
     res.json({
       success: true,
       recurringCreated,
       assignmentScope: normalizedAssignmentScope,
       assignmentUpdatedCount: assignmentUpdatedJobIds.length,
+      ...(notificationSent !== undefined ? { notificationSent, notificationError } : {}),
     });
   } catch (err) {
     // The in-transaction duplicate-series backstop rolled the spawn back —

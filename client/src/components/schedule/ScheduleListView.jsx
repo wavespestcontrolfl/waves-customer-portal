@@ -67,6 +67,10 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh }
   // late-cancel fee. Default OFF: unchecked keeps today's behavior (an
   // in-window cancel of a held-card visit charges the disclosed fee).
   const [bulkWaiveCardHoldFee, setBulkWaiveCardHoldFee] = useState(false);
+  // Whether the batch texts each customer. Seeded per action when it's
+  // picked: reschedule defaults silent (matching the drag-and-drop modal),
+  // cancel defaults to texting (matching the appointment sidebar).
+  const [bulkNotify, setBulkNotify] = useState('none');
 
   const fetchList = useCallback(async () => {
     setLoading(true);
@@ -136,8 +140,8 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh }
     try {
       let payload = {};
       if (bulkAction === 'reassign') payload = { technicianId: bulkTechId || null };
-      else if (bulkAction === 'reschedule') payload = { scheduledDate: bulkDate };
-      else if (bulkAction === 'cancel') payload = { waiveCardHoldFee: bulkWaiveCardHoldFee };
+      else if (bulkAction === 'reschedule') payload = { scheduledDate: bulkDate, notifyCustomer: bulkNotify === 'text' };
+      else if (bulkAction === 'cancel') payload = { waiveCardHoldFee: bulkWaiveCardHoldFee, notifyCustomer: bulkNotify === 'text' };
       else if (bulkAction === 'mark_prepaid') payload = { totalAmount: Number(bulkPrepaidAmount), method: bulkPrepaidMethod };
 
       await adminFetch('/admin/schedule/bulk-action', {
@@ -226,7 +230,7 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh }
           <span className="u-nums font-medium">{selected.size} selected</span>
           <span className="text-zinc-500">·</span>
           <select value={bulkAction}
-            onChange={e => { setBulkAction(e.target.value); setBulkWaiveCardHoldFee(false); }}
+            onChange={e => { setBulkAction(e.target.value); setBulkWaiveCardHoldFee(false); setBulkNotify(e.target.value === 'cancel' ? 'text' : 'none'); }}
             className="text-12 px-2 py-1 rounded-sm bg-zinc-800 text-white border border-zinc-600">
             <option value="">Choose action…</option>
             <option value="reassign">Reassign tech</option>
@@ -244,6 +248,13 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh }
           {bulkAction === 'reschedule' && (
             <input type="date" value={bulkDate} onChange={e => setBulkDate(e.target.value)}
               className="text-12 u-nums px-2 py-1 rounded-sm bg-zinc-800 text-white border border-zinc-600" />
+          )}
+          {(bulkAction === 'reschedule' || bulkAction === 'cancel') && (
+            <select value={bulkNotify} onChange={e => setBulkNotify(e.target.value)}
+              className="text-12 px-2 py-1 rounded-sm bg-zinc-800 text-white border border-zinc-600">
+              <option value="text">Text each customer</option>
+              <option value="none">Don&rsquo;t send notifications</option>
+            </select>
           )}
           {bulkAction === 'cancel' && (
             <label className="flex items-center gap-1.5 text-12 text-zinc-300 select-none cursor-pointer">
