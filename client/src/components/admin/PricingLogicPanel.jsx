@@ -1274,8 +1274,21 @@ function ConfigCard({ config, onUpdate }) {
   const [rawText, setRawText] = useState("");
   const [saving, setSaving] = useState(false);
 
-  const handleFieldUpdate = async (key, newVal) => {
-    const updated = { ...data, [key]: newVal };
+  // Immutable set at a nested path — the structured editors below recurse
+  // into nested blobs (e.g. pest_base.initial_roach.display.regular), so a
+  // leaf save must rewrite its ancestors, not stamp the leaf's key at the
+  // config root (that silently added a junk top-level key and left the real
+  // nested value untouched — codex P2 on PR #3078).
+  const setAtPath = (obj, path, value) => {
+    if (!path.length) return value;
+    const [head, ...rest] = path;
+    const base = Array.isArray(obj) ? [...obj] : { ...(obj || {}) };
+    base[head] = setAtPath(base[head], rest, value);
+    return base;
+  };
+
+  const handlePathUpdate = async (path, newVal) => {
+    const updated = setAtPath(data, path, newVal);
     setSaving(true);
     await af(`/admin/pricing-config/${config.config_key}`, {
       method: "PUT",
@@ -1302,7 +1315,8 @@ function ConfigCard({ config, onUpdate }) {
   };
 
   // Render nested objects (like WaveGuard tiers)
-  const renderValue = (key, val) => {
+  const renderValue = (key, val, parentPath = []) => {
+    const path = [...parentPath, key];
     if (Array.isArray(val)) {
       return (
         <div
@@ -1325,7 +1339,7 @@ function ConfigCard({ config, onUpdate }) {
           >
             {key.replace(/_/g, " ")}
           </div>
-          {renderArray(val, key)}
+          {renderArray(val, path)}
         </div>
       );
     }
@@ -1353,7 +1367,7 @@ function ConfigCard({ config, onUpdate }) {
           </div>
           {Object.entries(val).map(([k, v]) =>
             typeof v === "object" && v !== null ? (
-              renderValue(k, v)
+              renderValue(k, v, path)
             ) : (
               <div
                 key={k}
@@ -1378,7 +1392,7 @@ function ConfigCard({ config, onUpdate }) {
                   value={v}
                   onSave={(newV) => {
                     const nested = { ...val, [k]: newV };
-                    handleFieldUpdate(key, nested);
+                    handlePathUpdate(path, nested);
                   }}
                   type={typeof v === "number" ? "number" : "text"}
                 />{" "}
@@ -1407,7 +1421,7 @@ function ConfigCard({ config, onUpdate }) {
         </span>{" "}
         <EditCell
           value={val}
-          onSave={(newV) => handleFieldUpdate(key, newV)}
+          onSave={(newV) => handlePathUpdate(path, newV)}
           type={typeof val === "number" ? "number" : "text"}
         />{" "}
       </div>
@@ -1415,9 +1429,13 @@ function ConfigCard({ config, onUpdate }) {
   };
 
   // Handle array data (breakpoints, brackets)
-  const renderArray = (arr, parentKey = null) => {
+  // parentPath: full path of this array inside the config blob (array of
+  // keys), or null for the read-only top-level array view. Editable cells
+  // rewrite the array at its real nested path (see setAtPath above).
+  const renderArray = (arr, parentPath = null) => {
     if (arr.length === 0)
       return <div style={{ color: D.muted, fontSize: 12 }}>Empty</div>;
+    const parentKey = Array.isArray(parentPath) && parentPath.length > 0 ? parentPath : null;
     const first = arr[0];
     if (typeof first === "object" && !Array.isArray(first)) {
       const cols = Object.keys(first);
@@ -1425,18 +1443,18 @@ function ConfigCard({ config, onUpdate }) {
         const next = arr.map((r, i) =>
           i === rowIdx ? { ...r, [col]: newVal } : r,
         );
-        if (parentKey) handleFieldUpdate(parentKey, next);
+        if (parentKey) handlePathUpdate(parentKey, next);
       };
       const deleteRow = (rowIdx) => {
         const next = arr.filter((_, i) => i !== rowIdx);
-        if (parentKey) handleFieldUpdate(parentKey, next);
+        if (parentKey) handlePathUpdate(parentKey, next);
       };
       const addRow = () => {
         const blank = Object.fromEntries(
           cols.map((c) => [c, typeof first[c] === "number" ? 0 : ""]),
         );
         const next = [...arr, blank];
-        if (parentKey) handleFieldUpdate(parentKey, next);
+        if (parentKey) handlePathUpdate(parentKey, next);
       };
       return (
         <div style={{ overflowX: "auto" }}>

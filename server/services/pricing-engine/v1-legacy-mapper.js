@@ -837,6 +837,10 @@ function mapV1ToLegacyShape(v1Result) {
         ...measurementMetadataFields(li),
         ...termiticideMetadataFields(li),
       };
+      // Treatment-visit count (pest_initial_roach display config) — the
+      // public estimate view reads it off the persisted item to render
+      // "Includes N treatment visits" on the fee card.
+      if (li.treatments !== undefined) item.treatments = li.treatments;
       if (li.spacing !== undefined) item.spacing = li.spacing;
       if (li.lawnType !== undefined) item.lawnType = li.lawnType;
       if (li.tierName !== undefined) item.tierName = li.tierName;

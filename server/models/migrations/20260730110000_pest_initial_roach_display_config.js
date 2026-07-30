@@ -66,10 +66,12 @@ exports.up = async function up(knex) {
 };
 
 exports.down = async function down(knex) {
-  // Only strip the display block if this migration's up() created it — keyed
-  // off the audit row — so admin-tuned names/treatment counts written after
-  // an independent admin edit survive rollback. No audit table means no proof
-  // of ownership; leave data alone.
+  // Only strip the display block if this migration's up() created it (keyed
+  // off the audit row) AND it is still byte-identical to what up() seeded —
+  // an admin who tuned the name/treatment count AFTER the migration ran must
+  // keep those edits through a rollback (seed rollbacks are never
+  // destructive). No audit table means no proof of ownership; leave data
+  // alone either way.
   if (!(await knex.schema.hasTable('pricing_config_audit'))) return;
   const ownUp = await knex('pricing_config_audit')
     .where({ config_key: 'pest_base', changed_by: MIGRATION_TAG, reason: UP_REASON })
@@ -81,6 +83,7 @@ exports.down = async function down(knex) {
   const { data } = loaded;
   const ir = data.initial_roach;
   if (!ir || typeof ir !== 'object' || Array.isArray(ir) || !ir.display) return;
+  if (JSON.stringify(ir.display) !== JSON.stringify(DISPLAY_DEFAULTS)) return;
   const { display, ...rest } = ir;
   const newData = { ...data, initial_roach: rest };
   await savePestBase(

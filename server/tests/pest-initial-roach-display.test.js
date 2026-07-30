@@ -11,7 +11,8 @@
  */
 const constants = require('../services/pricing-engine/constants');
 const { syncConstantsFromDB } = require('../services/pricing-engine/db-bridge');
-const { pricePestInitialRoach } = require('../services/pricing-engine');
+const { pricePestInitialRoach, generateEstimate } = require('../services/pricing-engine');
+const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
 const migration = require('../models/migrations/20260730110000_pest_initial_roach_display_config');
 
 const PROPERTY = { homeSqFt: 2000 };
@@ -71,6 +72,24 @@ describe('pest_initial_roach display config', () => {
     expect(line.label).toBe('One-Time Cockroach Service');
     expect(line.treatments).toBe(2);
     expect(line.price).toBe(239);
+  });
+
+  test('v1 legacy mapper carries treatments onto the persisted one-time item', () => {
+    const next = cloneInitialRoach();
+    next.display.regular = { name: 'Cockroach Treatment', treatments: 2 };
+    constants.PEST.pestInitialRoach = next;
+
+    // Server-authoritative admin estimates persist through mapV1ToLegacyShape
+    // (admin-estimate-persistence) — the public estimate view reads
+    // `treatments` off the saved item, so the mapper must not drop it.
+    const mapped = mapV1ToLegacyShape(generateEstimate({
+      homeSqFt: 2000,
+      services: { pest: { frequency: 'quarterly', roachType: 'regular' } },
+    }));
+    const item = (mapped.oneTime.items || []).find((it) => it.service === 'pest_initial_roach');
+    expect(item).toBeTruthy();
+    expect(item.treatments).toBe(2);
+    expect(item.name).toBe('Cockroach Treatment');
   });
 
   test('db-bridge merges a partial display blob and ignores invalid values', async () => {
@@ -166,13 +185,20 @@ describe('20260730110000 seed migration', () => {
     expect(state.auditInserts).toHaveLength(0);
   });
 
+  const SEEDED_DISPLAY = {
+    regular: { name: 'Cockroach Treatment', treatments: 1 },
+    german: { name: 'German Cockroach Treatment', treatments: 1 },
+    regular_standalone: { name: 'Cockroach Treatment', treatments: 1 },
+  };
+  const OWNING_AUDIT_ROW = {
+    changed_by: 'migration:20260730110000',
+    reason: 'Seed initial_roach.display (customer-facing name + treatment count, owner directive 2026-07-30)',
+  };
+
   test('down() strips display only when up() owns it via the audit row', async () => {
     const owned = fakeKnex({
-      pestBaseData: { base: 117, initial_roach: { regular: [{ sqft: null, price: 169 }], display: { regular: { name: 'Cockroach Treatment', treatments: 1 } } } },
-      auditRows: [{
-        changed_by: 'migration:20260730110000',
-        reason: 'Seed initial_roach.display (customer-facing name + treatment count, owner directive 2026-07-30)',
-      }],
+      pestBaseData: { base: 117, initial_roach: { regular: [{ sqft: null, price: 169 }], display: SEEDED_DISPLAY } },
+      auditRows: [OWNING_AUDIT_ROW],
     });
     await migration.down(owned.knex);
     expect(owned.state.updated).toBeTruthy();
@@ -187,5 +213,23 @@ describe('20260730110000 seed migration', () => {
     });
     await migration.down(unowned.knex);
     expect(unowned.state.updated).toBeNull();
+  });
+
+  test('down() preserves a display block the admin edited after the migration ran', async () => {
+    // Owning audit row exists, but the live block no longer matches what
+    // up() seeded (admin bumped treatments to 2) — rollback must not erase
+    // the operator's edit (codex P2 on PR #3078).
+    const edited = fakeKnex({
+      pestBaseData: {
+        base: 117,
+        initial_roach: {
+          display: { ...SEEDED_DISPLAY, regular: { name: 'Cockroach Treatment', treatments: 2 } },
+        },
+      },
+      auditRows: [OWNING_AUDIT_ROW],
+    });
+    await migration.down(edited.knex);
+    expect(edited.state.updated).toBeNull();
+    expect(edited.state.auditInserts).toHaveLength(0);
   });
 });
