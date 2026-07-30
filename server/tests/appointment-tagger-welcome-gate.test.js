@@ -20,6 +20,12 @@ jest.mock('../services/new-recurring-welcome-sms', () => ({
   sendNewRecurringWelcome: jest.fn(async () => ({ sent: false, queued: true })),
   isNewRecurringSignupCandidate: jest.fn(async () => false),
 }));
+// Label provenance defaults to a verified non-label (legacy scenarios);
+// override to 'label' / 'unknown' to assert the comms-silent suppression.
+const mockTierLabelStatus = jest.fn(async () => 'not_label');
+jest.mock('../services/self-booking-plan-sync', () => ({
+  tierLabelStatus: (...args) => mockTierLabelStatus(...args),
+}));
 jest.mock('../services/sms-template-renderer', () => ({
   renderSmsTemplate: jest.fn(async () => null),
 }));

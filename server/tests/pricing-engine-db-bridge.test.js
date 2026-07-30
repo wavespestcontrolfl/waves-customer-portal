@@ -333,18 +333,18 @@ describe('pricing engine DB bridge', () => {
   test('validates active mosquito recurring and one-time config defaults', () => {
     expect(validatePestPricingConfig(constants)).toEqual(expect.objectContaining({ valid: true }));
     expect(constants.MOSQUITO.basePrices).toEqual(expect.objectContaining({
-      SMALL: [66, 60],
-      QUARTER: [69, 63],
-      THIRD: [72, 66],
-      HALF: [78, 70],
-      ACRE: [88, 78],
+      SMALL: [73, 66],
+      QUARTER: [76, 69],
+      THIRD: [79, 73],
+      HALF: [86, 77],
+      ACRE: [97, 86],
     }));
     expect(constants.MOSQUITO.tierVisits).toEqual({ seasonal9: 9, monthly12: 12 });
     expect(constants.ONE_TIME.mosquito).toEqual(expect.objectContaining({
-      SMALL: 99,
-      STANDARD: 129,
-      LARGE: 159,
-      XL: 199,
+      SMALL: 149,
+      STANDARD: 169,
+      LARGE: 189,
+      XL: 209,
       ESTATE: 239,
       ACRE_CLASS: 269,
       OVER_ACRE: 269,
@@ -876,7 +876,7 @@ describe('pricing engine DB bridge', () => {
 
     snapshot.TERMITE.stationSpacing = 0;
     snapshot.TERMITE.systems.advance.stationCost = -1;
-    snapshot.TERMITE.monitoring.basic.monthly = 0;
+    snapshot.TERMITE.monitoring.baseMonthly = 0;
     snapshot.SPECIALTY.trenching.concretePctCap = 1.2;
     snapshot.SPECIALTY.trenching.products.termidor_sc.containerCost = 0;
     snapshot.SPECIALTY.trenching.products.taurus_sc.productOzPerFinishedGallonAtHighRate = 0.4;
@@ -903,7 +903,7 @@ describe('pricing engine DB bridge', () => {
     expect(result.errors).toEqual(expect.arrayContaining([
       'TERMITE.stationSpacing must be positive',
       'TERMITE.systems.advance.stationCost must be non-negative',
-      'TERMITE.monitoring.basic.monthly must be positive',
+      'TERMITE.monitoring.baseMonthly must be positive',
       'SPECIALTY.trenching.concretePctCap must be between 0 and 1',
       'SPECIALTY.trenching.productPremiumMultiplier must be at least 1',
       'SPECIALTY.trenching.products.termidor_sc.containerCost must be positive',
@@ -920,14 +920,35 @@ describe('pricing engine DB bridge', () => {
     ]));
   });
 
+  test('termite monitoring brackets sync whole-dollar and ignore the retired flat keys', async () => {
+    const db = pricingConfigDb([{
+      config_key: 'termite_monitoring',
+      // Whole dollars end-to-end (codex P2 rounds 0+1 on #3017): the
+      // engine's annual is whole-dollar by design, so cents cannot stay
+      // coherent across monthly x 12 / monthly x 3 — the admin validator
+      // rejects cents, and a legacy/hand-edited cent row ROUNDS here
+      // rather than desyncing server vs client fallback. Legacy
+      // basic/premier keys are ignored — honoring `basic` as a bracket
+      // base would double the small-home rate.
+      data: { pricing_model: 'station_brackets', base_monthly: 19.5, step_monthly: 4.25, bracket_stations: 5, basic: 35, premier: 65 },
+    }]);
+    await expect(syncConstantsFromDB(db)).resolves.toBe(true);
+    expect(constants.TERMITE.monitoring.baseMonthly).toBe(20);
+    expect(constants.TERMITE.monitoring.stepMonthly).toBe(4);
+    expect(constants.TERMITE.monitoring.bracketStations).toBe(5);
+  });
+
   test('rejects invalid termite DB overlay and restores previous constants', async () => {
+    // station_spacing_ft is retired and no longer synced (owner
+    // 2026-07-28), so the invalid trigger is a negative station cost —
+    // still a synced field.
     const db = pricingConfigDb([{
       config_key: 'termite_install',
-      data: { station_spacing_ft: 0, multiplier: 1.45 },
+      data: { advance_bait: -1, multiplier: 1.45 },
     }]);
 
     await expect(syncConstantsFromDB(db)).resolves.toBe(false);
-    expect(constants.TERMITE.stationSpacing).toBe(originalTermite.stationSpacing);
+    expect(constants.TERMITE.systems.advance.stationCost).toBe(originalTermite.systems.advance.stationCost);
     expect(constants.TERMITE.installMultiplier).toBe(originalTermite.installMultiplier);
   });
 });

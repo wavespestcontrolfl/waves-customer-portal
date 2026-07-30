@@ -693,6 +693,62 @@ async function acquireSeriesCreateLocks(conn, units = []) {
   return keys;
 }
 
+// Auto tier alignment after a recurring series lands (owner directive
+// 2026-07-28) — every flow that seeds a series (estimate accepts, public
+// booking, pay-at-visit, prepay renewals, admin scheduling) gets the
+// customer's WaveGuard tier stamped/upgraded in the same call, with the
+// write rules (tier only for non-members, no comms) enforced inside the
+// gated sync. Best-effort by design: the tier is derived state healed
+// nightly by reconcileNoPlanRecurringTiers, so a sync failure must never
+// fail the booking that seeded the series. Lazy requires keep this module
+// dependency-light and cycle-free.
+// Run the tier sync on the shared pool in a fresh transaction — used both
+// directly (pool callers) and as the post-commit continuation below.
+async function runTierSyncOnPool(customerId) {
+  try {
+    const db = require('../models/db');
+    const { syncCustomerWaveGuardPlanFromScheduledServices } = require('./self-booking-plan-sync');
+    await db.transaction(async (inner) => {
+      await syncCustomerWaveGuardPlanFromScheduledServices({ database: inner, customerId });
+    });
+  } catch (err) {
+    try {
+      require('./logger').warn(`[recurring-seeder] WaveGuard tier sync failed for customer ${customerId}: ${err.message}`);
+    } catch { /* never let logging fail anything */ }
+  }
+}
+
+async function syncCustomerTierAfterSeeding(conn, customerId) {
+  if (!customerId) return;
+  try {
+    const { isEnabled } = require('../config/feature-gates');
+    if (!isEnabled('autoWaveguardTierEnroll')) return;
+    // Inside a caller transaction, DEFER the sync until that transaction
+    // settles (Codex #3011 r5 P1): seeding callers may already hold the
+    // recurring-series-create advisory lock (booking.js takes advisory ->
+    // then this would take the customers row lock), while estimate-converter
+    // updates the customer FIRST and then waits on the same advisory lock —
+    // opposite acquisition order, a deadlock; a victim savepoint in the
+    // converter's fail-open advisory guard could even seed a duplicate
+    // series. Post-commit the caller's locks are released, so the pool sync
+    // acquires the customer row lock without holding anything else — no
+    // cycle. On ROLLBACK there is no series, so there is nothing to sync;
+    // any miss is healed by the nightly reconcile.
+    if (conn.isTransaction && conn.executionPromise) {
+      conn.executionPromise.then(
+        () => runTierSyncOnPool(customerId),
+        () => { /* rolled back — no series landed, nothing to sync */ },
+      );
+      return;
+    }
+    await runTierSyncOnPool(customerId);
+  } catch (err) {
+    try {
+      require('./logger').warn(`[recurring-seeder] WaveGuard tier sync scheduling failed for customer ${customerId}: ${err.message}`);
+    } catch { /* never let logging fail the seeding */ }
+  }
+}
+
 async function seedFollowUpsForParent(conn, parent, opts = {}) {
   const pattern = normalizeRecurringPattern(opts.pattern || parent?.recurring_pattern);
   if (!conn || !parent?.id || !parent?.customer_id || !parent?.scheduled_date || !pattern) {
@@ -725,6 +781,9 @@ async function seedFollowUpsForParent(conn, parent, opts = {}) {
   }).map((row) => filterByColumns(row, columns));
 
   if (!rows.length) {
+    // Even with no NEW follow-up rows (series dates already exist), the parent
+    // was just marked recurring — that alone is tier evidence.
+    await syncCustomerTierAfterSeeding(conn, parent.customer_id);
     return {
       pattern,
       plannedCount: plannedVisitCountForPattern(pattern, opts),
@@ -735,6 +794,7 @@ async function seedFollowUpsForParent(conn, parent, opts = {}) {
 
   const inserted = await conn('scheduled_services').insert(rows).returning('*');
   const insertedRows = Array.isArray(inserted) ? inserted : [];
+  await syncCustomerTierAfterSeeding(conn, parent.customer_id);
   return {
     pattern,
     plannedCount: plannedVisitCountForPattern(pattern, opts),

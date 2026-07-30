@@ -441,10 +441,10 @@ Implication: the DB value was a dead/cosmetic field. The reconciliation cleaned 
 
 v1 Case 4 (`zone_d_quarterly_pest_bahia_basic`) was unchanged, but `v2_zone_d_quarterly_pest_bahia` moved +$38.88 (+3.4%) despite identical-shape inputs. Not a reconciliation bug — the two engines have genuinely different read paths:
 
-- **v1 engine** reads `PEST.frequencyDiscounts.v1 = { quarterly: 1.00, bimonthly: 0.92, monthly: 0.85 }` from `constants.js`. The DB keys `pest_frequency.{monthly, bimonthly, quarterly}` sync to `.v1` and did NOT drift.
-- **v2 engine** reads `PEST.frequencyDiscounts.v2 = { quarterly: 1.00, bimonthly: 0.88, monthly: 0.78 }` from `constants.js`. The DB keys `pest_frequency.{v2_monthly, v2_bimonthly}` sync to `.v2` and DID drift.
+- **v1 engine** reads `PEST.frequencyDiscounts.v1 = { quarterly: 1.00, bimonthly: 0.85, monthly: 0.70 }` from `constants.js`.
+- **v2 engine** reads `PEST.frequencyDiscounts.v2 = { quarterly: 1.00, bimonthly: 0.88, monthly: 0.78 }` from `constants.js`.
 
-Same conceptual value — "frequency discount multiplier" — read from two different config shapes by two different engines. v2 exercises the drifted path for this fixture; v1 does not.
+**CORRECTION (audit 2026-07-28): the `pest_frequency` pricing_config row does NOT sync to either curve.** No code outside migrations/tests reads that config key — `db-bridge.js` only VALIDATES `PEST.frequencyDiscounts` (both curves in (0,1]) and never writes it; the cadence curve is code-authoritative BY DESIGN (#2966). The earlier claim here that the DB keys "sync to .v1/.v2" was wrong, and the v1 values quoted (0.92/0.85) were the inert DB row's values, not the constants'. The row itself was removed by migration `20260729...drop_inert_pest_frequency_row` so the admin Pricing Logic panel stops offering a no-op editor.
 
 **Resolution: Session 11 (v2 retirement) will consolidate these read paths.** Until then, v1 and v2 can respond differently to identical fixtures on pest-frequency changes. When diagnosing future pest-frequency regressions, check *which* engine is serving the fixture and *which* frequency key it reads.
 
@@ -547,3 +547,59 @@ The DB-authoritative delta was isolated by running the pre-change `origin/main` 
 - The corresponding local fixtures changed for the same scenarios under in-memory constants.
 
 Migration `20260716140000_retire_pest_tree_driveway_modifiers` records the actual retired DB values in both `pricing_config_audit` and `pricing_changelog`; rollback restores those exact values rather than hardcoded defaults.
+
+---
+
+## 2026-07-28 — Mosquito reprice: 60% target margin + 500-sf step interpolation
+
+Owner reprice (Adam, 2026-07-28). Recurring per-visit [seasonal9, monthly12]
++10% across the board (SMALL 73/66 … ACRE 97/86) — lands the real cost basis
+(~11min on-site, 20min drive, $51/yr admin) at a ~60% contribution margin.
+One-time ladder aligned ~25% under the one-time pest band: 149/169/189/209/239/269
+(ESTATE/ACRE_CLASS held). Engine change in the same PR: bucket prices now act
+as interpolation anchors at each bucket's top edge with 500-sf price steps
+between them (declining marginal rate — big lots are not priced out by bucket
+jumps). See migration `20260728200000_mosquito_reprice_60_margin` for the
+`pricing_changelog` entry.
+
+- `pricing-engine.local-baseline.json`: `mosquito_acre_waterfront_max_pressure`, `edge_large_footprint_5500sf_platinum_bundle`, `platinum_bundle_4_qualifying_services_zone_a`
+- `pricing-engine-v1-adapter.local-baseline.json`: `v1adapter_mosquito_waterfront_heavy_pressure`, `v1adapter_platinum_bundle_4_services_zone_a`
+
+**Not done here:** the DB-synced prod baselines (`*.baseline.json`) still carry
+the 2026-06 mosquito prices and should be recaptured against prod once the
+migration deploys — same post-deploy DB-parity recapture the 2026-06 reprice
+required.
+
+---
+
+## 2026-07-28 — Post-deploy DB-parity recapture (mosquito reprice + termite Trelona)
+
+DB-synced prod baselines (`*.baseline.json`) recaptured against live prod
+`pricing_config` after the #3026 mosquito reprice deployed — the step the
+2026-07-28 mosquito entry above called out. Both DB-mode suites verify green
+against prod afterward.
+
+Access note: this was an owner-authorized read-only recapture run in a local
+operator session with the connection injected ephemerally by `railway run`
+(read of `pricing_config` only; nothing written). No production credential is
+stored anywhere, and none exists in any Codex environment — the AGENTS.md
+"Codex local database policy" (which forbids pointing the *Codex sandbox* at
+production) is about Codex sessions and is not in play here. Codex sandboxes
+should continue to verify this suite via the authenticated HTTP mode
+(`PROD_URL` + `ADMIN_TOKEN`) or a dev/preview Postgres branch.
+
+Per-case attribution:
+- **Mosquito reprice #3026** (this lane): `mosquito_acre_waterfront_max_pressure`,
+  `platinum_bundle_4_qualifying_services_zone_a`,
+  `v1adapter_platinum_bundle_4_services_zone_a`,
+  `v1adapter_mosquito_waterfront_heavy_pressure`.
+- **Termite Trelona-only #3017** (merged + deployed 2026-07-28, DB baselines
+  were stale for it): `termite_basic_standard_perimeter`,
+  `v1adapter_termite_bait_three_systems` (Advance→Trelona install, new bait
+  rates).
+- **Additive T&S tier in prod config** (NOT from #3026):
+  `v1adapter_zone_c_bimonthly_pest_lawn_treeshrub` AND
+  `v1adapter_platinum_bundle_4_services_zone_a` each gained an `Enhanced`
+  entry in `results.ts` — additive, no price changes to existing entries. The
+  platinum case therefore carries BOTH the mosquito reprice delta and this
+  config delta.

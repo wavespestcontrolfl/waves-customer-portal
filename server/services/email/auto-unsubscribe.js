@@ -1,3 +1,5 @@
+const dns = require('dns').promises;
+const net = require('net');
 const db = require('../../models/db');
 const logger = require('../logger');
 
@@ -20,6 +22,139 @@ function isSafePublicUrl(rawUrl) {
   return true;
 }
 
+/**
+ * True unless the literal is a GLOBAL UNICAST address. Deny-by-default: the
+ * request only proceeds for plain public space — private, loopback,
+ * link-local, CGN, benchmarking (198.18/15), documentation, multicast
+ * (224/4, ff00::/8), reserved (240/4), site-local and every other special
+ * range all refuse.
+ */
+function isPrivateAddress(ip) {
+  const v = net.isIP(ip);
+  if (!v) return true; // unparseable — treat as unsafe
+  const addr = ip.toLowerCase();
+  if (v === 4) {
+    const o = addr.split('.').map(Number);
+    if (o[0] === 0 || o[0] === 10 || o[0] === 127) return true;           // this-net, private, loopback
+    if (o[0] >= 224) return true;                                          // multicast + reserved + broadcast
+    if (o[0] === 100 && o[1] >= 64 && o[1] <= 127) return true;            // CGN 100.64/10
+    if (o[0] === 169 && o[1] === 254) return true;                         // link-local / metadata
+    if (o[0] === 172 && o[1] >= 16 && o[1] <= 31) return true;             // private 172.16/12
+    if (o[0] === 192 && o[1] === 168) return true;                         // private 192.168/16
+    if (o[0] === 192 && o[1] === 0 && (o[2] === 0 || o[2] === 2)) return true; // IETF special + TEST-NET-1
+    if (o[0] === 198 && (o[1] === 18 || o[1] === 19)) return true;         // benchmarking 198.18/15
+    if (o[0] === 198 && o[1] === 51 && o[2] === 100) return true;          // TEST-NET-2
+    if (o[0] === 203 && o[1] === 0 && o[2] === 113) return true;           // TEST-NET-3
+    return false;
+  }
+  // IPv6: IPv4-mapped recurses to the v4 rules; otherwise ONLY global
+  // unicast (2000::/3) passes, minus the documentation prefix — loopback,
+  // unspecified, unique-local, link-local, site-local, multicast and every
+  // other special block fail the 2000::/3 test automatically.
+  if (addr.startsWith('::ffff:')) return isPrivateAddress(addr.slice(7));
+  if (!/^[23]/.test(addr)) return true;
+  if (addr.startsWith('2001:db8')) return true; // documentation
+  return false;
+}
+
+/**
+ * One PINNED http(s) request: the socket connects to the pre-validated
+ * address via a custom `lookup`, so the DNS answer the guard checked is the
+ * DNS answer the connection uses — a rebinding attacker can't serve a public
+ * A record to the validator and a private one to the request. Host header
+ * and TLS SNI still come from the URL's hostname. Responses are truncated
+ * (nothing is read beyond status/headers + a small body drain).
+ */
+function requestPinned(urlString, { method = 'GET', headers = {}, body = null } = {}, pinnedAddress, pinnedFamily) {
+  const u = new URL(urlString);
+  const mod = u.protocol === 'https:' ? require('https') : require('http');
+  return new Promise((resolve, reject) => {
+    const req = mod.request({
+      protocol: u.protocol,
+      hostname: u.hostname,
+      port: u.port || (u.protocol === 'https:' ? 443 : 80),
+      path: `${u.pathname}${u.search}`,
+      method,
+      headers,
+      timeout: 10000,
+      // Node's agent may call the custom lookup with { all: true } — that
+      // shape REQUIRES an array result or every hostname request dies with
+      // ERR_INVALID_IP_ADDRESS.
+      lookup: (host, opts, cb) => (opts && opts.all
+        ? cb(null, [{ address: pinnedAddress, family: pinnedFamily }])
+        : cb(null, pinnedAddress, pinnedFamily)),
+    }, (res) => {
+      resolve({
+        ok: res.statusCode >= 200 && res.statusCode < 300,
+        status: res.statusCode,
+        headers: { get: (name) => res.headers[String(name).toLowerCase()] ?? null },
+      });
+      // Status + headers are all we ever use — tear the socket down NOW so
+      // an attacker endpoint can't stream forever (the request timeout is
+      // inactivity-based and would never fire on an active stream).
+      res.destroy();
+    });
+    req.on('timeout', () => req.destroy(new Error('unsubscribe request timeout')));
+    req.on('error', reject);
+    if (body) req.write(body);
+    req.end();
+  });
+}
+
+/**
+ * SSRF-hardened fetch for UNTRUSTED, sender-controlled URLs. The header/body
+ * URL check alone is not enough: a public hostname can resolve to a private
+ * address, an open redirect can bounce the request to internal/metadata
+ * endpoints, and a rebinding DNS server can answer the validator and the
+ * request differently. Every hop (redirects manual, max 3) is
+ * string-validated, DNS-resolved with every address required public, and the
+ * request socket is PINNED to the validated address (requestPinned above).
+ */
+async function fetchPublicOnly(rawUrl, options = {}, maxHops = 3) {
+  let current = rawUrl;
+  for (let hop = 0; hop < maxHops; hop += 1) {
+    if (!isSafePublicUrl(current)) throw new Error(`unsafe URL refused (hop ${hop})`);
+    const { hostname } = new URL(current);
+    let pinned;
+    if (net.isIP(hostname)) {
+      if (isPrivateAddress(hostname)) throw new Error(`private IP literal refused (hop ${hop})`);
+      pinned = { address: hostname, family: net.isIP(hostname) };
+    } else {
+      const results = await dns.lookup(hostname, { all: true });
+      if (!results.length || results.some((r) => isPrivateAddress(r.address))) {
+        throw new Error(`private/unresolvable host refused (hop ${hop})`);
+      }
+      pinned = results[0];
+    }
+    const res = await requestPinned(current, options, pinned.address, pinned.family);
+    // Callers that need one-click semantics must know whether the FINAL
+    // response answered the original POST or a downgraded GET.
+    res.finalMethod = options.method || 'GET';
+    if (res.status >= 300 && res.status < 400) {
+      const location = res.headers.get('location');
+      if (!location) return res;
+      current = new URL(location, current).toString();
+      // 307/308 preserve method AND body by definition — an RFC 8058
+      // one-click POST must stay a POST through them, or a redirected
+      // endpoint never receives the unsubscribe and a trailing GET 2xx
+      // would be reported as confirmed. 301/302/303 downgrade to GET
+      // (browser semantics) and drop the body. Every hop still passes the
+      // same public-address validation above.
+      if (res.status !== 307 && res.status !== 308) {
+        options = { headers: options.headers, method: 'GET' };
+      }
+      continue;
+    }
+    return res;
+  }
+  throw new Error('too many redirects');
+}
+
+// Hostname-only view of a sender-controlled URL for log lines.
+function safeHost(rawUrl) {
+  try { return new URL(rawUrl).hostname; } catch { return 'unparseable'; }
+}
+
 async function autoUnsubscribe(email) {
   const fromDomain = email.from_address?.split('@')[1] || '';
 
@@ -34,6 +169,51 @@ async function autoUnsubscribe(email) {
     return { method: 'none', note: 'operational sender — never unsubscribe' };
   }
 
+  // The unsubscribe URLs are sender-controlled requests — following them for
+  // mail that did not authenticate as its claimed domain hands harvesting
+  // spammers a live-mailbox signal (and a request trigger). Unauthenticated
+  // bulk mail gets archived only.
+  const { hasAlignedAuth } = require('./inbox-hygiene');
+  if (!hasAlignedAuth(email.authentication_results, domainFromAddress(email.from_address))) {
+    logger.info(`[unsubscribe] Refused: sender not authenticated (email ${email.id})`);
+    return { method: 'none', note: 'unauthenticated sender — archive only' };
+  }
+
+  // Idempotency: classifyEmail runs executeAutoAction and the admin
+  // reclassify route runs it AGAIN — one email must never fire two live
+  // unsubscribe requests (nor let a later attempt overwrite a confirmed
+  // outcome). The attempt log is the claim record.
+  const prior = await db('email_unsubscribe_log').where({ email_id: email.id }).first();
+  if (prior) {
+    // Replay (stale newsletter-claim recovery) must not downgrade a
+    // CONFIRMED outcome recorded by the first attempt — report what
+    // actually happened.
+    logger.info(`[unsubscribe] Skipped: attempt already recorded (email ${email.id}, status=${prior.status})`);
+    return {
+      method: prior.status === 'claimed' ? 'none' : (prior.unsubscribe_method || 'none'),
+      confirmed: prior.status === 'confirmed',
+      note: 'already attempted',
+    };
+  }
+  // The claim row lands BEFORE any external request — a crash mid-request
+  // leaves 'claimed', which the check above treats as attempted, so stale
+  // newsletter recovery can never repeat a live unsubscribe request.
+  // (Concurrent callers are already serialized by handleNewsletter's
+  // newsletter_processing row claim — the only path into this function.)
+  const [claim] = await db('email_unsubscribe_log').insert({
+    email_id: email.id,
+    from_domain: fromDomain,
+    unsubscribe_method: 'pending',
+    unsubscribe_url: null,
+    status: 'claimed',
+  }).returning('id');
+  const claimId = claim?.id ?? claim;
+  const settleClaim = async (method, url, status) => {
+    await db('email_unsubscribe_log').where({ id: claimId })
+      .update({ unsubscribe_method: method, unsubscribe_url: url, status })
+      .catch(() => {});
+  };
+
   // Method 1: Check List-Unsubscribe header (stored in extracted_data or label_ids context)
   // We need the raw headers — check if they were stored
   const listUnsub = email.list_unsubscribe || null;
@@ -43,36 +223,51 @@ async function autoUnsubscribe(email) {
 
     if (urlMatch) {
       if (!isSafePublicUrl(urlMatch[1])) {
-        logger.warn(`[unsubscribe] Refused unsafe List-Unsubscribe URL: ${urlMatch[1]}`);
+        // Hostname only — unsubscribe URLs commonly embed the recipient
+        // address or mailbox-specific tokens (PII stays out of logs).
+        logger.warn(`[unsubscribe] Refused unsafe List-Unsubscribe URL host: ${safeHost(urlMatch[1])} (email ${email.id})`);
         return { method: 'none', note: 'Unsafe unsubscribe URL refused' };
       }
       try {
-        // Try POST first (RFC 8058 one-click)
-        let res = await fetch(urlMatch[1], {
-          method: 'POST',
-          redirect: 'follow',
-          headers: {
-            'User-Agent': 'Mozilla/5.0',
-            'Content-Type': 'application/x-www-form-urlencoded',
-          },
-          body: 'List-Unsubscribe=One-Click',
-        });
-
-        if (!res.ok) {
-          res = await fetch(urlMatch[1], { method: 'GET', redirect: 'follow', headers: { 'User-Agent': 'Mozilla/5.0' } });
+        // RFC 8058 one-click POST is only allowed when the sender DECLARED
+        // it via List-Unsubscribe-Post — a plain List-Unsubscribe URL may be
+        // a preference page never meant to receive a POST. Hardened fetch
+        // either way: every hop DNS-validated public, socket pinned,
+        // redirects manual (see fetchPublicOnly).
+        const oneClick = /list-unsubscribe=one-click/i.test(String(email.list_unsubscribe_post || ''));
+        let confirmed = false;
+        let res;
+        if (oneClick) {
+          res = await fetchPublicOnly(urlMatch[1], {
+            method: 'POST',
+            headers: {
+              'User-Agent': 'Mozilla/5.0',
+              'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            body: 'List-Unsubscribe=One-Click',
+          });
+          // Only an RFC 8058 one-click 2xx that was STILL a POST at the
+          // final hop confirms — a 301/302/303 downgrade to GET may have
+          // merely loaded a preference page.
+          confirmed = res.ok && res.finalMethod === 'POST';
         }
+        if (!res || !res.ok) {
+          // A 2xx GET may just be a preference page — best-effort ATTEMPT,
+          // never reported as confirmed.
+          res = await fetchPublicOnly(urlMatch[1], { method: 'GET', headers: { 'User-Agent': 'Mozilla/5.0' } });
+        }
+        // A 404/500 on both attempts is a FAILED unsubscribe — reporting it
+        // as success would let the digest claim work that never happened and
+        // stop the newsletter path from trying the body-link fallback.
+        if (!res.ok) throw new Error(`unsubscribe endpoint returned ${res.status}`);
 
-        await db('email_unsubscribe_log').insert({
-          email_id: email.id,
-          from_domain: fromDomain,
-          unsubscribe_method: 'list_header_url',
-          unsubscribe_url: urlMatch[1],
-          status: 'attempted',
-        });
-        logger.info(`[unsubscribe] Hit List-Unsubscribe URL (email ${email.id})`);
-        return { method: 'list_header_url', url: urlMatch[1] };
+        await settleClaim(confirmed ? 'list_header_one_click' : 'list_header_get', urlMatch[1], confirmed ? 'confirmed' : 'attempted');
+        logger.info(`[unsubscribe] Hit List-Unsubscribe URL (email ${email.id}, confirmed=${confirmed})`);
+        return { method: confirmed ? 'list_header_one_click' : 'list_header_get', confirmed, url: urlMatch[1] };
       } catch (err) {
-        logger.warn(`[unsubscribe] List-Unsubscribe URL failed: ${err.message}`);
+        // Code/name only — transport errors embed the sender-controlled
+        // hostname (which can carry recipient tokens) in err.message.
+        logger.warn(`[unsubscribe] List-Unsubscribe URL failed (email ${email.id}): ${err.code || err.name || 'request_failed'}`);
       }
     }
   }
@@ -85,31 +280,27 @@ async function autoUnsubscribe(email) {
   if (matches && matches.length > 0) {
     const unsubUrl = matches[0].replace(/["'>]+$/, ''); // Clean trailing chars
     if (!isSafePublicUrl(unsubUrl)) {
-      logger.warn(`[unsubscribe] Refused unsafe body unsubscribe URL: ${unsubUrl}`);
+      logger.warn(`[unsubscribe] Refused unsafe body unsubscribe URL host: ${safeHost(unsubUrl)} (email ${email.id})`);
       return { method: 'none', note: 'Unsafe unsubscribe URL refused' };
     }
     try {
-      await fetch(unsubUrl, {
+      const res = await fetchPublicOnly(unsubUrl, {
         method: 'GET',
-        redirect: 'follow',
         headers: { 'User-Agent': 'Mozilla/5.0' },
       });
+      // Same bar as the header path: a 4xx/5xx is a FAILED unsubscribe and
+      // must not be recorded (or digested) as success.
+      if (!res.ok) throw new Error(`unsubscribe endpoint returned ${res.status}`);
 
-      await db('email_unsubscribe_log').insert({
-        email_id: email.id,
-        from_domain: fromDomain,
-        unsubscribe_method: 'body_link',
-        unsubscribe_url: unsubUrl,
-        status: 'attempted',
-      });
-      logger.info(`[unsubscribe] Hit body unsubscribe link (email ${email.id})`);
-      return { method: 'body_link', url: unsubUrl };
+      await settleClaim('body_link', unsubUrl, 'attempted');
+      logger.info(`[unsubscribe] Hit body unsubscribe link (email ${email.id}) — attempt only`);
+      return { method: 'body_link', confirmed: false, url: unsubUrl };
     } catch (err) {
-      logger.warn(`[unsubscribe] Body link failed: ${err.message}`);
+      logger.warn(`[unsubscribe] Body link failed (email ${email.id}): ${err.code || err.name || 'request_failed'}`);
     }
   }
 
   return { method: 'none', note: 'No unsubscribe mechanism found' };
 }
 
-module.exports = { autoUnsubscribe };
+module.exports = { autoUnsubscribe, fetchPublicOnly, isPrivateAddress, isSafePublicUrl };

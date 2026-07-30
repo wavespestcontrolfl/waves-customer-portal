@@ -31,7 +31,8 @@ const { grassTypeLabel, normalizeGrassType } = require('./lawn-grass-context');
 const { hasQuizToken, buildQuizSubstitutions } = require('./newsletter-quiz');
 const { hasFeedbackToken, ensureFeedbackToken, buildFeedbackSubstitutions } = require('./newsletter-feedback');
 const { isFlagshipDeliveryWindow, isCurrentFlagshipTarget } = require('./event-freshness');
-const { validateFlagshipEventSelection } = require('./newsletter-event-selection');
+const { validateFlagshipEventSelection, parseLockedEventIds } = require('./newsletter-event-selection');
+const { reverifyEvents, reverifyEnabled } = require('./event-reverify');
 
 // CITY_TOKEN / GRASS_TYPE_TOKEN + their neutral defaults are defined once in
 // newsletter-draft.js (imported above) so the live-send substitution and every
@@ -371,12 +372,48 @@ async function sendCampaign(sendId, opts = {}) {
   // seeded) reseeds the whole audience — that IS a first send, so it faces
   // the full gates: no resuming an entire issue outside the Tuesday window
   // or on a stale lineup.
+  if (opts.preclaimed && opts.existingDeliveriesOnly) {
+    // Partial resume: the freshness/cadence gates above are DELIBERATELY
+    // bypassed (a partial send must be able to finish its own issue), but
+    // the LIVE page recheck is not — retryable recipients must not receive
+    // an event that died between the first pass and recovery. Gate-off or
+    // fetch flake still passes (reverifyEvents fails open on infra).
+    const lockedIds = [...new Set(parseLockedEventIds(send.event_ids).map(String))];
+    if (lockedIds.length && reverifyEnabled()) {
+      const lockedRows = await db('events_raw')
+        .whereIn('id', lockedIds)
+        .select('id', 'title', 'event_url');
+      if (lockedRows.length !== lockedIds.length) {
+        // A locked event deleted/merged since the first pass would simply
+        // vanish from the recheck — retry recipients would receive stale
+        // content for an event that no longer exists.
+        const err = new Error(`live page recheck failed on resume: ${lockedIds.length - lockedRows.length} locked event(s) no longer exist`);
+        err.code = 'EVENT_REVERIFY_FAILED';
+        throw err;
+      }
+      const resumeRecheck = await reverifyEvents(lockedRows);
+      if (!resumeRecheck.ok) {
+        const err = new Error(`live page recheck failed on resume: ${resumeRecheck.failures.map((f) => `${f.title} — ${f.reason}`).join('; ')}`);
+        err.code = 'EVENT_REVERIFY_FAILED';
+        throw err;
+      }
+    }
+  }
   if (!(opts.preclaimed && opts.existingDeliveriesOnly)) {
     const eventSelection = await validateFlagshipEventSelection(send);
     if (eventSelection.flagship) {
       if (!eventSelection.valid) {
         const err = new Error(`flagship event selection is no longer eligible: ${eventSelection.errors.join(' ')}`);
         err.code = 'EVENT_SELECTION_INVALID';
+        throw err;
+      }
+      // Live official-page recheck (dark behind NEWSLETTER_LIVE_REVERIFY):
+      // fail closed ONLY on confirmed dead-event evidence — a listed event
+      // whose page is gone or explicitly cancelled must not reach inboxes.
+      const recheck = await reverifyEvents(eventSelection.events);
+      if (!recheck.ok) {
+        const err = new Error(`live page recheck failed: ${recheck.failures.map((f) => `${f.title} — ${f.reason}`).join('; ')}`);
+        err.code = 'EVENT_REVERIFY_FAILED';
         throw err;
       }
       const now = new Date();
@@ -523,6 +560,8 @@ async function sendCampaign(sendId, opts = {}) {
     preheader: send.preview_text || undefined,
     newsletterType: send.newsletter_type || undefined,
     preferredSourcesCta: true,
+    // Web-version permalink — the Astro archive page for this issue.
+    webVersionUrl: send.slug ? `https://www.wavespestcontrol.com/newsletter/archive/${send.slug}` : undefined,
   });
 
   let accepted = 0, failed = 0;
@@ -557,6 +596,15 @@ async function sendCampaign(sendId, opts = {}) {
   // engagement_token so a tap lands on the right delivery row. Scanned on
   // the local copies so the send-time append above is always resolved.
   const feedbackEnabled = hasFeedbackToken(quizBody);
+  // Event click-tracking tokens ({{evclick:<eventId>}}): substituted per
+  // recipient with the tracking redirect carrying their engagement_token —
+  // same substitution mechanics as the quiz/feedback tokens. The direct
+  // event URLs are the fallback for recipients without a token.
+  const {
+    evclickIdsInBody, buildEvclickSubstitutions, eventUrlMapForSend,
+  } = require('./newsletter-event-clicks');
+  const evclickEnabled = evclickIdsInBody(quizBody).length > 0;
+  const evclickUrlById = evclickEnabled ? await eventUrlMapForSend(send) : new Map();
 
   // Split by variant so each batch uses the right subject line. When A/B is
   // off every delivery gets variant=null and we just ship one group.
@@ -606,6 +654,7 @@ async function sendCampaign(sendId, opts = {}) {
             // token (shouldn't happen post-migration) → neutral link-free render.
             ...(quizEnabled ? buildQuizSubstitutions(quizBody, { token: deliveryBySub.get(s.id)?.engagement_token }) : {}),
             ...(feedbackEnabled ? buildFeedbackSubstitutions(quizBody, { token: deliveryBySub.get(s.id)?.engagement_token }) : {}),
+            ...(evclickEnabled ? buildEvclickSubstitutions(quizBody, { token: deliveryBySub.get(s.id)?.engagement_token, urlById: evclickUrlById }) : {}),
           },
           // delivery_id rides on every SendGrid event webhook for this
           // recipient, so the handler can resolve back to the right row
@@ -909,7 +958,7 @@ async function resumeCampaign(sendId) {
  */
 async function processScheduledSends() {
   const { requiresClaimValidation, FLAGSHIP_TYPE_KEY } = require('../config/newsletter-types');
-  const { validateNewsletterDraft } = require('../services/newsletter-validator');
+  const { validateNewsletterDraft, lockedPricesForSend } = require('../services/newsletter-validator');
 
   const due = await db('newsletter_sends')
     .where({ status: 'scheduled' })
@@ -935,12 +984,24 @@ async function processScheduledSends() {
       if (eventSelection.flagship) {
         const now = new Date();
         const currentTarget = isCurrentFlagshipTarget(row.scheduled_for, now);
-        if (!eventSelection.valid || !currentTarget || !isFlagshipDeliveryWindow(now)) {
+        // Live recheck failures take the SAME revert-to-editable-draft
+        // exit as an invalid lineup: a generic 'failed' send can't be
+        // edited (PATCH accepts draft/scheduled only) and Resume just
+        // repeats the recheck — the week would strand with no way to
+        // apply the suggested alternate.
+        let recheckReason = null;
+        if (eventSelection.valid && currentTarget && isFlagshipDeliveryWindow(now)) {
+          const recheck = await reverifyEvents(eventSelection.events);
+          if (!recheck.ok) {
+            recheckReason = `live page recheck failed: ${recheck.failures.map((f) => `${f.title} — ${f.reason}`).join('; ')}`;
+          }
+        }
+        if (!eventSelection.valid || !currentTarget || !isFlagshipDeliveryWindow(now) || recheckReason) {
           const reason = !eventSelection.valid
             ? eventSelection.errors.join(', ')
             : !currentTarget
               ? 'scheduled_for is not the current issue Tuesday at 6:00 AM ET'
-              : 'missed the Tuesday 6:00–6:14 AM ET delivery window';
+              : (recheckReason || 'missed the Tuesday 6:00–6:14 AM ET delivery window');
           logger.error(`[newsletter-scheduler] flagship send ${row.id} blocked: ${reason}`);
           // Reverting an approved schedule INVALIDATES the approval: the
           // state the owner signed off (lineup, target Tuesday) no longer
@@ -973,7 +1034,8 @@ async function processScheduledSends() {
         const recipientCount = Number(
           (await buildSubscriberQuery(row.segment_filter, await resolveSegmentCustomerIds(row.segment_filter)).count('* as c').first())?.c || 0
         );
-        const { errors } = validateNewsletterDraft(typedRow, { recipientCount });
+        const lockedPrices = await lockedPricesForSend(typedRow, db);
+        const { errors } = validateNewsletterDraft(typedRow, { recipientCount, lockedPrices });
         if (errors.length > 0) {
           logger.error(`[newsletter-scheduler] send ${row.id} blocked by validation: ${errors.join(', ')}`);
           // Same approval invalidation as the flagship revert above.
@@ -1002,6 +1064,28 @@ async function processScheduledSends() {
       // to failed or we'd overwrite an in-flight campaign.
       if (err.code === 'ALREADY_CLAIMED') {
         logger.info(`[newsletter-scheduler] send ${row.id} already claimed by another worker — skipping`);
+        continue;
+      }
+      if (err.code === 'EVENT_REVERIFY_FAILED' || err.code === 'EVENT_SELECTION_INVALID') {
+        // sendCampaign's own pre-claim gates re-run the lineup checks and
+        // can newly fail even though the tick's gate just passed (the
+        // recheck fetches live pages). A generic 'failed' flip would
+        // strand the week uneditable — take the same
+        // revert-to-editable-draft exit as the tick's gate.
+        logger.error(`[newsletter-scheduler] send ${row.id} blocked at dispatch: ${err.message}`);
+        try {
+          const reverted = await db('newsletter_sends').where({ id: row.id, status: 'scheduled' }).update({
+            status: 'draft',
+            scheduled_for: null,
+            proof_token: null,
+            proof_sent_at: null,
+            proof_approved_at: null,
+            updated_at: new Date(),
+          });
+          if (reverted) {
+            await db('newsletter_calendar').where({ send_id: row.id }).update({ status: 'drafted', updated_at: new Date() });
+          }
+        } catch { /* swallow */ }
         continue;
       }
       logger.error(`[newsletter-scheduler] send ${row.id} failed: ${err.message}`);

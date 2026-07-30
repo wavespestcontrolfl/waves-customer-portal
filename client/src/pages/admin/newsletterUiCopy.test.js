@@ -5,9 +5,9 @@ describe('newsletter admin identity contract', () => {
   it('keeps operator-facing identity and calendar cadence aligned', () => {
     expect(NEWSLETTER_UI_COPY).toMatchInlineSnapshot(`
       {
-        "calendarWeekHeading": "The Waves Newsletter (Tuesday 6:00 AM ET)",
-        "name": "The Waves Newsletter",
-        "scheduleHint": "The Waves Newsletter delivery is locked to Tuesday at exactly 6:00 AM ET.",
+        "calendarWeekHeading": "Waves Newsletter (Tuesday 6:00 AM ET)",
+        "name": "Waves Newsletter",
+        "scheduleHint": "Waves Newsletter delivery is locked to Tuesday at exactly 6:00 AM ET.",
         "sendCadence": "Tuesday 6:00 AM ET",
         "tagline": "",
         "weekStartLabel": "Week starting (Tuesday · 6:00 AM ET delivery)",

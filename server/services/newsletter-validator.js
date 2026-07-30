@@ -57,14 +57,65 @@ function decodeEntities(text) {
  * produce three error rows). HTML tags are stripped and entities decoded
  * before matching; plain text passes through unchanged.
  */
-function findHallucinatedClaims(body) {
+function findHallucinatedClaims(body, lockedPrices = [], mode = 'text') {
   if (!body) return [];
+  const normPrice = (v) => decodeEntities(String(v || '')).normalize('NFKC').replace(/\s+/g, ' ').trim();
+  // Entries are {eventId, price} pairs (lockedPricesForSend) or bare
+  // strings (legacy/tests). Text excision uses the VALUES; the HTML span
+  // exemption requires the event/price PAIR to match.
+  const priceEntries = (Array.isArray(lockedPrices) ? lockedPrices : [])
+    .map((e) => (typeof e === 'string' ? { eventId: null, price: e } : (e || {})))
+    .filter((e) => typeof e.price === 'string' && e.price.trim());
+  const lockedSet = new Set(priceEntries.map((e) => normPrice(e.price)).filter(Boolean));
+  const priceByEvent = new Map(priceEntries
+    .filter((e) => e.eventId)
+    .map((e) => [String(e.eventId).toLowerCase(), normPrice(e.price)]));
   // NFKC folds Unicode look-alikes (fullwidth '＄', fullwidth digits, etc.)
   // down to their ASCII forms so a homoglyph "＄15" / "ｆｒｅｅ" can't render as
   // the claim to subscribers while slipping past the ASCII regexes.
-  const bodyText = decodeEntities(body.replace(/<[^>]+>/g, ' '))
+  let bodyText = decodeEntities(String(body)
+    // Structural exemption FIRST — and PAIR-verified: an assembler-
+    // emitted price span carries its event id, and it vanishes only when
+    // its decoded content matches THAT event's own locked price. A
+    // hand-edited value ($25 → $250, or Event A wearing Event B's real
+    // price) keeps the sentinel but loses the pair match, falls through
+    // to the scan, and blocks. Spans without an id never exempt.
+    .replace(/<span data-db-price="([^"]*)">([\s\S]*?)<\/span>/gi, (m, id, inner) => (
+      priceByEvent.get(String(id).toLowerCase()) === normPrice(inner) ? ' ' : ` ${inner} `
+    ))
+    .replace(/<span data-db-price>([\s\S]*?)<\/span>/gi, (m, inner) => ` ${inner} `)
+    .replace(/<[^>]+>/g, ' '))
     .normalize('NFKC')
     .replace(/\s+/g, ' ');
+  // DB-locked prices in HTML are STRUCTURALLY identified: the assembler
+  // wraps them in <span data-db-price>…</span>, a tag model prose can
+  // never produce (markdownToHtml escapes HTML before markdown), so
+  // stripping the span — done above, before tag-strip — exempts exactly
+  // the renderer's own field and nothing else.
+  //
+  // The plain-text body has no markup, but the renderer's facts line is
+  // immediately followed by that event's OWN {{evclick:<eventId>}} token
+  // ("Tickets & info: …"), so the text exemption binds the event/price
+  // pair too — mode 'text' only: "Tickets: <price>" excises ONLY when
+  // the same event's evclick token follows within the renderer's
+  // distance. Editing Event A's facts line to Event B's real price
+  // leaves A's token adjacent, the pair mismatches, and it blocks.
+  // Boundary-bound so a locked "$25" can't hollow an invented "$250";
+  // model prose repeating a claim appears in the HTML segment too,
+  // where no text excision exists. Entries WITHOUT an eventId (bare
+  // strings — unit-test convenience; lockedPricesForSend always sets
+  // ids) excise unbound.
+  if (mode === 'text') {
+    for (const entry of priceEntries) {
+      const norm = normPrice(entry.price);
+      if (!norm) continue;
+      const esc = norm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const re = entry.eventId
+        ? new RegExp(`Tickets:\\s*${esc}(?![\\w])(?=[\\s\\S]{0,200}?\\{\\{evclick:${String(entry.eventId).toLowerCase()}\\}\\})`, 'gu')
+        : new RegExp(`Tickets:\\s*${esc}(?![\\w])`, 'gu');
+      bodyText = bodyText.replace(re, ' ');
+    }
+  }
   const seen = new Set();
   const errors = [];
   for (const { pattern, label } of HALLUCINATED_CLAIM_PATTERNS) {
@@ -76,6 +127,24 @@ function findHallucinatedClaims(body) {
     }
   }
   return errors;
+}
+
+/**
+ * Fetch the DB-locked price strings for a send's own lineup — the only
+ * strings the claim scan may excise. Callers pass the result as
+ * opts.lockedPrices; fail-open to [] (scan stays maximally strict).
+ */
+async function lockedPricesForSend(send, knex) {
+  try {
+    const ids = Array.isArray(send?.event_ids) ? send.event_ids : JSON.parse(send?.event_ids || '[]');
+    if (!Array.isArray(ids) || !ids.length || !knex) return [];
+    const rows = await knex('events_raw').whereIn('id', ids).select('id', 'price_text');
+    return rows
+      .filter((r) => typeof r.price_text === 'string' && r.price_text.trim())
+      .map((r) => ({ eventId: String(r.id).toLowerCase(), price: r.price_text.trim() }));
+  } catch {
+    return [];
+  }
 }
 
 function validateNewsletterDraft(send, opts = {}) {
@@ -107,14 +176,14 @@ function validateNewsletterDraft(send, opts = {}) {
 
   if (isFlagshipType(send.newsletter_type)) {
     if (send.html_body) {
-      const bodyText = send.html_body.replace(/<[^>]+>/g, '').toLowerCase();
+      const bodyText = send.html_body.replace(/<[^>]+>/g, ' ').toLowerCase();
       if (!['homeowner minute', 'homeowner tip', 'quick tip', 'before heading out'].some((s) => bodyText.includes(s))) {
         warnings.push('No Homeowner Minute section detected');
       }
       if (!['schedule service', 'book', 'call us', 'reply to this email', 'wavespestcontrol.com'].some((s) => bodyText.includes(s))) {
         warnings.push('No Waves CTA detected');
       }
-      if (!send.html_body.includes('<h2>') && !send.html_body.includes('<strong>')) {
+      if (!send.html_body.includes('<h2') && !send.html_body.includes('<strong>')) {
         warnings.push('No event structure detected');
       }
     }
@@ -130,12 +199,24 @@ function validateNewsletterDraft(send, opts = {}) {
   // gate. Manually-authored types (service-promo) stay exempt — they
   // quote prices legitimately.
   if (requiresClaimValidation(send.newsletter_type)) {
-    const combinedBody = [send.subject, send.preview_text, send.html_body, send.text_body]
-      .filter(Boolean).join('\n');
-    if (combinedBody) errors.push(...findHallucinatedClaims(combinedBody));
+    // Segment-scoped scanning: subject/preview and HTML get NO string
+    // excision (HTML's exemption is the structural data-db-price span;
+    // a subject like "🎟️ From $25 in prizes" always blocks). Only the
+    // plain-text segment excises its renderer shape ("Tickets: <price>").
+    const claimSeen = new Set();
+    const scanSegment = (body, lockedPrices, mode) => {
+      if (!body) return;
+      for (const err of findHallucinatedClaims(body, lockedPrices, mode)) {
+        if (!claimSeen.has(err)) { claimSeen.add(err); errors.push(err); }
+      }
+    };
+    scanSegment([send.subject, send.preview_text].filter(Boolean).join('\n'), [], 'none');
+    scanSegment(send.html_body, opts.lockedPrices || [], 'html');
+    scanSegment(send.text_body, opts.lockedPrices || [], 'text');
   }
 
   return { errors, warnings };
 }
 
-module.exports = { validateNewsletterDraft, findHallucinatedClaims };
+module.exports = {
+  lockedPricesForSend, validateNewsletterDraft, findHallucinatedClaims };

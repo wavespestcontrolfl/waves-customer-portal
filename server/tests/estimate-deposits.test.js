@@ -63,6 +63,12 @@ const mockLoadExistingRecurringQualifyingRows = jest.fn(async () => []);
 jest.mock('../services/waveguard-existing-services', () => ({
   loadExistingRecurringQualifyingRows: (...args) => mockLoadExistingRecurringQualifyingRows(...args),
 }));
+// Label provenance defaults to a verified non-label (the legacy scenarios
+// these tests stage); individual tests override to 'label' / 'unknown'.
+const mockTierLabelStatus = jest.fn(async () => 'not_label');
+jest.mock('../services/self-booking-plan-sync', () => ({
+  tierLabelStatus: (...args) => mockTierLabelStatus(...args),
+}));
 const mockResolveForInvoice = jest.fn(async () => ({ payerId: null }));
 jest.mock('../services/payer', () => ({
   resolveForInvoice: (...args) => mockResolveForInvoice(...args),
@@ -204,6 +210,28 @@ describe('resolveDepositPolicyForEstimate — live plan-customer fallback (P2)',
     expect(policy.required).toBe(false);
     expect(policy.exemptReason).toBe('existing_plan_customer');
     expect(policy.slotRequired).toBe(true);
+  });
+
+  it('an auto-derived tier LABEL never waives the deposit — snapshot or live rows (Codex #3011 r8-r10)', async () => {
+    mockTierLabelStatus.mockResolvedValueOnce('label');
+    // Frozen snapshot claims membership; provenance override must clear it
+    // and skip the live rows fallback entirely.
+    const policy = await resolveDepositPolicyForEstimate({
+      estimate: linkedEstimate,
+      membership: { isExistingCustomer: true },
+    });
+    expect(policy.required).toBe(true);
+    expect(mockLoadExistingRecurringQualifyingRows).not.toHaveBeenCalled();
+  });
+
+  it("unverifiable provenance ('unknown') keeps the deposit required (Codex #3011 r10)", async () => {
+    mockTierLabelStatus.mockResolvedValueOnce('unknown');
+    const policy = await resolveDepositPolicyForEstimate({
+      estimate: linkedEstimate,
+      membership: { isExistingCustomer: false },
+    });
+    expect(policy.required).toBe(true);
+    expect(mockLoadExistingRecurringQualifyingRows).not.toHaveBeenCalled();
   });
 
   it('no qualifying services or a failed lookup = deposit stays required (fail-closed)', async () => {

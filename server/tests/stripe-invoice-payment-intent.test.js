@@ -623,6 +623,181 @@ describe('StripeService.finalizeInvoicePayment saved-card serialization', () => 
   });
 });
 
+// A failed surcharged attempt (bad CVC / decline on a credit card) strands
+// amount_details.surcharge on the PI; Stripe then hard-rejects a debit/prepaid
+// confirm ("A surcharge amount can only be provided with the following card
+// funding types: credit"), blocking the surcharge-free path until the customer
+// goes back to a credit card. The no-fee finalize must clear the stale
+// breakdown — same contract the deposit lane already tests.
+describe('StripeService.finalizeInvoicePayment stale surcharge clear', () => {
+  const crypto = require('crypto');
+  let originalJwtSecret;
+  let invoice;
+  let stripeClient;
+
+  const quoteTokenFor = () => {
+    const payload = JSON.stringify({
+      invoiceId: invoice.id,
+      paymentMethodId: 'pm-card',
+      invoiceTotal: 75,
+      quotedAt: Date.now(),
+    });
+    const signature = crypto.createHmac('sha256', process.env.JWT_SECRET).update(payload).digest('base64url');
+    return `${Buffer.from(payload).toString('base64url')}.${signature}`;
+  };
+
+  beforeEach(() => {
+    jest.resetModules();
+    originalJwtSecret = process.env.JWT_SECRET;
+    process.env.JWT_SECRET = 'finalize-test-secret';
+
+    invoice = {
+      id: 'inv-finalize',
+      invoice_number: 'WPC-FINALIZE',
+      status: 'sent',
+      total: '75.00',
+      credit_applied: 0,
+      customer_id: 'cust-1',
+      payer_id: null,
+      stripe_payment_intent_id: 'pi-public',
+    };
+    stripeClient = {
+      paymentMethods: {
+        retrieve: jest.fn().mockResolvedValue({ id: 'pm-card', type: 'card', card: { funding: 'debit' } }),
+      },
+      paymentIntents: {
+        retrieve: jest.fn().mockResolvedValue({ id: 'pi-public', status: 'requires_payment_method', amount_details: null }),
+        update: jest.fn().mockResolvedValue({}),
+        confirm: jest.fn().mockResolvedValue({ id: 'pi-public', status: 'succeeded', client_secret: 'pi-public_secret' }),
+      },
+    };
+    const invoiceQuery = {
+      where: jest.fn(() => invoiceQuery),
+      forUpdate: jest.fn(() => invoiceQuery),
+      first: jest.fn().mockResolvedValue(invoice),
+    };
+    const attemptQuery = {
+      where: jest.fn(() => attemptQuery),
+      whereIn: jest.fn(() => attemptQuery),
+      whereNull: jest.fn(() => attemptQuery),
+      first: jest.fn().mockResolvedValue(null),
+    };
+    const orphanQuery = {
+      where: jest.fn(() => orphanQuery),
+      first: jest.fn().mockResolvedValue(null),
+    };
+    const paymentsQuery = {
+      where: jest.fn(() => paymentsQuery),
+      whereNull: jest.fn(() => paymentsQuery),
+      whereRaw: jest.fn(() => paymentsQuery),
+      whereIn: jest.fn(() => paymentsQuery),
+      orWhereColumn: jest.fn(() => paymentsQuery),
+      first: jest.fn().mockResolvedValue(null),
+    };
+    const rootInvoiceQuery = {
+      where: jest.fn(() => rootInvoiceQuery),
+      first: jest.fn().mockResolvedValue(invoice),
+    };
+    const dbMock = jest.fn((table) => {
+      if (table === 'invoices') return rootInvoiceQuery;
+      throw new Error(`Unexpected root table ${table}`);
+    });
+    dbMock.transaction = jest.fn(async (callback) => callback((table) => {
+      if (table === 'invoices') return invoiceQuery;
+      if (table === 'stripe_invoice_charge_attempts') return attemptQuery;
+      if (table === 'stripe_orphan_charges') return orphanQuery;
+      if (table === 'payments') return paymentsQuery;
+      throw new Error(`Unexpected finalize table ${table}`);
+    }));
+
+    jest.doMock('stripe', () => jest.fn(() => stripeClient));
+    jest.doMock('../config', () => ({}));
+    jest.doMock('../config/stripe-config', () => ({
+      secretKey: 'sk_test_mock',
+      publishableKey: 'pk_test_mock',
+    }));
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    jest.doMock('../models/db', () => dbMock);
+  });
+
+  afterEach(() => {
+    if (originalJwtSecret == null) delete process.env.JWT_SECRET;
+    else process.env.JWT_SECRET = originalJwtSecret;
+  });
+
+  test('no-fee finalize clears amount_details unconditionally with the unset form (no probe — TOCTOU-proof)', async () => {
+    const StripeService = require('../services/stripe');
+    const result = await StripeService.finalizeInvoicePayment(invoice.id, quoteTokenFor());
+
+    expect(result.surcharge).toBe(0);
+    // No read-then-write window: the clear rides the same update that
+    // attaches the PM, so a concurrent credit attempt's stranded surcharge
+    // can never survive into this confirm.
+    expect(stripeClient.paymentIntents.retrieve).not.toHaveBeenCalled();
+    const [, params, updateOpts] = stripeClient.paymentIntents.update.mock.calls[0];
+    expect(params.amount).toBe(7500);
+    expect(params.amount_details).toBe('');
+    expect(params.metadata.card_surcharge).toBe('0');
+    expect(updateOpts).toEqual({ apiVersion: expect.any(String) });
+    const [, , confirmOpts] = stripeClient.paymentIntents.confirm.mock.calls[0];
+    expect(confirmOpts).toEqual({ apiVersion: expect.any(String) });
+  });
+
+  test('credit finalize applies the surcharge breakdown', async () => {
+    stripeClient.paymentMethods.retrieve.mockResolvedValue({ id: 'pm-card', type: 'card', card: { funding: 'credit' } });
+    const StripeService = require('../services/stripe');
+    const result = await StripeService.finalizeInvoicePayment(invoice.id, quoteTokenFor());
+
+    expect(stripeClient.paymentIntents.retrieve).not.toHaveBeenCalled();
+    expect(result.surcharge).toBe(2.17);
+    const [, params] = stripeClient.paymentIntents.update.mock.calls[0];
+    expect(params.amount).toBe(7717);
+    expect(params.amount_details).toEqual({ surcharge: { amount: 217, enforce_validation: 'enabled' } });
+  });
+
+  test('unset-rejected fallback verifies the PI is clean before confirming', async () => {
+    stripeClient.paymentIntents.update
+      .mockRejectedValueOnce(new Error('amount_details unset not supported'))
+      .mockResolvedValueOnce({});
+    // Post-fallback verify: no residue → safe to confirm.
+    stripeClient.paymentIntents.retrieve.mockResolvedValue({
+      id: 'pi-public',
+      status: 'requires_payment_method',
+      amount_details: null,
+    });
+    const StripeService = require('../services/stripe');
+    const result = await StripeService.finalizeInvoicePayment(invoice.id, quoteTokenFor());
+
+    expect(result.status).toBe('succeeded');
+    expect(stripeClient.paymentIntents.update).toHaveBeenCalledTimes(2);
+    const [, fallbackParams, fallbackOpts] = stripeClient.paymentIntents.update.mock.calls[1];
+    expect(fallbackParams.amount).toBe(7500);
+    expect(fallbackParams.amount_details).toBeUndefined();
+    expect(fallbackOpts).toBeUndefined();
+    const [, , verifyOpts] = stripeClient.paymentIntents.retrieve.mock.calls[0];
+    expect(verifyOpts).toEqual({ apiVersion: expect.any(String) });
+    expect(stripeClient.paymentIntents.confirm).toHaveBeenCalled();
+  });
+
+  test('unset-rejected fallback NEVER confirms while surcharge residue remains', async () => {
+    stripeClient.paymentIntents.update
+      .mockRejectedValueOnce(new Error('amount_details unset not supported'))
+      .mockResolvedValueOnce({});
+    // Post-fallback verify still shows the stranded credit-attempt surcharge:
+    // confirming would either reject (debit) or misstate the breakdown.
+    stripeClient.paymentIntents.retrieve.mockResolvedValue({
+      id: 'pi-public',
+      status: 'requires_payment_method',
+      amount_details: { surcharge: { amount: 217 } },
+    });
+    const StripeService = require('../services/stripe');
+
+    await expect(StripeService.finalizeInvoicePayment(invoice.id, quoteTokenFor()))
+      .rejects.toThrow(/pending card fee/);
+    expect(stripeClient.paymentIntents.confirm).not.toHaveBeenCalled();
+  });
+});
+
 describe('StripeService.updateInvoicePaymentIntentMethod', () => {
   let invoiceRow;
   let stripeClient;

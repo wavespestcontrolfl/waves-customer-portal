@@ -7,9 +7,11 @@ import LawnReportV2Section from '../components/report/lawnV2/LawnReportV2Section
 import { StationMapCard } from '../components/StationMapCard';
 import { LawnVisitTimeline, PrintContext as LawnPrintContext } from '../components/report/lawnV2/LawnReportV2';
 import PestReportV2Section from '../components/report/pestV2/PestReportV2Section';
+import { PestCustomerConcern } from '../components/report/pestV2/PestReportV2';
 import TracedTreatmentZoneMap from '../components/report/TracedTreatmentZoneMap';
 import MosquitoReportV2Section from '../components/report/mosquitoV2/MosquitoReportV2Section';
 import TreeShrubReportV2Section from '../components/report/treeShrubV2/TreeShrubReportV2Section';
+import useStickyStuck from '../hooks/useStickyStuck';
 import {
   AlertTriangle,
   CheckCircle2,
@@ -628,7 +630,6 @@ export function smartStatusSummary(data = {}, mode = 'live', nowMs = Date.now())
   const completedItems = coverageItems.filter((item) => isCompletedCoverageStatus(item.status));
   const actionNeededItems = coverageItems.filter((item) => isActionNeededCoverageStatus(item.status));
   const completedAreas = shortList(completedItems.map((item) => item.areaName || item.name), 4);
-  const productsApplied = uniqueStrings((data.applications || []).map((app) => applicationProductName(app)));
   const technician = data.technician?.name || data.technicianName || 'Your Waves technician';
   const completionTime = formatTimelineTime(getReportCompletionTime(data));
   const context = data.dynamicContext || {};
@@ -714,9 +715,11 @@ export function smartStatusSummary(data = {}, mode = 'live', nowMs = Date.now())
       statusTone: 'neutral',
       result: 'Re-service completed — we returned between your regular visits to address the activity you reported and re-treated the affected areas.',
       completedLine: completedAreas ? `${completedItems.length} area${completedItems.length === 1 ? '' : 's'} completed · ${completedAreas}` : 'Reported activity areas were re-treated today.',
+      // The tech photo card carries arrival/finish times and the "What Waves did
+      // today" cell carries the product count — repeating both here read as filler
+      // (audit 2026-07-28). The detail line keeps only what no other cell says.
       detail: [
-        completionTime ? `${technician} completed the visit at ${completionTime}.` : `${technician} completed the visit.`,
-        productsApplied.length ? `${productsApplied.length} product${productsApplied.length === 1 ? '' : 's'} applied.` : null,
+        data.techVisitCard ? null : (completionTime ? `${technician} completed the visit at ${completionTime}.` : `${technician} completed the visit.`),
         'Treatments can take several days to knock activity down fully — contact us if you are still seeing activity after two weeks.',
       ].filter(Boolean).join(' '),
     };
@@ -736,10 +739,11 @@ export function smartStatusSummary(data = {}, mode = 'live', nowMs = Date.now())
         || v2Snapshot.statusHeadline
         || 'Service completed — we noted items to keep an eye on; details are below.',
       completedLine: completedAreas ? `${completedItems.length} area${completedItems.length === 1 ? '' : 's'} completed · ${completedAreas}` : 'Service areas were completed today.',
-      detail: [
-        completionTime ? `${technician} completed the visit at ${completionTime}.` : `${technician} completed the visit.`,
-        productsApplied.length ? `${productsApplied.length} product${productsApplied.length === 1 ? '' : 's'} applied.` : null,
-      ].filter(Boolean).join(' '),
+      // Times live on the tech card, product count on "What Waves did today" —
+      // only state the completion here when neither is on screen (audit 2026-07-28).
+      detail: data.techVisitCard
+        ? ''
+        : (completionTime ? `${technician} completed the visit at ${completionTime}.` : `${technician} completed the visit.`),
     };
   }
 
@@ -749,10 +753,9 @@ export function smartStatusSummary(data = {}, mode = 'live', nowMs = Date.now())
     statusTone: allReady ? 'ready' : 'neutral',
     result: 'Routine service completed. No high-priority issues were noted.',
     completedLine: completedAreas ? `${completedItems.length} area${completedItems.length === 1 ? '' : 's'} completed · ${completedAreas}` : 'Service areas were completed today.',
-    detail: [
-      completionTime ? `${technician} completed the visit at ${completionTime}.` : `${technician} completed the visit.`,
-      productsApplied.length ? `${productsApplied.length} product${productsApplied.length === 1 ? '' : 's'} applied.` : null,
-    ].filter(Boolean).join(' '),
+    detail: data.techVisitCard
+      ? ''
+      : (completionTime ? `${technician} completed the visit at ${completionTime}.` : `${technician} completed the visit.`),
   };
 }
 
@@ -831,9 +834,18 @@ function applicationPurpose(app = {}, serviceLine = 'pest') {
   const product = String(app.product?.name || '').toLowerCase();
   const category = String(app.product?.category || '').toLowerCase();
   if (serviceLine === 'lawn') {
-    if (method.includes('spot') || category.includes('herb') || product.includes('weed')) return 'Targeted weed treatment';
-    if (category.includes('fung') || product.includes('fung')) return 'Fungus control application';
-    if (method.includes('granular') || category.includes('fert') || product.includes('fert')) return 'Lawn nutrient application';
+    // Classify by WHAT the product is (active ingredient + category + name),
+    // never by method alone: "spot treatment" used to imply weed control, which
+    // mislabeled a spot-applied insecticide (clothianidin) as targeting "visible
+    // weed pressure" on a live report (audit 2026-07-28).
+    const active = String(app.product?.active_ingredient || '').toLowerCase();
+    const hay = `${product} ${category} ${active}`;
+    if (/insect|chinch|grub|bifen\w*|\w*thrin\b|pyrethroid|imidacloprid|dinotefuran|clothianidin|thiamethoxam|fipronil|trichlorfon|spinosad|indoxacarb/.test(hay)) return 'Lawn insect control';
+    if (/fung|azoxy|propiconazole|thiophanate|chlorothalonil|myclobutanil/.test(hay)) return 'Fungus control application';
+    if (/pre.?emerg|prodiamine|dithiopyr|pendimethalin/.test(hay)) return 'Weed prevention application';
+    if (/herb|weed|celsius|atrazine|2,?4-?d|metsulfuron|halosulfuron|sedgehammer|sulfentrazone|dicamba/.test(hay)) return 'Targeted weed treatment';
+    if (/fert|\b\d{1,2}-\d{1,2}-\d{1,2}\b|chelat|micro[\s-]?nutrient|iron|humic|kelp|potash|nitrogen|urea|sulfur/.test(hay)) return 'Lawn nutrient application';
+    if (method.includes('granular') || category.includes('fert')) return 'Lawn nutrient application';
     return 'Lawn treatment application';
   }
   if (serviceLine === 'mosquito') return 'Mosquito pressure reduction';
@@ -866,6 +878,16 @@ function applicationPurpose(app = {}, serviceLine = 'pest') {
 function applicationPurposeCopy(app = {}, serviceLine = 'pest') {
   const purpose = applicationPurpose(app, serviceLine);
   if (purpose === 'Targeted weed treatment') return 'Applied where visible weed pressure or service notes called for targeted control.';
+  if (purpose === 'Lawn insect control') {
+    // Name only the RECORDED targets — a hardcoded "chinch bugs and grubs"
+    // example could describe an off-target use or imply unsupported history
+    // when the application was tagged for something else (codex P2 #3038 r4).
+    const insectTargets = (Array.isArray(app.targets) ? app.targets : []).map((t) => String(t || '').trim()).filter(Boolean);
+    return insectTargets.length
+      ? `Applied to protect the turf from ${insectTargets.join(', ').toLowerCase()}, where activity, history, or seasonal pressure called for it.`
+      : 'Applied to protect the turf from lawn-damaging insects where activity, history, or seasonal pressure called for it.';
+  }
+  if (purpose === 'Weed prevention application') return 'Applied to stop new weeds before they sprout, ahead of the season when they spread fastest.';
   if (purpose === 'Fungus control application') return 'Applied to support turf health where fungus pressure or seasonal conditions called for protection.';
   if (purpose === 'Lawn nutrient application') return 'Used to support turf density, color, and recovery within the documented lawn program.';
   if (purpose === 'Lawn treatment application') return 'Recorded as part of today’s lawn care visit and treatment plan.';
@@ -893,7 +915,7 @@ function applicationPurposeCopy(app = {}, serviceLine = 'pest') {
 
 function productIdentifierDetails(app = {}) {
   const details = [];
-  const epa = String(app.product?.epa_reg || '').trim();
+  const epa = applicationEpaReg(app);
   const active = String(app.product?.active_ingredient || '').trim();
   if (epa) details.push(`EPA registration number recorded: ${epa}.`);
   if (active) details.push(`Active ingredient recorded: ${active}.`);
@@ -975,7 +997,12 @@ function applicationProductName(app = {}) {
 }
 
 function applicationEpaReg(app = {}) {
-  return app.product?.epa_reg || app.epaReg || '';
+  const raw = String(app.product?.epa_reg || app.epaReg || '').trim();
+  // Catalog rows for unregistered products (fertilizers, micronutrients) store
+  // the literal "N/A" — rendering an "EPA Reg. No.: N/A" cell reads like missing
+  // paperwork to a customer. Treat it as absent so the cell hides.
+  if (/^n\/?a$/i.test(raw) || /^none$/i.test(raw)) return '';
+  return raw;
 }
 
 function applicationActiveIngredient(app = {}) {
@@ -1034,6 +1061,12 @@ function applicationGroupPurposeCopy(purpose, serviceLine = 'pest') {
   }
   if (purpose === 'Targeted weed treatment') {
     return 'These products were applied where visible weed pressure or service notes called for targeted control.';
+  }
+  if (purpose === 'Lawn insect control') {
+    return 'These products were applied to protect the turf from lawn-damaging insects where activity, history, or seasonal pressure called for it.';
+  }
+  if (purpose === 'Weed prevention application') {
+    return 'These products were applied to stop new weeds before they sprout.';
   }
   if (purpose === 'Fungus control application') {
     return 'These products were applied to support turf health where fungus pressure or seasonal conditions called for protection.';
@@ -2043,32 +2076,45 @@ function ReentryReadinessCard({ context, mode, token }) {
         </div>
         <div className="readiness-status-chip">{readiness.status}</div>
       </div>
-      <div className="readiness-facts">
-        <div className="sr-cell">
-          <div className="sr-cell-label">Treatment area type</div>
-          <div className="sr-cell-value">{readiness.areaType}</div>
-        </div>
-        <div className="sr-cell">
-          <div className="sr-cell-label">Status</div>
-          <div className="sr-cell-value">{readiness.status}</div>
-        </div>
+      {readiness.allReady ? (
+        /* Everything is ready: the chip + headline already say "Ready now" —
+           repeating it in a Status cell and again per-area tile said the same
+           thing four times over 1.5 phone screens (audit 2026-07-28). Keep just
+           the one fact the header doesn't carry: the precautions line. */
         <div className="sr-cell">
           <div className="sr-cell-label">Precautions</div>
           <div className="sr-cell-value">{readiness.precautions}</div>
         </div>
-      </div>
-      {targets.length > 0 && (
-        <div className="reentry-target-grid readiness-target-grid" aria-label="Re-entry ready times">
-          {targets.map((target) => (
-            <ReentryTargetTile
-              key={target.key || target.label || target.readyAt}
-              target={target}
-              nowMs={nowMs}
-              mode={mode}
-              timezone={timezone}
-            />
-          ))}
-        </div>
+      ) : (
+        <>
+          <div className="readiness-facts">
+            <div className="sr-cell">
+              <div className="sr-cell-label">Treatment area type</div>
+              <div className="sr-cell-value">{readiness.areaType}</div>
+            </div>
+            <div className="sr-cell">
+              <div className="sr-cell-label">Status</div>
+              <div className="sr-cell-value">{readiness.status}</div>
+            </div>
+            <div className="sr-cell">
+              <div className="sr-cell-label">Precautions</div>
+              <div className="sr-cell-value">{readiness.precautions}</div>
+            </div>
+          </div>
+          {targets.length > 0 && (
+            <div className="reentry-target-grid readiness-target-grid" aria-label="Re-entry ready times">
+              {targets.map((target) => (
+                <ReentryTargetTile
+                  key={target.key || target.label || target.readyAt}
+                  target={target}
+                  nowMs={nowMs}
+                  mode={mode}
+                  timezone={timezone}
+                />
+              ))}
+            </div>
+          )}
+        </>
       )}
     </section>
   );
@@ -2230,6 +2276,10 @@ function FloatingAskWaves({ mode, token, serviceLine, data }) {
   const [question, setQuestion] = useState('');
   const [answer, setAnswer] = useState('');
   const [asking, setAsking] = useState(false);
+  // 57 = the wrap's sticky `top`. While pinned on a phone the bar collapses
+  // to the slim ask row (owner screenshot 2026-07-29: the two-row bar hid a
+  // third of the screen while scrolling).
+  const [stuck, sentinelRef] = useStickyStuck(57);
 
   const ask = async (text) => {
     const q = String((text ?? question) || '').trim();
@@ -2256,7 +2306,9 @@ function FloatingAskWaves({ mode, token, serviceLine, data }) {
   if (mode !== 'live') return null;
 
   return (
-    <div className="floating-ask-wrap">
+    <>
+      <div ref={sentinelRef} className="floating-ask-sentinel" aria-hidden="true" />
+      <div className="floating-ask-wrap" data-stuck={stuck ? '' : undefined}>
       <section data-glass="card" className="floating-ask-bar" aria-label="Waves AI — ask about this report">
         <span className="floating-ask-title">Waves AI</span>
 
@@ -2307,7 +2359,8 @@ function FloatingAskWaves({ mode, token, serviceLine, data }) {
           </div>
         )}
       </section>
-    </div>
+      </div>
+    </>
   );
 }
 
@@ -3816,6 +3869,7 @@ function ServiceCoverageCard({
   mapAttribution,
   live = true,
   tracedMap = null,
+  tracedVariant = 'spray',
   applications = [],
 }) {
   const [activeItemId, setActiveItemId] = useState(null);
@@ -3896,7 +3950,7 @@ function ServiceCoverageCard({
         <div className={`service-coverage-card-grid${showMap ? ' has-map' : ' list-only'}${showList ? ' has-list' : ' map-only'}`}>
           {showMap ? (
             showTraced ? (
-              <TracedTreatmentZoneMap traced={tracedMap} live={live} />
+              <TracedTreatmentZoneMap traced={tracedMap} live={live} variant={tracedVariant} />
             ) : (
               <ServiceCoverageMap
                 coverage={coverage}
@@ -6493,6 +6547,12 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           z-index: 8;
           margin-top: 20px;
         }
+        /* stuck-detection sentinel (useStickyStuck) — 1px tall so
+           IntersectionObserver tracks it reliably, margin cancels the height */
+        .floating-ask-sentinel {
+          height: 1px;
+          margin-bottom: -1px;
+        }
         .floating-ask-bar {
           display: grid;
           grid-template-areas: 'title pills form';
@@ -6633,6 +6693,13 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               'pills pills';
             grid-template-columns: auto minmax(0, 1fr);
             border-radius: 16px;
+          }
+          /* While pinned on a phone, collapse to the slim ask row — the
+             two-row bar hid a third of the screen over the report content
+             (owner screenshot 2026-07-29). Pills return at the top. */
+          .floating-ask-wrap[data-stuck] .floating-ask-pills { display: none; }
+          .floating-ask-wrap[data-stuck] .floating-ask-bar {
+            grid-template-areas: 'title form';
           }
         }
         /* animated weather mark — live only; the media block below parks it */
@@ -7808,13 +7875,26 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           transform: none;
           box-shadow: none;
         }
+        /* Very narrow phones (320-374px): even slimmed 2-up columns can't hold
+           the nowrap button labels — fall back to a single column there only.
+           The extra .report-action-bar specificity outranks the 760px block's
+           2-up rule regardless of source order (codex P2 #3038). */
+        @media (max-width: 374px) {
+          .report-action-bar .report-action-buttons { grid-template-columns: 1fr; }
+        }
         @media (max-width: 760px) {
           .sr-top-inner { align-items: center; flex-direction: row; }
           .sr-actions { width: 100%; justify-content: stretch; }
           .sr-actions a, .sr-actions button { flex: 1; }
           .sr-shell { padding: 16px 16px 36px; }
           .report-action-bar { padding: 16px; }
-          .report-action-buttons { grid-template-columns: 1fr; }
+          /* Keep the 2×2 grid on phones — four stacked full-width buttons made
+             the utility bar a full screen tall (audit 2026-07-28). Slimmer
+             button padding so "Download PDF" / "Portal Login" fit a half-width
+             column (the doc buttons are nowrap — codex P2 #3038). */
+          .report-action-buttons { grid-template-columns: 1fr 1fr; gap: 10px; }
+          .report-action-buttons > a,
+          .report-action-buttons > button { padding-left: 10px; padding-right: 10px; }
           .service-status-main,
           .readiness-card-header { flex-direction: column; }
           .sr-pressure { justify-self: stretch; }
@@ -8017,9 +8097,8 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           route wrap, owner 2026-07-06) provides the standard chrome. */}
       {/* div, not <main> — WavesShell supplies the main landmark. */}
       <div className="sr-shell">
-        {mode === 'live' && (data.internalOnly
-          ? <InternalReviewBar />
-          : <ReportActionBar pdfUrl={pdfUrl} token={token} onShare={share} />)}
+        {/* Staff-only shadow reports keep the internal notice on top. */}
+        {mode === 'live' && data.internalOnly && <InternalReviewBar />}
 
         {/* Ask Waves floats with the customer: sticky under the shell header for
             the whole scroll (owner ask 2026-07-09). Live only — the pdf/static
@@ -8027,6 +8106,13 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         <FloatingAskWaves mode={mode} token={token} serviceLine={data.serviceLine} data={data} />
 
         <ServiceStatusCard data={data} mode={mode} resultOverride={data.reportV2?.todaysResult || null} />
+
+        {/* Utility bar sits BELOW the greeting/result: on a phone the stacked
+            Download/Share/Print/Login buttons used to fill the entire first
+            screen before the customer saw their own report (audit 2026-07-28). */}
+        {mode === 'live' && !data.internalOnly && (
+          <ReportActionBar pdfUrl={pdfUrl} token={token} onShare={share} />
+        )}
 
         {/* V2 + pest: a review ask up top, location-synced to the closest GBP
             (ReviewRequestCard picks the office review URL). Self-gates on
@@ -8041,6 +8127,12 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             ? cleanVisitSummary(data.summary)
             : null}
         />
+
+        {/* Standalone concern acknowledgment for pest reports WITHOUT the V2
+            dashboard (cockroach-family typed reports skip it by design) — the
+            dashboard path renders the same card inside PestReportV2Section
+            (codex P2 #3043). */}
+        {data.customerConcernCard ? <PestCustomerConcern concern={data.customerConcernCard} /> : null}
 
         <RecapVideoCard recap={data.recap} token={token} />
 
@@ -8204,6 +8296,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               mapBackgroundUrl={mode === 'live' ? data.treatmentMap?.satellite?.live?.url : null}
               mapAttribution={mode === 'live' ? data.treatmentMap?.satellite?.attributionText : null}
               tracedMap={data.pestReportV2 ? null : (data.treatmentMap?.traced || null)}
+              tracedVariant={data.serviceLine === 'lawn' ? 'outline' : 'spray'}
               live={mode === 'live'}
               applications={data.applications || []}
             />
@@ -8216,7 +8309,12 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             WDO, rodent...) keep the card — those tiles ARE the record. */}
         {!data.pestReportV2 && <TypedFindingsCard typedReport={data.typedReport} />}
 
-        <LawnProtocolCard protocol={dynamicContext.lawnProtocol} />
+        {/* Seasonal-protocol card renders internal operating fields (production
+            mode, carrier target, inventory deductions, compliance gate) that
+            read as ops language on a customer surface. The V2 lawn report
+            already tells the treatment story in customer terms, so suppress it
+            there — same pattern as LawnProgramOverviewCard below. */}
+        {!data.reportV2 && <LawnProtocolCard protocol={dynamicContext.lawnProtocol} />}
 
         {dynamicContext.pressureTrend && (
           <PressureTrendCard
@@ -8329,6 +8427,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               mapBackgroundUrl={mode === 'live' ? data.treatmentMap?.satellite?.live?.url : null}
               mapAttribution={mode === 'live' ? data.treatmentMap?.satellite?.attributionText : null}
               tracedMap={data.pestReportV2 ? null : (data.treatmentMap?.traced || null)}
+              tracedVariant={data.serviceLine === 'lawn' ? 'outline' : 'spray'}
               live={mode === 'live'}
               applications={data.applications || []}
             />

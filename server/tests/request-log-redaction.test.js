@@ -89,3 +89,13 @@ describe('request URL log redaction', () => {
     expect(redactRequestUrl(`/api/public/newsletter/feedback/${uuid}/loved`)).toBe('/api/public/newsletter/feedback/[REDACTED]/loved');
   });
 });
+
+describe('newsletter event click-through tokens (codex on #3028)', () => {
+  const { redactRequestUrl } = require('../utils/redact-request-url');
+  test('the engagement token after /e/ is redacted; the event UUID after it stays', () => {
+    const url = '/api/public/newsletter/e/aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee/11111111-1111-4111-8111-111111111111';
+    const redacted = redactRequestUrl(url);
+    expect(redacted).not.toContain('aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee');
+    expect(redacted).toContain('11111111-1111-4111-8111-111111111111');
+  });
+});

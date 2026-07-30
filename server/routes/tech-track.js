@@ -680,6 +680,7 @@ router.post('/:id/treatment-zone', upload.single('snapshot'), async (req, res, n
       zoom: payload.zoom,
       address: payload.address,
       snapshotPngBuffer: req.file?.buffer || null,
+      captureMode: payload.captureMode,
     });
 
     logger.info(
@@ -728,9 +729,17 @@ router.post('/:id/treatment-zone/suggest', upload.single('map'), async (req, res
       return res.status(400).json({ error: 'map must be a PNG' });
     }
     const { suggestTreatmentZone } = require('../services/treatment-zone-suggest');
-    const suggestion = await suggestTreatmentZone(req.file.buffer);
+    // mode=lawn traces the property's turf boundary instead of the building
+    // footprint — a building suggestion saved in lawn mode would publish a
+    // house outline labeled "treated lawn area" (pre-push audit P1 2026-07-28).
+    const mode = req.body?.mode === 'lawn' ? 'lawn' : 'perimeter';
+    const suggestion = await suggestTreatmentZone(req.file.buffer, { mode });
     if (!suggestion) {
-      return res.status(422).json({ error: 'Could not detect the building outline — trace it manually.' });
+      return res.status(422).json({
+        error: mode === 'lawn'
+          ? 'Could not detect the lawn outline — trace it manually.'
+          : 'Could not detect the building outline — trace it manually.',
+      });
     }
     logger.info(
       `[tech-track] treatment zone suggested service=${svc.id} tech=${req.technicianId} `

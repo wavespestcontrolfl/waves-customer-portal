@@ -173,6 +173,16 @@ function normalizeIncomingConfigData(configKey, data) {
     RETIRED_PEST_FEATURE_KEYS.forEach((key) => delete normalized[key]);
     return normalized;
   }
+  if (configKey === 'termite_install' && data && typeof data === 'object' && !Array.isArray(data)) {
+    // station_spacing_ft is retired (owner 2026-07-28): spacing is
+    // per-system label truth (Trelona 15 ft, Advance 10) and the bridge no
+    // longer reads this key — stripping it on save keeps the row from
+    // advertising a dial that changes nothing.
+    const normalized = { ...data };
+    delete normalized.station_spacing_ft;
+    delete normalized.stationSpacing;
+    return normalized;
+  }
   return data;
 }
 
@@ -228,6 +238,29 @@ function validatePricingConfigData(configKey, data, oldConfig) {
     // an admin edit can't silently orphan a term the estimator still offers.
     for (const term of ['term_1yr', 'term_5yr', 'term_10yr']) {
       if (!isPositive(data?.[term])) return fail(`termite_bond.${term} must be a positive $/quarter amount`);
+    }
+  } else if (configKey === 'termite_monitoring') {
+    // Station-check brackets (owner 2026-07-28): monthly = base + step ×
+    // bracket-index. The legacy flat shape ({ basic, premier }) priced a
+    // retired model and the runtime sync ignores it — reject it here so an
+    // admin edit can't silently save keys that change nothing.
+    if (data?.pricing_model !== 'station_brackets') {
+      return fail("termite_monitoring.pricing_model must be 'station_brackets' (the flat basic/premier tiers are retired)");
+    }
+    // WHOLE dollars only (codex P2 on #3017): the engine's annual is
+    // whole-dollar by design (Math.round at the line level), so a cent
+    // value like 19.55 would price $234.60 -> $235 and derive a per-app
+    // that disagrees with monthly x 3 across server/client/persisted
+    // payloads. Integers keep monthly x 12 and monthly x 3 exact end to end.
+    if (!isPositive(data?.base_monthly) || !Number.isInteger(num(data?.base_monthly))) {
+      return fail('termite_monitoring.base_monthly must be a positive WHOLE-dollar $/mo amount (cents cannot survive the whole-dollar annualization)');
+    }
+    if (!isNonNegative(data?.step_monthly) || !Number.isInteger(num(data?.step_monthly))) {
+      return fail('termite_monitoring.step_monthly must be a non-negative WHOLE-dollar $/mo amount');
+    }
+    const bracket = num(data?.bracket_stations);
+    if (!Number.isInteger(bracket) || bracket < 1 || bracket > 50) {
+      return fail('termite_monitoring.bracket_stations must be a whole number of stations between 1 and 50');
     }
   } else if (configKey === 'termite_rental') {
     // Station rental amortization horizon (owner 2026-07-26). The uplift is
@@ -390,13 +423,13 @@ async function ensureTable() {
 
       // Mosquito
       { config_key: 'mosquito_lot_sizes', name: 'Mosquito Treatable Area Categories', category: 'mosquito', sort_order: 1, data: JSON.stringify({ SMALL: { max_sqft: 7999 }, QUARTER: { max_sqft: 11999 }, THIRD: { max_sqft: 17999 }, HALF: { max_sqft: 34999 }, ACRE: { max_sqft: 999999 } }) },
-      { config_key: 'mosquito_base_prices', name: 'Mosquito Program Per-Visit Pricing', category: 'mosquito', sort_order: 2, data: JSON.stringify({ SMALL: { seasonal9: 66, monthly12: 60 }, QUARTER: { seasonal9: 69, monthly12: 63 }, THIRD: { seasonal9: 72, monthly12: 66 }, HALF: { seasonal9: 78, monthly12: 70 }, ACRE: { seasonal9: 88, monthly12: 78 } }) },
+      { config_key: 'mosquito_base_prices', name: 'Mosquito Program Per-Visit Pricing', category: 'mosquito', sort_order: 2, data: JSON.stringify({ SMALL: { seasonal9: 73, monthly12: 66 }, QUARTER: { seasonal9: 76, monthly12: 69 }, THIRD: { seasonal9: 79, monthly12: 73 }, HALF: { seasonal9: 86, monthly12: 77 }, ACRE: { seasonal9: 97, monthly12: 86 } }) },
       { config_key: 'mosquito_visits', name: 'Mosquito Program Visits', category: 'mosquito', sort_order: 3, data: JSON.stringify({ seasonal9: 9, monthly12: 12 }) },
       { config_key: 'mosquito_pressure', name: 'Mosquito Pressure Factors', category: 'mosquito', sort_order: 4, data: JSON.stringify({ trees_heavy: 0.15, trees_moderate: 0.05, complexity_complex: 0.10, complexity_moderate: 0.05, pool: 0.05, near_water: 0.10, irrigation: 0.08, lot_acre: 0.15, lot_half: 0.05, cap: 2.0 }) },
 
       // Termite
       { config_key: 'termite_install', name: 'Termite Install Multiplier', category: 'termite', sort_order: 1, data: JSON.stringify({ multiplier: 1.45, hexpro_bait: 8.69, advance_bait: 13.16, trelona_bait: 22.05, labor_per_station: 5.25, misc_per_station: 0.75 }) },
-      { config_key: 'termite_monitoring', name: 'Termite Monitoring Monthly', category: 'termite', sort_order: 2, data: JSON.stringify({ basic: 35, premier: 65 }) },
+      { config_key: 'termite_monitoring', name: 'Termite Station-Check Brackets', category: 'termite', sort_order: 2, data: JSON.stringify({ pricing_model: 'station_brackets', base_monthly: 19, step_monthly: 5, bracket_stations: 5 }) },
 
       // Rodent — bait stations (recurring monthly)
       { config_key: 'rodent_monthly', name: 'Rodent Bait Monthly Tiers (quarterly visits, billed monthly)', category: 'rodent', sort_order: 1, data: JSON.stringify({ small: 49, medium: 59, large: 69, visits_per_year: 4 }) },
@@ -416,7 +449,7 @@ async function ensureTable() {
       { config_key: 'onetime_recurring_discount', name: 'Recurring Customer Discount', category: 'one_time', sort_order: 2, data: JSON.stringify({ discount: 0.15, note: '15% off one-time services for recurring customers' }) },
       { config_key: 'onetime_pest', name: 'One-Time Pest Pricing', category: 'one_time', sort_order: 3, data: JSON.stringify({ floor: 199, multiplier: 2.2 }) },
       { config_key: 'onetime_lawn', name: 'One-Time Lawn Treatment', category: 'one_time', sort_order: 4, data: JSON.stringify({ floor: 115, fungicide_floor: 115, recurringPerAppMultiplier: 1.50, treatment_multipliers: { fert: 1.00, fertilization: 1.00, weed: 1.12, pest: 1.30, fungicide: 1.38 } }) },
-      { config_key: 'onetime_mosquito', name: 'One-Time Mosquito Treatment', category: 'one_time', sort_order: 5, data: JSON.stringify({ SMALL: 99, STANDARD: 129, LARGE: 159, XL: 199, ESTATE: 239, ACRE_CLASS: 269, OVER_ACRE: 269, overAcreIncrementSqFt: 10000, overAcreIncrementPrice: 40, stationAddOn: 75, dunkAddOn: 15 }) },
+      { config_key: 'onetime_mosquito', name: 'One-Time Mosquito Treatment', category: 'one_time', sort_order: 5, data: JSON.stringify({ SMALL: 149, STANDARD: 169, LARGE: 189, XL: 209, ESTATE: 239, ACRE_CLASS: 269, OVER_ACRE: 269, overAcreIncrementSqFt: 10000, overAcreIncrementPrice: 40, stationAddOn: 75, dunkAddOn: 15 }) },
       { config_key: 'onetime_trenching', name: 'Trenching Rates', category: 'one_time', sort_order: 6, data: JSON.stringify({
         per_lf_dirt: 10,
         per_lf_concrete: 14,

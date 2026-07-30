@@ -159,7 +159,7 @@ describe('estimate add-service request workflow', () => {
     expect(revision.status).toBe('priced');
     expect(revision.updated.monthly).toBeGreaterThan(0);
     expect(revision.draftEstimateData.inputs.services.termite_bait).toEqual(expect.objectContaining({
-      system: 'advance',
+      system: 'trelona',
       monitoringTier: 'basic',
     }));
   });

@@ -2501,6 +2501,9 @@ router.post('/', requireAdmin, async (req, res, next) => {
         first_name: normalized.firstName, last_name: normalized.lastName || null, phone: normalized.phone, email: normalized.email,
         address_line1: normalized.addressLine1 || null, address_line2: normalized.addressLine2 || null, city: normalized.city || null, state: normalized.state, zip: normalized.zip || null,
         waveguard_tier: normalized.tier, monthly_rate: normalized.monthlyRate,
+        // Human-chosen tier at create: 'manual' provenance keeps the
+        // auto-tier machinery off it (migration 20260728000001).
+        waveguard_tier_source: normalized.tier ? 'manual' : null,
         member_since: etDateString(),
         referral_code: code, lead_source: normalized.leadSource,
         pipeline_stage: normalized.pipelineStage,
@@ -2682,7 +2685,16 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
     for (const [k, v] of Object.entries(fields)) {
       if (req.body[k] !== undefined) {
         // Handle empty strings for numeric/date fields
-        if (v === 'monthly_rate') { updates[v] = req.body[k] === '' ? 0 : parseFloat(req.body[k]) || 0; }
+        if (v === 'waveguard_tier') {
+          updates[v] = req.body[k];
+          // A human set (or cleared) the tier: record 'manual' provenance so
+          // the auto-tier machinery (GATE_AUTO_WAVEGUARD_TIER realignment +
+          // label-only messaging suppression) never treats an admin-chosen
+          // tier as a derived label it may move. Clearing the tier clears
+          // provenance with it. Ships with migration 20260728000001.
+          updates.waveguard_tier_source = req.body[k] ? 'manual' : null;
+        }
+        else if (v === 'monthly_rate') { updates[v] = req.body[k] === '' ? 0 : parseFloat(req.body[k]) || 0; }
         else if (v === 'next_follow_up_date') { updates[v] = req.body[k] || null; }
         else if (v === 'has_left_google_review') { updates[v] = !!req.body[k]; }
         else if (v === 'payer_id') { updates[v] = (req.body[k] === '' || req.body[k] == null) ? null : (parseInt(req.body[k], 10) || null); }
@@ -2829,11 +2841,20 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           sensitiveFieldsChanged: changed.filter(field => sensitiveFields.includes(field)),
         }, true);
       }
-      const beforeHasMembership = hasMembership(before);
-      const afterHasMembership = hasMembership(after);
+      // EFFECTIVE membership for lifecycle emails: an auto-derived tier
+      // LABEL (waveguard_tier_source = 'auto', no positive rate, label-only
+      // lane) is not a membership the customer knows about — deactivating,
+      // reactivating, or clearing it must not send membership.canceled /
+      // reactivated / started emails (Codex #3011 r8 P1: the tier stamp is
+      // contractually comms-silent). A label that transitions to a REAL
+      // membership in this same save (rate/lane set) correctly counts as a
+      // membership start, because the label side evaluates to non-member.
+      const { isAutoDerivedTierLabelRow } = require('../services/self-booking-plan-sync');
+      const beforeHasMembership = hasMembership(before) && !isAutoDerivedTierLabelRow(before);
+      const afterHasMembership = hasMembership(after) && !isAutoDerivedTierLabelRow(after);
       const membershipFieldChanged = membershipDetailsChanged(before, after);
       const membershipEventAt = new Date();
-      if (updates.active === false && before.active !== false && hasMembership(before)) {
+      if (updates.active === false && before.active !== false && beforeHasMembership) {
         void AccountMembershipEmail.sendMembershipCanceled({
           customerId: req.params.id,
           effectiveDate: membershipEventAt,
@@ -2842,13 +2863,18 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           monthlyRate: before.monthly_rate,
           idempotencyKey: adminMembershipDailyIdempotencyKey('membership.canceled', req.params.id, 'admin', membershipEventAt),
         }).catch(err => logger.warn(`[customers] membership.canceled email failed for ${req.params.id}: ${err.message}`));
-      } else if (updates.active === true && before.active === false && hasMembership(after)) {
+      } else if (updates.active === true && before.active === false && afterHasMembership) {
         void AccountMembershipEmail.sendMembershipReactivated({
           customerId: req.params.id,
           effectiveDate: membershipEventAt,
           idempotencyKey: adminMembershipDailyIdempotencyKey('membership.reactivated', req.params.id, 'admin', membershipEventAt),
         }).catch(err => logger.warn(`[customers] membership.reactivated email failed for ${req.params.id}: ${err.message}`));
-      } else if (membershipFieldChanged && !beforeHasMembership && afterHasMembership) {
+      } else if (!beforeHasMembership && afterHasMembership) {
+        // Effective-membership transition alone is the trigger (Codex #3011
+        // r9): a label becoming a REAL membership can happen WITHOUT the
+        // tier/rate fields changing — re-saving the same tier flips
+        // provenance to 'manual', or an established billing lane is selected
+        // — and membershipDetailsChanged compares only tier and rate.
         void AccountMembershipEmail.sendMembershipStarted({
           customerId: req.params.id,
           effectiveDate: membershipEventAt,
@@ -2857,7 +2883,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           sourceId: `admin_membership_start:${req.params.id}:${etDateString(membershipEventAt)}`,
           idempotencyKey: adminMembershipStartIdempotencyKey(req.params.id, before, after, membershipEventAt),
         }).catch(err => logger.warn(`[customers] membership.started email failed for ${req.params.id}: ${err.message}`));
-      } else if (membershipFieldChanged && beforeHasMembership && !afterHasMembership) {
+      } else if (beforeHasMembership && !afterHasMembership) {
         void AccountMembershipEmail.sendMembershipCanceled({
           customerId: req.params.id,
           effectiveDate: membershipEventAt,

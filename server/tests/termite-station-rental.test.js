@@ -131,7 +131,7 @@ describe('engine + mapper emission', () => {
     });
     // Bait row itself is untouched beside it.
     expect(rentMapped.recurring.services.find((s) => s.service === 'termite_bait'))
-      .toMatchObject({ mo: 35, perTreatment: 105, visitsPerYear: 4 });
+      .toMatchObject({ mo: 34, perTreatment: 102, visitsPerYear: 4 });
     expect(rentBait.installation.retailValue).toBe(ownBait.installation.price);
 
     // EXACT annual survives the mapped totals (codex P2 round 3): the

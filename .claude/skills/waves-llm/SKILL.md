@@ -89,6 +89,10 @@ a provider issue never causes a gap:
 - Gemini vision → retry `GEMINI_VISION_FALLBACK_MODEL` (default
   `gemini-2.5-flash`), and the parallel Claude-vision fan-out still runs.
 
+Gemini parsing trap (twin of the DEEP thinking-block rule): Gemini 3.x
+Flash is a thinking model — always JOIN ALL text parts of the response,
+never read `parts[0]`, and budget output tokens for the thinking spend.
+
 Adding a new cross-provider feature: add a `ROUTES` entry (env-overridable),
 dispatch through `llm/call.js`, implement the Claude fallback, and document
 the route in `models.js`. Never call the OpenAI/Gemini SDK directly from a

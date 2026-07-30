@@ -1,9 +1,12 @@
 // Traced Treatment Zone map + spray render (owner 2026-07-21): the
 // tech-traced perimeter snapshot with the looping smoke/spray replay.
 // Shared by the pest V2 hero and the legacy coverage card.
+// variant="outline" (owner 2026-07-28): lawn visits treat an AREA, not a
+// perimeter barrier — the smoke/spray replay read wrong on lawn reports.
+// Lawn renders a clean pulsing outline of the treated lawn instead.
 import { useEffect, useRef, useState } from 'react';
 
-export default function TracedTreatmentZoneMap({ traced, live = true }) {
+export default function TracedTreatmentZoneMap({ traced, live = true, variant = 'spray' }) {
   // Spray replay (owner 2026-07-21): the tech-side mapper animates a
   // spray-mist "applying" the barrier along the traced line — the customer
   // report replays it over the saved snapshot. Mounts ONLY after the map
@@ -31,8 +34,20 @@ export default function TracedTreatmentZoneMap({ traced, live = true }) {
   }, [live, canReplay, sprayLive]);
 
   if (!traced?.snapshotUrl) return null;
-  // No linear-ft figure in the customer caption (owner 2026-07-21).
-  const caption = traced.label || 'Treated perimeter traced on-site by your technician.';
+  const outline = variant === 'outline';
+  // Only traces CAPTURED by the lawn outline workflow may claim "treated lawn
+  // area" — legacy rows predate capture_mode and may be building-perimeter
+  // traces, so they keep a neutral caption and skip the interior wash while
+  // still getting the calmer outline presentation (codex P1 #3038).
+  const lawnCapture = traced.captureMode === 'lawn';
+  // No linear-ft figure in the customer caption (owner 2026-07-21). The
+  // server label speaks perimeter language — the outline variant tells the
+  // area story instead.
+  const caption = outline
+    ? (lawnCapture
+      ? 'Treated lawn area outlined on-site by your technician.'
+      : 'Service area traced on-site by your technician.')
+    : (traced.label || 'Treated perimeter traced on-site by your technician.');
   const pathD = canReplay
     ? `M ${points.map((p) => `${Math.round(p.x)} ${Math.round(p.y)}`).join(' L ')}${traced.closedLoop ? ' Z' : ''}`
     : null;
@@ -46,9 +61,69 @@ export default function TracedTreatmentZoneMap({ traced, live = true }) {
         <img
           className="traced-zone-image"
           src={traced.snapshotUrl}
-          alt="Satellite photo of the property with the treated perimeter highlighted"
+          alt={outline
+            ? (lawnCapture
+              ? 'Satellite photo of the property with the treated lawn area outlined'
+              : 'Satellite photo of the property with the technician-traced service area outlined')
+            : 'Satellite photo of the property with the treated perimeter highlighted'}
         />
-        {sprayLive && pathD && (
+        {sprayLive && pathD && outline && (
+          <svg
+            viewBox="0 0 1280 960"
+            preserveAspectRatio="xMidYMid slice"
+            aria-hidden="true"
+            style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'none' }}
+          >
+            <defs>
+              <filter id="outlineGlow" x="-40%" y="-40%" width="180%" height="180%">
+                <feGaussianBlur stdDeviation="6" />
+              </filter>
+            </defs>
+            <style>{`
+              @keyframes outlineDraw { from { stroke-dashoffset: 1; } to { stroke-dashoffset: 0; } }
+              /* The treated area breathes: a slow, calm pulse — no smoke, no
+                 emitter. Draw-in plays once, then the pulse takes over. */
+              @keyframes outlinePulse {
+                0%, 100% { opacity: 1; }
+                50% { opacity: 0.45; }
+              }
+              .treated-outline-line { animation: outlineDraw 2.4s ease-in-out both; }
+              .treated-outline-pulse { animation: outlinePulse 3.6s ease-in-out 2.4s infinite; }
+            `}</style>
+            {/* NO interior fill — the loop commonly wraps the yard with the
+                house inside it, and a filled polygon would shade the roof as
+                treated turf (codex P1 #3038 r3). The boundary + pulse carry
+                the treated-area story. */}
+            <g className="treated-outline-pulse">
+              <path
+                className="treated-outline-line"
+                d={pathD}
+                fill="none"
+                stroke="#2FA89D"
+                strokeOpacity="0.45"
+                strokeWidth="22"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                pathLength="1"
+                strokeDasharray="1"
+                filter="url(#outlineGlow)"
+              />
+              <path
+                className="treated-outline-line"
+                d={pathD}
+                fill="none"
+                stroke="#2FA89D"
+                strokeOpacity="0.95"
+                strokeWidth="7"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                pathLength="1"
+                strokeDasharray="1"
+              />
+            </g>
+          </svg>
+        )}
+        {sprayLive && pathD && !outline && (
           <svg
             viewBox="0 0 1280 960"
             preserveAspectRatio="xMidYMid slice"

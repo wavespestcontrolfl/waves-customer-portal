@@ -6,6 +6,11 @@ const {
   TERMITE_BAIT_RECURRING_PLANS,
   TREE_SHRUB_RECURRING_PLANS,
   buildCustomerWaveGuardAlignmentUpdates,
+  buildLabelOnlyTierRealignmentUpdates,
+  buildNoPlanTierEnrollmentUpdates,
+  isAutoDerivedTierLabelRow,
+  isCommercialServiceRow,
+  isRodentLedServiceRow,
   buildRecurringOccurrenceDates,
   detectWaveGuardPlanKeys,
   inferTierFromServiceCount,
@@ -200,6 +205,7 @@ describe('self-booking plan sync helpers', () => {
       {
         waveguard_tier: 'Bronze',
         monthly_rate: 0,
+        billing_mode: 'monthly_membership',
         member_since: null,
         earliest_service_date: '2026-06-19',
       },
@@ -218,6 +224,49 @@ describe('self-booking plan sync helpers', () => {
       }),
     }));
 
+    // Rate repair lanes: the legacy NULL lane keeps its pre-existing repair
+    // (a recognized member with a zeroed rate is outside billing-cron's
+    // positive-rate selection until repaired) — but an 'auto'-provenance
+    // label must never have a rate invented, and explicit non-monthly lanes
+    // never backfill (Codex #3011 r10).
+    const nullLaneLegacy = buildCustomerWaveGuardAlignmentUpdates(
+      {
+        waveguard_tier: 'Bronze',
+        monthly_rate: 0,
+        billing_mode: null,
+        member_since: '2025-01-01',
+      },
+      detected,
+      customerColumns,
+      '2026-06-20',
+    );
+    expect(nullLaneLegacy.updates).toHaveProperty('monthly_rate', 205);
+    const nullLaneAutoLabel = buildCustomerWaveGuardAlignmentUpdates(
+      {
+        waveguard_tier: 'Bronze',
+        waveguard_tier_source: 'auto',
+        monthly_rate: 0,
+        billing_mode: null,
+        member_since: '2025-01-01',
+      },
+      detected,
+      customerColumns,
+      '2026-06-20',
+    );
+    expect(nullLaneAutoLabel.updates).not.toHaveProperty('monthly_rate');
+    const perVisitLane = buildCustomerWaveGuardAlignmentUpdates(
+      {
+        waveguard_tier: 'Bronze',
+        monthly_rate: 0,
+        billing_mode: 'per_visit',
+        member_since: '2025-01-01',
+      },
+      detected,
+      customerColumns,
+      '2026-06-20',
+    );
+    expect(perVisitLane.updates).not.toHaveProperty('monthly_rate');
+
     const existingGold = buildCustomerWaveGuardAlignmentUpdates(
       { waveguard_tier: 'Gold', monthly_rate: 149, member_since: '2025-01-01' },
       ['pest_control_quarterly', 'lawn_care_monthly'],
@@ -226,6 +275,211 @@ describe('self-booking plan sync helpers', () => {
     );
     expect(existingGold.updates).not.toHaveProperty('waveguard_tier');
     expect(existingGold.updates).not.toHaveProperty('monthly_rate');
+  });
+
+  test('auto-enrolls a No-Plan customer as tier ONLY, scaled by family count', () => {
+    const customerColumns = {
+      active: {},
+      pipeline_stage: {},
+      waveguard_tier: {},
+      waveguard_tier_source: {},
+      monthly_rate: {},
+      member_since: {},
+    };
+    const noPlan = { waveguard_tier: null, monthly_rate: null, active: true, pipeline_stage: 'won' };
+
+    // Exactly { waveguard_tier, waveguard_tier_source: 'auto' } — never
+    // monthly_rate / member_since / pipeline_stage / active: the label must
+    // not create billing state, and every stamp records 'auto' provenance so
+    // only these tiers are ever auto-realigned.
+    expect(buildNoPlanTierEnrollmentUpdates(noPlan, ['pest_control_quarterly'], customerColumns))
+      .toEqual(expect.objectContaining({
+        updates: { waveguard_tier: 'Bronze', waveguard_tier_source: 'auto' },
+        inferredTier: 'Bronze',
+      }));
+    expect(buildNoPlanTierEnrollmentUpdates(noPlan, ['pest_control_quarterly', 'lawn_care_monthly'], customerColumns).updates)
+      .toEqual({ waveguard_tier: 'Silver', waveguard_tier_source: 'auto' });
+    expect(buildNoPlanTierEnrollmentUpdates(noPlan, ['pest_control_quarterly', 'lawn_care_monthly', 'mosquito_monthly'], customerColumns).updates)
+      .toEqual({ waveguard_tier: 'Gold', waveguard_tier_source: 'auto' });
+    expect(buildNoPlanTierEnrollmentUpdates(
+      noPlan,
+      ['pest_control_quarterly', 'lawn_care_monthly', 'mosquito_monthly', 'termite_bait_quarterly'],
+      customerColumns,
+    ).updates).toEqual({ waveguard_tier: 'Platinum', waveguard_tier_source: 'auto' });
+
+    // Cadence variants of one family never overcount the tier.
+    expect(buildNoPlanTierEnrollmentUpdates(noPlan, ['lawn_care_monthly', 'lawn_care_6week'], customerColumns).updates)
+      .toEqual({ waveguard_tier: 'Bronze', waveguard_tier_source: 'auto' });
+
+    // Explicit non-member sentinels still enroll — the directive keys on
+    // upcoming recurring coverage, not the old label.
+    expect(buildNoPlanTierEnrollmentUpdates({ ...noPlan, waveguard_tier: 'none' }, ['pest_control_quarterly'], customerColumns).updates)
+      .toEqual({ waveguard_tier: 'Bronze', waveguard_tier_source: 'auto' });
+
+    // Pre-migration environment (no provenance column): enrollment REFUSES
+    // to stamp — a tier without recorded provenance would surface as a
+    // NULL-provenance "member" once the migration lands (Codex #3011 r11).
+    expect(buildNoPlanTierEnrollmentUpdates(noPlan, ['pest_control_quarterly'], { waveguard_tier: {}, monthly_rate: {} }).updates)
+      .toEqual({});
+  });
+
+  test('tier auto-enrollment fail-closes on members, commercial, and no evidence', () => {
+    const customerColumns = { waveguard_tier: {}, monthly_rate: {} };
+
+    // Existing members belong to the alignment path, never enrollment.
+    expect(buildNoPlanTierEnrollmentUpdates({ waveguard_tier: 'Bronze' }, ['pest_control_quarterly', 'lawn_care_monthly'], customerColumns).updates)
+      .toEqual({});
+    expect(buildNoPlanTierEnrollmentUpdates({ waveguard_tier: null, monthly_rate: 89 }, ['pest_control_quarterly'], customerColumns).updates)
+      .toEqual({});
+
+    // Commercial sentinel never converts to a WaveGuard tier.
+    expect(buildNoPlanTierEnrollmentUpdates({ waveguard_tier: 'Commercial', monthly_rate: null }, ['pest_control_quarterly'], customerColumns).updates)
+      .toEqual({});
+
+    // No detected qualifying plan keys, or no tier column -> no mutation.
+    expect(buildNoPlanTierEnrollmentUpdates({ waveguard_tier: null, monthly_rate: null }, [], customerColumns).updates)
+      .toEqual({});
+    expect(buildNoPlanTierEnrollmentUpdates({ waveguard_tier: null, monthly_rate: null }, ['pest_control_quarterly'], { monthly_rate: {} }).updates)
+      .toEqual({});
+  });
+
+  test('commercial service rows are never auto-tier evidence, whatever the sentinel', () => {
+    // An imported commercial customer whose tier is still NULL must not be
+    // stamped a residential tier off commercial rows — commercial plans are
+    // flat and outside WaveGuard tiers.
+    expect(isCommercialServiceRow({ service_type: 'Commercial Pest Control' })).toBe(true);
+    expect(isCommercialServiceRow({ service_type: 'Commercial Turf Treatment Program' })).toBe(true);
+    expect(isCommercialServiceRow({ service_type: 'Lawn Care', service_name: 'Commercial Turf Program' })).toBe(true);
+    expect(isCommercialServiceRow({ service_type: 'Quarterly Pest Control Service' })).toBe(false);
+    expect(isCommercialServiceRow({ service_type: 'Monthly Lawn Care' })).toBe(false);
+    expect(isCommercialServiceRow({})).toBe(false);
+  });
+
+  test('rodent-led rows are never auto-tier evidence; pest-primary combined names still count', () => {
+    // Mirrors toQualifyingKeys in waveguard-existing-services: "Rodent Pest
+    // Control" is a rodent service row (no keys), not pest coverage, but the
+    // pest resolver would map it to the quarterly pest plan if unguarded.
+    expect(isRodentLedServiceRow({ service_type: 'Rodent Pest Control' })).toBe(true);
+    expect(isRodentLedServiceRow({ service_type: 'Rodent Bait Station Service' })).toBe(true);
+    expect(isRodentLedServiceRow({ service_type: 'Rat Control Quarterly' })).toBe(true);
+    expect(isRodentLedServiceRow({ service_type: 'Pest & Rodent Control' })).toBe(false);
+    expect(isRodentLedServiceRow({ service_type: 'Quarterly Pest Control Service' })).toBe(false);
+    expect(isRodentLedServiceRow({})).toBe(false);
+
+    // Per-field classification (Codex #3011 r7): a stale/generic
+    // service_type in FRONT of a rodent catalog name must not read as
+    // pest-primary from token order across concatenated fields, and
+    // underscored catalog keys must still match word boundaries.
+    expect(isRodentLedServiceRow({
+      service_type: 'Pest Control',
+      service_key: 'rodent_general_one_time',
+      service_name: 'Rodent Pest Control',
+    })).toBe(true);
+    expect(isRodentLedServiceRow({ service_key: 'rodent_bait_program' })).toBe(true);
+    // A pest-primary combined name in each populated field stays pest.
+    expect(isRodentLedServiceRow({
+      service_type: 'Pest & Rodent Control',
+      service_name: 'Pest & Rodent Control',
+    })).toBe(false);
+  });
+
+  test('auto-derived label detection: only auto-provenance zero-rate label-lane tiers', () => {
+    // Labels: excluded from member messaging, lifecycle emails, and the
+    // deposit / card-on-file paid-member exemptions.
+    expect(isAutoDerivedTierLabelRow({ waveguard_tier: 'Bronze', waveguard_tier_source: 'auto', monthly_rate: 0, billing_mode: null })).toBe(true);
+    expect(isAutoDerivedTierLabelRow({ waveguard_tier: 'Silver', waveguard_tier_source: 'auto', monthly_rate: null, billing_mode: 'per_visit' })).toBe(true);
+
+    // Real members in every other shape — manual/NULL provenance, positive
+    // rate, or a paying lane — keep full member behavior.
+    expect(isAutoDerivedTierLabelRow({ waveguard_tier: 'Bronze', waveguard_tier_source: 'manual', monthly_rate: 0, billing_mode: null })).toBe(false);
+    expect(isAutoDerivedTierLabelRow({ waveguard_tier: 'Bronze', monthly_rate: 0, billing_mode: null })).toBe(false);
+    expect(isAutoDerivedTierLabelRow({ waveguard_tier: 'Bronze', waveguard_tier_source: 'auto', monthly_rate: 55, billing_mode: null })).toBe(false);
+    expect(isAutoDerivedTierLabelRow({ waveguard_tier: 'Bronze', waveguard_tier_source: 'auto', monthly_rate: 0, billing_mode: 'monthly_membership' })).toBe(false);
+    expect(isAutoDerivedTierLabelRow({ waveguard_tier: null, waveguard_tier_source: 'auto', monthly_rate: 0 })).toBe(false);
+    expect(isAutoDerivedTierLabelRow({})).toBe(false);
+  });
+
+  test('realigns an auto-stamped label-only customer to exactly what upcoming coverage supports', () => {
+    const customerColumns = { waveguard_tier: {}, waveguard_tier_source: {}, monthly_rate: {} };
+    const labelOnly = { monthly_rate: null, billing_mode: null, waveguard_tier_source: 'auto' };
+
+    // Silver with only one remaining family -> Bronze (provenance kept).
+    expect(buildLabelOnlyTierRealignmentUpdates({ ...labelOnly, waveguard_tier: 'Silver' }, ['pest_control_quarterly'], customerColumns).updates)
+      .toEqual({ waveguard_tier: 'Bronze' });
+    // Platinum down to two families -> Silver.
+    expect(buildLabelOnlyTierRealignmentUpdates({ ...labelOnly, waveguard_tier: 'Platinum' }, ['pest_control_quarterly', 'lawn_care_monthly'], customerColumns).updates)
+      .toEqual({ waveguard_tier: 'Silver' });
+    // No upcoming recurring coverage at all -> tier AND provenance cleared,
+    // so a later re-enrollment starts clean.
+    expect(buildLabelOnlyTierRealignmentUpdates({ ...labelOnly, waveguard_tier: 'Bronze' }, [], customerColumns).updates)
+      .toEqual({ waveguard_tier: null, waveguard_tier_source: null });
+
+    // Coverage ABOVE the current label is raised too (a second family added
+    // by import/direct edit outside the booking-time hook) — Codex #3011 P2.
+    expect(buildLabelOnlyTierRealignmentUpdates({ ...labelOnly, waveguard_tier: 'Bronze' }, ['pest_control_quarterly', 'lawn_care_monthly'], customerColumns).updates)
+      .toEqual({ waveguard_tier: 'Silver' });
+    // Coverage equal to the current tier -> untouched.
+    expect(buildLabelOnlyTierRealignmentUpdates({ ...labelOnly, waveguard_tier: 'Bronze' }, ['pest_control_quarterly'], customerColumns).updates)
+      .toEqual({});
+  });
+
+  test('never auto-realigns paying members, paid lanes, unprovenanced tiers, or unrecognized tiers', () => {
+    const customerColumns = { waveguard_tier: {}, waveguard_tier_source: {}, monthly_rate: {} };
+
+    // NO provenance ('auto' absent): a pre-existing tier — possibly a
+    // legitimate legacy member whose billing lane is intentionally NULL
+    // (unclassified, migration 20260717000001) — must NEVER be treated as a
+    // derived label, whatever its rate/lane (Codex #3011 r7 P1).
+    expect(buildLabelOnlyTierRealignmentUpdates({ waveguard_tier: 'Silver', monthly_rate: 0, billing_mode: null }, [], customerColumns).updates)
+      .toEqual({});
+    expect(buildLabelOnlyTierRealignmentUpdates({ waveguard_tier: 'Silver', monthly_rate: 0, billing_mode: null, waveguard_tier_source: 'manual' }, [], customerColumns).updates)
+      .toEqual({});
+    // Missing provenance COLUMN (pre-migration environment) fail-closes even
+    // for an 'auto'-marked row object.
+    expect(buildLabelOnlyTierRealignmentUpdates(
+      { waveguard_tier: 'Silver', monthly_rate: 0, waveguard_tier_source: 'auto' },
+      [],
+      { waveguard_tier: {}, monthly_rate: {} },
+    ).updates).toEqual({});
+
+    // Positive monthly_rate = paying member — the cancellation/offboarding
+    // flow owns their tier, a schedule gap must not strip it.
+    expect(buildLabelOnlyTierRealignmentUpdates({ waveguard_tier: 'Silver', monthly_rate: 129, waveguard_tier_source: 'auto' }, [], customerColumns).updates)
+      .toEqual({});
+    // Explicit paying lanes are preserved even at rate 0 — allowlist, so
+    // monthly_membership, annual_prepay (prepaid-term lifecycle owns that
+    // state — Codex #3011 P1), per_application, and unknown future lanes all
+    // stay untouched.
+    for (const lane of ['monthly_membership', 'annual_prepay', 'per_application', 'some_future_lane']) {
+      expect(buildLabelOnlyTierRealignmentUpdates({ waveguard_tier: 'Bronze', monthly_rate: 0, billing_mode: lane, waveguard_tier_source: 'auto' }, [], customerColumns).updates)
+        .toEqual({});
+    }
+    // The label-only lanes remain realignable for 'auto' tiers.
+    for (const lane of ['per_visit', 'one_time']) {
+      expect(buildLabelOnlyTierRealignmentUpdates({ waveguard_tier: 'Bronze', monthly_rate: 0, billing_mode: lane, waveguard_tier_source: 'auto' }, [], customerColumns).updates)
+        .toEqual({ waveguard_tier: null, waveguard_tier_source: null });
+    }
+    // No recognized tier (No Plan / sentinels) -> nothing to realign.
+    expect(buildLabelOnlyTierRealignmentUpdates({ waveguard_tier: null, monthly_rate: null }, [], customerColumns).updates)
+      .toEqual({});
+    expect(buildLabelOnlyTierRealignmentUpdates({ waveguard_tier: 'none', monthly_rate: null }, [], customerColumns).updates)
+      .toEqual({});
+    // Missing waveguard_tier column (older environment) -> no mutation.
+    expect(buildLabelOnlyTierRealignmentUpdates({ waveguard_tier: 'Silver', monthly_rate: 0, waveguard_tier_source: 'auto' }, [], { waveguard_tier_source: {}, monthly_rate: {} }).updates)
+      .toEqual({});
+  });
+
+  test('catalog family authority: stale service_type cannot add a second family', () => {
+    // One lawn service with a stale 'Pest Control' service_type is ONE
+    // family, never pest + lawn (Codex #3011 r12) — a single recurring
+    // service must not produce a Silver combined tier.
+    expect(detectWaveGuardPlanKeys({
+      service_type: 'Pest Control',
+      service_key: 'lawn_care_monthly',
+      service_name: 'Monthly Lawn Care Program',
+    })).toEqual(['lawn_care_monthly']);
+    // Rows with no catalog identity keep full multi-family text detection.
+    expect(detectWaveGuardPlanKeys({ service_type: 'Pest + Lawn + Mosquito Bundle' }).length).toBe(3);
   });
 
   test('detects WaveGuard plan keys only from recurring service rows for sync', () => {

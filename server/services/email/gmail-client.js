@@ -118,6 +118,34 @@ function parseMessage(msg) {
   const fromAddress = fromMatch && fromMatch[2] ? fromMatch[2].trim() : (fromRaw || '').trim();
 
   const listUnsubscribe = getHeader('List-Unsubscribe');
+  const listUnsubscribePost = getHeader('List-Unsubscribe-Post');
+  // Reply-To carries the actionable recipient for relayed mail (contact
+  // forms, ticketing) whose From is a provider no-reply mailbox. It is
+  // attacker-typed — accept ONLY a header holding exactly one plain mailbox
+  // (the same shape createDraft enforces for recipients); a multi-recipient
+  // list stays null ENTIRELY (extracting just the first address would
+  // silently drop the ticketing/audit recipient), as does any other junk —
+  // replies then fall back to From.
+  const replyToRaw = getHeader('Reply-To');
+  let replyTo = null;
+  if (replyToRaw) {
+    // Commas inside quoted display names ("Doe, Jane" <j@x>) are legal;
+    // any comma OUTSIDE quotes means more than one mailbox — reject the
+    // whole header before extracting anything.
+    const unquoted = replyToRaw.replace(/"[^"]*"/g, '');
+    if (!unquoted.includes(',')) {
+      const replyToMatch = replyToRaw.match(/<([^>]+)>/);
+      const replyToAddr = (replyToMatch ? replyToMatch[1] : replyToRaw).trim();
+      if (/^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/.test(replyToAddr)) replyTo = replyToAddr;
+    }
+  }
+  // Authentication-Results is only trustworthy when GMAIL wrote it — a
+  // sender can inject their own copy claiming dkim=pass. Take the first
+  // instance whose authserv-id is Google's receiving MX.
+  const trustedAuthResults = headers
+    .filter((h) => h.name.toLowerCase() === 'authentication-results')
+    .map((h) => h.value || '')
+    .find((v) => /^\s*mx\.google\.com[;\s]/i.test(v)) || null;
 
   const body = extractBody(msg.payload);
   const attachments = extractAttachments(msg.payload, msg.id);
@@ -138,6 +166,17 @@ function parseMessage(msg) {
     is_read: !(msg.labelIds || []).includes('UNREAD'),
     is_starred: (msg.labelIds || []).includes('STARRED'),
     list_unsubscribe: listUnsubscribe || null,
+    // RFC Message-ID — required (with In-Reply-To/References) for a reply
+    // draft to join the source thread.
+    message_id: getHeader('Message-ID') || null,
+    reply_to: replyTo,
+    // RFC 8058 one-click consent — POST is only allowed when the sender
+    // explicitly declared it.
+    list_unsubscribe_post: listUnsubscribePost || null,
+    // Gmail's own SPF/DKIM/DMARC verdict (trusted authserv-id only) — the
+    // spam-rescue sweep and known-sender override require aligned
+    // authentication before trusting a From address.
+    authentication_results: trustedAuthResults,
     attachments,
     historyId: msg.historyId,
   };
@@ -268,17 +307,170 @@ async function trashMessage(messageId) {
 
 async function getHistory(startHistoryId) {
   const gmail = await getGmail();
-  const res = await gmail.users.history.list({
-    userId: 'me',
-    startHistoryId,
-    historyTypes: ['messageAdded', 'messageDeleted', 'labelAdded', 'labelRemoved'],
-  });
-  return res.data;
+  // Bulk label sweeps (quarantine, spam rescue) can span multiple history
+  // pages in one run — advancing the sync cursor after a single page would
+  // permanently skip the later pages' messages. Drain the whole feed; a
+  // backlog too deep to drain is treated like an expired cursor (the error
+  // message carries 'historyId' so email-sync falls back to a full resync
+  // instead of advancing past unseen changes).
+  const history = [];
+  let latestHistoryId = null;
+  let pageToken;
+  for (let page = 0; page < 50; page += 1) {
+    const res = await gmail.users.history.list({
+      userId: 'me',
+      startHistoryId,
+      historyTypes: ['messageAdded', 'messageDeleted', 'labelAdded', 'labelRemoved'],
+      pageToken,
+    });
+    if (res.data.history) history.push(...res.data.history);
+    if (res.data.historyId) latestHistoryId = res.data.historyId;
+    pageToken = res.data.nextPageToken;
+    if (!pageToken) break;
+  }
+  if (pageToken) {
+    throw new Error('historyId backlog exceeds 50 pages — full resync required');
+  }
+  return { history: history.length ? history : undefined, historyId: latestHistoryId };
+}
+
+/**
+ * The mailbox's CURRENT historyId — the only safe anchor for a fresh
+ * incremental cursor after a full scan (per-message historyIds end on the
+ * oldest message and would hand the next run an unbounded backlog).
+ */
+async function getProfileHistoryId() {
+  const gmail = await getGmail();
+  const res = await gmail.users.getProfile({ userId: 'me' });
+  return res.data?.historyId || null;
 }
 
 async function isConnected() {
   const state = await db('email_sync_state').first();
   return !!(state?.refresh_token);
+}
+
+/**
+ * Create (or find) a user label and return its id. Gmail's modify API takes
+ * label IDs, not names, for custom labels — system labels (INBOX, SPAM,
+ * TRASH, IMPORTANT, STARRED) pass through by name. Cached per process; the
+ * create call races safely (a concurrent create returns 409 and the
+ * follow-up list finds the winner's label).
+ */
+const labelIdCache = new Map();
+const LABEL_CACHE_TTL_MS = 15 * 60000;
+async function ensureLabel(name) {
+  // TTL'd cache — a deleted/recreated label or a re-authed mailbox changes
+  // label ids, and a permanently cached id would 400 every quarantine call
+  // until restart.
+  const cached = labelIdCache.get(name);
+  if (cached && Date.now() - cached.at < LABEL_CACHE_TTL_MS) return cached.id;
+  const gmail = await getGmail();
+  const list = await gmail.users.labels.list({ userId: 'me' });
+  const existing = (list.data.labels || []).find((l) => l.name === name);
+  if (existing) {
+    labelIdCache.set(name, { id: existing.id, at: Date.now() });
+    return existing.id;
+  }
+  try {
+    const created = await gmail.users.labels.create({
+      userId: 'me',
+      requestBody: { name, labelListVisibility: 'labelShow', messageListVisibility: 'show' },
+    });
+    labelIdCache.set(name, { id: created.data.id, at: Date.now() });
+    return created.data.id;
+  } catch (e) {
+    const retry = await gmail.users.labels.list({ userId: 'me' });
+    const won = (retry.data.labels || []).find((l) => l.name === name);
+    if (won) {
+      labelIdCache.set(name, { id: won.id, at: Date.now() });
+      return won.id;
+    }
+    throw e;
+  }
+}
+
+/**
+ * Create a reply DRAFT in the given thread. Never sends — the draft sits in
+ * the thread for the operator's one-click review (owner rule: drafts never
+ * auto-send). Same header discipline as sendMessage.
+ */
+async function createDraft(to, subject, body, threadId = null, inReplyTo = null) {
+  const gmail = await getGmail();
+  const fromEmail = sanitizeHeaderValue(process.env.GMAIL_USER_EMAIL || 'contact@wavespestcontrol.com');
+  const safeTo = sanitizeHeaderValue(to);
+  const safeSubject = encodeHeaderUtf8(subject);
+  const safeInReplyTo = sanitizeHeaderValue(inReplyTo);
+  if (!safeTo) throw new Error('Recipient (to) is required');
+  // Exactly ONE plain mailbox: a parsed From like "victim@x.com,
+  // attacker@y.com" must never become a draft that discloses the reply to a
+  // second address the moment the operator clicks Send.
+  if (!/^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/.test(safeTo)) {
+    throw new Error('Draft recipient must be a single plain mailbox address');
+  }
+
+  const headers = [
+    `From: Waves Pest Control <${fromEmail}>`,
+    `To: ${safeTo}`,
+    `Subject: ${safeSubject}`,
+    'MIME-Version: 1.0',
+    'Content-Type: text/html; charset=utf-8',
+  ];
+  if (safeInReplyTo) {
+    headers.push(`In-Reply-To: ${safeInReplyTo}`);
+    headers.push(`References: ${safeInReplyTo}`);
+  }
+  const raw = Buffer.from(headers.join('\r\n') + '\r\n\r\n' + body).toString('base64url');
+  const requestBody = { message: { raw } };
+  if (threadId) requestBody.message.threadId = threadId;
+  const res = await gmail.users.drafts.create({ userId: 'me', requestBody });
+  return res.data;
+}
+
+/**
+ * Paginated message listing — walks nextPageToken up to `cap` ids so a
+ * burst of junk can't hide older matches behind a single-page limit.
+ * Callers that must drain BEYOND the cap resume with the returned
+ * nextPageToken (pass it back as opts.pageToken).
+ */
+async function listAllMessages(query = '', cap = 500, { includeSpamTrash = false, pageToken = null } = {}) {
+  const gmail = await getGmail();
+  const ids = [];
+  let token = pageToken || undefined;
+  while (ids.length < cap) {
+    const res = await gmail.users.messages.list({
+      userId: 'me',
+      q: query,
+      maxResults: Math.min(100, cap - ids.length),
+      pageToken: token,
+      // messages.list EXCLUDES Spam/Trash by default even when the query
+      // says in:spam — the caller must opt in.
+      includeSpamTrash,
+    });
+    ids.push(...(res.data.messages || []));
+    token = res.data.nextPageToken;
+    if (!token) break;
+  }
+  return { messages: ids, truncated: !!token, nextPageToken: token || null };
+}
+
+/** Live labelIds for one message — the quarantine sweep's operator-veto check. */
+async function getMessageLabels(messageId) {
+  const gmail = await getGmail();
+  const res = await gmail.users.messages.get({ userId: 'me', id: messageId, format: 'minimal' });
+  return res.data.labelIds || [];
+}
+
+/** Thread metadata (per-message labelIds + headers) for reply detection. */
+async function getThread(threadId) {
+  const gmail = await getGmail();
+  const res = await gmail.users.threads.get({
+    userId: 'me',
+    id: threadId,
+    format: 'metadata',
+    metadataHeaders: ['From', 'Date'],
+  });
+  return res.data;
 }
 
 module.exports = {
@@ -290,9 +482,16 @@ module.exports = {
   getMessage,
   getAttachment,
   sendMessage,
+  createDraft,
+  ensureLabel,
+  getThread,
+  getMessageLabels,
+  listAllMessages,
   modifyLabels,
   archiveMessage,
   trashMessage,
   getHistory,
+  getProfileHistoryId,
   isConnected,
+  parseMessage,
 };

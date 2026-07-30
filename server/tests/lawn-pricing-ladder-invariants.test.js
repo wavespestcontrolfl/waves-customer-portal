@@ -3,10 +3,13 @@
 // Property-tests the sold lawn ladder across the full track × size grid on
 // code defaults (pure functions, no DB) and pins the provenance fields that
 // must survive engine → v1-legacy-mapper → stored estimate blob. The shape
-// invariant "per-app never increases with visits" is intentionally NOT
-// asserted here — it fails on today's market bracket config and repricing it
-// is an owner decision (Phase 2); the weekly sweep carries it behind
-// LAWN_SWEEP_SHAPE_CHECKS until then.
+// invariant "per-app never increases with visits" is PARTIALLY enforced as
+// of 2026-07-29: the owner-approved 12x retune guarantees 12x per-app ≤ 9x
+// per-app at every size (bracket cells + interpolated/extrapolated lookups —
+// see the "premium ladder cap" block below). The 6x-vs-9x half still fails
+// at the top brackets on today's market config; repricing that half remains
+// an owner decision, and the weekly sweep carries the full shape check
+// behind LAWN_SWEEP_SHAPE_CHECKS until then.
 const { priceLawnCare } = require('../services/pricing-engine/service-pricing');
 const { generateEstimate } = require('../services/pricing-engine');
 const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
@@ -89,6 +92,25 @@ describe('lawn ladder invariants — full track × size grid (code defaults)', (
     expect(shapeChecks).toBe(false); // per-app shape check stays opt-in until Phase 2 repricing
     expect(cellsChecked).toBeGreaterThan(400);
     expect(violations).toEqual([]);
+  });
+});
+
+describe('premium ladder cap — 12x per-app never exceeds 9x per-app (owner 2026-07-28)', () => {
+  // Bracket-cell caps alone don't survive independent per-tier interpolation
+  // rounding (codex #3041 r1: 4,125 sqft st_augustine rounded enhanced to
+  // $47/mo = $62.67/app and premium to $63/mo = $63/app) — the engine caps
+  // the looked-up premium too. Sweep every 125 sqft through the table AND
+  // the extrapolation region above table max.
+  it.each(TRACKS)('%s: fine-grained size sweep holds the cap', (track) => {
+    for (let sqft = 2000; sqft <= 24000; sqft += 125) {
+      const tiers = soldTiers(track, sqft);
+      const nine = tiers.find((t) => t.visits === 9);
+      const twelve = tiers.find((t) => t.visits === 12);
+      expect(nine).toBeDefined();
+      expect(twelve).toBeDefined();
+      // Allow the half-cent that two independent round2 derivations can carry.
+      expect(twelve.perApp).toBeLessThanOrEqual(nine.perApp + 0.005);
+    }
   });
 });
 

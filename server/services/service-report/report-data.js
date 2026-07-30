@@ -1358,10 +1358,15 @@ function stripLiveOnlyScheduleFields(data) {
 function shouldAddNoActivityFinding({ service = {}, structured = {}, protocol = {} } = {}) {
   const visitOutcome = String(protocol.visitOutcome || service.visit_outcome || service.status || 'completed').toLowerCase();
   const concernText = structuredCustomerConcern(structured);
+  // A positive activity rating recorded at completion means SOMETHING was
+  // seen — synthesizing "all zones clear" beside it re-creates the exact
+  // contradiction the insert guard now prevents (codex P1 #3043 r2).
+  const rating = Number(service.client_pest_rating);
   return visitOutcome === 'completed'
     && !(protocol.observations || []).length
     && !(protocol.recommendations || []).length
-    && !concernText;
+    && !concernText
+    && !(Number.isFinite(rating) && rating > 0);
 }
 
 function findingSeverityForObservation(text) {
@@ -1766,17 +1771,6 @@ async function lawnPhotoUrl(photo) {
   }
 }
 
-async function firstLawnAssessmentPhoto(knex, assessmentId) {
-  if (!assessmentId) return null;
-  return knex('lawn_assessment_photos')
-    .where({ assessment_id: assessmentId, customer_visible: true })
-    .orderBy('is_best_photo', 'desc')
-    .orderBy('quality_score', 'desc')
-    .orderBy('photo_order', 'asc')
-    .first()
-    .catch(() => null);
-}
-
 async function loadLinkedLawnAssessment(service, knex = db) {
   if (!service?.customer_id) return null;
 
@@ -1853,10 +1847,52 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db) {
 
   let beforeAfter = null;
   if (historyRows.length >= 2) {
-    const [beforePhoto, afterPhoto] = await Promise.all([
-      firstLawnAssessmentPhoto(knex, initialRow.id),
-      firstLawnAssessmentPhoto(knex, assessment.id),
+    // The before/after slider claims "the same lawn, then vs now" — pairing the
+    // best photo of each visit regardless of WHERE it was taken produced a bed
+    // photo next to a curb-strip photo (audit 2026-07-28). Pair by ZONE: pull
+    // both visits' visible photos (already rank-ordered), find the first shared
+    // zone, and take each side's best photo from it — anchoring on only the
+    // single best "before" photo missed valid pairs when a lower-ranked zone
+    // matched (pre-push audit P1). Photos without recorded zones (older rows)
+    // fall back to best-vs-best; when both sides record zones but none match,
+    // drop the photo pair (the score delta still reports) rather than show a
+    // false comparison.
+    const photosFor = (assessmentId) => knex('lawn_assessment_photos')
+      .where({ assessment_id: assessmentId, customer_visible: true })
+      .orderBy('is_best_photo', 'desc')
+      .orderBy('quality_score', 'desc')
+      .orderBy('photo_order', 'asc')
+      .catch(() => []);
+    const [beforeCandidates, afterCandidates] = await Promise.all([
+      photosFor(initialRow.id),
+      photosFor(assessment.id),
     ]);
+    // Only an explicitly recorded zone is a location claim. photo_type looks
+    // locational ('front_yard') but the primary save path synthesizes it from
+    // UPLOAD ORDER (admin-lawn-assessment.js — i===0 → 'front_yard'), so
+    // keying on it would falsely pair two arbitrary first-selected photos as
+    // the same area (codex P1 #3038 r3). Photos without real zones fall back
+    // to best-vs-best, same as before this change.
+    const zoneKey = (p) => String(p?.zone || '').trim().toLowerCase();
+    let beforePhoto = null;
+    let afterPhoto = null;
+    for (const candidate of beforeCandidates) {
+      const zone = zoneKey(candidate);
+      if (!zone) continue;
+      const match = afterCandidates.find((p) => zoneKey(p) === zone);
+      if (match) {
+        beforePhoto = candidate;
+        afterPhoto = match;
+        break;
+      }
+    }
+    if (!beforePhoto) {
+      const bothSidesZoned = beforeCandidates.some((p) => zoneKey(p))
+        && afterCandidates.some((p) => zoneKey(p));
+      beforePhoto = beforeCandidates[0] || null;
+      // Zones recorded on both sides but disjoint → no honest pair exists.
+      afterPhoto = bothSidesZoned ? null : (afterCandidates[0] || null);
+    }
     beforeAfter = {
       before: {
         date: initialRow.service_date,
@@ -2104,6 +2140,30 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     detail: finding.detail || '',
     recommendation: finding.recommendation || '',
   }));
+
+  // Render-time honesty pass for PERSISTED no-activity rows: older completions
+  // could stamp "All inspected zones were clear…" even when the homeowner
+  // reported something during the visit (the insert guard now suppresses these
+  // going forward, but stored rows are permanent). When a customer concern is
+  // on record, soften the absolute claim so the report never tells a customer
+  // "all clear" right after they flagged something (John Kelleher audit
+  // 2026-07-29). PEST ONLY — other lines have their own no-activity copy, and
+  // the softened sentence must not claim treatment or a scheduled follow-up
+  // the record doesn't evidence (codex P2 #3043 ×2).
+  if (serviceLine === 'pest') {
+    const renderConcern = structuredCustomerConcern(structured);
+    if (renderConcern) {
+      for (const finding of findings) {
+        if (finding.category === 'no_activity') {
+          // Title AND detail (r2), in NEUTRAL wording (r3): the concern may
+          // be about service or access ("please avoid the herb garden"), so
+          // the copy must not characterize it as a pest sighting.
+          finding.title = 'No pest activity confirmed this visit';
+          finding.detail = 'Inspected areas showed no confirmed pest activity. The note you shared with us is recorded on this visit’s report.';
+        }
+      }
+    }
+  }
 
   for (const observation of protocol.observations) {
     if (findings.some((finding) => finding.title.toLowerCase() === observation.toLowerCase())) continue;
@@ -2400,6 +2460,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
             linearFt: numberOrNull(tracedRow.linear_ft),
             closedLoop: Boolean(tracedRow.closed_loop),
             capturedAt: tracedRow.updated_at || tracedRow.created_at || null,
+            // 'lawn' | 'perimeter' | null (legacy rows predate the column) —
+            // the client only claims "treated lawn area" for rows actually
+            // captured by the lawn outline workflow (codex P1 #3038).
+            captureMode: tracedRow.capture_mode || null,
             label: 'Treated perimeter traced on-site by your technician.',
             // Traced path in snapshot pixel space (1280x960) so the report
             // can REPLAY the spray application the tech saw (owner
@@ -3192,6 +3256,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // 'recap' for the completion recap — lets response wrappers (Pest V2
     // hero) surface the reviewed copy without re-parsing the notes.
     summarySource: visitSummarySource,
+    // Customer concern captured at completion — feeds the pest V2 "what you
+    // flagged" card (reports-public passes it to buildPestReportV2). Lawn and
+    // tree & shrub already consume it inside their own V2 builders.
+    customerConcern: structuredCustomerConcern(structured),
     customerInteraction: service.customer_interaction || structured.customerInteraction || null,
     serviceAreas: areaLabels,
     measurements: {
@@ -3304,6 +3372,7 @@ module.exports = {
   calculateLawnOverallScore,
   lawnScoreDelta,
   lawnScoreValue,
+  resolveStressDamage,
   singleVoiceObservation,
   parseJsonObject,
   parseJsonArray,

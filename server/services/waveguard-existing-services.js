@@ -29,9 +29,13 @@ function membershipTierKey(value) {
 
 // A customer is an actual WaveGuard plan member only when their record carries
 // a membership tier (Bronze/Silver/Gold/Platinum) — NOT merely because they
-// have a scheduled visit. A lead / one-time buyer whose initial service
-// auto-scheduled a recurring follow-up is still "No Plan" and must be treated
-// as a new customer for the WaveGuard setup fee + annual-prepay decisions.
+// have a scheduled visit. Note (owner directive 2026-07-28): customers with
+// UPCOMING recurring qualifying services now get a tier stamped automatically
+// (self-booking-plan-sync enrollment path + nightly reconcile, behind
+// GATE_AUTO_WAVEGUARD_TIER), so "recurring but tierless" is a transient state
+// rather than a policy. Until that stamp lands, such a customer is still
+// "No Plan" here and is treated as a new customer for the WaveGuard setup fee
+// + annual-prepay decisions.
 function isMembershipCustomerRow(customer = {}) {
   const tierKey = membershipTierKey(customer.waveguard_tier ?? customer.tier);
   if (tierKey && NON_MEMBERSHIP_TIER_KEYS.has(tierKey)) return false;
@@ -109,6 +113,10 @@ async function loadActiveRecurringServiceRows(database, customerId) {
   const selectCols = ['id', 'service_type', 'scheduled_date'];
   if (cols.estimated_price) selectCols.push('estimated_price');
   if (cols.annual_prepay_term_id) selectCols.push('annual_prepay_term_id');
+  // Carried for the gated qualifying-row filter below — additive for every
+  // other consumer of these rows.
+  if (cols.is_callback) selectCols.push('is_callback');
+  if (cols.source) selectCols.push('source');
   const hasStampedAddress = !!cols.service_address_line1;
   if (hasStampedAddress) {
     selectCols.push('service_address_line1');
@@ -136,20 +144,118 @@ async function loadActiveRecurringServiceRows(database, customerId) {
   }));
 }
 
+// With the auto-tier gate on, membership pricing evidence uses the SAME
+// authoritative predicate as tier derivation: upcoming (scheduled_date >=
+// today), not a callback, not a one-time booking source (Codex #3011 r4 P1
+// — a stale past nonterminal row in a second family must not grant a Silver
+// discount to a customer the reconciler stamped Bronze). Gate off keeps the
+// legacy all-nonterminal evidence byte-identical. scheduled_date is a pg
+// DATE column arriving as a midnight Date — read the stored calendar day
+// directly (repo DATE-column convention), never via ET conversion.
+function qualifyingRowDateKey(value) {
+  if (!value) return null;
+  if (typeof value === 'string') return value.split('T')[0];
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  return null;
+}
+
+function rowPassesGatedPricingEvidence(row, today) {
+  const rowDate = qualifyingRowDateKey(row.scheduled_date);
+  if (!rowDate || rowDate < today) return false;
+  if (row.is_callback === true || row.is_callback === 1 || row.is_callback === '1' || row.is_callback === 'true') return false;
+  // Lazy require: self-booking-plan-sync requires this module at load time,
+  // so a top-level require back at it would be a cycle.
+  const { isOneTimeBookingSource } = require('./self-booking-plan-sync');
+  if (isOneTimeBookingSource(row.source)) return false;
+  return true;
+}
+
+// Gated: the commercial predicate must see the same JOINED text as the
+// tier-evidence path (Codex #3011 r5 P1) — an imported row can carry a
+// generic service_type ("Lawn Care") while its catalog name is "Commercial
+// Turf Treatment Program"; classifying service_type alone would count it as
+// a qualifying family here after tier derivation rejected it, and price a
+// Bronze-stamped customer at Silver. Best-effort: where the catalog is
+// absent (older environments) the filter degrades to service_type-only,
+// exactly the legacy behavior.
+async function loadCatalogFieldsByRowId(database, customerId) {
+  try {
+    const catalogRows = await database('scheduled_services as s')
+      .leftJoin('services as svc', 's.service_id', 'svc.id')
+      .where({ 's.customer_id': customerId })
+      .select('s.id', 'svc.service_key', 'svc.name as service_name');
+    return new Map(catalogRows.map((row) => [row.id, row]));
+  } catch {
+    return new Map();
+  }
+}
+
 // Load the customer's active, recurring, WaveGuard-qualifying rows. The plan
 // gate prevents a lead/one-time buyer with a stray recurring visit from
 // receiving membership pricing.
 async function loadExistingRecurringQualifyingRows(database, customerId) {
   if (!(await isActivePlanCustomer(database, customerId))) return [];
   const rows = await loadActiveRecurringServiceRows(database, customerId);
-  return rows.filter((r) => toQualifyingKeys(r.service_type).length > 0);
+  const { isEnabled } = require('../config/feature-gates');
+  if (!isEnabled('autoWaveguardTierEnroll')) {
+    return rows.filter((r) => toQualifyingKeys(r.service_type).length > 0);
+  }
+  const { etDateString } = require('../utils/datetime-et');
+  // Lazy require — self-booking-plan-sync requires this module at load time.
+  // The commercial AND rodent-led classifiers both run against the JOINED
+  // row (Codex #3011 r8: a generic service_type 'Pest Control' whose catalog
+  // fields say rodent_general_one_time / "Rodent Pest Control" must be
+  // excluded from pricing evidence exactly as tier derivation excludes it —
+  // otherwise pricing counts a family the tier does not).
+  const { isCommercialServiceRow, isRodentLedServiceRow } = require('./self-booking-plan-sync');
+  const catalogById = await loadCatalogFieldsByRowId(database, customerId);
+  const today = etDateString();
+  // The kept rows are returned ENRICHED with their catalog identity (Codex
+  // #3011 r11 P1): downstream reducers (qualifyingKeysFromRows and the
+  // repricing paths built on it) must derive families from the same joined
+  // identity this filter qualified on, or a generic 'Lawn Care' row linked
+  // to lawn_care_monthly contributes no family and a stale different-family
+  // label contributes the wrong one.
+  const kept = [];
+  for (const r of rows) {
+    if (!rowPassesGatedPricingEvidence(r, today)) continue;
+    const joined = { ...r, ...(catalogById.get(r.id) || {}) };
+    if (isCommercialServiceRow(joined) || isRodentLedServiceRow(joined)) continue;
+    // Qualify from the same catalog-authoritative classifier the downstream
+    // reducer uses (Codex #3011 r10-r12): a stale 'Tree & Shrub Care'
+    // service_type linked to palm_injection resolves no family, and a
+    // 'Pest Control' service_type linked to lawn_care_monthly resolves only
+    // lawn_care.
+    if (qualifyingKeysForRow(joined).length === 0) continue;
+    kept.push(joined);
+  }
+  return kept;
+}
+
+// Qualifying keys for a row, with CATALOG FAMILY AUTHORITY (Codex #3011
+// r12): when the catalog identity (service_key / catalog name) resolves to a
+// family, stale service_type text must not contribute ANOTHER — a
+// 'Pest Control' service_type linked to lawn_care_monthly is one lawn
+// service, never pest + lawn. When the catalog resolves no family
+// (palm/rodent/uninformative), classification falls to the joined text so
+// catalog exclusion tokens (palm) still veto service_type families while an
+// uninformative catalog leaves service_type classification intact. Plain
+// rows (no catalog fields) classify on service_type alone — byte-identical
+// to the legacy behavior.
+function qualifyingKeysForRow(row = {}) {
+  const catalogText = [row.service_key, row.service_name]
+    .filter(Boolean).join(' ').replace(/[_-]+/g, ' ');
+  if (!catalogText) return toQualifyingKeys(row.service_type);
+  const catalogKeys = toQualifyingKeys(catalogText);
+  if (catalogKeys.length) return catalogKeys;
+  return toQualifyingKeys(`${String(row.service_type || '')} ${catalogText}`.trim());
 }
 
 // Distinct qualifying service keys from a set of rows.
 function qualifyingKeysFromRows(rows = []) {
   const keys = new Set();
   for (const r of rows) {
-    toQualifyingKeys(r.service_type).forEach((key) => keys.add(key));
+    qualifyingKeysForRow(r).forEach((key) => keys.add(key));
   }
   return [...keys];
 }

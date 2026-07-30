@@ -122,7 +122,8 @@ function currentServiceObjectsFor(keys, context) {
     };
     if (key === 'mosquito') services.mosquito = { tier: 'monthly12' };
     if (key === 'tree_shrub') services.treeShrub = { tier: 'standard' };
-    if (key === 'termite') services.termite = { system: 'advance', monitoringTier: 'basic' };
+    // Trelona-only menu (owner 2026-07-28); 'advance' is replay-only.
+    if (key === 'termite') services.termite = { system: 'trelona', monitoringTier: 'basic' };
     if (key === 'rodent_bait') services.rodentBait = {};
   }
   return services;
@@ -139,7 +140,7 @@ function optionServices(option, context) {
   };
   if (option.serviceKey === 'mosquito') return { mosquito: { tier: option.program } };
   if (option.serviceKey === 'tree_shrub') return { treeShrub: { tier: option.tier } };
-  if (option.serviceKey === 'termite') return { termite: { system: 'advance', monitoringTier: option.monitoringTier } };
+  if (option.serviceKey === 'termite') return { termite: { system: 'trelona', monitoringTier: 'basic' } };
   if (option.serviceKey === 'rodent_bait') return { rodentBait: {} };
   if (option.serviceKey === 'palm') return {
     palm: {
@@ -218,11 +219,12 @@ function variantsForService(serviceKey, prompt = '', generic = false) {
     return generic ? all.slice(0, 1) : all;
   }
   if (serviceKey === 'termite') {
-    const all = [
-      { id: 'termite-basic', serviceKey, label: 'Termite bait monitoring', monitoringTier: 'basic', cadence: 'Monthly monitoring billing' },
-      { id: 'termite-premier', serviceKey, label: 'Premier termite monitoring', monitoringTier: 'premier', cadence: 'Monthly monitoring billing' },
+    // ONE variant (owner 2026-07-28): the Premier tier is retired and the
+    // station check prices by station count — two identically-priced
+    // "tiers" would let a customer request a plan that no longer exists.
+    return [
+      { id: 'termite-basic', serviceKey, label: 'Termite bait monitoring', monitoringTier: 'basic', cadence: 'Quarterly station check, billed per application' },
     ];
-    return generic ? all.slice(0, 1) : all;
   }
   if (serviceKey === 'one_time_lawn') {
     if (/fungicide|fungus|brown patch/i.test(prompt)) {

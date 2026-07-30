@@ -17,24 +17,35 @@ function buildAddress(c) {
 }
 
 /**
- * Geocode a free-form address string. Returns { lat, lng } or null.
+ * Geocode a free-form address string, reporting whether a failure is
+ * permanent. Returns { location: {lat,lng}|null, permanent: boolean } —
+ * `permanent` is true only for answers that will never change without an
+ * address edit (empty address, ZERO_RESULTS); quota / config / network
+ * failures are transient and safe to retry.
  */
-async function geocodeAddress(address) {
-  if (!address) return null;
-  if (memo.has(address)) return memo.get(address);
+async function geocodeAddressWithStatus(address) {
+  if (!address) return { location: null, permanent: true };
+  if (memo.has(address)) {
+    const cached = memo.get(address);
+    // memo only ever stores null for ZERO_RESULTS, so a cached null is permanent.
+    return { location: cached, permanent: cached === null };
+  }
   if (!GOOGLE_KEY) {
     logger.warn('[geocoder] GOOGLE_API_KEY not set');
-    return null;
+    return { location: null, permanent: false };
   }
   try {
     const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}&key=${GOOGLE_KEY}`;
-    const resp = await fetch(url);
+    // Timeout so a hung request can't stall sweep batches (or hold the
+    // backstop cron's advisory lock) indefinitely; aborts land in the
+    // catch below and count as transient.
+    const resp = await fetch(url, { signal: AbortSignal.timeout(10_000) });
     const data = await resp.json();
     if (data.status === 'OK' && data.results && data.results.length > 0) {
       const { lat, lng } = data.results[0].geometry.location;
       const result = { lat, lng };
       memo.set(address, result);
-      return result;
+      return { location: result, permanent: false };
     }
     logger.warn(`[geocoder] Geocoding failed: ${data.status}`);
     // Only memoize ZERO_RESULTS — Google saying "this address truly
@@ -46,12 +57,21 @@ async function geocodeAddress(address) {
     // address as null in-process until restart.
     if (data.status === 'ZERO_RESULTS') {
       memo.set(address, null);
+      return { location: null, permanent: true };
     }
-    return null;
+    return { location: null, permanent: false };
   } catch (err) {
     logger.error(`[geocoder] Geocoding error: ${err.message}`);
-    return null;
+    return { location: null, permanent: false };
   }
+}
+
+/**
+ * Geocode a free-form address string. Returns { lat, lng } or null.
+ */
+async function geocodeAddress(address) {
+  const { location } = await geocodeAddressWithStatus(address);
+  return location;
 }
 
 /**
@@ -75,8 +95,134 @@ async function ensureCustomerGeocoded(customerId) {
   return result;
 }
 
+/**
+ * Backstop sweep: geocode customers whose create path left latitude/longitude
+ * NULL. Several booking/webhook create paths never call ensureCustomerGeocoded,
+ * and the paths that do fire-and-forget it, so a transient Google failure
+ * leaves the customer permanently coordinate-less — which silently drops
+ * their stops from route optimization. Newest customers first.
+ */
+// Customers whose CURRENT address permanently failed to geocode
+// (ZERO_RESULTS), keyed id → the address string that failed. Skipped on
+// later passes so a block of bad addresses at the top of the newest-first
+// ordering can't starve older customers out of the batch. Exclusions are
+// pruned as soon as the customer's address no longer matches the failed
+// one, so an address fix re-enters the sweep without waiting for a
+// restart. Process restart clears it entirely (stuck rows retry).
+const sweepUnresolved = new Map();
+
+const SWEEP_UNRESOLVED_CAP = 2000;
+
+// Drop exclusions whose customer address has changed since the failure —
+// the corrected address deserves a fresh geocode attempt.
+async function pruneStaleExclusions() {
+  if (!sweepUnresolved.size) return;
+  const ids = Array.from(sweepUnresolved.keys());
+  const rows = await db('customers')
+    .whereIn('id', ids)
+    .select('id', 'address_line1', 'city', 'state', 'zip');
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  for (const [id, failedAddress] of sweepUnresolved) {
+    const current = byId.get(id);
+    if (!current || buildAddress(current) !== failedAddress) {
+      sweepUnresolved.delete(id);
+    }
+  }
+}
+
+async function sweepUngeocodedCustomers({ limit = 25 } = {}) {
+  // Excluding in the query (not post-filter) so a backlog of unresolvable
+  // rows can never crowd eligible older customers out of the batch. The map
+  // is capped by evicting the OLDEST exclusions (Map preserves insertion
+  // order) — a full clear would reset traversal to the same newest rows.
+  while (sweepUnresolved.size > SWEEP_UNRESOLVED_CAP) {
+    sweepUnresolved.delete(sweepUnresolved.keys().next().value);
+  }
+  await pruneStaleExclusions();
+  const excluded = Array.from(sweepUnresolved.keys());
+  const rows = await db('customers')
+    .whereNull('deleted_at')
+    .where(function () {
+      this.whereNull('latitude').orWhereNull('longitude');
+    })
+    .whereNotNull('address_line1')
+    // Blank/whitespace streets (e.g. twilio-webhook creates '' addresses)
+    // must be skipped — geocoding "Bradenton, FL" alone would pin the
+    // customer at a city centroid, a false coordinate worse than none.
+    .whereRaw("btrim(address_line1) <> ''")
+    .modify((q) => {
+      if (excluded.length) q.whereNotIn('id', excluded);
+    })
+    .orderBy('created_at', 'desc')
+    .limit(limit)
+    .select('id');
+
+  const results = { checked: rows.length, geocoded: 0, unresolved: 0 };
+  for (const row of rows) {
+    try {
+      const c = await db('customers').where({ id: row.id }).first();
+      if (!c) continue;
+      if (c.latitude != null && c.longitude != null) {
+        results.geocoded += 1;
+        continue;
+      }
+      const address = buildAddress(c);
+      const { location, permanent } = await geocodeAddressWithStatus(address);
+      if (location) {
+        // Guard against a concurrent edit: only write if the address we
+        // geocoded is still the customer's address and both coordinates
+        // still hold the values we read (either may be half-set — e.g.
+        // latitude present, longitude null). A raced row counts as
+        // unresolved and retries next pass. The customer write and the
+        // primary-property mirror (repo convention for every re-geocode
+        // path) share one transaction so a sync failure rolls both back
+        // and the customer stays sweep-eligible.
+        const written = await db.transaction(async (trx) => {
+          let guarded = trx('customers').where({ id: row.id });
+          for (const [col, val] of [['latitude', c.latitude], ['longitude', c.longitude]]) {
+            guarded = val == null ? guarded.whereNull(col) : guarded.where(col, val);
+          }
+          for (const col of ['address_line1', 'city', 'state', 'zip']) {
+            guarded = c[col] == null ? guarded.whereNull(col) : guarded.where(col, c[col]);
+          }
+          const count = await guarded.update({
+            latitude: location.lat,
+            longitude: location.lng,
+            updated_at: new Date(),
+          });
+          if (count) {
+            await require('./customer-properties').syncPrimaryCoordsFromCustomer(row.id, trx);
+          }
+          return count;
+        });
+        if (written) results.geocoded += 1;
+        else results.unresolved += 1;
+      } else {
+        results.unresolved += 1;
+        // Only permanent failures (ZERO_RESULTS for this exact address) are
+        // excluded from future sweeps — and only while the address still
+        // matches (see pruneStaleExclusions). Transient failures (quota,
+        // network, config) stay eligible and retry on the next hourly pass.
+        if (permanent) sweepUnresolved.set(row.id, address);
+      }
+    } catch (err) {
+      results.unresolved += 1;
+      logger.error(`[geocoder] sweep failed for customer ${row.id}: ${err.message}`);
+    }
+  }
+  if (results.checked > 0) {
+    logger.info(
+      `[geocoder] backstop sweep: checked=${results.checked}, ` +
+      `geocoded=${results.geocoded}, unresolved=${results.unresolved}`,
+    );
+  }
+  return results;
+}
+
 module.exports = {
   geocodeAddress,
+  geocodeAddressWithStatus,
   ensureCustomerGeocoded,
   buildAddress,
+  sweepUngeocodedCustomers,
 };

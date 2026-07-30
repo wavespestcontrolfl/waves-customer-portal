@@ -200,7 +200,12 @@ function normalizeTermiteComplexity(property = {}, options = {}) {
 
 function normalizeTermiteSystem(value) {
   const requestedSystem = value;
-  const raw = normalizeToken(value || 'advance');
+  // Menu is Trelona-only (owner 2026-07-28): an ABSENT system now defaults
+  // to Trelona. Explicit legacy values (old estimates' replayable inputs
+  // always stored their system) keep pricing as Advance — the system stays
+  // fully priceable off-menu, so replays never silently reprice.
+  const fallback = TERMITE.defaultSystem || 'trelona';
+  const raw = normalizeToken(value || fallback);
   const aliases = {
     advance: 'advance',
     advanced: 'advance',
@@ -209,9 +214,22 @@ function normalizeTermiteSystem(value) {
     sentricon_recruit_hd: 'advance',
     trelona: 'trelona',
   };
-  const selectedSystem = aliases[raw] || 'advance';
-  const warnings = raw && !aliases[raw] ? ['invalid_termite_system_defaulted_to_advance'] : [];
+  const selectedSystem = aliases[raw] || fallback;
+  const warnings = raw && !aliases[raw] ? [`invalid_termite_system_defaulted_to_${fallback}`] : [];
   return { requestedSystem, selectedSystem, warnings };
+}
+
+// Station-check monthly by 5-station bracket (owner 2026-07-28): ≤10
+// stations → baseMonthly; each further bracket of `bracketStations` adds
+// stepMonthly. Anchored so a ~23-station home lands $34/mo gross — the
+// market-standard ~$29/mo a WaveGuard Gold member sees. Replaces the flat
+// Basic/Premier tiers (Premier was never defined or sold).
+function termiteMonitoringMonthlyForStations(stations) {
+  const m = TERMITE.monitoring || {};
+  const bracketSize = Number(m.bracketStations) > 0 ? Number(m.bracketStations) : 5;
+  const count = Math.max(1, Number(stations) || 0);
+  const steps = Math.max(0, Math.ceil(count / bracketSize) - 2);
+  return Math.round((Number(m.baseMonthly) + steps * Number(m.stepMonthly)) * 100) / 100;
 }
 
 function normalizeTermiteMonitoringTier(value) {
@@ -1756,7 +1774,28 @@ function resolveLawnTier(tier, lawnFreq) {
   return LAWN_TIERS[tier] ? tier : 'enhanced';
 }
 
+// Premium (12x) ladder cap (owner directive 2026-07-28): the 12x
+// per-application price must never exceed the 9x per-application price at
+// the same size — premium_monthly ≤ floor(enhanced_monthly × freq_ratio),
+// where freq_ratio = 12/9 makes the two per-app prices equal. The bracket
+// TABLE carries capped endpoint cells, but each tier interpolates and
+// rounds independently between endpoints (and extrapolates above table
+// max), so the invariant must also be enforced on the looked-up result
+// (codex #3041 r1: 4,125 sqft st_augustine rounded enhanced to $47 and
+// premium to $63 → $63/app vs $62.67/app).
 function lookupLawnBracket(lawnSqFt, tierIndex, track = 'st_augustine') {
+  const result = lookupLawnBracketUncapped(lawnSqFt, tierIndex, track);
+  if (tierIndex === LAWN_TIERS.premium.index && result.monthly > 0) {
+    const enhanced = lookupLawnBracketUncapped(lawnSqFt, LAWN_TIERS.enhanced.index, track);
+    if (enhanced.monthly > 0) {
+      const cap = Math.floor(enhanced.monthly * (LAWN_TIERS.premium.freq / LAWN_TIERS.enhanced.freq));
+      result.monthly = Math.min(result.monthly, cap);
+    }
+  }
+  return result;
+}
+
+function lookupLawnBracketUncapped(lawnSqFt, tierIndex, track = 'st_augustine') {
   const brackets = LAWN_BRACKETS[track];
   if (!brackets || !brackets.length) {
     return { monthly: 0, pricingBasis: 'TABLE_INTERPOLATION', pricingSource: 'MARKET_TABLE' };
@@ -3672,6 +3711,71 @@ function pricePalmInjection(property, options) {
 // ============================================================
 // MOSQUITO
 // ============================================================
+// Piecewise-linear price curve between bucket anchors, quantized to 500-sf
+// steps (MOSQUITO.priceStepSqFt). Anchor prices are the DB-authoritative
+// bucket prices, pinned at each bucket's top edge — so the increment added
+// per 500 sf shrinks as lots grow (drive + setup dominate visit cost, not
+// spray time) instead of flat-bucket pricing jumping at every boundary.
+function interpolateMosquitoPrice(anchors, sqft) {
+  const step = MOSQUITO.priceStepSqFt || 500;
+  const stepped = Math.ceil(Math.max(0, Number(sqft) || 0) / step) * step;
+  if (stepped <= anchors[0].sqft) return anchors[0].price;
+  for (let i = 1; i < anchors.length; i++) {
+    if (stepped <= anchors[i].sqft) {
+      const a = anchors[i - 1];
+      const b = anchors[i];
+      const t = (stepped - a.sqft) / (b.sqft - a.sqft);
+      return Math.round(a.price + t * (b.price - a.price));
+    }
+  }
+  return anchors[anchors.length - 1].price;
+}
+
+// Recurring anchors: each category's per-visit price sits at its top edge
+// (SMALL 8k / QUARTER 12k / THIRD 18k / HALF 35k). The terminal (ACRE) anchor
+// extends past one acre at no more than the previous segment's slope, so the
+// per-500-sf increment keeps DECLINING into the widest lots instead of
+// steepening (owner directive); the curve holds flat once the ACRE price is
+// reached. Derived from the live prices so admin-panel reprices keep the shape.
+function mosquitoRecurringAnchors(programIndex) {
+  const cats = MOSQUITO.lotCategories;
+  const anchors = cats
+    .filter((c) => Number.isFinite(c.maxSqFt))
+    .map((c) => ({ sqft: c.maxSqFt + 1, price: MOSQUITO.basePrices[c.key][programIndex] }));
+  const terminal = cats[cats.length - 1];
+  const terminalPrice = MOSQUITO.basePrices[terminal.key][programIndex];
+  const last = anchors[anchors.length - 1];
+  const prev = anchors[anchors.length - 2];
+  const prevSlope = last && prev ? (last.price - prev.price) / (last.sqft - prev.sqft) : 0;
+  const step = MOSQUITO.priceStepSqFt || 500;
+  let terminalSqFt = 43560;
+  if (last && terminalPrice > last.price && prevSlope > 0) {
+    const span = Math.ceil((terminalPrice - last.price) / prevSlope / step) * step;
+    terminalSqFt = Math.max(43560, last.sqft + span);
+  }
+  anchors.push({ sqft: terminalSqFt, price: terminalPrice });
+  return anchors;
+}
+
+// Continuous lot-size pressure: ramps up to lot_half by the HALF boundary and
+// to lot_acre by the ACRE boundary — matching the old categorical values where
+// each category began — so the customer price has no boundary jumps.
+function mosquitoLotSizePressure(sqft) {
+  const bound = (key) => {
+    const c = MOSQUITO.lotCategories.find((x) => x.key === key);
+    return c && Number.isFinite(c.maxSqFt) ? c.maxSqFt + 1 : null;
+  };
+  const rampStart = bound('QUARTER') || 12000; // ramp in across the THIRD band
+  const halfStart = bound('THIRD') || 18000;   // HALF begins where THIRD ends
+  const acreStart = bound('HALF') || 35000;    // ACRE begins where HALF ends
+  const halfFactor = MOSQUITO.pressureFactors.lot_half || 0;
+  const acreFactor = MOSQUITO.pressureFactors.lot_acre || 0;
+  if (sqft >= acreStart) return acreFactor;
+  if (sqft >= halfStart) return halfFactor + ((sqft - halfStart) / (acreStart - halfStart)) * (acreFactor - halfFactor);
+  if (sqft >= rampStart) return ((sqft - rampStart) / (halfStart - rampStart)) * halfFactor;
+  return 0;
+}
+
 function priceMosquito(property, options = {}) {
   const {
     tier = null,
@@ -3686,6 +3790,11 @@ function priceMosquito(property, options = {}) {
   const lotCategory = categoryResolution.lotCategory;
   const basePrices = MOSQUITO.basePrices[lotCategory];
   if (!basePrices) throw new Error(`Unknown lot category: ${lotCategory}`);
+  // Interpolate on treatable sf, floored at the resolved category's lower
+  // edge so the gross-lot guardrail still lifts suspiciously-low derivations.
+  const categoryIndex = MOSQUITO.lotCategories.findIndex((c) => c.key === lotCategory);
+  const categoryFloorSqFt = categoryIndex > 0 ? MOSQUITO.lotCategories[categoryIndex - 1].maxSqFt + 1 : 0;
+  const pricingSqFt = Math.max(areaResolution.mosquitoTreatableSqFt || 0, categoryFloorSqFt);
   const waterMeta = normalizeMosquitoWaterMultiplier((modifiers || {}).mosquitoWaterMult);
   const waterMultiplier = waterMeta.waterMultiplier;
   const hasGraduatedWaterMultiplier = waterMultiplier > 1.0;
@@ -3700,8 +3809,7 @@ function priceMosquito(property, options = {}) {
   if (f.pool || f.poolCage) pressure += MOSQUITO.pressureFactors.pool;
   if (f.nearWater && !hasGraduatedWaterMultiplier) pressure += MOSQUITO.pressureFactors.nearWater;
   if (f.irrigation) pressure += MOSQUITO.pressureFactors.irrigation;
-  if (lotCategory === 'ACRE') pressure += MOSQUITO.pressureFactors.lot_acre;
-  else if (lotCategory === 'HALF') pressure += MOSQUITO.pressureFactors.lot_half;
+  pressure += mosquitoLotSizePressure(pricingSqFt);
   if (waterMultiplier && waterMultiplier !== 1.0) {
     pressure *= waterMultiplier;
   }
@@ -3722,7 +3830,7 @@ function priceMosquito(property, options = {}) {
   if (tierIndex < 0) throw new Error(`Unknown mosquito program: ${tier}`);
   const tierWasForced = !!normalizedRequestedTier && selectedProgram !== recommendedProgram;
   if (tierWasForced) recommendationReasons.push('forced_by_request');
-  const basePrice = basePrices[tierIndex];
+  const basePrice = interpolateMosquitoPrice(mosquitoRecurringAnchors(tierIndex), pricingSqFt);
 
   const perVisit = Math.round(basePrice * pressure);
   const visits = MOSQUITO.tierVisits[selectedProgram];
@@ -3754,7 +3862,7 @@ function priceMosquito(property, options = {}) {
   const marginFloorOk = margin >= GLOBAL.MARGIN_FLOOR;
 
   const tiers = MOSQUITO.programs.map((name, idx) => {
-    const bp = basePrices[idx];
+    const bp = interpolateMosquitoPrice(mosquitoRecurringAnchors(idx), pricingSqFt);
     const pv = Math.round(bp * pressure);
     const v = MOSQUITO.tierVisits[name];
     const ann = pv * v + annualAddOns;
@@ -3813,6 +3921,7 @@ function priceMosquito(property, options = {}) {
     mosquitoTreatableSqFtConfidence: areaResolution.confidence,
     fallbackTreatableSqFt: areaResolution.fallbackTreatableSqFt,
     missingAreaData: areaResolution.missingAreaData,
+    pricingSqFt,
     basePrice, pressureMultiplier: pressure,
     pressureBeforeCap,
     perVisit, visits, annual, monthly,
@@ -3915,9 +4024,11 @@ function priceTermiteStationRental(installPrice) {
 
 function priceTermiteBait(property, options = {}) {
   const {
-    // Default switched to Advance Apr 2026 (was 'trelona') for competitive
-    // doorstep pricing. Trelona remains available as the premium upgrade.
-    system = 'advance',
+    // No destructure default (codex P2): an absent system must reach
+    // normalizeTermiteSystem, whose fallback is TERMITE.defaultSystem
+    // (Trelona-only menu, owner 2026-07-28) — a literal here would shadow
+    // it and quote 10-ft Advance for direct callers.
+    system,
     monitoringTier = 'basic',
     // 'own' (customer buys the stations, one-time install charge) or 'rent'
     // (Waves retains ownership, $0 install, recovery rides the quarterly).
@@ -3975,8 +4086,6 @@ function priceTermiteBait(property, options = {}) {
       ? ['stories_estimated']
       : []),
   ]);
-  const mon = TERMITE.monitoring[selectedMonitoringTier] || TERMITE.monitoring.basic;
-
   if (perimeterResolution.value === null) {
     return {
       service: 'termite_bait',
@@ -4021,8 +4130,10 @@ function priceTermiteBait(property, options = {}) {
       monitoring: {
         monthly: 0,
         annual: 0,
-        quotedMonthly: mon.monthly,
-        quotedAnnual: mon.monthly * 12,
+        // No perimeter → no station count; quote the smallest program's
+        // rate as the "from" figure (min-station bracket).
+        quotedMonthly: termiteMonitoringMonthlyForStations(TERMITE.minStations),
+        quotedAnnual: termiteMonitoringMonthlyForStations(TERMITE.minStations) * 12,
       },
       annual: 0,
       monthly: 0,
@@ -4030,9 +4141,15 @@ function priceTermiteBait(property, options = {}) {
   }
 
   const perimeter = perimeterResolution.value;
-  const stations = Math.max(TERMITE.minStations, Math.ceil(perimeter / TERMITE.stationSpacing));
+  const sys = TERMITE.systems[selectedSystem]
+    || TERMITE.systems[TERMITE.defaultSystem]
+    || TERMITE.systems.advance;
+  // Label-driven spacing per system (Trelona 15 ft, Advance 10 ft — owner
+  // 2026-07-28) wins over the legacy global; the DB termite_install row can
+  // still tune the FALLBACK spacing but never a system's label spacing.
+  const spacingFt = Number(sys.spacingFt) > 0 ? Number(sys.spacingFt) : TERMITE.stationSpacing;
+  const stations = Math.max(TERMITE.minStations, Math.ceil(perimeter / spacingFt));
 
-  const sys = TERMITE.systems[selectedSystem] || TERMITE.systems.advance;
   const conMult = constructionMult.value;
   const foundAdj = foundationAdj.value;
   const installMaterialCost = stations * (sys.stationCost + sys.laborMaterial + sys.misc);
@@ -4053,7 +4170,9 @@ function priceTermiteBait(property, options = {}) {
   const isRentedStations = ownership === 'rent';
   const billedInstallPrice = isRentedStations ? 0 : installPrice;
 
-  const monitoringMonthly = mon.monthly;
+  // Bracketed by the station count this property actually needs (owner
+  // 2026-07-28) — the flat Basic/Premier tiers are retired.
+  const monitoringMonthly = termiteMonitoringMonthlyForStations(stations);
   const monitoringAnnual = monitoringMonthly * 12;
 
   return {
@@ -4816,13 +4935,29 @@ function getOneTimeMosquitoAreaBucket(mosquitoTreatableSqFt) {
   return 'OVER_ACRE';
 }
 
+// One-time anchors: bucket prices pinned at each bucket's top edge, so the
+// price climbs in 500-sf steps between them (see interpolateMosquitoPrice)
+// instead of jumping at bucket boundaries.
+const ONE_TIME_MOSQUITO_ANCHOR_SQFT = [
+  ['SMALL', 7500],
+  ['STANDARD', 11000],
+  ['LARGE', 16000],
+  ['XL', 24000],
+  ['ESTATE', 32000],
+  ['ACRE_CLASS', 43560],
+];
+
 function getOneTimeMosquitoBase(mosquitoTreatableSqFt) {
   const sqft = Math.max(0, Math.round(Number(mosquitoTreatableSqFt) || 0));
   const areaBucket = getOneTimeMosquitoAreaBucket(sqft);
-  const base = ONE_TIME.mosquito[areaBucket] || ONE_TIME.mosquito.SMALL;
   if (areaBucket !== 'OVER_ACRE') {
-    return { areaBucket, basePrice: base, requiresManualReview: false };
+    const anchors = ONE_TIME_MOSQUITO_ANCHOR_SQFT.map(([bucket, anchorSqFt]) => ({
+      sqft: anchorSqFt,
+      price: ONE_TIME.mosquito[bucket] || ONE_TIME.mosquito.SMALL,
+    }));
+    return { areaBucket, basePrice: interpolateMosquitoPrice(anchors, sqft), requiresManualReview: false };
   }
+  const base = ONE_TIME.mosquito.OVER_ACRE || ONE_TIME.mosquito.ACRE_CLASS || ONE_TIME.mosquito.SMALL;
   const overageSqFt = Math.max(0, sqft - 43560);
   const incrementCount = Math.ceil(overageSqFt / ONE_TIME.mosquito.overAcreIncrementSqFt);
   return {
@@ -7826,6 +7961,7 @@ module.exports = {
   priceCommercialMosquito, priceCommercialTermiteBait, priceCommercialRodentBait, pricePalmInjection,
   normalizeCommercialTermiteScope, COMMERCIAL_TERMITE_AUTO_SCOPES,
   priceMosquito, priceTermiteBait, priceTermiteBond, priceTermiteStationRental,
+  termiteMonitoringMonthlyForStations,
   priceRodentBait, priceRodentTrapping,
   priceRodentTrappingFollowups, priceSanitation, priceBaitSetup,
   priceRodentInspection, priceTrapOnlyRetainer, priceRodentWireMesh,

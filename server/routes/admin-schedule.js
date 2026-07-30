@@ -8,6 +8,8 @@ const { callAnthropic, callOpenAI } = require('../services/llm/call');
 const { isEnabled } = require('../config/feature-gates');
 const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const { invoiceAmountDue, isInvoiceCollectibleStatus } = require('../services/invoice-helpers');
+const { previewText, stripSchedulerAuditText } = require('../utils/visit-notes');
+const { loadLastServices } = require('../utils/last-line-service');
 const MODELS = require('../config/models');
 const trackTransitions = require('../services/track-transitions');
 const {
@@ -50,6 +52,9 @@ const {
   auditRecurringScheduleAnomalies,
 } = require('../services/recurring-schedule-audit');
 const {
+  detectWaveGuardPlanKeys,
+  isCommercialServiceRow,
+  isRodentLedServiceRow,
   syncCustomerWaveGuardPlanFromScheduledServices,
 } = require('../services/self-booking-plan-sync');
 const { getDailyRainOutlookBounded } = require('../services/weather-forecast');
@@ -1003,6 +1008,7 @@ async function resolveLineDiscount(input, baseAmount, customer, serviceContext =
     subtotal: baseAmount,
     serviceKey: serviceContext.serviceKey || null,
     serviceCategory: serviceContext.serviceCategory || null,
+    recurringMembershipBooking: !!serviceContext.recurringMembershipBooking,
   });
   if (failures.length) {
     throw httpError(400, `${row.name} is not eligible: ${failures.join(', ')}`);
@@ -1018,16 +1024,130 @@ async function resolveLineDiscount(input, baseAmount, customer, serviceContext =
   };
 }
 
-async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, estimatedPrice, primaryLinePrice, primaryLineDiscount, serviceAddons, discountId, discountType, discountAmount, customer }) {
+// Default price for a hand-scheduled one-time mosquito line (owner decision
+// 2026-07-28). With a usable lot size the engine ladder prices it over the
+// GROSS lot (no footprint source exists on the customer row — see inline
+// note). Without lot data the Service Library catalog base controls the
+// amount (edits there must keep working); recurring-plan members keep the
+// engine's canonical one-time perk in both cases — membership derived via the
+// file's one predicate (hasMembership) so tier sentinels stay in one place.
+// Returns null when the caller's own catalog fallback should apply as-is.
+function mosquitoOneTimeDefaultPrice(customer, catalogBasePrice = null) {
+  const isRecurringCustomer = hasMembership(customer || {});
+  const lotSqFt = Number(customer?.lot_sqft);
+  if (Number.isFinite(lotSqFt) && lotSqFt > 0) {
+    try {
+      const { priceOneTimeMosquito } = require('../services/pricing-engine');
+      // Gross lot only: the customer row has no footprint source —
+      // customers.property_sqft is treated LAWN area by arbitration contract
+      // (source-arbitration.js: "deliberately NOT a home-sqft source") and
+      // must never be subtracted as a footprint. Hand-scheduled pricing may
+      // therefore sit one step above the estimate path for the same
+      // property; the estimate path stays the precise one and the operator
+      // can always override the price.
+      const quote = priceOneTimeMosquito({ lotSqFt }, { isRecurringCustomer });
+      const price = Number(quote?.price);
+      if (Number.isFinite(price) && price > 0) return price;
+    } catch (e) {
+      logger.warn(`[schedule] mosquito ladder default failed, using catalog price: ${e.message}`);
+    }
+  }
+  const base = Number(catalogBasePrice);
+  if (!Number.isFinite(base) || base <= 0) return null;
+  if (!isRecurringCustomer) return null;
+  const { WAVEGUARD } = require('../services/pricing-engine/constants');
+  const rate = Number(WAVEGUARD?.recurringCustomerOneTimePerk) || 0;
+  return rate > 0 ? Math.round(base * (1 - rate)) : null;
+}
+
+// GET /mosquito-onetime-quote?customerId= — live default for the
+// create-appointment modal, computed by the same helper + catalog row the
+// booking path uses (post-syncConstantsFromDB, so admin pricing-config AND
+// Service Library edits are reflected immediately). Always answers with the
+// authoritative amount booking will stamp — never the client's cached line
+// price (estimate-loaded lines carry the estimate's quoted price there).
+// requireAdmin: the create-appointment modal is an office surface (POST '/'
+// is requireAdmin too), and tech tokens must not be able to probe arbitrary
+// customer ids for lot-size/price data outside their assignment scope.
+router.get('/mosquito-onetime-quote', requireAdmin, async (req, res, next) => {
+  try {
+    const customerId = String(req.query.customerId || '').trim();
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(customerId)) {
+      throw httpError(400, 'customerId must be a valid customer id');
+    }
+    const customer = await db('customers')
+      .where({ id: customerId })
+      .first('id', 'lot_sqft', 'waveguard_tier', 'monthly_rate');
+    if (!customer) throw httpError(404, 'Customer not found');
+    const catalogRow = await db('services')
+      .where({ service_key: 'mosquito_one_time' })
+      .first('base_price')
+      .catch(() => null);
+    const computed = mosquitoOneTimeDefaultPrice(customer, catalogRow?.base_price);
+    const catalogBase = Number(catalogRow?.base_price);
+    const price = computed != null
+      ? computed
+      : (Number.isFinite(catalogBase) && catalogBase > 0 ? Math.round(catalogBase * 100) / 100 : null);
+    res.json({ price, source: computed != null ? 'engine_default' : (price != null ? 'catalog_base' : null) });
+  } catch (err) { next(err); }
+});
+
+// Booking-time twin of the tier sync's evidence test (self-booking-plan-sync):
+// TRUE when the series being booked would itself count as WaveGuard plan
+// coverage — recurring, not a callback/re-service, not commercial or
+// rodent-led, UPCOMING (a past-dated series is historical data entry, not
+// upcoming coverage), not for a commercial-sentinel customer (commercial plans are
+// flat, outside the residential tiers — enrollment fail-closes on them too),
+// and resolving to a WaveGuard plan family. The customer's tier is stamped
+// from the created rows only AFTER pricing validates (the in-transaction sync
+// below), so the "any member" discount floor must accept this booking-context
+// evidence or the member discount is rejected on the very sale that enrolls
+// the member (a new client booked onto quarterly pest control).
+//
+// Deliberately NOT mirrored: GATE_AUTO_WAVEGUARD_TIER. The gate is the kill
+// switch for AUTOMATIC tier stamping (a billing-side concern); this flag only
+// lets an operator-selected member discount through on a recurring-plan sale,
+// which is the owner's stated pricing rule (2026-07-29) independent of
+// whether the label automation is on.
+function bookingCreatesWaveGuardCoverage({ isRecurring, isCallback, serviceType, serviceRecord, customer, scheduledDate }) {
+  if (!isRecurring || isCallback) return false;
+  // Same sentinel normalization as the enrollment path's commercial guard
+  // (tierSentinelKey in self-booking-plan-sync, not exported).
+  const customerTierKey = String(customer?.waveguard_tier || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
+  if (customerTierKey === 'commercial') return false;
+  const anchorDate = dateOnly(scheduledDate);
+  if (!anchorDate || anchorDate < etDateString()) return false;
+  const row = {
+    service_type: serviceType,
+    service_key: serviceRecord?.service_key,
+    service_name: serviceRecord?.name,
+  };
+  if (isCommercialServiceRow(row) || isRodentLedServiceRow(row)) return false;
+  return detectWaveGuardPlanKeys(row).length > 0;
+}
+
+async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, estimatedPrice, primaryLinePrice, primaryLineDiscount, serviceAddons, discountId, discountType, discountAmount, customer, recurringMembershipBooking = false }) {
   if (discountType && !discountId) {
     throw httpError(400, 'discountId is required for appointment-level discounts');
   }
 
-  const primaryBaseFallback = serviceRecord?.base_price != null ? serviceRecord.base_price : estimatedPrice;
+  // One-time mosquito default follows the lot-based ladder (owner decision
+  // 2026-07-28) instead of the flat catalog price. An explicitly typed price
+  // still wins; catalog base_price remains the fallback when the customer has
+  // no lot size on file. Applied per line (primary here, add-on lines below)
+  // so a grouped booking never silently bills mosquito at $0.
+  let mosquitoLadderDefault = null;
+  if (serviceRecord?.service_key === 'mosquito_one_time' && primaryLinePrice == null) {
+    mosquitoLadderDefault = mosquitoOneTimeDefaultPrice(customer, serviceRecord?.base_price);
+  }
+  const primaryBaseFallback = mosquitoLadderDefault != null
+    ? mosquitoLadderDefault
+    : (serviceRecord?.base_price != null ? serviceRecord.base_price : estimatedPrice);
   const primaryBase = parseMoneyInput(primaryLinePrice ?? primaryBaseFallback, 'primaryLinePrice');
   const primaryDiscount = await resolveLineDiscount(primaryLineDiscount, primaryBase || 0, customer, {
     serviceKey: serviceRecord?.service_key,
     serviceCategory: serviceRecord?.category,
+    recurringMembershipBooking,
   });
   const primaryNet = primaryBase == null
     ? null
@@ -1040,13 +1160,22 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
 
   const addonLines = [];
   for (const addon of Array.isArray(serviceAddons) ? serviceAddons : []) {
-    const base = parseMoneyInput(addon.basePrice ?? addon.grossPrice ?? addon.price, `price for ${addon.name || addon.serviceName || 'add-on'}`);
+    let base = parseMoneyInput(addon.basePrice ?? addon.grossPrice ?? addon.price, `price for ${addon.name || addon.serviceName || 'add-on'}`);
     const addonService = addon.serviceId
-      ? await db('services').where({ id: addon.serviceId }).first('service_key', 'category')
+      ? await db('services').where({ id: addon.serviceId }).first('service_key', 'category', 'base_price')
       : null;
+    // Blank-priced one-time mosquito add-on lines get the same lot-ladder
+    // default as the primary (catalog base_price as the no-lot-data
+    // fallback) — a grouped booking must never silently bill mosquito at $0.
+    if (base == null && addonService?.service_key === 'mosquito_one_time') {
+      const ladder = mosquitoOneTimeDefaultPrice(customer, addonService.base_price);
+      const fallback = ladder != null ? ladder : (addonService.base_price != null ? Number(addonService.base_price) : null);
+      if (fallback != null) base = parseMoneyInput(fallback, `price for ${addon.name || addon.serviceName || 'add-on'}`);
+    }
     const lineDiscount = await resolveLineDiscount(addon, base || 0, customer, {
       serviceKey: addonService?.service_key,
       serviceCategory: addonService?.category,
+      recurringMembershipBooking,
     });
     const net = base == null
       ? null
@@ -1098,6 +1227,7 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
         subtotal: appointmentDiscountBase,
         serviceKey: eligibilityContext.serviceKey || null,
         serviceCategory: eligibilityContext.serviceCategory || null,
+        recurringMembershipBooking: !!recurringMembershipBooking,
       });
       if (failures.length) {
         throw httpError(400, `${appointmentDiscount.name} is not eligible: ${failures.join(', ')}`);
@@ -1669,9 +1799,14 @@ router.get('/', async (req, res, next) => {
     // Enrich with property prefs and last service
     const enriched = await Promise.all(services.map(async (s) => {
       const prefs = await db('property_preferences').where({ customer_id: s.customer_id }).first();
-      const lastService = await db('service_records')
-        .where({ customer_id: s.customer_id, status: 'completed' })
-        .orderBy('service_date', 'desc').first();
+      // Any-line latest keeps the "Last:" card + new-customer detection
+      // semantics; the line-scoped record feeds the service dashboard so a
+      // pest visit never shows the customer's lawn notes (multi-service
+      // customers were leaking cross-line notes into the Protocol panel).
+      // Paged same-line search — a fixed window silently lost history for
+      // high-cadence customers (two weekly lines ≈ 104 rows between annual
+      // termite visits).
+      const { lastService, lastLineService } = await loadLastServices(db, s.customer_id, s.service_type);
 
       const genuinelyNew = await isNewCustomer(db, s.customer_id);
 
@@ -1720,8 +1855,11 @@ router.get('/', async (req, res, next) => {
       if (prefs?.side_gate_access) alerts.push({ type: 'access', text: `Side gate: ${prefs.side_gate_access}` });
       if (prefs?.parking_notes) alerts.push({ type: 'access', text: `Parking: ${prefs.parking_notes}` });
       if (prefs?.special_instructions) alerts.push({ type: 'special', text: prefs.special_instructions });
-      // Only add notes if there's meaningful content after cleaning
-      if (cleanedNotes) alerts.push({ type: 'note', text: cleanedNotes });
+      // Only add notes if there's meaningful content after cleaning. Ops
+      // sessions write scheduling-audit trails into notes; those are internal
+      // and never belong on the tech-facing alerts block.
+      const displayNotes = stripSchedulerAuditText(cleanedNotes);
+      if (displayNotes) alerts.push({ type: 'note', text: displayNotes });
       // Show "New customer" badge ONLY if genuinely new (no completed service records)
       if (genuinelyNew) alerts.push({ type: 'new_customer', text: 'New customer — first visit' });
       // Service-preference opt-outs — the customer toggled one of these off
@@ -1883,7 +2021,16 @@ router.get('/', async (req, res, next) => {
         isNewCustomer: genuinelyNew,                    // FIX #1: computed from service_records
         lastServiceDate: safeDate(lastService?.service_date),   // FIX #3: safe date
         lastServiceType: lastService ? normalizeServiceType(lastService.service_type) : null,
-        lastServiceNotes: lastService?.technician_notes?.slice(0, 200),
+        // Technician-authored notes get the word-boundary preview only — the
+        // scheduler-audit filter is for scheduled_services.notes (where ops
+        // sessions write audit trails), and would false-positive on genuine
+        // tech prose like "No SMS sent because the phone is disconnected".
+        lastServiceNotes: previewText(lastService?.technician_notes),
+        // Line-scoped last visit for the service dashboards (Protocol panel):
+        // null when the customer has no completed history on THIS line.
+        lastLineServiceDate: safeDate(lastLineService?.service_date),
+        lastLineServiceType: lastLineService ? normalizeServiceType(lastLineService.service_type) : null,
+        lastLineServiceNotes: previewText(lastLineService?.technician_notes),
         checkInTime: s.check_in_time, checkOutTime: s.check_out_time,
         actualDuration: s.actual_duration_minutes,
         weatherAdvisory: s.weather_advisory,
@@ -2863,6 +3010,27 @@ router.post('/', requireAdmin, async (req, res, next) => {
       ? recurrenceOrdinalOptions(scheduledDate, { nth: recurringNth, weekday: recurringWeekday })
       : { nth: recurringNth, weekday: recurringWeekday };
 
+    // Re-service rows (pest_re_service / lawn_re_service) ARE callbacks by
+    // definition — the new-appointment modal never sends `isCallback`, so
+    // derive it server-side from the catalog row. Persisted `is_callback`
+    // drives callback reporting + completion invoice suppression downstream.
+    // Computed BEFORE pricing: the membership-booking evidence below must
+    // exclude callbacks, mirroring the tier sync.
+    const resolvedIsCallback = isCallback
+      || isReService({ serviceKey: serviceRecord?.service_key, serviceName: serviceRecord?.name, serviceType });
+
+    // A recurring booking that creates WaveGuard plan coverage IS the
+    // membership sale — let the "any member" discount floor see that, since
+    // the customer row's tier is only stamped after the series commits.
+    const recurringMembershipBooking = bookingCreatesWaveGuardCoverage({
+      isRecurring: !!isRecurring,
+      isCallback: resolvedIsCallback,
+      serviceType,
+      serviceRecord,
+      customer,
+      scheduledDate,
+    });
+
     const pricing = await buildAppointmentPricing({
       serviceRecord,
       serviceType,
@@ -2875,14 +3043,8 @@ router.post('/', requireAdmin, async (req, res, next) => {
       discountType,
       discountAmount,
       customer,
+      recurringMembershipBooking,
     });
-
-    // Re-service rows (pest_re_service / lawn_re_service) ARE callbacks by
-    // definition — the new-appointment modal never sends `isCallback`, so
-    // derive it server-side from the catalog row. Persisted `is_callback`
-    // drives callback reporting + completion invoice suppression downstream.
-    const resolvedIsCallback = isCallback
-      || isReService({ serviceKey: serviceRecord?.service_key, serviceName: serviceRecord?.name, serviceType });
 
     // Re-service callbacks default to $0 for WaveGuard customers, but an operator
     // can still enter an explicit charge (e.g. a re-service that also handled a
@@ -2920,6 +3082,16 @@ router.post('/', requireAdmin, async (req, res, next) => {
 
     let waveguardPlanSync = null;
     await db.transaction(async (trx) => {
+      // Global lock order for recurring creators: CUSTOMER ROW first, series
+      // advisory lock second — the same order estimate-converter uses (it
+      // updates the customer, then waits on the advisory lock). Taking the
+      // advisory lock below first and the customer row later (inside the
+      // WaveGuard sync at the end of this transaction) is the opposite
+      // order and deadlocks against a concurrent conversion for the same
+      // customer (Codex #3011 r6 P1).
+      if (isRecurring) {
+        await trx('customers').where({ id: customerId }).forUpdate().first('id');
+      }
       // Race-safe duplicate-series backstop (P0: check-then-insert race).
       // The preflight above ran OUTSIDE this transaction, so two concurrent
       // recurring creates for the same customer + service family could both
@@ -3259,6 +3431,10 @@ router.post('/', requireAdmin, async (req, res, next) => {
           // count / booked cadence) so on payment the term attaches + stamps
           // the rows this request just created instead of seeding duplicates.
           annualPrepayCoverage: bookingBillingTermEffective === 'prepay_annual' ? annualPrepayCoverage : null,
+          // Program-agreement start date: only when the booked series IS the
+          // termite service (a pest/lawn booking on a multi-service estimate
+          // must not become the termite program start).
+          agreementStartDate: /termite/i.test(String(serviceType || '')) ? dateOnly(scheduledDate) : null,
         });
         estimateAutoAccepted = true;
         if (bookingBillingTermEffective === 'prepay_annual') {
@@ -3298,6 +3474,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
               adminUserId: req.technicianId || null,
               source: 'verbal_yes_booking',
               billingTerm: 'standard',
+              agreementStartDate: /termite/i.test(String(serviceType || '')) ? dateOnly(scheduledDate) : null,
             });
             estimateAutoAccepted = true;
             downgradedAfterOverlapRace = true;
@@ -7480,6 +7657,21 @@ function reportCopyCacheSet(key, value) {
 function reportCopyRejection(report) {
   const text = String(report || '').trim();
   if (!text) return 'empty';
+  // The prompt forbids quoting the internal 0–5 activity rating as a number
+  // ("2/5") — the customer report shows its own pressure gauge on a different
+  // scale and a second number reads as a contradiction. The prompt instruction
+  // alone is soft; a model that echoes the numeric RATING is rejected and
+  // regenerated. Scoped to rating language, and a fraction that is a
+  // DENOMINATOR of counted things ("2/5 bait stations", "4/5 zones") is not a
+  // rating even when 'activity' appears earlier in the sentence
+  // (codex P2 #3043 r2+r3).
+  const COUNT_NOUN_AFTER = /^\s*(?:bait|monitoring|interior|exterior|treated|serviced)?\s*(?:stations?|traps?|zones?|areas?|placements?|devices?|monitors?|stops?|visits?|rooms?|sides?)\b/i;
+  const ratingRe = /\b(?:rated?|rating|activity(?:\s+(?:level|was|is))?)\b[^.\n]{0,40}?\b[0-5]\s*\/\s*5\b|\b[0-5]\s*\/\s*5\b(?=\s*(?:rating|scale))/gi;
+  let ratingMatch;
+  while ((ratingMatch = ratingRe.exec(text)) !== null) {
+    const after = text.slice(ratingMatch.index + ratingMatch[0].length);
+    if (!COUNT_NOUN_AFTER.test(after)) return 'numeric_rating';
+  }
   const banned = ActivityIndicators.findBannedCustomerCopy(text);
   return banned.length ? `banned:${banned.join(',')}` : null;
 }
@@ -7622,7 +7814,7 @@ router.post('/generate-report', async (req, res) => {
     const crypto = require('crypto');
     const { buildReportCopyContext } = require('../services/service-report/report-copy-context');
     const {
-      scheduledServiceId, customerName, serviceType, technicianName, serviceDate, arrivalTime,
+      scheduledServiceId, lawnAssessmentId, customerName, serviceType, technicianName, serviceDate, arrivalTime,
       serviceNotes, productsApplied, products,
       areasServiced, actionsCompleted, observations, recommendations,
       customerInteraction, customerConcern, pestActivityRating, photoCount,
@@ -7643,11 +7835,33 @@ router.post('/generate-report', async (req, res) => {
     const ratingNum = Number.isInteger(pestActivityRating) ? pestActivityRating : null;
     // Same "is there enough to generate?" rule as the client (buildAiReportPayload).
     // photoCount is intentionally NOT sufficient on its own — the model can't see photos.
+    // A confirmed photo-scored lawn assessment is substantive input on its
+    // own — but only a VALIDATED one (exists, tech-confirmed, linked to the
+    // authorized visit). A stale/crafted id must not open the gate for an
+    // otherwise-empty request the grounding would later reject fail-soft.
+    let hasValidLawnAssessment = false;
+    if (scheduledServiceId && lawnAssessmentId !== null) {
+      try {
+        // Explicit id → validate that exact row. Absent field (failed client
+        // lookup / legacy caller / scores-only visit) → validate the same
+        // visit-linked row the grounding fallback will use, so the documented
+        // fallback stays reachable. Explicit null (retake pending) counts as
+        // no assessment.
+        hasValidLawnAssessment = !!(await db('lawn_assessments')
+          .where({
+            ...(lawnAssessmentId ? { id: lawnAssessmentId } : {}),
+            service_id: scheduledServiceId,
+            confirmed_by_tech: true,
+          })
+          .first('id'));
+      } catch { /* fail toward not-substantive */ }
+    }
     const hasReportInput = Boolean((serviceNotes || '').trim())
       || productsText.length > 0
       || areas.length > 0 || actions.length > 0 || obs.length > 0 || recs.length > 0
       || concernText.length > 0
-      || ratingNum !== null;
+      || ratingNum !== null
+      || hasValidLawnAssessment;
     if (!hasReportInput) return res.status(400).json({ error: 'Not enough visit detail to generate a report' });
 
     const PEST_ACTIVITY_LABELS = { 0: 'none', 1: 'very low', 2: 'low', 3: 'moderate', 4: 'high', 5: 'severe' };
@@ -7682,9 +7896,9 @@ A generic report is a failed report. Build both sections around the concrete det
 
 2. **No overpromising.** Never claim: elimination, eradication, impenetrable, guaranteed, 100%, total protection, pest-free, foolproof. Use language like: reduce activity, manage pressure, support long-term control, limit conducive conditions.
 
-3. **No invented observations.** Only reference conditions, pest types, or findings that appear in the service notes. If notes say "general pest control" with no specifics, write generally. Do not fabricate sightings.
+3. **No invented observations.** Only reference conditions, pest types, or findings that appear in the service notes. If notes say "general pest control" with no specifics, write generally. Do not fabricate sightings. ONE exception: tech-confirmed LAWN ASSESSMENT scores supplied in GROUNDING CONTEXT are verified findings for this visit — you may (and should) reference them and their deltas even when the notes do not repeat them.
 
-4. **No brand names for products.** Use active ingredient names (fipronil, bifenthrin, imidacloprid, prodiamine, etc.) or functional descriptions (non-repellent residual, insect growth regulator, pre-emergent herbicide, systemic drench). If the active ingredient is not provided in the inputs, use the functional description only.
+4. **No brand names for products.** Use active ingredient names (fipronil, bifenthrin, imidacloprid, prodiamine, etc.) or functional descriptions (non-repellent residual, insect growth regulator, pre-emergent herbicide, systemic drench). If the active ingredient is not provided in the inputs, use the functional description only. When the copy tells the homeowner to DO something with a product, lead with the plain-language role, not a bare chemical name — "water in today's grub treatment", never "water in the clothianidin".
 
 5. **Plain text only.** No markdown, no bold, no emojis, no bullet points, no headers in the output body. Just paragraphs under the two section titles.
 
@@ -7701,7 +7915,7 @@ A generic report is a failed report. Build both sections around the concrete det
 
 9. **Active ingredients come only from Products applied.** Never infer an active ingredient or product from an action label or area (e.g. "Exterior perimeter band" does not imply bifenthrin). If Products applied is empty, use functional descriptions only.
 
-10. **Pest activity rating** is 0–5 (0 = none … 5 = severe). Reflect it honestly in WHAT WE FOUND when present; a 0 means no visible activity noted — do not imply a problem. Never invent a rating that wasn't provided.
+10. **Pest activity rating** is 0–5 (0 = none … 5 = severe). Reflect it honestly in WHAT WE FOUND when present; a 0 means no visible activity noted — do not imply a problem. Never invent a rating that wasn't provided. **Describe the rating in words only ("light activity", "no visible activity") — never quote the number ("2/5").** The customer report displays its own pest-pressure gauge on a different scale, and a second number beside it reads as the report contradicting itself.
 
 11. **No invented tenure or timeframes.** Never state how long someone has been a customer, how many visits they've had, or "X years/seasons" unless that number is explicitly provided. Do not default to stock recovery windows like "7–14 days" or "10–14 days" — give a timeframe only when a specific product or the grounding context justifies one, and make it fit the situation.
 
@@ -7719,7 +7933,7 @@ Vary your opening. Rotate how WHAT WE DID begins — sometimes lead with the pes
 ## USING THE GROUNDING CONTEXT (when present)
 
 The GROUNDING CONTEXT block beneath the inputs holds real, customer-specific facts. Use them to make the copy specific — but still obey every hard constraint, and never assert anything the context or notes don't support:
-- **Targets tagged today**: when the context lists the specific targets the technician tagged per product, NAME them in the copy — "ghost ants and big-headed ants along the foundation," "brown patch in the front turf" — instead of generic categories ("ants," "pests," "disease"). For fertilization goals ("iron chlorosis," "nitrogen green-up"), state the nutritional objective in plain words. Use only the tagged names; never invent a species or condition that isn't tagged or noted.
+- **Targets tagged today**: when the context lists the specific targets the technician tagged per product, NAME them in the copy — "ghost ants and big-headed ants along the foundation," "brown patch in the front turf" — instead of generic categories ("ants," "pests," "disease"). For fertilization goals ("iron chlorosis," "nitrogen green-up"), state the nutritional objective in plain words. Use only the tagged names; never invent a species or condition that isn't tagged or noted. A tagged target is what the product was applied to CONTROL — if the observations do not record that pest or condition as seen, frame the application as protection ("targeting chinch bugs ahead of their peak season"), never as activity that was found. Do not write "no concerns were observed" and "the activity we found" about the same visit.
 - **Prior visits**: do NOT repeat the prior wording — say something fresh, and note what has CHANGED since (an improvement, a recurring pest, a previously-noted concern that has eased). If the same pest recurs across visits, acknowledge it honestly rather than implying it is brand new.
 - **Pest pressure trend**: if it shows real movement, reflect it ("pest pressure has trended down across recent visits") instead of a vague statement. Claim only what the grounding states — do not invent a "first visit" or all-time baseline it doesn't provide.
 - **Weather (at service + recent rain)**: use it to explain a method choice, timing, or rainfast guidance — not as small talk.
@@ -7912,6 +8126,14 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
     try {
       const ctx = await buildReportCopyContext({
         customerId: groundingCustomerId,
+        // Only pass the visit linkage when the caller was authorized for
+        // service grounding (groundingCustomerId is set on that same path).
+        scheduledServiceId: groundingCustomerId ? scheduledServiceId : null,
+        // The closeout sends its CURRENT confirmation state: an id grounds
+        // exactly that row; explicit null means a retake is pending (the old
+        // confirmed row is superseded — no today section); absent (legacy
+        // caller) falls back to the visit-linked lookup.
+        lawnAssessmentId: groundingCustomerId ? lawnAssessmentId : undefined,
         serviceType: groundingServiceType,
         serviceLine: null, // derived from the server-side service type, not the body
         suppressPressureTrend: groundingSuppressPressure,
@@ -7923,6 +8145,24 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
       contextSignals = ctx.signals || {};
     } catch (ctxErr) {
       logger.warn(`[generate-report] grounding context failed: ${ctxErr.message}`);
+    }
+
+    // Scores-only requests live or die by the assessment grounding: when the
+    // validated assessment was the ONLY substantive input and the grounding
+    // load then failed (or resolved to retake-pending), there is nothing real
+    // to write from — reject instead of returning generic copy the closeout
+    // would cache as this visit's report.
+    const assessmentWasOnlyInput = hasValidLawnAssessment
+      && !(serviceNotes || '').trim()
+      && !productsText.length
+      && !areas.length && !actions.length && !obs.length && !recs.length
+      && !concernText.length
+      && ratingNum === null;
+    if (assessmentWasOnlyInput && !contextSignals.hasCurrentLawnAssessment) {
+      return res.status(503).json({
+        error: 'Lawn assessment grounding is unavailable right now — try again in a moment.',
+        code: 'lawn_assessment_grounding_unavailable',
+      });
     }
 
     // F2 (universal one-time services, ratified Q13): opt-in windowed comms
@@ -7954,6 +8194,18 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
 
     const generated = await generateReportCopyWithFallback({ systemPrompt, userMessage: fullUserMessage });
     if (!generated.ok) {
+      // Assessment-only requests carry no structured facts the deterministic
+      // fallback can echo — generic completed-service prose without the
+      // scores must not become this visit's report. Fail retryable instead.
+      if (assessmentWasOnlyInput) {
+        logger.warn('[generate-report] both AI providers missed on an assessment-only request; refusing deterministic fallback', {
+          failures: generated.failures,
+        });
+        return res.status(503).json({
+          error: 'AI report generation is temporarily unavailable. Your existing service notes were not changed.',
+          retryable: true,
+        });
+      }
       const report = buildDeterministicReportCopy({
         serviceType: groundingServiceType,
         areas,
@@ -8909,6 +9161,7 @@ router._test = {
   reportCopyRejection,
   generateReportCopyWithFallback,
   buildDeterministicReportCopy,
+  bookingCreatesWaveGuardCoverage,
   buildAppointmentPricing,
   calculateVisitFinancialsForAddons,
   calculateStoredVisitFinancials,

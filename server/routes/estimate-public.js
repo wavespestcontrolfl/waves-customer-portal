@@ -80,6 +80,7 @@ const {
 } = require('../constants/business');
 const {
   pricingBundleMatchesEstimateTotals,
+  resolveStoredPestPricingVersion,
 } = require('../services/estimate-pricing-bundle-utils');
 const {
   estimateDataHasUnresolvedManagerApproval,
@@ -10107,6 +10108,20 @@ router.put('/:token/accept', async (req, res, next) => {
       }
     } catch (e) { logger.error(`[notifications] Estimate accepted notification failed: ${e.message}`); }
 
+    // Termite bait accepts prep the signable program agreement (draft +
+    // admin bell; customer send only behind
+    // GATE_TERMITE_PROGRAM_AGREEMENT_AUTOSEND). The service never throws
+    // and skips silently for non-termite estimates. Re-read the row so the
+    // agreement prefills from the ACCEPTED figures written above, not the
+    // pre-accept snapshot in memory.
+    if (customerId) {
+      try {
+        const { maybeCreateTermiteProgramAgreement } = require('../services/termite-program-agreement');
+        const acceptedRow = await db('estimates').where({ id: estimate.id }).first();
+        await maybeCreateTermiteProgramAgreement({ estimate: acceptedRow || estimate, customerId, req, billingTerm });
+      } catch (e) { logger.error(`[termite-agreement] accept hook failed: ${e.message}`); }
+    }
+
     // Customer-facing accepts should get the same admin phone workflow as a
     // quote request: call Adam from a Waves number during business hours, then
     // auto-bridge to the customer when the leadAutoBridge gate is enabled.
@@ -11047,6 +11062,24 @@ function extractEngineInputs(estData) {
       eligibilityConfirmed: true,
       floorBreachAcknowledged: opAdj.floorBreachAcknowledged === true,
     };
+  }
+  // Curve provenance for unstamped pest inputs (audit 2026-07-28): agent
+  // drafts persisted engineInputs WITHOUT services.pest.version, and the
+  // ladder replay below defaults unstamped → v1 — rendering (and accepting)
+  // a v2-priced draft at retired v1 bi-monthly/monthly prices. Resolve the
+  // sold curve from the stored result exactly like the save path
+  // (admin-estimate-persistence) does; only a truly evidence-less input is
+  // left unstamped for the legacy-replay default. Clone before stamping —
+  // `out.services` still references the stored estimate_data object.
+  if (out.services?.pest && typeof out.services.pest === 'object'
+    && !out.services.pest.version) {
+    const resolvedVersion = resolveStoredPestPricingVersion(estData);
+    if (resolvedVersion) {
+      out.services = {
+        ...out.services,
+        pest: { ...out.services.pest, version: resolvedVersion },
+      };
+    }
   }
   return out;
 }
@@ -15295,10 +15328,19 @@ function frequencyFromTreatmentRow(baseFrequency = {}, key, row = {}, recurringS
     || row.label
     || recurringServiceDisplayName(key)
     || 'Recurring service';
+  // Mirrored non-pest sections track the pest cadence KEY (the bundle has
+  // one selector) but must not wear the pest ladder's visit counts over
+  // their own card — "Bi-monthly (6 visits)" on a 9-application lawn
+  // program misstates the program (audit 2026-07-28). Keep the cadence
+  // word, drop the parenthetical; the card's own sub-label renders this
+  // service's real visit count from its row's visitsPerYear.
+  const selectableLabel = key === 'pest_control'
+    ? (baseFrequency.label || fallbackLabel)
+    : (String(baseFrequency.label || '').replace(/\s*\(\d+\s+visits?\)\s*$/i, '') || fallbackLabel);
   return {
     key: useSelectableCadence ? baseFrequency.key : 'recurring',
     label: useSelectableCadence
-      ? (baseFrequency.label || fallbackLabel)
+      ? selectableLabel
       : fallbackLabel,
     monthlyBase,
     monthly,
@@ -17514,11 +17556,13 @@ async function buildPricingBundleInner(estimate) {
       inputsForFrequency.services.pest = {
         ...(inputsForFrequency.services.pest || {}),
         frequency: ladder.engineFrequency,
-        // STORED-inputs replay: unstamped saved inputs predate the v2 default
-        // and must reprice on the v1 curve they were quoted with — never
+        // STORED-inputs replay: extractEngineInputs resolves unstamped
+        // inputs from the stored pest line's curve (v2-priced agent drafts
+        // replay v2; unstamped stored lines replay v1). An input still
+        // unstamped here has NO stored pest evidence — it predates the v2
+        // default, so reprice on the v1 curve it was quoted with; never
         // silently render/accept a sent bi-monthly/monthly quote at the
-        // higher v2 price (codex #2966 r2 P1). New saves stamp their priced
-        // version into engineInputs at persistence.
+        // higher v2 price (codex #2966 r2 P1).
         version: (inputsForFrequency.services.pest || {}).version || 'v1',
       };
       // The operator's below-floor acknowledgement covered ONE computed
@@ -18673,3 +18717,7 @@ module.exports.matchAcceptCustomerByPhone = matchAcceptCustomerByPhone;
 module.exports.resolveEstimateContactFields = resolveEstimateContactFields;
 module.exports.applySelectedTermiteBondToEstimateData = applySelectedTermiteBondToEstimateData;
 module.exports.attachTermiteBondSelector = attachTermiteBondSelector;
+// Test hooks (audit 2026-07-28): curve resolution for unstamped pest replays
+// and the mirrored-section label rule.
+module.exports.extractEngineInputs = extractEngineInputs;
+module.exports.frequencyFromTreatmentRow = frequencyFromTreatmentRow;

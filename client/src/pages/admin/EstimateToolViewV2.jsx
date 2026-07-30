@@ -2106,7 +2106,9 @@ export default function EstimateToolViewV2({
     termiteFootprintSqFt: "",
     termitePerimeterLF: "",
     termiteBaitComplexity: "",
-    termiteBaitSystem: "advance",
+    // Trelona-only menu (owner 2026-07-28); tier is a retired concept the
+    // API still accepts.
+    termiteBaitSystem: "trelona",
     termiteMonitoringTier: "basic",
     termiteBondTerm: "none",
     termiteOwnership: "own",
@@ -2355,12 +2357,29 @@ export default function EstimateToolViewV2({
       }
     }
     if (form.svcMosquito && !commercialDetected) {
-      const programBase =
-        form.mosquitoProgram === "seasonal9" ? 105 : 90;
-      approx.mosquito = Math.max(
-        programBase,
-        Math.round(lotSqft * 0.005 + programBase),
-      );
+      // Rough preview; engine is authoritative. Mirrors the server's 500-sf
+      // step interpolation between per-visit bucket anchors (no pressure
+      // factors), then visits/yr -> levelized monthly.
+      const mqSeasonal = form.mosquitoProgram === "seasonal9";
+      const mqAnchors = mqSeasonal
+        ? [[8000, 73], [12000, 76], [18000, 79], [35000, 86], [62000, 97]]
+        : [[8000, 66], [12000, 69], [18000, 73], [35000, 77], [73500, 86]];
+      const mqTreatable = Math.max(0, lotSqft - (sqft || 0));
+      const mqStepped = Math.ceil(mqTreatable / 500) * 500;
+      let mqPerVisit = mqAnchors[mqAnchors.length - 1][1];
+      if (mqStepped <= mqAnchors[0][0]) {
+        mqPerVisit = mqAnchors[0][1];
+      } else {
+        for (let i = 1; i < mqAnchors.length; i++) {
+          if (mqStepped <= mqAnchors[i][0]) {
+            const [aSq, aPr] = mqAnchors[i - 1];
+            const [bSq, bPr] = mqAnchors[i];
+            mqPerVisit = Math.round(aPr + ((mqStepped - aSq) / (bSq - aSq)) * (bPr - aPr));
+            break;
+          }
+        }
+      }
+      approx.mosquito = Math.round((mqPerVisit * (mqSeasonal ? 9 : 12)) / 12);
     }
     if (form.svcTermiteBait && !commercialDetected) approx.termiteBait = 50;
     if (form.svcRodentBait && !commercialDetected) approx.rodentBait = sqft > 2500 ? 69 : 49;
@@ -3531,7 +3550,7 @@ export default function EstimateToolViewV2({
         thatchProbe3Inches: form.thatchProbe3Inches,
         thatchDepthInches: form.thatchDepthInches,
         thatchMeasurementSource: form.thatchMeasurementSource || "manual",
-        termiteBaitSystem: form.termiteBaitSystem || "advance",
+        termiteBaitSystem: form.termiteBaitSystem || "trelona",
         termiteMonitoringTier: form.termiteMonitoringTier || "basic",
         termiteBondTerm: form.termiteBondTerm || "none",
         // Hard floor to purchase when the server has not advertised the
@@ -4237,7 +4256,7 @@ export default function EstimateToolViewV2({
       termiteFootprintSqFt: "",
       termitePerimeterLF: "",
       termiteBaitComplexity: "",
-      termiteBaitSystem: "advance",
+      termiteBaitSystem: "trelona",
       termiteMonitoringTier: "basic",
       termiteBondTerm: "none",
       termiteOwnership: "own",
@@ -6038,24 +6057,13 @@ export default function EstimateToolViewV2({
                             ]}
                           />
                         </FieldV2>
-                        <FieldV2 label="System">
-                          <SelectV2
-                            k="termiteBaitSystem"
-                            options={[
-                              { value: "advance", label: "Advance" },
-                              { value: "trelona", label: "Trelona" },
-                            ]}
-                          />
-                        </FieldV2>
-                        <FieldV2 label="Monitoring">
-                          <SelectV2
-                            k="termiteMonitoringTier"
-                            options={[
-                              { value: "basic", label: "Basic" },
-                              { value: "premier", label: "Premier" },
-                            ]}
-                          />
-                        </FieldV2>
+                        {/* System + Monitoring selects removed (owner
+                            2026-07-28): the menu is Trelona-only at its
+                            label 15-ft spacing, and the station check is
+                            bracket-priced by station count — no tiers.
+                            Advance stays priceable in the engine for
+                            replaying old estimates; the form always sends
+                            trelona/basic for new quotes. */}
                         {/* Residential bond rider (owner 2026-07-20): fixed
                             quarterly warranty rate per term, priced by the
                             engine — labels stay term-only so a DB rate change
@@ -7866,24 +7874,40 @@ export default function EstimateToolViewV2({
                               <>
                                 <TierGridV2>
                                   {" "}
-                                  {R.tmBait.ai != null && (
-                                    <TierRowV2
-                                      name="Advance"
-                                      detail={`${fmtInt(R.tmBait.ai)} install | Basic $35 | Premier $65/mo`}
-                                      price="$35-65"
-                                      recommended={R.tmBait.selectedSystem === "advance"}
-                                      dimmed={R.tmBait.selectedSystem && R.tmBait.selectedSystem !== "advance"}
-                                    />
-                                  )}{" "}
-                                  {R.tmBait.ti != null && (
-                                    <TierRowV2
-                                      name="Trelona"
-                                      detail={`${fmtInt(R.tmBait.ti)} install | Basic $35 | Premier $65/mo`}
-                                      price="$35-65"
-                                      recommended={R.tmBait.selectedSystem === "trelona"}
-                                      dimmed={R.tmBait.selectedSystem && R.tmBait.selectedSystem !== "trelona"}
-                                    />
-                                  )}{" "}
+                                  {/* Trelona-only menu + station-count
+                                      bracket pricing (owner 2026-07-28) —
+                                      the retired flat Basic/Premier figures
+                                      must never render beside a bracketed
+                                      quote total. Renders whichever system
+                                      the result actually priced: new quotes
+                                      are Trelona, but a replayed pre-change
+                                      Advance draft still shows ITS row
+                                      (server adapter exposes monMonthly;
+                                      bmo is the legacy fallback name). */}
+                                  {(() => {
+                                    const tmSys =
+                                      R.tmBait.selectedSystem === "advance"
+                                        ? "advance"
+                                        : "trelona";
+                                    const tmInstallPrice =
+                                      tmSys === "advance"
+                                        ? R.tmBait.ai
+                                        : R.tmBait.ti;
+                                    const tmMon =
+                                      R.tmBait.monMonthly ?? R.tmBait.bmo;
+                                    return tmInstallPrice != null ? (
+                                      <TierRowV2
+                                        name={
+                                          tmSys === "advance"
+                                            ? "Advance (legacy)"
+                                            : "Trelona"
+                                        }
+                                        detail={`${fmtInt(tmInstallPrice)} install | ${R.tmBait.sta} stations | $${tmMon}/mo station check`}
+                                        price={`$${Math.round((tmMon ?? 0) * 3)}/app`}
+                                        recommended
+                                      />
+                                    ) : null;
+                                  })()}{" "}
                                 </TierGridV2>{" "}
                                 <div className="text-11 text-ink-secondary mt-1">
                                   Install cost is a one-time setup fee, not a

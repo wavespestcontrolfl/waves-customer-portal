@@ -15,6 +15,7 @@ import { getAdminAuthToken } from '../../lib/adminAuth';
 import {
   MAP_WIDTH,
   MAP_HEIGHT,
+  buildOutlineAccum,
   buildSettledAccum,
   composeSnapshot,
   loadBestMapImage,
@@ -80,6 +81,9 @@ const CLOSE_TAP_CSS_PX = 22;
 export default function TechTreatmentZoneModal({
   serviceId, customerName, address, lat, lng, onClose, onSaved,
   appearance = 'dark',
+  // Lawn visits outline the treated AREA (clean pulsing outline on the report)
+  // instead of the perimeter spray-mist metaphor (owner 2026-07-28).
+  lawnMode = false,
 }) {
   const light = appearance === 'light';
   const T = light ? LIGHT : DARK;
@@ -253,6 +257,10 @@ export default function TechTreatmentZoneModal({
       const blob = await exportMapPng(mapState.image, mapState.url);
       const form = new FormData();
       form.append('map', blob, 'map.png');
+      // Lawn mode asks the vision suggester for the TURF boundary — the
+      // default building-footprint suggestion would outline the house as the
+      // treated lawn area (pre-push audit P1 2026-07-28).
+      if (lawnMode) form.append('mode', 'lawn');
       const res = await fetch(`${API}/api/tech/services/${serviceId}/treatment-zone/suggest`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${getAdminAuthToken()}` },
@@ -260,13 +268,15 @@ export default function TechTreatmentZoneModal({
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.suggestion?.perimeter?.length) {
-        throw new Error(data.error || 'Could not detect the building outline — trace it manually.');
+        throw new Error(data.error || (lawnMode
+          ? 'Could not detect the lawn outline — trace it manually.'
+          : 'Could not detect the building outline — trace it manually.'));
       }
       setPoints(data.suggestion.perimeter.map((pt) => ({ x: pt.x * MAP_WIDTH, y: pt.y * MAP_HEIGHT })));
       setClosed(true);
       setSuggestNote(data.suggestion.includesPoolEnclosure
-        ? 'Auto-traced — pool enclosure included. Drag any corner to adjust, then Play spray.'
-        : 'Auto-traced. Drag any corner to adjust, then Play spray.');
+        ? `Auto-traced — pool enclosure included. Drag any corner to adjust, then ${lawnMode ? 'Set outline' : 'Play spray'}.`
+        : `Auto-traced. Drag any corner to adjust, then ${lawnMode ? 'Set outline' : 'Play spray'}.`);
     } catch (err) {
       setSuggestNote(err.message || 'Auto-trace failed — trace manually.');
     } finally {
@@ -289,6 +299,10 @@ export default function TechTreatmentZoneModal({
         lng: center.lng,
         zoom,
         address: address || null,
+        // Discriminates the outline workflow from the perimeter spray trace —
+        // the report only labels a trace "treated lawn area" when it was
+        // actually captured as one (codex P1 #3038).
+        captureMode: lawnMode ? 'lawn' : 'perimeter',
       }));
       const token = getAdminAuthToken();
       const res = await fetch(`${API}/api/tech/services/${serviceId}/treatment-zone`, {
@@ -312,8 +326,25 @@ export default function TechTreatmentZoneModal({
     if (step !== 'play' || mapState.status !== 'ready') return undefined;
     const canvas = canvasRef.current;
     if (!canvas) return undefined;
-    setStatus({ phase: 'spraying', pct: 0, feet: 0 });
     setSaveState(null);
+    if (lawnMode) {
+      // Lawn: no spray replay — draw the settled outline immediately and save
+      // the same frame. The customer report owns the pulse animation.
+      const outline = buildOutlineAccum({
+        width: MAP_WIDTH,
+        height: MAP_HEIGHT,
+        points,
+        closed,
+        color: MIST_COLOR,
+      });
+      const ctx = canvas.getContext('2d');
+      ctx.clearRect(0, 0, MAP_WIDTH, MAP_HEIGHT);
+      ctx.drawImage(outline, 0, 0);
+      setStatus({ phase: 'settled', pct: 1, feet: totalFeet });
+      save(outline);
+      return undefined;
+    }
+    setStatus({ phase: 'spraying', pct: 0, feet: 0 });
     const totalPx = pathLengthPx(points, closed);
     const lastEmit = { ts: 0 };
     const engine = startSprayEngine({
@@ -351,9 +382,11 @@ export default function TechTreatmentZoneModal({
   }, [step, runKey, mapState.status]);
 
   const settled = status.phase !== 'spraying';
-  const statusText = settled
-    ? `Barrier set — ${Math.round(totalFeet)} linear ft treated`
-    : `Applying perimeter barrier — ${Math.round(status.pct * 100)}%`;
+  const statusText = lawnMode
+    ? `Treated lawn area outlined — ${Math.round(totalFeet)} linear ft`
+    : settled
+      ? `Barrier set — ${Math.round(totalFeet)} linear ft treated`
+      : `Applying perimeter barrier — ${Math.round(status.pct * 100)}%`;
 
   // Every close path locks while the upload is in flight (same reason
   // Back/Replay/Done do): closing lets the tech reopen and re-save, and the
@@ -529,14 +562,24 @@ export default function TechTreatmentZoneModal({
               >
                 Close loop
               </button>
+              {/* A lawn OUTLINE is an area claim — it needs a closed loop of
+                  3+ points before it can be set; an open 2-point line would
+                  save captureMode 'lawn' and read as a treated lawn area on
+                  the report (codex P2 #3038). Perimeter mode keeps its
+                  open-path spray behavior. */}
               <button
-                style={btnStyle('primary', points.length < 2)}
-                disabled={points.length < 2}
+                style={btnStyle('primary', lawnMode ? (points.length < 3 || !closed) : points.length < 2)}
+                disabled={lawnMode ? (points.length < 3 || !closed) : points.length < 2}
                 onClick={() => setStep('play')}
               >
-                Play spray
+                {lawnMode ? 'Set outline' : 'Play spray'}
               </button>
             </div>
+            {lawnMode && points.length >= 3 && !closed && (
+              <p style={{ margin: '8px 0 0', fontSize: smallText, color: T.muted }}>
+                Tap Close loop to finish the lawn outline.
+              </p>
+            )}
           </>
         )}
 
@@ -582,13 +625,15 @@ export default function TechTreatmentZoneModal({
               >
                 Back to trace
               </button>
-              <button
-                style={btnStyle('ghost', saveState === 'saving')}
-                disabled={saveState === 'saving'}
-                onClick={() => setRunKey((k) => k + 1)}
-              >
-                Replay
-              </button>
+              {!lawnMode && (
+                <button
+                  style={btnStyle('ghost', saveState === 'saving')}
+                  disabled={saveState === 'saving'}
+                  onClick={() => setRunKey((k) => k + 1)}
+                >
+                  Replay
+                </button>
+              )}
               <button
                 style={btnStyle('primary', saveState === 'saving')}
                 disabled={saveState === 'saving'}

@@ -255,9 +255,14 @@ function checkSchemaValid(draft) {
   catch { return { ok: false, reason: 'schema_not_valid_json' }; }
 }
 
-function checkTitleMetaSpamFree(draft, brief) {
+function checkTitleMetaSpamFree(draft, brief, context) {
   const result = evaluateTitleMetaSpam({
-    title: draft.title || draft.frontmatter?.title,
+    // protectedTitle: the target's rendered title is a protected service/
+    // location metaTitle the publisher will keep regardless of the draft
+    // (owner rule 2026-07-16) — spam-checking the discarded proposal would
+    // gate text that can never ship. Blank title makes inspectTitle skip;
+    // the meta-description half still runs in full.
+    title: context?.protectedTitle ? '' : (draft.title || draft.frontmatter?.title),
     meta_description: draft.meta_description || draft.frontmatter?.meta_description,
     city: brief.city,
     service: brief.service,
@@ -960,7 +965,11 @@ function checkVoiceMatch(draft) {
 
 // ── metadata checks ─────────────────────────────────────────────────
 
-function checkTitleLengthBounds(draft) {
+function checkTitleLengthBounds(draft, brief, context) {
+  // Protected service/location metaTitle: the publisher keeps the live value,
+  // so the draft's proposal never ships — length-checking it would park valid
+  // description-only rewrites (owner rule 2026-07-16).
+  if (context?.protectedTitle) return { ok: true, reason: 'protected_title_not_published' };
   const t = (draft.title || draft.frontmatter?.title || '').trim();
   if (!t) return { ok: false, reason: 'no_title' };
   if (t.length < 30 || t.length > 70) return { ok: false, reason: `title_length_${t.length}_outside_30-70` };
@@ -974,7 +983,10 @@ function checkMetaLengthBounds(draft) {
   return { ok: true };
 }
 
-function checkPrimaryKeywordInTitle(draft, brief) {
+function checkPrimaryKeywordInTitle(draft, brief, context) {
+  // Protected metaTitle targets: the shipped title is the unchanged live one
+  // (which carries the keyword by construction) — see checkTitleLengthBounds.
+  if (context?.protectedTitle) return { ok: true, reason: 'protected_title_not_published' };
   const t = (draft.title || draft.frontmatter?.title || '').toLowerCase();
   const kw = (brief.target_keyword || '').toLowerCase();
   if (!kw) return { ok: false, reason: 'no_target_keyword_on_brief' };
@@ -987,6 +999,9 @@ function checkPrimaryKeywordInTitle(draft, brief) {
 }
 
 function checkNoDuplicateTitle(draft, _brief, context) {
+  // Protected metaTitle targets: the shipped title is the unchanged live one,
+  // which cannot NEWLY collide with a sibling — see checkTitleLengthBounds.
+  if (context?.protectedTitle) return { ok: true, reason: 'protected_title_not_published' };
   const t = (draft.title || draft.frontmatter?.title || '').trim().toLowerCase();
   if (!t || !context.siblingTitles) return { ok: true };
   if (context.siblingTitles.has(t)) return { ok: false, reason: 'title_duplicates_existing_page' };

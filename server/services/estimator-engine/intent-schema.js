@@ -66,7 +66,8 @@ const SERVICE_OPTION_SCHEMAS = {
   termite: {
     type: 'object',
     properties: {
-      system: { enum: ['advance'] },
+      // Trelona-only menu (owner 2026-07-28); 'advance' is replay-only.
+      system: { enum: ['trelona'] },
       monitoringTier: { enum: ['basic'] },
     },
     additionalProperties: false,

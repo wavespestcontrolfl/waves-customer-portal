@@ -44,6 +44,9 @@ Three interfaces:
 9. **All automation and site infra is native.** Do not reference Zapier, Make, Elementor, NitroPack, RankMath, or any external automation/CMS tool in new code.
 10. **Plan first for non-trivial work.** For anything beyond a small, well-specified change, present a plan and get sign-off before writing code (use Plan mode). A misunderstanding caught at the plan stage costs minutes; caught after the code is written, it costs the rework.
 11. **When a mistake is caught, record the rule.** Run `/lesson` (or follow `.claude/commands/lesson.md`) so the correction lands in AGENTS.md, the matching skill, or here — in the same PR as the fix. Rules belong in skills or AGENTS.md by default; this file stays lean.
+12. **Never send or trigger customer-facing communications** (SMS, email, calls) — the owner sends all. Before any prod action, check for comm side effects (editing/completing/rescheduling `scheduled_services` rows can fire confirmation/reminder SMS) and route around them.
+13. **Never test on real customers' live records.** "No durable writes" is not the safety bar (e.g. slot holds block real bookings). Use the staff draft-preview paths or owner-created test records; read-only DB inspection is fine.
+14. **Hands-off + exception-based by default.** Deterministic green checks auto-apply with an audit trail and no bell; only exceptions park and surface; every lane keeps an env kill switch + one-click revoke. Where a human decision is genuinely required, use the email-reply approval pattern — a tokenized email to contact@ answered by replying "approved"/"not approved", fail-closed, at-most-once (current in-repo exemplar: the newsletter proof flow in `server/services/newsletter-proof.js`; a generalized module is in flight on PR #3024) — never a park-on-portal-visit queue. Never extend email-approval to customer comms, money movement, or gate flips.
 
 ## Admin UI & Design Systems
 
@@ -77,10 +80,16 @@ Everything else — architecture, the context→tools mapping, design decisions,
 
 **Operator/agent tooling** — recurring prod-ops scripts (token pulls, Railway var hygiene, audit purges) live in `ops/agents/`; check its README before writing a new scratchpad script for prod access. Mutating scripts there are dry-run by default (`--execute` to write).
 
+**Error monitoring** — investigate "what errors happened" via Sentry (org `waves-pest-control`, project `node-express`), not Railway logs (current-deploy only, ~20-line HTTP buffer). Include `Fixes NODE-EXPRESS-<id>` in the fixing commit or the Sentry issue never auto-closes.
+
 ## Environment Variables (Railway)
 
 Core: `DATABASE_URL`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN`, `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET`, `JWT_SECRET`.
 
 Optional model overrides: `MODEL_DEEP` / `MODEL_EXTREME` / `MODEL_FLAGSHIP` / `MODEL_WORKHORSE` / `MODEL_FAST` / `MODEL_VOICE` / `MODEL_VISION` (global), `INTELLIGENCE_BAR_MODEL` / `INTELLIGENCE_BAR_TECH_MODEL` (IB-specific). Fable is never automatic; opt in explicitly through `MODEL_EXTREME` or a deliberate feature route.
+
+LLM mention prober (AEO): `PERPLEXITY_API_KEY` enables the Perplexity probe (`PERPLEXITY_MENTIONS_MODEL`, default `sonar`) alongside the existing `OPENAI_MENTIONS_MODEL` / `GEMINI_MENTIONS_MODEL` / `MODEL_MENTIONS` / `LLM_MENTIONS_MAX_PROBES` overrides. Measurement probes call each answer engine directly by design — no ROUTES entry, no Claude fallback (a fallback would falsify the visibility measurement).
+
+Call transcription tunables: `OPENAI_TRANSCRIPTION_MODEL` / `OPENAI_TRANSCRIPTION_KEYWORDS` (CSV of literal keyword hints, gpt-transcribe family only), `CALL_PROC_MIN_AUDIO_BYTES_PER_SEC` (partial-download floor, default 3000), `CALL_PROC_EARLY_PROCESS_DELAY_MS` (early verified attempt, default 2 min).
 
 Cross-provider routing: `MODEL_OPENAI_REPORT_WRITER` (Sol), `MODEL_OPENAI_BALANCED` (Terra), `MODEL_OPENAI_FAST` (Luna), plus legacy `MODEL_OPENAI_BEST` as a Terra-compatible override. Knowledge embeddings: `MODEL_OPENAI_EMBEDDING` (default `text-embedding-3-small`, 1536-dim) behind `GATE_HYBRID_KNOWLEDGE`; MCP read tools at `/api/mcp` behind `GATE_MCP_READ_TOOLS` + `MCP_SERVICE_TOKEN` — single-provider BY DESIGN (embedding spaces don't cross providers; unavailable → search degrades to full-text), and changing the model requires re-embedding the corpus. Completed-service reports are Sol-first, Opus-second, and return deterministic safe copy if both miss. Generated text must use a two-provider `TEXT_POLICIES` entry; a same-provider fallback is rejected by the dispatcher. No permanent shadow/parallel model calls. Gemini vision/image/video and call transcription keep their specialized provider ladders; V2 call extraction routes `CALL_EXTRACTION_PROVIDER`/`CALL_EXTRACTION_MODEL` (default `openai`/`gpt-5.6-sol`, Claude Opus fallback, kill = `CALL_EXTRACTION_PROVIDER=gemini`).

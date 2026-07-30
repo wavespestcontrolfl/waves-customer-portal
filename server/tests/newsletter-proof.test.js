@@ -34,6 +34,7 @@ jest.mock('../services/newsletter-sender', () => ({
 }));
 jest.mock('../services/newsletter-validator', () => ({
   validateNewsletterDraft: mockValidate,
+  lockedPricesForSend: jest.fn(async () => []),
 }));
 jest.mock('../services/newsletter-event-selection', () => ({
   validateFlagshipEventSelection: mockValidateEventSelection,

@@ -57,8 +57,9 @@ describe('engine + mapper emission', () => {
     const bond = estimate.lineItems.find((l) => l.service === 'termite_bond');
     expect(bond).toMatchObject({ bondTerm: '10yr', annual: 180, perApp: 45, visitsPerYear: 4 });
 
-    // 420 monitoring + 180 bond, no discount (solo termite = Bronze 0%).
-    expect(estimate.summary.recurringAnnualAfterDiscount).toBe(600);
+    // 408 monitoring (23-station bracket $34/mo, owner 2026-07-28) + 180
+    // bond, no discount (solo termite = Bronze 0%).
+    expect(estimate.summary.recurringAnnualAfterDiscount).toBe(588);
 
     const mapped = mapV1ToLegacyShape(estimate);
     const row = mapped.recurring.services.find((svc) => svc.service === 'termite_bond_10yr');
@@ -74,11 +75,11 @@ describe('engine + mapper emission', () => {
     });
     // Bait row unchanged beside it.
     const bait = mapped.recurring.services.find((svc) => svc.service === 'termite_bait');
-    expect(bait).toMatchObject({ mo: 35, perTreatment: 105, visitsPerYear: 4 });
+    expect(bait).toMatchObject({ mo: 34, perTreatment: 102, visitsPerYear: 4 });
     // Options snapshot + selection persist for the customer selector.
     expect(mapped.results.tmBait.bondOptions).toHaveLength(3);
     expect(mapped.results.tmBait.selectedBondTerm).toBe('10yr');
-    expect(mapped.recurring.monthlyTotal).toBe(50);
+    expect(mapped.recurring.monthlyTotal).toBe(49);
   });
 
   test('no bondTerm -> no bond line; options snapshot still persisted for the selector', () => {
@@ -211,8 +212,8 @@ describe('estimate view payload + bond term switcher rewrite', () => {
     const bondRows = rows.filter((svc) => String(svc.service).startsWith('termite_bond'));
     expect(bondRows).toHaveLength(1);
     expect(bondRows[0]).toMatchObject({ service: 'termite_bond_1yr', mo: 20, perTreatment: 60, visitsPerYear: 4 });
-    expect(parsed.result.recurring.monthlyTotal).toBe(55);
-    expect(parsed.result.recurring.annualAfterDiscount).toBe(660);
+    expect(parsed.result.recurring.monthlyTotal).toBe(54);
+    expect(parsed.result.recurring.annualAfterDiscount).toBe(648);
     expect(parsed.result.results.tmBait.selectedBondTerm).toBe('1yr');
   });
 
@@ -222,7 +223,7 @@ describe('estimate view payload + bond term switcher rewrite', () => {
     const outcome = applySelectedTermiteBondToEstimateData(parsed, 'none');
     expect(outcome).toMatchObject({ ok: true, changed: true, monthlyDelta: -15, annualDelta: -180, selectedBondTerm: null });
     expect(parsed.result.recurring.services.some((svc) => String(svc.service).startsWith('termite_bond'))).toBe(false);
-    expect(parsed.result.recurring.monthlyTotal).toBe(35);
+    expect(parsed.result.recurring.monthlyTotal).toBe(34);
   });
 
   test('switcher rewrite: invalid term and bond-less payloads fail closed', () => {
@@ -254,20 +255,20 @@ describe('solo termite accept totals carry the bond (money-path)', () => {
     const bundle = await buildPricingBundle(soloBondEstimate('10yr'));
     expect(bundle.services).toHaveLength(1);
     const entry = bundle.services[0].frequencies[0];
-    // 35+15 monthly, 420+180 annual, 105+45 per application — the true
+    // 34+15 monthly, 408+180 annual, 102+45 per application — the true
     // price of the combined bait+bond visit; accept's effective totals and
     // the converter's $150 per-application fee both read these.
-    expect(entry.monthly).toBe(50);
-    expect(entry.annual).toBe(600);
-    expect(entry.perTreatment).toBe(150);
+    expect(entry.monthly).toBe(49);
+    expect(entry.annual).toBe(588);
+    expect(entry.perTreatment).toBe(147);
     expect(entry.visitsPerYear).toBe(4);
   });
 
   test('no bond selected: solo section frequency unchanged', async () => {
     const bundle = await buildPricingBundle(soloBondEstimate(null));
     const entry = bundle.services[0].frequencies[0];
-    expect(entry.monthly).toBe(35);
-    expect(entry.perTreatment).toBe(105);
+    expect(entry.monthly).toBe(34);
+    expect(entry.perTreatment).toBe(102);
   });
 });
 
@@ -279,7 +280,7 @@ describe('GATE_TERMITE_BOND_OPTION (default OFF)', () => {
       const mapped = mapV1ToLegacyShape(generateEstimate(termiteInput({ termiteBondTerm: '10yr' })));
       expect(mapped.recurring.services.some((svc) => String(svc.service).startsWith('termite_bond'))).toBe(false);
       expect(mapped.results.tmBait.bondOptions).toBeFalsy();
-      expect(mapped.recurring.monthlyTotal).toBe(35);
+      expect(mapped.recurring.monthlyTotal).toBe(34);
     } finally {
       process.env.GATE_TERMITE_BOND_OPTION = prev;
     }
@@ -333,8 +334,8 @@ describe('codex #2915 r1 hardening', () => {
       expect(termite.selectedBondTerm).toBeUndefined();
       // Sold state: the selected bond still folds into the solo plan the
       // accept freezes — a kill-switch flip never rewrites a quoted price.
-      expect(termite.frequencies[0].monthly).toBe(50);
-      expect(termite.frequencies[0].perTreatment).toBe(150);
+      expect(termite.frequencies[0].monthly).toBe(49);
+      expect(termite.frequencies[0].perTreatment).toBe(147);
     } finally {
       process.env.GATE_TERMITE_BOND_OPTION = prev;
     }

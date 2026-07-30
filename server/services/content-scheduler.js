@@ -141,7 +141,7 @@ function gbpFallbackByLocation() {
   const { WAVES_LOCATIONS } = require('../config/locations');
   const out = {};
   for (const loc of WAVES_LOCATIONS) {
-    out[loc.id] = `The Waves Newsletter is live — local events and weekend plans near ${loc.name}, all across SW Florida.`;
+    out[loc.id] = `The latest Waves Newsletter is live — local events and weekend plans near ${loc.name}, all across SW Florida.`;
   }
   return out;
 }
@@ -175,7 +175,7 @@ async function generateNewsletterSocialContent(send) {
   const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.contentDraft, {
     maxTokens: 800,
     jsonMode: true,
-    text: `Generate social media captions for Waves Pest Control's weekly local events guide "The Waves Newsletter."
+    text: `Generate social media captions for Waves Pest Control's weekly local events guide "Waves Newsletter."
 This is NOT a pest control post — it's a punchy, upbeat local events roundup for SW Florida (North Port to Tampa).
 Tone: fun, local-guide energy. Light FOMO is good ("just dropped", "here's what's happening this week") but don't be spammy or clickbaity.
 
