@@ -351,16 +351,22 @@ async function activeProgramVersionIds(conn = db) {
   return new Set(rows.map((r) => r.active_version_id));
 }
 
-// Earliest publish time of the currently active versions — the rollout
-// moment. Requests that expired BEFORE it are ordinary historical expiries
-// (deliberately blockers in the main sweep), not rollout casualties.
-async function activeVersionRolloutStart(activeVersionIds, conn = db) {
-  if (!activeVersionIds?.size) return null;
-  const row = await conn('document_template_versions')
-    .whereIn('id', [...activeVersionIds])
-    .min({ published: 'published_at' })
-    .first();
-  return row?.published ? new Date(row.published) : null;
+// Per-template rollout moments: template_key → its ACTIVE version's
+// published_at. Requests that expired before THEIR OWN template's rollout
+// are ordinary historical expiries (deliberately blockers in the main
+// sweep), not rollout casualties — a single global minimum would let an
+// agreement that deliberately expired between two templates' staggered
+// upgrades slip back in.
+async function activeVersionRolloutStarts(conn = db) {
+  const rows = await conn('document_templates as dt')
+    .join('document_template_versions as dtv', 'dtv.id', 'dt.active_version_id')
+    .whereIn('dt.template_key', PROGRAM_TEMPLATE_KEYS)
+    .select('dt.template_key', 'dtv.published_at');
+  const map = new Map();
+  for (const row of rows) {
+    if (row.published_at) map.set(row.template_key, new Date(row.published_at));
+  }
+  return map;
 }
 
 async function existingBlockingProgramAgreement(customerId, estimate, conn = db, activeVersionIds = null) {
@@ -437,6 +443,46 @@ function isCommercialEstimate(estimate = {}, estData = null) {
   return false;
 }
 
+// A PARKED accept (commercial/multi-unit, annual prepay, unresolved
+// figures) creates no replacement draft — the operator does — but any open
+// agreement for the same property now carries obsolete figures/terms and
+// must not stay signable. Retires them under the same advisory lock +
+// FOR UPDATE + conditional-cancel discipline as the creation path. Uses
+// the ordinary supersession reason (NOT the compliance reason) so the
+// sweeps don't try to auto-replace what the operator now owns.
+async function retireSamePropertyOpenAgreements(customerId, estimate, activeVersionIds) {
+  const lockKey = `termite-agreement:${customerId}`;
+  await db.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [lockKey]);
+    const openRows = await openProgramAgreements(customerId, trx, { forUpdate: true });
+    const nowTs = new Date();
+    for (const row of openRows) {
+      // Everything that isn't provably another property's request retires —
+      // including same-estimate current-version rows (their figures predate
+      // this revised accept).
+      if (classifyExistingAgreement(row, estimate, nowTs, { activeVersionIds }) === 'ignore') continue;
+      const cancelled = await trx('customer_contracts')
+        .where({ id: row.id })
+        .whereIn('status', OPEN_STATUSES)
+        .update({
+          status: 'cancelled',
+          cancelled_at: nowTs,
+          cancelled_reason: 'Superseded by a newer accepted termite estimate',
+          updated_at: nowTs,
+        });
+      if (!cancelled) continue;
+      await trx('customer_contract_events').insert({
+        contract_id: row.id,
+        customer_id: customerId,
+        event_type: 'cancelled',
+        actor_type: 'system',
+        actor_id: null,
+        metadata: JSON.stringify({ reason: 'superseded', supersededByEstimateId: estimate.id, parkedAccept: true }),
+      });
+    }
+  });
+}
+
 // Create the draft agreement for an accepted termite estimate. Never throws
 // into the caller (acceptance must not fail because agreement prep did);
 // failures are retryable via reconcileTermiteProgramAgreements. Returns a
@@ -467,6 +513,7 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
     const NotificationService = require('./notification-service');
 
     if (isCommercialEstimate(estimate, estData)) {
+      await retireSamePropertyOpenAgreements(customerId, estimate, await activeProgramVersionIds());
       let belled = null;
       if (notifyOnUnresolved) {
         belled = await ringAdminBell(NotificationService, [
@@ -485,6 +532,7 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       // Fail closed: the seeded wording states per-application billing,
       // which would contradict the annual-prepay invoice. Park it for
       // manual preparation with accurate terms.
+      await retireSamePropertyOpenAgreements(customerId, estimate, await activeProgramVersionIds());
       let prepayBelled = null;
       if (notifyOnUnresolved) {
         prepayBelled = await ringAdminBell(NotificationService, [
@@ -510,6 +558,7 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       // exception with the owner instead of drafting a wrong document.
       // (The reconciliation sweep passes notifyOnUnresolved=false so the
       // original accept-time bell isn't re-rung daily.)
+      await retireSamePropertyOpenAgreements(customerId, estimate, await activeProgramVersionIds());
       let figuresBelled = null;
       if (notifyOnUnresolved) {
         figuresBelled = await ringAdminBell(NotificationService, [
@@ -777,18 +826,25 @@ async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
   // OPEN_STATUSES and blocked by the ordinary sweep's anti-join — without
   // this leg it would never receive its compliant replacement. Its token is
   // already dead, so it only needs the re-prep, not a cancel.
-  // Bounded to expiries at-or-after the active-version rollout: a request
-  // that expired historically (weeks before the upgrade) was already a
-  // deliberate blocker in the ordinary sweep and must not be revived and
-  // autosent just because a newer template version exists.
-  const rolloutStart = await activeVersionRolloutStart(activeVersionIds);
-  const expiredStale = rolloutStart ? await notReprocessed(db('customer_contracts')
+  // Bounded to expiries at-or-after the OWN template's rollout: a request
+  // that expired historically (or deliberately between two templates'
+  // staggered upgrades) was already a deliberate blocker in the ordinary
+  // sweep and must not be revived and autosent just because a newer
+  // template version exists. Coarse SQL prefilter on the earliest rollout,
+  // exact per-template comparison in JS.
+  const rolloutStarts = await activeVersionRolloutStarts();
+  const earliestRollout = rolloutStarts.size ? new Date(Math.min(...[...rolloutStarts.values()].map((d) => d.getTime()))) : null;
+  const expiredStaleCandidates = earliestRollout ? await notReprocessed(db('customer_contracts')
     .whereIn('document_template_key', PROGRAM_TEMPLATE_KEYS)
     .where('status', 'expired')
     .whereNotIn('document_template_version_id', [...activeVersionIds])
-    .where('share_token_expires_at', '>=', rolloutStart))
-    .select('id', 'customer_id', 'status', 'recipient_name', 'document_variables_snapshot')
+    .where('share_token_expires_at', '>=', earliestRollout))
+    .select('id', 'customer_id', 'status', 'recipient_name', 'document_variables_snapshot', 'document_template_key', 'share_token_expires_at')
     .limit(limit) : [];
+  const expiredStale = expiredStaleCandidates.filter((row) => {
+    const cutoff = rolloutStarts.get(row.document_template_key);
+    return cutoff && row.share_token_expires_at && new Date(row.share_token_expires_at) >= cutoff;
+  });
 
   const NotificationService = require('./notification-service');
   const seenEstimates = new Set();

@@ -475,15 +475,19 @@ exports.down = async function down(knex) {
   for (const seed of TEMPLATE_V2) {
     const template = await knex('document_templates').where({ template_key: seed.template_key }).first();
     if (!template) continue;
-    const v1 = await knex('document_template_versions')
-      .where({ template_id: template.id, version_number: 1 })
-      .first();
+    // Restore the LATEST version that is not this migration's seeded body —
+    // when an administrator had already published newer wording before the
+    // migration ran, rollback returns to THAT, not blindly to v1.
+    const versions = await knex('document_template_versions')
+      .where({ template_id: template.id })
+      .orderBy('version_number', 'desc');
+    const prior = versions.find((v) => v.body !== seed.body) || null;
     // Cancelled v1 requests stay cancelled on rollback — recreating them
     // would resurrect superseded wording; the reconciliation sweep preps
     // fresh ones from whatever version is active.
-    if (v1?.id) {
+    if (prior?.id) {
       await knex('document_templates').where({ id: template.id }).update({
-        active_version_id: v1.id,
+        active_version_id: prior.id,
         updated_at: knex.fn.now(),
       });
     }
