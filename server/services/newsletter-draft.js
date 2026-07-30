@@ -1284,12 +1284,14 @@ async function assembleBeehiivNewsletter(draft) {
   const eventShowsImage = events.map((ev) => {
     const u = safeUrl(ev.imageUrl);
     if (!u || isLikelyGifUrl(u)) return false;
-    // Case-preserving key: scheme/host fold (case-insensitive per RFC),
-    // path/query stay verbatim — /EventA.jpg and /eventa.jpg are
-    // different assets on case-sensitive CDNs.
-    let key = u;
+    // Case-preserving key from the RAW url — safeUrl's output is entity-
+    // escaped for attributes (an escaped apostrophe's '#39;' would parse
+    // as a fragment and truncate the key). Scheme/host fold (case-
+    // insensitive per RFC); path/query stay verbatim — /EventA.jpg and
+    // /eventa.jpg are different assets on case-sensitive CDNs.
+    let key = String(ev.imageUrl);
     try {
-      const parsed = new URL(u);
+      const parsed = new URL(String(ev.imageUrl));
       key = `${parsed.protocol}//${parsed.host.toLowerCase()}${parsed.pathname}${parsed.search}`;
     } catch { /* fall back to the raw url */ }
     if (seenImageUrls.has(key)) return false;
