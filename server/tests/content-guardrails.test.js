@@ -2108,3 +2108,21 @@ describe('literal phone in draft titles (round-3 hardening)', () => {
     expect(r.findings.some((f) => f.code === 'LITERAL_PHONE_IN_TITLE')).toBe(true);
   });
 });
+
+describe('blog meta contract applies to NON-refresh blog publishes (legacy lane)', () => {
+  test('a new (non-refresh) blog draft with a salesy meta P1s when targetIsBlog', () => {
+    const r = guardrails.evaluate(
+      { body: 'Body.', frontmatter: { meta_description: 'Bradenton pest options compared for homeowners weighing plans this season — call now for a free estimate from the local Waves team.' } },
+      { targetIsBlog: true },
+    );
+    expect(r.findings.some((f) => f.code === 'BLOG_META_SALESY')).toBe(true);
+  });
+
+  test('non-blog non-refresh drafts remain outside this finding', () => {
+    const r = guardrails.evaluate(
+      { body: 'Body.', frontmatter: { meta_description: 'No phone here and no CTA either — a plain page description that is long enough to be a realistic meta for a service page today.' } },
+      {},
+    );
+    expect(r.findings.some((f) => String(f.code).startsWith('META_') || String(f.code).startsWith('BLOG_META'))).toBe(false);
+  });
+});

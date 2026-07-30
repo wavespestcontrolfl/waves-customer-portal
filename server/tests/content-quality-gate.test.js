@@ -40,7 +40,7 @@ function fullDraft(overrides = {}) {
     url: '/blog/how-to-identify-termite-swarm/',
     body: 'Termite swarmers look like flying ants but have straight antennae. In Bradenton you might see them after rain.',
     title: 'How to Identify a Termite Swarm in Bradenton',
-    meta_description: 'Termite swarmers look like flying ants but have straight antennae and equal-length wings. Here is how Bradenton homeowners spot them early.',
+    meta_description: 'Termite swarmers look like flying ants but have straight antennae and equal-length wings. Learn more on the Waves blog.',
     schema: { '@type': 'Article' },
     frontmatter: {},
     ...overrides,

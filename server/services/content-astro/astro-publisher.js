@@ -903,6 +903,12 @@ async function publishAstro(postId) {
         // real topic regardless of which field holds it.
         service: [post.category, post.tag],
         primaryKeyword: post.keyword || data.primary_keyword || null,
+        // publishAstro publishes BLOG posts — declare it so the blog meta
+        // contract (no phone, nothing salesy, soft CTA at the end) applies on
+        // this path too; the autonomous lanes get it from the supporting-blog
+        // quality bundle, but this legacy BlogWriter/admin/calendar path runs
+        // guardrails only.
+        targetIsBlog: true,
       },
     );
     if (!guardrails.pass) {

@@ -1761,11 +1761,17 @@ function metaDescriptionContractFinding(frontmatter, { isRefresh = false, liveMe
   // SALESY/SOFT-CTA definitions shared with the quality gate (single source
   // in title-meta-spam-gate) so the two enforcement points can't drift.
   const { SALESY_META_RE, endsWithSoftCta } = require('./title-meta-spam-gate');
-  if (!isRefresh) return null;
+  // Runs on refresh drafts (both contracts, changed metas only) AND on any
+  // caller that declares a blog target — the legacy BlogWriter/admin/
+  // calendar publishAstro path runs ONLY guardrails (no supporting-blog
+  // quality bundle), so gating on isRefresh alone let a scheduled blog meta
+  // ship "{{cityPhone}}" or sales copy untouched. A NEW blog meta is always
+  // "changed", so the grandfather clause simply never matches there.
+  if (!isRefresh && !targetIsBlog) return null;
   const draftMeta = frontmatter?.metaDescription ?? frontmatter?.meta_description;
   if (draftMeta === undefined || !String(draftMeta).trim()) return null; // absent → publisher keeps the live value
   const draftTrim = String(draftMeta).trim();
-  if (liveMetaDescription != null && draftTrim === String(liveMetaDescription).trim()) return null; // unchanged → grandfathered
+  if (isRefresh && liveMetaDescription != null && draftTrim === String(liveMetaDescription).trim()) return null; // unchanged → grandfathered
   if (targetIsBlog) {
     if (draftTrim.includes('{{cityPhone}}') || draftTrim.includes('{{phone}}') || LITERAL_PHONE_IN_META_RE.test(draftTrim)) {
       return finding('P1', 'BLOG_META_CARRIES_PHONE', 'Blog meta descriptions never carry a phone number (owner rule 2026-07-29: informational summary + soft CTA only).');
