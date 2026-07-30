@@ -142,8 +142,6 @@ EVENT RULES:
 
 INTRO: greeting "Hey there!" energy — NEVER include a name or name placeholder; the renderer appends the subscriber's first name automatically. introText 2-4 sentences with a "Whether you're into X, Y, or Z" triad and a FOMO close. introGifCaption: cold-open punchline for the intro GIF (same caption genre).
 
-HOMEOWNER MINUTE: One useful seasonal tip (pest, lawn, plants, home prep) — VARY the topic week to week; don't default to rain-and-roaches. Max ~90 words. One factual guard: never imply weather causes an indoor infestation. Genuinely useful, not salesy — the brand sell in this newsletter is ZERO; this tip is the only Waves-adjacent content and it must stand on its own. Voice it like the themed issues: **bold the facts**, _italicize the jokes_, anthropomorphize the pest/plant when it lands ("that mosquito keeping you up at night? Probably a mom-to-be"), urgency biological/seasonal, never commercial. May end with a "Hot tip:" one-liner.
-
 CLOSING: closingText = 1-2 short paragraphs that CALL BACK to this issue's actual events in an absurd triad ("Whether you end up juggling pineapples, dancing to swamp funk, or sobbing quietly to Schubert — we fully support your weekend choices."). closingChecklist: 3-4 short ✔️-style reminders mixing practical + absurd ("Hydrate like it's your job", "Don't underestimate the power of a funnel cake"). Do NOT include the ✔️ itself in the items — the renderer adds it.
 
 SIGN-OFF: "${voice.signoff}"
@@ -175,7 +173,6 @@ Return STRICT JSON (no HTML, no prose outside the JSON):
       "closingLine": "string (bold punchy kicker)"
     }
   ],
-  "homeownerMinute": "string (the tip text, plain — no HTML)",
   "closingEmoji": "string",
   "closingHeading": "string (recap title, e.g. 'That's the scoop, crew')",
   "closingText": "string (callback triad wrapping the week)",
@@ -1279,9 +1276,18 @@ async function assembleBeehiivNewsletter(draft) {
   // real still art shows THAT (the useful information), and the reaction
   // GIF is the fallback comedy device for events without art. Giphy is
   // only queried for events that will actually render a GIF.
+  // One appearance per image URL per issue (owner 2026-07-30: "duplicate
+  // images throughout") — several events can share a source-site default
+  // og:image; the FIRST keeps the photo, repeats fall back to their
+  // reaction GIF.
+  const seenImageUrls = new Set();
   const eventShowsImage = events.map((ev) => {
     const u = safeUrl(ev.imageUrl);
-    return Boolean(u && !isLikelyGifUrl(u));
+    if (!u || isLikelyGifUrl(u)) return false;
+    const key = u.toLowerCase();
+    if (seenImageUrls.has(key)) return false;
+    seenImageUrls.add(key);
+    return true;
   });
   const eventRendersGif = (i) => !eventShowsImage[i];
   const [introCandidates, ...eventCandidates] = await Promise.all([
@@ -1325,9 +1331,6 @@ async function assembleBeehiivNewsletter(draft) {
     const tease = leaks ? `Weekend pick #${i + 1}` : markdownToHtml(ev.title);
     return `<li style="margin:0 0 6px 0;"><a href="#evt-${slugify(ev.title)}" class="dm-link" style="color:${COLORS.blue};text-decoration:none;">${escapeHtml(ev.emoji || '🎯')} <strong>${tease}</strong></a></li>`;
   });
-  if (draft.homeownerMinute) {
-    tocItems.push(`<li style="margin:0 0 6px 0;"><a href="#homeowner-minute" style="color:${COLORS.blue};text-decoration:none;font-weight:500;">🏠 Homeowner Minute</a></li>`);
-  }
   // Owner 2026-07-29: the summary line is JUST the read time — no count,
   // no geography, no "(tap for the list)".
   const tocSummary = '~5-minute read';
@@ -1488,16 +1491,6 @@ async function assembleBeehiivNewsletter(draft) {
     }
   }
 
-  // ── Homeowner Minute ──
-  if (draft.homeownerMinute) {
-    parts.push(sectionSpacer);
-    parts.push(`<a name="homeowner-minute"></a>`);
-    parts.push(`<h2 id="homeowner-minute" class="dm-chip" style="${sectionHeadingStyle(events.length)}">🏠 <strong><em>Homeowner Minute</em></strong></h2>`);
-    parts.push(`<div class="dm-box" style="margin:0 0 20px 0;padding:18px 20px;background:${COLORS.homeownerBg};border-radius:12px;border-left:4px solid ${COLORS.blue};">
-<p style="margin:0;font-family:${COLORS.font};font-size:15px;line-height:1.6;">${markdownToHtml(draft.homeownerMinute)}</p>
-</div>`);
-  }
-
   // ── Closing ──
   if (draft.closingHeading || draft.closingText) {
     parts.push(sectionSpacer);
@@ -1626,12 +1619,6 @@ function buildFlagshipTextBody(draft) {
     }
     out.push(lines.join('\n'));
   }
-  if (draft.homeownerMinute) {
-    // No appended CTA: the HTML's schedule link is wrapper furniture the
-    // operator reviewed; injecting unreviewed sales copy into the text
-    // alternative would break the zero-sell rule AND MIME equivalence.
-    out.push(`== Homeowner Minute ==\n${stripMd(draft.homeownerMinute)}`);
-  }
   if (draft.closingHeading) out.push(`== ${stripMd(draft.closingHeading)} ==`);
   if (draft.closingText) out.push(stripMd(draft.closingText));
   const checklist = Array.isArray(draft.closingChecklist) ? draft.closingChecklist : [];
@@ -1756,32 +1743,10 @@ async function createNewsletterDraft({
     ? buildPestInsiderSystemPrompt(voice, month)
     : buildFlagshipSystemPrompt(voice, month);
 
-  // Enrich the user prompt with homeowner minute topic if provided;
-  // otherwise supply RECENT topics so "vary week to week" is enforceable
-  // (the model can't avoid repeats it has never seen).
-  let enrichedPrompt = prompt;
-  if (homeownerMinuteTopic) {
-    enrichedPrompt += `\nHomeowner Minute topic: ${homeownerMinuteTopic}`;
-  } else if (typeConfig?.flagship) {
-    try {
-      // STRICTLY earlier weeks only: operators pre-plan future topics
-      // (four planned rows would displace history), and the current
-      // issue's OWN planned topic must never land in the do-not-repeat
-      // list — /draft-ai calls without homeownerMinuteTopic even when
-      // the week's calendar row has one. week_of is an ET DATE, so
-      // compare against the issue's ET date string, not the timestamp
-      // (a date < timestamp comparison would re-include same-day rows).
-      const recent = await knex('newsletter_calendar')
-        .whereNotNull('homeowner_minute_topic')
-        .where('week_of', '<', etDateString(editorialReference))
-        .orderBy('week_of', 'desc')
-        .limit(4)
-        .pluck('homeowner_minute_topic');
-      if (recent.length) {
-        enrichedPrompt += `\nRecent Homeowner Minute topics (do NOT repeat these): ${recent.join('; ')}`;
-      }
-    } catch { /* best-effort — the section still generates without history */ }
-  }
+  // Homeowner Minute RETIRED from the flagship (owner 2026-07-30) —
+  // homeownerMinuteTopic is accepted for caller compatibility but no
+  // longer reaches the prompt.
+  const enrichedPrompt = prompt;
 
   const userPrompt = `Topic / prompt: ${enrichedPrompt}
 ${audience ? `Audience: ${audience}` : ''}

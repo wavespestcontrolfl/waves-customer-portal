@@ -1846,6 +1846,20 @@ describe('uniform event treatment (owner direction 2026-07-29 v2: consistent ful
     expect(html).toMatch(/<h2 id="evt-curiosity-title-0" class="dm-chip"/);
   });
 
+  test('duplicate image urls render ONCE — repeats fall back to their GIF slot; Homeowner Minute never renders', async () => {
+    const html = await assembleBeehiivNewsletter({
+      selectedSubject: 'T',
+      homeownerMinute: 'A tip that must not render.',
+      events: [
+        mk(1, { imageUrl: 'https://cdn.example.com/shared.jpg' }),
+        mk(2, { imageUrl: 'https://cdn.example.com/shared.jpg' }),
+      ],
+    });
+    expect(html.match(/https:\/\/cdn\.example\.com\/shared\.jpg/g)).toHaveLength(1);
+    expect(html).not.toContain('Homeowner Minute');
+    expect(html).not.toContain('A tip that must not render');
+  });
+
   test('DB-locked price renders (FREE wins over priceText); labels chip line renders', async () => {
     const html = await assembleBeehiivNewsletter(draft());
     expect(html).toMatch(/🎟️ <span data-db-price="a0000001-[^"]+">From \$25<\/span>/);
@@ -1868,7 +1882,6 @@ describe('uniform event treatment (owner direction 2026-07-29 v2: consistent ful
       introText: 'Big weekend **ahead**.',
       transitionLine: "Let's get into it",
       events: [mk(1), mk(3, { isFree: true })],
-      homeownerMinute: 'Check your _screens_.',
       closingHeading: 'That is the scoop, crew',
       closingText: 'Go outside.',
       closingChecklist: ['Hydrate like it\'s your job'],
@@ -1890,7 +1903,8 @@ describe('uniform event treatment (owner direction 2026-07-29 v2: consistent ful
     expect(text).toContain("[ ] Hydrate like it's your job");
     expect(text).toContain('P.S. Forward this to a friend.');
     expect(text).not.toContain('Schedule a visit');
-    expect(text).toContain('== Homeowner Minute ==');
+    // Homeowner Minute retired from the flagship (owner 2026-07-30).
+    expect(text).not.toContain('Homeowner Minute');
     const withAddr = buildFlagshipTextBody({ events: [mk(1, { address: '123 Main St' })] });
     expect(withAddr).toContain('Venue 1, Sarasota (123 Main St)');
     expect(text).not.toContain('**');
@@ -2018,12 +2032,12 @@ describe('newsletter greeting personalization + render polish', () => {
     expect(html).not.toContain('width="100"');
   });
 
-  test('wrapNewsletter local-guide chrome uses the 2026 logo (glass footer, 44px)', () => {
+  test('wrapNewsletter local-guide chrome uses the Waves Pest Control logo (glass footer, 44px)', () => {
     // The 88px header logo was retired with the pre-glass theme (#2428);
     // the glass wrapper carries the 2026 logo in the footer at 44px.
     const { wrapNewsletter } = require('../services/email-template');
     const html = wrapNewsletter({ body: '<p>x</p>', newsletterType: 'local-weekly-fresh-events' });
-    expect(html).toContain('waves-logo-2026.png');
+    expect(html).toContain('waves-logo-pest-control.png');
     expect(html).not.toContain('/waves-logo.png');
     expect(html).toContain('width="44"');
   });

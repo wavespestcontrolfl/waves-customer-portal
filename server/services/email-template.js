@@ -207,7 +207,11 @@ function ctaButton(href, label) {
 // Classic rendering below is untouched, so the gate-off path stays
 // byte-identical to the pre-theme markup.
 
-const GLASS_LOGO_IMG = 'https://portal.wavespestcontrol.com/waves-logo-2026.png';
+// The REAL brand logo (owner 2026-07-30: the footer/masthead showed the
+// re-rendered "Lawn & Pest" art — wrong name AND wrong asset). This is
+// the website's "WAVES PEST CONTROL" mascot mark, converted to PNG for
+// email-client support and hosted by the portal.
+const GLASS_LOGO_IMG = 'https://portal.wavespestcontrol.com/waves-logo-pest-control.png';
 
 // Edition identity by newsletter type (owner directive 2026-07-28): the
 // flagship weekly masthead is "Waves Newsletter" — no "The", no subtitle,
