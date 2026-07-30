@@ -292,7 +292,13 @@ router.post('/versions/:id/publish', async (req, res, next) => {
     if (!version) return res.status(404).json({ error: 'Document template version not found' });
     await db.transaction(async (trx) => {
       await trx('document_template_versions').where({ id: version.id }).update({
-        published_at: version.published_at || trx.fn.now(),
+        // Activation IS the rollout moment: downstream consumers (e.g. the
+        // termite-agreement expired-recovery cutoff) read the ACTIVE
+        // version's published_at as "when this wording went live", so a
+        // reactivated older version must carry the reactivation time —
+        // keeping its original timestamp would let requests that
+        // deliberately expired long before the reactivation be revived.
+        published_at: trx.fn.now(),
       });
       await trx('document_templates').where({ id: version.template_id }).update({
         active_version_id: version.id,
