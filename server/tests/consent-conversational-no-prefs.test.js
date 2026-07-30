@@ -40,7 +40,7 @@ describe('conversational sends with NO notification_prefs row', () => {
     const res = await checkConsentForPurpose(
       smsInput(),
       policy,
-      { prefs: null, customer: { id: 'c1' }, lookupFailed: false, hasInboundHistory: true },
+      { prefs: null, customer: { id: 'c1' }, lookupFailed: false, hasInboundHistory: true, suppressionLoaded: true },
     );
     expect(res).toEqual({ ok: true });
   });
@@ -50,7 +50,7 @@ describe('conversational sends with NO notification_prefs row', () => {
     const res = await checkConsentForPurpose(
       smsInput(),
       policy,
-      { prefs: null, customer: { id: 'c1' }, lookupFailed: false, hasInboundHistory: false },
+      { prefs: null, customer: { id: 'c1' }, lookupFailed: false, hasInboundHistory: false, suppressionLoaded: true },
     );
     expect(res.ok).toBe(false);
     expect(res.code).toBe('NO_CONSENT_RECORD');
@@ -68,6 +68,17 @@ describe('conversational sends with NO notification_prefs row', () => {
         hasInboundHistory: true,
         suppressionLookupFailed: true,
       },
+    );
+    expect(res.ok).toBe(false);
+    expect(res.code).toBe('CONSENT_LOOKUP_FAILED');
+  });
+
+  test('suppression state never loaded (e.g. table missing): exception refuses to fire too', async () => {
+    const policy = resolvePolicy('customer', 'conversational');
+    const res = await checkConsentForPurpose(
+      smsInput(),
+      policy,
+      { prefs: null, customer: { id: 'c1' }, lookupFailed: false, hasInboundHistory: true },
     );
     expect(res.ok).toBe(false);
     expect(res.code).toBe('CONSENT_LOOKUP_FAILED');
@@ -201,61 +212,97 @@ describe('loadContactState — inbound-history evidence', () => {
   });
 
   test('formatted phones are queried in BOTH raw and canonical E.164 forms', async () => {
-    mockDb({ customer: { id: 'c1', phone: '+44 20 7946 0958' }, inboundRow: { id: 's1' } });
+    mockDb({ customer: { id: 'c1', phone: '+1 941 555 0100' }, inboundRow: { id: 's1' } });
     await loadContactState({ ...baseInput, to: '(941) 555-0100' });
     expect(smsLogPhones).toEqual(expect.arrayContaining([
-      '(941) 555-0100', '+19415550100',
-      '+44 20 7946 0958', '+442079460958',
+      '(941) 555-0100', '+19415550100', '+1 941 555 0100',
     ]));
+  });
+
+  test("customer phone that is a DIFFERENT number than input.to contributes NO evidence candidates", async () => {
+    mockDb({ customer: { id: 'c1', phone: '+44 20 7946 0958' }, inboundRow: { id: 's1' } });
+    await loadContactState({ ...baseInput, to: '(941) 555-0100' });
+    expect(smsLogPhones).toEqual(expect.arrayContaining(['(941) 555-0100', '+19415550100']));
+    expect(smsLogPhones).not.toEqual(expect.arrayContaining(['+44 20 7946 0958']));
+    expect(smsLogPhones).not.toEqual(expect.arrayContaining(['+442079460958']));
   });
 });
 
-describe('loadSuppressionState — transient failure is UNKNOWN state, not empty', () => {
+describe('loadSuppressionState — positive-load marker and canonical matching', () => {
   const db = require('../models/db');
   const { loadSuppressionState } = require('../services/messaging/validators/suppression');
 
-  test('transient lookup error stamps suppressionLookupFailed on contactState', async () => {
+  let suppressionPhones;
+
+  const mockSuppressionDb = ({ row = null, throws = null }) => {
+    suppressionPhones = null;
     db.mockImplementation(() => ({
-      where: () => ({ first: async () => { throw new Error('connection terminated'); } }),
+      whereIn: (_col, phones) => {
+        suppressionPhones = phones;
+        return {
+          where: () => ({
+            first: async () => {
+              if (throws) throw throws;
+              return row;
+            },
+          }),
+        };
+      },
     }));
+  };
+
+  test('transient lookup error stamps suppressionLookupFailed, suppressionLoaded stays unset', async () => {
+    mockSuppressionDb({ throws: new Error('connection terminated') });
     const state = await loadSuppressionState({ to: '+19415550100' }, { prefs: null });
     expect(state.suppressionLookupFailed).toBe(true);
+    expect(state.suppressionLoaded).toBeUndefined();
     expect(state.suppression).toBeUndefined();
   });
 
-  test('missing-table error keeps failing open without the flag (migration-not-applied path)', async () => {
-    db.mockImplementation(() => ({
-      where: () => ({ first: async () => { throw new Error('relation "messaging_suppression" does not exist'); } }),
-    }));
+  test('missing-table error fails open for legacy paths but never sets suppressionLoaded', async () => {
+    mockSuppressionDb({ throws: new Error('relation "messaging_suppression" does not exist') });
     const state = await loadSuppressionState({ to: '+19415550100' }, { prefs: null });
     expect(state.suppressionLookupFailed).toBeUndefined();
+    expect(state.suppressionLoaded).toBeUndefined();
   });
 
-  test('42P01 error code fails open without the flag even with a nonstandard message', async () => {
+  test('42P01 error code fails open without the flags even with a nonstandard message', async () => {
     const err = new Error('some driver wording');
     err.code = '42P01';
-    db.mockImplementation(() => ({
-      where: () => ({ first: async () => { throw err; } }),
-    }));
+    mockSuppressionDb({ throws: err });
     const state = await loadSuppressionState({ to: '+19415550100' }, { prefs: null });
     expect(state.suppressionLookupFailed).toBeUndefined();
+    expect(state.suppressionLoaded).toBeUndefined();
   });
 
-  test('an error merely MENTIONING the table (permission denied) still stamps the flag', async () => {
-    db.mockImplementation(() => ({
-      where: () => ({ first: async () => { throw new Error('permission denied for table messaging_suppression'); } }),
-    }));
+  test('an error merely MENTIONING the table (permission denied) still stamps the failure flag', async () => {
+    mockSuppressionDb({ throws: new Error('permission denied for table messaging_suppression') });
     const state = await loadSuppressionState({ to: '+19415550100' }, { prefs: null });
     expect(state.suppressionLookupFailed).toBe(true);
+    expect(state.suppressionLoaded).toBeUndefined();
   });
 
-  test('successful lookup with an active row still lands on contactState.suppression', async () => {
+  test('successful lookup sets suppressionLoaded and lands the active row', async () => {
     const row = { phone: '+19415550100', reason: 'opt_out_keyword', active: true };
-    db.mockImplementation(() => ({
-      where: () => ({ first: async () => row }),
-    }));
+    mockSuppressionDb({ row });
     const state = await loadSuppressionState({ to: '+19415550100' }, { prefs: null });
     expect(state.suppression).toEqual(row);
+    expect(state.suppressionLoaded).toBe(true);
     expect(state.suppressionLookupFailed).toBeUndefined();
+  });
+
+  test('clean no-row lookup also sets suppressionLoaded (positively empty)', async () => {
+    mockSuppressionDb({ row: null });
+    const state = await loadSuppressionState({ to: '+19415550100' }, { prefs: null });
+    expect(state.suppression).toBeUndefined();
+    expect(state.suppressionLoaded).toBe(true);
+  });
+
+  test('formatted destination queries BOTH raw and canonical E.164 suppression keys', async () => {
+    mockSuppressionDb({ row: null });
+    await loadSuppressionState({ to: '+44 20 7946 0958' }, { prefs: null });
+    expect(suppressionPhones).toEqual(expect.arrayContaining([
+      '+44 20 7946 0958', '+442079460958',
+    ]));
   });
 });

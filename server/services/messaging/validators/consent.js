@@ -83,19 +83,21 @@ async function checkConsentForPurpose(input, policy, contactState) {
       input.purpose === 'conversational' &&
       contactState
     ) {
-      // The exception only fires on POSITIVELY loaded state. Suppression
-      // fails open for recipients with a prefs row (sms_enabled still
-      // catches the common STOP case), but here the prefs row is absent —
-      // a pre-customer STOP lives ONLY in messaging_suppression, and the
-      // very inbound that recorded it also supplies hasInboundHistory. If
-      // that lookup failed we cannot rule out an active suppression, so
-      // return the retryable code instead of granting the exception
-      // (Codex P1 on 92cb96ae4).
-      if (contactState.suppressionLookupFailed) {
+      // The exception only fires on POSITIVELY loaded suppression state
+      // (suppressionLoaded is set by loadSuppressionState only when its
+      // query succeeded). Suppression fails open for recipients with a
+      // prefs row (sms_enabled still catches the common STOP case), but
+      // here the prefs row is absent — a pre-customer STOP lives ONLY in
+      // messaging_suppression (or, in the migration-not-applied state,
+      // only as the inbound sms_log row that would read as reply
+      // evidence), so unknown suppression state — transient DB error OR
+      // missing table — must return the retryable code instead of
+      // granting the exception (Codex P1 on 92cb96ae4 + P2 on 2396f5557).
+      if (contactState.suppressionLoaded !== true) {
         return {
           ok: false,
           code: 'CONSENT_LOOKUP_FAILED',
-          reason: 'Could not load messaging_suppression state (DB error during lookup) — required before the no-prefs conversational exception; retry advised',
+          reason: 'messaging_suppression state not positively loaded (lookup error or table missing) — required before the no-prefs conversational exception; retry advised',
         };
       }
       if (contactState.hasInboundHistory === true) {
@@ -274,8 +276,17 @@ async function loadContactState(input) {
     // '(941) 555-1234') that an exact match would miss — blocking the very
     // reply this evidence exists to allow (Codex P2 on 5fbf59c8b). Query
     // both the raw and toE164 forms of each candidate.
+    //
+    // Evidence must come from the ACTUAL destination: customer.phone only
+    // contributes alternate formatting when it canonicalizes to the same
+    // number as input.to. If they differ (e.g. the scheduled-replay path
+    // sends a queued to_phone after the customer changed numbers), an
+    // inbound on the customer's new number must not authorize the stale,
+    // possibly reassigned destination (Codex P2 on 2396f5557).
+    const custPhone = state.customer?.phone;
+    const sameNumber = custPhone && input.to && toE164(custPhone) === toE164(input.to);
     const phones = [...new Set(
-      [input.to, state.customer?.phone]
+      [input.to, ...(sameNumber ? [custPhone] : [])]
         .flatMap((p) => [p, toE164(p)])
         .filter(Boolean),
     )];
