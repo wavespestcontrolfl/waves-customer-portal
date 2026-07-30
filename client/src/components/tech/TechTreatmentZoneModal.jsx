@@ -412,7 +412,10 @@ export default function TechTreatmentZoneModal({
         }
       }
       const accum = lawnMode
-        ? buildOutlineAccum({ width: MAP_WIDTH, height: MAP_HEIGHT, points: finalPoints, closed, color: MIST_COLOR })
+        ? buildOutlineAccum({
+          width: MAP_WIDTH, height: MAP_HEIGHT, points: finalPoints, closed,
+          color: MIST_COLOR, spotlight: true,
+        })
         : buildSettledAccum({
           width: MAP_WIDTH, height: MAP_HEIGHT, points: finalPoints, closed,
           mistColor: MIST_COLOR, interior,

@@ -248,6 +248,12 @@ const MIST_LIGHT_MIX = 0.45;
 // Interior wash alphas — the baked footprint fill for interior-spray traces.
 const INTERIOR_FILL_ALPHA = 0.12;
 const INTERIOR_FILL_LIGHT_ALPHA = 0.05;
+// Lawn spotlight (owner 2026-07-30 "the lawn should focus on the lawn"):
+// everything OUTSIDE the traced boundary dims so the turf is the bright
+// subject — deliberately NOT a fill inside the loop (the house sits inside
+// it; codex P1 #3038 r3).
+const SPOTLIGHT_DIM_ALPHA = 0.35;
+const SPOTLIGHT_DIM_RGB = 'rgba(2,10,18';
 const PULSE_MS = 1200;
 const BREATH_MS = 2400;
 
@@ -484,6 +490,29 @@ export function startSprayEngine({
     target.fill();
   };
 
+  // Lawn spotlight: dim the frame OUTSIDE the loop (even-odd fill of the
+  // full rect minus the traced polygon). Closed loops only.
+  const canSpotlight = outlineMode && closed && points.length > 2;
+  const dimOutside = (target, alpha) => {
+    if (!canSpotlight || alpha <= 0) return;
+    target.beginPath();
+    target.rect(0, 0, width, height);
+    target.moveTo(points[0].x, points[0].y);
+    for (let i = 1; i < points.length; i += 1) target.lineTo(points[i].x, points[i].y);
+    target.closePath();
+    target.fillStyle = `${SPOTLIGHT_DIM_RGB},${alpha})`;
+    target.fill('evenodd');
+  };
+
+  // drawBase with the spotlight dim UNDER the outline.
+  const drawBaseSpotlit = (alpha) => {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.setTransform(viewScale, 0, 0, viewScale, 0, 0);
+    dimOutside(ctx, alpha);
+    ctx.drawImage(accum, 0, 0);
+  };
+
   if (reducedMotion) {
     if (!outlineMode) {
       stampBand(0, total);
@@ -492,7 +521,7 @@ export function startSprayEngine({
         fillPath(actx, rgba(mistLight, INTERIOR_FILL_LIGHT_ALPHA));
       }
     }
-    lastFrame = () => drawBase();
+    lastFrame = outlineMode ? () => drawBaseSpotlit(SPOTLIGHT_DIM_ALPHA) : () => drawBase();
     lastFrame();
     onStatus({ phase: 'settled', pct: 1, feet: totalFeet });
     onSettled(accum);
@@ -545,12 +574,20 @@ export function startSprayEngine({
       const p = pointAt(dist);
       if (outlineMode) {
         // Lawn: the outline draws itself — growing glow + white casing +
-        // brand-blue core with the mascot riding the tip. No smoke, no band.
+        // brand-blue core with a soft glow tip. No mascot here (owner
+        // 2026-07-30: lawn must not read like a pest spray), no smoke.
         clearView();
         strokePartial(dist, 16, rgba(mist, 0.28));
         strokePartial(dist, 9, rgba([255, 255, 255], 0.6));
         strokePartial(dist, 4.5, rgba(mist, 0.92));
-        drawHead(p.x, p.y);
+        const tip = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, 26);
+        tip.addColorStop(0, 'rgba(255,255,255,0.85)');
+        tip.addColorStop(0.5, rgba(mistLight, 0.5));
+        tip.addColorStop(1, rgba(mist, 0));
+        ctx.fillStyle = tip;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 26, 0, Math.PI * 2);
+        ctx.fill();
       } else {
         if (dist > paintedDist) {
           stampBand(paintedDist, dist);
@@ -596,7 +633,9 @@ export function startSprayEngine({
       }
       puffs = puffs.filter((q) => q.age < q.life);
 
-      drawBase();
+      // Lawn spotlight fades in with the completion sweep.
+      if (outlineMode) drawBaseSpotlit(SPOTLIGHT_DIM_ALPHA * t);
+      else drawBase();
       for (const puff of puffs) drawPuff(puff);
 
       // Interior wash floods in during the one-shot pulse sweep.
@@ -626,18 +665,21 @@ export function startSprayEngine({
       // outline by ruling, so the line is the subject there).
       phaseT += dt * 1000;
       const wave = 0.5 + 0.5 * Math.sin((2 * Math.PI * phaseT) / BREATH_MS - Math.PI / 2);
-      drawBase();
       if (outlineMode) {
+        drawBaseSpotlit(SPOTLIGHT_DIM_ALPHA);
         strokePath(16, rgba(mist, 0.06 + 0.2 * wave));
         strokePath(4.5, rgba(mist, 0.2 + 0.55 * wave));
       } else {
+        drawBase();
         if (fillInterior) fillPath(ctx, rgba(mist, INTERIOR_FILL_ALPHA * (0.6 + 0.4 * wave)));
         strokePath(BAND_RADIUS * 2 + 12, rgba(mist, 0.04 + 0.16 * wave));
         strokePath(BAND_RADIUS, rgba(mistLight, 0.06 + 0.18 * wave));
       }
     }
 
-    lastFrame = drawBase;
+    lastFrame = outlineMode && phase !== 'spraying'
+      ? () => drawBaseSpotlit(SPOTLIGHT_DIM_ALPHA)
+      : drawBase;
     raf = requestAnimationFrame(frame);
   };
   raf = requestAnimationFrame(frame);
@@ -661,7 +703,7 @@ export function startSprayEngine({
 // yard with the house inside it, and a filled polygon would permanently
 // shade the roof as "treated turf" in the snapshot (codex P1 #3038 r3).
 // The customer report animates the pulse; this is the settled frame.
-export function buildOutlineAccum({ width, height, points, closed, color }) {
+export function buildOutlineAccum({ width, height, points, closed, color, spotlight = false }) {
   const rgb = hexToRgb(color);
   const accum = document.createElement('canvas');
   accum.width = width;
@@ -674,6 +716,19 @@ export function buildOutlineAccum({ width, height, points, closed, color }) {
     for (let i = 1; i < points.length; i += 1) ctx.lineTo(points[i].x, points[i].y);
     if (closed && points.length > 2) ctx.closePath();
   };
+  // Spotlight (owner 2026-07-30 "focus on the lawn"): bake the outside-dim
+  // into the snapshot so the customer report shows the lawn as the bright
+  // subject. Closed loops only; still no fill INSIDE the loop (codex P1
+  // #3038 r3 — the house sits in there).
+  if (spotlight && closed && points.length > 2) {
+    ctx.beginPath();
+    ctx.rect(0, 0, width, height);
+    ctx.moveTo(points[0].x, points[0].y);
+    for (let i = 1; i < points.length; i += 1) ctx.lineTo(points[i].x, points[i].y);
+    ctx.closePath();
+    ctx.fillStyle = `${SPOTLIGHT_DIM_RGB},${SPOTLIGHT_DIM_ALPHA})`;
+    ctx.fill('evenodd');
+  }
   ctx.lineJoin = 'round';
   ctx.lineCap = 'round';
   trace();
