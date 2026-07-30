@@ -8,6 +8,7 @@ const { sweepUngeocodedCustomers } = require('../services/geocoder');
 
 function installDb({ listRows, customersById }) {
   const updates = [];
+  mockDb.transaction = jest.fn(async (fn) => fn(mockDb));
   mockDb.mockImplementation(() => {
     const chain = {
       whereNull: jest.fn(() => chain),

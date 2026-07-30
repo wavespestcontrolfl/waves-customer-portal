@@ -173,28 +173,30 @@ async function sweepUngeocodedCustomers({ limit = 25 } = {}) {
         // geocoded is still the customer's address and both coordinates
         // still hold the values we read (either may be half-set — e.g.
         // latitude present, longitude null). A raced row counts as
-        // unresolved and retries next pass.
-        let guarded = db('customers').where({ id: row.id });
-        for (const [col, val] of [['latitude', c.latitude], ['longitude', c.longitude]]) {
-          guarded = val == null ? guarded.whereNull(col) : guarded.where(col, val);
-        }
-        for (const col of ['address_line1', 'city', 'state', 'zip']) {
-          guarded = c[col] == null ? guarded.whereNull(col) : guarded.where(col, c[col]);
-        }
-        const written = await guarded.update({
-          latitude: location.lat,
-          longitude: location.lng,
-          updated_at: new Date(),
+        // unresolved and retries next pass. The customer write and the
+        // primary-property mirror (repo convention for every re-geocode
+        // path) share one transaction so a sync failure rolls both back
+        // and the customer stays sweep-eligible.
+        const written = await db.transaction(async (trx) => {
+          let guarded = trx('customers').where({ id: row.id });
+          for (const [col, val] of [['latitude', c.latitude], ['longitude', c.longitude]]) {
+            guarded = val == null ? guarded.whereNull(col) : guarded.where(col, val);
+          }
+          for (const col of ['address_line1', 'city', 'state', 'zip']) {
+            guarded = c[col] == null ? guarded.whereNull(col) : guarded.where(col, c[col]);
+          }
+          const count = await guarded.update({
+            latitude: location.lat,
+            longitude: location.lng,
+            updated_at: new Date(),
+          });
+          if (count) {
+            await require('./customer-properties').syncPrimaryCoordsFromCustomer(row.id, trx);
+          }
+          return count;
         });
-        if (written) {
-          results.geocoded += 1;
-          // Repo convention for every re-geocode path: mirror fresh coords
-          // onto the primary customer_properties row so property-linked
-          // bookings can stamp them.
-          await require('./customer-properties').syncPrimaryCoordsFromCustomer(row.id);
-        } else {
-          results.unresolved += 1;
-        }
+        if (written) results.geocoded += 1;
+        else results.unresolved += 1;
       } else {
         results.unresolved += 1;
         // Only permanent failures (ZERO_RESULTS for this exact address) are
