@@ -571,7 +571,9 @@ describe('v9 — natural voice + owner-approved voice profile', () => {
     expect(CUSTOMER_SMS_HOUSE_VOICE).toMatch(/real person/i);
     // unchanged hard lines survive the rewrite
     expect(CUSTOMER_SMS_HOUSE_VOICE).toMatch(/EMOJIS: Zero/);
-    expect(CUSTOMER_SMS_HOUSE_VOICE).toMatch(/Never quote exact prices/);
+    // v10 owner additions: anti-AI-tic lines (em dashes, filler, performed warmth)
+    expect(CUSTOMER_SMS_HOUSE_VOICE).toMatch(/No em dashes/);
+    expect(CUSTOMER_SMS_HOUSE_VOICE).toMatch(/Never perform enthusiasm/);
     // and the live assistant + drafter still share the exact text
     expect(AGENT_CONFIG.system).toContain(CUSTOMER_SMS_HOUSE_VOICE);
     expect(buildSystemPrompt()).toContain(CUSTOMER_SMS_HOUSE_VOICE);
