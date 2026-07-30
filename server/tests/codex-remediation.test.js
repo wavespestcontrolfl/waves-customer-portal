@@ -91,9 +91,10 @@ function makeDb(initial = {}) {
   }
   // Emulates the two raw statements these tests reach.
   db.raw = async (sql, params) => {
-    // armPushHold: insert-or-arm, COALESCE keeps an existing hold, terminal rows
-    // untouched.
-    if (/sync_pending_sha = COALESCE/.test(sql)) {
+    // armPushHold: insert-or-arm; a GENUINE unsynced hold is kept, while a
+    // hold that already equals synced_sha (completed, release lost) is replaced by
+    // the fresh sentinel; terminal rows untouched.
+    if (/sync_pending_sha = CASE/.test(sql)) {
       const [n, branch, sentinel] = params;
       tables.codex_remediation_state = tables.codex_remediation_state || [];
       const t = tables.codex_remediation_state;
@@ -108,7 +109,9 @@ function makeDb(initial = {}) {
       if (row.status === 'merged' || row.status === 'closed') return { rowCount: 0 };
       row.branch = branch;
       row.status = 'remediating';
-      row.sync_pending_sha = row.sync_pending_sha ?? sentinel; // COALESCE
+      const genuineHold = row.sync_pending_sha != null
+        && row.sync_pending_sha !== (row.synced_sha ?? null);
+      row.sync_pending_sha = genuineHold ? row.sync_pending_sha : sentinel;
       row.updated_at = new Date();
       return { rowCount: 1 };
     }
@@ -3237,5 +3240,66 @@ describe('synced_sha recovers a lost hold release', () => {
     const gh = makeGh({ reviewComments: [finding({ body: p2Body('a') })], reviews: [codexReview()] });
     const r = await rem.p2OnlyMergeEligible(5, HEAD, { db, gh });
     expect(r.eligible).toBe(true);
+  });
+});
+
+// Arming must replace an ALREADY-SYNCED hold (completed sync, lost release) with the
+// fresh sentinel. A plain COALESCE preserved it, and the deferred recovery — which
+// clears when pending == synced — would then erase the hold guarding the new push.
+describe('arming replaces a completed hold but preserves a genuine one', () => {
+  test('an already-synced hold is replaced by the fresh sentinel', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const db = makeDb({
+      codex_remediation_state: [{
+        pr_number: 5, rounds: 1, status: 'parked', parked_head_sha: 'oldhead111',
+        sync_pending_sha: 'completedX', synced_sha: 'completedX', park_phase: 'pre_push',
+      }],
+    });
+    const gh = makeGh();
+    let atPushTime = null;
+    const origPut = gh.putFile;
+    gh.putFile = async (args) => {
+      atPushTime = { ...db._tables.codex_remediation_state.find((x) => x.pr_number === 5) };
+      return origPut(args);
+    };
+    await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
+    // Fresh sentinel, NOT the completed hold — so the imminent push is guarded and
+    // the deferred recovery can no longer match (pending !== synced).
+    expect(atPushTime.sync_pending_sha).toBe(`push_in_flight:${HEAD}`);
+  });
+
+  test('a genuine UNSYNCED hold is still preserved', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const db = makeDb({
+      codex_remediation_state: [{
+        pr_number: 5, rounds: 1, status: 'parked', parked_head_sha: 'oldhead111',
+        sync_pending_sha: 'unsyncedB', synced_sha: 'somethingelse', park_phase: 'pre_push',
+      }],
+    });
+    const gh = makeGh();
+    let atPushTime = null;
+    const origPut = gh.putFile;
+    gh.putFile = async (args) => {
+      atPushTime = { ...db._tables.codex_remediation_state.find((x) => x.pr_number === 5) };
+      return origPut(args);
+    };
+    await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
+    expect(atPushTime.sync_pending_sha).toBe('unsyncedB');
+  });
+
+  test('the deferred release is a CAS — a re-armed row is not cleared', async () => {
+    const db = makeDb({
+      codex_remediation_state: [{
+        pr_number: 5, rounds: 1, status: 'remediating',
+        sync_pending_sha: `push_in_flight:${HEAD}`, synced_sha: 'completedX',
+        updated_at: new Date().toISOString(),
+      }],
+    });
+    // pending is a fresh sentinel, synced names an older commit → no release, and
+    // the fresh in-flight hold stands (age gate holds it too).
+    const h = await rem.syncPendingHold(5, { db, headSha: HEAD, branch: 'content/blog-x' });
+    expect(h.pending).toBe(true);
+    expect(db._tables.codex_remediation_state.find((x) => x.pr_number === 5).sync_pending_sha)
+      .toBe(`push_in_flight:${HEAD}`);
   });
 });

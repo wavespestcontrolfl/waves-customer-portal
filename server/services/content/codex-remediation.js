@@ -313,11 +313,13 @@ async function syncPendingHold(prNumber, {
   // forever. No replay and no inference, just the release that failed earlier.
   const syncedSha = String(state.synced_sha || '').trim().toLowerCase();
   if (syncedSha && syncedSha === sha) {
-    if (await retryWrite(db, prNumber, { sync_pending_sha: null }, 2, 'deferred sync-hold release')) {
+    if (await releaseSyncedHoldCas(db, prNumber, sha)) {
       logger.info(`[codex-remediation] released a stuck sync hold on PR #${prNumber} from the merge gate: the sync for ${shortSha(sha)} was already recorded complete`);
       return { pending: false };
     }
-    return { pending: true, sha, reason: `the sync for ${shortSha(sha)} completed but its hold could not be released — retrying next tick` };
+    // Either the write failed or a concurrent round re-armed the row. Both mean
+    // "do not merge on this snapshot"; the next tick reads the new state.
+    return { pending: true, sha, reason: `the sync for ${shortSha(sha)} completed but its hold was not released (write failed or the row was re-armed) — re-checking next tick` };
   }
 
   const head = String(headSha || '').trim().toLowerCase();
@@ -1241,12 +1243,19 @@ function reviewRequestedForHead(issueComments = [], headSha = null) {
  * Arm a round for its push: mark 'remediating' and take the sync hold, in ONE
  * statement.
  *
- * The hold uses COALESCE, so an EXISTING pending SHA is preserved rather than
- * replaced. Overwriting it lost real state: if push B never synced, a human then
- * advanced the branch to C, and remediation's push from C failed before
+ * An existing pending SHA is preserved rather than replaced, but ONLY when it is a
+ * genuine unsynced hold. Overwriting one lost real state: if push B never synced, a
+ * human then advanced the branch to C, and remediation's push from C failed before
  * committing, the new in-flight sentinel would later be reconciled away as
  * "nothing landed" — forgetting that B is still unsynced, letting C merge and a
  * rebuild resurrect the pre-B portal content.
+ *
+ * A hold that already EQUALS synced_sha is different: it is a completed sync whose
+ * release write was lost, so it must NOT be preserved. A plain COALESCE kept it,
+ * and then the deferred recovery (which clears when pending == synced) would erase
+ * the hold this arm was supposed to install — leaving the imminent push unguarded.
+ * The CASE installs the fresh sentinel in that case, which also makes pending no
+ * longer equal synced, so the recovery path can no longer fire against it.
  *
  * The new commit only becomes the hold once a push is CONFIRMED (the push-time
  * write), and the hold clears only after a content sync succeeds — which resolves
@@ -1263,7 +1272,13 @@ async function armPushHold(db, prNumber, branch, preHeadSha) {
      ON CONFLICT (pr_number) DO UPDATE
        SET branch = EXCLUDED.branch,
            status = 'remediating',
-           sync_pending_sha = COALESCE(codex_remediation_state.sync_pending_sha, EXCLUDED.sync_pending_sha),
+           sync_pending_sha = CASE
+             WHEN codex_remediation_state.sync_pending_sha IS NOT NULL
+              AND codex_remediation_state.sync_pending_sha
+                  IS DISTINCT FROM codex_remediation_state.synced_sha
+             THEN codex_remediation_state.sync_pending_sha
+             ELSE EXCLUDED.sync_pending_sha
+           END,
            updated_at = NOW()
        WHERE codex_remediation_state.status NOT IN ('merged', 'closed')`,
     [prNumber, branch, inFlightSentinel(preHeadSha)],
@@ -1291,6 +1306,31 @@ async function releaseSyncHold(db, prNumber, newHead, attempts = 3) {
     logger.error(`[codex-remediation] could not release the sync hold for PR #${prNumber} after ${attempts} attempts — the fix commit ${shortSha(newHead)} IS synced${marked ? ', and that is recorded, so a later tick will clear the hold automatically' : ' but the marker write ALSO failed, so the hold needs clearing by hand after checking the portal row'}`);
   }
   return released;
+}
+
+/**
+ * Clear a hold ONLY while it still equals the recorded completed sync.
+ *
+ * A compare-and-set, because the decision is made from a snapshot: a concurrent
+ * armPushHold can install a fresh sentinel in between, and a blind clear would erase
+ * the hold guarding that new push. Matching both columns means the row must still be
+ * in the exact "synced but unreleased" state we judged.
+ */
+async function releaseSyncedHoldCas(db, prNumber, sha, attempts = 2) {
+  for (let i = 1; i <= attempts; i += 1) {
+    try {
+      const n = await db('codex_remediation_state')
+        .where({ pr_number: prNumber, sync_pending_sha: sha, synced_sha: sha })
+        .update({ sync_pending_sha: null, updated_at: new Date() });
+      return n > 0;
+    } catch (e) {
+      if (i === attempts) {
+        logger.warn(`[codex-remediation] deferred sync-hold release failed for PR #${prNumber} after ${attempts} attempts: ${e.message}`);
+        return false;
+      }
+    }
+  }
+  return false;
 }
 
 async function retryWrite(db, prNumber, patch, attempts, label) {
@@ -1496,7 +1536,7 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
         // Not ambiguous: the sync for THIS commit is recorded as complete, so only
         // the release write was lost. Clear the hold — nothing to replay, nothing
         // to infer. This is the automatic recovery the marker exists for.
-        if (await retryWrite(db, prNumber, { sync_pending_sha: null }, 2, 'deferred sync-hold release')) {
+        if (await releaseSyncedHoldCas(db, prNumber, pendingSha)) {
           logger.info(`[codex-remediation] released a stuck sync hold on PR #${prNumber}: the sync for ${shortSha(pendingSha)} was already recorded complete`);
         }
       } else if (pendingSha) {

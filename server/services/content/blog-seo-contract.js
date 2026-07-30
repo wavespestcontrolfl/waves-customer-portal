@@ -53,6 +53,33 @@ function hublessService(serviceKey) {
  * /lawn-care-venice-fl/ — the right service, the wrong town, and the generic
  * city-reason check waves it through too.
  */
+/** The normalized service key for a brief (frontmatter fallback mirrors the contract builder). */
+function serviceKeyFor(brief = {}) {
+  return normalizeService(brief.service);
+}
+
+/**
+ * Does the contract include the brief's own service+city route? Shared with the
+ * completion gate's stand-in rule, so the queue flag and the gate agree.
+ */
+function hasCityServiceLink(contract, brief) {
+  const links = [
+    ...(Array.isArray(contract.includedInternalLinks) ? contract.includedInternalLinks : []),
+    ...(Array.isArray(contract.internalLinks) ? contract.internalLinks : []),
+  ];
+  if (!links.length) return false;
+  const service = serviceKeyFor(brief);
+  const exact = cityServiceRoute(service, brief.city);
+  if (exact) {
+    const want = exact.replace(/\/$/, '');
+    return links.some((l) => String(l.url || '').replace(/\/$/, '') === want);
+  }
+  const slug = CITY_SERVICE_SLUG[service];
+  if (!slug) return false;
+  const anyCity = new RegExp(`^/${slug}-[a-z][a-z0-9-]*-fl/?$`);
+  return links.some((l) => anyCity.test(String(l.url || '')));
+}
+
 function cityServiceRoute(serviceKey, city) {
   const slug = CITY_SERVICE_SLUG[serviceKey];
   const citySlug = slugify(city);
@@ -256,7 +283,16 @@ function validateBlogSeoContract(contract = {}, { brief = {} } = {}) {
   }
 
   if (brief.city && !hasRequiredLink(contract.internalLinks, 'city')) reviewFlags.add('missing_city_link');
-  if (brief.service && !hasRequiredLink(contract.internalLinks, 'service')) reviewFlags.add('missing_service_link');
+  // Same carve-out the completion gate applies: a hubless vertical (lawn, tree &
+  // shrub) has no hub-level service page, so its own city-service route IS the
+  // service link. Without this, a compliant hubless draft passes the gate but still
+  // shows reviewFlags: ['missing_service_link'] in the autonomous review queue —
+  // a permanent false alarm on every lawn and tree/shrub post.
+  const hublessServiceCityLink = hublessService(serviceKeyFor(brief))
+    && hasCityServiceLink(contract, brief);
+  if (brief.service && !hasRequiredLink(contract.internalLinks, 'service') && !hublessServiceCityLink) {
+    reviewFlags.add('missing_service_link');
+  }
   if (!hasRequiredLink(contract.internalLinks, 'conversion')) reviewFlags.add('missing_conversion_cta');
   if (isPestPracticeTopic(brief) && !pestPracticesComplete(contract.pestPractices)) {
     reviewFlags.add('missing_pest_practices');
