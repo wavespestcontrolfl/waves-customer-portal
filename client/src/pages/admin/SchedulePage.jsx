@@ -1737,9 +1737,14 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     setSaving(false);
   };
 
-  const canCancelAppointment = !["completed", "cancelled", "skipped"].includes(
-    String(service.status || "").toLowerCase(),
-  );
+  // no_show is terminal on the server too (the status route 409s a
+  // no_show → cancelled transition) — don't offer a cancel that must fail.
+  const canCancelAppointment = ![
+    "completed",
+    "cancelled",
+    "skipped",
+    "no_show",
+  ].includes(String(service.status || "").toLowerCase());
 
   const handleCancelAppointment = async () => {
     if (cancelling) return;

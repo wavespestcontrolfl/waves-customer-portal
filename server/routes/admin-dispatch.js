@@ -10479,6 +10479,11 @@ router.delete('/:serviceId/recap-media/:mediaId', async (req, res, next) => {
 });
 
 module.exports = router;
+// Shared with admin-schedule's update-details opt-in reschedule notice, so
+// its failed-send compensation is the same guarded re-arm this route uses
+// (never a diverging local copy).
+module.exports.captureReminderGuards = captureReminderGuards;
+module.exports.rearmRescheduleReminderWindows = rearmRescheduleReminderWindows;
 module.exports._test = {
   lawnAssessmentCompletionBlockPayload,
   preflightLawnAssessmentCompletion,

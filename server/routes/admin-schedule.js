@@ -4126,9 +4126,13 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 // IS the customer's message.
                 const reminderBefore = await db('appointment_reminders')
                   .where({ scheduled_service_id: id })
-                  .first('id', 'confirmation_sent');
-                await AppointmentReminders.handleReschedule(id, reminderSyncTime, { sendNotification: bulkNotify });
-                if (!bulkNotify && reminderBefore && !reminderBefore.confirmation_sent) {
+                  .first('id', 'confirmation_sent', 'suppressed_by_sibling');
+                // A sibling-suppressed row's slot OWNER carries the customer
+                // messaging — sending here too would text the customer once
+                // per sibling for one slot. Suppressed rows move silently.
+                const notifyThisRow = bulkNotify && !!reminderBefore && !reminderBefore.suppressed_by_sibling;
+                await AppointmentReminders.handleReschedule(id, reminderSyncTime, { sendNotification: notifyThisRow });
+                if (!notifyThisRow && reminderBefore && !reminderBefore.confirmation_sent) {
                   await db('appointment_reminders')
                     .where({ id: reminderBefore.id })
                     .update({ confirmation_sent: false, confirmation_sent_at: null });
@@ -5504,6 +5508,9 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       notificationSent = false;
       notificationError = null;
       const AppointmentReminders = require('../services/appointment-reminders');
+      const { captureReminderGuards, rearmRescheduleReminderWindows } = require('./admin-dispatch');
+      const noticeDate = String(scheduleMoveTimeForNotice).split('T')[0];
+      const noticeStart = String(scheduleMoveTimeForNotice).split('T')[1];
       try {
         // Cover any already-due reminder window before sending so the 15-min
         // cron can't fire a day-before reminder in the gap between the commit
@@ -5516,6 +5523,10 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       } catch (e) {
         logger.warn(`[schedule/update-details] reminder cover before reschedule notice failed for ${req.params.id}: ${e.message}`);
       }
+      // Snapshot the just-covered reminder state BEFORE the send attempt —
+      // the no-send re-arm below guards on it so it can't stomp a newer
+      // reschedule landing during a slow send.
+      const reminderGuards = await captureReminderGuards(req.params.id);
       try {
         const svc = await db('scheduled_services')
           .where('scheduled_services.id', req.params.id)
@@ -5527,12 +5538,16 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         } else {
           const apptTime = parseETDateTime(scheduleMoveTimeForNotice);
           const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
+          const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
           const body = await renderRequiredSmsTemplate('appointment_rescheduled', {
             first_name: svc.first_name || 'there',
             service_type: svc.service_type || 'service',
             day: formatETDay(apptTime),
             date: formatETDate(apptTime),
-            time: formatETTime(apptTime),
+            // Customer-facing time is ALWAYS the 2-hour arrival window from
+            // the start — never the exact start or the duration-driven
+            // window_end (owner directive; see utils/sms-time-format).
+            time: formatSmsTimeRange(arrivalWindowRange(noticeStart)) || formatETTime(apptTime),
           }, {
             workflow: 'schedule_update_reschedule',
             entity_type: 'scheduled_service',
@@ -5548,6 +5563,20 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             customerId: svc.customer_id,
             identityTrustLevel: 'phone_matches_customer',
             metadata: { original_message_type: 'reschedule_confirmation' },
+            // Final recheck before the provider handoff: a concurrent move
+            // that won the race means this message's date/window is stale —
+            // abort rather than text obsolete details (the winning move owns
+            // the customer messaging).
+            preDispatchCheck: async () => {
+              const row = await db('scheduled_services')
+                .where({ id: req.params.id })
+                .first('scheduled_date', 'window_start');
+              const stillDate = row && normalizeDateOnly(row.scheduled_date) === noticeDate;
+              const stillStart = row && normalizeHHMM(row.window_start) === normalizeHHMM(noticeStart);
+              return stillDate && stillStart
+                ? { ok: true }
+                : { ok: false, code: 'appointment_moved', reason: 'appointment changed again before the reschedule text was sent' };
+            },
           });
           notificationSent = !(msg?.blocked || msg?.sent === false);
           if (!notificationSent) notificationError = msg?.code || msg?.reason || 'blocked';
@@ -5558,6 +5587,15 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       } catch (e) {
         notificationError = e.message;
         logger.warn(`[schedule/update-details] edit committed for ${req.params.id}, but reschedule SMS failed: ${e.message}`);
+      }
+      if (!notificationSent) {
+        // The covered windows must not survive a send that never happened —
+        // re-arm them (guarded) so the cron's fallback reminder still
+        // delivers the new time. Same compensation the dispatch route runs.
+        await rearmRescheduleReminderWindows(reminderGuards, [{
+          scheduledServiceId: req.params.id,
+          appointmentTime: parseETDateTime(scheduleMoveTimeForNotice),
+        }]);
       }
     }
 
