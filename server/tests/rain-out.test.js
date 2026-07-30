@@ -595,6 +595,105 @@ describe('rain-out service', () => {
     });
   });
 
+  describe('rain_out_moved_v3 (GATE_RAINOUT_MOVE_BANNER)', () => {
+    afterEach(() => { delete process.env.GATE_RAINOUT_MOVE_BANNER; });
+
+    function wireSingle() {
+      wireDb({
+        scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) })],
+      });
+    }
+
+    const COMMIT_ARGS = {
+      serviceId: 'svc-1',
+      technicianId: 'tech-1',
+      reasonCode: 'weather_rain',
+      scope: 'job',
+      target: { date: '2026-06-11', window: { start: '13:00', end: '14:00' } },
+      notifyCustomer: true,
+    };
+
+    test('gate on: renders the short v3 template with the link clause and stamps the v3 kill-switch key', async () => {
+      process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+      wireSingle();
+
+      const result = await RainOut.commit(COMMIT_ARGS);
+
+      expect(result.ok).toBe(true);
+      expect(renderSmsTemplate).toHaveBeenCalledTimes(1);
+      expect(renderSmsTemplate.mock.calls[0][0]).toBe('rain_out_moved_v3');
+      const vars = renderSmsTemplate.mock.calls[0][1];
+      // Short copy: the detail moved onto the /reschedule banner — no
+      // better-day / efficacy / forecast clauses in the SMS anymore.
+      expect(vars.link_clause).toBe(' New time, forecast & other options: https://waves.test/r/tok123');
+      expect(vars.weather_lead).toBeDefined();
+      expect(vars.new_option).toContain('1:00 PM - 3:00 PM');
+      expect(vars.better_day_clause).toBeUndefined();
+      expect(vars.efficacy_clause).toBeUndefined();
+      expect(vars.forecast_clause).toBeUndefined();
+      expect(sendCustomerMessage.mock.calls[0][0].metadata).toMatchObject({
+        original_message_type: 'rain_out_moved_v3',
+      });
+    });
+
+    test('gate on, no reschedule link: the clause degrades to reply-to-this-message', async () => {
+      process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+      wireSingle();
+      buildRescheduleLink.mockResolvedValueOnce({ url: null });
+
+      await RainOut.commit(COMMIT_ARGS);
+
+      expect(renderSmsTemplate.mock.calls[0][1].link_clause)
+        .toBe(' Need a different time? Reply to this message.');
+    });
+
+    test('gate on, ABSENT v3 row: falls back to the v2 render and stamps the v2 key', async () => {
+      process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+      wireDb({
+        scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) })],
+        // v3 render nulls and the row is truly gone (rolled-back migration).
+        sms_templates: [chain({ first: jest.fn().mockResolvedValue(undefined) })],
+      });
+      renderSmsTemplate.mockResolvedValueOnce(null);
+
+      const result = await RainOut.commit(COMMIT_ARGS);
+
+      expect(result.results[0].smsSent).toBe(true);
+      expect(renderSmsTemplate).toHaveBeenCalledTimes(2);
+      expect(renderSmsTemplate.mock.calls[1][0]).toBe('rain_out_moved_v2');
+      expect(sendCustomerMessage.mock.calls[0][0].metadata).toMatchObject({
+        original_message_type: 'rain_out_moved_v2',
+      });
+    });
+
+    test('gate on, DISABLED v3 row is the kill switch — no v2 reroute, no SMS', async () => {
+      process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+      wireDb({
+        scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) })],
+        // v3 render nulls but the row EXISTS (admin disabled it).
+        sms_templates: [chain({ first: jest.fn().mockResolvedValue({ id: 'tpl-v3' }) })],
+      });
+      renderSmsTemplate.mockResolvedValueOnce(null);
+
+      const result = await RainOut.commit(COMMIT_ARGS);
+
+      expect(result.results[0]).toMatchObject({ ok: true, smsSent: false, smsReason: 'missing_template' });
+      expect(renderSmsTemplate).toHaveBeenCalledTimes(1);
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    test('gate off: v3 is never rendered — v2 stays the default', async () => {
+      wireSingle();
+
+      await RainOut.commit(COMMIT_ARGS);
+
+      expect(renderSmsTemplate.mock.calls[0][0]).toBe('rain_out_moved_v2');
+      expect(sendCustomerMessage.mock.calls[0][0].metadata).toMatchObject({
+        original_message_type: 'rain_out_moved_v2',
+      });
+    });
+  });
+
   describe('commit — route scope', () => {
     const ROUTE_JOBS = [
       { id: 'svc-2', status: 'confirmed', scheduled_date: '2026-06-11', window_start: '11:30', window_end: '13:30', customer_id: 'cust-2', service_type: 'Lawn Care' },

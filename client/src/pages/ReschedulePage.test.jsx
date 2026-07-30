@@ -449,3 +449,74 @@ describe('ReschedulePage Waves AI search', () => {
     expect(screen.queryByText('Sunday, July 12')).not.toBeInTheDocument();
   });
 });
+
+describe('ReschedulePage weather-move banner', () => {
+  const weatherMove = {
+    reasonCode: 'weather_rain',
+    from: { date: '2026-07-09', windowStart: '12:00' },
+    to: { date: '2026-07-10', windowStart: '09:00' },
+    fromChance: 80,
+    toChance: 15,
+  };
+
+  it('renders the was/now story, app badges, and why-the-move when the payload carries weatherMove', async () => {
+    stubFetch({ get: jsonResponse(reschedulablePayload({ weatherMove })) });
+
+    renderPage();
+
+    expect(await screen.findByText('Moved for weather')).toBeInTheDocument();
+    expect(screen.getByText(/Hi Pat — rain moved your pest control to a dry window/)).toBeInTheDocument();
+    // Matched Was/Now rows with the day-level rain chances.
+    expect(screen.getByText('Was')).toBeInTheDocument();
+    expect(screen.getByText('Now')).toBeInTheDocument();
+    expect(screen.getByText(/80% rain/)).toBeInTheDocument();
+    expect(screen.getByText(/15% rain/)).toBeInTheDocument();
+    // Arrival windows quote the 2-hour promise from each start.
+    expect(screen.getByText('Arrival 12:00 PM–2:00 PM')).toBeInTheDocument();
+    expect(screen.getByText('Arrival 9:00 AM–11:00 AM')).toBeInTheDocument();
+    // Waves-app download block with both store badges.
+    expect(screen.getByText('Download the Waves app')).toBeInTheDocument();
+    // Anchor + its role="img" SVG both carry the store label.
+    expect(screen.getAllByLabelText('Download on the App Store').length).toBeGreaterThan(0);
+    expect(screen.getAllByLabelText('Get it on Google Play').length).toBeGreaterThan(0);
+    // Rain gets the bonding explainer, collapsed by default.
+    expect(screen.getByText('Why the move?')).toBeInTheDocument();
+    expect(screen.getByText(/microencapsulated/)).toBeInTheDocument();
+    // The hero reframes: new time already confirmed, page is optional.
+    expect(screen.getByText('Want a different time instead?')).toBeInTheDocument();
+  });
+
+  it('renders nothing weather-related when the payload has no weatherMove', async () => {
+    stubFetch();
+
+    renderPage();
+
+    await screen.findByText(/Hey Pat/);
+    expect(screen.queryByText('Moved for weather')).not.toBeInTheDocument();
+    expect(screen.queryByText('Why the move?')).not.toBeInTheDocument();
+  });
+
+  it('wind moves skip the rain-bonding explainer and say better window', async () => {
+    stubFetch({
+      get: jsonResponse(reschedulablePayload({
+        weatherMove: { ...weatherMove, reasonCode: 'weather_wind', fromChance: null, toChance: null },
+      })),
+    });
+
+    renderPage();
+
+    expect(await screen.findByText(/wind moved your pest control to a better window/)).toBeInTheDocument();
+    expect(screen.queryByText('Why the move?')).not.toBeInTheDocument();
+    // No forecast coverage → no chips.
+    expect(screen.queryByText(/% rain/)).not.toBeInTheDocument();
+  });
+
+  it('shows the banner on the classic layout too', async () => {
+    stubFetch({ get: jsonResponse(reschedulablePayload({ weatherMove })) });
+
+    renderPage({ classic: true });
+
+    expect(await screen.findByText('Moved for weather')).toBeInTheDocument();
+    expect(screen.getByText('Want a different time instead?')).toBeInTheDocument();
+  });
+});

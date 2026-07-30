@@ -54,6 +54,7 @@ const { noStore } = require('../middleware/no-store');
 router.use(noStore);
 const { etDateString, addETDays, etParts } = require('../utils/datetime-et');
 const { stampedDivergesSql } = require('../services/stamped-address');
+const { getDailyRainOutlook } = require('../services/weather-forecast');
 
 // Token format: 64-char lowercase hex (matches encode(gen_random_bytes(32), 'hex')).
 const TOKEN_RE = /^[a-f0-9]{64}$/;
@@ -235,6 +236,67 @@ async function loadByToken(token) {
     );
 }
 
+// ── "Moved for weather" banner context (GATE_RAINOUT_MOVE_BANNER) ────────
+// The rain-out flow (services/rain-out.js) moves the visit first and texts a
+// short link to this page; the banner tells the rest of the story — the
+// was/now slots and the forecast on both days. Present ONLY when the visit's
+// newest reschedule_log row is a recent weather move it is still sitting on:
+// any later move (customer, dispatch) supersedes the rain-out narrative, so
+// the banner disappears rather than describing a stale transition.
+const WEATHER_REASON_CODES = new Set(['weather_rain', 'weather_wind', 'weather_lightning', 'weather_heat']);
+const WEATHER_MOVE_MAX_AGE_DAYS = 14;
+// Same fail-open budget the rain-out SMS uses: the forecast decorates the
+// banner, it never delays the page.
+const WEATHER_FORECAST_TIMEOUT_MS = 1500;
+
+async function loadWeatherMove(svc, now = new Date()) {
+  if (process.env.GATE_RAINOUT_MOVE_BANNER !== 'true') return null;
+  const log = await db('reschedule_log')
+    .where({ scheduled_service_id: svc.id })
+    .orderBy('created_at', 'desc')
+    .first('reason_code', 'original_date', 'original_window', 'new_date', 'new_window', 'created_at');
+  if (!log || !WEATHER_REASON_CODES.has(log.reason_code)) return null;
+  const ageMs = now - new Date(log.created_at);
+  if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs > WEATHER_MOVE_MAX_AGE_DAYS * 86400000) return null;
+  // Still on the moved-to slot? Compare the log's landing date/start against
+  // the row's live values (windows log as 'HH:MM:SS-HH:MM:SS').
+  if (apptDateStr(log.new_date) !== apptDateStr(svc.scheduled_date)) return null;
+  const loggedStart = hhmm(String(log.new_window || '').split('-')[0] || null);
+  if (loggedStart && hhmm(svc.window_start) && loggedStart !== hhmm(svc.window_start)) return null;
+
+  const move = {
+    reasonCode: log.reason_code,
+    from: {
+      date: apptDateStr(log.original_date),
+      windowStart: hhmm(String(log.original_window || '').split('-')[0] || null),
+    },
+    to: {
+      date: apptDateStr(svc.scheduled_date),
+      windowStart: hhmm(svc.window_start),
+    },
+    // Day-level NWS rain chance for each side; null (chip hidden) when the
+    // forecast has no coverage — original dates in the past age out of the
+    // outlook naturally.
+    fromChance: null,
+    toChance: null,
+  };
+  try {
+    const lat = svc.latitude != null ? parseFloat(svc.latitude) : null;
+    const lng = svc.longitude != null ? parseFloat(svc.longitude) : null;
+    if (lat != null && lng != null && Number.isFinite(lat) && Number.isFinite(lng)) {
+      const outlook = await Promise.race([
+        getDailyRainOutlook(lat, lng).catch(() => null),
+        new Promise((resolve) => { setTimeout(resolve, WEATHER_FORECAST_TIMEOUT_MS).unref?.(); }),
+      ]);
+      if (outlook) {
+        move.fromChance = outlook[move.from.date]?.rainChance ?? null;
+        move.toChance = outlook[move.to.date]?.rainChance ?? null;
+      }
+    }
+  } catch { /* fail-open — banner renders without chips */ }
+  return move;
+}
+
 // The reschedule window mirrors the public /book funnel's config-driven
 // range: [today + advance_days_min, today + advance_days_max].
 function bookingRange(config, now = new Date()) {
@@ -337,14 +399,26 @@ router.get('/:token', async (req, res, next) => {
     const range = bookingRange(config);
 
     let availability = null;
+    let weatherMove = null;
+    // Banner context loads alongside availability (both are decoration for
+    // the same render); a missed visit renders the rebook framing where a
+    // "we moved you for weather" banner would be stale noise.
+    const weatherMovePromise = elig.missed
+      ? Promise.resolve(null)
+      : loadWeatherMove(svc).catch((err) => {
+        logger.warn(`[reschedule-public] weatherMove failed for ${svc.id}: ${err.message}`);
+        return null;
+      });
     try {
       availability = await buildAvailabilityForService(svc, { ...range, config });
     } catch (err) {
       logger.error(`[reschedule-public] availability failed for ${svc.id}: ${err.message}`);
     }
+    weatherMove = await weatherMovePromise;
 
     return res.json({
       ...base,
+      weatherMove,
       availability: availability
         ? {
           slots: availability.slots,
@@ -779,6 +853,8 @@ router._test = {
   pullForwardDays,
   shouldReanchor,
   REANCHOR_PULLFORWARD_DAYS,
+  loadWeatherMove,
+  WEATHER_MOVE_MAX_AGE_DAYS,
 };
 
 module.exports = router;

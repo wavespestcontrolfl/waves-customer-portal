@@ -21,7 +21,9 @@ import { COLORS, FONTS } from '../theme-brand';
 import { FS, FW, LH, SP } from '../theme-doc';
 import { CUSTOMER_SURFACE } from '../theme-customer';
 import { WavesShell } from '../components/brand';
-import BrandFooter from '../components/BrandFooter';
+import BrandFooter, {
+  APP_STORE_URL, PLAY_STORE_URL, AppStoreBadgeSvg, GooglePlayBadgeSvg,
+} from '../components/BrandFooter';
 import Icon from '../components/Icon';
 import { useGlassSurface } from '../glass/glass-engine';
 import WavesAIScheduleSearch from '../components/booking/WavesAIScheduleSearch';
@@ -148,6 +150,160 @@ function ReanchorNote() {
       Heads up — moving this far up shifts your whole plan: your following
       visits will move to match the new date, keeping your regular schedule.
     </div>
+  );
+}
+
+// ── "Moved for weather" banner ──────────────────────────────────────────
+// Renders only when the GET payload carries `weatherMove` (server gate
+// GATE_RAINOUT_MOVE_BANNER + the visit still sits on a recent rain-out
+// move). Anatomy mirrors TrackPage's EnRouteCard: 3px status accent bar,
+// status pill, heading, then matched Was/Now rows — the design spec is the
+// owner-approved mock from the 2026-07-30 session. Weather chips are the
+// rain blue on BOTH rows (owner call: one weather color, sun icon only
+// signals the dry side).
+
+const WEATHER_MOVE_BLUE = '#0369A1';
+
+const WEATHER_MOVE_LEADS = {
+  weather_rain: 'rain moved your',
+  weather_lightning: 'lightning moved your',
+  weather_wind: 'wind moved your',
+  weather_heat: 'extreme heat moved your',
+};
+
+// Rain washes uncured product away; wind/heat moves are operational and the
+// bonding explainer would be off-topic there.
+const WHY_MOVE_REASONS = new Set(['weather_rain', 'weather_lightning']);
+
+function WeatherMoveChip({ chance, sunny }) {
+  if (chance == null || !Number.isFinite(Number(chance))) return null;
+  return (
+    <span data-glass="chip" data-glass-pill="" style={{
+      display: 'inline-flex', alignItems: 'center', gap: 4, flexShrink: 0,
+      fontSize: 12, fontWeight: 700, color: WEATHER_MOVE_BLUE,
+      background: `${WEATHER_MOVE_BLUE}1A`, padding: '4px 10px', borderRadius: 9999,
+      whiteSpace: 'nowrap',
+    }}>
+      <Icon name={sunny ? 'sun' : 'cloudRain'} size={12} style={{ verticalAlign: '-2px' }} />
+      {' '}{Math.round(Number(chance))}% rain
+    </span>
+  );
+}
+
+function WeatherMoveRow({ label, date, windowStart, chance, isNow }) {
+  return (
+    <div data-glass="soft" style={{
+      display: 'flex', alignItems: 'center', gap: 12,
+      background: isNow ? S.soft : S.page,
+      border: `1px solid ${isNow ? S.softBorder : S.border}`,
+      borderRadius: 8, padding: 14, marginTop: isNow ? 8 : 16,
+    }}>
+      <span style={{
+        fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.11em',
+        width: 40, flexShrink: 0, color: isNow ? '#0E7490' : S.muted,
+      }}>
+        {label}
+      </span>
+      <span style={{
+        flex: 1, fontSize: 16, fontWeight: 600, lineHeight: 1.3,
+        color: isNow ? S.text : S.muted,
+        ...(isNow ? {} : { textDecoration: 'line-through', textDecorationColor: S.border }),
+      }}>
+        {formatDateLabel(date)}
+        {windowStart ? (
+          <small style={{ display: 'block', fontSize: 14, fontWeight: 500, color: isNow ? S.body : S.muted }}>
+            Arrival {arrivalWindowLabel(windowStart)}
+          </small>
+        ) : null}
+      </span>
+      <WeatherMoveChip chance={chance} sunny={isNow} />
+    </div>
+  );
+}
+
+function weatherMoveHeading({ move, firstName, serviceType }) {
+  const lead = WEATHER_MOVE_LEADS[move.reasonCode] || 'weather moved your';
+  const dry = move.reasonCode === 'weather_rain' || move.reasonCode === 'weather_lightning';
+  return `${firstName ? `Hi ${firstName} — ` : ''}${lead} ${(serviceType || 'service').toLowerCase()} to a ${dry ? 'dry' : 'better'} window.`;
+}
+
+function WeatherMovePill() {
+  return (
+    <div data-glass="chip" data-glass-pill="" style={{
+      display: 'inline-block', fontSize: 12, fontWeight: 700, textTransform: 'uppercase',
+      color: WEATHER_MOVE_BLUE, background: `${WEATHER_MOVE_BLUE}1A`,
+      padding: '6px 12px', borderRadius: 9999,
+    }}>
+      <span style={{
+        display: 'inline-block', width: 6, height: 6, borderRadius: '50%',
+        background: WEATHER_MOVE_BLUE, marginRight: 8, verticalAlign: 'middle',
+      }} />
+      Moved for weather
+    </div>
+  );
+}
+
+// `hero` (V2): the pill + heading render as the caller's hero block in the
+// page-title type scale, so the card carries only the rows; classic keeps
+// them in-card at the same 22px scale its sibling headings use.
+function WeatherMoveBanner({ move, firstName, serviceType, hero = false }) {
+  if (!move) return null;
+  return (
+    <Card style={{ borderTop: `3px solid ${WEATHER_MOVE_BLUE}` }}>
+      {hero ? null : (
+        <>
+          <WeatherMovePill />
+          <div data-gt="h3x" style={{ fontSize: 22, fontWeight: 800, fontFamily: FONTS.heading, marginTop: 14, lineHeight: 1.3 }}>
+            {weatherMoveHeading({ move, firstName, serviceType })}
+          </div>
+        </>
+      )}
+
+      <WeatherMoveRow label="Was" date={move.from?.date} windowStart={move.from?.windowStart} chance={move.fromChance} isNow={false} />
+      <WeatherMoveRow label="Now" date={move.to?.date} windowStart={move.to?.windowStart} chance={move.toChance} isNow />
+
+      {/* Same centered label-over-badges shape as BrandFooter's StoreBadges. */}
+      <div data-glass="soft" style={{
+        display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10, marginTop: 14,
+        background: S.soft, border: `1px solid ${S.softBorder}`, borderRadius: 8, padding: '14px 16px',
+        textAlign: 'center',
+      }}>
+        <div style={{ fontSize: 15, fontWeight: 600, color: S.text, lineHeight: 1.4 }}>
+          Download the Waves app
+        </div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'center', justifyContent: 'center' }}>
+          <a href={APP_STORE_URL} target="_blank" rel="noopener noreferrer" aria-label="Download on the App Store" style={{ display: 'inline-block' }}>
+            <AppStoreBadgeSvg fill={COLORS.glassNavy} />
+          </a>
+          <a href={PLAY_STORE_URL} target="_blank" rel="noopener noreferrer" aria-label="Get it on Google Play" style={{ display: 'inline-block' }}>
+            <GooglePlayBadgeSvg fill={COLORS.glassNavy} />
+          </a>
+        </div>
+      </div>
+
+      {WHY_MOVE_REASONS.has(move.reasonCode) ? (
+        <details data-glass="soft" style={{
+          marginTop: 12, background: S.soft, border: `1px solid ${S.softBorder}`, borderRadius: 8,
+        }}>
+          <summary style={{
+            listStyle: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8,
+            padding: 14, fontSize: 15, fontWeight: 600, color: S.text,
+          }}>
+            Why the move?
+            <Icon name="chevronDown" size={16} style={{ marginLeft: 'auto', color: S.muted }} />
+          </summary>
+          <div style={{ padding: '0 14px 14px', fontSize: 14, color: S.body, lineHeight: 1.5 }}>
+            Our liquid treatments need a dry surface and a few hours to bond after application.
+            Rain during or right after a visit can wash product away before it binds — which
+            means weaker protection for your home. Once bonded, it's a different story: our
+            products use microencapsulated formulas — the active ingredient is sealed in
+            microscopic capsules that lock onto treated surfaces and release gradually — so
+            everyday Southwest Florida rain won't wash an established treatment away. Timing
+            the application to a dry window is what protects that bond, at no charge to you.
+          </div>
+        </details>
+      ) : null}
+    </Card>
   );
 }
 
@@ -1085,17 +1241,49 @@ export default function ReschedulePage() {
         <V2FloatingAsk key={aiSession} onSearch={runAiSearch} aiFiltered={aiFiltered} onShowAll={showAllTimes} />
         <div className="rsv2-layout">
           <div className="rsv2-col-left">
+            {/* Weather-move banner carries the greeting + was/now story when
+                present (heading in the page-title scale, owner ask
+                2026-07-30), so the hero below drops its own greeting and
+                reframes as the "different time?" ask — the moved-to slot is
+                already confirmed, the page becomes optional adjustment. */}
+            {data.weatherMove ? (
+              <div className="rsv2-hero" style={{ marginBottom: 12 }}>
+                <WeatherMovePill />
+                <h1 className="rsv2-title" style={{ marginTop: 12 }}>
+                  {weatherMoveHeading({
+                    move: data.weatherMove,
+                    firstName: data.customerFirstName,
+                    serviceType: data.service?.type,
+                  })}
+                </h1>
+              </div>
+            ) : null}
+            <WeatherMoveBanner
+              move={data.weatherMove}
+              firstName={data.customerFirstName}
+              serviceType={data.service?.type}
+              hero
+            />
             {/* Hero mirrors the service report's header (owner ask
                 2026-07-14): section eyebrow + serif "Hey {first}, …" title
                 floating on the scene, meta line below — same tokens as
-                ReportViewPage's .section-eyebrow / .sr-title. */}
+                ReportViewPage's .section-eyebrow / .sr-title. The eyebrow
+                drops when the banner already heads the page (owner ask
+                2026-07-30). */}
             <div className="rsv2-hero">
-              <div className="rsv2-eyebrow">Reschedule</div>
+              {data.weatherMove ? null : <div className="rsv2-eyebrow">Reschedule</div>}
               <h1 className="rsv2-title">
-                Hey {data.customerFirstName || 'there'}, {data.missed ? 'looks like we missed each other' : "let's pick a new time"}
+                {data.weatherMove
+                  ? 'Want a different time instead?'
+                  : <>Hey {data.customerFirstName || 'there'}, {data.missed ? 'looks like we missed each other' : "let's pick a new time"}</>}
               </h1>
               <div className="rsv2-hero-meta">
-                {data.missed ? (
+                {data.weatherMove ? (
+                  <>
+                    Your new time is confirmed — nothing else to do. Or pick any
+                    open time below and we'll move it again.
+                  </>
+                ) : data.missed ? (
                   <>
                     Your <strong>{data.service?.type || 'service'}</strong> visit was set
                     for <strong>{formatDateLabel(current.date)}</strong> — pick a new time below
@@ -1182,12 +1370,24 @@ export default function ReschedulePage() {
 
   return (
     <Page>
+      <WeatherMoveBanner
+        move={data.weatherMove}
+        firstName={data.customerFirstName}
+        serviceType={data.service?.type}
+      />
       <Card>
         <div data-gt="h3x" style={{ fontSize: 22, fontWeight: 800, fontFamily: FONTS.heading, marginBottom: 6 }}>
-          {data.customerFirstName ? `Hi ${data.customerFirstName} — ` : ''}pick a new time
+          {data.weatherMove
+            ? 'Want a different time instead?'
+            : <>{data.customerFirstName ? `Hi ${data.customerFirstName} — ` : ''}pick a new time</>}
         </div>
         <div style={{ fontSize: 15, color: S.body, lineHeight: 1.55 }}>
-          {data.missed ? (
+          {data.weatherMove ? (
+            <>
+              Your new time is confirmed — nothing else to do. Or pick any open
+              time below and we'll move it again.
+            </>
+          ) : data.missed ? (
             <>
               Your <strong style={{ color: S.text }}>{data.service?.type || 'service'}</strong> visit was set
               for <strong style={{ color: S.text }}>{formatDateLabel(current.date)}</strong>, but it looks like

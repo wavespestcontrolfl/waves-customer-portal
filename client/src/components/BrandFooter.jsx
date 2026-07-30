@@ -63,7 +63,9 @@ export const SOCIAL_ICON_PATHS = [
 export const APP_STORE_URL = 'https://apps.apple.com/us/app/waves-pest-control/id6782775654';
 export const PLAY_STORE_URL = 'https://play.google.com/store/apps/details?id=com.wavespestcontrol.portal';
 
-function AppStoreBadgeSvg({ fill }) {
+// Exported for reuse (ReschedulePage's weather-move banner) — single source
+// of the store badges, same rule as SOCIAL_ICON_PATHS: don't fork copies.
+export function AppStoreBadgeSvg({ fill }) {
   return (
     <svg xmlns="http://www.w3.org/2000/svg" width="132" height="40" viewBox="0 0 132 40" role="img" aria-label="Download on the App Store" style={{ display: 'block', height: 32, width: 'auto' }}>
       <rect width="132" height="40" rx="7" fill={fill} />
@@ -74,7 +76,7 @@ function AppStoreBadgeSvg({ fill }) {
   );
 }
 
-function GooglePlayBadgeSvg({ fill }) {
+export function GooglePlayBadgeSvg({ fill }) {
   return (
     <svg xmlns="http://www.w3.org/2000/svg" width="135" height="40" viewBox="0 0 135 40" role="img" aria-label="Get it on Google Play" style={{ display: 'block', height: 32, width: 'auto' }}>
       <rect width="135" height="40" rx="7" fill={fill} />

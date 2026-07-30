@@ -7,7 +7,11 @@
 const mockDb = jest.fn();
 mockDb.schema = { hasTable: jest.fn(async () => true) };
 jest.mock('../models/db', () => mockDb);
+jest.mock('../services/weather-forecast', () => ({
+  getDailyRainOutlook: jest.fn().mockResolvedValue(null),
+}));
 
+const { getDailyRainOutlook } = require('../services/weather-forecast');
 const reschedulePublicRouter = require('../routes/reschedule-public');
 const { smsLineFor } = require('../services/reschedule-link');
 const smsMigration = require('../models/migrations/20260702000011_reschedule_link_sms_templates');
@@ -16,6 +20,7 @@ const emailMigration = require('../models/migrations/20260702000012_reschedule_l
 const {
   eligibility, bookingRange, searchParseOpts, apptDateStr, label12,
   pullForwardDays, shouldReanchor, REANCHOR_PULLFORWARD_DAYS,
+  loadWeatherMove, WEATHER_MOVE_MAX_AGE_DAYS,
 } = reschedulePublicRouter._test;
 
 // Fixed "now": 2026-07-02 12:00 ET (16:00 UTC, EDT).
@@ -240,5 +245,101 @@ describe('email template migration helpers', () => {
     expect(withVariable(['a'], 'reschedule_url')).toEqual(['a', 'reschedule_url']);
     expect(withVariable(['a', 'reschedule_url'], 'reschedule_url')).toEqual(['a', 'reschedule_url']);
     expect(withVariable('["a"]', 'reschedule_url')).toEqual(['a', 'reschedule_url']);
+  });
+});
+
+describe('weatherMove banner context (GATE_RAINOUT_MOVE_BANNER)', () => {
+  afterEach(() => {
+    delete process.env.GATE_RAINOUT_MOVE_BANNER;
+    jest.clearAllMocks();
+  });
+
+  const SVC = {
+    id: 'svc-1',
+    scheduled_date: '2026-07-04',
+    window_start: '09:00:00',
+    latitude: '27.4',
+    longitude: '-82.4',
+  };
+  const LOG = {
+    reason_code: 'weather_rain',
+    original_date: '2026-07-03',
+    original_window: '12:00:00-14:00:00',
+    new_date: '2026-07-04',
+    new_window: '09:00:00-10:00:00',
+    created_at: '2026-07-02T15:00:00.000Z',
+  };
+
+  function wireLog(row) {
+    mockDb.mockImplementation(() => ({
+      where: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue(row),
+    }));
+  }
+
+  test('gate off: always null, no queries', async () => {
+    wireLog(LOG);
+    expect(await loadWeatherMove(SVC, NOW)).toBeNull();
+    expect(mockDb).not.toHaveBeenCalled();
+  });
+
+  test('gate on: a recent weather move the visit still sits on returns was/now + forecast chances', async () => {
+    process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+    wireLog(LOG);
+    getDailyRainOutlook.mockResolvedValueOnce({
+      '2026-07-03': { rainChance: 80 },
+      '2026-07-04': { rainChance: 15 },
+    });
+
+    const move = await loadWeatherMove(SVC, NOW);
+    expect(move).toEqual({
+      reasonCode: 'weather_rain',
+      from: { date: '2026-07-03', windowStart: '12:00' },
+      to: { date: '2026-07-04', windowStart: '09:00' },
+      fromChance: 80,
+      toChance: 15,
+    });
+    expect(getDailyRainOutlook).toHaveBeenCalledWith(27.4, -82.4);
+  });
+
+  test('forecast failure or no coverage is fail-open: move present, chips null', async () => {
+    process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+    wireLog(LOG);
+    getDailyRainOutlook.mockRejectedValueOnce(new Error('nws down'));
+
+    const move = await loadWeatherMove(SVC, NOW);
+    expect(move).toMatchObject({ fromChance: null, toChance: null });
+    expect(move.from.date).toBe('2026-07-03');
+  });
+
+  test('a non-weather newest log row means no banner — later moves supersede the story', async () => {
+    process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+    wireLog({ ...LOG, reason_code: 'customer_request' });
+    expect(await loadWeatherMove(SVC, NOW)).toBeNull();
+  });
+
+  test('a weather move the visit no longer sits on (date or start changed) means no banner', async () => {
+    process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+    wireLog({ ...LOG, new_date: '2026-07-05' });
+    expect(await loadWeatherMove(SVC, NOW)).toBeNull();
+
+    wireLog({ ...LOG, new_window: '13:00:00-14:00:00' });
+    expect(await loadWeatherMove(SVC, NOW)).toBeNull();
+  });
+
+  test('a stale move ages out', async () => {
+    process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+    const staleMs = (WEATHER_MOVE_MAX_AGE_DAYS + 1) * 86400000;
+    wireLog({ ...LOG, created_at: new Date(NOW.getTime() - staleMs).toISOString() });
+    expect(await loadWeatherMove(SVC, NOW)).toBeNull();
+  });
+
+  test('missing coordinates skip the forecast but keep the banner', async () => {
+    process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+    wireLog(LOG);
+    const move = await loadWeatherMove({ ...SVC, latitude: null, longitude: null }, NOW);
+    expect(move).toMatchObject({ fromChance: null, toChance: null });
+    expect(getDailyRainOutlook).not.toHaveBeenCalled();
   });
 });

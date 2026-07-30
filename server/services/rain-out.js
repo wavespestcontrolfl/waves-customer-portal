@@ -439,38 +439,74 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, fore
     first_name: customer.first_name || 'there',
     service_type: (job.service_type || 'service').toLowerCase(),
     new_option: customerArrivalOption(chosen.date, chosen.window),
-    alt_clause: altClause,
-    forecast_clause: forecastClause,
   };
+  // v2/legacy only — v3's link_clause replaces both (the page the link
+  // opens carries the forecast, so a second weather.gov URL is redundant).
+  const longFormVars = { alt_clause: altClause, forecast_clause: forecastClause };
   const renderContext = {
     workflow: 'tech_rain_out',
     entity_type: 'scheduled_service',
     entity_id: serviceId,
   };
 
-  // rain_out_moved_v2 is the forecast-grounded template this PR's
-  // migration seeds; the legacy rain_out_moved row stays untouched so an
-  // older server (or a rolled-back deploy) keeps rendering it. The legacy
-  // fallback fires ONLY when the v2 ROW is absent (a rolled-back
-  // migration) — an existing-but-disabled v2 row is the ops kill switch
-  // and must stop the send, not reroute it to old copy. The legacy row
-  // is retired in the cleanup PR once this deploy is verified.
-  let body = await renderSmsTemplate('rain_out_moved_v2', {
-    ...sharedVars,
-    weather_lead: composeWeatherLead({ reasonCode, isSameDay, hour: etParts().hour, todayChance }),
-    better_day_clause: composeBetterDayClause({
-      reasonCode, isSameDay, chosenDate: String(chosen.date), todayStr, todayChance, newChance,
-      windowChance, windowStart: chosen.window?.start,
-    }),
-    efficacy_clause: composeEfficacyClause({ reasonCode, serviceType: job.service_type }),
-  }, renderContext);
+  const weatherLead = composeWeatherLead({ reasonCode, isSameDay, hour: etParts().hour, todayChance });
+
+  // Template ladder, newest first. Each rung falls through ONLY when its
+  // ROW is absent (a rolled-back migration) — an existing-but-disabled row
+  // is the ops kill switch and must stop the send, not reroute it to older
+  // copy. original_message_type must track whichever rung rendered, since
+  // twilio.js keys its per-template kill switch on it (the #2891 lesson:
+  // stamping a retired key suppresses every send as a sentinel "success").
+  //
+  //   v3 (GATE_RAINOUT_MOVE_BANNER) — short link-first copy; the detail
+  //     (was/now slots, forecast, efficacy note) lives on the /reschedule
+  //     page's weather banner, which the same gate turns on.
+  //   v2 — forecast-grounded long copy; today's default while the gate is
+  //     dark, and the fallback if the v3 migration is rolled back.
+  //   legacy rain_out_moved — retired in prod (is_active=false) but the
+  //     row is load-bearing as the absent-v2 fallback body; never delete.
+  let body = null;
+  let renderedKey = null;
+  if (process.env.GATE_RAINOUT_MOVE_BANNER === 'true') {
+    body = await renderSmsTemplate('rain_out_moved_v3', {
+      ...sharedVars,
+      weather_lead: weatherLead,
+      link_clause: rescheduleUrl
+        ? ` New time, forecast & other options: ${rescheduleUrl}`
+        : ' Need a different time? Reply to this message.',
+    }, renderContext);
+    if (body) {
+      renderedKey = 'rain_out_moved_v3';
+    } else {
+      const v3Row = await db('sms_templates').where({ template_key: 'rain_out_moved_v3' }).first('id');
+      if (v3Row) {
+        logger.warn(`[rain-out] rain_out_moved_v3 disabled — moved ${serviceId} without SMS`);
+        return { sent: false, reason: 'missing_template' };
+      }
+    }
+  }
+  if (!body) {
+    body = await renderSmsTemplate('rain_out_moved_v2', {
+      ...sharedVars,
+      ...longFormVars,
+      weather_lead: weatherLead,
+      better_day_clause: composeBetterDayClause({
+        reasonCode, isSameDay, chosenDate: String(chosen.date), todayStr, todayChance, newChance,
+        windowChance, windowStart: chosen.window?.start,
+      }),
+      efficacy_clause: composeEfficacyClause({ reasonCode, serviceType: job.service_type }),
+    }, renderContext);
+    if (body) renderedKey = 'rain_out_moved_v2';
+  }
   if (!body) {
     const v2Row = await db('sms_templates').where({ template_key: 'rain_out_moved_v2' }).first('id');
     if (!v2Row) {
       body = await renderSmsTemplate('rain_out_moved', {
         ...sharedVars,
+        ...longFormVars,
         weather_phrase: WEATHER_PHRASES[reasonCode] || 'weather',
       }, renderContext);
+      if (body) renderedKey = 'rain_out_moved_v2';
     }
   }
   if (!body) {
@@ -487,12 +523,13 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, fore
     customerId: customer.id,
     identityTrustLevel: 'phone_matches_customer',
     // original_message_type doubles as the per-template ops kill-switch key
-    // (twilio.js isTemplateActive) and MUST be the v2 template's key: the
-    // legacy rain_out_moved row is retired (is_active=false), and stamping
-    // the legacy key suppresses every send as a sentinel "success". An
-    // absent v2 row (rolled-back migration) counts as active there, so the
-    // legacy-render fallback above still texts.
-    metadata: { original_message_type: 'rain_out_moved_v2', reason_code: reasonCode },
+    // (twilio.js isTemplateActive) and MUST be the key of the rung that
+    // actually rendered: the legacy rain_out_moved row is retired
+    // (is_active=false), and stamping a retired key suppresses every send
+    // as a sentinel "success". The legacy-render fallback stamps the v2 key
+    // for the same reason — an absent v2 row (rolled-back migration) counts
+    // as active there, so the fallback still texts.
+    metadata: { original_message_type: renderedKey, reason_code: reasonCode },
   });
   if (result?.blocked || result?.sent === false) {
     return { sent: false, reason: result.code || result.reason || 'blocked' };
