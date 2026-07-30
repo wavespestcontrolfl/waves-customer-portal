@@ -507,6 +507,24 @@ function classifyLane({ intent, propertyFacts, engineResult, totals, comps, cali
   if (lowConfidenceLines.length) {
     reasons.push(`engine low pricing confidence: ${lowConfidenceLines.map((l) => l.service).join(', ')}`);
   }
+  // The residential lawn pricer reports its low-confidence signal as
+  // turfConfidence/turfBasis, NOT pricingConfidence — without this check a
+  // new caller's lawn line priced off heuristic turf (lot minus impervious
+  // and bed defaults, turfBasis lotFallback) green-laned as if measured.
+  // LOW-confidence turf must land yellow, same as any fallback sqft source.
+  const lowTurfLines = pricedLines.filter((l) => String(l.turfConfidence || '').toLowerCase() === 'low');
+  if (lowTurfLines.length) {
+    reasons.push(`turf area is a heuristic estimate (${lowTurfLines.map((l) => `${l.service}: ${l.turfBasis || 'unknown basis'}`).join(', ')}) — verify treated area before send`);
+  }
+  // The pricer coerces any grass track it doesn't recognize to st_augustine
+  // silently (normalizeGrassType fallback). A schema-valid track the pricer
+  // priced as a DIFFERENT track (e.g. paspalum → St. Augustine table) is a
+  // wrong-program risk the operator must see, never a green one-click send.
+  const intentLawnTrack = intent.services?.lawn?.track;
+  const lawnLine = lines.find((l) => l.service === 'lawn_care');
+  if (intentLawnTrack && lawnLine?.track && lawnLine.track !== intentLawnTrack) {
+    reasons.push(`caller's grass track '${intentLawnTrack}' is not in the pricing vocabulary — priced on the ${lawnLine.grassType || lawnLine.track} table; verify program fit before send`);
+  }
   if ((intent.constraint_flags || []).length) {
     reasons.push(`constraints the engine can't express: ${intent.constraint_flags.map((f) => f.flag).join(', ')}`);
   }

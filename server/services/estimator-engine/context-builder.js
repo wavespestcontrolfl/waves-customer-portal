@@ -117,8 +117,13 @@ async function loadLeadForCall(call, phone, { phoneFallback = true } = {}) {
     // claim any lead touched in the days since — a later unrelated
     // interaction's lead would get current-call priority AND be mutated via
     // leads.estimate_id. Outside the window the lead falls to the byPhone
-    // path (forThisCall=false), which is the conservative direction;
-    // processor-CREATED leads are sid-stamped and already claimed above.
+    // path (forThisCall=false), which is the conservative direction.
+    // A lead sid-stamped for a DIFFERENT call is provably another call's
+    // creation (the processor stamps twilio_call_sid only on insert), so it
+    // must not be claimed here: on a shared line, a second call's lead
+    // landing inside this call's window would otherwise supply the address,
+    // customer_email, and leads.estimate_id linkage for the WRONG caller.
+    // This call's own sid was already claimed by the byCall branch above.
     if (call?.created_at) {
       const processedBy = new Date(new Date(call.created_at).getTime() + 2 * 3600 * 1000);
       const reused = await db('leads')
@@ -127,6 +132,10 @@ async function loadLeadForCall(call, phone, { phoneFallback = true } = {}) {
         .whereNull('deleted_at')
         .where('updated_at', '>=', call.created_at)
         .where('updated_at', '<=', processedBy)
+        .where((qb) => {
+          qb.whereNull('twilio_call_sid');
+          if (call?.twilio_call_sid) qb.orWhere('twilio_call_sid', call.twilio_call_sid);
+        })
         .orderBy('updated_at', 'desc')
         .first();
       if (reused) return { lead: reused, forThisCall: true };

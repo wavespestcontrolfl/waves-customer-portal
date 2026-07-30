@@ -418,22 +418,32 @@ function applyV2ToPropertyFacts(propertyFacts, v2) {
 
   // V2 may resolve the lot to NULL for a no-lot property (condo unit on a
   // common master parcel) — that resolved null must WIN over a V1 lot that
-  // leaked in from the development's parcel.
+  // leaked in from the development's parcel. But only applicabilities that
+  // mean the priced property genuinely has no individual lot may clear a
+  // V1-resolved lot: a leased_land tenant's parcel physically exists and
+  // lot-driven services (lawn/mosquito) still treat it — not owning the lot
+  // is not evidence it is absent — and an unresolved private_parcel value
+  // is missing data, not a resolved "no lot". Clearing those stamped a
+  // false high-confidence no_individual_lot source on real parcels.
+  const NO_LOT_APPLICABILITIES = new Set(['common_master_parcel', 'no_individual_lot']);
   if (facts.lot && facts.lot.applicability !== 'unknown') {
-    propertyFacts.lot = legacy.lotSize
-      ? {
+    if (legacy.lotSize) {
+      propertyFacts.lot = {
         value: legacy.lotSize,
         source: v1SourceForSelection(facts, facts.lot),
         confidence: facts.confidenceLevel,
         ...(propertyFacts.lot?.disputed ? { disputed: true } : {}),
         rejected: propertyFacts.lot?.rejected || [],
-      }
-      : {
+      };
+    } else if (NO_LOT_APPLICABILITIES.has(facts.lot.applicability)) {
+      propertyFacts.lot = {
         value: null,
         source: `no_individual_lot:${facts.lot.applicability}`,
         confidence: 'high',
         rejected: propertyFacts.lot?.rejected || [],
       };
+    }
+    // leased_land / unresolved private_parcel: keep the V1 lot untouched.
   }
   if (legacy.stories) propertyFacts.stories = legacy.stories;
   return propertyFacts;

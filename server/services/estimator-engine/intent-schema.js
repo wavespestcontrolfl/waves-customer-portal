@@ -34,6 +34,10 @@ const SERVICE_OPTION_SCHEMAS = {
   lawn: {
     type: 'object',
     properties: {
+      // 'paspalum' has NO pricing table — the pricer coerces it to the
+      // St. Augustine table. It stays in the enum so the caller's actual
+      // grass is recorded; classifyLane yellow-flags any track the pricer
+      // priced as a different one, so the coercion can never green-lane.
       track: { enum: ['st_augustine', 'bahia', 'zoysia', 'bermuda', 'paspalum'] },
       tier: { enum: ['basic', 'standard', 'enhanced', 'premium'] },
     },
