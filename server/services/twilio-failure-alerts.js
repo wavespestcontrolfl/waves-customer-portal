@@ -93,9 +93,21 @@ async function resolveRemoteParty(direction, from, to) {
   const digits = String(e164).replace(/\D/g, '');
   const party = { name: null, customerId: null };
   try {
+    // Match every customer contact slot, not just the primary phone — the
+    // pipeline records spouses/tenants into the service-contact slots (same
+    // column set as call-recording-processor's CONTACT_MATCH_PHONE_COLS).
+    // Enrich only an UNAMBIGUOUS match: two customers sharing the number
+    // (e.g. primary on one account, service contact on another) stay
+    // nameless rather than naming the wrong one.
+    const key = digits.slice(-10);
+    const phoneCols = ['phone', 'service_contact_phone', 'service_contact2_phone', 'service_contact3_phone'];
     const matches = await db('customers')
       .whereNull('deleted_at')
-      .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [digits.slice(-10)])
+      .where(function anyContactSlot() {
+        for (const col of phoneCols) {
+          this.orWhereRaw(`RIGHT(regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g'), 10) = ?`, [key]);
+        }
+      })
       .orderBy('updated_at', 'desc')
       .limit(2);
     if (Array.isArray(matches) && matches.length === 1) {

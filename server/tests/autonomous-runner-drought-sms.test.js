@@ -133,7 +133,15 @@ test('day-dedupe: a drought alert already in notifications today suppresses the 
   expect(twilio.sendSMS).not.toHaveBeenCalled();
   expect(db).toHaveBeenCalledWith('notifications');
   expect(chain.where).toHaveBeenCalledWith('recipient_type', 'admin');
-  expect(chain.where).toHaveBeenCalledWith('title', 'like', 'Waves content engine: NO blog post today%');
+  // The title predicate is a grouped orWhere covering BOTH the short
+  // notificationTitle the bell persists now and the pre-2026-07-30 full-body
+  // title (transition-day dedupe).
+  const titleGroup = chain.where.mock.calls.find((args) => typeof args[0] === 'function')?.[0];
+  expect(titleGroup).toBeInstanceOf(Function);
+  const groupChain = { orWhere: jest.fn().mockReturnThis() };
+  titleGroup.call(groupChain);
+  expect(groupChain.orWhere).toHaveBeenCalledWith('title', 'like', 'Content engine: NO blog post today%');
+  expect(groupChain.orWhere).toHaveBeenCalledWith('title', 'like', 'Waves content engine: NO blog post today%');
 });
 
 test('day-dedupe: no prior SMS in sms_log today → alert sends', async () => {

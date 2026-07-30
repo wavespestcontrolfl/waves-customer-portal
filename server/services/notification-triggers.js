@@ -257,7 +257,9 @@ const TRIGGER_REGISTRY = {
       return {
         title: `${who ? `${who} — ` : ''}${channel} ${status}`,
         body: `${direction}${channel}${phase}${code}: from ${from} to ${to}${p.errorMessage ? ` — ${p.errorMessage}` : ''}`,
-        link: p.customerId ? `/admin/customers/${p.customerId}` : (p.link || '/admin/communications'),
+        // CustomersPageV2 opens a record via the customerId query param — the
+        // SPA has no /admin/customers/<id> route.
+        link: p.customerId ? `/admin/customers?customerId=${p.customerId}` : (p.link || '/admin/communications'),
       };
     },
   },

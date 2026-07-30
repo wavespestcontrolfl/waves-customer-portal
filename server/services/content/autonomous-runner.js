@@ -1426,10 +1426,17 @@ class AutonomousRunner {
     // leaves no row and lookup errors throw — both fail OPEN, the right
     // direction for an alert that exists to catch silence.
     try {
+      // Both titles: the bell now persists the short notificationTitle
+      // ('Content engine: NO blog post today'); the old full-body title is
+      // kept in the match so the transition day still dedupes against a
+      // pre-deploy morning row.
       const dup = await db('notifications')
         .where('recipient_type', 'admin')
         .where('created_at', '>=', startOfEtDay())
-        .where('title', 'like', 'Waves content engine: NO blog post today%')
+        .where(function droughtTitle() {
+          this.orWhere('title', 'like', 'Content engine: NO blog post today%')
+            .orWhere('title', 'like', 'Waves content engine: NO blog post today%');
+        })
         .first('id');
       if (dup) {
         logger.info('[autonomous-runner] blog drought alert already delivered today; skipping duplicate');
