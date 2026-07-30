@@ -1474,6 +1474,22 @@ async function reconcileTermiteProgramAgreements({ sinceDays = 21, limit = 25 } 
           // COALESCE keeps NULL cancelled_reason rows as blockers.
           .whereRaw("NOT (cc.status = 'cancelled' AND COALESCE(cc.cancelled_reason, '') LIKE 'Superseded by updated compliance wording%' AND NOT EXISTS (SELECT 1 FROM customer_contract_events cce2 WHERE cce2.contract_id = cc.id AND cce2.event_type = 'superseded_reprocessed'))");
       })
+      // Parked accepts (commercial/multi-unit, annual prepay, unresolved
+      // figures) create NO contract, so the anti-join above can't exclude
+      // them — without this they re-enter the scan daily for the full
+      // 21-day window and can crowd out genuine transient failures. Their
+      // manual-prep bell IS the durable handled marker: once it landed the
+      // operator owns the estimate (BELL_DEDUPE_DAYS=30 outlives the
+      // 21-day window, so a parked estimate never re-enters while
+      // eligible). Bell-less parks (notify failure) stay selected — that
+      // is the retry path.
+      .whereNotExists(function manualPrepBelled() {
+        this.select(db.raw('1'))
+          .from('notifications as n')
+          .where('n.recipient_type', 'admin')
+          .where('n.title', 'like', 'Termite agreement needs manual prep%')
+          .whereRaw("n.metadata->>'estimateId' = estimates.id::text");
+      })
       .orderBy('accepted_at', 'desc')
       .limit(PAGE_SIZE)
       .select('*');
