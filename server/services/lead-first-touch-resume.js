@@ -251,14 +251,19 @@ async function resumeHeldFirstTouch({
         continue;
       }
 
-      // Re-read the target immediately before any send (Codex #3084 r13):
+      // Re-read the row immediately before any send (Codex #3084 r13):
       // a SECOND correction supersedes a claimed row's held_email, and a
       // value that CHANGED since our claim-time snapshot is newer than even
       // this release's own email param. A changed address gets its own
-      // suppression re-check.
+      // suppression re-check. The deny stamp is re-checked on the SAME
+      // fresh read (Codex #3084 r15): a verdict's bulk resolve precedes its
+      // stamp upsert, so a reconciliation claiming in that gap would
+      // otherwise gate on a stale unstamped snapshot.
       let sendEmail = resumeEmail;
+      let freshDenyStamped = false;
       try {
-        const freshRow = await dbh('first_touch_holds').where({ id: hold.id }).first('held_email');
+        const freshRow = await dbh('first_touch_holds').where({ id: hold.id }).first('held_email', 'last_error');
+        freshDenyStamped = freshRow?.last_error === 'email_denied_await_correction';
         const freshEmail = String(freshRow?.held_email || '').trim().toLowerCase();
         if (freshEmail && freshEmail !== String(hold.held_email || '').trim().toLowerCase()
             && RESUME_EMAIL_RE.test(freshEmail)) {
@@ -266,6 +271,11 @@ async function resumeHeldFirstTouch({
         }
       } catch (rereadErr) {
         logger.warn(`[first-touch-resume] pre-send target re-read failed: ${rereadErr.code || rereadErr.name || 'db_error'} — using claim-time target`);
+      }
+      if (freshDenyStamped && !email) {
+        await settleHold(hold.id, { status: 'pending' }, dbh); // stamp untouched
+        result.skipped = result.skipped || 'email_denied';
+        continue;
       }
       if (sendEmail !== resumeEmail && await emailSuppressedForNewLead(sendEmail, dbh)) {
         await settleHold(hold.id, { status: 'pending', last_error: 'email_suppressed' }, dbh);

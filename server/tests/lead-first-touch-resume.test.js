@@ -19,6 +19,7 @@ let mockMergeArgs = [];
 let mockCustomerFirstQueue = null; // shift per customers.first(); an Error value throws
 let mockSubscriberRow = null; // newsletter_subscribers.first() (DOI dedupe guard)
 let mockSubscriberUpdates = [];
+let mockOnFirstTouchClaim = null; // fires when a claim update lands (race simulation)
 let mockTriageFirstQueue = null; // shift per triage_items.first()
 jest.mock('../models/db', () => {
   const handler = (table) => {
@@ -52,6 +53,7 @@ jest.mock('../models/db', () => {
         if (table === 'first_touch_holds') {
           if (patch.status === 'releasing' && mockClaimFails) return 0;
           mockHoldUpdates.push(patch);
+          if (patch.status === 'releasing' && mockOnFirstTouchClaim) mockOnFirstTouchClaim();
         }
         if (table === 'newsletter_subscribers') mockSubscriberUpdates.push(patch);
         return 1;
@@ -133,6 +135,7 @@ beforeEach(() => {
   mockCustomerFirstQueue = null;
   mockSubscriberRow = null;
   mockSubscriberUpdates = [];
+  mockOnFirstTouchClaim = null;
   mockTriageFirstQueue = null;
 });
 
@@ -427,6 +430,20 @@ describe('deny-stamped holds and dedupe hardening (r14)', () => {
     mockHold = baseHold({ last_error: 'email_denied_await_correction' });
     const res = await resumeHeldFirstTouch({ customerId: 'cust-1', email: 'corrected@example.com' });
     expect(res.enrolled).toBe(true);
+  });
+
+  test('a deny stamp landing AFTER the claim is still honored (fresh pre-send re-read)', async () => {
+    // The verdict's bulk resolve precedes its stamp upsert — a claim in
+    // that gap sees an unstamped snapshot; the pre-send re-read must catch
+    // the stamp that landed since.
+    mockHold = baseHold();
+    mockOnFirstTouchClaim = () => {
+      mockHold = { ...mockHold, last_error: 'email_denied_await_correction' };
+    };
+    const res = await resumeHeldFirstTouch({ callLogId: 'call-1' });
+    expect(res.skipped).toBe('email_denied');
+    expect(mockEnroll).not.toHaveBeenCalled();
+    expect(mockNewsletter).not.toHaveBeenCalled();
   });
 
   test('a hold re-pended for an unconfirmed DOI bypasses the dedupe stamp and re-sends', async () => {
