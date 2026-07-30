@@ -1382,7 +1382,15 @@ class AutonomousRunner {
 
     const twilio = require('../twilio');
     const ownerPhone = process.env.OWNER_PHONE || '+19415993489';
-    await twilio.sendSMS(ownerPhone, body, { messageType: 'internal_alert', link: '/admin/seo' });
+    // notificationTitle: without it the redirect-to-bell uses the whole body
+    // as the title, which truncates uselessly in phone banners (owner ruling
+    // 2026-07-30 — titles must identify the alert immediately).
+    await twilio.sendSMS(ownerPhone, body, {
+      messageType: 'internal_alert',
+      link: '/admin/seo',
+      notificationTitle: `Content engine: ${published} published, ${review} to review`,
+      notificationBody: body,
+    });
     logger.info(`[autonomous-runner] daily digest SMS sent: ${body}`);
   }
 
@@ -1418,10 +1426,17 @@ class AutonomousRunner {
     // leaves no row and lookup errors throw — both fail OPEN, the right
     // direction for an alert that exists to catch silence.
     try {
+      // Both titles: the bell now persists the short notificationTitle
+      // ('Content engine: NO blog post today'); the old full-body title is
+      // kept in the match so the transition day still dedupes against a
+      // pre-deploy morning row.
       const dup = await db('notifications')
         .where('recipient_type', 'admin')
         .where('created_at', '>=', startOfEtDay())
-        .where('title', 'like', 'Waves content engine: NO blog post today%')
+        .where(function droughtTitle() {
+          this.orWhere('title', 'like', 'Content engine: NO blog post today%')
+            .orWhere('title', 'like', 'Waves content engine: NO blog post today%');
+        })
         .first('id');
       if (dup) {
         logger.info('[autonomous-runner] blog drought alert already delivered today; skipping duplicate');
@@ -1453,7 +1468,13 @@ class AutonomousRunner {
     const body = `Waves content engine: NO blog post today — ${why}.${gateDetail ? ` Detail: ${gateDetail.trim().slice(0, 160)}` : ''}`;
     const twilio = require('../twilio');
     const ownerPhone = process.env.OWNER_PHONE || '+19415993489';
-    await twilio.sendSMS(ownerPhone, body, { messageType: 'internal_alert', link: '/admin/seo' });
+    // Short notificationTitle: banner-truncation ruling, see daily digest.
+    await twilio.sendSMS(ownerPhone, body, {
+      messageType: 'internal_alert',
+      link: '/admin/seo',
+      notificationTitle: 'Content engine: NO blog post today',
+      notificationBody: body,
+    });
     logger.info(`[autonomous-runner] blog drought SMS sent: ${body}`);
   }
 

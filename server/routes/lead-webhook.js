@@ -531,6 +531,13 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     let callConnected = false;
     let attemptedLeadCallFrom = null;
     let pendingLeadAlertCallLogId = null;
+    // The legacy "New lead!" SMS to Adam's cell is redirected into an
+    // internal_admin_alert bell (owner phones never receive raw SMS), so on
+    // every after-hours or call-fallback lead it duplicated the new_lead
+    // bell fired below (2026-07-30 audit: two bells one second apart per web
+    // lead). Record the intent here; the send happens after the new_lead
+    // trigger, and only if that bell/push failed to deliver.
+    let legacyLeadSmsWanted = false;
 
     try {
       const twilioClient = require('twilio')(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
@@ -647,17 +654,12 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
             to: ADAM_CELL,
             link: '/admin/leads',
           });
-          await TwilioService.sendSMS(ADAM_CELL,
-            `🔔 New lead!\n${firstName} ${lastName}\n📞 ${phoneFormatted}\n📍 ${fullAddress || 'No address'}\n🌐 ${leadSource.detail || leadSource.source}\n${utmCampaign ? '📊 Campaign: ' + utmCampaign : ''}`,
-            { messageType: 'internal_alert' }
-          );
+          legacyLeadSmsWanted = true;
         }
       } else {
-        // After hours: SMS alert only
-        await TwilioService.sendSMS(ADAM_CELL,
-          `🔔 New lead!\n${firstName} ${lastName}\n📞 ${phoneFormatted}\n📍 ${fullAddress || 'No address'}\n🌐 ${leadSource.detail || leadSource.source}\n${utmCampaign ? '📊 Campaign: ' + utmCampaign : ''}`,
-          { messageType: 'internal_alert' }
-        );
+        // After hours: no call — the new_lead bell below covers the alert,
+        // with the legacy SMS as delivery fallback only.
+        legacyLeadSmsWanted = true;
       }
     } catch (e) { logger.error(`Lead alert failed: ${e.message}`); }
 
@@ -891,16 +893,35 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
 
     // Push + bell notification for admins. Deep-links the LEAD row; if lead
     // creation failed the customer id keeps a (degraded) bell rather than none.
+    let leadBellDelivered = false;
     try {
       const { triggerNotification } = require('../services/notification-triggers');
-      await triggerNotification('new_lead', {
+      const stats = await triggerNotification('new_lead', {
         name: `${firstName || ''} ${lastName || ''}`.trim() || phoneFormatted,
         source: leadSource.detail || leadSource.source,
         zip: customer.zip,
         service: serviceInterest || null,
         leadId: leadRecord?.id || customer.id,
       });
+      // suppressed counts as HANDLED (internal test customer) — the legacy
+      // SMS fallback must not re-create the alert the suppression removed.
+      leadBellDelivered = Boolean(stats && !stats.error &&
+        (stats.suppressed || stats.bellWritten || Number(stats.push?.sent || 0) > 0));
     } catch (e) { logger.error(`[notifications] new_lead trigger failed: ${e.message}`); }
+
+    // Last-resort delivery only: the legacy SMS becomes an
+    // internal_admin_alert bell for owner phones, so sending it alongside a
+    // delivered new_lead bell raised two notifications for the same lead.
+    if (legacyLeadSmsWanted && !leadBellDelivered) {
+      try {
+        await TwilioService.sendSMS(ADAM_CELL,
+          `New lead!\n${firstName} ${lastName}\nPhone: ${phoneFormatted}\nAddress: ${fullAddress || 'No address'}\nSource: ${leadSource.detail || leadSource.source}${utmCampaign ? '\nCampaign: ' + utmCampaign : ''}`,
+          { messageType: 'internal_alert' }
+        );
+      } catch (smsErr) {
+        logger.error(`[lead-webhook] fallback lead alert SMS failed: ${smsErr.message}`);
+      }
+    }
 
     // Fire-and-forget AI triage
     if (leadRecord) {

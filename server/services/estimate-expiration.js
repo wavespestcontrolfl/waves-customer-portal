@@ -60,7 +60,10 @@ async function runEstimateExpiration() {
     // conversion at `expired`, where the sweep's sent/viewed filter can
     // never reclaim it. The hold self-lifts if the booking dies.
     .modify(excludePendingFirstBookings)
-    .update({ status: 'expired', updated_at: now });
+    // RETURNING the flipped rows so the admin bell can name who walked away
+    // (owner ruling 2026-07-30: a bell that says "Customer expired without a
+    // decision" is not actionable).
+    .update({ status: 'expired', updated_at: now }, ['id', 'customer_name', 'monthly_total', 'annual_total', 'onetime_total']);
 
   // Rule 2: explicit expires_at — any non-terminal row whose expires_at has
   // passed. Accepted/declined estimates are left alone.
@@ -73,9 +76,11 @@ async function runEstimateExpiration() {
     // before the customer booked doesn't make expiring their live courtship
     // any less wrong.
     .modify(excludePendingFirstBookings)
-    .update({ status: 'expired', updated_at: now });
+    .update({ status: 'expired', updated_at: now }, ['id', 'customer_name', 'monthly_total', 'annual_total', 'onetime_total']);
 
-  logger.info(`[estimate-expiration] thresholdDays=${thresholdDays} aged=${agedResult} dateExpired=${dateResult}`);
+  const agedRows = Array.isArray(agedResult) ? agedResult : [];
+  const dateRows = Array.isArray(dateResult) ? dateResult : [];
+  logger.info(`[estimate-expiration] thresholdDays=${thresholdDays} aged=${agedRows.length} dateExpired=${dateRows.length}`);
 
   // Refund acceptance deposits stranded on terminal estimates — money
   // received while the estimate was live (paid then abandoned, or paid then
@@ -90,18 +95,29 @@ async function runEstimateExpiration() {
   }
 
   // Fire a single batched notification when anything flipped — one ping per
-  // cron run, not per estimate, so Virginia doesn't get 5 bells at 6am.
-  const total = (agedResult || 0) + (dateResult || 0);
+  // cron run, not per estimate, so Virginia doesn't get 5 bells at 6am. The
+  // payload names who walked away so the bell/banner is actionable.
+  const expiredRows = [...agedRows, ...dateRows];
+  const total = expiredRows.length;
   if (total > 0) {
     try {
       const { triggerNotification } = require('./notification-triggers');
-      await triggerNotification('estimate_expired', { count: total });
+      const single = total === 1 ? expiredRows[0] : null;
+      await triggerNotification('estimate_expired', {
+        count: total,
+        customerName: single?.customer_name || null,
+        monthlyTotal: single?.monthly_total || null,
+        annualTotal: single?.annual_total || null,
+        onetimeTotal: single?.onetime_total || null,
+        estimateId: single?.id || null,
+        names: expiredRows.map((r) => r.customer_name).filter(Boolean).slice(0, 5),
+      });
     } catch (e) {
       logger.warn(`[estimate-expiration] notification trigger failed: ${e.message}`);
     }
   }
 
-  return { aged: agedResult, dateExpired: dateResult };
+  return { aged: agedRows.length, dateExpired: dateRows.length };
 }
 
 module.exports = { runEstimateExpiration };

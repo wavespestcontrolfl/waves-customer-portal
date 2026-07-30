@@ -861,7 +861,7 @@ async function handleStatementPaymentIntentEvent(paymentIntent, eventType, event
         await db('notifications').insert({
           recipient_type: 'admin',
           category: 'payment',
-          title: `⚠️ Statement payment failed: S-${statementId}`,
+          title: `Statement payment failed: S-${statementId}`,
           body: `PI ${piId} failed after confirmation — ${reasonMsg}. Statement reopened for collection.`,
           icon: '⚠️',
           link: '/admin/payers',
@@ -4030,7 +4030,7 @@ async function handleDisputeCreated(dispute) {
         await db('notifications').insert({
           recipient_type: 'admin',
           category: 'dispute',
-          title: `⚠️ Statement dispute opened: $${amount}`,
+          title: `Statement dispute opened: $${amount}`,
           body: `Statement S-${disputedStmt.id} chargeback (${reason}). PI ${dispute.payment_intent}. Charge ${chargeId}.`,
           icon: '⚠️',
           link: '/admin/payers',
@@ -4129,7 +4129,7 @@ async function handleDisputeCreated(dispute) {
     await db('notifications').insert({
       recipient_type: 'admin',
       category: 'dispute',
-      title: `\u26A0\uFE0F Dispute opened: $${amount}`,
+      title: `Dispute opened: $${amount}`,
       body: `Reason: ${reason}. Respond by ${dispute.evidence_details?.due_by ? new Date(dispute.evidence_details.due_by * 1000).toLocaleDateString('en-US', { timeZone: 'America/New_York' }) : 'soon'}. Charge: ${chargeId}`,
       icon: '\u26A0\uFE0F',
       link: '/admin/invoices',

@@ -18,6 +18,7 @@ const logger = require('./logger');
 const NotificationService = require('./notification-service');
 const PushService = require('./push-notifications');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
+const { stripEmoji } = require('../utils/strip-emoji');
 
 const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
 // Lookarounds keep the match from starting or ending inside a longer
@@ -86,15 +87,24 @@ function sanitizeNotificationValue(value, key = '') {
   return redactSensitiveText(value);
 }
 
-function sanitizeNotificationPayload(_triggerKey, payload = {}) {
+function sanitizeNotificationPayload(triggerKey, payload = {}) {
+  if (TRIGGER_REGISTRY[triggerKey]?.allowContactDetails) return payload;
   return sanitizeNotificationValue(payload);
 }
 
-function sanitizeBuiltNotification(built = {}) {
+// Emoji strip (owner ruling 2026-07-30, see utils/strip-emoji.js) applies
+// here too: this `built` object also feeds the Web Push payload, which never
+// passes through NotificationService.create.
+function sanitizeBuiltNotification(built = {}, trigger = {}) {
+  const cleanTitle = (value) => stripEmoji(String(value || 'Notification')) || String(value || 'Notification');
+  const cleanBody = (value) => (value === null || value === undefined ? value : stripEmoji(value));
+  if (trigger.allowContactDetails) {
+    return { ...built, title: cleanTitle(built.title), body: cleanBody(built.body) };
+  }
   return {
     ...built,
-    title: redactSensitiveText(built.title || 'Notification'),
-    body: built.body === null || built.body === undefined ? built.body : redactSensitiveText(built.body),
+    title: cleanTitle(redactSensitiveText(built.title || 'Notification')),
+    body: built.body === null || built.body === undefined ? built.body : cleanBody(redactSensitiveText(built.body)),
   };
 }
 
@@ -159,13 +169,19 @@ const TRIGGER_REGISTRY = {
     category: 'voicemail_callback',
     priority: 'high',
     group: 'Communication',
+    // Owner ruling (Adam, 2026-07-30, same as twilio_failure): the callback
+    // bell shows the real number — a masked callback number is undialable.
+    // Payload fields are built by call-recording-processor, not free text.
+    allowContactDetails: true,
     build: (p) => {
-      const who = p.name || (p.phone ? maskPhone(p.phone) : 'Unknown caller');
+      const who = p.name || p.phone || 'Unknown caller';
       const bodyParts = [who];
       if (p.service) bodyParts.push(`Asked about ${p.service}`);
-      if (p.phone) bodyParts.push(`Callback: ${maskPhone(p.phone)}`);
+      if (p.phone) bodyParts.push(`Callback: ${p.phone}`);
       return {
-        title: 'Voicemail callback needed',
+        // Banner-first: the WHO leads so a truncated phone banner still
+        // identifies the caller (owner ruling 2026-07-30).
+        title: `Voicemail — ${who}`,
         body: bodyParts.join(' - '),
         // Voicemail recordings render under the Calls tab (hash-routed);
         // ?thread= would open the SMS view instead. CallLogTabV2 has no
@@ -219,16 +235,37 @@ const TRIGGER_REGISTRY = {
     category: 'system',
     priority: 'urgent',
     group: 'Communication',
+    // Owner ruling (Adam, 2026-07-30): fully-masked failure bells ("from
+    // ***5598 — CA...a76a0e") were untriageable. This trigger is exempt from
+    // contact masking: the bell shows the real numbers and, when the remote
+    // phone maps to exactly one customer, their name and record link. Every
+    // payload field is built by twilio-failure-alerts.js, which still
+    // sanitizes provider error text before it gets here.
+    allowContactDetails: true,
     build: (p) => {
       const channel = String(p.channel || 'message').toUpperCase();
       const direction = p.direction ? `${p.direction} ` : '';
       const phase = p.phase ? ` (${p.phase})` : '';
       const status = p.status || 'failed';
       const code = p.errorCode ? ` error ${p.errorCode}` : '';
+      const from = p.fromPhone || p.fromMasked || 'unknown';
+      const to = p.toPhone || p.toMasked || 'unknown';
+      // Banner-first title: iOS/Android banners truncate, so the WHO leads
+      // (owner ruling 2026-07-30 — "the alert should immediately tell me").
+      // Only an EXPLICIT direction identifies the remote side — the voice
+      // call-status exception path passes direction 'unknown', and guessing
+      // `from` there banners Waves' own originating number as the customer.
+      const remote = p.direction === 'outbound' ? to : (p.direction === 'inbound' ? from : null);
+      const who = p.remoteName || (remote && remote !== 'unknown' ? remote : null);
       return {
-        title: `Twilio ${channel} ${status}`,
-        body: `${direction}${channel}${phase}${code}: ${p.errorMessage || `from ${p.fromMasked || 'unknown'} to ${p.toMasked || 'unknown'}`} — ${p.sidMasked || 'no SID'}`,
-        link: p.link || '/admin/communications',
+        title: `${who ? `${who} — ` : ''}${channel} ${status}`,
+        // sidMasked stays in the body — with several events on one number it
+        // is the only handle correlating this alert to the masked provider
+        // SID in the logs.
+        body: `${direction}${channel}${phase}${code}: from ${from} to ${to}${p.errorMessage ? ` — ${p.errorMessage}` : ''}${p.sidMasked ? ` — ${p.sidMasked}` : ''}`,
+        // CustomersPageV2 opens a record via the customerId query param — the
+        // SPA has no /admin/customers/<id> route.
+        link: p.customerId ? `/admin/customers?customerId=${p.customerId}` : (p.link || '/admin/communications'),
       };
     },
   },
@@ -352,15 +389,36 @@ const TRIGGER_REGISTRY = {
     category: 'estimate',
     priority: 'normal',
     group: 'Leads & Sales',
-    build: (p) => ({
-      title: p.count && p.count > 1
-        ? `${p.count} estimates expired`
-        : `Estimate expired — ${p.customerName || 'customer'}`,
-      body: p.count && p.count > 1
-        ? `${p.count} estimates aged out today. Review the pipeline for follow-up opportunities.`
-        : `${p.customerName || 'Customer'}${p.monthlyTotal ? ' — $' + p.monthlyTotal + '/mo' : ''} expired without a decision.`,
-      link: p.estimateId ? `/admin/estimates?estimateId=${p.estimateId}` : '/admin/estimates',
-    }),
+    // Banner-first + actionable (owner ruling 2026-07-30): the WHO leads the
+    // title, and the old nameless fallback ("Customer expired without a
+    // decision.") never renders — a batch without names uses the count copy.
+    build: (p) => {
+      const names = Array.isArray(p.names) ? p.names.filter(Boolean) : [];
+      if (p.count && p.count > 1) {
+        const extra = p.count - names.length;
+        return {
+          title: `${p.count} estimates expired`,
+          body: names.length
+            ? `Expired without a decision: ${names.join(', ')}${extra > 0 ? ` +${extra} more` : ''}. Worth follow-up calls.`
+            : `${p.count} estimates aged out today. Review the pipeline for follow-up opportunities.`,
+          link: '/admin/estimates',
+        };
+      }
+      // Postgres decimals arrive as strings ("0.00" is truthy) — coerce, and
+      // label by which total actually carries the price: monthly, else the
+      // annual-only recurring shape, else one-time.
+      const monthly = Number(p.monthlyTotal || 0);
+      const annual = Number(p.annualTotal || 0);
+      const onetime = Number(p.onetimeTotal || 0);
+      const price = monthly > 0 ? `$${monthly.toFixed(2)}/mo`
+        : annual > 0 ? `$${annual.toFixed(2)}/yr`
+          : onetime > 0 ? `$${onetime.toFixed(2)} one-time` : null;
+      return {
+        title: p.customerName ? `${p.customerName} — estimate expired` : 'Estimate expired',
+        body: `${p.customerName ? `${p.customerName}'s` : 'An'} estimate${price ? ` (${price})` : ''} expired without a decision. Worth a follow-up call.`,
+        link: p.estimateId ? `/admin/estimates?estimateId=${p.estimateId}` : '/admin/estimates',
+      };
+    },
   },
   bundle_quote_requested: {
     label: 'Bundle quote requested',
@@ -593,7 +651,7 @@ async function triggerNotification(triggerKey, payload = {}) {
       return { bellWritten: false, push: null, suppressed: true };
     }
 
-    const built = sanitizeBuiltNotification(trigger.build(payload));
+    const built = sanitizeBuiltNotification(trigger.build(payload), trigger);
     const safePayload = sanitizeNotificationPayload(triggerKey, payload);
 
     // Load per-user preferences (default to enabled if no row exists)

@@ -40,6 +40,12 @@ async function existingCustomerNotification(customerId, dedupeKey, connection = 
     .first();
 }
 
+// No emojis in admin notification text (owner ruling 2026-07-30) — enforced
+// centrally here so every call site (trigger registry, direct notifyAdmin,
+// legacy alert strings, quoted customer text) is covered without a per-site
+// sweep. Customer-facing notifications are untouched.
+const { stripEmoji } = require('../utils/strip-emoji');
+
 const NotificationService = {
   // Create a notification
   async create({ recipientType, recipientId, category, title, body, icon, link, metadata, connection = db }) {
@@ -61,12 +67,15 @@ const NotificationService = {
         // as success-without-a-row.
         return { id: null, suppressed: true };
       }
+      // A title that was ONLY emoji falls back to the original rather than
+      // inserting an empty string.
+      const isAdmin = recipientType === 'admin';
       const [notif] = await connection('notifications').insert({
         recipient_type: recipientType,
         recipient_id: recipientId || null,
         category,
-        title,
-        body: body || null,
+        title: isAdmin ? (stripEmoji(title) || title) : title,
+        body: (isAdmin ? stripEmoji(body) : body) || null,
         icon: icon || getCategoryIcon(category),
         link: link || null,
         metadata: metadata ? JSON.stringify(metadata) : null,
