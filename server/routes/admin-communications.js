@@ -1635,6 +1635,21 @@ router.post('/schedule-sms', async (req, res, next) => {
       throw scheduleErr;
     }
 
+    // Scheduling a reply is the operator's response act — stamp the
+    // Speed-to-Lead clock NOW (the scheduled-SMS cron replays human and
+    // automation rows under one entry point, so fire time can't tell them
+    // apart; the decision to respond already happened here). If the queued
+    // send later fails, the failure alert lane surfaces it.
+    try {
+      const { stampFirstResponseByContact } = require('../services/lead-estimate-link');
+      await stampFirstResponseByContact({
+        phone: to,
+        performedBy: req.technicianId ? `admin:${req.technicianId}` : 'admin',
+      });
+    } catch (stampErr) {
+      logger.warn(`[admin-communications] scheduled-reply first-response stamp failed: ${stampErr.message}`);
+    }
+
     res.json({ success: true, id: row?.id, scheduledFor: sendAt.toISOString() });
   } catch (err) { next(err); }
 });

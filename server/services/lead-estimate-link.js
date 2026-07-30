@@ -78,22 +78,30 @@ function performedByFromTechnician(technician) {
 // old send is timed from first_contact_at → sent_at, not first_contact_at → today
 // (which would stamp a wildly inflated response_time_minutes onto the KPI).
 async function recordFirstResponseIfNeeded(database, lead, performedBy = 'system', respondedAt = null) {
-  if (!lead || lead.response_time_minutes != null || !lead.first_contact_at) return;
+  if (!lead || lead.response_time_minutes != null || !lead.first_contact_at) return false;
   const firstContact = new Date(lead.first_contact_at);
   const respondedMs = respondedAt ? new Date(respondedAt).getTime() : Date.now();
   const minutes = Math.max(0, Math.round((respondedMs - firstContact.getTime()) / 60000));
-  if (!Number.isFinite(minutes)) return;
+  if (!Number.isFinite(minutes)) return false;
 
-  await database('leads').where({ id: lead.id }).update({
-    response_time_minutes: minutes,
-    updated_at: new Date(),
-  });
+  // Atomic claim: the loaded row may be stale when two responses land
+  // concurrently (Comms reply racing an estimate send) — condition on the
+  // CURRENT null so exactly one caller stamps and writes the activity row.
+  const updated = await database('leads')
+    .where({ id: lead.id })
+    .whereNull('response_time_minutes')
+    .update({
+      response_time_minutes: minutes,
+      updated_at: new Date(),
+    });
+  if (!updated) return false;
   await database('lead_activities').insert({
     lead_id: lead.id,
     activity_type: 'first_response',
     description: `First response in ${minutes} minutes`,
     performed_by: performedBy,
   });
+  return true;
 }
 
 async function attachLeadToEstimate({
@@ -309,24 +317,40 @@ async function linkRescuedLead(database, lead, estimate, performedBy) {
 // pileup found in the 2026-07-30 audit — 6 of them had sent estimates).
 // Stamps response_time_minutes only — never status, never estimate_id, never
 // the funnel bridge.
-async function stampFirstResponseByContact({ database = db, phone = null, email = null, performedBy = 'system', respondedAt = null }) {
+async function stampFirstResponseByContact({ database = db, phone = null, email = null, performedBy = 'system', respondedAt = null, originatingNotAfter = null }) {
   const normPhone = normalizePhone(phone);
   const normEmail = normalizeEmail(email);
   if (!normPhone && !normEmail) return 0;
   let stamped = 0;
   try {
-    const leads = await database('leads')
+    const query = database('leads')
       .whereNull('deleted_at')
       .whereNull('response_time_minutes')
       .whereNotNull('first_contact_at')
       .whereNotIn('status', [...CLOSED_LEAD_STATUSES])
       .where(function contactMatch() {
-        if (normPhone) this.orWhereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [normPhone]);
+        if (normPhone) {
+          // normalizePhone yields 10 digits for NANP; anything longer is an
+          // international E.164 tail — match the FULL digit string there, or
+          // a +44 caller would stamp the US lead sharing its last ten digits.
+          if (normPhone.length === 10) {
+            this.orWhereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [normPhone]);
+          } else {
+            this.orWhereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') = ?", [normPhone]);
+          }
+        }
         if (normEmail) this.orWhereRaw("LOWER(TRIM(COALESCE(email, ''))) = ?", [normEmail]);
       });
+    // A response cannot precede the inquiry: on historical replays
+    // (respondedAt from the backfill) only leads that already existed at the
+    // response moment are answered by it. originatingNotAfter (the backfill's
+    // cutoff) narrows the same way — a newer open inquiry sharing the contact
+    // must keep its live SLA clock.
+    if (respondedAt) query.where('first_contact_at', '<=', new Date(respondedAt));
+    if (originatingNotAfter) query.where('first_contact_at', '<=', new Date(originatingNotAfter));
+    const leads = await query;
     for (const lead of leads) {
-      await recordFirstResponseIfNeeded(database, lead, performedBy, respondedAt);
-      stamped += 1;
+      stamped += (await recordFirstResponseIfNeeded(database, lead, performedBy, respondedAt)) ? 1 : 0;
     }
   } catch (e) {
     // SLA bookkeeping must never break a send.
@@ -383,6 +407,9 @@ async function markLinkedLeadEstimateSent({ estimateId, sendMethod, performedBy 
         email: estimateRow.customer_email,
         performedBy,
         respondedAt,
+        // The backfill's cutoff rides through — a newer inquiry sharing this
+        // contact must not be stamped by a historical replay.
+        originatingNotAfter,
       });
     }
   } catch (e) {

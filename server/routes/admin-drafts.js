@@ -735,6 +735,19 @@ router.put('/:id/approve', async (req, res, next) => {
       });
     }
 
+    // An approved draft delivered to the customer is a first response for any
+    // open lead on this phone (SLA truth only; status/linkage untouched).
+    // Fail-soft — bookkeeping never breaks the approval.
+    try {
+      const { stampFirstResponseByContact } = require('../services/lead-estimate-link');
+      await stampFirstResponseByContact({
+        phone: toPhone,
+        performedBy: req.technicianId ? `admin:${req.technicianId}` : 'admin',
+      });
+    } catch (stampErr) {
+      logger.warn(`[admin-drafts] first-response stamp failed: ${stampErr.message}`);
+    }
+
     const responseTime = Math.round((Date.now() - new Date(draft.created_at)) / 1000);
 
     // Draft finalization + linked-row release (click action → 'sent';
@@ -860,6 +873,18 @@ router.put('/:id/revise', async (req, res, next) => {
         code: 'SEND_SUPPRESSED',
         reason: suppressed,
       });
+    }
+
+    // Same first-response stamp as the approve route — an edited-and-sent
+    // draft is still an operator reply.
+    try {
+      const { stampFirstResponseByContact } = require('../services/lead-estimate-link');
+      await stampFirstResponseByContact({
+        phone: toPhone,
+        performedBy: req.technicianId ? `admin:${req.technicianId}` : 'admin',
+      });
+    } catch (stampErr) {
+      logger.warn(`[admin-drafts] first-response stamp failed: ${stampErr.message}`);
     }
 
     const responseTime = Math.round((Date.now() - new Date(draft.created_at)) / 1000);

@@ -159,6 +159,7 @@ describe('lead-estimate link service', () => {
         };
         return {
           whereIn: () => ({ update }),
+          whereNull: () => ({ update }),
           update,
         };
       },
@@ -1420,6 +1421,12 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
                   return opts.linkRows == null ? 1 : opts.linkRows;
                 },
               }),
+              // recordFirstResponseIfNeeded's atomic claim:
+              // .where({id}).whereNull('response_time_minutes').update(patch)
+              update: async (patch) => {
+                updates.push({ id: clause.id, whereNull: col, patch });
+                return 1;
+              },
             }),
             whereIn: (col, vals) => ({
               update: async (patch) => {
@@ -1910,5 +1917,55 @@ describe('stampFirstResponseByContact', () => {
 
     const [u] = updates.filter((x) => x.table === 'leads');
     expect(u.patch.response_time_minutes).toBe(45);
+  });
+
+  test('respondedAt/originatingNotAfter constrain the query so newer inquiries keep their clock (backfill safety)', async () => {
+    // The chain records every where() clause — assert the first_contact_at
+    // cutoffs are applied when the historical replay provides them.
+    const whereCalls = [];
+    const database = (table) => {
+      const q = {
+        whereNull: () => q,
+        whereNotNull: () => q,
+        whereNotIn: () => q,
+        where: (...args) => { whereCalls.push(args); return q; },
+        then: (resolve, reject) => Promise.resolve([]).then(resolve, reject),
+      };
+      return q;
+    };
+
+    const responded = new Date('2026-07-10T12:45:00Z');
+    const cutoff = new Date('2026-07-09T00:00:00Z');
+    await stampFirstResponseByContact({
+      database,
+      phone: '9415550103',
+      respondedAt: responded,
+      originatingNotAfter: cutoff,
+    });
+
+    const cutoffCalls = whereCalls.filter((args) => args[0] === 'first_contact_at' && args[1] === '<=');
+    expect(cutoffCalls.map((args) => args[2].toISOString())).toEqual([
+      responded.toISOString(),
+      cutoff.toISOString(),
+    ]);
+  });
+
+  test('international callers match by FULL digit string, never last-10', async () => {
+    const raws = [];
+    const database = (table) => {
+      const q = {
+        whereNull: () => q,
+        whereNotNull: () => q,
+        whereNotIn: () => q,
+        where: (fn) => { if (typeof fn === 'function') fn.call({ orWhereRaw: (sql, binds) => { raws.push({ sql, binds }); } }); return q; },
+        then: (resolve, reject) => Promise.resolve([]).then(resolve, reject),
+      };
+      return q;
+    };
+
+    await stampFirstResponseByContact({ database, phone: '+442079460958' });
+    expect(raws).toHaveLength(1);
+    expect(raws[0].sql).not.toContain('RIGHT(');
+    expect(raws[0].binds).toEqual(['442079460958']);
   });
 });
