@@ -293,16 +293,23 @@ finding and warns on P1. Reviewers must return JSON matching
   (owner rule re-affirmed 2026-07-23). Invoice/prepay surfaces and
   commercial proposals are exempt; true monthly-billed legacy plans keep
   "/mo". No service is ever presented as a flat monthly spread.
-- **Appointment windows start on the hour.** `window_start`/`window_end`
-  are always HH:00:00 (owner 2026-07-27) — flag any slot/window creation
-  that can produce :15/:30 starts. Customer-facing arrival copy is
+- **Appointment windows start on the hour.** `window_start` is always
+  HH:00:00 (owner 2026-07-27) — flag any slot/window creation that can
+  produce :15/:30 STARTS. `window_end` is duration-driven and may
+  legitimately land off-hour (`classifySlot` in
+  `estimate-slot-availability.js` produces a 10:30 end for a 90-min
+  service at 09:00 — regression-asserted); never round or reject it.
+  Customer-facing arrival copy is
   `window_start` → +120 min, DISPLAY-ONLY, via `arrivalWindowRange()`
   (`server/utils/sms-time-format.js`); never change `window_end` itself
   (it drives scheduling/overlap), and report "next appointment" displays
   follow the same +2h rule.
-- **Email-change token fanout.** Customer-facing tokens ROTATE when a
-  customer's email moves; never retarget unlinked sends by email address
-  alone.
+- **Email-change token fanout.** EMAIL-BOUND delivery/bearer tokens
+  (newsletter engagement tokens and similar per-recipient send tokens)
+  ROTATE when a customer's email moves; never retarget unlinked sends by
+  email address alone. Permanent public artifacts are explicitly exempt —
+  `invoices.token` receipt links never rotate (see the receipt-permanence
+  P0 above).
 - **Compliance language on any customer surface** (portal copy, prep
   guides, reports, estimator benefit lines, marketing): no pesticide is
   ever "safe" (incl. "pet-safe"/"family-safe"); "EPA-registered"/"EPA-

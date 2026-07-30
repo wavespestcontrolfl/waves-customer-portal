@@ -45,8 +45,9 @@ environment that carries the row (prod does), **editing
   blanket revert. Direct prod `pricing_config` UPDATEs are blocked —
   always ship via migration.
 - Regression baselines regenerate via
-  `CAPTURE_BASELINE=1 npx jest tests/pricing-engine.regression.test.js`,
-  then hand-apply the delta to `pricing-engine.baseline.json`.
+  `cd server && CAPTURE_BASELINE=1 npx jest tests/pricing-engine.regression.test.js`
+  (the suite lives in the `server` workspace), then hand-apply the delta
+  to `pricing-engine.baseline.json`.
 - Known client-mirror sites beyond TechEstimatorPage:
   `client/src/lib/estimateEngine.js` (mosquito ×2 blocks),
   `EstimateToolViewV2.jsx` (approx preview), `PortalPage`, `EstimatePage.jsx`.

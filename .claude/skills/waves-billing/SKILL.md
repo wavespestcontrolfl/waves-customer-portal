@@ -55,10 +55,13 @@ payment path).
    non-autopay/non-prepaid customers by design. Rate precedence:
    `estimated_price` → `monthly_rate` → $0, and the server recomputes —
    never trust client-sent amounts. Per-application plans have their own
-   precedence: row price → `per_application_fee` → $0 with a loud warn —
-   NEVER the whole-plan `monthly_rate` (multi-service per-app rows carry
-   NULL fee/prices by design). A $0/NULL-priced row is NOT inert — it falls
-   through to monthly_rate/WaveGuard-tier billing.
+   precedence: row price → `per_application_fee` → $0 with a loud warn and
+   manual-billing routing — NEVER the whole-plan `monthly_rate`
+   (multi-service per-app rows carry NULL fee/prices by design; see
+   `server/services/billing-lane.js`). On LEGACY monthly-billed plans only,
+   a $0/NULL-priced row is NOT inert — it falls through to
+   monthly_rate/WaveGuard-tier billing; never assume zeroing a row
+   disables its billing.
 7. **Pay-at-visit and estimate pricing** read the estimate-level net, never
    per-line fields.
 8. **Unpriced = NULL, never $0.** A blank price means "manual quote

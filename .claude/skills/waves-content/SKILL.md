@@ -104,8 +104,11 @@ this skill.
    115–160 chars, 24 required fields, additionalProperties false).
 2. `npm run publish:post <file>` before merge;
    `npm run validate:generated-blog -- --slug=<slug>` after build. The
-   astro repo's vendored copy of the schema is synced from the portal via
-   `sync:blog-schema` — never hand-edit the vendored copy.
+   ASTRO repo is upstream for the blog schema: the portal's
+   `packages/blog-schema` is a VENDORED copy pulled from astro via
+   `npm run sync:blog-schema` (`scripts/sync-from-astro.js`; a checksum
+   drift check fails the build on mismatch) — edit the schema in the
+   astro repo, then sync; never hand-edit the vendored copy here.
 3. Bump `modified:` frontmatter on ANY content edit (drives sitemap
    lastmod); never rename a slug without a 301.
 4. Ship via the waves-ship skill; pace astro pushes (every push rebuilds the
