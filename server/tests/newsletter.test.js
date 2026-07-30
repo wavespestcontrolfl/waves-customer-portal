@@ -1671,35 +1671,53 @@ describe('newsletter assembly — Beehiiv-parity event rendering', () => {
 describe('DB-locked prices vs the hallucinated-claim scan', () => {
   const { findHallucinatedClaims } = require('../services/newsletter-validator');
 
-  test('marker-bound: renderer-shaped locked prices pass; the same value bare in prose still blocks', () => {
-    expect(findHallucinatedClaims('<p>🎟️ From $25</p>', ['From $25'])).toEqual([]);
-    expect(findHallucinatedClaims('Tickets: From $25', ['From $25'])).toEqual([]);
-    // Exact-value collision in commentary is NOT excised — the model
-    // repeating the value is not the renderer emitting the field.
+  test('HTML exemption is STRUCTURAL: the data-db-price span passes with no lock list; anything else blocks', () => {
+    // Assembler-emitted shape — model prose can never produce this tag
+    // (markdownToHtml escapes HTML before markdown).
+    expect(findHallucinatedClaims('<p>🎟️ <span data-db-price>From $25</span></p>')).toEqual([]);
+    expect(findHallucinatedClaims('<p>🎟️ <span data-db-price>Free admission · paid parking</span></p>')).toEqual([]);
+    // Marker-prefixed prose WITHOUT the span blocks even with a lock —
+    // this is the subject-laundering case ("🎟️ From $25 in prizes").
+    expect(findHallucinatedClaims('<p>🎟️ From $25 in prizes</p>', ['From $25'])).toEqual(
+      expect.arrayContaining([expect.stringContaining('dollar amount in body')]),
+    );
     expect(findHallucinatedClaims('<p>Win $25 cash at the raffle!</p>', ['$25'])).toEqual(
       expect.arrayContaining([expect.stringContaining('dollar amount in body')]),
     );
-    const sneaky = '<p>🎟️ From $25 but VIP is $99.</p>';
+  });
+
+  test('text-segment excision: the Tickets: renderer shape passes; boundary-bound; other amounts block', () => {
+    expect(findHallucinatedClaims('Tickets: From $25', ['From $25'])).toEqual([]);
+    expect(findHallucinatedClaims('Tickets: From&nbsp;&#36;25', ['From $25'])).toEqual([]);
+    // Locked $25 cannot hollow an invented $250.
+    expect(findHallucinatedClaims('Tickets: $250 tonight.', ['$25'])).toEqual(
+      expect.arrayContaining([expect.stringContaining('dollar amount in body')]),
+    );
+    expect(findHallucinatedClaims('Enjoy free admission all day.', ['Free'])).toEqual(
+      expect.arrayContaining([expect.stringContaining('admission claim')]),
+    );
+    const sneaky = 'Tickets: From $25 but VIP is $99.';
     expect(findHallucinatedClaims(sneaky, ['From $25'])).toEqual(
       expect.arrayContaining([expect.stringContaining('dollar amount in body')]),
     );
   });
 
-  test('excision is boundary-bound: a locked prefix cannot hollow out a larger invented amount', () => {
-    expect(findHallucinatedClaims('<p>🎟️ $250 tonight.</p>', ['$25'])).toEqual(
-      expect.arrayContaining([expect.stringContaining('dollar amount in body')]),
-    );
-    expect(findHallucinatedClaims('<p>Enjoy free admission all day.</p>', ['Free'])).toEqual(
-      expect.arrayContaining([expect.stringContaining('admission claim')]),
-    );
+  test('validateNewsletterDraft scans segments separately — a priced subject blocks even when the body price is locked', () => {
+    const { validateNewsletterDraft } = require('../services/newsletter-validator');
+    const send = {
+      subject: '🎟️ From $25 in prizes this weekend',
+      preview_text: 'ok',
+      html_body: '<p>🎟️ <span data-db-price>From $25</span></p><p>Great show.</p>',
+      text_body: 'Tickets: From $25',
+      newsletter_type: 'local-weekly-fresh-events',
+    };
+    const { errors } = validateNewsletterDraft(send, { recipientCount: 5, lockedPrices: ['From $25'] });
+    expect(errors).toEqual(expect.arrayContaining([expect.stringContaining('dollar amount in body')]));
+    const clean = validateNewsletterDraft({ ...send, subject: 'Weekend chaos incoming' }, { recipientCount: 5, lockedPrices: ['From $25'] });
+    expect(clean.errors).toEqual([]);
   });
 
-  test('excision normalizes like the body scan — entity forms cannot dodge it', () => {
-    expect(findHallucinatedClaims('<p>🎟️ From&nbsp;&#36;25</p>', ['From $25'])).toEqual([]);
-    expect(findHallucinatedClaims('<p>🎟️ Free admission · paid parking</p>', ['Free admission · paid parking'])).toEqual([]);
-  });
-
-  test('assembled meta-box price validates cleanly with the lineup lock, blocks without it', async () => {
+  test('assembled meta-box price validates cleanly via the structural span — no lock list needed for HTML', async () => {
     const { assembleBeehiivNewsletter } = require('../services/newsletter-draft');
     const html = await assembleBeehiivNewsletter({
       selectedSubject: 'T',
@@ -1710,9 +1728,8 @@ describe('DB-locked prices vs the hallucinated-claim scan', () => {
         isFree: false, priceText: 'From $25',
       }],
     });
-    expect(html).toContain('🎟️ From $25');
-    expect(findHallucinatedClaims(html, ['From $25'])).toEqual([]);
-    expect(findHallucinatedClaims(html, [])).not.toEqual([]);
+    expect(html).toContain('<span data-db-price>From $25</span>');
+    expect(findHallucinatedClaims(html)).toEqual([]);
   });
 });
 
@@ -1760,7 +1777,7 @@ describe('tiered event treatment (owner direction 2026-07-29)', () => {
 
   test('DB-locked price renders (FREE wins over priceText); labels chip line renders', async () => {
     const html = await assembleBeehiivNewsletter(draft());
-    expect(html).toContain('🎟️ From $25');
+    expect(html).toContain('🎟️ <span data-db-price>From $25</span>');
     expect(html).toContain('🏷️ <em>Family · Worth the drive</em>');
     const free = await assembleBeehiivNewsletter({ selectedSubject: 'T', events: [mk(1, { isFree: true })] });
     expect(free).toContain('🎟️ <strong>FREE</strong>');

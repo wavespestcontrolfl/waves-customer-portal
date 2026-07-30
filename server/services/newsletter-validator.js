@@ -62,24 +62,31 @@ function findHallucinatedClaims(body, lockedPrices = []) {
   // NFKC folds Unicode look-alikes (fullwidth '＄', fullwidth digits, etc.)
   // down to their ASCII forms so a homoglyph "＄15" / "ｆｒｅｅ" can't render as
   // the claim to subscribers while slipping past the ASCII regexes.
-  let bodyText = decodeEntities(body.replace(/<[^>]+>/g, ' '))
+  let bodyText = decodeEntities(String(body)
+    // Structural exemption FIRST (see below): assembler-emitted price
+    // spans vanish with their content before tags are stripped.
+    .replace(/<span data-db-price>[\s\S]*?<\/span>/gi, ' ')
+    .replace(/<[^>]+>/g, ' '))
     .normalize('NFKC')
     .replace(/\s+/g, ' ');
-  // DB-locked price strings (events_raw.price_text for the send's own
-  // lineup — fetched by the caller via lockedPricesForSend) are the ONE
-  // legitimate pricing source. Excision is MARKER-BOUND and boundary-
-  // bound: only the renderer's own shapes are excised — "🎟️ <price>"
-  // (HTML meta box / shortlist meta line) and "Tickets: <price>" (the
-  // plain-text facts line) — with a trailing word boundary so a locked
-  // "$25" can't hollow an invented "$250". A bare exact-value collision
-  // in prose ("Win $25 cash" when some event costs $25) still blocks:
-  // the model repeating the VALUE is not the same as the renderer
-  // emitting the FIELD.
+  // DB-locked prices in HTML are STRUCTURALLY identified: the assembler
+  // wraps them in <span data-db-price>…</span>, a tag model prose can
+  // never produce (markdownToHtml escapes HTML before markdown), so
+  // stripping the span — done above, before tag-strip — exempts exactly
+  // the renderer's own field and nothing else.
+  //
+  // The plain-text body has no markup, so its renderer shape
+  // ("Tickets: <price>", the facts line) is excised by string — but ONLY
+  // when the caller scopes lockedPrices to the TEXT segment
+  // (validateNewsletterDraft scans subject/preview/html with an empty
+  // list). Boundary-bound so a locked "$25" can't hollow an invented
+  // "$250"; any model prose that repeats a claim appears in the HTML
+  // segment too, where no string excision exists, and still blocks.
   for (const price of lockedPrices) {
     const norm = decodeEntities(String(price || '')).normalize('NFKC').replace(/\s+/g, ' ').trim();
     if (!norm) continue;
     const esc = norm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    bodyText = bodyText.replace(new RegExp(`(?:🎟️|Tickets:)\\s*${esc}(?![\\w])`, 'gu'), ' ');
+    bodyText = bodyText.replace(new RegExp(`Tickets:\\s*${esc}(?![\\w])`, 'gu'), ' ');
   }
   const seen = new Set();
   const errors = [];
@@ -162,9 +169,20 @@ function validateNewsletterDraft(send, opts = {}) {
   // gate. Manually-authored types (service-promo) stay exempt — they
   // quote prices legitimately.
   if (requiresClaimValidation(send.newsletter_type)) {
-    const combinedBody = [send.subject, send.preview_text, send.html_body, send.text_body]
-      .filter(Boolean).join('\n');
-    if (combinedBody) errors.push(...findHallucinatedClaims(combinedBody, opts.lockedPrices || []));
+    // Segment-scoped scanning: subject/preview and HTML get NO string
+    // excision (HTML's exemption is the structural data-db-price span;
+    // a subject like "🎟️ From $25 in prizes" always blocks). Only the
+    // plain-text segment excises its renderer shape ("Tickets: <price>").
+    const claimSeen = new Set();
+    const scanSegment = (body, lockedPrices) => {
+      if (!body) return;
+      for (const err of findHallucinatedClaims(body, lockedPrices)) {
+        if (!claimSeen.has(err)) { claimSeen.add(err); errors.push(err); }
+      }
+    };
+    scanSegment([send.subject, send.preview_text].filter(Boolean).join('\n'), []);
+    scanSegment(send.html_body, []);
+    scanSegment(send.text_body, opts.lockedPrices || []);
   }
 
   return { errors, warnings };

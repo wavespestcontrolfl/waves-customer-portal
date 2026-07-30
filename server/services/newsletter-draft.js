@@ -1378,7 +1378,10 @@ async function assembleBeehiivNewsletter(draft) {
       meta.push(`📍 <em>${loc}</em>`);
     }
     if (ev.isFree) meta.push(`🎟️ <strong>FREE</strong>`);
-    else if (ev.priceText) meta.push(`🎟️ ${escapeHtml(ev.priceText)}`);
+    // data-db-price sentinel: the ONLY structurally exempt price shape in
+    // the claim scan. Model prose can never produce this tag —
+    // markdownToHtml escapes HTML before applying markdown.
+    else if (ev.priceText) meta.push(`🎟️ <span data-db-price>${escapeHtml(ev.priceText)}</span>`);
     if (ev.admission) meta.push(`🎟️ ${markdownToHtml(ev.admission)}`);
     if (pieces.labels.length) {
       meta.push(`🏷️ <em>${pieces.labels.map((l) => escapeHtml(l)).join(' · ')}</em>`);
@@ -1440,7 +1443,7 @@ async function assembleBeehiivNewsletter(draft) {
       if (ev.dateStr) metaBits.push(`📅 <strong>${escapeHtml(ev.dateStr)}</strong>${ev.timeStr ? ` · ${escapeHtml(ev.timeStr)}` : ''}`);
       if (ev.location) metaBits.push(`📍 ${escapeHtml(ev.location)}`);
       if (ev.isFree) metaBits.push(`🎟️ <strong>FREE</strong>`);
-      else if (ev.priceText) metaBits.push(`🎟️ ${escapeHtml(ev.priceText)}`);
+      else if (ev.priceText) metaBits.push(`🎟️ <span data-db-price>${escapeHtml(ev.priceText)}</span>`);
       if (pieces.ticketUrl) metaBits.push(`🔗 <a href="${pieces.ticketHref}" style="color:${COLORS.blue};text-decoration:underline;font-weight:500;">${escapeHtml(pieces.anchorText)}</a>`);
       if (metaBits.length) {
         lines.push(`<p style="margin:0;font-size:13px;line-height:1.7;color:${COLORS.muted};">${metaBits.join(' &nbsp;·&nbsp; ')}</p>`);
@@ -1900,15 +1903,16 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
   //     block draft creation — the send gate remains the hard stop.
   if (typeConfig?.flagship) {
     const { findHallucinatedClaims } = require('./newsletter-validator');
-    // Same lock list the send-time gate uses — without it every
-    // DB-rendered price would log a false hallucination warning here.
+    // Segment-scoped like the send-time gate: html's exemption is the
+    // structural data-db-price span; only the text segment excises its
+    // renderer shape via the lineup's locked prices.
     const draftLockedPrices = (draft.events || [])
       .map((ev) => (typeof ev.priceText === 'string' ? ev.priceText : ''))
       .filter(Boolean);
-    const claimErrors = findHallucinatedClaims(
-      [draft.htmlBody, draft.textBody].filter(Boolean).join('\n'),
-      draftLockedPrices,
-    );
+    const claimErrors = [...new Set([
+      ...findHallucinatedClaims(draft.htmlBody || ''),
+      ...findHallucinatedClaims(draft.textBody || '', draftLockedPrices),
+    ])];
     if (claimErrors.length > 0) {
       draft.hallucinationErrors = claimErrors;
       logger.warn(`[newsletter-draft] ${claimErrors.length} hallucinated-claim error(s) at draft time: ${claimErrors.join(' | ')}`);
