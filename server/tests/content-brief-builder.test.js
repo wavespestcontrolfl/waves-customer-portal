@@ -448,14 +448,22 @@ describe('_internalLinksFor conversion link', () => {
     expect(pest).toContain('/pest-control-bradenton-fl/');
     expect(pest.length).toBeLessThanOrEqual(5);
 
+    // The hub links asserted here used to be '/lawn-care/' and
+    // '/tree-shrub-care/' — both 404 (verified against the live hub
+    // 2026-07-29; only city-scoped versions exist). A brief's
+    // internal_links_to_add is a binding writer instruction that also exempts
+    // the route from the dead-link gate, so this test was pinning a defect in
+    // place. It now asserts the real replacements AND that the dead routes are
+    // gone.
     const lawn = builder._internalLinksFor({ city: 'Venice', service: 'lawn-care' }, 'supporting-blog');
     expect(lawn).toContain('/contact/');
-    expect(lawn).toContain('/lawn-care/');
+    expect(lawn).toContain('/lawn-care/fertilizer-blackout-manatee-county/');
+    expect(lawn).not.toContain('/lawn-care/');
     expect(lawn).toContain('/lawn-care-venice-fl/');
 
     const trees = builder._internalLinksFor({ city: null, service: 'tree-shrub-care' }, 'supporting-blog');
     expect(trees).toContain('/contact/');
-    expect(trees).toContain('/tree-shrub-care/');
+    expect(trees).not.toContain('/tree-shrub-care/');
   });
 
   test('non-blog page types keep their existing link shape', () => {

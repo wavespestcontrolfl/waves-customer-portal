@@ -2264,3 +2264,168 @@ describe('P3 badges are recognized as nonblocking (Codex round-1 on the declined
     expect(r.p2Count).toBe(3);
   });
 });
+
+// ── astro #409 (2026-07-27): the pre-push park classes the bar didn't know ──
+// PR #409 sat 2 days with 3 P2s. Round 1 pushed a fix; a stale getPr read
+// parked it "moved past" its own push WITHOUT recording the round; the
+// contradiction check re-armed with rounds reset to 0; the next round's fix
+// tripped a guardrails false positive and parked "fix failed content gates" —
+// a THIRD pre-push class the accepted-reasons whitelist didn't list. Net
+// effect: two LLM rounds spent, state row reading rounds=0 /
+// last_push_sha=null, and a P2-only head that could never merge.
+describe('p2OnlyMergeEligible — pre-push parks open the bar (astro #409)', () => {
+  const p2Body = (t) => `**<sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub>  ${t}**\n\nd`;
+  const p1Body = (t) => `**<sub><sub>![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat)</sub></sub>  ${t}**\n\nd`;
+  const parked = (reason, over = {}) => makeDb({
+    codex_remediation_state: [{ pr_number: 5, rounds: 0, status: 'parked', parked_head_sha: HEAD, park_reason: reason, ...over }],
+  });
+  const allP2 = () => makeGh({ reviewComments: [finding({ body: p2Body('a') })], reviews: [codexReview()] });
+
+  test('the exact #409 park reason opens the bar', async () => {
+    const db = parked('fix failed content gates: guardrails UNKNOWN_INTERNAL_ROUTE');
+    const r = await rem.p2OnlyMergeEligible(5, HEAD, { db, gh: allP2() });
+    expect(r.eligible).toBe(true);
+    expect(r.declined).toBe(true);
+  });
+
+  // Allow-by-default is the point: these are pre-push verdicts nobody
+  // enumerated, and each one used to starve the bar exactly like #409.
+  test.each([
+    ['schema-shape park', 'fix changes the body-derived schema types (frontmatter schema is frozen)'],
+    ['MDX token park', 'fix introduces an MDX-breaking token ({{brandName}})'],
+    ['meta-quality park', 'rewritten meta_description failed metadata quality checks: too short'],
+    ['unresolvable target park', 'could not resolve target markdown file'],
+    ['missing file park', 'file not found on branch: src/content/blog/x.mdx'],
+    ['round-limit park', 'exhausted 3 remediation rounds'],
+  ])('%s opens the bar (head is still the reviewed content)', async (_label, reason) => {
+    const r = await rem.p2OnlyMergeEligible(5, HEAD, { db: parked(reason), gh: allP2() });
+    expect(r.eligible).toBe(true);
+  });
+
+  test('a P1 alongside the P2s still blocks a pre-push park', async () => {
+    const gh = makeGh({ reviewComments: [finding({ body: p2Body('a') }), finding({ body: p1Body('b') })], reviews: [codexReview()] });
+    const r = await rem.p2OnlyMergeEligible(5, HEAD, { db: parked('fix failed content gates: x'), gh });
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toMatch(/blocking findings/);
+  });
+
+  // The divergence hold is the one thing that must NOT fail open — and it has
+  // to survive last_push_sha == head, which is now the normal state for a
+  // post-push park (bookkeeping moved to push time).
+  test.each([
+    ['moved-past', `pr head moved past the remediation push (${HEAD.slice(0, 7)} → other12); sync withheld`],
+    ['revalidation-failed', `post-push PR revalidation failed (fix commit ${HEAD.slice(0, 7)} pushed, sync withheld): gh 502`],
+    ['row-sync-failed', `portal row sync failed after fix commit ${HEAD.slice(0, 7)}: boom`],
+  ])('%s park still blocks even with last_push_sha == head', async (_label, reason) => {
+    const db = parked(reason, { rounds: 1, last_push_sha: HEAD });
+    const r = await rem.p2OnlyMergeEligible(5, HEAD, { db, gh: allP2() });
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toMatch(/branch-mutating/);
+  });
+
+  test('a pre-push park on an OLDER head does not count for the current head', async () => {
+    const db = parked('fix failed content gates: x', { parked_head_sha: 'older9999999' });
+    const r = await rem.p2OnlyMergeEligible(5, HEAD, { db, gh: allP2() });
+    expect(r.eligible).toBe(false);
+  });
+
+  test('isPostPushPark classifies only the three branch-mutating reasons', () => {
+    expect(rem.isPostPushPark('pr head moved past the remediation push (a → b)')).toBe(true);
+    expect(rem.isPostPushPark('post-push PR revalidation failed (fix commit abc pushed)')).toBe(true);
+    expect(rem.isPostPushPark('portal row sync failed after fix commit abc: boom')).toBe(true);
+    expect(rem.isPostPushPark('fix failed content gates: guardrails UNKNOWN_INTERNAL_ROUTE')).toBe(false);
+    expect(rem.isPostPushPark('remediation produced no change (likely false-positive findings)')).toBe(false);
+    expect(rem.isPostPushPark(null)).toBe(false);
+  });
+});
+
+// The round record must exist the moment the commit does. Every park between
+// the push and the old end-of-function write used to discard it, which both
+// un-bounded LLM spend (MAX_ROUNDS never arrives) and hid the pushed commit
+// from the P2 bar.
+describe('round bookkeeping is written at push time (astro #409)', () => {
+  test('a post-push revalidation park still records rounds + last_push_sha', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const db = makeDb();
+    // Healthy on the pre-push state check, 502 on the post-push revalidation —
+    // that window is the one the old end-of-function write lost the round in.
+    const gh = makeGh();
+    gh.getPr = async () => {
+      if (gh._calls.putFile.length) throw new Error('gh 502');
+      return { state: 'open', head: { sha: HEAD, ref: 'content/blog-x' } };
+    };
+    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
+    expect(r.parked).toBe(true);
+    expect(r.reason).toMatch(/revalidation failed/);
+    const row = db._tables.codex_remediation_state.find((x) => x.pr_number === 5);
+    expect(row.rounds).toBe(1);
+    expect(row.last_push_sha).toBe('newcommit999aaa');
+  });
+
+  test('a portal-row-sync park still records the round', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const db = makeDb();
+    const gh = makeGh();
+    const r = await runRemediationForPr(
+      { ...CTX, onRemediated: async () => { throw new Error('row sync boom'); } },
+      { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS },
+    );
+    expect(r.parked).toBe(true);
+    const row = db._tables.codex_remediation_state.find((x) => x.pr_number === 5);
+    expect(row.rounds).toBe(1);
+    expect(row.last_push_sha).toBe('newcommit999aaa');
+  });
+
+  test('a PRE-push park records no round (nothing was committed)', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const db = makeDb();
+    const gh = makeGh();
+    const r = await runRemediationForPr(CTX, {
+      db, gh, callAnthropic: makeCall('FIXED'),
+      validateFixedBlogFile: () => ({ ok: false, reason: 'guardrails UNKNOWN_INTERNAL_ROUTE' }),
+    });
+    expect(r.parked).toBe(true);
+    const row = db._tables.codex_remediation_state.find((x) => x.pr_number === 5);
+    expect(row.rounds || 0).toBe(0);
+    expect(row.last_push_sha ?? null).toBeNull();
+    expect(gh._calls.putFile).toHaveLength(0);
+  });
+});
+
+// A same-head re-arm must not hand out a fresh round budget. #409's stale
+// 'moved past' park re-armed on the SAME head with rounds reset to 0, so the
+// loop re-ran round "1" indefinitely and the bar saw no round spent.
+describe('same-head contradiction re-arm preserves the round count (astro #409)', () => {
+  test("stale 'moved past' re-arm keeps rounds; a NEW head resets them", async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    // Parked on the sha the branch ref still reports as the tip → the park's
+    // premise ("something moved past us") is contradicted, so it re-arms.
+    const stale = makeDb({
+      codex_remediation_state: [{
+        pr_number: 5, rounds: 2, status: 'parked', last_push_sha: 'newcommit999aaa',
+        parked_head_sha: 'newcommit999aaa',
+        park_reason: 'pr head moved past the remediation push (newcomm → older1); sync withheld',
+      }],
+    });
+    // Findings must be pinned to the re-armed head, or the round no-ops on
+    // "no fresh findings" and never exercises the round counter.
+    const gh = makeGh({
+      reviewComments: [finding({ commit_id: 'newcommit999aaa' })],
+      gh: { getPr: async () => ({ state: 'open', head: { sha: 'newcommit999aaa', ref: 'content/blog-x' } }) },
+    });
+    await runRemediationForPr(CTX, { db: stale, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
+    const row = stale._tables.codex_remediation_state.find((x) => x.pr_number === 5);
+    expect(row.rounds).toBe(3); // 2 preserved + this round, NOT reset to 0 then 1
+
+    // Contrast: a genuinely NEW head is what earns a fresh budget.
+    const advanced = makeDb({
+      codex_remediation_state: [{
+        pr_number: 5, rounds: 2, status: 'parked', parked_head_sha: 'oldhead111',
+        park_reason: 'fix failed content gates: guardrails UNKNOWN_INTERNAL_ROUTE',
+      }],
+    });
+    await runRemediationForPr(CTX, { db: advanced, gh: makeGh(), callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
+    const row2 = advanced._tables.codex_remediation_state.find((x) => x.pr_number === 5);
+    expect(row2.rounds).toBe(1); // reset, then this round
+  });
+});

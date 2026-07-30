@@ -18,7 +18,9 @@ const logger = require('../logger');
 const { etDateString, addETDays, parseETDateTime } = require('../../utils/datetime-et');
 const { THRESHOLDS } = require('./scoring-config');
 const { buildSeoRequirements } = require('./blog-seo-contract');
-const { isFaqBlockedService, PAGE_CITY_SLUGS } = require('./content-guardrails');
+const {
+  isFaqBlockedService, PAGE_CITY_SLUGS, ALLOWED_INTERNAL_LINKS, isKnownGoodInternalRoute,
+} = require('./content-guardrails');
 const { isEnabled } = require('../../config/feature-gates');
 
 const queue = require('./opportunity-queue');
@@ -331,15 +333,43 @@ const SERVICE_CITY_SLUG = {
   // fall back to the service hub link only.
 };
 
+// Every route here must be a REAL page. A brief's internal_links_to_add is a
+// binding writer instruction that content-guardrails threads in as a per-draft
+// route allowance, so a dead entry doesn't just slip past the dead-link gate —
+// it INSTRUCTS the writer to add the dead link and then exempts it. The city
+// links below have been validated against PAGE_CITY_SLUGS since the start for
+// exactly this reason ("a served town without a page would make the brief
+// mandate a dead link"); the hub links were not, and carried four 404s
+// (/lawn-care/, /mosquito-control/, /rodent-control/, /tree-shrub-care/ —
+// bare hub pages that do not exist; only city-scoped ones do). Verified
+// against the live hub 2026-07-29, and now enforced by the assertion below
+// plus a unit test rather than by comment.
 const SERVICE_HUB_LINKS = {
   pest: ['/pest-control-services/', '/waveguard-memberships/', '/pest-library/'],
-  lawn: ['/lawn-care/', '/lawn-care/fertilizer-blackout-manatee-county/'],
-  mosquito: ['/mosquito-control/'],
+  lawn: ['/lawn-care/fertilizer-blackout-manatee-county/'],
+  mosquito: ['/pest-control-services/'],
   termite: ['/termite-inspection/'],
-  rodent: ['/rodent-control/'],
-  'tree-shrub': ['/tree-shrub-care/'],
+  rodent: ['/pest-control-services/', '/pest-library/'],
+  // No hub-level tree & shrub page exists (only /{city}-tree-shrub-care/,
+  // which is not a CITY_SERVICE_LINK_RE shape). /contact/ is this vertical's
+  // conversion link and a real page; checkHubLinkPresent accepts any route in
+  // the union of this map, so the gate is satisfied without a dead link.
+  'tree-shrub': ['/contact/'],
   specialty: ['/pest-control-services/'],
 };
+
+// Fail LOUD at require time if a hub link is not on the guardrail allowlist.
+// The allowlist is the single source of route truth (same posture as
+// PAGE_CITY_SLUGS for city links), so drift can only mean one of the two
+// lists is wrong — and a dead mandated link is invisible until a published
+// post 404s. A boot crash is the cheap failure; a silent dead link is not.
+{
+  const allowed = new Set(ALLOWED_INTERNAL_LINKS);
+  const dead = [...new Set(Object.values(SERVICE_HUB_LINKS).flat())].filter((l) => !allowed.has(l));
+  if (dead.length) {
+    throw new Error(`SERVICE_HUB_LINKS contains route(s) missing from the content-guardrails allowlist: ${dead.join(', ')} — add the real route to ALLOWED_INTERNAL_LINKS (after verifying it returns 200) or point the vertical at a page that exists.`);
+  }
+}
 
 // The SEO completion gate P1s a supporting-blog draft whose body has no
 // conversion link (/contact | *quote* | *estimate* | calculator), but the
@@ -792,7 +822,37 @@ class ContentBriefBuilder {
       const conversion = SERVICE_CONVERSION_LINK[service];
       if (conversion) links.add(conversion);
     }
-    return Array.from(links).slice(0, 5);
+    // Only the maps in THIS file are vetted here. Operator/seed overlay links
+    // are deliberately NOT filtered: they legitimately point at the ~198
+    // published blog posts (/{category}/{slug}/) and city-service slug variants
+    // that no static allowlist enumerates, so filtering them silently discards
+    // real curated links. Overlay route hygiene belongs in the overlay's own
+    // source data — see the seed manifest fix in this change.
+    return this._vetInternalLinks(Array.from(links), { service, city: opportunity.city }).slice(0, 5);
+  }
+
+  /**
+   * Drop a mandated internal link this file's own maps cannot prove resolves.
+   *
+   * Scoped to house-generated links (SERVICE_HUB_LINKS / SERVICE_CITY_SLUG /
+   * SERVICE_CONVERSION_LINK), where every value IS expected to be on the
+   * guardrail allowlist or a published city-service route — the module-load
+   * assertion above enforces exactly that, so this is the runtime backstop for
+   * the city-slug branch and for future map edits.
+   *
+   * Dropping beats keeping for these: content-guardrails threads
+   * internal_links_to_add in as a per-draft route ALLOWANCE, so a dead
+   * mandated link doesn't merely evade the dead-link gate — it instructs the
+   * writer to add the link and then suppresses the P0 that would have caught
+   * it. Warn rather than throw: a brief with one fewer link still publishes.
+   */
+  _vetInternalLinks(links, ctx = {}) {
+    const vetted = [];
+    for (const link of Array.isArray(links) ? links : []) {
+      if (isKnownGoodInternalRoute(link)) { vetted.push(link); continue; }
+      logger.warn(`[content-brief-builder] dropped unverifiable internal link "${link}" (service=${ctx.service || 'n/a'} city=${ctx.city || 'n/a'}) — not on the guardrail allowlist and not a published city-service route`);
+    }
+    return vetted;
   }
 
   /**

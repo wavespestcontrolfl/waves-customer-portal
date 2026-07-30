@@ -1738,6 +1738,49 @@ describe('internal-route allowlist (UNKNOWN_INTERNAL_ROUTE)', () => {
       }
     }
   });
+
+  // The drift guard above only proves the two lists AGREE. Both carried the
+  // same four 404s for weeks and it stayed green — consistency is not
+  // reachability. These routes were fetched against the live hub on
+  // 2026-07-29: each returned 404 because only city-scoped versions exist
+  // (CITY_SERVICE_LINK_RE covers those). Re-adding one re-opens the worst
+  // failure mode this gate has: a dead route on the allowlist doesn't merely
+  // pass the dead-link check, it makes the brief MANDATE the dead link and
+  // then exempts it from review.
+  const VERIFIED_DEAD_ROUTES = ['/lawn-care/', '/mosquito-control/', '/rodent-control/', '/tree-shrub-care/'];
+
+  test('no verified-dead route is allowlisted or brief-mandated', () => {
+    const { SERVICE_HUB_LINKS } = require('../services/content/content-brief-builder')._internals;
+    const mandated = new Set(Object.values(SERVICE_HUB_LINKS).flat());
+    for (const dead of VERIFIED_DEAD_ROUTES) {
+      expect(guardrails.ALLOWED_INTERNAL_LINKS).not.toContain(dead);
+      expect(mandated.has(dead)).toBe(false);
+    }
+  });
+
+  test('a dead bare service route in a draft body is still a P0', () => {
+    for (const dead of VERIFIED_DEAD_ROUTES) {
+      const r = guardrails.evaluate({ body: `Ask about our [service](${dead}) options today.` }, {});
+      expect(r.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE' && f.severity === 'P0')).toBe(true);
+    }
+  });
+
+  // astro #409's actual trigger: Codex told the fixer to point a quote CTA at
+  // /quote/ (a real 200 page — src/pages/quote.astro), the allowlist only had
+  // /pest-control-quote/, so the correct fix was rejected as an invented route
+  // and the remediation loop parked for two days.
+  test('/quote/ is allowlisted — the real lead-form flow (astro #409)', () => {
+    expect(guardrails.ALLOWED_INTERNAL_LINKS).toContain('/quote/');
+    const r = guardrails.evaluate({ body: 'Ready when you are — [get a quote](/quote/) and we will send a price.' }, {});
+    expect(r.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
+  });
+
+  test('every city-scoped replacement for the removed bare routes still passes', () => {
+    for (const live of ['/mosquito-control-sarasota-fl/', '/rodent-control-venice-fl/', '/pest-control-bradenton-fl/']) {
+      const r = guardrails.evaluate({ body: `See our [local page](${live}) for details.` }, {});
+      expect(r.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
+    }
+  });
 });
 
 describe('footprint gate — round-12 hardening (Codex findings + astro r12 parity)', () => {

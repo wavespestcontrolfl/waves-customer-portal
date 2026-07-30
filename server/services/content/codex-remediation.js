@@ -191,14 +191,38 @@ function findingSeverity(body) {
   return m ? `P${m[1]}` : 'P1';
 }
 
+// Parks that happened AFTER the branch was mutated. These are the only park
+// classes that must keep the P2-only merge bar shut, and the reason is
+// divergence, not fix quality: the fix commit IS on the branch, but the
+// post-commit sync/revalidation didn't finish, so portal state may not match
+// what a merge would ship. A human reconciles those.
+//
+// Every OTHER park is a PRE-PUSH verdict — remediation looked at the fix and
+// declined to commit it (frontmatter whitelist, no-change round, failed
+// content gates, schema/MDX guards, unresolvable target...). The head is
+// still exactly the content Codex reviewed, untouched, so a P2-only review of
+// it is as mergeable as it was before remediation tried. That is what the
+// owner directive asks for.
+//
+// Deliberately an ALLOW-BY-DEFAULT test on a closed set of three, not a
+// whitelist of accepted reasons. The whitelist form is what broke: it listed
+// two pre-push classes by prose prefix, so every pre-push class added later
+// silently starved the bar — first #394–#398 (07-22), then astro #409 (07-27)
+// on "fix failed content gates". New pre-push classes now open the bar by
+// default; only a new branch-mutating park needs to be added here.
+const POST_PUSH_PARK_RE = /^(?:pr head moved past the remediation push|post-push PR revalidation failed|portal row sync failed after fix commit)/;
+
+function isPostPushPark(parkReason) {
+  return POST_PUSH_PARK_RE.test(String(parkReason || ''));
+}
+
 /**
  * p2OnlyMergeEligible(prNumber, headSha) → { eligible, p2Count?, rounds?, reason? }
  * eligible=true means: Codex HAS reviewed this exact head (findings tied to
- * it exist), every current-head finding is a P2, and codex_remediation_state
- * records BOTH >= 1 remediation round spent AND that the current head IS the
- * remediation commit this loop last pushed (last_push_sha). Callers still
- * run their own merge guards (deploy-green, hub-only, sha-pinned merge,
- * queue re-checks).
+ * it exist), every current-head finding is a P2, and remediation has had its
+ * shot at this head — either it PUSHED the head (last_push_sha) or it parked
+ * on a pre-push verdict (isPostPushPark excluded). Callers still run their own
+ * merge guards (deploy-green, hub-only, sha-pinned merge, queue re-checks).
  */
 async function p2OnlyMergeEligible(prNumber, headSha, deps = {}) {
   if (!p2MergeEnabled()) return { eligible: false, reason: 'disabled (AUTONOMOUS_CODEX_P2_MERGE=false)' };
@@ -206,28 +230,39 @@ async function p2OnlyMergeEligible(prNumber, headSha, deps = {}) {
   const db = deps.db || dbDefault;
   const gh = deps.gh || ghDefault;
   const state = await getState(db, prNumber);
+  const head = String(headSha).trim().toLowerCase();
+  const lastPush = String(state.last_push_sha || '').trim().toLowerCase();
+  const parkedHead = String(state.parked_head_sha || '').trim().toLowerCase();
+  const parkedOnThisHead = state.status === 'parked' && Boolean(parkedHead) && parkedHead === head;
+
+  // A branch-mutating park on THIS head holds unconditionally — including when
+  // last_push_sha equals the head (it now always does for these, since the
+  // round bookkeeping is written at push time). The park exists because portal
+  // state may not match what a merge would ship, and no amount of "remediation
+  // had its shot" makes that divergence safe to merge. Checked FIRST so it
+  // can't be short-circuited by the improved/declined tests below.
+  if (parkedOnThisHead && isPostPushPark(state.park_reason)) {
+    return { eligible: false, reason: `parked after a branch-mutating round (held for a human): ${String(state.park_reason || '').slice(0, 160)}` };
+  }
+
   // Two ways remediation "had its shot" (the bar's precondition under the
   // owner directive):
   //   IMPROVED — the head under review IS a remediation commit this loop
-  //   pushed (last_push_sha equals the current head; failed attempts never
-  //   write it, and a park re-arm resets rounds but keeps last_push_sha as
-  //   history, so presence alone is not enough — Round-9, Codex P2).
-  //   DECLINED — remediation ATTEMPTED this head and parked with one of its
-  //   own fix-safety verdicts (frontmatter-whitelist violation or a
-  //   no-change round): the P2s are real but not auto-fixable within the
-  //   whitelist. Observed 2026-07-22: every open content PR (#394–#398)
-  //   carried ONLY P2/P3 findings yet sat unmergeable because the declined
-  //   park kept last_push_sha ≠ head forever — the fixer's safety whitelist
-  //   starved the very bar the "no gates on the auto blog" directive added.
-  //   Scoped to the CURRENT head and to the two decline classes only —
-  //   infrastructure parks (sync failures, unresolvable targets, exhausted
-  //   rounds) keep holding for a human.
-  const head = String(headSha).trim().toLowerCase();
-  const lastPush = String(state.last_push_sha || '').trim().toLowerCase();
+  //   pushed (last_push_sha equals the current head; failed pre-push attempts
+  //   never write it, and a park re-arm resets rounds but keeps last_push_sha
+  //   as history, so presence alone is not enough — Round-9, Codex P2).
+  //   DECLINED — remediation ATTEMPTED this head and parked on a PRE-PUSH
+  //   verdict, so the head is still the unmodified content Codex reviewed.
+  //   Observed 2026-07-22: every open content PR (#394–#398) carried ONLY
+  //   P2/P3 findings yet sat unmergeable because a declined park kept
+  //   last_push_sha ≠ head forever — the fixer's safety envelope starved the
+  //   very bar the "no gates on the auto blog" directive added. That was
+  //   patched by naming two park reasons; astro #409 (07-27) then stalled 2
+  //   days on a THIRD ("fix failed content gates" — a guardrails
+  //   false-positive on a real route), which is why this is now the
+  //   complement of isPostPushPark instead of a list of accepted prose.
   const remediationImproved = Boolean(lastPush) && lastPush === head;
-  const remediationDeclined = state.status === 'parked'
-    && String(state.parked_head_sha || '').trim().toLowerCase() === head
-    && /^(?:fix changed frontmatter beyond the whitelist|remediation produced no change)/.test(String(state.park_reason || ''));
+  const remediationDeclined = parkedOnThisHead;
   if (!remediationImproved && !remediationDeclined) {
     if ((state.rounds || 0) < 1) return { eligible: false, reason: 'no remediation round spent yet' };
     if (!lastPush) {
@@ -1128,9 +1163,19 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
       }
       return { skipped: true, reason: 'parked' };
     }
-    await saveState(db, prNumber, { status: 'active', rounds: 0, park_reason: null, parked_head_sha: null });
+    // Fresh rounds are the reward for a NEW head — a human or agent pushed
+    // something new, so the loop gets another budget to carry it. The
+    // stale-'moved past' contradiction re-arm is NOT that: the head is
+    // unchanged and its round really was spent, so resetting the counter there
+    // hands out unlimited rounds on one head AND (now that last_push_sha is
+    // written at push time) leaves the P2 bar reading rounds=0 with
+    // last_push_sha == head, i.e. "no remediation round spent yet" forever.
+    // That combination is exactly how astro #409 spent two rounds and still
+    // reported none. Keep the count on a same-head re-arm.
+    const rearmRounds = staleMovedPastPark ? (state.rounds || 0) : 0;
+    await saveState(db, prNumber, { status: 'active', rounds: rearmRounds, park_reason: null, parked_head_sha: null });
     state.status = 'active';
-    state.rounds = 0;
+    state.rounds = rearmRounds;
     logger.info(staleMovedPastPark
       ? `[codex-remediation] re-armed parked PR #${prNumber}: 'moved past' park contradicted — the branch head IS the parked push ${currentHead.slice(0, 7)} (stale read at park time)`
       : `[codex-remediation] re-armed parked PR #${prNumber}: head advanced ${parkedHead ? `${parkedHead.slice(0, 7)} → ` : ''}${currentHead.slice(0, 7)}`);
@@ -1309,6 +1354,24 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
     || (commit && commit.content && commit.content.sha)
     || (await gh.getBranchSha(branch));
 
+  // Record the round the INSTANT the push lands, before any post-push
+  // revalidation that can park. Previously this lived at the end of the
+  // function, so every park between here and there discarded the fact that a
+  // round had run at all: rounds stayed 0 and last_push_sha stayed null even
+  // though a commit was on the branch. astro #409 burned two full LLM rounds
+  // that way — a stale getPr read parked it "moved past" its own push, the
+  // contradiction check re-armed it with rounds reset to 0, and both fix
+  // commits ended up labelled "round 1" while the P2 bar saw no round spent
+  // and no pushed commit forever.
+  //
+  // Two invariants this restores: round accounting BOUNDS LLM spend (an
+  // unrecorded round is a free retry, so the MAX_ROUNDS ceiling never
+  // arrives), and last_push_sha is the bar's proof the loop improved this
+  // head — which is true as soon as the commit exists, not once the sync
+  // finishes. Divergence from a post-push park is held by isPostPushPark at
+  // the bar, not by withholding the bookkeeping.
+  await saveState(db, prNumber, { rounds: round, last_push_sha: newHead || null, last_findings: JSON.stringify(findings) });
+
   // Post-push revalidation: the PR can merge/close in the window between the
   // pre-push saveState and gh.putFile. The push itself is then inert (the
   // commit sits on a branch main never took), but the sync below would
@@ -1398,10 +1461,9 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
     }
   }
 
-  // last_push_sha is the P2-only merge bar's proof that a remediation round
-  // actually PUSHED (round 9) — only this success path may write it; the
-  // no-valid-fix retry path spends rounds without it.
-  await saveState(db, prNumber, { rounds: round, last_push_sha: newHead || null, last_findings: JSON.stringify(findings) });
+  // Round bookkeeping (rounds / last_push_sha / last_findings) was already
+  // written at push time above — a park between the push and here must not
+  // discard it. All that remains is asking Codex to review the new head.
   await gh.createIssueComment(prNumber, buildReviewRequestBody(newHead));
 
   logger.info(`[codex-remediation] round ${round} pushed for PR #${prNumber}: ${findings.length} finding(s) → ${shortSha(newHead)}`);
@@ -1641,5 +1703,6 @@ module.exports = {
   p2MergeEnabled,
   p2OnlyMergeEligible,
   findingSeverity,
+  isPostPushPark,
   MAX_ROUNDS,
 };
