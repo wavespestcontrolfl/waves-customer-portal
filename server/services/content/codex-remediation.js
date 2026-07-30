@@ -339,7 +339,21 @@ async function syncPendingHold(prNumber, {
       // Old enough that no live round could still be pre-push, AND the branch
       // never moved: the round died before its push. Nothing is unsynced, so
       // release the hold rather than wedging the PR forever.
-      await saveState(db, prNumber, { sync_pending_sha: null });
+      //
+      // COMPARE-AND-SET, not a blanket clear. Every check above ran against a
+      // snapshot, and a fresh round can stamp a new sentinel and start pushing in
+      // the meantime — a blanket clear would then erase a LIVE hold, and if that
+      // push landed and crashed before recording its SHA, a later clean review
+      // could merge unsynchronized content. Only clear the exact row state we
+      // judged; a lost CAS means someone else moved it, so report pending and let
+      // the next tick re-evaluate the new state.
+      const cleared = await db('codex_remediation_state')
+        .where({ pr_number: prNumber, sync_pending_sha: sha, updated_at: state.updated_at })
+        .update({ sync_pending_sha: null, updated_at: new Date() });
+      if (!cleared) {
+        logger.info(`[codex-remediation] stale in-flight sync hold on PR #${prNumber} changed under us — leaving it held for the next tick`);
+        return { pending: true, sha, reason: 'the remediation sync state changed while it was being evaluated — holding until the next check' };
+      }
       logger.info(`[codex-remediation] released a stale in-flight sync hold on PR #${prNumber}: branch still at the pre-push head ${shortSha(preHead)} after ${Math.round(age / 60000)}m, no commit landed`);
       return { pending: false };
     }

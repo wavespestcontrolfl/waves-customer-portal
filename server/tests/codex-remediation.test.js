@@ -2967,3 +2967,63 @@ describe('mirrorFrontmatterToDraftPayload', () => {
     expect(empty._updates()).toBe(0);
   });
 });
+
+// The release decision is made against a snapshot, so the clear must be a
+// compare-and-set. A fresh round can stamp a new sentinel and start pushing between
+// the read and the write; a blanket clear would erase that LIVE hold, and if the new
+// push landed and crashed before recording its SHA, a later clean review could merge
+// unsynchronized content.
+describe('the stale-sentinel release is a compare-and-set', () => {
+  const OLD = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+
+  test('a sentinel refreshed under us is NOT cleared', async () => {
+    const rows = [{
+      pr_number: 5, status: 'remediating', sync_pending_sha: `push_in_flight:${HEAD}`, updated_at: OLD,
+    }];
+    let firstRead = true;
+    const db = () => {
+      let crit = {};
+      return {
+        where(c) { crit = c; return this; },
+        async first() {
+          const row = rows.find((r) => r.pr_number === crit.pr_number);
+          if (!row) return null;
+          const snap = { ...row };
+          if (firstRead) {
+            firstRead = false;
+            // A new round stamps a fresh sentinel right after this read.
+            row.sync_pending_sha = 'push_in_flight:newerhead999';
+            row.updated_at = new Date().toISOString();
+          }
+          return snap;
+        },
+        async update(patch) {
+          const row = rows.find((r) => r.pr_number === crit.pr_number
+            && (crit.sync_pending_sha === undefined || r.sync_pending_sha === crit.sync_pending_sha)
+            && (crit.updated_at === undefined || r.updated_at === crit.updated_at));
+          if (!row) return 0; // CAS lost
+          Object.assign(row, patch);
+          return 1;
+        },
+      };
+    };
+    const gh = { getBranchSha: async () => HEAD };
+    const h = await rem.syncPendingHold(5, { db, headSha: HEAD, gh, branch: 'content/blog-x' });
+    expect(h.pending).toBe(true);
+    expect(h.reason).toMatch(/changed while it was being evaluated/);
+    // The newer round's hold survived untouched.
+    expect(rows[0].sync_pending_sha).toBe('push_in_flight:newerhead999');
+  });
+
+  test('an unchanged row IS cleared (the CAS matches)', async () => {
+    const db = makeDb({
+      codex_remediation_state: [{
+        pr_number: 5, status: 'remediating', sync_pending_sha: `push_in_flight:${HEAD}`, updated_at: OLD,
+      }],
+    });
+    const gh = { getBranchSha: async () => HEAD };
+    const h = await rem.syncPendingHold(5, { db, headSha: HEAD, gh, branch: 'content/blog-x' });
+    expect(h.pending).toBe(false);
+    expect(db._tables.codex_remediation_state.find((x) => x.pr_number === 5).sync_pending_sha).toBeNull();
+  });
+});
