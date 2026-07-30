@@ -67,12 +67,18 @@ const MAX_CONSECUTIVE_FAILURES = envNum('SEALED_EVAL_MAX_CONSEC_FAILURES', 5);
 const EXAM_LEG_ROUTES = Object.freeze({
   anthropic: Object.freeze({ provider: MODELS.PROVIDER.ANTHROPIC, model: MODELS.SMS_SONNET }),
   openai: Object.freeze({ provider: MODELS.PROVIDER.OPENAI, model: MODELS.OPENAI_SMS_DRAFT }),
-  // MEASUREMENT-ONLY leg (owner ask 07-30: "check gemini, rank them"): drafts
-  // the same frozen items so Gemini ranks against the two live providers with
-  // zero live exposure — exam drafts are structurally unsendable. Excluded
-  // from the graduation gate and the nightly auto-sweep below: an
-  // experimental leg must neither block autonomy nor auto-spend.
+  // MEASUREMENT-ONLY legs (owner asks 07-30: "check gemini, rank them" +
+  // "run sol, fable, opus — get the absolute best model, and fallback"):
+  // each drafts the same frozen items so every candidate ranks against the
+  // live providers with zero live exposure — exam drafts are structurally
+  // unsendable. All excluded from the graduation gate and the nightly
+  // auto-sweep below: experimental legs must neither block autonomy nor
+  // auto-spend. Fable here is the sanctioned deliberate opt-in the registry
+  // policy requires (EXTREME is never routed automatically).
   gemini: Object.freeze({ provider: MODELS.PROVIDER.GEMINI, model: MODELS.GEMINI_TEXT_BEST }),
+  sol: Object.freeze({ provider: MODELS.PROVIDER.OPENAI, model: MODELS.OPENAI_REPORT_WRITER }),
+  opus: Object.freeze({ provider: MODELS.PROVIDER.ANTHROPIC, model: MODELS.FLAGSHIP }),
+  fable: Object.freeze({ provider: MODELS.PROVIDER.ANTHROPIC, model: MODELS.EXTREME }),
 });
 const EXAM_LEGS = Object.freeze(Object.keys(EXAM_LEG_ROUTES));
 // The legs autonomy decisions ride on — the two LIVE SMS drafting providers.
