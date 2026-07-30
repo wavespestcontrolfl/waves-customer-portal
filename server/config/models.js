@@ -177,7 +177,10 @@ const ROUTES = Object.freeze({
   estimateAssistant: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BALANCED }), // balanced prose; Claude fallback
   askWaves:          Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_BALANCED }), // balanced public chat; Claude fallback
   churnClassify:     Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_FAST }), // low-cost structured lane; Claude fallback
-  smsDraftDefault:   Object.freeze({ provider: PROVIDER.OPENAI,    model: OPENAI_SMS_DRAFT }), // default draft; Claude Sonnet backup
+  // Owner ruling 2026-07-30 (v9 sealed-exam ranking: Sonnet beat Luna on
+  // voice 7.79 vs 7.25, overall 6.50 vs 5.90, 0 unsafe vs 1): Claude Sonnet
+  // drafts EVERY SMS lane, GPT (Sol via the highStakes fallback) backs it up.
+  smsDraftDefault:   Object.freeze({ provider: PROVIDER.ANTHROPIC, model: SMS_SONNET }),       // default draft; OpenAI Sol backup
   smsDraftSaveSale:  Object.freeze({ provider: PROVIDER.ANTHROPIC, model: SMS_SONNET }),       // cancel/complaint draft; OpenAI Sol backup
   smsToneRewrite:    Object.freeze({ provider: PROVIDER.ANTHROPIC, model: SMS_SONNET }),       // tone rewrite; OpenAI Terra backup
 });
