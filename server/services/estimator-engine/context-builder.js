@@ -147,27 +147,32 @@ async function loadLeadForCall(call, phone, { phoneFallback = true } = {}) {
         .orderBy('updated_at', 'desc')
         .first();
       if (reused) {
-        const foreignSid = reused.twilio_call_sid && call?.twilio_call_sid
-          && reused.twilio_call_sid !== call.twilio_call_sid;
-        if (!foreignSid) return { lead: reused, forThisCall: true };
-        // An OLDER foreign-sid lead updated inside this call's window was
-        // most likely touched by THIS call's processing — but on a shared
-        // line a CONCURRENT call could have reused it instead, and
-        // updated_at cannot say who. Attribute it to this call only when
-        // no other call from this line overlaps the window; otherwise it
-        // falls through to the byPhone path as prior history (the
-        // conservative direction — never current-call address/email/
-        // estimate-linkage trust on ambiguous attribution).
-        const concurrentCall = await db('call_log')
+        const ownSid = reused.twilio_call_sid && call?.twilio_call_sid
+          && reused.twilio_call_sid === call.twilio_call_sid;
+        if (ownSid) return { lead: reused, forThisCall: true };
+        // ANY reused row not stamped with THIS call's sid — an older
+        // foreign-sid lead or an unstamped web/manual lead — was most
+        // likely touched by this call's processing, but on a shared line a
+        // CONCURRENT call could have reused it instead, and updated_at
+        // cannot say who. Attribute it to this call only when no other
+        // call from this line overlaps the window. The overlap check looks
+        // back 2h before this call's start: a call that began earlier can
+        // still be live or processing inside this call's window. On
+        // ambiguity the lead falls through to the byPhone path as prior
+        // history (the conservative direction — never current-call
+        // address/email/estimate-linkage trust on ambiguous attribution).
+        const lookback = new Date(new Date(call.created_at).getTime() - 2 * 3600 * 1000);
+        let concurrentQ = db('call_log')
           .select('id')
           .where((qb) => {
             qb.whereRaw("regexp_replace(coalesce(from_phone, ''), '\\D', '', 'g') LIKE ?", [`%${digits}`])
               .orWhereRaw("regexp_replace(coalesce(to_phone, ''), '\\D', '', 'g') LIKE ?", [`%${digits}`]);
           })
-          .whereNot('twilio_call_sid', call.twilio_call_sid)
-          .where('created_at', '>=', call.created_at)
-          .where('created_at', '<=', processedBy)
-          .first();
+          .where('created_at', '>=', lookback)
+          .where('created_at', '<=', processedBy);
+        if (call?.twilio_call_sid) concurrentQ = concurrentQ.whereNot('twilio_call_sid', call.twilio_call_sid);
+        if (call?.id) concurrentQ = concurrentQ.whereNot('id', call.id);
+        const concurrentCall = await concurrentQ.first();
         if (!concurrentCall) return { lead: reused, forThisCall: true };
       }
     }

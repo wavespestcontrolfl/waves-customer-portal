@@ -285,6 +285,69 @@ describe('audit P2: reused-lead window vs foreign-sid leads', () => {
     expect(lead?.id).toBe('lead-ambiguous');
   });
 
+  test('an UNSTAMPED reused lead is also ambiguous when a concurrent call overlaps — falls to history', async () => {
+    mockLeadRows = [{
+      id: 'lead-unstamped-ambiguous',
+      phone: '+19415550123',
+      twilio_call_sid: null,
+      deleted_at: null,
+      created_at: '2026-06-20T09:00:00.000Z',
+      updated_at: '2026-07-01T17:05:00.000Z',
+    }];
+    mockCallLogRows = [{
+      id: 'call-b',
+      twilio_call_sid: 'CA-call-b',
+      from_phone: '+19415550123',
+      to_phone: '+19415551111',
+      created_at: '2026-07-01T17:10:00.000Z',
+    }];
+    const { forThisCall } = await ctxPriv.loadLeadForCall(CALL, '+19415550123');
+    expect(forThisCall).toBe(false);
+  });
+
+  test('a call that STARTED BEFORE this one but overlaps the window still makes attribution ambiguous', async () => {
+    mockLeadRows = [{
+      id: 'lead-earlier-call',
+      phone: '+19415550123',
+      twilio_call_sid: 'CA-two-weeks-ago',
+      deleted_at: null,
+      created_at: '2026-06-17T09:00:00.000Z',
+      updated_at: '2026-07-01T17:06:00.000Z',
+    }];
+    mockCallLogRows = [{
+      id: 'call-earlier',
+      twilio_call_sid: 'CA-call-earlier',
+      from_phone: '+19415550123',
+      to_phone: '+19415551111',
+      // Began 40 minutes before this call — inside the 2h pre-start
+      // lookback; its processing can still touch the lead in-window.
+      created_at: '2026-07-01T16:20:00.000Z',
+    }];
+    const { forThisCall } = await ctxPriv.loadLeadForCall(CALL, '+19415550123');
+    expect(forThisCall).toBe(false);
+  });
+
+  test("the current call's own call_log row does not count as a concurrent call", async () => {
+    mockLeadRows = [{
+      id: 'lead-own-row',
+      phone: '+19415550123',
+      twilio_call_sid: null,
+      deleted_at: null,
+      created_at: '2026-06-20T09:00:00.000Z',
+      updated_at: '2026-07-01T17:05:00.000Z',
+    }];
+    mockCallLogRows = [{
+      id: 'call-a',
+      twilio_call_sid: 'CA-call-a',
+      from_phone: '+19415550123',
+      to_phone: '+19415551111',
+      created_at: '2026-07-01T17:00:00.000Z',
+    }];
+    const { lead, forThisCall } = await ctxPriv.loadLeadForCall(CALL, '+19415550123');
+    expect(forThisCall).toBe(true);
+    expect(lead.id).toBe('lead-own-row');
+  });
+
   test('an unstamped reused lead touched inside the window keeps current-call priority', async () => {
     mockLeadRows = [{
       id: 'lead-reused',
