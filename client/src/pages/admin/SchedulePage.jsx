@@ -100,188 +100,6 @@ const CHIP_ACTION_BY_LABEL = Object.fromEntries(
 // (pest control, mosquito, termite, rodent) get a pest-focused list, while
 // plant-health services (lawn, tree/shrub) keep the original broad list that
 // includes lawn/ornamental entries like irrigation, fungus, and weeds.
-const CHIP_OBSERVATIONS_PEST = [
-  "Pest activity noted",
-  "Ant trails observed",
-  "Roach activity (live/dead)",
-  "Spider webs/egg sacs",
-  "Wasp/bee nests found",
-  "Rodent signs",
-  "Entry points identified",
-  "Moisture/conducive conditions",
-  "Conducive vegetation against structure",
-  "Standing water found",
-  "Debris in gutters",
-  "Property access issue",
-  "Customer concern discussed",
-];
-const CHIP_OBSERVATIONS_LAWN = [
-  "Lawn stress/dry patches",
-  "Standing water found",
-  "Irrigation issue",
-  "Fungus/disease visible",
-  "Weeds spreading",
-  "Lawn pest activity (chinch/armyworm/grubs)",
-  "Thinning/bare areas",
-  "Scalping/mowing damage",
-  "Property access issue",
-  "Customer concern discussed",
-];
-const CHIP_OBSERVATIONS_TREE_SHRUB = [
-  "Scale insects present",
-  "Whitefly activity",
-  "Aphids/mealybugs",
-  "Lace bug damage",
-  "Spider mites",
-  "Sooty mold present",
-  "Fungal leaf spot/blight",
-  "Nutrient deficiency (chlorosis)",
-  "Dieback/declining branches",
-  "Caterpillar/defoliation",
-  "Property access issue",
-  "Customer concern discussed",
-];
-const CHIP_RECOMMENDATIONS_PEST = [
-  "Callback recommended",
-  "Follow-up in 2 weeks",
-  "Schedule interior next visit",
-  "Bait station replacement",
-  "Customer wants estimate",
-];
-const CHIP_RECOMMENDATIONS_LAWN = [
-  "Callback recommended",
-  "Irrigation adjustment needed",
-  "Raise mowing height",
-  "Follow-up in 2 weeks",
-  "Customer wants estimate",
-];
-const CHIP_RECOMMENDATIONS_TREE_SHRUB = [
-  "Callback recommended",
-  "Systemic soil drench next visit",
-  "Horticultural oil / insecticidal soap",
-  "Prune deadwood/affected growth",
-  "Fertilize / nutritional supplement",
-  "Follow-up in 2 weeks",
-  "Customer wants estimate",
-];
-const CHIP_OBSERVATIONS_MOSQUITO = [
-  "Heavy adult activity",
-  "Larvae present (containers/bromeliads)",
-  "Standing water found",
-  "Bromeliads/plant axils holding water",
-  "Dense vegetation/harborage",
-  "Breeding source identified",
-  "Property access issue",
-  "Customer concern discussed",
-];
-const CHIP_RECOMMENDATIONS_MOSQUITO = [
-  "Callback recommended",
-  "Eliminate standing water (customer)",
-  "Treat bromeliads next visit",
-  "Increase frequency",
-  "In2Care/larvicide station service",
-  "Customer wants estimate",
-];
-const CHIP_OBSERVATIONS_TERMITE = [
-  "Active mud tubes found",
-  "Swarmers/wings observed",
-  "Wood damage noted",
-  "Station hit / bait consumed",
-  "Wood-to-ground contact",
-  "Conducive moisture",
-  "Property access issue",
-  "Customer concern discussed",
-];
-const CHIP_RECOMMENDATIONS_TERMITE = [
-  "Callback recommended",
-  "Schedule re-treatment",
-  "Add/replace bait station",
-  "Recommend WDO inspection",
-  "Customer wants estimate",
-];
-const CHIP_OBSERVATIONS_RODENT = [
-  "Fresh droppings found",
-  "Gnaw marks/damage",
-  "Burrows/runways noted",
-  "Station hit / bait consumed",
-  "Entry points identified",
-  "Harborage/clutter present",
-  "Property access issue",
-  "Customer concern discussed",
-];
-const CHIP_RECOMMENDATIONS_RODENT = [
-  "Callback recommended",
-  "Replace/add bait station",
-  "Exclusion work recommended",
-  "Follow-up in 2 weeks",
-  "Customer wants estimate",
-];
-const CHIP_OBSERVATIONS_PALM = [
-  "Frizzle top / nutrient deficiency",
-  "Yellowing/necrotic fronds",
-  "Mn/Mg/boron deficiency signs",
-  "Palm weevil activity",
-  "Ganoderma conk present",
-  "Declining canopy",
-  "Injection sites treated",
-  "Property access issue",
-  "Customer concern discussed",
-];
-const CHIP_RECOMMENDATIONS_PALM = [
-  "Callback recommended",
-  "Re-inject next cycle",
-  "Soil nutrient supplement",
-  "Remove declining palm",
-  "Follow-up in 2 weeks",
-  "Customer wants estimate",
-];
-// Closeout observation/recommendation chips are scoped to the service LINE
-// (serviceLineFromType: pest · palm · lawn · tree_shrub · mosquito · termite ·
-// rodent). lawn / tree_shrub / mosquito / termite / rodent / palm each have
-// their own set; everything else falls back to the pest set.
-const CHIP_OBSERVATIONS_BY_LINE = {
-  lawn: CHIP_OBSERVATIONS_LAWN,
-  tree_shrub: CHIP_OBSERVATIONS_TREE_SHRUB,
-  palm: CHIP_OBSERVATIONS_PALM,
-  mosquito: CHIP_OBSERVATIONS_MOSQUITO,
-  termite: CHIP_OBSERVATIONS_TERMITE,
-  rodent: CHIP_OBSERVATIONS_RODENT,
-  pest: CHIP_OBSERVATIONS_PEST,
-};
-const CHIP_RECOMMENDATIONS_BY_LINE = {
-  lawn: CHIP_RECOMMENDATIONS_LAWN,
-  tree_shrub: CHIP_RECOMMENDATIONS_TREE_SHRUB,
-  palm: CHIP_RECOMMENDATIONS_PALM,
-  mosquito: CHIP_RECOMMENDATIONS_MOSQUITO,
-  termite: CHIP_RECOMMENDATIONS_TERMITE,
-  rodent: CHIP_RECOMMENDATIONS_RODENT,
-  pest: CHIP_RECOMMENDATIONS_PEST,
-};
-function observationChipsForLine(serviceLine) {
-  return CHIP_OBSERVATIONS_BY_LINE[serviceLine] || CHIP_OBSERVATIONS_PEST;
-}
-function recommendationChipsForLine(serviceLine) {
-  return CHIP_RECOMMENDATIONS_BY_LINE[serviceLine] || CHIP_RECOMMENDATIONS_PEST;
-}
-// Pest-primary combined services ("Pest & Rodent Control", "Quarterly Pest +
-// Termite Bait Station") keep the PEST chip set, mirroring the server
-// classifier (server/services/service-report/service-line-configs.js
-// detectServiceLine): a "pest" mention BEFORE the rodent/termite token marks a
-// pest-primary bundle whose companion line is just a section, not the report
-// layout. Token order is load-bearing — "Rodent Pest Control" stays rodent;
-// lawn/turf/mosquito mentions still win. The client serviceLineFromType lacks
-// this precedence, so apply it here before selecting chips (chips only — the
-// recap/tree-shrub gating on serviceLineForCloseout is intentionally unchanged).
-function closeoutChipLine(serviceType, serviceLine) {
-  const text = String(serviceType || "").toLowerCase();
-  if (
-    /\bpest\b.*\b(rodent|termite)\b/.test(text) &&
-    !/\b(lawn|turf|grass|weed|fertil|mosquito)\b/.test(text)
-  ) {
-    return "pest";
-  }
-  return serviceLine;
-}
 const VISIT_OUTCOME_OPTIONS = [
   { value: "completed", label: "Completed" },
   { value: "inspection_only", label: "Inspection only" },
@@ -357,10 +175,6 @@ const AREAS_BY_SERVICE = {
     "Front yard",
     "Back yard",
     "Side yards",
-  ],
-  universal: [
-    "No issues found",
-    "Follow-up recommended",
   ],
 };
 // Per-product treatment areas are multi-select but stored as ONE
@@ -8681,6 +8495,14 @@ export function CompletionPanel({
   );
   const [selectedRecommendationLabels, setSelectedRecommendationLabels] =
     useState([]);
+  // Free-text observations/recommendations (owner 2026-07-30): the preset
+  // dropdowns are gone — the tech types what they saw / what's next, only
+  // when there's something to say. One entry per line; submitted as the
+  // same observations/recommendations arrays the server already reads.
+  // The selected-label arrays above stay only so restored older drafts
+  // keep their chip selections.
+  const [observationsText, setObservationsText] = useState("");
+  const [recommendationsText, setRecommendationsText] = useState("");
   // Flips true once Generate AI report replaces the notes with clean prose.
   // Before that, the [Protocol]/[Found]/[Next] chip lines in the notes are the
   // selection source of truth (delete a line = deselect); after, the label
@@ -8742,13 +8564,6 @@ export function CompletionPanel({
   // ornamental pest list (see targetPickerConfig).
   const isTreeShrub =
     !isTypedFindings && ["tree_shrub", "palm"].includes(serviceLineForCloseout);
-  // Closeout observation/recommendation chips are scoped to the service line
-  // (lawn / tree_shrub / mosquito / termite / rodent / palm each have their own
-  // set; pest is the fallback). Pest-primary combined names resolve back to pest
-  // via closeoutChipLine so a "Pest & Rodent Control" bundle keeps the pest set.
-  const chipServiceLine = closeoutChipLine(serviceTypeForArea, serviceLineForCloseout);
-  const observationChips = observationChipsForLine(chipServiceLine);
-  const recommendationChips = recommendationChipsForLine(chipServiceLine);
   // Under a backdated quiet closeout the server never enqueues the recap
   // render and recap delivery refuses the send — so hide the capture/approve
   // cards and let the success overlay auto-close instead of holding it open
@@ -8839,15 +8654,12 @@ export function CompletionPanel({
     setLawnAssessmentId(assessmentId || null);
     setLawnAssessmentRevision((v) => v + 1);
   };
-  // Lawn visits use only the real turf zones — no ornamental/tree-shrub areas
-  // and no generic status chips ("No issues found" / "Follow-up recommended"),
-  // which don't belong on a lawn report. Other lines keep the universal set.
-  const areaOptions = serviceCategory === "lawn"
-    ? [...AREAS_BY_SERVICE.lawn]
-    : [
-        ...(AREAS_BY_SERVICE[serviceCategory] || AREAS_BY_SERVICE.pest),
-        ...AREAS_BY_SERVICE.universal,
-      ];
+  // Real treated areas only — the generic status chips ("No issues found" /
+  // "Follow-up recommended") were dropped everywhere (owner 2026-07-30):
+  // they aren't areas and don't belong in the treated-areas list.
+  const areaOptions = [
+    ...(AREAS_BY_SERVICE[serviceCategory] || AREAS_BY_SERVICE.pest),
+  ];
   const onSiteEntry = (service.statusLog || []).find(
     (e) => e.status === "on_site",
   );
@@ -9467,6 +9279,8 @@ export function CompletionPanel({
       selectedProtocolActionLabels.length ||
       selectedObservationLabels.length ||
       selectedRecommendationLabels.length ||
+      observationsText.trim() ||
+      recommendationsText.trim() ||
       nextVisitNote.trim() ||
       oneTimeRecapOnly ||
       reviewTiming !== "120" ||
@@ -9558,6 +9372,8 @@ export function CompletionPanel({
         actionScopeByLabel,
         selectedObservationLabels,
         selectedRecommendationLabels,
+        observationsText,
+        recommendationsText,
         // Which deselect model the label arrays were saved under — a restored
         // post-AI-draft (no chip lines in notes) must restore as detached or
         // labelsStillInNotes would silently drop every structured selection.
@@ -9618,6 +9434,8 @@ export function CompletionPanel({
     actionScopeByLabel,
     selectedObservationLabels,
     selectedRecommendationLabels,
+    observationsText,
+    recommendationsText,
     chipLinesDetached,
     nextVisitNote,
     showNextVisitNote,
@@ -9748,6 +9566,16 @@ export function CompletionPanel({
       Array.isArray(savedDraft.selectedRecommendationLabels)
         ? savedDraft.selectedRecommendationLabels
         : [],
+    );
+    setObservationsText(
+      typeof savedDraft.observationsText === "string"
+        ? savedDraft.observationsText
+        : "",
+    );
+    setRecommendationsText(
+      typeof savedDraft.recommendationsText === "string"
+        ? savedDraft.recommendationsText
+        : "",
     );
     // Drafts saved before the detached-selection model lack the field → false,
     // which matches their notes still carrying the chip-marker lines.
@@ -10083,6 +9911,14 @@ export function CompletionPanel({
       .join("\n")
       .trim();
   }
+  // Free-text observations/recommendations → the same string[] the server
+  // already reads (one entry per non-empty line).
+  function freeTextLines(text) {
+    return String(text || "")
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+  }
   // Single source of truth for the AI report payload + the "is there enough to
   // generate?" gate, so the two Generate buttons (mobile + desktop) and the
   // server can't drift. The payload classifies inputs by provenance so the
@@ -10094,8 +9930,16 @@ export function CompletionPanel({
       .map((p) => p.name + (p.rate ? ` (${p.rate} ${p.rateUnit})` : ""))
       .join(", ");
     const actionsCompleted = activeSelectedLabels(selectedProtocolActionLabels);
-    const observations = activeSelectedLabels(selectedObservationLabels);
-    const recommendations = activeSelectedLabels(selectedRecommendationLabels);
+    // Free text is the input surface now; restored older drafts can still
+    // carry chip-label selections, so both merge into the same arrays.
+    const observations = [
+      ...activeSelectedLabels(selectedObservationLabels),
+      ...freeTextLines(observationsText),
+    ];
+    const recommendations = [
+      ...activeSelectedLabels(selectedRecommendationLabels),
+      ...freeTextLines(recommendationsText),
+    ];
     // Mirror the final-submit gate (handleSubmit only sends customerConcernText
     // when the interaction is still "customer had a concern"): if the tech typed
     // a concern then switched the interaction away, the concern input is hidden
@@ -10352,10 +10196,17 @@ export function CompletionPanel({
         // control and trims rather than typing from scratch. Editable as before.
         // Protocol-added products (addProduct(action.product)) are serialized
         // without target_pests, so fall back to the loaded catalog row by id.
-        targets: normalizeLabelTargets(
-          product.target_pests
-            ?? product.targetPests
-            ?? (products || []).find((p) => String(p.id) === String(product.id))?.target_pests,
+        // Broad-label products (Bifen etc.) carry turf pests on the label —
+        // on a non-lawn visit those prefills read wrong on the report (owner
+        // 2026-07-30), so they're dropped here; the tech can still add any
+        // target by hand.
+        targets: filterLabelTargetsForLine(
+          normalizeLabelTargets(
+            product.target_pests
+              ?? product.targetPests
+              ?? (products || []).find((p) => String(p.id) === String(product.id))?.target_pests,
+          ),
+          { isLawn },
         ),
       },
     ]);
@@ -10801,13 +10652,15 @@ export function CompletionPanel({
           return { label, scope: meta.scope, treatmentApplied: meta.treatmentApplied === true };
         })
         .filter(Boolean);
-      const reportObservations = activeSelectedLabels(
-        selectedObservationLabels,
-      );
+      const reportObservations = [
+        ...activeSelectedLabels(selectedObservationLabels),
+        ...freeTextLines(observationsText),
+      ];
       // Typed mode appends the optional recommendations textarea into the
       // existing recommendations array — no new server field.
       const reportRecommendations = [
         ...activeSelectedLabels(selectedRecommendationLabels),
+        ...freeTextLines(recommendationsText),
         ...(isTypedFindings && typedRecommendations.trim()
           ? [typedRecommendations.trim()]
           : []),
@@ -11167,18 +11020,6 @@ export function CompletionPanel({
       (opt) => opt.value === value,
     );
     if (option?.action) applyProtocolAction(option.action);
-  }
-  function handleObservationSelect(value) {
-    if (value && !generating) {
-      appendUniqueLabel(setSelectedObservationLabels, value);
-      addChipNote("Found", value);
-    }
-  }
-  function handleRecommendationSelect(value) {
-    if (value && !generating) {
-      appendUniqueLabel(setSelectedRecommendationLabels, value);
-      addChipNote("Next", value);
-    }
   }
   function markTypedFirstFieldTouch() {
     if (!completionTelemetryRef.current.firstFieldTouchedAt) {
@@ -12176,35 +12017,25 @@ export function CompletionPanel({
             )}
             <Field label="Observations">
               {" "}
-              <select
-                aria-label="Add observation"
-                value=""
-                onChange={(e) => handleObservationSelect(e.target.value)}
-                style={mSelect}
-              >
-                <option value="">Add observation...</option>
-                {observationChips.map((chip) => (
-                  <option key={chip} value={chip}>
-                    {chip}
-                  </option>
-                ))}
-              </select>{" "}
+              <textarea
+                aria-label="Observations"
+                value={observationsText}
+                onChange={(e) => setObservationsText(e.target.value)}
+                rows={2}
+                placeholder="Optional — anything you noticed (one per line)"
+                style={mTextarea}
+              />{" "}
             </Field>
             <Field label="Recommendations">
               {" "}
-              <select
-                aria-label="Add recommendation"
-                value=""
-                onChange={(e) => handleRecommendationSelect(e.target.value)}
-                style={mSelect}
-              >
-                <option value="">Add recommendation...</option>
-                {recommendationChips.map((chip) => (
-                  <option key={chip} value={chip}>
-                    {chip}
-                  </option>
-                ))}
-              </select>{" "}
+              <textarea
+                aria-label="Recommendations"
+                value={recommendationsText}
+                onChange={(e) => setRecommendationsText(e.target.value)}
+                rows={2}
+                placeholder="Optional — next steps if needed (one per line)"
+                style={mTextarea}
+              />{" "}
             </Field>
             {/* AI report — drafts customer-facing visit copy into the notes box
                 from the structured visit data (actions, observations, products,
@@ -12957,7 +12788,14 @@ export function CompletionPanel({
                 fetch failed) keeps the picker hidden too. */}
             {techRatingAllowed === true && !quickComplete && (
               <Field label="Pest activity rating (0–5, optional)">
-                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <div
+                  style={{
+                    display: "flex",
+                    gap: 8,
+                    flexWrap: "wrap",
+                    justifyContent: "center",
+                  }}
+                >
                   {[0, 1, 2, 3, 4, 5].map((n) => {
                     const selected = clientPestRating === n;
                     return (
@@ -12995,6 +12833,7 @@ export function CompletionPanel({
                     fontSize: 12,
                     color: M.muted,
                     fontFamily: font,
+                    textAlign: "center",
                   }}
                 >
                   0 = none, 5 = severe. Tap a number again to clear.
@@ -14025,37 +13864,27 @@ export function CompletionPanel({
               <label style={{ ...labelStyle, color: D.amber }}>
                 Observations
               </label>{" "}
-              <select
-                aria-label="Add observation"
-                value=""
-                onChange={(e) => handleObservationSelect(e.target.value)}
-                style={inputStyle}
-              >
-                <option value="">Add observation...</option>
-                {observationChips.map((chip) => (
-                  <option key={chip} value={chip}>
-                    {chip}
-                  </option>
-                ))}
-              </select>{" "}
+              <textarea
+                aria-label="Observations"
+                value={observationsText}
+                onChange={(e) => setObservationsText(e.target.value)}
+                rows={2}
+                placeholder="Optional — anything you noticed (one per line)"
+                style={{ ...inputStyle, height: "auto", resize: "vertical" }}
+              />{" "}
             </div>
             <div style={{ marginBottom: 12 }}>
               <label style={{ ...labelStyle, color: D.green }}>
                 Recommendations
               </label>{" "}
-              <select
-                aria-label="Add recommendation"
-                value=""
-                onChange={(e) => handleRecommendationSelect(e.target.value)}
-                style={inputStyle}
-              >
-                <option value="">Add recommendation...</option>
-                {recommendationChips.map((chip) => (
-                  <option key={chip} value={chip}>
-                    {chip}
-                  </option>
-                ))}
-              </select>{" "}
+              <textarea
+                aria-label="Recommendations"
+                value={recommendationsText}
+                onChange={(e) => setRecommendationsText(e.target.value)}
+                rows={2}
+                placeholder="Optional — next steps if needed (one per line)"
+                style={{ ...inputStyle, height: "auto", resize: "vertical" }}
+              />{" "}
             </div>{" "}
           </div>
           {/* AI Service Report — drafts customer-facing visit copy into the
@@ -14782,11 +14611,18 @@ export function CompletionPanel({
               missing the data-capture entirely (codex-review P2 on the
               first push of #1013). */}
           {techRatingAllowed === true && !quickComplete && (
-            <div style={{ marginBottom: 20 }}>
+            <div style={{ marginBottom: 20, textAlign: "center" }}>
               <label style={labelStyle}>
                 Pest activity rating (0–5, optional)
               </label>
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <div
+                style={{
+                  display: "flex",
+                  gap: 8,
+                  flexWrap: "wrap",
+                  justifyContent: "center",
+                }}
+              >
                 {[0, 1, 2, 3, 4, 5].map((n) => {
                   const selected = clientPestRating === n;
                   return (
@@ -15172,6 +15008,18 @@ function normalizeLabelTargets(value) {
   }
   if (!Array.isArray(v)) return [];
   return v.map((t) => String(t).trim()).filter(Boolean);
+}
+
+// Turf-only label targets that must not prefill on a structural-pest (or any
+// non-lawn) visit: turf insects, turf diseases, and weeds. Matching is
+// substring-loose because catalog target_pests values are free text pulled
+// from labels ("Southern Chinch Bugs", "sod webworm", "chinch bug (southern)").
+const LAWN_ONLY_TARGET_RE =
+  /chinch|sod webworm|armyworm|white grub|\bgrubs?\b|mole cricket|billbug|spittlebug|nematode|crabgrass|goosegrass|torpedograss|kyllinga|dollarweed|doveweed|chamberbitter|spurge|clover|nutsedge|\bsedge\b|broadleaf weed|\bweeds?\b|poa annua|bluegrass|brown patch|large patch|dollar spot|gray leaf spot|take-?all|fairy ring|pythium|turf/i;
+
+function filterLabelTargetsForLine(targets, { isLawn } = {}) {
+  if (isLawn) return targets;
+  return targets.filter((t) => !LAWN_ONLY_TARGET_RE.test(t));
 }
 
 // Species-specific, not category-broad (owner request 2026-07-23): the chips
