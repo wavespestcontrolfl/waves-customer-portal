@@ -422,6 +422,38 @@ router.post('/:key/contracts', async (req, res, next) => {
           staleErr.status = 409;
           throw staleErr;
         }
+        // One live program request per customer/property — the same
+        // invariant the accept-time service, the sweeps, and the rollback
+        // enforce. A manual issue is a replacement: supersede the prior
+        // open requests instead of stacking a second live signing flow
+        // (or inserting beside a source a rollback just restored).
+        // Conditional cancel: a signature committed concurrently wins.
+        const openPrior = await trx('customer_contracts')
+          .where({ customer_id: customer.id, contract_type: 'document_template' })
+          .whereIn('document_template_key', PROGRAM_TEMPLATE_KEYS)
+          .whereIn('status', ['draft', 'sent', 'viewed'])
+          .forUpdate()
+          .select('id');
+        for (const prior of openPrior) {
+          const cancelled = await trx('customer_contracts')
+            .where({ id: prior.id })
+            .whereIn('status', ['draft', 'sent', 'viewed'])
+            .update({
+              status: 'cancelled',
+              cancelled_at: new Date(),
+              cancelled_reason: 'Superseded by a newer manually issued program agreement',
+              updated_at: new Date(),
+            });
+          if (!cancelled) continue;
+          await trx('customer_contract_events').insert({
+            contract_id: prior.id,
+            customer_id: customer.id,
+            event_type: 'cancelled',
+            actor_type: 'admin',
+            actor_id: req.technicianId || null,
+            metadata: jsonb({ reason: 'superseded_by_manual_reissue' }, {}),
+          });
+        }
       }
       const [row] = await trx('customer_contracts').insert({
         customer_id: customer.id,

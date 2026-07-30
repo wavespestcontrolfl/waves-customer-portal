@@ -390,6 +390,19 @@ exports.up = async function up(knex) {
       .where({ template_id: template.id })
       .orderBy('version_number', 'asc');
     let seededVersion = versions.find((v) => v.body === seed.body) || null;
+    if (seededVersion) {
+      // Body-equal identifies OUR wording, but an admin-created draft can
+      // carry the approved body with different signature metadata (title,
+      // disclosure, variables, required_fields). The activated compliance
+      // version must be canonical in full — repair the matched row to the
+      // seeded metadata (idempotent no-op when already canonical).
+      await knex('document_template_versions').where({ id: seededVersion.id }).update({
+        title: seed.title,
+        signer_disclosure: 'I agree to receive and sign this document electronically.',
+        variables: JSON.stringify(seed.variables),
+        required_fields: JSON.stringify(['initials', 'signedName']),
+      });
+    }
     if (!seededVersion) {
       const nextNumber = versions.length
         ? Math.max(...versions.map((v) => Number(v.version_number) || 0)) + 1
