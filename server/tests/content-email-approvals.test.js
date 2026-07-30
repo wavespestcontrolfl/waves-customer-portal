@@ -357,16 +357,39 @@ describe('round-5 hardening (Codex r5)', () => {
     expect(updates.some((u) => u.status === 'failed')).toBe(false);
   });
 
-  test('approval-token subjects are control messages when the token EXISTS in any status (Codex r8+r10)', async () => {
+  test('control-message bypass = existing token AND a control participant sender (Codex r8+r10+r15)', async () => {
     const db = require('../models/db');
     const mkDb = (row) => db.mockImplementation(() => ({
       whereRaw: jest.fn().mockReturnValue({ first: jest.fn().mockResolvedValue(row) }),
     }));
-    mkDb({ id: 'x', status: 'approved' }); // already-decided token still OUR traffic
-    await expect(approvals.isApprovalControlMessage({ subject: 'Re: [EA-1a2b3c4d] Approve? Post' })).resolves.toBe(true);
-    mkDb(null); // token-shaped but unknown — a blocked sender earns no bypass
-    await expect(approvals.isApprovalControlMessage({ subject: 'Re: [EA-deadbeef] spam' })).resolves.toBe(false);
-    await expect(approvals.isApprovalControlMessage({ subject: 'Quarterly service question' })).resolves.toBe(false);
+    const prev = process.env.APPROVAL_ALLOWED_SENDERS;
+    process.env.APPROVAL_ALLOWED_SENDERS = 'owner@example.com';
+    try {
+      mkDb({ id: 'x', status: 'approved' }); // already-decided token still OUR traffic…
+      await expect(approvals.isApprovalControlMessage({ subject: 'Re: [EA-1a2b3c4d] Approve? Post', from_address: 'owner@example.com' })).resolves.toBe(true);
+      // …and our own outbound (sent from the polling account) counts too.
+      await expect(approvals.isApprovalControlMessage({ subject: '[EA-1a2b3c4d] Approve? Post', from_address: 'contact@wavespestcontrol.com' })).resolves.toBe(true);
+      // A blocked sender with a copied historical token earns NOTHING.
+      await expect(approvals.isApprovalControlMessage({ subject: 'Re: [EA-1a2b3c4d] spam', from_address: 'spammer@evil.example' })).resolves.toBe(false);
+      // No sender info → fail closed.
+      await expect(approvals.isApprovalControlMessage({ subject: 'Re: [EA-1a2b3c4d] x' })).resolves.toBe(false);
+      mkDb(null); // token-shaped but unknown
+      await expect(approvals.isApprovalControlMessage({ subject: 'Re: [EA-deadbeef] spam', from_address: 'owner@example.com' })).resolves.toBe(false);
+      await expect(approvals.isApprovalControlMessage({ subject: 'Quarterly service question', from_address: 'owner@example.com' })).resolves.toBe(false);
+    } finally {
+      if (prev === undefined) delete process.env.APPROVAL_ALLOWED_SENDERS; else process.env.APPROVAL_ALLOWED_SENDERS = prev;
+    }
+  });
+
+  test('an empty text/plain alternative falls through to the HTML leaf (Codex r15)', () => {
+    const raw = [
+      'Content-Type: multipart/alternative; boundary="b"', '',
+      '--b', 'Content-Type: text/plain; charset=UTF-8', '',
+      '   ', '',
+      '--b', 'Content-Type: text/html; charset=UTF-8', '',
+      '<div>approved</div>', '--b--',
+    ].join('\r\n');
+    expect(parseDecision(extractReplyText(raw))).toBe('approved');
   });
 
   test('reversed/deferred rejections fail closed; reasoned rejections still reject (Codex r10)', () => {

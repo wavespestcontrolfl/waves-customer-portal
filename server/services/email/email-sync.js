@@ -223,7 +223,7 @@ async function upsertEmail(parsed) {
   let approvalControlEarly = false;
   try {
     const { isApprovalControlMessage } = require('../content/email-approvals');
-    approvalControlEarly = await isApprovalControlMessage({ subject: parsed.subject });
+    approvalControlEarly = await isApprovalControlMessage({ subject: parsed.subject, from_address: parsed.from_address });
   } catch { /* module unavailable — fall through to normal handling */ }
 
   // Check blocklist before inserting — skip blocked senders

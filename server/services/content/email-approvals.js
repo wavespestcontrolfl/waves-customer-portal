@@ -38,7 +38,6 @@ const { maskEmail } = require('../newsletter-proof');
 
 const APPROVABLE_KIND_RE = /^(named_competitor_review|trust_build_\d+_of_\d+)$/;
 const TOKEN_RE = /\bEA-[0-9a-f]{8}\b/i;
-const SWEEP_WINDOW_DAYS = 14;
 const EXECUTING_RECOVERY_MINUTES = 15;
 const SEND_CLAIM_STALE_MINUTES = 10;
 // PROVABLY pre-side-effect failures (lock/busy contention happens before
@@ -195,7 +194,11 @@ function extractReplyText(source, depth = 0) {
       const split = splitHeadersBody(part);
       if (!split || isAttachment(split.headers)) continue;
       if (/content-type:\s*text\/plain/i.test(split.headers)) {
-        return decodePartBody(split.headers, split.body);
+        const text = decodePartBody(split.headers, split.body);
+        // An EMPTY plain alternative must not shadow a real HTML body —
+        // some clients send blank text/plain with the content in HTML
+        // (Codex r15). Fall through to the later passes.
+        if (text && text.trim()) return text;
       }
     }
     for (const part of parts) {
@@ -313,6 +316,19 @@ function verifySenderAuthentication(rawSource, senderAddress) {
 async function isApprovalControlMessage(email = {}) {
   const m = String(email.subject || '').match(TOKEN_RE);
   if (!m) return false;
+  // The bypass is bound to WHO sent it, not just the token: only the
+  // configured approvers and our own sending/polling account are control
+  // participants — a blocked sender who copies a historical token from a
+  // forwarded thread earns nothing (Codex r15). When no sender is known
+  // (defensive caller), fail closed.
+  const sender = String(email.from_address || email.from || '').toLowerCase().replace(/^.*</, '').replace(/>.*$/, '').trim();
+  if (!sender) return false;
+  const participants = new Set([
+    ...allowedSenders(),
+    approvalRecipient().toLowerCase(),
+    imapMailbox().user.toLowerCase(),
+  ]);
+  if (!participants.has(sender)) return false;
   try {
     // ANY status counts: a reply whose decision the poller already executed
     // (or that arrived before sync ingested it) is still OUR control
@@ -554,7 +570,10 @@ async function notifyParkedRun(runId) {
  * hook (e.g. the GBP trust-build branch).
  */
 async function sweepUnnotifiedRuns() {
-  const cutoff = new Date(Date.now() - SWEEP_WINDOW_DAYS * 86400_000);
+  // No age cutoff: runs parked while the gate was still dark predate any
+  // rollout window, and their opportunities are STILL awaiting a decision
+  // — the pending_review join is the liveness filter (an expired/decided
+  // item drops out naturally). Bounded per sweep instead (Codex r15).
   const orphans = await db('autonomous_runs as r')
     .join('opportunity_queue as o', 'o.id', 'r.opportunity_id')
     .leftJoin('content_email_approvals as a', 'a.run_id', 'r.id')
@@ -562,7 +581,7 @@ async function sweepUnnotifiedRuns() {
     .where('r.outcome', 'completed_pending_review')
     .where('r.shadow_mode', false)
     .where('o.status', 'pending_review')
-    .where('r.created_at', '>', cutoff)
+    .limit(50)
     // Only the LATEST parked run per opportunity: a requeue leaves the old
     // run parked too, and emailing both would offer the owner a decision
     // on a superseded draft (Codex r13).
@@ -733,13 +752,34 @@ async function finishExecution(row, decision, sender, { recovery = false } = {})
     const stale = err.statusCode === 409 && /changed since|newer run/i.test(message);
     if (stale) {
       // The emailed draft was replaced — never apply the reply to a draft
-      // the owner didn't see. Supersede and email the current one instead.
-      await db('content_email_approvals').where({ id: row.id })
-        .update({ status: 'superseded', last_error: message, updated_at: new Date() });
-      await notifyAdmin('Approval reply matched an outdated draft', `${row.token}: a newer draft replaced the one you were emailed — nothing was applied. A fresh approval email is on its way.`);
+      // the owner didn't see.
       const latest = await db('autonomous_runs')
         .where({ opportunity_id: row.opportunity_id, outcome: 'completed_pending_review', shadow_mode: false })
         .orderBy('created_at', 'desc').first();
+      if (latest && String(latest.id) === String(row.run_id) && isApprovableKind(latest.skip_reason)) {
+        // SAME run, changed content (the under-lock sha check fired):
+        // run_id is unique per approval row, so superseding would leave
+        // nothing able to re-email. RESET this row instead — fresh token,
+        // cleared snapshot/send state — and the poller re-emails the
+        // current draft (Codex r15).
+        await db('content_email_approvals').where({ id: row.id }).update({
+          status: 'awaiting_reply',
+          token: newToken(),
+          draft_sha: null,
+          decision: null,
+          decided_by: null,
+          decided_at: null,
+          email_sent_at: null,
+          email_sending_at: null,
+          last_error: 'draft changed under lock — re-requested',
+          updated_at: new Date(),
+        });
+        await notifyAdmin('Draft changed since you were emailed', `${row.token}: the draft was modified before your reply executed — nothing was applied. A fresh email with the current content is on its way.`);
+        return { skipped: 'draft_changed' };
+      }
+      await db('content_email_approvals').where({ id: row.id })
+        .update({ status: 'superseded', last_error: message, updated_at: new Date() });
+      await notifyAdmin('Approval reply matched an outdated draft', `${row.token}: a newer draft replaced the one you were emailed — nothing was applied. A fresh approval email is on its way.`);
       if (latest && isApprovableKind(latest.skip_reason)) {
         await sendApprovalRequest(latest).catch(() => {});
       }
@@ -867,7 +907,26 @@ async function pollReplies() {
   await recoverExecutingRows();
   await sweepUnnotifiedRuns();
 
-  const awaiting = await db('content_email_approvals').where({ status: 'awaiting_reply' });
+  let awaiting = await db('content_email_approvals').where({ status: 'awaiting_reply' });
+  if (!awaiting.length) return { checked: 0, decided: 0 };
+
+  // Reconcile portal decisions FIRST: a sent approval the owner never
+  // replied to, later decided in /admin/seo, must leave awaiting_reply —
+  // otherwise it anchors IMAP scans forever and a months-late reply could
+  // still look actionable (Codex r15). Same freshness rules as the
+  // decision-time guard.
+  for (const row of awaiting) {
+    if (!row.email_sent_at) continue; // unsent rows are the resend path's job
+    const run = row.run_id ? await db('autonomous_runs').where({ id: row.run_id }).first() : null;
+    const opp = row.opportunity_id ? await db('opportunity_queue').where({ id: row.opportunity_id }).first() : null;
+    const stillParked = run && run.outcome === 'completed_pending_review' && run.skip_reason === row.kind
+      && !run.trust_build_approved_at && opp && opp.status === 'pending_review';
+    if (!stillParked) {
+      await db('content_email_approvals').where({ id: row.id, status: 'awaiting_reply' })
+        .update({ status: 'superseded', last_error: `decided elsewhere before any reply (run ${run?.skip_reason || run?.outcome || 'gone'}, opp ${opp?.status || 'gone'})`, updated_at: new Date() });
+    }
+  }
+  awaiting = await db('content_email_approvals').where({ status: 'awaiting_reply' });
   if (!awaiting.length) return { checked: 0, decided: 0 };
 
   // Retry unsent approval emails (first send failed) before polling.

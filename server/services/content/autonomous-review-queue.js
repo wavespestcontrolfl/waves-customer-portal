@@ -133,6 +133,19 @@ async function decideReviewItem(opportunityId, { decision, note, reviewer, expec
   if (normalizedDecision === 'approve_trust_build') {
     assertTrustBuildRun(run);
     await db.transaction(async (trx) => {
+      // Email-approval snapshot binding (Codex #3024 r15): asserted under
+      // the row lock so a concurrent draft edit can't credit content the
+      // owner never read. Portal callers pass no sha.
+      if (expectedDraftSha && run?.id) {
+        const lockedRun = await trx('autonomous_runs').where({ id: run.id }).forUpdate().first();
+        const { draftPreview } = require('./email-approvals')._internals;
+        if (lockedRun && draftPreview(lockedRun).sha !== expectedDraftSha) {
+          const err = new Error('Draft content changed since it was reviewed; refresh and review again');
+          err.statusCode = 409;
+          err.isOperational = true;
+          throw err;
+        }
+      }
       await updatePendingReviewOpportunity(trx, opportunityId, {
         status: 'done',
         skip_reason: 'trust_build_approved',
@@ -211,6 +224,18 @@ async function decideReviewItem(opportunityId, { decision, note, reviewer, expec
           err.statusCode = 409;
           err.isOperational = true;
           throw err;
+        }
+        // Email-approval snapshot binding (Codex #3024 r15): a dismissal
+        // bound to an emailed snapshot must not dismiss content the owner
+        // never saw. Portal callers pass no sha.
+        if (expectedDraftSha && lockedRun) {
+          const { draftPreview } = require('./email-approvals')._internals;
+          if (draftPreview(lockedRun).sha !== expectedDraftSha) {
+            const err = new Error('Draft content changed since it was reviewed; refresh and review again');
+            err.statusCode = 409;
+            err.isOperational = true;
+            throw err;
+          }
         }
       }
       await updatePendingReviewOpportunity(trx, opportunityId, {
