@@ -185,13 +185,16 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
 
   function agentCommitted(flags = ['caller_not_authorized'], { claim = true, speaker = 'agent', quote = AGENT_COMMIT_QUOTE } = {}) {
     const ex = extraction(flags);
+    // Slot must match the committed quote ("noon on Sunday") — 2026-08-02 is
+    // a Sunday; slot binding rejects a quote↔confirmed_start_at mismatch.
+    ex.scheduling.confirmed_start_at = '2026-08-02T12:00:00-04:00';
     ex.scheduling.agent_committed_booking = claim;
     ex.evidence = quote === null ? [] : [
       { field_path: '/scheduling/agent_committed_booking', quote, speaker, transcript_offset_ms: null },
     ];
     return ex;
   }
-  const opts = (extra = {}) => ({ agentCommitFailOpen: true, transcript: TRANSCRIPT, ...extra });
+  const opts = (extra = {}) => ({ agentCommitFailOpen: true, transcriptLabelsTrusted: true, transcript: TRANSCRIPT, ...extra });
 
   test('agent commitment demotes caller_not_authorized to failedOpenFlags and books', () => {
     const r = canAutoRoute(agentCommitted(), opts());
@@ -235,6 +238,32 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
       expect(r.allowed).toBe(false);
       expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
     }
+  });
+
+  test('untrusted transcript labels fail closed — LLM-inferred Agent:/Caller: prefixes never clear the hard block (round-2 P1)', () => {
+    for (const trusted of [undefined, false, 'true']) {
+      const r = canAutoRoute(agentCommitted(), opts({ transcriptLabelsTrusted: trusted }));
+      expect(r.allowed).toBe(false);
+      expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+    }
+  });
+
+  test('the commitment quote must bind to the confirmed slot — a Tuesday-at-10 commitment never unlocks a Sunday-noon booking (round-2 P1)', () => {
+    // Same call, but the model mixed slots: commitment quote says Tuesday at
+    // 10 while confirmed_start_at holds Sunday noon.
+    const tueQuote = "So we'll get you on the schedule for Tuesday at 10, and just let us know if anything changes.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, tueQuote);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: tueQuote }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('slot binding requires the weekday too — an hour-only commitment quote stays in triage (round-2 P1)', () => {
+    const vagueQuote = "So we'll confirm it for noon then, and just let us know if anything changes.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, vagueQuote);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: vagueQuote }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
   test('an off-hour confirmed start (2:30 PM) is never demoted — windows start on the hour (P1)', () => {

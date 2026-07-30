@@ -397,9 +397,39 @@ function agentQuoteGroundedInTranscript(quote, transcript) {
   return agentTurns.some((t) => normalizeForGrounding(t).includes(q));
 }
 
+// Slot binding (codex round-2 P1): the grounded commitment quote must refer
+// to the SAME slot the extraction put in confirmed_start_at — a call that
+// discusses several dates can otherwise pair an agent commitment to Tuesday
+// at 10 with a model mix-up that left Sunday noon in confirmed_start_at, and
+// the unauthorized Sunday appointment books. Deterministic token check on the
+// normalized quote: it must contain BOTH the confirmed slot's ET weekday
+// name AND its ET hour in a spoken form ("noon"/"midnight" or the 12-hour
+// number). Relative-day commitments ("we'll see you tomorrow at 10") fail —
+// conservative and accepted: the call date isn't threaded here, so relative
+// days can't be verified and those calls stay in triage.
+function quoteBindsConfirmedSlot(quote, confirmedStartAt) {
+  const q = ` ${normalizeForGrounding(quote)} `;
+  const start = new Date(String(confirmedStartAt || ''));
+  if (!q.trim() || Number.isNaN(start.getTime())) return false;
+  let weekday; let hour12; let dayPeriod;
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/New_York', weekday: 'long', hour: 'numeric', hour12: true,
+    }).formatToParts(start);
+    weekday = parts.find((p) => p.type === 'weekday')?.value?.toLowerCase();
+    hour12 = parts.find((p) => p.type === 'hour')?.value;
+    dayPeriod = parts.find((p) => p.type === 'dayPeriod')?.value?.toLowerCase();
+  } catch { return false; }
+  if (!weekday || !hour12) return false;
+  const hourTokens = [` ${hour12} `];
+  if (hour12 === '12') hourTokens.push(dayPeriod === 'am' ? ' midnight ' : ' noon ');
+  return q.includes(` ${weekday} `) && hourTokens.some((t) => q.includes(t));
+}
+
 // True only when the model pinned an AGENT-spoken evidence quote for the
-// scheduling.agent_committed_booking claim AND that quote grounds against an
-// agent turn of the source transcript (see agentQuoteGroundedInTranscript).
+// scheduling.agent_committed_booking claim, that quote grounds against an
+// agent turn of the source transcript (see agentQuoteGroundedInTranscript),
+// AND the quote binds to the confirmed slot (see quoteBindsConfirmedSlot).
 // The speaker label alone is NOT the trust boundary — it is model output like
 // the rest of the extraction; the transcript grounding is what makes the
 // commitment verifiable.
@@ -408,6 +438,7 @@ function hasAgentCommittedEvidence(extraction, transcript) {
     String(e?.field_path || '') === '/scheduling/agent_committed_booking'
     && e?.speaker === 'agent'
     && agentQuoteGroundedInTranscript(e?.quote, transcript)
+    && quoteBindsConfirmedSlot(e?.quote, extraction?.scheduling?.confirmed_start_at)
   ));
 }
 
@@ -499,7 +530,18 @@ function canAutoRoute(extraction, opts = {}) {
   // the booking; it stays in triage for the office to place on an hour
   // boundary (codex P1).
   const commitStartMinute = String(extraction.scheduling?.confirmed_start_at || '').match(/T\d{2}:(\d{2})/);
-  if (opts.agentCommitFailOpen && confirmedWithStart
+  // opts.transcriptLabelsTrusted (codex round-2 P1): the Agent:/Caller:
+  // prefixes the grounding relies on are themselves produced by an LLM
+  // labeling pass that is explicitly told to INFER unclear identities, and
+  // its integrity check verifies words, not attribution — so complete-but-
+  // SWAPPED labels would pass every guard here and let a caller's own
+  // sentence clear the hard block. Until speaker labels come from a
+  // deterministic source (dual-channel recording / channel-derived
+  // diarization), the caller stays in review: the demotion additionally
+  // requires this opt, wired to GATE_CALL_AGENT_COMMIT_TRUSTED_LABELS
+  // (owner-flip; see feature-gates.js). Fail closed by default.
+  if (opts.agentCommitFailOpen && opts.transcriptLabelsTrusted === true
+      && confirmedWithStart
       && commitStartMinute && commitStartMinute[1] === '00'
       && extraction.scheduling?.agent_committed_booking === true
       && hasAgentCommittedEvidence(extraction, opts.transcript)) {
