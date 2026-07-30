@@ -283,6 +283,23 @@ describe('trackAdminPageView', () => {
     expect(lastBody().pageKey).toBe('dashboard');
   });
 
+  it('an aged pending dwell is flushed even when the destination dedupes (return-to-recent-page)', () => {
+    trackAdminPageView({ pathname: '/admin/dashboard', search: '' });
+    settle();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    fetchMock.mockClear();
+    // 2s genuine dwell on Settings (5s self-reporting window still open),
+    // then back to the recently-counted dashboard: the dashboard dedupes,
+    // but the Settings dwell must be counted, not swallowed.
+    vi.advanceTimersByTime(1000);
+    trackAdminPageView({ pathname: '/admin/settings', search: '' });
+    vi.advanceTimersByTime(2000);
+    trackAdminPageView({ pathname: '/admin/dashboard', search: '' });
+    settle();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(lastBody().pageKey).toBe('settings');
+  });
+
   it('flushes the pending beacon on pagehide so the last view is not lost', () => {
     trackAdminPageView({ pathname: '/admin/invoices', search: '' });
     expect(fetchMock).not.toHaveBeenCalled();

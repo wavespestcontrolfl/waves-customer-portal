@@ -256,14 +256,20 @@ export function trackAdminPageView({ pathname, search, authoritative = false } =
   }
 
   if (lastLogged && lastLogged.key === key && now - lastLogged.ts < DEDUPE_MS) {
-    // The navigation chain landed on an already-counted view — drop any
-    // intermediate hop still settling, or it flushes as a phantom row.
-    // (Re-tapping the active Schedule item queues /admin/schedule, the
-    // redirect returns here via dedupe, and the legacy hop would otherwise
-    // survive the collapse. Codex #2961 P2.)
-    if (pendingTimer) clearTimeout(pendingTimer);
-    pendingTimer = null;
-    pendingBeacon = null;
+    // The navigation chain landed on an already-counted view. A YOUNG
+    // pending (inside the redirect window) is an intermediate hop — drop
+    // it, or it flushes as a phantom row (re-tapping the active Schedule
+    // item, Codex r1). An AGED pending — only possible under the longer
+    // self-reporting window — is a REAL dwell (e.g. dashboard → 2s on
+    // Settings → back to dashboard) and must be counted before the
+    // destination dedupes (Codex #2961 r13).
+    if (pendingBeacon && now - pendingBeacon.queuedAt > REDIRECT_SETTLE_MS) {
+      flushPendingBeacon();
+    } else {
+      if (pendingTimer) clearTimeout(pendingTimer);
+      pendingTimer = null;
+      pendingBeacon = null;
+    }
     pendingSource = null;
     return;
   }
