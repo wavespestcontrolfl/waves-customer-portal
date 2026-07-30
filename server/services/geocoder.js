@@ -89,17 +89,26 @@ async function ensureCustomerGeocoded(customerId) {
 // admin address edits re-geocode directly so a fix never waits on this set.
 const sweepUnresolvedIds = new Set();
 
+const SWEEP_UNRESOLVED_CAP = 2000;
+
 async function sweepUngeocodedCustomers({ limit = 25 } = {}) {
-  const candidates = await db('customers')
+  // Excluding in the query (not post-filter) so a backlog of unresolvable
+  // rows can never crowd eligible older customers out of the batch. The
+  // set is capped; clearing it just means stuck rows get retried.
+  if (sweepUnresolvedIds.size > SWEEP_UNRESOLVED_CAP) sweepUnresolvedIds.clear();
+  const excluded = Array.from(sweepUnresolvedIds);
+  const rows = await db('customers')
     .whereNull('deleted_at')
     .where(function () {
       this.whereNull('latitude').orWhereNull('longitude');
     })
     .whereNotNull('address_line1')
+    .modify((q) => {
+      if (excluded.length) q.whereNotIn('id', excluded);
+    })
     .orderBy('created_at', 'desc')
-    .limit(Math.max(limit * 8, 200))
+    .limit(limit)
     .select('id');
-  const rows = candidates.filter((r) => !sweepUnresolvedIds.has(r.id)).slice(0, limit);
 
   const results = { checked: rows.length, geocoded: 0, unresolved: 0 };
   for (const row of rows) {

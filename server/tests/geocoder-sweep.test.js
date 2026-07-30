@@ -23,7 +23,15 @@ function installDb({ listRows, customersById }) {
       }),
       orderBy: jest.fn(() => chain),
       limit: jest.fn(() => chain),
-      select: jest.fn(async () => listRows),
+      modify: jest.fn((cb) => {
+        cb(chain);
+        return chain;
+      }),
+      whereNotIn: jest.fn((col, ids) => {
+        chain._excluded = ids;
+        return chain;
+      }),
+      select: jest.fn(async () => listRows.filter((r) => !(chain._excluded || []).includes(r.id))),
       first: jest.fn(async () => customersById[chain._id] || null),
       update: jest.fn(async (patch) => {
         updates.push({ id: chain._id, patch });
