@@ -2764,3 +2764,42 @@ describe('the sync hold is taken before the push (codex P1)', () => {
     expect(row.sync_pending_sha).toBe('push_in_flight');
   });
 });
+
+// The hold has to gate EVERY merge path. p2OnlyMergeEligible only runs when the
+// review is NOT clean, so a hold checked only there is invisible to the common
+// case: a clean review merging normally while portal state is still pre-fix.
+describe('syncPendingHold is a standalone, all-paths gate (codex P1)', () => {
+  test('reports a pending hold with a diagnosable reason', async () => {
+    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, sync_pending_sha: HEAD, status: 'remediating' }] });
+    const h = await rem.syncPendingHold(5, { db, headSha: HEAD });
+    expect(h.pending).toBe(true);
+    expect(h.sha).toBe(HEAD);
+    expect(h.reason).toMatch(/unfinished portal sync/);
+  });
+
+  test('names an ancestor push distinctly from the head under review', async () => {
+    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, sync_pending_sha: 'oldpush000111' }] });
+    const h = await rem.syncPendingHold(5, { db, headSha: HEAD });
+    expect(h.pending).toBe(true);
+    expect(h.reason).toMatch(/ancestor of the head under review/);
+  });
+
+  test('the in-flight sentinel reads as an unconfirmed push', async () => {
+    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, sync_pending_sha: 'push_in_flight' }] });
+    const h = await rem.syncPendingHold(5, { db, headSha: HEAD });
+    expect(h.reason).toMatch(/in flight and never confirmed/);
+  });
+
+  test('no row, or a cleared column, is not a hold', async () => {
+    expect((await rem.syncPendingHold(5, { db: makeDb(), headSha: HEAD })).pending).toBe(false);
+    const cleared = makeDb({ codex_remediation_state: [{ pr_number: 5, sync_pending_sha: null }] });
+    expect((await rem.syncPendingHold(5, { db: cleared, headSha: HEAD })).pending).toBe(false);
+  });
+
+  test('a lookup error fails OPEN — one bad row must not wedge the whole lane', async () => {
+    const db = () => { throw new Error('db down'); };
+    db.raw = async () => ({ rowCount: 0 });
+    const h = await rem.syncPendingHold(5, { db, headSha: HEAD });
+    expect(h.pending).toBe(false);
+  });
+});

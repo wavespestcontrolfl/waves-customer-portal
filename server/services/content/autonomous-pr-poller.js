@@ -700,6 +700,19 @@ async function maybeAutoMerge(run, pr) {
   if (!deployedSha) return { pending: true, reason: 'preview_build_commit_unknown' };
   if (deployedSha !== headSha) return { pending: true, reason: 'preview_build_stale_commit' };
 
+  // 1c. A remediation push that never finished its portal sync blocks EVERY
+  //     merge path, so it is asserted here — before the Codex gate — not inside
+  //     p2OnlyMergeEligible. That function only runs when the review is NOT
+  //     clean, so a hold checked only there would miss the common case: a clean
+  //     review merging normally while portal state is still pre-fix, which a
+  //     later republish or social share resurrects.
+  const { syncPendingHold } = require('./codex-remediation');
+  const hold = await syncPendingHold(pr.number, { headSha: pr.head?.sha });
+  if (hold.pending) {
+    logger.info(`[autonomous-pr-poller] auto-merge blocked for run ${run.id} PR #${pr.number}: ${hold.reason}`);
+    return { pending: true, reason: `sync_pending: ${hold.reason}` };
+  }
+
   // 2. Codex review must be clear for the current head (fail closed —
   //    same gate mergeAstro applies on the scheduler path).
   const publisher = require('../content-astro/astro-publisher');

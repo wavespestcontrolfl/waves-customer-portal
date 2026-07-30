@@ -1930,6 +1930,17 @@ async function mergeAstro(postId, { expectHeadSha = null } = {}) {
       throw new Error(`PR #${pr.number} head ${String(pr.head.sha).slice(0, 7)} no longer matches the verified build commit ${String(expectHeadSha).slice(0, 7)}; re-verify before merge`);
     }
     if (!isUnpublish) await assertOpenPublishPrIsHubOnly(post, pr);
+    // A remediation push whose blog_posts.content mirror never completed must not
+    // merge on ANY path — including a clean review, which never consults the P2
+    // bar where this used to be checked. Merging would ship the fix with the
+    // portal row still pre-fix, and a later republish/social share rebuilds from
+    // that stale row. Unpublish PRs are exempt: they remove the page, so a stale
+    // body mirror is moot.
+    if (!isUnpublish) {
+      const { syncPendingHold } = require('../content/codex-remediation');
+      const hold = await syncPendingHold(pr.number, { headSha: pr.head?.sha });
+      if (hold.pending) throw new Error(`PR #${pr.number} cannot merge: ${hold.reason}`);
+    }
     await assertCodexReviewClear(pr.number, { headSha: pr.head?.sha });
 
     const result = await gh.mergePr(post.astro_pr_number, {

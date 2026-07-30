@@ -246,6 +246,40 @@ function isPostPushPark(state) {
 }
 
 /**
+ * syncPendingHold(prNumber, { db?, headSha? }) → { pending, sha?, reason? }
+ *
+ * Does a remediation push on this PR still owe its portal sync? If so NOTHING
+ * may merge it — this is a property of the PR, independent of what Codex said.
+ *
+ * It must be asserted on EVERY merge path, not just the P2 one. p2OnlyMergeEligible
+ * is only consulted after assertCodexReviewClear REJECTS, so a hold checked only
+ * there is invisible to the far more common case: a clean review merging through
+ * the normal path while blog_posts.content is still pre-fix, which a later
+ * republish or social share then resurrects. Callers: autonomous-pr-poller
+ * (before its codex gate) and astro-publisher mergeAstro (the scheduler lane).
+ *
+ * Fail-open ONLY on a lookup error: an unreadable state row must not wedge every
+ * merge in the lane, and the divergence it guards is rare and human-visible.
+ */
+async function syncPendingHold(prNumber, { db: injectedDb = null, headSha = null } = {}) {
+  const db = injectedDb || dbDefault;
+  let state;
+  try {
+    state = await getState(db, prNumber);
+  } catch (e) {
+    logger.warn(`[codex-remediation] sync-hold lookup failed for PR #${prNumber}: ${e.message} — not holding the merge`);
+    return { pending: false };
+  }
+  const sha = String(state.sync_pending_sha || '').trim().toLowerCase();
+  if (!sha) return { pending: false };
+  const head = String(headSha || '').trim().toLowerCase();
+  const which = sha === SYNC_PENDING_PUSH_IN_FLIGHT
+    ? 'a fix push was in flight and never confirmed'
+    : `remediation push ${shortSha(sha)}${head && sha !== head ? ' (an ancestor of the head under review)' : ''}`;
+  return { pending: true, sha, reason: `${which} has an unfinished portal sync (held for a human)` };
+}
+
+/**
  * p2OnlyMergeEligible(prNumber, headSha) → { eligible, p2Count?, rounds?, reason? }
  * eligible=true means: Codex HAS reviewed this exact head (findings tied to
  * it exist), every current-head finding is a P2, and remediation has had its
@@ -281,13 +315,8 @@ async function p2OnlyMergeEligible(prNumber, headSha, deps = {}) {
   // dependency is the wrong trade. Any pending sync holds until a round actually
   // completes one, which is the case that should reach a human anyway (the
   // scheduler lane has already disarmed its publishing claim by then).
-  const syncPending = String(state.sync_pending_sha || '').trim().toLowerCase();
-  if (syncPending) {
-    const which = syncPending === SYNC_PENDING_PUSH_IN_FLIGHT
-      ? 'a fix push was in flight and never confirmed'
-      : `remediation push ${shortSha(syncPending)}${syncPending === head ? '' : ' (an ancestor of the head under review)'}`;
-    return { eligible: false, reason: `${which} has an unfinished portal sync (held for a human)` };
-  }
+  const hold = await syncPendingHold(prNumber, { db, headSha });
+  if (hold.pending) return { eligible: false, reason: hold.reason };
 
   // A branch-mutating park on THIS head holds unconditionally — including when
   // last_push_sha equals the head (it now always does for these, since the
@@ -1835,6 +1864,7 @@ module.exports = {
   remediationEnabled,
   p2MergeEnabled,
   p2OnlyMergeEligible,
+  syncPendingHold,
   findingSeverity,
   isPostPushPark,
   MAX_ROUNDS,
