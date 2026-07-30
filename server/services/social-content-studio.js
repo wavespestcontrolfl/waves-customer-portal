@@ -740,7 +740,7 @@ async function renderReviewGraphicImageUrl(candidate, platform) {
   );
 }
 
-function previewWithVisual(preview, { imageUrl, variant, templateKey, creative, variants, videoUrl }) {
+function previewWithVisual(preview, { imageUrl, gbpImageUrl, variant, templateKey, creative, variants, videoUrl }) {
   if (!imageUrl) return preview;
   return {
     ...preview,
@@ -751,7 +751,11 @@ function previewWithVisual(preview, { imageUrl, variant, templateKey, creative, 
       // Creative-engine metadata: which scene concept made this image (feeds the
       // no-repeat rotation) and, on draft runs, the alternate variants the admin
       // can pick from in the approval queue. videoUrl records an approved Reel
-      // (the primary imageUrl stays a still for thumbnails/GBP).
+      // (the primary imageUrl stays a still for thumbnails).
+      // gbpImageUrl is the DETERMINISTIC GBP card for this run — persisted so
+      // an approved draft's GBP post keeps its compliant image (publishToAll
+      // never falls back to the shared image for GBP; no AI imagery on GBP).
+      ...(gbpImageUrl ? { gbpImageUrl } : {}),
       ...(creative ? { creative } : {}),
       ...(Array.isArray(variants) && variants.length ? { variants } : {}),
       ...(videoUrl ? { videoUrl } : {}),
@@ -1420,6 +1424,7 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
       }
       finalPreview = previewWithVisual(preview, {
         imageUrl,
+        gbpImageUrl,
         variant: isReviewRun ? 'review' : 'campaign',
         templateKey: isReviewRun ? 'waves_photo_review_v1' : 'waves_photo_square_v1',
         creative: {
@@ -1439,6 +1444,7 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
       if (wantsGbp) gbpImageUrl = await renderReviewGraphicImageUrl(plan.reviewGraphic, 'gbp');
       finalPreview = previewWithVisual(preview, {
         imageUrl,
+        gbpImageUrl,
         variant: 'review',
         templateKey: 'waves_clean_square',
       });
@@ -1447,6 +1453,7 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
       if (wantsGbp) gbpImageUrl = await renderCampaignImageUrl(plan, preview, 'gbp');
       finalPreview = previewWithVisual(preview, {
         imageUrl,
+        gbpImageUrl,
         variant: 'campaign',
         templateKey: 'waves_campaign_square',
       });
@@ -1690,7 +1697,10 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
         customContent: preview.drafts,
         channels: remainingChannels,
         imageUrl: chosenImageUrl,
-        gbpImageUrl: httpUrlOrNull(imageVariant?.gbpImageUrl),
+        // Per-variant GBP image if one exists, else the run's stored
+        // deterministic GBP card. publishToAll posts GBP text-only when both
+        // are absent — it never falls back to the (possibly AI) imageUrl.
+        gbpImageUrl: httpUrlOrNull(imageVariant?.gbpImageUrl || preview.visual?.gbpImageUrl),
         videoUrl: chosenVideoUrl,
         noAiImage: true, // stored visual only — never a fresh literal AI image
         gbpLocationIds: [gbpLocationId],

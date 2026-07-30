@@ -21,14 +21,20 @@ const FLAGGED = [
   'guaranteed elimination',
   '100% effective against roaches',
   'completely safe once applied',
+  // Bare safe + product-noun claims are the same banned class.
+  'safe pesticide treatments',
+  'safe products for your lawn',
+  'a safe treatment plan for summer',
+  'targeted, safe application practices',
 ];
 
 const CLEAN = [
   'EPA-registered products applied by licensed technicians',
   'a failsafe scheduling process',
-  'targeted, safe application practices reviewed on every label', // "safe" alone is not the banned class
   'Petsmart is next door',
   'keep pets off treated areas until completely dry',
+  'Safe once dry — technician confirms timing', // the approved idiom
+  'review the safety data sheet before mixing',
 ];
 
 describe('SAFETY_OVERCLAIMS compliance class', () => {

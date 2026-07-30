@@ -372,7 +372,7 @@ const PRICING_PATTERNS = /\$\d+(?:\.\d{2})?(?:\s*\/\s*(?:mo(?:nth)?|yr|year|visi
 // Includes the compliance-language class (AGENTS.md): no pesticide is ever
 // blanket-"safe" (pet-safe / family-safe / safe for kids), and it's
 // "EPA-registered", never "EPA-approved".
-const SAFETY_OVERCLAIMS = /\b(?:guarante(?:e[ds]?|ing)|100\s*%\s*(?:effective|safe|eliminat)|completely\s+safe|risk[\s-]*free|no\s+side\s+effects|(?:pet|kid|child|family)[\s-]*(?:and[\s-]*(?:pet|kid|child|family)[\s-]*)?safe|safe\s+(?:for|around)\s+(?:your\s+|the\s+|our\s+)?(?:pets?|kids?|children|famil(?:y|ies))|EPA[\s-]*approved)\b/i;
+const SAFETY_OVERCLAIMS = /\b(?:guarante(?:e[ds]?|ing)|100\s*%\s*(?:effective|safe|eliminat)|completely\s+safe|risk[\s-]*free|no\s+side\s+effects|(?:pet|kid|child|family)[\s-]*(?:and[\s-]*(?:pet|kid|child|family)[\s-]*)?safe|safe\s+(?:for|around)\s+(?:your\s+|the\s+|our\s+)?(?:pets?|kids?|children|famil(?:y|ies))|safe\s+(?:pesticides?|products?|treatments?|sprays?|chemicals?|applications?)|EPA[\s-]*approved)\b/i;
 const PHONE_PATTERN = /(?:\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}|\+1\d{10})/g;
 
 const KNOWN_PHONES = new Set();
@@ -1664,9 +1664,6 @@ const SocialMediaService = {
         gbpWantsImage = configured.some((loc) => !requestedGbpLocations || requestedGbpLocations.has(loc.id));
       }
     }
-    // Provenance of generatedImageUrl: true only when it came from the AI
-    // image generator (else branch below). GBP must never post AI imagery.
-    let aiGeneratedImage = false;
     if (metaWantsImage || gbpWantsImage || linkedinWantsHero) {
       if (noAiImage) {
         // Autonomous callers (RSS cron blog shares, studio campaigns, scheduled
@@ -1700,8 +1697,7 @@ const SocialMediaService = {
             const filename = `post-${Date.now()}.jpg`;
             const s3Url = await uploadImageToS3(img.base64, filename);
             if (s3Url) {
-              generatedImageUrl = s3Url;
-              aiGeneratedImage = true; // FB/IG only — GBP must not inherit it
+              generatedImageUrl = s3Url; // FB/IG only — GBP never reads this
             }
           }
         } catch { /* non-critical */ }
@@ -1940,16 +1936,13 @@ const SocialMediaService = {
           continue;
         }
 
-        // Reuse the image already generated + uploaded to the CDN for this
-        // run (see generatedImageUrl above) so GBP posts carry a photo too —
-        // a GBP local post without media renders as a flat text card and its
-        // "Learn more" CTA is easy to miss. Same public URL Instagram uses.
-        // Prefer a GBP-specific image (4:3, no center-crop of the card's logo/
-        // CTA); fall back to the shared square image when none was supplied —
-        // but NEVER an AI-generated one (owner rule: no AI imagery on GBP;
-        // hero/brand-card images are fine, AI runs post text-only here).
-        const gbpImg = (typeof resolvedGbpImageUrl === 'string' && resolvedGbpImageUrl)
-          || (!aiGeneratedImage && typeof generatedImageUrl === 'string' ? generatedImageUrl : null);
+        // GBP posts use ONLY the explicit GBP image channel
+        // (resolvedGbpImageUrl: caller gbpImageUrl, blog hero, or the 4:3
+        // brand card). NO fallback to the shared/generic image — provenance
+        // of a caller-supplied imageUrl is unknowable here (approved studio
+        // drafts re-enter with an AI scene as imageUrl), and the owner rule
+        // is NO AI imagery on GBP, ever. No explicit GBP image → text-only.
+        const gbpImg = (typeof resolvedGbpImageUrl === 'string' && resolvedGbpImageUrl) || null;
         let r = await postToGBP(loc.id, gbpContent, link, gbpImg);
         // Media is best-effort: if Google rejects or can't fetch the image,
         // retry text-only so an image problem doesn't block a post that would
