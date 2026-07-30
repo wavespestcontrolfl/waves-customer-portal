@@ -89,7 +89,7 @@ const TWO_TREATMENT_PACKAGE_KEYS = new Set(['cockroach_control', 'bed_bug_treatm
 // 2468" — codex r3). Ordinary copy ("entry points treated", "gate was
 // open") never trips; a street address near the word "gate" may — that
 // false positive fails closed and the tech rephrases.
-const COMPLETION_ACCESS_CODE_RE = /(?:\b(?:gate|garage|door|lock\s?box|keypad|alarm|entry|access)\b[^\n.!?]{0,40}\b(?:code|pin|combo|combination)\b|\b(?:code|pin|combo|combination)\b[^\n.!?]{0,15}\d{3,}|\b(?:gate|garage|door|lock\s?box|keypad|alarm|entry|access)\b[^\n.!?]{0,12}\b\d{3,8}\b)/i;
+const COMPLETION_ACCESS_CODE_RE = /(?:\b(?:gate|garage|door|lock\s?box|keypad|alarm|entry|access)\b[^\n.!?]{0,40}\b(?:code|pin|combo|combination)\b|\b(?:code|pin|combo|combination)\b[^\n.!?]{0,15}[a-z]?\d{2,4}(?:[-\s]\d{2,4}){0,2}|\b(?:gate|garage|door|lock\s?box|keypad|alarm|entry|access)\b[^\n.!?]{0,12}\b(?:[a-z]?\d{3,8}|[a-z]?\d{2,4}(?:[-\s]\d{2,4}){1,2})\b)/i;
 const { buildPrepaidSeriesContext } = require('../services/prepaid-series');
 const {
   findFirstApplicationInvoiceForEstimateService,
@@ -3145,8 +3145,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // recommendations feed the recap, captions sit under photos) — the
       // free-text fields must pass the same banned-copy policy as typed
       // forms, or the untyped path becomes a compliance side door (codex
-      // pre-push P1 2026-07-30).
-      if (!typedFindingsType && !isIncompleteVisit) {
+      // pre-push P1 2026-07-30). Internal-only consultations are exempt
+      // (codex r7): they mint no customer report, so blocking a staff-only
+      // assessment on customer-copy rules would strand valid internal
+      // notes — same reasoning as the caption gate's fresh-consultation
+      // skip below.
+      if (!typedFindingsType && !isIncompleteVisit && !isInternalOnlyCompletion) {
         const untypedCopySources = [
           ...(Array.isArray(observations) ? observations : []),
           ...(Array.isArray(recommendations) ? recommendations : []),
