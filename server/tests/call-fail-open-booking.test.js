@@ -453,6 +453,14 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
+  test('a conditional BOOKING with a benign-looking tail fails — "we will book you for Sunday at noon if anything changes" (P0 regression)', () => {
+    const conditionalBooking = 'We will book you for Sunday at noon if anything changes.';
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, conditionalBooking);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: conditionalBooking }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
   test('nonzero SECONDS in confirmed_start_at fail the on-the-hour guard (round-4 P1)', () => {
     const ex = agentCommitted();
     ex.scheduling.confirmed_start_at = '2026-08-02T12:00:30-04:00';

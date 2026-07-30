@@ -413,13 +413,20 @@ const CONDITIONAL_TOKENS = [
   ' unless ', ' assuming ', ' provided ', ' as long as ', ' pending ',
   ' depends ', ' depending ', ' when ', ' once ', ' should the ',
 ];
-const BENIGN_IF_RE = /^if (anything changes|that changes|anything comes up|something comes up|you need anything|you have any questions)/;
+// "if" is exempt ONLY inside the exact recognized closing construction —
+// "(just) let us know if <benign follower>" (codex P0, round 7g: "we will
+// book you for Sunday at noon IF ANYTHING CHANGES" is a conditional booking
+// even though the follower matches, so the follower alone is not enough:
+// the words BEFORE the "if" must be the let-us-know closer).
+const BENIGN_IF_PRECEDER_RE = /(?:^| )(?:just )?let us know $/;
+const BENIGN_IF_FOLLOWER_RE = /^if (anything changes|that changes|anything comes up|something comes up|you need anything|you have any questions)/;
 function turnHasUnresolvedConditional(normalizedTurn) {
   const padded = ` ${normalizedTurn} `;
   if (CONDITIONAL_TOKENS.some((t) => padded.includes(t))) return true;
   let idx = padded.indexOf(' if ');
   while (idx !== -1) {
-    if (!BENIGN_IF_RE.test(padded.slice(idx + 1))) return true;
+    if (!BENIGN_IF_PRECEDER_RE.test(padded.slice(0, idx + 1))
+      || !BENIGN_IF_FOLLOWER_RE.test(padded.slice(idx + 1))) return true;
     idx = padded.indexOf(' if ', idx + 1);
   }
   return false;
