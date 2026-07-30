@@ -107,7 +107,16 @@ exports.up = async function up(knex) {
     for (const v of variants) {
       if (typeof v.body !== 'string') continue;
       if (v.template_key === 'secure_appointment_card' || v.template_key === 'secure_appointment_card_plans') continue;
-      const next = mechanical(v.template_key, v.body);
+      let next = mechanical(v.template_key, v.body);
+      if (v.template_key === 'autopay_pre_charge') {
+        // A selected variant renders INSTEAD of the rewritten base body —
+        // carry the plan-aware label into it too, or a tierless monthly
+        // customer could receive the misbranded "WaveGuard" literal this
+        // migration exists to eliminate (the outbound guard that used to
+        // block it is retired in this same change). The sender always
+        // supplies {autopay_label}.
+        next = next.replace(/WaveGuard auto-pay/g, '{autopay_label}');
+      }
       if (next !== v.body) {
         await knex('sms_template_variants').where({ id: v.id }).update({ body: next, updated_at: new Date() });
       }
