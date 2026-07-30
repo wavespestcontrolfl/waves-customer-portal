@@ -1375,6 +1375,24 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 5:30AM — Newsletter event og:image backfill. Half an hour after
+  // normalization so today's newly-normalized rows get probed same-day.
+  // 25 rows/run, weekly retry backoff, SSRF-hardened transport shared with
+  // event-reverify. Kill switch: NEWSLETTER_IMAGE_BACKFILL=false.
+  // =========================================================================
+  cron.schedule('30 5 * * *', async () => {
+    logger.info('Running: Newsletter event image backfill');
+    try {
+      // runExclusive: deploy-overlap instances would each select the same
+      // unstamped batch and double the outbound fetches.
+      const EventImageBackfill = require('./event-image-backfill');
+      await runExclusive('event-image-backfill', () => EventImageBackfill.backfillBatch());
+    } catch (err) {
+      logger.error(`Event image backfill failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // EVERY MIN — Newsletter scheduled sends (dispatches any whose scheduled_for
   // has passed). Intentionally high-frequency so "send at 8:00am" fires close
   // to the minute. Per-tick work is a single indexed query on newsletter_sends.

@@ -359,4 +359,8 @@ module.exports = {
   deadTextNearTitle,
   assertPublicHttpUrl,
   distinctiveTitleWords,
+  // Hardened transport, reused by event-image-backfill so every fetch of
+  // a feed-controlled url shares one SSRF discipline. Not gated by
+  // NEWSLETTER_LIVE_REVERIFY — the gate is on the reverify FEATURE.
+  pinnedGet,
 };
