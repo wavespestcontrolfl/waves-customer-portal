@@ -2,7 +2,7 @@
 // non-turf surfaces — terracotta/barrel-tile roofs, mulch, stained
 // hardscape — must never be painted as treated lawn on a customer report).
 import { describe, expect, test } from 'vitest';
-import { isConfidentTurfPixel, isTurfPixel, lawnMaskPasses } from './treatmentZoneSpray';
+import { growTurfRegion, isConfidentTurfPixel, isTurfPixel, lawnMaskPasses } from './treatmentZoneSpray';
 
 describe('isTurfPixel (lawn highlight classifier)', () => {
   const TURF = [
@@ -57,5 +57,38 @@ describe('lawnMaskPasses (paver-dominated areas fall back to the outline)', () =
   test('near-empty masks fail the coverage floor', () => {
     expect(lawnMaskPasses({ insideCount: 10000, litCount: 50, confidentCount: 50 })).toBe(false);
     expect(lawnMaskPasses({ insideCount: 0, litCount: 0, confidentCount: 0 })).toBe(false);
+  });
+});
+
+describe('growTurfRegion (connectivity — codex P1 #3075)', () => {
+  // 6x3 grid: blob A (cols 0-1) has a confident-green seed with an adjacent
+  // tan pixel; blob B (cols 4-5) is all-tan pavers, separated by a non-turf
+  // gap (cols 2-3). B must be dropped even though A has plenty of grass.
+  const W = 6;
+  const H = 3;
+  const idx = (x, y) => y * W + x;
+  const eligible = new Uint8Array(W * H);
+  const confident = new Uint8Array(W * H);
+  for (let y = 0; y < H; y += 1) {
+    for (const x of [0, 1]) eligible[idx(x, y)] = 1; // blob A
+    for (const x of [4, 5]) eligible[idx(x, y)] = 1; // blob B (tan island)
+  }
+  confident[idx(0, 1)] = 1; // one green seed in blob A
+
+  test('tan connected to green stays; detached tan island is dropped', () => {
+    const kept = growTurfRegion(eligible, confident, W, H);
+    for (let y = 0; y < H; y += 1) {
+      expect(kept[idx(0, y)]).toBe(1);
+      expect(kept[idx(1, y)]).toBe(1);
+      expect(kept[idx(4, y)]).toBe(0);
+      expect(kept[idx(5, y)]).toBe(0);
+      expect(kept[idx(2, y)]).toBe(0);
+      expect(kept[idx(3, y)]).toBe(0);
+    }
+  });
+
+  test('no seeds → nothing kept', () => {
+    const kept = growTurfRegion(eligible, new Uint8Array(W * H), W, H);
+    expect(kept.every((v) => v === 0)).toBe(true);
   });
 });

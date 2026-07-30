@@ -301,6 +301,33 @@ export function lawnMaskPasses({ insideCount, litCount, confidentCount }) {
 }
 
 /**
+ * Region growing from confidently-green seeds (codex P1 #3075): ambiguous
+ * tan pixels only light when CONNECTED to confident green — a browning
+ * patch inside the lawn stays lit, while a beige paver patio that never
+ * touches grass is dropped entirely, no matter how much grass exists
+ * elsewhere in the trace. 4-neighbor multi-source flood fill.
+ */
+export function growTurfRegion(eligible, confident, w, h) {
+  const kept = new Uint8Array(w * h);
+  const stack = [];
+  for (let i = 0; i < w * h; i += 1) {
+    if (confident[i] && eligible[i]) {
+      kept[i] = 1;
+      stack.push(i);
+    }
+  }
+  while (stack.length) {
+    const i = stack.pop();
+    const x = i % w;
+    if (x > 0 && eligible[i - 1] && !kept[i - 1]) { kept[i - 1] = 1; stack.push(i - 1); }
+    if (x < w - 1 && eligible[i + 1] && !kept[i + 1]) { kept[i + 1] = 1; stack.push(i + 1); }
+    if (i >= w && eligible[i - w] && !kept[i - w]) { kept[i - w] = 1; stack.push(i - w); }
+    if (i < w * (h - 1) && eligible[i + w] && !kept[i + w]) { kept[i + w] = 1; stack.push(i + w); }
+  }
+  return kept;
+}
+
+/**
  * Grass highlight mask: a width×height overlay canvas painting turf inside
  * the traced loop with the luminous green; everything else transparent.
  * Built at 320×240 and upscaled with a slight blur for soft organic edges.
@@ -329,34 +356,46 @@ export function buildLawnHighlightMask({ source, points, closed, width = MAP_WID
   pctx.closePath();
   pctx.fill();
   const poly = pctx.getImageData(0, 0, SW, SH);
+  const n = SW * SH;
+  const eligible = new Uint8Array(n);
+  const confident = new Uint8Array(n);
+  let insideCount = 0;
+  for (let i = 0; i < n; i += 1) {
+    const o = i * 4;
+    if (poly.data[o + 3] <= 127) continue;
+    insideCount += 1;
+    const r = img.data[o];
+    const g = img.data[o + 1];
+    const b = img.data[o + 2];
+    if (isTurfPixel(r, g, b)) {
+      eligible[i] = 1;
+      if (isConfidentTurfPixel(r, g, b)) confident[i] = 1;
+    }
+  }
+  // Ambiguous tan only lights when CONNECTED to confident green — confident
+  // grass on one side of the yard can't bless a detached paver patio
+  // (codex P1 #3075).
+  const kept = growTurfRegion(eligible, confident, SW, SH);
   const out = sctx.createImageData(SW, SH);
   const litA = Math.round(HIGHLIGHT_ALPHA * 255);
   let litCount = 0;
   let confidentCount = 0;
-  let insideCount = 0;
-  for (let i = 0; i < SW * SH; i += 1) {
+  for (let i = 0; i < n; i += 1) {
     const o = i * 4;
-    const inside = poly.data[o + 3] > 127;
-    if (inside) insideCount += 1;
-    const r = img.data[o];
-    const g = img.data[o + 1];
-    const b = img.data[o + 2];
-    const lit = inside && isTurfPixel(r, g, b);
-    if (lit) {
+    if (kept[i]) {
       litCount += 1;
-      if (isConfidentTurfPixel(r, g, b)) confidentCount += 1;
+      if (confident[i]) confidentCount += 1;
     }
     out.data[o] = HIGHLIGHT_RGB[0];
     out.data[o + 1] = HIGHLIGHT_RGB[1];
     out.data[o + 2] = HIGHLIGHT_RGB[2];
-    out.data[o + 3] = lit ? litA : 0;
+    out.data[o + 3] = kept[i] ? litA : 0;
   }
   // Confidence gates (codex P1s #3075): a mask that lights (almost) nothing
   // (fully dormant lawn, washed-out imagery), or whose lit area is NOT
-  // dominated by confidently-green pixels (tan pavers / beige hardscape
-  // masquerading as dry turf), must not claim to be a grass highlight —
-  // return null so callers fall back to the truthful outline instead of
-  // baking hardscape into a customer report as treated lawn.
+  // dominated by confidently-green pixels, must not claim to be a grass
+  // highlight — return null so callers fall back to the truthful outline
+  // instead of baking hardscape into a customer report as treated lawn.
   if (!lawnMaskPasses({ insideCount, litCount, confidentCount })) return null;
   const oc = document.createElement('canvas');
   oc.width = SW;
