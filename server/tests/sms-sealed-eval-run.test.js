@@ -238,13 +238,19 @@ describe('runSealedExam — voice-profile pin (Codex r2)', () => {
     );
   });
 
-  test('a pinned run whose profile row vanished FAILS instead of drafting unpinned', async () => {
+  test('a pinned run whose profile row vanished is FINALIZED failed — never drafts unpinned, never wedges the one-running index (codex r3)', async () => {
     const dbi = makeRunnerDb({
       runs: [{ id: 'r1', status: 'running', provider_leg: 'openai', prompt_version: 'house_voice_v9_test', voice_profile_version: 9 }],
       items: [item('i1')],
       voiceProfiles: [],
     });
-    await expect(sealedEval.runSealedExam({ runId: 'r1', dbi })).rejects.toThrow(/voice profile v9, which no longer exists/);
+    const out = await sealedEval.runSealedExam({ runId: 'r1', dbi });
+    expect(out.status).toBe('failed');
+    expect(out.error).toMatch(/voice profile v9, which no longer exists/);
+    // the row must leave 'running' (the partial unique index keys on it) —
+    // a pre-try throw would have stranded it and blocked every future exam
+    const failedPatch = dbi.state.runPatches.find((p) => p.id === 'r1' && p.patch.status === 'failed');
+    expect(failedPatch).toBeTruthy();
     expect(drafter.generateGroundedDraft).not.toHaveBeenCalled();
   });
 });

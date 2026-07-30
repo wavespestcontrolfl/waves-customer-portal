@@ -158,6 +158,21 @@ describe('runAutoExamSweep', () => {
     expect(result.ran).toBe(1);
   });
 
+  test('stranded STALE-PROFILE row is resumed but never claims the leg — fresh current-profile run in the SAME sweep (codex r3)', async () => {
+    // Effective profile is none (mock resolver → null) but the stranded run
+    // was pinned to profile v7: finishing it keeps the paid cohort and frees
+    // the one-running index, yet the leg still needs a current-profile run.
+    const examRunner = jest.fn(async () => ({ status: 'complete' }));
+    const dbi = makeDbi({
+      runningRow: { id: 'stale-profile-1', provider_leg: 'anthropic', prompt_version: CURRENT, voice_profile_version: 7 },
+      completeByLeg: { openai: { id: 'r2' } },
+    });
+    const result = await runAutoExamSweep({ dbi, examRunner, summaryFn: summaryBothClean });
+    expect(examRunner).toHaveBeenCalledWith(expect.objectContaining({ runId: 'stale-profile-1' }));
+    expect(examRunner).toHaveBeenCalledWith(expect.objectContaining({ providerLeg: 'anthropic' }));
+    expect(result.legs.anthropic.outcome).not.toBe('resumed_stranded');
+  });
+
   test('stranded STALE-version row is recovered without shadowing the current-version leg', async () => {
     // Resume path retires stale-version rows then throws by contract.
     const retire = new Error('examined house_voice_v8 but the drafter is now house_voice_v9_test — start a new run');

@@ -524,21 +524,6 @@ async function runSealedExam({ providerLeg, baselineRunId, runId, triggeredBy = 
   const route = EXAM_LEG_ROUTES[run.provider_leg];
   if (!route) throw new Error(`run ${String(run.id).slice(0, 8)} has unknown provider leg ${run.provider_leg}`);
 
-  // Frozen voice profile: every item in this sitting — including resumed
-  // ones — drafts under the profile version the run was CREATED with, by
-  // text lookup on the immutable voice_profiles row (superseded/revoked rows
-  // keep their profile_text). A missing row is a hard failure: drafting the
-  // remainder unpinned would mix prompts inside one run.
-  let runVoiceProfile = null;
-  if (run.voice_profile_version != null) {
-    runVoiceProfile = await dbi('voice_profiles')
-      .where({ version: run.voice_profile_version })
-      .first('version', 'profile_text');
-    if (!runVoiceProfile) {
-      throw new Error(`run ${String(run.id).slice(0, 8)} is pinned to voice profile v${run.voice_profile_version}, which no longer exists`);
-    }
-  }
-
   const Anthropic = require('@anthropic-ai/sdk');
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -553,6 +538,24 @@ async function runSealedExam({ providerLeg, baselineRunId, runId, triggeredBy = 
   let consecutiveFailures = 0;
   let processed = 0;
   try {
+    // Frozen voice profile: every item in this sitting — including resumed
+    // ones — drafts under the profile version the run was CREATED with, by
+    // text lookup on the immutable voice_profiles row (superseded/revoked
+    // rows keep their profile_text). A missing row is a hard failure —
+    // drafting the remainder unpinned would mix prompts inside one run —
+    // and it MUST fail inside this block so the catch finalizes the run to
+    // status='failed' (Codex r3): thrown pre-try, the row would stay
+    // 'running' and the one-running unique index would wedge every future
+    // exam behind an unresumable sitting.
+    let runVoiceProfile = null;
+    if (run.voice_profile_version != null) {
+      runVoiceProfile = await dbi('voice_profiles')
+        .where({ version: run.voice_profile_version })
+        .first('version', 'profile_text');
+      if (!runVoiceProfile) {
+        throw new Error(`run ${String(run.id).slice(0, 8)} is pinned to voice profile v${run.voice_profile_version}, which no longer exists`);
+      }
+    }
     // Sweep pending items until none remain or the leg looks down. The
     // per-batch re-query IS the resume mechanism: results are keyed
     // UNIQUE(run_id, item_id), so finished items drop out of the join.
@@ -766,7 +769,7 @@ async function runAutoExamSweep({ dbi = db, examRunner = runSealedExam, summaryF
   // one. Only a lock actually HELD means a sitting is genuinely in progress.
   const inFlight = await dbi('sms_sealed_eval_runs')
     .where({ status: 'running' })
-    .first('id', 'provider_leg', 'prompt_version');
+    .first('id', 'provider_leg', 'prompt_version', 'voice_profile_version');
   if (inFlight) {
     if (await isLocked('sms-sealed-eval')) {
       return { skipped: 'run_in_progress', version: currentVersion };
@@ -778,9 +781,14 @@ async function runAutoExamSweep({ dbi = db, examRunner = runSealedExam, summaryF
         return { skipped: 'run_in_progress', version: currentVersion };
       }
       // Only claim the leg when the stranded run examined the CURRENT
-      // version — a retired stale-version row must not shadow this leg's
-      // fresh run below.
-      if (inFlight.prompt_version === currentVersion) {
+      // (version, effective-profile) pair — a retired stale-version row, or
+      // a run pinned to a profile that was swapped while it sat stranded
+      // (Codex r3), must not shadow this leg's fresh run below. The stale
+      // resume still ran on purpose: it finishes the paid cohort and frees
+      // the one-running index so the loop can create the current-profile
+      // run in THIS sweep, not tomorrow's.
+      if (inFlight.prompt_version === currentVersion
+          && (inFlight.voice_profile_version ?? null) === (sweepProfilePin ?? null)) {
         if (result && result.status === 'complete') {
           legs[inFlight.provider_leg] = { outcome: 'resumed_stranded', runId: inFlight.id };
           ran += 1;
