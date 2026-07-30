@@ -8967,7 +8967,19 @@ const CallRecordingProcessor = {
           logger.info(`[call-proc] Rebuilt newsletter candidate for call-created customer on retry (${maskSid(callSid)})`);
         }
       } catch (rebuildErr) {
-        logger.warn(`[call-proc] newsletter candidate rebuild failed for ${maskSid(callSid)}: ${rebuildErr.message}`);
+        logger.warn(`[call-proc] newsletter candidate rebuild failed for ${maskSid(callSid)}: ${rebuildErr.code || rebuildErr.name || 'db_error'}`);
+        // A recovery run that cannot rebuild the candidate must NOT
+        // finalize 'processed' (Codex #3084 r30): the retry sweep never
+        // revisits a processed call, so a transient customers-read failure
+        // here would permanently cost the call-created customer its DOI
+        // and its durable held_newsletter record. Same contract as the
+        // ledger-unavailable throw in the reconciliation below: land in
+        // the outer procErr catch, which stamps extraction_failed with the
+        // capped retry budget — this branch only runs on recovery passes,
+        // so a normal first attempt is never affected.
+        const recoverErr = new Error('newsletter_rebuild_unavailable');
+        recoverErr.newsletterRebuildUnavailable = true;
+        throw recoverErr;
       }
     }
     if (newsletterCandidate && v2EmailBlocked) {

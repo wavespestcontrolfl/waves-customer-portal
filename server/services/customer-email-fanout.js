@@ -104,6 +104,23 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
 
   const now = new Date();
 
+  // Lock-order discipline (Codex #3084 r30): the release engine's enroll
+  // transaction locks first_touch_holds FOR UPDATE and then writes
+  // automation_enrollments; this fan-out previously locked enrollment rows
+  // (the sync below) and THEN waited on the hold retargets — a classic
+  // cycle Postgres resolves by aborting one side (a 500 on the customer
+  // edit, or a delayed release). Take the customer's hold-row locks FIRST,
+  // so both paths acquire first_touch_holds → automation_enrollments in
+  // the same order. Later hold updates re-lock rows this transaction
+  // already owns.
+  if (await conn.schema.hasTable('first_touch_holds')) {
+    await conn('first_touch_holds')
+      .where({ customer_id: customerId })
+      .whereIn('status', ['pending', 'releasing'])
+      .forUpdate()
+      .select('id');
+  }
+
   // Snapshot copies exist only when there was an old value to copy.
   if (oldEmail) {
     counts.leads += await conn('leads')

@@ -523,6 +523,7 @@ async function resumeHeldFirstTouch({
         // enrollment at all. On a knex transaction handle this nests as a
         // savepoint (deferred/triage callers).
         let dripSkip = null;
+        let dripStamp = null;
         try {
           await dbh.transaction(async (trx) => {
             const locked = await trx('first_touch_holds')
@@ -577,6 +578,22 @@ async function resumeHeldFirstTouch({
                 .update({ email: sendEmail, updated_at: new Date() });
             }
             result.enrolled = result.enrolled || !!enroll?.enrolled;
+            // The drip settlement commits WITH the enrollment (Codex #3084
+            // r30): a deny landing after this transaction but before the
+            // later ledger settle would see an active, immediately-due
+            // enrollment whose release was never recorded — the fence
+            // correctly blocks that settle, but nothing would cancel the
+            // enrollment. Settling released_drip here, under the same row
+            // lock, means any later deny arrives strictly AFTER a durably
+            // recorded release (the accepted too-late semantics; the
+            // correction's enrollment sweep retargets remaining steps).
+            // The write doubles as a lease renewal: the fresh stamp is
+            // this worker's fence from here on, and it restarts the
+            // stale-claim window.
+            dripStamp = new Date();
+            await trx('first_touch_holds')
+              .where({ id: hold.id })
+              .update({ released_drip: true, held_email: sendEmail, updated_at: dripStamp });
           });
           if (dripSkip) {
             if (dripSkip.repen) {
@@ -586,6 +603,10 @@ async function resumeHeldFirstTouch({
             }
             result.skipped = result.skipped || dripSkip.skipped;
             continue;
+          }
+          if (dripStamp) {
+            claimStamp = dripStamp;
+            claimStamps.set(hold.id, dripStamp);
           }
           patch.released_drip = true;
         } catch (enrollErr) {
@@ -1055,11 +1076,25 @@ async function recordFirstTouchHold({ callLogId, customerId = null, heldEmail, h
           // (the correction fanout) — a processor merge overwriting it
           // would make the claimant's pre-send fresh read adopt a
           // force-reprocess's unconfirmed guess as if it were a correction
-          // and send to it without read-back (Codex #3084 r20).
-          held_email: dbh.raw(
-            "CASE WHEN first_touch_holds.status = 'releasing' THEN first_touch_holds.held_email ELSE ? END",
-            [emailToRecord],
-          ),
+          // and send to it without read-back (Codex #3084 r20). Rows
+          // RELEASED during this run keep their address atomically too
+          // (Codex #3084 r30): the pre-merge `existing` read adopts a
+          // released-during-run target, but a correction can commit in the
+          // read→merge gap — the CASE inspects the CURRENT row, so the
+          // operator-confirmed value survives no matter when the
+          // correction lands.
+          held_email: runStartedAt
+            ? dbh.raw(
+              "CASE WHEN first_touch_holds.status = 'releasing' THEN first_touch_holds.held_email"
+              + " WHEN first_touch_holds.released_at IS NOT NULL AND first_touch_holds.released_at >= ?"
+              + " AND COALESCE(first_touch_holds.held_email, '') <> '' THEN first_touch_holds.held_email"
+              + ' ELSE ? END',
+              [runStartedAt, emailToRecord],
+            )
+            : dbh.raw(
+              "CASE WHEN first_touch_holds.status = 'releasing' THEN first_touch_holds.held_email ELSE ? END",
+              [emailToRecord],
+            ),
           held_drip: dbh.raw('first_touch_holds.held_drip OR excluded.held_drip'),
           held_newsletter: dbh.raw('first_touch_holds.held_newsletter OR excluded.held_newsletter'),
           // Never demote an ACTIVE 'releasing' claim back to 'pending' — a
@@ -1114,16 +1149,23 @@ async function sweepAbandonedFirstTouchHolds({ dbh = db, limit = 10 } = {}) {
     // main sweep below only looks at pending/stale-releasing rows, so
     // nothing else would ever retry it. The CAS matches exactly that
     // inconsistent state (a correctly released row always has its released
-    // flags covering its held flags), is deny-safe, and re-pends into the
-    // normal sweep flow.
+    // flags covering its held flags) and re-pends into the normal sweep
+    // flow. Deny-STAMPED inconsistent rows re-pend too, KEEPING the stamp
+    // (Codex #3084 r30): the correction fanout only retargets pending and
+    // releasing rows, so a deny left on a released row could never be
+    // lifted — parked as pending-with-stamp, the sweep keeps excluding it
+    // while the correction path can finally clear it.
     try {
       await dbh('first_touch_holds')
         .where({ status: 'released' })
         .whereRaw('((held_drip AND NOT released_drip) OR (held_newsletter AND NOT released_newsletter))')
-        .where(function notDenied() {
-          this.whereNull('last_error').orWhereNot('last_error', 'email_denied_await_correction');
-        })
-        .update({ status: 'pending', last_error: 'work_merged_during_release', updated_at: new Date() });
+        .update({
+          status: 'pending',
+          last_error: dbh.raw(
+            "CASE WHEN last_error = 'email_denied_await_correction' THEN last_error ELSE 'work_merged_during_release' END",
+          ),
+          updated_at: new Date(),
+        });
     } catch (recoverErr) {
       logger.warn(`[first-touch-resume] merged-work recovery pass failed: ${recoverErr.code || recoverErr.name || 'db_error'} — next sweep retries`);
     }

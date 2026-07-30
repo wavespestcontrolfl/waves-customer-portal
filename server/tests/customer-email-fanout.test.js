@@ -66,6 +66,7 @@ function makeConn(cfg = {}) {
       whereNull: () => qb,
       whereIn: (col, vals) => { calls.push({ table, op: 'whereIn', arg: { col, vals } }); return qb; },
       whereNotIn: (col, vals) => { calls.push({ table, op: 'whereNotIn', arg: { col, vals } }); return qb; },
+      forUpdate: () => { calls.push({ table, op: 'forUpdate' }); return qb; },
       select: () => qb,
       count: () => { counting = true; return qb; },
       first: () => Promise.resolve(counting
@@ -145,6 +146,15 @@ describe('propagateCustomerEmailChange', () => {
     const cardUpdate = conn.__updates('triage_items')[0].arg;
     expect(cardUpdate.status).toBe('resolved');
     expect(cardUpdate.resolution_note).toContain('Email corrected');
+
+    // Lock-order discipline (Codex #3084 r30): the hold-row FOR UPDATE
+    // locks are taken BEFORE any automation_enrollments write, matching
+    // the release engine's first_touch_holds → enrollments order — no
+    // deadlock cycle between a correction and an in-flight release.
+    const lockIdx = conn.__calls.findIndex((c) => c.table === 'first_touch_holds' && c.op === 'forUpdate');
+    const enrollIdx = conn.__calls.findIndex((c) => c.table === 'automation_enrollments' && c.op === 'update');
+    expect(lockIdx).toBeGreaterThanOrEqual(0);
+    expect(lockIdx).toBeLessThan(enrollIdx);
 
     // No other cards remain open on the call → review_status resolves.
     const callSync = conn.__updates('call_log')[0].arg;

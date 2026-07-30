@@ -236,10 +236,12 @@ beforeEach(() => {
 });
 
 // The merge's held_email is a bound CASE since r20 (an ACTIVE claim's target
-// is preserved over a fresh extraction guess) — unwrap the recorded value.
+// is preserved over a fresh extraction guess; with runStartedAt the r30
+// released-during-run branch adds a leading timestamp binding) — the
+// fallback address is always the LAST binding.
 function mergedHeldEmail(mergeArg) {
   const v = mergeArg.held_email;
-  return typeof v === 'string' ? v : v.bindings[0];
+  return typeof v === 'string' ? v : v.bindings[v.bindings.length - 1];
 }
 
 describe('resumeHeldFirstTouch (ledger release engine)', () => {
@@ -250,6 +252,10 @@ describe('resumeHeldFirstTouch (ledger release engine)', () => {
       customer: expect.objectContaining({ email: 'confirmed@example.com', id: 'cust-1' }),
     }));
     expect(mockNewsletter).toHaveBeenCalledWith(expect.objectContaining({ email: 'confirmed@example.com' }));
+    // The drip settlement commits WITH the enrollment (Codex #3084 r30):
+    // a deny landing after the enroll transaction always finds the release
+    // durably recorded, never an active enrollment with no ledger trace.
+    expect(mockHoldUpdates[1]).toMatchObject({ released_drip: true, held_email: 'confirmed@example.com' });
     expect(mockHoldUpdates.at(-1)).toMatchObject({ status: 'released', released_drip: true, released_newsletter: true });
   });
 
@@ -379,11 +385,13 @@ describe('resumeHeldFirstTouch (ledger release engine)', () => {
     expect(mockHoldUpdates[0]).toMatchObject({ status: 'releasing' });
   });
 
-  test('a claim lost during a slow enroll never sends the DOI', async () => {
-    // The fence held at the pre-send read, then the sweep reclaimed the row
-    // while enrollCustomer ran. The claim-time skipDedupe marker would
-    // bypass the dedupe guard on a blind resume — the pre-DOI ownership
-    // re-check catches the reclaim and abandons (Codex #3084 r27).
+  test('a claim lost after the enroll transaction never sends the DOI', async () => {
+    // In prod the enroll transaction's row lock + in-trx renewal make a
+    // mid-enroll reclaim impossible (r29/r30) — this exercises the
+    // defensive path where the lease is lost between the committed enroll
+    // and the DOI: the claim-time skipDedupe marker would bypass the
+    // dedupe guard on a blind resume, so the pre-DOI renewal refuses and
+    // the worker abandons with the drip release already durably recorded.
     mockHold = baseHold({ last_error: 'newsletter_doi_not_confirmed' });
     mockEnroll.mockImplementationOnce(async () => {
       mockClaimLost = true;
@@ -392,7 +400,9 @@ describe('resumeHeldFirstTouch (ledger release engine)', () => {
     const res = await resumeHeldFirstTouch({ callLogId: 'call-1' });
     expect(res.skipped).toBe('claim_lost');
     expect(mockNewsletter).not.toHaveBeenCalled();
-    expect(mockHoldUpdates).toHaveLength(1); // the claim only
+    // The claim, then the in-trx drip settlement (r30) — nothing after.
+    expect(mockHoldUpdates).toHaveLength(2);
+    expect(mockHoldUpdates[1]).toMatchObject({ released_drip: true });
   });
 
   test('a post-commit callback that lost its claims abandons the deferred DOI', async () => {
@@ -526,6 +536,14 @@ describe('recordFirstTouchHold (durable hold ledger writes)', () => {
       heldEmail: 'original@example.com', heldNewsletter: true, runStartedAt,
     });
     expect(mergedHeldEmail(mockMergeArgs.at(-1))).toBe('confirmed@example.com');
+    // The adoption is ATOMIC in the conflict expression too (Codex #3084
+    // r30): a correction committing between the pre-merge read and the
+    // upsert is inspected on the CURRENT row — the CASE carries a
+    // released-during-run branch keyed on released_at, bound to this
+    // run's start.
+    const heldEmailCase = mockMergeArgs.at(-1).held_email;
+    expect(String(heldEmailCase.sql)).toContain('first_touch_holds.released_at >= ?');
+    expect(heldEmailCase.bindings[0]).toBe(runStartedAt);
   });
 
   test('a hold released in an EARLIER cycle re-pends normally with the fresh address', async () => {
@@ -996,7 +1014,12 @@ describe('DOI dedupe guard and ledger sweep', () => {
     // (Codex #3084 r29). Deny-safe CAS on exactly that inconsistent state.
     mockHolds = []; // no sweep candidates — only the recovery pass runs
     await sweepAbandonedFirstTouchHolds({});
-    expect(mockHoldUpdates[0]).toMatchObject({ status: 'pending', last_error: 'work_merged_during_release' });
+    expect(mockHoldUpdates[0]).toMatchObject({ status: 'pending' });
+    // The marker is a CASE since r30: deny-stamped inconsistent rows
+    // re-pend KEEPING their stamp (the correction path clears it); every
+    // other row gets the merged-work marker.
+    expect(String(mockHoldUpdates[0].last_error)).toContain("'work_merged_during_release'");
+    expect(String(mockHoldUpdates[0].last_error)).toContain('email_denied_await_correction');
   });
 
   test('the sweep never releases when the LATEST review cycle was dismissed', async () => {
