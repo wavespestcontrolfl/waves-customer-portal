@@ -15,6 +15,7 @@ const {
   hublessService,
   normalizeService,
   CITY_SERVICE_SLUG,
+  cityServiceRoute,
 } = require('./blog-seo-contract');
 const { isFaqBlockedService, findHardcodedPrice } = require('./content-guardrails');
 
@@ -221,10 +222,22 @@ function hasLinkReason(contract, reason) {
  * only true when it is the right service's page.
  */
 function hasServiceCityLink(contract, brief) {
-  const slug = CITY_SERVICE_SLUG[normalizeService(brief.service)];
-  if (!slug || !Array.isArray(contract.includedInternalLinks)) return false;
-  const expected = new RegExp(`^/${slug}-[a-z][a-z0-9-]*-fl/?$`);
-  return contract.includedInternalLinks.some((link) => expected.test(String(link.url || '')));
+  if (!Array.isArray(contract.includedInternalLinks)) return false;
+  const service = normalizeService(brief.service);
+  // Prefer the exact service+city route. Matching the service prefix alone let a
+  // Sarasota lawn brief pass on /lawn-care-venice-fl/ — right service, wrong town.
+  const exact = cityServiceRoute(service, brief.city);
+  if (exact) {
+    const want = exact.replace(/\/$/, '');
+    return contract.includedInternalLinks
+      .some((link) => String(link.url || '').replace(/\/$/, '') === want);
+  }
+  // No city on the brief: nothing to match against, so any of this service's city
+  // pages is as specific as the brief itself is.
+  const slug = CITY_SERVICE_SLUG[service];
+  if (!slug) return false;
+  const anyCity = new RegExp(`^/${slug}-[a-z][a-z0-9-]*-fl/?$`);
+  return contract.includedInternalLinks.some((link) => anyCity.test(String(link.url || '')));
 }
 
 function hasIncludedLinkReason(contract, reason) {

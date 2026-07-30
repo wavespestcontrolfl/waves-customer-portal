@@ -977,3 +977,36 @@ describe('checkHubLinkPresent — lawn is hubless and uses its city page', () =>
     expect(r.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
   });
 });
+
+// Right service, WRONG town must not satisfy either gate: a Sarasota lawn brief
+// linking /lawn-care-venice-fl/ used to pass both, because the service prefix matched
+// and the generic city-reason check only looks at URL shape.
+describe('the stand-in city link must match the brief CITY too', () => {
+  const gate = require('../services/content/content-quality-gate');
+  const hub = (body, brief) => gate._internals.checkHubLinkPresent({ body }, brief);
+
+  test('quality gate: wrong town fails, right town passes', () => {
+    const brief = { service: 'lawn', city: 'Sarasota', page_type: 'supporting-blog' };
+    expect(hub('See [Venice lawn care](/lawn-care-venice-fl/).', brief).ok).toBe(false);
+    expect(hub('See [Sarasota lawn care](/lawn-care-sarasota-fl/).', brief).ok).toBe(true);
+  });
+
+  test('quality gate: a city-less brief still accepts any of its city pages', () => {
+    const brief = { service: 'lawn', page_type: 'supporting-blog' };
+    expect(hub('See [Venice lawn care](/lawn-care-venice-fl/).', brief).ok).toBe(true);
+  });
+
+  test('quality gate: multi-word cities slugify correctly', () => {
+    const brief = { service: 'tree-shrub', city: 'Lakewood Ranch', page_type: 'supporting-blog' };
+    expect(hub('See [our page](/tree-and-shrub-care-lakewood-ranch-fl/).', brief).ok).toBe(true);
+    expect(hub('See [our page](/tree-and-shrub-care-venice-fl/).', brief).ok).toBe(false);
+  });
+
+  test('cityServiceRoute builds the shared expectation', () => {
+    const { cityServiceRoute } = require('../services/content/blog-seo-contract');
+    expect(cityServiceRoute('lawn', 'Sarasota')).toBe('/lawn-care-sarasota-fl/');
+    expect(cityServiceRoute('tree-shrub', 'Lakewood Ranch')).toBe('/tree-and-shrub-care-lakewood-ranch-fl/');
+    expect(cityServiceRoute('lawn', null)).toBeNull();
+    expect(cityServiceRoute('specialty', 'Sarasota')).toBeNull(); // no city-service slug
+  });
+});

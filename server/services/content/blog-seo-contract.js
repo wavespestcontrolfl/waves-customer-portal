@@ -45,6 +45,21 @@ function hublessService(serviceKey) {
   return Boolean(target) && !target.url;
 }
 
+/**
+ * The city-service route for a service + city, or null when either is unknown.
+ *
+ * One builder so every gate asks the same question. Checking only the service
+ * prefix let a Sarasota lawn brief satisfy its requirement with
+ * /lawn-care-venice-fl/ — the right service, the wrong town, and the generic
+ * city-reason check waves it through too.
+ */
+function cityServiceRoute(serviceKey, city) {
+  const slug = CITY_SERVICE_SLUG[serviceKey];
+  const citySlug = slugify(city);
+  if (!slug || !citySlug) return null;
+  return `/${slug}-${citySlug}-fl/`;
+}
+
 // Must stay in step with content-brief-builder's SERVICE_CITY_SLUG — this map
 // decides which URL a city recommendation points at, and inferLinkReason below
 // decides whether a link COUNTS as the city link. Tree & shrub city pages ship as
@@ -592,6 +607,7 @@ module.exports = {
   hublessService,
   normalizeService,
   CITY_SERVICE_SLUG,
+  cityServiceRoute,
   _internals: {
     buildDefaultBlogBreadcrumbs,
     buildCityTarget,

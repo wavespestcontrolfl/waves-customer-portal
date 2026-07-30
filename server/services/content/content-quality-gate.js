@@ -941,10 +941,15 @@ function checkHubLinkPresent(draft, brief) {
   // services the city-service page IS the most relevant local page the brief
   // mandates, so accept it. Scoped to hubless services only: a vertical that HAS
   // a hub must link it rather than substituting a city page.
-  const citySlug = SERVICE_CITY_SLUG[service];
-  if (!serviceHubs.length && citySlug) {
-    const cityRoute = new RegExp(`/${citySlug}-[a-z][a-z0-9-]*-fl/`);
-    if (cityRoute.test(body)) return { ok: true };
+  if (!serviceHubs.length) {
+    // Same specificity the SEO gate applies: prefer the brief's exact service+city
+    // route, since the service prefix alone accepts any town's page.
+    const { cityServiceRoute } = require('./blog-seo-contract');
+    const city = brief?.city || brief?.voice_constraints?.operator_brief?.city;
+    const exact = cityServiceRoute(service, city);
+    if (exact) return body.includes(exact) ? { ok: true } : { ok: false, reason: 'no_hub_link_found' };
+    const citySlug = SERVICE_CITY_SLUG[service];
+    if (citySlug && new RegExp(`/${citySlug}-[a-z][a-z0-9-]*-fl/`).test(body)) return { ok: true };
   }
   return { ok: false, reason: 'no_hub_link_found' };
 }
