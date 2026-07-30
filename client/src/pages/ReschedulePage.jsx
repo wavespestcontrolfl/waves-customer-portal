@@ -1249,13 +1249,16 @@ export default function ReschedulePage() {
             {data.weatherMove ? (
               <div className="rsv2-hero" style={{ marginBottom: 12 }}>
                 <WeatherMovePill />
-                <h1 className="rsv2-title" style={{ marginTop: 12 }}>
+                {/* h2, not h1: the glass type ramp sizes headings by tag, and
+                    the owner sized the weather flow one step down (2026-07-30)
+                    — both this heading and the "different time?" hero. */}
+                <h2 className="rsv2-title" style={{ marginTop: 12 }}>
                   {weatherMoveHeading({
                     move: data.weatherMove,
                     firstName: data.customerFirstName,
                     serviceType: data.service?.type,
                   })}
-                </h1>
+                </h2>
               </div>
             ) : null}
             <WeatherMoveBanner
@@ -1272,11 +1275,13 @@ export default function ReschedulePage() {
                 2026-07-30). */}
             <div className="rsv2-hero">
               {data.weatherMove ? null : <div className="rsv2-eyebrow">Reschedule</div>}
-              <h1 className="rsv2-title">
-                {data.weatherMove
-                  ? 'Want a different time instead?'
-                  : <>Hey {data.customerFirstName || 'there'}, {data.missed ? 'looks like we missed each other' : "let's pick a new time"}</>}
-              </h1>
+              {data.weatherMove ? (
+                <h2 className="rsv2-title">Want a different time instead?</h2>
+              ) : (
+                <h1 className="rsv2-title">
+                  Hey {data.customerFirstName || 'there'}, {data.missed ? 'looks like we missed each other' : "let's pick a new time"}
+                </h1>
+              )}
               <div className="rsv2-hero-meta">
                 {data.weatherMove ? (
                   <>
