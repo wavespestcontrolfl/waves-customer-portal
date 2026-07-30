@@ -104,6 +104,10 @@ beforeEach(() => {
   gmailClient.getAuthClient.mockImplementation(async () => ({}));
   require('googleapis').google.people.mockImplementation(() => mockPeopleApi);
   mockPeopleApi.people.searchContacts.mockImplementation(async () => ({ data: { results: [] } }));
+  // Default get/update serve absorbDuplicate's survivor-merge reads; tests
+  // that need specific payloads stack mockResolvedValueOnce on top.
+  mockPeopleApi.people.get.mockImplementation(async () => ({ data: { etag: 'e-default', metadata: { sources: [] }, memberships: [] } }));
+  mockPeopleApi.people.updateContact.mockImplementation(async ({ resourceName }) => ({ data: { resourceName } }));
   mockPeopleApi.people.connections.list.mockImplementation(async () => ({ data: { connections: [] } }));
   mockPeopleApi.people.deleteContact.mockImplementation(async () => ({}));
 });
@@ -231,6 +235,38 @@ describe('runContactsSync', () => {
     const counts = await runContactsSync({ gapMs: 0 });
     expect(counts.synced).toBe(1);
     expect(mockPeopleApi.people.createContact).toHaveBeenCalled();
+  });
+
+  test('duplicate retirement ABSORBS operator data into the survivor before deleting', async () => {
+    setupDb({
+      leads: [{ id: 'l-1', first_name: 'Jane', email: 'jane@customer.example', phone: null, customer_id: 'c-1', google_contact_id: 'people/dup', updated_at: '2026-07-28T11:00:00Z' }],
+      firstResults: { customers: [{ id: 'c-1' }, { id: 'c-1', google_contact_id: 'people/cust' }, null, { id: 'c-1' }], leads: [null] },
+    });
+    mockPeopleApi.people.get
+      .mockResolvedValueOnce({ data: { etag: 'd', metadata: { sources: [] }, memberships: [{ contactGroupMembership: { contactGroupResourceName: 'contactGroups/operatorLabel' } }], emailAddresses: [{ value: 'work@x.example' }] } })
+      .mockResolvedValueOnce({ data: { etag: 's', metadata: { sources: [] }, memberships: [], emailAddresses: [{ value: 'jane@customer.example' }] } });
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(counts.skipped).toBe(1);
+    const merge = mockPeopleApi.people.updateContact.mock.calls[0][0];
+    expect(merge.resourceName).toBe('people/cust');
+    expect(merge.requestBody.emailAddresses.map((e) => e.value)).toContain('work@x.example');
+    expect(merge.requestBody.memberships.map((m) => m.contactGroupMembership.contactGroupResourceName)).toContain('contactGroups/operatorLabel');
+    expect(mockPeopleApi.people.deleteContact).toHaveBeenCalledWith({ resourceName: 'people/dup' });
+  });
+
+  test('a FAILED operator-data merge RETAINS the duplicate — retried next run, never orphaned', async () => {
+    const state = setupDb({
+      leads: [{ id: 'l-1', first_name: 'Jane', email: 'jane@customer.example', phone: null, customer_id: 'c-1', google_contact_id: 'people/dup', updated_at: '2026-07-28T11:00:00Z' }],
+      firstResults: { customers: [{ id: 'c-1' }, { id: 'c-1', google_contact_id: 'people/cust' }, null], leads: [null] },
+    });
+    const boom = new Error('backend error');
+    boom.code = 500;
+    mockPeopleApi.people.updateContact.mockRejectedValueOnce(boom);
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(counts.failed).toBe(1);
+    expect(mockPeopleApi.people.deleteContact).not.toHaveBeenCalled();
+    // The lead was NOT stamped away from its (still live) duplicate.
+    expect(state.updates.filter((u) => u.table === 'leads')).toEqual([]);
   });
 
   test('a repeat-inquiry lead ADOPTS the sibling lead contact instead of minting another', async () => {

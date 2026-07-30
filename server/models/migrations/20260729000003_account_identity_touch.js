@@ -16,6 +16,7 @@
  */
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('customer_accounts')) || !(await knex.schema.hasTable('customers'))) return;
+  const hasAuditLog = await knex.schema.hasTable('audit_log');
   // Remove the earlier reverse fan-out if a prior deploy created it.
   await knex.raw('DROP TRIGGER IF EXISTS customer_accounts_identity_touch ON customer_accounts');
   await knex.raw('DROP FUNCTION IF EXISTS touch_linked_customers_on_account_identity()');
@@ -54,14 +55,22 @@ exports.up = async function up(knex) {
       -- single-property account seeded from its customer shares the exact
       -- timestamp while the customer holds the correction — a strict gate
       -- (or requiring some sibling to still match the account) would skip
-      -- precisely the rows this backfill exists to repair. No app writer
-      -- has ever UPDATEd account identity (inserts + the trigger below
-      -- only), so an account strictly newer than every divergent copy can
-      -- only be a deliberate direct correction — preserved. (Residual: a
-      -- manual correction that didn't bump ca.updated_at is
-      -- indistinguishable from drift; the trigger heals those on the next
-      -- real identity edit.)
+      -- precisely the rows this backfill exists to repair.
       AND c.updated_at >= ca.updated_at
+      ${hasAuditLog ? `
+      -- Field-specific provenance: data-hygiene auto-apply DOES write
+      -- account identity directly (data-hygiene/auto-apply.js,
+      -- NORMALIZATION_TABLES.customer_account) and audits every apply.
+      -- Any account with a recorded direct identity correction is
+      -- EXCLUDED wholesale — a property row bumped later for unrelated
+      -- reasons must never revert a hygiene fix. Un-audited accounts are
+      -- the pre-trigger legacy population this backfill targets.
+      AND NOT EXISTS (
+        SELECT 1 FROM audit_log al
+        WHERE al.action = 'data_hygiene.proposal.apply'
+          AND al.resource_type = 'customer_account'
+          AND al.resource_id = ca.id::text
+      )` : ''}
   `);
   await knex.raw(`
     CREATE OR REPLACE FUNCTION propagate_customer_identity_to_account() RETURNS trigger AS $$

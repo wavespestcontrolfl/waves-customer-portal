@@ -573,6 +573,50 @@ async function upsertContact(people, table, row, kind, gapMs, { markerSearchKey 
   return { resourceName: created.data.resourceName || null, created: true };
 }
 
+/**
+ * Duplicate retirement WITHOUT losing operator-managed data: merge the
+ * duplicate's emails/phones/addresses and group memberships into the
+ * surviving contact, then delete it. If the merge cannot complete, the
+ * duplicate is RETAINED (returns false) — a lingering duplicate is
+ * recoverable on the next pass; deleted operator data is not.
+ */
+async function absorbDuplicate(people, dupId, survivorId, gapMs) {
+  try {
+    const dup = await people.people.get({
+      resourceName: dupId,
+      personFields: 'metadata,memberships,clientData,emailAddresses,phoneNumbers,addresses',
+    });
+    const survivor = await people.people.get({
+      resourceName: survivorId,
+      personFields: 'metadata,memberships,clientData,emailAddresses,phoneNumbers,addresses',
+    });
+    await sleep(gapMs);
+    await people.people.updateContact({
+      resourceName: survivorId,
+      updatePersonFields: 'emailAddresses,phoneNumbers,addresses,memberships',
+      requestBody: {
+        emailAddresses: mergeValueLists(survivor.data.emailAddresses, dup.data.emailAddresses, emailValueKey),
+        phoneNumbers: mergeValueLists(survivor.data.phoneNumbers, dup.data.phoneNumbers, phoneValueKey),
+        addresses: mergeValueLists(survivor.data.addresses, dup.data.addresses, addressValueKey),
+        memberships: mergedMemberships([...(survivor.data.memberships || []), ...(dup.data.memberships || [])]),
+        metadata: survivor.data.metadata,
+        etag: survivor.data.etag,
+      },
+    });
+    await sleep(gapMs);
+  } catch (e) {
+    // Systemic failures keep their classification for the run-level abort.
+    if (isScopeError(e) || isAuthError(e) || isServiceDisabledError(e)) throw e;
+    if (!isGone(e)) {
+      logger.warn(`[contacts-sync] duplicate ${dupId} RETAINED — operator-data merge into ${survivorId} failed: ${safeErr(e)}`);
+      return false;
+    }
+    // The duplicate (or survivor) is already gone — nothing to preserve.
+  }
+  await deleteContact(people, dupId);
+  return true;
+}
+
 /** Delete tolerating already-gone. */
 async function deleteContact(people, resourceName) {
   try {
@@ -908,11 +952,16 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
             const queued = customerById.get(ownership.customerId);
             if (existingContact) {
               if (queued && !queued.google_contact_id) queued.google_contact_id = existingContact;
-              // ...and the lead's contact is a duplicate (unless shared).
+              // ...and the lead's contact is a duplicate (unless shared):
+              // operator data is absorbed into the survivor first. A
+              // failed merge RETAINS the duplicate and keeps this lead
+              // pointing at it — retried next run instead of orphaned.
               if (existingContact !== row.google_contact_id
                 && !(await contactInUseElsewhere(row.google_contact_id, table, row.id))) {
-                await deleteContact(people, row.google_contact_id);
-                await sleep(gapMs);
+                if (!(await absorbDuplicate(people, row.google_contact_id, existingContact, gapMs))) {
+                  counts.failed += 1;
+                  continue;
+                }
               }
             } else {
               // deleted_at predicate: the transfer must not hand the
@@ -949,10 +998,13 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
         } else if (row.__recoveredFresh && ownership.adoptContactId
           && ownership.adoptContactId !== row.google_contact_id) {
           // Recovered orphan vs an established sibling contact: the
-          // sibling's wins; the orphan is retired (unless shared).
+          // sibling's wins; the orphan's operator data is absorbed into it
+          // before retirement (unless shared).
           if (!(await contactInUseElsewhere(row.google_contact_id, table, row.id))) {
-            await deleteContact(people, row.google_contact_id);
-            await sleep(gapMs);
+            if (!(await absorbDuplicate(people, row.google_contact_id, ownership.adoptContactId, gapMs))) {
+              counts.failed += 1;
+              continue; // duplicate retained — row keeps it; retried next run
+            }
           }
           row.google_contact_id = ownership.adoptContactId;
         } else if (row.google_contact_id && !ownership.adoptContactId
@@ -1016,9 +1068,12 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
         if (accountContact && accountContact !== row.google_contact_id) {
           if (row.google_contact_id
             && !(await contactInUseElsewhere(row.google_contact_id, table, row.id))) {
-            // Recovered orphan vs the account's established contact.
-            await deleteContact(people, row.google_contact_id);
-            await sleep(gapMs);
+            // Recovered orphan vs the account's established contact —
+            // absorb before retiring.
+            if (!(await absorbDuplicate(people, row.google_contact_id, accountContact, gapMs))) {
+              counts.failed += 1;
+              continue; // duplicate retained — retried next run
+            }
           }
           row.google_contact_id = accountContact;
         }
@@ -1076,8 +1131,10 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
           if (leadContact && leadContact !== row.google_contact_id) {
             if (row.google_contact_id
               && !(await contactInUseElsewhere(row.google_contact_id, table, row.id))) {
-              await deleteContact(people, row.google_contact_id);
-              await sleep(gapMs);
+              if (!(await absorbDuplicate(people, row.google_contact_id, leadContact, gapMs))) {
+                counts.failed += 1;
+                continue; // duplicate retained — retried next run
+              }
             }
             row.google_contact_id = leadContact;
           }
