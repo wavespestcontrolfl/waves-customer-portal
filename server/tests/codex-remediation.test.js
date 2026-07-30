@@ -2699,3 +2699,68 @@ describe('sync_pending_sha survives re-arm and blocks the bar (codex P1)', () =>
     expect(r.reason).toMatch(/unfinished portal sync/);
   });
 });
+
+// The hold must exist BEFORE the push, or a crash between gh.putFile returning
+// and the bookkeeping write leaves an unsynced commit with no hold — and the
+// 'remediating' recovery branch only re-requests review, it never re-syncs.
+describe('the sync hold is taken before the push (codex P1)', () => {
+  const p2Body = (t) => `**<sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub>  ${t}**\n\nd`;
+
+  test('the pre-push write stamps the in-flight sentinel', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const db = makeDb();
+    const gh = makeGh();
+    let atPushTime = null;
+    const origPut = gh.putFile;
+    gh.putFile = async (args) => {
+      // Observe the row as the push lands — this is the crash window.
+      atPushTime = { ...db._tables.codex_remediation_state.find((x) => x.pr_number === 5) };
+      return origPut(args);
+    };
+    await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
+    expect(atPushTime.sync_pending_sha).toBe('push_in_flight');
+    expect(atPushTime.status).toBe('remediating');
+  });
+
+  test('a row left mid-window blocks the bar (simulated crash)', async () => {
+    const db = makeDb({
+      codex_remediation_state: [{
+        pr_number: 5, rounds: 1, status: 'remediating',
+        last_push_sha: HEAD, sync_pending_sha: 'push_in_flight',
+      }],
+    });
+    const gh = makeGh({ reviewComments: [finding({ body: p2Body('a') })], reviews: [codexReview()] });
+    const r = await rem.p2OnlyMergeEligible(5, HEAD, { db, gh });
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toMatch(/in flight and never confirmed/);
+  });
+
+  test('a push failure with an UNCHANGED branch ref releases the hold', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const db = makeDb();
+    const gh = makeGh();
+    gh.putFile = async () => { throw new Error('gh 502'); };
+    gh.getBranchSha = async () => HEAD; // ref still at the pre-push head → nothing landed
+    await expect(runRemediationForPr(CTX, {
+      db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS,
+    })).rejects.toThrow('gh 502');
+    const row = db._tables.codex_remediation_state.find((x) => x.pr_number === 5);
+    expect(row.sync_pending_sha ?? null).toBeNull();
+  });
+
+  test.each([
+    ['a CHANGED ref', async () => 'somethingelse999'],
+    ['an UNREADABLE ref', async () => { throw new Error('ref lookup down'); }],
+  ])('a push failure with %s keeps the hold (fail closed)', async (_label, getBranchSha) => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const db = makeDb();
+    const gh = makeGh();
+    gh.putFile = async () => { throw new Error('gh 502'); };
+    gh.getBranchSha = getBranchSha;
+    await expect(runRemediationForPr(CTX, {
+      db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS,
+    })).rejects.toThrow('gh 502');
+    const row = db._tables.codex_remediation_state.find((x) => x.pr_number === 5);
+    expect(row.sync_pending_sha).toBe('push_in_flight');
+  });
+});

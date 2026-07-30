@@ -208,6 +208,11 @@ function findingSeverity(body) {
 const PARK_PRE_PUSH = 'pre_push';
 const PARK_POST_PUSH = 'post_push';
 
+// Placeholder written to sync_pending_sha before gh.putFile, when a commit is
+// about to exist but its SHA isn't known yet. Deliberately not SHA-shaped so it
+// can never be mistaken for one; the merge bar blocks on any non-empty value.
+const SYNC_PENDING_PUSH_IN_FLIGHT = 'push_in_flight';
+
 // LEGACY ROWS ONLY. park_phase (a persisted column, written at every park call
 // site) is the real signal; this regex is the fallback for rows parked before
 // that column existed, which carry park_phase = NULL.
@@ -278,7 +283,10 @@ async function p2OnlyMergeEligible(prNumber, headSha, deps = {}) {
   // scheduler lane has already disarmed its publishing claim by then).
   const syncPending = String(state.sync_pending_sha || '').trim().toLowerCase();
   if (syncPending) {
-    return { eligible: false, reason: `remediation push ${shortSha(syncPending)} has an unfinished portal sync (held for a human${syncPending === head ? '' : '; it is an ancestor of the head under review'})` };
+    const which = syncPending === SYNC_PENDING_PUSH_IN_FLIGHT
+      ? 'a fix push was in flight and never confirmed'
+      : `remediation push ${shortSha(syncPending)}${syncPending === head ? '' : ' (an ancestor of the head under review)'}`;
+    return { eligible: false, reason: `${which} has an unfinished portal sync (held for a human)` };
   }
 
   // A branch-mutating park on THIS head holds unconditionally — including when
@@ -1408,16 +1416,47 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   // A false return means markPrTerminal won (the PR merged/closed while
   // this round was in flight) — stop BEFORE gh.putFile so we never push
   // fixes to a branch whose PR already left the open state.
-  const armed = await saveState(db, prNumber, { branch, status: 'remediating' });
+  // The sync hold is taken BEFORE the push, not after it. gh.putFile returning
+  // and the bookkeeping write are two steps: a process death (or a deploy) in
+  // between used to leave the row merely 'remediating' with no hold, and the
+  // recovery branch only re-requests review — it never re-runs onRemediated. A
+  // subsequent clean review would then merge via the normal path with
+  // blog_posts.content still pre-fix, and a later republish resurrects it.
+  // SYNC_PENDING_PUSH_IN_FLIGHT is a non-SHA sentinel; the bar blocks on ANY
+  // non-empty value, so the hold is live from here on.
+  const armed = await saveState(db, prNumber, {
+    branch, status: 'remediating', sync_pending_sha: SYNC_PENDING_PUSH_IN_FLIGHT,
+  });
   if (!armed) return { skipped: true, reason: 'pr left the open state during remediation (terminal row)' };
 
-  const commit = await gh.putFile({
-    path: targetPath,
-    content: fixed,
-    message: `fix(blog): address Codex review findings (round ${round})`,
-    branch,
-    sha: file.sha,
-  });
+  let commit;
+  try {
+    commit = await gh.putFile({
+      path: targetPath,
+      content: fixed,
+      message: `fix(blog): address Codex review findings (round ${round})`,
+      branch,
+      sha: file.sha,
+    });
+  } catch (e) {
+    // A putFile throw is AMBIGUOUS — GitHub may have applied the write and
+    // failed the response. Resolve it against the branch ref (the same posture
+    // the post-push checks use) rather than guessing: only an unchanged ref
+    // proves nothing landed, and only then is it safe to release the hold. A
+    // changed or unreadable ref keeps it, so a transient error can never drop a
+    // real unsynced commit — while an ordinary 502 that wrote nothing doesn't
+    // wedge the bar forever either.
+    let refHead = null;
+    try { refHead = String((await gh.getBranchSha(branch)) || '').trim().toLowerCase(); } catch (_) { refHead = null; }
+    const nothingLanded = Boolean(refHead) && refHead === String(headSha || '').trim().toLowerCase();
+    if (nothingLanded) {
+      await saveState(db, prNumber, { sync_pending_sha: null });
+      logger.warn(`[codex-remediation] fix push failed for PR #${prNumber} and the branch ref is unchanged (${shortSha(refHead)}) — nothing landed, sync hold released: ${e.message}`);
+    } else {
+      logger.warn(`[codex-remediation] fix push failed for PR #${prNumber} with an ambiguous branch state (ref ${refHead ? shortSha(refHead) : 'unreadable'}) — keeping the sync hold (fail closed): ${e.message}`);
+    }
+    throw e;
+  }
   const newHead = (commit && commit.commit && commit.commit.sha)
     || (commit && commit.content && commit.content.sha)
     || (await gh.getBranchSha(branch));
@@ -1439,11 +1478,10 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   // finishes. Divergence from a post-push park is held by isPostPushPark at
   // the bar, not by withholding the bookkeeping.
   //
-  // sync_pending_sha is stamped in the SAME write: from this instant the commit
-  // exists on the branch but its portal sync has not run, and every exit between
-  // here and the sync leaves it that way. Stamping it up front (rather than only
-  // in the park paths) means no exit — park, throw, or process death mid-round —
-  // can lose the fact. The success path clears it once onRemediated returns.
+  // sync_pending_sha is UPGRADED here from the pre-push sentinel to the real
+  // commit, so the hold names the commit that owes a sync. The hold itself has
+  // been live since before the push, which is what makes a crash in this window
+  // safe. The success path clears it once onRemediated returns.
   //
   // The return value is load-bearing, exactly as it is for the pre-push save: a
   // false means markPrTerminal won the race and the row is already merged/closed.
