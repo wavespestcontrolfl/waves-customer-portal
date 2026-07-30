@@ -407,10 +407,20 @@ function agentQuoteGroundedInTranscript(quote, transcript) {
 // number). Relative-day commitments ("we'll see you tomorrow at 10") fail —
 // conservative and accepted: the call date isn't threaded here, so relative
 // days can't be verified and those calls stay in triage.
-function quoteBindsConfirmedSlot(quote, confirmedStartAt) {
+const WEEKDAY_NAMES = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+
+function quoteBindsConfirmedSlot(quote, confirmedStartAt, callStartedAt) {
   const q = ` ${normalizeForGrounding(quote)} `;
   const start = new Date(String(confirmedStartAt || ''));
   if (!q.trim() || Number.isNaN(start.getTime())) return false;
+  // Calendar disambiguation (codex round-5 P1): a weekday name alone cannot
+  // distinguish "this Sunday" from "next Sunday". Requiring the confirmed
+  // slot to fall within 7 days AFTER the call makes the spoken weekday name
+  // a UNIQUE calendar date. Commitments further out fail closed (triage).
+  const callMs = new Date(String(callStartedAt || '')).getTime();
+  if (Number.isNaN(callMs) || !(start.getTime() > callMs) || start.getTime() - callMs > 7 * 86400000) {
+    return false;
+  }
   let weekday; let hour12; let dayPeriod;
   try {
     const parts = new Intl.DateTimeFormat('en-US', {
@@ -421,16 +431,29 @@ function quoteBindsConfirmedSlot(quote, confirmedStartAt) {
     dayPeriod = parts.find((p) => p.type === 'dayPeriod')?.value?.toLowerCase();
   } catch { return false; }
   if (!weekday || !hour12 || (dayPeriod !== 'am' && dayPeriod !== 'pm')) return false;
-  // AM/PM must corroborate (codex round-4 P1): a bare hour token would let
-  // "Sunday at 10 AM" authorize a 10 PM confirmed_start_at. The hour number
-  // counts only when the quote also names the CORRECT period and never the
-  // wrong one; a quote naming both ("at 10 AM, not 10 PM") stays ambiguous
-  // and fails closed. Unambiguous aliases: "noon" (12 PM) / "midnight"
-  // (12 AM). A period-less "10 o'clock" cannot bind — conservative.
-  const wrongPeriod = dayPeriod === 'am' ? ' pm ' : ' am ';
-  const hourWithPeriod = q.includes(` ${hour12} `) && q.includes(` ${dayPeriod} `) && !q.includes(wrongPeriod);
-  const alias12 = hour12 === '12' && q.includes(dayPeriod === 'am' ? ' midnight ' : ' noon ');
-  return q.includes(` ${weekday} `) && (hourWithPeriod || alias12);
+  // Exact binding, not presence (codex round-5 P1): a multi-slot turn
+  // ("Sunday at 10 AM won't work, but we'll see you at 11 AM") scatters
+  // matching tokens without committing to them. The quote must contain
+  // EXACTLY ONE time mention and EXACTLY ONE weekday name, each equal to the
+  // confirmed slot's. Time mentions are period-attached hours ("10 am",
+  // "10 00 am") plus the unambiguous aliases noon (12 PM) / midnight
+  // (12 AM), deduplicated by meaning ("12 pm" + "noon" is one mention).
+  // Negations can't be parsed deterministically, so ANY second time or
+  // weekday mention fails closed — the extraction prompt directs the model
+  // to pin the single final commitment sentence.
+  const mentions = new Set();
+  for (const m of q.matchAll(/(?:^| )(\d{1,2})(?: 00)? (am|pm)(?= |$)/g)) {
+    const h = String(Number(m[1]));
+    if (Number(h) >= 1 && Number(h) <= 12) mentions.add(`${h} ${m[2]}`);
+    else mentions.add(`invalid ${m[1]} ${m[2]}`);
+  }
+  if (q.includes(' noon ')) mentions.add('12 pm');
+  if (q.includes(' midnight ')) mentions.add('12 am');
+  const weekdaysInQuote = WEEKDAY_NAMES.filter((w) => q.includes(` ${w} `));
+  return mentions.size === 1
+    && mentions.has(`${Number(hour12)} ${dayPeriod}`)
+    && weekdaysInQuote.length === 1
+    && weekdaysInQuote[0] === weekday;
 }
 
 // True only when the model pinned an AGENT-spoken evidence quote for the
@@ -440,12 +463,12 @@ function quoteBindsConfirmedSlot(quote, confirmedStartAt) {
 // The speaker label alone is NOT the trust boundary — it is model output like
 // the rest of the extraction; the transcript grounding is what makes the
 // commitment verifiable.
-function hasAgentCommittedEvidence(extraction, transcript) {
+function hasAgentCommittedEvidence(extraction, transcript, callStartedAt) {
   return (Array.isArray(extraction?.evidence) ? extraction.evidence : []).some((e) => (
     String(e?.field_path || '') === '/scheduling/agent_committed_booking'
     && e?.speaker === 'agent'
     && agentQuoteGroundedInTranscript(e?.quote, transcript)
-    && quoteBindsConfirmedSlot(e?.quote, extraction?.scheduling?.confirmed_start_at)
+    && quoteBindsConfirmedSlot(e?.quote, extraction?.scheduling?.confirmed_start_at, callStartedAt)
   ));
 }
 
@@ -556,7 +579,7 @@ function canAutoRoute(extraction, opts = {}) {
       && confirmedWithStart
       && commitStartOnTheHour
       && extraction.scheduling?.agent_committed_booking === true
-      && hasAgentCommittedEvidence(extraction, opts.transcript)) {
+      && hasAgentCommittedEvidence(extraction, opts.transcript, opts.callStartedAt)) {
     appointmentBlockingFlags = appointmentBlockingFlags.filter((f) => {
       if (f === 'caller_not_authorized') { failedOpenFlags.push(f); return false; }
       return true;

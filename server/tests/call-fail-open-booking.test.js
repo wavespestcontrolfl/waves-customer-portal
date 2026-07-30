@@ -194,7 +194,9 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     ];
     return ex;
   }
-  const opts = (extra = {}) => ({ agentCommitFailOpen: true, transcriptLabelsTrusted: true, transcript: TRANSCRIPT, ...extra });
+  // Call Thursday 7/30; committed slot Sunday 8/2 — inside the 7-day window
+  // that makes a spoken weekday a unique calendar date.
+  const opts = (extra = {}) => ({ agentCommitFailOpen: true, transcriptLabelsTrusted: true, transcript: TRANSCRIPT, callStartedAt: '2026-07-30T15:50:00-04:00', ...extra });
 
   test('agent commitment demotes caller_not_authorized to failedOpenFlags and books', () => {
     const r = canAutoRoute(agentCommitted(), opts());
@@ -288,6 +290,38 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     const ex = agentCommitted(['caller_not_authorized'], { quote: bare });
     ex.scheduling.confirmed_start_at = '2026-08-02T10:00:00-04:00';
     const r = canAutoRoute(ex, opts({ transcript }));
+    expect(r.allowed).toBe(false);
+  });
+
+  test('a multi-slot turn never binds — rejected 10 AM + committed 11 AM fails for BOTH slots (round-5 P1)', () => {
+    const multi = "Sunday at 10 AM won't work, but we'll see you at 11 AM, and just let us know if anything changes.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, multi);
+    for (const startAt of ['2026-08-02T10:00:00-04:00', '2026-08-02T11:00:00-04:00']) {
+      const ex = agentCommitted(['caller_not_authorized'], { quote: multi });
+      ex.scheduling.confirmed_start_at = startAt;
+      const r = canAutoRoute(ex, opts({ transcript }));
+      expect(r.allowed).toBe(false);
+      expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+    }
+  });
+
+  test('two weekday names in the quote are ambiguous and fail closed (round-5 P1)', () => {
+    const twoDays = "Saturday is booked solid, so we'll confirm it for noon on Sunday instead, just let us know.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, twoDays);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: twoDays }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+  });
+
+  test('a committed slot more than 7 days after the call fails closed — weekday is not a unique date (round-5 P1)', () => {
+    const ex = agentCommitted();
+    ex.scheduling.confirmed_start_at = '2026-08-09T12:00:00-04:00'; // Sunday AFTER next
+    const r = canAutoRoute(ex, opts());
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('missing callStartedAt fails closed (round-5 P1)', () => {
+    const r = canAutoRoute(agentCommitted(), opts({ callStartedAt: undefined }));
     expect(r.allowed).toBe(false);
   });
 

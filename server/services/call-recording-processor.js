@@ -5325,6 +5325,9 @@ const CallRecordingProcessor = {
             // Speaker labels are LLM-inferred today — the demotion stays dark
             // until this companion gate flips (see feature-gates.js).
             transcriptLabelsTrusted: isEnabled('callAgentCommitTrustedLabels'),
+            // Slot binding needs the call time: a spoken weekday only names a
+            // unique date within the 7 days after the call.
+            callStartedAt: call.created_at,
           });
           // Address fail-open is only safe when the on-file address really is
           // the booking address — V1-captured address evidence that conflicts
@@ -8861,6 +8864,7 @@ const CallRecordingProcessor = {
           agentCommitFailOpen: isEnabled('callAgentCommitBooking') && !isOutboundCall(call),
           transcript: transcription,
           transcriptLabelsTrusted: isEnabled('callAgentCommitTrustedLabels'),
+          callStartedAt: call.created_at,
         });
         // Mirror the enforce path's V1 address-conflict demotion — the saved
         // shadow decision must hold exactly where enforce would hold, or
