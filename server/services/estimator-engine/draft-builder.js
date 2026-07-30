@@ -495,6 +495,12 @@ function classifyLane({ intent, propertyFacts, engineResult, totals, comps, cali
     || lines.some((l) => l.turfSf || l.turfSqFt || l.treatableArea);
   if (usesLot && FALLBACK_SQFT_SOURCES.has(propertyFacts?.lot?.source)) {
     reasons.push(`lot sqft from fallback source (${propertyFacts.lot.source})`);
+  } else if (usesLot && String(propertyFacts?.lot?.confidence || '').toLowerCase() === 'low') {
+    // A retained V1 lot can be caller-stated at LOW confidence (the V2
+    // gate-on apply keeps real parcels instead of stamping a false "no
+    // lot") — low confidence must park review even when the source is not
+    // in the fallback set.
+    reasons.push(`lot sqft is low-confidence (${propertyFacts.lot.source}) — verify treatable area before send`);
   }
   if (propertyFacts?.home?.disputed) reasons.push('caller-stated sqft disagrees with the county roll');
   if (propertyFacts?.lot?.disputed) reasons.push('caller-stated lot size disagrees with the county parcel');
@@ -506,6 +512,33 @@ function classifyLane({ intent, propertyFacts, engineResult, totals, comps, cali
   const lowConfidenceLines = pricedLines.filter((l) => String(l.pricingConfidence || '').toLowerCase() === 'low');
   if (lowConfidenceLines.length) {
     reasons.push(`engine low pricing confidence: ${lowConfidenceLines.map((l) => l.service).join(', ')}`);
+  }
+  // The residential lawn pricer reports its low-confidence signal as
+  // turfConfidence/turfBasis, NOT pricingConfidence — without this check a
+  // new caller's lawn line priced off heuristic turf (lot minus impervious
+  // and bed defaults, turfBasis lotFallback) green-laned as if measured.
+  // Flag by BASIS, not just confidence: plausibleMaxTurfCap comes back
+  // MEDIUM yet means the estimate was capped at the parcel's plausible
+  // maximum — every heuristic/capped basis must land yellow, same as any
+  // fallback sqft source. Measured/supplied bases (measuredTurfSf,
+  // lawnSqFt, estimatedTurfSf) stay green unless graded LOW.
+  const HEURISTIC_TURF_BASES = new Set([
+    'lotFallback', 'plausibleMaxTurfCap', 'legacyHardscapeEstimate',
+    'countyPrior', 'commercialLotFallback', 'commercialDefault',
+  ]);
+  const lowTurfLines = pricedLines.filter((l) => String(l.turfConfidence || '').toLowerCase() === 'low'
+    || (l.turfBasis && HEURISTIC_TURF_BASES.has(l.turfBasis)));
+  if (lowTurfLines.length) {
+    reasons.push(`turf area is a heuristic estimate (${lowTurfLines.map((l) => `${l.service}: ${l.turfBasis || 'unknown basis'}`).join(', ')}) — verify treated area before send`);
+  }
+  // The pricer coerces any grass track it doesn't recognize to st_augustine
+  // silently (normalizeGrassType fallback). A schema-valid track the pricer
+  // priced as a DIFFERENT track (e.g. paspalum → St. Augustine table) is a
+  // wrong-program risk the operator must see, never a green one-click send.
+  const intentLawnTrack = intent.services?.lawn?.track;
+  const lawnLine = lines.find((l) => l.service === 'lawn_care');
+  if (intentLawnTrack && lawnLine?.track && lawnLine.track !== intentLawnTrack) {
+    reasons.push(`caller's grass track '${intentLawnTrack}' is not in the pricing vocabulary — priced on the ${lawnLine.grassType || lawnLine.track} table; verify program fit before send`);
   }
   if ((intent.constraint_flags || []).length) {
     reasons.push(`constraints the engine can't express: ${intent.constraint_flags.map((f) => f.flag).join(', ')}`);
