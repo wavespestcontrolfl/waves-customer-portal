@@ -50,7 +50,10 @@ function makeConn(cfg = {}) {
       insert: (arg) => { calls.push({ table, op: 'insert', arg }); return qb; },
       onConflict: () => qb,
       ignore: () => Promise.resolve(1),
-      then: (resolve, reject) => Promise.resolve(t.rows || []).then(resolve, reject),
+      distinct: () => qb,
+      then: (resolve, reject) => Promise.resolve(
+        (t.rowsQueue && t.rowsQueue.length) ? t.rowsQueue.shift() : (t.rows || [])
+      ).then(resolve, reject),
     };
     return qb;
   };
@@ -361,6 +364,30 @@ describe('propagateCustomerEmailChange', () => {
     expect(result.pendingConfirmation.heldNewsletterHoldIds).toEqual(['hold-1', 'hold-2']);
     expect(result.heldNewsletterResume).toBeUndefined();
     expect(conn.__updates('first_touch_holds')).toHaveLength(0);
+  });
+
+  test('the marker persists even when the email card was ALREADY resolved (deny-then-correct)', async () => {
+    // A non-releasing deny resolves the card before the correction arrives:
+    // openItems is empty, but the call still needs its marker — otherwise
+    // the processor records the stale extracted address and the end-of-run
+    // reconciliation reads the resolved-during-run deny as confirmation.
+    const conn = makeConn({
+      triage_items: {
+        rowsQueue: [
+          [], // openItems: nothing open — the deny already resolved the card
+          [{ call_log_id: 'call-1' }], // marker sweep: card exists (resolved)
+        ],
+      },
+    });
+    const counts = await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
+    expect(counts.reviewCards).toBe(0);
+    const inserts = conn.__calls.filter((c) => c.table === 'first_touch_holds' && c.op === 'insert');
+    expect(inserts).toHaveLength(1);
+    expect(inserts[0].arg).toMatchObject({
+      call_log_id: 'call-1',
+      held_email: 'charleswrobb@gmail.com',
+      status: 'released',
+    });
   });
 
   test('a correction leaves a SETTLED ledger marker for reviewed calls with no hold row', async () => {

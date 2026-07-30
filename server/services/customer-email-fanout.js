@@ -344,32 +344,41 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
         .where({ id: callId })
         .update({ review_status: parseInt(stillOpen?.n || 0, 10) > 0 ? 'open' : 'resolved', updated_at: now });
     }
-    // A correction that answers a call's read-back BEFORE the processor's
-    // Step-6 hold write must still leave its answer in the ledger (Codex
-    // #3084 r9): in that window the card exists but no first_touch_holds
-    // row does, so the resume above had nothing to release — and the
-    // processor would later record (and end-of-run release) the stale
-    // pre-correction address. A SETTLED marker row keyed to the call makes
-    // recordFirstTouchHold's released-during-run guard adopt the corrected
-    // address instead. onConflict-ignore: real hold rows are never
-    // clobbered; errors propagate with the rest of the edit transaction.
-    if (await conn.schema.hasTable('first_touch_holds')) {
-      for (const callId of [...new Set(openItems.map((i) => i.call_log_id).filter(Boolean))]) {
-        await conn('first_touch_holds')
-          .insert({
-            call_log_id: callId,
-            customer_id: customerId,
-            held_email: newEmail,
-            held_drip: false,
-            held_newsletter: false,
-            status: 'released',
-            released_at: now,
-            created_at: now,
-            updated_at: now,
-          })
-          .onConflict('call_log_id')
-          .ignore();
-      }
+  }
+
+  // A correction that answers a call's read-back BEFORE the processor's
+  // Step-6 hold write must still leave its answer in the ledger (Codex
+  // #3084 r9): in that window the card exists but no first_touch_holds
+  // row does, so the resume above had nothing to release — and the
+  // processor would later record (and end-of-run release) the stale
+  // pre-correction address. A SETTLED marker row keyed to the call makes
+  // recordFirstTouchHold's released-during-run guard adopt the corrected
+  // address instead. Covers cards in ANY state, not just open ones (Codex
+  // #3084 r11): a non-releasing deny can resolve the card before the
+  // correction arrives, and the end-of-run reconciliation would read that
+  // resolved-during-run card as confirmation of the stale address.
+  // onConflict-ignore: real hold rows are never clobbered; errors propagate
+  // with the rest of the edit transaction.
+  if (await conn.schema.hasTable('first_touch_holds')) {
+    const reviewedCalls = await conn('triage_items')
+      .whereIn('reason_code', EMAIL_REVIEW_REASON_CODES)
+      .whereIn('call_log_id', conn('call_log').select('id').where({ customer_id: customerId }))
+      .distinct('call_log_id');
+    for (const callId of [...new Set(reviewedCalls.map((r) => r.call_log_id).filter(Boolean))]) {
+      await conn('first_touch_holds')
+        .insert({
+          call_log_id: callId,
+          customer_id: customerId,
+          held_email: newEmail,
+          held_drip: false,
+          held_newsletter: false,
+          status: 'released',
+          released_at: now,
+          created_at: now,
+          updated_at: now,
+        })
+        .onConflict('call_log_id')
+        .ignore();
     }
   }
 

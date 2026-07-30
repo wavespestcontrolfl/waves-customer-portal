@@ -301,17 +301,26 @@ async function resumeHeldFirstTouch({
     // Sanitized code only — subscriber/enrollment errors can echo the email.
     const code = err.code || err.name || 'error';
     logger.warn(`[first-touch-resume] failed (${source}): ${code}`);
-    // Restore the claimed hold to a retryable state. Guarded on
-    // status='releasing' so a hold this loop already settled (pending /
-    // blocked / released) is never flipped — 'blocked' is a consent
-    // terminal and must stay that way.
-    if (inFlightHoldId) {
+    // Restore every claim this run still owns to a retryable state: the
+    // in-flight hold AND any earlier deferred claims whose post-commit
+    // payloads are being discarded with this error return (Codex #3084
+    // r11 — their rows would otherwise sit 'releasing' with no payload
+    // left to execute). Guarded on status='releasing' so a hold this loop
+    // already settled (pending / blocked / released) is never flipped —
+    // 'blocked' is a consent terminal and must stay that way.
+    const strandedIds = new Set([
+      ...(inFlightHoldId ? [inFlightHoldId] : []),
+      ...(Array.isArray(result.newsletterResume)
+        ? result.newsletterResume.map((p) => p?.holdId).filter(Boolean)
+        : []),
+    ]);
+    for (const strandedId of strandedIds) {
       try {
         await dbh('first_touch_holds')
-          .where({ id: inFlightHoldId, status: 'releasing' })
+          .where({ id: strandedId, status: 'releasing' })
           .update({ status: 'pending', last_error: `resume_failed: ${code}`, updated_at: new Date() });
       } catch (repenErr) {
-        logger.warn(`[first-touch-resume] hold ${inFlightHoldId} re-pend failed: ${repenErr.code || repenErr.name || 'db_error'} (stale-claim window will reclaim)`);
+        logger.warn(`[first-touch-resume] hold ${strandedId} re-pend failed: ${repenErr.code || repenErr.name || 'db_error'} (stale-claim window will reclaim)`);
       }
     }
     return { ...result, newsletterResume: null, skipped: 'error' };

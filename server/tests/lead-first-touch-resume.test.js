@@ -16,6 +16,7 @@ let mockHoldUpdates = [];
 let mockTriageCardRow = null;
 let mockMergeFailures = 0;
 let mockMergeArgs = [];
+let mockCustomerFirstQueue = null; // shift per customers.first(); an Error value throws
 jest.mock('../models/db', () => {
   const handler = (table) => {
     const chain = {
@@ -45,7 +46,14 @@ jest.mock('../models/db', () => {
       }),
       first: jest.fn(async () => {
         if (table === 'first_touch_holds') return mockHold;
-        if (table === 'customers') return mockCustomerRow;
+        if (table === 'customers') {
+          if (mockCustomerFirstQueue && mockCustomerFirstQueue.length) {
+            const next = mockCustomerFirstQueue.shift();
+            if (next instanceof Error) throw next;
+            return next;
+          }
+          return mockCustomerRow;
+        }
         if (table === 'call_log') return mockDncRow;
         if (table === 'triage_items') return mockTriageCardRow;
         if (table === 'automation_templates') return { key: 'new_lead' };
@@ -101,6 +109,7 @@ beforeEach(() => {
   mockTriageCardRow = null;
   mockMergeFailures = 0;
   mockMergeArgs = [];
+  mockCustomerFirstQueue = null;
 });
 
 describe('resumeHeldFirstTouch (ledger release engine)', () => {
@@ -222,6 +231,25 @@ describe('resumeHeldFirstTouch (ledger release engine)', () => {
     expect(res.resumed).toBe(false);
     expect(mockEnroll).not.toHaveBeenCalled();
     expect(mockNewsletter).not.toHaveBeenCalled();
+  });
+
+  test('a mid-loop failure re-pends EVERY outstanding deferred claim, not just the in-flight one', async () => {
+    // Hold-1 defers its newsletter (claim stays 'releasing', payload
+    // accumulated); the customer lookup for hold-2 then throws. The error
+    // return discards hold-1's payload — its claim must be restored too,
+    // or the DOI is stranded 'releasing' with nothing left to execute.
+    mockHolds = [
+      baseHold({ id: 'hold-1', call_log_id: 'call-1' }),
+      baseHold({ id: 'hold-2', call_log_id: 'call-2' }),
+    ];
+    const dbErr = new Error('connection reset');
+    dbErr.code = 'ECONNRESET';
+    mockCustomerFirstQueue = [{ id: 'cust-1', first_name: 'Pat', last_name: 'Sample' }, dbErr];
+    const res = await resumeHeldFirstTouch({ customerId: 'cust-1', email: 'corrected@example.com', deferNewsletter: true });
+    expect(res.skipped).toBe('error');
+    expect(res.newsletterResume).toBeNull();
+    const repens = mockHoldUpdates.filter((u) => u.status === 'pending' && String(u.last_error || '').startsWith('resume_failed'));
+    expect(repens).toHaveLength(2);
   });
 
   test('an email correction releases EVERY pending hold for the customer', async () => {

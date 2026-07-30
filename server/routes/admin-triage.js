@@ -149,9 +149,22 @@ async function transitionCore({ id, nextStatus, note, assignedTo }) {
     try {
       const { resumeHeldFirstTouch, EMAIL_REVIEW_REASON_CODES } = require('../services/lead-first-touch-resume');
       if (EMAIL_REVIEW_REASON_CODES.includes(item.reason_code)) {
-        const call = await db('call_log').where({ id: item.call_log_id }).first('customer_id');
-        if (call?.customer_id) {
-          await resumeHeldFirstTouch({ customerId: call.customer_id, callLogId: item.call_log_id, source: 'triage_resolve' });
+        // A force-reprocess can leave BOTH an email_invalid and an
+        // email_unverified card on the call (the partial unique index is
+        // per reason_code) — resolving one while the sibling is still live
+        // means the replacement extraction is still awaiting read-back, so
+        // the hold must not release yet (Codex #3084 r11). The sibling's
+        // own resolve (or the correction fanout) releases it.
+        const siblingLive = await db('triage_items')
+          .where({ call_log_id: item.call_log_id })
+          .whereIn('reason_code', EMAIL_REVIEW_REASON_CODES)
+          .whereIn('status', OPEN_STATES)
+          .first('id');
+        if (!siblingLive) {
+          const call = await db('call_log').where({ id: item.call_log_id }).first('customer_id');
+          if (call?.customer_id) {
+            await resumeHeldFirstTouch({ customerId: call.customer_id, callLogId: item.call_log_id, source: 'triage_resolve' });
+          }
         }
       }
     } catch (resumeErr) {
