@@ -165,7 +165,13 @@ function collectTermiteFacts(estData) {
     // the proposal editor must still mark the program so the commercial
     // park runs instead of a silent no_termite_program return.
     if (!key && !name
-      && typeof node.description === 'string' && /termite/i.test(node.description)
+      && typeof node.description === 'string'
+      && /termite/i.test(node.description)
+      // The BAIT PROGRAM specifically — 'termite trenching' and other
+      // one-time termite work must not trigger the program agreement flow
+      // (which would retire an existing bait agreement and ring a false
+      // manual-prep bell).
+      && /bait|station|monitor/i.test(node.description)
       && ('unitPrice' in node || 'unit_price' in node || 'quantity' in node)) {
       facts.hasProgram = true;
     }
@@ -1033,12 +1039,16 @@ async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
       continue;
     }
 
-    if (seenEstimates.has(estimateId)) {
+    // Dedupe by customer+estimate: a manually issued row carrying ANOTHER
+    // customer's (valid) estimate UUID must not poison the batch and route
+    // the legitimate row into the duplicate branch.
+    const dedupeKey = `${row.customer_id}:${estimateId}`;
+    if (seenEstimates.has(dedupeKey)) {
       if ((await cancelStaleSource(row)) === 'reactivated') continue;
       await markSupersededHandled(row, 'duplicate_estimate');
       continue;
     }
-    seenEstimates.add(estimateId);
+    seenEstimates.add(dedupeKey);
     // Retire the stale source UP FRONT — every downstream outcome (signed
     // skip, replacement exists, estimate unavailable, parked, replaced, or
     // a concurrent reissue racing maybeCreate's already_exists) must leave

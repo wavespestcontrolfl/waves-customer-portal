@@ -557,7 +557,13 @@ exports.down = async function down(knex) {
     for (const evt of cancelEvents) {
       let meta = evt.metadata;
       if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
-      const priorStatus = ['draft', 'sent', 'viewed'].includes(meta?.prior_status) ? meta.prior_status : 'draft';
+      let priorStatus = ['draft', 'sent', 'viewed'].includes(meta?.prior_status) ? meta.prior_status : 'draft';
+      // A share token that expired while the row sat cancelled must not
+      // come back as a live-looking request whose link 410s — restore it
+      // as 'expired' so the delivery lifecycle owns the renewal.
+      if (source.share_token_expires_at && new Date(source.share_token_expires_at) < new Date()) {
+        priorStatus = 'expired';
+      }
       // Never reopen a source whose customer already has a replacement for
       // the SAME property (open OR signed) — restoring it would put two
       // public signing flows (or a signed contract plus a live request) in
@@ -566,8 +572,17 @@ exports.down = async function down(knex) {
       // conservative (suppress).
       const source = await knex('customer_contracts')
         .where({ id: evt.contract_id })
-        .first('customer_id', 'document_variables_snapshot');
+        .first('customer_id', 'document_variables_snapshot', 'document_template_key', 'document_template_version_id', 'share_token_expires_at');
       if (!source) continue;
+      // Only restore when this source's version actually became active
+      // again in this rollback: on the content-reuse path (approved body
+      // was already active before up(), no state recorded) v2 REMAINS
+      // active, and reopening a v1 request would put superseded wording
+      // back in front of the customer.
+      const sourceTemplate = await knex('document_templates')
+        .where({ template_key: source.document_template_key })
+        .first('active_version_id');
+      if (!sourceTemplate || sourceTemplate.active_version_id !== source.document_template_version_id) continue;
       const normAddr = (v) => String(v || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
       const snapOf = (raw) => {
         let sn = raw;
