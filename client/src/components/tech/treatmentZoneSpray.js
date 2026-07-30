@@ -298,13 +298,16 @@ export function buildLawnHighlightMask({ source, points, closed, width = MAP_WID
     const g = img.data[o + 1];
     const b = img.data[o + 2];
     // Turf test, inverted on purpose: SWFL lawns run green through browning
-    // tan, so "must be green" misses half the actual lawn. Instead exclude
-    // what is clearly NOT turf — neutral gray (roofs/drives/screens: tiny
-    // channel spread), blue-dominant (pools), or near-white (lanai frames,
-    // bright concrete). Trees highlighting is fine — vegetation on the lawn.
+    // tan, so "must be green" misses half the actual lawn. Exclude what is
+    // clearly NOT turf — neutral gray (shingle roofs/drives/screens: tiny
+    // channel spread), blue-dominant (pools), near-white (lanai frames,
+    // bright concrete), and RED-DOMINANT (terracotta/barrel-tile roofs,
+    // mulch beds — pre-push audit P1 2026-07-30: r≫g passed the old test).
+    // Browning turf is warm but never red-dominant (r-g ≲ 25); tile roofs
+    // and mulch run r-g ≈ 60-90. Trees highlighting is fine — vegetation.
     const spread = Math.max(r, g, b) - Math.min(r, g, b);
     const lum = 0.299 * r + 0.587 * g + 0.114 * b;
-    const turf = spread >= 18 && b < Math.max(r, g) && lum < 215;
+    const turf = spread >= 18 && b < Math.max(r, g) && lum < 215 && (r - g) < 28;
     const lit = poly.data[o + 3] > 127 && turf;
     out.data[o] = HIGHLIGHT_RGB[0];
     out.data[o + 1] = HIGHLIGHT_RGB[1];
