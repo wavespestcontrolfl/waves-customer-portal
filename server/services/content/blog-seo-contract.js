@@ -15,15 +15,35 @@ const BLOG_CATEGORY_BY_SERVICE = {
   specialty: { value: 'pest-control', label: 'Pest Control', url: '/blog/category/pest-control/' },
 };
 
+// This map supplies the REQUIRED service-link recommendation, so a dead url here
+// is handed to the writer as a mandate. Four of these were 404s (/lawn-care/,
+// /mosquito-control/, /rodent-control/, /tree-shrub-care/ — no bare hub pages
+// exist; verified by live fetch 2026-07-29). Mosquito and rodent now point at the
+// pest services hub that actually covers them; lawn and tree & shrub have NO
+// hub-level page at all, so they carry url: null and are satisfied by their
+// city-service page instead (see hublessService below and the matching
+// SERVICE_HUB_LINKS entries in content-brief-builder).
 const SERVICE_TARGETS = {
   pest: { name: 'Pest Control', slug: 'pest-control', url: '/pest-control-services/' },
-  lawn: { name: 'Lawn Care', slug: 'lawn-care', url: '/lawn-care/' },
+  lawn: { name: 'Lawn Care', slug: 'lawn-care', url: null },
   termite: { name: 'Termite Control', slug: 'termite-control', url: '/termite-control/' },
-  mosquito: { name: 'Mosquito Control', slug: 'mosquito-control', url: '/mosquito-control/' },
-  rodent: { name: 'Rodent Control', slug: 'rodent-control', url: '/rodent-control/' },
-  'tree-shrub': { name: 'Tree & Shrub Care', slug: 'tree-shrub-care', url: '/tree-shrub-care/' },
+  mosquito: { name: 'Mosquito Control', slug: 'mosquito-control', url: '/pest-control-services/' },
+  rodent: { name: 'Rodent Control', slug: 'rodent-control', url: '/pest-control-services/' },
+  'tree-shrub': { name: 'Tree & Shrub Care', slug: 'tree-shrub-care', url: null },
   specialty: { name: 'Pest Control', slug: 'pest-control', url: '/pest-control-services/' },
 };
+
+/**
+ * A vertical with no hub-level page. Its city-service page is the most specific
+ * real page it has, so that page satisfies BOTH the city and the service link
+ * requirements — otherwise a fully compliant lawn or tree/shrub draft raises
+ * P1_MISSING_SERVICE_LINK forever, and with AUTONOMOUS_CONTENT_MAX_P1_FINDINGS=0
+ * it can never publish.
+ */
+function hublessService(serviceKey) {
+  const target = SERVICE_TARGETS[serviceKey];
+  return Boolean(target) && !target.url;
+}
 
 // Must stay in step with content-brief-builder's SERVICE_CITY_SLUG — this map
 // decides which URL a city recommendation points at, and inferLinkReason below
@@ -306,7 +326,10 @@ function recommendationsFromBrief(brief = {}, { city, primaryService } = {}) {
       required: true,
     });
   }
-  if (primaryService) {
+  // A hubless vertical has no service URL to recommend — recommending the old
+  // bare route handed the writer a 404 as a REQUIRED link. Its city page (already
+  // recommended above) doubles as the service link; see hublessService.
+  if (primaryService && primaryService.url) {
     links.push({
       url: primaryService.url,
       anchorText: primaryService.name.toLowerCase(),
@@ -566,6 +589,8 @@ module.exports = {
   inferContentCluster,
   normalizeInternalLinks,
   pestPracticesComplete,
+  hublessService,
+  normalizeService,
   _internals: {
     buildDefaultBlogBreadcrumbs,
     buildCityTarget,

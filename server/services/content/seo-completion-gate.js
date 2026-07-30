@@ -12,6 +12,8 @@ const {
   buildSeoRequirements,
   extractVisibleFaqs,
   pestPracticesComplete,
+  hublessService,
+  normalizeService,
 } = require('./blog-seo-contract');
 const { isFaqBlockedService, findHardcodedPrice } = require('./content-guardrails');
 
@@ -99,7 +101,13 @@ function evaluate(input = {}) {
   if (requirements.articleSchemaRequired && contract.schema?.article !== true) {
     findings.push(finding('P1', 'P1_MISSING_ARTICLE_SCHEMA', 'Article or BlogPosting schema is not requested.', 'Include Article or BlogPosting structured data for the blog post.'));
   }
-  if (brief.service && !hasIncludedLinkReason(contract, 'service')) {
+  // Lawn and tree & shrub have no hub-level service page, so their city-service
+  // page is the most specific real page they have and satisfies BOTH requirements.
+  // Without this a fully compliant draft raises P1_MISSING_SERVICE_LINK forever,
+  // and with AUTONOMOUS_CONTENT_MAX_P1_FINDINGS=0 it can never publish.
+  const serviceSatisfiedByCity = hublessService(normalizeService(brief.service))
+    && hasIncludedLinkReason(contract, 'city');
+  if (brief.service && !hasIncludedLinkReason(contract, 'service') && !serviceSatisfiedByCity) {
     findings.push(finding('P1', 'P1_MISSING_SERVICE_LINK', 'Required service link is not included in the draft body.', 'Add one relevant service/hub link using descriptive anchor text.'));
   }
   if (brief.city && !hasIncludedLinkReason(contract, 'city')) {
