@@ -246,7 +246,7 @@
       "id": "decision-maker-callback-lead",
       "call_log_id": "9d6f5199-f832-41b7-835b-7daf554199c4",
       "reviewed_at": "2026-07-30",
-      "reviewed_outcome": "Caller ended with talking to spouse then calling back \u2014 a live lead, not a dead end. Requires NEW call-nature key.",
+      "reviewed_outcome": "Caller ended with talking to spouse then calling back — a live lead, not a dead end. Requires NEW call-nature key.",
       "expect": {
         "current_status": "valid",
         "current_would_auto_route": false,
@@ -305,7 +305,7 @@
       "id": "commercial-condo-assoc-quote",
       "call_log_id": "888229ef-f46e-4f23-9527-10a086d9593b",
       "reviewed_at": "2026-07-30",
-      "reviewed_outcome": "Condominium association inquiry \u2014 commercial, requires quote path, never an unattended residential booking.",
+      "reviewed_outcome": "Condominium association inquiry — commercial, requires quote path, never an unattended residential booking.",
       "expect": {
         "current_status": "valid",
         "current_would_auto_route": false,
@@ -324,6 +324,41 @@
         "current_would_auto_route": false,
         "current_flags_include": [
           "quote_promised"
+        ]
+      }
+    },
+    {
+      "id": "wrong-number-robocall-stays-blocked",
+      "call_log_id": "bb77c2a4-9583-43a1-a40b-06129fd8727d",
+      "reviewed_at": "2026-07-30",
+      "reviewed_outcome": "Automated school-attendance robocall left on the line (wrong number). A July 2026 mining pass mislabeled it a spam false positive; owner review confirmed the block is correct and must keep firing.",
+      "expect": {
+        "current_status": "valid",
+        "current_would_auto_route": false,
+        "current_flags_include": [
+          "spam_or_wrong_number"
+        ],
+        "current_call_nature_in": [
+          "wrong_number",
+          "spam_solicitation",
+          "robocall"
+        ]
+      }
+    },
+    {
+      "id": "existing-customer-followup-routed",
+      "call_log_id": "8c0e5059-362d-4d77-a792-f531388f71e8",
+      "reviewed_at": "2026-07-30",
+      "reviewed_outcome": "Existing customer follow-up where the owner handled the visit personally on the call. Correct behavior is existing-customer routing with no unattended booking; a mining pass mislabeled this a missed booking.",
+      "expect": {
+        "current_status": "valid",
+        "current_would_auto_route": false,
+        "current_call_nature_in": [
+          "existing_customer_service",
+          "existing_customer_scheduling"
+        ],
+        "current_recommended_disposition_in": [
+          "existing_customer_routed"
         ]
       }
     }
