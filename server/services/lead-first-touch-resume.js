@@ -1,35 +1,37 @@
 /**
- * Resume the HELD first-touch email sends for a call-created lead once the
- * office settles the email read-back question (2026-07-30 lane).
+ * Release engine for HELD first-touch email sends (2026-07-30 lane).
  *
- * The call pipeline holds BOTH first-touch emails while an
- * email_unverified / email_invalid review card is live:
- *   - the new_lead automation drip (Step 6 enroll), and
- *   - the newsletter double-opt-in subscribe.
- * This module is the single release point, invoked from every way the
- * question can settle:
- *   - the operator corrects the email on the record (customer-email-fanout),
- *   - the operator resolves the card as-is in the Triage Inbox
- *     (admin-triage single resolve AND the call-level accept verdict).
+ * The call pipeline holds BOTH first-touch emails while an email read-back
+ * card is live — the new_lead drip and the newsletter double-opt-in — and
+ * records the hold in the durable `first_touch_holds` ledger: what was held,
+ * for which address (the post-correction value Step 6 actually withheld),
+ * for which call and customer. This module settles that row from every path
+ * where the question resolves:
  *
- * Consent is RE-CHECKED here (Codex #3084): the original enrollment veto ran
- * inside call processing, and a resume that skipped the recheck could start
- * a marketing sequence for a caller whose extraction said do-not-contact.
- * An active email suppression also blocks the resume — enrolling a
- * suppressed address would just bounce-cancel again.
+ *   - Triage Inbox resolve / call-level ACCEPT verdict → release as-held.
+ *   - Operator email correction (customer-email-fanout via Customer 360 or
+ *     the Intelligence Bar) → release to the CORRECTED address — works even
+ *     when the review cards were already resolved earlier (e.g. by a deny
+ *     verdict), because the ledger row, not the card, carries the pending
+ *     state.
+ *   - End-of-run reconciliation for a card resolved mid-processing.
  *
- * Best-effort by contract: failures log and return { resumed: false } —
- * never break the caller's transition/fanout. enrollCustomer carries its own
- * dedupe, so calling this for a normally-enrolled customer is a no-op.
+ * Consent is re-checked at release: a do-not-contact veto marks the hold
+ * 'blocked' (terminal). Every transient failure keeps the row 'pending'
+ * with last_error, so each failure mode stays retryable by the next release
+ * trigger. The newsletter DOI cannot be rolled back, so transactional
+ * callers defer it: the payload is returned for post-commit execution, and
+ * released_newsletter is set only when the confirmation actually sent.
+ * Never throws into a caller.
  */
 
 const db = require('../models/db');
 const logger = require('./logger');
 
 const EMAIL_REVIEW_REASON_CODES = ['email_unverified', 'email_invalid'];
-// Same permissive-but-real syntax class the fanout uses — the resume is also
-// reached when an email_invalid card is resolved as-is, and enrollCustomer
-// performs no syntax validation of its own (Codex #3084 r4).
+// Same permissive-but-real syntax class the fanout uses — releases are also
+// triggered when an email_invalid card is resolved as-is, and enrollCustomer
+// performs no syntax validation of its own.
 const RESUME_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 
 async function customerCallDoNotContact(customerId, dbh) {
@@ -40,10 +42,9 @@ async function customerCallDoNotContact(customerId, dbh) {
   return !!row;
 }
 
-// Canonical suppression semantics (Codex #3084 r3): only a suppression that
-// the automation lane itself would honor blocks the resume — a group-scoped
-// suppression for an unrelated stream (e.g. service_operational) must not
-// bury a marketing-drip release. Mirrors automation-runner's own gate.
+// Canonical suppression semantics: only a suppression the automation lane
+// itself would honor blocks the release — a group-scoped suppression for an
+// unrelated stream (e.g. service_operational) must not bury it.
 async function emailSuppressedForNewLead(email, dbh) {
   if (!(await dbh.schema.hasTable('email_suppressions'))) return false;
   const rows = await dbh('email_suppressions')
@@ -55,177 +56,178 @@ async function emailSuppressedForNewLead(email, dbh) {
   return rows.some((row) => automationSuppressionMatches(template || {}, row));
 }
 
-// The newsletter DOI resumes ONLY when this call actually held one — the
-// processor stamps held_newsletter on the review card at hold time. An
-// existing customer whose card resolution never held a subscribe must not
-// receive a DOI email (Codex #3084 r3); the marker also guarantees no
-// newsletter_subscribers row exists yet, so the global-connection subscribe
-// cannot collide with an uncommitted row move inside a caller's transaction.
-async function heldNewsletterCards(customerId, dbh) {
-  return dbh('triage_items')
-    .whereIn('reason_code', EMAIL_REVIEW_REASON_CODES)
-    .whereRaw("payload->>'held_newsletter' = 'true'")
-    .whereIn('call_log_id', dbh('call_log').select('id').where({ customer_id: customerId }))
-    .select('id', 'payload');
+async function findPendingHold({ callLogId = null, customerId = null, dbh }) {
+  if (!(await dbh.schema.hasTable('first_touch_holds'))) return null;
+  let q = dbh('first_touch_holds').where({ status: 'pending' });
+  if (callLogId) q = q.where({ call_log_id: callLogId });
+  else if (customerId) q = q.where({ customer_id: customerId });
+  else return null;
+  return q.orderBy('created_at', 'desc').first('*');
 }
 
-// The marker is CONSUMED on successful resume (Codex #3084 r4) — a later
-// call's card resolution must not re-trigger a DOI from a stale historical
-// marker.
-async function consumeHeldNewsletterMarkers(cards, dbh) {
-  for (const card of cards) {
-    let payload = {};
-    try { payload = typeof card.payload === 'string' ? JSON.parse(card.payload || '{}') : (card.payload || {}); } catch { payload = {}; }
-    await dbh('triage_items')
-      .where({ id: card.id })
-      .update({ payload: JSON.stringify({ ...payload, held_newsletter: false, held_newsletter_resumed_at: new Date().toISOString() }), updated_at: new Date() });
-  }
+async function settleHold(holdId, patch, dbh) {
+  await dbh('first_touch_holds').where({ id: holdId }).update({ ...patch, updated_at: new Date() });
 }
 
-async function resumeHeldFirstTouch({ customerId, email = null, callLogId = null, dbh = db, source = 'email_review_resolved', deferNewsletter = false }) {
+// Delivered = the DOI confirmation actually went out, or the helper
+// deliberately skipped (unsubscribed/invalid — nothing left to retry). A
+// created subscriber whose confirmation SEND failed keeps the hold
+// retryable (Codex #3084 r6).
+function newsletterDelivered(outcome) {
+  if (!outcome) return false;
+  if (outcome.skipped) return true;
+  return outcome.confirmationEmailSent !== false;
+}
+
+async function runNewsletterResume(payload) {
+  const CRP = require('./call-recording-processor');
+  if (typeof CRP.resumeNewsletterForCallCustomer !== 'function') return null;
+  return CRP.resumeNewsletterForCallCustomer(payload);
+}
+
+/**
+ * Release the pending first-touch hold for a call (triage paths) or a
+ * customer (email-correction paths). `email` (a corrected address) overrides
+ * the ledger's held_email; the customer's STORED email is deliberately never
+ * used — for a matched existing customer it can be a different, stale
+ * address than the one confirmed on the call.
+ */
+async function resumeHeldFirstTouch({
+  customerId = null,
+  callLogId = null,
+  email = null,
+  dbh = db,
+  source = 'email_review_resolved',
+  deferNewsletter = false,
+} = {}) {
   const result = { resumed: false, enrolled: false, newsletter: null, newsletterResume: null, skipped: null };
   try {
-    if (!customerId) return { ...result, skipped: 'no_customer' };
-    const customer = await dbh('customers')
-      .where({ id: customerId })
-      .first('id', 'first_name', 'last_name', 'email');
-    if (!customer) return { ...result, skipped: 'customer_not_found' };
-    // Prefer the address CONFIRMED on the call (Codex #3084 r5 P1): a
-    // matched existing customer keeps their stored email, but the held
-    // enrollment was for the call's extracted address — resolving the card
-    // confirms THAT one. Explicit email (the fanout's corrected value) wins;
-    // the customer's stored email is the last resort.
-    let callEmail = null;
-    if (!email && callLogId) {
-      try {
-        const callRow = await dbh('call_log')
-          .where({ id: callLogId })
-          .first(dbh.raw("ai_extraction_enriched->'caller'->>'email' AS extracted_email"));
-        callEmail = callRow?.extracted_email || null;
-      } catch { callEmail = null; }
-    }
-    const resumeEmail = String(email || callEmail || customer.email || '').trim().toLowerCase();
-    if (!resumeEmail) return { ...result, skipped: 'no_email' };
-    if (!RESUME_EMAIL_RE.test(resumeEmail)) return { ...result, skipped: 'invalid_email' };
+    const hold = await findPendingHold({ callLogId, customerId, dbh });
+    if (!hold) return { ...result, skipped: 'no_pending_hold' };
 
-    if (await customerCallDoNotContact(customerId, dbh)) {
-      logger.info(`[first-touch-resume] customer ${customerId}: do-not-contact veto — not resuming (${source})`);
+    const holdCustomerId = hold.customer_id || customerId;
+    if (!holdCustomerId) {
+      await settleHold(hold.id, { last_error: 'no_customer_linked' }, dbh);
+      return { ...result, skipped: 'no_customer' };
+    }
+    const customer = await dbh('customers')
+      .where({ id: holdCustomerId })
+      .first('id', 'first_name', 'last_name');
+    if (!customer) {
+      await settleHold(hold.id, { last_error: 'customer_not_found' }, dbh);
+      return { ...result, skipped: 'customer_not_found' };
+    }
+
+    const resumeEmail = String(email || hold.held_email || '').trim().toLowerCase();
+    if (!resumeEmail || !RESUME_EMAIL_RE.test(resumeEmail)) {
+      // Stays pending: a later correction releases it.
+      await settleHold(hold.id, { last_error: 'invalid_email' }, dbh);
+      return { ...result, skipped: 'invalid_email' };
+    }
+
+    if (await customerCallDoNotContact(holdCustomerId, dbh)) {
+      await settleHold(hold.id, { status: 'blocked', last_error: 'do_not_contact' }, dbh);
+      logger.info(`[first-touch-resume] customer ${holdCustomerId}: do-not-contact veto — hold blocked (${source})`);
       return { ...result, skipped: 'do_not_contact' };
     }
     if (await emailSuppressedForNewLead(resumeEmail, dbh)) {
-      logger.info(`[first-touch-resume] customer ${customerId}: address suppressed — not resuming (${source})`);
+      // Pending, not blocked: a corrected address after a bounce releases it.
+      await settleHold(hold.id, { last_error: 'email_suppressed' }, dbh);
+      logger.info(`[first-touch-resume] customer ${holdCustomerId}: address suppressed — hold stays pending (${source})`);
       return { ...result, skipped: 'email_suppressed' };
     }
 
-    const AutomationRunner = require('./automation-runner');
-    try {
-      const enroll = await AutomationRunner.enrollCustomer({
-        templateKey: 'new_lead',
-        customer: {
-          email: resumeEmail,
-          first_name: customer.first_name || null,
-          last_name: customer.last_name || null,
-          id: customerId,
-        },
-        dbh,
-      });
-      result.enrolled = !!enroll?.enrolled;
-    } catch (enrollErr) {
-      // The card is already resolved by the time this runs — without a
-      // persisted retryable release the lead would be permanently outside
-      // the drip (Codex #3084 r5). Re-open an advisory review card so the
-      // office sees the failure and re-resolving retries the release.
-      logger.warn(`[first-touch-resume] enroll failed for customer ${customerId} — leaving a retryable release card: ${enrollErr.message}`);
-      await leaveRetryableReleaseCard({ customerId, callLogId, dbh });
-      return { ...result, skipped: 'enroll_failed' };
+    const patch = {};
+    if (hold.held_drip && !hold.released_drip) {
+      try {
+        const AutomationRunner = require('./automation-runner');
+        const enroll = await AutomationRunner.enrollCustomer({
+          templateKey: 'new_lead',
+          customer: {
+            email: resumeEmail,
+            first_name: customer.first_name || null,
+            last_name: customer.last_name || null,
+            id: holdCustomerId,
+          },
+          dbh,
+        });
+        result.enrolled = !!enroll?.enrolled;
+        patch.released_drip = true;
+      } catch (enrollErr) {
+        // Stays pending — the ledger row IS the retryable release.
+        await settleHold(hold.id, { last_error: `enroll_failed: ${String(enrollErr.message).slice(0, 200)}` }, dbh);
+        logger.warn(`[first-touch-resume] enroll failed for customer ${holdCustomerId} — hold stays pending: ${enrollErr.message}`);
+        return { ...result, skipped: 'enroll_failed' };
+      }
     }
 
-    // Newsletter DOI resume — only when the pipeline actually held one for
-    // this customer's call (held_newsletter marker). A TRANSACTIONAL caller
-    // (the email-correction fanout) must not fire the DOI mid-transaction
-    // (Codex #3084 r4): with deferNewsletter the payload is RETURNED for the
-    // caller to execute post-commit via resumeHeldNewsletterPostCommit —
-    // the same contract as the fanout's pendingConfirmation.
-    try {
-      const heldCards = await heldNewsletterCards(customerId, dbh);
-      if (heldCards.length) {
-        const newsletterPayload = {
-          customerId,
+    let newsletterSettled = !hold.held_newsletter || hold.released_newsletter;
+    if (hold.held_newsletter && !hold.released_newsletter) {
+      if (deferNewsletter) {
+        // Transactional caller: DOI executes post-commit via
+        // resumeHeldNewsletterPostCommit, which settles the flag itself.
+        result.newsletterResume = {
+          holdId: hold.id,
+          customerId: holdCustomerId,
           email: resumeEmail,
           firstName: customer.first_name || null,
           lastName: customer.last_name || null,
-          cardIds: heldCards.map((c) => c.id),
         };
-        if (deferNewsletter) {
-          result.newsletterResume = newsletterPayload;
+      } else {
+        result.newsletter = await runNewsletterResume({
+          customerId: holdCustomerId,
+          email: resumeEmail,
+          firstName: customer.first_name || null,
+          lastName: customer.last_name || null,
+        });
+        if (newsletterDelivered(result.newsletter)) {
+          patch.released_newsletter = true;
+          newsletterSettled = true;
         } else {
-          const CRP = require('./call-recording-processor');
-          if (typeof CRP.resumeNewsletterForCallCustomer === 'function') {
-            result.newsletter = await CRP.resumeNewsletterForCallCustomer(newsletterPayload);
-            if (result.newsletter && !result.newsletter.skipped) {
-              await consumeHeldNewsletterMarkers(heldCards, dbh);
-            }
-          }
+          patch.last_error = 'newsletter_doi_not_confirmed';
         }
       }
-    } catch (newsletterErr) {
-      logger.warn(`[first-touch-resume] newsletter resume failed for customer ${customerId}: ${newsletterErr.message}`);
     }
 
-    result.resumed = result.enrolled || !!(result.newsletter && !result.newsletter.skipped);
+    const dripSettled = !hold.held_drip || hold.released_drip || patch.released_drip;
+    if (dripSettled && newsletterSettled) {
+      patch.status = 'released';
+      patch.released_at = new Date();
+      patch.last_error = null;
+    }
+    if (Object.keys(patch).length) await settleHold(hold.id, patch, dbh);
+
+    result.resumed = result.enrolled || newsletterDelivered(result.newsletter) || !!result.newsletterResume;
     if (result.resumed) {
-      logger.info(`[first-touch-resume] customer ${customerId}: first-touch resumed (${source}; enrolled=${result.enrolled})`);
+      logger.info(`[first-touch-resume] customer ${holdCustomerId}: first-touch released (${source}; enrolled=${result.enrolled})`);
     }
     return result;
   } catch (err) {
-    logger.warn(`[first-touch-resume] failed for customer ${customerId}: ${err.message}`);
+    logger.warn(`[first-touch-resume] failed (${source}): ${err.message}`);
     return { ...result, skipped: 'error' };
-  }
-}
-
-// Persist a retryable release when the resume itself fails AFTER the review
-// card resolved: a fresh advisory card puts the customer back in the Needs
-// Review inbox, and resolving it re-runs this release path. Best-effort.
-async function leaveRetryableReleaseCard({ customerId, callLogId, dbh }) {
-  try {
-    let targetCall = callLogId;
-    if (!targetCall) {
-      const card = await dbh('triage_items')
-        .whereIn('reason_code', EMAIL_REVIEW_REASON_CODES)
-        .whereIn('call_log_id', dbh('call_log').select('id').where({ customer_id: customerId }))
-        .orderBy('created_at', 'desc')
-        .first('call_log_id');
-      targetCall = card?.call_log_id || null;
-    }
-    if (!targetCall) return;
-    const { buildTriageItem } = require('./call-routing-gates');
-    await dbh('triage_items')
-      .insert(buildTriageItem({
-        callLogId: targetCall,
-        flag: 'email_unverified',
-        extraction: { meta: { call_summary: null } },
-        severity: 'advisory',
-        extraPayload: { hold_reason: 'first_touch_resume_failed' },
-      }))
-      .onConflict(dbh.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
-      .ignore();
-  } catch (err) {
-    logger.warn(`[first-touch-resume] retryable release card failed for customer ${customerId}: ${err.message}`);
   }
 }
 
 // Post-commit companion for transactional callers (same contract as the
 // fanout's resendPendingConfirmation): execute the deferred newsletter DOI
-// after the edit commits, then consume the markers. Never throws.
+// after the edit commits, then settle the ledger. Never throws.
 async function resumeHeldNewsletterPostCommit(payload, dbh = db) {
   if (!payload) return null;
   try {
-    const CRP = require('./call-recording-processor');
-    if (typeof CRP.resumeNewsletterForCallCustomer !== 'function') return null;
-    const outcome = await CRP.resumeNewsletterForCallCustomer(payload);
-    if (outcome && !outcome.skipped && Array.isArray(payload.cardIds)) {
-      const cards = await dbh('triage_items').whereIn('id', payload.cardIds).select('id', 'payload');
-      await consumeHeldNewsletterMarkers(cards, dbh);
+    const outcome = await runNewsletterResume(payload);
+    if (payload.holdId) {
+      if (newsletterDelivered(outcome)) {
+        const hold = await dbh('first_touch_holds').where({ id: payload.holdId }).first('held_drip', 'released_drip');
+        const dripSettled = !hold || !hold.held_drip || hold.released_drip;
+        await dbh('first_touch_holds').where({ id: payload.holdId }).update({
+          released_newsletter: true,
+          ...(dripSettled ? { status: 'released', released_at: new Date(), last_error: null } : {}),
+          updated_at: new Date(),
+        });
+      } else {
+        await dbh('first_touch_holds').where({ id: payload.holdId })
+          .update({ last_error: 'newsletter_doi_not_confirmed', updated_at: new Date() });
+      }
     }
     return outcome;
   } catch (err) {
@@ -234,4 +236,48 @@ async function resumeHeldNewsletterPostCommit(payload, dbh = db) {
   }
 }
 
-module.exports = { resumeHeldFirstTouch, resumeHeldNewsletterPostCommit, EMAIL_REVIEW_REASON_CODES };
+/**
+ * Record (or re-pend) the hold — called by the processor at hold time with
+ * the address it ACTUALLY withheld (post dictation-decoder / arbiter /
+ * domain-correction, which can differ from the persisted extraction).
+ * Idempotent per call; a force-reprocess refreshes the row to pending with
+ * the fresh address, and held flags accumulate (drip and newsletter holds
+ * are recorded at different steps of the same run).
+ */
+async function recordFirstTouchHold({ callLogId, customerId = null, heldEmail, heldDrip = false, heldNewsletter = false, dbh = db }) {
+  try {
+    if (!(await dbh.schema.hasTable('first_touch_holds'))) return null;
+    const now = new Date();
+    await dbh('first_touch_holds')
+      .insert({
+        call_log_id: callLogId,
+        customer_id: customerId,
+        held_email: String(heldEmail || '').trim().toLowerCase(),
+        held_drip: heldDrip,
+        held_newsletter: heldNewsletter,
+        status: 'pending',
+        created_at: now,
+        updated_at: now,
+      })
+      .onConflict('call_log_id')
+      .merge({
+        customer_id: customerId,
+        held_email: String(heldEmail || '').trim().toLowerCase(),
+        held_drip: dbh.raw('first_touch_holds.held_drip OR excluded.held_drip'),
+        held_newsletter: dbh.raw('first_touch_holds.held_newsletter OR excluded.held_newsletter'),
+        status: 'pending',
+        updated_at: now,
+      });
+    return true;
+  } catch (err) {
+    logger.warn(`[first-touch-resume] hold record failed for call ${callLogId}: ${err.message}`);
+    return null;
+  }
+}
+
+module.exports = {
+  resumeHeldFirstTouch,
+  resumeHeldNewsletterPostCommit,
+  recordFirstTouchHold,
+  EMAIL_REVIEW_REASON_CODES,
+};

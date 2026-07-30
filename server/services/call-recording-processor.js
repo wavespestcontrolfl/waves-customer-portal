@@ -1149,33 +1149,6 @@ function isNonLeadCallContent(extracted = {}) {
   return NON_LEAD_CALL_TYPES.has(callType);
 }
 
-// Stamp WHAT was held onto the call's live email read-back card(s) so the
-// resume paths release exactly what the pipeline withheld — the newsletter
-// DOI resumes only for calls whose candidate was actually held here, never
-// for an existing customer whose card resolution should not trigger a
-// subscribe (Codex #3084 r3). Best-effort: no card (insert failed) means
-// the drip still resumes via its unconditional dedup-safe path.
-async function markFirstTouchHeld(callLogId, patch) {
-  try {
-    // ALL statuses deliberately (Codex #3084 r5): a card the admin resolved
-    // mid-run must still record what was held, or the end-of-run
-    // reconciliation resumes the drip but silently drops the newsletter.
-    const cards = await db('triage_items')
-      .where({ call_log_id: callLogId })
-      .whereIn('reason_code', ['email_unverified', 'email_invalid'])
-      .select('id', 'payload');
-    for (const card of cards) {
-      let payload = {};
-      try { payload = typeof card.payload === 'string' ? JSON.parse(card.payload || '{}') : (card.payload || {}); } catch { payload = {}; }
-      await db('triage_items')
-        .where({ id: card.id })
-        .update({ payload: JSON.stringify({ ...payload, ...patch }), updated_at: new Date() });
-    }
-  } catch (err) {
-    logger.warn(`[call-proc] first-touch hold marker failed: ${err.message}`);
-  }
-}
-
 // True when the call has a live email read-back card — the extracted address
 // is a transcription guess and must not receive first-touch email until the
 // office confirms it. 'in_progress' counts as live (canonical open-review set,
@@ -4377,6 +4350,7 @@ const CallRecordingProcessor = {
    * Called from recording-status webhook or manually from admin.
    */
   async processRecording(callSid, opts = {}) {
+    const processingStartedAt = new Date();
     const call = await db('call_log').where('twilio_call_sid', callSid).first();
     if (!call) throw new Error(`Call not found: ${callSid}`);
 
@@ -8785,7 +8759,11 @@ const CallRecordingProcessor = {
       // admin force-reprocess after the run.
       logger.info(`[call-proc] Skipping new_lead automation enroll for ${maskSid(callSid)}: extracted email is under read-back review`);
       beehiivResult = { skipped: 'email_under_review' };
-      await markFirstTouchHeld(call.id, { held_drip: true });
+      // Ledger row carries the address ACTUALLY held (post dictation/
+      // arbiter/domain correction) — the release engine sends to this, never
+      // to a matched customer's stale stored email.
+      const { recordFirstTouchHold } = require('./lead-first-touch-resume');
+      await recordFirstTouchHold({ callLogId: call.id, customerId, heldEmail: extracted.email, heldDrip: true });
     } else if (customerId && extracted.email) {
       try {
         const AutomationRunner = require('./automation-runner');
@@ -8875,7 +8853,8 @@ const CallRecordingProcessor = {
       // confirmation is ALSO a first-touch email to the unconfirmed address.
       logger.info(`[call-proc] Skipping newsletter subscribe for ${callSid}: extracted email is under read-back review`);
       newsletterResult = { skipped: 'email_under_review' };
-      await markFirstTouchHeld(call.id, { held_newsletter: true });
+      const { recordFirstTouchHold } = require('./lead-first-touch-resume');
+      await recordFirstTouchHold({ callLogId: call.id, customerId, heldEmail: newsletterCandidate.email || extracted.email, heldNewsletter: true });
     } else if (newsletterCandidate) {
       const stillOwned = await db('call_log')
         .where({ id: call.id })
@@ -8908,10 +8887,14 @@ const CallRecordingProcessor = {
           //   - the card insert FAILED, so no card ever existed → the
           //     address is still unverified; persist the recovery marker
           //     and stay held (the standard resume paths release it).
+          // Resolved DURING this run (Codex #3084 r6): a force-reprocess of
+          // a call whose card resolved in an EARLIER cycle must not read
+          // that historical row as a fresh operator confirmation.
           const resolvedCard = await db('triage_items')
             .where({ call_log_id: call.id })
             .whereIn('reason_code', ['email_unverified', 'email_invalid'])
             .whereIn('status', ['resolved'])
+            .where('resolved_at', '>=', processingStartedAt)
             .first('id');
           if (resolvedCard) {
             const { resumeHeldFirstTouch } = require('./lead-first-touch-resume');

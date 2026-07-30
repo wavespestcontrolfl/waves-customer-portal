@@ -377,15 +377,10 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
   // its markers so a later cycle cannot re-fire it.
   if (pendingConfirmation && heldNewsletterResume) {
     try {
-      if (Array.isArray(heldNewsletterResume.cardIds) && heldNewsletterResume.cardIds.length) {
-        const heldCards = await conn('triage_items').whereIn('id', heldNewsletterResume.cardIds).select('id', 'payload');
-        for (const card of heldCards) {
-          let payload = {};
-          try { payload = typeof card.payload === 'string' ? JSON.parse(card.payload || '{}') : (card.payload || {}); } catch { payload = {}; }
-          await conn('triage_items')
-            .where({ id: card.id })
-            .update({ payload: JSON.stringify({ ...payload, held_newsletter: false, held_newsletter_resumed_at: now.toISOString() }), updated_at: now });
-        }
+      if (heldNewsletterResume.holdId) {
+        await conn('first_touch_holds')
+          .where({ id: heldNewsletterResume.holdId })
+          .update({ released_newsletter: true, updated_at: now });
       }
     } catch (dedupeErr) {
       logger.warn(`[email-fanout] held-newsletter dedupe failed for customer ${customerId}: ${dedupeErr.message}`);
