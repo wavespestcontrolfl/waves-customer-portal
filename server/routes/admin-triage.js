@@ -351,7 +351,15 @@ router.post('/:id/verdict', async (req, res) => {
           // #3084 r17; atomic with the resolve since r18).
           await trx('first_touch_holds')
             .where({ call_log_id: item.call_log_id, last_error: 'email_denied_await_correction' })
-            .update({ last_error: null, updated_at: now });
+            .update({
+              last_error: null,
+              // A live claim's updated_at is its fence stamp (Codex #3084
+              // r27) — bumping it on a releasing row would fence out the
+              // in-flight worker this approval wants to succeed. (The deny
+              // stamp above deliberately keeps its bump: fencing a worker
+              // out of a denied send is the point.)
+              updated_at: trx.raw("CASE WHEN status = 'releasing' THEN updated_at ELSE ? END", [now]),
+            });
         }
       }
     });

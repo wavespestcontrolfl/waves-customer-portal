@@ -484,6 +484,15 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
     pendingConfirmation.heldNewsletterHoldIds = heldNewsletterResume
       .map((p) => p?.holdId)
       .filter(Boolean);
+    // Per-hold claim fence stamps ride along too (Codex #3084 r27): the
+    // post-commit resend must prove it still owns each claimed row before
+    // sending or settling — a callback delayed past the stale-claim window
+    // lost its rows to the sweep's reclaim.
+    pendingConfirmation.heldNewsletterHoldClaims = Object.fromEntries(
+      heldNewsletterResume
+        .filter((p) => p?.holdId && p?.claimStamp)
+        .map((p) => [p.holdId, p.claimStamp]),
+    );
     heldNewsletterResume = null;
   }
   const extras = {};
@@ -505,6 +514,12 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
   const holdIds = Array.isArray(pendingConfirmation.heldNewsletterHoldIds)
     ? pendingConfirmation.heldNewsletterHoldIds
     : [];
+  // Claim fence (Codex #3084 r27): every hold write below lands only while
+  // this callback still owns the row's claim — a delay past the stale-claim
+  // window hands reclaimed rows (sends AND settles) to the sweep.
+  const holdClaims = pendingConfirmation.heldNewsletterHoldClaims || {};
+  const { ownsClaim, fencedHoldWrite } = require('./lead-first-touch-resume');
+  const fenceOf = (holdId) => holdClaims[holdId] || null;
   // The captured payload can be SUPERSEDED before this callback runs
   // (Codex #3084 r18): a second correction committed in the gap rotates the
   // subscriber's email and confirmation token in its own transaction, and
@@ -520,13 +535,16 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
   const repenHolds = async (marker) => {
     for (const holdId of holdIds) {
       try {
-        const repenned = await conn('first_touch_holds').where({ id: holdId })
-          .where(function notDenied() {
-            this.whereNull('last_error').orWhereNot('last_error', 'email_denied_await_correction');
-          })
+        const repenned = await fencedHoldWrite(
+          conn('first_touch_holds').where({ id: holdId })
+            .where(function notDenied() {
+              this.whereNull('last_error').orWhereNot('last_error', 'email_denied_await_correction');
+            }),
+          fenceOf(holdId),
+        )
           .update({ status: 'pending', last_error: marker, updated_at: new Date() });
         if (!repenned) {
-          await conn('first_touch_holds').where({ id: holdId })
+          await fencedHoldWrite(conn('first_touch_holds').where({ id: holdId }), fenceOf(holdId))
             .update({ status: 'pending', updated_at: new Date() });
         }
       } catch (repenErr) {
@@ -574,7 +592,7 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
       logger.info(`[email-fanout] DOI re-send vetoed for subscriber ${pendingConfirmation.id}: do-not-contact — hold(s) blocked`);
       for (const holdId of holdIds) {
         try {
-          await conn('first_touch_holds').where({ id: holdId })
+          await fencedHoldWrite(conn('first_touch_holds').where({ id: holdId }), fenceOf(holdId))
             .update({ status: 'blocked', last_error: 'do_not_contact', updated_at: new Date() });
         } catch (blockErr) {
           logger.warn(`[email-fanout] hold ${holdId} block failed: ${blockErr.code || blockErr.name || 'db_error'} (stale-claim window will reclaim)`);
@@ -607,7 +625,7 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
         logger.info(`[email-fanout] DOI re-send vetoed for subscriber ${pendingConfirmation.id}: hold denied — awaiting correction`);
         for (const holdId of holdIds) {
           try {
-            await conn('first_touch_holds').where({ id: holdId })
+            await fencedHoldWrite(conn('first_touch_holds').where({ id: holdId }), fenceOf(holdId))
               .update({ status: 'pending', updated_at: new Date() });
           } catch (repenErr) {
             logger.warn(`[email-fanout] hold ${holdId} re-pend failed: ${repenErr.code || repenErr.name || 'db_error'} (stale-claim window will reclaim)`);
@@ -618,6 +636,21 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
     } catch (denyErr) {
       logger.warn(`[email-fanout] DOI re-send deny check failed for subscriber ${pendingConfirmation.id}: ${denyErr.code || denyErr.name || 'db_error'} — not sending`);
       await repenHolds('target_verify_failed');
+      return false;
+    }
+  }
+  // Fence filter before anything irreversible (Codex #3084 r27): keep only
+  // holds this callback still owns; when every fenced hold was reclaimed,
+  // the sweep's own release owns the send too (and the group's skipDedupe
+  // semantics would otherwise double-mail past the dedupe guard).
+  let liveHoldIds = holdIds;
+  if (holdIds.length && Object.keys(holdClaims).length) {
+    liveHoldIds = [];
+    for (const holdId of holdIds) {
+      if (await ownsClaim(holdId, fenceOf(holdId), conn)) liveHoldIds.push(holdId);
+    }
+    if (!liveHoldIds.length) {
+      logger.info(`[email-fanout] DOI re-send claims lost to a reclaim for subscriber ${pendingConfirmation.id} — abandoning send`);
       return false;
     }
   }
@@ -714,13 +747,16 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
   // re-checks for work merged during the claim (Step 8 adding held_drip
   // mid-callback) exactly like the resume paths (Codex #3084 r19).
   const { repenIfWorkMergedDuringClaim } = require('./lead-first-touch-resume');
-  for (const holdId of holdIds) {
+  for (const holdId of liveHoldIds) {
     try {
       const hold = await conn('first_touch_holds').where({ id: holdId }).first('held_drip', 'released_drip');
       const dripSettled = !hold || !hold.held_drip || hold.released_drip;
-      const settled = await conn('first_touch_holds')
-        .where({ id: holdId })
-        .whereRaw("LOWER(COALESCE(held_email, '')) = ?", [sentEmailLc])
+      const settled = await fencedHoldWrite(
+        conn('first_touch_holds')
+          .where({ id: holdId })
+          .whereRaw("LOWER(COALESCE(held_email, '')) = ?", [sentEmailLc]),
+        fenceOf(holdId),
+      )
         // A deny stamping mid-callback must survive the settle — same
         // guard as the resume module's settleIfTargetUnchanged (Codex
         // #3084 r21).
@@ -735,15 +771,18 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
         });
       if (!settled) {
         // Two-step deny-preserving re-pend (mirrors repenHoldPreservingDeny):
-        // the fallback marker only lands on un-stamped rows.
-        const repenned = await conn('first_touch_holds')
-          .where({ id: holdId })
-          .where(function notDenied() {
-            this.whereNull('last_error').orWhereNot('last_error', 'email_denied_await_correction');
-          })
+        // the fallback marker only lands on un-stamped rows. Fenced (r27).
+        const repenned = await fencedHoldWrite(
+          conn('first_touch_holds')
+            .where({ id: holdId })
+            .where(function notDenied() {
+              this.whereNull('last_error').orWhereNot('last_error', 'email_denied_await_correction');
+            }),
+          fenceOf(holdId),
+        )
           .update({ status: 'pending', last_error: 'superseded_during_send', updated_at: new Date() });
         if (!repenned) {
-          await conn('first_touch_holds').where({ id: holdId })
+          await fencedHoldWrite(conn('first_touch_holds').where({ id: holdId }), fenceOf(holdId))
             .update({ status: 'pending', updated_at: new Date() });
         }
         continue;

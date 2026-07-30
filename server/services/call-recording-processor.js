@@ -2140,11 +2140,21 @@ async function subscribeNewCallCustomerToNewsletter({ customerId, email, firstNa
       // subscribeOrResubscribe stamps confirmation_sent_at BEFORE the send —
       // clear it on failure so retry paths (the first-touch-resume DOI
       // dedupe guard, the stale-pending sweep) never read the pre-send
-      // stamp as delivery (Codex #3084 r13).
+      // stamp as delivery (Codex #3084 r13). Scoped to the ATTEMPTED
+      // email/token/status (Codex #3084 r27): a correction rotating the
+      // subscriber mid-send pre-stamps its OWN DOI, and an id-only clear
+      // would null the rotated token's timestamp — making the newer mailed
+      // token permanent (no expiry, purge-exempt). Zero rows = rotated →
+      // the rotation's own callback owns its stamp.
       if (result.subscriber?.id) {
         try {
           await db('newsletter_subscribers')
-            .where({ id: result.subscriber.id })
+            .where({
+              id: result.subscriber.id,
+              confirmation_token: result.subscriber.confirmation_token,
+              status: 'pending',
+            })
+            .whereRaw('LOWER(email) = ?', [String(result.subscriber.email || emailLc).trim().toLowerCase()])
             .update({ confirmation_sent_at: null, updated_at: new Date() });
         } catch (clearErr) {
           logger.warn(`[call-proc] confirmation_sent_at clear failed for subscriber ${result.subscriber.id}: ${clearErr.code || clearErr.name || 'db_error'}`);

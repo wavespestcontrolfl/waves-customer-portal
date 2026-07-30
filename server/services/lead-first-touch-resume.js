@@ -82,7 +82,16 @@ async function findPendingHolds({ callLogId = null, customerId = null, dbh }) {
 // run the DOI side effect. The winner flips pending→releasing; the loser's
 // conditional update affects 0 rows and skips. Failure paths revert to
 // pending (retryable); terminal paths settle released/blocked.
+// Returns the claim's FENCE STAMP — the exact updated_at it wrote — or null
+// when the claim lost (Codex #3084 r27): a worker suspended past the
+// stale-claim window loses the row to the sweep's reclaim, and without a
+// fence it would resume blind — sending a second DOI (its claim-time
+// skipDedupe marker bypasses the dedupe guard) and competing on settles.
+// Nothing else bumps a releasing row's updated_at while a claim is live
+// (the correction retarget and the processor merge both preserve it), so a
+// changed value means exactly one thing: someone reclaimed the row.
 async function claimHold(hold, dbh) {
+  const stamp = new Date();
   const claimed = await dbh('first_touch_holds')
     .where({ id: hold.id })
     .where(function claimable() {
@@ -92,32 +101,68 @@ async function claimHold(hold, dbh) {
             .where('updated_at', '<', new Date(Date.now() - STALE_CLAIM_MS));
         });
     })
-    .update({ status: 'releasing', updated_at: new Date() });
-  return claimed > 0;
+    .update({ status: 'releasing', updated_at: stamp });
+  return claimed > 0 ? stamp : null;
 }
 
-async function settleHold(holdId, patch, dbh) {
+// Read-side fence check before an irreversible side effect (Codex #3084
+// r27). Fail-closed: an unverifiable claim state reports NOT owned — the
+// worst case of a false negative is a skipped send the sweep retries,
+// while a false positive is a duplicate DOI. Callers without a stamp
+// (payloads built before the fence shipped) keep the pre-fence behavior.
+async function ownsClaim(holdId, claimStamp, dbh) {
+  if (!claimStamp) return true;
+  try {
+    const row = await dbh('first_touch_holds').where({ id: holdId }).first('status', 'updated_at');
+    return !!row && String(row.status) === 'releasing'
+      && +new Date(row.updated_at) === +new Date(claimStamp);
+  } catch (fenceErr) {
+    logger.warn(`[first-touch-resume] claim fence check failed: ${fenceErr.code || fenceErr.name || 'db_error'} — treating claim as lost`);
+    return false;
+  }
+}
+
+// WHERE-clause fence for hold writes made under a claim (Codex #3084 r27):
+// with a stamp, the write lands only while this worker still owns the row
+// (status unchanged since claim, updated_at untouched) — a fenced-out
+// worker's late settles and re-pends miss silently, leaving the reclaimer's
+// state authoritative. Stamp-less calls are unfenced (pre-claim paths and
+// legacy payloads).
+function fencedHoldWrite(qb, claimStamp) {
+  if (claimStamp) {
+    qb.where({ status: 'releasing', updated_at: new Date(claimStamp) });
+  }
+  return qb;
+}
+
+async function settleHold(holdId, patch, dbh, claimStamp = null) {
   // EVERY retryable settle (pending + a fallback marker) is deny-preserving
   // (Codex #3084 r22): a deny stamping after the pre-send read must not be
   // buried under ANY retry marker — the card is resolved by then, and the
   // sweep excludes only the exact deny marker. Terminal released settles
   // carry their own deny guard (settleIfTargetUnchanged); 'blocked' is a
-  // stronger consent terminal and may overwrite.
+  // stronger consent terminal and may overwrite. With a claimStamp every
+  // write is fenced (Codex #3084 r27): a worker that lost its claim to the
+  // sweep's reclaim writes nothing.
   if (patch.status === 'pending' && patch.last_error) {
-    const updated = await dbh('first_touch_holds')
-      .where({ id: holdId })
-      .where(function notDenied() {
-        this.whereNull('last_error').orWhereNot('last_error', 'email_denied_await_correction');
-      })
+    const updated = await fencedHoldWrite(
+      dbh('first_touch_holds')
+        .where({ id: holdId })
+        .where(function notDenied() {
+          this.whereNull('last_error').orWhereNot('last_error', 'email_denied_await_correction');
+        }),
+      claimStamp,
+    )
       .update({ ...patch, updated_at: new Date() });
     if (!updated) {
       const { last_error, ...rest } = patch;
-      await dbh('first_touch_holds').where({ id: holdId })
+      await fencedHoldWrite(dbh('first_touch_holds').where({ id: holdId }), claimStamp)
         .update({ ...rest, status: 'pending', updated_at: new Date() });
     }
     return;
   }
-  await dbh('first_touch_holds').where({ id: holdId }).update({ ...patch, updated_at: new Date() });
+  await fencedHoldWrite(dbh('first_touch_holds').where({ id: holdId }), claimStamp)
+    .update({ ...patch, updated_at: new Date() });
 }
 
 // A claimant settles from its claim-time snapshot — work merged into the row
@@ -148,15 +193,18 @@ async function repenIfWorkMergedDuringClaim(holdId, dbh) {
 // only the exact marker) would release the address the operator rejected.
 // Two steps: write the fallback error only onto un-stamped rows; a stamped
 // row re-pends with its stamp untouched.
-async function repenHoldPreservingDeny(holdId, fallbackError, dbh) {
-  const updated = await dbh('first_touch_holds')
-    .where({ id: holdId })
-    .where(function notDenied() {
-      this.whereNull('last_error').orWhereNot('last_error', 'email_denied_await_correction');
-    })
+async function repenHoldPreservingDeny(holdId, fallbackError, dbh, claimStamp = null) {
+  const updated = await fencedHoldWrite(
+    dbh('first_touch_holds')
+      .where({ id: holdId })
+      .where(function notDenied() {
+        this.whereNull('last_error').orWhereNot('last_error', 'email_denied_await_correction');
+      }),
+    claimStamp,
+  )
     .update({ status: 'pending', last_error: fallbackError, updated_at: new Date() });
   if (!updated) {
-    await dbh('first_touch_holds').where({ id: holdId })
+    await fencedHoldWrite(dbh('first_touch_holds').where({ id: holdId }), claimStamp)
       .update({ status: 'pending', updated_at: new Date() });
   }
 }
@@ -168,10 +216,13 @@ async function repenHoldPreservingDeny(holdId, fallbackError, dbh) {
 // 'superseded_during_send' (NOT the send-failed marker — skipDedupe must
 // stay false; the correction's rotation cleared the pending subscriber's
 // delivered-stamp, so the retry sends a fresh DOI to the new target).
-async function settleIfTargetUnchanged(holdId, observedEmailLc, patch, dbh) {
-  const settled = await dbh('first_touch_holds')
-    .where({ id: holdId })
-    .whereRaw("LOWER(COALESCE(held_email, '')) = ?", [observedEmailLc])
+async function settleIfTargetUnchanged(holdId, observedEmailLc, patch, dbh, claimStamp = null) {
+  const settled = await fencedHoldWrite(
+    dbh('first_touch_holds')
+      .where({ id: holdId })
+      .whereRaw("LOWER(COALESCE(held_email, '')) = ?", [observedEmailLc]),
+    claimStamp,
+  )
     // A deny stamping AFTER the pre-send read must survive the settle
     // (Codex #3084 r21): the claim-safe merge preserves held_email, so the
     // target CAS alone would pass and the released patch's last_error:null
@@ -183,7 +234,10 @@ async function settleIfTargetUnchanged(holdId, observedEmailLc, patch, dbh) {
     })
     .update({ ...patch, updated_at: new Date() });
   if (!settled) {
-    await repenHoldPreservingDeny(holdId, 'superseded_during_send', dbh);
+    // The fallback re-pend carries the same fence (r27): when the settle
+    // missed because the claim was RECLAIMED (not merely retargeted), the
+    // reclaimer owns the row and this worker must not touch it.
+    await repenHoldPreservingDeny(holdId, 'superseded_during_send', dbh, claimStamp);
   }
   return settled > 0;
 }
@@ -300,13 +354,18 @@ async function resumeHeldFirstTouch({
   // re-pends it if an error escapes mid-release, so a claimed row never
   // strands 'releasing' with its card already resolved (Codex #3084 r10).
   let inFlightHoldId = null;
+  // Fence stamps for every claim this run took (Codex #3084 r27) — the
+  // outer catch re-pends only rows this run still OWNS.
+  const claimStamps = new Map();
   try {
     const holds = await findPendingHolds({ callLogId, customerId, dbh });
     if (!holds.length) return { ...result, newsletterResume: null, skipped: 'no_pending_hold' };
 
     for (const hold of holds) {
-      if (!(await claimHold(hold, dbh))) continue; // another release path owns it
+      const claimStamp = await claimHold(hold, dbh);
+      if (!claimStamp) continue; // another release path owns it
       inFlightHoldId = hold.id;
+      claimStamps.set(hold.id, claimStamp);
 
       // A deny-stamped hold means the operator resolved the card WITHOUT
       // approving the address (Codex #3084 r14) — no automated trigger
@@ -314,7 +373,7 @@ async function resumeHeldFirstTouch({
       // Only an explicit correction (the `email` override) does; success
       // clears the stamp with the released-settle's last_error: null.
       if (hold.last_error === 'email_denied_await_correction' && !email) {
-        await settleHold(hold.id, { status: 'pending' }, dbh);
+        await settleHold(hold.id, { status: 'pending' }, dbh, claimStamp);
         result.skipped = result.skipped || 'email_denied';
         continue;
       }
@@ -340,7 +399,7 @@ async function resumeHeldFirstTouch({
           liveCard = { unverified: true };
         }
         if (liveCard) {
-          await settleHold(hold.id, { status: 'pending' }, dbh);
+          await settleHold(hold.id, { status: 'pending' }, dbh, claimStamp);
           result.skipped = result.skipped || 'email_review_live';
           continue;
         }
@@ -348,34 +407,34 @@ async function resumeHeldFirstTouch({
 
       const holdCustomerId = hold.customer_id || customerId;
       if (!holdCustomerId) {
-        await settleHold(hold.id, { status: 'pending', last_error: 'no_customer_linked' }, dbh);
+        await settleHold(hold.id, { status: 'pending', last_error: 'no_customer_linked' }, dbh, claimStamp);
         continue;
       }
       const customer = await dbh('customers')
         .where({ id: holdCustomerId })
         .first('id', 'first_name', 'last_name');
       if (!customer) {
-        await settleHold(hold.id, { status: 'pending', last_error: 'customer_not_found' }, dbh);
+        await settleHold(hold.id, { status: 'pending', last_error: 'customer_not_found' }, dbh, claimStamp);
         continue;
       }
 
       const resumeEmail = String(email || hold.held_email || '').trim().toLowerCase();
       if (!resumeEmail || !RESUME_EMAIL_RE.test(resumeEmail)) {
         // Back to pending: a later correction releases it.
-        await settleHold(hold.id, { status: 'pending', last_error: 'invalid_email' }, dbh);
+        await settleHold(hold.id, { status: 'pending', last_error: 'invalid_email' }, dbh, claimStamp);
         result.skipped = result.skipped || 'invalid_email';
         continue;
       }
 
       if (await customerCallDoNotContact(holdCustomerId, dbh)) {
-        await settleHold(hold.id, { status: 'blocked', last_error: 'do_not_contact' }, dbh);
+        await settleHold(hold.id, { status: 'blocked', last_error: 'do_not_contact' }, dbh, claimStamp);
         logger.info(`[first-touch-resume] customer ${holdCustomerId}: do-not-contact veto — hold blocked (${source})`);
         result.skipped = result.skipped || 'do_not_contact';
         continue;
       }
       if (await emailSuppressedForNewLead(resumeEmail, dbh)) {
         // Back to pending: a corrected address after a bounce releases it.
-        await settleHold(hold.id, { status: 'pending', last_error: 'email_suppressed' }, dbh);
+        await settleHold(hold.id, { status: 'pending', last_error: 'email_suppressed' }, dbh, claimStamp);
         logger.info(`[first-touch-resume] customer ${holdCustomerId}: address suppressed — hold stays pending (${source})`);
         result.skipped = result.skipped || 'email_suppressed';
         continue;
@@ -395,7 +454,18 @@ async function resumeHeldFirstTouch({
       // conditional on it still matching (Codex #3084 r19).
       let observedEmailLc = String(hold.held_email || '').trim().toLowerCase();
       try {
-        const freshRow = await dbh('first_touch_holds').where({ id: hold.id }).first('held_email', 'last_error');
+        const freshRow = await dbh('first_touch_holds').where({ id: hold.id })
+          .first('held_email', 'last_error', 'status', 'updated_at');
+        // Fence check on the SAME fresh read (Codex #3084 r27): a worker
+        // suspended past the stale-claim window lost this row to the
+        // sweep's reclaim — the reclaimer owns every send and settle now,
+        // so this worker walks away without writing anything.
+        if (!freshRow || String(freshRow.status) !== 'releasing'
+            || +new Date(freshRow.updated_at) !== +claimStamp) {
+          logger.info('[first-touch-resume] claim lost to a reclaim — abandoning hold untouched');
+          result.skipped = result.skipped || 'claim_lost';
+          continue;
+        }
         freshDenyStamped = freshRow?.last_error === 'email_denied_await_correction';
         observedEmailLc = String(freshRow?.held_email || '').trim().toLowerCase();
         if (observedEmailLc && observedEmailLc !== String(hold.held_email || '').trim().toLowerCase()
@@ -409,17 +479,17 @@ async function resumeHeldFirstTouch({
         // re-attempts the read. Deny-preserving (r19): the read failed, so
         // a stamp that landed since the claim must not be overwritten.
         logger.warn(`[first-touch-resume] pre-send target re-read failed: ${rereadErr.code || rereadErr.name || 'db_error'} — hold stays pending`);
-        await repenHoldPreservingDeny(hold.id, 'target_verify_failed', dbh);
+        await repenHoldPreservingDeny(hold.id, 'target_verify_failed', dbh, claimStamp);
         result.skipped = result.skipped || 'target_verify_failed';
         continue;
       }
       if (freshDenyStamped && !email) {
-        await settleHold(hold.id, { status: 'pending' }, dbh); // stamp untouched
+        await settleHold(hold.id, { status: 'pending' }, dbh, claimStamp); // stamp untouched
         result.skipped = result.skipped || 'email_denied';
         continue;
       }
       if (sendEmail !== resumeEmail && await emailSuppressedForNewLead(sendEmail, dbh)) {
-        await settleHold(hold.id, { status: 'pending', last_error: 'email_suppressed' }, dbh);
+        await settleHold(hold.id, { status: 'pending', last_error: 'email_suppressed' }, dbh, claimStamp);
         result.skipped = result.skipped || 'email_suppressed';
         continue;
       }
@@ -508,7 +578,7 @@ async function resumeHeldFirstTouch({
           // Sanitized code only, in the log AND the ledger: an enrollment
           // unique-violation can echo the denormalized email.
           const enrollCode = enrollErr.code || enrollErr.name || 'enroll_failed';
-          await settleHold(hold.id, { status: 'pending', last_error: `enroll_failed: ${enrollCode}` }, dbh);
+          await settleHold(hold.id, { status: 'pending', last_error: `enroll_failed: ${enrollCode}` }, dbh, claimStamp);
           logger.warn(`[first-touch-resume] enroll failed for customer ${holdCustomerId} — hold stays pending: ${enrollCode}`);
           result.skipped = result.skipped || 'enroll_failed';
           continue;
@@ -529,6 +599,10 @@ async function resumeHeldFirstTouch({
             email: sendEmail,
             firstName: customer.first_name || null,
             lastName: customer.last_name || null,
+            // The claim's fence stamp rides the payload (Codex #3084 r27)
+            // so the post-commit callback can prove it still owns the row
+            // before sending or settling.
+            claimStamp,
           });
           deferredThisHold = true;
         } else {
@@ -537,6 +611,18 @@ async function resumeHeldFirstTouch({
           // undelivered (re-pends below) and log only a sanitized code (a
           // unique-violation message can echo the subscriber email),
           // Codex #3084 r10.
+          // Fence re-check immediately before the DOI (Codex #3084 r27):
+          // the enroll above can be slow, and this claim's snapshot may
+          // carry the skipDedupe marker — a worker that lost the row to
+          // the sweep's reclaim would bypass the dedupe guard and send a
+          // SECOND confirmation. A lost claim walks away; the drip work
+          // already done is recorded by the reclaimer's own release (the
+          // enroll is idempotent by template+customer).
+          if (!(await ownsClaim(hold.id, claimStamp, dbh))) {
+            logger.info('[first-touch-resume] claim lost before DOI send — abandoning hold untouched');
+            result.skipped = result.skipped || 'claim_lost';
+            continue;
+          }
           let outcome = null;
           try {
             outcome = await runNewsletterResume({
@@ -572,8 +658,9 @@ async function resumeHeldFirstTouch({
       }
       if (patch.status === 'released') {
         // Terminal settle only if no concurrent correction retargeted the
-        // row since our pre-send read (Codex #3084 r19).
-        const settled = await settleIfTargetUnchanged(hold.id, observedEmailLc, patch, dbh);
+        // row since our pre-send read (Codex #3084 r19) AND this worker
+        // still owns the claim (r27).
+        const settled = await settleIfTargetUnchanged(hold.id, observedEmailLc, patch, dbh, claimStamp);
         if (settled) await repenIfWorkMergedDuringClaim(hold.id, dbh);
       } else if (Object.keys(patch).length) {
         // Retryable settles CAS the target too (Codex #3084 r23): a
@@ -581,17 +668,21 @@ async function resumeHeldFirstTouch({
         // held_email — writing the observed address back would point the
         // sweep's retry at the superseded (possibly hard-bounced) value.
         // On a mismatch (or a mid-attempt deny), everything EXCEPT
-        // held_email still settles via the deny-preserving path.
-        const settled = await dbh('first_touch_holds')
-          .where({ id: hold.id })
-          .whereRaw("LOWER(COALESCE(held_email, '')) = ?", [observedEmailLc])
+        // held_email still settles via the deny-preserving path. Fenced
+        // (r27): a reclaimed row belongs to the reclaimer.
+        const settled = await fencedHoldWrite(
+          dbh('first_touch_holds')
+            .where({ id: hold.id })
+            .whereRaw("LOWER(COALESCE(held_email, '')) = ?", [observedEmailLc]),
+          claimStamp,
+        )
           .where(function notDenied() {
             this.whereNull('last_error').orWhereNot('last_error', 'email_denied_await_correction');
           })
           .update({ ...patch, updated_at: new Date() });
         if (!settled) {
           const { held_email, ...rest } = patch;
-          await settleHold(hold.id, { ...rest, status: 'pending' }, dbh);
+          await settleHold(hold.id, { ...rest, status: 'pending' }, dbh, claimStamp);
         }
       }
 
@@ -625,16 +716,23 @@ async function resumeHeldFirstTouch({
       try {
         // Deny-preserving (Codex #3084 r19): this is an unknown-state error
         // path — a stamp that landed since the claim must not be buried
-        // under the resume_failed marker.
-        const repenned = await dbh('first_touch_holds')
-          .where({ id: strandedId, status: 'releasing' })
-          .where(function notDenied() {
-            this.whereNull('last_error').orWhereNot('last_error', 'email_denied_await_correction');
-          })
+        // under the resume_failed marker. Fenced (r27): a row this run no
+        // longer owns (the sweep reclaimed it) is the reclaimer's to settle.
+        const fence = claimStamps.get(strandedId) || null;
+        const repenned = await fencedHoldWrite(
+          dbh('first_touch_holds')
+            .where({ id: strandedId, status: 'releasing' })
+            .where(function notDenied() {
+              this.whereNull('last_error').orWhereNot('last_error', 'email_denied_await_correction');
+            }),
+          fence,
+        )
           .update({ status: 'pending', last_error: `resume_failed: ${code}`, updated_at: new Date() });
         if (!repenned) {
-          await dbh('first_touch_holds')
-            .where({ id: strandedId, status: 'releasing' })
+          await fencedHoldWrite(
+            dbh('first_touch_holds').where({ id: strandedId, status: 'releasing' }),
+            fence,
+          )
             .update({ status: 'pending', updated_at: new Date() });
         }
       } catch (repenErr) {
@@ -659,17 +757,23 @@ async function resumeHeldNewsletterPostCommit(payloadOrList, dbh = db) {
   const groups = new Map();
   for (const p of list) {
     const key = `${p.customerId}|${String(p.email || '').trim().toLowerCase()}`;
-    if (!groups.has(key)) groups.set(key, { payload: p, holdIds: [] });
-    if (p.holdId) groups.get(key).holdIds.push(p.holdId);
+    if (!groups.has(key)) groups.set(key, { payload: p, holdIds: [], claims: new Map() });
+    if (p.holdId) {
+      groups.get(key).holdIds.push(p.holdId);
+      // Per-hold fence stamps (Codex #3084 r27); stamp-less legacy
+      // payloads stay unfenced.
+      if (p.claimStamp) groups.get(key).claims.set(p.holdId, p.claimStamp);
+    }
   }
   const outcomes = [];
-  for (const { payload, holdIds } of groups.values()) {
-    outcomes.push(await runOnePostCommitResume(payload, holdIds, dbh));
+  for (const { payload, holdIds, claims } of groups.values()) {
+    outcomes.push(await runOnePostCommitResume(payload, holdIds, dbh, claims));
   }
   return Array.isArray(payloadOrList) ? outcomes : outcomes[0];
 }
 
-async function runOnePostCommitResume(payload, holdIds, dbh) {
+async function runOnePostCommitResume(payload, holdIds, dbh, claims = new Map()) {
+  const fenceOf = (holdId) => claims.get(holdId) || null;
   try {
     // Re-read the freshest target before sending (Codex #3084 r13): a
     // second correction may have superseded held_email after this payload
@@ -691,8 +795,8 @@ async function runOnePostCommitResume(payload, holdIds, dbh) {
         for (const holdId of holdIds) {
           try {
             // Deny-preserving (r19): the read failed, so a stamp that
-            // landed since the claim must not be overwritten.
-            await repenHoldPreservingDeny(holdId, 'target_verify_failed', dbh);
+            // landed since the claim must not be overwritten. Fenced (r27).
+            await repenHoldPreservingDeny(holdId, 'target_verify_failed', dbh, fenceOf(holdId));
           } catch (repenErr) {
             logger.warn(`[first-touch-resume] hold ${holdId} re-pend failed: ${repenErr.code || repenErr.name || 'db_error'} (stale-claim window will reclaim)`);
           }
@@ -721,7 +825,7 @@ async function runOnePostCommitResume(payload, holdIds, dbh) {
           .first('id');
         if (denyRow) {
           for (const holdId of holdIds) {
-            await dbh('first_touch_holds').where({ id: holdId })
+            await fencedHoldWrite(dbh('first_touch_holds').where({ id: holdId }), fenceOf(holdId))
               .update({ status: 'pending', updated_at: new Date() });
           }
           logger.info('[first-touch-resume] post-commit deny veto — hold(s) stay pending');
@@ -736,7 +840,7 @@ async function runOnePostCommitResume(payload, holdIds, dbh) {
         logger.warn(`[first-touch-resume] resend-marker lookup failed: ${markerErr.code || markerErr.name || 'db_error'} — hold(s) stay pending`);
         for (const holdId of holdIds) {
           try {
-            await repenHoldPreservingDeny(holdId, 'target_verify_failed', dbh);
+            await repenHoldPreservingDeny(holdId, 'target_verify_failed', dbh, fenceOf(holdId));
           } catch (repenErr) {
             logger.warn(`[first-touch-resume] hold ${holdId} re-pend failed: ${repenErr.code || repenErr.name || 'db_error'} (stale-claim window will reclaim)`);
           }
@@ -754,7 +858,7 @@ async function runOnePostCommitResume(payload, holdIds, dbh) {
     // through to the outer catch, which re-pends every hold (retryable).
     if (payload.customerId && await customerCallDoNotContact(payload.customerId, dbh)) {
       for (const holdId of holdIds) {
-        await dbh('first_touch_holds').where({ id: holdId })
+        await fencedHoldWrite(dbh('first_touch_holds').where({ id: holdId }), fenceOf(holdId))
           .update({ status: 'blocked', last_error: 'do_not_contact', updated_at: new Date() });
       }
       logger.info(`[first-touch-resume] customer ${payload.customerId}: post-commit do-not-contact veto — hold(s) blocked`);
@@ -762,26 +866,43 @@ async function runOnePostCommitResume(payload, holdIds, dbh) {
     }
     if (await emailSuppressedForNewLead(sendPayload.email, dbh)) {
       for (const holdId of holdIds) {
-        await repenHoldPreservingDeny(holdId, 'email_suppressed', dbh);
+        await repenHoldPreservingDeny(holdId, 'email_suppressed', dbh, fenceOf(holdId));
       }
       logger.info('[first-touch-resume] post-commit target suppressed — hold(s) stay pending');
       return { skipped: 'email_suppressed' };
     }
+    // Fence check immediately before the send (Codex #3084 r27): a
+    // callback delayed past the stale-claim window lost its rows to the
+    // sweep's reclaim, whose own release owns the send — and the group's
+    // skipDedupe marker would bypass the dedupe guard and double-mail.
+    // Only holds this callback still owns are settled below; when every
+    // fenced hold is lost, there is nothing left that is ours to send.
+    let liveHoldIds = holdIds;
+    if (holdIds.length && claims.size) {
+      liveHoldIds = [];
+      for (const holdId of holdIds) {
+        if (await ownsClaim(holdId, fenceOf(holdId), dbh)) liveHoldIds.push(holdId);
+      }
+      if (!liveHoldIds.length) {
+        logger.info('[first-touch-resume] post-commit claim(s) lost to a reclaim — abandoning send');
+        return { skipped: 'claim_lost' };
+      }
+    }
     const outcome = await runNewsletterResume(sendPayload, dbh, { skipDedupe: holdWasDoiUnconfirmed });
     const sentEmailLc = String(sendPayload.email || '').trim().toLowerCase();
-    for (const holdId of holdIds) {
+    for (const holdId of liveHoldIds) {
       if (newsletterDelivered(outcome)) {
         const hold = await dbh('first_touch_holds').where({ id: holdId }).first('held_drip', 'released_drip');
         const dripSettled = !hold || !hold.held_drip || hold.released_drip;
         // Conditional on the target still matching what this callback sent
         // (Codex #3084 r19): correction B can retarget the releasing row
         // after our re-read, and settling would bury B's address with no
-        // retry trigger left.
+        // retry trigger left. Fenced (r27).
         const settled = await settleIfTargetUnchanged(holdId, sentEmailLc, {
           released_newsletter: true,
           status: dripSettled ? 'released' : 'pending',
           ...(dripSettled ? { released_at: new Date(), last_error: null } : {}),
-        }, dbh);
+        }, dbh, fenceOf(holdId));
         if (settled && dripSettled) await repenIfWorkMergedDuringClaim(holdId, dbh);
       } else {
         // Back to pending — the DOI never confirmed; the next release
@@ -790,7 +911,7 @@ async function runOnePostCommitResume(payload, holdIds, dbh) {
         // Deny-preserving (r22); the force-resend marker only when the
         // subscriber still carries the attempted address (r25).
         await repenHoldPreservingDeny(holdId, outcome?.retryReason
-          || await sendFailedMarkerFor(sentEmailLc, dbh), dbh);
+          || await sendFailedMarkerFor(sentEmailLc, dbh), dbh, fenceOf(holdId));
       }
     }
     return outcome;
@@ -806,7 +927,8 @@ async function runOnePostCommitResume(payload, holdIds, dbh) {
     for (const holdId of holdIds) {
       try {
         // Deny-preserving (r22): a stamp landing mid-callback survives.
-        await repenHoldPreservingDeny(holdId, `newsletter_resume_failed: ${code}`, dbh);
+        // Fenced (r27): rows lost to a reclaim stay the reclaimer's.
+        await repenHoldPreservingDeny(holdId, `newsletter_resume_failed: ${code}`, dbh, fenceOf(holdId));
       } catch (repenErr) {
         logger.warn(`[first-touch-resume] hold ${holdId} re-pend failed: ${repenErr.code || repenErr.name || 'db_error'} (stale-claim window will reclaim)`);
       }
@@ -915,7 +1037,14 @@ async function recordFirstTouchHold({ callLogId, customerId = null, heldEmail, h
           // hold into a releasable state. Released/pending re-pend as
           // before.
           status: dbh.raw("CASE WHEN first_touch_holds.status IN ('releasing', 'blocked') THEN first_touch_holds.status ELSE 'pending' END"),
-          updated_at: now,
+          // A live claim's updated_at IS its fence stamp (Codex #3084 r27)
+          // — bumping it here would fence out the owning worker mid-release
+          // AND extend a dead claimant's stale-claim window (the r12
+          // rationale). Releasing rows keep their stamp; everything else
+          // records the merge time as before.
+          updated_at: dbh.raw(
+            "CASE WHEN first_touch_holds.status = 'releasing' THEN first_touch_holds.updated_at ELSE excluded.updated_at END",
+          ),
         });
       return true;
     } catch (err) {
@@ -1032,4 +1161,8 @@ module.exports = {
   customerCallDoNotContact,
   emailSuppressedForNewLead,
   sendFailedMarkerFor,
+  // Claim-fence primitives (Codex #3084 r27) — the fanout's coalesced
+  // resend holds claims too and must honor the same lease.
+  ownsClaim,
+  fencedHoldWrite,
 };

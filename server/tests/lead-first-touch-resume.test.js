@@ -30,14 +30,18 @@ let mockTriageFirstQueue = null; // shift per triage_items.first()
 let mockReleasedSettleZeroOnce = false; // next released-settle matches 0 rows (mid-send retarget)
 let mockRepenGuardZeroTimes = 0; // next N guarded re-pends match 0 rows (deny stamp landed)
 let mockEnrollmentUpdates = []; // automation_enrollments update() patches
+let mockClaimStampById = {}; // claim fence stamps recorded per hold id (r27)
+let mockClaimLost = false; // fence reads report the claim as reclaimed (r27)
 jest.mock('../models/db', () => {
   const handler = (table) => {
     let markerFilter = false; // this chain filters on the resend marker
     let denyFilter = false; // this chain filters on the deny stamp
+    let whereId = null; // the chain's {id} filter (fence stamp bookkeeping)
     const chain = {
       where: jest.fn((arg) => {
         if (arg && arg.last_error === 'newsletter_doi_not_confirmed') markerFilter = true;
         if (arg && arg.last_error === 'email_denied_await_correction') denyFilter = true;
+        if (arg && arg.id !== undefined) whereId = arg.id;
         return chain;
       }),
       whereIn: jest.fn(() => chain),
@@ -67,6 +71,11 @@ jest.mock('../models/db', () => {
       update: jest.fn(async (patch) => {
         if (table === 'first_touch_holds') {
           if (patch.status === 'releasing' && mockClaimFails) return 0;
+          // A landing claim's updated_at is its fence stamp (r27) —
+          // remember it per hold so the fence reads below can echo it.
+          if (patch.status === 'releasing' && patch.updated_at && whereId != null) {
+            mockClaimStampById[whereId] = patch.updated_at;
+          }
           if (patch.status === 'released' && mockReleasedSettleZeroOnce) {
             mockReleasedSettleZeroOnce = false;
             return 0; // conditional settle: target no longer matches
@@ -87,7 +96,7 @@ jest.mock('../models/db', () => {
         }
         return 1;
       }),
-      first: jest.fn(async () => {
+      first: jest.fn(async (...cols) => {
         if (table === 'first_touch_holds') {
           if (denyFilter) {
             if (mockDoiMarkerError) throw mockDoiMarkerError;
@@ -97,10 +106,29 @@ jest.mock('../models/db', () => {
             if (mockDoiMarkerError) throw mockDoiMarkerError;
             return mockDoiMarkerRow;
           }
+          // ownsClaim's fence read (r27) — status+updated_at only. Echo the
+          // recorded claim stamp so a live claim verifies; mockClaimLost
+          // simulates the sweep's reclaim.
+          if (cols.length === 2 && cols[0] === 'status') {
+            if (mockClaimLost) return { status: 'pending', updated_at: new Date(0) };
+            return { status: 'releasing', updated_at: mockClaimStampById[whereId] };
+          }
           if (mockHoldFirstQueue && mockHoldFirstQueue.length) {
             const next = mockHoldFirstQueue.shift();
             if (next instanceof Error) throw next;
+            // The pre-send re-read carries the fence fields since r27 —
+            // supply a passing fence unless the row overrides them.
+            if (next && cols.length === 4 && cols[0] === 'held_email') {
+              return mockClaimLost
+                ? { status: 'pending', updated_at: new Date(0), ...next }
+                : { status: 'releasing', updated_at: mockClaimStampById[whereId], ...next };
+            }
             return next;
+          }
+          if (mockHold && cols.length === 4 && cols[0] === 'held_email') {
+            return mockClaimLost
+              ? { ...mockHold, status: 'pending', updated_at: new Date(0) }
+              : { ...mockHold, status: 'releasing', updated_at: mockClaimStampById[whereId] };
           }
           return mockHold;
         }
@@ -195,6 +223,8 @@ beforeEach(() => {
   mockReleasedSettleZeroOnce = false;
   mockRepenGuardZeroTimes = 0;
   mockEnrollmentUpdates = [];
+  mockClaimStampById = {};
+  mockClaimLost = false;
 });
 
 // The merge's held_email is a bound CASE since r20 (an ACTIVE claim's target
@@ -322,6 +352,51 @@ describe('resumeHeldFirstTouch (ledger release engine)', () => {
     const res = await resumeHeldFirstTouch({ callLogId: 'call-1' });
     expect(res.resumed).toBe(false);
     expect(mockEnroll).not.toHaveBeenCalled();
+    expect(mockNewsletter).not.toHaveBeenCalled();
+  });
+
+  test('a claim reclaimed by the sweep fences the suspended worker out before any send', async () => {
+    // The worker suspended past the stale-claim window; the sweep reclaimed
+    // the row (its claim bumped updated_at). The resumed worker's pre-send
+    // fence check sees the changed stamp and walks away without sending OR
+    // writing — the reclaimer owns both (Codex #3084 r27).
+    mockClaimLost = true;
+    const res = await resumeHeldFirstTouch({ callLogId: 'call-1' });
+    expect(res).toMatchObject({ resumed: false, skipped: 'claim_lost' });
+    expect(mockEnroll).not.toHaveBeenCalled();
+    expect(mockNewsletter).not.toHaveBeenCalled();
+    // The only ledger write is this worker's own claim — no settle, no
+    // re-pend touches the reclaimer's row.
+    expect(mockHoldUpdates).toHaveLength(1);
+    expect(mockHoldUpdates[0]).toMatchObject({ status: 'releasing' });
+  });
+
+  test('a claim lost during a slow enroll never sends the DOI', async () => {
+    // The fence held at the pre-send read, then the sweep reclaimed the row
+    // while enrollCustomer ran. The claim-time skipDedupe marker would
+    // bypass the dedupe guard on a blind resume — the pre-DOI ownership
+    // re-check catches the reclaim and abandons (Codex #3084 r27).
+    mockHold = baseHold({ last_error: 'newsletter_doi_not_confirmed' });
+    mockEnroll.mockImplementationOnce(async () => {
+      mockClaimLost = true;
+      return { enrolled: true };
+    });
+    const res = await resumeHeldFirstTouch({ callLogId: 'call-1' });
+    expect(res.skipped).toBe('claim_lost');
+    expect(mockNewsletter).not.toHaveBeenCalled();
+    expect(mockHoldUpdates).toHaveLength(1); // the claim only
+  });
+
+  test('a post-commit callback that lost its claims abandons the deferred DOI', async () => {
+    // The deferred payload carries the claim's fence stamp; a callback
+    // delayed past the stale-claim window finds every grouped hold
+    // reclaimed and abandons the send — the sweep's own release owns it
+    // (Codex #3084 r27).
+    const res = await resumeHeldFirstTouch({ customerId: 'cust-1', email: 'corrected@example.com', deferNewsletter: true });
+    expect(res.newsletterResume).toEqual([expect.objectContaining({ holdId: 'hold-1', claimStamp: expect.any(Date) })]);
+    mockClaimLost = true;
+    const outcome = await resumeHeldNewsletterPostCommit(res.newsletterResume);
+    expect(outcome).toEqual([{ skipped: 'claim_lost' }]);
     expect(mockNewsletter).not.toHaveBeenCalled();
   });
 
@@ -467,6 +542,18 @@ describe('recordFirstTouchHold (durable hold ledger writes)', () => {
     const merged = mockMergeArgs.at(-1).held_email;
     expect(String(merged.sql)).toContain("WHEN first_touch_holds.status = 'releasing' THEN first_touch_holds.held_email");
     expect(merged.bindings[0]).toBe('guess@example.com');
+  });
+
+  test("the merge never bumps an ACTIVE claim's updated_at — it IS the fence stamp", async () => {
+    // A Step-8 merge landing mid-claim must not rewrite the releasing
+    // row's updated_at: the claimant proves ownership against that exact
+    // value (Codex #3084 r27), and bumping it would also extend a dead
+    // claimant's stale-claim window (the r12 rationale).
+    mockHold = null;
+    await recordFirstTouchHold({ callLogId: 'call-1', customerId: 'cust-1', heldEmail: 'a@example.com', heldNewsletter: true });
+    expect(String(mockMergeArgs.at(-1).updated_at)).toContain(
+      "WHEN first_touch_holds.status = 'releasing' THEN first_touch_holds.updated_at",
+    );
   });
 });
 
@@ -710,7 +797,9 @@ describe('mid-send races (r19)', () => {
     // guarded write refuses and the fallback re-pends without a marker.
     mockHold = baseHold({ held_newsletter: false });
     mockHoldFirstQueue = [
-      baseHold({ held_newsletter: false }), // pre-send target re-read
+      // pre-send target re-read — fence fields (status/updated_at) come
+      // from the mock's live-claim defaults (r27); only the target rides.
+      { held_email: 'confirmed@example.com', last_error: null },
       { status: 'released', held_drip: true, released_drip: false, held_newsletter: true, released_newsletter: false }, // merged-work re-read
     ];
     mockRepenGuardZeroTimes = 1;

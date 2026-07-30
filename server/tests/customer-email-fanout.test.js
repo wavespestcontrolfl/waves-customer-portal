@@ -14,12 +14,20 @@ const mockRepenMerged = jest.fn();
 const mockDnc = jest.fn();
 const mockSuppressed = jest.fn();
 const mockSendFailedMarker = jest.fn();
+const mockOwnsClaim = jest.fn();
 jest.mock('../services/lead-first-touch-resume', () => ({
   resumeHeldFirstTouch: (...a) => mockResume(...a),
   repenIfWorkMergedDuringClaim: (...a) => mockRepenMerged(...a),
   customerCallDoNotContact: (...a) => mockDnc(...a),
   emailSuppressedForNewLead: (...a) => mockSuppressed(...a),
   sendFailedMarkerFor: (...a) => mockSendFailedMarker(...a),
+  ownsClaim: (...a) => mockOwnsClaim(...a),
+  // Same contract as the real helper: with a stamp the write is fenced on
+  // the claim's status+updated_at; without one it passes through.
+  fencedHoldWrite: (qb, claimStamp) => {
+    if (claimStamp) qb.where({ status: 'releasing', updated_at: new Date(claimStamp) });
+    return qb;
+  },
 }));
 beforeEach(() => {
   mockResume.mockReset().mockResolvedValue({ resumed: false, enrolled: false, newsletterResume: null });
@@ -27,6 +35,7 @@ beforeEach(() => {
   mockDnc.mockReset().mockResolvedValue(false);
   mockSuppressed.mockReset().mockResolvedValue(false);
   mockSendFailedMarker.mockReset().mockResolvedValue('newsletter_doi_not_confirmed');
+  mockOwnsClaim.mockReset().mockResolvedValue(true);
 });
 
 const { propagateCustomerEmailChange, resendPendingConfirmation, emailKey } = require('../services/customer-email-fanout');
@@ -380,11 +389,12 @@ describe('propagateCustomerEmailChange', () => {
     // TWO calls: the re-sent confirmation is the one DOI, but the holds must
     // NOT settle inside the edit transaction — the re-send can still fail
     // post-commit, and a consumed hold would leave nothing to retry.
+    const stamp1 = new Date();
     mockResume.mockResolvedValueOnce({
       resumed: true,
       enrolled: true,
       newsletterResume: [
-        { holdId: 'hold-1', customerId: 'cust-1', email: HOLD_AFTER.email },
+        { holdId: 'hold-1', customerId: 'cust-1', email: HOLD_AFTER.email, claimStamp: stamp1 },
         { holdId: 'hold-2', customerId: 'cust-1', email: HOLD_AFTER.email },
       ],
     });
@@ -398,6 +408,9 @@ describe('propagateCustomerEmailChange', () => {
     });
     const result = await propagateCustomerEmailChange({ before: HOLD_BEFORE, after: HOLD_AFTER }, conn);
     expect(result.pendingConfirmation.heldNewsletterHoldIds).toEqual(['hold-1', 'hold-2']);
+    // Claim fence stamps ride along per hold (r27); stamp-less legacy
+    // payloads simply stay unfenced.
+    expect(result.pendingConfirmation.heldNewsletterHoldClaims).toEqual({ 'hold-1': stamp1 });
     expect(result.heldNewsletterResume).toBeUndefined();
     // Nothing CONSUMED in-trx (the releasing-claim retarget is not a consume).
     expect(conn.__updates('first_touch_holds').filter((u) => u.arg.released_newsletter)).toHaveLength(0);
@@ -664,6 +677,30 @@ describe('resendPendingConfirmation', () => {
     expect(holdUpdates).toHaveLength(1);
     expect(holdUpdates[0].arg).toMatchObject({ status: 'pending', last_error: 'target_verify_failed' });
     expect(holdUpdates[0].arg.released_newsletter).toBeUndefined();
+  });
+
+  test('a resend whose hold claims were all reclaimed abandons the send', async () => {
+    // The callback was delayed past the stale-claim window and the sweep
+    // reclaimed every deduped hold — the sweep's own release owns the send
+    // and the settles; this callback must not double-mail past the dedupe
+    // guard or write over the reclaimer's state (Codex #3084 r27).
+    mockOwnsClaim.mockResolvedValue(false);
+    const sendsBefore = sendConfirmationEmail.mock.calls.length;
+    const claimStamp = new Date();
+    const payload = {
+      id: 811,
+      email: 'samtypo@example.com',
+      confirmation_token: 'tok-1',
+      heldNewsletterHoldIds: ['hold-1'],
+      heldNewsletterHoldClaims: { 'hold-1': claimStamp },
+    };
+    const conn = makeConn(matchRow(payload));
+    const ok = await resendPendingConfirmation(payload, conn);
+    expect(ok).toBe(false);
+    expect(sendConfirmationEmail.mock.calls.length).toBe(sendsBefore);
+    expect(mockOwnsClaim).toHaveBeenCalledWith('hold-1', claimStamp, conn);
+    expect(conn.__updates('newsletter_subscribers')).toHaveLength(0);
+    expect(conn.__updates('first_touch_holds')).toHaveLength(0);
   });
 
   test('a do-not-contact request vetoes the coalesced DOI re-send and blocks the holds', async () => {
