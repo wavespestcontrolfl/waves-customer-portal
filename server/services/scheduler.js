@@ -3534,16 +3534,25 @@ function initScheduledJobs() {
       // duplicate bells/drafts.
       const { runExclusive } = require('../utils/cron-lock');
       await runExclusive('termite-agreement-reconcile', async () => {
-        const { reconcileSupersededProgramAgreements, reconcileTermiteProgramAgreements } = require('./termite-program-agreement');
-        // Version-upgrade retirements first (any estimate age, bells on for
-        // parked re-preps), then the standard recent-accepts sweep.
-        const superseded = await reconcileSupersededProgramAgreements();
-        if (superseded.checked) {
-          logger.info(`Termite agreement superseded-reprep: ${superseded.checked} checked, ${superseded.created} created, ${superseded.failed} failed`);
-        }
-        const recon = await reconcileTermiteProgramAgreements();
-        if (recon.created || recon.failed) {
-          logger.info(`Termite agreement reconciliation: ${recon.checked} checked, ${recon.created} created, ${recon.failed} failed`);
+        // Reconciliation failures must not take the unrelated document
+        // reminders down with them — the ORDERING is required (reminders
+        // after reconciliation), the coupling isn't. A reminder skipped by
+        // a transient reconcile error could hit its schedule's end and
+        // become permanently unsendable.
+        try {
+          const { reconcileSupersededProgramAgreements, reconcileTermiteProgramAgreements } = require('./termite-program-agreement');
+          // Version-upgrade retirements first (any estimate age, bells on for
+          // parked re-preps), then the standard recent-accepts sweep.
+          const superseded = await reconcileSupersededProgramAgreements();
+          if (superseded.checked) {
+            logger.info(`Termite agreement superseded-reprep: ${superseded.checked} checked, ${superseded.created} created, ${superseded.failed} failed`);
+          }
+          const recon = await reconcileTermiteProgramAgreements();
+          if (recon.created || recon.failed) {
+            logger.info(`Termite agreement reconciliation: ${recon.checked} checked, ${recon.created} created, ${recon.failed} failed`);
+          }
+        } catch (err) {
+          logger.error(`Termite agreement reconciliation failed: ${err.message}`);
         }
         // Reminders run INSIDE the same exclusive section, strictly after
         // reconciliation: on a skipped tick (another dyno holds the lock)
@@ -3559,7 +3568,7 @@ function initScheduledJobs() {
         }
       });
     } catch (err) {
-      logger.error(`Termite agreement reconciliation failed: ${err.message}`);
+      logger.error(`Document lifecycle exclusive section failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
