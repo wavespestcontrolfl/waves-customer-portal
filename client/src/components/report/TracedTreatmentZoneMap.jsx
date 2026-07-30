@@ -40,6 +40,10 @@ export default function TracedTreatmentZoneMap({ traced, live = true, variant = 
   // traces, so they keep a neutral caption and skip the interior wash while
   // still getting the calmer outline presentation (codex P1 #3038).
   const lawnCapture = traced.captureMode === 'lawn';
+  // Interior-spray captures (owner 2026-07-29) flood the traced footprint
+  // with the brand-blue wash — only rows captured that way, and only closed
+  // loops, get the fill (same area-claim rule as lawn).
+  const interiorCapture = traced.captureMode === 'interior' && Boolean(traced.closedLoop);
   // No linear-ft figure in the customer caption (owner 2026-07-21). The
   // server label speaks perimeter language — the outline variant tells the
   // area story instead.
@@ -65,7 +69,9 @@ export default function TracedTreatmentZoneMap({ traced, live = true, variant = 
             ? (lawnCapture
               ? 'Satellite photo of the property with the treated lawn area outlined'
               : 'Satellite photo of the property with the technician-traced service area outlined')
-            : 'Satellite photo of the property with the treated perimeter highlighted'}
+            : (interiorCapture
+              ? 'Satellite photo of the property with the treated home and perimeter highlighted'
+              : 'Satellite photo of the property with the treated perimeter highlighted')}
         />
         {sprayLive && pathD && outline && (
           <svg
@@ -99,8 +105,8 @@ export default function TracedTreatmentZoneMap({ traced, live = true, variant = 
                 className="treated-outline-line"
                 d={pathD}
                 fill="none"
-                stroke="#2FA89D"
-                strokeOpacity="0.45"
+                stroke="#7CC7F0"
+                strokeOpacity="0.5"
                 strokeWidth="22"
                 strokeLinecap="round"
                 strokeLinejoin="round"
@@ -108,11 +114,24 @@ export default function TracedTreatmentZoneMap({ traced, live = true, variant = 
                 strokeDasharray="1"
                 filter="url(#outlineGlow)"
               />
+              {/* white casing keeps the navy core readable over dark roofs */}
               <path
                 className="treated-outline-line"
                 d={pathD}
                 fill="none"
-                stroke="#2FA89D"
+                stroke="#FFFFFF"
+                strokeOpacity="0.8"
+                strokeWidth="12"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                pathLength="1"
+                strokeDasharray="1"
+              />
+              <path
+                className="treated-outline-line"
+                d={pathD}
+                fill="none"
+                stroke="#0A7EC2"
                 strokeOpacity="0.95"
                 strokeWidth="7"
                 strokeLinecap="round"
@@ -132,7 +151,7 @@ export default function TracedTreatmentZoneMap({ traced, live = true, variant = 
           >
             <defs>
               {/* smoke, not lines: everything renders through a heavy blur so
-                  the band reads as drifting spray — same teal as the mist the
+                  the band reads as drifting spray — same brand navy as the mist the
                   tech-side engine bakes into the snapshot (MIST_COLOR). */}
               <filter id="tracedMistBlur" x="-60%" y="-60%" width="220%" height="220%">
                 <feGaussianBlur stdDeviation="10" />
@@ -160,7 +179,7 @@ export default function TracedTreatmentZoneMap({ traced, live = true, variant = 
                  first, then the pulse takes over. */
               @keyframes tracedMistPulse {
                 0%, 100% { opacity: 1; }
-                50% { opacity: 0.55; }
+                50% { opacity: 0.35; }
               }
               .traced-spray-line { animation: tracedSprayDraw 3.2s ease-in-out both; }
               .traced-mist-breathe { animation: tracedMistPulse 4.8s ease-in-out 3.2s infinite; }
@@ -170,12 +189,17 @@ export default function TracedTreatmentZoneMap({ traced, live = true, variant = 
             {/* wide soft mist band + tighter dense core — draw in once, then
                 the whole band breathes */}
             <g className="traced-mist-breathe">
+              {interiorCapture && (
+                /* interior-spray capture: the footprint breathes with the
+                   band — the snapshot already carries the settled wash */
+                <path d={pathD} fill="#0A7EC2" fillOpacity="0.14" stroke="none" />
+              )}
               <path
                 className="traced-spray-line"
                 d={pathD}
                 fill="none"
-                stroke="#2FA89D"
-                strokeOpacity="0.34"
+                stroke="#0A7EC2"
+                strokeOpacity="0.4"
                 strokeWidth="58"
                 strokeLinecap="round"
                 strokeLinejoin="round"
@@ -187,7 +211,7 @@ export default function TracedTreatmentZoneMap({ traced, live = true, variant = 
                 className="traced-spray-line"
                 d={pathD}
                 fill="none"
-                stroke="#2FA89D"
+                stroke="#0A7EC2"
                 strokeOpacity="0.52"
                 strokeWidth="26"
                 strokeLinecap="round"
@@ -205,14 +229,16 @@ export default function TracedTreatmentZoneMap({ traced, live = true, variant = 
                 filter="url(#tracedMistBlur)"
                 style={{ animationDelay: `${(i / Math.max(1, puffs.length)) * 7}s` }}
               >
-                <circle cx={Math.round(p.x)} cy={Math.round(p.y)} r="30" fill="#2FA89D" fillOpacity="0.5" />
-                <circle cx={Math.round(p.x) + 14} cy={Math.round(p.y) - 10} r="20" fill="#7CD6CB" fillOpacity="0.45" />
-                <circle cx={Math.round(p.x) - 13} cy={Math.round(p.y) + 6} r="17" fill="#2FA89D" fillOpacity="0.4" />
+                {/* dark waves-navy smoke with one light accent so the puffs
+                    still read as mist, not shadow (owner 2026-07-29) */}
+                <circle cx={Math.round(p.x)} cy={Math.round(p.y)} r="30" fill="#0A7EC2" fillOpacity="0.5" />
+                <circle cx={Math.round(p.x) + 14} cy={Math.round(p.y) - 10} r="20" fill="#7CC7F0" fillOpacity="0.45" />
+                <circle cx={Math.round(p.x) - 13} cy={Math.round(p.y) + 6} r="17" fill="#0A7EC2" fillOpacity="0.4" />
               </g>
             ))}
             {/* mist emitter — a glowing spray blob riding the band, no hard marker */}
             <g className="traced-spray-emitter" filter="url(#tracedMistBlur)">
-              <circle r="26" fill="#7CD6CB" fillOpacity="0.8">
+              <circle r="26" fill="#7CC7F0" fillOpacity="0.8">
                 <animateMotion dur="7s" repeatCount="indefinite" path={pathD} calcMode="linear" />
               </circle>
             </g>

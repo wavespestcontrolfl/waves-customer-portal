@@ -110,6 +110,30 @@ describe('saveTreatmentZoneMap', () => {
     expect(row.id).toBe('row-1');
   });
 
+  test('interior capture mode persists for a closed 3+ point loop (owner 2026-07-29)', async () => {
+    const knex = makeKnex();
+    await saveTreatmentZoneMap({
+      scheduledServiceId: 'svc-1',
+      pathPoints: VALID_POINTS,
+      closedLoop: true,
+      captureMode: 'interior',
+      knex,
+    });
+    expect(knex.state.inserted.capture_mode).toBe('interior');
+  });
+
+  test('interior capture mode downgrades to perimeter on an open path — area claims need a closed loop', async () => {
+    const knex = makeKnex();
+    await saveTreatmentZoneMap({
+      scheduledServiceId: 'svc-1',
+      pathPoints: VALID_POINTS,
+      closedLoop: false,
+      captureMode: 'interior',
+      knex,
+    });
+    expect(knex.state.inserted.capture_mode).toBe('perimeter');
+  });
+
   test('without a new snapshot keeps the existing S3 key and skips upload', async () => {
     const knex = makeKnex({ existing: { id: 'row-1', snapshot_s3_key: 'service-photos/treatment-zones/svc-1/old.png' } });
     await saveTreatmentZoneMap({

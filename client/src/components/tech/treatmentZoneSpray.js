@@ -18,6 +18,10 @@ export const MAP_HEIGHT = MAP_LOGICAL_HEIGHT * MAP_SCALE;
 // down where Google has no imagery that deep — the traced zoom is saved in
 // the payload, so all downstream px→ft/latLng math follows automatically.
 export const ZOOM_ATTEMPTS = [21, 20, 19];
+// Owner ask (2026-07-29): the default frame is sometimes TOO tight to finish
+// the trace — the modal exposes −/+ zoom steps down to this floor (the max is
+// whatever zoom the initial imagery probe accepted).
+export const MIN_TRACE_ZOOM = 18;
 
 export function staticMapUrl(lat, lng, zoom, apiKey) {
   const params = new URLSearchParams({
@@ -94,6 +98,95 @@ export async function loadBestMapImage(lat, lng, apiKey, zooms = ZOOM_ATTEMPTS) 
   throw lastErr || new Error('The satellite photo failed to load.');
 }
 
+/**
+ * Re-project already-dropped trace points when the tech steps the map zoom.
+ * The Static Map re-centers on the same lat/lng, so one zoom step is a pure
+ * 2× scale about the frame center — the points keep marking the same ground.
+ */
+export function rescalePointsForZoom(points, deltaZoom) {
+  const f = Math.pow(2, deltaZoom);
+  return points.map((p) => ({
+    x: MAP_WIDTH / 2 + (p.x - MAP_WIDTH / 2) * f,
+    y: MAP_HEIGHT / 2 + (p.y - MAP_HEIGHT / 2) * f,
+  }));
+}
+
+// ── Home alignment (owner 2026-07-29) ───────────────────────────────────────
+// Static Maps tiles are always north-up, so homes on angled lots render
+// crooked. The fix: rotate the working frame about its center so the home's
+// walls sit square. Rotation preserves scale, so px→ft math is untouched;
+// only lat/lng conversion needs the point un-rotated back to map space first.
+
+/**
+ * Length-weighted dominant orientation of a traced loop, in the 90°-periodic
+ * domain (walls and their perpendiculars agree). Returns radians in
+ * (-π/4, π/4] — the rotation that squares the loop is the negative of this.
+ */
+export function dominantAngleRad(points, closed) {
+  if (!Array.isArray(points) || points.length < 2) return 0;
+  const pts = closed && points.length > 2 ? [...points, points[0]] : points;
+  let sx = 0;
+  let sy = 0;
+  for (let i = 1; i < pts.length; i += 1) {
+    const dx = pts[i].x - pts[i - 1].x;
+    const dy = pts[i].y - pts[i - 1].y;
+    const len = Math.hypot(dx, dy);
+    if (!len) continue;
+    const ang = Math.atan2(dy, dx);
+    sx += len * Math.cos(4 * ang);
+    sy += len * Math.sin(4 * ang);
+  }
+  if (sx === 0 && sy === 0) return 0;
+  return Math.atan2(sy, sx) / 4;
+}
+
+/** Rotate points by -angleRad about the frame center (pairs buildAlignedBase). */
+export function rotatePointsAboutCenter(points, angleRad) {
+  const c = Math.cos(-angleRad);
+  const s = Math.sin(-angleRad);
+  return points.map((p) => {
+    const dx = p.x - MAP_WIDTH / 2;
+    const dy = p.y - MAP_HEIGHT / 2;
+    return { x: MAP_WIDTH / 2 + dx * c - dy * s, y: MAP_HEIGHT / 2 + dx * s + dy * c };
+  });
+}
+
+/** Inverse of rotatePointsAboutCenter for a single point (aligned → map px). */
+export function unrotatePointAboutCenter(p, angleRad) {
+  const c = Math.cos(angleRad);
+  const s = Math.sin(angleRad);
+  const dx = p.x - MAP_WIDTH / 2;
+  const dy = p.y - MAP_HEIGHT / 2;
+  return { x: MAP_WIDTH / 2 + dx * c - dy * s, y: MAP_HEIGHT / 2 + dx * s + dy * c };
+}
+
+/**
+ * Build the aligned working frame: fetch ONE ZOOM STEP LOWER (2× the ground
+ * span at half the px density), rotate about the shared center, and let the
+ * standard frame crop it at the original zoom's scale. The doubled source's
+ * inscribed half-height (960px) always covers the crop's half-diagonal
+ * (800px), so no rotation angle can expose blank corners.
+ * Throws when the tile fails or the canvas taints (verified up front —
+ * a tainted aligned frame could never be composited into the snapshot).
+ */
+export async function buildAlignedBase(lat, lng, zoom, apiKey, angleRad) {
+  const img = await loadMapImage(staticMapUrl(lat, lng, zoom - 1, apiKey));
+  const c = document.createElement('canvas');
+  c.width = MAP_WIDTH;
+  c.height = MAP_HEIGHT;
+  const ctx = c.getContext('2d');
+  ctx.translate(MAP_WIDTH / 2, MAP_HEIGHT / 2);
+  ctx.rotate(-angleRad);
+  ctx.scale(2, 2);
+  ctx.drawImage(img, -img.width / 2, -img.height / 2);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.getImageData(0, 0, 1, 1); // taint probe — throws on a CORS-dirty canvas
+  // data: URL for the display <img> — the deployed CSP allows data: in
+  // img-src (connect-src does not, but the taint probe above guarantees the
+  // compose path never needs to re-fetch this URL).
+  return { image: c, url: c.toDataURL('image/png') };
+}
+
 /** Meters per physical image pixel at this latitude/zoom (scale-2 imagery). */
 export function metersPerPixel(lat, zoom) {
   return (156543.03392 * Math.cos((lat * Math.PI) / 180)) / Math.pow(2, zoom) / MAP_SCALE;
@@ -132,10 +225,21 @@ export function pixelToLatLng(px, center, zoom) {
 
 // ── Spray engine ─────────────────────────────────────────────────────────────
 
-const BAND_RADIUS = 30;
+// Owner ask (2026-07-29): the mist band reads too small on-site — wider band,
+// bigger puffs. Color tuning landed on FRIENDLY waves blue: the near-opaque
+// navy build read like a shadow ("the color needs to be friendly, inviting"),
+// so the band keeps a soft white-mixed core over the brand-blue mist.
+const BAND_RADIUS = 44;
+const BAND_JITTER = 12;
 const STAMP_STEP = 4;
+const STAMP_ALPHA_CORE = 0.075;
+const STAMP_ALPHA_EDGE = 0.05;
+const MIST_LIGHT_MIX = 0.45;
+// Interior wash alphas — the baked footprint fill for interior-spray traces.
+const INTERIOR_FILL_ALPHA = 0.12;
+const INTERIOR_FILL_LIGHT_ALPHA = 0.05;
 const PULSE_MS = 1200;
-const BREATH_MS = 3000;
+const BREATH_MS = 2400;
 
 function hexToRgb(hex) {
   const h = hex.replace('#', '');
@@ -162,6 +266,14 @@ export function startSprayEngine({
   closed,
   mistColor,
   headColor,
+  // Waves mascot logo rides the line as the emitter (owner 2026-07-29 —
+  // "use the waves logo instead of the circle"). Optional: falls back to the
+  // original circle head when the image hasn't loaded.
+  logoImage,
+  // Interior spray showcase (owner 2026-07-29): the traced building footprint
+  // floods with a soft brand-blue wash after the perimeter pass — interior
+  // treatments finally render instead of looking like an untouched roof.
+  interior = false,
   durationMs,
   totalFeet,
   reducedMotion,
@@ -179,7 +291,7 @@ export function startSprayEngine({
   const total = cum[cum.length - 1] || 1;
 
   const mist = hexToRgb(mistColor);
-  const mistLight = mixWithWhite(mist, 0.55);
+  const mistLight = mixWithWhite(mist, MIST_LIGHT_MIX);
   const head = hexToRgb(headColor);
 
   const ctx = canvas.getContext('2d');
@@ -232,10 +344,10 @@ export function startSprayEngine({
   const stampBand = (from, to) => {
     for (let d = from; d <= to; d += STAMP_STEP) {
       const p = pointAt(d);
-      const jitter = BAND_RADIUS + (Math.random() - 0.5) * 8;
+      const jitter = BAND_RADIUS + (Math.random() - 0.5) * BAND_JITTER;
       const g = actx.createRadialGradient(p.x, p.y, 0, p.x, p.y, jitter);
-      g.addColorStop(0, rgba(mistLight, 0.055));
-      g.addColorStop(0.6, rgba(mist, 0.035));
+      g.addColorStop(0, rgba(mistLight, STAMP_ALPHA_CORE));
+      g.addColorStop(0.6, rgba(mist, STAMP_ALPHA_EDGE));
       g.addColorStop(1, rgba(mist, 0));
       actx.fillStyle = g;
       actx.beginPath();
@@ -253,9 +365,9 @@ export function startSprayEngine({
 
   const drawPuff = (p) => {
     const lifeT = p.age / p.life;
-    const alpha = Math.sin(Math.PI * Math.min(1, lifeT)) * 0.28;
+    const alpha = Math.sin(Math.PI * Math.min(1, lifeT)) * 0.32;
     const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.r);
-    g.addColorStop(0, rgba(mixWithWhite(mist, 0.8), alpha));
+    g.addColorStop(0, rgba(mixWithWhite(mist, 0.5), alpha));
     g.addColorStop(0.55, rgba(mistLight, alpha * 0.6));
     g.addColorStop(1, rgba(mist, 0));
     ctx.fillStyle = g;
@@ -265,6 +377,21 @@ export function startSprayEngine({
   };
 
   const drawHead = (x, y) => {
+    if (logoImage && logoImage.width) {
+      // Waves mascot rides the line — soft white halo keeps it readable over
+      // dark imagery. Kept upright (logos don't rotate along paths).
+      const halo = ctx.createRadialGradient(x, y, 0, x, y, 52);
+      halo.addColorStop(0, 'rgba(255,255,255,0.6)');
+      halo.addColorStop(1, 'rgba(255,255,255,0)');
+      ctx.fillStyle = halo;
+      ctx.beginPath();
+      ctx.arc(x, y, 52, 0, Math.PI * 2);
+      ctx.fill();
+      const w = 76;
+      const h = w * (logoImage.height / logoImage.width);
+      ctx.drawImage(logoImage, x - w / 2, y - h / 2, w, h);
+      return;
+    }
     const glow = ctx.createRadialGradient(x, y, 0, x, y, 38);
     glow.addColorStop(0, rgba(head, 0.5));
     glow.addColorStop(1, rgba(head, 0));
@@ -293,8 +420,24 @@ export function startSprayEngine({
     ctx.stroke();
   };
 
+  // Interior wash needs a genuinely closed footprint — an open path has no
+  // interior to claim.
+  const fillInterior = interior && closed && points.length > 2;
+  const fillPath = (target, style) => {
+    target.fillStyle = style;
+    target.beginPath();
+    target.moveTo(points[0].x, points[0].y);
+    for (let i = 1; i < points.length; i += 1) target.lineTo(points[i].x, points[i].y);
+    target.closePath();
+    target.fill();
+  };
+
   if (reducedMotion) {
     stampBand(0, total);
+    if (fillInterior) {
+      fillPath(actx, rgba(mist, INTERIOR_FILL_ALPHA));
+      fillPath(actx, rgba(mistLight, INTERIOR_FILL_LIGHT_ALPHA));
+    }
     lastFrame = () => drawBase();
     lastFrame();
     onStatus({ phase: 'settled', pct: 1, feet: totalFeet });
@@ -325,12 +468,12 @@ export function startSprayEngine({
       const perp = angle + (side * Math.PI) / 2 + (Math.random() - 0.5) * 0.9;
       const speed = 14 + Math.random() * 30;
       puffs.push({
-        x: x + (Math.random() - 0.5) * 14,
-        y: y + (Math.random() - 0.5) * 14,
+        x: x + (Math.random() - 0.5) * 18,
+        y: y + (Math.random() - 0.5) * 18,
         vx: Math.cos(perp) * speed,
         vy: Math.sin(perp) * speed - 6,
-        r: 8 + Math.random() * 7,
-        growth: 24 + Math.random() * 18,
+        r: 12 + Math.random() * 9,
+        growth: 34 + Math.random() * 24,
         age: 0,
         life: 0.9 + Math.random() * 0.5,
       });
@@ -392,16 +535,18 @@ export function startSprayEngine({
       drawBase();
       for (const puff of puffs) drawPuff(puff);
 
+      // Interior wash floods in during the one-shot pulse sweep.
+      if (fillInterior) fillPath(ctx, rgba(mist, INTERIOR_FILL_ALPHA * t));
       const p = pointAt(t * total);
       const soft = Math.sin(Math.PI * t);
-      const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, 95);
+      const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, 120);
       g.addColorStop(0, rgba(mixWithWhite(mist, 0.85), 0.32 * soft));
       g.addColorStop(1, rgba(mist, 0));
       ctx.fillStyle = g;
       ctx.beginPath();
-      ctx.arc(p.x, p.y, 95, 0, Math.PI * 2);
+      ctx.arc(p.x, p.y, 120, 0, Math.PI * 2);
       ctx.fill();
-      strokePath(BAND_RADIUS * 2, rgba(mistLight, 0.1 * soft));
+      strokePath(BAND_RADIUS * 2, rgba(mistLight, 0.12 * soft));
 
       onStatus({ phase, pct: 1, feet: totalFeet });
       if (t >= 1) {
@@ -410,10 +555,15 @@ export function startSprayEngine({
         onStatus({ phase, pct: 1, feet: totalFeet });
       }
     } else {
+      // Settled loop PULSES (owner 2026-07-29): the whole dark-navy band
+      // breathes hard — no crisp center line (owner: "don't do the line in
+      // between"), the BAND is the pulse.
       phaseT += dt * 1000;
-      const breath = 0.045 + 0.035 * (0.5 + 0.5 * Math.sin((2 * Math.PI * phaseT) / BREATH_MS));
+      const wave = 0.5 + 0.5 * Math.sin((2 * Math.PI * phaseT) / BREATH_MS - Math.PI / 2);
       drawBase();
-      strokePath(BAND_RADIUS * 2, rgba(mistLight, breath));
+      if (fillInterior) fillPath(ctx, rgba(mist, INTERIOR_FILL_ALPHA * (0.6 + 0.4 * wave)));
+      strokePath(BAND_RADIUS * 2 + 12, rgba(mist, 0.04 + 0.16 * wave));
+      strokePath(BAND_RADIUS, rgba(mistLight, 0.06 + 0.18 * wave));
     }
 
     lastFrame = drawBase;
@@ -466,14 +616,26 @@ export function buildOutlineAccum({ width, height, points, closed, color }) {
   return accum;
 }
 
-export function buildSettledAccum({ width, height, points, closed, mistColor }) {
+export function buildSettledAccum({ width, height, points, closed, mistColor, interior = false }) {
   const pts = closed && points.length > 2 ? [...points, points[0]] : [...points];
   const mist = hexToRgb(mistColor);
-  const mistLight = mixWithWhite(mist, 0.55);
+  const mistLight = mixWithWhite(mist, MIST_LIGHT_MIX);
   const accum = document.createElement('canvas');
   accum.width = width;
   accum.height = height;
   const actx = accum.getContext('2d');
+  // Interior-spray traces bake the footprint wash into the snapshot (owner
+  // 2026-07-29). Closed loops only — an open path has no interior.
+  if (interior && closed && points.length > 2) {
+    actx.beginPath();
+    actx.moveTo(points[0].x, points[0].y);
+    for (let i = 1; i < points.length; i += 1) actx.lineTo(points[i].x, points[i].y);
+    actx.closePath();
+    actx.fillStyle = rgba(mist, INTERIOR_FILL_ALPHA);
+    actx.fill();
+    actx.fillStyle = rgba(mistLight, INTERIOR_FILL_LIGHT_ALPHA);
+    actx.fill();
+  }
   for (let i = 1; i < pts.length; i += 1) {
     const a = pts[i - 1];
     const b = pts[i];
@@ -482,10 +644,10 @@ export function buildSettledAccum({ width, height, points, closed, mistColor }) 
       const t = d / segLen;
       const x = a.x + (b.x - a.x) * t;
       const y = a.y + (b.y - a.y) * t;
-      const jitter = BAND_RADIUS + (Math.random() - 0.5) * 8;
+      const jitter = BAND_RADIUS + (Math.random() - 0.5) * BAND_JITTER;
       const g = actx.createRadialGradient(x, y, 0, x, y, jitter);
-      g.addColorStop(0, rgba(mistLight, 0.055));
-      g.addColorStop(0.6, rgba(mist, 0.035));
+      g.addColorStop(0, rgba(mistLight, STAMP_ALPHA_CORE));
+      g.addColorStop(0.6, rgba(mist, STAMP_ALPHA_EDGE));
       g.addColorStop(1, rgba(mist, 0));
       actx.fillStyle = g;
       actx.beginPath();
