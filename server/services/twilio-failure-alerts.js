@@ -96,13 +96,15 @@ async function resolveRemoteParty(direction, from, to) {
     // Match every customer contact slot, not just the primary phone — the
     // pipeline records spouses/tenants into the service-contact slots (same
     // column set as call-recording-processor's CONTACT_MATCH_PHONE_COLS).
-    // Enrich only an UNAMBIGUOUS match: two customers sharing the number
-    // (e.g. primary on one account, service contact on another) stay
-    // nameless rather than naming the wrong one.
+    // LIVE customers only (whereLiveCustomer — customers.active is true for
+    // leads too, so a bare deleted_at check would let a stale lead/churned
+    // row suppress or mislabel the one live match). Enrich only an
+    // UNAMBIGUOUS match: two live customers sharing the number stay nameless
+    // rather than naming the wrong one.
+    const { whereLiveCustomer } = require('./customer-stages');
     const key = digits.slice(-10);
     const phoneCols = ['phone', 'service_contact_phone', 'service_contact2_phone', 'service_contact3_phone'];
-    const matches = await db('customers')
-      .whereNull('deleted_at')
+    const matches = await whereLiveCustomer(db('customers'))
       .where(function anyContactSlot() {
         for (const col of phoneCols) {
           this.orWhereRaw(`RIGHT(regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g'), 10) = ?`, [key]);

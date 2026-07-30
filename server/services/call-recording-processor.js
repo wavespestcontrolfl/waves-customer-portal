@@ -5047,9 +5047,11 @@ const CallRecordingProcessor = {
           const vmAlertPhone = resolveCallContactPhone(call, extracted.phone);
           // Customer lookup moved ahead of the plan: known-customer identity
           // is now an alert basis of its own (owner ruling 2026-07-30), not
-          // just payload enrichment.
+          // just payload enrichment. Pre-linked calls fetch the full row —
+          // the banner needs the customer's NAME when the caller doesn't say
+          // theirs (the typical known-customer "call me back" voicemail).
           const vmAlertCustomer = call.customer_id
-            ? { id: call.customer_id }
+            ? (await db('customers').where({ id: call.customer_id }).first().catch(() => null)) || { id: call.customer_id }
             : await findCustomerForCallContact(vmAlertPhone, extracted).catch(() => null);
           const alertPlan = voicemailCallbackAlertPlan({
             extracted,
@@ -5075,8 +5077,13 @@ const CallRecordingProcessor = {
               .update({ voicemail_callback_alerted_at: new Date() });
             if (claimed) {
               const { triggerNotification } = require('./notification-triggers');
+              // Extraction name first (the caller's own words), matched
+              // customer's account name as fallback.
+              const vmCustomerName = [vmAlertCustomer?.first_name, vmAlertCustomer?.last_name]
+                .filter(Boolean).join(' ') || null;
               await triggerNotification('customer_voicemail_callback', {
                 ...alertPlan,
+                name: alertPlan.name || vmCustomerName,
                 customerId: vmAlertCustomer?.id || null,
                 callLogId: call.id,
               });

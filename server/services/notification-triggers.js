@@ -252,8 +252,11 @@ const TRIGGER_REGISTRY = {
       const to = p.toPhone || p.toMasked || 'unknown';
       // Banner-first title: iOS/Android banners truncate, so the WHO leads
       // (owner ruling 2026-07-30 — "the alert should immediately tell me").
-      const remote = p.direction === 'outbound' ? to : from;
-      const who = p.remoteName || (remote !== 'unknown' ? remote : null);
+      // Only an EXPLICIT direction identifies the remote side — the voice
+      // call-status exception path passes direction 'unknown', and guessing
+      // `from` there banners Waves' own originating number as the customer.
+      const remote = p.direction === 'outbound' ? to : (p.direction === 'inbound' ? from : null);
+      const who = p.remoteName || (remote && remote !== 'unknown' ? remote : null);
       return {
         title: `${who ? `${who} — ` : ''}${channel} ${status}`,
         body: `${direction}${channel}${phase}${code}: from ${from} to ${to}${p.errorMessage ? ` — ${p.errorMessage}` : ''}`,
@@ -383,15 +386,27 @@ const TRIGGER_REGISTRY = {
     category: 'estimate',
     priority: 'normal',
     group: 'Leads & Sales',
-    build: (p) => ({
-      title: p.count && p.count > 1
-        ? `${p.count} estimates expired`
-        : `Estimate expired — ${p.customerName || 'customer'}`,
-      body: p.count && p.count > 1
-        ? `${p.count} estimates aged out today. Review the pipeline for follow-up opportunities.`
-        : `${p.customerName || 'Customer'}${p.monthlyTotal ? ' — $' + p.monthlyTotal + '/mo' : ''} expired without a decision.`,
-      link: p.estimateId ? `/admin/estimates?estimateId=${p.estimateId}` : '/admin/estimates',
-    }),
+    // Banner-first + actionable (owner ruling 2026-07-30): the WHO leads the
+    // title, and the old nameless fallback ("Customer expired without a
+    // decision.") never renders — a batch without names uses the count copy.
+    build: (p) => {
+      const names = Array.isArray(p.names) ? p.names.filter(Boolean) : [];
+      if (p.count && p.count > 1) {
+        const extra = p.count - names.length;
+        return {
+          title: `${p.count} estimates expired`,
+          body: names.length
+            ? `Expired without a decision: ${names.join(', ')}${extra > 0 ? ` +${extra} more` : ''}. Worth follow-up calls.`
+            : `${p.count} estimates aged out today. Review the pipeline for follow-up opportunities.`,
+          link: '/admin/estimates',
+        };
+      }
+      return {
+        title: p.customerName ? `${p.customerName} — estimate expired` : 'Estimate expired',
+        body: `${p.customerName ? `${p.customerName}'s` : 'An'} estimate${p.monthlyTotal ? ` ($${p.monthlyTotal}/mo)` : ''} expired without a decision. Worth a follow-up call.`,
+        link: p.estimateId ? `/admin/estimates?estimateId=${p.estimateId}` : '/admin/estimates',
+      };
+    },
   },
   bundle_quote_requested: {
     label: 'Bundle quote requested',
