@@ -303,9 +303,16 @@ function glassPillHeader(T) {
       </table>`;
 }
 
-function glassCard(T, innerHtml, padding = '22px 26px') {
-  return `<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" class="dm-card" style="background:${T.card};background:${T.cardGlassBg};border:1px solid ${T.cardBorder};border-radius:${T.cardRadius};box-shadow:${T.cardShadow};">
-            <tr><td class="dm-text" style="padding:${padding};">${innerHtml}</td></tr>
+function glassCard(T, innerHtml, padding = '22px 26px', { darkAware = false } = {}) {
+  // darkAware: ONLY the newsletter wrapper opts its cards into the dark
+  // theme — its body markup carries dm-* hooks throughout. Transactional
+  // cards (invoices, contracts, appointments, renderBlocks tables) keep
+  // their light surface in dark mode: their inline light-theme colors
+  // stay readable as a white card on the darkened page.
+  const cardClass = darkAware ? ' class="dm-card"' : '';
+  const tdClass = darkAware ? ' class="dm-text"' : '';
+  return `<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"${cardClass} style="background:${T.card};background:${T.cardGlassBg};border:1px solid ${T.cardBorder};border-radius:${T.cardRadius};box-shadow:${T.cardShadow};">
+            <tr><td${tdClass} style="padding:${padding};">${innerHtml}</td></tr>
           </table>`;
 }
 
@@ -387,9 +394,11 @@ function glassPage(T, { preheader, title, contentHtml, msoWidth = 640 }) {
     .dm-page { background: #071F30 !important; background-image: none !important; }
     .dm-card { background: #0C2B42 !important; border-color: #1E4460 !important; }
     .dm-text, .dm-text p, .dm-text li { color: #DCE9F3 !important; }
-    h1, h2, h3, h4, .dm-ink { color: #EAF4FB !important; }
+    .dm-card h1, .dm-card h2, .dm-card h3, .dm-card h4, .dm-ink { color: #EAF4FB !important; }
     .dm-muted, .dm-muted a { color: #9DB4C6 !important; }
+    .dm-page-text { color: #DCE9F3 !important; }
     .dm-box { background: #12354F !important; }
+    .dm-box, .dm-box p, .dm-box li, .dm-box span, .dm-box em, .dm-box strong { color: #DCE9F3 !important; }
     .dm-chip { background: #12354F !important; color: #CFE6F5 !important; }
     a.dm-link { color: #6CC1F0 !important; }
   }
@@ -397,9 +406,11 @@ function glassPage(T, { preheader, title, contentHtml, msoWidth = 640 }) {
   [data-ogsc] .dm-page, [data-ogsb] .dm-page { background: #071F30 !important; background-image: none !important; }
   [data-ogsc] .dm-card, [data-ogsb] .dm-card { background: #0C2B42 !important; border-color: #1E4460 !important; }
   [data-ogsc] .dm-text, [data-ogsc] .dm-text p, [data-ogsc] .dm-text li { color: #DCE9F3 !important; }
-  [data-ogsc] h1, [data-ogsc] h2, [data-ogsc] h3, [data-ogsc] h4, [data-ogsc] .dm-ink { color: #EAF4FB !important; }
+  [data-ogsc] .dm-card h1, [data-ogsc] .dm-card h2, [data-ogsc] .dm-card h3, [data-ogsc] .dm-card h4, [data-ogsc] .dm-ink { color: #EAF4FB !important; }
   [data-ogsc] .dm-muted, [data-ogsc] .dm-muted a { color: #9DB4C6 !important; }
+  [data-ogsc] .dm-page-text { color: #DCE9F3 !important; }
   [data-ogsc] .dm-box, [data-ogsb] .dm-box { background: #12354F !important; }
+  [data-ogsc] .dm-box, [data-ogsc] .dm-box p, [data-ogsc] .dm-box li, [data-ogsc] .dm-box span, [data-ogsc] .dm-box em, [data-ogsc] .dm-box strong { color: #DCE9F3 !important; }
   [data-ogsc] .dm-chip, [data-ogsb] .dm-chip { background: #12354F !important; color: #CFE6F5 !important; }
   [data-ogsc] a.dm-link { color: #6CC1F0 !important; }
 </style>
@@ -429,8 +440,8 @@ function glassEmail({ preheader, heading, intro, lines, ctaHref, ctaLabel, foote
   const contentHtml = `${glassPillHeader(T)}
       <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="max-width:560px;">
         <tr><td align="left" style="padding:30px 4px 0 4px;">
-          <h1 style="margin:0 0 14px 0;font-family:${T.headingFont};font-size:34px;line-height:1.08;letter-spacing:-0.03em;color:${T.ink};font-weight:700;">${heading}</h1>
-          <div style="font-family:${T.font};font-size:15px;line-height:1.6;color:${T.body};">
+          <h1 class="dm-ink" style="margin:0 0 14px 0;font-family:${T.headingFont};font-size:34px;line-height:1.08;letter-spacing:-0.03em;color:${T.ink};font-weight:700;">${heading}</h1>
+          <div class="dm-page-text" style="font-family:${T.font};font-size:15px;line-height:1.6;color:${T.body};">
             ${intro}
           </div>
         </td></tr>
@@ -444,7 +455,7 @@ function glassEmail({ preheader, heading, intro, lines, ctaHref, ctaLabel, foote
         </td></tr>` : ''}
         ${footerNote ? `
         <tr><td align="center" style="padding:28px 4px 0 4px;">
-          <div style="font-family:${T.font};font-size:13px;line-height:1.6;color:${T.muted};text-align:center;">
+          <div class="dm-muted" style="font-family:${T.font};font-size:13px;line-height:1.6;color:${T.muted};text-align:center;">
             ${footerNote}
           </div>
         </td></tr>` : ''}
@@ -468,7 +479,7 @@ function glassServiceEmail({ preheader, body, footerNote } = {}) {
         </td></tr>
         ${footerNote ? `
         <tr><td align="center" style="padding:24px 4px 0 4px;">
-          <div style="font-family:${T.font};font-size:13px;line-height:1.6;color:${T.muted};text-align:center;">
+          <div class="dm-muted" style="font-family:${T.font};font-size:13px;line-height:1.6;color:${T.muted};text-align:center;">
             ${footerNote}
           </div>
         </td></tr>` : ''}
@@ -514,7 +525,7 @@ function glassNewsletter({ body, unsubscribeUrl, preheader, footerNote, preferre
           ${heroBlock}
         </td></tr>
         <tr><td style="padding:24px 0 0 0;">
-          ${glassCard(T, `<div style="font-family:${T.font};font-size:15px;line-height:1.6;color:${T.body};">${body || ''}</div>`, '26px 28px')}
+          ${glassCard(T, `<div style="font-family:${T.font};font-size:15px;line-height:1.6;color:${T.body};">${body || ''}</div>`, '26px 28px', { darkAware: true })}
         </td></tr>
         ${footerExtras ? `<tr><td align="center" style="padding:24px 4px 0 4px;">${footerExtras}</td></tr>` : ''}
         <tr><td align="center" style="padding:16px 4px 0 4px;">

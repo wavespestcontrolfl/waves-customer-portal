@@ -135,8 +135,8 @@ EVENT RULES:
 - CONSISTENT TREATMENT (owner rule): every event gets the SAME volume — description 40-70 words, highlights 3-4 bullets, closingLine; proTip optional. Keep the events in the order provided. No event should read noticeably longer or shorter than its neighbors.
 - description: conversational, says WHY someone would actually go (40-70 words, EVERY event). Work the event's official name (exactly as given in the record) into the prose once — the renderer turns it into the ticket link. Do NOT restate the date, venue, or URL — those render automatically.
 - scoopLabel: the lead-in for the highlights list. Rotate across events, never repeat in one issue: "Here's the scoop:", "Here's the deal:", "Here's what's going down:", "What to expect:", "Here's the rundown:", "Why it's a vibe:", "Why it's a weekend winner:", "Here's what you're walking into:".
-- highlights: 3-5 short bullets, PLAIN TEXT — no emojis, no leading bullet characters (the renderer adds the "•" marker). Vibe-only; no logistics, no prices.
-- proTip (HEADLINER only, optional): a genuinely useful planning tip GROUNDED in the event record provided — arrive-early for a stated start time, what to bring for a stated venue type, weather planning for an outdoor venue. NEVER invent logistics the record doesn't support (parking rules, bag policies, sellout predictions, registration requirements). If nothing useful is grounded, return null — a joke is not a tip (jokes live in the description). Do NOT include the words "Pro tip" — the renderer adds the label. NOT pricing.
+- highlights: 3-4 short bullets (EVERY event — consistent volume), PLAIN TEXT — no emojis, no leading bullet characters (the renderer adds the "•" marker). Vibe-only; no logistics, no prices.
+- proTip (optional, ANY event): a genuinely useful planning tip GROUNDED in the event record provided — arrive-early for a stated start time, what to bring for a stated venue type, weather planning for an outdoor venue. NEVER invent logistics the record doesn't support (parking rules, bag policies, sellout predictions, registration requirements). If nothing useful is grounded, return null — a joke is not a tip (jokes live in the description). Do NOT include the words "Pro tip" — the renderer adds the label. NOT pricing.
 - closingLine: punchy one-line kicker to wrap the event — bold the punch ("This is **Bradenton's Fourth of July mic drop.**").
 - linkText: short anchor text for the ticket link, rotated across events: "More info here", "Get tickets", "Grab your spot", "Full lineup", "Save your seat", "All the details".
 
@@ -411,7 +411,7 @@ async function assemblePestInsiderNewsletter(draft) {
     draft.pitchHeading && `<li style="margin:0 0 6px 0;"><a href="#pi-pitch" style="color:${COLORS.blue};text-decoration:none;font-weight:500;">${markdownToHtml(draft.pitchHeading)}</a></li>`,
   ].filter(Boolean);
   if (tocItems.length) {
-    parts.push(`<div style="margin:0 0 24px 0;padding:16px 20px;background:${COLORS.cardBg};border-radius:10px;">
+    parts.push(`<div class="dm-box" style="margin:0 0 24px 0;padding:16px 20px;background:${COLORS.cardBg};border-radius:10px;">
 <p style="margin:0 0 10px 0;font-size:14px;text-transform:uppercase;letter-spacing:0.05em;color:${COLORS.muted};font-weight:600;">In this email:</p>
 <ul style="list-style:none;padding:0;margin:0;font-size:14px;line-height:2;">${tocItems.join('\n')}</ul>
 </div>`);
@@ -450,7 +450,7 @@ async function assemblePestInsiderNewsletter(draft) {
       card.diyTip && `🛠️ <strong>DIY tip:</strong> ${markdownToHtml(card.diyTip)}`,
       card.whenToCall && `📞 <strong>When to call:</strong> ${markdownToHtml(card.whenToCall)}`,
     ].filter(Boolean);
-    parts.push(`<div style="margin:0 0 14px 0;padding:14px 18px;background:${COLORS.cardBg};border-radius:10px;font-size:14px;line-height:1.8;">\n${rows.join('<br/>\n')}\n</div>`);
+    parts.push(`<div class="dm-box" style="margin:0 0 14px 0;padding:14px 18px;background:${COLORS.cardBg};border-radius:10px;font-size:14px;line-height:1.8;">\n${rows.join('<br/>\n')}\n</div>`);
   }
 
   // 3. The Lawn Corner
@@ -460,7 +460,7 @@ async function assemblePestInsiderNewsletter(draft) {
       parts.push(`<h2 id="pi-lawn" class="dm-chip" style="${sectionHeadingStyle(2, 8)}"><strong><em>${markdownToHtml(draft.lawnHeading)}</em></strong></h2>`);
     }
     if (draft.lawnText) {
-      parts.push(`<div style="margin:0 0 14px 0;padding:14px 18px;background:#F2F8F0;border-radius:10px;border-left:4px solid #5BA862;">
+      parts.push(`<div class="dm-box" style="margin:0 0 14px 0;padding:14px 18px;background:#F2F8F0;border-radius:10px;border-left:4px solid #5BA862;">
 <p style="margin:0;font-size:15px;line-height:1.6;">${markdownToHtml(draft.lawnText)}</p>
 </div>`);
     }
@@ -1187,7 +1187,7 @@ async function assembleWavesNewsletter(draft) {
     if (hero.heroWhy) heroParts.push(`<p style="margin:0 0 8px 0;font-size:14px;line-height:1.5;"><strong>Why it made the cut:</strong> ${markdownToHtml(hero.heroWhy)}</p>`);
     const heroCta = detailsLink(hero, 'Details & tickets');
     if (heroCta) heroParts.push(`<p style="margin:0;font-size:14px;">${heroCta}</p>`);
-    parts.push(`<div style="margin:0 0 24px 0;padding:18px 20px;background:${COLORS.cardBg};border-radius:10px;">\n${heroParts.join('\n')}\n</div>`);
+    parts.push(`<div class="dm-box" style="margin:0 0 24px 0;padding:18px 20px;background:${COLORS.cardBg};border-radius:10px;">\n${heroParts.join('\n')}\n</div>`);
   }
 
   // ── Standard picks ──
@@ -1228,7 +1228,7 @@ async function assembleWavesNewsletter(draft) {
     .slice(0, 2);
   if (notes.length) {
     const noteLines = notes.map((n) => `<p style="margin:0 0 4px 0;font-size:14px;line-height:1.5;">• ${markdownToHtml(n)}</p>`);
-    parts.push(`<div style="margin:0 0 24px 0;padding:14px 18px;background:#FFF8EC;border-radius:10px;">
+    parts.push(`<div class="dm-box" style="margin:0 0 24px 0;padding:14px 18px;background:#FFF8EC;border-radius:10px;">
 <p style="margin:0 0 6px 0;font-size:13px;text-transform:uppercase;letter-spacing:0.05em;color:${COLORS.muted};font-weight:600;">Community notes</p>
 ${noteLines.join('\n')}
 </div>`);
@@ -1470,7 +1470,7 @@ async function assembleBeehiivNewsletter(draft) {
     parts.push(dividerHtml());
     parts.push(`<a name="homeowner-minute"></a>`);
     parts.push(`<h2 id="homeowner-minute" class="dm-chip" style="${sectionHeadingStyle(events.length)}">🏠 <strong><em>Homeowner Minute</em></strong></h2>`);
-    parts.push(`<div style="margin:0 0 20px 0;padding:18px 20px;background:${COLORS.homeownerBg};border-radius:12px;border-left:4px solid ${COLORS.blue};">
+    parts.push(`<div class="dm-box" style="margin:0 0 20px 0;padding:18px 20px;background:${COLORS.homeownerBg};border-radius:12px;border-left:4px solid ${COLORS.blue};">
 <p style="margin:0;font-size:15px;line-height:1.6;">${markdownToHtml(draft.homeownerMinute)}</p>
 </div>`);
   }

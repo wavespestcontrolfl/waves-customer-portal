@@ -1,6 +1,7 @@
 const {
   newsletterPalette,
   wrapNewsletter,
+  wrapEmail,
 } = require('../services/email-template');
 const {
   assembleBeehiivNewsletter,
@@ -125,7 +126,7 @@ describe('newsletter rendering contract', () => {
     expect(html).toContain('width="20" height="20"');
   });
 
-  test('dark-mode layer: designed dark overrides + hooks ship on every glass page', () => {
+  test('dark-mode layer: designed dark overrides + hooks ship on every glass page; only the newsletter opts its cards in', () => {
     const html = wrapNewsletter({ body: '<p>x</p>', newsletterType: 'local-weekly-fresh-events' });
     expect(html).toContain('name="color-scheme" content="light dark"');
     expect(html).toContain('@media (prefers-color-scheme: dark)');
@@ -133,6 +134,13 @@ describe('newsletter rendering contract', () => {
     expect(html).toContain('class="dm-body"');
     expect(html).toContain('class="dm-page"');
     expect(html).toContain('class="dm-card"');
+    // Heading darkening is SCOPED to dark-aware cards — transactional
+    // emails keep light cards, so their navy headings must stay navy.
+    expect(html).toContain('.dm-card h1, .dm-card h2');
+    const transactional = wrapEmail({ heading: 'Invoice ready', intro: 'Hi.' });
+    expect(transactional).not.toContain('class="dm-card"');
+    expect(transactional).toContain('class="dm-ink"');
+    expect(transactional).toContain('class="dm-page-text"');
     // Logo sits in its own block row ABOVE the masthead title.
     expect(html).toMatch(/<div style="display:block;text-align:center;"><a [^>]+><img [^>]*waves[^>]*><\/a><\/div>\s*<h1 class="dm-ink"/i);
   });
