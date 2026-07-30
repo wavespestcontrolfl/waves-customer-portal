@@ -78,6 +78,36 @@ function remotePartyDigits(direction, from, to) {
   return String(e164).replace(/\D/g, '');
 }
 
+// Who is on the other end of the failed call/message. Owner ruling (Adam,
+// 2026-07-30): the admin bell must show the real number and, when the phone
+// maps to exactly one live customer, their name and record id — fully masked
+// alerts were untriageable. Log lines keep masking (maskPhone/maskSid); only
+// the notification payload is enriched. Any lookup error degrades to a
+// nameless alert, never a suppressed one.
+async function resolveRemoteParty(direction, from, to) {
+  const dir = String(direction || '').toLowerCase();
+  if (dir !== 'inbound' && dir !== 'outbound') return null;
+  const raw = dir === 'inbound' ? from : to;
+  const e164 = toE164(raw);
+  if (!e164 || !isLikelyE164(e164)) return null;
+  const digits = String(e164).replace(/\D/g, '');
+  const party = { name: null, customerId: null };
+  try {
+    const matches = await db('customers')
+      .whereNull('deleted_at')
+      .whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [digits.slice(-10)])
+      .orderBy('updated_at', 'desc')
+      .limit(2);
+    if (Array.isArray(matches) && matches.length === 1) {
+      party.name = [matches[0].first_name, matches[0].last_name].filter(Boolean).join(' ') || null;
+      party.customerId = matches[0].id || null;
+    }
+  } catch (err) {
+    logger.warn(`[twilio-alerts] remote-party lookup failed: ${err.message}`);
+  }
+  return party;
+}
+
 // Atomically claim the alert window for this key. Exactly one concurrent
 // caller gets a row back; everyone else is inside an open window and skips.
 // Any DB error fails OPEN — a broken dedupe layer must never eat a failure
@@ -265,6 +295,7 @@ async function alertTwilioFailure(input = {}) {
     : ['twilio', channel || 'unknown', direction || 'unknown', phase || 'unknown', eventId, normalizedStatus, errorCode || 'no-code'].join(':'));
   const dedupeKey = publicDedupeKey(rawDedupeKey);
   const safeErrorMessage = sanitizeFailureText(errorMessage);
+  const remote = await resolveRemoteParty(direction, from, to);
 
   const notification = {
     logLine:
@@ -281,6 +312,10 @@ async function alertTwilioFailure(input = {}) {
       errorMessage: safeErrorMessage,
       fromMasked: maskPhone(from),
       toMasked: maskPhone(to),
+      fromPhone: from || null,
+      toPhone: to || null,
+      remoteName: remote?.name || null,
+      customerId: remote?.customerId || null,
       link,
       dedupeKey,
     },

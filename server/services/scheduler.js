@@ -2559,7 +2559,7 @@ function initScheduledJobs() {
       // spam sitting in the inbox — that's exactly what the digest exists
       // to flag.
       const quarantineIssues = emails.filter(e => ['spam_quarantine_failed', 'spam_quarantine_ambiguous'].includes(e.auto_action)).length;
-      if (quarantineIssues > 0) parts.push(`⚠️ ${quarantineIssues} quarantine failure${quarantineIssues > 1 ? 's' : ''} (spam still in inbox)`);
+      if (quarantineIssues > 0) parts.push(`${quarantineIssues} quarantine failure${quarantineIssues > 1 ? 's' : ''} (spam still in inbox)`);
       const unsubscribed = emails.filter(e => e.auto_action && e.auto_action.startsWith('newsletter_unsubscribed')).length;
       if (unsubscribed > 0) parts.push(`${unsubscribed} unsubscribed`);
       // Real Gmail draft ids only — 'pending' claims and reconciliation

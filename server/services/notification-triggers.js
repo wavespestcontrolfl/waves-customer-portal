@@ -18,6 +18,7 @@ const logger = require('./logger');
 const NotificationService = require('./notification-service');
 const PushService = require('./push-notifications');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
+const { stripEmoji } = require('../utils/strip-emoji');
 
 const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
 // Lookarounds keep the match from starting or ending inside a longer
@@ -86,15 +87,24 @@ function sanitizeNotificationValue(value, key = '') {
   return redactSensitiveText(value);
 }
 
-function sanitizeNotificationPayload(_triggerKey, payload = {}) {
+function sanitizeNotificationPayload(triggerKey, payload = {}) {
+  if (TRIGGER_REGISTRY[triggerKey]?.allowContactDetails) return payload;
   return sanitizeNotificationValue(payload);
 }
 
-function sanitizeBuiltNotification(built = {}) {
+// Emoji strip (owner ruling 2026-07-30, see utils/strip-emoji.js) applies
+// here too: this `built` object also feeds the Web Push payload, which never
+// passes through NotificationService.create.
+function sanitizeBuiltNotification(built = {}, trigger = {}) {
+  const cleanTitle = (value) => stripEmoji(String(value || 'Notification')) || String(value || 'Notification');
+  const cleanBody = (value) => (value === null || value === undefined ? value : stripEmoji(value));
+  if (trigger.allowContactDetails) {
+    return { ...built, title: cleanTitle(built.title), body: cleanBody(built.body) };
+  }
   return {
     ...built,
-    title: redactSensitiveText(built.title || 'Notification'),
-    body: built.body === null || built.body === undefined ? built.body : redactSensitiveText(built.body),
+    title: cleanTitle(redactSensitiveText(built.title || 'Notification')),
+    body: built.body === null || built.body === undefined ? built.body : cleanBody(redactSensitiveText(built.body)),
   };
 }
 
@@ -159,13 +169,19 @@ const TRIGGER_REGISTRY = {
     category: 'voicemail_callback',
     priority: 'high',
     group: 'Communication',
+    // Owner ruling (Adam, 2026-07-30, same as twilio_failure): the callback
+    // bell shows the real number — a masked callback number is undialable.
+    // Payload fields are built by call-recording-processor, not free text.
+    allowContactDetails: true,
     build: (p) => {
-      const who = p.name || (p.phone ? maskPhone(p.phone) : 'Unknown caller');
+      const who = p.name || p.phone || 'Unknown caller';
       const bodyParts = [who];
       if (p.service) bodyParts.push(`Asked about ${p.service}`);
-      if (p.phone) bodyParts.push(`Callback: ${maskPhone(p.phone)}`);
+      if (p.phone) bodyParts.push(`Callback: ${p.phone}`);
       return {
-        title: 'Voicemail callback needed',
+        // Banner-first: the WHO leads so a truncated phone banner still
+        // identifies the caller (owner ruling 2026-07-30).
+        title: `Voicemail — ${who}`,
         body: bodyParts.join(' - '),
         // Voicemail recordings render under the Calls tab (hash-routed);
         // ?thread= would open the SMS view instead. CallLogTabV2 has no
@@ -219,16 +235,29 @@ const TRIGGER_REGISTRY = {
     category: 'system',
     priority: 'urgent',
     group: 'Communication',
+    // Owner ruling (Adam, 2026-07-30): fully-masked failure bells ("from
+    // ***5598 — CA...a76a0e") were untriageable. This trigger is exempt from
+    // contact masking: the bell shows the real numbers and, when the remote
+    // phone maps to exactly one customer, their name and record link. Every
+    // payload field is built by twilio-failure-alerts.js, which still
+    // sanitizes provider error text before it gets here.
+    allowContactDetails: true,
     build: (p) => {
       const channel = String(p.channel || 'message').toUpperCase();
       const direction = p.direction ? `${p.direction} ` : '';
       const phase = p.phase ? ` (${p.phase})` : '';
       const status = p.status || 'failed';
       const code = p.errorCode ? ` error ${p.errorCode}` : '';
+      const from = p.fromPhone || p.fromMasked || 'unknown';
+      const to = p.toPhone || p.toMasked || 'unknown';
+      // Banner-first title: iOS/Android banners truncate, so the WHO leads
+      // (owner ruling 2026-07-30 — "the alert should immediately tell me").
+      const remote = p.direction === 'outbound' ? to : from;
+      const who = p.remoteName || (remote !== 'unknown' ? remote : null);
       return {
-        title: `Twilio ${channel} ${status}`,
-        body: `${direction}${channel}${phase}${code}: ${p.errorMessage || `from ${p.fromMasked || 'unknown'} to ${p.toMasked || 'unknown'}`} — ${p.sidMasked || 'no SID'}`,
-        link: p.link || '/admin/communications',
+        title: `${who ? `${who} — ` : ''}${channel} ${status}`,
+        body: `${direction}${channel}${phase}${code}: from ${from} to ${to}${p.errorMessage ? ` — ${p.errorMessage}` : ''}`,
+        link: p.customerId ? `/admin/customers/${p.customerId}` : (p.link || '/admin/communications'),
       };
     },
   },
@@ -593,7 +622,7 @@ async function triggerNotification(triggerKey, payload = {}) {
       return { bellWritten: false, push: null, suppressed: true };
     }
 
-    const built = sanitizeBuiltNotification(trigger.build(payload));
+    const built = sanitizeBuiltNotification(trigger.build(payload), trigger);
     const safePayload = sanitizeNotificationPayload(triggerKey, payload);
 
     // Load per-user preferences (default to enabled if no row exists)

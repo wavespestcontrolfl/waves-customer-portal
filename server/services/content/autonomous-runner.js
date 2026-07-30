@@ -1382,7 +1382,15 @@ class AutonomousRunner {
 
     const twilio = require('../twilio');
     const ownerPhone = process.env.OWNER_PHONE || '+19415993489';
-    await twilio.sendSMS(ownerPhone, body, { messageType: 'internal_alert', link: '/admin/seo' });
+    // notificationTitle: without it the redirect-to-bell uses the whole body
+    // as the title, which truncates uselessly in phone banners (owner ruling
+    // 2026-07-30 — titles must identify the alert immediately).
+    await twilio.sendSMS(ownerPhone, body, {
+      messageType: 'internal_alert',
+      link: '/admin/seo',
+      notificationTitle: `Content engine: ${published} published, ${review} to review`,
+      notificationBody: body,
+    });
     logger.info(`[autonomous-runner] daily digest SMS sent: ${body}`);
   }
 
@@ -1453,7 +1461,13 @@ class AutonomousRunner {
     const body = `Waves content engine: NO blog post today — ${why}.${gateDetail ? ` Detail: ${gateDetail.trim().slice(0, 160)}` : ''}`;
     const twilio = require('../twilio');
     const ownerPhone = process.env.OWNER_PHONE || '+19415993489';
-    await twilio.sendSMS(ownerPhone, body, { messageType: 'internal_alert', link: '/admin/seo' });
+    // Short notificationTitle: banner-truncation ruling, see daily digest.
+    await twilio.sendSMS(ownerPhone, body, {
+      messageType: 'internal_alert',
+      link: '/admin/seo',
+      notificationTitle: 'Content engine: NO blog post today',
+      notificationBody: body,
+    });
     logger.info(`[autonomous-runner] blog drought SMS sent: ${body}`);
   }
 

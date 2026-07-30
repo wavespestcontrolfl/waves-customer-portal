@@ -1630,7 +1630,7 @@ function hasWorkableLeadSignal({ extracted = {}, phone = null, voicemail = false
 // voicemail carries no workable service signal (plain "call me back" messages
 // stay bell-free). Pure decision core — the caller owns the gate check, the
 // customer lookup, and the dedupe.
-function voicemailCallbackAlertPlan({ extracted = {}, voicemailChannel = false, voicemailLeadPath = false, vmPhone = null, outbound = false } = {}) {
+function voicemailCallbackAlertPlan({ extracted = {}, voicemailChannel = false, voicemailLeadPath = false, vmPhone = null, outbound = false, knownCustomer = false, transcript = '' } = {}) {
   if (!voicemailChannel || voicemailLeadPath) return null;
   // An OUTBOUND call reaching the customer's voicemail records OUR message —
   // a staff recording that names the service would otherwise satisfy the
@@ -1638,7 +1638,16 @@ function voicemailCallbackAlertPlan({ extracted = {}, voicemailChannel = false, 
   if (outbound) return null;
   if (extracted.is_spam) return null;
   if (!vmPhone) return null;
-  if (!hasWorkableLeadSignal({ extracted, phone: vmPhone, voicemail: true })) return null;
+  // Owner ruling (Adam, 2026-07-30): a voicemail from a KNOWN customer rings
+  // the callback bell even without concrete service intent — plain "call me
+  // back" customer messages were ending terminal and silent. Unknown callers
+  // still need the workable service signal, so solicitor/robocall voicemails
+  // stay bell-free. Dead-air recordings ([VOICEMAIL]/[NO SPEECH] markers with
+  // no spoken content, e.g. a customer pocket dial) never ring on the
+  // known-customer basis.
+  const workable = hasWorkableLeadSignal({ extracted, phone: vmPhone, voicemail: true });
+  const spokenContent = String(transcript || '').replace(/\[(?:VOICEMAIL|NO SPEECH)\]/gi, '').trim();
+  if (!workable && !(knownCustomer && spokenContent)) return null;
   const name = [capitalizeName(extracted.first_name), capitalizeName(extracted.last_name || '')]
     .filter(Boolean)
     .join(' ');
@@ -5036,12 +5045,20 @@ const CallRecordingProcessor = {
       if (isEnabled('voicemailCallbackAlert')) {
         try {
           const vmAlertPhone = resolveCallContactPhone(call, extracted.phone);
+          // Customer lookup moved ahead of the plan: known-customer identity
+          // is now an alert basis of its own (owner ruling 2026-07-30), not
+          // just payload enrichment.
+          const vmAlertCustomer = call.customer_id
+            ? { id: call.customer_id }
+            : await findCustomerForCallContact(vmAlertPhone, extracted).catch(() => null);
           const alertPlan = voicemailCallbackAlertPlan({
             extracted,
             voicemailChannel,
             voicemailLeadPath,
             vmPhone: vmAlertPhone,
             outbound: isOutboundCall(call),
+            knownCustomer: Boolean(vmAlertCustomer?.id),
+            transcript: transcription,
           });
           if (alertPlan) {
             // One alert per call even across reprocessing (retranscription
@@ -5057,9 +5074,6 @@ const CallRecordingProcessor = {
               .whereNull('voicemail_callback_alerted_at')
               .update({ voicemail_callback_alerted_at: new Date() });
             if (claimed) {
-              const vmAlertCustomer = call.customer_id
-                ? { id: call.customer_id }
-                : await findCustomerForCallContact(vmAlertPhone, extracted).catch(() => null);
               const { triggerNotification } = require('./notification-triggers');
               await triggerNotification('customer_voicemail_callback', {
                 ...alertPlan,
