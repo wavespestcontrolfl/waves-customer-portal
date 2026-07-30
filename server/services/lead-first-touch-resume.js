@@ -270,7 +270,14 @@ async function resumeHeldFirstTouch({
           sendEmail = freshEmail;
         }
       } catch (rereadErr) {
-        logger.warn(`[first-touch-resume] pre-send target re-read failed: ${rereadErr.code || rereadErr.name || 'db_error'} — using claim-time target`);
+        // Can't verify the authoritative target — never send on a stale
+        // guess (Codex #3084 r16): a supersede or deny stamp may have
+        // landed since the claim. Back to pending; every retry path
+        // re-attempts the read.
+        logger.warn(`[first-touch-resume] pre-send target re-read failed: ${rereadErr.code || rereadErr.name || 'db_error'} — hold stays pending`);
+        await settleHold(hold.id, { status: 'pending', last_error: 'target_verify_failed' }, dbh);
+        result.skipped = result.skipped || 'target_verify_failed';
+        continue;
       }
       if (freshDenyStamped && !email) {
         await settleHold(hold.id, { status: 'pending' }, dbh); // stamp untouched
@@ -455,7 +462,19 @@ async function runOnePostCommitResume(payload, holdIds, dbh) {
           adoptedSuperseded = true;
         }
       } catch (rereadErr) {
-        logger.warn(`[first-touch-resume] post-commit target re-read failed: ${rereadErr.code || rereadErr.name || 'db_error'} — using payload target`);
+        // Can't verify the authoritative target — never send on a stale
+        // guess (Codex #3084 r16). Re-pend every associated hold; the
+        // sweep (or a later trigger) retries with a fresh read.
+        logger.warn(`[first-touch-resume] post-commit target re-read failed: ${rereadErr.code || rereadErr.name || 'db_error'} — hold(s) stay pending`);
+        for (const holdId of holdIds) {
+          try {
+            await dbh('first_touch_holds').where({ id: holdId })
+              .update({ status: 'pending', last_error: 'target_verify_failed', updated_at: new Date() });
+          } catch (repenErr) {
+            logger.warn(`[first-touch-resume] hold ${holdId} re-pend failed: ${repenErr.code || repenErr.name || 'db_error'} (stale-claim window will reclaim)`);
+          }
+        }
+        return { skipped: 'target_verify_failed' };
       }
     }
     // An adopted superseded target was never suppression-checked by THIS
@@ -672,12 +691,17 @@ async function sweepAbandonedFirstTouchHolds({ dbh = db, limit = 10 } = {}) {
         .whereIn('status', ['open', 'in_progress'])
         .first('id');
       if (live) continue; // still under review — the hold stands
-      const resolved = await dbh('triage_items')
+      // The LATEST review cycle must be the one that resolved (Codex #3084
+      // r16): a force-reprocess can leave an old resolved card next to a
+      // newer DISMISSED one — dismissal is "not actionable", never a
+      // confirmation, and the historical resolution must not release the
+      // newer unconfirmed address.
+      const latest = await dbh('triage_items')
         .where({ call_log_id: row.call_log_id })
         .whereIn('reason_code', EMAIL_REVIEW_REASON_CODES)
-        .where({ status: 'resolved' })
-        .first('id');
-      if (!resolved) continue; // never reviewed — never auto-release
+        .orderBy('created_at', 'desc')
+        .first('status');
+      if (!latest || latest.status !== 'resolved') continue;
       const res = await resumeHeldFirstTouch({ callLogId: row.call_log_id, source: 'ledger_sweep' });
       if (res?.resumed) swept.released += 1;
     }

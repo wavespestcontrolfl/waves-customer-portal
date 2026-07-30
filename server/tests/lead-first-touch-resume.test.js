@@ -20,6 +20,7 @@ let mockCustomerFirstQueue = null; // shift per customers.first(); an Error valu
 let mockSubscriberRow = null; // newsletter_subscribers.first() (DOI dedupe guard)
 let mockSubscriberUpdates = [];
 let mockOnFirstTouchClaim = null; // fires when a claim update lands (race simulation)
+let mockHoldFirstQueue = null; // shift per first_touch_holds.first(); an Error value throws
 let mockTriageFirstQueue = null; // shift per triage_items.first()
 jest.mock('../models/db', () => {
   const handler = (table) => {
@@ -59,7 +60,14 @@ jest.mock('../models/db', () => {
         return 1;
       }),
       first: jest.fn(async () => {
-        if (table === 'first_touch_holds') return mockHold;
+        if (table === 'first_touch_holds') {
+          if (mockHoldFirstQueue && mockHoldFirstQueue.length) {
+            const next = mockHoldFirstQueue.shift();
+            if (next instanceof Error) throw next;
+            return next;
+          }
+          return mockHold;
+        }
         if (table === 'customers') {
           if (mockCustomerFirstQueue && mockCustomerFirstQueue.length) {
             const next = mockCustomerFirstQueue.shift();
@@ -136,6 +144,7 @@ beforeEach(() => {
   mockSubscriberRow = null;
   mockSubscriberUpdates = [];
   mockOnFirstTouchClaim = null;
+  mockHoldFirstQueue = null;
   mockTriageFirstQueue = null;
 });
 
@@ -498,8 +507,8 @@ describe('DOI dedupe guard and ledger sweep', () => {
 
   test('the sweep releases an abandoned hold whose review question is answered', async () => {
     mockHolds = [baseHold()];
-    // live-card check → none; resolved-card check → answered.
-    mockTriageFirstQueue = [null, { id: 'resolved-1' }];
+    // live-card check → none; latest-cycle check → resolved.
+    mockTriageFirstQueue = [null, { status: 'resolved' }];
     const swept = await sweepAbandonedFirstTouchHolds({});
     expect(swept).toMatchObject({ examined: 1, released: 1 });
     expect(mockEnroll).toHaveBeenCalled();
@@ -509,10 +518,31 @@ describe('DOI dedupe guard and ledger sweep', () => {
     mockHolds = [baseHold(), baseHold({ id: 'hold-2', call_log_id: 'call-2' })];
     mockTriageFirstQueue = [
       { id: 'live-1' }, // hold 1: card still live → skip
-      null, null, // hold 2: no live card AND no resolved card → never reviewed → skip
+      null, null, // hold 2: no live card AND no card at all → never reviewed → skip
     ];
     const swept = await sweepAbandonedFirstTouchHolds({});
     expect(swept).toMatchObject({ examined: 2, released: 0 });
     expect(mockEnroll).not.toHaveBeenCalled();
+  });
+
+  test('the sweep never releases when the LATEST review cycle was dismissed', async () => {
+    // Force-reprocess: an old resolved card sits next to a newer dismissed
+    // one — dismissal is "not actionable", never a confirmation.
+    mockHolds = [baseHold()];
+    mockTriageFirstQueue = [null, { status: 'dismissed' }];
+    const swept = await sweepAbandonedFirstTouchHolds({});
+    expect(swept).toMatchObject({ examined: 1, released: 0 });
+    expect(mockEnroll).not.toHaveBeenCalled();
+  });
+
+  test('a failed pre-send target re-read re-pends instead of sending on a stale guess', async () => {
+    const dbErr = new Error('read timeout');
+    dbErr.code = 'ETIMEDOUT';
+    mockHoldFirstQueue = [dbErr]; // the pre-send re-read is the first .first() on the ledger
+    const res = await resumeHeldFirstTouch({ callLogId: 'call-1' });
+    expect(res.skipped).toBe('target_verify_failed');
+    expect(mockEnroll).not.toHaveBeenCalled();
+    expect(mockNewsletter).not.toHaveBeenCalled();
+    expect(mockHoldUpdates.at(-1)).toMatchObject({ status: 'pending', last_error: 'target_verify_failed' });
   });
 });

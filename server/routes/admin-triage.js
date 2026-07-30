@@ -269,17 +269,58 @@ router.post('/:id/verdict', async (req, res) => {
       .whereIn('status', OPEN_STATES)
       .first('id');
 
-    const resolved = await db('triage_items')
-      .where({ call_log_id: item.call_log_id })
-      .whereNot('reason_code', 'email_bounce_reverify')
-      .whereIn('status', OPEN_STATES)
-      .update({
-        status: 'resolved',
-        resolution_note: note,
-        assigned_to: req.technicianId,
-        resolved_at: new Date(),
-        updated_at: new Date(),
-      });
+    // A deny that must keep the email held stamps the ledger ATOMICALLY
+    // with the card resolution (Codex #3084 r16): a committed resolve with
+    // a failed stamp would let the sweep read the resolved card as
+    // confirmation, and the terminal card makes the verdict unretryable
+    // (409). One transaction — the stamp failing rolls the resolve back,
+    // the route 500s with the cards still open, and a retry works.
+    const denyClearsEmailEarly = verdict === 'deny'
+      && wrongFields.length > 0
+      && !wrongFields.includes('name')
+      && !wrongFields.includes('consent');
+    const needsDenyStamp = verdict === 'deny' && !denyClearsEmailEarly && !!liveEmailCard
+      && await db.schema.hasTable('first_touch_holds');
+    const stampCall = needsDenyStamp
+      ? await db('call_log').where({ id: item.call_log_id }).first('customer_id')
+      : null;
+    let resolved = 0;
+    await db.transaction(async (trx) => {
+      resolved = await trx('triage_items')
+        .where({ call_log_id: item.call_log_id })
+        .whereNot('reason_code', 'email_bounce_reverify')
+        .whereIn('status', OPEN_STATES)
+        .update({
+          status: 'resolved',
+          resolution_note: note,
+          assigned_to: req.technicianId,
+          resolved_at: new Date(),
+          updated_at: new Date(),
+        });
+      if (resolved > 0 && needsDenyStamp) {
+        // UPSERT, not update (r14): a deny can land BEFORE the processor's
+        // Step 6/8 ledger write, and an update-only stamp would leave the
+        // later-inserted hold unstamped. The insert's empty held_email is
+        // inert (the invalid-address guard blocks sends); the processor's
+        // merge fills flags/address but never touches last_error. Only the
+        // correction fanout releases a stamped hold; success clears it.
+        const now = new Date();
+        await trx('first_touch_holds')
+          .insert({
+            call_log_id: item.call_log_id,
+            customer_id: stampCall?.customer_id || null,
+            held_email: '',
+            held_drip: false,
+            held_newsletter: false,
+            status: 'pending',
+            last_error: 'email_denied_await_correction',
+            created_at: now,
+            updated_at: now,
+          })
+          .onConflict('call_log_id')
+          .merge({ last_error: 'email_denied_await_correction', updated_at: now });
+      }
+    });
     if (resolved === 0) {
       return res.status(409).json({ error: 'Call was just actioned by someone else' });
     }
@@ -300,10 +341,9 @@ router.post('/:id/verdict', async (req, res) => {
     // saying what — it must not read as confirming the email (Codex #3084
     // r10). The hold stays pending; the correction fanout (ungated on card
     // state since r8) releases it once the operator fixes the record.
-    const denyClearsEmail = verdict === 'deny'
-      && wrongFields.length > 0
-      && !wrongFields.includes('name')
-      && !wrongFields.includes('consent');
+    // (The non-releasing deny's ledger stamp already happened atomically
+    // with the resolve above.)
+    const denyClearsEmail = denyClearsEmailEarly;
     if ((verdict === 'accept' || denyClearsEmail) && liveEmailCard) {
       try {
         const { resumeHeldFirstTouch } = require('../services/lead-first-touch-resume');
@@ -315,37 +355,6 @@ router.post('/:id/verdict', async (req, res) => {
         }
       } catch (resumeErr) {
         logger.warn(`[admin-triage] first-touch resume failed for call ${item.call_log_id}: ${resumeErr.message}`);
-      }
-    } else if (verdict === 'deny' && liveEmailCard) {
-      // The deny resolved the email card WITHOUT approving the address —
-      // stamp the hold so no automated release path (sweep, end-of-run
-      // reconciliation) reads this resolution as confirmation (Codex #3084
-      // r13). UPSERT, not update (r14): a deny can land BEFORE the
-      // processor's Step 6/8 ledger write, and an update-only stamp would
-      // leave the later-inserted hold unstamped. The insert's empty
-      // held_email is inert (the invalid-address guard blocks sends); the
-      // processor's merge fills flags/address but never touches last_error.
-      // Only the correction fanout (explicit corrected address) releases a
-      // stamped hold, and a successful release clears the stamp.
-      try {
-        const call = await db('call_log').where({ id: item.call_log_id }).first('customer_id');
-        const now = new Date();
-        await db('first_touch_holds')
-          .insert({
-            call_log_id: item.call_log_id,
-            customer_id: call?.customer_id || null,
-            held_email: '',
-            held_drip: false,
-            held_newsletter: false,
-            status: 'pending',
-            last_error: 'email_denied_await_correction',
-            created_at: now,
-            updated_at: now,
-          })
-          .onConflict('call_log_id')
-          .merge({ last_error: 'email_denied_await_correction', updated_at: now });
-      } catch (stampErr) {
-        logger.warn(`[admin-triage] deny stamp failed for call ${item.call_log_id}: ${stampErr.code || stampErr.name || 'db_error'}`);
       }
     }
 

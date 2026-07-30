@@ -45,7 +45,11 @@ function makeConn(cfg = {}) {
       first: () => Promise.resolve(counting
         ? ((t.countQueue || []).shift() ?? { n: 0 })
         : ((t.firstQueue || []).shift() ?? null)),
-      update: (patch) => { calls.push({ table, op: 'update', arg: patch }); return Promise.resolve(t.updateCount ?? 1); },
+      update: (patch) => {
+        calls.push({ table, op: 'update', arg: patch });
+        if (t.updateError) return Promise.reject(t.updateError);
+        return Promise.resolve(t.updateCount ?? 1);
+      },
       del: () => { calls.push({ table, op: 'del' }); return Promise.resolve(1); },
       insert: (arg) => { calls.push({ table, op: 'insert', arg }); return qb; },
       onConflict: () => qb,
@@ -474,6 +478,22 @@ describe('resendPendingConfirmation', () => {
       expect(u.arg.released_newsletter).toBe(true);
       expect(u.arg.status).toBe('released');
     }
+  });
+
+  test('a post-send bookkeeping failure never re-pends as an unsent DOI', async () => {
+    // The send succeeded; a hold-settle failure must NOT write
+    // newsletter_doi_not_confirmed — retries treat that marker as "must
+    // re-send" (skipDedupe) and would double-mail the confirmation. The
+    // claim stays for the stale-claim reclaim + dedupe guard instead.
+    sendConfirmationEmail.mockResolvedValueOnce(true);
+    const dbErr = new Error('settle write failed');
+    const conn = makeConn({ first_touch_holds: { updateError: dbErr } });
+    const ok = await resendPendingConfirmation(
+      { id: 811, email: 'samtypo@example.com', confirmation_token: 'tok-1', heldNewsletterHoldIds: ['hold-1'] }, conn);
+    expect(ok).toBe(true);
+    const repens = conn.__updates('first_touch_holds')
+      .filter((u) => u.arg.last_error === 'newsletter_doi_not_confirmed');
+    expect(repens).toHaveLength(0);
   });
 
   test('re-pends deduped holds when the re-send fails — the DOI stays retryable', async () => {

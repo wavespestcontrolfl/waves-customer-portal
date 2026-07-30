@@ -451,29 +451,12 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
   const holdIds = Array.isArray(pendingConfirmation.heldNewsletterHoldIds)
     ? pendingConfirmation.heldNewsletterHoldIds
     : [];
+  // The 'newsletter_doi_not_confirmed' re-pend is scoped to SEND failures
+  // only (Codex #3084 r16): retries treat that marker as "must actually
+  // re-send" (skipDedupe), so a post-send bookkeeping failure marked the
+  // same way would double-mail a delivered confirmation.
   try {
     await require('./newsletter-confirm').sendConfirmationEmail(pendingConfirmation);
-    await conn('newsletter_subscribers')
-      .where({ id: pendingConfirmation.id })
-      .update({ confirmation_sent_at: new Date(), updated_at: new Date() });
-    // This re-sent DOI IS the resume for any newsletter hold deduped against
-    // it (one DOI, never two) — settle those holds only now that delivery
-    // succeeded (Codex #3084 r9).
-    for (const holdId of holdIds) {
-      try {
-        const hold = await conn('first_touch_holds').where({ id: holdId }).first('held_drip', 'released_drip');
-        const dripSettled = !hold || !hold.held_drip || hold.released_drip;
-        await conn('first_touch_holds').where({ id: holdId }).update({
-          released_newsletter: true,
-          status: dripSettled ? 'released' : 'pending',
-          ...(dripSettled ? { released_at: new Date(), last_error: null } : {}),
-          updated_at: new Date(),
-        });
-      } catch (settleErr) {
-        logger.warn(`[email-fanout] hold ${holdId} settle failed after DOI re-send: ${settleErr.code || settleErr.name || 'db_error'}`);
-      }
-    }
-    return true;
   } catch (e) {
     // Provider error bodies can echo the recipient address — log only the
     // subscriber id and a sanitized code (this path exists BECAUSE the email
@@ -492,6 +475,34 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
     }
     return false;
   }
+  // Post-send bookkeeping — failures here log and leave the claim
+  // 'releasing' for the stale-claim reclaim; the retry's dedupe guard sees
+  // the delivered stamp and settles without a second send.
+  try {
+    await conn('newsletter_subscribers')
+      .where({ id: pendingConfirmation.id })
+      .update({ confirmation_sent_at: new Date(), updated_at: new Date() });
+  } catch (stampErr) {
+    logger.warn(`[email-fanout] confirmation_sent_at stamp failed for subscriber ${pendingConfirmation.id}: ${stampErr.code || stampErr.name || 'db_error'}`);
+  }
+  // This re-sent DOI IS the resume for any newsletter hold deduped against
+  // it (one DOI, never two) — settle those holds only now that delivery
+  // succeeded (Codex #3084 r9).
+  for (const holdId of holdIds) {
+    try {
+      const hold = await conn('first_touch_holds').where({ id: holdId }).first('held_drip', 'released_drip');
+      const dripSettled = !hold || !hold.held_drip || hold.released_drip;
+      await conn('first_touch_holds').where({ id: holdId }).update({
+        released_newsletter: true,
+        status: dripSettled ? 'released' : 'pending',
+        ...(dripSettled ? { released_at: new Date(), last_error: null } : {}),
+        updated_at: new Date(),
+      });
+    } catch (settleErr) {
+      logger.warn(`[email-fanout] hold ${holdId} settle failed after DOI re-send: ${settleErr.code || settleErr.name || 'db_error'}`);
+    }
+  }
+  return true;
 }
 
 // Operator-facing disclosure of everything this fan-out touches. The IB
