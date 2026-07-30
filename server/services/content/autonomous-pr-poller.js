@@ -706,8 +706,10 @@ async function maybeAutoMerge(run, pr) {
   //     clean, so a hold checked only there would miss the common case: a clean
   //     review merging normally while portal state is still pre-fix, which a
   //     later republish or social share resurrects.
+  //     gh + branch let it reconcile a stale in-flight sentinel (a round that
+  //     died before its push) against the branch ref, instead of holding forever.
   const { syncPendingHold } = require('./codex-remediation');
-  const hold = await syncPendingHold(pr.number, { headSha: pr.head?.sha });
+  const hold = await syncPendingHold(pr.number, { headSha: pr.head?.sha, branch: pr.head?.ref });
   if (hold.pending) {
     logger.info(`[autonomous-pr-poller] auto-merge blocked for run ${run.id} PR #${pr.number}: ${hold.reason}`);
     return { pending: true, reason: `sync_pending: ${hold.reason}` };

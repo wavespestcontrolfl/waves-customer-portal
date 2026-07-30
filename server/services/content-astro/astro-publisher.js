@@ -1938,7 +1938,7 @@ async function mergeAstro(postId, { expectHeadSha = null } = {}) {
     // body mirror is moot.
     if (!isUnpublish) {
       const { syncPendingHold } = require('../content/codex-remediation');
-      const hold = await syncPendingHold(pr.number, { headSha: pr.head?.sha });
+      const hold = await syncPendingHold(pr.number, { headSha: pr.head?.sha, branch: pr.head?.ref });
       if (hold.pending) throw new Error(`PR #${pr.number} cannot merge: ${hold.reason}`);
     }
     await assertCodexReviewClear(pr.number, { headSha: pr.head?.sha });

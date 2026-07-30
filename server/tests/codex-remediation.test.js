@@ -2718,7 +2718,7 @@ describe('the sync hold is taken before the push (codex P1)', () => {
       return origPut(args);
     };
     await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
-    expect(atPushTime.sync_pending_sha).toBe('push_in_flight');
+    expect(atPushTime.sync_pending_sha).toBe(`push_in_flight:${HEAD}`);
     expect(atPushTime.status).toBe('remediating');
   });
 
@@ -2761,7 +2761,7 @@ describe('the sync hold is taken before the push (codex P1)', () => {
       db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS,
     })).rejects.toThrow('gh 502');
     const row = db._tables.codex_remediation_state.find((x) => x.pr_number === 5);
-    expect(row.sync_pending_sha).toBe('push_in_flight');
+    expect(row.sync_pending_sha).toBe(`push_in_flight:${HEAD}`);
   });
 });
 
@@ -2796,10 +2796,67 @@ describe('syncPendingHold is a standalone, all-paths gate (codex P1)', () => {
     expect((await rem.syncPendingHold(5, { db: cleared, headSha: HEAD })).pending).toBe(false);
   });
 
-  test('a lookup error fails OPEN — one bad row must not wedge the whole lane', async () => {
+});
+
+// Two failure modes of the hold itself: it must not permit a merge when it can't
+// be read, and it must not hold forever when nothing was ever pushed.
+describe('syncPendingHold error and recovery behavior (codex P1 x2)', () => {
+  test('a lookup error fails CLOSED — a merge-safety gate must not open on a blip', async () => {
     const db = () => { throw new Error('db down'); };
     db.raw = async () => ({ rowCount: 0 });
     const h = await rem.syncPendingHold(5, { db, headSha: HEAD });
+    expect(h.pending).toBe(true);
+    expect(h.reason).toMatch(/could not read the remediation sync state/);
+  });
+
+  test('a stale in-flight sentinel is RELEASED when the branch never moved', async () => {
+    const db = makeDb({
+      codex_remediation_state: [{ pr_number: 5, status: 'remediating', sync_pending_sha: `push_in_flight:${HEAD}` }],
+    });
+    // Ref still at the pre-push head → the round died before gh.putFile.
+    const gh = { getBranchSha: async () => HEAD };
+    const h = await rem.syncPendingHold(5, { db, headSha: HEAD, gh, branch: 'content/blog-x' });
     expect(h.pending).toBe(false);
+    // And it is cleared, so the release is durable rather than re-derived.
+    expect(db._tables.codex_remediation_state.find((x) => x.pr_number === 5).sync_pending_sha).toBeNull();
+  });
+
+  test('an in-flight sentinel HOLDS when the branch moved (a push did land)', async () => {
+    const db = makeDb({
+      codex_remediation_state: [{ pr_number: 5, status: 'remediating', sync_pending_sha: `push_in_flight:${HEAD}` }],
+    });
+    const gh = { getBranchSha: async () => 'landedcommit123' };
+    const h = await rem.syncPendingHold(5, { db, headSha: 'landedcommit123', gh, branch: 'content/blog-x' });
+    expect(h.pending).toBe(true);
+    expect(db._tables.codex_remediation_state.find((x) => x.pr_number === 5).sync_pending_sha)
+      .toBe(`push_in_flight:${HEAD}`);
+  });
+
+  test('an unreadable ref HOLDS (fail closed)', async () => {
+    const db = makeDb({
+      codex_remediation_state: [{ pr_number: 5, status: 'remediating', sync_pending_sha: `push_in_flight:${HEAD}` }],
+    });
+    const gh = { getBranchSha: async () => { throw new Error('ref lookup down'); } };
+    const h = await rem.syncPendingHold(5, { db, headSha: HEAD, gh, branch: 'content/blog-x' });
+    expect(h.pending).toBe(true);
+  });
+
+  test('without a branch to reconcile against, an in-flight sentinel HOLDS', async () => {
+    const db = makeDb({
+      codex_remediation_state: [{ pr_number: 5, sync_pending_sha: `push_in_flight:${HEAD}` }],
+    });
+    const h = await rem.syncPendingHold(5, { db, headSha: HEAD });
+    expect(h.pending).toBe(true);
+    expect(h.reason).toMatch(/pre-push head/);
+  });
+
+  test('a real commit SHA hold is never reconciled away by the ref check', async () => {
+    const db = makeDb({
+      codex_remediation_state: [{ pr_number: 5, status: 'parked', sync_pending_sha: HEAD }],
+    });
+    const gh = { getBranchSha: async () => HEAD };
+    const h = await rem.syncPendingHold(5, { db, headSha: HEAD, gh, branch: 'content/blog-x' });
+    expect(h.pending).toBe(true);
+    expect(db._tables.codex_remediation_state.find((x) => x.pr_number === 5).sync_pending_sha).toBe(HEAD);
   });
 });

@@ -208,10 +208,24 @@ function findingSeverity(body) {
 const PARK_PRE_PUSH = 'pre_push';
 const PARK_POST_PUSH = 'post_push';
 
-// Placeholder written to sync_pending_sha before gh.putFile, when a commit is
-// about to exist but its SHA isn't known yet. Deliberately not SHA-shaped so it
-// can never be mistaken for one; the merge bar blocks on any non-empty value.
+// Written to sync_pending_sha before gh.putFile, when a commit is about to exist
+// but its SHA isn't known yet. Carries the PRE-push head so the sentinel is
+// self-reconciling: if the process dies before the push, comparing the branch ref
+// to this head proves whether anything landed, and a stuck sentinel can be
+// released instead of holding every merge forever. Deliberately not SHA-shaped so
+// it can never be mistaken for a commit; ~56 chars, inside varchar(64).
 const SYNC_PENDING_PUSH_IN_FLIGHT = 'push_in_flight';
+const inFlightSentinel = (preHeadSha) => (preHeadSha
+  ? `${SYNC_PENDING_PUSH_IN_FLIGHT}:${String(preHeadSha).trim().toLowerCase()}`
+  : SYNC_PENDING_PUSH_IN_FLIGHT);
+const parseInFlightSentinel = (value) => {
+  const v = String(value || '').trim().toLowerCase();
+  if (v === SYNC_PENDING_PUSH_IN_FLIGHT) return { inFlight: true, preHead: null };
+  if (v.startsWith(`${SYNC_PENDING_PUSH_IN_FLIGHT}:`)) {
+    return { inFlight: true, preHead: v.slice(SYNC_PENDING_PUSH_IN_FLIGHT.length + 1) || null };
+  }
+  return { inFlight: false, preHead: null };
+};
 
 // LEGACY ROWS ONLY. park_phase (a persisted column, written at every park call
 // site) is the real signal; this regex is the fallback for rows parked before
@@ -258,23 +272,49 @@ function isPostPushPark(state) {
  * republish or social share then resurrects. Callers: autonomous-pr-poller
  * (before its codex gate) and astro-publisher mergeAstro (the scheduler lane).
  *
- * Fail-open ONLY on a lookup error: an unreadable state row must not wedge every
- * merge in the lane, and the divergence it guards is rare and human-visible.
+ * Fails CLOSED on a lookup error. This is a merge-safety gate, and the pollers
+ * retry every couple of minutes, so a transient database blip costs one deferred
+ * tick — whereas proceeding could merge stale portal state permanently.
+ *
+ * A `push_in_flight:<pre-push head>` sentinel is RECONCILED when gh + branch are
+ * supplied: if the branch ref still matches the recorded pre-push head, no commit
+ * ever landed (the process died between the stamp and gh.putFile), so the hold is
+ * released and cleared. Without that reconciliation a pre-push crash would hold
+ * every merge on the PR forever, since a clean review never re-enters remediation
+ * and nothing else clears the column.
  */
-async function syncPendingHold(prNumber, { db: injectedDb = null, headSha = null } = {}) {
+async function syncPendingHold(prNumber, {
+  db: injectedDb = null, headSha = null, gh: injectedGh = null, branch = null,
+} = {}) {
   const db = injectedDb || dbDefault;
   let state;
   try {
     state = await getState(db, prNumber);
   } catch (e) {
-    logger.warn(`[codex-remediation] sync-hold lookup failed for PR #${prNumber}: ${e.message} — not holding the merge`);
-    return { pending: false };
+    logger.warn(`[codex-remediation] sync-hold lookup failed for PR #${prNumber}: ${e.message} — holding the merge (fail closed)`);
+    return { pending: true, reason: `could not read the remediation sync state (${e.message}) — holding the merge until it is readable` };
   }
   const sha = String(state.sync_pending_sha || '').trim().toLowerCase();
   if (!sha) return { pending: false };
   const head = String(headSha || '').trim().toLowerCase();
-  const which = sha === SYNC_PENDING_PUSH_IN_FLIGHT
-    ? 'a fix push was in flight and never confirmed'
+  const { inFlight, preHead } = parseInFlightSentinel(sha);
+
+  if (inFlight && preHead && branch) {
+    const gh = injectedGh || ghDefault;
+    let refHead = null;
+    try { refHead = String((await gh.getBranchSha(branch)) || '').trim().toLowerCase(); } catch (_) { refHead = null; }
+    if (refHead && refHead === preHead) {
+      // The branch never moved: the round died before its push. Nothing is
+      // unsynced, so release the hold rather than wedging the PR.
+      await saveState(db, prNumber, { sync_pending_sha: null });
+      logger.info(`[codex-remediation] released a stale in-flight sync hold on PR #${prNumber}: branch still at the pre-push head ${shortSha(preHead)}, no commit landed`);
+      return { pending: false };
+    }
+    // Ref moved (a push DID land) or is unreadable → keep holding.
+  }
+
+  const which = inFlight
+    ? `a fix push was in flight and never confirmed${preHead ? ` (pre-push head ${shortSha(preHead)})` : ''}`
     : `remediation push ${shortSha(sha)}${head && sha !== head ? ' (an ancestor of the head under review)' : ''}`;
   return { pending: true, sha, reason: `${which} has an unfinished portal sync (held for a human)` };
 }
@@ -1454,7 +1494,7 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   // SYNC_PENDING_PUSH_IN_FLIGHT is a non-SHA sentinel; the bar blocks on ANY
   // non-empty value, so the hold is live from here on.
   const armed = await saveState(db, prNumber, {
-    branch, status: 'remediating', sync_pending_sha: SYNC_PENDING_PUSH_IN_FLIGHT,
+    branch, status: 'remediating', sync_pending_sha: inFlightSentinel(headSha),
   });
   if (!armed) return { skipped: true, reason: 'pr left the open state during remediation (terminal row)' };
 
