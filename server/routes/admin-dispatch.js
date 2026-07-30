@@ -8070,6 +8070,45 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           reason: 'tech_marked_needed',
         };
       }
+      // An owed follow-up must outlive the success overlay: the CTA is the
+      // only place the suggestion surfaces, so tapping "Done" used to drop
+      // the follow-up with no durable trace — nothing parks it and no sweep
+      // re-finds it. Persist the same follow_up_needed dispatch alert the
+      // pre-cutover project flow wrote (createProjectFollowupAlert), deduped
+      // against any unresolved alert on this job (incl. the
+      // visit-outcome=follow_up_needed path). The completion is already
+      // durable here, so a failed alert write logs instead of failing the
+      // response; /schedule-followup resolves the alert when the CTA books.
+      if (followupSuggestion?.required) {
+        try {
+          const { createAlertOnce } = require('../services/dispatch-alerts');
+          const existingFollowupAlert = await db('dispatch_alerts')
+            .where({ type: 'follow_up_needed', job_id: svc.id })
+            .whereNull('resolved_at')
+            .first('id');
+          if (!existingFollowupAlert) {
+            await createAlertOnce({
+              type: 'follow_up_needed',
+              severity: 'info',
+              techId: svc.technician_id || null,
+              jobId: svc.id,
+              payload: {
+                source: 'typed_completion',
+                serviceRecordId: record?.id || null,
+                serviceType: svc.service_type || completionProfile?.serviceName || null,
+                customerId: svc.customer_id || null,
+                customerName: [svc.first_name, svc.last_name].filter(Boolean).join(' ').trim() || null,
+                followupPolicy: followupSuggestion.policy,
+                followupDays: followupSuggestion.days,
+                suggestedFollowupDate: followupSuggestion.suggestedDate,
+              },
+              existingPayloadSource: 'typed_completion',
+            });
+          }
+        } catch (e) {
+          logger.warn(`[dispatch] follow-up alert persist failed for ${svc.id}: ${e.message}`);
+        }
+      }
     }
 
     // Third-party Bill-To: a payer-billed auto-invoice is intentionally NOT
@@ -8620,6 +8659,22 @@ router.post('/:serviceId/schedule-followup', async (req, res, next) => {
       throw err;
     }
     logger.info(`[dispatch] follow-up ${appointment.id} booked from ${svc.id} (${profile.findingsType}) for ${date}`);
+    // Booking the owed follow-up clears the parked exception — resolve the
+    // completion-minted follow_up_needed alert so it doesn't linger as a
+    // stale bell for a visit that is now on the schedule. Best-effort: the
+    // booking above is the durable outcome and must not fail on this.
+    try {
+      const { resolveAlert } = require('../services/dispatch-alerts');
+      const openFollowupAlerts = await db('dispatch_alerts')
+        .where({ type: 'follow_up_needed', job_id: svc.id })
+        .whereNull('resolved_at')
+        .select('id');
+      for (const alert of openFollowupAlerts) {
+        await resolveAlert({ id: alert.id, resolvedBy: req.technicianId || null });
+      }
+    } catch (e) {
+      logger.warn(`[dispatch] follow-up alert resolve failed for ${svc.id}: ${e.message}`);
+    }
     // Without this the visit never enters appointment_reminders, so the
     // 72h/24h reminder cron can't see it (the cron reads only that table).
     // sendConfirmation:false — no immediate SMS; the customer was told about
