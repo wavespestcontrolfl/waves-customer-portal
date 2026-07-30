@@ -57,9 +57,12 @@ function validateTemplateBody(body, variables, templateKey = null) {
   // runtime guard that blocked the hardcoded literal is retired, so the
   // literal is rejected at WRITE time instead — a hardcoded brand here would
   // misbrand every tierless monthly-membership recipient.
-  if (templateKey === 'autopay_pre_charge' && /WaveGuard\s+auto-pay/i.test(String(body || ''))) {
+  // ANY hardcoded WaveGuard mention (auto-pay, autopay, Auto Pay, bare
+  // brand...) misbrands tierless monthly-membership recipients — the token
+  // is the only sanctioned way to brand this template.
+  if (templateKey === 'autopay_pre_charge' && /waveguard/i.test(String(body || ''))) {
     return {
-      error: 'autopay_pre_charge must use {autopay_label} instead of a hardcoded "WaveGuard auto-pay" — the label is resolved per customer (WaveGuard members vs everyone else)',
+      error: 'autopay_pre_charge must not hardcode WaveGuard — use {autopay_label}, which resolves per customer (WaveGuard members vs everyone else)',
     };
   }
   const allowed = new Set(parseTemplateVariables(variables));

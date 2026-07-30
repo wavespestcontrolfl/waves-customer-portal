@@ -189,10 +189,12 @@ describe('admin SMS template routes', () => {
           Authorization: 'Bearer admin',
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ body: 'Hello {first_name}! Your WaveGuard auto-pay will process on {charge_date}.' }),
+        body: JSON.stringify({ body: 'Hello {first_name}! Your WaveGuard Auto Pay will process on {charge_date}.' }),
       });
       const body = await res.json();
 
+      // Spelling variants (Auto Pay / autopay / bare brand) are rejected too —
+      // the check is on any hardcoded WaveGuard mention, not one phrase.
       expect(res.status).toBe(400);
       expect(body.error).toContain('{autopay_label}');
       expect(updateQuery.update).not.toHaveBeenCalled();
