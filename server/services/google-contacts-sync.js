@@ -669,6 +669,27 @@ async function absorbDuplicate(people, dupId, survivorId, gapMs) {
   return true;
 }
 
+/**
+ * Run a destructive reconcile under the SOURCE row's lock: FOR UPDATE +
+ * row-token guard held through the external call, so a concurrent
+ * identity edit blocks on the lock (or, having already committed, vetoes
+ * via the token) instead of racing a stale ownership decision — the
+ * later stamp veto cannot undo an external delete.
+ */
+async function withRowClaim(table, row, fn) {
+  let vetoed = false;
+  let result = false;
+  await db.transaction(async (trx) => {
+    const locked = await applyRowGuard(
+      trx(table).where({ id: row.id }).forUpdate().select('id'),
+      row,
+    ).first();
+    if (!locked) { vetoed = true; return; }
+    result = await fn();
+  });
+  return { vetoed, result };
+}
+
 /** Delete tolerating already-gone. */
 async function deleteContact(people, resourceName) {
   try {
@@ -1039,20 +1060,10 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
               // pointing at it — retried next run instead of orphaned.
               if (existingContact !== row.google_contact_id
                 && !(await contactInUseElsewhere(row.google_contact_id, table, row.id))) {
-                // Claim the lead's UNCHANGED state (row-token conditional)
-                // before the destructive absorb — an identity edit that
-                // committed after ownership resolved may no longer match
-                // this customer, and the later stamp veto can't undo an
-                // external delete.
-                const leadUnchanged = await applyRowGuard(db(table).where({ id: row.id }), row)
-                  .update({ updated_at: db.raw('updated_at') });
-                if (!leadUnchanged) {
+                const claim = await withRowClaim(table, row, () => absorbDuplicate(people, row.google_contact_id, existingContact, gapMs));
+                if (claim.vetoed || !claim.result) {
                   counts.failed += 1;
-                  continue; // edited mid-run — ownership re-resolves next tick
-                }
-                if (!(await absorbDuplicate(people, row.google_contact_id, existingContact, gapMs))) {
-                  counts.failed += 1;
-                  continue;
+                  continue; // edited mid-run or merge refused — retried next tick
                 }
               }
             } else {
@@ -1092,9 +1103,10 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
           // contacts (absorb ours into the sibling's, unless shared)
           // instead of leaving both permanently active.
           if (!(await contactInUseElsewhere(row.google_contact_id, table, row.id))) {
-            if (!(await absorbDuplicate(people, row.google_contact_id, ownership.adoptContactId, gapMs))) {
+            const claim = await withRowClaim(table, row, () => absorbDuplicate(people, row.google_contact_id, ownership.adoptContactId, gapMs));
+            if (claim.vetoed || !claim.result) {
               counts.failed += 1;
-              continue; // duplicate retained — row keeps it; retried next run
+              continue; // edited mid-run or duplicate retained — retried next run
             }
           }
           row.google_contact_id = ownership.adoptContactId;
@@ -1160,10 +1172,11 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
           if (row.google_contact_id
             && !(await contactInUseElsewhere(row.google_contact_id, table, row.id))) {
             // Recovered orphan vs the account's established contact —
-            // absorb before retiring.
-            if (!(await absorbDuplicate(people, row.google_contact_id, accountContact, gapMs))) {
+            // absorb before retiring, under the row's lock.
+            const claim = await withRowClaim(table, row, () => absorbDuplicate(people, row.google_contact_id, accountContact, gapMs));
+            if (claim.vetoed || !claim.result) {
               counts.failed += 1;
-              continue; // duplicate retained — retried next run
+              continue; // edited mid-run or duplicate retained — retried next run
             }
           }
           row.google_contact_id = accountContact;
@@ -1222,9 +1235,10 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
           if (leadContact && leadContact !== row.google_contact_id) {
             if (row.google_contact_id
               && !(await contactInUseElsewhere(row.google_contact_id, table, row.id))) {
-              if (!(await absorbDuplicate(people, row.google_contact_id, leadContact, gapMs))) {
+              const claim = await withRowClaim(table, row, () => absorbDuplicate(people, row.google_contact_id, leadContact, gapMs));
+              if (claim.vetoed || !claim.result) {
                 counts.failed += 1;
-                continue; // duplicate retained — retried next run
+                continue; // edited mid-run or duplicate retained — retried next run
               }
             }
             row.google_contact_id = leadContact;

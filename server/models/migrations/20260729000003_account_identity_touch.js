@@ -103,7 +103,7 @@ exports.up = async function up(knex) {
         last_name  = CASE WHEN NEW.last_name  IS DISTINCT FROM OLD.last_name  THEN NEW.last_name  ELSE last_name  END,
         email      = CASE WHEN NEW.email      IS DISTINCT FROM OLD.email      THEN NEW.email      ELSE email      END,
         phone      = CASE WHEN NEW.phone      IS DISTINCT FROM OLD.phone      THEN NEW.phone      ELSE phone      END,
-        updated_at = now()
+        updated_at = GREATEST(customer_accounts.updated_at, clock_timestamp())
       WHERE id = NEW.account_id;
       RETURN NEW;
     END $$ LANGUAGE plpgsql;

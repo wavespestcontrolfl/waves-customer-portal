@@ -12,7 +12,12 @@ exports.up = async function up(knex) {
   await knex.raw(`
     CREATE OR REPLACE FUNCTION touch_updated_at_on_contact_fields() RETURNS trigger AS $$
     BEGIN
-      NEW.updated_at = now();
+      -- clock_timestamp(), not now(): now() is frozen at transaction
+      -- start, so a long-running or lock-blocked writer could commit an
+      -- edit with updated_at OLDER than a google_contact_synced_at
+      -- stamped meanwhile — permanently invisible to the stale predicate.
+      -- GREATEST keeps the stamp monotonic against manual updated_at sets.
+      NEW.updated_at = GREATEST(OLD.updated_at, clock_timestamp());
       RETURN NEW;
     END $$ LANGUAGE plpgsql;
   `);
@@ -24,7 +29,10 @@ exports.up = async function up(knex) {
       WHEN (OLD.email IS DISTINCT FROM NEW.email OR OLD.phone IS DISTINCT FROM NEW.phone
         OR OLD.first_name IS DISTINCT FROM NEW.first_name OR OLD.last_name IS DISTINCT FROM NEW.last_name
         OR OLD.address_line1 IS DISTINCT FROM NEW.address_line1 OR OLD.address_line2 IS DISTINCT FROM NEW.address_line2
-        OR OLD.city IS DISTINCT FROM NEW.city OR OLD.state IS DISTINCT FROM NEW.state OR OLD.zip IS DISTINCT FROM NEW.zip)
+        OR OLD.city IS DISTINCT FROM NEW.city OR OLD.state IS DISTINCT FROM NEW.state OR OLD.zip IS DISTINCT FROM NEW.zip
+        -- account reassignment changes the contact's canonical identity,
+        -- aggregated addresses, and shared ownership — it must requeue.
+        OR OLD.account_id IS DISTINCT FROM NEW.account_id)
       EXECUTE FUNCTION touch_updated_at_on_contact_fields();
     `);
   }

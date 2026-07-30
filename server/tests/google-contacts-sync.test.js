@@ -205,8 +205,9 @@ describe('runContactsSync', () => {
     setupDb({
       leads: [{ id: 'l-1', first_name: 'Jane', email: 'jane@customer.example', phone: null, customer_id: 'c-1', google_contact_id: 'people/dup', updated_at: '2026-07-28T11:00:00Z' }],
       // live-link check → fresh dest re-read (already covered) → dup
-      // in-use probe (customers, leads) → pre-stamp dest-liveness
-      firstResults: { customers: [{ id: 'c-1' }, { id: 'c-1', google_contact_id: 'people/cust' }, null, { id: 'c-1' }], leads: [null] },
+      // in-use probe (customers, leads) → row-claim lock → in-stamp
+      // dest-liveness
+      firstResults: { customers: [{ id: 'c-1' }, { id: 'c-1', google_contact_id: 'people/cust' }, null, { id: 'c-1' }], leads: [null, { id: 'l-1' }] },
     });
     const counts = await runContactsSync({ gapMs: 0 });
     expect(counts.skipped).toBe(1);
@@ -253,7 +254,7 @@ describe('runContactsSync', () => {
   test('duplicate retirement ABSORBS operator data into the survivor before deleting', async () => {
     setupDb({
       leads: [{ id: 'l-1', first_name: 'Jane', email: 'jane@customer.example', phone: null, customer_id: 'c-1', google_contact_id: 'people/dup', updated_at: '2026-07-28T11:00:00Z' }],
-      firstResults: { customers: [{ id: 'c-1' }, { id: 'c-1', google_contact_id: 'people/cust' }, null, { id: 'c-1' }], leads: [null] },
+      firstResults: { customers: [{ id: 'c-1' }, { id: 'c-1', google_contact_id: 'people/cust' }, null, { id: 'c-1' }], leads: [null, { id: 'l-1' }] },
     });
     mockPeopleApi.people.get
       .mockResolvedValueOnce({ data: { etag: 'd', metadata: { sources: [] }, memberships: [{ contactGroupMembership: { contactGroupResourceName: 'contactGroups/operatorLabel' } }], emailAddresses: [{ value: 'work@x.example' }] } })
@@ -270,7 +271,7 @@ describe('runContactsSync', () => {
   test('a FAILED operator-data merge RETAINS the duplicate — retried next run, never orphaned', async () => {
     const state = setupDb({
       leads: [{ id: 'l-1', first_name: 'Jane', email: 'jane@customer.example', phone: null, customer_id: 'c-1', google_contact_id: 'people/dup', updated_at: '2026-07-28T11:00:00Z' }],
-      firstResults: { customers: [{ id: 'c-1' }, { id: 'c-1', google_contact_id: 'people/cust' }, null], leads: [null] },
+      firstResults: { customers: [{ id: 'c-1' }, { id: 'c-1', google_contact_id: 'people/cust' }, null], leads: [null, { id: 'l-1' }] },
     });
     const boom = new Error('backend error');
     boom.code = 500;
@@ -286,7 +287,7 @@ describe('runContactsSync', () => {
   test('a MISSING survivor never green-lights deleting the duplicate (the last remaining contact)', async () => {
     setupDb({
       leads: [{ id: 'l-1', first_name: 'Jane', email: 'jane@customer.example', phone: null, customer_id: 'c-1', google_contact_id: 'people/dup', updated_at: '2026-07-28T11:00:00Z' }],
-      firstResults: { customers: [{ id: 'c-1' }, { id: 'c-1', google_contact_id: 'people/cust' }, null], leads: [null] },
+      firstResults: { customers: [{ id: 'c-1' }, { id: 'c-1', google_contact_id: 'people/cust' }, null], leads: [null, { id: 'l-1' }] },
     });
     const gone = new Error('not found');
     gone.code = 404;
@@ -1083,7 +1084,7 @@ describe('runContactsSync', () => {
         // sibling holds the contact → in-use probe for the lead's dup →
         // pre-stamp dest-liveness re-read
         customers: [{ id: 'c-1' }, { id: 'c-1', account_id: 'acct-1', google_contact_id: null }, { id: 'c-9', google_contact_id: 'people/acct' }, null, { id: 'c-1' }],
-        leads: [null],
+        leads: [null, { id: 'l-1' }],
       },
     });
     const counts = await runContactsSync({ gapMs: 0 });
@@ -1184,7 +1185,7 @@ describe('runContactsSync', () => {
       leads: [{ id: 'l-p', first_name: 'Sam', email: 'sam@new.example', phone: null, customer_id: null, google_contact_id: 'pending_create_recovery::sam%40new.example', google_contact_synced_at: '2026-07-01T00:00:00Z', updated_at: '2026-07-28T11:00:00Z' }],
       // ownership: no customer match; sibling EMAIL match owns the
       // established contact; in-use probe for the orphan: none share it
-      firstResults: { customers: [null, null], leads: [{ id: 'l-1', google_contact_id: 'people/established' }, null] },
+      firstResults: { customers: [null, null], leads: [{ id: 'l-1', google_contact_id: 'people/established' }, null, { id: 'l-p' }] },
     });
     mockPeopleApi.people.searchContacts.mockImplementation(async ({ query }) => (
       query === 'sam@new.example'
