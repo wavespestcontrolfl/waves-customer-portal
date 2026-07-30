@@ -17,6 +17,7 @@ const mockPeopleApi = {
     createContact: jest.fn(),
     deleteContact: jest.fn(async () => ({})),
     searchContacts: jest.fn(async () => ({ data: { results: [] } })),
+    connections: { list: jest.fn(async () => ({ data: { connections: [] } })) },
   },
 };
 jest.mock('googleapis', () => ({ google: { people: jest.fn(() => mockPeopleApi) } }));
@@ -103,6 +104,7 @@ beforeEach(() => {
   gmailClient.getAuthClient.mockImplementation(async () => ({}));
   require('googleapis').google.people.mockImplementation(() => mockPeopleApi);
   mockPeopleApi.people.searchContacts.mockImplementation(async () => ({ data: { results: [] } }));
+  mockPeopleApi.people.connections.list.mockImplementation(async () => ({ data: { connections: [] } }));
   mockPeopleApi.people.deleteContact.mockImplementation(async () => ({}));
 });
 afterEach(() => { delete process.env.GATE_CONTACTS_SYNC; });
@@ -1127,7 +1129,9 @@ describe('runContactsSync', () => {
     expect(counts.synced).toBe(1);
     expect(mockPeopleApi.people.createContact).toHaveBeenCalledTimes(1);
 
-    // Recovery (pending marker): truncation IS inconclusive — defers.
+    // Recovery (pending marker): a truncated search falls through to the
+    // conclusive full-list scan — the tagged orphan is FOUND there and
+    // adopted; a common recovery key must not park the row forever.
     jest.clearAllMocks();
     require('googleapis').google.people.mockImplementation(() => mockPeopleApi);
     require('../services/email/gmail-client').getAuthClient.mockImplementation(async () => ({}));
@@ -1135,9 +1139,29 @@ describe('runContactsSync', () => {
     process.env.GATE_CONTACTS_SYNC = 'true';
     setupDb({ customers: [{ ...CUSTOMER, google_contact_id: 'pending_create_recovery::jane%40customer.example', google_contact_synced_at: '2026-07-01T00:00:00Z' }] });
     mockPeopleApi.people.searchContacts.mockImplementation(async ({ query }) => (query === '' ? { data: {} } : fullSet));
+    mockPeopleApi.people.connections.list.mockImplementation(async () => ({ data: { connections: [
+      { resourceName: 'people/orphan', clientData: [{ key: 'waves_row', value: 'customers:c-1' }] },
+    ] } }));
+    mockPeopleApi.people.get.mockResolvedValueOnce({ data: { etag: 'e1', metadata: { sources: [] }, memberships: [] } });
+    mockPeopleApi.people.updateContact.mockResolvedValueOnce({ data: { resourceName: 'people/orphan' } });
     const counts2 = await runContactsSync({ gapMs: 0 });
-    expect(counts2.failed).toBe(1);
+    expect(counts2.synced).toBe(1);
     expect(mockPeopleApi.people.createContact).not.toHaveBeenCalled();
+
+    // Truncated search + tag conclusively ABSENT from the full scan (past
+    // grace): the row proceeds to a clean create instead of parking.
+    jest.clearAllMocks();
+    require('googleapis').google.people.mockImplementation(() => mockPeopleApi);
+    require('../services/email/gmail-client').getAuthClient.mockImplementation(async () => ({}));
+    mockPeopleApi.people.deleteContact.mockImplementation(async () => ({}));
+    process.env.GATE_CONTACTS_SYNC = 'true';
+    setupDb({ customers: [{ ...CUSTOMER, google_contact_id: 'pending_create_recovery::jane%40customer.example', google_contact_synced_at: '2026-07-01T00:00:00Z' }] });
+    mockPeopleApi.people.searchContacts.mockImplementation(async ({ query }) => (query === '' ? { data: {} } : fullSet));
+    mockPeopleApi.people.connections.list.mockImplementation(async () => ({ data: { connections: [] } }));
+    mockPeopleApi.people.createContact.mockResolvedValueOnce({ data: { resourceName: 'people/clean' } });
+    const counts3 = await runContactsSync({ gapMs: 0 });
+    expect(counts3.synced).toBe(1);
+    expect(mockPeopleApi.people.createContact).toHaveBeenCalledTimes(1);
   });
 
   test('updates PRESERVE operator-added secondary emails/phones/addresses', async () => {

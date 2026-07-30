@@ -379,6 +379,30 @@ async function contactInUseElsewhere(resourceName, exceptTable, exceptId) {
  * Best-effort — search-index lag can miss a seconds-old contact; the tag
  * makes the NEXT pass reconcile it.
  */
+/**
+ * Conclusive fallback for truncated searches: page the full connections
+ * list and match our waves_row tag. connections.list reads the primary
+ * contact store (creates appear immediately) — unlike searchContacts's
+ * lagging cache — so an absent tag here is proof, not lag.
+ */
+async function findByTagFullScan(people, tag) {
+  let pageToken;
+  do {
+    const res = await people.people.connections.list({
+      resourceName: 'people/me',
+      pageSize: 1000,
+      personFields: 'metadata,clientData',
+      ...(pageToken ? { pageToken } : {}),
+    });
+    const hit = (res.data.connections || []).find((p) => (
+      (p?.clientData || []).some((c) => c.key === 'waves_row' && c.value === tag)
+    ));
+    if (hit?.resourceName) return hit.resourceName;
+    pageToken = res.data.nextPageToken;
+  } while (pageToken);
+  return null;
+}
+
 async function findExistingContact(people, row, tag, { queryOverride = null, requireConclusive = false } = {}) {
   // queryOverride = the CREATE-TIME identity from a recovery marker — the
   // row's current values may have been scrambled by a merge since.
@@ -405,11 +429,14 @@ async function findExistingContact(people, row, tag, { queryOverride = null, req
       // A FULL result set is a truncated one — absence of the tag among
       // the first 30 hits is not proof no tagged contact exists. Only
       // RECOVERY decisions demand that proof; a first-time create with a
-      // common name has no lost contact to find, and deferring it forever
-      // would pin the newest-first lane.
-      const truncated = new Error('identity search truncated — inconclusive');
-      truncated.searchInconclusive = true;
-      throw truncated;
+      // common name has no lost contact to find. A common recovery key
+      // (e.g. a frequent name) can stay truncated on EVERY run — treating
+      // that as inconclusive forever would park the row in recovery and
+      // fail the job indefinitely, so fall through to a conclusive
+      // full-list scan of connections matched by our tag (the primary
+      // store, not the lagging search cache).
+      const scanned = await findByTagFullScan(people, tag);
+      return scanned || null;
     }
     return null;
   } catch (e) {
