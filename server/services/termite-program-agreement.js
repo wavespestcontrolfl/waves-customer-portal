@@ -160,6 +160,16 @@ function collectTermiteFacts(estData) {
     const key = String(node.service || node.key || '').toLowerCase();
     const name = String(node.name || '').toLowerCase();
 
+    // Commercial-proposal lineItems keep only description/quantity/unitPrice
+    // (the normalizer drops service/key/name) — a termite line authored in
+    // the proposal editor must still mark the program so the commercial
+    // park runs instead of a silent no_termite_program return.
+    if (!key && !name
+      && typeof node.description === 'string' && /termite/i.test(node.description)
+      && ('unitPrice' in node || 'unit_price' in node || 'quantity' in node)) {
+      facts.hasProgram = true;
+    }
+
     // Commercial termite lines use their own key — they mark the PROGRAM
     // present (so the commercial park runs instead of a silent
     // no_termite_program return) but contribute no residential figures.
@@ -681,6 +691,7 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       // no-longer-active version.
       const liveTemplate = await trx('document_templates')
         .where({ template_key: prepared.templateKey })
+        .forUpdate()
         .first('active_version_id');
       if (!liveTemplate || liveTemplate.active_version_id !== version.id) return 'version_changed';
       // FOR UPDATE: the status re-read must be current when we cancel — a
@@ -838,11 +849,11 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 // cancelled, e.g. by the compliance migration): the superseded wording's
 // public signing link must die whenever the row is deemed handled.
 async function cancelStaleSource(row, conn = db) {
-  // Revalidate staleness at cancel time: an admin may have REACTIVATED this
-  // row's template version after the sweep's activeVersionIds snapshot was
-  // taken — a now-current request must not be cancelled, and the caller
-  // must NOT write a reprocessed marker (a later rollout must be able to
-  // reconsider the row).
+  // Reactivation-safe AND atomic: the staleness condition rides the UPDATE
+  // itself (NOT EXISTS an active pointer at this row's version), so an
+  // admin reactivating the version between any pre-read and the write
+  // cannot get a current request cancelled. The pre-read only provides the
+  // fast-path 'reactivated' signal for callers.
   if (row.document_template_version_id && row.document_template_key) {
     const template = await conn('document_templates')
       .where({ template_key: row.document_template_key })
@@ -852,6 +863,16 @@ async function cancelStaleSource(row, conn = db) {
   const cancelled = await conn('customer_contracts')
     .where({ id: row.id })
     .whereIn('status', OPEN_STATUSES)
+    .modify((q) => {
+      if (row.document_template_version_id && row.document_template_key) {
+        q.whereNotExists(function stillStale() {
+          this.select(conn.raw('1'))
+            .from('document_templates as dt')
+            .where('dt.template_key', row.document_template_key)
+            .where('dt.active_version_id', row.document_template_version_id);
+        });
+      }
+    })
     .update({
       status: 'cancelled',
       cancelled_at: new Date(),
@@ -867,8 +888,17 @@ async function cancelStaleSource(row, conn = db) {
       actor_id: null,
       metadata: JSON.stringify({ reason: 'superseded_stale_version' }),
     });
+    return true;
   }
-  return !!cancelled;
+  // Zero rows: either not open anymore (fine) or the atomic condition hit a
+  // mid-flight reactivation — distinguish so the caller skips the marker.
+  if (row.document_template_version_id && row.document_template_key) {
+    const template = await conn('document_templates')
+      .where({ template_key: row.document_template_key })
+      .first('active_version_id');
+    if (template?.active_version_id === row.document_template_version_id) return 'reactivated';
+  }
+  return false;
 }
 
 async function markSupersededHandled(row, outcome, conn = db) {

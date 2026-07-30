@@ -553,10 +553,24 @@ exports.down = async function down(knex) {
       .where({ event_type: 'cancelled', actor_type: 'system' })
       .whereRaw("metadata->>'reason' = 'superseded_by_v2_migration'")
       .select('contract_id', 'customer_id', 'metadata');
+    const templateKeysForRestore = TEMPLATE_V2.map((t) => t.template_key);
     for (const evt of cancelEvents) {
       let meta = evt.metadata;
       if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
       const priorStatus = ['draft', 'sent', 'viewed'].includes(meta?.prior_status) ? meta.prior_status : 'draft';
+      // Never reopen a source whose customer already has a replacement
+      // (open OR signed) — restoring it would put two public signing flows
+      // (or a signed contract plus a live request) in front of the customer.
+      // Those stay cancelled; the operator handles any residue manually.
+      const source = await knex('customer_contracts').where({ id: evt.contract_id }).first('customer_id');
+      if (!source) continue;
+      const replacement = await knex('customer_contracts')
+        .where({ customer_id: source.customer_id })
+        .whereIn('document_template_key', templateKeysForRestore)
+        .whereNot('id', evt.contract_id)
+        .whereIn('status', ['draft', 'sent', 'viewed', 'signed'])
+        .first('id');
+      if (replacement) continue;
       const restored = await knex('customer_contracts')
         .where({ id: evt.contract_id, status: 'cancelled' })
         .where('cancelled_reason', 'like', 'Superseded by updated compliance wording%')
