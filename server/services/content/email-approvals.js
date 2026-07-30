@@ -376,7 +376,10 @@ function draftPreview(run) {
 // allow email replies is made on the RENDERED bytes, not source chars
 // (Codex r12). Over the ceiling, the email flips to portal-routing copy and
 // emailed approval is refused at decision time via the same helper.
-const RENDERED_EMAIL_MAX_BYTES = 95_000;
+// 85KB leaves ~17KB headroom under Gmail's ~102KB clip for wrapHtml's
+// template chrome (~8KB measured) plus heading/subject overhead — the
+// ceiling is checked on bodyHtml BEFORE wrapping (Codex r14).
+const RENDERED_EMAIL_MAX_BYTES = 85_000;
 
 /**
  * Build the approval email body and the EFFECTIVE truncation verdict.
@@ -601,32 +604,15 @@ async function executeDecision(row, decision, sender) {
       return { skipped: 'already_decided_elsewhere' };
     }
   }
-  // An oversized draft was never fully shown in the email, so an emailed
-  // "approved" must not publish it — the email itself says so and directs
-  // the decision to the portal. Rejection is still honored (dismissing
-  // unseen content is safe). Checked at DECISION time, not just send time,
-  // so a payload edited after the email went out can't slip through.
-  if (decision === 'approved') {
+  {
     const run = await db('autonomous_runs').where({ id: row.run_id }).first();
     const current = run ? draftPreview(run) : null;
-    // The SAME renderer that built the email decides whether the owner
-    // could have read everything — including the rendered-bytes ceiling
-    // (raw caps alone under-measure escaped/UTF-8 expansion, Codex r12).
-    const effectiveTruncated = current
-      ? (current.truncated || renderApprovalEmail({ run, row, preview: current }).truncated)
-      : false;
-    if (effectiveTruncated) {
-      const marker = 'oversized_approve_ignored';
-      if (row.last_error !== marker) {
-        await db('content_email_approvals').where({ id: row.id }).update({ last_error: marker, updated_at: new Date() });
-        await notifyAdmin('Approval requires the portal', `${row.token}: this draft exceeds email size limits, so your emailed "approved" was NOT executed. Review and approve it in /admin/seo.`);
-      }
-      return { skipped: 'requires_portal_review' };
-    }
-    // Approval binds to the CONTENT the owner read, not just the run id:
-    // a payload that changed after the email went out must never publish
-    // off the old reply. Reset the row (fresh token + sha, unsent) so the
-    // poller re-emails the current draft; the old token stops matching.
+    // BOTH decisions bind to the CONTENT the owner read, not just the run
+    // id: a payload edited after the email went out must neither publish
+    // off an old "approved" NOR be dismissed off an old "not approved"
+    // (the owner never saw the new version — Codex r7 + r14). Reset the
+    // row (fresh token + sha, unsent) so the poller re-emails the current
+    // draft; the old token stops matching.
     if (current && row.draft_sha && current.sha !== row.draft_sha) {
       await db('content_email_approvals').where({ id: row.id, status: 'awaiting_reply' }).update({
         token: newToken(),
@@ -638,6 +624,26 @@ async function executeDecision(row, decision, sender) {
       });
       await notifyAdmin('Draft changed since you were emailed', `${row.token}: the draft was modified after your approval email went out, so your reply was NOT applied. A fresh email with the current content is on its way.`);
       return { skipped: 'draft_changed' };
+    }
+    // An oversized draft was never fully shown in the email, so an emailed
+    // "approved" must not publish it — the email itself says so and
+    // directs the decision to the portal. Rejection is still honored
+    // (dismissing unseen content is safe). The SAME renderer that built
+    // the email decides whether the owner could have read everything —
+    // including the rendered-bytes ceiling (raw caps alone under-measure
+    // escaped/UTF-8 expansion, Codex r12).
+    if (decision === 'approved') {
+      const effectiveTruncated = current
+        ? (current.truncated || renderApprovalEmail({ run, row, preview: current }).truncated)
+        : false;
+      if (effectiveTruncated) {
+        const marker = 'oversized_approve_ignored';
+        if (row.last_error !== marker) {
+          await db('content_email_approvals').where({ id: row.id }).update({ last_error: marker, updated_at: new Date() });
+          await notifyAdmin('Approval requires the portal', `${row.token}: this draft exceeds email size limits, so your emailed "approved" was NOT executed. Review and approve it in /admin/seo.`);
+        }
+        return { skipped: 'requires_portal_review' };
+      }
     }
   }
   // Claim into a RECOVERABLE 'executing' state first (decision + sender
@@ -707,6 +713,10 @@ async function finishExecution(row, decision, sender, { recovery = false } = {})
       reviewer: `email:${sender}`,
       note: 'decided via owner email reply',
       expectedRunId: row.run_id,
+      // Re-asserted inside the runner's engine-locked reload, so no
+      // concurrent draft edit can slip between our pre-check and the
+      // publish (Codex r14).
+      expectedDraftSha: row.draft_sha || null,
     });
     await db('content_email_approvals').where({ id: row.id })
       .update({ status: decision, last_error: null, updated_at: new Date() });

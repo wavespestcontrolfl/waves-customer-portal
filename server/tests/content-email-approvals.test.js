@@ -642,6 +642,55 @@ describe('round-12 hardening (Codex r12)', () => {
   });
 });
 
+describe('round-14 hardening (Codex r14)', () => {
+  test('a rejection on a CHANGED draft re-requests instead of dismissing (snapshot binds both decisions)', async () => {
+    const reviewQueue = require('../services/content/autonomous-review-queue');
+    reviewQueue.decideReviewItem.mockClear();
+    const db = require('../models/db');
+    const updates = [];
+    db.mockImplementation((table) => ({
+      where: jest.fn().mockReturnValue({
+        update: jest.fn().mockImplementation((p) => { updates.push(p); return Promise.resolve(1); }),
+        first: jest.fn().mockResolvedValue(
+          table === 'autonomous_runs' ? { id: 'r', outcome: 'completed_pending_review', skip_reason: 'named_competitor_review', draft_payload: JSON.stringify({ title: 'T', body: 'EDITED after email' }) }
+            : table === 'opportunity_queue' ? { status: 'pending_review' } : null
+        ),
+        orderBy: jest.fn().mockReturnValue({ first: jest.fn().mockResolvedValue(null) }),
+      }),
+    }));
+    const row = { id: 'x', token: 'EA-deadbeef', run_id: 'r', opportunity_id: 'o', kind: 'named_competitor_review', draft_sha: 'sha-of-ORIGINAL', last_error: null };
+    const result = await approvals._internals.executeDecision(row, 'rejected', 'owner@example.com');
+    expect(result).toEqual({ skipped: 'draft_changed' });
+    expect(reviewQueue.decideReviewItem).not.toHaveBeenCalled(); // no dismiss of unseen content
+  });
+
+  test('finishExecution threads expectedDraftSha into the decision engine', async () => {
+    const reviewQueue = require('../services/content/autonomous-review-queue');
+    reviewQueue.decideReviewItem.mockClear();
+    reviewQueue.decideReviewItem.mockResolvedValue({});
+    const db = require('../models/db');
+    db.mockImplementation(() => ({
+      where: jest.fn().mockReturnValue({
+        update: jest.fn().mockResolvedValue(1),
+        first: jest.fn().mockResolvedValue(null),
+        orderBy: jest.fn().mockReturnValue({ first: jest.fn().mockResolvedValue(null) }),
+      }),
+    }));
+    const row = { id: 'x', token: 'EA-deadbeef', run_id: 'r', opportunity_id: 'o', kind: 'named_competitor_review', draft_sha: 'sha-emailed' };
+    await approvals._internals.finishExecution(row, 'approved', 'owner@example.com');
+    expect(reviewQueue.decideReviewItem).toHaveBeenCalledWith('o', expect.objectContaining({ expectedDraftSha: 'sha-emailed' }));
+  });
+
+  test('the rendered ceiling reserves wrapper headroom (85KB on bodyHtml)', () => {
+    // ~90KB rendered body: passes raw caps, must flip truncated under the
+    // 85KB pre-wrap ceiling (wrapHtml adds ~8KB chrome on top).
+    const run = { draft_payload: JSON.stringify({ title: 'T', body: 'x'.repeat(58000) + '&'.repeat(7000) }), reviewer_notes: null, action_type: 'x' };
+    const row = { kind: 'named_competitor_review', token: 'EA-deadbeef' };
+    const rendered = approvals._internals.renderApprovalEmail({ run, row });
+    expect(rendered.truncated).toBe(true);
+  });
+});
+
 describe('gate + full-draft rules (Codex r2)', () => {
   test('the feature gate requires explicit opt-in in EVERY environment', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../config/feature-gates.js'), 'utf8');

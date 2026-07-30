@@ -102,7 +102,7 @@ async function getReviewItem(opportunityId) {
   return buildReviewItem({ opportunity, brief, run, remediation, includeDraftBody: true });
 }
 
-async function decideReviewItem(opportunityId, { decision, note, reviewer, expectedRunId = null } = {}) {
+async function decideReviewItem(opportunityId, { decision, note, reviewer, expectedRunId = null, expectedDraftSha = null } = {}) {
   const normalizedDecision = normalizeDecision(decision);
   const reviewerName = normalizeReviewer(reviewer);
   const cleanNote = normalizeNote(note);
@@ -159,7 +159,7 @@ async function decideReviewItem(opportunityId, { decision, note, reviewer, expec
     // publish failure throws and leaves the item parked for retry.
     const runner = require('./autonomous-runner');
     // Publish the exact run that was reviewed (run.id), not "latest for the opp".
-    await runner.approveAndPublishNamedCompetitor(opportunityId, { runId: run?.id, approvedBy: reviewerName });
+    await runner.approveAndPublishNamedCompetitor(opportunityId, { runId: run?.id, approvedBy: reviewerName, expectedDraftSha });
     if (run?.id) {
       await db('autonomous_runs').where('id', run.id).update({
         reviewer_notes: appendReviewerNote(run.reviewer_notes, {
