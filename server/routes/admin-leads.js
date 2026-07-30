@@ -1210,6 +1210,13 @@ router.post('/:id/schedule-appointment', async (req, res, next) => {
   try {
     const { date, time, serviceType, serviceId, technicianId, notes, durationMinutes } = req.body;
     if (!date || !time) return res.status(400).json({ error: 'Date and time are required' });
+    // Appointment windows start on the hour (owner rule 2026-07-27) — reject
+    // rather than floor: silently moving the time would book a different slot
+    // than the admin confirmed to the customer. This also closes the old
+    // malformed-time path that booked with window_start = null.
+    if (!/^([01]\d|2[0-3]):00$/.test(time)) {
+      return res.status(400).json({ error: 'Appointment windows start on the hour (HH:00)' });
+    }
     const svcType = typeof serviceType === 'string' ? serviceType.trim() : '';
     if (!svcType) return res.status(400).json({ error: 'Service type is required' });
 

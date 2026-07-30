@@ -2762,8 +2762,10 @@ export function LeadsSection() {
                                           fontSize: 13,
                                         }}
                                       />
-                                      <input
-                                        type="time"
+                                      {/* Windows start on the hour (owner rule) — an
+                                          hourly select, not a free time input; the
+                                          server rejects non-HH:00 anyway. */}
+                                      <select
                                         value={apptForm.time}
                                         onChange={(e) =>
                                           setApptForm((prev) => ({
@@ -2780,7 +2782,22 @@ export function LeadsSection() {
                                           color: C.text,
                                           fontSize: 13,
                                         }}
-                                      />
+                                      >
+                                        <option value="">Time…</option>
+                                        {/* All 24 hours, mirroring the shared
+                                            CreateAppointmentModal's HOURLY_TIME_OPTIONS —
+                                            the endpoint accepts any HH:00. */}
+                                        {Array.from({ length: 24 }, (_, h) => {
+                                          const value = `${String(h).padStart(2, "0")}:00`;
+                                          const hour12 = h % 12 || 12;
+                                          const label = `${hour12}:00 ${h >= 12 ? "PM" : "AM"}`;
+                                          return (
+                                            <option key={value} value={value}>
+                                              {label}
+                                            </option>
+                                          );
+                                        })}
+                                      </select>
                                     </div>
                                     <div
                                       style={{
