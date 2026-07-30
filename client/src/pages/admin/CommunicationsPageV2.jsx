@@ -97,6 +97,7 @@ import {
   DialogFooter,
   cn,
 } from "../../components/ui";
+import { trackAdminPageView } from "../../lib/adminUsage";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -2490,6 +2491,16 @@ function PrepSendDialog({ open, onClose }) {
   );
 }
 
+// Usage-beacon leaf for the rendered tab state (exported for tests).
+// Underscore keys (call_routing; the email_templates back-compat hash →
+// the email sub-view of Templates) canonicalize to the hyphenated slug
+// shape the tracking pipeline accepts, and the Templates sub-view reports
+// the DEEPEST rendered leaf, matching the nested-*Tab convention.
+export function usageLeafFor(tab, templateKind) {
+  const leaf = tab === "templates" && templateKind === "email" ? "email-templates" : tab;
+  return leaf.replace(/_/g, "-");
+}
+
 export default function CommunicationsPageV2() {
   const [tab, setTab] = useState("sms");
   // SMS / Email are sub-views of the single Message Templates tab.
@@ -2518,6 +2529,21 @@ export default function CommunicationsPageV2() {
     window.addEventListener("hashchange", applyHashTab);
     return () => window.removeEventListener("hashchange", applyHashTab);
   }, [tabs]);
+
+  // Usage beacon for the leaf that actually RENDERS. Tab state here never
+  // reaches the router — header clicks are state-only, and cross-tab deep
+  // links arrive via raw window.location.hash (#tab=…, hashTo in
+  // NotificationEventsTabV2), which react-router (and so the layout's
+  // raw-URL beacon) never observes (Codex #2961 r14). This page is listed
+  // in SELF_REPORTING_PAGES (lib/adminUsage.js).
+  const usageLeaf = usageLeafFor(tab, templateKind);
+  useEffect(() => {
+    trackAdminPageView({
+      pathname: "/admin/communications",
+      search: `?tab=${usageLeaf}`,
+      authoritative: true,
+    });
+  }, [usageLeaf]);
 
   return (
     <div className="bg-surface-page min-h-full font-sans text-zinc-900 max-w-[1300px] mx-auto">

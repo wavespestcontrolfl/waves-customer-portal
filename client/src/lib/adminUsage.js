@@ -46,14 +46,18 @@ const DEDUPE_MS = 30000;
 // Without this, every legacy redirect route logs a phantom page and steals
 // the attribution of a core destination.
 const REDIRECT_SETTLE_MS = 800;
-// Pages that emit their own AUTHORITATIVE leaf beacon after mount
-// (currently only Settings). Their raw route beacon settles longer: the
-// page chunk is lazy-loaded, and on a cold load the authoritative beacon
-// can arrive well after 800ms — flushing the raw one first would record a
-// duplicate untabbed row (or an invalid deep-link tab) that the page's
-// beacon was supposed to supersede (Codex #2961 r12). Any page that
-// adopts authoritative beacons must be listed here.
-const SELF_REPORTING_PAGES = new Set(['settings']);
+// Pages that emit their own AUTHORITATIVE leaf beacon after mount —
+// Settings (validated leaf), the Assessments hub (invalid ?tab= renders a
+// fallback WITHOUT rewriting the URL), and Communications (tab state
+// lives outside the router: state-only header clicks + raw
+// window.location.hash deep links). Their raw route beacon settles
+// longer: the page chunk is lazy-loaded, and on a cold load the
+// authoritative beacon can arrive well after 800ms — flushing the raw
+// one first would record a duplicate untabbed row (or an invalid
+// deep-link tab) that the page's beacon was supposed to supersede
+// (Codex #2961 r12). Any page that adopts authoritative beacons must be
+// listed here.
+const SELF_REPORTING_PAGES = new Set(['settings', 'lawn-assessments', 'communications']);
 const SELF_REPORT_SETTLE_MS = 5000;
 
 let pendingSource = null; // { source, ts }

@@ -273,6 +273,45 @@ describe('trackAdminPageView', () => {
     expect(lastBody().tab).toBe('general');
   });
 
+  it('holds the raw beacon for every self-reporting page, not just Settings', () => {
+    // lawn-assessments and communications adopted authoritative beacons in
+    // r14 — their raw beacons must get the same 5s refinement window, or a
+    // slow chunk records a duplicate untabbed row before the page reports.
+    for (const [pathname, tab] of [
+      ['/admin/communications', 'sms'],
+      ['/admin/lawn-assessments', 'funnel'],
+    ]) {
+      __resetAdminUsageForTests();
+      fetchMock.mockClear();
+      trackAdminPageView({ pathname, search: '' });
+      vi.advanceTimersByTime(900); // past the 800ms redirect window
+      expect(fetchMock).not.toHaveBeenCalled();
+      trackAdminPageView({ pathname, search: `?tab=${tab}`, authoritative: true });
+      settle();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(lastBody().tab).toBe(tab);
+    }
+  });
+
+  it('a newer authoritative leaf replaces a still-pending one (mount flash)', () => {
+    // Communications mounts on its default leaf, then the #tab= hash (or a
+    // sub-view) resolves in the same breath — the settled destination must
+    // be the ONE row recorded, not both.
+    trackAdminPageView({
+      pathname: '/admin/communications',
+      search: '?tab=sms',
+      authoritative: true,
+    });
+    trackAdminPageView({
+      pathname: '/admin/communications',
+      search: '?tab=email-templates',
+      authoritative: true,
+    });
+    settle();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(lastBody().tab).toBe('email-templates');
+  });
+
   it('a real dwell on a self-reporting page is flushed, not swallowed, by later navigation', () => {
     trackAdminPageView({ pathname: '/admin/settings', search: '' });
     vi.advanceTimersByTime(2000); // genuine dwell, chunk never refined (edge)
