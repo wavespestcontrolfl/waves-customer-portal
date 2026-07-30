@@ -1284,7 +1284,14 @@ async function assembleBeehiivNewsletter(draft) {
   const eventShowsImage = events.map((ev) => {
     const u = safeUrl(ev.imageUrl);
     if (!u || isLikelyGifUrl(u)) return false;
-    const key = u.toLowerCase();
+    // Case-preserving key: scheme/host fold (case-insensitive per RFC),
+    // path/query stay verbatim — /EventA.jpg and /eventa.jpg are
+    // different assets on case-sensitive CDNs.
+    let key = u;
+    try {
+      const parsed = new URL(u);
+      key = `${parsed.protocol}//${parsed.host.toLowerCase()}${parsed.pathname}${parsed.search}`;
+    } catch { /* fall back to the raw url */ }
     if (seenImageUrls.has(key)) return false;
     seenImageUrls.add(key);
     return true;
