@@ -318,15 +318,32 @@ router.post('/:id/verdict', async (req, res) => {
       }
     } else if (verdict === 'deny' && liveEmailCard) {
       // The deny resolved the email card WITHOUT approving the address —
-      // stamp the hold so the ledger sweep (which releases answered
-      // questions by resolved-card presence) never reads this resolution
-      // as confirmation (Codex #3084 r13). The correction fanout still
-      // releases it: findPendingHolds ignores last_error, and a successful
-      // release clears it.
+      // stamp the hold so no automated release path (sweep, end-of-run
+      // reconciliation) reads this resolution as confirmation (Codex #3084
+      // r13). UPSERT, not update (r14): a deny can land BEFORE the
+      // processor's Step 6/8 ledger write, and an update-only stamp would
+      // leave the later-inserted hold unstamped. The insert's empty
+      // held_email is inert (the invalid-address guard blocks sends); the
+      // processor's merge fills flags/address but never touches last_error.
+      // Only the correction fanout (explicit corrected address) releases a
+      // stamped hold, and a successful release clears the stamp.
       try {
+        const call = await db('call_log').where({ id: item.call_log_id }).first('customer_id');
+        const now = new Date();
         await db('first_touch_holds')
-          .where({ call_log_id: item.call_log_id, status: 'pending' })
-          .update({ last_error: 'email_denied_await_correction', updated_at: new Date() });
+          .insert({
+            call_log_id: item.call_log_id,
+            customer_id: call?.customer_id || null,
+            held_email: '',
+            held_drip: false,
+            held_newsletter: false,
+            status: 'pending',
+            last_error: 'email_denied_await_correction',
+            created_at: now,
+            updated_at: now,
+          })
+          .onConflict('call_log_id')
+          .merge({ last_error: 'email_denied_await_correction', updated_at: now });
       } catch (stampErr) {
         logger.warn(`[admin-triage] deny stamp failed for call ${item.call_log_id}: ${stampErr.code || stampErr.name || 'db_error'}`);
       }

@@ -18,6 +18,7 @@ let mockMergeFailures = 0;
 let mockMergeArgs = [];
 let mockCustomerFirstQueue = null; // shift per customers.first(); an Error value throws
 let mockSubscriberRow = null; // newsletter_subscribers.first() (DOI dedupe guard)
+let mockSubscriberUpdates = [];
 let mockTriageFirstQueue = null; // shift per triage_items.first()
 jest.mock('../models/db', () => {
   const handler = (table) => {
@@ -26,6 +27,9 @@ jest.mock('../models/db', () => {
       whereIn: jest.fn(() => chain),
       whereRaw: jest.fn(() => chain),
       whereNotNull: jest.fn(() => chain),
+      whereNull: jest.fn(() => chain),
+      whereNot: jest.fn(() => chain),
+      orWhereNot: jest.fn(() => chain),
       whereExists: jest.fn(() => chain),
       whereNotExists: jest.fn(() => chain),
       from: jest.fn(() => chain),
@@ -49,6 +53,7 @@ jest.mock('../models/db', () => {
           if (patch.status === 'releasing' && mockClaimFails) return 0;
           mockHoldUpdates.push(patch);
         }
+        if (table === 'newsletter_subscribers') mockSubscriberUpdates.push(patch);
         return 1;
       }),
       first: jest.fn(async () => {
@@ -127,6 +132,7 @@ beforeEach(() => {
   mockMergeArgs = [];
   mockCustomerFirstQueue = null;
   mockSubscriberRow = null;
+  mockSubscriberUpdates = [];
   mockTriageFirstQueue = null;
 });
 
@@ -402,6 +408,62 @@ describe('resumeHeldNewsletterPostCommit failure paths', () => {
     expect(outcomes).toHaveLength(1);
     const settles = mockHoldUpdates.filter((u) => u.released_newsletter === true);
     expect(settles).toHaveLength(2);
+  });
+});
+
+describe('deny-stamped holds and dedupe hardening (r14)', () => {
+  test('a deny-stamped hold never releases via automated triggers', async () => {
+    mockHold = baseHold({ last_error: 'email_denied_await_correction' });
+    const res = await resumeHeldFirstTouch({ callLogId: 'call-1' });
+    expect(res.skipped).toBe('email_denied');
+    expect(mockEnroll).not.toHaveBeenCalled();
+    expect(mockNewsletter).not.toHaveBeenCalled();
+    // Claim released back to pending; the stamp itself is untouched.
+    expect(mockHoldUpdates.at(-1)).toMatchObject({ status: 'pending' });
+    expect(mockHoldUpdates.at(-1).last_error).toBeUndefined();
+  });
+
+  test('an explicit correction releases a deny-stamped hold', async () => {
+    mockHold = baseHold({ last_error: 'email_denied_await_correction' });
+    const res = await resumeHeldFirstTouch({ customerId: 'cust-1', email: 'corrected@example.com' });
+    expect(res.enrolled).toBe(true);
+  });
+
+  test('a hold re-pended for an unconfirmed DOI bypasses the dedupe stamp and re-sends', async () => {
+    // The send failed; even if the pre-send stamp survived a failed
+    // cleanup, this retry must actually send.
+    mockHold = baseHold({ held_drip: false, last_error: 'newsletter_doi_not_confirmed' });
+    mockSubscriberRow = { status: 'pending', confirmation_sent_at: new Date() };
+    const res = await resumeHeldFirstTouch({ callLogId: 'call-1' });
+    expect(mockNewsletter).toHaveBeenCalled();
+    expect(res.resumed).toBe(true);
+  });
+
+  test('the dedupe skip still links an unlinked pending subscriber', async () => {
+    mockHold = baseHold({ held_drip: false });
+    mockSubscriberRow = { status: 'pending', confirmation_sent_at: new Date() };
+    await resumeHeldFirstTouch({ callLogId: 'call-1' });
+    expect(mockNewsletter).not.toHaveBeenCalled();
+    expect(mockSubscriberUpdates.at(-1)).toMatchObject({ customer_id: 'cust-1' });
+  });
+
+  test('post-commit re-pends when a superseded target is suppressed', async () => {
+    mockHold = { held_drip: false, released_drip: false, held_email: 'superseded@example.com', last_error: null };
+    mockSuppressionRow = { id: 'sup-1', suppression_type: 'bounce', group_key: null };
+    const outcome = await resumeHeldNewsletterPostCommit({ holdId: 'hold-1', customerId: 'cust-1', email: 'original@example.com' });
+    expect(outcome).toMatchObject({ skipped: 'email_suppressed' });
+    expect(mockNewsletter).not.toHaveBeenCalled();
+    expect(mockHoldUpdates.at(-1)).toMatchObject({ status: 'pending', last_error: 'email_suppressed' });
+  });
+
+  test('recordFirstTouchHold coerces a missing address to an inert empty string', async () => {
+    // Email demoted at intake: the hold still records (NOT NULL satisfied
+    // by ''), stays send-safe behind the invalid-address guard, and waits
+    // for the correction fanout.
+    mockHold = null;
+    const ok = await recordFirstTouchHold({ callLogId: 'call-1', customerId: 'cust-1', heldEmail: null, heldNewsletter: true });
+    expect(ok).toBe(true);
+    expect(mockMergeArgs.at(-1).held_email).toBe('');
   });
 });
 

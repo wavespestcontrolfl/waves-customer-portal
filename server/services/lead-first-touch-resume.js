@@ -138,17 +138,38 @@ function newsletterDelivered(outcome) {
 // buries an undelivered DOI.
 const RESUME_DOI_DEDUPE_MS = 24 * 60 * 60 * 1000;
 
-async function runNewsletterResume(payload, dbh = db) {
-  try {
-    const existing = await dbh('newsletter_subscribers')
-      .whereRaw('LOWER(email) = ?', [String(payload.email || '').trim().toLowerCase()])
-      .first('status', 'confirmation_sent_at');
-    if (existing && String(existing.status) === 'pending' && existing.confirmation_sent_at
-        && (Date.now() - new Date(existing.confirmation_sent_at).getTime()) < RESUME_DOI_DEDUPE_MS) {
-      return { skipped: 'confirmation_recently_sent' };
+async function runNewsletterResume(payload, dbh = db, { skipDedupe = false } = {}) {
+  // skipDedupe (Codex #3084 r14): a hold re-pended with
+  // 'newsletter_doi_not_confirmed' means the SEND itself failed — even if
+  // the pre-send confirmation_sent_at stamp survived a failed cleanup, this
+  // retry must actually re-send, never trust the stamp.
+  if (!skipDedupe) {
+    try {
+      const emailLc = String(payload.email || '').trim().toLowerCase();
+      const existing = await dbh('newsletter_subscribers')
+        .whereRaw('LOWER(email) = ?', [emailLc])
+        .first('status', 'confirmation_sent_at');
+      if (existing && String(existing.status) === 'pending' && existing.confirmation_sent_at
+          && (Date.now() - new Date(existing.confirmation_sent_at).getTime()) < RESUME_DOI_DEDUPE_MS) {
+        // Preserve canonical linkage even when the send is deduped (Codex
+        // #3084 r14): the pending row may predate the call customer, and an
+        // unlinked subscriber is invisible to the email fanout's token
+        // rotation. Adopt only unlinked rows — never steal a link.
+        if (payload.customerId) {
+          try {
+            await dbh('newsletter_subscribers')
+              .whereRaw('LOWER(email) = ?', [emailLc])
+              .whereNull('customer_id')
+              .update({ customer_id: payload.customerId, updated_at: new Date() });
+          } catch (linkErr) {
+            logger.warn(`[first-touch-resume] dedupe linkage failed for customer ${payload.customerId}: ${linkErr.code || linkErr.name || 'db_error'}`);
+          }
+        }
+        return { skipped: 'confirmation_recently_sent' };
+      }
+    } catch (guardErr) {
+      logger.warn(`[first-touch-resume] DOI-dedupe guard lookup failed: ${guardErr.code || guardErr.name || 'db_error'} — proceeding with resume`);
     }
-  } catch (guardErr) {
-    logger.warn(`[first-touch-resume] DOI-dedupe guard lookup failed: ${guardErr.code || guardErr.name || 'db_error'} — proceeding with resume`);
   }
   const CRP = require('./call-recording-processor');
   if (typeof CRP.resumeNewsletterForCallCustomer !== 'function') return null;
@@ -183,6 +204,17 @@ async function resumeHeldFirstTouch({
     for (const hold of holds) {
       if (!(await claimHold(hold, dbh))) continue; // another release path owns it
       inFlightHoldId = hold.id;
+
+      // A deny-stamped hold means the operator resolved the card WITHOUT
+      // approving the address (Codex #3084 r14) — no automated trigger
+      // (end-of-run reconciliation, sweep, triage race) may release it.
+      // Only an explicit correction (the `email` override) does; success
+      // clears the stamp with the released-settle's last_error: null.
+      if (hold.last_error === 'email_denied_await_correction' && !email) {
+        await settleHold(hold.id, { status: 'pending' }, dbh);
+        result.skipped = result.skipped || 'email_denied';
+        continue;
+      }
 
       const holdCustomerId = hold.customer_id || customerId;
       if (!holdCustomerId) {
@@ -305,7 +337,7 @@ async function resumeHeldFirstTouch({
               email: sendEmail,
               firstName: customer.first_name || null,
               lastName: customer.last_name || null,
-            }, dbh);
+            }, dbh, { skipDedupe: hold.last_error === 'newsletter_doi_not_confirmed' });
           } catch (newsletterErr) {
             logger.warn(`[first-touch-resume] newsletter resume failed for customer ${holdCustomerId}: ${newsletterErr.code || newsletterErr.name || 'resume_failed'}`);
           }
@@ -400,19 +432,35 @@ async function runOnePostCommitResume(payload, holdIds, dbh) {
     // second correction may have superseded held_email after this payload
     // was built inside the first correction's transaction.
     let sendPayload = payload;
+    let adoptedSuperseded = false;
+    let holdWasDoiUnconfirmed = false;
     if (payload.holdId) {
       try {
-        const fresh = await dbh('first_touch_holds').where({ id: payload.holdId }).first('held_email');
+        const fresh = await dbh('first_touch_holds').where({ id: payload.holdId }).first('held_email', 'last_error');
+        holdWasDoiUnconfirmed = fresh?.last_error === 'newsletter_doi_not_confirmed';
         const freshEmail = String(fresh?.held_email || '').trim().toLowerCase();
         if (freshEmail && freshEmail !== String(payload.email || '').trim().toLowerCase()
             && RESUME_EMAIL_RE.test(freshEmail)) {
           sendPayload = { ...payload, email: freshEmail };
+          adoptedSuperseded = true;
         }
       } catch (rereadErr) {
         logger.warn(`[first-touch-resume] post-commit target re-read failed: ${rereadErr.code || rereadErr.name || 'db_error'} — using payload target`);
       }
     }
-    const outcome = await runNewsletterResume(sendPayload, dbh);
+    // An adopted superseded target was never suppression-checked by THIS
+    // claim (Codex #3084 r14) — mirror the direct path's gate before the
+    // unrollbackable send; suppressed → back to pending for a later
+    // correction.
+    if (adoptedSuperseded && await emailSuppressedForNewLead(sendPayload.email, dbh)) {
+      for (const holdId of holdIds) {
+        await dbh('first_touch_holds').where({ id: holdId })
+          .update({ status: 'pending', last_error: 'email_suppressed', updated_at: new Date() });
+      }
+      logger.info('[first-touch-resume] superseded post-commit target suppressed — hold(s) stay pending');
+      return { skipped: 'email_suppressed' };
+    }
+    const outcome = await runNewsletterResume(sendPayload, dbh, { skipDedupe: holdWasDoiUnconfirmed });
     for (const holdId of holdIds) {
       if (newsletterDelivered(outcome)) {
         const hold = await dbh('first_touch_holds').where({ id: holdId }).first('held_drip', 'released_drip');
@@ -585,6 +633,10 @@ async function sweepAbandonedFirstTouchHolds({ dbh = db, limit = 10 } = {}) {
       .where(function notDenied() {
         this.whereNull('last_error').orWhereNot('last_error', 'email_denied_await_correction');
       })
+      // Address-less rows (email demoted at intake, deny stamps) can only
+      // release via a correction — sweeping them would just churn through
+      // the invalid-address guard every pass.
+      .whereNot('held_email', '')
       .whereExists(function answered() {
         this.select(1).from('triage_items')
           .whereRaw('triage_items.call_log_id = first_touch_holds.call_log_id')
