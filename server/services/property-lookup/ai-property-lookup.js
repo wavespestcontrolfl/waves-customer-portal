@@ -3080,12 +3080,16 @@ function charlottePoolFeatures(detailHtml) {
 }
 
 function parseManateePaoRecord({ address, search, land, buildings, features }) {
-  // Multi-situs master parcel (land-lease mobile-home park is the common
-  // case): the typed address matched ONE situs line, but every land and
-  // building row describes the WHOLE parcel — a ~47-acre park lot or another
-  // unit's building must never price a single home. Keep the identity facts
-  // (matched situs, parcel link) and leave every per-unit dimension to
-  // AI/field sources; _multiSitusParcel drives the panel's park verify-flag.
+  // Multi-situs parcel (a land-lease mobile-home park at hundreds of
+  // addresses, a duplex at two): the typed address matched ONE situs line,
+  // but every land and building row describes the WHOLE parcel — a ~47-acre
+  // park lot or the other unit's half of a duplex must never price a single
+  // home. Keep the identity facts (matched situs, parcel link) and leave
+  // every per-unit dimension to AI/field sources; _multiSitusParcel drives
+  // the panel's verify-flag, whose copy scales with situsCount (park
+  // semantics only at association scale, ≥5). Before the situs-cell split
+  // these rows could never match at all, so no valid county dimensions are
+  // lost relative to the old behavior.
   if ((search.situsCount || 1) > 1) {
     return {
       squareFootage: null,

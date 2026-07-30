@@ -2615,15 +2615,20 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null) {
   }
 
   // Multi-situs master parcel: the roll DID match the address, but as one
-  // situs line of a parcel shared by many homes — land-lease communities
-  // (mobile-home parks) are assessed as ONE parcel, so parcel-level
-  // dimensions describe the park, not the home, and the county record
-  // intentionally ships without sqft/lot/stories.
+  // situs line of a parcel shared with other units, so parcel-level
+  // dimensions describe the whole parcel and the county record
+  // intentionally ships without sqft/lot/stories. Park semantics are only
+  // claimed at association scale (≥5 addresses, the same threshold the
+  // stacked-parcel aggregation uses) or when the GIS lane confirmed DOR 28
+  // — a 2–4 address parcel is more likely a duplex/small multi-unit and
+  // gets neutral copy.
   const parkParcel = detectMultiSitusMasterParcel(rc);
   if (parkParcel) {
     flags.push({
       field: 'parkParcel',
-      reason: `Address is one of ${parkParcel.situsCount} homes on a single county master parcel — a land-lease community (mobile-home park or similar), so per-home sq ft, lot size, and stories are not on the roll. Get home dimensions from the customer or on site and save them as field-verified.`,
+      reason: parkParcel.situsCount >= 5
+        ? `Address is one of ${parkParcel.situsCount} homes on a single county master parcel — a land-lease community (mobile-home park or similar), so per-home sq ft, lot size, and stories are not on the roll. Get home dimensions from the customer or on site and save them as field-verified.`
+        : `Address shares one county parcel with ${parkParcel.situsCount - 1} other unit(s) — a duplex or small multi-unit parcel, so the roll's dimensions describe the whole building and lot, not this unit. Get the unit's sq ft and stories from the customer or on site and save them as field-verified.`,
       priority: 'HIGH',
     });
   }

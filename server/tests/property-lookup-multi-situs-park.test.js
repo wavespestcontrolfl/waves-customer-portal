@@ -212,6 +212,20 @@ describe('park parcel verify flag', () => {
     expect(parkFlag.reason).toContain('land-lease');
   });
 
+  test('small multi-situs parcels (duplex scale) get neutral copy, not park semantics', () => {
+    const rc = {
+      squareFootage: 0,
+      lotSize: 0,
+      _raw: { multiSitusParcel: { situsCount: 2, parcelId: '900000200', situsAddress: '210 DUNLIN CT' } },
+    };
+    const flags = routePrivate.buildFieldVerifyFlags(rc, {});
+    const parkFlag = flags.find((f) => f.field === 'parkParcel');
+    expect(parkFlag).toBeDefined();
+    expect(parkFlag.priority).toBe('HIGH');
+    expect(parkFlag.reason).toContain('duplex or small multi-unit');
+    expect(parkFlag.reason).not.toContain('land-lease');
+  });
+
   test('no parkParcel flag on ordinary records', () => {
     const flags = routePrivate.buildFieldVerifyFlags({ squareFootage: 1400, lotSize: 6000, _raw: {} }, {});
     expect(flags.find((f) => f.field === 'parkParcel')).toBeUndefined();
