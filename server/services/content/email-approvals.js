@@ -341,12 +341,18 @@ function draftPreview(run) {
   // see ALL of it before approving, not just the body.
   let metadata = null;
   if (payload && typeof payload === 'object') {
-    const meta = { ...(typeof payload.frontmatter === 'object' && payload.frontmatter ? payload.frontmatter : {}) };
+    // Frontmatter stays NAMESPACED, never flattened: the publisher reads
+    // frontmatter fields from frontmatter — if the payload carries the
+    // same key at both levels (e.g. meta_description), flattening would
+    // show the owner one variant while the other publishes (Codex r12).
+    const meta = {};
+    if (typeof payload.frontmatter === 'object' && payload.frontmatter && Object.keys(payload.frontmatter).length) {
+      meta.frontmatter = payload.frontmatter;
+    }
     for (const [k, v] of Object.entries(payload)) {
-      if (k === 'body' || k === 'content' || k === 'frontmatter') continue;
+      if (k === 'body' || k === 'content' || k === 'frontmatter' || k === 'title') continue;
       meta[k] = v;
     }
-    delete meta.title; // shown separately
     if (Object.keys(meta).length) {
       try { metadata = JSON.stringify(meta, null, 1); } catch { metadata = null; }
     }
@@ -363,6 +369,57 @@ function draftPreview(run) {
     // approval binds to this snapshot, not merely the run id.
     sha: crypto.createHash('sha256').update(`${title}\u0000${full}\u0000${metadata || ''}`).digest('hex'),
   };
+}
+
+// Rendered-size ceiling for the ENCODED email body: Gmail clips HTML around
+// ~102KB, and escapeHtml/UTF-8 expand raw characters — so the decision to
+// allow email replies is made on the RENDERED bytes, not source chars
+// (Codex r12). Over the ceiling, the email flips to portal-routing copy and
+// emailed approval is refused at decision time via the same helper.
+const RENDERED_EMAIL_MAX_BYTES = 95_000;
+
+/**
+ * Build the approval email body and the EFFECTIVE truncation verdict.
+ * Single source of truth for both send time and decision time — the guard
+ * that refuses emailed approval must measure exactly what the owner was
+ * (or wasn't) shown.
+ */
+function renderApprovalEmail({ run, row, opportunity = null, preview = null }) {
+  const p = preview || draftPreview(run);
+  const { title, body: draftBody, metadata } = p;
+  const isCompetitor = row.kind === 'named_competitor_review';
+  const senders = allowedSenders();
+  const build = (truncatedFlag) => [
+    `<p><strong>${isCompetitor ? 'Named-competitor draft' : 'Trust-build draft'}</strong> is parked for your decision.</p>`,
+    `<p><strong>Title:</strong> ${escapeHtml(title)}<br/>`,
+    `<strong>Target:</strong> ${escapeHtml(opportunity?.query || run.action_type || '')}<br/>`,
+    `<strong>Parked as:</strong> ${escapeHtml(row.kind)}</p>`,
+    run.reviewer_notes ? `<p><strong>Reviewer notes:</strong> ${escapeHtml(String(run.reviewer_notes).slice(0, 600))}</p>` : '',
+    // The COMPLETE draft. For named-competitor runs approval PUBLISHES this
+    // content; a trust-build approval only grants ramp credit — the label
+    // must never promise a publication that doesn't happen (Codex r5).
+    draftBody ? `<p><strong>${isCompetitor ? 'Full draft (this exact content publishes on approval):' : 'Full draft (approval grants trust-build credit — this draft does NOT publish now):'}</strong></p><blockquote style="border-left:3px solid #ccc;padding-left:10px;color:#444;white-space:pre-wrap;">${escapeHtml(draftBody)}</blockquote>` : '',
+    metadata ? `<p><strong>Metadata (${isCompetitor ? 'also publishes — ' : ''}frontmatter, alt text, schema):</strong></p><blockquote style="border-left:3px solid #ccc;padding-left:10px;color:#666;white-space:pre-wrap;font-size:12px;">${escapeHtml(metadata)}</blockquote>` : '',
+    truncatedFlag
+      ? '<p style="color:#b00;"><strong>This draft exceeds email size limits, so it cannot be fully shown here. Replying "approved" will NOT execute — review and decide in /admin/seo instead. ("not approved" still works.)</strong></p>'
+      : '<p><strong>Reply to this email</strong> (keep the subject) with exactly one of:</p>\n<p style="font-size:18px;"><strong>approved</strong> &nbsp;—or—&nbsp; <strong>not approved</strong></p>',
+    isCompetitor ? '<p>approved → the post publishes through the normal pipeline; not approved → the draft is dismissed and the topic is closed.</p>'
+      : '<p>approved → the draft earns trust-build credit toward auto-publish (it does not publish now); not approved → the item is dismissed.</p>',
+    senders.length
+      ? `<p style="color:#666;font-size:13px;">Replies are accepted only from: ${senders.map(escapeHtml).join(', ')}.</p>`
+      : '<p style="color:#b00;font-size:13px;">No approver addresses are configured (APPROVAL_ALLOWED_SENDERS) — replies cannot be processed until one is set.</p>',
+  ].join('\n');
+
+  let truncated = p.truncated;
+  let bodyHtml = build(truncated);
+  if (!truncated && Buffer.byteLength(bodyHtml, 'utf8') > RENDERED_EMAIL_MAX_BYTES) {
+    // Raw caps passed but the ENCODED render would clip — flip to the
+    // portal-routing presentation so the owner is never asked to approve
+    // content hidden behind "[Message clipped]".
+    truncated = true;
+    bodyHtml = build(true);
+  }
+  return { bodyHtml, truncated };
 }
 
 /**
@@ -388,6 +445,21 @@ async function sendApprovalRequest(run, opportunity = null) {
     if (!row) row = await db('content_email_approvals').where({ run_id: run.id }).first();
   }
   if (!row || row.email_sent_at) return { row, skipped: row ? 'already_sent' : 'insert_failed' };
+
+  // Revalidate before (re)sending: a failed first send can be retried
+  // AFTER the item was decided in the portal — trust-build approvals stamp
+  // the run and complete the opportunity without changing skip_reason, so
+  // the kind check alone can't see it (Codex r12). A decided item's row is
+  // superseded, never re-emailed.
+  {
+    const opp = row.opportunity_id ? await db('opportunity_queue').where({ id: row.opportunity_id }).first() : null;
+    const decidedElsewhere = (opp && opp.status !== 'pending_review') || !!run.trust_build_approved_at;
+    if (decidedElsewhere) {
+      await db('content_email_approvals').where({ id: row.id, status: 'awaiting_reply' })
+        .update({ status: 'superseded', last_error: `decided before email could send (opp ${opp?.status || '?'}${run.trust_build_approved_at ? ', trust-build approved' : ''})`, updated_at: new Date() });
+      return { row, skipped: 'decided_before_send' };
+    }
+  }
 
   // Atomic RECOVERABLE send claim: the runner hook and the ten-minute sweep
   // race on the same unsent row — whoever stamps email_sending_at first
@@ -418,35 +490,14 @@ async function sendApprovalRequest(run, opportunity = null) {
     ...(rebindingChangedDraft ? { token: row.token } : {}),
     updated_at: new Date(),
   });
-  const isCompetitor = row.kind === 'named_competitor_review';
-  const senders = allowedSenders();
+  const rendered = renderApprovalEmail({ run, row, opportunity, preview: { title, body: draftBody, truncated, metadata } });
   const subject = `[${row.token}] Approve? ${title}`;
-  const bodyHtml = [
-    `<p><strong>${isCompetitor ? 'Named-competitor draft' : 'Trust-build draft'}</strong> is parked for your decision.</p>`,
-    `<p><strong>Title:</strong> ${escapeHtml(title)}<br/>`,
-    `<strong>Target:</strong> ${escapeHtml(opportunity?.query || run.action_type || '')}<br/>`,
-    `<strong>Parked as:</strong> ${escapeHtml(row.kind)}</p>`,
-    run.reviewer_notes ? `<p><strong>Reviewer notes:</strong> ${escapeHtml(String(run.reviewer_notes).slice(0, 600))}</p>` : '',
-    // The COMPLETE draft. For named-competitor runs approval PUBLISHES this
-    // content; a trust-build approval only grants ramp credit — the label
-    // must never promise a publication that doesn't happen (Codex r5).
-    draftBody ? `<p><strong>${isCompetitor ? 'Full draft (this exact content publishes on approval):' : 'Full draft (approval grants trust-build credit — this draft does NOT publish now):'}</strong></p><blockquote style="border-left:3px solid #ccc;padding-left:10px;color:#444;white-space:pre-wrap;">${escapeHtml(draftBody)}</blockquote>` : '',
-    metadata ? `<p><strong>Metadata (${isCompetitor ? 'also publishes — ' : ''}meta description, alt text, schema):</strong></p><blockquote style="border-left:3px solid #ccc;padding-left:10px;color:#666;white-space:pre-wrap;font-size:12px;">${escapeHtml(metadata)}</blockquote>` : '',
-    truncated
-      ? '<p style="color:#b00;"><strong>This draft exceeds email size limits, so it cannot be fully shown here. Replying "approved" will NOT execute — review and decide in /admin/seo instead. ("not approved" still works.)</strong></p>'
-      : '<p><strong>Reply to this email</strong> (keep the subject) with exactly one of:</p>\n<p style="font-size:18px;"><strong>approved</strong> &nbsp;—or—&nbsp; <strong>not approved</strong></p>',
-    isCompetitor ? '<p>approved → the post publishes through the normal pipeline; not approved → the draft is dismissed and the topic is closed.</p>'
-      : '<p>approved → the draft earns trust-build credit toward auto-publish (it does not publish now); not approved → the item is dismissed.</p>',
-    senders.length
-      ? `<p style="color:#666;font-size:13px;">Replies are accepted only from: ${senders.map(escapeHtml).join(', ')}.</p>`
-      : '<p style="color:#b00;font-size:13px;">No approver addresses are configured (APPROVAL_ALLOWED_SENDERS) — replies cannot be processed until one is set.</p>',
-  ].join('\n');
 
   const result = await email.send({
     to: approvalRecipient(),
     subject,
     heading: 'Content approval needed',
-    body: bodyHtml,
+    body: rendered.bodyHtml,
     // Replies must land in the mailbox the poller actually reads —
     // email.js sends FROM the fixed contact@ account, so without this an
     // APPROVAL_IMAP_USER override would poll a mailbox replies never reach.
@@ -533,7 +584,13 @@ async function executeDecision(row, decision, sender) {
   if (decision === 'approved') {
     const run = await db('autonomous_runs').where({ id: row.run_id }).first();
     const current = run ? draftPreview(run) : null;
-    if (current?.truncated) {
+    // The SAME renderer that built the email decides whether the owner
+    // could have read everything — including the rendered-bytes ceiling
+    // (raw caps alone under-measure escaped/UTF-8 expansion, Codex r12).
+    const effectiveTruncated = current
+      ? (current.truncated || renderApprovalEmail({ run, row, preview: current }).truncated)
+      : false;
+    if (effectiveTruncated) {
       const marker = 'oversized_approve_ignored';
       if (row.last_error !== marker) {
         await db('content_email_approvals').where({ id: row.id }).update({ last_error: marker, updated_at: new Date() });
@@ -930,6 +987,7 @@ module.exports = {
     sweepUnnotifiedRuns,
     verifySenderAuthentication,
     reconcileFromPersistedState,
+    renderApprovalEmail,
     htmlToText,
     draftPreview,
     TOKEN_RE,

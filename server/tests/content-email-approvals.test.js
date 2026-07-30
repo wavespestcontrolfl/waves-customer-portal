@@ -548,6 +548,59 @@ describe('round-9 hardening (Codex r9)', () => {
   });
 });
 
+describe('round-12 hardening (Codex r12)', () => {
+  test('frontmatter stays namespaced in the metadata snapshot — colliding keys are both visible', () => {
+    const { metadata } = approvals._internals.draftPreview({
+      draft_payload: JSON.stringify({
+        title: 'T', body: 'b',
+        meta_description: 'TOP-LEVEL variant',
+        frontmatter: { meta_description: 'FRONTMATTER variant (this one publishes)' },
+      }),
+    });
+    expect(metadata).toContain('TOP-LEVEL variant');
+    expect(metadata).toContain('FRONTMATTER variant');
+  });
+
+  test('the rendered-bytes ceiling flips an email to portal routing even when raw caps pass', () => {
+    // Heavy escaping: '&' renders as 5 bytes each. 40k raw chars < 60KB cap,
+    // but ~200KB rendered — must flip truncated.
+    const run = { draft_payload: JSON.stringify({ title: 'T', body: '&'.repeat(40000) }), reviewer_notes: null, action_type: 'new_supporting_blog' };
+    const row = { kind: 'named_competitor_review', token: 'EA-deadbeef' };
+    const rendered = approvals._internals.renderApprovalEmail({ run, row });
+    expect(rendered.truncated).toBe(true);
+    expect(rendered.bodyHtml).toContain('will NOT execute');
+  });
+
+  test('a retry send after a portal trust-build approval supersedes instead of re-emailing', async () => {
+    const db = require('../models/db');
+    const email = require('../services/email');
+    email.send = jest.fn().mockResolvedValue({ ok: true });
+    const gates = require('../config/feature-gates');
+    const gateSpy = jest.spyOn(gates, 'isEnabled').mockReturnValue(true);
+    const updates = [];
+    const row = { id: 'x', token: 'EA-deadbeef', run_id: 'r', opportunity_id: 'o', kind: 'trust_build_2_of_5', email_sent_at: null, email_sending_at: null, draft_sha: null };
+    db.mockImplementation((table) => ({
+      where: jest.fn().mockReturnValue({
+        first: jest.fn().mockResolvedValue(
+          table === 'content_email_approvals' ? row
+            : table === 'opportunity_queue' ? { status: 'done' } : null
+        ),
+        update: jest.fn().mockImplementation((p) => { updates.push(p); return Promise.resolve(1); }),
+        whereNull: jest.fn().mockReturnValue({ where: jest.fn().mockReturnValue({ update: jest.fn().mockResolvedValue(1) }) }),
+      }),
+      insert: jest.fn().mockReturnValue({ onConflict: jest.fn().mockReturnValue({ ignore: jest.fn().mockReturnValue({ returning: jest.fn().mockResolvedValue([row]) }) }) }),
+    }));
+    try {
+      const result = await approvals.sendApprovalRequest({ id: 'r', skip_reason: 'trust_build_2_of_5', opportunity_id: 'o', trust_build_approved_at: null, draft_payload: '{}' });
+      expect(result.skipped).toBe('decided_before_send');
+      expect(email.send).not.toHaveBeenCalled();
+      expect(updates.find((u) => u.status === 'superseded')).toBeTruthy();
+    } finally {
+      gateSpy.mockRestore();
+    }
+  });
+});
+
 describe('gate + full-draft rules (Codex r2)', () => {
   test('the feature gate requires explicit opt-in in EVERY environment', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../config/feature-gates.js'), 'utf8');
