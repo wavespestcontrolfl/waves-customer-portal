@@ -26,6 +26,11 @@ describe('redactAccessCodes — deterministic code masking', () => {
     expect(redactAccessCodes('close the gate so the dog stays in')).toContain('dog stays in');
   });
 
+  test('password-labeled credentials mask (codex r8)', () => {
+    expect(redactAccessCodes('gate password is waves')).not.toContain('waves');
+    expect(redactAccessCodes('the wifi passphrase is sunshine1')).not.toContain('sunshine1');
+  });
+
   test('lowercase credentials mask positionally (codex r7)', () => {
     expect(redactAccessCodes('gate code blue')).not.toContain('blue');
     expect(redactAccessCodes('the gate code is waves')).not.toContain('waves');

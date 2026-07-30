@@ -19,6 +19,10 @@ const UPCOMING_SERVICE_STATUSES = ['pending', 'confirmed', 'en_route', 'on_site'
 // Calls the extractor affirmatively classified as not-a-real-conversation
 // with this customer — their summaries must never ground an SMS reply.
 const EXCLUDED_CALL_TYPES = new Set(['spam', 'wrong_number']);
+// V2-enriched natures that are affirmatively NOT a conversation with this
+// customer (Codex r8): a shadow-mode V2 can classify a call spam while the
+// legacy signals stay silent — a valid V2 verdict wins.
+const EXCLUDED_V2_NATURES = new Set(['spam_solicitation', 'robocall', 'wrong_number', 'vendor_or_partner']);
 
 // Deterministic access-code redaction (Codex r1, PR #3076): free-text fields
 // REALLY carry code values — call-profile-enrichment persists strings like
@@ -26,7 +30,7 @@ const EXCLUDED_CALL_TYPES = new Set(['spam', 'wrong_number']);
 // dedicated code columns are not enough. Any 3-8 digit run within a short
 // window after a code-ish keyword is masked before the text can reach a
 // prompt (and therefore facts_block rows and sealed-eval items).
-const ACCESS_CODE_KEYWORDS = 'gate|garage|door|lock\\s*box|keypad|entry|access|alarm|pin|code|combo|combination|passcode';
+const ACCESS_CODE_KEYWORDS = 'gate|garage|door|lock\\s*box|keypad|entry|access|alarm|pin|code|combo|combination|passcode|password|passphrase';
 const ACCESS_CODE_RE = new RegExp(`\\b(${ACCESS_CODE_KEYWORDS})\\b([^\\n]{0,40}?)\\b(\\d{3,8})\\b`, 'gi');
 // Reverse order too (Codex r5): "4545 is the gate code" — digits first,
 // keyword within the following window.
@@ -36,16 +40,16 @@ const ACCESS_CODE_REVERSE_RE = new RegExp(`\\b(\\d{3,8})\\b([^\\n]{0,40}?)\\b(${
 // every value-shaped token (digit run, ALLCAPS word, letter+digit mix) is
 // masked. Over-redaction is the safe direction for access text; the keyword
 // words themselves stay legible.
-const ACCESS_CODE_NOUN_RE = /\b(?:code|pin|combo|combination|passcode)\b/i;
+const ACCESS_CODE_NOUN_RE = /\b(?:code|pin|combo|combination|passcode|password|passphrase)\b/i;
 const ACCESS_CODE_CONTEXT_RE = new RegExp(`\\b(?:${ACCESS_CODE_KEYWORDS})\\b`, 'i');
 const ACCESS_CODE_VALUE_RE = /\b(?:\d{3,8}|[A-Z]{2,10}|[A-Za-z]*\d[A-Za-z0-9#*]*)\b/g;
 // Lowercase credentials (Codex r7: "gate code blue", "the gate code is
 // waves") can't be shape-detected — they're masked POSITIONALLY: the 1-2
 // tokens directly following the code noun (with optional is/: connector),
 // and the token directly before "is/= the … code" phrasing.
-const ACCESS_CODE_AFTER_NOUN_RE = /\b(code|pin|combo|combination|passcode)\b(\s*(?:is|:|=|-)?\s*)([A-Za-z0-9#*]{2,12})(\s+[A-Za-z0-9#*]{2,12})?/gi;
+const ACCESS_CODE_AFTER_NOUN_RE = /\b(code|pin|combo|combination|passcode|password|passphrase)\b(\s*(?:is|:|=|-)?\s*)([A-Za-z0-9#*]{2,12})(\s+[A-Za-z0-9#*]{2,12})?/gi;
 const ACCESS_CODE_BEFORE_NOUN_RE = /\b([A-Za-z0-9#*]{2,12})(\s+(?:is|=)\s+(?:the\s+)?[^.\n]{0,20}?\b(?:code|pin|combo|combination|passcode)\b)/gi;
-const ACCESS_CODE_STOPWORDS = new Set(['gate', 'garage', 'door', 'lockbox', 'lock', 'box', 'keypad', 'entry', 'access', 'alarm', 'pin', 'code', 'combo', 'combination', 'passcode', 'is', 'the', 'a', 'an', 'use', 'tech', 'only', 'for', 'to', 'and', 'or', 'needed', 'required', 'broken', 'works', 'not', 'no', 'none', 'unknown', 'same', 'new', 'old']);
+const ACCESS_CODE_STOPWORDS = new Set(['gate', 'garage', 'door', 'lockbox', 'lock', 'box', 'keypad', 'entry', 'access', 'alarm', 'pin', 'code', 'combo', 'combination', 'passcode', 'password', 'passphrase', 'is', 'the', 'a', 'an', 'use', 'tech', 'only', 'for', 'to', 'and', 'or', 'needed', 'required', 'broken', 'works', 'not', 'no', 'none', 'unknown', 'same', 'new', 'old']);
 function redactAccessCodes(text) {
   let out = String(text || '');
   // repeat until stable: "gate code 1234 and garage 5678" needs both masked
@@ -131,10 +135,14 @@ class ContextAggregator {
     // Parallel data fetch
     const [smsHistory, serviceHistory, upcomingServices, propertyPrefs, payments, interactions, complaints, reschedules, pendingEstimate, activeCancelSave, compliance, recentCalls, collectibleInvoices, lawnAssessments, cardOnFile, payerInvRows] = await Promise.all([
       db('sms_log').where({ customer_id: customer.id }).orderBy('created_at', 'desc').limit(20),
-      db('service_records').where({ customer_id: customer.id }).orderBy('service_date', 'desc').limit(5),
+      // completed visits only (Codex r8): an 'incomplete' closeout must not
+      // answer "what did you do last time" as though the work happened.
+      db('service_records').where({ customer_id: customer.id, status: 'completed' }).orderBy('service_date', 'desc').limit(5),
       db('scheduled_services as ss').leftJoin('technicians as tech', 'ss.technician_id', 'tech.id').where('ss.customer_id', customer.id).where('ss.scheduled_date', '>=', etDateString()).whereIn('ss.status', UPCOMING_SERVICE_STATUSES).orderBy('ss.scheduled_date').limit(3).select('ss.service_type', 'ss.scheduled_date', 'ss.window_display', 'ss.window_start', 'ss.window_end', 'ss.time_window', 'ss.status', 'tech.name as technician_name'),
       db('property_preferences').where({ customer_id: customer.id }).first(),
-      db('payments').where({ 'payments.customer_id': customer.id }).orderBy('payment_date', 'desc').limit(5),
+      // 'upcoming' filtered IN SQL (Codex r8) — post-limit JS filtering let
+      // five future autopay rows empty the history.
+      db('payments').where({ 'payments.customer_id': customer.id }).whereNot('status', 'upcoming').orderBy('payment_date', 'desc').limit(5),
       db('customer_interactions').where({ customer_id: customer.id }).orderBy('created_at', 'desc').limit(10),
       db('customer_interactions').where({ customer_id: customer.id, interaction_type: 'complaint' }).where('created_at', '>', new Date(Date.now() - 90 * 86400000)),
       db('reschedule_log').where({ customer_id: customer.id }).where('created_at', '>', new Date(Date.now() - 30 * 86400000)).count('* as count').first(),
@@ -225,10 +233,17 @@ class ContextAggregator {
     const invoiceBalance = ownInvoices.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0);
     const failedStandalone = ownPayments
       .filter(p => ['failed', 'pending', 'overdue'].includes(p.status) && !p.superseded_by_payment_id)
-      .filter(p => { const invId = paymentInvoiceId(p); return !(invId && ownInvoiceIds.has(invId)); })
+      // ANY invoice-linked failure is excluded (Codex r8, billing-v2 canon):
+      // the invoice lifecycle owns that money — a settled/voided invoice's
+      // old failure must not read as still owed, and a collectible one is
+      // already summed above.
+      .filter(p => !paymentInvoiceId(p))
       .reduce((sum, p) => sum + parseFloat(p.amount || 0), 0);
     const balance = invoiceBalance + failedStandalone;
-    const openInvoice = ownInvoices[0] || null;
+    // Newest own invoice with a POSITIVE due (Codex r8): a fully-credited
+    // newest row must not present "$0.00 due" while an older invoice carries
+    // the balance.
+    const openInvoice = ownInvoices.find((inv) => invoiceAmountDue(inv) > 0) || null;
     const hasPayerBilledOpen = (collectibleInvoices || []).some((inv) => inv.payer_id);
     // Canonical autopay state (Codex r1): the raw autopay_enabled flag lies
     // when the default method is missing/expired/unhealthy, and a stale
@@ -466,6 +481,13 @@ class ContextAggregator {
   isExcludedCall(row) {
     if (String(row?.processing_status || '').trim().toLowerCase() === 'spam') return true;
     if (EXCLUDED_CALL_TYPES.has(this.extractedCallType(row?.ai_extraction))) return true;
+    // Valid V2 verdicts count (Codex r8) — legacy signals may be silent.
+    if (String(row?.v2_extraction_status || '') === 'valid') {
+      try {
+        const enriched = typeof row.ai_extraction_enriched === 'string' ? JSON.parse(row.ai_extraction_enriched) : row.ai_extraction_enriched;
+        if (EXCLUDED_V2_NATURES.has(String(enriched?.call_nature || '').trim().toLowerCase())) return true;
+      } catch { /* malformed enriched → fall through to legacy signals */ }
+    }
     try {
       const obj = typeof row?.ai_extraction === 'string' ? JSON.parse(row.ai_extraction) : row?.ai_extraction;
       return obj?.is_spam === true;
