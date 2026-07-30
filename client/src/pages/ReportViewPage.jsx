@@ -786,16 +786,23 @@ function conditionRows(conditions = {}, { weeklyRainIn = null } = {}) {
   // Lawn reports show the week's rain (the number the water card and 7-day
   // chart are built from) so every rain figure on the page agrees; other
   // lines keep the trailing-24h capture (owner 2026-07-30).
-  const rainRow = weeklyRainIn != null && weeklyRainIn !== '' && Number.isFinite(Number(weeklyRainIn))
+  const usingWeeklyRain = weeklyRainIn != null && weeklyRainIn !== '' && Number.isFinite(Number(weeklyRainIn));
+  const rainRow = usingWeeklyRain
     ? ['Rain this week', weeklyRainIn, ' in']
     : ['Rain last 24 hr', conditions.rain_24h_in, ' in'];
+  // The weekly rain figure is always the Open-Meteo property-week series —
+  // when the point capture came from another provider (FAWN), the Source row
+  // must credit both (codex P2 #3093).
+  const sourceValue = usingWeeklyRain && conditions.source && !/open-meteo/i.test(String(conditions.source))
+    ? `${conditions.source} + Open-Meteo`
+    : conditions.source;
   const rows = [
     ['Air temp', conditions.temp_f ?? conditions.temp, '°F'],
     ['Humidity', conditions.humidity_pct ?? conditions.humidity, '%'],
     ['Wind', conditions.wind_mph ?? conditions.wind, ' mph'],
     rainRow,
     ['Sky', conditions.sky ?? conditions.cloudCover, ''],
-    ['Source', conditions.source, ''],
+    ['Source', sourceValue, ''],
   ];
   return rows
     .filter(([, value]) => value !== null && value !== undefined && value !== '')
@@ -1964,7 +1971,7 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
           conditions={data.conditions || {}}
           weatherCall={data.dynamicContext?.premiumExperience?.weatherCall}
           live={mode === 'live'}
-          weeklyRainIn={data.reportV2?.water?.rainInches ?? null}
+          weeklyRainIn={data.serviceLine === 'lawn' ? (data.reportV2?.water?.rainInches ?? null) : null}
         />
       </div>
     </section>

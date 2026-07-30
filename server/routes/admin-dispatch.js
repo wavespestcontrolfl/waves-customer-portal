@@ -5560,6 +5560,18 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         const wiki = require('../services/agronomic-wiki');
         const outcome = await wiki.linkTreatmentOutcome(record.id);
         await attachLawnAssessmentOutcomePhotoRefs(outcome, completedLawnAssessmentId);
+        // Recommendations were generated at confirm time, BEFORE the
+        // service_records/service_products rows existed, so the applied-today
+        // grounding in generateAssessmentRecommendations never fired (codex
+        // P1 #3093). Now that the visit's applications are persisted and the
+        // assessment is back-linked, regenerate. Fire-and-forget — closeout
+        // must not wait on an LLM call, and a failure just leaves the
+        // confirm-time recommendations in place.
+        const KnowledgeBridge = require('../services/knowledge-bridge');
+        setImmediate(() => {
+          KnowledgeBridge.generateAssessmentRecommendations(completedAssessment.id)
+            .catch((recErr) => logger.warn(`[dispatch] post-completion recommendation regen failed (non-blocking): ${recErr.message}`));
+        });
       } catch (err) {
         logger.error(`[dispatch] Lawn assessment service_record link failed (non-blocking): ${err.message}`);
       }

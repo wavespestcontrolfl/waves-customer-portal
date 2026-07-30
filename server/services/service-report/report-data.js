@@ -2228,22 +2228,21 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // LAWN honesty pass (Harris audit 2026-07-30), mirroring the pest pass
   // above but keyed on treatment evidence: a "No lawn issues observed" row
   // (persisted at closeout OR the render-time fallback just above) must not
-  // sit on the same page as a visit that treated observed conditions.
-  // Corrective product classes (fungicide/herbicide) or disease/weed language
-  // in the technician's own summary are the signal — routine lawn visits are
-  // fertilizer + preventive insecticide only. The softened wording stays true
-  // either way: no structured corrective finding was logged; the summary
-  // carries what the technician addressed.
+  // sit on the same page as a visit that applied corrective product classes
+  // (fungicide/herbicide) — routine lawn visits are fertilizer + preventive
+  // insecticide only. Product rows are the ONLY trigger: keyword-matching the
+  // raw technician notes would fire on negated statements ("no weeds or
+  // disease observed") and derive customer copy from unparsed prose (codex
+  // P1 #3093). The softened wording claims nothing beyond the record: no
+  // structured corrective finding was logged.
   if (serviceLine === 'lawn' && findings.some((f) => f.category === 'no_activity')) {
     const correctiveApplied = rawProducts.some((p) =>
       /fungicide|herbicide/i.test(String(p.product_category || '')));
-    const notesMentionIssues = /\b(leaf spot|root rot|dry rot|fung(?:us|al)|disease|weeds?|crabgrass|sedge|dollarweed|doveweed)\b/i
-      .test(String(service.technician_notes || ''));
-    if (correctiveApplied || notesMentionIssues) {
+    if (correctiveApplied) {
       for (const finding of findings) {
         if (finding.category === 'no_activity') {
           finding.title = 'No corrective findings logged this visit';
-          finding.detail = 'Your technician’s visit summary describes what was observed and treated today; no separate corrective finding was required.';
+          finding.detail = 'See your technician’s visit summary for what was applied and observed today; no separate corrective finding was logged.';
         }
       }
     }
