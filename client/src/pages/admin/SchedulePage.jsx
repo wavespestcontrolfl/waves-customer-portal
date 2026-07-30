@@ -12105,7 +12105,10 @@ export function CompletionPanel({
                 generate payload snapshots these fields, and an edit landing
                 mid-request would ship a summary that contradicts what the
                 completion then persists (same rule the old chip handlers
-                enforced with their `generating` guard). */}
+                enforced with their `generating` guard). Observations also
+                freeze during photo analysis (codex r9): they're the vision
+                prompt's context on basic completions, and captions returned
+                against a stale snapshot would persist under the photos. */}
             <Field label="Observations">
               {" "}
               <textarea
@@ -12114,8 +12117,8 @@ export function CompletionPanel({
                 onChange={(e) => setObservationsText(e.target.value)}
                 rows={2}
                 placeholder="Optional — anything you noticed (one per line)"
-                disabled={generating}
-                style={{ ...mTextarea, opacity: generating ? 0.55 : 1 }}
+                disabled={generating || photoAnalyzing}
+                style={{ ...mTextarea, opacity: generating || photoAnalyzing ? 0.55 : 1 }}
               />{" "}
             </Field>
             <Field label="Recommendations">
@@ -13977,7 +13980,8 @@ export function CompletionPanel({
             </div>
             )}
             {/* Frozen while an AI draft is in flight (codex P2) — mirrors
-                the mobile variant. */}
+                the mobile variant. Observations also freeze during photo
+                analysis (codex r9): they're the vision prompt's context. */}
             <div style={{ marginBottom: 12 }}>
               <label style={{ ...labelStyle, color: D.amber }}>
                 Observations
@@ -13988,8 +13992,8 @@ export function CompletionPanel({
                 onChange={(e) => setObservationsText(e.target.value)}
                 rows={2}
                 placeholder="Optional — anything you noticed (one per line)"
-                disabled={generating}
-                style={{ ...inputStyle, height: "auto", resize: "vertical", opacity: generating ? 0.55 : 1 }}
+                disabled={generating || photoAnalyzing}
+                style={{ ...inputStyle, height: "auto", resize: "vertical", opacity: generating || photoAnalyzing ? 0.55 : 1 }}
               />{" "}
             </div>
             <div style={{ marginBottom: 12 }}>
