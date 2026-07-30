@@ -50,12 +50,24 @@ function makeDb(initial = {}) {
     tables[table] = tables[table] || [];
     let crit = {};
     let notIn = null;
+    let olderThanMs = null;
     return {
       where(c) { crit = c; return this; },
       whereNotIn(col, vals) { notIn = { col, vals }; return this; },
+      // Emulates `updated_at < NOW() - (? * interval '1 millisecond')` — the
+      // staleness predicate the sentinel release asserts atomically in SQL
+      // (comparing a round-tripped timestamp cannot work: NOW() is microsecond
+      // precision, the pg driver truncates to ms).
+      whereRaw(sql, params = []) {
+        if (/updated_at < NOW\(\)/.test(sql)) olderThanMs = params[0];
+        return this;
+      },
       async first() { const r = tables[table].find((x) => match(x, crit)); return r ? { ...r } : null; },
       async update(patch) {
-        const rows = tables[table].filter((x) => match(x, crit) && (!notIn || !notIn.vals.includes(x[notIn.col])));
+        const rows = tables[table].filter((x) => match(x, crit)
+          && (!notIn || !notIn.vals.includes(x[notIn.col]))
+          && (olderThanMs === null
+            || (Date.now() - (x.updated_at ? new Date(x.updated_at).getTime() : 0)) > olderThanMs));
         rows.forEach((r) => Object.assign(r, patch));
         return rows.length;
       },
@@ -3003,8 +3015,13 @@ describe('the stale-sentinel release is a compare-and-set', () => {
     let firstRead = true;
     const db = () => {
       let crit = {};
+      let olderThanMs = null;
       return {
         where(c) { crit = c; return this; },
+        whereRaw(sql, params = []) {
+          if (/updated_at < NOW\(\)/.test(sql)) olderThanMs = params[0];
+          return this;
+        },
         async first() {
           const row = rows.find((r) => r.pr_number === crit.pr_number);
           if (!row) return null;
@@ -3020,8 +3037,9 @@ describe('the stale-sentinel release is a compare-and-set', () => {
         async update(patch) {
           const row = rows.find((r) => r.pr_number === crit.pr_number
             && (crit.sync_pending_sha === undefined || r.sync_pending_sha === crit.sync_pending_sha)
-            && (crit.updated_at === undefined || r.updated_at === crit.updated_at));
-          if (!row) return 0; // CAS lost
+            && (olderThanMs === null
+              || (Date.now() - new Date(r.updated_at).getTime()) > olderThanMs));
+          if (!row) return 0; // CAS lost — sentinel changed or row was refreshed
           Object.assign(row, patch);
           return 1;
         },

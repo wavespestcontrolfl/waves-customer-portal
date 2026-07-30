@@ -347,8 +347,16 @@ async function syncPendingHold(prNumber, {
       // could merge unsynchronized content. Only clear the exact row state we
       // judged; a lost CAS means someone else moved it, so report pending and let
       // the next tick re-evaluate the new state.
+      // The age predicate is re-asserted IN SQL rather than by comparing the
+      // updated_at we read: NOW() writes microsecond precision, the pg driver
+      // truncates to milliseconds, so round-tripping the timestamp almost never
+      // compares equal and the abandoned sentinel would hold forever — silently
+      // defeating this whole recovery path. Matching on the sentinel VALUE plus
+      // "still older than the staleness window" is the same guarantee without the
+      // precision trap: any refresh by a new round bumps updated_at and fails it.
       const cleared = await db('codex_remediation_state')
-        .where({ pr_number: prNumber, sync_pending_sha: sha, updated_at: state.updated_at })
+        .where({ pr_number: prNumber, sync_pending_sha: sha })
+        .whereRaw(`updated_at < NOW() - (? * interval '1 millisecond')`, [STALE_IN_FLIGHT_MS])
         .update({ sync_pending_sha: null, updated_at: new Date() });
       if (!cleared) {
         logger.info(`[codex-remediation] stale in-flight sync hold on PR #${prNumber} changed under us — leaving it held for the next tick`);
@@ -1248,6 +1256,30 @@ async function armPushHold(db, prNumber, branch, preHeadSha) {
   return (res?.rowCount ?? 0) > 0;
 }
 
+/**
+ * Release the sync hold after a completed sync. Bounded retry, never throws.
+ *
+ * A real-SHA hold has no age-based reconciliation (only the in-flight sentinel
+ * does), so losing this write would block every merge path forever on a PR whose
+ * content is actually synced. Retries absorb a transient blip; a total failure is
+ * logged loudly and recovered on a later tick by re-running the idempotent sync.
+ */
+async function releaseSyncHold(db, prNumber, newHead, attempts = 3) {
+  for (let i = 1; i <= attempts; i += 1) {
+    try {
+      await saveState(db, prNumber, { sync_pending_sha: null });
+      return true;
+    } catch (e) {
+      if (i === attempts) {
+        logger.error(`[codex-remediation] could not release the sync hold for PR #${prNumber} after ${attempts} attempts (${e.message}) — the fix commit ${shortSha(newHead)} IS synced, but the hold will block merges until a later tick re-runs the sync or it is cleared by hand`);
+        return false;
+      }
+      logger.warn(`[codex-remediation] sync-hold release attempt ${i} failed for PR #${prNumber}: ${e.message} — retrying`);
+    }
+  }
+  return false;
+}
+
 async function park(db, prNumber, reason, onPark, headSha, phase) {
   // Persist the reason, the head the verdict applied to, and the round PHASE —
   // the reason used to live only in logs (short retention: three parked
@@ -1415,6 +1447,30 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
     // the re-review request actually landed (recovers from a failed
     // createIssueComment on a prior tick); then wait.
     if (state.status === 'remediating') {
+      // Durable recovery for a hold whose sync completed but whose release write
+      // failed. A real-SHA hold has no age-based reconciliation, so without this a
+      // lost release would block every merge path forever on already-synced
+      // content. Both lanes' syncs are idempotent (they mirror the CURRENT body /
+      // payload), so re-running one is safe; only do it when the hold names the
+      // head under review, i.e. the content in hand is what owes the sync.
+      const pendingSha = String(state.sync_pending_sha || '').trim().toLowerCase();
+      if (pendingSha && pendingSha === String(headSha || '').trim().toLowerCase()) {
+        try {
+          if (typeof onRemediated === 'function') {
+            const file = await gh.getFile(pickTargetPath([], slug) || ASTRO_BLOG_DIR, branch);
+            const markdown = file && file.content ? file.content : null;
+            if (markdown) {
+              const body = String((fm.parse(markdown) || {}).content || '').trim();
+              await onRemediated({ markdown, body, newHead: headSha, round: state.rounds || 0, datesRestamped: false, frontmatterChanges: {} });
+            }
+          }
+          if (await releaseSyncHold(db, prNumber, headSha, 2)) {
+            logger.info(`[codex-remediation] re-ran the post-commit sync and released a stuck hold on PR #${prNumber} head ${shortSha(headSha)}`);
+          }
+        } catch (e) {
+          logger.warn(`[codex-remediation] could not re-run the post-commit sync for PR #${prNumber}: ${e.message} — the hold stands`);
+        }
+      }
       const issueComments = await gh.listIssueComments(prNumber);
       if (!reviewRequestedForHead(issueComments, headSha)) {
         await gh.createIssueComment(prNumber, buildReviewRequestBody(headSha));
@@ -1737,7 +1793,13 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   // owes one — release the divergence hold that the push-time write took. This
   // is the ONLY place it is cleared: every other exit above left the branch
   // mutated with the portal row unreconciled.
-  await saveState(db, prNumber, { sync_pending_sha: null });
+  //
+  // A transient failure here would leave a real-SHA hold, which has no age-based
+  // reconciliation, on a PR whose content IS synced — blocking every merge path
+  // forever. Retry a few times to absorb a blip; if it still fails, the recovery
+  // branch above re-runs the (idempotent) sync and re-clears on a later tick, so
+  // this is no longer terminal.
+  await releaseSyncHold(db, prNumber, newHead);
 
   // Round bookkeeping (rounds / last_push_sha / last_findings) was already
   // written at push time above — a park between the push and here must not

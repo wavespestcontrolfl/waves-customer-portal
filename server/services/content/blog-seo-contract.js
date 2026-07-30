@@ -591,6 +591,7 @@ module.exports = {
   pestPracticesComplete,
   hublessService,
   normalizeService,
+  CITY_SERVICE_SLUG,
   _internals: {
     buildDefaultBlogBreadcrumbs,
     buildCityTarget,
