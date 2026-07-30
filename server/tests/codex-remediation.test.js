@@ -2735,20 +2735,12 @@ describe('the sync hold is taken before the push (codex P1)', () => {
     expect(r.reason).toMatch(/in flight and never confirmed/);
   });
 
-  test('a push failure with an UNCHANGED branch ref releases the hold', async () => {
-    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
-    const db = makeDb();
-    const gh = makeGh();
-    gh.putFile = async () => { throw new Error('gh 502'); };
-    gh.getBranchSha = async () => HEAD; // ref still at the pre-push head → nothing landed
-    await expect(runRemediationForPr(CTX, {
-      db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS,
-    })).rejects.toThrow('gh 502');
-    const row = db._tables.codex_remediation_state.find((x) => x.pr_number === 5);
-    expect(row.sync_pending_sha ?? null).toBeNull();
-  });
-
+  // A putFile throw is ambiguous (GitHub may have committed and failed the
+  // response) and an immediate ref read can still serve the OLD head, so NO
+  // outcome of the push clears the hold here. Releasing it is the aged-sentinel
+  // path's job, where the ref has had time to settle.
   test.each([
+    ['an UNCHANGED ref', async () => HEAD],
     ['a CHANGED ref', async () => 'somethingelse999'],
     ['an UNREADABLE ref', async () => { throw new Error('ref lookup down'); }],
   ])('a push failure with %s keeps the hold (fail closed)', async (_label, getBranchSha) => {

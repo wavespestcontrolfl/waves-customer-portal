@@ -1541,22 +1541,19 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
       sha: file.sha,
     });
   } catch (e) {
-    // A putFile throw is AMBIGUOUS — GitHub may have applied the write and
-    // failed the response. Resolve it against the branch ref (the same posture
-    // the post-push checks use) rather than guessing: only an unchanged ref
-    // proves nothing landed, and only then is it safe to release the hold. A
-    // changed or unreadable ref keeps it, so a transient error can never drop a
-    // real unsynced commit — while an ordinary 502 that wrote nothing doesn't
-    // wedge the bar forever either.
-    let refHead = null;
-    try { refHead = String((await gh.getBranchSha(branch)) || '').trim().toLowerCase(); } catch (_) { refHead = null; }
-    const nothingLanded = Boolean(refHead) && refHead === String(headSha || '').trim().toLowerCase();
-    if (nothingLanded) {
-      await saveState(db, prNumber, { sync_pending_sha: null });
-      logger.warn(`[codex-remediation] fix push failed for PR #${prNumber} and the branch ref is unchanged (${shortSha(refHead)}) — nothing landed, sync hold released: ${e.message}`);
-    } else {
-      logger.warn(`[codex-remediation] fix push failed for PR #${prNumber} with an ambiguous branch state (ref ${refHead ? shortSha(refHead) : 'unreadable'}) — keeping the sync hold (fail closed): ${e.message}`);
-    }
+    // A putFile throw is AMBIGUOUS — GitHub may have committed the write and
+    // failed the response — and a ref read taken immediately afterwards can
+    // still serve the OLD head (the same read-after-write staleness the
+    // post-push checks already defend against). So one unchanged-ref read is
+    // NOT proof nothing landed, and clearing the hold on it would drop the
+    // all-paths merge guard for a commit that later turns out to exist.
+    //
+    // Keep the sentinel on every failure and let syncPendingHold's aged
+    // reconciliation resolve it: once it has sat untouched past
+    // STALE_IN_FLIGHT_MS *and* the ref still reports the pre-push head, the
+    // release is safe. That path already exists, so this one only has to avoid
+    // being clever.
+    logger.warn(`[codex-remediation] fix push failed for PR #${prNumber} — keeping the in-flight sync hold (a commit may have landed despite the error; the aged-sentinel check will release it if not): ${e.message}`);
     throw e;
   }
   const newHead = (commit && commit.commit && commit.commit.sha)
