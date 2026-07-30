@@ -1671,11 +1671,17 @@ describe('newsletter assembly — Beehiiv-parity event rendering', () => {
 describe('DB-locked prices vs the hallucinated-claim scan', () => {
   const { findHallucinatedClaims } = require('../services/newsletter-validator');
 
-  test('HTML exemption is STRUCTURAL: the data-db-price span passes with no lock list; anything else blocks', () => {
+  test('HTML exemption is STRUCTURAL and VERIFIED: only spans whose content matches a locked price pass', () => {
     // Assembler-emitted shape — model prose can never produce this tag
-    // (markdownToHtml escapes HTML before markdown).
-    expect(findHallucinatedClaims('<p>🎟️ <span data-db-price>From $25</span></p>')).toEqual([]);
-    expect(findHallucinatedClaims('<p>🎟️ <span data-db-price>Free admission · paid parking</span></p>')).toEqual([]);
+    // (markdownToHtml escapes HTML before markdown) — verified against
+    // the send's own locked values.
+    expect(findHallucinatedClaims('<p>🎟️ <span data-db-price>From $25</span></p>', ['From $25'], 'html')).toEqual([]);
+    expect(findHallucinatedClaims('<p>🎟️ <span data-db-price>Free admission · paid parking</span></p>', ['Free admission · paid parking'], 'html')).toEqual([]);
+    // A hand-edited span (sentinel intact, value changed) falls through
+    // to the scan and blocks.
+    expect(findHallucinatedClaims('<p>🎟️ <span data-db-price>$250</span></p>', ['$25'], 'html')).toEqual(
+      expect.arrayContaining([expect.stringContaining('dollar amount in body')]),
+    );
     // Marker-prefixed prose WITHOUT the span blocks even with a lock —
     // this is the subject-laundering case ("🎟️ From $25 in prizes").
     expect(findHallucinatedClaims('<p>🎟️ From $25 in prizes</p>', ['From $25'])).toEqual(
@@ -1729,7 +1735,7 @@ describe('DB-locked prices vs the hallucinated-claim scan', () => {
       }],
     });
     expect(html).toContain('<span data-db-price>From $25</span>');
-    expect(findHallucinatedClaims(html)).toEqual([]);
+    expect(findHallucinatedClaims(html, ['From $25'], 'html')).toEqual([]);
   });
 });
 
@@ -1813,6 +1819,8 @@ describe('tiered event treatment (owner direction 2026-07-29)', () => {
     });
     expect(text).toContain('== Official Event 1 ==');
     expect(text).toContain('Friday, June 12 at 8:00 PM | Venue 1, Sarasota | Tickets: From $25');
+    const withAddr = buildFlagshipTextBody({ events: [mk(1, { address: '123 Main St' })] });
+    expect(withAddr).toContain('Venue 1, Sarasota (123 Main St)');
     // evclick token — sendCampaign substitutes both MIME parts.
     expect(text).toContain('Tickets & info: {{evclick:a0000001-0000-4000-8000-000000000001}}');
     expect(text).toContain("Let's get into it");

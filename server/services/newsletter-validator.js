@@ -57,15 +57,22 @@ function decodeEntities(text) {
  * produce three error rows). HTML tags are stripped and entities decoded
  * before matching; plain text passes through unchanged.
  */
-function findHallucinatedClaims(body, lockedPrices = []) {
+function findHallucinatedClaims(body, lockedPrices = [], mode = 'text') {
   if (!body) return [];
+  const normPrice = (v) => decodeEntities(String(v || '')).normalize('NFKC').replace(/\s+/g, ' ').trim();
+  const lockedSet = new Set(lockedPrices.map(normPrice).filter(Boolean));
   // NFKC folds Unicode look-alikes (fullwidth '＄', fullwidth digits, etc.)
   // down to their ASCII forms so a homoglyph "＄15" / "ｆｒｅｅ" can't render as
   // the claim to subscribers while slipping past the ASCII regexes.
   let bodyText = decodeEntities(String(body)
-    // Structural exemption FIRST (see below): assembler-emitted price
-    // spans vanish with their content before tags are stripped.
-    .replace(/<span data-db-price>[\s\S]*?<\/span>/gi, ' ')
+    // Structural exemption FIRST — and VERIFIED: an assembler-emitted
+    // price span vanishes only when its decoded content matches one of
+    // the send's locked prices. An operator hand-editing the persisted
+    // HTML from $25 to $250 keeps the sentinel but loses the match, so
+    // the edited value falls through to the scan and blocks.
+    .replace(/<span data-db-price>([\s\S]*?)<\/span>/gi, (m, inner) => (
+      lockedSet.has(normPrice(inner)) ? ' ' : ` ${inner} `
+    ))
     .replace(/<[^>]+>/g, ' '))
     .normalize('NFKC')
     .replace(/\s+/g, ' ');
@@ -76,17 +83,17 @@ function findHallucinatedClaims(body, lockedPrices = []) {
   // the renderer's own field and nothing else.
   //
   // The plain-text body has no markup, so its renderer shape
-  // ("Tickets: <price>", the facts line) is excised by string — but ONLY
-  // when the caller scopes lockedPrices to the TEXT segment
-  // (validateNewsletterDraft scans subject/preview/html with an empty
-  // list). Boundary-bound so a locked "$25" can't hollow an invented
-  // "$250"; any model prose that repeats a claim appears in the HTML
-  // segment too, where no string excision exists, and still blocks.
-  for (const price of lockedPrices) {
-    const norm = decodeEntities(String(price || '')).normalize('NFKC').replace(/\s+/g, ' ').trim();
-    if (!norm) continue;
-    const esc = norm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    bodyText = bodyText.replace(new RegExp(`Tickets:\\s*${esc}(?![\\w])`, 'gu'), ' ');
+  // ("Tickets: <price>", the facts line) is excised by string — mode
+  // 'text' only: the HTML segment's exemption is the verified span above
+  // (mode 'html'), and subject/preview scan with no exemptions at all.
+  // Boundary-bound so a locked "$25" can't hollow an invented "$250";
+  // any model prose that repeats a claim appears in the HTML segment
+  // too, where no string excision exists, and still blocks.
+  if (mode === 'text') {
+    for (const norm of lockedSet) {
+      const esc = norm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      bodyText = bodyText.replace(new RegExp(`Tickets:\\s*${esc}(?![\\w])`, 'gu'), ' ');
+    }
   }
   const seen = new Set();
   const errors = [];
@@ -174,15 +181,15 @@ function validateNewsletterDraft(send, opts = {}) {
     // a subject like "🎟️ From $25 in prizes" always blocks). Only the
     // plain-text segment excises its renderer shape ("Tickets: <price>").
     const claimSeen = new Set();
-    const scanSegment = (body, lockedPrices) => {
+    const scanSegment = (body, lockedPrices, mode) => {
       if (!body) return;
-      for (const err of findHallucinatedClaims(body, lockedPrices)) {
+      for (const err of findHallucinatedClaims(body, lockedPrices, mode)) {
         if (!claimSeen.has(err)) { claimSeen.add(err); errors.push(err); }
       }
     };
-    scanSegment([send.subject, send.preview_text].filter(Boolean).join('\n'), []);
-    scanSegment(send.html_body, []);
-    scanSegment(send.text_body, opts.lockedPrices || []);
+    scanSegment([send.subject, send.preview_text].filter(Boolean).join('\n'), [], 'none');
+    scanSegment(send.html_body, opts.lockedPrices || [], 'html');
+    scanSegment(send.text_body, opts.lockedPrices || [], 'text');
   }
 
   return { errors, warnings };

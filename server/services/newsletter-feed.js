@@ -88,12 +88,15 @@ async function getPostBySlug(slug) {
   if (!slug || typeof slug !== 'string') return null;
   const row = await db('newsletter_sends')
     .where({ slug })
-    // 'sending' included BY DESIGN: the emailed web-version link reaches
-    // the first recipients while a multi-batch broadcast is still in
-    // flight, and a 404 until the last batch lands would break exactly
-    // the readers most eager to click. Feed/list surfaces stay
-    // sent-only (getPublishedPosts) — this is the direct-permalink path.
-    .whereIn('status', ['sending', 'sent'])
+    // 'sending' AND 'failed' included BY DESIGN: the emailed web-version
+    // link reaches the first recipients while a multi-batch broadcast is
+    // still in flight, and a campaign can flip to 'failed' AFTER chunks
+    // were accepted (lost SendGrid response, late error) — recipients
+    // already hold the link either way; a 404 would break exactly the
+    // readers most eager to click. Once delivery MAY have started, the
+    // permalink stays readable. Feed/list surfaces stay sent-only
+    // (getPublishedPosts) — this is the direct-permalink path.
+    .whereIn('status', ['sending', 'sent', 'failed'])
     // Same exclusion as getPublishedPosts — win-backs never render publicly.
     .whereRaw("newsletter_type IS DISTINCT FROM 'reengagement'")
     .first();

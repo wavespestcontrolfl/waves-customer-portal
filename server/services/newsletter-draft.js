@@ -1611,7 +1611,9 @@ function buildFlagshipTextBody(draft) {
     }
     const facts = [];
     if (ev.dateStr) facts.push(ev.timeStr ? `${ev.dateStr} at ${ev.timeStr}` : ev.dateStr);
-    if (ev.location) facts.push(ev.location);
+    // Same venue rendering as the HTML meta box — the separately locked
+    // street address rides along when it isn't already in the venue name.
+    if (ev.location) facts.push(ev.address ? `${ev.location} (${ev.address})` : ev.location);
     if (ev.isFree) facts.push('FREE');
     // "Tickets:" marker on purpose — the claim scan only excises locked
     // prices in the renderer's own marker-bound shapes.
@@ -1919,8 +1921,8 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
       .map((ev) => (typeof ev.priceText === 'string' ? ev.priceText : ''))
       .filter(Boolean);
     const claimErrors = [...new Set([
-      ...findHallucinatedClaims(draft.htmlBody || ''),
-      ...findHallucinatedClaims(draft.textBody || '', draftLockedPrices),
+      ...findHallucinatedClaims(draft.htmlBody || '', draftLockedPrices, 'html'),
+      ...findHallucinatedClaims(draft.textBody || '', draftLockedPrices, 'text'),
     ])];
     if (claimErrors.length > 0) {
       draft.hallucinationErrors = claimErrors;
