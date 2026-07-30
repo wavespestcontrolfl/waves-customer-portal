@@ -60,35 +60,79 @@ describe('lawnMaskPasses (paver-dominated areas fall back to the outline)', () =
   });
 });
 
-describe('growTurfRegion (connectivity — codex P1 #3075)', () => {
-  // 6x3 grid: blob A (cols 0-1) has a confident-green seed with an adjacent
-  // tan pixel; blob B (cols 4-5) is all-tan pavers, separated by a non-turf
-  // gap (cols 2-3). B must be dropped even though A has plenty of grass.
-  const W = 6;
-  const H = 3;
-  const idx = (x, y) => y * W + x;
-  const eligible = new Uint8Array(W * H);
-  const confident = new Uint8Array(W * H);
-  for (let y = 0; y < H; y += 1) {
-    for (const x of [0, 1]) eligible[idx(x, y)] = 1; // blob A
-    for (const x of [4, 5]) eligible[idx(x, y)] = 1; // blob B (tan island)
-  }
-  confident[idx(0, 1)] = 1; // one green seed in blob A
+describe('growTurfRegion (connectivity + color continuity — codex P1 #3075)', () => {
+  const GREEN = [80, 140, 60];
+  const BROWNING = [110, 130, 85]; // gentle step from green (Δsum = 65 ≤ 72)
+  const PAVER = [190, 170, 140]; // sharp step from any turf tone
+  const GRAY = [150, 150, 148];
+  const grid = (W, H, cells) => {
+    // cells: (x,y) => [r,g,b, eligible, confident]
+    const eligible = new Uint8Array(W * H);
+    const confident = new Uint8Array(W * H);
+    const colors = new Uint8ClampedArray(W * H * 4);
+    for (let y = 0; y < H; y += 1) {
+      for (let x = 0; x < W; x += 1) {
+        const i = y * W + x;
+        const [r, g, b, e, c] = cells(x, y);
+        colors[i * 4] = r;
+        colors[i * 4 + 1] = g;
+        colors[i * 4 + 2] = b;
+        eligible[i] = e;
+        confident[i] = c;
+      }
+    }
+    return { eligible, confident, colors };
+  };
+  const idx = (W) => (x, y) => y * W + x;
 
   test('tan connected to green stays; detached tan island is dropped', () => {
-    const kept = growTurfRegion(eligible, confident, W, H);
+    // cols 0-1 green blob (seed at 0,1); cols 2-3 gray gap; cols 4-5 pavers
+    const W = 6; const H = 3; const at = idx(W);
+    const { eligible, confident, colors } = grid(W, H, (x, y) => {
+      if (x <= 1) return [...GREEN, 1, x === 0 && y === 1 ? 1 : 0];
+      if (x >= 4) return [...PAVER, 1, 0];
+      return [...GRAY, 0, 0];
+    });
+    const kept = growTurfRegion(eligible, confident, W, H, colors);
     for (let y = 0; y < H; y += 1) {
-      expect(kept[idx(0, y)]).toBe(1);
-      expect(kept[idx(1, y)]).toBe(1);
-      expect(kept[idx(4, y)]).toBe(0);
-      expect(kept[idx(5, y)]).toBe(0);
-      expect(kept[idx(2, y)]).toBe(0);
-      expect(kept[idx(3, y)]).toBe(0);
+      expect(kept[at(0, y)]).toBe(1);
+      expect(kept[at(1, y)]).toBe(1);
+      expect(kept[at(4, y)]).toBe(0);
+      expect(kept[at(5, y)]).toBe(0);
     }
   });
 
+  test('paver region DIRECTLY ADJOINING green turf is blocked by the color edge', () => {
+    // cols 0-2 green (seed 0,0), cols 3-5 pavers touching the grass — the
+    // sharp color step stops propagation at the boundary.
+    const W = 6; const H = 2; const at = idx(W);
+    const { eligible, confident, colors } = grid(W, H, (x, y) => {
+      if (x <= 2) return [...GREEN, 1, x === 0 && y === 0 ? 1 : 0];
+      return [...PAVER, 1, 0];
+    });
+    const kept = growTurfRegion(eligible, confident, W, H, colors);
+    for (let y = 0; y < H; y += 1) {
+      expect(kept[at(2, y)]).toBe(1);
+      expect(kept[at(3, y)]).toBe(0);
+      expect(kept[at(4, y)]).toBe(0);
+    }
+  });
+
+  test('gradual browning gradient inside the lawn still propagates', () => {
+    // green seed → browning neighbor (smooth step) both kept
+    const W = 2; const H = 1; const at = idx(W);
+    const { eligible, confident, colors } = grid(W, H, (x) => (
+      x === 0 ? [...GREEN, 1, 1] : [...BROWNING, 1, 0]
+    ));
+    const kept = growTurfRegion(eligible, confident, W, H, colors);
+    expect(kept[at(0, 0)]).toBe(1);
+    expect(kept[at(1, 0)]).toBe(1);
+  });
+
   test('no seeds → nothing kept', () => {
-    const kept = growTurfRegion(eligible, new Uint8Array(W * H), W, H);
+    const W = 4; const H = 2;
+    const { eligible, colors } = grid(W, H, () => [...PAVER, 1, 0]);
+    const kept = growTurfRegion(eligible, new Uint8Array(W * H), W, H, colors);
     expect(kept.every((v) => v === 0)).toBe(true);
   });
 });

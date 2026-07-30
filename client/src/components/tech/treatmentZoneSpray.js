@@ -305,9 +305,15 @@ export function lawnMaskPasses({ insideCount, litCount, confidentCount }) {
  * tan pixels only light when CONNECTED to confident green — a browning
  * patch inside the lawn stays lit, while a beige paver patio that never
  * touches grass is dropped entirely, no matter how much grass exists
- * elsewhere in the trace. 4-neighbor multi-source flood fill.
+ * elsewhere in the trace. 4-neighbor multi-source flood fill, constrained
+ * by LOCAL COLOR CONTINUITY (codex P1 #3075 round 2): growth only crosses
+ * into a neighbor whose color is close to the current pixel's, so gradual
+ * grass→browning transitions propagate while the sharp edge onto an
+ * ADJOINING paver/walkway stops the fill at the boundary.
+ * `colors` is the RGBA byte array the pixels were classified from.
  */
-export function growTurfRegion(eligible, confident, w, h) {
+const TURF_GROW_MAX_COLOR_STEP = 72;
+export function growTurfRegion(eligible, confident, w, h, colors) {
   const kept = new Uint8Array(w * h);
   const stack = [];
   for (let i = 0; i < w * h; i += 1) {
@@ -316,13 +322,29 @@ export function growTurfRegion(eligible, confident, w, h) {
       stack.push(i);
     }
   }
+  const smooth = (a, b) => {
+    if (!colors) return true;
+    const oa = a * 4;
+    const ob = b * 4;
+    return (
+      Math.abs(colors[oa] - colors[ob])
+      + Math.abs(colors[oa + 1] - colors[ob + 1])
+      + Math.abs(colors[oa + 2] - colors[ob + 2])
+    ) <= TURF_GROW_MAX_COLOR_STEP;
+  };
+  const tryGrow = (from, to) => {
+    if (eligible[to] && !kept[to] && smooth(from, to)) {
+      kept[to] = 1;
+      stack.push(to);
+    }
+  };
   while (stack.length) {
     const i = stack.pop();
     const x = i % w;
-    if (x > 0 && eligible[i - 1] && !kept[i - 1]) { kept[i - 1] = 1; stack.push(i - 1); }
-    if (x < w - 1 && eligible[i + 1] && !kept[i + 1]) { kept[i + 1] = 1; stack.push(i + 1); }
-    if (i >= w && eligible[i - w] && !kept[i - w]) { kept[i - w] = 1; stack.push(i - w); }
-    if (i < w * (h - 1) && eligible[i + w] && !kept[i + w]) { kept[i + w] = 1; stack.push(i + w); }
+    if (x > 0) tryGrow(i, i - 1);
+    if (x < w - 1) tryGrow(i, i + 1);
+    if (i >= w) tryGrow(i, i - w);
+    if (i < w * (h - 1)) tryGrow(i, i + w);
   }
   return kept;
 }
@@ -372,10 +394,11 @@ export function buildLawnHighlightMask({ source, points, closed, width = MAP_WID
       if (isConfidentTurfPixel(r, g, b)) confident[i] = 1;
     }
   }
-  // Ambiguous tan only lights when CONNECTED to confident green — confident
-  // grass on one side of the yard can't bless a detached paver patio
+  // Ambiguous tan only lights when CONNECTED to confident green through a
+  // smooth color path — confident grass can't bless a detached paver patio,
+  // and the sharp edge onto an adjoining walkway stops the fill
   // (codex P1 #3075).
-  const kept = growTurfRegion(eligible, confident, SW, SH);
+  const kept = growTurfRegion(eligible, confident, SW, SH, img.data);
   const out = sctx.createImageData(SW, SH);
   const litA = Math.round(HIGHLIGHT_ALPHA * 255);
   let litCount = 0;
