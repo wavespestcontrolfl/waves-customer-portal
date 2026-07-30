@@ -69,7 +69,6 @@ const {
   buildEstimateAssistantContext,
 } = require('../services/estimate-assistant');
 const { loadPublicEstimateSupportSources } = require('../services/estimate-ai-context');
-const { triggerAdminFollowupCall } = require('../services/admin-followup-call');
 const {
   WAVES_SUPPORT_PHONE_DISPLAY,
   WAVES_SUPPORT_PHONE_E164,
@@ -10122,40 +10121,6 @@ router.put('/:token/accept', async (req, res, next) => {
       } catch (e) { logger.error(`[termite-agreement] accept hook failed: ${e.message}`); }
     }
 
-    // Customer-facing accepts should get the same admin phone workflow as a
-    // quote request: call Adam from a Waves number during business hours, then
-    // auto-bridge to the customer when the leadAutoBridge gate is enabled.
-    // Admin "mark won" uses server/routes/admin-estimates.js and does not
-    // pass through this public route.
-    try {
-      await triggerAdminFollowupCall({
-        customerId,
-        customerName: estimate.customer_name,
-        customerPhone: estimate.customer_phone,
-        address: estimate.address,
-        source: 'estimate-accept',
-        eventLabel: 'Estimate accepted',
-        sourceLabel: buildAcceptOfficeFallback({
-          customerName: estimate.customer_name,
-          address: estimate.address,
-          waveguardTier: estimate.waveguard_tier || 'Bronze',
-          monthlyTotal: effectiveMonthlyTotal || estimate.monthly_total,
-          proposedMonthlyTotal: proposedMonthlyForNotify,
-          serviceLabel: invoiceServiceLabel || acceptedOneTimeServiceLabel || oneTimeList[0]?.name || 'One-time service',
-          treatAsOneTime,
-          billByInvoice,
-          invoiceMode,
-          invoiceLinkDelivered,
-          invoicePayUrl,
-          reservationCommitted,
-          billingTerm,
-          annualPrepayAmount: annualPrepayQuotedAmount,
-        }),
-      });
-    } catch (e) {
-      logger.error(`[estimate-accept] Admin follow-up call failed: ${e.message}`);
-    }
-
     res.json(buildAcceptSuccessPayload({
       invoiceMode,
       invoiceLinkDelivered,
@@ -12982,55 +12947,6 @@ function acceptedMonthlyDisplay(monthlyTotal, proposedMonthlyTotal) {
     ? ` (proposed at ${fmtMoney(proposed)}/mo)`
     : '';
   return { monthlyText: `${fmtMoney(accepted)}/mo`, proposedNote };
-}
-
-function buildAcceptOfficeFallback({
-  customerName = '',
-  address = '',
-  waveguardTier = 'Bronze',
-  monthlyTotal = 0,
-  proposedMonthlyTotal = null,
-  serviceLabel = 'service',
-  treatAsOneTime = false,
-  billByInvoice = false,
-  invoiceMode = false,
-  invoiceLinkDelivered = false,
-  invoicePayUrl = null,
-  reservationCommitted = false,
-  billingTerm = 'standard',
-  annualPrepayAmount = null,
-} = {}) {
-  const safeCustomerName = String(customerName || '').trim() || 'Unknown customer';
-  const safeAddress = String(address || '').trim() || 'address unavailable';
-  const { monthlyText, proposedNote } = acceptedMonthlyDisplay(monthlyTotal, proposedMonthlyTotal);
-
-  if (billByInvoice) {
-    const label = treatAsOneTime
-      ? `${serviceLabel} one-time service`
-      : `${waveguardTier} WaveGuard ${monthlyText}${proposedNote}`;
-    const invoiceText = invoiceLinkDelivered
-      ? 'Invoice pay link sent.'
-      : (invoiceMode || invoicePayUrl ? 'Invoice created; optional pay link available.' : 'Invoice mode selected.');
-    return `Estimate accepted by ${safeCustomerName} at ${safeAddress} - ${label}. ${invoiceText}`;
-  }
-  if (treatAsOneTime) {
-    const nextStep = reservationCommitted ? 'Appointment confirmed.' : 'Booking link sent.';
-    return `One-time estimate accepted by ${safeCustomerName} at ${safeAddress} - ${serviceLabel}. ${nextStep}`;
-  }
-  if (billingTerm === 'prepay_annual') {
-    const amountText = annualPrepayAmount != null ? ` ${fmtMoney(annualPrepayAmount)}` : '';
-    const invoiceText = invoiceLinkDelivered
-      ? 'Invoice pay link sent.'
-      : (invoiceMode || invoicePayUrl ? 'Invoice created; optional pay link available.' : 'Invoice follow-up needed.');
-    return `Estimate accepted by ${safeCustomerName} at ${safeAddress} - ${waveguardTier} WaveGuard annual prepay${amountText}. ${invoiceText}`;
-  }
-  if (invoiceMode || invoicePayUrl) {
-    const invoiceText = invoiceLinkDelivered
-      ? 'Setup + first application invoice pay link sent.'
-      : 'Setup + first application invoice created; optional pay link available.';
-    return `Estimate accepted by ${safeCustomerName} at ${safeAddress} - ${waveguardTier} WaveGuard ${monthlyText}${proposedNote}. ${invoiceText}`;
-  }
-  return `Estimate accepted by ${safeCustomerName} at ${safeAddress} - ${waveguardTier} WaveGuard ${monthlyText}${proposedNote}. Invoice follow-up needed.`;
 }
 
 async function fireBundleQuoteRequestedNotification({ estimate, suggestedService, bundled }, triggerFn) {
@@ -18673,7 +18589,6 @@ module.exports.oneTimeInvoiceLabelForCategory = oneTimeInvoiceLabelForCategory;
 module.exports.oneTimeToggleCopyForCategory = oneTimeToggleCopyForCategory;
 module.exports.isOneTimeChoiceItemForCategory = isOneTimeChoiceItemForCategory;
 module.exports.confirmationServiceLabel = confirmationServiceLabel;
-module.exports.buildAcceptOfficeFallback = buildAcceptOfficeFallback;
 module.exports.buildAcceptNotificationPayload = buildAcceptNotificationPayload;
 module.exports.buildStandardPayPerApplicationInvoiceCopy = buildStandardPayPerApplicationInvoiceCopy;
 module.exports.fireBundleQuoteRequestedNotification = fireBundleQuoteRequestedNotification;

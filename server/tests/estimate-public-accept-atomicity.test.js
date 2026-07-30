@@ -204,9 +204,6 @@ jest.mock('../services/notification-service', () => ({
   notifyAdmin: jest.fn(async () => ({})),
   notifyCustomer: jest.fn(async () => ({})),
 }));
-jest.mock('../services/admin-followup-call', () => ({
-  triggerAdminFollowupCall: jest.fn(async () => ({})),
-}));
 jest.mock('../services/payer', () => ({
   resolveForInvoice: jest.fn(async () => null),
 }));
