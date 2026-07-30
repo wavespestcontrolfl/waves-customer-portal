@@ -8,6 +8,8 @@ jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({ mocke
 jest.mock('../services/sms-shadow-drafter', () => ({
   PROMPT_VERSION: 'house_voice_v9_test',
   generateGroundedDraft: jest.fn(),
+  // effective profile = none unless a test overrides — keeps the pin inert
+  resolveEffectiveVoiceProfile: jest.fn(async () => null),
 }));
 jest.mock('../services/sms-shadow-judge', () => ({ judgeOne: jest.fn() }));
 jest.mock('../utils/cron-lock', () => ({
@@ -40,6 +42,11 @@ function makeDbi({
       return b;
     });
     b.orderBy = jest.fn(() => b);
+    // profile pin (Codex r2): the sweep's mock resolver returns no profile
+    // and these fixture runs carry no voice_profile_version, so the
+    // COALESCE(-1) = -1 predicate is a semantic no-op here — record-free
+    // pass-through keeps the fixture routing on _kv.
+    b.whereRaw = jest.fn(() => b);
     b.count = jest.fn(() => {
       if (table === 'sms_sealed_eval_items') return Promise.resolve([{ count: activeCount }]);
       return b;

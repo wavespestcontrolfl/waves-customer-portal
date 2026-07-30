@@ -254,7 +254,7 @@ function computeSignificance({ candidateResults = [], baselineResults = [], alph
  * Returns true when a result row landed; false leaves the item pending for
  * a resume pass (transient provider/judge misses must not poison the run).
  */
-async function examOneItem({ run, item, route, client, dbi = db }) {
+async function examOneItem({ run, item, route, client, dbi = db, voiceProfile = null }) {
   const startedAt = Date.now();
   const drafter = require('./sms-shadow-drafter');
   const judge = require('./sms-shadow-judge');
@@ -267,6 +267,7 @@ async function examOneItem({ run, item, route, client, dbi = db }) {
     schedulingIntent: Boolean(item.scheduling_intent),
     factsBlock: item.facts_block, // frozen day-of snapshot — never a live context
     routeOverride: route, // pinned leg, cross-provider fallback disabled
+    voiceProfile, // pinned at run creation — null means drafted profile-free
   });
   if (!parsed) {
     logger.warn(`[sealed-eval] draft failed for item ${String(item.id).slice(0, 8)} (leg ${run.provider_leg}); left pending`);
@@ -429,6 +430,12 @@ async function createExamRun({ providerLeg, baselineRunId, triggeredBy = 'manual
       .first('id');
     baseline = prior?.id || null;
   }
+  // Voice-profile pin (Codex r2): the run is created under ONE effective
+  // profile version and drafts under it for its whole life (resume
+  // included) — a mid-run profile approval must not mix prompts within a
+  // sitting. Resolution errors propagate: an exam must not silently record
+  // itself under an unknown profile state.
+  const effectiveProfile = await drafter.resolveEffectiveVoiceProfile({ dbi });
   try {
     const [run] = await dbi('sms_sealed_eval_runs')
       .insert({
@@ -437,6 +444,7 @@ async function createExamRun({ providerLeg, baselineRunId, triggeredBy = 'manual
         status: 'running',
         items_total: Number(activeCount),
         baseline_run_id: baseline,
+        voice_profile_version: effectiveProfile?.version ?? null,
         triggered_by: String(triggeredBy || 'manual').slice(0, 100),
       })
       .returning('*');
@@ -516,6 +524,21 @@ async function runSealedExam({ providerLeg, baselineRunId, runId, triggeredBy = 
   const route = EXAM_LEG_ROUTES[run.provider_leg];
   if (!route) throw new Error(`run ${String(run.id).slice(0, 8)} has unknown provider leg ${run.provider_leg}`);
 
+  // Frozen voice profile: every item in this sitting — including resumed
+  // ones — drafts under the profile version the run was CREATED with, by
+  // text lookup on the immutable voice_profiles row (superseded/revoked rows
+  // keep their profile_text). A missing row is a hard failure: drafting the
+  // remainder unpinned would mix prompts inside one run.
+  let runVoiceProfile = null;
+  if (run.voice_profile_version != null) {
+    runVoiceProfile = await dbi('voice_profiles')
+      .where({ version: run.voice_profile_version })
+      .first('version', 'profile_text');
+    if (!runVoiceProfile) {
+      throw new Error(`run ${String(run.id).slice(0, 8)} is pinned to voice profile v${run.voice_profile_version}, which no longer exists`);
+    }
+  }
+
   const Anthropic = require('@anthropic-ai/sdk');
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
@@ -550,7 +573,7 @@ async function runSealedExam({ providerLeg, baselineRunId, runId, triggeredBy = 
       for (const item of items) {
         let ok = false;
         try {
-          ok = await examOneItem({ run, item, route, client, dbi });
+          ok = await examOneItem({ run, item, route, client, dbi, voiceProfile: runVoiceProfile });
         } catch (err) {
           logger.error(`[sealed-eval] item ${String(item.id).slice(0, 8)} failed: ${err.message}`);
         }
@@ -595,6 +618,7 @@ function shapeRun(run) {
   return {
     id: run.id,
     promptVersion: run.prompt_version,
+    voiceProfileVersion: run.voice_profile_version ?? null,
     providerLeg: run.provider_leg,
     status: run.status,
     itemsTotal: run.items_total,
@@ -620,7 +644,18 @@ function shapeRun(run) {
  * /intent-modes advisory payload. Callers treat errors as "no exam signal".
  */
 async function getSealedExamSummary({ dbi = db } = {}) {
-  const currentVersion = require('./sms-shadow-drafter').PROMPT_VERSION;
+  const drafter = require('./sms-shadow-drafter');
+  const currentVersion = drafter.PROMPT_VERSION;
+  // Voice-profile pin (Codex r2): a leg's HEADLINE run — the one
+  // evaluateExamGate accepts and the auto-sweep short-circuits on — must
+  // have been drafted under the CURRENTLY effective profile, not merely the
+  // current prompt version: the weekly distiller changes generation without
+  // a version bump, and an old-profile run is not evidence about the prompt
+  // that is live now. Resolution errors propagate (gate + autorun callers
+  // fail closed / skip). A profile swap therefore empties the headline legs
+  // until the nightly sweep re-examines under the new profile.
+  const effectiveProfile = await drafter.resolveEffectiveVoiceProfile({ dbi });
+  const profilePin = effectiveProfile?.version ?? null;
   const [counts] = await dbi('sms_sealed_eval_items')
     .count('* as total')
     .select(dbi.raw('COUNT(*) FILTER (WHERE active)::int as active'));
@@ -633,6 +668,7 @@ async function getSealedExamSummary({ dbi = db } = {}) {
     dbi('sms_sealed_eval_runs').orderBy('started_at', 'desc').limit(20),
     ...EXAM_LEGS.map((leg) => dbi('sms_sealed_eval_runs')
       .where({ provider_leg: leg, status: 'complete', prompt_version: currentVersion })
+      .whereRaw('COALESCE(voice_profile_version, -1) = ?', [profilePin ?? -1])
       .orderBy('started_at', 'desc')
       .first()),
   ]);
@@ -708,7 +744,15 @@ const AUTO_EXAM_MAX_ITEMS = envNum('SEALED_EXAM_AUTO_MAX_ITEMS', 150);
  * exist to grade.
  */
 async function runAutoExamSweep({ dbi = db, examRunner = runSealedExam, summaryFn = getSealedExamSummary } = {}) {
-  const currentVersion = require('./sms-shadow-drafter').PROMPT_VERSION;
+  const drafterMod = require('./sms-shadow-drafter');
+  const currentVersion = drafterMod.PROMPT_VERSION;
+  // Profile-aware coverage (Codex r2): "already examined" means a complete
+  // run under the current (version, effective-profile) pair — after a weekly
+  // profile approval the sweep re-baselines both legs under the new profile,
+  // inside the same spend rails. Resolution errors abort the sweep (fail
+  // closed; tomorrow retries).
+  const sweepProfilePin = (await drafterMod.resolveEffectiveVoiceProfile({ dbi }))?.version ?? null;
+  const profileMatch = (q) => q.whereRaw('COALESCE(voice_profile_version, -1) = ?', [sweepProfilePin ?? -1]);
   const { runExclusive, isLocked } = require('../utils/cron-lock');
 
   const legs = {};
@@ -763,15 +807,15 @@ async function runAutoExamSweep({ dbi = db, examRunner = runSealedExam, summaryF
     // A completed run for this (leg, version) always wins — a NEWER failed
     // manual rerun must not trick the sweep into re-spending on a version
     // that is already covered.
-    const complete = await dbi('sms_sealed_eval_runs')
-      .where({ provider_leg: leg, prompt_version: currentVersion, status: 'complete' })
+    const complete = await profileMatch(dbi('sms_sealed_eval_runs')
+      .where({ provider_leg: leg, prompt_version: currentVersion, status: 'complete' }))
       .first('id');
     if (complete) {
       legs[leg] = { outcome: 'already_examined', runId: complete.id };
       continue;
     }
-    const failed = await dbi('sms_sealed_eval_runs')
-      .where({ provider_leg: leg, prompt_version: currentVersion, status: 'failed' })
+    const failed = await profileMatch(dbi('sms_sealed_eval_runs')
+      .where({ provider_leg: leg, prompt_version: currentVersion, status: 'failed' }))
       .orderBy('started_at', 'desc')
       .first('id');
     // Spend rails gate NEW runs only. A resume finishes an already-created,

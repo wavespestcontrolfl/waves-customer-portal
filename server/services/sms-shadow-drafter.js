@@ -83,19 +83,31 @@ const INTENDED_ACTION_TYPES = [
 const VOICE_PROFILE_ENABLED = process.env.SHADOW_VOICE_PROFILE !== 'false';
 
 /**
- * Latest owner-approved voice profile for the drafter, or null. Blocking on
- * purpose (unlike the phone agent's non-blocking cache): the drafter is
- * fire-and-forget off the webhook, so one indexed SELECT costs nothing — and
- * a deterministic fetch keeps the v9 cohort homogeneous (every v9 draft
- * either has THE current approved profile or none, never a stale cached
- * one). Fail-safe: kill switch, no approved row, or any error → null, and
- * the system prompt is the base prompt.
+ * The EFFECTIVE voice profile — the single source of truth every consumer
+ * shares (drafting, graduation's readiness pin, the sealed-exam run pin):
+ * null when the kill switch is off OR no profile is approved; otherwise the
+ * approved row. The kill switch lives here so a disabled switch reads as
+ * "no profile" EVERYWHERE at once — graduation pinning to an approved row
+ * the drafter isn't using would zero out live evidence (Codex r2 P2).
+ * Errors PROPAGATE: autonomy callers must fail closed on an unknowable
+ * profile state, not silently unpin.
+ */
+async function resolveEffectiveVoiceProfile({ dbi = db } = {}) {
+  if (!VOICE_PROFILE_ENABLED) return null;
+  const { getApprovedVoiceProfile } = require('./voice-profile-distiller');
+  return getApprovedVoiceProfile({ dbi });
+}
+
+/**
+ * Drafting-path wrapper: same resolution, but fail-SAFE — a profile fetch
+ * error must never block drafting, so it degrades to the base prompt.
+ * Blocking on purpose (unlike the phone agent's non-blocking cache): the
+ * drafter is fire-and-forget off the webhook, so one indexed SELECT costs
+ * nothing — and a deterministic fetch keeps the v9 cohort homogeneous.
  */
 async function fetchVoiceProfileForDrafter({ dbi = db } = {}) {
-  if (!VOICE_PROFILE_ENABLED) return null;
   try {
-    const { getApprovedVoiceProfile } = require('./voice-profile-distiller');
-    return await getApprovedVoiceProfile({ dbi });
+    return await resolveEffectiveVoiceProfile({ dbi });
   } catch (err) {
     logger.warn(`[sms-shadow] voice profile fetch failed (${err.message}); drafting on base prompt`);
     return null;
@@ -437,13 +449,18 @@ async function generateDraftOnce(client, system, userContent, route = MODELS.ROU
  * verification miss must never break drafting. Caller supplies the Anthropic
  * client so live + backfill share one implementation.
  */
-async function generateGroundedDraft({ client, context, inboundMessage, intent, schedulingIntent, factsBlock: presetFactsBlock, routeOverride }) {
+async function generateGroundedDraft({ client, context, inboundMessage, intent, schedulingIntent, factsBlock: presetFactsBlock, routeOverride, voiceProfile: presetVoiceProfile }) {
   // v9: the owner-approved voice profile joins the system prompt for every
-  // generation in the loop (revisions included), live and sealed-exam alike —
-  // the exam must draft under the exact prompt live traffic drafts under.
-  // voiceProfileVersion rides back in telemetry so cohort readouts can see
-  // which profile (if any) shaped each draft.
-  const voiceProfile = await fetchVoiceProfileForDrafter();
+  // generation in the loop (revisions included). voiceProfileVersion rides
+  // back in telemetry so cohort readouts can see which profile (if any)
+  // shaped each draft. presetVoiceProfile (sealed exam) pins the profile the
+  // RUN was created under — an exam sitting must be internally consistent
+  // even if the weekly distiller swaps the approved profile mid-run, so the
+  // exam passes { version, profile_text } (or null = drafted profile-free)
+  // and live callers omit it to get the current effective profile.
+  const voiceProfile = presetVoiceProfile !== undefined
+    ? presetVoiceProfile
+    : await fetchVoiceProfileForDrafter();
   const system = buildSystemPrompt(voiceProfile?.profile_text || '');
   // presetFactsBlock (sealed-eval exam) replays the FROZEN facts the drafter
   // saw the day of the original message — building from a live context here
@@ -787,6 +804,7 @@ module.exports = {
   formatExemplarBlock,
   fetchVoiceExemplars,
   fetchVoiceProfileForDrafter,
+  resolveEffectiveVoiceProfile,
   DRAFTER,
   PROMPT_VERSION,
   SHADOW_STATUS,

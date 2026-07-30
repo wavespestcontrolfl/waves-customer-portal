@@ -91,17 +91,69 @@ function makeFakeDb(rows = []) {
 const filterCalls = (dbi, name, column) => dbi.calls.filter(([m, args]) => m === name && args[0] === column);
 
 describe('fetchSuggestOutcomes — cohort filter reaches the query', () => {
-  test('an active cohort applies whereIn(prompt_version) (NULL rows drop out by SQL semantics)', async () => {
+  test('an active cohort applies whereIn(a.prompt_version) (NULL rows drop out by SQL semantics)', async () => {
     const dbi = makeFakeDb([{ status: 'accepted', count: '4' }]);
-    const out = await fetchSuggestOutcomes({ intent: 'x', dbi, cohortVersions: [CURRENT] });
-    expect(filterCalls(dbi, 'whereIn', 'prompt_version')).toEqual([['whereIn', ['prompt_version', [CURRENT]]]]);
+    const out = await fetchSuggestOutcomes({ intent: 'x', dbi, cohortVersions: [CURRENT], voiceProfileVersion: null });
+    expect(filterCalls(dbi, 'whereIn', 'a.prompt_version')).toEqual([['whereIn', ['a.prompt_version', [CURRENT]]]]);
     expect(out).toEqual({ accepted: 4, corrected: 0, ignored: 0 });
   });
 
   test('all_live (null cohort) applies no version filter', async () => {
     const dbi = makeFakeDb([]);
-    await fetchSuggestOutcomes({ intent: 'x', dbi, cohortVersions: null });
-    expect(filterCalls(dbi, 'whereIn', 'prompt_version')).toEqual([]);
+    await fetchSuggestOutcomes({ intent: 'x', dbi, cohortVersions: null, voiceProfileVersion: null });
+    expect(filterCalls(dbi, 'whereIn', 'a.prompt_version')).toEqual([]);
+  });
+
+  test('joins the stamped draft and pins to the active voice profile (Codex r2)', async () => {
+    const dbi = makeFakeDb([]);
+    await fetchSuggestOutcomes({ intent: 'x', dbi, cohortVersions: [CURRENT], voiceProfileVersion: 7 });
+    // the human-decision cohort rides the draft's stamp via entity_id
+    expect(dbi.calls.some(([m, args]) => m === 'join' && JSON.stringify(args).includes('entity_id'))).toBe(true);
+    const pins = dbi.calls.filter(([m, args]) => m === 'whereRaw' && /voice_profile_version/.test(args[0]));
+    expect(pins).toHaveLength(1);
+    expect(pins[0][1][1]).toEqual(['7']);
+  });
+
+  test('no-profile state pins to the sentinel; resolution failure propagates', async () => {
+    const dbi = makeFakeDb([]);
+    await fetchSuggestOutcomes({ intent: 'x', dbi, cohortVersions: null, voiceProfileVersion: null });
+    const pins = dbi.calls.filter(([m, args]) => m === 'whereRaw' && /voice_profile_version/.test(args[0]));
+    expect(pins[0][1][1]).toEqual(['__none__']);
+    // omitted pin forces resolution via the drafter's effective-profile
+    // resolver, whose builder chain (.first) this fake lacks — must throw,
+    // so the executor gate fails closed rather than silently unpinning.
+    const dbi2 = makeFakeDb([]);
+    await expect(fetchSuggestOutcomes({ intent: 'x', dbi: dbi2, cohortVersions: null })).rejects.toThrow();
+  });
+});
+
+describe('rollupSuggestOutcomes — voice-profile pin on the readiness slice (Codex r2)', () => {
+  const rows = [
+    { intent: 'i', status: 'accepted', prompt_version: CURRENT, voice_profile_version: '7', count: 5 },
+    { intent: 'i', status: 'accepted', prompt_version: CURRENT, voice_profile_version: '6', count: 90 },
+    { intent: 'i', status: 'accepted', prompt_version: CURRENT, voice_profile_version: null, count: 3 },
+  ];
+
+  test('cohort slice counts only rows drafted under the pinned profile; display stays all-time', () => {
+    const e = rollupSuggestOutcomes(rows, [CURRENT], 7).get('i');
+    expect(e.cohort.accepted).toBe(5);
+    expect(e.display.accepted).toBe(98);
+  });
+
+  test('null pin (no profile) matches only unprofiled rows', () => {
+    const e = rollupSuggestOutcomes(rows, [CURRENT], null).get('i');
+    expect(e.cohort.accepted).toBe(3);
+  });
+
+  test("the '__unresolved__' sentinel empties readiness evidence (fail closed) without touching display", () => {
+    const e = rollupSuggestOutcomes(rows, [CURRENT], '__unresolved__').get('i');
+    expect(e.cohort.accepted).toBe(0);
+    expect(e.display.accepted).toBe(98);
+  });
+
+  test('undefined pin keeps the pre-pin behavior (display-only callers)', () => {
+    const e = rollupSuggestOutcomes(rows, [CURRENT]).get('i');
+    expect(e.cohort.accepted).toBe(98);
   });
 });
 

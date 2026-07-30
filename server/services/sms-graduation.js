@@ -185,6 +185,19 @@ function evaluateRung({ mode = 'shadow', locked = false, judge = {}, suggest = {
  * voice-profile version (see the pin comment in the function body) — a
  * profile swap resets readiness evidence the same way a prompt bump does.
  */
+/**
+ * The voice-profile pin every readiness/eligibility query shares: the
+ * EFFECTIVE profile version (null when none is approved OR the drafter's
+ * SHADOW_VOICE_PROFILE kill switch is off — the drafter's resolver owns that
+ * switch, so a disabled switch reads as "no profile" here too instead of
+ * zeroing out live evidence, Codex r2 P2). Errors propagate: an unknowable
+ * pin must fail closed at the callers, never silently unpin.
+ */
+async function resolveVoiceProfilePin({ dbi = db } = {}) {
+  const profile = await require('./sms-shadow-drafter').resolveEffectiveVoiceProfile({ dbi });
+  return profile?.version ?? null;
+}
+
 async function fetchLiveJudgeSignals(dbi = db, { recentWindow = THRESHOLDS.suggestToAutosend.recentWindow, cohortVersions, voiceProfileVersion } = {}) {
   const cohort = cohortVersions === undefined ? resolveCohortVersions() : cohortVersions;
   // v9 voice-profile pin: the weekly distiller can swap the approved voice
@@ -200,7 +213,7 @@ async function fetchLiveJudgeSignals(dbi = db, { recentWindow = THRESHOLDS.sugge
   // JSON (the pin key ships with the same version that stamps it).
   const pin = voiceProfileVersion !== undefined
     ? voiceProfileVersion
-    : (await require('./voice-profile-distiller').getApprovedVoiceProfile({ dbi }))?.version ?? null;
+    : await resolveVoiceProfilePin({ dbi });
   const pinValue = pin == null ? '__none__' : String(pin);
   const liveOnly = function () {
     this.whereNotNull('j.intent').whereRaw("md.prompt_version NOT LIKE '%backfill'");
@@ -292,8 +305,19 @@ async function fetchLiveJudgeSignals(dbi = db, { recentWindow = THRESHOLDS.sugge
  *     prompt_version (legacy rows predating stamping) never matches an
  *     active cohort — fail closed, it is evidence for no version. A null
  *     cohort (all_live) counts everything.
+ *
+ * voiceProfilePin (third arg) further scopes the COHORT slice to rows whose
+ * voice_profile_version matches the currently effective profile ('__none__'
+ * sentinel = no profile). Pass the resolved pin (or null for no-profile);
+ * pass the never-matching '__unresolved__' sentinel when resolution failed —
+ * readiness evidence empties (fail closed) while display stays all-time.
+ * undefined = no profile scoping (display-only callers).
  */
-function rollupSuggestOutcomes(rows, cohort) {
+function rollupSuggestOutcomes(rows, cohort, voiceProfilePin) {
+  const pinValue = voiceProfilePin === undefined
+    ? undefined
+    : (voiceProfilePin == null ? '__none__' : String(voiceProfilePin));
+  const rowPin = (row) => (row.voice_profile_version == null ? '__none__' : String(row.voice_profile_version));
   const map = new Map();
   const ensure = (intent) => {
     const key = intent || 'GENERAL';
@@ -311,7 +335,8 @@ function rollupSuggestOutcomes(rows, cohort) {
     e.display.suggested += n;
     const key = row.status === 'pending_review' ? 'pending' : row.status;
     if (key in e.display) e.display[key] += n;
-    if ((!cohort || cohort.includes(row.prompt_version)) && key in e.cohort) e.cohort[key] += n;
+    const profileMatch = pinValue === undefined || rowPin(row) === pinValue;
+    if ((!cohort || cohort.includes(row.prompt_version)) && profileMatch && key in e.cohort) e.cohort[key] += n;
   }
   return map;
 }
@@ -428,15 +453,29 @@ async function computeReadiness({ intents, dbi = db } = {}) {
  * legacy rows with a NULL version drop out when a cohort is active —
  * fail-closed, they count for no version.
  */
-async function fetchSuggestOutcomes({ intent, dbi = db, cohortVersions } = {}) {
+async function fetchSuggestOutcomes({ intent, dbi = db, cohortVersions, voiceProfileVersion } = {}) {
   const { SUGGEST_WORKFLOW } = require('./sms-suggest-mode');
   const cohort = cohortVersions === undefined ? resolveCohortVersions() : cohortVersions;
-  const query = dbi('agent_decisions')
-    .where({ workflow: SUGGEST_WORKFLOW, detected_intent: intent })
-    .select('status')
+  // Voice-profile pin (Codex r2 P1): human accepted/corrected decisions are
+  // evidence about the drafts a specific profile produced — after a profile
+  // swap, the judge pin resets but these outcome counts would otherwise
+  // carry the ENTIRE prior profile's acceptance record toward auto_send.
+  // agent_decisions.entity_id is the stamped message_drafts row, so the same
+  // per-draft voice_profile_version predicate applies. Inner join is
+  // fail-closed: a decision without a resolvable draft is evidence for
+  // nothing.
+  const pin = voiceProfileVersion !== undefined
+    ? voiceProfileVersion
+    : await resolveVoiceProfilePin({ dbi });
+  const pinValue = pin == null ? '__none__' : String(pin);
+  const query = dbi({ a: 'agent_decisions' })
+    .join({ md: 'message_drafts' }, 'md.id', 'a.entity_id')
+    .where({ 'a.workflow': SUGGEST_WORKFLOW, 'a.detected_intent': intent })
+    .whereRaw("COALESCE(md.intended_actions::jsonb->>'voice_profile_version', '__none__') = ?", [pinValue])
+    .select('a.status as status')
     .count('* as count')
-    .groupBy('status');
-  if (cohort) query.whereIn('prompt_version', cohort);
+    .groupBy('a.status');
+  if (cohort) query.whereIn('a.prompt_version', cohort);
   const rows = await query;
   const out = { accepted: 0, corrected: 0, ignored: 0 };
   for (const r of rows) {
@@ -502,6 +541,7 @@ module.exports = {
   evaluateRung,
   evaluateAutoSendHealth,
   fetchLiveJudgeSignals,
+  resolveVoiceProfilePin,
   fetchSuggestOutcomes,
   evaluateAutoSendEligibility,
   computeReadiness,
