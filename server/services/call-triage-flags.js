@@ -461,6 +461,29 @@ function commitmentTurnVocabularyOk(normalizedTurn) {
   ));
 }
 
+// Affirmative sentence FORM (codex P0, interrogatives): normalization strips
+// punctuation, so "Will you be there Sunday at noon?" survives the closed
+// vocabulary. After optional discourse openers, the turn must BEGIN with a
+// first-person commitment head — interrogative-initial forms (will/are/can
+// leading) never match and fail closed.
+const COMMITMENT_OPENER_TOKENS = new Set([
+  'so', 'ok', 'okay', 'alright', 'awesome', 'perfect', 'great', 'sounds',
+  'good', 'yep', 'yes', 'and', 'then', 'all', 'right',
+]);
+const COMMITMENT_HEADS = [
+  'we ll ', 'we will ', 'i ll ', 'i will ', 'we re ', 'we are ',
+  'you re confirmed', 'you are confirmed', 'you re booked', 'you are booked',
+  'you re all set', 'you are all set', 'you re on the schedule',
+  'you are on the schedule', 'it s confirmed',
+];
+function turnHasAffirmativeCommitmentForm(normalizedTurn) {
+  const toks = normalizedTurn.split(' ').filter(Boolean);
+  let i = 0;
+  while (i < toks.length && COMMITMENT_OPENER_TOKENS.has(toks[i])) i += 1;
+  const rest = `${toks.slice(i).join(' ')} `;
+  return COMMITMENT_HEADS.some((h) => rest.startsWith(h));
+}
+
 function agentQuoteGroundedInTranscript(quote, transcript) {
   const q = normalizeForGrounding(quote);
   if (!q || q.length < 12) return false;
@@ -482,7 +505,8 @@ function agentQuoteGroundedInTranscript(quote, transcript) {
   // which one the model meant: fail closed.
   return matching.every((t) => !turnHasNegationOrHedge(t)
     && !turnHasUnresolvedConditional(t)
-    && commitmentTurnVocabularyOk(t));
+    && commitmentTurnVocabularyOk(t)
+    && turnHasAffirmativeCommitmentForm(t));
 }
 
 // Slot binding (codex round-2 P1): the grounded commitment quote must refer
