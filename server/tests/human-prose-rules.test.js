@@ -44,7 +44,11 @@ describe('injection — every long-form prose prompt carries the block', () => {
     expect(visit._test.SYSTEM_PROMPT).toContain('HUMAN PROSE RULES');
     expect(lawn._test.PROMPT_VERSION).toBe('lawn_report_v2_narrative_v3');
     expect(lawn._test.SYSTEM_PROMPT).toContain('HUMAN PROSE RULES');
+    expect(rodent._test.PROMPT_VERSION).toBe('typed_report_narrative_v3');
+    expect(rodent._test.SYSTEM_PROMPT).toContain('HUMAN PROSE RULES');
     expect(treatment.PROMPT_VERSION).toBe('treatment_narrative_v3');
+    expect(treatment.buildTreatmentNarrativePrompt({ serviceLine: 'pest', products: [], findingsText: '', photoSummary: '' }))
+      .toContain('HUMAN PROSE RULES');
   });
 
   test('social/GBP caption prompts (autonomous GBP posts route through generateContent)', () => {
