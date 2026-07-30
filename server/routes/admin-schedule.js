@@ -613,7 +613,11 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM) {
     if (!customer) {
       error = 'Customer not found';
     } else {
-      const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => null);
+      // Fail CLOSED on an unreadable prefs row (the PREFS_UNAVAILABLE
+      // sentinel) — safeSendAppointment then treats the primary as opted
+      // out rather than texting past a possibly-stored explicit opt-out.
+      const { PREFS_UNAVAILABLE } = require('../services/customer-contact');
+      const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => PREFS_UNAVAILABLE);
       const apptTime = parseETDateTime(noticeTime);
       const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
       const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
@@ -621,11 +625,18 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM) {
       // start — never the exact start or the duration-driven window_end
       // (owner directive; see utils/sms-time-format).
       const timeText = formatSmsTimeRange(arrivalWindowRange(start));
+      // The reminder row's stored label is the sanitized, add-on-inclusive
+      // customer-facing one — prefer it over the raw primary service_type.
+      const reminderRow = await db('appointment_reminders')
+        .where({ scheduled_service_id: serviceId })
+        .first('service_type')
+        .catch(() => null);
+      const serviceLabel = AppointmentReminders.smsServiceLabelStored(reminderRow?.service_type || svc.service_type) || 'service';
       sent = await AppointmentReminders.safeSendAppointment(customer, prefs || {}, async (contact) => {
         const firstName = String(contact?.name || '').trim().split(/\s+/)[0] || customer.first_name || 'there';
         return renderRequiredSmsTemplate('appointment_rescheduled', {
           first_name: firstName,
-          service_type: svc.service_type || 'service',
+          service_type: serviceLabel,
           day: formatETDay(apptTime),
           date: formatETDate(apptTime),
           time: timeText,
@@ -658,26 +669,19 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM) {
     logger.warn(`[schedule] reschedule notice failed for ${serviceId}: ${e.message}`);
   }
   if (sent) {
-    // Close the covered windows ONLY while the reminder row still matches
-    // the pre-send snapshot — a newer reschedule that re-armed for its own
-    // slot must keep its fallback reminders. No guard snapshot → skip the
+    // Close the covered windows atomically guarded on the pre-send snapshot
+    // (one conditional UPDATE inside markRescheduleNoticeSent) — a newer
+    // reschedule that re-armed for its own slot makes the guarded update
+    // miss and keeps its fallback reminders. No guard snapshot → skip the
     // mark (worst case is a redundant reminder for the slot we texted,
     // never a silenced newer slot).
     const guardRow = Array.isArray(guards) && guards.length ? guards[0] : null;
-    const stillOurs = guardRow
-      ? !!(await db('appointment_reminders')
-          .where({
-            scheduled_service_id: serviceId,
-            appointment_time: guardRow.appointmentTime,
-            updated_at: guardRow.updatedAt,
-          })
-          .first('id')
-          .catch(() => null))
-      : false;
-    if (stillOurs) {
-      await AppointmentReminders.markRescheduleNoticeSent(serviceId);
+    if (guardRow) {
+      await AppointmentReminders.markRescheduleNoticeSent(serviceId, {
+        guardsByServiceId: { [serviceId]: guardRow },
+      });
     } else {
-      logger.info(`[schedule] reschedule notice sent for ${serviceId} but the reminder row moved on — leaving the newer slot's reminder state untouched`);
+      logger.info(`[schedule] reschedule notice sent for ${serviceId} without a guard snapshot — leaving the reminder close to the cron`);
     }
   } else {
     // The covered windows must not survive a send that never happened —

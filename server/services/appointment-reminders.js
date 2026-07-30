@@ -1995,16 +1995,23 @@ const AppointmentReminders = {
     }
   },
 
-  async markRescheduleNoticeSent(scheduledServiceIds) {
+  async markRescheduleNoticeSent(scheduledServiceIds, options = {}) {
     try {
       const ids = Array.isArray(scheduledServiceIds)
         ? [...new Set(scheduledServiceIds.filter(Boolean))]
         : [scheduledServiceIds].filter(Boolean);
       if (!ids.length) return { updated: 0 };
 
+      // Optional per-service guard ({ [serviceId]: { appointmentTime,
+      // updatedAt } }): the close lands only while the row still matches the
+      // caller's pre-send snapshot, making guard + close one conditional
+      // UPDATE — a newer reschedule that re-armed for its own slot keeps its
+      // fallback reminders and the zero-row update is the concurrency signal.
+      const guardsByServiceId = options.guardsByServiceId || null;
+
       const records = await db('appointment_reminders')
         .whereIn('scheduled_service_id', ids)
-        .select('id', 'appointment_time', 'suppressed_by_sibling');
+        .select('id', 'scheduled_service_id', 'appointment_time', 'suppressed_by_sibling');
 
       const now = new Date();
       let updated = 0;
@@ -2013,17 +2020,29 @@ const AppointmentReminders = {
         // its flags from the appointment time would put it back in the cron's
         // send set alongside the slot's owner (duplicate reminders).
         if (record.suppressed_by_sibling) continue;
-        const { alreadyInside72hWindow, alreadyInside24hWindow } = reminderFlagsCoveredByNotice(record.appointment_time, now);
-        await db('appointment_reminders')
-          .where({ id: record.id })
-          .update({
-            reminder_72h_sent: alreadyInside72hWindow,
-            reminder_72h_sent_at: alreadyInside72hWindow ? new Date() : null,
-            reminder_24h_sent: alreadyInside24hWindow,
-            reminder_24h_sent_at: alreadyInside24hWindow ? new Date() : null,
-            updated_at: new Date(),
-          });
-        updated++;
+        const guard = guardsByServiceId ? guardsByServiceId[record.scheduled_service_id] : null;
+        // Judge the covered windows against the GUARDED time when one is
+        // supplied — that is the slot the caller's notice actually promised.
+        const flagTime = guard ? guard.appointmentTime : record.appointment_time;
+        const { alreadyInside72hWindow, alreadyInside24hWindow } = reminderFlagsCoveredByNotice(flagTime, now);
+        let query = db('appointment_reminders').where({ id: record.id });
+        if (guard) {
+          query = query
+            .where('appointment_time', guard.appointmentTime)
+            .where('updated_at', guard.updatedAt);
+        }
+        const changed = await query.update({
+          reminder_72h_sent: alreadyInside72hWindow,
+          reminder_72h_sent_at: alreadyInside72hWindow ? new Date() : null,
+          reminder_24h_sent: alreadyInside24hWindow,
+          reminder_24h_sent_at: alreadyInside24hWindow ? new Date() : null,
+          updated_at: new Date(),
+        });
+        if (guard && changed === 0) {
+          logger.info(`[appt-remind] reschedule-notice close skipped for ${record.scheduled_service_id} — reminder row moved on under the guard`);
+          continue;
+        }
+        updated += changed;
       }
 
       return { updated };
@@ -2233,9 +2252,21 @@ const AppointmentReminders = {
    * contact path as single-appointment cancellation.
    */
   async handleSeriesCancellation(scheduledServiceIds, representativeScheduledServiceId, options = {}) {
+    // Same optional out-param contract as handleCancellation — callers that
+    // surface send results pass options.outcome = {} and read
+    // notificationSent/notificationError afterwards.
+    const outcome = (options.outcome && typeof options.outcome === 'object') ? options.outcome : null;
+    const reportOutcome = (sent, error) => {
+      if (!outcome) return;
+      outcome.notificationSent = sent;
+      outcome.notificationError = error;
+    };
     try {
       const ids = [...new Set((scheduledServiceIds || []).filter(Boolean))];
-      if (!ids.length) return null;
+      if (!ids.length) {
+        reportOutcome(false, 'No appointments to notify about');
+        return null;
+      }
 
       await db('appointment_reminders')
         .whereIn('scheduled_service_id', ids)
@@ -2261,6 +2292,7 @@ const AppointmentReminders = {
       }
       if (!record) {
         logger.info(`[appt-remind] Series cancellation: no reminder records for ${ids.length} appointment(s)`);
+        reportOutcome(false, 'No reminder records for these visits — no cancellation text was sent');
         return { cancelledCount: ids.length };
       }
 
@@ -2269,7 +2301,7 @@ const AppointmentReminders = {
         const prefs = await db('notification_prefs').where({ customer_id: record.customer_id }).first().catch(() => PREFS_UNAVAILABLE);
         const scopeText = options.scope === 'series' ? 'recurring series' : 'future recurring appointments';
         const serviceLabel = smsServiceLabelStored(options.serviceType || record.service_type);
-        await safeSendAppointment(customer, prefs || {}, async (contact) => {
+        const noticeSent = await safeSendAppointment(customer, prefs || {}, async (contact) => {
           const firstName = firstNameFrom(contact.name) || customer?.first_name || 'there';
           return renderTemplate(
             'appointment_series_cancelled',
@@ -2277,12 +2309,20 @@ const AppointmentReminders = {
             { workflow: 'appointment_series_cancelled', entity_type: 'scheduled_service', entity_id: representativeScheduledServiceId || record.scheduled_service_id },
           );
         }, 'appointment_series_cancelled', 'appointment_cancellation');
-        logger.info(`[appt-remind] Series cancellation notice sent for customer ${record.customer_id} - ${ids.length} appointment(s)`);
+        if (noticeSent) {
+          logger.info(`[appt-remind] Series cancellation notice sent for customer ${record.customer_id} - ${ids.length} appointment(s)`);
+        }
+        reportOutcome(noticeSent, noticeSent
+          ? null
+          : 'customer was not notified (no eligible recipient, opted out, or the text was blocked)');
+      } else {
+        reportOutcome(false, 'Customer not found');
       }
 
       return { ...record, cancelledCount: ids.length };
     } catch (err) {
       logger.error(`[appt-remind] handleSeriesCancellation failed: ${err.message}`);
+      reportOutcome(false, err.message);
       return null;
     }
   },
@@ -2314,6 +2354,10 @@ AppointmentReminders.reminder24hStillReachable = reminder24hStillReachable;
 // of texting customers.phone directly, so appointment_notify_primary and
 // service-contact routing always apply.
 AppointmentReminders.safeSendAppointment = safeSendAppointment;
+// Sanitized customer-facing service label (strips admin suffixes; the
+// reminder row's stored value already folds in add-on lines) — shared so
+// the admin reschedule notice renders the same label as every reminder.
+AppointmentReminders.smsServiceLabelStored = smsServiceLabelStored;
 
 AppointmentReminders._test = {
   maskPhone,

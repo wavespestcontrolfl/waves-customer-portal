@@ -2284,11 +2284,30 @@ router.put('/:serviceId/status', async (req, res, next) => {
       try {
         const AppointmentReminders = require('../services/appointment-reminders');
         const targetIds = targets.map((target) => target.id);
+        cancelNoticeOutcome = notifyCustomer !== false ? {} : null;
         await AppointmentReminders.handleSeriesCancellation(targetIds, svc.id, {
           sendNotification: notifyCustomer !== false,
           scope,
+          ...(cancelNoticeOutcome ? { outcome: cancelNoticeOutcome } : {}),
         });
       } catch (e) { logger.error(`[admin-dispatch] series cancellation reminder handling failed: ${e.message}`); }
+
+      // One-time card-on-file holds: this branch returns before the
+      // single-cancel hold block below, so settle every cancelled target's
+      // hold here — an in-window cancel charges the disclosed late-cancel
+      // fee unless waiveCardHoldFee (admin-only, same gate as the single
+      // path) releases it free; no-op for visits without a hold. Dark until
+      // ONE_TIME_CARD_HOLD; best-effort — never blocks the committed cancels.
+      try {
+        const CardHolds = require('../services/estimate-card-holds');
+        const waiveFee = req.techRole === 'admin' && req.body?.waiveCardHoldFee === true;
+        for (const target of targets) {
+          await CardHolds.handleCardHoldCancellation({
+            scheduledServiceId: target.id,
+            waiveFee,
+          });
+        }
+      } catch (e) { logger.error(`[admin-dispatch] series cancellation card-hold handling failed: ${e.message}`); }
 
       // Void any still-open invoices pre-minted for the cancelled visits so
       // dunning doesn't chase cancelled jobs. The helper enforces the
@@ -2332,7 +2351,17 @@ router.put('/:serviceId/status', async (req, res, next) => {
           + (ongoingStopped > 0 ? ' and stopped the ongoing recurring plan' : ''),
       });
 
-      return res.json({ success: true, cancelledCount: targets.length, scope });
+      return res.json({
+        success: true,
+        cancelledCount: targets.length,
+        scope,
+        ...(cancelNoticeOutcome && cancelNoticeOutcome.notificationSent !== undefined
+          ? {
+              notificationSent: cancelNoticeOutcome.notificationSent,
+              notificationError: cancelNoticeOutcome.notificationError || null,
+            }
+          : {}),
+      });
     }
 
     const fromStatus = svc.status;
