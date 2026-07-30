@@ -400,7 +400,9 @@ const AGRONOMIC_EXEMPT_RE = /\b(?:mow\w*|water\w*|irrigat\w*|fertiliz\w*|seed\w*
 // professional pest control" stays legal.
 const SAFETY_WORD_RE = /\bsafe(?:ly|ty)?\b/i;
 const PRODUCT_CONTEXT_RE = /\b(?:pesticides?|products?|treatments?|sprays?(?:ing)?|chemicals?|applications?|pest\s+control|exterminat\w*)\b/i;
-const SAFE_DRY_IDIOM_RE = /\bsafe\s*[—–,-]?\s*(?:once|until|when)\s+(?:completely\s+|fully\s+)?dry\b/gi;
+// "once/when dry" only — "safe UNTIL dry" literally claims the treatment is
+// safe while WET (the opposite meaning) and is never exempt.
+const SAFE_DRY_IDIOM_RE = /\bsafe\s*[—–,-]?\s*(?:once|when)\s+(?:completely\s+|fully\s+)?dry\b/gi;
 // The idiom is only approved WITH its technician-CONFIRMS-timing framing —
 // bare "our treatments are safe once dry" is still a product-safety claim,
 // and a mere technician MENTION ("our technician applied…") doesn't count:
@@ -1978,6 +1980,17 @@ const SocialMediaService = {
         // judge (ok:false) never blocks the lane; a definitive non-compliant
         // verdict skips this platform exactly like a validation failure.
         const verdict = await judgeCopyOnce(content);
+        // LinkedIn additionally forwards title/description as the article
+        // card metadata — judge that surface too (memoized; identical to the
+        // seed string, so generated-copy runs reuse the seed verdict).
+        const linkedinMetaVerdict = p.key === 'linkedin'
+          ? await judgeCopyOnce([title, description].filter(Boolean).join('\n'))
+          : null;
+        if (linkedinMetaVerdict && linkedinMetaVerdict.ok && !linkedinMetaVerdict.compliant) {
+          logger.warn(`[social] Compliance judge rejected linkedin article metadata: ${linkedinMetaVerdict.violations.join('; ')}`);
+          platformResults.push({ platform: 'linkedin', success: false, skipped: true, error: `Compliance judge: ${linkedinMetaVerdict.violations[0] || 'violation'}` });
+          continue;
+        }
         if (verdict.ok && !verdict.compliant) {
           const why = verdict.violations.join('; ') || 'compliance violation';
           logger.warn(`[social] Compliance judge rejected ${p.key} copy: ${why}`);

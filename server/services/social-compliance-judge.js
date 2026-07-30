@@ -61,8 +61,10 @@ async function judgeSocialCopy(text) {
   try {
     const MODELS = require('../config/models');
     const { dispatchWithFallback } = require('./llm/call');
-    const Anthropic = require('@anthropic-ai/sdk');
-    const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    // No eager client construction: the dispatcher builds the Anthropic
+    // client itself when a key exists and cleanly no_key's the fallback leg
+    // otherwise — an OpenAI-only environment must still reach the OpenAI
+    // PRIMARY instead of dying here on a missing Anthropic key.
     const routed = await dispatchWithFallback(
       MODELS.TEXT_POLICIES.fastStructured,
       {
@@ -74,7 +76,6 @@ async function judgeSocialCopy(text) {
         jsonMode: false,
         maxTokens: 300,
         timeoutMs: JUDGE_TIMEOUT_MS,
-        anthropicClient: client,
       },
       { validate: (result) => (parseVerdict(result.text || '') ? null : 'unparseable') },
     );
