@@ -54,12 +54,15 @@ Violating these makes the live page render broken:
   from frontmatter. Any in-body image must be a DIFFERENT image, mid-article.
 - Phone numbers in body copy MUST be tap-to-call links:
   [(941) 297-5749](tel:+19412975749) — never bare text.
-- If you rewrite the metaDescription/meta_description frontmatter field, it
-  MUST contain the literal token {{cityPhone}} (owner rule 2026-07-29: every
-  meta carries a phone; the token renders each page's OWN tracking number —
-  a typed-out number shows the wrong phone on other domains) and stay within
-  115-160 characters once tokens render ({{cityPhone}} ≈ 14 chars). If the
-  existing meta already meets this, prefer leaving it unchanged.
+- If you rewrite the metaDescription/meta_description frontmatter field
+  (owner rule 2026-07-29): on SERVICE/LOCATION pages it MUST contain the
+  literal token {{cityPhone}} (the token renders each page's OWN tracking
+  number — a typed-out number shows the wrong phone on other domains); on
+  BLOG posts it must carry NO phone and nothing salesy — informational
+  summary ending with a soft CTA like "Learn more on the Waves blog."
+  Either way stay within 115-160 characters once tokens render
+  ({{cityPhone}} ≈ 14 chars). If the existing meta already meets this,
+  prefer leaving it unchanged.
 - Avoid stray curly braces { } — a token-substitution plugin processes
   {token} patterns and will mangle literal braces.
 

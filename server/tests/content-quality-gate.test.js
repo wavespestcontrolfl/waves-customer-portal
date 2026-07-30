@@ -916,22 +916,35 @@ describe('checkMetaDescriptionComplete — refresh target typing (Codex round 12
 describe('meta phone-token contract (owner rule 2026-07-29)', () => {
   const { checkMetaPhoneTokenPresent } = require('../services/content/content-quality-gate')._internals;
   const PAD = 'Chinch bugs, sod webworms and fire ants handled by local techs. ';
+  const PAGE = { target_page_type: 'page' };
+  const BLOG = { target_page_type: 'supporting-blog' };
 
-  test('meta with the {{cityPhone}} token passes', () => {
+  test('non-blog meta with the {{cityPhone}} token passes', () => {
     const m = `${PAD}Call ☎️ {{cityPhone}} for a FREE estimate today.`;
-    expect(checkMetaPhoneTokenPresent({ meta_description: m }).ok).toBe(true);
+    expect(checkMetaPhoneTokenPresent({ meta_description: m }, PAGE).ok).toBe(true);
   });
 
-  test('meta without any phone fails', () => {
-    const r = checkMetaPhoneTokenPresent({ meta_description: `${PAD}Get a free estimate today.` });
+  test('non-blog meta without any phone fails', () => {
+    const r = checkMetaPhoneTokenPresent({ meta_description: `${PAD}Get a free estimate today.` }, PAGE);
     expect(r.ok).toBe(false);
     expect(r.reason).toBe('meta_missing_cityPhone_token');
   });
 
   test('typed-out phone number fails even alongside the token', () => {
-    const r = checkMetaPhoneTokenPresent({ meta_description: `${PAD}Call (941) 297-2606 or {{cityPhone}} now.` });
+    const r = checkMetaPhoneTokenPresent({ meta_description: `${PAD}Call (941) 297-2606 or {{cityPhone}} now.` }, PAGE);
     expect(r.ok).toBe(false);
     expect(r.reason).toBe('literal_phone_in_meta_use_cityPhone_token');
+  });
+
+  test('blog meta: informational + soft CTA passes; phone or salesy CTA fails', () => {
+    const good = 'How to tell chinch bug damage from drought stress in a SWFL lawn, and what recovery actually takes. Learn more on the Waves blog.';
+    expect(checkMetaPhoneTokenPresent({ meta_description: good }, BLOG).ok).toBe(true);
+    const withPhone = checkMetaPhoneTokenPresent({ meta_description: `${PAD}Call ☎️ {{cityPhone}} for details on the blog.` }, BLOG);
+    expect(withPhone.ok).toBe(false);
+    expect(withPhone.reason).toBe('blog_meta_must_not_carry_phone');
+    const salesy = checkMetaPhoneTokenPresent({ meta_description: `${PAD}Get your free estimate today on the Waves blog.` }, BLOG);
+    expect(salesy.ok).toBe(false);
+    expect(salesy.reason).toBe('blog_meta_salesy');
   });
 
   test('meta_length_in_bounds measures RENDERED length (tokens expanded)', () => {

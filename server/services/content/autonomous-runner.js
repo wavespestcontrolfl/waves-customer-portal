@@ -2795,6 +2795,7 @@ class AutonomousRunner {
     let liveDomains = null;
     let liveMetaTitle = null;
     let liveMetaDescription = null;
+    let targetIsBlog = false;
     if (brief.action_type === 'refresh_existing_page') {
       const publisher = getAstroPublisher();
       if (publisher?.getLiveFrontmatter) {
@@ -2824,13 +2825,14 @@ class AutonomousRunner {
         const liveIsBlog = typeof publisher.isBlogTarget === 'function'
           && typeof liveFm._astro_source_path === 'string'
           && publisher.isBlogTarget(liveFm._astro_source_path);
+        targetIsBlog = liveIsBlog;
         liveMetaTitle = !liveIsBlog && liveFm.metaTitle != null && String(liveFm.metaTitle).trim()
           ? String(liveFm.metaTitle)
           : null;
-        // Owner rule 2026-07-29: a refresh that CHANGES the meta description
-        // must carry {{cityPhone}} and stay ≤160 rendered — the guardrail
-        // compares against the live value so an unchanged carried-over meta
-        // is grandfathered. All target types (blog included).
+        // Owner rule 2026-07-29 meta contract: non-blog changed metas must
+        // carry {{cityPhone}}; blog changed metas carry NO phone and nothing
+        // salesy; all cap at 160 rendered. The guardrail compares against the
+        // live value so an unchanged carried-over meta is grandfathered.
         const liveMeta = liveFm.metaDescription ?? liveFm.meta_description;
         liveMetaDescription = liveMeta != null ? String(liveMeta) : null;
       }
@@ -2906,6 +2908,7 @@ class AutonomousRunner {
       priorBody,
       liveMetaTitle,
       liveMetaDescription,
+      targetIsBlog,
     };
   }
 

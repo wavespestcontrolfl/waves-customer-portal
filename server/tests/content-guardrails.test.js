@@ -2059,3 +2059,32 @@ describe('meta description contract on refresh (owner rule 2026-07-29)', () => {
     expect(r.findings.some((f) => String(f.code).startsWith('META_'))).toBe(false);
   });
 });
+
+describe('blog meta contract on refresh (owner rule 2026-07-29 refinement)', () => {
+  const base = { body: 'Refreshed blog body.', frontmatter: {} };
+  const opts = { isRefresh: true, priorBody: 'old body', liveMetaDescription: 'Old blog meta.', targetIsBlog: true };
+
+  test('blog changed meta with a phone token P1s', () => {
+    const r = guardrails.evaluate(
+      { ...base, frontmatter: { meta_description: 'What chinch bug damage looks like in SWFL turf and what recovery takes. Call ☎️ {{cityPhone}} to read more on the Waves blog today, neighbors.' } },
+      opts,
+    );
+    expect(r.findings.some((f) => f.code === 'BLOG_META_CARRIES_PHONE')).toBe(true);
+  });
+
+  test('blog changed meta with a salesy CTA P1s', () => {
+    const r = guardrails.evaluate(
+      { ...base, frontmatter: { meta_description: 'What chinch bug damage looks like in SWFL turf and what a recovery takes — book today for your free estimate from our local lawn techs.' } },
+      opts,
+    );
+    expect(r.findings.some((f) => f.code === 'BLOG_META_SALESY')).toBe(true);
+  });
+
+  test('informational blog meta with a soft CTA passes', () => {
+    const r = guardrails.evaluate(
+      { ...base, frontmatter: { meta_description: 'How to tell chinch bug damage from drought stress in a SWFL lawn, and what recovery actually takes. Learn more on the Waves blog.' } },
+      opts,
+    );
+    expect(r.findings.some((f) => String(f.code).startsWith('META_') || String(f.code).startsWith('BLOG_META'))).toBe(false);
+  });
+});

@@ -157,9 +157,10 @@ describe('rewrite_title_meta live adapter', () => {
           draft: {
             type: 'metadata',
             title: 'Pest Control in Lakewood Ranch, FL | Waves',
-            // Meets the 2026-07-29 meta contract: {{cityPhone}} token present
-            // (never a literal number) and 115-160 chars rendered.
-            meta_description: 'Need pest control in Lakewood Ranch? Waves treats and prevents Southwest Florida pest problems. Call ☎️ {{cityPhone}} for a FREE estimate.',
+            // Meets the 2026-07-29 meta contract. The mocked publisher has no
+            // getLiveFrontmatter, so target resolution fails closed to the
+            // BLOG contract: no phone, nothing salesy, soft CTA, 115-160.
+            meta_description: 'Need pest control in Lakewood Ranch? How to identify, treat, and prevent common Southwest Florida pest problems. Learn more on the Waves blog.',
           },
           agent_id: 'agent_meta',
           session_id: 'session_meta',

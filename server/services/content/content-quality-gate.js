@@ -1012,9 +1012,25 @@ function checkPrimaryKeywordInTitle(draft, brief, context) {
 // Meta text must use the {{cityPhone}} token instead — see the bundle entry.
 const LITERAL_PHONE_IN_META_RE = /\(\d{3}\)\s*\d{3}[-.\s]?\d{4}|\b\d{3}[-.]\d{3}[-.]\d{4}\b/;
 
-function checkMetaPhoneTokenPresent(draft) {
+// Salesy markers banned from BLOG metas (owner rule 2026-07-29: the blog is
+// the informational lane — its metas summarize and end with a soft CTA like
+// "Learn more on the Waves blog", never a phone or sales pitch).
+const SALESY_META_RE = /free\s+(estimate|quote|inspection)|call\s+(now|today|us)\b|book\s+(now|today)\b/i;
+
+function checkMetaPhoneTokenPresent(draft, brief) {
   const m = (draft.meta_description || draft.frontmatter?.meta_description || draft.frontmatter?.metaDescription || '').trim();
   if (!m) return { ok: false, reason: 'no_meta_description' };
+  // Blog targets (target_page_type !== 'page'): NO phone and nothing salesy —
+  // informational summary + soft CTA only. Non-blog pages: the phone is
+  // REQUIRED, always as the {{cityPhone}} token.
+  const isBlogTarget = brief?.target_page_type !== 'page';
+  if (isBlogTarget) {
+    if (m.includes('{{cityPhone}}') || m.includes('{{phone}}') || LITERAL_PHONE_IN_META_RE.test(m)) {
+      return { ok: false, reason: 'blog_meta_must_not_carry_phone' };
+    }
+    if (SALESY_META_RE.test(m)) return { ok: false, reason: 'blog_meta_salesy' };
+    return { ok: true };
+  }
   if (!m.includes('{{cityPhone}}')) return { ok: false, reason: 'meta_missing_cityPhone_token' };
   if (LITERAL_PHONE_IN_META_RE.test(m)) return { ok: false, reason: 'literal_phone_in_meta_use_cityPhone_token' };
   return { ok: true };

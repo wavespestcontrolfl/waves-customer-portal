@@ -58,15 +58,18 @@ this skill.
   uplifting, never scary; grounded in SWFL.
 - **Never hardcode WaveGuard/dollar amounts on marketing pages** — link
   `/pest-control-calculator/`.
-- **Meta descriptions carry the page's phone and cap at 160 rendered chars
-  (owner rule 2026-07-29):** any NEW or REWRITTEN meta must contain the
-  `{{cityPhone}}` token — never a typed-out number (many tracking numbers;
-  the token renders the number that belongs to that page/domain) — and stay
-  ≤160 characters once tokens render. Enforced: quality gate
-  `meta_phone_token_present` + rendered `meta_length_in_bounds` (metadata
-  lane), guardrails `META_MISSING_PHONE_TOKEN` / `LITERAL_PHONE_IN_META` /
-  `META_OVER_160_RENDERED` (refresh lane, changed metas only — untouched
-  legacy metas are grandfathered).
+- **Meta-description contract (owner rule 2026-07-29), 160 rendered chars
+  max for everything:** NON-BLOG pages — any new or rewritten meta must
+  contain the `{{cityPhone}}` token, never a typed-out number (many
+  tracking numbers; the token renders the number that belongs to that
+  page/domain). BLOG posts — NO phone at all and nothing salesy;
+  informational summary ending with a soft CTA like "Learn more on the
+  Waves blog." Enforced: quality gate `meta_phone_token_present` (blog- vs
+  page-aware) + rendered `meta_length_in_bounds` (metadata lane),
+  guardrails `META_MISSING_PHONE_TOKEN` / `LITERAL_PHONE_IN_META` /
+  `BLOG_META_CARRIES_PHONE` / `BLOG_META_SALESY` / `META_OVER_160_RENDERED`
+  (refresh lane, changed metas only — untouched legacy metas are
+  grandfathered).
 - **Protected URL families:** `/pest-control-{city}-fl/` and the `-quote-`
   families take no 301/canonical/title changes without per-URL owner
   sign-off; city×service pages with >5K impressions follow the same
