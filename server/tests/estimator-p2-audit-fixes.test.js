@@ -146,11 +146,19 @@ describe('audit P2: lawn turf provenance', () => {
     expect(reasons.some((r) => r.includes('turf area is a heuristic estimate') && r.includes('lotFallback'))).toBe(true);
   });
 
-  test('MEDIUM estimated turf does not over-flag', () => {
+  test('MEDIUM supplied-estimate turf does not over-flag', () => {
     const { lane } = classifyLane(lawnArgs(lawnLine({
       turfEstimated: true, turfConfidence: 'MEDIUM', turfBasis: 'estimatedTurfSf',
     })));
     expect(lane).toBe(LANES.GREEN);
+  });
+
+  test('MEDIUM plausibleMaxTurfCap turf still lands yellow — capped basis is heuristic regardless of grade', () => {
+    const { lane, reasons } = classifyLane(lawnArgs(lawnLine({
+      turfEstimated: true, turfConfidence: 'MEDIUM', turfBasis: 'plausibleMaxTurfCap',
+    })));
+    expect(lane).toBe(LANES.YELLOW);
+    expect(reasons.some((r) => r.includes('plausibleMaxTurfCap'))).toBe(true);
   });
 });
 

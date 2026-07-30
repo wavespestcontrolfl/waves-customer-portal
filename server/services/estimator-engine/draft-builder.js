@@ -511,8 +511,17 @@ function classifyLane({ intent, propertyFacts, engineResult, totals, comps, cali
   // turfConfidence/turfBasis, NOT pricingConfidence — without this check a
   // new caller's lawn line priced off heuristic turf (lot minus impervious
   // and bed defaults, turfBasis lotFallback) green-laned as if measured.
-  // LOW-confidence turf must land yellow, same as any fallback sqft source.
-  const lowTurfLines = pricedLines.filter((l) => String(l.turfConfidence || '').toLowerCase() === 'low');
+  // Flag by BASIS, not just confidence: plausibleMaxTurfCap comes back
+  // MEDIUM yet means the estimate was capped at the parcel's plausible
+  // maximum — every heuristic/capped basis must land yellow, same as any
+  // fallback sqft source. Measured/supplied bases (measuredTurfSf,
+  // lawnSqFt, estimatedTurfSf) stay green unless graded LOW.
+  const HEURISTIC_TURF_BASES = new Set([
+    'lotFallback', 'plausibleMaxTurfCap', 'legacyHardscapeEstimate',
+    'countyPrior', 'commercialLotFallback', 'commercialDefault',
+  ]);
+  const lowTurfLines = pricedLines.filter((l) => String(l.turfConfidence || '').toLowerCase() === 'low'
+    || (l.turfBasis && HEURISTIC_TURF_BASES.has(l.turfBasis)));
   if (lowTurfLines.length) {
     reasons.push(`turf area is a heuristic estimate (${lowTurfLines.map((l) => `${l.service}: ${l.turfBasis || 'unknown basis'}`).join(', ')}) — verify treated area before send`);
   }
