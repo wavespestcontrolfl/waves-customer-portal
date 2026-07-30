@@ -401,9 +401,12 @@ const AGRONOMIC_EXEMPT_RE = /\b(?:mow\w*|water\w*|irrigat\w*|fertiliz\w*|seed\w*
 const SAFETY_WORD_RE = /\bsafe(?:ly|ty)?\b/i;
 const PRODUCT_CONTEXT_RE = /\b(?:pesticides?|products?|treatments?|sprays?(?:ing)?|chemicals?|applications?|pest\s+control|exterminat\w*)\b/i;
 const SAFE_DRY_IDIOM_RE = /\bsafe\s*[—–,-]?\s*(?:once|until|when)\s+(?:completely\s+|fully\s+)?dry\b/gi;
-// The idiom is only approved WITH its technician-confirms-timing framing —
-// bare "our treatments are safe once dry" is still a product-safety claim.
-const TECH_CONFIRM_CONTEXT_RE = /\btech(?:nician)?s?\b|\bconfirm\w*\b/i;
+// The idiom is only approved WITH its technician-CONFIRMS-timing framing —
+// bare "our treatments are safe once dry" is still a product-safety claim,
+// and a mere technician MENTION ("our technician applied…") doesn't count:
+// the sentence needs an actual confirmation ("technician confirms/will let
+// you know", "confirms timing").
+const TECH_CONFIRM_CONTEXT_RE = /\btech(?:nician)?s?\b[^.!?\n]{0,40}\b(?:confirm\w*|advise\w*|tells?|will\s+(?:tell|let\s+you\s+know))|\bconfirm\w*[^.!?\n]{0,25}\btiming\b|\btiming\b[^.!?\n]{0,30}\bconfirm/i;
 const SAFE_FROM_PEST_RE = /\bsafe(?:ly|ty)?\s+from\s+[\w'-]+(?:\s+(?:and|or)\s+[\w'-]+)?/gi;
 // Worker-safety mentions ("technicians ... stay safe while applying") are
 // about the crew's PPE, not a product claim — stripped before testing.
@@ -2252,7 +2255,7 @@ const SocialMediaService = {
   /**
    * Post to a single platform (from admin UI).
    */
-  async postToSingle(platform, { title, description, link, content, imageUrl, locationId, mediaFallback = true }) {
+  async postToSingle(platform, { title, description, link, content, imageUrl, locationId, mediaFallback = true, complianceJudged = false }) {
     if (!SOCIAL_FLAGS.automationEnabled) {
       return { platform, success: false, error: 'Automation is disabled' };
     }
@@ -2274,7 +2277,13 @@ const SocialMediaService = {
     // Semantic second pass (owner ruling 2026-07-30) — postToSingle serves
     // the tech no-admin-queue flow, which must not bypass the judge. A
     // rejection is skipped (content decision, not a platform failure).
-    const singleVerdict = await require('./social-compliance-judge').judgeSocialCopy(text);
+    // Callers that already judged this exact copy PRE-claim (tech-social
+    // /publish) pass complianceJudged:true — a second nondeterministic
+    // verdict after the claim/photo-upload would recreate the dead-end this
+    // preflight exists to prevent.
+    const singleVerdict = complianceJudged
+      ? { ok: true, compliant: true, violations: [] }
+      : await require('./social-compliance-judge').judgeSocialCopy(text);
     if (singleVerdict.ok && !singleVerdict.compliant) {
       logger.warn(`[social] Compliance judge rejected ${platform} copy: ${singleVerdict.violations.join('; ')}`);
       return { platform, success: false, skipped: true, error: `Compliance judge: ${singleVerdict.violations[0] || 'violation'}` };

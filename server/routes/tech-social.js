@@ -355,6 +355,9 @@ router.post('/publish', async (req, res, next) => {
           imageUrl: imageUrl || undefined,
           locationId: platform === 'gbp' ? locationId : undefined,
           mediaFallback: false, // photo-first: never downgrade to a text-only post
+          // This exact copy passed the pre-claim judge above — a second
+          // nondeterministic verdict after the claim would dead-end retries.
+          complianceJudged: true,
         });
         // Keep the claim regardless of the result: once postToSingle is invoked the
         // outcome is ambiguous (a returned failure or a thrown timeout may still have

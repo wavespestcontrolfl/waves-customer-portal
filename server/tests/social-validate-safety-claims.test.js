@@ -35,6 +35,8 @@ const FLAGGED_PRODUCT_SAFETY = [
   'our treatments are safe once completely dry',
   'Our treatments are safe—once dry',
   'Our treatments are safe, once dry',
+  // r3: a technician MENTION without a confirmation verb is not framing.
+  'Our technician applied treatments that are safe once dry',
   'safe pesticide treatments',
   'safe products for your lawn',
   'a safe treatment plan for summer',
