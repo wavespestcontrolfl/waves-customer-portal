@@ -360,6 +360,15 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
   // onConflict-ignore: real hold rows are never clobbered; errors propagate
   // with the rest of the edit transaction.
   if (await conn.schema.hasTable('first_touch_holds')) {
+    // A claim already in flight ('releasing') can't be re-claimed by this
+    // correction — supersede its TARGET so any retry of that claim (every
+    // failure path re-pends, and the ledger sweep re-triggers) resumes to
+    // the NEWEST corrected address, not the value captured at claim time
+    // (Codex #3084 r12). updated_at is deliberately untouched: bumping it
+    // would extend a possibly-dead claimant's stale-claim window.
+    await conn('first_touch_holds')
+      .where({ customer_id: customerId, status: 'releasing' })
+      .update({ held_email: newEmail });
     const reviewedCalls = await conn('triage_items')
       .whereIn('reason_code', EMAIL_REVIEW_REASON_CODES)
       .whereIn('call_log_id', conn('call_log').select('id').where({ customer_id: customerId }))

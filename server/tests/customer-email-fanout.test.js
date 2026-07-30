@@ -363,7 +363,20 @@ describe('propagateCustomerEmailChange', () => {
     const result = await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
     expect(result.pendingConfirmation.heldNewsletterHoldIds).toEqual(['hold-1', 'hold-2']);
     expect(result.heldNewsletterResume).toBeUndefined();
-    expect(conn.__updates('first_touch_holds')).toHaveLength(0);
+    // Nothing CONSUMED in-trx (the releasing-claim retarget is not a consume).
+    expect(conn.__updates('first_touch_holds').filter((u) => u.arg.released_newsletter)).toHaveLength(0);
+  });
+
+  test('a newer correction retargets claims already in flight', async () => {
+    const conn = makeConn();
+    await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
+    const retarget = conn.__updates('first_touch_holds').find((u) => u.arg.held_email === 'charleswrobb@gmail.com');
+    expect(retarget).toBeDefined();
+    // Scoped to active claims only, and updated_at untouched — never extend
+    // a possibly-dead claimant's stale-claim window.
+    expect(conn.__calls.some((c) => c.table === 'first_touch_holds' && c.op === 'where'
+      && c.arg && c.arg.status === 'releasing' && c.arg.customer_id === 'cust-1')).toBe(true);
+    expect(retarget.arg.updated_at).toBeUndefined();
   });
 
   test('the marker persists even when the email card was ALREADY resolved (deny-then-correct)', async () => {
@@ -420,7 +433,7 @@ describe('propagateCustomerEmailChange', () => {
     const conn = makeConn();
     const result = await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
     expect(result.heldNewsletterResume).toEqual([expect.objectContaining({ holdId: 'hold-1' })]);
-    expect(conn.__updates('first_touch_holds')).toHaveLength(0);
+    expect(conn.__updates('first_touch_holds').filter((u) => u.arg.released_newsletter)).toHaveLength(0);
   });
 });
 

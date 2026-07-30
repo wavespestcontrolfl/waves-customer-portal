@@ -996,6 +996,24 @@ httpServer.listen(PORT, () => {
       setInterval(runReportHoldSweep, 60 * 1000).unref();
     }
 
+    // First-touch hold ledger sweep — retries abandoned release claims on
+    // the first_touch_holds ledger (worker died mid post-commit DOI, or a
+    // transient failure after the email review card resolved). Only holds
+    // whose review question is ANSWERED release; unreviewed rows stay held
+    // for an operator. (2026-07-30 email-hold lane.)
+    {
+      const runFirstTouchHoldSweep = async () => {
+        try {
+          const { sweepAbandonedFirstTouchHolds } = require('./services/lead-first-touch-resume');
+          await sweepAbandonedFirstTouchHolds({ limit: 10 });
+        } catch (err) {
+          logger.error(`[first-touch-resume] sweep failed: ${err.message}`);
+        }
+      };
+      setTimeout(runFirstTouchHoldSweep, 90 * 1000).unref();
+      setInterval(runFirstTouchHoldSweep, 5 * 60 * 1000).unref();
+    }
+
     // WDO report attention sweep — exception-based bell for reports stalled
     // BEFORE send (inspection never closed out, signed-but-unsent drafts,
     // holds failing release). Quiet when clean; gated + cross-replica

@@ -17,13 +17,17 @@ let mockTriageCardRow = null;
 let mockMergeFailures = 0;
 let mockMergeArgs = [];
 let mockCustomerFirstQueue = null; // shift per customers.first(); an Error value throws
+let mockSubscriberRow = null; // newsletter_subscribers.first() (DOI dedupe guard)
+let mockTriageFirstQueue = null; // shift per triage_items.first()
 jest.mock('../models/db', () => {
   const handler = (table) => {
     const chain = {
       where: jest.fn(() => chain),
       whereIn: jest.fn(() => chain),
       whereRaw: jest.fn(() => chain),
+      whereNotNull: jest.fn(() => chain),
       orderBy: jest.fn(() => chain),
+      limit: jest.fn(() => chain),
       select: jest.fn(() => chain),
       insert: jest.fn(() => chain),
       onConflict: jest.fn(() => chain),
@@ -55,7 +59,11 @@ jest.mock('../models/db', () => {
           return mockCustomerRow;
         }
         if (table === 'call_log') return mockDncRow;
-        if (table === 'triage_items') return mockTriageCardRow;
+        if (table === 'triage_items') {
+          if (mockTriageFirstQueue && mockTriageFirstQueue.length) return mockTriageFirstQueue.shift();
+          return mockTriageCardRow;
+        }
+        if (table === 'newsletter_subscribers') return mockSubscriberRow;
         if (table === 'automation_templates') return { key: 'new_lead' };
         return null;
       }),
@@ -85,7 +93,12 @@ jest.mock('../services/call-recording-processor', () => ({
   resumeNewsletterForCallCustomer: (...a) => mockNewsletter(...a),
 }));
 
-const { resumeHeldFirstTouch, recordFirstTouchHold, resumeHeldNewsletterPostCommit } = require('../services/lead-first-touch-resume');
+const {
+  resumeHeldFirstTouch,
+  recordFirstTouchHold,
+  resumeHeldNewsletterPostCommit,
+  sweepAbandonedFirstTouchHolds,
+} = require('../services/lead-first-touch-resume');
 const logger = require('../services/logger');
 
 function baseHold(overrides = {}) {
@@ -110,6 +123,8 @@ beforeEach(() => {
   mockMergeFailures = 0;
   mockMergeArgs = [];
   mockCustomerFirstQueue = null;
+  mockSubscriberRow = null;
+  mockTriageFirstQueue = null;
 });
 
 describe('resumeHeldFirstTouch (ledger release engine)', () => {
@@ -372,5 +387,50 @@ describe('resumeHeldNewsletterPostCommit failure paths', () => {
     const outcome = await resumeHeldNewsletterPostCommit({ holdId: 'hold-1', customerId: 'cust-1', email: 'ok@example.com' });
     expect(outcome).toMatchObject({ subscribed: true });
     expect(mockHoldUpdates.at(-1)).toMatchObject({ released_newsletter: true, status: 'released' });
+  });
+
+  test('payloads for the same recipient coalesce into ONE DOI that settles every hold', async () => {
+    mockHold = { held_drip: false, released_drip: false };
+    const outcomes = await resumeHeldNewsletterPostCommit([
+      { holdId: 'hold-1', customerId: 'cust-1', email: 'same@example.com' },
+      { holdId: 'hold-2', customerId: 'cust-1', email: 'same@example.com' },
+    ]);
+    expect(mockNewsletter).toHaveBeenCalledTimes(1);
+    expect(outcomes).toHaveLength(1);
+    const settles = mockHoldUpdates.filter((u) => u.released_newsletter === true);
+    expect(settles).toHaveLength(2);
+  });
+});
+
+describe('DOI dedupe guard and ledger sweep', () => {
+  test('a pending subscriber with a RECENT confirmation skips the resend and settles', async () => {
+    // The DOI already went out (e.g. a settle failure re-pended the hold
+    // after a successful send) — the retry must settle without a second
+    // confirmation email.
+    mockSubscriberRow = { status: 'pending', confirmation_sent_at: new Date() };
+    const res = await resumeHeldFirstTouch({ callLogId: 'call-1' });
+    expect(mockNewsletter).not.toHaveBeenCalled();
+    expect(res.resumed).toBe(true);
+    expect(mockHoldUpdates.at(-1)).toMatchObject({ status: 'released', released_newsletter: true });
+  });
+
+  test('the sweep releases an abandoned hold whose review question is answered', async () => {
+    mockHolds = [baseHold()];
+    // live-card check → none; resolved-card check → answered.
+    mockTriageFirstQueue = [null, { id: 'resolved-1' }];
+    const swept = await sweepAbandonedFirstTouchHolds({});
+    expect(swept).toMatchObject({ examined: 1, released: 1 });
+    expect(mockEnroll).toHaveBeenCalled();
+  });
+
+  test('the sweep never releases a hold that is still under review or never reviewed', async () => {
+    mockHolds = [baseHold(), baseHold({ id: 'hold-2', call_log_id: 'call-2' })];
+    mockTriageFirstQueue = [
+      { id: 'live-1' }, // hold 1: card still live → skip
+      null, null, // hold 2: no live card AND no resolved card → never reviewed → skip
+    ];
+    const swept = await sweepAbandonedFirstTouchHolds({});
+    expect(swept).toMatchObject({ examined: 2, released: 0 });
+    expect(mockEnroll).not.toHaveBeenCalled();
   });
 });

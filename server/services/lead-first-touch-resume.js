@@ -128,7 +128,25 @@ function newsletterDelivered(outcome) {
   return outcome.confirmationEmailSent !== false;
 }
 
-async function runNewsletterResume(payload) {
+// A pending subscriber whose DOI went out within this window was already
+// resumed by an earlier release — a post-send settle failure or a sibling
+// hold for the same recipient must not fire the confirmation again
+// (Codex #3084 r12). subscribeOrResubscribe stamps confirmation_sent_at on
+// every send, so the stamp IS the delivery record.
+const RESUME_DOI_DEDUPE_MS = 24 * 60 * 60 * 1000;
+
+async function runNewsletterResume(payload, dbh = db) {
+  try {
+    const existing = await dbh('newsletter_subscribers')
+      .whereRaw('LOWER(email) = ?', [String(payload.email || '').trim().toLowerCase()])
+      .first('status', 'confirmation_sent_at');
+    if (existing && String(existing.status) === 'pending' && existing.confirmation_sent_at
+        && (Date.now() - new Date(existing.confirmation_sent_at).getTime()) < RESUME_DOI_DEDUPE_MS) {
+      return { skipped: 'confirmation_recently_sent' };
+    }
+  } catch (guardErr) {
+    logger.warn(`[first-touch-resume] DOI-dedupe guard lookup failed: ${guardErr.code || guardErr.name || 'db_error'} — proceeding with resume`);
+  }
   const CRP = require('./call-recording-processor');
   if (typeof CRP.resumeNewsletterForCallCustomer !== 'function') return null;
   return CRP.resumeNewsletterForCallCustomer(payload);
@@ -262,7 +280,7 @@ async function resumeHeldFirstTouch({
               email: resumeEmail,
               firstName: customer.first_name || null,
               lastName: customer.last_name || null,
-            });
+            }, dbh);
           } catch (newsletterErr) {
             logger.warn(`[first-touch-resume] newsletter resume failed for customer ${holdCustomerId}: ${newsletterErr.code || newsletterErr.name || 'resume_failed'}`);
           }
@@ -329,32 +347,46 @@ async function resumeHeldFirstTouch({
 
 // Post-commit companion for transactional callers (same contract as the
 // fanout's resendPendingConfirmation): execute the deferred newsletter DOI
-// after the edit commits, then settle the ledger. Never throws.
+// after the edit commits, then settle the ledger. Payloads are COALESCED by
+// recipient (Codex #3084 r12) — multiple holds for the same customer+email
+// are one subscription question, and per-payload execution would send
+// confirmation_sent then confirmation_resent to the same inbox. Never
+// throws.
 async function resumeHeldNewsletterPostCommit(payloadOrList, dbh = db) {
   if (!payloadOrList) return null;
-  if (Array.isArray(payloadOrList)) {
-    const outcomes = [];
-    for (const p of payloadOrList) outcomes.push(await resumeHeldNewsletterPostCommit(p, dbh));
-    return outcomes;
+  const list = (Array.isArray(payloadOrList) ? payloadOrList : [payloadOrList]).filter(Boolean);
+  if (!list.length) return Array.isArray(payloadOrList) ? [] : null;
+  const groups = new Map();
+  for (const p of list) {
+    const key = `${p.customerId}|${String(p.email || '').trim().toLowerCase()}`;
+    if (!groups.has(key)) groups.set(key, { payload: p, holdIds: [] });
+    if (p.holdId) groups.get(key).holdIds.push(p.holdId);
   }
-  const payload = payloadOrList;
+  const outcomes = [];
+  for (const { payload, holdIds } of groups.values()) {
+    outcomes.push(await runOnePostCommitResume(payload, holdIds, dbh));
+  }
+  return Array.isArray(payloadOrList) ? outcomes : outcomes[0];
+}
+
+async function runOnePostCommitResume(payload, holdIds, dbh) {
   try {
-    const outcome = await runNewsletterResume(payload);
-    if (payload.holdId) {
+    const outcome = await runNewsletterResume(payload, dbh);
+    for (const holdId of holdIds) {
       if (newsletterDelivered(outcome)) {
-        const hold = await dbh('first_touch_holds').where({ id: payload.holdId }).first('held_drip', 'released_drip');
+        const hold = await dbh('first_touch_holds').where({ id: holdId }).first('held_drip', 'released_drip');
         const dripSettled = !hold || !hold.held_drip || hold.released_drip;
-        await dbh('first_touch_holds').where({ id: payload.holdId }).update({
+        await dbh('first_touch_holds').where({ id: holdId }).update({
           released_newsletter: true,
           status: dripSettled ? 'released' : 'pending',
           ...(dripSettled ? { released_at: new Date(), last_error: null } : {}),
           updated_at: new Date(),
         });
-        if (dripSettled) await repenIfWorkMergedDuringClaim(payload.holdId, dbh);
+        if (dripSettled) await repenIfWorkMergedDuringClaim(holdId, dbh);
       } else {
         // Back to pending — the DOI never confirmed; the next release
-        // trigger retries it.
-        await dbh('first_touch_holds').where({ id: payload.holdId })
+        // trigger (or the ledger sweep) retries it.
+        await dbh('first_touch_holds').where({ id: holdId })
           .update({ status: 'pending', last_error: 'newsletter_doi_not_confirmed', updated_at: new Date() });
       }
     }
@@ -365,16 +397,15 @@ async function resumeHeldNewsletterPostCommit(payloadOrList, dbh = db) {
     // corrected; it must not leak into logs (or the ledger).
     const code = err.code || err.name || 'resume_failed';
     logger.warn(`[first-touch-resume] post-commit newsletter resume failed for customer ${payload.customerId}: ${code}`);
-    // The hold was claimed 'releasing' before this ran — restore a
-    // retryable state; nothing else consumes the ledger on a schedule, so
-    // waiting out the stale-claim window would strand the DOI until some
-    // unrelated trigger happens to fire.
-    if (payload.holdId) {
+    // Restore a retryable state. A failure AFTER a successful send (the
+    // settle threw) cannot double-fire on retry: runNewsletterResume's
+    // confirmation_sent_at dedupe guard skips the resend and just settles.
+    for (const holdId of holdIds) {
       try {
-        await dbh('first_touch_holds').where({ id: payload.holdId })
+        await dbh('first_touch_holds').where({ id: holdId })
           .update({ status: 'pending', last_error: `newsletter_resume_failed: ${code}`, updated_at: new Date() });
       } catch (repenErr) {
-        logger.warn(`[first-touch-resume] hold ${payload.holdId} re-pend failed: ${repenErr.code || repenErr.name || 'db_error'} (stale-claim window will reclaim)`);
+        logger.warn(`[first-touch-resume] hold ${holdId} re-pend failed: ${repenErr.code || repenErr.name || 'db_error'} (stale-claim window will reclaim)`);
       }
     }
     return null;
@@ -479,9 +510,64 @@ async function recordFirstTouchHold({ callLogId, customerId = null, heldEmail, h
   return null;
 }
 
+/**
+ * Scheduled sweep for abandoned ledger rows (Codex #3084 r12): a deferred
+ * post-commit DOI dies with its worker, and a transiently failed release
+ * leaves a pending row after its card resolved — with no later
+ * edit/triage/run trigger, nothing would ever retry them. Eligible rows are
+ * pending (or stale-releasing) holds whose email question is ANSWERED: at
+ * least one RESOLVED email-review card on the call and none still live.
+ * Unreviewed holds — a live card, or no card at all (e.g. the card insert
+ * failed) — are never auto-released; they stay held until an operator acts.
+ * Consent, suppression, and the DOI dedupe guard all re-check inside
+ * resumeHeldFirstTouch.
+ */
+async function sweepAbandonedFirstTouchHolds({ dbh = db, limit = 10 } = {}) {
+  const swept = { examined: 0, released: 0 };
+  try {
+    if (!(await dbh.schema.hasTable('first_touch_holds'))) return swept;
+    const candidates = await dbh('first_touch_holds')
+      .where(function scope() {
+        this.where({ status: 'pending' })
+          .orWhere(function stale() {
+            this.where({ status: 'releasing' })
+              .where('updated_at', '<', new Date(Date.now() - STALE_CLAIM_MS));
+          });
+      })
+      .whereNotNull('call_log_id')
+      .orderBy('updated_at', 'asc')
+      .limit(limit)
+      .select('id', 'call_log_id');
+    for (const row of candidates) {
+      swept.examined += 1;
+      const live = await dbh('triage_items')
+        .where({ call_log_id: row.call_log_id })
+        .whereIn('reason_code', EMAIL_REVIEW_REASON_CODES)
+        .whereIn('status', ['open', 'in_progress'])
+        .first('id');
+      if (live) continue; // still under review — the hold stands
+      const resolved = await dbh('triage_items')
+        .where({ call_log_id: row.call_log_id })
+        .whereIn('reason_code', EMAIL_REVIEW_REASON_CODES)
+        .where({ status: 'resolved' })
+        .first('id');
+      if (!resolved) continue; // never reviewed — never auto-release
+      const res = await resumeHeldFirstTouch({ callLogId: row.call_log_id, source: 'ledger_sweep' });
+      if (res?.resumed) swept.released += 1;
+    }
+    if (swept.released) {
+      logger.info(`[first-touch-resume] ledger sweep released ${swept.released} abandoned hold(s)`);
+    }
+  } catch (err) {
+    logger.warn(`[first-touch-resume] ledger sweep failed: ${err.code || err.name || 'error'}`);
+  }
+  return swept;
+}
+
 module.exports = {
   resumeHeldFirstTouch,
   resumeHeldNewsletterPostCommit,
   recordFirstTouchHold,
+  sweepAbandonedFirstTouchHolds,
   EMAIL_REVIEW_REASON_CODES,
 };

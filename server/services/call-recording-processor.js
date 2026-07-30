@@ -1168,8 +1168,6 @@ async function shouldHoldLeadEmailEnrollment(callLogId) {
     // Persist a recovery marker (Codex #3084): without a live card the
     // standard resume paths (triage resolve / email correction) have nothing
     // to release, and the lead would stay silently outside the drip forever.
-    // Best-effort — if this insert also fails, the hold stands and the
-    // warning above is the only trace.
     try {
       const { buildTriageItem } = require('./call-routing-gates');
       await db('triage_items')
@@ -1183,7 +1181,16 @@ async function shouldHoldLeadEmailEnrollment(callLogId) {
         .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
         .ignore();
     } catch (markerErr) {
-      logger.warn(`[call-proc] email-hold recovery marker insert failed: ${markerErr.message}`);
+      // Neither the review state nor a recovery marker is available — a
+      // silent `true` here would durably hold both sends with no card
+      // visible to an operator and no resolution trigger left (Codex #3084
+      // r12). Fail the run instead: the outer procErr catch stamps
+      // extraction_failed with the capped retry budget, and the sweep
+      // re-processes the call when the DB recovers.
+      logger.error(`[call-proc] email-hold recovery marker insert failed: ${markerErr.message}`);
+      const stateErr = new Error('email_review_state_unavailable');
+      stateErr.emailReviewStateUnavailable = true;
+      throw stateErr;
     }
     return true;
   }
@@ -8958,9 +8965,11 @@ const CallRecordingProcessor = {
           }
         }
       } catch (reconcileErr) {
-        // Reconciliation is best-effort EXCEPT for a terminally
-        // unpersistable hold — that one must fail the run (see above).
-        if (reconcileErr.holdLedgerUnavailable) throw reconcileErr;
+        // Reconciliation is best-effort EXCEPT when durable hold state
+        // cannot be persisted at all — an unwritable ledger or an
+        // undeterminable review state with no recovery marker must fail the
+        // run (retryable) rather than complete with an invisible hold.
+        if (reconcileErr.holdLedgerUnavailable || reconcileErr.emailReviewStateUnavailable) throw reconcileErr;
         logger.warn(`[call-proc] first-touch hold reconciliation failed for ${maskSid(callSid)}: ${reconcileErr.message}`);
       }
     }
