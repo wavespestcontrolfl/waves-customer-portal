@@ -429,8 +429,16 @@ function applyV2ToPropertyFacts(propertyFacts, v2) {
   // - an unresolved private_parcel value is missing data, not a resolved
   //   "no lot" — clearing it stamped a false high-confidence source.
   if (facts.lot && facts.lot.applicability !== 'unknown') {
-    const keepsRealParcel = (facts.lot.applicability === 'leased_land'
-      && facts.serviceScope === 'entire_residential_structure')
+    // Positive whole-structure evidence required: entire_residential_
+    // structure is also inferServiceScope's FALLBACK for a missing or
+    // generic property type, and a tenant behind that fallback may really
+    // be an apartment renter whose only V1 lot is the development's county
+    // master parcel. Only a subtype that positively names a whole
+    // residential structure lets a leased_land tenant keep the lot.
+    const WHOLE_STRUCTURE_SUBTYPES = /single_?family|duplex|triplex|quadplex|townhou|villa|mobile_?home|manufactured/;
+    const positiveWholeStructure = facts.serviceScope === 'entire_residential_structure'
+      && WHOLE_STRUCTURE_SUBTYPES.test(String(facts.propertySubtype || ''));
+    const keepsRealParcel = (facts.lot.applicability === 'leased_land' && positiveWholeStructure)
       || facts.lot.applicability === 'private_parcel';
     if (legacy.lotSize) {
       propertyFacts.lot = {

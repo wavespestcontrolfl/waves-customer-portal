@@ -403,11 +403,12 @@ describe('audit P2: V2 apply keeps real lots for tenants and unresolved parcels'
     lot: { value: 9500, source: 'county_assessed', confidence: 'high', rejected: [] },
     stories: 1,
   });
-  const v2 = (applicability, lotSize = null, serviceScope = 'entire_residential_structure') => ({
+  const v2 = (applicability, lotSize = null, serviceScope = 'entire_residential_structure', propertySubtype = 'single_family') => ({
     legacyDerived: { squareFootage: 1800, lotSize, stories: 1 },
     facts: {
       confidenceLevel: 'high',
       serviceScope,
+      propertySubtype,
       lot: { applicability },
       structureArea: null,
     },
@@ -431,6 +432,15 @@ describe('audit P2: V2 apply keeps real lots for tenants and unresolved parcels'
     const facts = v1Facts();
     shadow.applyV2ToPropertyFacts(facts, v2('leased_land', null, 'unknown'));
     expect(facts.lot.value).toBeNull();
+  });
+
+  test('leased_land tenant with a MISSING/generic property type clears — whole-structure scope was only the inference fallback', () => {
+    const facts = v1Facts();
+    shadow.applyV2ToPropertyFacts(facts, v2('leased_land', null, 'entire_residential_structure', 'unknown'));
+    // An apartment renter with no recognized type lands here; the V1 lot
+    // could be the development's master parcel, so it must not survive.
+    expect(facts.lot.value).toBeNull();
+    expect(facts.lot.source).toBe('no_individual_lot:leased_land');
   });
 
   test('unresolved private_parcel keeps the V1 lot as DATA but downgrades it to low confidence', () => {
