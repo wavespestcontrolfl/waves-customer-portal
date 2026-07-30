@@ -197,7 +197,6 @@ const PEST = {
     },
     poolNoCageMinutes: 2,
     shrubMinutes: { light: -2, moderate: 0, heavy: 3 },
-    treeMinutes: { light: -2, moderate: 0, heavy: 3 },
     complexityMinutes: { simple: -3, moderate: 0, complex: 3 },
     nearWaterMinutes: 2,
     attachedGarageMinutes: 2,

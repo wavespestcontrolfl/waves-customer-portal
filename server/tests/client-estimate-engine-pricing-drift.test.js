@@ -201,6 +201,10 @@ describe('deprecated client estimator pricing drift guards', () => {
     }
 
     expect(adminToolViewSource).not.toMatch(/(?:Heavy|Moderate|Light) trees:|Large driveway:/);
+    // The V1 EstimatePage fallback carried these retired rows long after the
+    // server dropped them (driveway removed 2026-07-30, trees 2026-07-30) —
+    // guard both admin sources so they can't drift back.
+    expect(legacyAdminSource).not.toMatch(/(?:Heavy|Moderate|Light) trees:|Large driveway:/);
   });
 
   test('mirrors live server pest frequency discounts', () => {

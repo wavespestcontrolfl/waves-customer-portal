@@ -18,7 +18,6 @@ const BREAKDOWN_LABELS = {
   poolCage: "Pool cage",
   pool: "Pool deck",
   shrubs: "Shrubs",
-  trees: "Trees",
   complexity: "Landscape",
   nearWater: "Near water",
   attachedGarage: "Attached garage",

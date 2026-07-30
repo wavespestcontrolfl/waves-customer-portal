@@ -1243,7 +1243,6 @@ function calculatePestProductionDiagnostics(property) {
     poolCage: f.poolCage ? (cfg.poolCageMinutes?.[poolCageSize] || 0) : 0,
     pool: !f.poolCage && f.pool ? (cfg.poolNoCageMinutes || 0) : 0,
     shrubs: cfg.shrubMinutes?.[f.shrubs] || 0,
-    trees: cfg.treeMinutes?.[f.trees] || 0,
     complexity: cfg.complexityMinutes?.[f.complexity] || 0,
     nearWater: f.nearWater ? (cfg.nearWaterMinutes || 0) : 0,
     attachedGarage: hasAttachedGarageForPest(property) ? (cfg.attachedGarageMinutes || 0) : 0,
@@ -1262,7 +1261,10 @@ function calculatePestProductionDiagnostics(property) {
   else if (lotSqFt > (cfg.manualReviewLotSqFt || 20000)) manualReviewReasons.push('large_lot');
   if (poolCageSize === 'oversized') lowConfidenceReasons.push('oversized_pool_cage');
   else if (poolCageSize === 'large') manualReviewReasons.push('large_pool_cage');
-  if (f.complexity === 'complex' && (f.shrubs === 'heavy' || f.trees === 'heavy')) manualReviewReasons.push('complex_heavy_vegetation');
+  // Tree density is excluded from pest entirely (owner directive 2026-07-30,
+  // extending the 2026-07-16 price retirement to production diagnostics) —
+  // only shrubs trigger the heavy-vegetation review flag now.
+  if (f.complexity === 'complex' && f.shrubs === 'heavy') manualReviewReasons.push('complex_heavy_vegetation');
   if (outbuildingCount >= 2) manualReviewReasons.push('multiple_outbuildings');
   if (estimatedMinutes >= (cfg.lowConfidenceMinutes || 60)) lowConfidenceReasons.push('estimated_service_time_60_plus');
   else if (estimatedMinutes >= (cfg.manualReviewMinutes || 45)) manualReviewReasons.push('estimated_service_time_45_plus');
