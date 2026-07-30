@@ -964,12 +964,13 @@ export default function CustomersPageV2() {
 
   // Usage beacon for the view that actually RENDERS. `view` is taken from
   // the URL unvalidated, and an unknown value matches none of the render
-  // conditionals — emit only views that map to a real panel, so the
-  // query-less Directory default is named and garbage never is
-  // (Codex #2961 r17).
+  // conditionals — real views report their leaf; an unknown view reports
+  // the authoritative TAB-LESS beacon ('') so the page view still counts
+  // while the raw ?view=garbage beacon is superseded instead of flushing
+  // a leaf nobody saw (Codex #2961 r17/r18).
   useRenderedTabBeacon(
     "/admin/customers",
-    CUSTOMER_VIEW_KEYS.has(view) ? view : null,
+    CUSTOMER_VIEW_KEYS.has(view) ? view : "",
   );
   const [search, setSearch] = useState("");
   const [filterStage, setFilterStage] = useState("all");

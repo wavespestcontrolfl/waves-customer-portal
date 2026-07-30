@@ -303,7 +303,7 @@ describe('trackAdminPageView', () => {
       ['/admin/compliance', 'dashboard'],
       ['/admin/newsletter', 'dashboard'],
       ['/admin/contracts', 'templates'],
-      ['/admin/pricing-logic', 'logic'],
+      ['/admin/pricing-logic', 'margins'],
       ['/admin/blog', 'posts'],
       ['/admin/ppc', 'ppc-dashboard'],
       ['/admin/pipeline', 'leads'],
@@ -321,6 +321,21 @@ describe('trackAdminPageView', () => {
       expect(fetchMock).toHaveBeenCalledTimes(1);
       expect(lastBody().tab).toBe(tab);
     }
+  });
+
+  it("an authoritative TAB-LESS beacon supersedes the raw tabbed beacon (no rendered subview)", () => {
+    // Cold load of /admin/customers?view=garbage: the raw beacon carries
+    // the shape-valid 'garbage' and is held under the self-reporting
+    // window; the page mounts, renders NO panel, and declares that with
+    // an authoritative tab-less beacon — one row, no tab (Codex #2961 r18).
+    trackAdminPageView({ pathname: '/admin/customers', search: '?view=garbage' });
+    vi.advanceTimersByTime(900); // past the redirect window, inside the hold
+    expect(fetchMock).not.toHaveBeenCalled();
+    trackAdminPageView({ pathname: '/admin/customers', search: '', authoritative: true });
+    settle();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(lastBody().pageKey).toBe('customers');
+    expect(lastBody().tab).toBeUndefined();
   });
 
   it('a newer authoritative leaf replaces a still-pending one (mount flash)', () => {

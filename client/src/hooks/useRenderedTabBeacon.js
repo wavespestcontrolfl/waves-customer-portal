@@ -16,15 +16,19 @@ import { trackAdminPageView } from '../lib/adminUsage';
  */
 export default function useRenderedTabBeacon(pathname, renderedTab, extraDeps = []) {
   useEffect(() => {
-    // Falsy leaf = "not mine to report right now" — a hub deferring to the
+    // null/undefined = "not mine to report" — a hub deferring to the
     // embedded child that owns the deeper leaf (ServiceLibrary → protocol
-    // command center), a child rendered outside its tracked route, or a
-    // state value that matches no rendered panel. The raw route beacon
-    // remains the fallback record in that case.
-    if (!renderedTab) return;
+    // command center, PricingHub → PricingLogicPage sections), or a child
+    // rendered outside its tracked route. Another reporter owns the view.
+    if (renderedTab == null) return;
+    // Empty string = "this page rendered NO subview" — an authoritative
+    // TAB-LESS beacon that still counts the page view while superseding
+    // the layout's raw ?tab= beacon, so a malformed deep link
+    // (?view=garbage on Customers) never records a leaf nobody saw
+    // (Codex #2961 r18).
     trackAdminPageView({
       pathname,
-      search: `?tab=${renderedTab}`,
+      search: renderedTab ? `?tab=${renderedTab}` : '',
       authoritative: true,
     });
   }, [pathname, renderedTab, ...extraDeps]);

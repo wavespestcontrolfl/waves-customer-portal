@@ -23,8 +23,15 @@ export default function PricingHubPage() {
 
   // Usage beacon for the area that actually RENDERS — an invalid or
   // missing ?area= resolves to Logic & Margins without rewriting the URL
-  // (Codex #2961 r17).
-  useRenderedTabBeacon("/admin/pricing-logic", activeArea, [searchParams]);
+  // (Codex #2961 r17). The Logic area DEFERS (null) to PricingLogicPage,
+  // which owns the deeper ?section= leaf and reports it itself — a parent
+  // 'logic' beacon here would suppress the raw beacon that used to carry
+  // the section (Codex #2961 r18).
+  useRenderedTabBeacon(
+    "/admin/pricing-logic",
+    activeArea === "logic" ? null : activeArea,
+    [searchParams],
+  );
 
   const selectArea = (area) => {
     // Re-clicking the active area renders nothing new — skip the URL

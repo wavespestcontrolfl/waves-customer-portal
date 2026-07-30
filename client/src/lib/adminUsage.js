@@ -264,14 +264,19 @@ export function trackAdminPageView({ pathname, search, authoritative = false } =
     return;
   }
 
-  // Likewise a tab-less view never downgrades a still-settling tabbed view
-  // of the SAME page: on a query-less Settings open, the page's mount
+  // Likewise a RAW tab-less view never downgrades a still-settling tabbed
+  // view of the SAME page: on a query-less Settings open, the page's mount
   // effect records the rendered leaf BEFORE the layout's route beacon
   // fires (child effects run first), and the coarse layout beacon must
-  // refine into that row, not replace it. Codex #2961 r4.
+  // refine into that row, not replace it (Codex #2961 r4). An
+  // AUTHORITATIVE tab-less beacon is the opposite direction — the page
+  // declaring "no subview rendered" (?view=garbage on Customers) — and
+  // must supersede a raw tabbed pending, or a malformed deep link's tab
+  // outlives the page's own correction (Codex #2961 r18).
   if (
     pendingBeacon
     && !tab
+    && !authoritative
     && pendingBeacon.body.tab
     && pendingBeacon.body.pageKey === norm.pageKey
     && pendingBeacon.body.path === norm.path
