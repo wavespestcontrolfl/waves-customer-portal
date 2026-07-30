@@ -1939,6 +1939,18 @@ const SocialMediaService = {
           platformResults.push({ platform: p.key, success: false, error: `Validation: ${validation.issues[0]}`, validationIssues: validation.issues });
           continue;
         }
+        // Semantic second pass (owner ruling 2026-07-30): the deterministic
+        // checks above are the fast first-pass; the cross-provider judge
+        // catches phrasings no regex enumerates. FAIL-OPEN — an unavailable
+        // judge (ok:false) never blocks the lane; a definitive non-compliant
+        // verdict skips this platform exactly like a validation failure.
+        const verdict = await require('./social-compliance-judge').judgeSocialCopy(content);
+        if (verdict.ok && !verdict.compliant) {
+          const why = verdict.violations.join('; ') || 'compliance violation';
+          logger.warn(`[social] Compliance judge rejected ${p.key} copy: ${why}`);
+          platformResults.push({ platform: p.key, success: false, error: `Compliance judge: ${verdict.violations[0] || 'violation'}`, validationIssues: verdict.violations });
+          continue;
+        }
 
         if (SOCIAL_FLAGS.dryRun) {
           logger.info(`[social] DRY RUN — ${p.key}: ${content.substring(0, 120)}...`);

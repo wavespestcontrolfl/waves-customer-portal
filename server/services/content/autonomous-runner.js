@@ -2162,6 +2162,21 @@ class AutonomousRunner {
         },
       };
     }
+    // Semantic second pass (owner ruling 2026-07-30): this action posts via
+    // postToGBP directly (not publishToAll), so it runs its own judge call.
+    // A definitive violation PARKS for review like a validation failure; an
+    // unavailable judge (ok:false) fails open to the deterministic pass.
+    const complianceVerdict = await require('../social-compliance-judge').judgeSocialCopy(content);
+    if (complianceVerdict.ok && !complianceVerdict.compliant) {
+      return {
+        claim: 'pending',
+        patch: {
+          outcome: 'completed_pending_review',
+          skip_reason: 'gbp_post_compliance_judge_failed',
+          reviewer_notes: `Compliance judge rejected GBP copy (${complianceVerdict.violations.join('; ')}): ${content}`,
+        },
+      };
+    }
 
     // Router-flagged human review always parks before any posting decision —
     // mirrors the generic brief.human_review_required gate on the page
