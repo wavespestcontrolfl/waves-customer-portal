@@ -486,6 +486,15 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(r.allowed).toBe(false);
   });
 
+  test('the SAME sentence must carry form + slot — a pinned question after a commitment sentence never books (P0 splice regression)', () => {
+    const splice = 'We will see you Tuesday at 10 AM. Are you booked Sunday at noon?';
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, splice);
+    const ex = agentCommitted(['caller_not_authorized'], { quote: 'Are you booked Sunday at noon' });
+    const r = canAutoRoute(ex, opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
   test('nonzero SECONDS in confirmed_start_at fail the on-the-hour guard (round-4 P1)', () => {
     const ex = agentCommitted();
     ex.scheduling.confirmed_start_at = '2026-08-02T12:00:30-04:00';

@@ -503,8 +503,25 @@ function turnHasAffirmativeCommitmentForm(normalizedTurn) {
   return COMMITMENT_HEADS.some((h) => rest.startsWith(h));
 }
 
-function agentQuoteGroundedInTranscript(quote, transcript) {
-  const q = normalizeForGrounding(quote);
+// Shared normalization for commitment text: lowercase alnum tokens with the
+// punctuated day-period collapse ("10 a.m." → "10 am") applied consistently
+// to quotes AND sentences, so containment never breaks on formatting.
+function normalizeCommitmentText(s) {
+  return ` ${normalizeForGrounding(s)} `.replace(/ ([ap]) m(?= )/g, ' $1m').replace(/\s+/g, ' ').trim();
+}
+
+// SENTENCE-scoped grounding (codex P0, round 7i): checking form on the TURN
+// while binding the slot from the QUOTE let a splice through — "We will see
+// you Tuesday at 10 AM. Are you booked Sunday at noon?" with the second
+// sentence pinned passed the form check via the first. Sentence boundaries
+// are preserved (split on .!?; after collapsing "a.m."/"p.m." so the
+// abbreviation dots don't split), and the SAME sentence must: contain the
+// pinned quote, pass the negation/conditional screens, satisfy the closed
+// vocabulary AND the affirmative commitment form, and bind the slot. A quote
+// spanning sentences grounds nowhere and fails closed; if the quote appears
+// in several sentences, EVERY one must pass (ambiguity fails closed).
+function agentCommitmentSentenceVerified(quote, transcript, confirmedStartAt, callStartedAt) {
+  const q = normalizeCommitmentText(quote);
   if (!q || q.length < 12) return false;
   const agentTurns = [];
   let sawCaller = false;
@@ -516,16 +533,19 @@ function agentQuoteGroundedInTranscript(quote, transcript) {
     else sawCaller = true;
   }
   if (!agentTurns.length || !sawCaller) return false;
-  const matching = agentTurns.map((t) => normalizeForGrounding(t)).filter((t) => t.includes(q));
-  if (!matching.length) return false;
-  // EVERY turn the quote grounds in must be free of negation/hedging AND of
-  // unresolved conditional language — if a fragment appears in both a
-  // rejecting turn and a committing turn, we cannot deterministically tell
-  // which one the model meant: fail closed.
-  return matching.every((t) => !turnHasNegationOrHedge(t)
-    && !turnHasUnresolvedConditional(t)
-    && commitmentTurnVocabularyOk(t)
-    && turnHasAffirmativeCommitmentForm(t));
+  const containing = [];
+  for (const turn of agentTurns) {
+    for (const sentence of String(turn).replace(/\b([ap])\.\s?m\.?/gi, '$1m').split(/[.!?;]+/)) {
+      const ns = normalizeCommitmentText(sentence);
+      if (ns && ns.includes(q)) containing.push(ns);
+    }
+  }
+  if (!containing.length) return false;
+  return containing.every((ns) => !turnHasNegationOrHedge(ns)
+    && !turnHasUnresolvedConditional(ns)
+    && commitmentTurnVocabularyOk(ns)
+    && turnHasAffirmativeCommitmentForm(ns)
+    && quoteBindsConfirmedSlot(ns, confirmedStartAt, callStartedAt));
 }
 
 // Slot binding (codex round-2 P1): the grounded commitment quote must refer
@@ -570,12 +590,12 @@ function etWallClockOfConfirmedStart(value) {
   return raw.slice(0, 16);
 }
 
-function quoteBindsConfirmedSlot(quote, confirmedStartAt, callStartedAt) {
-  // Punctuated day periods (codex round-6 P2): "10 a.m." normalizes to the
-  // split tokens "10 a m" — collapse " a m " / " p m " back to " am " /
-  // " pm " so common transcript formats bind. Single-letter tokens only, so
-  // "plan a meeting" ("a meeting") is untouched.
-  const q = ` ${normalizeForGrounding(quote)} `.replace(/ ([ap]) m(?= )/g, ' $1m');
+// Binds one ALREADY-NORMALIZED commitment sentence (normalizeCommitmentText
+// output) to the confirmed slot. Sentence-scoped by the caller: the slot
+// facts come from the same utterance that passed the affirmative-form and
+// vocabulary checks.
+function quoteBindsConfirmedSlot(normalizedSentence, confirmedStartAt, callStartedAt) {
+  const q = ` ${String(normalizedSentence || '')} `;
   // All slot facts derive from the CANONICAL ET wall clock — the same value
   // booking writes (see etWallClockOfConfirmedStart above).
   const wall = etWallClockOfConfirmedStart(confirmedStartAt);
@@ -674,8 +694,7 @@ function hasAgentCommittedEvidence(extraction, transcript, callStartedAt) {
   return (Array.isArray(extraction?.evidence) ? extraction.evidence : []).some((e) => (
     String(e?.field_path || '') === '/scheduling/agent_committed_booking'
     && e?.speaker === 'agent'
-    && agentQuoteGroundedInTranscript(e?.quote, transcript)
-    && quoteBindsConfirmedSlot(e?.quote, extraction?.scheduling?.confirmed_start_at, callStartedAt)
+    && agentCommitmentSentenceVerified(e?.quote, transcript, extraction?.scheduling?.confirmed_start_at, callStartedAt)
   ));
 }
 
