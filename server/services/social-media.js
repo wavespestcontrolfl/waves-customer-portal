@@ -296,7 +296,11 @@ const PLATFORM_FLAG_MAP = {
 
 const PLATFORM_ENV_REQS = {
   facebook: ['FACEBOOK_ACCESS_TOKEN', 'FACEBOOK_PAGE_ID'],
-  instagram: ['FACEBOOK_ACCESS_TOKEN', 'INSTAGRAM_ACCOUNT_ID'],
+  // FACEBOOK_PAGE_ID: the IG Graph call itself doesn't need it, but the
+  // publishToAll loop gates Instagram on igReady = fbReady && … — readiness
+  // must agree with the actual publish predicate or callers (e.g. the studio
+  // creative engine) spend work on a post the loop will skip.
+  instagram: ['FACEBOOK_ACCESS_TOKEN', 'FACEBOOK_PAGE_ID', 'INSTAGRAM_ACCOUNT_ID'],
   gbp: [],
   linkedin: [], // OAuth tokens live in system_settings (like GBP), not env
 };
