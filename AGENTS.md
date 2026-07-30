@@ -282,6 +282,141 @@ finding and warns on P1. Reviewers must return JSON matching
   declare READ-ONLY or MUTATES in their header, default to dry-run when
   they mutate (write only under `--execute`), and contain no secrets,
   tokens, customer names, or invoice numbers. See `ops/agents/README.md`.
+- **Customer PII in the repo itself.** Customer names, lead addresses, or
+  live payload dumps must never appear in code, tests, migration headers,
+  commit messages, or PR bodies — reference accounts by id. (One violation
+  forced a branch history rewrite.) Same class as the PII-in-logs rules
+  above, but for the repo surface.
+- **"Per application" price copy.** Customer-facing price units read
+  "per application", never "per visit", and no combined plan totals
+  ("$X/mo" / "$X/yr") appear on any customer-facing estimate surface
+  (owner rule re-affirmed 2026-07-23). Invoice/prepay surfaces and
+  commercial proposals are exempt; true monthly-billed legacy plans keep
+  "/mo". No service is ever presented as a flat monthly spread.
+- **Appointment windows start on the hour.** `window_start` is always
+  HH:00:00 (owner 2026-07-27) — flag any slot/window creation that can
+  produce :15/:30 STARTS. `window_end` is duration-driven and may
+  legitimately land off-hour (`classifySlot` in
+  `estimate-slot-availability.js` produces a 10:30 end for a 90-min
+  service at 09:00 — regression-asserted); never round or reject it.
+  KNOWN GAP (2026-07-29): the lead-booking path (`LeadsTabs.jsx` time
+  input → `admin-leads.js`) still accepts and stores off-hour starts — a
+  clamp fix is owed; flag diffs that extend that path without clamping.
+  Customer-facing arrival copy is
+  `window_start` → +120 min, DISPLAY-ONLY, via `arrivalWindowRange()`
+  (`server/utils/sms-time-format.js`); never change `window_end` itself
+  (it drives scheduling/overlap), and report "next appointment" displays
+  follow the same +2h rule.
+- **Email-change token fanout.** When a customer's email moves, the
+  fanout ROTATES email-bound subscriber tokens
+  (`newsletter_subscribers.confirmation_token` / `unsubscribe_token`,
+  `customer-email-fanout.js`); never retarget unlinked sends by email
+  address alone. KNOWN GAP (2026-07-29): per-delivery
+  `newsletter_send_deliveries.engagement_token` values are NOT yet
+  rotated — don't describe them as rotating, and flag diffs that widen
+  what an old emailed token can reach. Permanent public artifacts are
+  explicitly exempt from rotation — `invoices.token` receipt links never
+  rotate (see the receipt-permanence P0 above).
+- **Compliance language on any customer surface** (portal copy, prep
+  guides, reports, estimator benefit lines, marketing): no pesticide is
+  ever "safe" (incl. "pet-safe"/"family-safe"); "EPA-registered"/"EPA-
+  exempt", never "EPA-approved"; never a fixed re-entry/drying minute
+  figure — the idiom is "safe once dry" + technician confirms timing.
+  When one instance of a banned claim class appears, sweep the whole tree
+  for the class. Existing violations in untouched code are a remediation
+  backlog, not proof the rule is wrong — flag diffs that ADD or EXTEND
+  such copy. Known outstanding as of 2026-07-29: the `/api/feed/faq`
+  pet-safe/drying-minutes copy (`server/routes/feed.js` ~474) and the
+  PortalPage FAQ — a copy-sweep fix is owed.
+- **Estimate follow-up truth scope** (`estimate-followup-copy.js`):
+  recurring residential lanes get the callbacks/90-day/no-contract line;
+  rodent/termite/commercial/bundle/unknown packs are terms-neutral —
+  termite NEVER gets recurring terms; copy failures fail soft to
+  'unknown' and never block a send.
+- **Report/track egress.** Access/gate/lockbox codes are deliberately
+  EXCLUDED from customer-facing service reports (`report-copy-context.js`)
+  — keep it that way. Raw `technician_notes` never egress on any report
+  path (parser-approved copy only). The `/api/public/track/:token` payload
+  masks email/phone server-side — do not un-mask.
+- **WDO + pre-treatment termite certificates are FDACS paper compliance
+  documents** — no AI narrative, no ask bar, conservative surfaces.
+  ("Infestation extent" is legitimate FDACS terminology on the WDO page
+  even though it's banned copy elsewhere.)
+- **Call pipeline do-not-regress** (`call-recording-processor.js` and the
+  extraction/routing stack):
+  - Call-created bookings must resolve to a real `services` catalog row
+    (`service_id` set); no confident match → book "Waves Assessment";
+    never an invented/coarse `service_type` with a null `service_id`.
+  - Recurring intent beats the single presenting pest
+    (`applyRecurringIntentDefault`): ambiguous/unstated cadence →
+    Quarterly; the backstop is upgrade-only; an explicit "just one-time"
+    keeps the single service; general-pest scope only.
+  - Only `scheduling.status === 'confirmed'` maps to a booked appointment
+    — "do you have availability Friday?" is not an appointment.
+  - Extraction schema changes are ADDITIVE-ONLY: update both schema JSONs
+    (model-output + persisted) + normalizer pass-through + persisted enum
+    + SCHEMA_VERSION bump; never add to `required`; new fields join the
+    replay FIELD_GROUPS; prompt-hash bumps reset the promotion cohort;
+    downstream composers read enriched/v2 extraction + raw transcript,
+    never v1.
+  - Address-validation routing: only `hasReplacedComponents` counts as a
+    correction (`hasInferredComponents` is benign on nearly every clean
+    address); never `validated_accept`/`corrected` unless
+    `inServiceArea === true`; AV unreachable → hold for review, never
+    silent auto-route.
+  - Auto-routing stays confidence-gated (auto-create only when confidence
+    ≥ threshold AND the address validates AND the service maps AND no
+    HOA/commercial flag — else triage), appointment inserts keep their
+    idempotency keys, and TCPA consent is checked before any SMS (email
+    fallback).
+  - Hard-bounced call-captured emails are re-verified against the
+    recording and surfaced for owner read-back — never auto-corrected or
+    auto-resent.
+- **Estimator engine authority.** `generateEstimate` is the SOLE dollar
+  authority — LLM output proposes intent only and never reaches
+  proposal/price fields; engine drafts never auto-send; existing customers
+  are blocked from engine drafting; engine low-confidence markers
+  (fpSource fallback, low pricingConfidence, turfBasis fallbacks) route to
+  the review lane, never auto-apply. Caller-stated unit size +
+  `relationship_to_property: tenant` outrank county building sqft for
+  commercial tenants.
+- **Lawn-diagnostic lockstep.** The four artifacts (CONDITION_LABELS /
+  SUMMARY_CAUSE_RE / CONFIRMABLE_CONDITION / the GOVERNED_CAUSE test) must
+  stay mirrored, plural-aware; customer-facing egress is
+  confidence-gated/allowlisted — never publish client- or LLM-supplied
+  `customer_wording`, and persist ignores client provenance.
+- **Lawn protocol data fan-out.** A product/protocol change must reach
+  BOTH sources of truth (the field-exec `protocols.json` AND the DB
+  operating layer: `lawn_protocol_products` rates/gates + windows) plus
+  `products_catalog` (seeded rates must match `default_rate_per_1000`;
+  lowercase category; `epa_reg` NOT NULL and never guessed), pricing.csv,
+  and the plan-matcher. Premium/optional rows are `default_in_plan:false`
+  + a conditional gate. Never write a full product name into parsable
+  protocol disclaimer lines (negated disclaimers re-add it via substring
+  match), and never bulk-import the legacy 4-turf workbook.
+- **Booking conflict-check class.** Tech-scoped conflict WHEREs are blind
+  to technician-NULL rows (the `filterCollidingSlots` class) — every new
+  booking/reschedule surface needs the mirror guard.
+- **Condo aggregation guards.** Never remove the `parcel.aggregated`
+  branch ahead of `countyUseDescToPropertyType` (associations would price
+  as one residential unit), and don't lower `AGGREGATE_MIN_UNITS` (5).
+- **Twilio number classification.** `TWILIO_NUMBERS.findByNumber` reports
+  the AI toll-free number as `type:'location', locationId:'bradenton'` —
+  "location numbers only" logic must ALSO exclude the AI number
+  explicitly.
+- **Admin OAuth pattern.** Admin auth is bearer-only (`Authorization`
+  header from `localStorage.waves_admin_token` — no cookie/query
+  fallback). An admin "connect" endpoint must return the consent URL as
+  JSON for the SPA to navigate; a bearer-protected `res.redirect`
+  hard-401s on top-level navigation. The OAuth callback validates via a
+  one-time `state` nonce, not bearer.
+- **New `@waves/*` CJS workspace packages** must join
+  `optimizeDeps.include` + `build.commonjsOptions.include` in
+  `client/vite.config.js`, or linked packages fail Rollup named-export
+  analysis in prod builds.
+- **Company name in written copy** is "Waves Pest Control" — never
+  "Waves Lawn & Pest". The mascot logo artwork carrying the old name is
+  current and intentional; do not flag it.
 
 ### Out of scope (do not flag)
 
@@ -294,6 +429,12 @@ finding and warns on P1. Reviewers must return JSON matching
   is Eastern-only.
 - Style-of-existing-code refactors. Match the file. Don't rewrite legacy
   inline styles to Tailwind in a non-redesign PR.
+- Settled owner rulings — do not re-flag or re-propose: the one-time
+  completion gate stays removed (#3013); `ESTIMATE_DEPOSIT_REQUIRED` stays
+  off (Auto Pay opt-in replaced required deposits); lawn IS
+  WaveGuard-tier-discountable (2026-07-28); deposit `deposit_credit`
+  ledger credits face value; missed surcharges are forward-only (no
+  clawback).
 
 ## Context
 

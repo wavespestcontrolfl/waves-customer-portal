@@ -21,6 +21,11 @@ Run top to bottom before merging any portal/astro PR. Every unchecked item is a 
 - [ ] Every finding on the current head (`original_commit_id` checked for staleness) — including P2s — is either fixed or rebutted inline with file:line evidence; nothing self-downgraded to a follow-up
 - [ ] No finding left silently unaddressed
 
+## Merge authorization
+- [ ] Adam authorized this merge in-session, OR a standing "merge when clean" applies AND the final round had ZERO findings (a rebutted round does not qualify)
+- [ ] If the PR was just un-drafted: the deeper un-draft review has completed on the final HEAD
+- [ ] Squash commit message checked — it comes from the commit message (written from a file), not the PR title
+
 ## Post-merge
 - [ ] Final commit landed: `gh pr view <n> --json headRefOid` == final push SHA (squash rewrites SHAs — ancestry check only valid for true merge commits)
 - [ ] Railway deploy green (portal) / Pages builds green (astro)
