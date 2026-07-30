@@ -91,7 +91,7 @@ export default function TracedTreatmentZoneMap({ traced, live = true, variant = 
                  emitter. Draw-in plays once, then the pulse takes over. */
               @keyframes outlinePulse {
                 0%, 100% { opacity: 1; }
-                50% { opacity: 0.45; }
+                50% { opacity: 0.35; }
               }
               .treated-outline-line { animation: outlineDraw 2.4s ease-in-out both; }
               .treated-outline-pulse { animation: outlinePulse 3.6s ease-in-out 2.4s infinite; }

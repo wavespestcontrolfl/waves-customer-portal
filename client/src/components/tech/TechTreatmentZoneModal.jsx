@@ -314,11 +314,13 @@ export default function TechTreatmentZoneModal({
       let pts = data.suggestion.perimeter.map((pt) => ({ x: pt.x * MAP_WIDTH, y: pt.y * MAP_HEIGHT }));
       // Align the photo with the home (owner 2026-07-29): satellite tiles are
       // north-up, so homes on angled lots render crooked. The suggested
-      // footprint gives us the home's orientation — rotate the working frame
-      // so the walls sit square, and rotate the suggestion with it. Fail-soft:
-      // any hiccup keeps the north-up frame. Lawn boundaries are organic —
-      // no meaningful orientation to align to.
-      if (!lawnMode) {
+      // footprint gives us the property's orientation — rotate the working
+      // frame so it sits square, and rotate the suggestion with it.
+      // Fail-soft: any hiccup keeps the north-up frame. Lawn included (owner
+      // 2026-07-30 "do it for lawn"): suburban turf boundaries follow the
+      // rectangular lot, so their dominant angle is just as meaningful — and
+      // a genuinely organic loop averages out below the threshold anyway.
+      {
         const tilt = dominantAngleRad(pts, true);
         if (Math.abs(tilt) > ALIGN_MIN_ANGLE) {
           try {
@@ -384,17 +386,17 @@ export default function TechTreatmentZoneModal({
     setSaveState('saving');
     try {
       const { center, zoom, url, image, angle = 0 } = mapState;
-      // Align the SAVED frame with the home (owner 2026-07-29). Manual traces
-      // usually run on the north-up display — square the snapshot to the
-      // traced loop's own dominant angle so the customer report shows the
-      // home straight-on. Display-aligned frames (auto-trace) come through
-      // with tilt ≈ 0 and skip this. Fail-soft to the north-up save. Lawn
-      // outlines are organic — nothing meaningful to align to.
+      // Align the SAVED frame with the home (owner 2026-07-29; lawn included
+      // 2026-07-30). Manual traces usually run on the north-up display —
+      // square the snapshot to the traced loop's own dominant angle so the
+      // customer report shows the property straight-on. Display-aligned
+      // frames (auto-trace) come through with tilt ≈ 0 and skip this.
+      // Fail-soft to the north-up save.
       let finalPoints = points;
       let base = image;
       let baseUrl = url;
       let totalAngle = angle;
-      if (!lawnMode && MAPS_KEY) {
+      if (MAPS_KEY) {
         const tilt = dominantAngleRad(points, closed);
         if (Math.abs(tilt) > ALIGN_MIN_ANGLE) {
           try {
@@ -461,23 +463,9 @@ export default function TechTreatmentZoneModal({
     const canvas = canvasRef.current;
     if (!canvas) return undefined;
     setSaveState(null);
-    if (lawnMode) {
-      // Lawn: no spray replay — draw the settled outline immediately and save
-      // the same frame. The customer report owns the pulse animation.
-      const outline = buildOutlineAccum({
-        width: MAP_WIDTH,
-        height: MAP_HEIGHT,
-        points,
-        closed,
-        color: MIST_COLOR,
-      });
-      const ctx = canvas.getContext('2d');
-      ctx.clearRect(0, 0, MAP_WIDTH, MAP_HEIGHT);
-      ctx.drawImage(outline, 0, 0);
-      setStatus({ phase: 'settled', pct: 1, feet: totalFeet });
-      save();
-      return undefined;
-    }
+    // Lawn animates too (owner 2026-07-30 "now lets do it for lawn"): the
+    // outline draws itself with the mascot riding the tip, then breathes —
+    // outlineMode keeps the no-smoke lawn ruling; the spray path is untouched.
     setStatus({ phase: 'spraying', pct: 0, feet: 0 });
     const totalPx = pathLengthPx(points, closed);
     const lastEmit = { ts: 0 };
@@ -490,8 +478,12 @@ export default function TechTreatmentZoneModal({
       mistColor: MIST_COLOR,
       headColor: HEAD_COLOR,
       logoImage: logoRef.current,
-      interior,
-      durationMs: Math.round(Math.min(8000, Math.max(6000, totalPx * 3))),
+      interior: !lawnMode && interior,
+      outlineMode: lawnMode,
+      // The clean outline reads slow at spray pacing — draw it snappier.
+      durationMs: lawnMode
+        ? Math.round(Math.min(5000, Math.max(3000, totalPx * 1.6)))
+        : Math.round(Math.min(8000, Math.max(6000, totalPx * 3))),
       totalFeet,
       reducedMotion: window.matchMedia('(prefers-reduced-motion: reduce)').matches,
       onStatus: (s) => {
@@ -513,7 +505,9 @@ export default function TechTreatmentZoneModal({
 
   const settled = status.phase !== 'spraying';
   const statusText = lawnMode
-    ? `Treated lawn area outlined — ${Math.round(totalFeet)} linear ft`
+    ? (settled
+      ? `Treated lawn area outlined — ${Math.round(totalFeet)} linear ft`
+      : `Outlining treated lawn — ${Math.round(status.pct * 100)}%`)
     : settled
       ? (interior
         ? `Home protected — interior + ${Math.round(totalFeet)} linear ft perimeter`
@@ -624,7 +618,9 @@ export default function TechTreatmentZoneModal({
           <>
             <p style={{ margin: '0 0 10px', fontSize: smallText, color: T.muted }}>
               {points.length === 0
-                ? 'Auto-trace the building outline (pool cage included), or tap the photo to drop points yourself. Photo too tight? Tap − to zoom out.'
+                ? (lawnMode
+                  ? 'Auto-trace the lawn outline, or tap the photo to drop points yourself. Photo too tight? Tap − to zoom out.'
+                  : 'Auto-trace the building outline (pool cage included), or tap the photo to drop points yourself. Photo too tight? Tap − to zoom out.')
                 : 'Tap the photo to drop points along the treated line. Drag any point to adjust it.'}
               {points.length >= 3 && !closed ? ' Tap the first point again to close the loop.' : ''}
             </p>
@@ -818,15 +814,14 @@ export default function TechTreatmentZoneModal({
               >
                 Back to trace
               </button>
-              {!lawnMode && (
-                <button
-                  style={btnStyle('ghost', saveState === 'saving')}
-                  disabled={saveState === 'saving'}
-                  onClick={() => setRunKey((k) => k + 1)}
-                >
-                  Replay
-                </button>
-              )}
+              {/* Lawn replays too now that the outline animates (2026-07-30). */}
+              <button
+                style={btnStyle('ghost', saveState === 'saving')}
+                disabled={saveState === 'saving'}
+                onClick={() => setRunKey((k) => k + 1)}
+              >
+                Replay
+              </button>
               <button
                 style={btnStyle('primary', saveState === 'saving')}
                 disabled={saveState === 'saving'}

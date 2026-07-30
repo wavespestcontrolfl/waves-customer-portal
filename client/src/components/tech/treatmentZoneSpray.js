@@ -274,6 +274,12 @@ export function startSprayEngine({
   // floods with a soft brand-blue wash after the perimeter pass — interior
   // treatments finally render instead of looking like an untouched roof.
   interior = false,
+  // Lawn outline animation (owner 2026-07-30 "now lets do it for lawn"):
+  // instead of the spray-mist band, a clean brand-blue outline DRAWS itself
+  // around the boundary with the mascot riding the tip, then breathes.
+  // Lawn keeps its no-smoke ruling (owner 2026-07-28) — this is a line, not
+  // a mist band, and there is never an interior fill (codex P1 #3038 r3).
+  outlineMode = false,
   durationMs,
   totalFeet,
   reducedMotion,
@@ -299,6 +305,11 @@ export function startSprayEngine({
   accum.width = width;
   accum.height = height;
   const actx = accum.getContext('2d');
+  if (outlineMode) {
+    // The settled frame IS the outline — bake it once and let drawBase serve
+    // it, exactly like the band accum in spray mode.
+    actx.drawImage(buildOutlineAccum({ width, height, points, closed, color: mistColor }), 0, 0);
+  }
 
   let viewScale = 1;
   let stopped = false;
@@ -420,6 +431,37 @@ export function startSprayEngine({
     ctx.stroke();
   };
 
+  // Outline draw-in: stroke the path only up to `dist` px along its length.
+  const strokePartial = (dist, lineWidth, style) => {
+    ctx.strokeStyle = style;
+    ctx.lineWidth = lineWidth;
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(pts[0].x, pts[0].y);
+    let remaining = dist;
+    for (let i = 1; i < pts.length && remaining > 0; i += 1) {
+      const seg = segLens[i - 1];
+      if (seg <= remaining) {
+        ctx.lineTo(pts[i].x, pts[i].y);
+        remaining -= seg;
+      } else {
+        const t = remaining / (seg || 1);
+        ctx.lineTo(pts[i - 1].x + (pts[i].x - pts[i - 1].x) * t, pts[i - 1].y + (pts[i].y - pts[i - 1].y) * t);
+        remaining = 0;
+      }
+    }
+    ctx.stroke();
+  };
+
+  // Blank the view without painting the accum — the draw-in phase must not
+  // reveal the finished outline behind the growing line.
+  const clearView = () => {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.setTransform(viewScale, 0, 0, viewScale, 0, 0);
+  };
+
   // Interior wash needs a genuinely closed footprint — an open path has no
   // interior to claim.
   const fillInterior = interior && closed && points.length > 2;
@@ -433,10 +475,12 @@ export function startSprayEngine({
   };
 
   if (reducedMotion) {
-    stampBand(0, total);
-    if (fillInterior) {
-      fillPath(actx, rgba(mist, INTERIOR_FILL_ALPHA));
-      fillPath(actx, rgba(mistLight, INTERIOR_FILL_LIGHT_ALPHA));
+    if (!outlineMode) {
+      stampBand(0, total);
+      if (fillInterior) {
+        fillPath(actx, rgba(mist, INTERIOR_FILL_ALPHA));
+        fillPath(actx, rgba(mistLight, INTERIOR_FILL_LIGHT_ALPHA));
+      }
     }
     lastFrame = () => drawBase();
     lastFrame();
@@ -488,26 +532,36 @@ export function startSprayEngine({
     if (phase === 'spraying') {
       sprayT += dt * 1000;
       const dist = Math.min(total, (sprayT / durationMs) * total);
-      if (dist > paintedDist) {
-        stampBand(paintedDist, dist);
-        paintedDist = dist;
-      }
       const p = pointAt(dist);
-      spawnPuffs(p.x, p.y, p.angle, dt);
+      if (outlineMode) {
+        // Lawn: the outline draws itself — growing glow + white casing +
+        // brand-blue core with the mascot riding the tip. No smoke, no band.
+        clearView();
+        strokePartial(dist, 16, rgba(mist, 0.28));
+        strokePartial(dist, 9, rgba([255, 255, 255], 0.6));
+        strokePartial(dist, 4.5, rgba(mist, 0.92));
+        drawHead(p.x, p.y);
+      } else {
+        if (dist > paintedDist) {
+          stampBand(paintedDist, dist);
+          paintedDist = dist;
+        }
+        spawnPuffs(p.x, p.y, p.angle, dt);
 
-      for (const puff of puffs) {
-        puff.age += dt;
-        puff.x += puff.vx * dt;
-        puff.y += puff.vy * dt;
-        puff.vx *= 0.985;
-        puff.vy *= 0.985;
-        puff.r += puff.growth * dt;
+        for (const puff of puffs) {
+          puff.age += dt;
+          puff.x += puff.vx * dt;
+          puff.y += puff.vy * dt;
+          puff.vx *= 0.985;
+          puff.vy *= 0.985;
+          puff.r += puff.growth * dt;
+        }
+        puffs = puffs.filter((q) => q.age < q.life);
+
+        drawBase();
+        for (const puff of puffs) drawPuff(puff);
+        drawHead(p.x, p.y);
       }
-      puffs = puffs.filter((q) => q.age < q.life);
-
-      drawBase();
-      for (const puff of puffs) drawPuff(puff);
-      drawHead(p.x, p.y);
 
       const pct = dist / total;
       onStatus({ phase, pct, feet: totalFeet * pct });
@@ -546,7 +600,8 @@ export function startSprayEngine({
       ctx.beginPath();
       ctx.arc(p.x, p.y, 120, 0, Math.PI * 2);
       ctx.fill();
-      strokePath(BAND_RADIUS * 2, rgba(mistLight, 0.12 * soft));
+      // Outline mode celebrates with a tight halo on the line, not a band.
+      strokePath(outlineMode ? 12 : BAND_RADIUS * 2, rgba(mistLight, (outlineMode ? 0.3 : 0.12) * soft));
 
       onStatus({ phase, pct: 1, feet: totalFeet });
       if (t >= 1) {
@@ -555,15 +610,21 @@ export function startSprayEngine({
         onStatus({ phase, pct: 1, feet: totalFeet });
       }
     } else {
-      // Settled loop PULSES (owner 2026-07-29): the whole dark-navy band
-      // breathes hard — no crisp center line (owner: "don't do the line in
-      // between"), the BAND is the pulse.
+      // Settled loop PULSES (owner 2026-07-29): the whole band breathes —
+      // no crisp center line in spray mode (owner: "don't do the line in
+      // between"). Outline mode breathes the LINE itself (lawn is a clean
+      // outline by ruling, so the line is the subject there).
       phaseT += dt * 1000;
       const wave = 0.5 + 0.5 * Math.sin((2 * Math.PI * phaseT) / BREATH_MS - Math.PI / 2);
       drawBase();
-      if (fillInterior) fillPath(ctx, rgba(mist, INTERIOR_FILL_ALPHA * (0.6 + 0.4 * wave)));
-      strokePath(BAND_RADIUS * 2 + 12, rgba(mist, 0.04 + 0.16 * wave));
-      strokePath(BAND_RADIUS, rgba(mistLight, 0.06 + 0.18 * wave));
+      if (outlineMode) {
+        strokePath(16, rgba(mist, 0.06 + 0.2 * wave));
+        strokePath(4.5, rgba(mist, 0.2 + 0.55 * wave));
+      } else {
+        if (fillInterior) fillPath(ctx, rgba(mist, INTERIOR_FILL_ALPHA * (0.6 + 0.4 * wave)));
+        strokePath(BAND_RADIUS * 2 + 12, rgba(mist, 0.04 + 0.16 * wave));
+        strokePath(BAND_RADIUS, rgba(mistLight, 0.06 + 0.18 * wave));
+      }
     }
 
     lastFrame = drawBase;
@@ -607,10 +668,16 @@ export function buildOutlineAccum({ width, height, points, closed, color }) {
   ctx.lineCap = 'round';
   trace();
   ctx.strokeStyle = rgba(rgb, 0.3);
-  ctx.lineWidth = 14;
+  ctx.lineWidth = 16;
+  ctx.stroke();
+  // White casing under the core — brand blue alone sinks into dark roofs and
+  // shaded turf (matches the report overlay casing, owner 2026-07-29/30).
+  trace();
+  ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+  ctx.lineWidth = 9;
   ctx.stroke();
   trace();
-  ctx.strokeStyle = rgba(rgb, 0.9);
+  ctx.strokeStyle = rgba(rgb, 0.92);
   ctx.lineWidth = 4.5;
   ctx.stroke();
   return accum;
