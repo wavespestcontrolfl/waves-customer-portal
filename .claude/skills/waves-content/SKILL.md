@@ -23,7 +23,21 @@ this skill.
 
 ## Truth rules (non-negotiable)
 - **Real E-E-A-T only:** Adam Benetti, founded **2024**, FDACS license
-  **JB351547**. Never a 2014 founding, invented tenure, or `fact_checked_by`.
+  **JB351547** (licensed in every FL pest-control category EXCEPT
+  fumigation). Never a 2014 founding, invented tenure (SWFL tenure is only
+  since 2024 — no `years_swfl`/years-of-experience claims, ever), or a
+  `fact_checked_by` attribution; `technically_reviewed_by: Adam` + the
+  `fact_checked` date stay.
+- **Company name in copy is "Waves Pest Control"** — never
+  "Waves Lawn & Pest". The mascot logo artwork carrying the old name is
+  current and intentional; never flag or swap the asset.
+- **Pesticide compliance idiom:** no product is ever "safe" (incl.
+  "pet-safe"/"family-safe"); "EPA-registered" or "EPA-exempt", never
+  "EPA-approved"; NEVER a fixed re-entry/drying minute figure — the idiom
+  is "safe once dry" + technician confirms timing. Applies to portal
+  surfaces too (estimator benefit lines, prep guides, reports). When one
+  instance of a banned claim class is flagged, sweep the WHOLE tree for
+  the class.
 - Every local/pest claim grounds in the facts bank
   (astro `content-ops/facts-bank/`) or a citable source — no invented
   county stats, pest seasons, or "customers report…" claims.
@@ -46,7 +60,18 @@ this skill.
   `/pest-control-calculator/`.
 - **Protected URL families:** `/pest-control-{city}-fl/` and the `-quote-`
   families take no 301/canonical/title changes without per-URL owner
-  sign-off.
+  sign-off; city×service pages with >5K impressions follow the same
+  per-URL rule. The `/pest-control-services-{city}-fl/` variants are NOT
+  protected — 301 them to the hub family (settled; don't re-ask).
+- **GBP imagery:** NO AI-generated imagery on GBP, ever; social images
+  strip EXIF GPS before upload.
+- **Termite copy rulings:** the warranty is an OPTIONAL annual renewable
+  bond — NEVER "included in the first year". "No contracts" is a GENERAL
+  brand promise allowed on termite pages, but guarantee/re-treat promises
+  stay OFF termite (re-treatment requires the paid bond). NO
+  `/termite-bait-stations/` URL — program content lives on the city pages.
+  Comparison claims use sourced label facts only (never "requires 2×
+  stations").
 
 ## Hub-and-spoke boundaries
 - **All blog lives on the hub.** Spoke `/blog/` renders empty by design;
@@ -59,14 +84,28 @@ this skill.
   rewrite.
 - Spoke-canonical pages are never re-rendered on the hub; hub orphans get
   blanket 301s. Exact-match 301s live in the Cloudflare account Bulk
-  Redirect list (`waves_redirects`), NOT the repo `_redirects` file.
+  Redirect list (`waves_redirects`), NOT the repo `_redirects` file (the
+  deployed hub `_redirects` already runs ~96 of the 100-rule Pages cap).
+- **Linking policy:** spokes link to the hub ONLY from blog content —
+  spoke service/city pages never link the hub; the hub links out to spokes
+  ZERO times. Breadcrumbs build from the SERVED domain (`Astro.site`),
+  never the canonical. `contact@wavespestcontrol.com` is the ONE permitted
+  Waves-domain string in spoke rendered HTML.
+- **GBP truth source** is `server/config/locations.js` (`WAVES_LOCATIONS`):
+  4 GBPs cover 5 staffed cities (the LWR GBP is shared with Bradenton);
+  North Port / Port Charlotte / Palmetto are service-area-only with NO GBP
+  — never invent one. The hub homepage HQ address is intentional
+  back-office (NOT a NAP mismatch), and the org-level schema node carries
+  no `aggregateRating` (ratings live on the 4 branch LocalBusiness nodes).
 
 ## Publishing procedure (blog)
 1. Draft per the astro CLAUDE.md frontmatter/component rules; the binding
    schema gate is `packages/blog-schema/schema.json` (meta description
    115–160 chars, 24 required fields, additionalProperties false).
 2. `npm run publish:post <file>` before merge;
-   `npm run validate:generated-blog -- --slug=<slug>` after build.
+   `npm run validate:generated-blog -- --slug=<slug>` after build. The
+   astro repo's vendored copy of the schema is synced from the portal via
+   `sync:blog-schema` — never hand-edit the vendored copy.
 3. Bump `modified:` frontmatter on ANY content edit (drives sitemap
    lastmod); never rename a slug without a 301.
 4. Ship via the waves-ship skill; pace astro pushes (every push rebuilds the
@@ -80,7 +119,9 @@ this skill.
   (`server/services/content*` + seo services) — audit the gap first, never
   rebuild it. Competitor-intercept briefs run fully autonomous; the
   Codex-gated auto-merge is the control surface. Blog-backlog PRs merge via
-  the poller — don't merge them manually.
+  the poller — don't merge them manually. While Codex is usage-limited that
+  safety layer is ABSENT — treat content auto-merges as ungated during a
+  sustained limit.
 - Newsletter voice: irreverent local-guide FOMO, events lead, banned
   corporate phrases, sign-off "— The Waves Pest Control Team"; its social
   auto-share stays fully automatic (no review queue).

@@ -40,6 +40,10 @@ Rules:
   query windows in the same frame.
 - When reviewing a diff, any string literal that looks like a timestamp
   inside `.where(...)` is a finding until proven offset-aware.
+- The trap runs the other way too: a `timestamptz` column takes a SINGLE
+  `AT TIME ZONE` — reviewers have falsely flagged correct timestamptz SQL
+  as naive. Verify the column's `udt_name` against prod before complying
+  with a timezone finding.
 
 ## 3. Local DB access — dev/preview by default, prod is break-glass
 
@@ -100,6 +104,27 @@ schedule inserts) and sometimes the bug (you expected a reminder to send).
   relies on via read-only SELECTs instead (§3, §5).
 - After merging a PR that ships a migration, verify the deploy actually ran
   it (deploy log or `knex_migrations`) before relying on the new schema.
+- **The 000018 pending-count illusion.**
+  `20260415000018_pest_service_cost_truing.js` is a no-op placeholder whose
+  `knex_migrations` row is deleted by `…000019` on every run — after EVERY
+  full `migrate:latest` it re-reads as "pending", chain counts come out one
+  higher than the file count, and a following `migrate:up` runs IT, not
+  your migration. Harmless, but do NOT conclude `migrate:down` is broken
+  (that wrong call shipped once). To test a specific migration's up/down,
+  `require()` the module and call `up(knex)`/`down(knex)` directly against
+  a throwaway DB.
+- Seed/data-correction migrations whose `up()` preserves admin edits must
+  make `down()` a DOCUMENTED NO-OP — a blanket revert erases exactly the
+  admin edits `up()` preserved. Seed rollbacks are never destructive.
+- SMS-template-seeding migrations dated before `20260706000010` must seed
+  bodies as fixed points of its `normalizeTemplateBody` (trailing
+  "Reply STOP to opt out.", "Hello {first_name}" greeting, no phone
+  numbers) — the normalizer already ran on prod, so late-seeded rows are
+  never normalized (compliance gap + prod/fresh drift).
+- `audit_log` is append-only: rows are NEVER deleted, and all writes go
+  through `services/audit-log.js` (`recordAuditEvent` — pass `trx` or the
+  write silently uses its own handle). A migration `down()` APPENDS a
+  rollback event, never deletes.
 
 ## 5. Raw SQL verification
 
@@ -127,6 +152,53 @@ schedule inserts) and sometimes the bug (you expected a reminder to send).
   negatives).
 - Staging has its OWN database and vault key — never copy encrypted
   ciphertext between DBs, and failed staging twins are not prod failures.
+- **`estimates.notes` and `scheduled_services.notes` are CUSTOMER/TECH
+  VISIBLE** (`estimate-public.js` serves `estimate.notes`;
+  scheduled-service notes render into tech Property Alerts). Internal,
+  calibration, or ops-audit text goes in `internal_notes`, NEVER `notes`.
+  This has bitten twice.
+- `notification_prefs.updated_at` is published as the marketing-SMS consent
+  `capturedAt` (`marketingSmsConsentBasisForContract`) — a system backfill
+  must NEVER restamp it (falsifies consent provenance); it's also the only
+  reliable "unchanged since our write" marker for a migration `down()`.
+- `lead_source='square'` means legacy import, not a marketing channel
+  (`lead_source_channel` is NULL on those rows).
+- Completion truth lives in `scheduled_services` — many recurring customers
+  have ZERO `service_records` rows ever, so "last completed service" read
+  from `service_records` (or the app) is a false-lapse signal.
+- Churn source of truth is CURRENT `pipeline_stage='churned'` — never
+  `churned_at` (sparse AND sticky; survives reactivation). Churn time =
+  `pipeline_stage_changed_at`. `customer_ltv` exists but is EMPTY.
+- Admin in-app notifications = the `notifications` table with
+  `recipient_type='admin'`; the type column is `category`, not `type`.
+- `customers.property_sqft` = treated LAWN area per the source-arbitration
+  contract — NEVER a building-footprint/home-sqft source.
+- `payments` has NO `invoice_id` column — link via the PI id + metadata
+  variants (mirror `findInvoiceForPayment`); `stripe_surcharge_status` is
+  never written.
+- The uuid-vs-integer split is PER-TABLE: `referrals.id` is UUID but
+  `referral_invites.promoter_id` / `referral_promoters.id` ARE integer —
+  verify each table against prod.
+- `scheduled_services.scheduled_date` is a plain DATE (`::text` to
+  inspect; no timestamptz comparisons), and any direct SQL date move must
+  sync `appointment_reminders` too.
+- One-shot guard stamps need DEDICATED columns — `estimate_data` (jsonb)
+  full-blob writers can erase embedded stamps and un-burn caps.
+- Customer-merge FK discovery must stay DYNAMIC from `information_schema`
+  (110+ tables reference `customers.id`; 19 have undeclared FKs, incl.
+  `leads`) — never hardcode the table list. The retired-loser phone
+  sentinel `merged-<id8>` is load-bearing for intake lookups.
+- `message_drafts` has a prod insert-guard trigger
+  (`message_drafts_disabled_guard`) that blocks non-allowlisted intents —
+  a new pending-queue intent needs a pg-function splice migration (§4) or
+  its drafts die silently.
+- `sms_templates`: a MISSING row is ACTIVE (`isTemplateActive`) — deleting
+  a disabled template row silently ENABLES the blocked send. The
+  `ai_assistant`/`ai_approved`/`ai_revised` rows are ops kill switches —
+  never delete them. Template-inactive ≠ feature-off (confirmation/72h/24h
+  reminders fall back to EMAIL), never disable rows to change scheduling
+  (kills the `original_message_type` mapping), and strip hardcoded fallback
+  copy when retiring an SMS action (it sends even with templates deleted).
 
 ## 7. Verification before "done"
 

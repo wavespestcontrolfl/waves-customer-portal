@@ -44,6 +44,9 @@ Three interfaces:
 9. **All automation and site infra is native.** Do not reference Zapier, Make, Elementor, NitroPack, RankMath, or any external automation/CMS tool in new code.
 10. **Plan first for non-trivial work.** For anything beyond a small, well-specified change, present a plan and get sign-off before writing code (use Plan mode). A misunderstanding caught at the plan stage costs minutes; caught after the code is written, it costs the rework.
 11. **When a mistake is caught, record the rule.** Run `/lesson` (or follow `.claude/commands/lesson.md`) so the correction lands in AGENTS.md, the matching skill, or here — in the same PR as the fix. Rules belong in skills or AGENTS.md by default; this file stays lean.
+12. **Never send or trigger customer-facing communications** (SMS, email, calls) — the owner sends all. Before any prod action, check for comm side effects (editing/completing/rescheduling `scheduled_services` rows can fire confirmation/reminder SMS) and route around them.
+13. **Never test on real customers' live records.** "No durable writes" is not the safety bar (e.g. slot holds block real bookings). Use the staff draft-preview paths or owner-created test records; read-only DB inspection is fine.
+14. **Hands-off + exception-based by default.** Deterministic green checks auto-apply with an audit trail and no bell; only exceptions park and surface; every lane keeps an env kill switch + one-click revoke. Where a human decision is genuinely required, use the email-reply approval pattern (`server/services/content/email-approvals.js` — reply "approved"/"not approved" to contact@, fail-closed, at-most-once), never a park-on-portal-visit queue. Never extend email-approval to customer comms, money movement, or gate flips.
 
 ## Admin UI & Design Systems
 
@@ -76,6 +79,8 @@ Everything else — architecture, the context→tools mapping, design decisions,
 **Twilio** — SMS (appointment reminders with Lookup landline detection, post-service automation, review requests 90–180min delay, manual messaging). Voice forwarding with call recording + transcription (no AI voice agent). Multiple numbers across 4 GBP locations + tracking numbers.
 
 **Operator/agent tooling** — recurring prod-ops scripts (token pulls, Railway var hygiene, audit purges) live in `ops/agents/`; check its README before writing a new scratchpad script for prod access. Mutating scripts there are dry-run by default (`--execute` to write).
+
+**Error monitoring** — investigate "what errors happened" via Sentry (org `waves-pest-control`, project `node-express`), not Railway logs (current-deploy only, ~20-line HTTP buffer). Include `Fixes NODE-EXPRESS-<id>` in the fixing commit or the Sentry issue never auto-closes.
 
 ## Environment Variables (Railway)
 
