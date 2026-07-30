@@ -246,7 +246,7 @@
       "id": "decision-maker-callback-lead",
       "call_log_id": "9d6f5199-f832-41b7-835b-7daf554199c4",
       "reviewed_at": "2026-07-30",
-      "reviewed_outcome": "Caller ended with talking to spouse then calling back — a live lead, not a dead end. Requires NEW call-nature key.",
+      "reviewed_outcome": "Caller ended with talking to spouse then calling back \u2014 a live lead, not a dead end. Requires NEW call-nature key.",
       "expect": {
         "current_status": "valid",
         "current_would_auto_route": false,
@@ -305,7 +305,7 @@
       "id": "commercial-condo-assoc-quote",
       "call_log_id": "888229ef-f46e-4f23-9527-10a086d9593b",
       "reviewed_at": "2026-07-30",
-      "reviewed_outcome": "Condominium association inquiry — commercial, requires quote path, never an unattended residential booking.",
+      "reviewed_outcome": "Condominium association inquiry \u2014 commercial, requires quote path, never an unattended residential booking.",
       "expect": {
         "current_status": "valid",
         "current_would_auto_route": false,
@@ -318,9 +318,10 @@
       "id": "email-initial-misread-guard",
       "call_log_id": "3d53bf59-f9a7-46af-9bb4-2d8a8bdfd922",
       "reviewed_at": "2026-07-13",
-      "reviewed_outcome": "Spoken middle-initial was misread into the email; the email-verification triage correctly held routing until the caller confirmed spelling. Quote intent must stay captured.",
+      "reviewed_outcome": "Spoken middle-initial was misread into the email; the email-verification triage correctly held routing until the caller confirmed spelling. Routing must stay held and quote intent must stay captured.",
       "expect": {
         "current_status": "valid",
+        "current_would_auto_route": false,
         "current_flags_include": [
           "quote_promised"
         ]

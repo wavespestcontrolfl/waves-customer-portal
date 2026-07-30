@@ -124,44 +124,60 @@ async function notifyFailure({ notify, sendEmail, finalAttempt, attempts, fixtur
   const title = `Call extraction replay eval: ${failedExpectations + replayErrors} failure(s)`;
   const body = `${lines.join('\n').slice(0, 1400)}${retryNote}\n\nRe-run manually: ${MANUAL_RERUN}`;
 
-  await notify({
-    recipient_type: 'admin',
-    category: 'eval_regression',
-    title,
-    body,
-    icon: '\u{1F9EA}',
-    link: '/admin/dashboard',
-    metadata: JSON.stringify({
-      fixturePath,
-      summary: compactSummary(finalRun?.summary),
-      failures: lines,
-      attempts: attempts.map(compactAttempt),
-    }),
-  });
+  // The email is an independent channel: attempt it even when the DB-backed
+  // notification insert fails (a DB outage is exactly when it matters most).
+  let notifyError = null;
+  try {
+    await notify({
+      recipient_type: 'admin',
+      category: 'eval_regression',
+      title,
+      body,
+      icon: '\u{1F9EA}',
+      link: '/admin/dashboard',
+      metadata: JSON.stringify({
+        fixturePath,
+        summary: compactSummary(finalRun?.summary),
+        failures: lines,
+        attempts: attempts.map(compactAttempt),
+      }),
+    });
+  } catch (err) {
+    notifyError = err;
+  }
   await emailFailure({ sendEmail, subject: title, textBody: body });
 
   logger.warn(`[call-replay-eval] failed: checked=${checked} replayErrors=${replayErrors} failedExpectations=${failedExpectations}`);
+  if (notifyError) throw notifyError;
 }
 
 async function notifyInconclusive({ notify, sendEmail, attempt, fixturePath }) {
   const title = 'Call extraction replay eval could not run';
   const body = `${attempt.error?.message || 'Unknown replay error'}\n\nThe reviewed-call extraction fixture was NOT verified.\n\nRe-run manually: ${MANUAL_RERUN}`;
 
-  await notify({
-    recipient_type: 'admin',
-    category: 'eval_regression',
-    title,
-    body,
-    icon: '\u{1F9EA}',
-    link: '/admin/dashboard',
-    metadata: JSON.stringify({
-      fixturePath,
-      error: attempt.error || null,
-    }),
-  });
+  // Same independent-channel rule as notifyFailure: a DB outage that breaks
+  // the notification insert is exactly when the email matters most.
+  let notifyError = null;
+  try {
+    await notify({
+      recipient_type: 'admin',
+      category: 'eval_regression',
+      title,
+      body,
+      icon: '\u{1F9EA}',
+      link: '/admin/dashboard',
+      metadata: JSON.stringify({
+        fixturePath,
+        error: attempt.error || null,
+      }),
+    });
+  } catch (err) {
+    notifyError = err;
+  }
   await emailFailure({ sendEmail, subject: title, textBody: body });
 
   logger.warn(`[call-replay-eval] inconclusive: ${attempt.error?.message || 'unknown error'}`);
+  if (notifyError) throw notifyError;
 }
 
 function compactAttempt(attempt) {

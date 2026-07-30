@@ -225,6 +225,25 @@ describe('call extraction replay scheduled eval', () => {
     }
   });
 
+  test('email still sends when the notification insert throws (DB outage)', async () => {
+    const emails = [];
+    const sendEmail = async (message) => { emails.push(message); return { ok: true }; };
+
+    await expect(runCallExtractionReplayEval({
+      runReplay: jest.fn(async () => failingRun()),
+      notify: async () => { throw new Error('db unavailable'); },
+      sendEmail,
+    })).rejects.toThrow('db unavailable');
+    expect(emails).toHaveLength(1);
+
+    await expect(runCallExtractionReplayEval({
+      runReplay: jest.fn(async () => { throw new Error('fixture unreadable'); }),
+      notify: async () => { throw new Error('db unavailable'); },
+      sendEmail,
+    })).rejects.toThrow('db unavailable');
+    expect(emails).toHaveLength(2);
+  });
+
   test('inconclusive runs email the unverified warning', async () => {
     const emails = [];
     await runCallExtractionReplayEval({
