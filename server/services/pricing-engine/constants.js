@@ -157,6 +157,17 @@ const PEST = {
       { sqft: 2501, price: r(239) },
       { sqft: Infinity, price: r(289) },
     ],
+    // Customer-facing presentation per scale key, admin-editable via the
+    // pest_base.initial_roach.display pricing_config blob (owner 2026-07-30:
+    // no "Initial" in the customer-facing name; treatment count must render
+    // on the estimate exactly as configured). `treatments` is the number of
+    // treatment visits the fee covers — it is display/scheduling metadata
+    // only and does NOT multiply the price.
+    display: {
+      regular: { name: 'Cockroach Treatment', treatments: 1 },
+      german: { name: 'German Cockroach Treatment', treatments: 1 },
+      regular_standalone: { name: 'Cockroach Treatment', treatments: 1 },
+    },
   },
   frequencyDiscounts: {
     // Per-visit rate multiplier by cadence. Quarterly is the reference baseline.

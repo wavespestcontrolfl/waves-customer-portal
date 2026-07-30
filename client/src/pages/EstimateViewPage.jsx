@@ -1590,6 +1590,11 @@ function SetupFeeCard({ fee, waiverBulletCovered = false }) {
       <div style={{ fontSize: 16, fontWeight: 700, color: ESTIMATE_TEXT, lineHeight: 1.35 }}>
         + {fmtMoney(fee.amount)} one-time {fee.label || 'first-visit setup'}
       </div>
+      {fee.treatments > 0 ? (
+        <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 2, lineHeight: 1.5 }}>
+          Includes {fee.treatments} treatment visit{fee.treatments === 1 ? '' : 's'}
+        </div>
+      ) : null}
       {fee.waivedWithPrepay ? (
         <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 2, lineHeight: 1.5 }}>
           {glassCopyActive() ? GLASS_COPY.setupWaivedNote : 'Waived when you pay the year in full up front.'}
@@ -5079,7 +5084,15 @@ function EstimateViewPageInner() {
               each service keeps its own boxed price section. */}
           <div>
           {services.map((section) => {
-            const setupFees = renderFlags.showWaveGuardSetupFee && section.setupFee
+            // section.setupFee is strictly the WaveGuard membership row, but
+            // feeList can carry a Cockroach Treatment fee with NO WaveGuard
+            // beside it (existing customer: prepay-ineligible, membership fee
+            // waived outright). The roach fee renders on its own evidence —
+            // gating it on the unrelated WaveGuard fee left the configured
+            // charge, name, and treatment count invisible whenever the
+            // membership fee was suppressed (codex #3078 r3).
+            const setupFees = renderFlags.showWaveGuardSetupFee
+              && (section.setupFee || feeList.some((fee) => fee?.service === 'pest_initial_roach'))
               ? feeList
               : [];
             const afterPrice = services.length === 1 ? (
@@ -5192,7 +5205,18 @@ function EstimateViewPageInner() {
             (pricing.firstVisitFees && pricing.firstVisitFees.length > 0
               ? pricing.firstVisitFees
               : (pricing.setupFee ? [pricing.setupFee] : [])
-            ).map(tierAwareFee).map((fee, i) => <SetupFeeCard key={`${fee.label || 'fee'}-${i}`} fee={fee} waiverBulletCovered={services.some((s) => s?.isPest === true)} />)
+            ).map(tierAwareFee)
+              // Multi-service plans embed the Cockroach Treatment row inside
+              // the pest section's own one-time block (oneTimeEmbed above) —
+              // rendering a plan-level card too showed the identical charge
+              // and treatment count twice (codex #3078 r3). Skip it here only
+              // when it genuinely renders embedded, so a payload whose
+              // breakdown never classified the row keeps the plan-level card
+              // instead of losing the fee entirely.
+              .filter((fee) => !(fee?.service === 'pest_initial_roach'
+                && services.some((s) => (s?.oneTimeContribution?.items || [])
+                  .some((item) => item && item.service === 'pest_initial_roach'))))
+              .map((fee, i) => <SetupFeeCard key={`${fee.label || 'fee'}-${i}`} fee={fee} waiverBulletCovered={services.some((s) => s?.isPest === true)} />)
           ) : null}
 
           {services.length > 1 && !estimate.showOneTimeOption ? (

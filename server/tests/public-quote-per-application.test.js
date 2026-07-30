@@ -279,7 +279,7 @@ describe('lawnPestControl — one-time turf-pest knockdown (owner decision 2026-
 });
 
 describe('cockroach chip path — roachType reaches the engine (2026-07-05)', () => {
-  test('roachType regular auto-adds the one-time Initial Roach Knockdown line', () => {
+  test('roachType regular auto-adds the one-time Cockroach Treatment line', () => {
     // The engine deliberately does NOT raise the recurring price for roach
     // activity (the multiplicative roachModifier is zeroed) — it recovers the
     // heavier visit-1 cost via an auto-added one-time pest_initial_roach line.
@@ -309,9 +309,11 @@ describe('cockroach chip path — roachType reaches the engine (2026-07-05)', ()
 
   test('label uses ENGINE normalization — raw truthy junk must not label an unpriced knockdown (codex rd2)', () => {
     const { publicQuotePestLabel } = _internals;
-    expect(publicQuotePestLabel({ frequency: 'quarterly', roachType: 'regular' })).toBe('Quarterly Pest Control + Roach Knockdown');
-    expect(publicQuotePestLabel({ frequency: 'quarterly', roachType: 'palmetto' })).toBe('Quarterly Pest Control + Roach Knockdown');
-    expect(publicQuotePestLabel({ frequency: 'quarterly', roachType: 'german' })).toBe('Quarterly Pest Control + Roach Knockdown');
+    expect(publicQuotePestLabel({ frequency: 'quarterly', roachType: 'regular' })).toBe('Quarterly Pest Control + Cockroach Treatment');
+    expect(publicQuotePestLabel({ frequency: 'quarterly', roachType: 'palmetto' })).toBe('Quarterly Pest Control + Cockroach Treatment');
+    // German resolves its own configured display name (codex #3078 r3 —
+    // the generic suffix mislabeled German-roach quotes).
+    expect(publicQuotePestLabel({ frequency: 'quarterly', roachType: 'german' })).toBe('Quarterly Pest Control + German Cockroach Treatment');
     // The engine normalizes these to 'none' and prices NO knockdown line —
     // a raw truthiness check would still have appended the label.
     for (const junk of ['false', 'no', 'NONE', 'not-a-roach-type']) {

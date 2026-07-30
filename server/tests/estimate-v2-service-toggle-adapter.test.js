@@ -443,7 +443,7 @@ describe('estimate v2 service toggle adapter', () => {
     expect(regularPest.roachAddOn).toBe(0);
     expect(initialRoach).toEqual(expect.objectContaining({
       service: 'pest_initial_roach',
-      label: 'Initial Native Roach Knockdown',
+      label: 'Cockroach Treatment',
       price: 139,
       roachType: 'regular',
     }));
@@ -472,7 +472,7 @@ describe('estimate v2 service toggle adapter', () => {
     const estimate = generateEstimate(input);
     const roachLine = estimate.lineItems.find((line) => line.service === 'pest_initial_roach');
     expect(roachLine).toEqual(expect.objectContaining({
-      label: 'Initial Native Roach Knockdown',
+      label: 'Cockroach Treatment',
       price: 289,
       roachType: 'regular',
       standalone: true,

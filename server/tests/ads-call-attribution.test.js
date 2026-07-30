@@ -79,6 +79,31 @@ describe('shared service-line inference (utils/service-line-infer)', () => {
     expect(inferSpecificService('german roach cleanout')).toBe('cockroach');
   });
 
+  test('renamed + per-species roach suffixes never reclassify a recurring pest quote (codex #3078 r3)', () => {
+    // The suffix now carries the per-species configured display name — the
+    // German default and any admin rename must strip like the legacy marker.
+    for (const interest of [
+      'Quarterly Pest Control + Cockroach Treatment',
+      'Quarterly Pest Control + German Cockroach Treatment',
+      'Monthly Pest + Roach', // compact label
+      'Bi-Monthly Pest + German Roach', // compact label
+    ]) {
+      expect(inferServiceLine(interest)).toBe('pest');
+      expect(inferSpecificService(interest)).toBe('quarterly_pest');
+      expect(inferServiceBucket(interest)).toBe('recurring');
+    }
+    // An admin rename in the live display config strips at runtime too.
+    const { PEST } = require('../services/pricing-engine/constants');
+    const original = PEST.pestInitialRoach.display.regular;
+    PEST.pestInitialRoach.display.regular = { name: 'Roach Rescue Visit', treatments: 1 };
+    try {
+      expect(inferSpecificService('Quarterly Pest Control + Roach Rescue Visit')).toBe('quarterly_pest');
+      expect(inferServiceBucket('Quarterly Pest Control + Roach Rescue Visit')).toBe('recurring');
+    } finally {
+      PEST.pestInitialRoach.display.regular = original;
+    }
+  });
+
   test('unknown/empty interest falls back to the same defaults as web leads', () => {
     expect(inferServiceLine('')).toBe('pest');
     expect(inferSpecificService('')).toBe('quarterly_pest');

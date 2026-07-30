@@ -22,12 +22,39 @@ function inferServiceLine(interest) {
   return 'pest';
 }
 
+// ' + Cockroach Treatment' is an ADD-ON marker publicQuotePestLabel appends
+// to a recurring pest label — strip it so the PRIMARY service drives
+// classification. Left in place, 'roach' matches the cockroach case and a
+// recurring pest quote misbuckets as one_time_entry. The marker's name is
+// admin-configurable per species (pest_base.initial_roach.display), so the
+// strip list is the CURRENT configured names plus the shipped defaults and
+// the retired pre-rename label (older stored interests carry
+// ' + Roach Knockdown'). Longest-first so a name that prefixes another
+// can't partially strip it and leave a stray token behind.
+function roachAddOnMarkerPattern() {
+  // 'roach' / 'german roach' are the compact forms compactRoachInterestPart
+  // (routes/public-quote.js) writes into the 32-char
+  // customers.lead_service_interest field — keep in sync.
+  const names = new Set([
+    'roach knockdown', 'cockroach treatment', 'german cockroach treatment',
+    'roach', 'german roach',
+  ]);
+  try {
+    const display = require('../services/pricing-engine/constants').PEST?.pestInitialRoach?.display || {};
+    for (const cfg of Object.values(display)) {
+      if (cfg && typeof cfg.name === 'string' && cfg.name.trim()) {
+        names.add(cfg.name.trim().toLowerCase().replace(/\s+/g, ' '));
+      }
+    }
+  } catch { /* constants unavailable — defaults above still strip */ }
+  const escaped = [...names]
+    .sort((a, b) => b.length - a.length)
+    .map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  return new RegExp(`\\s*\\+\\s*(?:${escaped.join('|')})`, 'g');
+}
+
 function inferSpecificService(interest) {
-  // ' + Roach Knockdown' is an ADD-ON marker publicQuotePestLabel appends to
-  // a recurring pest label — strip it so the PRIMARY service drives
-  // classification. Left in place, 'roach' matches the cockroach case and a
-  // recurring pest quote misbuckets as one_time_entry.
-  const t = (interest || '').toLowerCase().replace(/\s*\+\s*roach knockdown/g, '');
+  const t = (interest || '').toLowerCase().replace(roachAddOnMarkerPattern(), '');
   if (t.includes('rodent exclusion') || t.includes('rat exclusion')) return 'rodent_exclusion';
   if (t.includes('bed bug')) return 'bed_bug';
   if (t.includes('termite trench')) return 'termite_trenching';

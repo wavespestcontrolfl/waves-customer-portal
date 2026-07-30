@@ -66,6 +66,63 @@ describe('quote workflow service interest labels', () => {
     expect(compact.length).toBeLessThanOrEqual(32);
   });
 
+  test('quote-wizard roach labels use the per-species configured display name', () => {
+    // codex #3078 r3: the hardcoded suffix ignored admin renames and labeled
+    // German-roach quotes with the regular generic name.
+    expect(buildPublicQuoteServiceInterest({ pest: { frequency: 'quarterly', roachType: 'german' } }))
+      .toBe('Quarterly Pest Control + German Cockroach Treatment');
+    expect(buildPublicQuoteServiceInterest({ pest: { frequency: 'quarterly', roachType: 'palmetto' } }))
+      .toBe('Quarterly Pest Control + Cockroach Treatment');
+    // Garbage roach values still normalize to none and label no treatment.
+    expect(buildPublicQuoteServiceInterest({ pest: { frequency: 'quarterly', roachType: 'FALSE' } }))
+      .toBe('Quarterly Pest Control');
+  });
+
+  test('admin roach rename flows through quote-wizard labels and compacts at runtime', () => {
+    const { PEST } = require('../services/pricing-engine/constants');
+    const original = PEST.pestInitialRoach.display.regular;
+    PEST.pestInitialRoach.display.regular = { name: 'Roach Rescue Visit', treatments: 1 };
+    try {
+      expect(buildPublicQuoteServiceInterest({ pest: { frequency: 'monthly', roachType: 'regular' } }))
+        .toBe('Monthly Pest Control + Roach Rescue Visit');
+      // The renamed suffix still compacts to the fixed short form, so the
+      // 32-char customers.lead_service_interest cap can't drop it.
+      expect(buildCompactPublicQuoteServiceInterest({ pest: { frequency: 'monthly', roachType: 'regular' } }))
+        .toBe('Monthly Pest + Roach');
+    } finally {
+      PEST.pestInitialRoach.display.regular = original;
+    }
+  });
+
+  test('compact customer service interest keeps the roach add-on under the 32-char cap', () => {
+    // codex #3078 r3: "Quarterly Pest + Cockroach Treatment" is 36 chars, so
+    // without a compact mapping the roach requirement silently vanished from
+    // the customer record (the retired "Roach Knockdown" sat exactly at 32).
+    const regular = buildCompactPublicQuoteServiceInterest({ pest: { frequency: 'quarterly', roachType: 'regular' } });
+    expect(regular).toBe('Quarterly Pest + Roach');
+    expect(regular.length).toBeLessThanOrEqual(32);
+
+    const german = buildCompactPublicQuoteServiceInterest({ pest: { frequency: 'bimonthly', roachType: 'german' } });
+    expect(german).toBe('Bi-Monthly Pest + German Roach');
+    expect(german.length).toBeLessThanOrEqual(32);
+
+    // A stored full label round-trips through the customer-field compactor
+    // (the upsell path at public-quote.js:1680 feeds full labels back in).
+    expect(buildCompactCustomerServiceInterest(['Quarterly Pest Control + Cockroach Treatment']))
+      .toBe('Quarterly Pest + Roach');
+  });
+
+  test('labels stored under a since-renamed roach name still compact (codex #3078 r4)', () => {
+    // /upsell recompacts the lead's STORED full label. After the admin
+    // renames the species, the old configured name matches no candidate —
+    // the roach-worded fallback must keep the requirement on the customer
+    // record instead of silently dropping an over-32-char suffix.
+    expect(buildCompactCustomerServiceInterest(['Quarterly Pest Control + Premium Cockroach Treatment']))
+      .toBe('Quarterly Pest + Roach');
+    expect(buildCompactCustomerServiceInterest(['Quarterly Pest Control + German Roach Rescue Visit']))
+      .toBe('Quarterly Pest + German Roach');
+  });
+
   test('compact customer service interest drops overflow add-ons cleanly', () => {
     const compact = buildCompactCustomerServiceInterest([
       'Quarterly Pest Control',

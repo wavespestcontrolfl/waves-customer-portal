@@ -1708,15 +1708,30 @@ function pricePestInitialRoach(property, options = {}) {
     ...roachMeta.roachWarnings,
     ...severityMeta.warnings,
     ...(severityMeta.severity === 'severe' && isGerman
-      ? ['Severe German roach activity should use German Roach Cleanout, not only Initial German Roach Knockdown.']
+      ? ['Severe German roach activity should use German Roach Cleanout, not only the one-time German Cockroach Treatment.']
       : []),
   ]);
+  // Customer-facing name + treatment-visit count come from the admin-editable
+  // display config (pest_base.initial_roach.display via db-bridge). Owner
+  // 2026-07-30: the name carries no "Initial", and the configured treatment
+  // count renders on the estimate. Fallbacks keep the line well-formed if a
+  // stale config row predates the display key.
+  const displayConfig = PEST.pestInitialRoach?.display?.[scaleKey] || {};
+  const label = typeof displayConfig.name === 'string' && displayConfig.name.trim()
+    ? displayConfig.name.trim()
+    : (isGerman ? 'German Cockroach Treatment' : 'Cockroach Treatment');
+  const treatments = Number.isFinite(Number(displayConfig.treatments)) && Number(displayConfig.treatments) > 0
+    ? Math.round(Number(displayConfig.treatments))
+    : 1;
+  const treatmentsNote = `Includes ${treatments} treatment visit${treatments === 1 ? '' : 's'}.`;
+  const baseDetail = isGerman
+    ? 'Heavier treatment for German roaches (the small indoor / kitchen kind) — interior spray, gel bait at hot spots, and a growth regulator to break the breeding cycle.'
+    : 'Heavier treatment for SWFL native roaches (American / palmetto, smoky brown, Australian, Florida woods) — interior spray, bait at hot spots, and perimeter granular.';
   return {
     service: 'pest_initial_roach',
-    label: isGerman ? 'Initial German Roach Knockdown' : 'Initial Native Roach Knockdown',
-    detail: isGerman
-      ? 'Heavier first visit for German roaches (the small indoor / kitchen kind) — interior spray, gel bait at hot spots, and a growth regulator to break the breeding cycle.'
-      : 'Heavier first visit for SWFL native roaches (American / palmetto, smoky brown, Australian, Florida woods) — interior spray, bait at hot spots, and perimeter granular.',
+    label,
+    detail: `${baseDetail} ${treatmentsNote}`,
+    treatments,
     price,
     requestedRoachType: roachMeta.requestedRoachType,
     roachType,

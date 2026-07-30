@@ -11645,9 +11645,16 @@ function findInitialRoachItem(_pestTiers, estData) {
       return ROACH_NAME_RX.test(name);
     });
     if (hit && hit.price) {
+      const treatments = Number(hit.treatments);
       return {
         price: Number(hit.price) || 0,
-        label: hit.label || hit.name || 'Initial Roach Knockdown',
+        // Label comes from the saved line item, which carries the
+        // admin-configured display name (pest_base.initial_roach.display).
+        // The fallback covers legacy payloads saved before labels persisted.
+        label: hit.label || hit.name || 'Cockroach Treatment',
+        // Treatment-visit count for the fee card's sub-line. Absent on
+        // payloads saved before the engine emitted `treatments`.
+        treatments: Number.isFinite(treatments) && treatments > 0 ? Math.round(treatments) : null,
       };
     }
   }
@@ -17314,7 +17321,8 @@ async function buildPricingBundleInner(estimate) {
       firstVisitFees.push({
         service: 'pest_initial_roach',
         amount: initialRoachItem.price,
-        label: initialRoachItem.label || 'Initial Roach Knockdown',
+        label: initialRoachItem.label || 'Cockroach Treatment',
+        ...(initialRoachItem.treatments ? { treatments: initialRoachItem.treatments } : {}),
         waivedWithPrepay: false,
       });
     }
@@ -17582,6 +17590,34 @@ async function buildPricingBundleInner(estimate) {
       amount: Number(PEST.initialFee || 99) || 99,
       label: 'WaveGuard setup',
       waivedWithPrepay: enginePrepayEligible,
+    });
+  }
+  // Cockroach Treatment first-visit fee — mirror the v1 branch's fee card.
+  // Engine-input estimates (Agent estimates / quote wizard) carry the roach
+  // line in anchorEngineResult.lineItems; without this push the recurring
+  // view (which suppresses OneTimeBreakdownCard when the one-time choice is
+  // shown) never displays the configured name, price, or treatment count.
+  // ONLY the auto-fired recurring-pest add-on is a first-visit fee. A
+  // STANDALONE services.pestInitialRoach line shares the service key but is
+  // ordinary one-time work that belongs in the breakdown — promoting it
+  // alongside a non-pest recurring bundle (lawn + tree) hid the charge
+  // entirely: showWaveGuardSetupFee stays false with no recurring pest, so
+  // the client renders no fee card while still excluding every
+  // firstVisitFees service from OneTimeBreakdownCard (codex #3078 r4 P1).
+  const engineRoachLine = Array.isArray(anchorEngineResult?.lineItems)
+    ? anchorEngineResult.lineItems.find((li) => li && li.service === 'pest_initial_roach'
+      && li.autoFiredFromRecurringPest === true && Number(li.price) > 0)
+    : null;
+  if (engineRoachLine) {
+    const engineRoachTreatments = Number(engineRoachLine.treatments);
+    engineFirstVisitFees.push({
+      service: 'pest_initial_roach',
+      amount: Number(engineRoachLine.price) || 0,
+      label: engineRoachLine.label || engineRoachLine.name || 'Cockroach Treatment',
+      ...(Number.isFinite(engineRoachTreatments) && engineRoachTreatments > 0
+        ? { treatments: Math.round(engineRoachTreatments) }
+        : {}),
+      waivedWithPrepay: false,
     });
   }
 

@@ -3,7 +3,7 @@ const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { generateEstimate, normalizeRoachType } = require('../services/pricing-engine');
+const { generateEstimate, normalizeRoachType, constants: pricingConstants } = require('../services/pricing-engine');
 const { commercialLowConfidenceRequiresSiteQuote } = require('../services/estimate-delivery-options');
 const TwilioService = require('../services/twilio');
 const { shortenOrPassthrough } = require('../services/short-url');
@@ -244,6 +244,19 @@ function normalizePublicQuotePestFrequency(value) {
   return aliases[raw] || 'quarterly';
 }
 
+// Customer-facing name of the roach add-on, per species, from the SAME
+// admin-editable display config the engine's line item uses
+// (pest_base.initial_roach.display via db-bridge — pricingConstants.PEST is
+// the live merged object, so admin renames apply here without a restart).
+// A quote-wizard roach fee always prices at the recurring-add-on scale keys
+// (regular / german), never regular_standalone. Fallbacks mirror
+// pricePestInitialRoach's, for a stale config row predating the display key.
+function publicQuoteRoachDisplayName(roachType) {
+  const configured = pricingConstants.PEST?.pestInitialRoach?.display?.[roachType]?.name;
+  if (typeof configured === 'string' && configured.trim()) return configured.trim();
+  return roachType === 'german' ? 'German Cockroach Treatment' : 'Cockroach Treatment';
+}
+
 function publicQuotePestLabel(pest = {}) {
   const frequency = normalizePublicQuotePestFrequency(pest.frequency);
   const labels = {
@@ -254,11 +267,15 @@ function publicQuotePestLabel(pest = {}) {
   const base = labels[frequency] || 'Quarterly Pest Control';
   // The engine prices a roach-knockdown modifier on the pest line when
   // roachType is set (the cockroach estimate/chip path) — reflect it in the
-  // lead's service-interest label so the office sees what was quoted. Same
-  // normalization as the engine: raw values like 'no'/'FALSE'/garbage
-  // normalize to 'none' and price no knockdown, so they must not label one.
-  return normalizeRoachType(pest.roachType || 'none').roachType !== 'none'
-    ? `${base} + Roach Knockdown`
+  // lead's service-interest label so the office sees what was quoted, under
+  // the configured per-species customer-facing name (codex #3078 r3: the
+  // hardcoded suffix ignored admin renames AND labeled German-roach quotes
+  // with the regular name). Same normalization as the engine: raw values
+  // like 'no'/'FALSE'/garbage normalize to 'none' and price no knockdown,
+  // so they must not label one.
+  const { roachType } = normalizeRoachType(pest.roachType || 'none');
+  return roachType !== 'none'
+    ? `${base} + ${publicQuoteRoachDisplayName(roachType)}`
     : base;
 }
 
@@ -334,7 +351,44 @@ function compactServiceInterestPart(value) {
     'rodent control': 'Rodent',
     'tree & shrub care': 'Tree/Shrub',
   };
-  return labels[key] || text.replace(/ Pest Control\b/, ' Pest').replace(/ Control\b/, '');
+  return labels[key]
+    || compactRoachInterestPart(key)
+    || text.replace(/ Pest Control\b/, ' Pest').replace(/ Control\b/, '');
+}
+
+// Compact form of the roach add-on suffix. The customer-facing name is
+// admin-configurable (pest_base.initial_roach.display), so match the CURRENT
+// configured names plus the shipped defaults (covers labels stored before a
+// rename) instead of a fixed string. Without this, the renamed suffix blew
+// the 32-char customers.lead_service_interest cap — "Quarterly Pest +
+// Cockroach Treatment" is 36 chars, so buildCompactCustomerServiceInterest
+// silently dropped the roach requirement from the lead record (codex #3078
+// r3; the retired "Roach Knockdown" suffix was exactly at the cap).
+function compactRoachInterestPart(normalizedKey) {
+  const display = pricingConstants.PEST?.pestInitialRoach?.display || {};
+  const candidates = [
+    ...Object.entries(display).map(([scaleKey, cfg]) => [scaleKey, cfg?.name]),
+    ['german', 'German Cockroach Treatment'],
+    ['regular', 'Cockroach Treatment'],
+  ];
+  for (const [scaleKey, name] of candidates) {
+    if (typeof name !== 'string') continue;
+    const normalized = name.trim().toLowerCase().replace(/\s+/g, ' ');
+    if (normalized && normalized === normalizedKey) {
+      return String(scaleKey).startsWith('german') ? 'German Roach' : 'Roach';
+    }
+  }
+  // Fallback for labels stored under a SINCE-RENAMED configured name (codex
+  // #3078 r4: /upsell recompacts the lead's stored full label, and a
+  // no-longer-configured suffix over the 32-char budget silently dropped the
+  // roach requirement). Any roach-worded part compacts to the stable short
+  // form; species from the wording. A configured name with no roach wording
+  // is matched only while configured — an alias history would need
+  // persistence, and every shipped/observed name carries 'roach'.
+  if (/\broach\b|cockroach/.test(normalizedKey)) {
+    return normalizedKey.includes('german') ? 'German Roach' : 'Roach';
+  }
+  return null;
 }
 
 function buildCompactCustomerServiceInterest(parts = []) {

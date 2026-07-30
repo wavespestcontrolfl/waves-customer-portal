@@ -9,6 +9,11 @@ const constants = require('./constants');
 // to ASSIGN these back — merely skipping the assignment leaves whatever a prior
 // sync applied live while the DB and admin UI show the rejected values.
 const MOSQUITO_DEFAULT_LOT_CATEGORIES = constants.MOSQUITO.lotCategories.map(c => ({ ...c }));
+// Pristine in-code roach display defaults (same reasoning as above): the
+// display merge rebases on these every sync, so a name/count the admin
+// removes from the DB row reverts to the code default on the NEXT sync
+// instead of lingering until a process restart.
+const PEST_INITIAL_ROACH_DISPLAY_DEFAULTS = JSON.parse(JSON.stringify(constants.PEST.pestInitialRoach.display));
 const r = (val) => Math.round(val * constants.PROCESSING_ADJUSTMENT);
 const money = (val) => Math.round(Number(val) * constants.PROCESSING_ADJUSTMENT * 100) / 100;
 
@@ -156,6 +161,13 @@ function validatePestPricingConfig(snapshot = constants) {
       allowTerminalInfinity: true,
       requireTerminalInfinity: true,
     });
+    const display = PEST.pestInitialRoach?.display?.[scale];
+    if (!display || typeof display.name !== 'string' || !display.name.trim()) {
+      errors.push(`PEST.pestInitialRoach.display.${scale}.name must be a non-empty string`);
+    }
+    if (!isPositiveNumber(display?.treatments)) {
+      errors.push(`PEST.pestInitialRoach.display.${scale}.treatments must be positive`);
+    }
   }
   const diag = PEST.productionDiagnostics || {};
   for (const key of ['baseStopMinutes', 'manualReviewLotSqFt', 'lowConfidenceLotSqFt', 'manualReviewMinutes', 'lowConfidenceMinutes']) {
@@ -896,6 +908,30 @@ async function syncConstantsFromDB(dbInstance) {
             }));
           }
         }
+        // Customer-facing name + treatment-visit count per scale key. Rebased
+        // on the PRISTINE in-code defaults every sync (not the mutated
+        // runtime constants) and then overlaid with whatever the row carries,
+        // so: a row written before this key existed keeps sane values, an
+        // empty name or non-positive treatments never reaches the engine, and
+        // a species the admin deletes from the row reverts to the code
+        // default on this sync rather than after a restart.
+        const display = JSON.parse(JSON.stringify(PEST_INITIAL_ROACH_DISPLAY_DEFAULTS));
+        if (ir.display && typeof ir.display === 'object' && !Array.isArray(ir.display)) {
+          for (const species of ['regular', 'german', 'regular_standalone']) {
+            const d = ir.display[species];
+            if (!d || typeof d !== 'object' || Array.isArray(d)) continue;
+            const name = typeof d.name === 'string' && d.name.trim() ? d.name.trim() : null;
+            const treatments = Number.isFinite(Number(d.treatments)) && Number(d.treatments) > 0
+              ? Math.round(Number(d.treatments))
+              : null;
+            display[species] = {
+              ...display[species],
+              ...(name ? { name } : {}),
+              ...(treatments ? { treatments } : {}),
+            };
+          }
+        }
+        next.display = display;
         constants.PEST.pestInitialRoach = next;
       }
     }
