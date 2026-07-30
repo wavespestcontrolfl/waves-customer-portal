@@ -186,14 +186,19 @@ function collectTermiteFacts(estData) {
       // discount fields are absent exactly when no discount landed OR on
       // legacy lines that never carried them), so it must not bypass the
       // fail-closed discount check.
-      const visits = Number(node.visitsPerYear ?? node.visits) || 4;
+      const rawVisits = node.visitsPerYear ?? node.visits;
+      const visits = Number(rawVisits) || 4;
       // The seeded agreements promise a QUARTERLY cadence ("4 applications
-      // per year") verbatim. An EXPLICIT legacy/replayed count other than
-      // 4 must be remembered so the builder parks — otherwise a 3-visit
-      // accepted annual gets papered with a signable 4x promise that
-      // contradicts the accepted total.
-      if ((node.visitsPerYear != null || node.visits != null) && visits !== 4) {
-        facts.nonQuarterlyVisits = visits;
+      // per year") verbatim. Any EXPLICIT count that isn't a finite 4 —
+      // including 0, empty, or nonnumeric values that Number()||4 would
+      // silently coerce to quarterly — must be remembered so the builder
+      // parks instead of papering a fabricated 4x cadence over the
+      // accepted annual.
+      if (rawVisits != null) {
+        const parsedVisits = Number(rawVisits);
+        if (!Number.isFinite(parsedVisits) || parsedVisits !== 4) {
+          facts.nonQuarterlyVisits = Number.isFinite(parsedVisits) && parsedVisits > 0 ? parsedVisits : 'invalid';
+        }
       }
       const netAnnual = Number(node.manualFinalAnnual ?? node.annualAfterDiscount);
       if (Number.isFinite(netAnnual) && netAnnual > 0) {

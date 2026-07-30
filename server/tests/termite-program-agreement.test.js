@@ -157,6 +157,17 @@ describe('buildTermiteProgramAgreementValues', () => {
     expect(buildTermiteProgramAgreementValues({}, data)).toBeNull();
   });
 
+  test('fail-closed: explicit zero/nonnumeric visit counts park instead of coercing to quarterly', () => {
+    for (const bad of [0, 'abc', '']) {
+      const data = ownedEstData();
+      data.result.lineItems[0].visitsPerYear = bad;
+      expect(buildTermiteProgramAgreementValues({}, data)).toBeNull();
+    }
+    const ok = ownedEstData();
+    ok.result.lineItems[0].visitsPerYear = '4';
+    expect(buildTermiteProgramAgreementValues({}, ok)).not.toBeNull();
+  });
+
   test('fail-closed: owned program without an install price builds nothing', () => {
     const data = ownedEstData();
     delete data.result.lineItems[0].installation;
