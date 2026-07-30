@@ -7,11 +7,13 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/twilio-numbers', () => ({ isInternalNumber: jest.fn(() => false) }));
+jest.mock('../services/conversations', () => ({ syncVoiceMessageForCall: jest.fn(async () => null) }));
 
 const {
   runCallLogRelink,
   pickContactPhone,
   phoneLookupKey,
+  isLinkableKey,
   TRANSCRIPTION_REJECTED_SENTINEL,
 } = require('../services/call-log-relink');
 
@@ -46,6 +48,26 @@ describe('phoneLookupKey — lockstep with webhook intake', () => {
     expect(phoneLookupKey('')).toBe('');
     expect(phoneLookupKey(null)).toBe('');
     expect(phoneLookupKey('anonymous')).toBe('');
+  });
+});
+
+describe('isLinkableKey — which contact numbers may auto-link', () => {
+  test('NANP numbers are linkable in any formatting', () => {
+    expect(isLinkableKey('+19415550111')).toBe(true);
+    expect(isLinkableKey('(941) 555-0111')).toBe(true);
+  });
+
+  test('valid short international E.164 stays linkable (lockstep with intake exact-digit lookup)', () => {
+    // 8-digit national number with +-prefixed country code — utils/phone
+    // preserves these, and intake looks them up on exact digits.
+    expect(isLinkableKey('+3712345678')).toBe(true);
+  });
+
+  test('bare shortcodes, anonymous, and empty presentations never link', () => {
+    expect(isLinkableKey('262966')).toBe(false);
+    expect(isLinkableKey('anonymous')).toBe(false);
+    expect(isLinkableKey('')).toBe(false);
+    expect(isLinkableKey(null)).toBe(false);
   });
 });
 

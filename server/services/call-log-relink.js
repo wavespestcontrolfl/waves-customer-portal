@@ -40,6 +40,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { toE164 } = require('../utils/phone');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
+const { syncVoiceMessageForCall } = require('./conversations');
 
 // How far back each hourly run scans. Generous: the run is idempotent and the
 // candidate set (unlinked calls with a usable number) is small.
@@ -73,6 +74,21 @@ function phoneLookupKey(value) {
   const digits = String(normalized || value || '').replace(/\D/g, '');
   if (digits.length === 11 && digits.startsWith('1')) return digits.slice(1);
   return digits;
+}
+
+// Which keys are safe to auto-link on? A 10-digit NANP key always is. A
+// shorter key is linkable ONLY when toE164 recognized it as real E.164
+// (a '+'-prefixed 8–15 digit international number — utils/phone.js preserves
+// those, and intake performs the exact-digit lookup for them too). Bare short
+// digit strings (shortcodes, blocked/anonymous presentations, garbage) never
+// normalize to '+…' and are skipped: an exact match on those would link the
+// wrong record more often than the right one.
+function isLinkableKey(value) {
+  const key = phoneLookupKey(value);
+  if (!key) return false;
+  if (key.length >= 10) return true;
+  const normalized = toE164(value);
+  return typeof normalized === 'string' && normalized.startsWith('+');
 }
 
 async function findSingleCustomerByKey(conn, key) {
@@ -115,7 +131,7 @@ async function relinkUnattributedCalls({ now = new Date(), conn = db } = {}) {
       .whereRaw('transcription IS DISTINCT FROM ?', [TRANSCRIPTION_REJECTED_SENTINEL])
       .orderBy('id', 'asc')
       .limit(PAGE_SIZE)
-      .select('id', 'direction', 'from_phone', 'to_phone', 'created_at');
+      .select('id', 'twilio_call_sid', 'direction', 'from_phone', 'to_phone', 'created_at');
     if (cursorId) {
       query.where('id', '>', cursorId);
     }
@@ -133,23 +149,22 @@ async function relinkUnattributedCalls({ now = new Date(), conn = db } = {}) {
         skipped += 1;
         continue;
       }
-      const key = phoneLookupKey(contactPhone);
-      // Sub-10-digit keys are shortcodes/anonymous/garbage — an exact-digit
-      // match on those would link the wrong record more often than the right
-      // one, and intake would only ever have seen them as unlinkable anyway.
-      if (!key || key.length < 10) {
+      if (!isLinkableKey(contactPhone)) {
         skipped += 1;
         continue;
       }
+      const key = phoneLookupKey(contactPhone);
       if (!byKey.has(key)) byKey.set(key, []);
-      byKey.get(key).push(call.id);
+      byKey.get(key).push(call);
     }
     if (rows.length < PAGE_SIZE) break;
   }
 
   let linked = 0;
+  let rehomed = 0;
   let ambiguousOrUnmatched = 0;
-  for (const [key, callIds] of byKey) {
+  for (const [key, groupCalls] of byKey) {
+    const callIds = groupCalls.map((c) => c.id);
     const customer = await findSingleCustomerByKey(conn, key);
     if (!customer) {
       ambiguousOrUnmatched += callIds.length;
@@ -162,18 +177,32 @@ async function relinkUnattributedCalls({ now = new Date(), conn = db } = {}) {
       logger.warn(`[call-relink] matched customer ${customer.id} is keyed on an internal number; not linking ${callIds.length} call(s)`);
       continue;
     }
-    // whereNull again at write time: another writer (processing re-link,
-    // admin action) may have linked the row since we read it.
+    // Guards re-checked at WRITE time, not just scan time: another writer
+    // may have linked the row since we read it (whereNull), and the
+    // processor may have rejected the voicemail and deliberately cleared
+    // the link in the gap — re-linking a sentinel row would undo that
+    // unlink, so the sentinel predicate repeats here.
     const updated = await conn('call_log')
       .whereIn('id', callIds)
       .whereNull('customer_id')
+      .whereRaw('transcription IS DISTINCT FROM ?', [TRANSCRIPTION_REJECTED_SENTINEL])
       .update({ customer_id: customer.id, updated_at: new Date() });
     if (updated > 0) {
       linked += updated;
       logger.info(`[call-relink] Linked ${updated} call(s) on ${maskPhone(key)} to customer ${customer.id}`);
+      // call_log.customer_id alone doesn't surface the call in Customer 360 /
+      // Comms — those read the unified messages/conversations tables. Rehome
+      // each call's voice message into the customer's thread via the existing
+      // sync path (idempotent: re-reads call_log, advisory-locked, and
+      // no-ops/moves as appropriate; catches its own errors).
+      for (const c of groupCalls) {
+        if (!c.twilio_call_sid) continue;
+        const synced = await syncVoiceMessageForCall(c.twilio_call_sid);
+        if (synced) rehomed += 1;
+      }
     }
   }
-  return { scanned, linked, ambiguousOrUnmatched, skipped };
+  return { scanned, linked, rehomed, ambiguousOrUnmatched, skipped };
 }
 
 async function runCallLogRelink({ now = new Date() } = {}) {
@@ -190,6 +219,7 @@ module.exports = {
   relinkUnattributedCalls,
   pickContactPhone,
   phoneLookupKey,
+  isLinkableKey,
   TRANSCRIPTION_REJECTED_SENTINEL,
   WINDOW_DAYS,
   PAGE_SIZE,

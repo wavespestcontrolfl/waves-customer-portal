@@ -45,9 +45,10 @@ const logger = require('./logger');
 const NotificationService = require('./notification-service');
 const { etParts } = require('../utils/datetime-et');
 
-// How far back each run looks. Two days: long enough that a weekend outage
-// still surfaces Monday, short enough that the candidate set stays tiny.
-const LOOKBACK_HOURS = 48;
+// How far back each run looks. Four days: a Friday-evening call still sits
+// inside Monday morning's window even after a full weekend of gated-off or
+// dead cron ticks, with slack — while keeping the candidate set tiny.
+const LOOKBACK_HOURS = 96;
 // Calls younger than this are still legitimately in flight — transcription →
 // extraction → booking can take a while, and the office may be booking it
 // by hand right now.
@@ -126,17 +127,18 @@ function windowStartMinutes(windowStart) {
 
 // Call-linked booking evidence, mirroring findExistingCallAppointment
 // (call-recording-processor.js:2225): does this same-customer, same-ET-date,
-// non-cancelled/rescheduled row belong to THIS call's confirmed slot?
+// non-cancelled/rescheduled row belong to THIS call's confirmed slot? Only
+// call-specific evidence clears — a same-day row merely created after the
+// call could be any unrelated booking, and the canonical lookup does not
+// treat post-call timing alone as a match either. The cost of dropping the
+// timing shortcut is one deduped page when the office manually rebooks the
+// call at a renegotiated time >2h away; the cost of keeping it was silently
+// suppressing exactly the failures this pager exists for.
 function rowClearsSlot(row, call, slot) {
   if (row.source_call_log_id && row.source_call_log_id === call.id) return true;
   if (call.twilio_call_sid && String(row.notes || '').includes(`Call SID: ${call.twilio_call_sid}`)) return true;
   const startMinutes = windowStartMinutes(row.window_start);
   if (startMinutes !== null && Math.abs(startMinutes - slot.minutes) <= WINDOW_MATCH_TOLERANCE_MINUTES) return true;
-  // The office acted after the call: any same-date row created post-call is
-  // treated as the response to it (possibly at a renegotiated time). A row
-  // that PRE-dates the call is an unrelated appointment and must not
-  // suppress the page.
-  if (row.created_at && call.created_at && new Date(row.created_at) >= new Date(call.created_at)) return true;
   return false;
 }
 
@@ -191,16 +193,20 @@ async function runCallBookingMissWatchdog({ now = new Date() } = {}) {
 
 async function runInner({ now = new Date() } = {}) {
   const windowStart = new Date(now.getTime() - LOOKBACK_HOURS * 3600 * 1000);
-  // processing_status = 'processed' only: a delayed or force-reprocessed call
-  // persists its valid V2 extraction BEFORE the booking insert and the
-  // terminal status write — alerting mid-run would permanently ring a false
-  // "never booked" bell. Candidate filtering on the extraction happens in
-  // JS, not SQL: ai_extraction_enriched has been both json and
-  // stringified-text across its history, so a ->> filter would silently drop
-  // the string-era rows. The 48h window keeps this cheap.
+  // Exclude ACTIVE processing only ('processing' / NULL): a delayed or
+  // force-reprocessed call persists its valid V2 extraction BEFORE the
+  // booking insert and the terminal status write, so alerting mid-run would
+  // permanently ring a false bell. But failed TERMINAL states
+  // (customer_creation_failed, lead_creation_failed) must stay in — a
+  // confirmed slot on a call whose customer/lead creation failed is among
+  // the highest-value misses this pager exists for. Candidate filtering on
+  // the extraction happens in JS, not SQL: ai_extraction_enriched has been
+  // both json and stringified-text across its history, so a ->> filter
+  // would silently drop the string-era rows. The window keeps this cheap.
   const calls = await db('call_log')
     .where('created_at', '>=', windowStart)
-    .where({ v2_extraction_status: 'valid', processing_status: 'processed' })
+    .where({ v2_extraction_status: 'valid' })
+    .whereRaw("processing_status IS NOT NULL AND processing_status <> 'processing'")
     .whereNotNull('ai_extraction_enriched')
     .select('id', 'twilio_call_sid', 'customer_id', 'direction', 'created_at', 'from_phone', 'to_phone', 'ai_extraction_enriched');
 
@@ -239,7 +245,7 @@ async function runInner({ now = new Date() } = {}) {
       timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
     });
     const contactPhone = String(m.call.direction || '').startsWith('outbound') ? m.call.to_phone : m.call.from_phone;
-    await NotificationService.notifyAdmin(
+    const created = await NotificationService.notifyAdmin(
       'alert',
       `Confirmed appointment never booked — ${m.slot.name}, ${slotET}`,
       `${m.slot.name} (${contactPhone || 'no number'}) confirmed ${m.slot.service || 'a visit'} for ${slotET} ` +
@@ -257,6 +263,14 @@ async function runInner({ now = new Date() } = {}) {
         },
       },
     );
+    // NotificationService.create swallows insert errors into a null result;
+    // this job's ONLY output is the bell, so a lost bell must fail the run
+    // loudly (cron error log + failed job_health) instead of logging
+    // "alert fired". Internal-test suppression ({ suppressed: true }) is a
+    // deliberate success-without-a-row and passes.
+    if (!created || (created.id == null && !created.suppressed)) {
+      throw new Error(`[call-booking-miss] notification insert failed for ${dedupeKey} — pager output lost`);
+    }
     alerted += 1;
     logger.warn(`[call-booking-miss] Unbooked confirmed slot on call ${m.call.id} (${maskPhone(contactPhone)}, ${m.serviceDateET}) — alert fired`);
   }

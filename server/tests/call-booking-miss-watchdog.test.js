@@ -118,10 +118,10 @@ describe('rowClearsSlot — call-linked booking evidence only', () => {
     expect(rowClearsSlot(bookedRow({ window_start: '08:00:00', created_at: null }), call(), slot)).toBe(false);
   });
 
-  test('a row created AFTER the call clears (office acted); a PRE-existing row does not', () => {
+  test('post-call timing alone is NOT evidence — an unrelated row created after the call does not clear', () => {
     const afterCall = bookedRow({ window_start: '08:00:00', created_at: new Date(new Date(OLD_ENOUGH).getTime() + 10 * 60 * 1000).toISOString() });
     const beforeCall = bookedRow({ window_start: '08:00:00', created_at: new Date(new Date(OLD_ENOUGH).getTime() - 10 * 60 * 1000).toISOString() });
-    expect(rowClearsSlot(afterCall, call(), slot)).toBe(true);
+    expect(rowClearsSlot(afterCall, call(), slot)).toBe(false);
     expect(rowClearsSlot(beforeCall, call(), slot)).toBe(false);
   });
 });
