@@ -2776,6 +2776,7 @@ class AutonomousRunner {
    */
   async _deriveGuardrailOptions(opp, brief) {
     let liveDomains = null;
+    let liveMetaTitle = null;
     if (brief.action_type === 'refresh_existing_page') {
       const publisher = getAstroPublisher();
       if (publisher?.getLiveFrontmatter) {
@@ -2793,6 +2794,13 @@ class AutonomousRunner {
           throw e;
         }
         liveDomains = Array.isArray(liveFm.domains) ? liveFm.domains : [];
+        // Owner hard rule (2026-07-16): service/location metaTitles are never
+        // edited — hand the live value to the guardrails so a rewriting draft
+        // parks (PROTECTED_META_TITLE_REWRITE) instead of publishing. Rides
+        // the same fail-closed liveFm load as the brand-token guard above.
+        liveMetaTitle = liveFm.metaTitle != null && String(liveFm.metaTitle).trim()
+          ? String(liveFm.metaTitle)
+          : null;
       }
     }
     const operatorBrief = opp.bucket === OPERATOR_INTERCEPT_BUCKET
@@ -2864,6 +2872,7 @@ class AutonomousRunner {
       allowedInternalLinks,
       isRefresh,
       priorBody,
+      liveMetaTitle,
     };
   }
 

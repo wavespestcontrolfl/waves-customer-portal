@@ -1584,15 +1584,31 @@ async function publishMetadataRewrite(draft, brief = {}) {
   // the live page; only when neither variant exists, follow the page's
   // casing family so we never create a dead duplicate.
   const { titleField, metaField } = metaRewriteFieldTargets(currentFrontmatter);
+  // Owner hard rule (2026-07-16): service/location metaTitles — the
+  // intentional long near-me titles — are NEVER edited by automation. When
+  // the rewrite lane targets a non-blog page whose rendered title field is
+  // the protected metaTitle, keep the live value and apply only the
+  // meta-description rewrite. (Blog titles are legitimately editable, and
+  // non-blog pages rendering plain `title` are outside the protected
+  // contract — PR #224 edited those deliberately.)
+  const protectedMetaTitle = titleField === 'metaTitle'
+    && !isBlogTarget(filePath)
+    && currentFrontmatter.metaTitle !== undefined;
+  const effectiveTitle = protectedMetaTitle ? currentFrontmatter[titleField] : newTitle;
+  if (protectedMetaTitle && newTitle && newTitle !== String(currentFrontmatter[titleField] ?? '').trim()) {
+    logger.warn(`[astro-publisher] metadata rewrite for ${filePath} attempted a metaTitle rewrite — kept the live metaTitle (protected field)`);
+  }
   const nextFrontmatter = {
     ...currentFrontmatter,
-    [titleField]: newTitle,
+    [titleField]: effectiveTitle,
     [metaField]: newMeta,
   };
 
   // Semantic no-op check on the RENDERED fields (a parse→stringify round-trip
   // rarely reproduces the source byte-for-byte, so compare meaning, not text).
-  const titleChanged = newTitle !== String(currentFrontmatter[titleField] ?? '').trim();
+  const titleChanged = protectedMetaTitle
+    ? false // live value carried through untouched
+    : newTitle !== String(currentFrontmatter[titleField] ?? '').trim();
   const metaChanged = newMeta !== String(currentFrontmatter[metaField] ?? '').trim();
   if (!titleChanged && !metaChanged) {
     return {
@@ -1711,7 +1727,23 @@ async function publishRefresh(draft, brief = {}) {
   // fields, and only those that already exist on the live page (so we don't
   // introduce a title field a service page doesn't use, etc.).
   const nextFrontmatter = { ...currentFrontmatter };
+  const refreshBlogTarget = isBlogTarget(filePath);
   for (const field of REFRESH_EDITABLE_META_FIELDS) {
+    // Owner hard rule (2026-07-16): service/location metaTitles — the
+    // intentional long near-me titles — are NEVER edited by automation.
+    // Guardrails park a rewriting draft upstream (PROTECTED_META_TITLE_REWRITE);
+    // this freeze is the last-resort backstop for any caller that reaches the
+    // publisher without that gate. Blog pages don't carry the protected field
+    // contract (their titles are legitimately editable).
+    if (field === 'metaTitle' && !refreshBlogTarget) {
+      const attempted = draftFm[field] !== undefined && String(draftFm[field]).trim()
+        && currentFrontmatter[field] !== undefined
+        && String(draftFm[field]).trim() !== String(currentFrontmatter[field]).trim();
+      if (attempted) {
+        logger.warn(`[astro-publisher] refresh draft for ${filePath} attempted a metaTitle rewrite — kept the live metaTitle (protected field)`);
+      }
+      continue;
+    }
     if (currentFrontmatter[field] !== undefined && draftFm[field] !== undefined && String(draftFm[field]).trim()) {
       nextFrontmatter[field] = String(draftFm[field]).trim();
     }
