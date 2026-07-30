@@ -1650,12 +1650,20 @@ const SocialMediaService = {
         const linkedinStatus = await require('./linkedin').getStatus();
         linkedinWantsHero = !!linkedinStatus.connected && linkedinStatus.orgVerified !== false;
       }
-      if (requestedPlatforms.has('gbp') && SOCIAL_FLAGS.gbpEnabled
+      // GBP never consumes AI-generated imagery (owner rule) — its only
+      // legitimate image sources are the blog hero and the brand card, both
+      // of which live in the noAiImage branch below. In AI-allowed (manual)
+      // runs, don't count GBP as an image consumer: it can't use what would
+      // be generated, so a GBP-only manual run shouldn't burn image credits.
+      if (noAiImage && requestedPlatforms.has('gbp') && SOCIAL_FLAGS.gbpEnabled
         && (requestedGbpLocations === null || requestedGbpLocations.size > 0)) {
         const configured = await gbpService.getConfiguredLocations();
         gbpWantsImage = configured.some((loc) => !requestedGbpLocations || requestedGbpLocations.has(loc.id));
       }
     }
+    // Provenance of generatedImageUrl: true only when it came from the AI
+    // image generator (else branch below). GBP must never post AI imagery.
+    let aiGeneratedImage = false;
     if (metaWantsImage || gbpWantsImage || linkedinWantsHero) {
       if (noAiImage) {
         // Autonomous callers (RSS cron blog shares, studio campaigns, scheduled
@@ -1690,6 +1698,7 @@ const SocialMediaService = {
             const s3Url = await uploadImageToS3(img.base64, filename);
             if (s3Url) {
               generatedImageUrl = s3Url;
+              aiGeneratedImage = true; // FB/IG only — GBP must not inherit it
             }
           }
         } catch { /* non-critical */ }
@@ -1933,9 +1942,11 @@ const SocialMediaService = {
         // a GBP local post without media renders as a flat text card and its
         // "Learn more" CTA is easy to miss. Same public URL Instagram uses.
         // Prefer a GBP-specific image (4:3, no center-crop of the card's logo/
-        // CTA); fall back to the shared square image when none was supplied.
+        // CTA); fall back to the shared square image when none was supplied —
+        // but NEVER an AI-generated one (owner rule: no AI imagery on GBP;
+        // hero/brand-card images are fine, AI runs post text-only here).
         const gbpImg = (typeof resolvedGbpImageUrl === 'string' && resolvedGbpImageUrl)
-          || (typeof generatedImageUrl === 'string' ? generatedImageUrl : null);
+          || (!aiGeneratedImage && typeof generatedImageUrl === 'string' ? generatedImageUrl : null);
         let r = await postToGBP(loc.id, gbpContent, link, gbpImg);
         // Media is best-effort: if Google rejects or can't fetch the image,
         // retry text-only so an image problem doesn't block a post that would
@@ -2142,6 +2153,10 @@ module.exports.uploadImageToS3 = uploadImageToS3;
 module.exports.uploadVideoToS3 = uploadVideoToS3;
 module.exports.postToGBP = postToGBP;
 module.exports.isGbpMediaError = isGbpMediaError;
+// Deterministic on-brand card (SVG -> JPEG -> CDN) — the only image source
+// besides real photos/blog heroes that GBP posts may use (no AI imagery on
+// GBP, owner rule). Consumed by autonomous-runner's GBP action.
+module.exports.renderBrandCardUrl = renderBrandCardUrl;
 module.exports.normalizePublishChannels = normalizePublishChannels;
 module.exports.normalizeGbpLocationIds = normalizeGbpLocationIds;
 module.exports.checkAndRaiseAlert = checkAndRaiseAlert;

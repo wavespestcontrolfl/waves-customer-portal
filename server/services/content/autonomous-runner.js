@@ -2197,25 +2197,25 @@ class AutonomousRunner {
       };
     }
 
-    // Best-effort image so the GBP post isn't a flat text card. The image
-    // pipeline (generate -> S3 -> CDN) is the same one publishToAll uses for
-    // Instagram; on any failure we fall through to a text-only post (the
-    // prior behavior) rather than blocking the publish. Gate on image hosting
-    // first — uploadImageToS3 returns null without S3 + a CDN domain, so
-    // generating without it would just burn credits.
+    // Best-effort image so the GBP post isn't a flat text card. GBP never
+    // posts AI-generated imagery (owner rule) — use the same deterministic
+    // on-brand card the blog shares use, 4:3 so Google doesn't center-crop
+    // the logo/CTA. renderBrandCardUrl returns null on any failure (no
+    // S3/CDN, render error), falling through to a text-only post rather
+    // than blocking the publish.
     const imageHostingReady =
       !!process.env.S3_BUCKET && !!process.env.AWS_ACCESS_KEY_ID
       && !!process.env.AWS_SECRET_ACCESS_KEY && !!process.env.SOCIAL_MEDIA_CDN_DOMAIN;
     let gbpImageUrl = null;
     try {
-      if (imageHostingReady && social.generateImage && social.uploadImageToS3) {
-        const img = await social.generateImage(title);
-        if (img?.base64) {
-          gbpImageUrl = await social.uploadImageToS3(img.base64, `gbp-${location.id}-${Date.now()}.jpg`);
-        }
+      if (imageHostingReady && social.renderBrandCardUrl) {
+        gbpImageUrl = await social.renderBrandCardUrl(
+          { variant: 'blog', title, excerpt: content, cta: 'Learn more' },
+          'gbp',
+        );
       }
     } catch (err) {
-      logger.warn(`[autonomous-runner] GBP image generation failed (posting text-only): ${err.message}`);
+      logger.warn(`[autonomous-runner] GBP brand-card render failed (posting text-only): ${err.message}`);
     }
 
     const t2 = Date.now();
