@@ -1764,8 +1764,12 @@ async function createNewsletterDraft({
     enrichedPrompt += `\nHomeowner Minute topic: ${homeownerMinuteTopic}`;
   } else if (typeConfig?.flagship) {
     try {
+      // Bounded to weeks at or before THIS issue — operators pre-plan
+      // future calendar topics, and four planned future rows would
+      // otherwise displace all actual history.
       const recent = await knex('newsletter_calendar')
         .whereNotNull('homeowner_minute_topic')
+        .where('week_of', '<=', editorialReference)
         .orderBy('week_of', 'desc')
         .limit(4)
         .pluck('homeowner_minute_topic');
