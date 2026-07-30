@@ -174,6 +174,14 @@ async function loadLeadForCall(call, phone, { phoneFallback = true } = {}) {
         if (call?.id) concurrentQ = concurrentQ.whereNot('id', call.id);
         const concurrentCall = await concurrentQ.first();
         if (!concurrentCall) return { lead: reused, forThisCall: true };
+        // Ambiguous attribution on an actively-shared line: demoting the
+        // lead to the byPhone fallback is not enough — addressFromContext
+        // still lets a history lead supply the quote address for a new
+        // caller, so the wrong caller's parcel could still be priced. With
+        // overlapping calls on one line, no phone-matched lead is
+        // trustworthy at all: return none, and let the call transcript
+        // establish the address itself (or the draft red-lanes).
+        return { lead: null, forThisCall: false };
       }
     }
     if (!phoneFallback) return { lead: null, forThisCall: false };

@@ -282,7 +282,9 @@ describe('audit P2: reused-lead window vs foreign-sid leads', () => {
     }];
     const { lead, forThisCall } = await ctxPriv.loadLeadForCall(CALL, '+19415550123');
     expect(forThisCall).toBe(false);
-    expect(lead?.id).toBe('lead-ambiguous');
+    // Not even history: a history lead would still supply the quote
+    // address via addressFromContext for a new caller.
+    expect(lead).toBeNull();
   });
 
   test('an UNSTAMPED reused lead is also ambiguous when a concurrent call overlaps — falls to history', async () => {
@@ -301,8 +303,9 @@ describe('audit P2: reused-lead window vs foreign-sid leads', () => {
       to_phone: '+19415551111',
       created_at: '2026-07-01T17:10:00.000Z',
     }];
-    const { forThisCall } = await ctxPriv.loadLeadForCall(CALL, '+19415550123');
+    const { lead, forThisCall } = await ctxPriv.loadLeadForCall(CALL, '+19415550123');
     expect(forThisCall).toBe(false);
+    expect(lead).toBeNull();
   });
 
   test('a call that STARTED BEFORE this one but overlaps the window still makes attribution ambiguous', async () => {
@@ -323,8 +326,9 @@ describe('audit P2: reused-lead window vs foreign-sid leads', () => {
       // lookback; its processing can still touch the lead in-window.
       created_at: '2026-07-01T16:20:00.000Z',
     }];
-    const { forThisCall } = await ctxPriv.loadLeadForCall(CALL, '+19415550123');
+    const { lead, forThisCall } = await ctxPriv.loadLeadForCall(CALL, '+19415550123');
     expect(forThisCall).toBe(false);
+    expect(lead).toBeNull();
   });
 
   test("the current call's own call_log row does not count as a concurrent call", async () => {
