@@ -242,7 +242,7 @@ function appFooterHtml(T) {
   // its baked-in 41px margin) runs visually denser — 36px next to Apple's
   // 40px is the optical match. The 16px bottom margin keeps the badges
   // clear of the business fine-print lines that follow.
-  return `<div style="margin:14px 0 10px 0;font-family:${T.font};font-size:14px;font-weight:700;color:${T.ink};text-align:center;">
+  return `<div class="dm-page-text" style="margin:14px 0 10px 0;font-family:${T.font};font-size:14px;font-weight:700;color:${T.ink};text-align:center;">
             Track visits, reports &amp; payments in the Waves app
           </div>
           <div style="text-align:center;margin:0 0 16px 0;">
@@ -309,7 +309,11 @@ function glassCard(T, innerHtml, padding = '22px 26px', { darkAware = false } = 
   // cards (invoices, contracts, appointments, renderBlocks tables) keep
   // their light surface in dark mode: their inline light-theme colors
   // stay readable as a white card on the darkened page.
-  const cardClass = darkAware ? ' class="dm-card"' : '';
+  // Non-dark-aware cards still need ONE dark rule: the glass surface is
+  // semi-transparent rgba, which composites over the darkened page into
+  // an unreadable mid-grey — dm-lightcard forces the opaque white
+  // fallback so the light-theme inline colors keep their contrast.
+  const cardClass = darkAware ? ' class="dm-card"' : ' class="dm-lightcard"';
   const tdClass = darkAware ? ' class="dm-text"' : '';
   return `<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"${cardClass} style="background:${T.card};background:${T.cardGlassBg};border:1px solid ${T.cardBorder};border-radius:${T.cardRadius};box-shadow:${T.cardShadow};">
             <tr><td${tdClass} style="padding:${padding};">${innerHtml}</td></tr>
@@ -393,6 +397,8 @@ function glassPage(T, { preheader, title, contentHtml, msoWidth = 640 }) {
     body, .dm-body { background: #071F30 !important; }
     .dm-page { background: #071F30 !important; background-image: none !important; }
     .dm-card { background: #0C2B42 !important; border-color: #1E4460 !important; }
+    .dm-card a { color: #6CC1F0 !important; }
+    .dm-lightcard { background: #FFFFFF !important; }
     .dm-text, .dm-text p, .dm-text li { color: #DCE9F3 !important; }
     .dm-card h1, .dm-card h2, .dm-card h3, .dm-card h4, .dm-ink { color: #EAF4FB !important; }
     .dm-muted, .dm-muted a { color: #9DB4C6 !important; }
@@ -405,6 +411,8 @@ function glassPage(T, { preheader, title, contentHtml, msoWidth = 640 }) {
   [data-ogsc] body, [data-ogsb] body, [data-ogsc] .dm-body { background: #071F30 !important; }
   [data-ogsc] .dm-page, [data-ogsb] .dm-page { background: #071F30 !important; background-image: none !important; }
   [data-ogsc] .dm-card, [data-ogsb] .dm-card { background: #0C2B42 !important; border-color: #1E4460 !important; }
+  [data-ogsc] .dm-card a { color: #6CC1F0 !important; }
+  [data-ogsc] .dm-lightcard, [data-ogsb] .dm-lightcard { background: #FFFFFF !important; }
   [data-ogsc] .dm-text, [data-ogsc] .dm-text p, [data-ogsc] .dm-text li { color: #DCE9F3 !important; }
   [data-ogsc] .dm-card h1, [data-ogsc] .dm-card h2, [data-ogsc] .dm-card h3, [data-ogsc] .dm-card h4, [data-ogsc] .dm-ink { color: #EAF4FB !important; }
   [data-ogsc] .dm-muted, [data-ogsc] .dm-muted a { color: #9DB4C6 !important; }

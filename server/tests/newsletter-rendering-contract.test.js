@@ -137,10 +137,16 @@ describe('newsletter rendering contract', () => {
     // Heading darkening is SCOPED to dark-aware cards — transactional
     // emails keep light cards, so their navy headings must stay navy.
     expect(html).toContain('.dm-card h1, .dm-card h2');
-    const transactional = wrapEmail({ heading: 'Invoice ready', intro: 'Hi.' });
+    const transactional = wrapEmail({ heading: 'Invoice ready', intro: 'Hi.', lines: [['Total', '$10']] });
     expect(transactional).not.toContain('class="dm-card"');
+    // Transactional glass cards force the OPAQUE white fallback in dark
+    // mode — rgba would composite over the dark page into a mid-grey.
+    expect(transactional).toContain('class="dm-lightcard"');
+    expect(transactional).toContain('.dm-lightcard { background: #FFFFFF !important; }');
     expect(transactional).toContain('class="dm-ink"');
     expect(transactional).toContain('class="dm-page-text"');
+    // Every anchor inside the dark-aware newsletter card recolors.
+    expect(html).toContain('.dm-card a { color: #6CC1F0 !important; }');
     // Logo sits in its own block row ABOVE the masthead title.
     expect(html).toMatch(/<div style="display:block;text-align:center;"><a [^>]+><img [^>]*waves[^>]*><\/a><\/div>\s*<h1 class="dm-ink"/i);
   });
