@@ -1095,8 +1095,8 @@ router.get('/mosquito-onetime-quote', requireAdmin, async (req, res, next) => {
 // Booking-time twin of the tier sync's evidence test (self-booking-plan-sync):
 // TRUE when the series being booked would itself count as WaveGuard plan
 // coverage — recurring, not a callback/re-service, not commercial or
-// rodent-led, UPCOMING (a past-dated series is data backfill, not upcoming
-// coverage), not for a commercial-sentinel customer (commercial plans are
+// rodent-led, UPCOMING (a past-dated series is historical data entry, not
+// upcoming coverage), not for a commercial-sentinel customer (commercial plans are
 // flat, outside the residential tiers — enrollment fail-closes on them too),
 // and resolving to a WaveGuard plan family. The customer's tier is stamped
 // from the created rows only AFTER pricing validates (the in-transaction sync
