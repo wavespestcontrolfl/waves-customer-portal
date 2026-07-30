@@ -160,6 +160,14 @@ describe('audit P2: lawn turf provenance', () => {
     expect(lane).toBe(LANES.YELLOW);
     expect(reasons.some((r) => r.includes('plausibleMaxTurfCap'))).toBe(true);
   });
+
+  test('a LOW-confidence lot (caller-stated, e.g. retained by the V2 apply) parks a lot-driven draft yellow', () => {
+    const args = lawnArgs(lawnLine());
+    args.propertyFacts.lot = { value: 9500, source: 'caller_stated', confidence: 'low', rejected: [] };
+    const { lane, reasons } = classifyLane(args);
+    expect(lane).toBe(LANES.YELLOW);
+    expect(reasons.some((r) => r.includes('low-confidence') && r.includes('caller_stated'))).toBe(true);
+  });
 });
 
 // ── 2. Silent grass-track coercion parks yellow ───────────────

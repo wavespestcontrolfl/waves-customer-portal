@@ -495,6 +495,12 @@ function classifyLane({ intent, propertyFacts, engineResult, totals, comps, cali
     || lines.some((l) => l.turfSf || l.turfSqFt || l.treatableArea);
   if (usesLot && FALLBACK_SQFT_SOURCES.has(propertyFacts?.lot?.source)) {
     reasons.push(`lot sqft from fallback source (${propertyFacts.lot.source})`);
+  } else if (usesLot && String(propertyFacts?.lot?.confidence || '').toLowerCase() === 'low') {
+    // A retained V1 lot can be caller-stated at LOW confidence (the V2
+    // gate-on apply keeps real parcels instead of stamping a false "no
+    // lot") — low confidence must park review even when the source is not
+    // in the fallback set.
+    reasons.push(`lot sqft is low-confidence (${propertyFacts.lot.source}) — verify treatable area before send`);
   }
   if (propertyFacts?.home?.disputed) reasons.push('caller-stated sqft disagrees with the county roll');
   if (propertyFacts?.lot?.disputed) reasons.push('caller-stated lot size disagrees with the county parcel');
