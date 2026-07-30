@@ -48,31 +48,20 @@ exports.up = async function up(knex) {
       ORDER BY c1.account_id, c1.updated_at DESC
     ) c
     WHERE ca.id = c.account_id
-      -- Timestamp-gated: a canonical correction NEWER than every customer
-      -- copy is preserved — customers.updated_at moves for unrelated
-      -- reasons, so a stale property copy must never overwrite a fresher
-      -- account row.
-      AND c.updated_at > ca.updated_at
-      AND (ca.first_name IS DISTINCT FROM c.first_name
-        OR ca.last_name IS DISTINCT FROM c.last_name
-        OR ca.email IS DISTINCT FROM c.email
-        OR ca.phone IS DISTINCT FROM c.phone)
-      -- Identity-specific evidence: only reconcile an account that still
-      -- holds an EXACT derived copy of some live linked customer — that
-      -- proves the row was never independently corrected (no app writer
-      -- updates account identity pre-trigger; a direct/manual correction
-      -- matches no property copy and is preserved). Accounts matching no
-      -- live copy are left untouched: correction vs drift is
-      -- indistinguishable without per-field history, and the trigger
-      -- below heals them on the next real identity edit.
-      AND EXISTS (
-        SELECT 1 FROM customers c2
-        WHERE c2.account_id = ca.id AND c2.deleted_at IS NULL
-          AND c2.first_name IS NOT DISTINCT FROM ca.first_name
-          AND c2.last_name  IS NOT DISTINCT FROM ca.last_name
-          AND c2.email      IS NOT DISTINCT FROM ca.email
-          AND c2.phone      IS NOT DISTINCT FROM ca.phone
-      )
+      -- Promote unless the ACCOUNT row is STRICTLY newer than the newest
+      -- divergent copy. Equality must promote: the legacy admin path
+      -- edited identity WITHOUT bumping customers.updated_at, so a
+      -- single-property account seeded from its customer shares the exact
+      -- timestamp while the customer holds the correction — a strict gate
+      -- (or requiring some sibling to still match the account) would skip
+      -- precisely the rows this backfill exists to repair. No app writer
+      -- has ever UPDATEd account identity (inserts + the trigger below
+      -- only), so an account strictly newer than every divergent copy can
+      -- only be a deliberate direct correction — preserved. (Residual: a
+      -- manual correction that didn't bump ca.updated_at is
+      -- indistinguishable from drift; the trigger heals those on the next
+      -- real identity edit.)
+      AND c.updated_at >= ca.updated_at
   `);
   await knex.raw(`
     CREATE OR REPLACE FUNCTION propagate_customer_identity_to_account() RETURNS trigger AS $$

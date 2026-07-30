@@ -176,8 +176,8 @@ describe('runContactsSync', () => {
     const state = setupDb({
       customers: [queuedCustomer],
       leads: [{ id: 'l-1', first_name: 'Jane', email: 'jane2@customer.example', phone: null, customer_id: 'c-1', google_contact_id: 'people/lead1', updated_at: '2026-07-28T11:00:00Z' }],
-      // live-customer link check
-      firstResults: { customers: [{ id: 'c-1' }] },
+      // live-link check → fresh dest re-read → pre-stamp dest-liveness
+      firstResults: { customers: [{ id: 'c-1' }, { id: 'c-1' }, { id: 'c-1' }] },
     });
     mockPeopleApi.people.get.mockResolvedValueOnce({ data: { etag: 'e1', memberships: [] } });
     mockPeopleApi.people.updateContact.mockResolvedValueOnce({ data: { resourceName: 'people/lead1' } });
@@ -198,9 +198,9 @@ describe('runContactsSync', () => {
   test('a converted lead whose customer ALREADY has a different contact deletes the unshared duplicate', async () => {
     setupDb({
       leads: [{ id: 'l-1', first_name: 'Jane', email: 'jane@customer.example', phone: null, customer_id: 'c-1', google_contact_id: 'people/dup', updated_at: '2026-07-28T11:00:00Z' }],
-      updateResults: { customers: [0] }, // whereNull(google_contact_id) matches nothing
-      // live-link check, then the fresh re-read after the transfer miss
-      firstResults: { customers: [{ id: 'c-1' }, { id: 'c-1', google_contact_id: 'people/cust' }] },
+      // live-link check → fresh dest re-read (already covered) → dup
+      // in-use probe (customers, leads) → pre-stamp dest-liveness
+      firstResults: { customers: [{ id: 'c-1' }, { id: 'c-1', google_contact_id: 'people/cust' }, null, { id: 'c-1' }], leads: [null] },
     });
     const counts = await runContactsSync({ gapMs: 0 });
     expect(counts.skipped).toBe(1);
@@ -780,7 +780,8 @@ describe('runContactsSync', () => {
   test('a pending create on a CONVERTED lead is recovered and TRANSFERRED, never erased', async () => {
     const state = setupDb({
       leads: [{ id: 'l-p', first_name: 'Jane', email: 'jane@x.example', phone: null, customer_id: 'c-1', google_contact_id: 'pending_create_recovery::jane%40x.example', google_contact_synced_at: '2026-07-01T00:00:00Z', updated_at: '2026-07-28T11:00:00Z' }],
-      firstResults: { customers: [{ id: 'c-1' }] },
+      // live-link → fresh dest re-read → pre-stamp dest-liveness
+      firstResults: { customers: [{ id: 'c-1' }, { id: 'c-1' }, { id: 'c-1' }] },
     });
     mockPeopleApi.people.searchContacts.mockImplementation(async ({ query }) => (
       query === 'jane@x.example'
@@ -793,6 +794,45 @@ describe('runContactsSync', () => {
     // marker being stamped away over a live contact.
     expect(state.updates.find((u) => u.table === 'customers').patch).toEqual({ google_contact_id: 'people/orphan' });
     expect(state.updates.find((u) => u.table === 'leads').patch.google_contact_id).toBeNull();
+  });
+
+  test('a NEW customer adopts a phone-only lead contact with a compatible name', async () => {
+    setupDb({
+      customers: [{ ...CUSTOMER }],
+      // email adoption probe misses; the phone-suffix probe finds the
+      // previously synced phone-only lead
+      firstResults: { leads: [null, { id: 'l-po', google_contact_id: 'people/po', first_name: 'Jane', last_name: 'Customer' }] },
+    });
+    mockPeopleApi.people.get.mockResolvedValueOnce({ data: { etag: 'e1', metadata: { sources: [] }, memberships: [] } });
+    mockPeopleApi.people.updateContact.mockResolvedValueOnce({ data: { resourceName: 'people/po' } });
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(counts.synced).toBe(1);
+    expect(mockPeopleApi.people.createContact).not.toHaveBeenCalled();
+  });
+
+  test('a transfer destination tombstoned mid-run leaves the lead unstamped for re-resolution', async () => {
+    const state = setupDb({
+      leads: [{ id: 'l-1', first_name: 'Jane', email: 'jane@x.example', phone: null, customer_id: 'c-1', google_contact_id: null, updated_at: '2026-07-28T11:00:00Z' }],
+      // live-link check passes, then the pre-stamp liveness re-read finds
+      // the customer soft-deleted
+      firstResults: { customers: [{ id: 'c-1' }, null] },
+    });
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(counts.failed).toBe(1);
+    expect(counts.skipped).toBe(0);
+    // The lead was NOT stamped synced against a dead owner.
+    expect(state.updates.filter((u) => u.table === 'leads')).toEqual([]);
+  });
+
+  test('an auth failure during pending-create recovery BLOCKS the run (not a generic row failure)', async () => {
+    setupDb({
+      customers: [{ ...CUSTOMER, google_contact_id: 'pending_create_recovery::jane%40customer.example', google_contact_synced_at: '2026-07-01T00:00:00Z' }],
+    });
+    const err = new Error('invalid_grant');
+    err.code = 401;
+    mockPeopleApi.people.searchContacts.mockRejectedValue(err);
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(counts.blocked).toBe('google_auth_failed');
   });
 
   test('a restore-interrupted retirement REUSES the marked contact — no delete/recreate churn', async () => {
@@ -928,22 +968,26 @@ describe('runContactsSync', () => {
     expect(mockPeopleApi.people.createContact).not.toHaveBeenCalled();
   });
 
-  test('a failed sharer repoint falls back to a durable requeue of the stranded rows', async () => {
+  test('a failed sharer repoint rolls back the STAMP with it — atomic, then compensated', async () => {
     const state = setupDb({
       customers: [{ ...CUSTOMER, google_contact_id: 'people/dead', google_contact_synced_at: '2026-07-01T00:00:00Z' }],
-      // claim OK, stamp OK, customers repoint fails, fallback requeue succeeds
-      updateResults: { customers: [1, 1, new Error('db blip'), 1] },
+      // claim OK, stamp row OK, in-transaction customers repoint fails →
+      // the WHOLE stamp+repoint transaction rolls back
+      updateResults: { customers: [1, 1, new Error('db blip')] },
     });
     const gone = new Error('not found');
     gone.code = 404;
     mockPeopleApi.people.get.mockRejectedValueOnce(gone);
     mockPeopleApi.people.createContact.mockResolvedValueOnce({ data: { resourceName: 'people/reborn' } });
     const counts = await runContactsSync({ gapMs: 0 });
-    expect(counts.synced).toBe(1);
-    // The stranded sharers were requeued (synced_at cleared) so adoption
-    // re-resolves them to the replacement.
-    const requeue = state.updates.filter((u) => u.table === 'customers').map((u) => u.patch);
-    expect(requeue).toContainEqual({ google_contact_id: null, google_contact_synced_at: null });
+    // No half-state: the row was NOT stamped (rolled back with the failed
+    // repoint) and the fresh replacement was compensated away — the next
+    // run recreates and repoints atomically.
+    expect(counts.synced).toBe(0);
+    expect(counts.failed).toBe(1);
+    expect(mockPeopleApi.people.deleteContact).toHaveBeenCalledWith({ resourceName: 'people/reborn' });
+    const committed = state.updates.filter((u) => u.table === 'customers' && u.patch.google_contact_id === 'people/reborn');
+    expect(committed).toEqual([]);
   });
 
   test('a converted lead never gives a multi-property ACCOUNT a second contact', async () => {
@@ -951,8 +995,9 @@ describe('runContactsSync', () => {
       leads: [{ id: 'l-1', first_name: 'Jane', email: 'jane@x.example', phone: null, customer_id: 'c-1', google_contact_id: 'people/lead1', updated_at: '2026-07-28T11:00:00Z' }],
       firstResults: {
         // live-link → fresh read (row null but has account) → account
-        // sibling holds the contact → in-use probe for the lead's dup
-        customers: [{ id: 'c-1' }, { id: 'c-1', account_id: 'acct-1', google_contact_id: null }, { id: 'c-9', google_contact_id: 'people/acct' }, null],
+        // sibling holds the contact → in-use probe for the lead's dup →
+        // pre-stamp dest-liveness re-read
+        customers: [{ id: 'c-1' }, { id: 'c-1', account_id: 'acct-1', google_contact_id: null }, { id: 'c-9', google_contact_id: 'people/acct' }, null, { id: 'c-1' }],
         leads: [null],
       },
     });

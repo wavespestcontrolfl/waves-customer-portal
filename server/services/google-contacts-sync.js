@@ -299,7 +299,7 @@ const STAMP_VETO = Symbol('stampVeto');
  * would deadlock against it. A stale-account veto therefore has to ROLL
  * BACK the already-applied stamp instead of skipping it.
  */
-async function guardedStamp(table, row, patch) {
+async function guardedStamp(table, row, patch, { repoint = null } = {}) {
   try {
     return await db.transaction(async (trx) => {
       const q = applyRowGuard(trx(table).where({ id: row.id }), row);
@@ -318,6 +318,19 @@ async function guardedStamp(table, row, patch) {
           && new Date(acc.updated_at_us ? acc.updated_at_us.replace(' ', 'T') : 0).getTime()
             > new Date(row.__canonicalIdentity.updated_at).getTime() + 1) throw veto;
       }
+      if (n && repoint && repoint.from && repoint.from !== repoint.to) {
+        // ATOMIC sharer repoint: a crash between a committed stamp and a
+        // separate repoint pass would erase the durable marker while
+        // sharers still hold the dead id — each would then 404, search for
+        // its OWN tag (absent: the replacement carries the creator's) and
+        // permanently mint a duplicate. One transaction makes it
+        // stamp-and-repoint or neither; a veto/rollback leaves the marker
+        // for the next run's recovery.
+        for (const t of ['customers', 'leads']) {
+          await trx(t).where('google_contact_id', repoint.from)
+            .update({ google_contact_id: repoint.to });
+        }
+      }
       return n;
     });
   } catch (err) {
@@ -326,12 +339,12 @@ async function guardedStamp(table, row, patch) {
   }
 }
 
-async function stampIfUnchanged(table, row, patch) {
+async function stampIfUnchanged(table, row, patch, opts) {
   // GREATEST(updated_at, now()) — DB-side clock, skew-free: the watermark
   // must also cover the ACCOUNT staleness clause (ca.updated_at compares
   // against it), and copying updated_at alone would loop account-stale rows
   // forever.
-  return guardedStamp(table, row, { ...patch, google_contact_synced_at: db.raw('GREATEST(updated_at, now())') });
+  return guardedStamp(table, row, { ...patch, google_contact_synced_at: db.raw('GREATEST(updated_at, now())') }, opts);
 }
 
 /**
@@ -340,8 +353,8 @@ async function stampIfUnchanged(table, row, patch) {
  * back would leave the row eligible again immediately and pin the lane to
  * the same oldest rows forever.
  */
-async function stampVerified(table, row, resourceName, now) {
-  return guardedStamp(table, row, { google_contact_id: resourceName, google_contact_synced_at: now });
+async function stampVerified(table, row, resourceName, now, opts) {
+  return guardedStamp(table, row, { google_contact_id: resourceName, google_contact_synced_at: now }, opts);
 }
 
 /** True when another LIVE row still references this Google contact. */
@@ -779,6 +792,20 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
             logger.warn('[contacts-sync] People API scope missing — waiting on one-time owner re-consent at the admin Gmail auth URL');
             return counts;
           }
+          // findExistingContact deliberately rethrows all three systemic
+          // classes — swallowing auth/service-disabled here as generic row
+          // failures would let a fully-marked batch finish without the
+          // actionable blocked status.
+          if (isAuthError(searchErr)) {
+            counts.blocked = 'google_auth_failed';
+            logger.warn('[contacts-sync] Google credentials rejected during pending-create recovery — run blocked; reconnect Google in admin');
+            return counts;
+          }
+          if (isServiceDisabledError(searchErr)) {
+            counts.blocked = 'people_api_disabled';
+            logger.warn('[contacts-sync] People API disabled during pending-create recovery — run blocked; enable it in Google Cloud console');
+            return counts;
+          }
           counts.failed += 1;
           logger.warn(`[contacts-sync] pending-create recovery search inconclusive (${table} ${row.id}) — marker retained`);
           continue;
@@ -847,6 +874,7 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
                 // The customer row adopts the ACCOUNT's contact...
                 await db('customers').where({ id: ownership.customerId })
                   .whereNull('google_contact_id')
+                  .whereNull('deleted_at')
                   .update({ google_contact_id: existingContact });
               }
             }
@@ -860,12 +888,30 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
                 await sleep(gapMs);
               }
             } else {
+              // deleted_at predicate: the transfer must not hand the
+              // contact to a customer tombstoned since ownership resolved
+              // (the tombstone lane would retire it while the live lead
+              // points nowhere).
               const transferred = await db('customers')
                 .where({ id: ownership.customerId })
                 .whereNull('google_contact_id')
+                .whereNull('deleted_at')
                 .update({ google_contact_id: row.google_contact_id });
               if (transferred && queued && !queued.google_contact_id) queued.google_contact_id = row.google_contact_id;
             }
+          }
+          // Revalidate destination liveness before stamping the lead away
+          // from its contact — a customer soft-deleted mid-run means no
+          // live owner exists; leave the lead unstamped so the next tick
+          // re-resolves ownership (and mints its own if the link is gone).
+          const destStillLive = await db('customers')
+            .where({ id: ownership.customerId })
+            .whereNull('deleted_at')
+            .first();
+          if (!destStillLive) {
+            counts.failed += 1;
+            logger.warn(`[contacts-sync] transfer destination customer tombstoned mid-run (${table} ${row.id}) — lead re-resolves next tick`);
+            continue;
           }
           await stampIfUnchanged(table, row, { google_contact_id: null });
           counts.skipped += 1;
@@ -1009,6 +1055,39 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
             row.google_contact_id = leadContact;
           }
         }
+        if (!row.google_contact_id) {
+          // PHONE-ONLY leads never match the email probe — a previously
+          // synced unlinked lead with only a number would leave this
+          // customer minting a second contact for the same person. Same
+          // phone-suffix + compatible-name rules as the lead-side probe.
+          const identity = row.__canonicalIdentity || row;
+          const custPhoneDigits = String(identity.phone || row.phone || '').replace(/\D/g, '').slice(-10);
+          const custName = `${String(identity.first_name || '').trim()} ${String(identity.last_name || '').trim()}`.trim().toLowerCase();
+          if (custPhoneDigits.length >= 7) {
+            const phoneLeadOwner = await db('leads')
+              .whereNull('deleted_at')
+              .whereNotNull('google_contact_id')
+              .whereNot('google_contact_id', 'like', `${PENDING_CREATE}%`)
+              .whereNot('google_contact_id', 'like', `${PENDING_RETIRE}%`)
+              .whereRaw(
+                "(RIGHT(regexp_replace(phone, '\\D', '', 'g'), ?) = ?"
+                + " OR (LENGTH(regexp_replace(phone, '\\D', '', 'g')) BETWEEN 7 AND 9"
+                + " AND RIGHT(?, LENGTH(regexp_replace(phone, '\\D', '', 'g'))) = regexp_replace(phone, '\\D', '', 'g')))",
+                [custPhoneDigits.length, custPhoneDigits, custPhoneDigits],
+              )
+              .whereRaw("(TRIM(email) IS NULL OR TRIM(email) = '')")
+              .where((q) => {
+                if (custName) q.whereRaw("(TRIM(CONCAT_WS(' ', first_name, last_name)) = '' OR LOWER(TRIM(CONCAT_WS(' ', first_name, last_name))) = ?)", [custName]);
+              })
+              .select('id', 'google_contact_id', 'first_name', 'last_name')
+              .first();
+            if (phoneLeadOwner?.google_contact_id) {
+              const leadName = `${String(phoneLeadOwner.first_name || '').trim()} ${String(phoneLeadOwner.last_name || '').trim()}`.trim().toLowerCase();
+              const namesConflict = !!(custName && leadName && custName !== leadName);
+              if (!namesConflict) row.google_contact_id = phoneLeadOwner.google_contact_id;
+            }
+          }
+        }
       }
       const priorContactId = row.google_contact_id;
       if (row.google_contact_id && repointedThisRun.has(row.google_contact_id)) {
@@ -1035,9 +1114,14 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
             .catch(() => {});
         }
       };
+      // During recovery the row's prior id IS the recovered resource — the
+      // dead contact every sharer still holds is the one the MARKER kept.
+      const repointFrom = pendingRecovery ? markerPriorId : (created ? priorContactId : null);
+      const repoint = (repointFrom && repointFrom !== resourceName)
+        ? { from: repointFrom, to: resourceName } : null;
       let stamped = 0;
       try {
-        stamped = await stampIfUnchanged(table, row, { google_contact_id: resourceName });
+        stamped = await stampIfUnchanged(table, row, { google_contact_id: resourceName }, { repoint });
       } catch (stampErr) {
         // The row didn't record the contact — a GENUINELY fresh create
         // would leak a duplicate on retry; roll only that back (adopted or
@@ -1055,39 +1139,9 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
         logger.info(`[contacts-sync] stamp vetoed by a concurrent edit (${table} ${row.id}) — re-syncing next run`);
         continue;
       }
-      // During recovery the row's prior id IS the recovered resource — the
-      // dead contact every sharer still holds is the one the MARKER kept.
-      const repointFrom = pendingRecovery ? markerPriorId : (created ? priorContactId : null);
-      if (repointFrom && repointFrom !== resourceName) {
-        // 404-recreate (or a RECOVERED replacement create — the marker
-        // preserved the dead id) of a possibly SHARED contact: repoint
-        // every live row still holding the dead resource name, or
-        // verification would mint one replacement per sharer.
-        repointedThisRun.set(repointFrom, resourceName);
-        for (const t of ['customers', 'leads']) {
-          try {
-            await db(t).where('google_contact_id', repointFrom)
-              .update({ google_contact_id: resourceName });
-          } catch (repointErr) {
-            // Durable fallback: requeue the stranded sharers instead —
-            // stale rows re-resolve to the replacement through the normal
-            // adoption probes. If even that fails, the run reports failed
-            // so job health surfaces it.
-            try {
-              // Dead id cleared WITH the requeue — the adoption probes skip
-              // rows holding a non-null pointer, and the replacement's tag
-              // belongs to the creating sharer, so a stranded dead id could
-              // never self-resolve.
-              await db(t).where('google_contact_id', repointFrom)
-                .update({ google_contact_id: null, google_contact_synced_at: null });
-              logger.warn(`[contacts-sync] sharer repoint failed on ${t} — sharers requeued for adoption: ${safeErr(repointErr)}`);
-            } catch (requeueErr) {
-              counts.failed += 1;
-              logger.warn(`[contacts-sync] sharer repoint AND requeue failed on ${t} — run marked degraded: ${safeErr(requeueErr)}`);
-            }
-          }
-        }
-      }
+      // Sharer repoints committed atomically WITH the stamp above; the
+      // in-run map still forwards later batch rows to the replacement.
+      if (repoint) repointedThisRun.set(repoint.from, repoint.to);
       counts.synced += 1;
       await sleep(gapMs);
     } catch (err) {
@@ -1402,9 +1456,11 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
             .catch(() => {});
         }
       };
+      const verifyRepoint = (created && priorContactId && priorContactId !== resourceName)
+        ? { from: priorContactId, to: resourceName } : null;
       let stamped = 0;
       try {
-        stamped = await stampVerified(table, row, resourceName, now);
+        stamped = await stampVerified(table, row, resourceName, now, { repoint: verifyRepoint });
       } catch (stampErr) {
         // Same fresh-create compensation as the main lane — a 404-recreate
         // whose stamp threw would otherwise leak a replacement per retry.
@@ -1415,27 +1471,9 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
         await compensateVerifyCreate();
       }
       if (stamped) {
-        // Repoint sharers only AFTER the stamp holds — repointing first
-        // and then compensating a vetoed stamp would leave every sharer
-        // aimed at a deleted replacement.
-        if (created && priorContactId && priorContactId !== resourceName) {
-          repointedThisRun.set(priorContactId, resourceName);
-          for (const t of ['customers', 'leads']) {
-            try {
-              await db(t).where('google_contact_id', priorContactId)
-                .update({ google_contact_id: resourceName });
-            } catch (repointErr) {
-              try {
-                await db(t).where('google_contact_id', priorContactId)
-                  .update({ google_contact_id: null, google_contact_synced_at: null });
-                logger.warn(`[contacts-sync] sharer repoint failed on ${t} — sharers requeued for adoption: ${safeErr(repointErr)}`);
-              } catch (requeueErr) {
-                counts.failed += 1;
-                logger.warn(`[contacts-sync] sharer repoint AND requeue failed on ${t} — run marked degraded: ${safeErr(requeueErr)}`);
-              }
-            }
-          }
-        }
+        // Sharer repoints committed atomically WITH the stamp — a crash
+        // can no longer separate them, and a veto rolls both back.
+        if (verifyRepoint) repointedThisRun.set(verifyRepoint.from, verifyRepoint.to);
         counts.verified += 1;
       }
       await sleep(gapMs);
