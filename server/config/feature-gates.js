@@ -573,6 +573,25 @@ const gates = {
   // ingested. Read-only against Twilio; writes only admin notifications.
   // Off → cron ticks are no-ops.
   callIngestWatchdog: process.env.GATE_CALL_INGEST_WATCHDOG === 'true',
+  // Booking-miss watchdog: a 30-min cron that rings an admin bell when a
+  // call's V2 extraction says a concrete appointment slot was CONFIRMED but
+  // no non-cancelled scheduled_services row exists for that customer on that
+  // ET date — the pager for confirmed-but-never-booked calls (outbound skip,
+  // v2 routing block, missing fields all park silently in triage otherwise;
+  // born from a 2026-07-28 outbound callback whose confirmed Saturday-noon
+  // slot was never booked). Reads call_log + scheduled_services; writes only
+  // admin notifications.
+  // Off → cron ticks are no-ops.
+  callBookingMissWatchdog: process.env.GATE_CALL_BOOKING_MISS_WATCHDOG === 'true',
+  // Retroactive call_log→customer linking: an hourly cron that links
+  // customer_id-NULL calls to a customer by UNAMBIGUOUS primary-phone match
+  // (same single-match rule as webhook intake) — heals calls that arrived
+  // before their customer record existed (observed 2026-07: a voicemail
+  // orphaned for two weeks). Skips deliberate unlinks (internal-number
+  // phantoms, rejected voicemails). Idempotent, never overwrites a non-NULL
+  // link.
+  // Off → cron ticks are no-ops.
+  callLogRelink: process.env.GATE_CALL_LOG_RELINK === 'true',
   // Bounce-triggered call-audio email re-verification: a hard bounce on a
   // call-captured address re-runs the source RECORDING through transcription
   // (letter-fidelity contact pass) + a deterministic name-anchored candidate
