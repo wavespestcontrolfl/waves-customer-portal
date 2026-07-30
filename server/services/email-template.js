@@ -190,7 +190,7 @@ function ctaButton(href, label) {
     <table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:0 auto;${block ? 'width:100%;' : ''}">
       <tr>
         <td ${block ? 'align="center" ' : ''}style="border-radius:${T.ctaRadius};background:${T.ctaBg};${T.ctaBgImage ? `background-image:${T.ctaBgImage};` : ''}border:1px solid ${T.ctaBorder};${T.ctaShadow ? `box-shadow:${T.ctaShadow};` : ''}">
-          <a href="${href}" style="display:${block ? 'block' : 'inline-block'};padding:${T.ctaPad};font-family:${T.font};font-size:${T.ctaSize};font-weight:${T.ctaWeight};color:${T.ctaText};text-decoration:none;letter-spacing:0;line-height:1.1;${block ? 'text-align:center;' : ''}">
+          <a href="${href}" class="dm-gold" style="display:${block ? 'block' : 'inline-block'};padding:${T.ctaPad};font-family:${T.font};font-size:${T.ctaSize};font-weight:${T.ctaWeight};color:${T.ctaText};text-decoration:none;letter-spacing:0;line-height:1.1;${block ? 'text-align:center;' : ''}">
             ${label}
           </a>
         </td>
@@ -268,7 +268,7 @@ function ctaChip(href, label) {
     <table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:0 auto;">
       <tr>
         <td style="border-radius:${T.ctaRadius};background:#FFFFFF;${T.cardGlassBg ? `background:rgba(255,255,255,0.6);` : ''}border:1px solid ${T.cardGlassBg ? T.cardBorder : T.ink};">
-          <a href="${href}" style="display:inline-block;padding:12px 22px;font-family:${T.font};font-size:14px;font-weight:700;color:${T.ink};text-decoration:none;letter-spacing:0;line-height:1.1;">
+          <a href="${href}" class="dm-gold" style="display:inline-block;padding:12px 22px;font-family:${T.font};font-size:14px;font-weight:700;color:${T.ink};text-decoration:none;letter-spacing:0;line-height:1.1;">
             ${label}
           </a>
         </td>
@@ -400,13 +400,14 @@ function glassPage(T, { preheader, title, contentHtml, msoWidth = 640 }) {
     .dm-card a { color: #6CC1F0 !important; }
     .dm-card a.dm-gold, a.dm-gold { color: #1B2C5B !important; }
     .dm-card a.dm-onnavy, a.dm-onnavy { color: #FFFFFF !important; }
+    .dm-box span.dm-chip-lite { color: #04395E !important; }
     .dm-lightcard { background: #FFFFFF !important; }
     .dm-text, .dm-text p, .dm-text li { color: #DCE9F3 !important; }
     .dm-card h1, .dm-card h2, .dm-card h3, .dm-card h4, .dm-ink { color: #EAF4FB !important; }
     .dm-muted, .dm-muted a { color: #9DB4C6 !important; }
     .dm-page-text { color: #DCE9F3 !important; }
     .dm-box { background: #12354F !important; }
-    .dm-box, .dm-box p, .dm-box li, .dm-box span, .dm-box em, .dm-box strong { color: #DCE9F3 !important; }
+    .dm-box, .dm-box p, .dm-box li { color: #DCE9F3 !important; }
     .dm-chip { background: #12354F !important; color: #CFE6F5 !important; }
     a.dm-link { color: #6CC1F0 !important; }
   }
@@ -416,13 +417,14 @@ function glassPage(T, { preheader, title, contentHtml, msoWidth = 640 }) {
   [data-ogsc] .dm-card a { color: #6CC1F0 !important; }
   [data-ogsc] .dm-card a.dm-gold, [data-ogsc] a.dm-gold { color: #1B2C5B !important; }
   [data-ogsc] .dm-card a.dm-onnavy, [data-ogsc] a.dm-onnavy { color: #FFFFFF !important; }
+  [data-ogsc] .dm-box span.dm-chip-lite { color: #04395E !important; }
   [data-ogsc] .dm-lightcard, [data-ogsb] .dm-lightcard { background: #FFFFFF !important; }
   [data-ogsc] .dm-text, [data-ogsc] .dm-text p, [data-ogsc] .dm-text li { color: #DCE9F3 !important; }
   [data-ogsc] .dm-card h1, [data-ogsc] .dm-card h2, [data-ogsc] .dm-card h3, [data-ogsc] .dm-card h4, [data-ogsc] .dm-ink { color: #EAF4FB !important; }
   [data-ogsc] .dm-muted, [data-ogsc] .dm-muted a { color: #9DB4C6 !important; }
   [data-ogsc] .dm-page-text { color: #DCE9F3 !important; }
   [data-ogsc] .dm-box, [data-ogsb] .dm-box { background: #12354F !important; }
-  [data-ogsc] .dm-box, [data-ogsc] .dm-box p, [data-ogsc] .dm-box li, [data-ogsc] .dm-box span, [data-ogsc] .dm-box em, [data-ogsc] .dm-box strong { color: #DCE9F3 !important; }
+  [data-ogsc] .dm-box, [data-ogsc] .dm-box p, [data-ogsc] .dm-box li { color: #DCE9F3 !important; }
   [data-ogsc] .dm-chip, [data-ogsb] .dm-chip { background: #12354F !important; color: #CFE6F5 !important; }
   [data-ogsc] a.dm-link { color: #6CC1F0 !important; }
 </style>
@@ -529,7 +531,7 @@ function glassNewsletter({ body, unsubscribeUrl, preheader, footerNote, preferre
           <p class="dm-muted" style="margin:6px 0 0 0;font-family:${T.font};font-size:15px;line-height:1.5;color:${T.muted};">${identity.tagline}</p>` : ''}`;
 
   const footerExtras = `${webVersionLine}${preferredSourcesLine}${unsubscribeLine}${footerNote
-    ? `<div style="margin-top:8px;font-family:${T.font};font-size:14px;color:${T.muted};text-align:center;">${footerNote}</div>`
+    ? `<div class="dm-muted" style="margin-top:8px;font-family:${T.font};font-size:14px;color:${T.muted};text-align:center;">${footerNote}</div>`
     : ''}`;
 
   const contentHtml = `<table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="max-width:640px;">

@@ -313,9 +313,9 @@ function renderQuizNeutralHtml({ quizId = DEFAULT_QUIZ_ID } = {}) {
   const quiz = getQuiz(quizId);
   if (!quiz) return '';
   const chips = quiz.answers.map((a) =>
-    `<span style="display:inline-block;margin:4px;padding:9px 14px;background:#ffffff;border:1px solid ${C.rule};border-radius:8px;font-size:14px;color:${C.navy};font-family:Inter,Arial,sans-serif;">${esc(a.label)}</span>`,
+    `<span class="dm-chip-lite" style="display:inline-block;margin:4px;padding:9px 14px;background:#ffffff;border:1px solid ${C.rule};border-radius:8px;font-size:14px;color:${C.navy};font-family:Inter,Arial,sans-serif;">${esc(a.label)}</span>`,
   ).join('');
-  return `<div style="margin:24px 0;padding:20px;background:${C.cardBg};border:1px solid ${C.rule};border-radius:12px;text-align:center;">
+  return `<div class="dm-box" style="margin:24px 0;padding:20px;background:${C.cardBg};border:1px solid ${C.rule};border-radius:12px;text-align:center;">
 <p style="margin:0 0 12px 0;font-size:17px;font-weight:800;color:${C.navy};font-family:Inter,Arial,sans-serif;">${esc(quiz.question)}</p>
 <div>${chips}</div>
 <p style="margin:12px 0 0 0;font-size:12px;color:${C.muted};font-family:Inter,Arial,sans-serif;">Subscribers tap an answer right in the email to get a free check.</p>
