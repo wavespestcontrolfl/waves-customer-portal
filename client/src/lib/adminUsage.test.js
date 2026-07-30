@@ -114,6 +114,12 @@ describe('safeTab', () => {
     // and underscore names never occur as tab slugs in this app.
     expect(safeTab('?tab=5551234567')).toBeNull();
     expect(safeTab('?tab=john_smith')).toBeNull();
+    // A lowercased 32-hex customer-facing token starts with a letter and
+    // passes the slug shape — the opaque backstop (≥20 chars AND
+    // digit-bearing) rejects it, while long hyphenated route words
+    // without digits stay valid (Codex #2961 r21).
+    expect(safeTab('?tab=abcdef0123456789abcdef0123456789')).toBeNull();
+    expect(safeTab('?tab=pricing-reality-check')).toBe('pricing-reality-check');
   });
 });
 

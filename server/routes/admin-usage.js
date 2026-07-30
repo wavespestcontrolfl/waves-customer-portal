@@ -35,6 +35,12 @@ const PATH_RE = /^\/admin(?:\/(?::id|[a-z0-9]+(?:-[a-z0-9]+)*)){0,6}$/;
 // a hyphenated lowercase word is shape-indistinguishable from a tab slug,
 // same bounded residual as path route words.
 const TAB_RE = /^(?=.{1,32}$)[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
+// Opaque-identifier backstop for tabs, mirroring the path-segment rule:
+// safeTab lowercases before validating, so a 32-hex customer-facing token
+// that happens to start with a letter passes TAB_RE — but no real tab slug
+// is ≥20 chars AND digit-bearing, while lowercased hex tokens virtually
+// always are (Codex #2961 r21). Mirrored client-side.
+const TAB_OPAQUE_RE = /^(?=[a-z0-9-]*\d)[a-z0-9-]{20,}$/;
 const SOURCES = new Set(['sidebar', 'tabbar', 'more', 'palette', 'load', 'in-app']);
 const EVENT_TYPES = new Set(['page_view']);
 
@@ -153,7 +159,7 @@ router.post('/track', async (req, res, next) => {
     if (!KNOWN_PAGE_KEYS.has(derivedKey)) {
       return res.status(400).json({ error: 'Unknown page' });
     }
-    if (tab != null && (typeof tab !== 'string' || !TAB_RE.test(tab))) {
+    if (tab != null && (typeof tab !== 'string' || !TAB_RE.test(tab) || TAB_OPAQUE_RE.test(tab))) {
       return res.status(400).json({ error: 'Invalid tab' });
     }
     if (source != null && !SOURCES.has(source)) {

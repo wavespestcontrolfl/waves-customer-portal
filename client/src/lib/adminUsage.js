@@ -31,6 +31,11 @@ const OPAQUE_RE = /^(?=[A-Za-z0-9_-]*[A-Z0-9_])[A-Za-z0-9_-]{20,}$/;
 // tabs anywhere in this app — reject them so a crafted ?tab= link can't
 // smuggle an identifier. Mirrored server-side.
 const TAB_RE = /^(?=.{1,32}$)[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
+// Opaque-identifier backstop mirroring the path-segment rule: safeTab
+// lowercases first, so a 32-hex customer-facing token starting with a
+// letter passes TAB_RE — no real tab slug is ≥20 chars AND digit-bearing,
+// while lowercased hex tokens virtually always are (Codex #2961 r21).
+const TAB_OPAQUE_RE = /^(?=[a-z0-9-]*\d)[a-z0-9-]{20,}$/;
 const PAGE_KEY_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
 // How long a marked navigation source stays valid before falling back to
@@ -77,9 +82,6 @@ const SELF_REPORTING_PAGES = new Set([
   'dispatch',
   'service-library',
 ]);
-// NOT listed: dispatch — its URL sync-back effect rewrites ?tab= to the
-// resolved tab on mount (AdminDispatchPage), so the raw beacon
-// self-corrects inside the 800ms settle and needs no page-side report.
 const SELF_REPORT_SETTLE_MS = 5000;
 
 let pendingSource = null; // { source, ts }
@@ -170,13 +172,13 @@ export function safeTab(search) {
   for (const [key, raw] of params) {
     if (!NESTED_TAB_KEY_RE.test(key) || !raw) continue;
     const tab = raw.toLowerCase();
-    return TAB_RE.test(tab) ? tab : null;
+    return TAB_RE.test(tab) && !TAB_OPAQUE_RE.test(tab) ? tab : null;
   }
   for (const key of TAB_QUERY_KEYS) {
     const raw = params.get(key);
     if (!raw) continue;
     const tab = raw.toLowerCase();
-    return TAB_RE.test(tab) ? tab : null;
+    return TAB_RE.test(tab) && !TAB_OPAQUE_RE.test(tab) ? tab : null;
   }
   return null;
 }

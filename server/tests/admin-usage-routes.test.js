@@ -257,6 +257,9 @@ describe('admin usage: POST /track', () => {
     ['tab with spaces', { pageKey: 'leads', path: '/admin/leads', tab: 'my search' }],
     ['digits-only tab (phone-shaped)', { pageKey: 'leads', path: '/admin/leads', tab: '5551234567' }],
     ['underscore tab (name-shaped)', { pageKey: 'leads', path: '/admin/leads', tab: 'john_smith' }],
+    // A lowercased 32-hex token passes the slug shape; the opaque
+    // backstop (≥20 chars AND digit-bearing) rejects it (Codex r21).
+    ['32-hex-token tab (opaque)', { pageKey: 'leads', path: '/admin/leads', tab: 'abcdef0123456789abcdef0123456789' }],
     ['unknown source', { pageKey: 'leads', path: '/admin/leads', source: 'carrier-pigeon' }],
     ['unknown eventType', { pageKey: 'leads', path: '/admin/leads', eventType: 'click' }],
     ['missing pageKey', {}],
