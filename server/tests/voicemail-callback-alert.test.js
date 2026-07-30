@@ -115,7 +115,7 @@ describe('customer_voicemail_callback trigger registry entry', () => {
     expect(entry.group).toBe('Communication');
   });
 
-  test('build links to the customer thread when known and masks the phone', () => {
+  test('build links to the Calls tab and masks the phone', () => {
     const built = entry.build({
       name: 'Sam Example',
       service: 'WDO Inspection',
@@ -126,10 +126,22 @@ describe('customer_voicemail_callback trigger registry entry', () => {
     expect(built.body).toContain('Sam Example');
     expect(built.body).toContain('WDO Inspection');
     expect(built.body).not.toContain('5550006');
-    expect(built.link).toBe('/admin/communications?thread=cust-1');
+    // Voicemails render under the Calls tab — ?thread= would open the SMS
+    // view instead.
+    expect(built.link).toBe('/admin/communications#tab=calls');
 
     const anon = entry.build({ phone: TEST_PHONE });
-    expect(anon.link).toBe('/admin/communications');
+    expect(anon.link).toBe('/admin/communications#tab=calls');
     expect(anon.body).not.toContain('5550006');
+  });
+
+  test('push tag is unique per call so one caller cannot hide another', () => {
+    const { __private } = require('../services/notification-triggers');
+    const tagA = __private.pushTagFor('customer_voicemail_callback', { callLogId: 'call-a' });
+    const tagB = __private.pushTagFor('customer_voicemail_callback', { callLogId: 'call-b' });
+    expect(tagA).not.toBe(tagB);
+    expect(tagA).toContain('call-a');
+    // Same call re-push keeps a stable tag (replaces itself, not others).
+    expect(__private.pushTagFor('customer_voicemail_callback', { callLogId: 'call-a' })).toBe(tagA);
   });
 });

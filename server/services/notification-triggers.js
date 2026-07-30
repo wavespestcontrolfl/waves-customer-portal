@@ -167,7 +167,10 @@ const TRIGGER_REGISTRY = {
       return {
         title: 'Voicemail callback needed',
         body: bodyParts.join(' - '),
-        link: p.customerId ? `/admin/communications?thread=${p.customerId}` : '/admin/communications',
+        // Voicemail recordings render under the Calls tab (hash-routed);
+        // ?thread= would open the SMS view instead. CallLogTabV2 has no
+        // per-call URL param today, so the tab is the deepest stable link.
+        link: '/admin/communications#tab=calls',
       };
     },
   },
@@ -555,6 +558,13 @@ function pushTagFor(triggerKey, payload = {}) {
   if (triggerKey === 'sms_reply') {
     const thread = payload.threadId || 'unknown-thread';
     return `waves-sms_reply-${thread}-${crypto.randomUUID()}`;
+  }
+  if (triggerKey === 'customer_voicemail_callback') {
+    // Per-call tag: the service worker replaces same-tag pushes with
+    // renotify:false, so a static tag would let a second caller's alert
+    // silently swallow the first. Stable per call — a reprocess re-push for
+    // the SAME call may replace itself.
+    return `waves-customer_voicemail_callback-${payload.callLogId || 'unknown-call'}`;
   }
   return `waves-${triggerKey}`;
 }

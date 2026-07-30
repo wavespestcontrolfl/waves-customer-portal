@@ -5044,30 +5044,29 @@ const CallRecordingProcessor = {
             outbound: isOutboundCall(call),
           });
           if (alertPlan) {
-            const vmAlertCustomer = call.customer_id
-              ? { id: call.customer_id }
-              : await findCustomerForCallContact(vmAlertPhone, extracted).catch(() => null);
-            // One bell per call even across reprocessing (retranscription
-            // backfill re-runs terminal voicemails through this path).
-            // Competing reprocesses serialize on an advisory xact lock keyed
-            // to the call id: the holder's bell insert (auto-committed inside
-            // triggerNotification) lands before the lock releases, so the
-            // next holder's re-check sees it — check + insert stay atomic
-            // without a schema change.
-            await db.transaction(async (trx) => {
-              await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [call.id]);
-              const alreadyAlerted = await trx('notifications')
-                .where({ category: 'voicemail_callback' })
-                .whereRaw('metadata::text LIKE ?', [`%${call.id}%`])
-                .first();
-              if (alreadyAlerted) return;
+            // One alert per call even across reprocessing (retranscription
+            // backfill re-runs terminal voicemails through this path). The
+            // claim is a single atomic UPDATE on the call row — deliberately
+            // NOT a notifications-row check, because bell rows are
+            // preference-gated and pushes are delivered independently, so a
+            // delivery-dependent dedupe re-alerts whenever the bell row is
+            // missing. Claim-then-deliver: a delivery failure after the
+            // claim stays best-effort (triggerNotification never throws).
+            const claimed = await db('call_log')
+              .where({ id: call.id })
+              .whereNull('voicemail_callback_alerted_at')
+              .update({ voicemail_callback_alerted_at: new Date() });
+            if (claimed) {
+              const vmAlertCustomer = call.customer_id
+                ? { id: call.customer_id }
+                : await findCustomerForCallContact(vmAlertPhone, extracted).catch(() => null);
               const { triggerNotification } = require('./notification-triggers');
               await triggerNotification('customer_voicemail_callback', {
                 ...alertPlan,
                 customerId: vmAlertCustomer?.id || null,
                 callLogId: call.id,
               });
-            });
+            }
           }
         } catch (alertErr) {
           logger.warn(`[call-proc] voicemail callback alert failed for ${callSid}: ${alertErr.message}`);
