@@ -1808,8 +1808,14 @@ const SocialMediaService = {
     // (scheduler/RSS retries would otherwise repeat the spend each cycle).
     // The per-platform judges below still do the actual rejecting, with
     // properly-skipped result entries; this only suppresses image work.
-    const seedVerdict = await judgeCopyOnce([title, description].filter(Boolean).join('\n'));
-    const seedRejected = seedVerdict.ok && !seedVerdict.compliant;
+    // Only when copy will be GENERATED from the seed — caller-supplied
+    // customContent captions are judged on their own text and may be clean
+    // even when the internal title/description isn't.
+    let seedRejected = false;
+    if (!customContent) {
+      const seedVerdict = await judgeCopyOnce([title, description].filter(Boolean).join('\n'));
+      seedRejected = seedVerdict.ok && !seedVerdict.compliant;
+    }
     if (!generatedImageUrl && !SOCIAL_FLAGS.dryRun && hasImageHosting && !seedRejected) {
       // A requested platform must actually be able to consume the image.
       // Instagram is a sync env check. GBP is checked lazily (only when
@@ -2053,6 +2059,16 @@ const SocialMediaService = {
                 // here would keep the caption AND the URL — over-limit).
               } else if (content.length + suffix.length > igLimit) {
                 igCaption = `${content.slice(0, igLimit - suffix.length - 1).trimEnd()}…${suffix}`;
+                // The trim can amputate load-bearing framing (e.g. the
+                // technician-confirms-timing tail that legalizes the dry
+                // idiom) — re-judge the FINAL caption; a definitive
+                // violation posts nothing to Instagram.
+                const trimmedVerdict = await judgeCopyOnce(igCaption);
+                if (trimmedVerdict.ok && !trimmedVerdict.compliant) {
+                  logger.warn(`[social] Compliance judge rejected trimmed Instagram caption: ${trimmedVerdict.violations.join('; ')}`);
+                  platformResults.push({ platform: 'instagram', success: false, skipped: true, error: `Compliance judge: ${trimmedVerdict.violations[0] || 'violation'}` });
+                  continue;
+                }
               } else {
                 igCaption = `${content}${suffix}`;
               }
