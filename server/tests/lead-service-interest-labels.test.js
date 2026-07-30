@@ -112,6 +112,17 @@ describe('quote workflow service interest labels', () => {
       .toBe('Quarterly Pest + Roach');
   });
 
+  test('labels stored under a since-renamed roach name still compact (codex #3078 r4)', () => {
+    // /upsell recompacts the lead's STORED full label. After the admin
+    // renames the species, the old configured name matches no candidate —
+    // the roach-worded fallback must keep the requirement on the customer
+    // record instead of silently dropping an over-32-char suffix.
+    expect(buildCompactCustomerServiceInterest(['Quarterly Pest Control + Premium Cockroach Treatment']))
+      .toBe('Quarterly Pest + Roach');
+    expect(buildCompactCustomerServiceInterest(['Quarterly Pest Control + German Roach Rescue Visit']))
+      .toBe('Quarterly Pest + German Roach');
+  });
+
   test('compact customer service interest drops overflow add-ons cleanly', () => {
     const compact = buildCompactCustomerServiceInterest([
       'Quarterly Pest Control',

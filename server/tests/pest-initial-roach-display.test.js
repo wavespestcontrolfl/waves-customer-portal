@@ -144,6 +144,33 @@ describe('pest_initial_roach display config', () => {
     expect(roachFee.waivedWithPrepay).toBe(false);
   });
 
+  test('standalone roach work is NOT promoted into first-visit fees (codex #3078 r4 P1)', async () => {
+    // A standalone services.pestInitialRoach line shares the service key with
+    // the auto-fired recurring-pest add-on but is ordinary one-time work.
+    // Promoted alongside a non-pest recurring bundle, the client hid the
+    // charge: no recurring pest → showWaveGuardSetupFee false → no fee card,
+    // while OneTimeBreakdownCard still excludes every firstVisitFees service.
+    const { buildPricingBundle } = require('../routes/estimate-public');
+    const bundle = await buildPricingBundle({
+      id: 'estimate-test-roach-standalone-bundle',
+      status: 'draft',
+      waveguard_tier: 'Bronze',
+      estimate_data: {
+        engineInputs: {
+          homeSqFt: 2000,
+          services: {
+            pestInitialRoach: { roachType: 'regular' },
+            lawn: { track: 'A' },
+          },
+        },
+      },
+    });
+    expect((bundle.firstVisitFees || []).find((f) => f.service === 'pest_initial_roach')).toBeUndefined();
+    // The charge stays visible in the one-time breakdown instead.
+    const breakdownRow = (bundle.oneTimeBreakdown?.items || []).find((it) => it.service === 'pest_initial_roach');
+    expect(breakdownRow).toBeTruthy();
+  });
+
   test('db-bridge merges a partial display blob and ignores invalid values', async () => {
     const rows = [{
       config_key: 'pest_base',

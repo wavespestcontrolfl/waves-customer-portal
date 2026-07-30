@@ -17597,8 +17597,16 @@ async function buildPricingBundleInner(estimate) {
   // line in anchorEngineResult.lineItems; without this push the recurring
   // view (which suppresses OneTimeBreakdownCard when the one-time choice is
   // shown) never displays the configured name, price, or treatment count.
+  // ONLY the auto-fired recurring-pest add-on is a first-visit fee. A
+  // STANDALONE services.pestInitialRoach line shares the service key but is
+  // ordinary one-time work that belongs in the breakdown — promoting it
+  // alongside a non-pest recurring bundle (lawn + tree) hid the charge
+  // entirely: showWaveGuardSetupFee stays false with no recurring pest, so
+  // the client renders no fee card while still excluding every
+  // firstVisitFees service from OneTimeBreakdownCard (codex #3078 r4 P1).
   const engineRoachLine = Array.isArray(anchorEngineResult?.lineItems)
-    ? anchorEngineResult.lineItems.find((li) => li && li.service === 'pest_initial_roach' && Number(li.price) > 0)
+    ? anchorEngineResult.lineItems.find((li) => li && li.service === 'pest_initial_roach'
+      && li.autoFiredFromRecurringPest === true && Number(li.price) > 0)
     : null;
   if (engineRoachLine) {
     const engineRoachTreatments = Number(engineRoachLine.treatments);

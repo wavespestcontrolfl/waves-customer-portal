@@ -378,6 +378,16 @@ function compactRoachInterestPart(normalizedKey) {
       return String(scaleKey).startsWith('german') ? 'German Roach' : 'Roach';
     }
   }
+  // Fallback for labels stored under a SINCE-RENAMED configured name (codex
+  // #3078 r4: /upsell recompacts the lead's stored full label, and a
+  // no-longer-configured suffix over the 32-char budget silently dropped the
+  // roach requirement). Any roach-worded part compacts to the stable short
+  // form; species from the wording. A configured name with no roach wording
+  // is matched only while configured — an alias history would need
+  // persistence, and every shipped/observed name carries 'roach'.
+  if (/\broach\b|cockroach/.test(normalizedKey)) {
+    return normalizedKey.includes('german') ? 'German Roach' : 'Roach';
+  }
   return null;
 }
 
