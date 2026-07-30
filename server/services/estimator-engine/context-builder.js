@@ -149,6 +149,16 @@ async function loadLeadForCall(call, phone, { phoneFallback = true } = {}) {
     if (call?.created_at) {
       const cutoff = new Date(new Date(call.created_at).getTime() + 2 * 3600 * 1000);
       q = q.where('created_at', '<=', cutoff);
+      // A lead sid-stamped for ANOTHER call but created inside this call's
+      // window is a concurrent caller's lead on a shared line — known
+      // foreign, and by created_at desc it would win this fallback and hand
+      // the composer the wrong address/contact. Exclude it entirely. Leads
+      // sid-stamped by OLDER calls remain legitimate prior phone history.
+      q = q.where((qb) => {
+        qb.whereNull('twilio_call_sid')
+          .orWhere('created_at', '<', call.created_at);
+        if (call?.twilio_call_sid) qb.orWhere('twilio_call_sid', call.twilio_call_sid);
+      });
     }
     const byPhone = await q.first();
     // Touched-since-call leads were already claimed above — anything left is

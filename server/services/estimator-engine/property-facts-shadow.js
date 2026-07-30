@@ -418,15 +418,20 @@ function applyV2ToPropertyFacts(propertyFacts, v2) {
 
   // V2 may resolve the lot to NULL for a no-lot property (condo unit on a
   // common master parcel) — that resolved null must WIN over a V1 lot that
-  // leaked in from the development's parcel. But only applicabilities that
-  // mean the priced property genuinely has no individual lot may clear a
-  // V1-resolved lot: a leased_land tenant's parcel physically exists and
-  // lot-driven services (lawn/mosquito) still treat it — not owning the lot
-  // is not evidence it is absent — and an unresolved private_parcel value
-  // is missing data, not a resolved "no lot". Clearing those stamped a
-  // false high-confidence no_individual_lot source on real parcels.
-  const NO_LOT_APPLICABILITIES = new Set(['common_master_parcel', 'no_individual_lot']);
+  // leaked in from the development's parcel. But only cases where the priced
+  // property genuinely has no individual lot may clear a V1-resolved lot:
+  // - a leased_land tenant of an ENTIRE residential structure (single-family
+  //   rental) sits on a real parcel that lot-driven services still treat —
+  //   not owning the lot is not evidence it is absent. A leased_land tenant
+  //   in a UNIT scope (apartment/condo — inferOwnershipType maps residential
+  //   tenants to leased_land before the unit check) must still clear: the
+  //   only V1 lot available there is the development's master parcel.
+  // - an unresolved private_parcel value is missing data, not a resolved
+  //   "no lot" — clearing it stamped a false high-confidence source.
   if (facts.lot && facts.lot.applicability !== 'unknown') {
+    const keepsRealParcel = (facts.lot.applicability === 'leased_land'
+      && facts.serviceScope === 'entire_residential_structure')
+      || facts.lot.applicability === 'private_parcel';
     if (legacy.lotSize) {
       propertyFacts.lot = {
         value: legacy.lotSize,
@@ -435,7 +440,7 @@ function applyV2ToPropertyFacts(propertyFacts, v2) {
         ...(propertyFacts.lot?.disputed ? { disputed: true } : {}),
         rejected: propertyFacts.lot?.rejected || [],
       };
-    } else if (NO_LOT_APPLICABILITIES.has(facts.lot.applicability)) {
+    } else if (!keepsRealParcel) {
       propertyFacts.lot = {
         value: null,
         source: `no_individual_lot:${facts.lot.applicability}`,
@@ -443,7 +448,7 @@ function applyV2ToPropertyFacts(propertyFacts, v2) {
         rejected: propertyFacts.lot?.rejected || [],
       };
     }
-    // leased_land / unresolved private_parcel: keep the V1 lot untouched.
+    // keepsRealParcel: the V1 lot stays untouched.
   }
   if (legacy.stories) propertyFacts.stories = legacy.stories;
   return propertyFacts;

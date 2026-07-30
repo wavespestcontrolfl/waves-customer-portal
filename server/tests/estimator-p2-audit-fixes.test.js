@@ -37,7 +37,13 @@ jest.mock('../models/db', () => {
           const alts = [];
           const qb = {
             whereNull(col) { alts.push((r) => r[col] == null); return qb; },
-            orWhere(col, val) { alts.push((r) => r[col] === val); return qb; },
+            orWhere(col, opOrVal, val) {
+              if (val === undefined) { alts.push((r) => r[col] === opOrVal); return qb; }
+              if (opOrVal === '<') { alts.push((r) => toTime(r[col]) < toTime(val)); return qb; }
+              if (opOrVal === '>') { alts.push((r) => toTime(r[col]) > toTime(val)); return qb; }
+              alts.push((r) => r[col] === val);
+              return qb;
+            },
           };
           a(qb);
           filtered = filtered.filter((r) => alts.some((fn) => fn(r)));
@@ -173,7 +179,7 @@ describe('audit P2: reused-lead window vs foreign-sid leads', () => {
 
   beforeEach(() => { mockLeadRows = []; });
 
-  test("another call's sid-stamped lead inside the window is NOT claimed as this call's lead", async () => {
+  test("another call's sid-stamped lead inside the window is not returned at all", async () => {
     mockLeadRows = [{
       id: 'lead-b',
       phone: '+19415550123',
@@ -183,10 +189,25 @@ describe('audit P2: reused-lead window vs foreign-sid leads', () => {
       updated_at: '2026-07-01T17:20:00.000Z',
     }];
     const { lead, forThisCall } = await ctxPriv.loadLeadForCall(CALL, '+19415550123');
-    // The foreign lead may still surface via the generic byPhone fallback,
-    // but never with current-call priority (address/email/linkage trust).
+    // Neither current-call priority NOR the byPhone fallback may surface a
+    // concurrent caller's lead — its address/contact would otherwise still
+    // reach the composer as untrusted context.
     expect(forThisCall).toBe(false);
-    expect(lead?.id).toBe('lead-b');
+    expect(lead).toBeNull();
+  });
+
+  test("an OLDER call's sid-stamped lead remains legitimate prior phone history", async () => {
+    mockLeadRows = [{
+      id: 'lead-history',
+      phone: '+19415550123',
+      twilio_call_sid: 'CA-last-week',
+      deleted_at: null,
+      created_at: '2026-06-24T10:00:00.000Z',
+      updated_at: '2026-06-24T10:00:00.000Z',
+    }];
+    const { lead, forThisCall } = await ctxPriv.loadLeadForCall(CALL, '+19415550123');
+    expect(forThisCall).toBe(false);
+    expect(lead?.id).toBe('lead-history');
   });
 
   test('an unstamped reused lead touched inside the window keeps current-call priority', async () => {
@@ -244,20 +265,34 @@ describe('audit P2: V2 apply keeps real lots for tenants and unresolved parcels'
     lot: { value: 9500, source: 'county_assessed', confidence: 'high', rejected: [] },
     stories: 1,
   });
-  const v2 = (applicability, lotSize = null) => ({
+  const v2 = (applicability, lotSize = null, serviceScope = 'entire_residential_structure') => ({
     legacyDerived: { squareFootage: 1800, lotSize, stories: 1 },
     facts: {
       confidenceLevel: 'high',
+      serviceScope,
       lot: { applicability },
       structureArea: null,
     },
   });
 
-  test('leased_land tenant keeps the V1 county lot (parcel exists, service treats it)', () => {
+  test('leased_land tenant of an entire structure keeps the V1 county lot (parcel exists, service treats it)', () => {
     const facts = v1Facts();
     shadow.applyV2ToPropertyFacts(facts, v2('leased_land'));
     expect(facts.lot.value).toBe(9500);
     expect(facts.lot.source).toBe('county_assessed');
+  });
+
+  test('leased_land tenant in a UNIT scope still clears — the V1 lot is the development master parcel', () => {
+    const facts = v1Facts();
+    shadow.applyV2ToPropertyFacts(facts, v2('leased_land', null, 'residential_unit'));
+    expect(facts.lot.value).toBeNull();
+    expect(facts.lot.source).toBe('no_individual_lot:leased_land');
+  });
+
+  test('leased_land with an UNKNOWN scope stays conservative and clears', () => {
+    const facts = v1Facts();
+    shadow.applyV2ToPropertyFacts(facts, v2('leased_land', null, 'unknown'));
+    expect(facts.lot.value).toBeNull();
   });
 
   test('unresolved private_parcel keeps the V1 lot instead of a false "no lot"', () => {
