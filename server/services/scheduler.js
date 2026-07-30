@@ -4408,6 +4408,44 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // =========================================================================
+  // Call booking-miss watchdog — every 30 min (offset from the ingest
+  // watchdog), ring an admin bell for any call whose V2 extraction confirmed
+  // a concrete appointment slot that never became a scheduled_services row
+  // (outbound skip / v2 routing block / missing fields all park silently in
+  // triage otherwise). Dark behind GATE_CALL_BOOKING_MISS_WATCHDOG.
+  // See server/services/call-booking-miss-watchdog.js.
+  // =========================================================================
+  cron.schedule('22,52 * * * *', async () => {
+    try {
+      const { runCallBookingMissWatchdog } = require('./call-booking-miss-watchdog');
+      const result = await runCallBookingMissWatchdog();
+      if (!result.skipped && (result.misses > 0 || result.alerted > 0)) {
+        logger.warn(`[call-booking-miss] scanned=${result.scanned} misses=${result.misses} alerted=${result.alerted}`);
+      }
+    } catch (err) {
+      logger.error(`Call booking-miss watchdog tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // HOURLY :46 — Retroactive call_log→customer linking. Heals calls that
+  // arrived before their customer record existed (unambiguous primary-phone
+  // match only, same rule as webhook intake; idempotent). Dark behind
+  // GATE_CALL_LOG_RELINK. See server/services/call-log-relink.js.
+  // =========================================================================
+  cron.schedule('46 * * * *', async () => {
+    try {
+      const { runCallLogRelink } = require('./call-log-relink');
+      const result = await runCallLogRelink();
+      if (!result.skipped && result.linked > 0) {
+        logger.info(`[call-relink] scanned=${result.scanned} linked=${result.linked} ambiguousOrUnmatched=${result.ambiguousOrUnmatched}`);
+      }
+    } catch (err) {
+      logger.error(`Call-log relink tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   logger.info('Scheduled jobs initialized');
 }
 
