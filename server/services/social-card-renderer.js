@@ -437,7 +437,18 @@ async function renderPhotoCardJpegBase64(input = {}, opts = {}) {
 let _logoPromise = null;
 function getLogoDataUri() {
   if (_logoPromise) return _logoPromise;
-  _logoPromise = (async () => {
+  _logoPromise = getLogoPngBuffer()
+    .then((buf) => (buf ? `data:image/png;base64,${buf.toString('base64')}` : null));
+  return _logoPromise;
+}
+
+// Raw current-logo PNG (waves-logo-2026), resized to fit 260px. Shared by the
+// card chrome above and the GBP watermark in social-media.js — one asset
+// source, so a logo swap propagates everywhere.
+let _logoBufferPromise = null;
+function getLogoPngBuffer() {
+  if (_logoBufferPromise) return _logoBufferPromise;
+  _logoBufferPromise = (async () => {
     const candidates = [
       path.join(__dirname, '..', '..', 'client', 'public', 'waves-logo-2026.png'),
       path.join(__dirname, '..', '..', 'client', 'dist', 'waves-logo-2026.png'),
@@ -447,14 +458,13 @@ function getLogoDataUri() {
       const sharp = require('sharp');
       for (const p of candidates) {
         if (fs.existsSync(p)) {
-          const buf = await sharp(p).resize(260, 260, { fit: 'inside' }).png().toBuffer();
-          return `data:image/png;base64,${buf.toString('base64')}`;
+          return await sharp(p).resize(260, 260, { fit: 'inside' }).png().toBuffer();
         }
       }
     } catch { /* fall through to text wordmark */ }
     return null;
   })();
-  return _logoPromise;
+  return _logoBufferPromise;
 }
 
 async function renderSocialCardJpegBase64(input = {}, opts = {}) {
@@ -478,6 +488,7 @@ module.exports = {
   COLORS,
   PLATFORM_SIZES,
   filenameSlug,
+  getLogoPngBuffer,
   renderPhotoCardJpegBase64,
   renderPhotoOverlaySvg,
   renderSocialCardJpegBase64,

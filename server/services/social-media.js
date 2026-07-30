@@ -1207,7 +1207,91 @@ async function postToTwitter(text, link) {
   return twitter.createPost({ text, link });
 }
 
-async function postToGBP(locationId, summary, link, imageUrl) {
+// ── GBP watermark ──
+// Owner directive 2026-07-30: every GBP post image carries a small Waves
+// logo bottom-right. This is the single choke point every GBP post passes
+// through, so all sources are covered — blog heroes, tech field photos,
+// admin-supplied images — present and future. Rendered brand/review cards
+// are already branded by the card chrome and skip via opts.alreadyBranded
+// (a second logo would double-brand them). Fail-OPEN: an unwatermarked
+// image beats a failed post, so any error returns the original URL.
+// Cache is per source URL — a 4-location fan-out composites once; bounded
+// by process lifetime at a few posts/day.
+// SSRF guard: the watermark fetch runs SERVER-side on a caller-supplied URL
+// (admin publish-single accepts arbitrary strings), so only our own image
+// hosts are ever fetched — the social CDN and wavespestcontrol.com. Anything
+// else skips watermarking and posts the ORIGINAL URL (Google fetches that,
+// not us), so loopback/private/metadata endpoints are unreachable and
+// redirects are refused outright (our hosts don't redirect).
+function isTrustedImageHost(value) {
+  try {
+    const url = new URL(String(value));
+    if (url.protocol !== 'https:') return false;
+    const host = url.hostname.toLowerCase();
+    const cdn = String(process.env.SOCIAL_MEDIA_CDN_DOMAIN || '')
+      .toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+    if (cdn && host === cdn) return true;
+    return host === 'wavespestcontrol.com' || host.endsWith('.wavespestcontrol.com');
+  } catch {
+    return false;
+  }
+}
+
+// Cache is TTL'd, not process-lifetime: a 4-location fan-out (seconds apart)
+// composites once, but a stable-URL source whose CONTENT changed (blog hero
+// replaced, then force re-shared) re-fetches. The S3 key hashes the fetched
+// BYTES, so a changed hero mints a new object instead of overwriting.
+const _gbpWatermarkCache = new Map();
+const GBP_WATERMARK_CACHE_TTL_MS = 10 * 60 * 1000;
+async function watermarkGbpImage(imageUrl) {
+  try {
+    if (!isTrustedImageHost(imageUrl)) return imageUrl;
+    const cached = _gbpWatermarkCache.get(imageUrl);
+    if (cached && (Date.now() - cached.at) < GBP_WATERMARK_CACHE_TTL_MS) return cached.out;
+    const SocialCardRenderer = require('./social-card-renderer');
+    const logo = await SocialCardRenderer.getLogoPngBuffer();
+    if (!logo) return imageUrl;
+    const res = await fetch(imageUrl, { redirect: 'error', signal: AbortSignal.timeout(10000) });
+    if (!res.ok) return imageUrl;
+    const src = Buffer.from(await res.arrayBuffer());
+    if (!src.length) return imageUrl;
+    const sharp = require('sharp');
+    // Normalize BEFORE measuring/compositing: .rotate() bakes the EXIF
+    // orientation into pixels (a portrait phone JPEG would otherwise publish
+    // sideways with the logo on the wrong display corner, since JPEG output
+    // strips the orientation tag), and .flatten() gives transparent PNG/WebP
+    // sources a white background instead of black through JPEG conversion.
+    const normalized = await sharp(src).rotate().flatten({ background: '#ffffff' }).toBuffer();
+    const meta = await sharp(normalized).metadata();
+    if (!meta.width || !meta.height) return imageUrl;
+    // ~14% of the shorter edge, 3% margin — small but legible at GBP sizes.
+    const shortEdge = Math.min(meta.width, meta.height);
+    const logoTarget = Math.max(48, Math.round(shortEdge * 0.14));
+    const margin = Math.max(12, Math.round(shortEdge * 0.03));
+    const logoPng = await sharp(logo).resize(logoTarget, logoTarget, { fit: 'inside' }).png().toBuffer();
+    const logoMeta = await sharp(logoPng).metadata();
+    const composited = await sharp(normalized)
+      .composite([{
+        input: logoPng,
+        left: meta.width - (logoMeta.width || logoTarget) - margin,
+        top: meta.height - (logoMeta.height || logoTarget) - margin,
+      }])
+      .jpeg({ quality: 88 })
+      .toBuffer();
+    // Key on source AND logo bytes — a logo-asset swap mints new objects
+    // instead of overwriting CDN-cached keys with different pixels.
+    const hash = require('crypto').createHash('sha1').update(src).update(logo).digest('hex').slice(0, 12);
+    const url = await uploadImageToS3(composited.toString('base64'), `gbp-wm-${hash}.jpg`);
+    const out = url || imageUrl;
+    _gbpWatermarkCache.set(imageUrl, { out, at: Date.now() });
+    return out;
+  } catch (err) {
+    logger.warn(`[social] GBP watermark failed (posting original image): ${err.message}`);
+    return imageUrl;
+  }
+}
+
+async function postToGBP(locationId, summary, link, imageUrl, opts = {}) {
   const loc = WAVES_LOCATIONS.find(l => l.id === locationId);
   if (!loc?.googleLocationResourceName) throw new Error(`No GBP resource for ${locationId}`);
 
@@ -1217,12 +1301,16 @@ async function postToGBP(locationId, summary, link, imageUrl) {
     // "Learn more" button. Prefer the post's own link (blog URL / suggested
     // page); fall back to the site so a GBP post is never published linkless.
     const ctaUrl = (typeof link === 'string' && link.trim()) ? link.trim() : 'https://www.wavespestcontrol.com';
+    let mediaUrl = imageUrl || undefined;
+    if (mediaUrl && !opts.alreadyBranded) {
+      mediaUrl = await watermarkGbpImage(mediaUrl);
+    }
     const result = await gbpService.createPost(
       loc.googleLocationResourceName,
       {
         summary,
         callToAction: { actionType: 'LEARN_MORE', url: ctaUrl },
-        mediaUrl: imageUrl || undefined,
+        mediaUrl,
       },
       locationId
     );
@@ -1449,6 +1537,7 @@ const SocialMediaService = {
           // uploads.
           let imageUrl = null;
           let gbpImageUrl = null;
+          let gbpImageIsCard = false; // hero photos watermark; cards are pre-branded
           if (cardsEligible) {
             // Blog shares prefer the post's own hero image (one JPEG serves
             // every platform); the brand card is the fallback when the hero
@@ -1463,7 +1552,10 @@ const SocialMediaService = {
               // 4:3 for GBP — so a single-platform deployment doesn't upload an
               // unused variant.
               if (metaReady) imageUrl = await renderBrandCardUrl(card, 'square');
-              if (gbpReady) gbpImageUrl = await renderBrandCardUrl(card, 'gbp');
+              if (gbpReady) {
+                gbpImageUrl = await renderBrandCardUrl(card, 'gbp');
+                gbpImageIsCard = !!gbpImageUrl;
+              }
               // GBP-only: reuse the 4:3 as the base image so publishToAll sees a
               // non-null image and doesn't generate an orphan AI one.
               if (!imageUrl && gbpImageUrl) imageUrl = gbpImageUrl;
@@ -1480,6 +1572,7 @@ const SocialMediaService = {
             channels: PUBLISH_PLATFORMS,
             imageUrl,
             gbpImageUrl,
+            gbpImageBranded: gbpImageIsCard,
             // Autonomous (cron) shares use the brand card or go text-only — never
             // the AI image generator (irrelevant literal images). A manual admin
             // /check-rss keeps the existing AI fallback (admin is supervising).
@@ -1560,7 +1653,7 @@ const SocialMediaService = {
   // videoUrl: a hosted MP4 (creative-engine Reel). FB posts it as a page video
   // and IG as a Reel; GBP has no video ingestion, so it keeps the image params
   // (imageUrl/gbpImageUrl are the still fallback alongside a video).
-  async publishToAll({ title, description, link, guid, source, imageUrl, gbpImageUrl, videoUrl, customContent, channels, gbpLocationIds, noAiImage = false, postId = null, bypassAutoshareThrottle = false }) {
+  async publishToAll({ title, description, link, guid, source, imageUrl, gbpImageUrl, gbpImageBranded = false, videoUrl, customContent, channels, gbpLocationIds, noAiImage = false, postId = null, bypassAutoshareThrottle = false }) {
     if (!SOCIAL_FLAGS.automationEnabled) {
       return { success: false, platforms: [{ platform: 'all', skipped: 'Automation is disabled' }] };
     }
@@ -1607,6 +1700,11 @@ const SocialMediaService = {
     // GBP's own image (4:3) — caller-supplied, or rendered in the noAiImage
     // fallback below. The GBP loop reads this (falls back to generatedImageUrl).
     let resolvedGbpImageUrl = (typeof gbpImageUrl === 'string' && gbpImageUrl) ? gbpImageUrl : null;
+    // Watermark provenance for the GBP image (owner directive: small Waves
+    // logo bottom-right on every GBP image). Rendered cards are already
+    // branded; heroes/photos/unknown caller images get watermarked in
+    // postToGBP unless the caller vouches via gbpImageBranded.
+    let resolvedGbpBranded = resolvedGbpImageUrl ? !!gbpImageBranded : false;
     // SOCIAL_MEDIA_CDN_DOMAIN is required too: uploadImageToS3 returns null
     // without it (private S3 URLs aren't publicly fetchable), so generating
     // an image without a CDN just burns credits and discards the result.
@@ -1684,7 +1782,10 @@ const SocialMediaService = {
         const heroUrl = BLOG_HERO_SOURCES.has(source) ? await blogHeroSocialImageUrl(link) : null;
         if (heroUrl) {
           if (metaWantsImage || linkedinWantsHero) generatedImageUrl = heroUrl;
-          if (gbpWantsImage && !resolvedGbpImageUrl) resolvedGbpImageUrl = heroUrl;
+          if (gbpWantsImage && !resolvedGbpImageUrl) {
+            resolvedGbpImageUrl = heroUrl;
+            resolvedGbpBranded = false; // hero photo — watermark in postToGBP
+          }
         } else {
           const eyebrow = source === 'newsletter' ? 'Waves newsletter' : 'From the Waves blog';
           const card = { variant: 'blog', title, excerpt: description, cta: 'Learn more', eyebrow };
@@ -1694,7 +1795,10 @@ const SocialMediaService = {
           }
           if (gbpWantsImage && !resolvedGbpImageUrl) {
             const u = await renderBrandCardUrl(card, 'gbp');
-            if (u) resolvedGbpImageUrl = u;
+            if (u) {
+              resolvedGbpImageUrl = u;
+              resolvedGbpBranded = true; // brand card — chrome already carries the logo
+            }
           }
         }
       } else {
@@ -1951,7 +2055,7 @@ const SocialMediaService = {
         // drafts re-enter with an AI scene as imageUrl), and the owner rule
         // is NO AI imagery on GBP, ever. No explicit GBP image → text-only.
         const gbpImg = (typeof resolvedGbpImageUrl === 'string' && resolvedGbpImageUrl) || null;
-        let r = await postToGBP(loc.id, gbpContent, link, gbpImg);
+        let r = await postToGBP(loc.id, gbpContent, link, gbpImg, { alreadyBranded: resolvedGbpBranded });
         // Media is best-effort: if Google rejects or can't fetch the image,
         // retry text-only so an image problem doesn't block a post that would
         // otherwise have succeeded. Other failures (auth/quota) skip the retry.

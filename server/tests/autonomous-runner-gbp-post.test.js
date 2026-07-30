@@ -131,7 +131,8 @@ describe('_handleGbpPostAction', () => {
       'sarasota',
       'Sarasota ghost ants are peaking. Schedule an inspection.',
       'https://www.wavespestcontrol.com/pest-control-sarasota-fl/',
-      null
+      null,
+      { alreadyBranded: true }
     );
     expect(result.claim).toBe('complete');
     expect(result.patch.outcome).toBe('completed_published');
@@ -187,7 +188,7 @@ describe('_handleGbpPostAction', () => {
     expect(social.generateContent).toHaveBeenCalledWith('gbp', expect.objectContaining({
       locationName: 'North Port',
     }));
-    expect(social.postToGBP).toHaveBeenCalledWith('venice', expect.any(String), expect.anything(), null);
+    expect(social.postToGBP).toHaveBeenCalledWith('venice', expect.any(String), expect.anything(), null, { alreadyBranded: true });
   });
 
   test('unmapped city parks for manual routing without generating', async () => {
@@ -216,7 +217,7 @@ describe('_handleGbpPostAction', () => {
       baseBrief({ target_url: 'https://sarasotaexterminator.com/some-page/' }),
       run
     );
-    expect(social.postToGBP).toHaveBeenCalledWith('sarasota', expect.any(String), null, null);
+    expect(social.postToGBP).toHaveBeenCalledWith('sarasota', expect.any(String), null, null, { alreadyBranded: true });
   });
 
   test('attaches the on-brand card to the GBP post — never an AI image', async () => {
@@ -236,7 +237,8 @@ describe('_handleGbpPostAction', () => {
       'sarasota',
       expect.any(String),
       'https://www.wavespestcontrol.com/pest-control-sarasota-fl/',
-      'https://cdn.example.com/social-media/gbp-card.jpg'
+      'https://cdn.example.com/social-media/gbp-card.jpg',
+      { alreadyBranded: true }
     );
   });
 
@@ -250,7 +252,7 @@ describe('_handleGbpPostAction', () => {
     const result = await runner._handleGbpPostAction(baseBrief(), { shadow_mode: false });
 
     expect(social.postToGBP).toHaveBeenCalledTimes(2);
-    expect(social.postToGBP).toHaveBeenNthCalledWith(1, 'sarasota', expect.any(String), expect.any(String), 'https://cdn.example.com/social-media/gbp.jpg');
+    expect(social.postToGBP).toHaveBeenNthCalledWith(1, 'sarasota', expect.any(String), expect.any(String), 'https://cdn.example.com/social-media/gbp.jpg', { alreadyBranded: true });
     expect(social.postToGBP).toHaveBeenNthCalledWith(2, 'sarasota', expect.any(String), expect.any(String), null);
     expect(result.claim).toBe('complete');
     expect(result.patch.outcome).toBe('completed_published');
@@ -265,7 +267,7 @@ describe('_handleGbpPostAction', () => {
 
     expect(social.renderBrandCardUrl).not.toHaveBeenCalled();
     expect(social.generateImage).not.toHaveBeenCalled();
-    expect(social.postToGBP).toHaveBeenCalledWith('sarasota', expect.any(String), expect.any(String), null);
+    expect(social.postToGBP).toHaveBeenCalledWith('sarasota', expect.any(String), expect.any(String), null, { alreadyBranded: true });
   });
 
   test('non-media post failure does NOT retry text-only (auth/quota would just fail again)', async () => {
@@ -293,7 +295,7 @@ describe('_handleGbpPostAction', () => {
 
     expect(social.renderBrandCardUrl).not.toHaveBeenCalled();
     expect(result.claim).toBe('complete');
-    expect(social.postToGBP).toHaveBeenCalledWith('sarasota', expect.any(String), expect.any(String), null);
+    expect(social.postToGBP).toHaveBeenCalledWith('sarasota', expect.any(String), expect.any(String), null, { alreadyBranded: true });
   });
 
   test('headline with safety/timing language posts text-only even when the validator passes it', async () => {
@@ -309,7 +311,7 @@ describe('_handleGbpPostAction', () => {
 
     expect(social.renderBrandCardUrl).not.toHaveBeenCalled();
     expect(result.claim).toBe('complete');
-    expect(social.postToGBP).toHaveBeenCalledWith('sarasota', expect.any(String), expect.any(String), null);
+    expect(social.postToGBP).toHaveBeenCalledWith('sarasota', expect.any(String), expect.any(String), null, { alreadyBranded: true });
   });
 
   test('card render failure still posts (text-only), does not block publish', async () => {
@@ -320,7 +322,7 @@ describe('_handleGbpPostAction', () => {
 
     expect(result.claim).toBe('complete');
     expect(result.patch.outcome).toBe('completed_published');
-    expect(social.postToGBP).toHaveBeenCalledWith('sarasota', expect.any(String), expect.any(String), null);
+    expect(social.postToGBP).toHaveBeenCalledWith('sarasota', expect.any(String), expect.any(String), null, { alreadyBranded: true });
   });
 
   test('validation failure parks with the rejected copy in notes', async () => {

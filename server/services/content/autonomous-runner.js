@@ -2272,7 +2272,8 @@ class AutonomousRunner {
     }
 
     const t2 = Date.now();
-    let result = await social.postToGBP(location.id, content, link, gbpImageUrl);
+    // Brand card already carries the logo — skip the GBP watermark pass.
+    let result = await social.postToGBP(location.id, content, link, gbpImageUrl, { alreadyBranded: true });
     // Media is best-effort: if the post fails because of the image, retry
     // text-only so an image problem doesn't block an otherwise-valid post.
     // Non-media failures (auth/quota) skip the retry — they'd just fail again.
