@@ -134,6 +134,23 @@ describe('sweepUngeocodedCustomers', () => {
     expect(updates).toHaveLength(1);
   });
 
+  it('repairs half-set coordinates (latitude present, longitude null)', async () => {
+    const updates = installDb({
+      listRows: [{ id: 'cust-5' }],
+      customersById: {
+        'cust-5': { id: 'cust-5', latitude: '27.1000000', longitude: null, address_line1: '5 Sweep Test Ln', city: 'Palmetto', state: 'FL', zip: '34221' },
+      },
+    });
+    mockGoogle('OK', { lat: 27.11, lng: -82.55 });
+
+    const result = await sweepUngeocodedCustomers();
+
+    expect(result).toEqual({ checked: 1, geocoded: 1, unresolved: 0 });
+    expect(updates).toHaveLength(1);
+    expect(updates[0].patch.latitude).toBe(27.11);
+    expect(updates[0].patch.longitude).toBe(-82.55);
+  });
+
   it('returns zero counts when no customers are missing coordinates', async () => {
     installDb({ listRows: [], customersById: {} });
     mockGoogle('OK', { lat: 0, lng: 0 });

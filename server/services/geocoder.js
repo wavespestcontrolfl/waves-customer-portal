@@ -159,10 +159,15 @@ async function sweepUngeocodedCustomers({ limit = 25 } = {}) {
       const address = buildAddress(c);
       const { location, permanent } = await geocodeAddressWithStatus(address);
       if (location) {
-        // Guard against a concurrent address edit: only write if the address
-        // we geocoded is still the customer's address and coordinates are
-        // still unset. A raced row counts as unresolved and retries next pass.
-        let guarded = db('customers').where({ id: row.id }).whereNull('latitude');
+        // Guard against a concurrent edit: only write if the address we
+        // geocoded is still the customer's address and both coordinates
+        // still hold the values we read (either may be half-set — e.g.
+        // latitude present, longitude null). A raced row counts as
+        // unresolved and retries next pass.
+        let guarded = db('customers').where({ id: row.id });
+        for (const [col, val] of [['latitude', c.latitude], ['longitude', c.longitude]]) {
+          guarded = val == null ? guarded.whereNull(col) : guarded.where(col, val);
+        }
         for (const col of ['address_line1', 'city', 'state', 'zip']) {
           guarded = c[col] == null ? guarded.whereNull(col) : guarded.where(col, c[col]);
         }
