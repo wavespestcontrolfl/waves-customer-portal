@@ -259,7 +259,7 @@ const INTERIOR_FILL_LIGHT_ALPHA = 0.05;
 // #3038 r3). Fallback when the imagery is not pixel-readable: the classic
 // clean outline.
 const HIGHLIGHT_RGB = [96, 214, 116];
-const HIGHLIGHT_ALPHA = 0.34;
+const HIGHLIGHT_ALPHA = 0.48;
 
 /**
  * Grass highlight mask: a width×height overlay canvas painting turf inside
@@ -644,10 +644,28 @@ export function startSprayEngine({
       const dist = Math.min(total, (sprayT / durationMs) * total);
       const p = pointAt(dist);
       if (outlineMode && lawnHighlight) {
-        // Lawn: the grass highlight FADES IN — no box, no line, no mascot
-        // (owner 2026-07-30 "not a box, it just should highlight the lawn
-        // areas").
-        drawBaseFaded(dist / total);
+        // Lawn: the highlight SWEEPS across the property revealing the lit
+        // turf, with a shimmer riding the front edge (clipped to the turf
+        // pixels via source-atop). No box, no line, no mascot (owner
+        // 2026-07-30 "not a box, it just should highlight the lawn areas").
+        const pct = dist / total;
+        clearView();
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(0, 0, width * pct, height);
+        ctx.clip();
+        ctx.globalAlpha = Math.min(1, pct * 4);
+        ctx.drawImage(accum, 0, 0);
+        ctx.restore();
+        const edge = width * pct;
+        const shine = ctx.createLinearGradient(edge - 90, 0, edge, 0);
+        shine.addColorStop(0, 'rgba(255,255,255,0)');
+        shine.addColorStop(1, 'rgba(255,255,255,0.55)');
+        ctx.save();
+        ctx.globalCompositeOperation = 'source-atop';
+        ctx.fillStyle = shine;
+        ctx.fillRect(edge - 90, 0, 90, height);
+        ctx.restore();
       } else if (outlineMode) {
         // Fallback (imagery not pixel-readable): the classic outline draws
         // itself with a soft glow tip. No mascot, no smoke.
@@ -757,8 +775,9 @@ export function startSprayEngine({
       phaseT += dt * 1000;
       const wave = 0.5 + 0.5 * Math.sin((2 * Math.PI * phaseT) / BREATH_MS - Math.PI / 2);
       if (outlineMode && lawnHighlight) {
-        // The highlighted lawn breathes.
-        drawBaseFaded(0.72 + 0.28 * wave);
+        // The highlighted lawn breathes — deep enough to read from a phone
+        // in the field.
+        drawBaseFaded(0.55 + 0.45 * wave);
       } else if (outlineMode) {
         drawBase();
         strokePath(16, rgba(mist, 0.06 + 0.2 * wave));
