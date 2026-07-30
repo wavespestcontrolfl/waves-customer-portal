@@ -118,6 +118,45 @@ async function repenIfWorkMergedDuringClaim(holdId, dbh) {
   }
 }
 
+// Failure re-pend that cannot bury a concurrently-landed deny stamp (Codex
+// #3084 r19): a verdict can stamp 'email_denied_await_correction' after this
+// worker claimed the row, and an unconditional recovery write would replace
+// the stamp — the card is resolved by then, so the sweep (which excludes
+// only the exact marker) would release the address the operator rejected.
+// Two steps: write the fallback error only onto un-stamped rows; a stamped
+// row re-pends with its stamp untouched.
+async function repenHoldPreservingDeny(holdId, fallbackError, dbh) {
+  const updated = await dbh('first_touch_holds')
+    .where({ id: holdId })
+    .where(function notDenied() {
+      this.whereNull('last_error').orWhereNot('last_error', 'email_denied_await_correction');
+    })
+    .update({ status: 'pending', last_error: fallbackError, updated_at: new Date() });
+  if (!updated) {
+    await dbh('first_touch_holds').where({ id: holdId })
+      .update({ status: 'pending', updated_at: new Date() });
+  }
+}
+
+// Terminal settles are CONDITIONAL on the target this release observed
+// (Codex #3084 r19): a SECOND correction can retarget the row's held_email
+// after the pre-send read, and an unconditional released-settle would bury
+// the newer address with nothing left to retry. A mismatch re-pends
+// 'superseded_during_send' (NOT the send-failed marker — skipDedupe must
+// stay false; the correction's rotation cleared the pending subscriber's
+// delivered-stamp, so the retry sends a fresh DOI to the new target).
+async function settleIfTargetUnchanged(holdId, observedEmailLc, patch, dbh) {
+  const settled = await dbh('first_touch_holds')
+    .where({ id: holdId })
+    .whereRaw("LOWER(COALESCE(held_email, '')) = ?", [observedEmailLc])
+    .update({ ...patch, updated_at: new Date() });
+  if (!settled) {
+    await dbh('first_touch_holds').where({ id: holdId })
+      .update({ status: 'pending', last_error: 'superseded_during_send', updated_at: new Date() });
+  }
+  return settled > 0;
+}
+
 // Delivered = the DOI confirmation actually went out, or the helper
 // deliberately skipped (unsubscribed/invalid — nothing left to retry). A
 // created subscriber whose confirmation SEND failed keeps the hold
@@ -267,21 +306,25 @@ async function resumeHeldFirstTouch({
       // otherwise gate on a stale unstamped snapshot.
       let sendEmail = resumeEmail;
       let freshDenyStamped = false;
+      // The row value this release last OBSERVED — terminal settles are
+      // conditional on it still matching (Codex #3084 r19).
+      let observedEmailLc = String(hold.held_email || '').trim().toLowerCase();
       try {
         const freshRow = await dbh('first_touch_holds').where({ id: hold.id }).first('held_email', 'last_error');
         freshDenyStamped = freshRow?.last_error === 'email_denied_await_correction';
-        const freshEmail = String(freshRow?.held_email || '').trim().toLowerCase();
-        if (freshEmail && freshEmail !== String(hold.held_email || '').trim().toLowerCase()
-            && RESUME_EMAIL_RE.test(freshEmail)) {
-          sendEmail = freshEmail;
+        observedEmailLc = String(freshRow?.held_email || '').trim().toLowerCase();
+        if (observedEmailLc && observedEmailLc !== String(hold.held_email || '').trim().toLowerCase()
+            && RESUME_EMAIL_RE.test(observedEmailLc)) {
+          sendEmail = observedEmailLc;
         }
       } catch (rereadErr) {
         // Can't verify the authoritative target — never send on a stale
         // guess (Codex #3084 r16): a supersede or deny stamp may have
         // landed since the claim. Back to pending; every retry path
-        // re-attempts the read.
+        // re-attempts the read. Deny-preserving (r19): the read failed, so
+        // a stamp that landed since the claim must not be overwritten.
         logger.warn(`[first-touch-resume] pre-send target re-read failed: ${rereadErr.code || rereadErr.name || 'db_error'} — hold stays pending`);
-        await settleHold(hold.id, { status: 'pending', last_error: 'target_verify_failed' }, dbh);
+        await repenHoldPreservingDeny(hold.id, 'target_verify_failed', dbh);
         result.skipped = result.skipped || 'target_verify_failed';
         continue;
       }
@@ -385,8 +428,14 @@ async function resumeHeldFirstTouch({
       } else if (!deferredThisHold && !patch.status) {
         patch.status = 'pending';
       }
-      if (Object.keys(patch).length) await settleHold(hold.id, patch, dbh);
-      if (patch.status === 'released') await repenIfWorkMergedDuringClaim(hold.id, dbh);
+      if (patch.status === 'released') {
+        // Terminal settle only if no concurrent correction retargeted the
+        // row since our pre-send read (Codex #3084 r19).
+        const settled = await settleIfTargetUnchanged(hold.id, observedEmailLc, patch, dbh);
+        if (settled) await repenIfWorkMergedDuringClaim(hold.id, dbh);
+      } else if (Object.keys(patch).length) {
+        await settleHold(hold.id, patch, dbh);
+      }
 
       result.resumed = result.resumed || result.enrolled
         || newsletterDelivered(result.newsletter) || deferredThisHold;
@@ -416,9 +465,20 @@ async function resumeHeldFirstTouch({
     ]);
     for (const strandedId of strandedIds) {
       try {
-        await dbh('first_touch_holds')
+        // Deny-preserving (Codex #3084 r19): this is an unknown-state error
+        // path — a stamp that landed since the claim must not be buried
+        // under the resume_failed marker.
+        const repenned = await dbh('first_touch_holds')
           .where({ id: strandedId, status: 'releasing' })
+          .where(function notDenied() {
+            this.whereNull('last_error').orWhereNot('last_error', 'email_denied_await_correction');
+          })
           .update({ status: 'pending', last_error: `resume_failed: ${code}`, updated_at: new Date() });
+        if (!repenned) {
+          await dbh('first_touch_holds')
+            .where({ id: strandedId, status: 'releasing' })
+            .update({ status: 'pending', updated_at: new Date() });
+        }
       } catch (repenErr) {
         logger.warn(`[first-touch-resume] hold ${strandedId} re-pend failed: ${repenErr.code || repenErr.name || 'db_error'} (stale-claim window will reclaim)`);
       }
@@ -474,8 +534,9 @@ async function runOnePostCommitResume(payload, holdIds, dbh) {
         logger.warn(`[first-touch-resume] post-commit target re-read failed: ${rereadErr.code || rereadErr.name || 'db_error'} — hold(s) stay pending`);
         for (const holdId of holdIds) {
           try {
-            await dbh('first_touch_holds').where({ id: holdId })
-              .update({ status: 'pending', last_error: 'target_verify_failed', updated_at: new Date() });
+            // Deny-preserving (r19): the read failed, so a stamp that
+            // landed since the claim must not be overwritten.
+            await repenHoldPreservingDeny(holdId, 'target_verify_failed', dbh);
           } catch (repenErr) {
             logger.warn(`[first-touch-resume] hold ${holdId} re-pend failed: ${repenErr.code || repenErr.name || 'db_error'} (stale-claim window will reclaim)`);
           }
@@ -508,17 +569,21 @@ async function runOnePostCommitResume(payload, holdIds, dbh) {
       return { skipped: 'email_suppressed' };
     }
     const outcome = await runNewsletterResume(sendPayload, dbh, { skipDedupe: holdWasDoiUnconfirmed });
+    const sentEmailLc = String(sendPayload.email || '').trim().toLowerCase();
     for (const holdId of holdIds) {
       if (newsletterDelivered(outcome)) {
         const hold = await dbh('first_touch_holds').where({ id: holdId }).first('held_drip', 'released_drip');
         const dripSettled = !hold || !hold.held_drip || hold.released_drip;
-        await dbh('first_touch_holds').where({ id: holdId }).update({
+        // Conditional on the target still matching what this callback sent
+        // (Codex #3084 r19): correction B can retarget the releasing row
+        // after our re-read, and settling would bury B's address with no
+        // retry trigger left.
+        const settled = await settleIfTargetUnchanged(holdId, sentEmailLc, {
           released_newsletter: true,
           status: dripSettled ? 'released' : 'pending',
           ...(dripSettled ? { released_at: new Date(), last_error: null } : {}),
-          updated_at: new Date(),
-        });
-        if (dripSettled) await repenIfWorkMergedDuringClaim(holdId, dbh);
+        }, dbh);
+        if (settled && dripSettled) await repenIfWorkMergedDuringClaim(holdId, dbh);
       } else {
         // Back to pending — the DOI never confirmed; the next release
         // trigger (or the ledger sweep) retries it. retryReason outcomes
@@ -583,14 +648,18 @@ async function recordFirstTouchHold({ callLogId, customerId = null, heldEmail, h
         const existing = await dbh('first_touch_holds')
           .where({ call_log_id: callLogId })
           .first('held_email', 'status', 'released_at');
-        if (existing && existing.status === 'released'
-            && existing.released_at && new Date(existing.released_at) >= runStartedAt) {
+        if (existing && existing.released_at && new Date(existing.released_at) >= runStartedAt) {
           // The row's held_email IS the address the mid-run release actually
           // confirmed and sent to (the release stamps it — corrected value
           // after a correction, unchanged after an as-is accept; fanout
           // markers carry the corrected value). NEVER the customer's stored
           // email: for a matched existing customer that can be a stale
           // address the operator did not confirm (Codex #3084 r10).
+          // Keyed on released_at alone, NOT status (Codex #3084 r19): when
+          // Step 6 adopts a during-run fanout marker it re-pends the row,
+          // and Step 8's later call must keep adopting that operator-
+          // asserted address — not overwrite it with the stale in-memory
+          // newsletter candidate captured before the correction.
           const settledEmail = String(existing.held_email || '').trim().toLowerCase();
           if (settledEmail) {
             emailToRecord = settledEmail;
@@ -631,8 +700,12 @@ async function recordFirstTouchHold({ callLogId, customerId = null, heldEmail, h
           // Never demote an ACTIVE 'releasing' claim back to 'pending' — a
           // triage accept or correction may be mid-release on this row, and
           // re-pending it would let a second release path claim it and send
-          // a duplicate DOI. Released/blocked/pending all re-pend as before.
-          status: dbh.raw("CASE WHEN first_touch_holds.status = 'releasing' THEN 'releasing' ELSE 'pending' END"),
+          // a duplicate DOI. 'blocked' is the do-not-contact CONSENT
+          // terminal (Codex #3084 r19): a force-reprocess whose fresh
+          // extraction omits the earlier request must not resurrect the
+          // hold into a releasable state. Released/pending re-pend as
+          // before.
+          status: dbh.raw("CASE WHEN first_touch_holds.status IN ('releasing', 'blocked') THEN first_touch_holds.status ELSE 'pending' END"),
           updated_at: now,
         });
       return true;
@@ -744,4 +817,9 @@ module.exports = {
   recordFirstTouchHold,
   sweepAbandonedFirstTouchHolds,
   EMAIL_REVIEW_REASON_CODES,
+  // Shared with the correction fanout's DOI re-send path (Codex #3084 r19)
+  // so its settles and vetoes stay on the canonical semantics.
+  repenIfWorkMergedDuringClaim,
+  customerCallDoNotContact,
+  emailSuppressedForNewLead,
 };

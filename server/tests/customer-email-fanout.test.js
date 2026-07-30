@@ -10,11 +10,20 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/newsletter-confirm', () => ({ sendConfirmationEmail: jest.fn().mockResolvedValue(true) }));
 
 const mockResume = jest.fn();
+const mockRepenMerged = jest.fn();
+const mockDnc = jest.fn();
+const mockSuppressed = jest.fn();
 jest.mock('../services/lead-first-touch-resume', () => ({
   resumeHeldFirstTouch: (...a) => mockResume(...a),
+  repenIfWorkMergedDuringClaim: (...a) => mockRepenMerged(...a),
+  customerCallDoNotContact: (...a) => mockDnc(...a),
+  emailSuppressedForNewLead: (...a) => mockSuppressed(...a),
 }));
 beforeEach(() => {
   mockResume.mockReset().mockResolvedValue({ resumed: false, enrolled: false, newsletterResume: null });
+  mockRepenMerged.mockReset().mockResolvedValue(undefined);
+  mockDnc.mockReset().mockResolvedValue(false);
+  mockSuppressed.mockReset().mockResolvedValue(false);
 });
 
 const { propagateCustomerEmailChange, resendPendingConfirmation, emailKey } = require('../services/customer-email-fanout');
@@ -553,6 +562,68 @@ describe('resendPendingConfirmation', () => {
     const ok = await resendPendingConfirmation(payload, conn);
     expect(ok).toBe(false);
     expect(conn.__updates('newsletter_subscribers')).toHaveLength(0);
+  });
+
+  test('a do-not-contact request vetoes the coalesced DOI re-send and blocks the holds', async () => {
+    // The coalesced pending-subscriber path is a send site too (Codex #3084
+    // r19) — consent vetoes landing after the correction committed must be
+    // honored here, not only in runOnePostCommitResume.
+    mockDnc.mockResolvedValue(true);
+    const sendsBefore = sendConfirmationEmail.mock.calls.length;
+    const payload = { id: 811, email: 'samtypo@example.com', confirmation_token: 'tok-1', heldNewsletterHoldIds: ['hold-1'] };
+    const conn = makeConn({
+      newsletter_subscribers: { firstQueue: [{ email: payload.email, confirmation_token: payload.confirmation_token, customer_id: 'cust-1' }] },
+    });
+    const ok = await resendPendingConfirmation(payload, conn);
+    expect(ok).toBe(false);
+    expect(sendConfirmationEmail.mock.calls.length).toBe(sendsBefore);
+    expect(conn.__updates('first_touch_holds')[0].arg).toMatchObject({ status: 'blocked', last_error: 'do_not_contact' });
+  });
+
+  test('a suppression vetoes the coalesced DOI re-send and re-pends the holds', async () => {
+    mockSuppressed.mockResolvedValue(true);
+    const sendsBefore = sendConfirmationEmail.mock.calls.length;
+    const payload = { id: 811, email: 'samtypo@example.com', confirmation_token: 'tok-1', heldNewsletterHoldIds: ['hold-1'] };
+    const conn = makeConn(matchRow(payload));
+    const ok = await resendPendingConfirmation(payload, conn);
+    expect(ok).toBe(false);
+    expect(sendConfirmationEmail.mock.calls.length).toBe(sendsBefore);
+    expect(conn.__updates('first_touch_holds')[0].arg).toMatchObject({ status: 'pending', last_error: 'email_suppressed' });
+  });
+
+  test('a rotation between verify and send is caught by the conditional stamp — nothing settles', async () => {
+    // Correction B rotates email+token in the check/send gap (Codex #3084
+    // r19): the stamp's email+token predicate matches 0 rows, so the holds
+    // re-pend retryably and B's corrected row is never marked delivered.
+    sendConfirmationEmail.mockResolvedValueOnce(true);
+    const payload = { id: 811, email: 'samtypo@example.com', confirmation_token: 'tok-1', heldNewsletterHoldIds: ['hold-1'] };
+    const conn = makeConn({
+      newsletter_subscribers: {
+        firstQueue: [{ email: payload.email, confirmation_token: payload.confirmation_token }],
+        updateCount: 0,
+      },
+    });
+    const ok = await resendPendingConfirmation(payload, conn);
+    expect(ok).toBe(false);
+    const holdUpdates = conn.__updates('first_touch_holds');
+    expect(holdUpdates).toHaveLength(1);
+    expect(holdUpdates[0].arg).toMatchObject({ status: 'pending', last_error: 'target_verify_failed' });
+    expect(holdUpdates[0].arg.released_newsletter).toBeUndefined();
+  });
+
+  test('a released settle re-checks for drip work merged during the callback', async () => {
+    // Step 8 can add held_drip while this callback is in flight — the
+    // merged-work re-check (same as the resume paths) re-pends it instead
+    // of leaving a released row with an unreleased drip (Codex #3084 r19).
+    sendConfirmationEmail.mockResolvedValueOnce(true);
+    const payload = { id: 811, email: 'samtypo@example.com', confirmation_token: 'tok-1', heldNewsletterHoldIds: ['hold-1'] };
+    const conn = makeConn({
+      ...matchRow(payload),
+      first_touch_holds: { firstQueue: [{ held_drip: false, released_drip: false }] },
+    });
+    const ok = await resendPendingConfirmation(payload, conn);
+    expect(ok).toBe(true);
+    expect(mockRepenMerged).toHaveBeenCalledWith('hold-1', conn);
   });
 
   test('a superseded subscriber row skips the stale send and re-pends retryably', async () => {

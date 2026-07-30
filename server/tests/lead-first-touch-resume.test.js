@@ -23,6 +23,8 @@ let mockSubscriberUpdateError = null;
 let mockOnFirstTouchClaim = null; // fires when a claim update lands (race simulation)
 let mockHoldFirstQueue = null; // shift per first_touch_holds.first(); an Error value throws
 let mockTriageFirstQueue = null; // shift per triage_items.first()
+let mockReleasedSettleZeroOnce = false; // next released-settle matches 0 rows (mid-send retarget)
+let mockRepenGuardZeroOnce = false; // next guarded re-pend matches 0 rows (deny stamp landed)
 jest.mock('../models/db', () => {
   const handler = (table) => {
     const chain = {
@@ -54,6 +56,14 @@ jest.mock('../models/db', () => {
       update: jest.fn(async (patch) => {
         if (table === 'first_touch_holds') {
           if (patch.status === 'releasing' && mockClaimFails) return 0;
+          if (patch.status === 'released' && mockReleasedSettleZeroOnce) {
+            mockReleasedSettleZeroOnce = false;
+            return 0; // conditional settle: target no longer matches
+          }
+          if (patch.status === 'pending' && patch.last_error && mockRepenGuardZeroOnce) {
+            mockRepenGuardZeroOnce = false;
+            return 0; // guarded re-pend: a deny stamp landed since the claim
+          }
           mockHoldUpdates.push(patch);
           if (patch.status === 'releasing' && mockOnFirstTouchClaim) mockOnFirstTouchClaim();
         }
@@ -151,6 +161,8 @@ beforeEach(() => {
   mockOnFirstTouchClaim = null;
   mockHoldFirstQueue = null;
   mockTriageFirstQueue = null;
+  mockReleasedSettleZeroOnce = false;
+  mockRepenGuardZeroOnce = false;
 });
 
 describe('resumeHeldFirstTouch (ledger release engine)', () => {
@@ -362,6 +374,21 @@ describe('recordFirstTouchHold (durable hold ledger writes)', () => {
     expect(mockMergeArgs.at(-1).held_email).toBe('fresh@example.com');
   });
 
+  test('Step 8 keeps the during-run corrected address even after Step 6 re-pended the marker', async () => {
+    // Correction-before-Step-6 leaves a released marker; Step 6 adopts its
+    // address and re-pends the row. Step 8's later call must keep adopting
+    // the operator-asserted value — the adoption keys on released_at, not
+    // status (Codex #3084 r19) — never the stale in-memory newsletter
+    // candidate captured before the correction.
+    const runStartedAt = new Date(Date.now() - 60_000);
+    mockHold = baseHold({ status: 'pending', released_at: new Date(), held_email: 'corrected@example.com' });
+    await recordFirstTouchHold({
+      callLogId: 'call-1', customerId: 'cust-1',
+      heldEmail: 'stale-guess@example.com', heldNewsletter: true, runStartedAt,
+    });
+    expect(mockMergeArgs.at(-1).held_email).toBe('corrected@example.com');
+  });
+
   test('retries a transient write failure and succeeds', async () => {
     mockHold = null;
     mockMergeFailures = 1;
@@ -388,7 +415,7 @@ describe('recordFirstTouchHold (durable hold ledger writes)', () => {
     // duplicate DOI.
     mockHold = null;
     await recordFirstTouchHold({ callLogId: 'call-1', customerId: 'cust-1', heldEmail: 'a@example.com', heldDrip: true });
-    expect(String(mockMergeArgs.at(-1).status)).toContain("WHEN first_touch_holds.status = 'releasing' THEN 'releasing'");
+    expect(String(mockMergeArgs.at(-1).status)).toContain("WHEN first_touch_holds.status IN ('releasing', 'blocked') THEN first_touch_holds.status");
   });
 });
 
@@ -445,6 +472,31 @@ describe('resumeHeldNewsletterPostCommit failure paths', () => {
     expect(outcome).toMatchObject({ skipped: 'email_suppressed' });
     expect(mockNewsletter).not.toHaveBeenCalled();
     expect(mockHoldUpdates.at(-1)).toMatchObject({ status: 'pending', last_error: 'email_suppressed' });
+  });
+});
+
+describe('mid-send races (r19)', () => {
+  test('a released settle is conditional — a mid-send retarget re-pends instead of burying the newer address', async () => {
+    // Correction B retargets the row's held_email after the pre-send read;
+    // the terminal settle matches 0 rows and the hold re-pends
+    // 'superseded_during_send' (NOT the send-failed marker), so the sweep
+    // retries to B's address with the dedupe guard intact.
+    mockReleasedSettleZeroOnce = true;
+    const res = await resumeHeldFirstTouch({ callLogId: 'call-1' });
+    expect(res.resumed).toBe(true); // the sends to the observed target did go out
+    expect(mockHoldUpdates.at(-1)).toMatchObject({ status: 'pending', last_error: 'superseded_during_send' });
+  });
+
+  test('a failed pre-send re-read never buries a freshly-landed deny stamp', async () => {
+    // The re-read failed, so deny state is unknown — the guarded re-pend
+    // matches 0 rows (a deny stamp landed since the claim) and the recovery
+    // write re-pends WITHOUT touching last_error.
+    mockHoldFirstQueue = [new Error('db down')];
+    mockRepenGuardZeroOnce = true;
+    await resumeHeldFirstTouch({ callLogId: 'call-1' });
+    const last = mockHoldUpdates.at(-1);
+    expect(last).toMatchObject({ status: 'pending' });
+    expect(last.last_error).toBeUndefined();
   });
 });
 

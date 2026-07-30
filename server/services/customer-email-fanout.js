@@ -492,37 +492,65 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
   // correction's own callback, with the holds re-pended so the sweep
   // covers a lost callback. 'target_verify_failed', NOT the send-failed
   // marker: nothing was sent, so the retry must keep its dedupe guard.
+  const repenHolds = async (marker) => {
+    for (const holdId of holdIds) {
+      try {
+        await conn('first_touch_holds').where({ id: holdId })
+          .update({ status: 'pending', last_error: marker, updated_at: new Date() });
+      } catch (repenErr) {
+        logger.warn(`[email-fanout] hold ${holdId} re-pend failed: ${repenErr.code || repenErr.name || 'db_error'} (stale-claim window will reclaim)`);
+      }
+    }
+  };
+  let subscriberCustomerId = null;
   try {
     const current = await conn('newsletter_subscribers')
       .where({ id: pendingConfirmation.id })
-      .first('email', 'confirmation_token');
+      .first('email', 'confirmation_token', 'customer_id');
+    subscriberCustomerId = current?.customer_id || null;
     const emailMatches = String(current?.email || '').trim().toLowerCase()
       === String(pendingConfirmation.email || '').trim().toLowerCase();
     const tokenMatches = String(current?.confirmation_token || '')
       === String(pendingConfirmation.confirmation_token || '');
     if (!current || !emailMatches || !tokenMatches) {
       logger.info(`[email-fanout] DOI re-send superseded for subscriber ${pendingConfirmation.id} — stale payload skipped`);
-      for (const holdId of holdIds) {
-        try {
-          await conn('first_touch_holds').where({ id: holdId })
-            .update({ status: 'pending', last_error: 'target_verify_failed', updated_at: new Date() });
-        } catch (repenErr) {
-          logger.warn(`[email-fanout] hold ${holdId} re-pend failed: ${repenErr.code || repenErr.name || 'db_error'} (stale-claim window will reclaim)`);
-        }
-      }
+      await repenHolds('target_verify_failed');
       return false;
     }
   } catch (verifyErr) {
     // Can't verify the authoritative target — never send on a stale guess.
     logger.warn(`[email-fanout] DOI re-send target verify failed for subscriber ${pendingConfirmation.id}: ${verifyErr.code || verifyErr.name || 'db_error'}`);
-    for (const holdId of holdIds) {
-      try {
-        await conn('first_touch_holds').where({ id: holdId })
-          .update({ status: 'pending', last_error: 'target_verify_failed', updated_at: new Date() });
-      } catch (repenErr) {
-        logger.warn(`[email-fanout] hold ${holdId} re-pend failed: ${repenErr.code || repenErr.name || 'db_error'} (stale-claim window will reclaim)`);
+    await repenHolds('target_verify_failed');
+    return false;
+  }
+  // BOTH outbound vetoes run here too (Codex #3084 r19): when the coalesced
+  // pending-subscriber path carries the held DOI, this callback — not
+  // runOnePostCommitResume — is the send site, and a do-not-contact request
+  // or bounce suppression landing after the correction committed would
+  // otherwise bypass every check. Fail-closed: an unverifiable veto never
+  // defaults to sending.
+  try {
+    const { customerCallDoNotContact, emailSuppressedForNewLead } = require('./lead-first-touch-resume');
+    if (subscriberCustomerId && await customerCallDoNotContact(subscriberCustomerId, conn)) {
+      logger.info(`[email-fanout] DOI re-send vetoed for subscriber ${pendingConfirmation.id}: do-not-contact — hold(s) blocked`);
+      for (const holdId of holdIds) {
+        try {
+          await conn('first_touch_holds').where({ id: holdId })
+            .update({ status: 'blocked', last_error: 'do_not_contact', updated_at: new Date() });
+        } catch (blockErr) {
+          logger.warn(`[email-fanout] hold ${holdId} block failed: ${blockErr.code || blockErr.name || 'db_error'} (stale-claim window will reclaim)`);
+        }
       }
+      return false;
     }
+    if (await emailSuppressedForNewLead(pendingConfirmation.email, conn)) {
+      logger.info(`[email-fanout] DOI re-send vetoed for subscriber ${pendingConfirmation.id}: address suppressed — hold(s) stay pending`);
+      await repenHolds('email_suppressed');
+      return false;
+    }
+  } catch (vetoErr) {
+    logger.warn(`[email-fanout] DOI re-send veto check failed for subscriber ${pendingConfirmation.id}: ${vetoErr.code || vetoErr.name || 'db_error'} — not sending`);
+    await repenHolds('target_verify_failed');
     return false;
   }
   // The 'newsletter_doi_not_confirmed' re-pend is scoped to SEND failures
@@ -549,29 +577,58 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
     }
     return false;
   }
-  // Post-send bookkeeping — failures here log and leave the claim
-  // 'releasing' for the stale-claim reclaim; the retry's dedupe guard sees
-  // the delivered stamp and settles without a second send.
+  // Post-send bookkeeping. The stamp is CONDITIONAL on the row still
+  // matching the verified payload (Codex #3084 r19): correction B can
+  // rotate email + token between the verify read and the send, and an
+  // unconditional by-id stamp would mark B's corrected row as delivered on
+  // the strength of a dead link mailed to the superseded mailbox. Zero rows
+  // = definitely rotated → nothing usable delivered: re-pend the holds
+  // (retryable — B's rotation cleared the pending row's stamp, so the sweep
+  // retry sends a fresh DOI) and settle nothing. A THROWN stamp write keeps
+  // the r16 behavior: log and proceed — the verified send did go out, and
+  // the retry's dedupe guard covers a survived stamp.
+  let stampMatched = true;
   try {
-    await conn('newsletter_subscribers')
-      .where({ id: pendingConfirmation.id })
+    const stamped = await conn('newsletter_subscribers')
+      .where({ id: pendingConfirmation.id, confirmation_token: pendingConfirmation.confirmation_token })
+      .whereRaw('LOWER(email) = ?', [String(pendingConfirmation.email || '').trim().toLowerCase()])
       .update({ confirmation_sent_at: new Date(), updated_at: new Date() });
+    stampMatched = stamped > 0;
   } catch (stampErr) {
     logger.warn(`[email-fanout] confirmation_sent_at stamp failed for subscriber ${pendingConfirmation.id}: ${stampErr.code || stampErr.name || 'db_error'}`);
   }
+  if (!stampMatched) {
+    logger.info(`[email-fanout] DOI re-send superseded mid-send for subscriber ${pendingConfirmation.id} — holds stay retryable`);
+    await repenHolds('target_verify_failed');
+    return false;
+  }
   // This re-sent DOI IS the resume for any newsletter hold deduped against
   // it (one DOI, never two) — settle those holds only now that delivery
-  // succeeded (Codex #3084 r9).
+  // succeeded (Codex #3084 r9). Each settle is conditional on the hold
+  // still targeting the address this DOI went to, and a released settle
+  // re-checks for work merged during the claim (Step 8 adding held_drip
+  // mid-callback) exactly like the resume paths (Codex #3084 r19).
+  const { repenIfWorkMergedDuringClaim } = require('./lead-first-touch-resume');
+  const sentEmailLc = String(pendingConfirmation.email || '').trim().toLowerCase();
   for (const holdId of holdIds) {
     try {
       const hold = await conn('first_touch_holds').where({ id: holdId }).first('held_drip', 'released_drip');
       const dripSettled = !hold || !hold.held_drip || hold.released_drip;
-      await conn('first_touch_holds').where({ id: holdId }).update({
-        released_newsletter: true,
-        status: dripSettled ? 'released' : 'pending',
-        ...(dripSettled ? { released_at: new Date(), last_error: null } : {}),
-        updated_at: new Date(),
-      });
+      const settled = await conn('first_touch_holds')
+        .where({ id: holdId })
+        .whereRaw("LOWER(COALESCE(held_email, '')) = ?", [sentEmailLc])
+        .update({
+          released_newsletter: true,
+          status: dripSettled ? 'released' : 'pending',
+          ...(dripSettled ? { released_at: new Date(), last_error: null } : {}),
+          updated_at: new Date(),
+        });
+      if (!settled) {
+        await conn('first_touch_holds').where({ id: holdId })
+          .update({ status: 'pending', last_error: 'superseded_during_send', updated_at: new Date() });
+        continue;
+      }
+      if (dripSettled) await repenIfWorkMergedDuringClaim(holdId, conn);
     } catch (settleErr) {
       logger.warn(`[email-fanout] hold ${holdId} settle failed after DOI re-send: ${settleErr.code || settleErr.name || 'db_error'}`);
     }
