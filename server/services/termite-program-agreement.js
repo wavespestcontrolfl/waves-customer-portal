@@ -760,10 +760,21 @@ async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
     .where('cancelled_reason', 'like', 'Superseded by updated compliance wording%'))
     .select('id', 'customer_id', 'status', 'recipient_name', 'document_variables_snapshot')
     .limit(limit);
+  // A stale-version request whose token expired (processDocumentWorkflow
+  // runs earlier in this same cron and stamps 'expired') is out of
+  // OPEN_STATUSES and blocked by the ordinary sweep's anti-join — without
+  // this leg it would never receive its compliant replacement. Its token is
+  // already dead, so it only needs the re-prep, not a cancel.
+  const expiredStale = await notReprocessed(db('customer_contracts')
+    .whereIn('document_template_key', PROGRAM_TEMPLATE_KEYS)
+    .where('status', 'expired')
+    .whereNotIn('document_template_version_id', [...activeVersionIds]))
+    .select('id', 'customer_id', 'status', 'recipient_name', 'document_variables_snapshot')
+    .limit(limit);
 
   const NotificationService = require('./notification-service');
   const seenEstimates = new Set();
-  for (const row of [...staleOpen, ...migrationCancelled]) {
+  for (const row of [...staleOpen, ...migrationCancelled, ...expiredStale]) {
     if (results.checked >= limit) break;
     results.checked += 1;
     let snapshot = row.document_variables_snapshot;
@@ -794,8 +805,19 @@ async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
       continue;
     }
 
-    if (seenEstimates.has(estimateId)) { await markSupersededHandled(row, 'duplicate_estimate'); continue; }
+    if (seenEstimates.has(estimateId)) {
+      await cancelStaleSource(row);
+      await markSupersededHandled(row, 'duplicate_estimate');
+      continue;
+    }
     seenEstimates.add(estimateId);
+    // Retire the stale source UP FRONT — every downstream outcome (signed
+    // skip, replacement exists, estimate unavailable, parked, replaced, or
+    // a concurrent reissue racing maybeCreate's already_exists) must leave
+    // the superseded public signing link dead. Conditional + idempotent:
+    // migration-cancelled and expired rows are no-ops, and the bell-retry
+    // path stays bell-only.
+    await cancelStaleSource(row);
 
     // Executed agreements stay executed — but only for THIS property/estimate:
     // a signed agreement at another of the customer's properties must not
@@ -833,10 +855,6 @@ async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
       return openAddress === rowAddress;
     });
     if (replacementExists) {
-      // The staff-issued replacement covers the customer — but the stale
-      // source's public signing link must still die before the row is
-      // excluded from future sweeps.
-      await cancelStaleSource(row);
       await markSupersededHandled(row, 'replacement_exists');
       results.skipped += 1;
       continue;
@@ -855,13 +873,6 @@ async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
       notifyOnUnresolved: true,
     });
     const parked = ['commercial', 'annual_prepay', 'figures_unresolved'].includes(result.skipped);
-    if (parked || (result.ok && result.contractId && !result.skipped)) {
-      // A parked or replaced STALE-OPEN source must not stay signable on the
-      // superseded wording: maybeCreate's parked branches return before its
-      // supersede transaction, so cancel the source here (conditional on
-      // still being open; migration rows are already cancelled).
-      await cancelStaleSource(row);
-    }
     if (result.ok && result.contractId && !result.skipped) {
       await markSupersededHandled(row, 'replaced');
       results.created += 1;
