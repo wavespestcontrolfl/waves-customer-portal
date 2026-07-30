@@ -174,7 +174,7 @@ const WAVES_AI_TABS = {
   },
   learn: {
     placeholder: 'Ask about lawn or pest care…',
-    pills: ['Why is my lawn yellowing?', 'When is mosquito season?', 'Are treatments pet-safe?'],
+    pills: ['Why is my lawn yellowing?', 'When is mosquito season?', 'What about pets after a treatment?'],
   },
 };
 
