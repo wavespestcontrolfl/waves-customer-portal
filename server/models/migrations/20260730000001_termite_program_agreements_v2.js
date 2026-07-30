@@ -399,12 +399,22 @@ exports.up = async function up(knex) {
     .select('id', 'customer_id');
   const now = new Date();
   for (const row of openRows) {
-    await knex('customer_contracts').where({ id: row.id }).update({
-      status: 'cancelled',
-      cancelled_at: now,
-      cancelled_reason: 'Superseded by updated compliance wording (v2 templates)',
-      updated_at: now,
-    });
+    // Conditional on the status still being open: a customer signing
+    // concurrently with the deploy could commit 'signed' between the
+    // unlocked read above and this update — an executed agreement must
+    // never be overwritten as cancelled (same guard as the service's
+    // supersession path). The event is recorded only when the cancel
+    // actually landed.
+    const cancelled = await knex('customer_contracts')
+      .where({ id: row.id })
+      .whereIn('status', ['draft', 'sent', 'viewed'])
+      .update({
+        status: 'cancelled',
+        cancelled_at: now,
+        cancelled_reason: 'Superseded by updated compliance wording (v2 templates)',
+        updated_at: now,
+      });
+    if (!cancelled) continue;
     await knex('customer_contract_events').insert({
       contract_id: row.id,
       customer_id: row.customer_id,
