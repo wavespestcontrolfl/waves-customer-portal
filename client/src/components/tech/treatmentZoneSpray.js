@@ -121,22 +121,32 @@ export function rescalePointsForZoom(points, deltaZoom) {
  * Length-weighted dominant orientation of a traced loop, in the 90°-periodic
  * domain (walls and their perpendiculars agree). Returns radians in
  * (-π/4, π/4] — the rotation that squares the loop is the negative of this.
+ *
+ * Orientation-less loops return 0: when the 4θ resultant nearly cancels
+ * (circles, octagons, organic lawn edges), atan2 of the float residue would
+ * otherwise manufacture an arbitrary tilt that passes the alignment
+ * threshold and rotates the frame for no reason (pre-push audit P1
+ * 2026-07-30). Confidence = resultant magnitude / total length; a rectangle
+ * scores ~1, a circle ~0.
  */
+const ORIENTATION_MIN_CONFIDENCE = 0.35;
 export function dominantAngleRad(points, closed) {
   if (!Array.isArray(points) || points.length < 2) return 0;
   const pts = closed && points.length > 2 ? [...points, points[0]] : points;
   let sx = 0;
   let sy = 0;
+  let totalLen = 0;
   for (let i = 1; i < pts.length; i += 1) {
     const dx = pts[i].x - pts[i - 1].x;
     const dy = pts[i].y - pts[i - 1].y;
     const len = Math.hypot(dx, dy);
     if (!len) continue;
+    totalLen += len;
     const ang = Math.atan2(dy, dx);
     sx += len * Math.cos(4 * ang);
     sy += len * Math.sin(4 * ang);
   }
-  if (sx === 0 && sy === 0) return 0;
+  if (!totalLen || Math.hypot(sx, sy) / totalLen < ORIENTATION_MIN_CONFIDENCE) return 0;
   return Math.atan2(sy, sx) / 4;
 }
 
