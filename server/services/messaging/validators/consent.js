@@ -49,13 +49,18 @@ async function checkConsentForPurpose(input, policy, contactState) {
   }
 
   // Recipients with no notification_prefs row can still receive transactional
-  // conversational replies — they wrote in, they expect a reply. A missing
+  // conversational REPLIES — they wrote in, they expect a reply. A missing
   // row means "never opted out": STOP handling upserts a prefs row with
   // sms_enabled=false (twilio-webhook), so any real opt-out is caught by the
   // sms_enabled gate below, never by row absence. Customers created through
   // paths that don't seed notification_prefs were previously stranded here
   // (NO_CONSENT_RECORD on manual replies from Communications/tech Messages).
-  // Anything beyond conversational still needs a prefs row + sms_enabled=true.
+  // Reply evidence is required for non-lead audiences (hasInboundHistory —
+  // a prior inbound sms_log row from this phone, loaded by loadContactState):
+  // purpose 'conversational' is reused by flows that can START a thread, and
+  // a cold outbound to a no-row recipient must not bypass consent (Codex P1
+  // on PR #3057). Anything beyond conversational still needs a prefs row +
+  // sms_enabled=true.
   if (!contactState || !contactState.prefs) {
     if (
       input.audience === 'lead' &&
@@ -66,8 +71,17 @@ async function checkConsentForPurpose(input, policy, contactState) {
       return { ok: true };
     }
     if (
+      input.audience === 'lead' &&
       policy.requireConsent === 'transactional' &&
       input.purpose === 'conversational'
+    ) {
+      return { ok: true };
+    }
+    if (
+      policy.requireConsent === 'transactional' &&
+      input.purpose === 'conversational' &&
+      contactState &&
+      contactState.hasInboundHistory === true
     ) {
       return { ok: true };
     }
@@ -219,6 +233,27 @@ async function loadContactState(input) {
     } catch (err) {
       logger.warn(`[messaging:consent] phone-match lookup failed: ${err.message}`);
       state.lookupFailed = true;
+    }
+  }
+
+  // Reply evidence for the no-prefs-row conversational exception: has this
+  // phone ever texted US? Only queried when the prefs row is missing (the
+  // normal path never pays for it). On query error we leave it false — the
+  // exception simply doesn't apply and the send fails closed as
+  // NO_CONSENT_RECORD rather than converting a legit denial into a retry.
+  state.hasInboundHistory = false;
+  if (!state.prefs) {
+    const phones = [...new Set([input.to, state.customer?.phone].filter(Boolean))];
+    if (phones.length) {
+      try {
+        const inbound = await db('sms_log')
+          .where({ direction: 'inbound' })
+          .whereIn('from_phone', phones)
+          .first('id');
+        state.hasInboundHistory = Boolean(inbound);
+      } catch (err) {
+        logger.warn(`[messaging:consent] inbound-history lookup failed: ${err.message}`);
+      }
     }
   }
 
