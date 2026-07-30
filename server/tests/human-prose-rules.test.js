@@ -53,6 +53,13 @@ describe('injection — every long-form prose prompt carries the block', () => {
     expect((src.match(/HUMAN_PROSE_RULES/g) || []).length).toBeGreaterThanOrEqual(2);
   });
 
+  test('legacy/scheduled blog path + field-photo captions carry the block too (codex r1)', () => {
+    const blogWriter = require('fs').readFileSync(require.resolve('../services/content/blog-writer'), 'utf8');
+    const techCaption = require('fs').readFileSync(require.resolve('../services/tech-social-caption'), 'utf8');
+    expect(blogWriter).toContain('HUMAN_PROSE_RULES');
+    expect(techCaption).toContain('HUMAN_PROSE_RULES');
+  });
+
   test('deliberate NON-injections stay clean: newsletter captions + meta rewriter', () => {
     const scheduler = require('fs').readFileSync(require.resolve('../services/content-scheduler'), 'utf8');
     const meta = require('fs').readFileSync(require.resolve('../services/content/agents/meta-rewriter-config'), 'utf8');

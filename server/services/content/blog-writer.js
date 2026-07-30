@@ -205,7 +205,11 @@ class BlogWriter {
       differentiationNote = `\n\nIMPORTANT: We already have published content on similar topics:\n${existingOnTopic.map(e => `- "${e.title}" (${e.city}) targeting "${e.keyword}"`).join('\n')}\n\nYour post MUST differentiate by:\n- Focusing specifically on ${post.city} (not the cities above)\n- Taking a different angle or subtopic\n- Covering aspects the existing posts don't\n- DO NOT repeat the same core advice — add new value`;
     }
 
+    const { HUMAN_PROSE_RULES } = require('../llm/human-prose-rules');
     const systemPrompt = `You write blog posts for Waves Pest Control, a pest control and lawn care company in Southwest Florida.
+
+${HUMAN_PROSE_RULES}
+
 
 YOUR VOICE — study these real Waves blog titles and match the tone EXACTLY:
 ${(voice?.sample_titles || allTitles.map(t => t.title)).map(t => `• "${t}"`).join('\n')}
