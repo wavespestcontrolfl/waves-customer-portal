@@ -1761,6 +1761,14 @@ const SocialMediaService = {
     // branded; heroes/photos/unknown caller images get watermarked in
     // postToGBP unless the caller vouches via gbpImageBranded.
     let resolvedGbpBranded = resolvedGbpImageUrl ? !!gbpImageBranded : false;
+    // Compliance-judge memo for THIS publish call: identical copy (e.g. one
+    // GBP body fanned out to 4 locations) is judged once.
+    const _judgeMemo = new Map();
+    const judgeCopyOnce = (copy) => {
+      const key = String(copy || '');
+      if (!_judgeMemo.has(key)) _judgeMemo.set(key, require('./social-compliance-judge').judgeSocialCopy(key));
+      return _judgeMemo.get(key);
+    };
     // SOCIAL_MEDIA_CDN_DOMAIN is required too: uploadImageToS3 returns null
     // without it (private S3 URLs aren't publicly fetchable), so generating
     // an image without a CDN just burns credits and discards the result.
@@ -1944,11 +1952,14 @@ const SocialMediaService = {
         // catches phrasings no regex enumerates. FAIL-OPEN — an unavailable
         // judge (ok:false) never blocks the lane; a definitive non-compliant
         // verdict skips this platform exactly like a validation failure.
-        const verdict = await require('./social-compliance-judge').judgeSocialCopy(content);
+        const verdict = await judgeCopyOnce(content);
         if (verdict.ok && !verdict.compliant) {
           const why = verdict.violations.join('; ') || 'compliance violation';
           logger.warn(`[social] Compliance judge rejected ${p.key} copy: ${why}`);
-          platformResults.push({ platform: p.key, success: false, error: `Compliance judge: ${verdict.violations[0] || 'violation'}`, validationIssues: verdict.violations });
+          // skipped: a judge rejection is a content decision, not a platform
+          // attempt — it must not feed the consecutive-failure credential
+          // alerts (platformOutcomeForPost ignores skipped entries).
+          platformResults.push({ platform: p.key, success: false, skipped: true, error: `Compliance judge: ${verdict.violations[0] || 'violation'}`, validationIssues: verdict.violations });
           continue;
         }
 
@@ -2109,6 +2120,15 @@ const SocialMediaService = {
           platformResults.push({ platform: 'gbp', location: loc.id, success: false, error: `Validation: ${gbpValidation.issues[0]}` });
           continue;
         }
+        // Semantic second pass — same contract as the platforms loop above.
+        // judgeCopyOnce memoizes per content string, so a 4-location fan-out
+        // with shared copy judges once.
+        const gbpVerdict = await judgeCopyOnce(gbpContent);
+        if (gbpVerdict.ok && !gbpVerdict.compliant) {
+          logger.warn(`[social] Compliance judge rejected GBP copy for ${loc.name}: ${gbpVerdict.violations.join('; ')}`);
+          platformResults.push({ platform: 'gbp', location: loc.id, success: false, skipped: true, error: `Compliance judge: ${gbpVerdict.violations[0] || 'violation'}` });
+          continue;
+        }
 
         if (SOCIAL_FLAGS.dryRun) {
           logger.info(`[social] DRY RUN — gbp/${loc.name}: ${gbpContent.substring(0, 120)}...`);
@@ -2246,6 +2266,14 @@ const SocialMediaService = {
     const validation = validateContent(text, platform);
     if (!validation.valid) {
       return { platform, success: false, error: `Validation: ${validation.issues[0]}`, validationIssues: validation.issues };
+    }
+    // Semantic second pass (owner ruling 2026-07-30) — postToSingle serves
+    // the tech no-admin-queue flow, which must not bypass the judge. A
+    // rejection is skipped (content decision, not a platform failure).
+    const singleVerdict = await require('./social-compliance-judge').judgeSocialCopy(text);
+    if (singleVerdict.ok && !singleVerdict.compliant) {
+      logger.warn(`[social] Compliance judge rejected ${platform} copy: ${singleVerdict.violations.join('; ')}`);
+      return { platform, success: false, skipped: true, error: `Compliance judge: ${singleVerdict.violations[0] || 'violation'}` };
     }
 
     if (SOCIAL_FLAGS.dryRun) {
