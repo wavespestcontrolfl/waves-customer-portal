@@ -77,7 +77,8 @@ jest.mock('../services/call-recording-processor', () => ({
   resumeNewsletterForCallCustomer: (...a) => mockNewsletter(...a),
 }));
 
-const { resumeHeldFirstTouch, recordFirstTouchHold } = require('../services/lead-first-touch-resume');
+const { resumeHeldFirstTouch, recordFirstTouchHold, resumeHeldNewsletterPostCommit } = require('../services/lead-first-touch-resume');
+const logger = require('../services/logger');
 
 function baseHold(overrides = {}) {
   return {
@@ -274,5 +275,38 @@ describe('recordFirstTouchHold (durable hold ledger writes)', () => {
     });
     expect(ok).toBeNull();
     expect(mockMergeArgs).toHaveLength(0);
+  });
+
+  test('the merge never demotes an active releasing claim back to pending', async () => {
+    // A triage accept / correction mid-release must keep its claim — a
+    // demotion would let a second release path claim the row and send a
+    // duplicate DOI.
+    mockHold = null;
+    await recordFirstTouchHold({ callLogId: 'call-1', customerId: 'cust-1', heldEmail: 'a@example.com', heldDrip: true });
+    expect(String(mockMergeArgs.at(-1).status)).toContain("WHEN first_touch_holds.status = 'releasing' THEN 'releasing'");
+  });
+});
+
+describe('resumeHeldNewsletterPostCommit failure paths', () => {
+  test('re-pends the hold when the resume throws — and logs only a sanitized code', async () => {
+    const dbErr = new Error('duplicate key value violates unique constraint "newsletter_subscribers_email_unique" — (email)=(private@example.com)');
+    dbErr.code = '23505';
+    mockNewsletter.mockRejectedValueOnce(dbErr);
+    const outcome = await resumeHeldNewsletterPostCommit({ holdId: 'hold-1', customerId: 'cust-1', email: 'private@example.com' });
+    expect(outcome).toBeNull();
+    // Retryable state restored — the claim must not linger 'releasing'.
+    expect(mockHoldUpdates.at(-1)).toMatchObject({ status: 'pending' });
+    expect(String(mockHoldUpdates.at(-1).last_error)).toContain('newsletter_resume_failed: 23505');
+    // No raw error message (which can echo the subscriber email) in logs.
+    for (const call of logger.warn.mock.calls) {
+      expect(String(call[0])).not.toContain('private@example.com');
+    }
+  });
+
+  test('a successful post-commit resume settles the hold as released', async () => {
+    mockHold = { held_drip: false, released_drip: false };
+    const outcome = await resumeHeldNewsletterPostCommit({ holdId: 'hold-1', customerId: 'cust-1', email: 'ok@example.com' });
+    expect(outcome).toMatchObject({ subscribed: true });
+    expect(mockHoldUpdates.at(-1)).toMatchObject({ released_newsletter: true, status: 'released' });
   });
 });

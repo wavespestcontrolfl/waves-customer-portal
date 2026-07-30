@@ -47,11 +47,15 @@ function makeConn(cfg = {}) {
         : ((t.firstQueue || []).shift() ?? null)),
       update: (patch) => { calls.push({ table, op: 'update', arg: patch }); return Promise.resolve(t.updateCount ?? 1); },
       del: () => { calls.push({ table, op: 'del' }); return Promise.resolve(1); },
+      insert: (arg) => { calls.push({ table, op: 'insert', arg }); return qb; },
+      onConflict: () => qb,
+      ignore: () => Promise.resolve(1),
       then: (resolve, reject) => Promise.resolve(t.rows || []).then(resolve, reject),
     };
     return qb;
   };
   conn.raw = (sql) => ({ __raw: sql });
+  conn.schema = { hasTable: async () => true };
   conn.__calls = calls;
   conn.__updates = (table) => calls.filter((c) => c.table === table && c.op === 'update');
   return conn;
@@ -332,11 +336,11 @@ describe('propagateCustomerEmailChange', () => {
     }));
   });
 
-  test('DOI dedupe consumes EVERY deferred newsletter hold, not just one', async () => {
+  test('DOI dedupe hands EVERY deferred hold to the post-commit re-send — nothing consumed in-trx', async () => {
     // pendingConfirmation (moved pending subscriber) + deferred holds from
-    // TWO calls: the re-sent confirmation is the one DOI; both ledger rows
-    // must settle released_newsletter so neither can resend after the
-    // stale-claim window.
+    // TWO calls: the re-sent confirmation is the one DOI, but the holds must
+    // NOT settle inside the edit transaction — the re-send can still fail
+    // post-commit, and a consumed hold would leave nothing to retry.
     mockResume.mockResolvedValueOnce({
       resumed: true,
       enrolled: true,
@@ -352,22 +356,32 @@ describe('propagateCustomerEmailChange', () => {
           null,
         ],
       },
-      first_touch_holds: {
-        firstQueue: [
-          { held_drip: true, released_drip: true },
-          { held_drip: false, released_drip: false },
-        ],
-      },
     });
     const result = await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
-    expect(result.pendingConfirmation).toBeDefined();
+    expect(result.pendingConfirmation.heldNewsletterHoldIds).toEqual(['hold-1', 'hold-2']);
     expect(result.heldNewsletterResume).toBeUndefined();
-    const holdUpdates = conn.__updates('first_touch_holds');
-    expect(holdUpdates).toHaveLength(2);
-    for (const u of holdUpdates) {
-      expect(u.arg.released_newsletter).toBe(true);
-      expect(u.arg.status).toBe('released');
-    }
+    expect(conn.__updates('first_touch_holds')).toHaveLength(0);
+  });
+
+  test('a correction leaves a SETTLED ledger marker for reviewed calls with no hold row', async () => {
+    // The card can exist BEFORE the processor's Step-6 hold write (customer
+    // linked, hold not yet recorded). The correction resolves the card and
+    // finds nothing to release — the marker row carries the corrected
+    // address so the processor's released-during-run guard adopts it
+    // instead of the stale pre-correction extraction.
+    const conn = makeConn({
+      triage_items: { rows: [{ id: 'ti-1', call_log_id: 'call-1' }], countQueue: [{ n: 0 }] },
+    });
+    await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
+    const inserts = conn.__calls.filter((c) => c.table === 'first_touch_holds' && c.op === 'insert');
+    expect(inserts).toHaveLength(1);
+    expect(inserts[0].arg).toMatchObject({
+      call_log_id: 'call-1',
+      held_email: 'charleswrobb@gmail.com',
+      held_drip: false,
+      held_newsletter: false,
+      status: 'released',
+    });
   });
 
   test('deferred newsletter holds pass through when no pending subscriber was moved', async () => {
@@ -394,6 +408,38 @@ describe('resendPendingConfirmation', () => {
     expect(ok).toBe(true);
     expect(sendConfirmationEmail).toHaveBeenCalledWith(expect.objectContaining({ email: 'charleswrobb@gmail.com', confirmation_token: 'tok-1' }));
     expect(conn.__updates('newsletter_subscribers')[0].arg.confirmation_sent_at).toBeInstanceOf(Date);
+  });
+
+  test('settles deduped newsletter holds only AFTER the re-send succeeds', async () => {
+    sendConfirmationEmail.mockResolvedValueOnce(true);
+    const conn = makeConn({
+      first_touch_holds: {
+        firstQueue: [
+          { held_drip: true, released_drip: true },
+          { held_drip: false, released_drip: false },
+        ],
+      },
+    });
+    const ok = await resendPendingConfirmation(
+      { id: 739, email: 'charleswrobb@gmail.com', confirmation_token: 'tok-1', heldNewsletterHoldIds: ['hold-1', 'hold-2'] }, conn);
+    expect(ok).toBe(true);
+    const holdUpdates = conn.__updates('first_touch_holds');
+    expect(holdUpdates).toHaveLength(2);
+    for (const u of holdUpdates) {
+      expect(u.arg.released_newsletter).toBe(true);
+      expect(u.arg.status).toBe('released');
+    }
+  });
+
+  test('re-pends deduped holds when the re-send fails — the DOI stays retryable', async () => {
+    sendConfirmationEmail.mockRejectedValueOnce(new Error('sendgrid down'));
+    const conn = makeConn();
+    const ok = await resendPendingConfirmation(
+      { id: 739, email: 'charleswrobb@gmail.com', confirmation_token: 'tok-1', heldNewsletterHoldIds: ['hold-1'] }, conn);
+    expect(ok).toBe(false);
+    const holdUpdates = conn.__updates('first_touch_holds');
+    expect(holdUpdates).toHaveLength(1);
+    expect(holdUpdates[0].arg).toMatchObject({ status: 'pending', last_error: 'newsletter_doi_not_confirmed' });
   });
 
   test('a failed send never throws and leaves the stamp alone', async () => {

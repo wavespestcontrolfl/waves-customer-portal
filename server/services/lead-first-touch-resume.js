@@ -291,7 +291,23 @@ async function resumeHeldNewsletterPostCommit(payloadOrList, dbh = db) {
     }
     return outcome;
   } catch (err) {
-    logger.warn(`[first-touch-resume] post-commit newsletter resume failed for customer ${payload.customerId}: ${err.message}`);
+    // Sanitized code only — a unique-violation message can echo the
+    // subscriber email, and this path exists BECAUSE an address is being
+    // corrected; it must not leak into logs (or the ledger).
+    const code = err.code || err.name || 'resume_failed';
+    logger.warn(`[first-touch-resume] post-commit newsletter resume failed for customer ${payload.customerId}: ${code}`);
+    // The hold was claimed 'releasing' before this ran — restore a
+    // retryable state; nothing else consumes the ledger on a schedule, so
+    // waiting out the stale-claim window would strand the DOI until some
+    // unrelated trigger happens to fire.
+    if (payload.holdId) {
+      try {
+        await dbh('first_touch_holds').where({ id: payload.holdId })
+          .update({ status: 'pending', last_error: `newsletter_resume_failed: ${code}`, updated_at: new Date() });
+      } catch (repenErr) {
+        logger.warn(`[first-touch-resume] hold ${payload.holdId} re-pend failed: ${repenErr.code || repenErr.name || 'db_error'} (stale-claim window will reclaim)`);
+      }
+    }
     return null;
   }
 }
@@ -366,7 +382,11 @@ async function recordFirstTouchHold({ callLogId, customerId = null, heldEmail, h
           held_email: emailToRecord,
           held_drip: dbh.raw('first_touch_holds.held_drip OR excluded.held_drip'),
           held_newsletter: dbh.raw('first_touch_holds.held_newsletter OR excluded.held_newsletter'),
-          status: 'pending',
+          // Never demote an ACTIVE 'releasing' claim back to 'pending' — a
+          // triage accept or correction may be mid-release on this row, and
+          // re-pending it would let a second release path claim it and send
+          // a duplicate DOI. Released/blocked/pending all re-pend as before.
+          status: dbh.raw("CASE WHEN first_touch_holds.status = 'releasing' THEN 'releasing' ELSE 'pending' END"),
           updated_at: now,
         });
       return true;

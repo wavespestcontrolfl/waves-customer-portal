@@ -8911,6 +8911,15 @@ const CallRecordingProcessor = {
           });
           if (retried === null) {
             logger.error(`[call-proc] first-touch hold ledger write STILL failing for ${maskSid(callSid)} — held send(s) have no durable release record`);
+            // Six straight write failures — without this row the held
+            // send(s) can never be released, so the run must NOT complete
+            // as processed. Throwing lands in the outer procErr catch,
+            // which stamps extraction_failed with the capped retry budget:
+            // the sweep re-processes the call (reprocessing is
+            // bounded-safe) and re-attempts the ledger write.
+            const ledgerErr = new Error('first_touch_hold_ledger_unavailable');
+            ledgerErr.holdLedgerUnavailable = true;
+            throw ledgerErr;
           }
         }
         if (!(await shouldHoldLeadEmailEnrollment(call.id))) {
@@ -8949,6 +8958,9 @@ const CallRecordingProcessor = {
           }
         }
       } catch (reconcileErr) {
+        // Reconciliation is best-effort EXCEPT for a terminally
+        // unpersistable hold — that one must fail the run (see above).
+        if (reconcileErr.holdLedgerUnavailable) throw reconcileErr;
         logger.warn(`[call-proc] first-touch hold reconciliation failed for ${maskSid(callSid)}: ${reconcileErr.message}`);
       }
     }

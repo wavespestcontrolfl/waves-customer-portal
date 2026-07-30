@@ -344,6 +344,33 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
         .where({ id: callId })
         .update({ review_status: parseInt(stillOpen?.n || 0, 10) > 0 ? 'open' : 'resolved', updated_at: now });
     }
+    // A correction that answers a call's read-back BEFORE the processor's
+    // Step-6 hold write must still leave its answer in the ledger (Codex
+    // #3084 r9): in that window the card exists but no first_touch_holds
+    // row does, so the resume above had nothing to release — and the
+    // processor would later record (and end-of-run release) the stale
+    // pre-correction address. A SETTLED marker row keyed to the call makes
+    // recordFirstTouchHold's released-during-run guard adopt the corrected
+    // address instead. onConflict-ignore: real hold rows are never
+    // clobbered; errors propagate with the rest of the edit transaction.
+    if (await conn.schema.hasTable('first_touch_holds')) {
+      for (const callId of [...new Set(openItems.map((i) => i.call_log_id).filter(Boolean))]) {
+        await conn('first_touch_holds')
+          .insert({
+            call_log_id: callId,
+            customer_id: customerId,
+            held_email: newEmail,
+            held_drip: false,
+            held_newsletter: false,
+            status: 'released',
+            released_at: now,
+            created_at: now,
+            updated_at: now,
+          })
+          .onConflict('call_log_id')
+          .ignore();
+      }
+    }
   }
 
   // Resume the HELD first-touch sends (2026-07-30): the call pipeline holds
@@ -372,32 +399,19 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
   }
   // One DOI, never two (Codex #3084 r5): if the customer publicly
   // subscribed while the call's newsletter was held, the moved pending row's
-  // re-sent confirmation IS the resume — drop the held payloads and consume
-  // EVERY associated hold (newsletterResume is an array — one payload per
-  // pending hold; consuming only one would leave the rest 'releasing' and
-  // resendable after the stale-claim window, Codex #3084 r8). Each hold
-  // settles fully here: 'released' once its drip side is also done, so the
-  // claim never lingers for the reclaim sweep.
+  // re-sent confirmation IS the resume — drop the held payloads so only
+  // resendPendingConfirmation sends. The holds themselves are NOT consumed
+  // here (Codex #3084 r9): the re-send runs post-commit and can fail, and a
+  // hold consumed in-transaction would leave the subscriber pending with
+  // nothing left to retry. The ids ride along on pendingConfirmation;
+  // resendPendingConfirmation settles every one only after the confirmation
+  // actually sends, and re-pends them all on failure. Until then the rows
+  // stay 'releasing' (the deferred-resume claim), reclaimable via the
+  // stale-claim window if the process dies before the post-commit call.
   if (pendingConfirmation && heldNewsletterResume) {
-    try {
-      for (const payload of heldNewsletterResume) {
-        if (!payload?.holdId) continue;
-        const hold = await conn('first_touch_holds')
-          .where({ id: payload.holdId })
-          .first('held_drip', 'released_drip');
-        const dripSettled = !hold || !hold.held_drip || hold.released_drip;
-        await conn('first_touch_holds')
-          .where({ id: payload.holdId })
-          .update({
-            released_newsletter: true,
-            status: dripSettled ? 'released' : 'pending',
-            ...(dripSettled ? { released_at: now, last_error: null } : {}),
-            updated_at: now,
-          });
-      }
-    } catch (dedupeErr) {
-      logger.warn(`[email-fanout] held-newsletter dedupe failed for customer ${customerId}: ${dedupeErr.message}`);
-    }
+    pendingConfirmation.heldNewsletterHoldIds = heldNewsletterResume
+      .map((p) => p?.holdId)
+      .filter(Boolean);
     heldNewsletterResume = null;
   }
   const extras = {};
@@ -416,17 +430,48 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
  */
 async function resendPendingConfirmation(pendingConfirmation, conn = db) {
   if (!pendingConfirmation) return false;
+  const holdIds = Array.isArray(pendingConfirmation.heldNewsletterHoldIds)
+    ? pendingConfirmation.heldNewsletterHoldIds
+    : [];
   try {
     await require('./newsletter-confirm').sendConfirmationEmail(pendingConfirmation);
     await conn('newsletter_subscribers')
       .where({ id: pendingConfirmation.id })
       .update({ confirmation_sent_at: new Date(), updated_at: new Date() });
+    // This re-sent DOI IS the resume for any newsletter hold deduped against
+    // it (one DOI, never two) — settle those holds only now that delivery
+    // succeeded (Codex #3084 r9).
+    for (const holdId of holdIds) {
+      try {
+        const hold = await conn('first_touch_holds').where({ id: holdId }).first('held_drip', 'released_drip');
+        const dripSettled = !hold || !hold.held_drip || hold.released_drip;
+        await conn('first_touch_holds').where({ id: holdId }).update({
+          released_newsletter: true,
+          status: dripSettled ? 'released' : 'pending',
+          ...(dripSettled ? { released_at: new Date(), last_error: null } : {}),
+          updated_at: new Date(),
+        });
+      } catch (settleErr) {
+        logger.warn(`[email-fanout] hold ${holdId} settle failed after DOI re-send: ${settleErr.code || settleErr.name || 'db_error'}`);
+      }
+    }
     return true;
   } catch (e) {
     // Provider error bodies can echo the recipient address — log only the
     // subscriber id and a sanitized code (this path exists BECAUSE the email
     // is being corrected; it must not leak into logs).
     logger.warn(`[email-fanout] DOI confirmation re-send failed for subscriber ${pendingConfirmation.id}: ${e.code || e.statusCode || 'send_failed'}`);
+    // The deduped holds' DOI never went out — restore a retryable state so
+    // the next release trigger re-sends instead of stranding the pending
+    // subscriber (Codex #3084 r9).
+    for (const holdId of holdIds) {
+      try {
+        await conn('first_touch_holds').where({ id: holdId })
+          .update({ status: 'pending', last_error: 'newsletter_doi_not_confirmed', updated_at: new Date() });
+      } catch (repenErr) {
+        logger.warn(`[email-fanout] hold ${holdId} re-pend failed: ${repenErr.code || repenErr.name || 'db_error'} (stale-claim window will reclaim)`);
+      }
+    }
     return false;
   }
 }

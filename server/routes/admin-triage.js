@@ -136,25 +136,15 @@ async function transitionCore({ id, nextStatus, note, assignedTo }) {
     });
   if (updated === 0) return { outcome: 'conflict' };
 
-  // Keep call_log.review_status in sync with the call's remaining open items.
-  if (item.call_log_id) {
-    const stillOpen = await db('triage_items')
-      .where({ call_log_id: item.call_log_id })
-      .whereIn('status', OPEN_STATES)
-      .count('* as n')
-      .first();
-    const remaining = parseInt(stillOpen?.n || 0, 10);
-    await db('call_log')
-      .where({ id: item.call_log_id })
-      .update({ review_status: remaining > 0 ? 'open' : nextStatus, updated_at: new Date() });
-  }
-
   // Resolving an email read-back card AS-IS ("the spelling was right") is a
   // release point for the held first-touch sends — the email-correction
   // fanout only runs when the address actually changes, so without this the
   // held drip/newsletter would never start (2026-07-30 lane). Resolve only:
   // a DISMISSED card is "not actionable", not a confirmation. Best-effort —
-  // never affects the transition result.
+  // never affects the transition result. Runs IMMEDIATELY after winning the
+  // compare-and-swap (Codex #3084 r9): if it ran after the review-status
+  // bookkeeping and that write failed, the card would already be closed, a
+  // retry would 409, and the hold would have no release trigger left.
   if (nextStatus === 'resolved' && item.call_log_id) {
     try {
       const { resumeHeldFirstTouch, EMAIL_REVIEW_REASON_CODES } = require('../services/lead-first-touch-resume');
@@ -167,6 +157,19 @@ async function transitionCore({ id, nextStatus, note, assignedTo }) {
     } catch (resumeErr) {
       logger.warn(`[admin-triage] first-touch resume failed for item ${id}: ${resumeErr.message}`);
     }
+  }
+
+  // Keep call_log.review_status in sync with the call's remaining open items.
+  if (item.call_log_id) {
+    const stillOpen = await db('triage_items')
+      .where({ call_log_id: item.call_log_id })
+      .whereIn('status', OPEN_STATES)
+      .count('* as n')
+      .first();
+    const remaining = parseInt(stillOpen?.n || 0, 10);
+    await db('call_log')
+      .where({ id: item.call_log_id })
+      .update({ review_status: remaining > 0 ? 'open' : nextStatus, updated_at: new Date() });
   }
 
   return { outcome: 'ok', item };
@@ -268,6 +271,35 @@ router.post('/:id/verdict', async (req, res) => {
       return res.status(409).json({ error: 'Call was just actioned by someone else' });
     }
 
+    // An ACCEPT verdict confirms the extraction — including any email that
+    // was under read-back — so it is a release point for the held
+    // first-touch sends (2026-07-30 lane). A DENY releases too UNLESS the
+    // denial implicates identity ('name' — the category that owns email
+    // cards) or consent: those denials lead to a correction, and the
+    // email-correction fanout resumes then. Without this, a deny about an
+    // unrelated field (service/scheduling/routing) would resolve the email
+    // card with no release path left (Codex #3084 r3). Best-effort. Runs
+    // IMMEDIATELY after winning the bulk compare-and-swap (Codex #3084 r9):
+    // if the later feedback/review-status bookkeeping fails, the handler
+    // 500s with the cards already closed and a retried verdict 409s — this
+    // block must already have run by then or the hold loses its trigger.
+    const denyClearsEmail = verdict === 'deny'
+      && !wrongFields.includes('name')
+      && !wrongFields.includes('consent');
+    if ((verdict === 'accept' || denyClearsEmail) && liveEmailCard) {
+      try {
+        const { resumeHeldFirstTouch } = require('../services/lead-first-touch-resume');
+        {
+          const call = await db('call_log').where({ id: item.call_log_id }).first('customer_id');
+          if (call?.customer_id) {
+            await resumeHeldFirstTouch({ customerId: call.customer_id, callLogId: item.call_log_id, source: 'triage_verdict_accept' });
+          }
+        }
+      } catch (resumeErr) {
+        logger.warn(`[admin-triage] first-touch resume failed for call ${item.call_log_id}: ${resumeErr.message}`);
+      }
+    }
+
     // A surviving bounce card keeps the call visible in review.
     const stillOpen = await db('triage_items')
       .where({ call_log_id: item.call_log_id })
@@ -287,31 +319,6 @@ router.post('/:id/verdict', async (req, res) => {
       note,
       reviewedBy: req.technicianId,
     });
-
-    // An ACCEPT verdict confirms the extraction — including any email that
-    // was under read-back — so it is a release point for the held
-    // first-touch sends (2026-07-30 lane). A DENY releases too UNLESS the
-    // denial implicates identity ('name' — the category that owns email
-    // cards) or consent: those denials lead to a correction, and the
-    // email-correction fanout resumes then. Without this, a deny about an
-    // unrelated field (service/scheduling/routing) would resolve the email
-    // card with no release path left (Codex #3084 r3). Best-effort.
-    const denyClearsEmail = verdict === 'deny'
-      && !wrongFields.includes('name')
-      && !wrongFields.includes('consent');
-    if ((verdict === 'accept' || denyClearsEmail) && liveEmailCard) {
-      try {
-        const { resumeHeldFirstTouch } = require('../services/lead-first-touch-resume');
-        {
-          const call = await db('call_log').where({ id: item.call_log_id }).first('customer_id');
-          if (call?.customer_id) {
-            await resumeHeldFirstTouch({ customerId: call.customer_id, callLogId: item.call_log_id, source: 'triage_verdict_accept' });
-          }
-        }
-      } catch (resumeErr) {
-        logger.warn(`[admin-triage] first-touch resume failed for call ${item.call_log_id}: ${resumeErr.message}`);
-      }
-    }
 
     return res.json({ ok: true, id, status: 'resolved', verdict, resolved_count: resolved });
   } catch (err) {
