@@ -182,13 +182,17 @@ describe('token + kind + sender guards', () => {
 describe('executeDecision / finishExecution — recoverable claim state machine', () => {
   const ROW = { id: 'x', token: 'EA-deadbeef', run_id: 'r', opportunity_id: 'o', kind: 'named_competitor_review' };
 
-  function mockDb({ claim = 1 } = {}) {
+  // The decided-elsewhere pre-guard (r9) needs a STILL-PARKED run +
+  // pending_review opportunity for a decision to proceed.
+  const PARKED_RUN = { id: 'r', outcome: 'completed_pending_review', skip_reason: 'named_competitor_review', draft_payload: null };
+  function mockDb({ claim = 1, run = PARKED_RUN, opp = { status: 'pending_review' } } = {}) {
     const db = require('../models/db');
     const updates = [];
-    db.mockImplementation(() => ({
+    let updateCalls = 0;
+    db.mockImplementation((table) => ({
       where: jest.fn().mockReturnValue({
-        update: jest.fn().mockImplementation((payload) => { updates.push(payload); return Promise.resolve(updates.length === 1 ? claim : 1); }),
-        first: jest.fn().mockResolvedValue(null),
+        update: jest.fn().mockImplementation((payload) => { updates.push(payload); updateCalls++; return Promise.resolve(payload.status === 'executing' ? claim : 1); }),
+        first: jest.fn().mockResolvedValue(table === 'autonomous_runs' ? run : table === 'opportunity_queue' ? opp : null),
         orderBy: jest.fn().mockReturnValue({ first: jest.fn().mockResolvedValue(null) }),
       }),
     }));
@@ -260,10 +264,13 @@ describe('executeDecision / finishExecution — recoverable claim state machine'
     reviewQueue.decideReviewItem.mockRejectedValue(new Error('Request timed out'));
     const db = require('../models/db');
     const updates = [];
-    db.mockImplementation(() => ({
+    db.mockImplementation((table) => ({
       where: jest.fn().mockReturnValue({
         update: jest.fn().mockImplementation((p) => { updates.push(p); return Promise.resolve(1); }),
-        first: jest.fn().mockResolvedValue(null),
+        first: jest.fn().mockResolvedValue(
+          table === 'autonomous_runs' ? { id: 'r', outcome: 'completed_pending_review', skip_reason: 'named_competitor_review' }
+            : table === 'opportunity_queue' ? { status: 'pending_review' } : null
+        ),
         orderBy: jest.fn().mockReturnValue({ first: jest.fn().mockResolvedValue(null) }),
       }),
     }));
@@ -318,7 +325,10 @@ describe('round-5 hardening (Codex r5)', () => {
     db.mockImplementation((table) => ({
       where: jest.fn().mockReturnValue({
         update: jest.fn().mockImplementation((p) => { updates.push(p); return Promise.resolve(1); }),
-        first: jest.fn().mockResolvedValue(table === 'autonomous_runs' ? { id: 'r', draft_payload: JSON.stringify(bigMeta) } : null),
+        first: jest.fn().mockResolvedValue(
+          table === 'autonomous_runs' ? { id: 'r', outcome: 'completed_pending_review', skip_reason: 'named_competitor_review', draft_payload: JSON.stringify(bigMeta) }
+            : table === 'opportunity_queue' ? { status: 'pending_review' } : null
+        ),
         orderBy: jest.fn().mockReturnValue({ first: jest.fn().mockResolvedValue(null) }),
       }),
     }));
@@ -424,7 +434,8 @@ describe('round-5 hardening (Codex r5)', () => {
       where: jest.fn().mockReturnValue({
         update: jest.fn().mockImplementation((p) => { updates.push(p); return Promise.resolve(1); }),
         first: jest.fn().mockResolvedValue(
-          table === 'autonomous_runs' ? { id: 'r', draft_payload: JSON.stringify({ title: 'T', body: 'EDITED after the email went out' }) } : null
+          table === 'autonomous_runs' ? { id: 'r', outcome: 'completed_pending_review', skip_reason: 'named_competitor_review', draft_payload: JSON.stringify({ title: 'T', body: 'EDITED after the email went out' }) }
+            : table === 'opportunity_queue' ? { status: 'pending_review' } : null
         ),
         orderBy: jest.fn().mockReturnValue({ first: jest.fn().mockResolvedValue(null) }),
       }),
@@ -480,6 +491,49 @@ describe('round-5 hardening (Codex r5)', () => {
     const { body, truncated } = approvals._internals.draftPreview({ draft_payload: JSON.stringify({ title: 'T', body: big }) });
     expect(body.length).toBeLessThanOrEqual(60000);
     expect(truncated).toBe(true); // over-cap content routes to the portal
+  });
+});
+
+describe('round-9 hardening (Codex r9)', () => {
+  test('a late "not approved" after a portal approval is superseded, never applied (P1)', async () => {
+    const reviewQueue = require('../services/content/autonomous-review-queue');
+    reviewQueue.decideReviewItem.mockClear();
+    const db = require('../models/db');
+    const updates = [];
+    db.mockImplementation((table) => ({
+      where: jest.fn().mockReturnValue({
+        update: jest.fn().mockImplementation((p) => { updates.push(p); return Promise.resolve(1); }),
+        first: jest.fn().mockResolvedValue(
+          // Portal approve opened a PR: run re-parked as astro_pr_pending_merge,
+          // opportunity deliberately still pending_review.
+          table === 'autonomous_runs' ? { id: 'r', outcome: 'completed_pending_review', skip_reason: 'astro_pr_pending_merge' }
+            : table === 'opportunity_queue' ? { status: 'pending_review' } : null
+        ),
+        orderBy: jest.fn().mockReturnValue({ first: jest.fn().mockResolvedValue(null) }),
+      }),
+    }));
+    const row = { id: 'x', token: 'EA-deadbeef', run_id: 'r', opportunity_id: 'o', kind: 'named_competitor_review', last_error: null };
+    const result = await approvals._internals.executeDecision(row, 'rejected', 'owner@example.com');
+    expect(result).toEqual({ skipped: 'already_decided_elsewhere' });
+    expect(reviewQueue.decideReviewItem).not.toHaveBeenCalled(); // dismiss never fired
+    expect(updates.find((u) => u.status === 'superseded')).toBeTruthy();
+  });
+
+  test('non-pass DMARC verdicts (temperror/permerror) block the DKIM fallback (P1)', () => {
+    const verify = approvals._internals.verifySenderAuthentication;
+    const base = (auth) => `Delivered-To: contact@wavespestcontrol.com\r\n${auth}From: O <o@example.com>\r\n\r\napproved\r\n`;
+    expect(verify(base('Authentication-Results: mx.google.com; dkim=pass header.i=@mailer.example.com; dmarc=temperror header.from=example.com\r\n'), 'o@example.com')).toBe(false);
+    expect(verify(base('Authentication-Results: mx.google.com; dkim=pass header.d=example.com; dmarc=permerror\r\n'), 'o@example.com')).toBe(false);
+    // No DMARC verdict at all → aligned DKIM fallback still allowed.
+    expect(verify(base('Authentication-Results: mx.google.com; dkim=pass header.d=example.com\r\n'), 'o@example.com')).toBe(true);
+  });
+
+  test('raw fetch/network failure strings classify as ambiguous, never hard-fail (P1)', () => {
+    const { AMBIGUOUS_ERROR_RE, SAFE_RETRY_ERROR_RE } = approvals._internals;
+    for (const msg of ['fetch failed', 'socket hang up', 'ETIMEDOUT', 'ENOTFOUND api.github.com', 'request aborted']) {
+      expect(AMBIGUOUS_ERROR_RE.test(msg)).toBe(true);
+      expect(SAFE_RETRY_ERROR_RE.test(msg)).toBe(false);
+    }
   });
 });
 

@@ -49,7 +49,11 @@ const SAFE_RETRY_ERROR_RE = /engine[\s_-]*lock|another (?:run|publish) is in pro
 // completed before the error surfaced — a publish must NOT be blindly
 // replayed. The row stays 'executing' and the recovery sweep reconciles
 // from the persisted run/opportunity state instead.
-const AMBIGUOUS_ERROR_RE = /timeout|timed out|ECONN|EAI_AGAIN|too many connections|temporar/i;
+// Includes Node fetch's unclassified network failures ("fetch failed",
+// "socket hang up") — after github-client.createPr POSTs, any of these can
+// surface post-side-effect, so they must stay recoverable/reconcilable,
+// never hard-fail (Codex r9).
+const AMBIGUOUS_ERROR_RE = /timeout|timed out|ECONN|EAI_AGAIN|ETIMEDOUT|ENOTFOUND|EPIPE|fetch failed|socket hang up|network|aborted|too many connections|temporar/i;
 
 function emailApprovalsEnabled() {
   const { isEnabled } = require('../../config/feature-gates');
@@ -272,11 +276,13 @@ function verifySenderAuthentication(rawSource, senderAddress) {
   });
   if (!authLine) return false;
   const line = authLine.toLowerCase();
-  // An EXPLICIT DMARC failure is authoritative — the aligned-DKIM fallback
-  // exists only for receivers that report no DMARC verdict at all; letting
-  // a delegated-subdomain DKIM pass override the domain's own strict DMARC
-  // policy would defeat it (Codex r5).
-  if (/\bdmarc=fail\b/.test(line)) return false;
+  // Any EXPLICIT non-pass DMARC verdict (fail, temperror, permerror, …) is
+  // authoritative — the aligned-DKIM fallback exists only for receivers
+  // that report no DMARC verdict at all; a delegated-subdomain DKIM pass
+  // must never outrank the domain's own policy, including during policy
+  // lookup failures (Codex r5 + r9).
+  const dmarcVerdict = line.match(/\bdmarc=([a-z]+)/);
+  if (dmarcVerdict && dmarcVerdict[1] !== 'pass') return false;
   const domRe = senderDomain.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   if (new RegExp(`dmarc=pass[^;]*header\\.from=${domRe}(?:[;\\s]|$)`).test(line)) return true;
   if (new RegExp(`dkim=pass[^;]*header\\.i=@?(?:[a-z0-9.-]+\\.)?${domRe}(?:[;\\s]|$)`).test(line)) return true;
@@ -486,6 +492,23 @@ async function sweepUnnotifiedRuns() {
 }
 
 async function executeDecision(row, decision, sender) {
+  // The item may have been decided ELSEWHERE (portal approve → PR opened
+  // while the opportunity deliberately stays pending_review; portal
+  // dismiss → opportunity skipped) with this email row still awaiting. A
+  // late reply must never re-decide it — a stale "not approved" would
+  // skip an opportunity whose astro PR is pending merge (Codex r9).
+  {
+    const run = row.run_id ? await db('autonomous_runs').where({ id: row.run_id }).first() : null;
+    const opp = row.opportunity_id ? await db('opportunity_queue').where({ id: row.opportunity_id }).first() : null;
+    const runStillParked = run && run.outcome === 'completed_pending_review' && run.skip_reason === row.kind;
+    const oppStillParked = opp && opp.status === 'pending_review';
+    if (!runStillParked || !oppStillParked) {
+      await db('content_email_approvals').where({ id: row.id, status: 'awaiting_reply' })
+        .update({ status: 'superseded', last_error: `already decided elsewhere (run ${run?.skip_reason || run?.outcome || 'gone'}, opp ${opp?.status || 'gone'})`, updated_at: new Date() });
+      await notifyAdmin('Reply arrived after the item was decided', `${row.token}: this draft was already decided (portal or a newer flow) before your reply — nothing was changed.`);
+      return { skipped: 'already_decided_elsewhere' };
+    }
+  }
   // An oversized draft was never fully shown in the email, so an emailed
   // "approved" must not publish it — the email itself says so and directs
   // the decision to the portal. Rejection is still honored (dismissing
