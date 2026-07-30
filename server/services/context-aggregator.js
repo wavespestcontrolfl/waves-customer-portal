@@ -37,7 +37,7 @@ class ContextAggregator {
   // pick a different (or deleted) account that shares the number.
   async getContextForCustomer(customer) {
     // Parallel data fetch
-    const [smsHistory, serviceHistory, upcomingServices, propertyPrefs, payments, interactions, complaints, reschedules, pendingEstimate, activeCancelSave, compliance, recentCalls, openInvoice] = await Promise.all([
+    const [smsHistory, serviceHistory, upcomingServices, propertyPrefs, payments, interactions, complaints, reschedules, pendingEstimate, activeCancelSave, compliance, recentCalls, openInvoice, lawnAssessments, cardOnFile] = await Promise.all([
       db('sms_log').where({ customer_id: customer.id }).orderBy('created_at', 'desc').limit(20),
       db('service_records').where({ customer_id: customer.id }).orderBy('service_date', 'desc').limit(5),
       db('scheduled_services as ss').leftJoin('technicians as tech', 'ss.technician_id', 'tech.id').where('ss.customer_id', customer.id).where('ss.scheduled_date', '>=', etDateString()).whereIn('ss.status', UPCOMING_SERVICE_STATUSES).orderBy('ss.scheduled_date').limit(3).select('ss.service_type', 'ss.scheduled_date', 'ss.window_display', 'ss.window_start', 'ss.window_end', 'ss.time_window', 'ss.status', 'tech.name as technician_name'),
@@ -62,6 +62,17 @@ class ContextAggregator {
         .whereNotIn('status', ['paid', 'prepaid', 'void', 'draft'])
         .orderBy('created_at', 'desc')
         .first('id', 'title', 'status', 'total', 'due_date', 'payer_id', 'created_at')
+        .catch(() => null),
+      // v10: lawn health scores — "how's my lawn doing" is a routine text.
+      db('lawn_assessments').where({ customer_id: customer.id })
+        .orderBy('service_date', 'asc')
+        .select('service_date', 'turf_density', 'weed_suppression', 'fungus_control', 'thatch_level', 'color_health')
+        .catch(() => []),
+      // v10: the card on file (designated autopay card first). Brand + last4
+      // only — never a full number anywhere in this system.
+      db('payment_methods').where({ customer_id: customer.id })
+        .orderBy([{ column: 'autopay_enabled', order: 'desc' }, { column: 'created_at', order: 'desc' }])
+        .first('card_brand', 'last_four', 'exp_month', 'exp_year', 'autopay_enabled')
         .catch(() => null),
     ]);
 
@@ -126,7 +137,37 @@ class ContextAggregator {
           dueDate: openInvoice.due_date || null,
           payerBilled: Boolean(openInvoice.payer_id),
         } : null,
+        // v10: card on file — brand + last4 only, never a full number.
+        cardOnFile: cardOnFile && cardOnFile.last_four ? {
+          brand: cardOnFile.card_brand || 'card',
+          last4: cardOnFile.last_four,
+          expMonth: cardOnFile.exp_month || null,
+          expYear: cardOnFile.exp_year || null,
+          isAutopayCard: Boolean(cardOnFile.autopay_enabled),
+        } : null,
       },
+      // v10: lawn health — latest vs baseline, same scoring the AI-number
+      // assistant's get_lawn_health tool reports.
+      lawnHealth: (() => {
+        const rows = (lawnAssessments || []).filter((r) => r && r.service_date);
+        if (!rows.length) return null;
+        const score = (row) => {
+          const parts = [row.turf_density, row.weed_suppression, row.fungus_control, row.color_health, row.thatch_level]
+            .map((v) => Number(v)).filter((v) => Number.isFinite(v));
+          if (!parts.length) return null;
+          return Math.round(parts.reduce((s, v) => s + v, 0) / parts.length);
+        };
+        const shape = (row) => ({
+          date: row.service_date,
+          overall: score(row),
+          turfDensity: row.turf_density ?? null,
+          weedSuppression: row.weed_suppression ?? null,
+          fungusControl: row.fungus_control ?? null,
+          thatchLevel: row.thatch_level ?? null,
+          colorHealth: row.color_health ?? null,
+        });
+        return { baseline: shape(rows[0]), latest: shape(rows[rows.length - 1]), assessments: rows.length };
+      })(),
       // v10: pending estimate as a first-class fact (was only a flag detail).
       pendingEstimate: pendingEstimate ? {
         status: pendingEstimate.status,

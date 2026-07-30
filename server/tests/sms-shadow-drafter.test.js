@@ -517,6 +517,29 @@ describe('v10 — full-account grounding', () => {
     expect(none).not.toContain('LATEST CALL TRANSCRIPT');
   });
 
+  test('card on file renders brand + last4 only; LAWN HEALTH renders latest vs baseline', () => {
+    const block = buildFactsBlock({
+      summary: 'X',
+      billing: {
+        outstandingBalance: 0,
+        cardOnFile: { brand: 'Visa', last4: '4242', expMonth: 12, expYear: 2027, isAutopayCard: true },
+      },
+      lawnHealth: {
+        baseline: { date: '2026-03-01', overall: 58, turfDensity: 55, weedSuppression: 60, fungusControl: 60, thatchLevel: 55, colorHealth: 60 },
+        latest: { date: '2026-07-15', overall: 72, turfDensity: 70, weedSuppression: 80, fungusControl: 75, thatchLevel: 60, colorHealth: 75 },
+        assessments: 4,
+      },
+    });
+    expect(block).toContain('Card on file: Visa ending 4242, exp 12/2027 (autopay card)');
+    expect(block).toContain('LAWN HEALTH: overall 72');
+    expect(block).toContain('baseline 58');
+    expect(block).toContain('weeds 80');
+
+    const none = buildFactsBlock({ summary: 'X' });
+    expect(none).toContain('LAWN HEALTH: No assessments on file');
+    expect(none).not.toContain('Card on file');
+  });
+
   test('v10 system prompt wires the new sources + billing/access rules', () => {
     const p = buildSystemPrompt();
     expect(p).toContain('SERVICE HISTORY');
@@ -524,9 +547,12 @@ describe('v10 — full-account grounding', () => {
     expect(p).toContain('PROPERTY & PREFERENCES');
     expect(p).toContain('LATEST CALL TRANSCRIPT');
     expect(p).toContain('BILLING & MONEY RULES');
-    expect(p).toMatch(/NEVER put a dollar amount/i);
+    // owner ruling 07-30: real amounts MAY be texted — verbatim from facts only
+    expect(p).toMatch(/MAY state, exactly as written/i);
+    expect(p).toMatch(/never state a figure the facts don't show/i);
     expect(p).toContain('THIRD-PARTY PAYER');
     expect(p).toMatch(/NEVER include a code value/i);
+    expect(p).toContain('LAWN HEALTH');
     expect(p).not.toContain('LAST SERVICE,'); // stale source list would misdirect grounding
   });
 });

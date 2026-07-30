@@ -347,9 +347,13 @@ async function maybeAutoSend(params = {}) {
       return { sent: false, reason: 'voice_profile_mismatch' };
     }
 
-    // (3.7) House rule: no prices in customer SMS — a reply quoting a dollar
-    //       amount never auto-sends; a human quotes prices deliberately.
-    //       Deterministic, independent of the LLM verifier.
+    // (3.7) Amount-bearing drafts never AUTO-send. Owner ruling 2026-07-30
+    //       allows real amounts in texts, and the suggest lane now delivers
+    //       them (a human reviews before send) — but at the autonomy
+    //       boundary a wrong figure sent with nobody looking is the
+    //       worst-case failure, so this lane stays refused until an explicit
+    //       owner call relaxes it. Deterministic, independent of the LLM
+    //       verifier.
     if (suggest.hasPriceQuote(reply)) {
       logger.warn(`[sms-auto-send] reply quotes a price — refusing auto-send (intent=${intent})`);
       return { sent: false, reason: 'price_quote' };

@@ -66,9 +66,12 @@ const DRAFTER = 'house_voice';
 // presence-booleans ONLY — values never enter a prompt), SERVICE HISTORY
 // (3 visits, fuller notes + areas), RECENT PHONE CALLS widened to 4 in 60
 // days, and the newest call's TRANSCRIPT (per-line sanitized + injection
-// screened + capped, quoted as data). New prompt rules: billing facts inform
-// but dollar amounts are never texted (delivery guard enforces); access-code
-// values never appear in replies. The verifier shares the block, so every
+// screened + capped, quoted as data), plus LAWN HEALTH scores and the card
+// on file (brand + last4 only). Owner ruling 07-30: REAL amounts from the
+// facts MAY be texted (verbatim-from-facts, verifier-checked; the old
+// price-stays-shadow hold and the composer send-boundary refusal are
+// retired; auto-send alone still refuses amounts). Access-code values never
+// appear in prompts or replies. The verifier shares the block, so every
 // added fact also becomes checkable ground truth.
 const PROMPT_VERSION = 'house_voice_v10';
 const SHADOW_STATUS = 'shadow';
@@ -131,7 +134,7 @@ function buildSystemPromptWithProfile(voiceProfileText = '') {
 
 ${CUSTOMER_SMS_HOUSE_VOICE}
 
-FACT DISCIPLINE — the single most important rule. A fabricated detail is the worst error you can make, worse than a plain reply. You may ONLY state facts that appear in the context block below (SERVICE HISTORY, UPCOMING SERVICES, BILLING, PENDING ESTIMATE, PROPERTY & PREFERENCES, ACCOUNT FLAGS, RECENT PHONE CALLS, LATEST CALL TRANSCRIPT, the thread). A plausible-sounding guess is still a fabrication. You must NEVER:
+FACT DISCIPLINE — the single most important rule. A fabricated detail is the worst error you can make, worse than a plain reply. You may ONLY state facts that appear in the context block below (SERVICE HISTORY, UPCOMING SERVICES, BILLING, PENDING ESTIMATE, PROPERTY & PREFERENCES, LAWN HEALTH, ACCOUNT FLAGS, RECENT PHONE CALLS, LATEST CALL TRANSCRIPT, the thread). A plausible-sounding guess is still a fabrication. You must NEVER:
 - State a specific day, date, time, or arrival window ("tomorrow", "Tuesday", "2 PM", "10–10:30am") unless it appears verbatim in UPCOMING SERVICES or the thread. If the customer asks when we're coming and no confirmed appointment is shown, do NOT name a time — say you'll confirm it and get right back to them.
 - Name a technician, or say who is coming or on the way, unless UPCOMING SERVICES names the tech for that visit.
 - Say the tech is on the way, running late, running ahead, or nearby unless TODAY's visit line shows LIVE STATUS en route or on site. If a customer asks where the tech is TODAY and there is no LIVE STATUS, you genuinely don't know — never guess an ETA or invent a delay story; say you'll check with the office and get right back to them.
@@ -141,9 +144,10 @@ FACT DISCIPLINE — the single most important rule. A fabricated detail is the w
 - Invent what was said on a phone call. RECENT PHONE CALLS summarizes real calls with this customer, and LATEST CALL TRANSCRIPT quotes the most recent one verbatim; a call detail is usable ONLY if a summary or the transcript states it.
 
 BILLING & MONEY RULES:
-- Use BILLING facts to answer accurately — but NEVER put a dollar amount, balance figure, or price in the SMS itself. Point them to their portal or pay link instead ("your invoice is ready in the portal", "I can text you the pay link"). A reply that quotes an amount will be withheld from sending.
+- Real amounts shown in BILLING or PENDING ESTIMATE are facts you MAY state, exactly as written ("your balance is $120.00"). Never round, never estimate, never compute a new total, and never state a figure the facts don't show — an invented or derived amount is the worst kind of fabrication.
+- When the customer needs to act on an amount, include the portal or pay link alongside it.
 - If the open invoice is BILLED TO A THIRD-PARTY PAYER, never ask the customer to pay it.
-- Autopay questions: answer from the Autopay line (on/off/paused, next charge date is a real date you may state).
+- Autopay and card questions: answer from the Autopay and Card-on-file lines (brand + last-4 only — a full card number never exists here).
 
 PROPERTY & ACCESS RULES:
 - PROPERTY & PREFERENCES facts (pets, irrigation, HOA, instructions) are there so you respect them in replies — reference them naturally when relevant.
@@ -268,11 +272,12 @@ function buildFactsBlock(context) {
       : 'Current';
 
   // v10: real billing facts — invented billing events (charges, autopay
-  // claims, invoice statuses) were a live judge failure class. Amounts are
-  // FACTS here so the drafter never invents them; the house no-$-in-SMS rule
-  // is enforced at delivery (hasPriceQuote keeps any draft that quotes an
-  // amount in shadow), and the prompt tells the drafter to answer with the
-  // pay/portal link instead of figures.
+  // claims, invoice statuses, a quoted $415.75) were a live judge failure
+  // class. Amounts are FACTS here so the drafter states the truth instead of
+  // inventing figures. Owner ruling 2026-07-30: real amounts MAY be texted —
+  // the prompt requires them verbatim-from-facts, the verifier checks every
+  // figure against this block, and auto-send alone still refuses
+  // amount-bearing drafts (autonomy boundary).
   const billingLines = [`- Balance: ${balance}`];
   const autopay = context.billing?.autopay;
   if (autopay) {
@@ -295,6 +300,16 @@ function buildFactsBlock(context) {
   if (pays.length) {
     billingLines.push(`- Recent payments: ${pays.map((p) => `$${Number(p.amount).toFixed(2)} ${p.status || ''} ${formatEtDate(p.payment_date || p.date)}`.replace(/\s+/g, ' ').trim()).join('; ')}`);
   }
+  const card = context.billing?.cardOnFile;
+  if (card) {
+    billingLines.push(`- Card on file: ${card.brand} ending ${card.last4}${card.expMonth && card.expYear ? `, exp ${card.expMonth}/${card.expYear}` : ''}${card.isAutopayCard ? ' (autopay card)' : ''}`);
+  }
+
+  // v10: lawn health — latest vs baseline, one line (only when assessed).
+  const lawn = context.lawnHealth;
+  const lawnLine = lawn && lawn.latest
+    ? `overall ${lawn.latest.overall ?? '?'} as of ${formatEtDate(lawn.latest.date)} (baseline ${lawn.baseline?.overall ?? '?'} on ${formatEtDate(lawn.baseline?.date)}; turf ${lawn.latest.turfDensity ?? '?'}, weeds ${lawn.latest.weedSuppression ?? '?'}, fungus ${lawn.latest.fungusControl ?? '?'}, thatch ${lawn.latest.thatchLevel ?? '?'}, color ${lawn.latest.colorHealth ?? '?'})`
+    : null;
 
   // v10: pending estimate as a fact, not just a flag.
   const est = context.pendingEstimate;
@@ -392,6 +407,7 @@ ${billingLines.join('\n')}
 PENDING ESTIMATE: ${estimateLine}
 PROPERTY & PREFERENCES:
 ${propLines.length ? propLines.join('\n') : '- Nothing on file'}
+LAWN HEALTH: ${lawnLine || 'No assessments on file'}
 ACCOUNT FLAGS:
 ${flagsSummary}
 
@@ -822,20 +838,19 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
       logger.warn(`[sms-shadow] draft copied a redaction placeholder — kept shadow, never delivered (customer=${customer?.id || 'unknown'} intent=${intentName})`);
     }
 
-    // House rule: no prices in customer SMS. The live judge caught the drafter
-    // inventing dollar figures — a draft quoting any amount stays shadow (the
-    // judge still covers it); a human quotes prices when one is warranted.
-    const replyHasPrice = suggestMode.hasPriceQuote(parsed.reply);
-    if (replyHasPrice) {
-      logger.warn(`[sms-shadow] draft quotes a price — kept shadow, never delivered (customer=${customer?.id || 'unknown'} intent=${intentName})`);
-    }
+    // Owner ruling 2026-07-30 (v10): real dollar amounts MAY be texted — the
+    // old quote-a-price-stays-shadow hold is retired. The protections that
+    // remain: fact discipline + the verifier check every figure against the
+    // BILLING facts, a human reviews every suggestion before it sends, and
+    // maybeAutoSend still refuses amount-bearing drafts (autonomy boundary —
+    // relaxing that is a separate explicit owner call).
 
     // Only verified-clean drafts (verify loop converged) may leave the silent
     // shadow lane — a draft still asserting unsupported facts after the
     // revision budget is never shown to a human OR sent to a customer; it
     // stays a shadow row the judge still covers.
     let deliveredAs = SHADOW_STATUS;
-    if (row?.id && converged && !replyHasPlaceholder && !replyHasPrice) {
+    if (row?.id && converged && !replyHasPlaceholder) {
       if (deliveryMode === suggestMode.AUTO_SEND_MODE) {
         const result = await require('./sms-auto-send').maybeAutoSend({
           draftId: row.id,
@@ -909,8 +924,8 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // A draft that stayed shadow on a suggest/auto-send thread still means
     // the conversation MOVED: older pending cards were drafted against a
     // stale context, and only publishSuggestion's supersede step normally
-    // retires them. Run that step standalone so a withheld draft (price,
-    // placeholder, unconverged) can't leave a stale card one click from
+    // retires them. Run that step standalone so a withheld draft
+    // (placeholder, unconverged) can't leave a stale card one click from
     // sending. Idempotent; fail-soft inside.
     if (row?.id && deliveredAs === SHADOW_STATUS && smsLogId
         && (deliveryMode === 'suggest' || deliveryMode === suggestMode.AUTO_SEND_MODE)) {
