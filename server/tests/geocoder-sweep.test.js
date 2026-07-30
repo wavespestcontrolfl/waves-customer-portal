@@ -9,7 +9,7 @@ const { sweepUngeocodedCustomers } = require('../services/geocoder');
 function installDb({ listRows, customersById }) {
   const updates = [];
   mockDb.transaction = jest.fn(async (fn) => fn(mockDb));
-  mockDb.mockImplementation(() => {
+  mockDb.mockImplementation((table) => {
     const chain = {
       whereNull: jest.fn(() => chain),
       orWhereNull: jest.fn(() => chain),
@@ -49,7 +49,14 @@ function installDb({ listRows, customersById }) {
       },
       first: jest.fn(async () => customersById[chain._id] || null),
       update: jest.fn(async (patch) => {
-        updates.push({ id: chain._id, patch });
+        updates.push({ table, id: chain._id, patch });
+        // Mirror knex semantics: a committed customer update is visible to
+        // the sync helper's read-back, so the property-mirror path really
+        // runs in these tests instead of short-circuiting on stale NULLs.
+        if (table === 'customers' && chain._id && customersById[chain._id]) {
+          if ('latitude' in patch) customersById[chain._id].latitude = patch.latitude;
+          if ('longitude' in patch) customersById[chain._id].longitude = patch.longitude;
+        }
         return 1;
       }),
     };
@@ -84,9 +91,14 @@ describe('sweepUngeocodedCustomers', () => {
     const result = await sweepUngeocodedCustomers({ limit: 25 });
 
     expect(result).toEqual({ checked: 2, geocoded: 2, unresolved: 0 });
-    expect(updates).toHaveLength(2);
-    expect(updates[0].patch.latitude).toBe(27.5);
-    expect(updates[0].patch.longitude).toBe(-82.4);
+    const customerWrites = updates.filter((u) => u.table === 'customers');
+    const propertyMirrors = updates.filter((u) => u.table === 'customer_properties');
+    expect(customerWrites).toHaveLength(2);
+    expect(customerWrites[0].patch.latitude).toBe(27.5);
+    expect(customerWrites[0].patch.longitude).toBe(-82.4);
+    // Every successful geocode mirrors onto the primary property row.
+    expect(propertyMirrors).toHaveLength(2);
+    expect(propertyMirrors[0].patch.latitude).toBe(27.5);
   });
 
   it('counts un-geocodable addresses as unresolved without writing', async () => {
@@ -115,7 +127,8 @@ describe('sweepUngeocodedCustomers', () => {
     mockGoogle('OK', { lat: 27.7, lng: -82.3 });
     const third = await sweepUngeocodedCustomers();
     expect(third).toEqual({ checked: 1, geocoded: 1, unresolved: 0 });
-    expect(updates).toHaveLength(1);
+    expect(updates.filter((u) => u.table === 'customers')).toHaveLength(1);
+    expect(updates.filter((u) => u.table === 'customer_properties')).toHaveLength(1);
   });
 
   it('retries transient failures on later sweeps instead of excluding them', async () => {
@@ -137,7 +150,8 @@ describe('sweepUngeocodedCustomers', () => {
     mockGoogle('OK', { lat: 27.6, lng: -82.5 });
     const second = await sweepUngeocodedCustomers();
     expect(second).toEqual({ checked: 1, geocoded: 1, unresolved: 0 });
-    expect(updates).toHaveLength(1);
+    expect(updates.filter((u) => u.table === 'customers')).toHaveLength(1);
+    expect(updates.filter((u) => u.table === 'customer_properties')).toHaveLength(1);
   });
 
   it('repairs half-set coordinates (latitude present, longitude null)', async () => {
@@ -152,9 +166,11 @@ describe('sweepUngeocodedCustomers', () => {
     const result = await sweepUngeocodedCustomers();
 
     expect(result).toEqual({ checked: 1, geocoded: 1, unresolved: 0 });
-    expect(updates).toHaveLength(1);
-    expect(updates[0].patch.latitude).toBe(27.11);
-    expect(updates[0].patch.longitude).toBe(-82.55);
+    const customerWrites = updates.filter((u) => u.table === 'customers');
+    expect(customerWrites).toHaveLength(1);
+    expect(customerWrites[0].patch.latitude).toBe(27.11);
+    expect(customerWrites[0].patch.longitude).toBe(-82.55);
+    expect(updates.filter((u) => u.table === 'customer_properties')).toHaveLength(1);
   });
 
   it('returns zero counts when no customers are missing coordinates', async () => {
