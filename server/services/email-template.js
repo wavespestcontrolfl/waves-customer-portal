@@ -504,7 +504,7 @@ function glassServiceEmail({ preheader, body, footerNote } = {}) {
   return glassPage(T, { preheader, contentHtml, msoWidth: 620 });
 }
 
-function glassNewsletter({ body, unsubscribeUrl, preheader, footerNote, preferredSourcesCta, newsletterType, webVersionUrl } = {}) {
+function glassNewsletter({ body, unsubscribeUrl, preheader, footerNote, preferredSourcesCta, newsletterType, webVersionUrl, darkAwareBody = true } = {}) {
   const T = GLASS_THEME;
   const identity = newsletterIdentity(newsletterType);
   const unsubscribeLine = unsubscribeUrl
@@ -539,7 +539,7 @@ function glassNewsletter({ body, unsubscribeUrl, preheader, footerNote, preferre
           ${heroBlock}
         </td></tr>
         <tr><td style="padding:24px 0 0 0;">
-          ${glassCard(T, `<div style="font-family:${T.font};font-size:15px;line-height:1.6;color:${T.body};">${body || ''}</div>`, '26px 28px', { darkAware: true })}
+          ${glassCard(T, `<div style="font-family:${T.font};font-size:15px;line-height:1.6;color:${T.body};">${body || ''}</div>`, '26px 28px', { darkAware: darkAwareBody })}
         </td></tr>
         ${footerExtras ? `<tr><td align="center" style="padding:24px 4px 0 4px;">${footerExtras}</td></tr>` : ''}
         <tr><td align="center" style="padding:16px 4px 0 4px;">
@@ -621,8 +621,8 @@ function wrapServiceEmail({ preheader, body, footerNote } = {}) {
  *                                  // generic publication identity.
  * }} opts
  */
-function wrapNewsletter({ body, unsubscribeUrl, preheader, footerNote, preferredSourcesCta, newsletterType, webVersionUrl } = {}) {
-  return glassNewsletter({ body, unsubscribeUrl, preheader, footerNote, preferredSourcesCta, newsletterType, webVersionUrl });
+function wrapNewsletter({ body, unsubscribeUrl, preheader, footerNote, preferredSourcesCta, newsletterType, webVersionUrl, darkAwareBody } = {}) {
+  return glassNewsletter({ body, unsubscribeUrl, preheader, footerNote, preferredSourcesCta, newsletterType, webVersionUrl, darkAwareBody });
 }
 
 /**

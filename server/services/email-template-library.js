@@ -642,7 +642,11 @@ function renderTemplate({ template, version, payload: rawPayload = {}, unsubscri
     ? null
     : [serviceFooter, unsubFooterHtml].filter(Boolean).join(' ') || null;
   const html = mode === 'marketing'
-    ? wrapNewsletter({ body: bodyHtml, unsubscribeUrl, preheader: previewText || undefined })
+    // darkAwareBody:false — renderBlocks markup carries light-theme
+    // inline colors (like transactional emails), so marketing templates
+    // keep the opaque light card in dark mode instead of the dark
+    // newsletter card their cells can't survive on.
+    ? wrapNewsletter({ body: bodyHtml, unsubscribeUrl, preheader: previewText || undefined, darkAwareBody: false })
     : wrapServiceEmail({ body: bodyHtml, preheader: previewText || undefined, footerNote });
   const textBody = version.text_body
     ? [renderInline(version.text_body, payload, { html: false }), defaultCta.bodyText].filter(Boolean).join('\n\n')
