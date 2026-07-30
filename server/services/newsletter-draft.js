@@ -1603,8 +1603,12 @@ function buildFlagshipTextBody(draft) {
     if (ev.gifCaption) lines.push(stripMd(ev.gifCaption));
     if (ev.description) lines.push(stripMd(ev.description));
     // Headliner furniture serializes too — the MIME alternatives must
-    // stay content-equivalent (same fields, nothing extra, nothing less).
-    if (i === 0) {
+    // stay content-equivalent (same fields, nothing extra, nothing
+    // less). Keys off the PINNED tier when present (position fallback
+    // for direct callers) so a gapped lineup renders identically in
+    // both MIME parts.
+    const isHero = ev.tier ? ev.tier === 'hero' : i === 0;
+    if (isHero) {
       const hl = Array.isArray(ev.highlights) ? ev.highlights : [];
       if (hl.length && ev.scoopLabel) lines.push(stripMd(ev.scoopLabel));
       for (const h of hl) {
@@ -1837,25 +1841,27 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
         `but none matched the approved eventIds. Refusing to render an empty newsletter.`
       );
     }
-    // Re-assert the CALLER's rank (portfolio order) over whatever
-    // sequence the model echoed back, then pin each event's editorial
-    // TIER to its REQUESTED rank — not its position in the surviving
-    // array. A dropped/omitted event leaves a GAP instead of promoting
-    // copy written under a smaller tier's word contract (featured 40-60w
-    // as headliner, shortlist one-liner as featured).
-    draft.events = sortByCallerRank(locked, eventIds);
-    const requestRank = new Map((Array.isArray(eventIds) ? eventIds : [])
-      .map((id, i) => [String(id).toLowerCase(), i]));
+    // Rank against the APPROVED PROMPT LINEUP (approvedEvents, already
+    // caller-sorted) — the events the model actually saw — not the raw
+    // requested ids. An event the eligibility filter dropped BEFORE the
+    // prompt means the model legitimately wrote headliner copy for the
+    // next one (it was first in the prompt), so it IS the hero. Only a
+    // MODEL omission after the prompt leaves a GAP — nothing promotes
+    // into copy written under a smaller tier's word contract (featured
+    // 40-60w as headliner, shortlist one-liner as featured).
+    const promptIds = approvedEvents.map((r) => r.id);
+    draft.events = sortByCallerRank(locked, promptIds);
+    const promptRank = new Map(promptIds.map((id, i) => [String(id).toLowerCase(), i]));
     for (const ev of draft.events) {
-      const rank = requestRank.get(String(ev.eventId).toLowerCase());
+      const rank = promptRank.get(String(ev.eventId).toLowerCase());
       if (rank !== undefined) {
         ev.tier = rank === 0 ? 'hero' : (rank <= 2 ? 'featured' : 'quick');
       }
     }
-    if (requestRank.size && draft.events.length && draft.events[0].tier !== 'hero') {
+    if (promptRank.size && draft.events.length && draft.events[0].tier !== 'hero') {
       draft.factualLockingWarnings = [
         ...(draft.factualLockingWarnings || []),
-        'Requested headliner missing from the draft — first card renders with featured treatment (no promotion).',
+        'Prompt headliner missing from the draft — first card renders with featured treatment (no promotion).',
       ];
     }
   }

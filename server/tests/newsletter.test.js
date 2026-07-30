@@ -1864,6 +1864,16 @@ describe('tiered event treatment (owner direction 2026-07-29)', () => {
     expect(text).toContain('{{feedback-text}}');
   });
 
+  test('text builder keys hero furniture off the pinned tier — a gapped lineup stays MIME-equivalent', () => {
+    const gapped = buildFlagshipTextBody({
+      events: [mk(1, { tier: 'featured' }), mk(2, { tier: 'featured' })],
+      signoff: '— The Waves Team',
+    });
+    // No hero furniture anywhere: both survivors are featured-tier.
+    expect(gapped).not.toContain('Pro tip:');
+    expect(gapped).not.toContain('- Big stage');
+  });
+
   test('sortByCallerRank re-asserts portfolio order over a reordered model echo', () => {
     const { sortByCallerRank } = require('../services/newsletter-draft');
     const ids = [1, 2, 3].map((n) => `a000000${n}-0000-4000-8000-00000000000${n}`);
