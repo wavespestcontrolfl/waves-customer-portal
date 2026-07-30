@@ -1957,7 +1957,9 @@ function DigestPlanner({ onDraftFromPlan }) {
     const allEvents = Object.values(plan.sections).flat();
     const ids = allEvents.map((e) => e.id);
     const summary = allEvents.slice(0, 8).map((e) => `${e.title} (${e.city || "SWFL"})`).join(", ");
-    const prompt = `Build this ${NEWSLETTER_UI_COPY.name} issue with events from North Port to Tampa: ${summary}.${homeownerTopic ? ` Homeowner Minute topic: ${homeownerTopic}.` : ""}`;
+    // Homeowner Minute retired from the flagship (owner 2026-07-30) —
+    // the planner field no longer reaches the prompt.
+    const prompt = `Build this ${NEWSLETTER_UI_COPY.name} issue with events from North Port to Tampa: ${summary}.`;
     onDraftFromPlan({ eventIds: ids, prompt });
   };
 

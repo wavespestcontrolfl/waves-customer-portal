@@ -501,9 +501,11 @@ async function autoDraftFlagship() {
 
   // 7. Build prompt incorporating calendar data + derive event IDs from the
   //    resolved lineup (same set the preflight just validated).
+  // Homeowner Minute retired from the flagship (owner 2026-07-30) — the
+  // calendar column stays but its topic no longer reaches the prompt.
   const prompt = topic
-    ? `This weekend's theme: ${topic}. New events from North Port to Tampa.${homeownerMinuteTopic ? ` Homeowner Minute: ${homeownerMinuteTopic}.` : ''}`
-    : `New events for the weekend ahead from North Port to Tampa.${homeownerMinuteTopic ? ` Homeowner Minute: ${homeownerMinuteTopic}.` : ''}`;
+    ? `This weekend's theme: ${topic}. New events from North Port to Tampa.`
+    : `New events for the weekend ahead from North Port to Tampa.`;
 
   const eventIds = lineupEvents.map((ev) => ev.id);
 

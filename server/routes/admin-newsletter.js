@@ -2432,9 +2432,10 @@ router.post('/calendar/:id/draft-from-plan', aiDraftLimiter, async (req, res, ne
     }
 
     const eventIds = Array.isArray(snapshot.event_ids) ? snapshot.event_ids : [];
+    // Homeowner Minute retired from the flagship (owner 2026-07-30).
     const prompt = snapshot.topic
-      ? `This weekend's theme: ${snapshot.topic}. New events from North Port to Tampa.${snapshot.homeowner_minute_topic ? ` Homeowner Minute: ${snapshot.homeowner_minute_topic}.` : ''}`
-      : `New events for the weekend ahead from North Port to Tampa.${snapshot.homeowner_minute_topic ? ` Homeowner Minute: ${snapshot.homeowner_minute_topic}.` : ''}`;
+      ? `This weekend's theme: ${snapshot.topic}. New events from North Port to Tampa.`
+      : `New events for the weekend ahead from North Port to Tampa.`;
     const generated = await createNewsletterDraft({
       prompt,
       eventIds,

@@ -207,7 +207,12 @@ function ctaButton(href, label) {
 // Classic rendering below is untouched, so the gate-off path stays
 // byte-identical to the pre-theme markup.
 
-const GLASS_LOGO_IMG = 'https://portal.wavespestcontrol.com/waves-logo-2026.png';
+// THE Waves logo (owner 2026-07-30: "the logo should be the waves
+// logo") — /waves-logo.png, the SAME canonical asset every portal
+// surface renders (admin header, customer BrandFooter, favicon,
+// install prompt). The email chrome previously used the 2026 AI
+// re-render ("the rendered image"), which is retired here.
+const GLASS_LOGO_IMG = 'https://portal.wavespestcontrol.com/waves-logo.png';
 
 // Edition identity by newsletter type (owner directive 2026-07-28): the
 // flagship weekly masthead is "Waves Newsletter" — no "The", no subtitle,
