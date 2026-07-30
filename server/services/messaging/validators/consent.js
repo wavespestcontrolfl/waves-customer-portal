@@ -48,9 +48,14 @@ async function checkConsentForPurpose(input, policy, contactState) {
     };
   }
 
-  // Anonymous leads with no customer record can receive transactional
-  // conversational replies — they wrote in, they expect a reply. Anything
-  // beyond that needs a customer record + sms_enabled=true.
+  // Recipients with no notification_prefs row can still receive transactional
+  // conversational replies — they wrote in, they expect a reply. A missing
+  // row means "never opted out": STOP handling upserts a prefs row with
+  // sms_enabled=false (twilio-webhook), so any real opt-out is caught by the
+  // sms_enabled gate below, never by row absence. Customers created through
+  // paths that don't seed notification_prefs were previously stranded here
+  // (NO_CONSENT_RECORD on manual replies from Communications/tech Messages).
+  // Anything beyond conversational still needs a prefs row + sms_enabled=true.
   if (!contactState || !contactState.prefs) {
     if (
       input.audience === 'lead' &&
@@ -61,7 +66,6 @@ async function checkConsentForPurpose(input, policy, contactState) {
       return { ok: true };
     }
     if (
-      input.audience === 'lead' &&
       policy.requireConsent === 'transactional' &&
       input.purpose === 'conversational'
     ) {
