@@ -22,7 +22,9 @@ const ALL_STATES = ['open', 'in_progress', 'resolved', 'dismissed'];
 // auto-routed review list; nothing here changes routing automatically.
 const VERDICTS = ['accept', 'deny'];
 const WRONG_FIELDS = ['name', 'address', 'service', 'scheduling', 'consent', 'spam_status', 'routing'];
-const V2_DECISION_VERSION = 'v2-1.0.0';
+// History-spanning review queue: rows from BOTH decision versions must stay
+// visible (pre-bump v2-1.0.0 rows + current v2-1.1.0 rows).
+const { V2_DECISION_VERSIONS } = require('../services/call-routing-gates');
 
 function sanitizeWrongFields(input) {
   if (!Array.isArray(input)) return [];
@@ -276,7 +278,7 @@ router.get('/auto-routed', async (req, res) => {
       .leftJoin('call_log', 'route_decisions.call_log_id', 'call_log.id')
       .leftJoin('customers', 'call_log.customer_id', 'customers.id')
       .leftJoin('route_feedback', 'route_decisions.call_log_id', 'route_feedback.call_log_id')
-      .where('route_decisions.decision_version', V2_DECISION_VERSION)
+      .whereIn('route_decisions.decision_version', V2_DECISION_VERSIONS)
       .where('route_decisions.mode', 'enforce')
       .where('route_decisions.final_action_taken', 'auto_route')
       .orderBy('route_decisions.created_at', 'desc')

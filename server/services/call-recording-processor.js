@@ -87,7 +87,7 @@ const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsF
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
 const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
-const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, buildTriageItem } = require('./call-routing-gates');
+const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, buildTriageItem, V2_DECISION_VERSION } = require('./call-routing-gates');
 // Zero-triage layers (2026-07-10) — all dark-gated in feature-gates.js.
 const { isEnabled } = require('../config/feature-gates');
 const { decideDisposition } = require('./call-disposition');
@@ -8694,7 +8694,10 @@ const CallRecordingProcessor = {
       }
       try {
         await db('route_decisions')
-          .where({ call_log_id: call.id, decision_version: 'v2-1.0.0', mode: 'enforce' })
+          // Same-run outcome update: targets the row THIS process wrote
+          // moments ago, so the CURRENT version only (a reprocess writes —
+          // and updates — its own fresh v2-1.1.0 row).
+          .where({ call_log_id: call.id, decision_version: V2_DECISION_VERSION, mode: 'enforce' })
           .update({
             final_action_taken: bookedServiceId ? 'auto_route' : 'auto_route_skipped',
             ...(bookedServiceId ? { created_scheduled_service_id: bookedServiceId } : {}),
@@ -8889,7 +8892,7 @@ const CallRecordingProcessor = {
       }
 
       const validationPayload = {
-        validator: 'v2-1.0.0',
+        validator: V2_DECISION_VERSION,
         mode: validationMode,
         extraction_status: v2Result.status || null,
         routing: routingResult ? {
