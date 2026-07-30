@@ -70,14 +70,16 @@ describe('lawnMaterialCostPerVisit', () => {
 });
 
 describe('lawnComplexityMinutes', () => {
-  it('sums landscape/shrub/driveway terms like the server', () => {
+  it('sums landscape/shrub/fence terms like the server', () => {
     expect(lawnComplexityMinutes({})).toBe(0);
     expect(lawnComplexityMinutes({ landscapeComplexity: 'MODERATE' })).toBe(5);
     expect(lawnComplexityMinutes({ landscapeComplexity: 'COMPLEX' })).toBe(10);
     expect(lawnComplexityMinutes({ shrubDensity: 'HEAVY' })).toBe(5);
-    expect(lawnComplexityMinutes({ hasLargeDriveway: true })).toBe(5);
+    // largeDriveway is retired estimator-wide (2026-07-30): a legacy caller
+    // still passing the flag must get no minutes for it.
+    expect(lawnComplexityMinutes({ hasLargeDriveway: true })).toBe(0);
     expect(lawnComplexityMinutes({ hasPrivacyFence: true })).toBe(5);
-    expect(lawnComplexityMinutes({ landscapeComplexity: 'complex', shrubDensity: 'heavy', hasLargeDriveway: true })).toBe(20);
+    expect(lawnComplexityMinutes({ landscapeComplexity: 'complex', shrubDensity: 'heavy', hasPrivacyFence: true })).toBe(20);
   });
 });
 

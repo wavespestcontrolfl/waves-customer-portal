@@ -983,7 +983,7 @@ function mapV1ToLegacyShape(v1Result) {
 
   // Project v1 features back onto flat v2-shape keys so EstimatePage's
   // client-side modifiers fallback (which predates Session 11a and reads
-  // `p.poolCage === 'YES'`, `p.shrubDensity`, `p.hasLargeDriveway`, etc.)
+  // `p.poolCage === 'YES'`, `p.shrubDensity`, etc.)
   // renders correctly without touching the engine output shape.
   const vp = v1Result.property || {};
   const vf = vp.features || {};
@@ -993,7 +993,6 @@ function mapV1ToLegacyShape(v1Result) {
     pool: vf.pool ? 'YES' : 'NO',
     poolCage: vf.poolCage ? 'YES' : 'NO',
     poolCageSize: vf.poolCageSize || (vf.poolCage ? 'medium' : 'none'),
-    hasLargeDriveway: !!vf.largeDriveway,
     shrubDensity: upper(vf.shrubs),
     treeDensity: upper(vf.trees),
     landscapeComplexity: upper(vf.complexity),

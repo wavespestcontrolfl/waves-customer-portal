@@ -321,7 +321,7 @@ function validatePestPricingConfig(snapshot = constants) {
   if (!isPositiveNumber(trenching.concretePerLF)) errors.push('SPECIALTY.trenching.concretePerLF must be positive');
   if (!isPositiveNumber(trenching.floor)) errors.push('SPECIALTY.trenching.floor must be positive');
   if (!isNonNegativeNumber(trenching.renewal)) errors.push('SPECIALTY.trenching.renewal must be non-negative');
-  for (const key of ['concretePctBase', 'concretePctCage', 'concretePctPool', 'concretePctDriveway', 'concretePctCap']) {
+  for (const key of ['concretePctBase', 'concretePctCage', 'concretePctPool', 'concretePctCap']) {
     if (!isFiniteNumber(trenching[key]) || Number(trenching[key]) < 0 || Number(trenching[key]) > 1) {
       errors.push(`SPECIALTY.trenching.${key} must be between 0 and 1`);
     }
@@ -1430,7 +1430,6 @@ async function syncConstantsFromDB(dbInstance) {
       setNumber(constants.SPECIALTY.trenching, 'concretePctBase', ot.concretePctBase ?? ot.concrete_pct_base, Number);
       setNumber(constants.SPECIALTY.trenching, 'concretePctCage', ot.concretePctCage ?? ot.concrete_pct_cage, Number);
       setNumber(constants.SPECIALTY.trenching, 'concretePctPool', ot.concretePctPool ?? ot.concrete_pct_pool, Number);
-      setNumber(constants.SPECIALTY.trenching, 'concretePctDriveway', ot.concretePctDriveway ?? ot.concrete_pct_driveway, Number);
       setNumber(constants.SPECIALTY.trenching, 'concretePctCap', ot.concretePctCap ?? ot.concrete_pct_cap, Number);
       setString(constants.SPECIALTY.trenching, 'defaultProductKey', ot.defaultProductKey ?? ot.default_product_key);
       setString(constants.SPECIALTY.trenching, 'defaultIncludedProductKey', ot.defaultIncludedProductKey ?? ot.default_included_product_key);

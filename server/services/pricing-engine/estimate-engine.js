@@ -561,8 +561,6 @@ function generateEstimate(input) {
     poolCage: input.poolCage,
     hasPoolCage: input.hasPoolCage,
     poolCageSize: input.poolCageSize,
-    hasLargeDriveway: input.hasLargeDriveway,
-    largeDriveway: input.largeDriveway,
     shrubDensity: input.shrubDensity,
     treeDensity: input.treeDensity,
     landscapeComplexity: input.landscapeComplexity,

@@ -301,11 +301,13 @@ describe('lawn pricing production follow-up', () => {
 
     expect(withTopLevelFlags.features.pool).toBe(true);
     expect(withTopLevelFlags.features.poolCage).toBe(true);
-    expect(withTopLevelFlags.features.largeDriveway).toBe(true);
+    // largeDriveway is retired estimator-wide (2026-07-30): the top-level flag
+    // is ignored and stripped from the normalized profile.
+    expect(withTopLevelFlags.features.largeDriveway).toBeUndefined();
     expect(withTopLevelFlags.features.shrubs).toBe('heavy');
     expect(withTopLevelFlags.features.trees).toBe('heavy');
     expect(withTopLevelFlags.features.complexity).toBe('complex');
-    expect(withTopLevelFlags.hardscape).toBe(plain.hardscape + 900);
+    expect(withTopLevelFlags.hardscape).toBe(plain.hardscape + 600);
     expect(withTopLevelFlags.turfSf).toBeLessThan(plain.turfSf);
   });
 
@@ -326,7 +328,9 @@ describe('lawn pricing production follow-up', () => {
 
     expect(property.features.pool).toBe(true);
     expect(property.features.poolCage).toBe(true);
-    expect(property.features.largeDriveway).toBe(true);
+    // Retired estimator-wide (2026-07-30) — stripped even when a nested value
+    // was supplied.
+    expect(property.features.largeDriveway).toBeUndefined();
     expect(property.features.nearWater).toBe(true);
     expect(property.features.attachedGarage).toBe(true);
   });
