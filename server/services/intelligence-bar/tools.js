@@ -1577,11 +1577,36 @@ async function cancelAppointment(input) {
   const appt = await db('scheduled_services').where('id', appointment_id).first();
   if (!appt) return { error: 'Appointment not found' };
 
-  await db('scheduled_services').where('id', appointment_id).update({
-    status: 'cancelled',
-    notes: reason ? `${appt.notes || ''}\nCancelled: ${reason}`.trim() : appt.notes,
-    updated_at: new Date(),
-  });
+  // Route through the SHARED status writer, not a direct status update
+  // (Codex r3 on PR #3091): transitionJobStatus is where the cross-cutting
+  // cancellation behavior lives — the atomic racing-transition guard, the
+  // job_status_history audit row, socket board updates, overdue-alert
+  // auto-resolution, and the follow-up obligation re-park hook. A direct
+  // UPDATE silently skipped all of it.
+  try {
+    const { transitionJobStatus } = require('../job-status');
+    await transitionJobStatus({
+      jobId: appointment_id,
+      fromStatus: appt.status,
+      toStatus: 'cancelled',
+      transitionedBy: null,
+      notes: reason ? `Cancelled via Intelligence Bar: ${reason}` : 'Cancelled via Intelligence Bar',
+    });
+  } catch (err) {
+    if (err && err.message && err.message.includes('not in state')) {
+      return { error: 'Appointment status changed while cancelling (concurrent update) — refresh and try again.' };
+    }
+    if (err && err.code === 'OUTBOUND_REVIEW_UNCONFIRMED') {
+      return { error: 'This outbound-callback booking is pending office review — confirm or reject it there instead.' };
+    }
+    throw err;
+  }
+  if (reason) {
+    await db('scheduled_services').where('id', appointment_id).update({
+      notes: `${appt.notes || ''}\nCancelled: ${reason}`.trim(),
+      updated_at: new Date(),
+    });
+  }
 
   const customer = await db('customers').where('id', appt.customer_id).first();
 

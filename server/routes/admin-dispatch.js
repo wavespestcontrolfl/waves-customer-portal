@@ -78,6 +78,7 @@ const {
   typedFollowupObligationForCompletedSource,
   parkFollowupAlert,
   TWO_TREATMENT_PACKAGE_KEYS,
+  FOLLOWUP_CHILD_INACTIVE_STATUSES,
 } = require('../services/typed-followup-obligation');
 
 // Report/track egress (AGENTS.md): entry-code shapes that must never persist
@@ -4746,7 +4747,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // helper skips when a live linked child already covers the
         // obligation (the call pipeline pre-books visit 2 — alerting on a
         // booked follow-up parks a false exception; Codex r2) or an
-        // unresolved alert already exists (visit-outcome path). Emit
+        // unresolved alert already exists. The visit-outcome
+        // follow_up_needed writer runs LATER in this trx and defers to
+        // this park when the verdict is required (Codex r3). Emit
         // defers to commit via createAlertOnce's trx handling.
         if (followupSuggestion?.required) {
           await parkFollowupAlert({
@@ -5253,7 +5256,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         if (visitOutcome === 'customer_concern') {
           await createAlert({ ...alertBase, type: 'customer_concern', severity: 'warn' });
         }
-        if (visitOutcome === 'follow_up_needed') {
+        if (visitOutcome === 'follow_up_needed' && !followupSuggestion?.required) {
+          // When the typed verdict owns the obligation, parkFollowupAlert
+          // already inserted the follow_up_needed card earlier in THIS
+          // transaction — an unconditional second insert here deterministically
+          // double-carded one visit (Codex r3). Untyped completions and typed
+          // ones whose verdict withdrew (e.g. German "No") keep the
+          // outcome-driven alert exactly as before.
           await createAlert({ ...alertBase, type: 'follow_up_needed', severity: 'info' });
         }
         if (visitOutcome === 'incomplete') {
@@ -8558,7 +8567,7 @@ router.post('/:serviceId/schedule-followup', async (req, res, next) => {
 
     const existing = await db('scheduled_services')
       .where({ followup_source_service_id: svc.id })
-      .whereNotIn('status', ['cancelled', 'skipped'])
+      .whereNotIn('status', FOLLOWUP_CHILD_INACTIVE_STATUSES)
       .orderBy('created_at', 'desc')
       .first();
     if (existing) {
@@ -8599,7 +8608,7 @@ router.post('/:serviceId/schedule-followup', async (req, res, next) => {
       if (err && err.code === '23505') {
         const winner = await db('scheduled_services')
           .where({ followup_source_service_id: svc.id })
-          .whereNotIn('status', ['cancelled', 'skipped'])
+          .whereNotIn('status', FOLLOWUP_CHILD_INACTIVE_STATUSES)
           .orderBy('created_at', 'desc')
           .first();
         if (winner) {

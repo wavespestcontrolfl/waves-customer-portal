@@ -182,11 +182,11 @@ describe('/schedule-followup (source contracts)', () => {
 });
 
 describe('shared status writer re-parks on child cancellation (source contracts)', () => {
-  test('hook is guarded to cancelled/skipped, lazy-required, and runs POST-COMMIT on both trx paths', () => {
+  test('hook is guarded to cancelled/skipped/no_show, lazy-required, and runs POST-COMMIT on both trx paths', () => {
     const hookDef = jobStatusSource.indexOf('function maybeReparkFollowupObligation()');
     expect(hookDef).toBeGreaterThan(-1);
     const hookBody = jobStatusSource.slice(hookDef, hookDef + 1600);
-    expect(hookBody).toContain("['cancelled', 'skipped'].includes(String(toStatus || ''))");
+    expect(hookBody).toContain("['cancelled', 'skipped', 'no_show'].includes(String(toStatus || ''))");
     expect(hookBody).toContain("require('./typed-followup-obligation')");
     expect(hookBody).toContain('handleFollowupChildCancellation({ jobId, toStatus })');
     // POST-COMMIT on both paths: an error inside a Postgres trx would abort
@@ -206,14 +206,14 @@ describe('shared status writer re-parks on child cancellation (source contracts)
     const moduleSource = fs.readFileSync(path.join(__dirname, '../services/typed-followup-obligation.js'), 'utf8');
     const handler = moduleSource.slice(moduleSource.indexOf('async function handleFollowupChildCancellation'));
     // A replacement child already on the schedule keeps the alert away…
-    expect(handler).toContain("whereNotIn('status', ['cancelled', 'skipped'])");
+    expect(handler).toContain("whereNotIn('status', FOLLOWUP_CHILD_INACTIVE_STATUSES)");
     expect(handler).toContain("skipped: 'replacement_live'");
     // …and the verdict is re-derived from the committed snapshot, not assumed.
     expect(handler).toContain('typedFollowupObligationForCompletedSource');
     expect(handler).toContain("source: 'followup_cancelled'");
   });
 
-  test('parkFollowupAlert dedupe pre-check is load-bearing (createAlertOnce onConflict does not dedupe)', () => {
+  test('parkFollowupAlert guards: live-child skip before the cross-source dedupe pre-check', () => {
     const moduleSource = fs.readFileSync(path.join(__dirname, '../services/typed-followup-obligation.js'), 'utf8');
     const park = moduleSource.slice(moduleSource.indexOf('async function parkFollowupAlert'));
     // Live-child skip (call pipeline pre-books visit 2) BEFORE the alert query.
@@ -224,5 +224,54 @@ describe('shared status writer re-parks on child cancellation (source contracts)
     expect(park).toContain(".whereNull('resolved_at')");
     expect(park).toContain("skipped: 'followup_already_booked'");
     expect(park).toContain("skipped: 'already_parked'");
+  });
+});
+
+describe('codex r3 — double-card, no_show coverage, storage-level dedupe, IB writer (source contracts)', () => {
+  const moduleSource = fs.readFileSync(path.join(__dirname, '../services/typed-followup-obligation.js'), 'utf8');
+
+  test('visit-outcome follow_up_needed writer defers to the typed park (no double card)', () => {
+    const idx = dispatchSource.indexOf("if (visitOutcome === 'follow_up_needed' && !followupSuggestion?.required) {");
+    expect(idx).toBeGreaterThan(-1);
+    // The old unconditional form must be gone.
+    expect(dispatchSource).not.toContain("if (visitOutcome === 'follow_up_needed') {\n          await createAlert");
+    const parkIdx = dispatchSource.indexOf('await parkFollowupAlert({');
+    expect(parkIdx).toBeGreaterThan(-1);
+    expect(parkIdx).toBeLessThan(idx);
+  });
+
+  test('no_show children never cover the obligation — one shared constant everywhere', () => {
+    expect(require('../services/typed-followup-obligation').FOLLOWUP_CHILD_INACTIVE_STATUSES)
+      .toEqual(['cancelled', 'skipped', 'no_show']);
+    // Module: park live-child check + cancellation handler + otherLive all
+    // use the constant; no stranded literal pair remains.
+    expect(moduleSource).not.toContain("whereNotIn('status', ['cancelled', 'skipped'])");
+    // Route: schedule-followup existing + 23505 winner lookups use it.
+    const routeTail = dispatchSource.slice(dispatchSource.indexOf("router.post('/:serviceId/schedule-followup'"));
+    expect(routeTail.split("whereNotIn('status', FOLLOWUP_CHILD_INACTIVE_STATUSES)").length - 1).toBe(2);
+    // Shared writer hook fires on no_show too.
+    expect(jobStatusSource).toContain("['cancelled', 'skipped', 'no_show'].includes(String(toStatus || ''))");
+    // Handler trigger uses the constant.
+    expect(moduleSource).toContain('FOLLOWUP_CHILD_INACTIVE_STATUSES.includes(String(toStatus || ' + "''))");
+  });
+
+  test('storage-level dedupe: migration covers both typed sources and relaxes the link index for no_show', () => {
+    const migration = fs.readFileSync(
+      path.join(__dirname, '../models/migrations/20260730500000_typed_followup_alert_dedupe.js'), 'utf8',
+    );
+    expect(migration).toContain('idx_dispatch_alerts_typed_followup_one_unresolved');
+    expect(migration).toContain("payload->>'source' IN ('typed_completion', 'followup_cancelled')");
+    expect(migration).toContain("status NOT IN ('cancelled', 'skipped', 'no_show')");
+    // Pre-index cleanup mirrors 20260521000007 (keeps rows, stamps migration).
+    expect(migration).toContain('dedupedByMigration');
+  });
+
+  test('Intelligence Bar cancel_appointment routes through the shared status writer', () => {
+    const ibSource = fs.readFileSync(path.join(__dirname, '../services/intelligence-bar/tools.js'), 'utf8');
+    const fn = ibSource.slice(ibSource.indexOf('async function cancelAppointment'), ibSource.indexOf('async function draftSms'));
+    expect(fn).toContain('transitionJobStatus({');
+    expect(fn).toContain("toStatus: 'cancelled'");
+    // The direct status write is gone — only the notes append remains.
+    expect(fn).not.toContain("status: 'cancelled',");
   });
 });

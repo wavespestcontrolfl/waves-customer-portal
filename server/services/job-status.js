@@ -378,17 +378,20 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
   }
 
   function maybeReparkFollowupObligation() {
-    // Cancelling/skipping a completion-linked follow-up child resurfaces
-    // the source visit's owed follow-up as a fresh dispatch alert — the
-    // booking resolved it, and without this an ordinary cancellation left
-    // the obligation with neither an appointment nor an open alert. Runs
-    // POST-COMMIT, fire-and-forget: it must never block or poison the
+    // Cancelling/skipping/no-showing a completion-linked follow-up child
+    // resurfaces the source visit's owed follow-up as a fresh dispatch
+    // alert — the booking resolved it, and without this an ordinary
+    // cancellation left the obligation with neither an appointment nor an
+    // open alert (a no_show child likewise no longer covers it; Codex r3).
+    // Runs POST-COMMIT, fire-and-forget: it must never block or poison the
     // cancellation transaction (an error inside a Postgres trx aborts every
     // later statement), and the park is dedup-guarded so a same-status
-    // cancel re-send safely re-attempts it. Guarded here (the one shared
-    // status writer) so EVERY cancellation surface is covered. Lazy
+    // cancel re-send safely re-attempts it. Guarded here (the shared
+    // status writer) so every transitionJobStatus caller is covered; the
+    // one direct-update cancellation writer (Intelligence Bar
+    // cancel_appointment) now routes through this writer too. Lazy
     // require: the module's dependency chain reaches back into job-status.
-    if (!['cancelled', 'skipped'].includes(String(toStatus || ''))) return;
+    if (!['cancelled', 'skipped', 'no_show'].includes(String(toStatus || ''))) return;
     const { handleFollowupChildCancellation } = require('./typed-followup-obligation');
     void handleFollowupChildCancellation({ jobId, toStatus }).catch((e) => {
       logger.warn(`[job-status] follow-up re-park hook failed for ${jobId}: ${e.message}`);

@@ -22,19 +22,22 @@
  *                                  for an already-completed visit from its
  *                                  committed typedReportSnapshot.
  *  - parkFollowupAlert()         — dedup-guarded follow_up_needed insert.
- *                                  The (type, job_id) pre-check is
- *                                  load-bearing: dispatch_alerts has no
- *                                  matching unique index, so
- *                                  createAlertOnce's onConflict().ignore()
- *                                  inserts duplicates (verified on dev).
- *                                  Also skips when a live linked child
- *                                  already exists — the call pipeline can
- *                                  pre-book visit 2, and an alert for a
- *                                  booked follow-up is a false exception.
+ *                                  Atomicity comes from the partial unique
+ *                                  index idx_dispatch_alerts_typed_followup_
+ *                                  one_unresolved (migration 20260730500000,
+ *                                  covering BOTH payload sources) — the
+ *                                  read-side (type, job_id) pre-check is the
+ *                                  cross-source guard (project_completion /
+ *                                  visit-outcome cards live outside the
+ *                                  index) and the fast path. Also skips when
+ *                                  a live linked child already exists — the
+ *                                  call pipeline can pre-book visit 2, and
+ *                                  an alert for a booked follow-up is a
+ *                                  false exception.
  *  - handleFollowupChildCancellation() — the shared status writer
  *                                  (transitionJobStatus) calls this when a
- *                                  visit goes cancelled/skipped: if it was
- *                                  the linked follow-up child and no
+ *                                  visit goes cancelled/skipped/no_show: if
+ *                                  it was the linked follow-up child and no
  *                                  replacement is live, the source visit's
  *                                  obligation resurfaces as a fresh alert.
  */
@@ -52,6 +55,14 @@ const KNOCKDOWN_FOLLOWUP_WINDOW_DAYS = { '10–14 days': 14, '2–3 weeks': 21 }
 // an included follow-up completing must not mint a third (Codex r3 on
 // #3078-era rounds). Trapping programs deliberately chain and are excluded.
 const TWO_TREATMENT_PACKAGE_KEYS = new Set(['cockroach_control', 'bed_bug_treatment']);
+
+// A linked follow-up child in any of these states does NOT cover the
+// obligation: cancelled/skipped never happened, and a no_show means the
+// visit was missed — the customer still needs the treatment (Codex r3).
+// Must stay in lockstep with the partial unique index
+// uq_scheduled_services_followup_source_open (migration 20260730500000) so
+// a replacement can actually be booked once a child enters these states.
+const FOLLOWUP_CHILD_INACTIVE_STATUSES = ['cancelled', 'skipped', 'no_show'];
 
 function parseJsonObjectSafe(value) {
   if (value == null) return {};
@@ -186,7 +197,7 @@ async function parkFollowupAlert({
   const q = trx || knex;
   const liveChild = await q('scheduled_services')
     .where({ followup_source_service_id: scheduledService.id })
-    .whereNotIn('status', ['cancelled', 'skipped'])
+    .whereNotIn('status', FOLLOWUP_CHILD_INACTIVE_STATUSES)
     .first('id');
   if (liveChild) return { created: false, skipped: 'followup_already_booked', childId: liveChild.id };
   const existing = await q('dispatch_alerts')
@@ -227,7 +238,7 @@ async function parkFollowupAlert({
 
 /**
  * Shared-status-writer hook (transitionJobStatus): when a visit transitions
- * to cancelled/skipped and it was the linked follow-up child of a completed
+ * to cancelled/skipped/no_show and it was the linked follow-up child of a completed
  * typed visit, the source's obligation resurfaces — without this, an
  * ordinary cancellation left the required visit with neither an appointment
  * nor an open alert (the booking resolved it), permanently losing the
@@ -236,7 +247,7 @@ async function parkFollowupAlert({
  * makes any retry of the cancellation re-attempt the park safely.
  */
 async function handleFollowupChildCancellation({ jobId, toStatus, trx = null } = {}) {
-  if (!['cancelled', 'skipped'].includes(String(toStatus || ''))) return { skipped: 'not_cancellation' };
+  if (!FOLLOWUP_CHILD_INACTIVE_STATUSES.includes(String(toStatus || ''))) return { skipped: 'not_cancellation' };
   const q = trx || db;
   try {
     const child = await q('scheduled_services')
@@ -246,7 +257,7 @@ async function handleFollowupChildCancellation({ jobId, toStatus, trx = null } =
     const otherLive = await q('scheduled_services')
       .where({ followup_source_service_id: child.followup_source_service_id })
       .whereNot('id', child.id)
-      .whereNotIn('status', ['cancelled', 'skipped'])
+      .whereNotIn('status', FOLLOWUP_CHILD_INACTIVE_STATUSES)
       .first('id');
     if (otherLive) return { skipped: 'replacement_live' };
     const source = await q('scheduled_services')
@@ -277,4 +288,5 @@ module.exports = {
   handleFollowupChildCancellation,
   KNOCKDOWN_FOLLOWUP_WINDOW_DAYS,
   TWO_TREATMENT_PACKAGE_KEYS,
+  FOLLOWUP_CHILD_INACTIVE_STATUSES,
 };
