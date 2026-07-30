@@ -1214,6 +1214,40 @@ function reviewRequestedForHead(issueComments = [], headSha = null) {
 // the permissive value the fallback, so a new branch-mutating park that omitted
 // the phase would have opened the bar against unsynchronized state — the exact
 // thing isPostPushPark's unknown-value handling exists to prevent.
+/**
+ * Arm a round for its push: mark 'remediating' and take the sync hold, in ONE
+ * statement.
+ *
+ * The hold uses COALESCE, so an EXISTING pending SHA is preserved rather than
+ * replaced. Overwriting it lost real state: if push B never synced, a human then
+ * advanced the branch to C, and remediation's push from C failed before
+ * committing, the new in-flight sentinel would later be reconciled away as
+ * "nothing landed" — forgetting that B is still unsynced, letting C merge and a
+ * rebuild resurrect the pre-B portal content.
+ *
+ * The new commit only becomes the hold once a push is CONFIRMED (the push-time
+ * write), and the hold clears only after a content sync succeeds — which resolves
+ * any earlier pending push too, since the sync mirrors the full current body.
+ *
+ * Returns false when the row is terminal (merged/closed won the race), matching
+ * saveState's contract so callers stop before pushing.
+ */
+async function armPushHold(db, prNumber, branch, preHeadSha) {
+  const res = await db.raw(
+    `INSERT INTO codex_remediation_state
+       (pr_number, branch, status, rounds, sync_pending_sha, created_at, updated_at)
+     VALUES (?, ?, 'remediating', 0, ?, NOW(), NOW())
+     ON CONFLICT (pr_number) DO UPDATE
+       SET branch = EXCLUDED.branch,
+           status = 'remediating',
+           sync_pending_sha = COALESCE(codex_remediation_state.sync_pending_sha, EXCLUDED.sync_pending_sha),
+           updated_at = NOW()
+       WHERE codex_remediation_state.status NOT IN ('merged', 'closed')`,
+    [prNumber, branch, inFlightSentinel(preHeadSha)],
+  );
+  return (res?.rowCount ?? 0) > 0;
+}
+
 async function park(db, prNumber, reason, onPark, headSha, phase) {
   // Persist the reason, the head the verdict applied to, and the round PHASE —
   // the reason used to live only in logs (short retention: three parked
@@ -1540,9 +1574,7 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   // blog_posts.content still pre-fix, and a later republish resurrects it.
   // SYNC_PENDING_PUSH_IN_FLIGHT is a non-SHA sentinel; the bar blocks on ANY
   // non-empty value, so the hold is live from here on.
-  const armed = await saveState(db, prNumber, {
-    branch, status: 'remediating', sync_pending_sha: inFlightSentinel(headSha),
-  });
+  const armed = await armPushHold(db, prNumber, branch, headSha);
   if (!armed) return { skipped: true, reason: 'pr left the open state during remediation (terminal row)' };
 
   let commit;

@@ -77,9 +77,29 @@ function makeDb(initial = {}) {
       },
     };
   }
-  // Emulates markPrTerminal's atomic upsert — the only raw statement these
-  // tests reach (insert-or-flip, terminal rows untouched).
+  // Emulates the two raw statements these tests reach.
   db.raw = async (sql, params) => {
+    // armPushHold: insert-or-arm, COALESCE keeps an existing hold, terminal rows
+    // untouched.
+    if (/sync_pending_sha = COALESCE/.test(sql)) {
+      const [n, branch, sentinel] = params;
+      tables.codex_remediation_state = tables.codex_remediation_state || [];
+      const t = tables.codex_remediation_state;
+      const row = t.find((x) => x.pr_number === n);
+      if (!row) {
+        t.push({
+          pr_number: n, branch, status: 'remediating', rounds: 0,
+          sync_pending_sha: sentinel, updated_at: new Date(),
+        });
+        return { rowCount: 1 };
+      }
+      if (row.status === 'merged' || row.status === 'closed') return { rowCount: 0 };
+      row.branch = branch;
+      row.status = 'remediating';
+      row.sync_pending_sha = row.sync_pending_sha ?? sentinel; // COALESCE
+      row.updated_at = new Date();
+      return { rowCount: 1 };
+    }
     const [n, status] = params;
     tables.codex_remediation_state = tables.codex_remediation_state || [];
     const t = tables.codex_remediation_state;
@@ -3024,6 +3044,73 @@ describe('the stale-sentinel release is a compare-and-set', () => {
     const gh = { getBranchSha: async () => HEAD };
     const h = await rem.syncPendingHold(5, { db, headSha: HEAD, gh, branch: 'content/blog-x' });
     expect(h.pending).toBe(false);
+    expect(db._tables.codex_remediation_state.find((x) => x.pr_number === 5).sync_pending_sha).toBeNull();
+  });
+});
+
+// Arming a push must PRESERVE an existing unsynced-push hold. Overwriting it lost
+// real state: push B never syncs, a human advances the branch to C, remediation's
+// push from C fails before committing, and the fresh in-flight sentinel is later
+// reconciled away as "nothing landed" — forgetting B, letting C merge, and letting a
+// rebuild resurrect pre-B portal content.
+describe('armPushHold preserves an existing sync hold', () => {
+  test('an existing real-SHA hold survives arming a new round', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const db = makeDb({
+      codex_remediation_state: [{
+        pr_number: 5, rounds: 1, status: 'parked', parked_head_sha: 'oldhead111',
+        park_phase: 'post_push', sync_pending_sha: 'unsyncedpushB',
+        park_reason: 'portal row sync failed after fix commit unsynce: boom',
+      }],
+    });
+    let atPushTime = null;
+    const gh = makeGh();
+    const origPut = gh.putFile;
+    gh.putFile = async (args) => {
+      atPushTime = { ...db._tables.codex_remediation_state.find((x) => x.pr_number === 5) };
+      return origPut(args);
+    };
+    await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
+    // B's hold was NOT replaced by the in-flight sentinel while arming.
+    expect(atPushTime.sync_pending_sha).toBe('unsyncedpushB');
+    expect(atPushTime.status).toBe('remediating');
+  });
+
+  test('with no existing hold, arming stamps the in-flight sentinel', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const db = makeDb();
+    const gh = makeGh();
+    let atPushTime = null;
+    const origPut = gh.putFile;
+    gh.putFile = async (args) => {
+      atPushTime = { ...db._tables.codex_remediation_state.find((x) => x.pr_number === 5) };
+      return origPut(args);
+    };
+    await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
+    expect(atPushTime.sync_pending_sha).toBe(`push_in_flight:${HEAD}`);
+  });
+
+  test('a terminal row refuses the arm, so nothing is pushed', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const db = makeDb({ codex_remediation_state: [{ pr_number: 5, rounds: 1, status: 'merged' }] });
+    const gh = makeGh();
+    const r = await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
+    expect(r.skipped).toBe(true);
+    expect(gh._calls.putFile).toHaveLength(0);
+  });
+
+  test('a confirmed push replaces the hold with the new commit', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const db = makeDb({
+      codex_remediation_state: [{
+        pr_number: 5, rounds: 1, status: 'parked', parked_head_sha: 'oldhead111',
+        sync_pending_sha: 'unsyncedpushB', park_phase: 'pre_push',
+      }],
+    });
+    // No onRemediated → nothing to sync → the hold clears on the success path,
+    // which is what resolves B too (the sync mirrors the full current body).
+    const r = await runRemediationForPr(CTX, { db, gh: makeGh(), callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
+    expect(r.remediated).toBe(true);
     expect(db._tables.codex_remediation_state.find((x) => x.pr_number === 5).sync_pending_sha).toBeNull();
   });
 });
