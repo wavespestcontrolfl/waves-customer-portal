@@ -126,7 +126,7 @@ function windowStartMinutes(windowStart) {
 }
 
 // Call-linked booking evidence, mirroring findExistingCallAppointment
-// (call-recording-processor.js:2225): does this same-customer, same-ET-date,
+// (call-recording-processor.js:2225): does this same-customer,
 // non-cancelled/rescheduled row belong to THIS call's confirmed slot? Only
 // call-specific evidence clears — a same-day row merely created after the
 // call could be any unrelated booking, and the canonical lookup does not
@@ -134,9 +134,17 @@ function windowStartMinutes(windowStart) {
 // timing shortcut is one deduped page when the office manually rebooks the
 // call at a renegotiated time >2h away; the cost of keeping it was silently
 // suppressing exactly the failures this pager exists for.
+//
+// The provenance branches (source_call_log_id, Call SID notes marker) are
+// deliberately DATE-AGNOSTIC: SmartRebooker reschedules a call-created visit
+// by mutating the SAME row's scheduled_date in place (rebooker.js), so the
+// durable call-linked appointment can legitimately live on a different date
+// than the originally confirmed slot — it is still booked, not missed. Only
+// the window-proximity fallback requires the original ET date.
 function rowClearsSlot(row, call, slot) {
   if (row.source_call_log_id && row.source_call_log_id === call.id) return true;
   if (call.twilio_call_sid && String(row.notes || '').includes(`Call SID: ${call.twilio_call_sid}`)) return true;
+  if (row.sched_date !== slot.dateET) return false;
   const startMinutes = windowStartMinutes(row.window_start);
   if (startMinutes !== null && Math.abs(startMinutes - slot.minutes) <= WINDOW_MATCH_TOLERANCE_MINUTES) return true;
   return false;
@@ -159,7 +167,6 @@ function computeBookingMisses(calls, bookedRows, { now = new Date() } = {}) {
     if (!slot) continue;
     const cleared = !!call.customer_id && bookedRows.some((row) => (
       row.customer_id === call.customer_id
-      && row.sched_date === slot.dateET
       && rowClearsSlot(row, call, slot)
     ));
     if (cleared) continue;
@@ -217,12 +224,26 @@ async function runInner({ now = new Date() } = {}) {
   }
   const customerIds = [...new Set(provisional.map((m) => m.call.customer_id).filter(Boolean))];
   const dates = [...new Set(provisional.map((m) => m.serviceDateET))];
+  const callIds = provisional.map((m) => m.call.id);
+  const sidPatterns = provisional
+    .map((m) => m.call.twilio_call_sid)
+    .filter(Boolean)
+    .map((sid) => `%Call SID: ${sid}%`);
   let bookedRows = [];
   if (customerIds.length && dates.length) {
+    // Three OR'd fetch branches, matching rowClearsSlot's evidence: the
+    // confirmed date (window-proximity fallback) PLUS date-agnostic
+    // provenance (source_call_log_id / Call SID marker) — an in-place
+    // reschedule moves the call-linked row to another date and it must
+    // still be fetched or the watchdog pages a booked visit as missed.
     bookedRows = await db('scheduled_services')
       .whereIn('customer_id', customerIds)
       .whereNotIn('status', ['cancelled', 'rescheduled'])
-      .whereRaw("to_char(scheduled_date, 'YYYY-MM-DD') = ANY(?)", [dates])
+      .where(function bookedEvidence() {
+        this.whereRaw("to_char(scheduled_date, 'YYYY-MM-DD') = ANY(?)", [dates])
+          .orWhereIn('source_call_log_id', callIds);
+        if (sidPatterns.length) this.orWhereRaw('notes LIKE ANY(?)', [sidPatterns]);
+      })
       .select(
         'customer_id', 'window_start', 'created_at', 'source_call_log_id', 'notes',
         db.raw("to_char(scheduled_date, 'YYYY-MM-DD') AS sched_date"),

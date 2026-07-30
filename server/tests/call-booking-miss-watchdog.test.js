@@ -118,6 +118,18 @@ describe('rowClearsSlot — call-linked booking evidence only', () => {
     expect(rowClearsSlot(bookedRow({ window_start: '08:00:00', created_at: null }), call(), slot)).toBe(false);
   });
 
+  test('provenance clears DATE-AGNOSTICALLY (in-place reschedule moved the row) but window-proximity does not', () => {
+    // SmartRebooker mutates the same row's scheduled_date, keeping
+    // source_call_log_id — still booked, must not page.
+    const rescheduled = bookedRow({ sched_date: '2026-08-05', source_call_log_id: 'call-1', window_start: null, created_at: null });
+    expect(rowClearsSlot(rescheduled, call(), slot)).toBe(true);
+    const markerMoved = bookedRow({ sched_date: '2026-08-05', notes: 'Call SID: CAsynthetic001.', window_start: null, created_at: null });
+    expect(rowClearsSlot(markerMoved, call(), slot)).toBe(true);
+    // A near-noon window on some OTHER date is not evidence for this slot.
+    const wrongDateWindow = bookedRow({ sched_date: '2026-08-05', window_start: '12:00:00', created_at: null });
+    expect(rowClearsSlot(wrongDateWindow, call(), slot)).toBe(false);
+  });
+
   test('post-call timing alone is NOT evidence — an unrelated row created after the call does not clear', () => {
     const afterCall = bookedRow({ window_start: '08:00:00', created_at: new Date(new Date(OLD_ENOUGH).getTime() + 10 * 60 * 1000).toISOString() });
     const beforeCall = bookedRow({ window_start: '08:00:00', created_at: new Date(new Date(OLD_ENOUGH).getTime() - 10 * 60 * 1000).toISOString() });

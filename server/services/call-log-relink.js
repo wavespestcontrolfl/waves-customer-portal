@@ -50,6 +50,9 @@ const WINDOW_DAYS = 30;
 // can realistically hold.
 const PAGE_SIZE = 500;
 const MAX_PAGES = 20;
+// Cap per run for the rehome retry sweep — it re-runs hourly, so a backlog
+// drains across ticks without one run doing unbounded sync work.
+const REHOME_SWEEP_LIMIT = 200;
 // Verbatim sentinel from call-recording-processor.js — marks a rejected
 // empty-voicemail row whose customer link was deliberately cleared.
 const TRANSCRIPTION_REJECTED_SENTINEL = '[Recording had no usable speech; an implausible transcription was rejected.]';
@@ -202,6 +205,29 @@ async function relinkUnattributedCalls({ now = new Date(), conn = db } = {}) {
       }
     }
   }
+
+  // Retry safety net: the inline rehome above can fail transiently AFTER the
+  // call_log update committed (sync catches its own errors; a crash between
+  // the two writes has the same effect) — and later runs would never retry,
+  // because they only scan customer_id-NULL rows. This sweep finds LINKED
+  // calls in the window whose unified voice message still sits in a thread
+  // with a different (or no) customer, and re-syncs them. Also heals rows
+  // linked by other writers that never had a rehome at all.
+  const orphanedThreads = await conn('call_log as cl')
+    .join('messages as m', function joinVoice() {
+      this.on('m.twilio_sid', 'cl.twilio_call_sid').andOnVal('m.channel', 'voice');
+    })
+    .join('conversations as c', 'c.id', 'm.conversation_id')
+    .whereNotNull('cl.customer_id')
+    .where('cl.created_at', '>=', cutoff)
+    .whereRaw('c.customer_id IS DISTINCT FROM cl.customer_id')
+    .limit(REHOME_SWEEP_LIMIT)
+    .select('cl.twilio_call_sid');
+  for (const row of orphanedThreads) {
+    const synced = await syncVoiceMessageForCall(row.twilio_call_sid);
+    if (synced) rehomed += 1;
+  }
+
   return { scanned, linked, rehomed, ambiguousOrUnmatched, skipped };
 }
 
