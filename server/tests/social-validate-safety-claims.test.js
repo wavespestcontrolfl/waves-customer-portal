@@ -31,6 +31,10 @@ const FLAGGED_OVERCLAIM = [
 
 // Product-safety co-occurrence: safe + product word, any order.
 const FLAGGED_PRODUCT_SAFETY = [
+  // The dry idiom WITHOUT technician-confirms framing is still a claim.
+  'our treatments are safe once completely dry',
+  'Our treatments are safe—once dry',
+  'Our treatments are safe, once dry',
   'safe pesticide treatments',
   'safe products for your lawn',
   'a safe treatment plan for summer',
@@ -81,7 +85,7 @@ const CLEAN = [
   'Petsmart is next door',
   'keep pets off treated areas until completely dry',
   'Safe once dry — technician confirms timing', // the approved idiom
-  'our treatments are safe once completely dry',
+  'our treatments are safe once completely dry, and your technician confirms timing',
   'review the safety data sheet before mixing',
   // Durations OUTSIDE the drying/re-entry context stay legal copy.
   'visits typically take about 45 minutes',
@@ -98,9 +102,9 @@ const CLEAN = [
   'keep your home safe from termites',
   'Keep your home safe from termites with professional pest control.',
   'our products keep your home safe from ants',
-  // #3066 r1: punctuated idiom, contest CTA, worker-safety mention.
-  'Our treatments are safe—once dry',
-  'Our treatments are safe, once dry',
+  // #3066 r1+r2: punctuated idiom stays exempt WITH technician framing.
+  'Our treatments are safe—once dry; your technician confirms timing',
+  'Our treatments are safe, once dry — tech confirms when',
   'Enter within 24 hours for a chance to win',
   'Technicians wear protective equipment to stay safe while applying pesticides',
 ];

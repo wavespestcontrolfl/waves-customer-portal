@@ -401,6 +401,9 @@ const AGRONOMIC_EXEMPT_RE = /\b(?:mow\w*|water\w*|irrigat\w*|fertiliz\w*|seed\w*
 const SAFETY_WORD_RE = /\bsafe(?:ly|ty)?\b/i;
 const PRODUCT_CONTEXT_RE = /\b(?:pesticides?|products?|treatments?|sprays?(?:ing)?|chemicals?|applications?|pest\s+control|exterminat\w*)\b/i;
 const SAFE_DRY_IDIOM_RE = /\bsafe\s*[—–,-]?\s*(?:once|until|when)\s+(?:completely\s+|fully\s+)?dry\b/gi;
+// The idiom is only approved WITH its technician-confirms-timing framing —
+// bare "our treatments are safe once dry" is still a product-safety claim.
+const TECH_CONFIRM_CONTEXT_RE = /\btech(?:nician)?s?\b|\bconfirm\w*\b/i;
 const SAFE_FROM_PEST_RE = /\bsafe(?:ly|ty)?\s+from\s+[\w'-]+(?:\s+(?:and|or)\s+[\w'-]+)?/gi;
 // Worker-safety mentions ("technicians ... stay safe while applying") are
 // about the crew's PPE, not a product claim — stripped before testing.
@@ -412,8 +415,9 @@ function complianceOverclaims(text) {
   const sentences = String(text || '').split(/[.!?\n]+/);
   for (const sentence of sentences) {
     if (!sentence.trim()) continue;
-    const safetyScope = sentence
-      .replace(SAFE_DRY_IDIOM_RE, '')
+    const safetyScope = (TECH_CONFIRM_CONTEXT_RE.test(sentence)
+      ? sentence.replace(SAFE_DRY_IDIOM_RE, '')
+      : sentence)
       .replace(SAFE_FROM_PEST_RE, '')
       .replace(WORKER_SAFETY_RE, '');
     if (SAFETY_WORD_RE.test(safetyScope) && PRODUCT_CONTEXT_RE.test(safetyScope)) {

@@ -32,6 +32,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const captionService = require('../services/tech-social-caption');
+const judgeService = require('../services/social-compliance-judge');
 const social = require('../services/social-media');
 const { isUserFeatureEnabled } = require('../services/feature-flags');
 const { WAVES_LOCATIONS } = require('../config/locations');
@@ -164,6 +165,15 @@ router.post('/validate', async (req, res, next) => {
     const text = String(caption || '');
     const base = social.validateContent(text, p);
     const issues = [...(base.valid ? [] : base.issues), ...captionService.piiIssues(text)];
+    // Semantic pass covers the copy-delivery lane too (TikTok has no API —
+    // the caption goes out via clipboard, so this pre-copy check is its ONLY
+    // judge gate). Unavailable judge fails open to the deterministic issues.
+    if (!issues.length) {
+      const verdict = await judgeService.judgeSocialCopy(text);
+      if (verdict.ok && !verdict.compliant) {
+        issues.push(...verdict.violations.map((v) => `Compliance judge: ${v}`));
+      }
+    }
     res.json({ valid: issues.length === 0, issues });
   } catch (err) {
     next(err);
@@ -283,6 +293,16 @@ router.post('/publish', async (req, res, next) => {
       const issues = [...(base.valid ? [] : base.issues), ...captionService.piiIssues(content)];
       if (issues.length) {
         results.push({ platform, skipped: `Validation: ${issues[0]}`, validationIssues: issues });
+        continue;
+      }
+      // Semantic second pass BEFORE claiming/uploading — a definitive
+      // violation here surfaces to the tech immediately and never burns the
+      // platform claim or hosts the photo (an edited caption keeps the same
+      // publishId, so a post-claim rejection would dead-end the retry as a
+      // duplicate). Unavailable judge fails open to the deterministic pass.
+      const verdict = await judgeService.judgeSocialCopy(content);
+      if (verdict.ok && !verdict.compliant) {
+        results.push({ platform, skipped: `Compliance judge: ${verdict.violations[0] || 'violation'}`, validationIssues: verdict.violations });
         continue;
       }
       plan.push({ platform, content });
