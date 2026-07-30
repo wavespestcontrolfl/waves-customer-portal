@@ -279,6 +279,28 @@ export function isTurfPixel(r, g, b) {
 }
 
 /**
+ * Confidently GREEN turf — excess-green AND green strictly above red.
+ * Dry-tan turf/pavers (r > g) are deliberately excluded: tan is the
+ * ambiguous band turf shares with beige hardscape, so it can never count
+ * toward highlight confidence (codex P1 #3075: (160,140,100) passed a
+ * green test that lacked the g > r requirement).
+ */
+export function isConfidentTurfPixel(r, g, b) {
+  return (2 * g - r - b) >= 18 && g > r && b < g;
+}
+
+/**
+ * The highlight-confidence verdict: a mask must light ≥1% of the traced
+ * loop AND ≥35% of what it lights must be confidently green, or the caller
+ * falls back to the truthful outline — a paver/beige-dominated area can
+ * never save as a grass highlight.
+ */
+export function lawnMaskPasses({ insideCount, litCount, confidentCount }) {
+  if (!insideCount || !litCount || litCount / insideCount < 0.01) return false;
+  return confidentCount / litCount >= 0.35;
+}
+
+/**
  * Grass highlight mask: a width×height overlay canvas painting turf inside
  * the traced loop with the luminous green; everything else transparent.
  * Built at 320×240 and upscaled with a slight blur for soft organic edges.
@@ -322,9 +344,7 @@ export function buildLawnHighlightMask({ source, points, closed, width = MAP_WID
     const lit = inside && isTurfPixel(r, g, b);
     if (lit) {
       litCount += 1;
-      // Confidently GREEN turf (excess-green), as opposed to the ambiguous
-      // warm-tan band that browning lawns share with pavers/beige surfaces.
-      if (2 * g - r - b >= 18 && b < g) confidentCount += 1;
+      if (isConfidentTurfPixel(r, g, b)) confidentCount += 1;
     }
     out.data[o] = HIGHLIGHT_RGB[0];
     out.data[o + 1] = HIGHLIGHT_RGB[1];
@@ -337,8 +357,7 @@ export function buildLawnHighlightMask({ source, points, closed, width = MAP_WID
   // masquerading as dry turf), must not claim to be a grass highlight —
   // return null so callers fall back to the truthful outline instead of
   // baking hardscape into a customer report as treated lawn.
-  if (!insideCount || litCount / insideCount < 0.01) return null;
-  if (confidentCount / litCount < 0.35) return null;
+  if (!lawnMaskPasses({ insideCount, litCount, confidentCount })) return null;
   const oc = document.createElement('canvas');
   oc.width = SW;
   oc.height = SH;
