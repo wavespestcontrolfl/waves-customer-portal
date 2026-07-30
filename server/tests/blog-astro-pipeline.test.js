@@ -148,7 +148,7 @@ function validFrontmatter(overrides = {}) {
   return {
     title: 'Ant Trails in Bradenton',
     slug: '/ant-trails-bradenton/',
-    meta_description: 'Bradenton homeowners can use this guide to identify ant trails, reduce entry points, and know when a professional inspection is worth it.',
+    meta_description: 'Bradenton homeowners can use this guide to identify ant trails, reduce entry points, and spot trouble early. Learn more on the Waves blog.',
     primary_keyword: 'ant control Bradenton',
     secondary_keywords: [],
     category: 'pest-control',
@@ -543,7 +543,7 @@ describe('blog Astro frontmatter validation', () => {
           title: 'Orkin vs. a Local SWFL Pest Control Company',
           slug: '/pest-control/orkin-vs-local-pest-control-swfl/',
           canonical: '/pest-control/orkin-vs-local-pest-control-swfl/',
-          meta_description: 'Fair Orkin versus local Southwest Florida pest control comparison covering national scale, local accountability, and questions to ask before you switch.',
+          meta_description: 'Fair Orkin versus local Southwest Florida pest control comparison covering scale, accountability, and switching. Learn more on the Waves blog.',
           primary_keyword: 'orkin vs local pest control',
           secondary_keywords: ['local pest control SWFL'],
           category: 'pest-library',
@@ -1421,7 +1421,7 @@ describe('Astro publisher hero image republish', () => {
       id: 'post-1',
       title: 'Ant Trails in Bradenton',
       slug: 'ant-trails-bradenton',
-      meta_description: 'Bradenton homeowners can use this guide to identify ant trails, reduce entry points, and know when a professional inspection is worth it.',
+      meta_description: 'Bradenton homeowners can use this guide to identify ant trails, reduce entry points, and spot trouble early. Learn more on the Waves blog.',
       keyword: 'ant control Bradenton',
       category: 'pest-control',
       post_type: 'location',
@@ -1462,7 +1462,7 @@ describe('Astro publisher hero image republish', () => {
       id: 'post-1',
       title: 'Ant Trails in Bradenton',
       slug: 'ant-trails-bradenton',
-      meta_description: 'Bradenton homeowners can use this guide to identify ant trails, reduce entry points, and know when a professional inspection is worth it.',
+      meta_description: 'Bradenton homeowners can use this guide to identify ant trails, reduce entry points, and spot trouble early. Learn more on the Waves blog.',
       keyword: 'ant control Bradenton',
       category: 'pest-control',
       post_type: 'location',
@@ -1493,12 +1493,46 @@ describe('Astro publisher hero image republish', () => {
     expect(update.update).toHaveBeenCalledWith(expect.objectContaining({ astro_status: 'publish_failed' }));
   });
 
+  test('blocks a legacy-lane blog meta that violates the blog contract (phone/salesy) before opening a PR', async () => {
+    // Owner rule 2026-07-29: blog metas carry NO phone and nothing salesy.
+    // The BlogWriter/admin/calendar path runs ONLY guardrails (no
+    // supporting-blog quality bundle), so publishAstro must declare
+    // targetIsBlog for the contract to apply on this lane.
+    const post = {
+      id: 'post-1',
+      title: 'Comparing Pest Control Options in Bradenton',
+      slug: 'comparing-pest-control-options-bradenton',
+      meta_description: 'Bradenton pest options compared for homeowners weighing plans this season. Call \u260e\ufe0f {{cityPhone}} now for a free estimate from Waves today.',
+      keyword: 'pest control comparison Bradenton',
+      category: 'pest-control',
+      post_type: 'location',
+      service_areas_tag: ['Bradenton'],
+      related_services: [],
+      target_sites: ['wavespestcontrol.com'],
+      author_slug: 'adam',
+      reviewer_slug: 'reviewer',
+      technically_reviewed_at: '2026-05-08',
+      fact_checked_by: 'Virginia Gelser',
+      fact_checked_at: '2026-05-08',
+      featured_image_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+      hero_image_alt: 'Comparison of pest control options',
+      content: 'Every option has trade-offs worth weighing before you pick a provider for your home.',
+    };
+    const read = chain({ first: jest.fn().mockResolvedValue(post) });
+    const update = chain();
+    const queries = [read, update];
+    db.mockImplementation(() => queries.shift() || chain());
+
+    await expect(AstroPublisher.publishAstro('post-1')).rejects.toThrow(/BLOG_META_CARRIES_PHONE/);
+    expect(gh.createPr).not.toHaveBeenCalled();
+  });
+
   test('blocks a post whose comparison table fails the named-competitor gate before opening a PR (manual lane previously skipped it)', async () => {
     const post = {
       id: 'post-1',
       title: 'Comparing Pest Control Options in Bradenton',
       slug: 'comparing-pest-control-options-bradenton',
-      meta_description: 'A practical comparison of pest control options for Bradenton homeowners, covering service models, guarantees, and what to weigh before choosing.',
+      meta_description: 'A practical comparison of pest control options for Bradenton homeowners, covering service models and guarantees. Learn more on the Waves blog.',
       keyword: 'pest control comparison Bradenton',
       category: 'pest-control',
       post_type: 'location',
@@ -1537,7 +1571,7 @@ describe('Astro publisher hero image republish', () => {
       id: 'post-1',
       title: 'Comparing Pest Control Options in Bradenton',
       slug: 'comparing-pest-control-options-bradenton',
-      meta_description: 'A practical comparison of pest control options for Bradenton homeowners, covering service models, guarantees, and what to weigh before choosing.',
+      meta_description: 'A practical comparison of pest control options for Bradenton homeowners, covering service models and guarantees. Learn more on the Waves blog.',
       keyword: 'pest control comparison Bradenton',
       category: 'pest-control',
       post_type: 'location',
@@ -1574,7 +1608,7 @@ describe('Astro publisher hero image republish', () => {
       id: 'post-1',
       title: 'Ant Trails in Bradenton',
       slug: 'ant-trails-bradenton',
-      meta_description: 'Bradenton homeowners can use this guide to identify ant trails, reduce entry points, and know when a professional inspection is worth it.',
+      meta_description: 'Bradenton homeowners can use this guide to identify ant trails, reduce entry points, and spot trouble early. Learn more on the Waves blog.',
       keyword: 'ant control Bradenton',
       category: 'pest-control',
       post_type: 'location',
@@ -1607,7 +1641,7 @@ describe('Astro publisher hero image republish', () => {
       id: 'post-1',
       title: 'Keeping Rats Out of Bradenton Homes',
       slug: 'rats-out-of-bradenton-homes',
-      meta_description: 'Bradenton homeowners can use this guide to spot early rodent activity, seal entry points, and know when professional rodent control is worth calling.',
+      meta_description: 'Bradenton homeowners can use this guide to spot early rodent activity and seal entry points before damage spreads. Learn more on the Waves blog.',
       keyword: 'rodent control Bradenton',
       category: 'pest-control', // broad Astro category…
       tag: 'Rodents', // …real topic lives on `tag`
@@ -1639,7 +1673,7 @@ describe('Astro publisher hero image republish', () => {
       id: 'post-1',
       title: 'Ant Trails in Bradenton',
       slug: 'ant-trails-bradenton',
-      meta_description: 'Bradenton homeowners can use this guide to identify ant trails, reduce entry points, and know when a professional inspection is worth it.',
+      meta_description: 'Bradenton homeowners can use this guide to identify ant trails, reduce entry points, and spot trouble early. Learn more on the Waves blog.',
       keyword: 'ant control Bradenton',
       category: 'pest-control',
       post_type: 'location',
@@ -1678,7 +1712,7 @@ describe('publishAstro stamps astro_requires_human_merge (audit lane 4b)', () =>
       id: 'post-1',
       title: 'Ant Trails in Bradenton',
       slug: 'ant-trails-bradenton',
-      meta_description: 'Bradenton homeowners can use this guide to identify ant trails, reduce entry points, and know when a professional inspection is worth it.',
+      meta_description: 'Bradenton homeowners can use this guide to identify ant trails, reduce entry points, and spot trouble early. Learn more on the Waves blog.',
       keyword: 'ant control Bradenton',
       category: 'pest-control',
       post_type: 'location',
@@ -1857,7 +1891,7 @@ describe('publishAstro catch persists an already-opened PR marker (Codex round 3
       id: 'post-1',
       title: 'Ant Trails in Bradenton',
       slug: 'ant-trails-bradenton',
-      meta_description: 'Bradenton homeowners can use this guide to identify ant trails, reduce entry points, and know when a professional inspection is worth it.',
+      meta_description: 'Bradenton homeowners can use this guide to identify ant trails, reduce entry points, and spot trouble early. Learn more on the Waves blog.',
       keyword: 'ant control Bradenton',
       category: 'pest-control',
       post_type: 'location',

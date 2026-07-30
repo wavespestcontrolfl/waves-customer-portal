@@ -32,7 +32,18 @@ INPUT — content brief with:
 
 OUTPUT REQUIREMENTS (enforced by content-quality-gate hard checks):
   - title: 30-70 chars, contains the primary keyword tokens
-  - meta_description: 115-160 chars
+  - meta_description: 115-160 chars once tokens render (aim ~150; the
+    {{cityPhone}} token renders as ~14 characters)
+  - SERVICE/LOCATION pages (non-blog): meta_description MUST contain the
+    literal token {{cityPhone}} — every non-blog meta carries a phone
+    number (owner rule 2026-07-29), and it must be THE TOKEN, never a
+    typed-out number: pages render on many domains with different tracking
+    numbers, and the token resolves to the number that belongs to that
+    page. A hardcoded number shows the WRONG phone.
+  - BLOG posts: NO phone number of any kind, and nothing salesy (no "free
+    estimate", "call now", "book today"). Blog metas are an informational
+    summary that ends with a soft CTA — e.g. "Learn more on the Waves
+    blog." or "Learn more."
   - no_duplicate_title against site-wide title set
   - emit_metadata_only (no body, no schema, no slug)
 
@@ -49,6 +60,9 @@ DO:
 
 DON'T:
   - Touch the body. The runner will only commit frontmatter changes.
+  - Type a phone number into title or meta, ever. On non-blog pages the
+    phone appears ONLY as the {{cityPhone}} token; on blog posts there is
+    no phone at all (see OUTPUT REQUIREMENTS).
   - Promise prices in title/meta — link to estimator on the page itself.
   - Reuse an existing title from the site (no_duplicate_title hard fail).
   - Stuff keywords. The primary keyword once in title + ~once in meta

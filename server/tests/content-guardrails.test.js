@@ -2095,3 +2095,113 @@ describe('protected metaTitle rewrite gate (owner rule 2026-07-16)', () => {
     }
   });
 });
+
+describe('meta description contract on refresh (owner rule 2026-07-29)', () => {
+  const LIVE_META = 'Lawn care nearby in Sarasota, FL — {{brandShort}} targets chinch bugs. Call ☎️ {{cityPhone}} for a FREE lawn care estimate.';
+  const base = { body: 'Refreshed body.', frontmatter: {} };
+  const opts = (fmv, extra = {}) => ({ isRefresh: true, priorBody: 'old body', liveMetaDescription: LIVE_META, ...extra });
+
+  test('changed meta without the {{cityPhone}} token P1s', () => {
+    const r = guardrails.evaluate(
+      { ...base, frontmatter: { metaDescription: 'Fresh Sarasota lawn care from local techs. Free estimates in about sixty seconds, chinch bug and sod webworm coverage included today.' } },
+      opts(),
+    );
+    expect(r.findings.some((f) => f.code === 'META_MISSING_PHONE_TOKEN' && f.severity === 'P1')).toBe(true);
+  });
+
+  test('typed-out phone number in a changed meta P1s', () => {
+    const r = guardrails.evaluate(
+      { ...base, frontmatter: { metaDescription: 'Sarasota lawn care with chinch bug coverage — call (941) 297-2606 and {{cityPhone}} for a free estimate from our local team today.' } },
+      opts(),
+    );
+    expect(r.findings.some((f) => f.code === 'LITERAL_PHONE_IN_META')).toBe(true);
+  });
+
+  test('changed meta over 160 rendered characters P1s', () => {
+    const long = `Sarasota lawn care built for chinch bugs, sod webworms, and the county fertilizer blackout. Call ☎️ {{cityPhone}} for a FREE estimate from techs on local routes daily.`;
+    const r = guardrails.evaluate({ ...base, frontmatter: { metaDescription: long } }, opts());
+    expect(r.findings.some((f) => f.code === 'META_OVER_160_RENDERED')).toBe(true);
+  });
+
+  test('unchanged carried-over meta is grandfathered; absent meta passes', () => {
+    for (const fmv of [{ metaDescription: LIVE_META }, {}]) {
+      const r = guardrails.evaluate({ ...base, frontmatter: fmv }, opts());
+      expect(r.findings.some((f) => String(f.code).startsWith('META_'))).toBe(false);
+    }
+  });
+
+  test('inert outside refresh', () => {
+    const r = guardrails.evaluate(
+      { ...base, frontmatter: { metaDescription: 'No phone here at all but this is a NEW page draft, not a refresh — different lane, different contract, no meta finding expected.' } },
+      { isRefresh: false },
+    );
+    expect(r.findings.some((f) => String(f.code).startsWith('META_'))).toBe(false);
+  });
+});
+
+describe('blog meta contract on refresh (owner rule 2026-07-29 refinement)', () => {
+  const base = { body: 'Refreshed blog body.', frontmatter: {} };
+  const opts = { isRefresh: true, priorBody: 'old body', liveMetaDescription: 'Old blog meta.', targetIsBlog: true };
+
+  test('blog changed meta with a phone token P1s', () => {
+    const r = guardrails.evaluate(
+      { ...base, frontmatter: { meta_description: 'What chinch bug damage looks like in SWFL turf and what recovery takes. Call ☎️ {{cityPhone}} to read more on the Waves blog today, neighbors.' } },
+      opts,
+    );
+    expect(r.findings.some((f) => f.code === 'BLOG_META_CARRIES_PHONE')).toBe(true);
+  });
+
+  test('blog changed meta with a salesy CTA P1s', () => {
+    const r = guardrails.evaluate(
+      { ...base, frontmatter: { meta_description: 'What chinch bug damage looks like in SWFL turf and what a recovery takes — book today for your free estimate from our local lawn techs.' } },
+      opts,
+    );
+    expect(r.findings.some((f) => f.code === 'BLOG_META_SALESY')).toBe(true);
+  });
+
+  test('informational blog meta with a soft CTA passes', () => {
+    const r = guardrails.evaluate(
+      { ...base, frontmatter: { meta_description: 'How to tell chinch bug damage from drought stress in a SWFL lawn, and what recovery actually takes. Learn more on the Waves blog.' } },
+      opts,
+    );
+    expect(r.findings.some((f) => String(f.code).startsWith('META_') || String(f.code).startsWith('BLOG_META'))).toBe(false);
+  });
+});
+
+describe('blog meta soft-CTA requirement on refresh (owner rule 2026-07-29)', () => {
+  test('blog changed meta without a soft CTA P1s', () => {
+    const r = guardrails.evaluate(
+      { body: 'Refreshed blog body.', frontmatter: { meta_description: 'How to tell chinch bug damage from drought stress in a Southwest Florida lawn, and what a full turf recovery actually takes this season.' } },
+      { isRefresh: true, priorBody: 'old body', liveMetaDescription: 'Old blog meta.', targetIsBlog: true },
+    );
+    expect(r.findings.some((f) => f.code === 'BLOG_META_MISSING_SOFT_CTA')).toBe(true);
+  });
+});
+
+describe('literal phone in draft titles (round-3 hardening)', () => {
+  test('any lane: typed-out phone in a draft title P1s', () => {
+    const r = guardrails.evaluate(
+      { body: 'Body copy.', frontmatter: { title: 'Pest Control Sarasota — 941-297-2606' } },
+      {},
+    );
+    expect(r.findings.some((f) => f.code === 'LITERAL_PHONE_IN_TITLE')).toBe(true);
+  });
+});
+
+describe('blog meta contract applies to NON-refresh blog publishes (legacy lane)', () => {
+  test('a new (non-refresh) blog draft with a salesy meta P1s when targetIsBlog', () => {
+    const r = guardrails.evaluate(
+      { body: 'Body.', frontmatter: { meta_description: 'Bradenton pest options compared for homeowners weighing plans this season — call now for a free estimate from the local Waves team.' } },
+      { targetIsBlog: true },
+    );
+    expect(r.findings.some((f) => f.code === 'BLOG_META_SALESY')).toBe(true);
+  });
+
+  test('non-blog non-refresh drafts remain outside this finding', () => {
+    const r = guardrails.evaluate(
+      { body: 'Body.', frontmatter: { meta_description: 'No phone here and no CTA either — a plain page description that is long enough to be a realistic meta for a service page today.' } },
+      {},
+    );
+    expect(r.findings.some((f) => String(f.code).startsWith('META_') || String(f.code).startsWith('BLOG_META'))).toBe(false);
+  });
+});

@@ -195,6 +195,15 @@ wasted):
 - frontmatter.meta_description: 115–160 characters. NEVER exceed 160 — over
   160 is a hard publish block (the publisher truncates any overflow at a word
   boundary, so write to 160 to keep your own phrasing).
+- META PHONE/CTA CONTRACT (owner rule 2026-07-29 — hard publish blocks):
+    • city-service pages: the meta_description MUST contain the literal
+      token {{cityPhone}} — never a typed-out phone number (pages render on
+      many domains with different tracking numbers; the token resolves to
+      the right one).
+    • blog posts: NO phone number of any kind and nothing salesy (no "free
+      estimate", "call now", "book today", "request a quote"). Write an
+      informational summary that ENDS with a soft CTA — e.g. "Learn more on
+      the Waves blog." or "Learn more."
 - TITLE + META ANTI-SPAM (binding — the title/meta spam gate hard-fails the
   WHOLE draft on any one of these, exactly like a length overflow, and the run
   is wasted). The frontmatter.title must NOT:

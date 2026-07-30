@@ -684,7 +684,7 @@ describe('round-5 hardening (Codex findings on 2ef3b27)', () => {
 
   test('whitelist: a valid meta_description rewrite passes and is surfaced in `changed`', () => {
     const orig = '---\nslug: /pest-control/x/\nmeta_description: Too short and it ends with and\n---\nbody';
-    const fixedMeta = 'A no-panic Southwest Florida guide to spider identification covering the widow species that matter, the recluse myth, and the harmless ones eating mosquitoes.';
+    const fixedMeta = 'A no-panic Southwest Florida guide to spider identification covering the widow species and the recluse myth. Learn more on the Waves blog.';
     const fixed = orig.replace('Too short and it ends with and', fixedMeta);
     const res = rem.frontmatterFixViolation(orig, fixed, [{ body: 'Complete the truncated meta description' }]);
     expect(res.violation).toBeNull();
@@ -1409,7 +1409,7 @@ describe('frontmatter whitelist round trip (meta_description + hero_image.alt)',
   const prev = process.env.AUTONOMOUS_CODEX_REMEDIATION;
   afterEach(() => { process.env.AUTONOMOUS_CODEX_REMEDIATION = prev; });
 
-  const VALID_META = 'A no-panic Southwest Florida guide to spider identification covering the widow species that matter, the recluse myth, and the harmless ones eating mosquitoes.';
+  const VALID_META = 'A no-panic Southwest Florida guide to spider identification covering the widow species and the recluse myth. Learn more on the Waves blog.';
 
   test('a fix that completes meta_description + hero alt PUSHES instead of parking (scheduler lane) and mirrors the row columns', async () => {
     process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
@@ -1507,7 +1507,7 @@ describe('validateAutonomousRunGates revalidates REWRITTEN frontmatter (Codex r1
     const fixedMd = [
       '---',
       "title: T",
-      "meta_description: A no-panic Southwest Florida guide to spider identification covering the widow species that matter, the recluse myth, and the harmless ones eating mosquitoes.",
+      "meta_description: A no-panic Southwest Florida guide to spider identification covering the widow species and the recluse myth. Learn more on the Waves blog.",
       'hero_image:',
       '  src: /images/blog/x/hero.webp',
       '  alt: Accurate new alt',
@@ -1566,7 +1566,7 @@ describe('whitelist hardening round 2 (Codex r2 on #2757)', () => {
 
   test('scheduler lane: rewritten meta failing the title/meta spam check parks before push', async () => {
     process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
-    const VALID_META = 'A no-panic Southwest Florida guide to spider identification covering the widow species that matter, the recluse myth, and the harmless ones eating mosquitoes.';
+    const VALID_META = 'A no-panic Southwest Florida guide to spider identification covering the widow species and the recluse myth. Learn more on the Waves blog.';
     const orig = '---\ntitle: T\nmeta_description: Truncated ending with and\n---\nBODY';
     const fixedMd = orig.replace('Truncated ending with and', VALID_META);
     const gh = makeGh({ fileContent: orig, reviewComments: [finding({ body: 'Complete the truncated meta description' })] });
@@ -1585,7 +1585,7 @@ describe('whitelist hardening round 2 (Codex r2 on #2757)', () => {
 
   test('scheduler lane: rewritten meta failing the PII check parks before push', async () => {
     process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
-    const VALID_META = 'A no-panic Southwest Florida guide to spider identification covering the widow species that matter, the recluse myth, and the harmless ones eating mosquitoes.';
+    const VALID_META = 'A no-panic Southwest Florida guide to spider identification covering the widow species and the recluse myth. Learn more on the Waves blog.';
     const orig = '---\ntitle: T\nmeta_description: Truncated ending with and\n---\nBODY';
     const fixedMd = orig.replace('Truncated ending with and', VALID_META);
     const gh = makeGh({ fileContent: orig, reviewComments: [finding({ body: 'Complete the truncated meta description' })] });
@@ -1603,7 +1603,7 @@ describe('whitelist hardening round 2 (Codex r2 on #2757)', () => {
   });
 
   test('validateRewrittenMeta passes clean copy through the REAL spam + PII gates', () => {
-    const VALID_META = 'A no-panic Southwest Florida guide to spider identification covering the widow species that matter, the recluse myth, and the harmless ones eating mosquitoes.';
+    const VALID_META = 'A no-panic Southwest Florida guide to spider identification covering the widow species and the recluse myth. Learn more on the Waves blog.';
     const res = rem.validateRewrittenMeta(VALID_META, { title: 'Florida Spiders: Which Ones Matter', city: 'Sarasota', keyword: 'florida spiders', tag: 'pest-control' });
     expect(res.ok).toBe(true);
     // A legacy title with pre-existing spam issues must NOT park a clean
@@ -2297,6 +2297,30 @@ describe('P3 badges are recognized as nonblocking (Codex round-1 on the declined
     const r = await rem.p2OnlyMergeEligible(5, HEAD, { db, gh });
     expect(r.eligible).toBe(true);
     expect(r.p2Count).toBe(3);
+  });
+});
+
+describe('validateRewrittenMeta enforces the blog meta contract (owner rule 2026-07-29)', () => {
+  const CTX = { title: 'T', city: 'Sarasota', keyword: 'k', tag: 'pest-control' };
+
+  test('a rewritten meta carrying a phone token (any grammar) parks', () => {
+    for (const tok of ['{{cityPhone}}', '{{ cityPhone }}', '{{tel}}']) {
+      const r = rem.validateRewrittenMeta(`Spider identification for Southwest Florida homes with the species that matter. Call ${tok} for details. Learn more.`, CTX);
+      expect(r.ok).toBe(false);
+      expect(r.reason).toMatch(/blog_meta_must_not_carry_phone/);
+    }
+  });
+
+  test('a salesy rewritten meta parks', () => {
+    const r = rem.validateRewrittenMeta('Spider identification for Southwest Florida homes — request a quote today and our local team will handle the widow species that matter fast.', CTX);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/blog_meta_salesy/);
+  });
+
+  test('a rewritten meta without a final soft CTA parks', () => {
+    const r = rem.validateRewrittenMeta('A no-panic Southwest Florida guide to spider identification covering the widow species, the recluse myth, and the harmless mosquito eaters.', CTX);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/blog_meta_missing_soft_cta/);
   });
 });
 

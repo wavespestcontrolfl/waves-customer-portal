@@ -1776,10 +1776,13 @@ class AutonomousRunner {
     // publisher will keep the live title no matter what the draft proposes,
     // so every title-scoped gate must evaluate the description-only change
     // that will actually ship instead of parking on a discarded proposal.
-    // Resolution failure fails CLOSED to the stricter blog contract and to
-    // protectedTitle=false (full title gating) — such a target cannot
-    // publish anyway.
-    let targetPageType = 'supporting-blog';
+    // Resolution failure PARKS (fail closed): the blog and page meta
+    // contracts now genuinely diverge (blog = no phone; page = {{cityPhone}}
+    // required), and publishMetadataRewrite re-resolves the file
+    // independently — a transient read failure here followed by a successful
+    // resolve there could write a phone-free meta onto a service page if we
+    // merely defaulted to the blog contract and continued.
+    let targetPageType = null;
     let protectedTitle = false;
     try {
       const publisher = getAstroPublisher();
@@ -1787,11 +1790,25 @@ class AutonomousRunner {
         ? await publisher.getLiveFrontmatter(brief.target_url || brief.page_url || draft.page_url)
         : null;
       const srcPath = typeof liveFm?._astro_source_path === 'string' ? liveFm._astro_source_path : null;
-      if (srcPath && !srcPath.startsWith('src/content/blog/')) {
-        targetPageType = 'page';
-        protectedTitle = liveFm.metaTitle !== undefined;
+      if (srcPath) {
+        if (srcPath.startsWith('src/content/blog/')) {
+          targetPageType = 'supporting-blog';
+        } else {
+          targetPageType = 'page';
+          protectedTitle = liveFm.metaTitle !== undefined;
+        }
       }
-    } catch (_) { /* keep the stricter blog contract + full title gating */ }
+    } catch (_) { /* unresolved — parked below */ }
+    if (!targetPageType) {
+      return {
+        notes: 'metadata_target_unresolved',
+        patch: {
+          outcome: 'completed_pending_review',
+          skip_reason: 'metadata_target_unresolved',
+          reviewer_notes: 'Could not resolve the metadata rewrite target to a live Astro file (transient read failure or missing page) — parked instead of guessing which meta contract (blog vs page phone rules) applies.',
+        },
+      };
+    }
 
     const gateResult = spamGate.evaluateTitleMetaSpam({
       // Protected target: blank title makes inspectTitle skip (the proposal
@@ -1846,9 +1863,9 @@ class AutonomousRunner {
       },
     };
     // target_page_type + protectedTitle were derived from the resolved
-    // target file above, before the spam gate — for rewrite_title_meta
-    // briefs page_type is already 'metadata' (decision router), so it says
-    // nothing about the target.
+    // target file above, before the spam gate (unresolved targets parked) —
+    // for rewrite_title_meta briefs page_type is already 'metadata'
+    // (decision router), so it says nothing about the target.
     const metadataBrief = { ...brief, page_type: 'metadata', target_page_type: targetPageType };
     const qualityContext = {
       siblingTitles: await this._loadSiblingTitlesForMetadata(brief, draft),
@@ -2844,6 +2861,8 @@ class AutonomousRunner {
   async _deriveGuardrailOptions(opp, brief) {
     let liveDomains = null;
     let liveMetaTitle = null;
+    let liveMetaDescription = null;
+    let targetIsBlog = false;
     if (brief.action_type === 'refresh_existing_page') {
       const publisher = getAstroPublisher();
       if (publisher?.getLiveFrontmatter) {
@@ -2873,9 +2892,16 @@ class AutonomousRunner {
         const liveIsBlog = typeof publisher.isBlogTarget === 'function'
           && typeof liveFm._astro_source_path === 'string'
           && publisher.isBlogTarget(liveFm._astro_source_path);
+        targetIsBlog = liveIsBlog;
         liveMetaTitle = !liveIsBlog && liveFm.metaTitle != null && String(liveFm.metaTitle).trim()
           ? String(liveFm.metaTitle)
           : null;
+        // Owner rule 2026-07-29 meta contract: non-blog changed metas must
+        // carry {{cityPhone}}; blog changed metas carry NO phone and nothing
+        // salesy; all cap at 160 rendered. The guardrail compares against the
+        // live value so an unchanged carried-over meta is grandfathered.
+        const liveMeta = liveFm.metaDescription ?? liveFm.meta_description;
+        liveMetaDescription = liveMeta != null ? String(liveMeta) : null;
       }
     }
     const operatorBrief = opp.bucket === OPERATOR_INTERCEPT_BUCKET
@@ -2948,6 +2974,8 @@ class AutonomousRunner {
       isRefresh,
       priorBody,
       liveMetaTitle,
+      liveMetaDescription,
+      targetIsBlog,
     };
   }
 

@@ -1785,6 +1785,79 @@ function metaTitleRewriteFinding(frontmatter, { isRefresh = false, liveMetaTitle
     `Refresh draft proposes a different metaTitle ("${String(draftTitle).trim().slice(0, 80)}") than the live page's ${String(liveMetaTitle).length}-char metaTitle — service/location metaTitles are never edited (owner rule 2026-07-16). Carry the live metaTitle unchanged or omit the field.`);
 }
 
+// Owner rule 2026-07-29: NON-BLOG meta descriptions carry the page's phone as
+// the {{cityPhone}} TOKEN (pages render on many domains with different
+// tracking numbers — a typed-out number shows the wrong phone); BLOG metas
+// carry NO phone and nothing salesy (informational summary + a soft CTA like
+// "Learn more on the Waves blog"); every meta caps at 160 rendered chars.
+// Enforced here for REFRESH drafts that CHANGE the meta (an unchanged
+// carried-over meta is grandfathered — most legacy blog metas predate the
+// rule, and parking a body-only refresh on an untouched meta would block the
+// whole refresh lane). The metadata-rewrite lane gets the same contract from
+// the quality gate's meta_phone_token_present + meta_length_in_bounds.
+const LITERAL_PHONE_IN_META_RE = /\(\d{3}\)\s*\d{3}[-.\s]?\d{4}|\b\d{3}[-.]\d{3}[-.]\d{4}\b/;
+function metaDescriptionContractFinding(frontmatter, { isRefresh = false, liveMetaDescription = null, targetIsBlog = false } = {}) {
+  // SALESY/SOFT-CTA/token definitions shared with the quality gate (single
+  // source in title-meta-spam-gate) so the enforcement points can't drift.
+  // PHONE_TOKEN_RE covers the publisher's full substitution grammar —
+  // whitespace-tolerant, and the phone/tel aliases render a phone too.
+  const { SALESY_META_RE, endsWithSoftCta, PHONE_TOKEN_RE, CITY_PHONE_TOKEN_RE } = require('./title-meta-spam-gate');
+  // Runs on refresh drafts (both contracts, changed metas only) AND on any
+  // caller that declares a blog target — the legacy BlogWriter/admin/
+  // calendar publishAstro path runs ONLY guardrails (no supporting-blog
+  // quality bundle), so gating on isRefresh alone let a scheduled blog meta
+  // ship "{{cityPhone}}" or sales copy untouched. A NEW blog meta is always
+  // "changed", so the grandfather clause simply never matches there.
+  if (!isRefresh && !targetIsBlog) return null;
+  const draftMeta = frontmatter?.metaDescription ?? frontmatter?.meta_description;
+  if (draftMeta === undefined || !String(draftMeta).trim()) return null; // absent → publisher keeps the live value
+  const draftTrim = String(draftMeta).trim();
+  // Unchanged vs the caller-supplied live/original value → grandfathered.
+  // Refresh passes the live page's meta; remediation passes the pre-fix
+  // file's meta; publishAstro (new posts) passes NONE — a new meta is always
+  // graded in full.
+  if (liveMetaDescription != null && draftTrim === String(liveMetaDescription).trim()) return null;
+  if (targetIsBlog) {
+    if (PHONE_TOKEN_RE.test(draftTrim) || LITERAL_PHONE_IN_META_RE.test(draftTrim)) {
+      return finding('P1', 'BLOG_META_CARRIES_PHONE', 'Blog meta descriptions never carry a phone number (owner rule 2026-07-29: informational summary + soft CTA only).');
+    }
+    if (SALESY_META_RE.test(draftTrim)) {
+      return finding('P1', 'BLOG_META_SALESY', 'Blog meta descriptions stay informational — no sales CTAs (owner rule 2026-07-29); end with a soft CTA like "Learn more on the Waves blog."');
+    }
+    if (!endsWithSoftCta(draftTrim)) {
+      return finding('P1', 'BLOG_META_MISSING_SOFT_CTA', 'Blog meta descriptions must END with a soft CTA like "Learn more on the Waves blog." — the last sentence, not merely a mention (owner rule 2026-07-29).');
+    }
+  } else {
+    // {{cityPhone}} SPECIFICALLY — phone/tel aliases render the generic line.
+    if (!CITY_PHONE_TOKEN_RE.test(draftTrim)) {
+      return finding('P1', 'META_MISSING_PHONE_TOKEN', 'Rewritten meta description must contain the {{cityPhone}} token (owner rule 2026-07-29: every non-blog meta carries the page\'s own phone number — phone/tel aliases render the generic line).');
+    }
+    if (LITERAL_PHONE_IN_META_RE.test(draftTrim)) {
+      return finding('P1', 'LITERAL_PHONE_IN_META', 'Meta description contains a typed-out phone number — use the {{cityPhone}} token so each domain renders its own tracking number.');
+    }
+  }
+  const { renderMetaTokens } = require('./title-meta-spam-gate');
+  const rendered = renderMetaTokens(draftTrim).trim();
+  if (rendered.length > 160) {
+    return finding('P1', 'META_OVER_160_RENDERED', `Rewritten meta description renders at ${rendered.length} characters — the cap is 160 (owner rule 2026-07-29).`);
+  }
+  return null;
+}
+
+// A typed-out phone in a draft TITLE ships the wrong tracking number on every
+// other domain (titles are multi-domain like metas). Applies to every
+// body-content lane — no grandfathering: no live title legitimately carries a
+// literal number.
+function literalPhoneInTitleFinding(frontmatter) {
+  for (const field of ['title', 'metaTitle']) {
+    const v = frontmatter?.[field];
+    if (v !== undefined && LITERAL_PHONE_IN_META_RE.test(String(v))) {
+      return finding('P1', 'LITERAL_PHONE_IN_TITLE', `Draft ${field} contains a typed-out phone number — titles never carry literal numbers (pages render on many domains with different tracking numbers).`);
+    }
+  }
+  return null;
+}
+
 /**
  * evaluate(draft, { service, primaryKeyword, domains }) → { pass, findings }
  *
@@ -1813,7 +1886,7 @@ function metaTitleRewriteFinding(frontmatter, { isRefresh = false, liveMetaTitle
  *   citation-residue and off-footprint checks still apply in full (those are
  *   never legitimate, new or old).
  */
-function evaluate(draft, { service = null, primaryKeyword = null, domains = null, operatorFaqException = false, requiredSourceUrls = [], operatorCitations = false, allowedInternalLinks = [], isRefresh = false, priorBody = null, liveMetaTitle = null } = {}) {
+function evaluate(draft, { service = null, primaryKeyword = null, domains = null, operatorFaqException = false, requiredSourceUrls = [], operatorCitations = false, allowedInternalLinks = [], isRefresh = false, priorBody = null, liveMetaTitle = null, liveMetaDescription = null, targetIsBlog = false } = {}) {
   const body = draft?.body || draft?.content || '';
   const frontmatter = draft?.frontmatter || {};
   const kw = primaryKeyword || frontmatter.primary_keyword || frontmatter.primaryKeyword || null;
@@ -1915,6 +1988,11 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     // independently freezes the field as the last-resort backstop. An ABSENT
     // or identical draft metaTitle is fine — the publisher keeps the live one.
     metaTitleRewriteFinding(frontmatter, { isRefresh, liveMetaTitle }),
+    // Owner rule 2026-07-29: a refresh that CHANGES the meta description must
+    // carry {{cityPhone}}, never a literal number, and stay ≤160 rendered.
+    metaDescriptionContractFinding(frontmatter, { isRefresh, liveMetaDescription, targetIsBlog }),
+    // Typed-out phone in a draft title — wrong number on every other domain.
+    literalPhoneInTitleFinding(frontmatter),
   ].filter(Boolean);
 
   const pass = !findings.some((f) => f.severity === 'P0' || f.severity === 'P1');

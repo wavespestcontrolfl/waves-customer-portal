@@ -156,8 +156,72 @@ function slugReason(value) {
   return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
 }
 
+// Rendered-length approximation for meta text carrying per-domain tokens —
+// Google measures what RENDERS, not the template. Hub token widths; spoke
+// brand/phone values land within a few characters. Single source of truth
+// for the meta length contract (owner rule 2026-07-29: every meta carries
+// the {{cityPhone}} token and never exceeds 160 rendered characters) —
+// consumed by content-quality-gate and content-guardrails so the two
+// enforcement points can never drift.
+// Token grammar mirrors the Astro publisher's remark substitution
+// (whitespace-tolerant, and phone/tel are aliases that also render a phone
+// number) — exact-string checks let "{{ cityPhone }}" or "{{tel}}" through.
+// PHONE_TOKEN_RE is the BAN matcher (any token that renders a phone);
+// CITY_PHONE_TOKEN_RE is the REQUIREMENT matcher — only {{cityPhone}}
+// resolves the tracking number that belongs to the page (owner: "the phone
+// has to align with the page"); {{phone}}/{{tel}} render the generic line.
+const PHONE_TOKEN_RE = /\{\{\s*(cityPhone|phone|tel)\s*\}\}/i;
+const CITY_PHONE_TOKEN_RE = /\{\{\s*cityPhone\s*\}\}/i;
+const META_TOKEN_RENDERINGS = [
+  [/\{\{\s*(cityPhone|phone|tel)\s*\}\}/gi, '(941) 297-2606'],
+  [/\{\{\s*brandShort\s*\}\}/gi, 'Waves'],
+  [/\{\{\s*brandName\s*\}\}/gi, 'Waves Pest Control'],
+];
+function renderMetaTokens(text) {
+  let s = String(text || '');
+  for (const [re, v] of META_TOKEN_RENDERINGS) s = s.replace(re, v);
+  return s;
+}
+
+// Blog metas are the informational lane (owner rule 2026-07-29): no phone,
+// no sales copy, and they END with a soft CTA like "Learn more on the Waves
+// blog." Shared here (like renderMetaTokens) so the quality gate and the
+// guardrails enforce the SAME sales-copy/CTA definitions and can't drift.
+const SALESY_META_RE = /free\s+(estimate|quote|inspection)|call\s+(now|today|us)\b|book\s+(now|today|online)\b|schedule\s+(service|now|today|your)\b|(request|get)\s+a\s+(free\s+)?quote\b|contact\s+us\b|save\s+(on|up\s+to|with|big|money|\$|\d+\s*%)|you\s+can\s+save\b|\d+\s*%\s*off|discount|special\s+offer|act\s+now|limited\s+time|\b(choose|hire|trust|pick)\s+(waves|us\b|our\s)|\bwaves\s+(can|will)\s+(help|handle|protect|treat)\b|\bget\s+started\b|\bsign\s+up\b|\blet\s+us\s+(handle|help|take)\b|\bwe(?:'|’)ll\s+(handle|take\s+care)\b/i;
+const SOFT_CTA_RE = /\b(learn\s+(more|how|why|what)|read\s+(more|on|the\s+full)|find\s+out\s+(more|how|why|what)|see\s+(how|what|why))\b/i;
+
+// The meta's LAST sentence must BE a sanctioned soft CTA — not merely
+// contain a CTA-ish verb ("See how much you can save with Waves" contains
+// "see how" but is a sales pitch). Sanctioned shapes: "Learn more" /
+// "Read more" / "Read on" / "Find out more|how|why|what", optionally with
+// an "about <topic>" clause, optionally closed by a neutral pointer
+// ("on the Waves blog", "on our blog", "in our/the guide", "here").
+const SOFT_CTA_SENTENCE_RE = /^(learn\s+more|read\s+more|read\s+on|find\s+out\s+(?:more|how|why|what))(?:\s+about\s+[\w\s,.'’-]{1,50})?(?:\s+(?:on\s+the\s+waves\s+blog|on\s+our\s+blog|in\s+(?:our|the)\s+(?:full\s+)?guide|here))?$/i;
+// Money/deal terms can't ride in via the about-clause either
+// ("Learn more about saving big with Waves").
+const CTA_SALES_TERMS_RE = /\b(sav(?:e|ing|ings)|deal|offer|price|pricing|discount|percent|quote|estimate)\b|[%$]/i;
+// Abbreviation periods are NOT sentence boundaries — "Learn more about
+// St. Augustine grass." must keep its CTA sentence intact (St. Augustine is
+// the dominant SWFL turf, so this is the common case, not the edge).
+const ABBREV_DOT_RE = /\b(St|Dr|Mt|Ft|Mr|Mrs|Ms|vs|No)\./gi;
+function endsWithSoftCta(text) {
+  const t = String(text || '').trim();
+  if (!t) return false;
+  const masked = t.replace(ABBREV_DOT_RE, (m) => m.replace('.', '\u0001'));
+  const sentences = masked.split(/[.!?]+/).map((s) => s.replace(/\u0001/g, '.').trim()).filter(Boolean);
+  const last = sentences[sentences.length - 1] || '';
+  if (CTA_SALES_TERMS_RE.test(last)) return false;
+  return SOFT_CTA_SENTENCE_RE.test(last);
+}
+
 module.exports = {
   evaluateTitleMetaSpam,
+  renderMetaTokens,
+  PHONE_TOKEN_RE,
+  CITY_PHONE_TOKEN_RE,
+  SALESY_META_RE,
+  SOFT_CTA_RE,
+  endsWithSoftCta,
   HYPE_TERMS,
   COMMERCIAL_TERMS,
   _internals: {

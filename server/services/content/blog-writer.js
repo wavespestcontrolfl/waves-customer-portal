@@ -307,7 +307,7 @@ Write the full post in the Waves voice. Return ONLY the blog post content (no JS
       // sub-4096 cap can starve the visible JSON.
       maxTokens: 4096,
       jsonMode: true,
-      system: 'You optimize existing blog posts for Waves Pest Control. Improve SEO without changing core content. Match the Waves voice: snarky, casual, Florida-specific, technically knowledgeable.',
+      system: 'You optimize existing blog posts for Waves Pest Control. Improve SEO without changing core content. Match the Waves voice: snarky, casual, Florida-specific, technically knowledgeable. If you rewrite the meta_description (owner rule 2026-07-29): 115-160 characters, informational, NO phone number, nothing salesy ("free estimate", "call now", "book today"), and it must END with a soft CTA like "Learn more on the Waves blog."',
       text: `Optimize this published blog post. Current SEO score: ${post.seo_score || 'unknown'}/100.
 
 TITLE: ${post.title}
@@ -492,6 +492,13 @@ TARGETING:
 - tag MUST be exactly one of this closed set (no new labels): ${BLOG_TAGS.join(', ')}.
 - Secondary coverage gaps to help fill if nothing better: tags [${underrepTags.join(', ') || 'none'}], cities [${underrepCities.join(', ') || 'none'}].
 - keyword = a specific local-intent search phrase. Avoid any of these existing keywords: ${[...existingKeywords].slice(0, 40).join('; ') || '(none yet)'}.
+
+META DESCRIPTION CONTRACT (owner rule 2026-07-29 — hard publish blocks):
+- meta_description: 115-160 characters, informational summary of the post.
+- NO phone number of any kind and nothing salesy (no "free estimate",
+  "call now", "book today", "request a quote", "contact us").
+- It must END with a soft CTA as its last sentence — e.g. "Learn more on
+  the Waves blog." or "Learn more."
 
 Return ONLY a JSON array, no prose: [{ "title": "", "keyword": "", "tag": "", "slug": "", "meta_description": "", "city": "" }]`,
       text: `Generate ${requestCount} distinct, demand-aware, seasonally-relevant blog ideas. Reject your own duplicates before returning.`,

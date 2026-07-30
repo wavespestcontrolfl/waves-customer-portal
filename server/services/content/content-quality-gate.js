@@ -33,7 +33,7 @@
  */
 
 const { THRESHOLDS } = require('./scoring-config');
-const { evaluateTitleMetaSpam } = require('./title-meta-spam-gate');
+const { evaluateTitleMetaSpam, renderMetaTokens, PHONE_TOKEN_RE, CITY_PHONE_TOKEN_RE, SALESY_META_RE, endsWithSoftCta } = require('./title-meta-spam-gate');
 const { isFaqBlockedService } = require('./content-guardrails');
 
 // Compute the achievable maximum score PER PAGE TYPE so the pass
@@ -109,6 +109,10 @@ const PAGE_TYPE_CHECKS = {
     { name: 'service_menu_present', weight: 6, evaluate: checkServiceMenu },
     { name: 'faq_from_customer_calls', weight: 6, evaluate: checkFaqFromCustomer },
     { name: 'localbusiness_service_schema', weight: 6, isHard: true, evaluate: checkLocalBusinessServiceSchema },
+    // Owner rule 2026-07-29: non-blog metas carry {{cityPhone}} — weight 0
+    // like title_meta_spam_free (pure hard gate, thresholds unchanged).
+    { name: 'meta_phone_token_present', weight: 0, isHard: true, evaluate: checkCityServiceMetaPhone },
+    { name: 'meta_rendered_length_in_bounds', weight: 0, isHard: true, evaluate: checkAuthoredMetaLength },
     // Hard: city-service bodies are built from customer-derived signals
     // (FAQ-from-calls, local proof) exactly like customer-question pages,
     // but this was the ONE body-writing lane with no publish-time PII
@@ -143,12 +147,24 @@ const PAGE_TYPE_CHECKS = {
     { name: 'two_plus_city_mentions', weight: 4, evaluate: checkTwoPlusCityMentions },
     { name: 'faq_section_present', weight: 4, evaluate: checkFaqSectionPresent },
     { name: 'voice_match', weight: 6, evaluate: checkVoiceMatch },
+    // Owner rule 2026-07-29: blog metas carry NO phone, nothing salesy, and
+    // end with a soft CTA ("Learn more on the Waves blog"). Weight 0 hard
+    // gate — without it a freshly authored blog meta bypassed the metadata-
+    // lane check entirely.
+    { name: 'blog_meta_contract', weight: 0, isHard: true, evaluate: checkBlogMetaContract },
+    { name: 'meta_rendered_length_in_bounds', weight: 0, isHard: true, evaluate: checkAuthoredMetaLength },
   ],
   metadata: [
     { name: 'title_length_in_bounds', weight: 6, isHard: true, evaluate: checkTitleLengthBounds },
     { name: 'meta_length_in_bounds', weight: 6, isHard: true, evaluate: checkMetaLengthBounds },
     { name: 'primary_keyword_in_title', weight: 6, evaluate: checkPrimaryKeywordInTitle },
     { name: 'no_duplicate_title', weight: 8, isHard: true, evaluate: checkNoDuplicateTitle },
+    // Owner rule 2026-07-29: every meta carries the page's phone — as the
+    // {{cityPhone}} TOKEN (pages render on many domains with different
+    // tracking numbers; a typed-out number shows the wrong phone). Weight 0
+    // like title_meta_spam_free: pure hard gate, no score contribution, so
+    // the metadata threshold math is unchanged.
+    { name: 'meta_phone_token_present', weight: 0, isHard: true, evaluate: checkMetaPhoneTokenPresent },
   ],
   links: [],
   gbp: [],
@@ -1012,9 +1028,13 @@ function checkTitleLengthBounds(draft, brief, context) {
 }
 
 function checkMetaLengthBounds(draft) {
-  const m = (draft.meta_description || draft.frontmatter?.meta_description || '').trim();
-  if (!m) return { ok: false, reason: 'no_meta_description' };
-  if (m.length < 115 || m.length > 160) return { ok: false, reason: `meta_length_${m.length}_outside_115-160` };
+  const raw = (draft.meta_description || draft.frontmatter?.meta_description || '').trim();
+  if (!raw) return { ok: false, reason: 'no_meta_description' };
+  // Bound the RENDERED length — metas carry per-domain tokens ({{cityPhone}},
+  // {{brandShort}}) and Google measures what renders, not the template
+  // (owner rule 2026-07-29: never over 160 rendered characters).
+  const m = renderMetaTokens(raw).trim();
+  if (m.length < 115 || m.length > 160) return { ok: false, reason: `meta_rendered_length_${m.length}_outside_115-160` };
   return { ok: true };
 }
 
@@ -1031,6 +1051,88 @@ function checkPrimaryKeywordInTitle(draft, brief, context) {
     return { ok: false, reason: `title_missing_keyword_tokens_(${matched}/${kwTokens.length})` };
   }
   return { ok: true };
+}
+
+// Literal phone shapes: "(941) 555-1234", "941-555-1234", "941.555.1234".
+// Meta text must use the {{cityPhone}} token instead — see the bundle entry.
+const LITERAL_PHONE_IN_META_RE = /\(\d{3}\)\s*\d{3}[-.\s]?\d{4}|\b\d{3}[-.]\d{3}[-.]\d{4}\b/;
+
+// The two meta contracts (owner rule 2026-07-29), applied per target type.
+// SALESY_META_RE / SOFT_CTA_RE are shared with content-guardrails via
+// title-meta-spam-gate so the definitions can't drift.
+function pageMetaPhoneResult(m) {
+  // Requirement is {{cityPhone}} SPECIFICALLY — {{phone}}/{{tel}} render the
+  // generic line, not the tracking number that belongs to this page.
+  if (!CITY_PHONE_TOKEN_RE.test(m)) return { ok: false, reason: 'meta_missing_cityPhone_token' };
+  if (LITERAL_PHONE_IN_META_RE.test(m)) return { ok: false, reason: 'literal_phone_in_meta_use_cityPhone_token' };
+  return { ok: true };
+}
+function blogMetaContractResult(m) {
+  if (PHONE_TOKEN_RE.test(m) || LITERAL_PHONE_IN_META_RE.test(m)) {
+    return { ok: false, reason: 'blog_meta_must_not_carry_phone' };
+  }
+  if (SALESY_META_RE.test(m)) return { ok: false, reason: 'blog_meta_salesy' };
+  // The CTA must END the meta (last sentence), not merely appear somewhere —
+  // "Learn more about X. Professional treatment available…" is not the shape.
+  if (!endsWithSoftCta(m)) return { ok: false, reason: 'blog_meta_missing_soft_cta' };
+  return { ok: true };
+}
+
+// A typed-out phone in the publishable TITLE ships the wrong tracking number
+// on every other domain, same as in the meta. Checked wherever the title
+// will actually publish (a protected metaTitle proposal is discarded by the
+// publisher, so it's exempt via context.protectedTitle).
+function titleLiteralPhoneResult(draft) {
+  const t = (draft.title || draft.frontmatter?.title || '').trim();
+  if (t && LITERAL_PHONE_IN_META_RE.test(t)) return { ok: false, reason: 'literal_phone_in_title' };
+  return { ok: true };
+}
+
+// Metadata-rewrite lane: target-aware (brief.target_page_type is derived from
+// the RESOLVED target file by the runner; unresolved targets now PARK before
+// this gate runs — see metadata_target_unresolved).
+function checkMetaPhoneTokenPresent(draft, brief, context) {
+  // Publishable titles never carry a typed-out number either — skip only
+  // when the proposal is discarded (protected metaTitle target).
+  if (!context?.protectedTitle) {
+    const titleResult = titleLiteralPhoneResult(draft);
+    if (!titleResult.ok) return titleResult;
+  }
+  const m = (draft.meta_description || draft.frontmatter?.meta_description || draft.frontmatter?.metaDescription || '').trim();
+  if (!m) return { ok: false, reason: 'no_meta_description' };
+  return brief?.target_page_type === 'page' ? pageMetaPhoneResult(m) : blogMetaContractResult(m);
+}
+
+// city-service bundle: newly authored city/service pages must carry the
+// {{cityPhone}} token. Meta PRESENCE is other gates' job — empty defers.
+function checkCityServiceMetaPhone(draft) {
+  const titleResult = titleLiteralPhoneResult(draft);
+  if (!titleResult.ok) return titleResult;
+  const m = (draft.meta_description || draft.frontmatter?.meta_description || draft.frontmatter?.metaDescription || '').trim();
+  if (!m) return { ok: true, reason: 'no_meta_to_check' };
+  return pageMetaPhoneResult(m);
+}
+
+// Authoring bundles: rendered-length hard check for NEW drafts. The blog
+// schema and the spam gate measure LITERAL length (spam gate soft-warns
+// 161-190), so a 156-char template carrying {{brandName}} could render 161+
+// and publish. Empty defers — presence is other gates' job.
+function checkAuthoredMetaLength(draft, brief, context) {
+  const raw = (draft.meta_description || draft.frontmatter?.meta_description || draft.frontmatter?.metaDescription || '').trim();
+  if (!raw) return { ok: true, reason: 'no_meta_to_check' };
+  return checkMetaLengthBounds(draft, brief, context);
+}
+
+// supporting-blog bundle: newly authored blog posts get the full blog meta
+// contract (no phone, nothing salesy, soft CTA) — without this, a fresh blog
+// draft bypassed the metadata-lane check entirely and could auto-publish a
+// promotional meta.
+function checkBlogMetaContract(draft) {
+  const titleResult = titleLiteralPhoneResult(draft);
+  if (!titleResult.ok) return titleResult;
+  const m = (draft.meta_description || draft.frontmatter?.meta_description || '').trim();
+  if (!m) return { ok: true, reason: 'no_meta_to_check' };
+  return blogMetaContractResult(m);
 }
 
 function checkNoDuplicateTitle(draft, _brief, context) {
@@ -1063,4 +1165,6 @@ module.exports._internals = {
   checkHubLinkPresent, checkTwoPlusCityMentions, checkFaqSectionPresent, checkVoiceMatch,
   checkTitleLengthBounds, checkMetaLengthBounds,
   checkPrimaryKeywordInTitle, checkNoDuplicateTitle,
+  checkMetaPhoneTokenPresent, checkCityServiceMetaPhone, checkBlogMetaContract,
+  checkAuthoredMetaLength,
 };

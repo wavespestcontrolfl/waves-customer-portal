@@ -40,7 +40,7 @@ function fullDraft(overrides = {}) {
     url: '/blog/how-to-identify-termite-swarm/',
     body: 'Termite swarmers look like flying ants but have straight antennae. In Bradenton you might see them after rain.',
     title: 'How to Identify a Termite Swarm in Bradenton',
-    meta_description: 'Termite swarmers look like flying ants but have straight antennae and equal-length wings. Here is how Bradenton homeowners spot them early.',
+    meta_description: 'Termite swarmers look like flying ants but have straight antennae and equal-length wings. Learn more on the Waves blog.',
     schema: { '@type': 'Article' },
     frontmatter: {},
     ...overrides,
@@ -910,6 +910,180 @@ describe('checkMetaDescriptionComplete — refresh target typing (Codex round 12
       { page_type: 'refresh' },
     );
     expect(camel.ok).toBe(true);
+  });
+});
+
+describe('meta phone-token contract (owner rule 2026-07-29)', () => {
+  const { checkMetaPhoneTokenPresent } = require('../services/content/content-quality-gate')._internals;
+  const PAD = 'Chinch bugs, sod webworms and fire ants handled by local techs. ';
+  const PAGE = { target_page_type: 'page' };
+  const BLOG = { target_page_type: 'supporting-blog' };
+
+  test('non-blog meta with the {{cityPhone}} token passes', () => {
+    const m = `${PAD}Call ☎️ {{cityPhone}} for a FREE estimate today.`;
+    expect(checkMetaPhoneTokenPresent({ meta_description: m }, PAGE).ok).toBe(true);
+  });
+
+  test('non-blog meta without any phone fails', () => {
+    const r = checkMetaPhoneTokenPresent({ meta_description: `${PAD}Get a free estimate today.` }, PAGE);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('meta_missing_cityPhone_token');
+  });
+
+  test('typed-out phone number fails even alongside the token', () => {
+    const r = checkMetaPhoneTokenPresent({ meta_description: `${PAD}Call (941) 297-2606 or {{cityPhone}} now.` }, PAGE);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('literal_phone_in_meta_use_cityPhone_token');
+  });
+
+  test('blog meta: informational + soft CTA passes; phone or salesy CTA fails', () => {
+    const good = 'How to tell chinch bug damage from drought stress in a SWFL lawn, and what recovery actually takes. Learn more on the Waves blog.';
+    expect(checkMetaPhoneTokenPresent({ meta_description: good }, BLOG).ok).toBe(true);
+    const withPhone = checkMetaPhoneTokenPresent({ meta_description: `${PAD}Call ☎️ {{cityPhone}} for details on the blog.` }, BLOG);
+    expect(withPhone.ok).toBe(false);
+    expect(withPhone.reason).toBe('blog_meta_must_not_carry_phone');
+    const salesy = checkMetaPhoneTokenPresent({ meta_description: `${PAD}Get your free estimate today on the Waves blog.` }, BLOG);
+    expect(salesy.ok).toBe(false);
+    expect(salesy.reason).toBe('blog_meta_salesy');
+  });
+
+  test('meta_length_in_bounds measures RENDERED length (tokens expanded)', () => {
+    // Literal 150 chars incl. {{cityPhone}} (13) → rendered 151 (+1) — in bounds.
+    const base = 'Call {{cityPhone}} for lawn pest control. '; // 42 literal → 43 rendered
+    const inBounds = base + 'x'.repeat(108); // 150 literal → 151 rendered
+    expect(checkMetaLengthBounds({ meta_description: inBounds }).ok).toBe(true);
+    // Literal 159 chars, but {{brandName}} (13) renders as 18 (+5) → 164 — over.
+    const over = '{{brandName}} treats lawns. '.padEnd(159, 'y');
+    const r = checkMetaLengthBounds({ meta_description: over });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/^meta_rendered_length_164/);
+  });
+});
+
+describe('meta contract bundle checks + refinements (owner rule 2026-07-29)', () => {
+  const { checkMetaPhoneTokenPresent, checkCityServiceMetaPhone, checkBlogMetaContract } = require('../services/content/content-quality-gate')._internals;
+  const BLOG = { target_page_type: 'supporting-blog' };
+
+  test('blog meta without a soft CTA fails', () => {
+    const r = checkMetaPhoneTokenPresent({ meta_description: 'How to tell chinch bug damage from drought stress in a Southwest Florida lawn, and what a full turf recovery actually takes this season.' }, BLOG);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('blog_meta_missing_soft_cta');
+  });
+
+  test('expanded salesy phrases are rejected on blog metas', () => {
+    for (const tail of ['Request a quote today.', 'Contact us for treatment.', 'Schedule service today.', 'Save on professional service.']) {
+      const r = checkMetaPhoneTokenPresent({ meta_description: `What SWFL chinch bug damage looks like and what a turf recovery takes. ${tail}` }, BLOG);
+      expect(r.ok).toBe(false);
+      expect(r.reason).toBe('blog_meta_salesy');
+    }
+  });
+
+  test('city-service bundle check requires the token; empty meta defers', () => {
+    expect(checkCityServiceMetaPhone({ frontmatter: { meta_description: 'Pest control in Sarasota built for the coastal pressure. Call ☎️ {{cityPhone}} for a FREE estimate from techs on daily local routes.' } }).ok).toBe(true);
+    expect(checkCityServiceMetaPhone({ frontmatter: { meta_description: 'Pest control in Sarasota built around coastal pest pressure, from drywood termites to German roaches, with plans quoted in about a minute.' } }).reason).toBe('meta_missing_cityPhone_token');
+    expect(checkCityServiceMetaPhone({ frontmatter: {} }).ok).toBe(true);
+  });
+
+  test('supporting-blog bundle check applies the full blog contract; empty meta defers', () => {
+    expect(checkBlogMetaContract({ frontmatter: { meta_description: 'How to tell chinch bug damage from drought stress in a SWFL lawn, and what recovery takes. Learn more on the Waves blog.' } }).ok).toBe(true);
+    expect(checkBlogMetaContract({ frontmatter: { meta_description: 'Chinch bug basics for SWFL lawns and what recovery takes. Call ☎️ {{cityPhone}} to learn more from the Waves lawn team today.' } }).reason).toBe('blog_meta_must_not_carry_phone');
+    expect(checkBlogMetaContract({ frontmatter: {} }).ok).toBe(true);
+  });
+});
+
+describe('meta contract round-3 hardening (Codex findings)', () => {
+  const { checkMetaPhoneTokenPresent, checkBlogMetaContract, checkCityServiceMetaPhone } = require('../services/content/content-quality-gate')._internals;
+  const BLOG = { target_page_type: 'supporting-blog' };
+  const PAGE = { target_page_type: 'page' };
+
+  test('soft CTA must END the meta — a mid-meta mention with a promotional tail fails', () => {
+    const r = checkBlogMetaContract({ meta_description: 'Learn more about chinch bugs. Professional lawn treatment is available from Waves whenever you need a local turf expert in Southwest Florida.' });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('blog_meta_missing_soft_cta');
+  });
+
+  test('literal phone in a publishable title fails on every lane', () => {
+    const meta = 'Pest control in Sarasota built for coastal pressure. Call ☎️ {{cityPhone}} for a FREE estimate from techs on daily local routes here.';
+    const withPhoneTitle = { title: 'Pest Control Sarasota — 941-297-2606', meta_description: meta };
+    expect(checkMetaPhoneTokenPresent(withPhoneTitle, PAGE, {}).reason).toBe('literal_phone_in_title');
+    expect(checkMetaPhoneTokenPresent(withPhoneTitle, BLOG, {}).reason).toBe('literal_phone_in_title');
+    expect(checkCityServiceMetaPhone(withPhoneTitle).reason).toBe('literal_phone_in_title');
+    expect(checkBlogMetaContract(withPhoneTitle).reason).toBe('literal_phone_in_title');
+    // Protected metaTitle target: the proposal is discarded — title exempt.
+    expect(checkMetaPhoneTokenPresent(withPhoneTitle, PAGE, { protectedTitle: true }).ok).toBe(true);
+  });
+});
+
+describe('soft CTA final sentence must BE a CTA (round-5 hardening)', () => {
+  const { checkBlogMetaContract } = require('../services/content/content-quality-gate')._internals;
+  const LEAD = 'What chinch bug damage looks like in Southwest Florida turf and how full recovery works across a season of treatments. ';
+
+  test('a promotional sentence that merely contains a CTA verb fails', () => {
+    const r = checkBlogMetaContract({ meta_description: `${LEAD}See how much you can save with Waves.` });
+    expect(r.ok).toBe(false);
+  });
+
+  test('sanctioned shapes pass: bare, about-clause, and blog pointer', () => {
+    for (const tail of ['Learn more.', 'Read more.', 'Learn more about chinch bugs on the Waves blog.', 'Find out more in our guide.']) {
+      const r = checkBlogMetaContract({ meta_description: `${LEAD}${tail}` });
+      expect(r.ok).toBe(true);
+    }
+  });
+
+  test('sales terms cannot ride in through the about-clause', () => {
+    const r = checkBlogMetaContract({ meta_description: `${LEAD}Learn more about saving big with Waves.` });
+    expect(r.ok).toBe(false);
+  });
+});
+
+describe('meta contract round-6 hardening (Codex findings)', () => {
+  const { checkBlogMetaContract, checkAuthoredMetaLength } = require('../services/content/content-quality-gate')._internals;
+
+  test('abbreviation periods are not sentence boundaries — St. Augustine CTA passes', () => {
+    const r = checkBlogMetaContract({ meta_description: 'What summer heat does to Southwest Florida turf and how to help it recover. Learn more about St. Augustine grass on the Waves blog.' });
+    expect(r.ok).toBe(true);
+  });
+
+  test('authoring bundles bound RENDERED length — {{brandName}} expansion over 160 fails', () => {
+    // 156 literal chars incl {{brandName}} (13) → renders 161 (+5) — over.
+    const base = '{{brandName}} explains what summer heat does to Southwest Florida turf and how recovery works across a season. ';
+    const meta = base.padEnd(156, 'x');
+    const r = checkAuthoredMetaLength({ meta_description: meta });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/^meta_rendered_length_161/);
+    // Empty defers — presence is other gates' job.
+    expect(checkAuthoredMetaLength({ frontmatter: {} }).ok).toBe(true);
+  });
+});
+
+describe('phone-token grammar (round-7 hardening)', () => {
+  const { checkMetaPhoneTokenPresent, checkBlogMetaContract } = require('../services/content/content-quality-gate')._internals;
+  const PAGE = { target_page_type: 'page' };
+  const LEAD = 'What summer heat does to Southwest Florida turf and how a full recovery works. ';
+
+  test('only {{cityPhone}} (whitespace-tolerant) satisfies the non-blog requirement — phone/tel aliases render the generic line', () => {
+    const meta = (tok) => `Pest control in Sarasota built for the coastal pressure this season. Call ${tok} for an estimate from techs on daily local routes.`;
+    expect(checkMetaPhoneTokenPresent({ meta_description: meta('{{ cityPhone }}') }, PAGE, {}).ok).toBe(true);
+    for (const tok of ['{{tel}}', '{{ phone }}']) {
+      const r = checkMetaPhoneTokenPresent({ meta_description: meta(tok) }, PAGE, {});
+      expect(r.ok).toBe(false);
+      expect(r.reason).toBe('meta_missing_cityPhone_token');
+    }
+  });
+
+  test('choose/hire-brand solicitation is salesy on blog metas', () => {
+    const { checkBlogMetaContract: blogCheck } = require('../services/content/content-quality-gate')._internals;
+    const r = blogCheck({ meta_description: 'Choose Waves for professional pest control across Southwest Florida homes, with local experience for the bugs residents see most. Learn more.' });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('blog_meta_salesy');
+  });
+
+  test('whitespace-tolerant and alias tokens are banned from blog metas', () => {
+    for (const tok of ['{{ cityPhone }}', '{{tel}}']) {
+      const r = checkBlogMetaContract({ meta_description: `${LEAD}Details at ${tok} today. Learn more.` });
+      expect(r.ok).toBe(false);
+      expect(r.reason).toBe('blog_meta_must_not_carry_phone');
+    }
   });
 });
 
