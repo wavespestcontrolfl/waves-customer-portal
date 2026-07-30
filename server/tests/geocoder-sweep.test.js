@@ -79,6 +79,11 @@ describe('sweepUngeocodedCustomers', () => {
 
     expect(result).toEqual({ checked: 1, geocoded: 0, unresolved: 1 });
     expect(updates).toHaveLength(0);
+
+    // Unresolved ids are skipped on later sweeps so they can't starve the
+    // batch — the same candidate list now yields nothing to check.
+    const second = await sweepUngeocodedCustomers();
+    expect(second).toEqual({ checked: 0, geocoded: 0, unresolved: 0 });
   });
 
   it('returns zero counts when no customers are missing coordinates', async () => {

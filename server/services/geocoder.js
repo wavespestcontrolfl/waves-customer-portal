@@ -82,25 +82,38 @@ async function ensureCustomerGeocoded(customerId) {
  * leaves the customer permanently coordinate-less — which silently drops
  * their stops from route optimization. Newest customers first.
  */
+// Ids that failed to resolve during this process's sweeps. Skipped on later
+// passes so a block of permanently bad addresses at the top of the
+// newest-first ordering can't starve older customers out of the batch.
+// Process restart clears it, giving stuck rows a fresh retry each deploy;
+// admin address edits re-geocode directly so a fix never waits on this set.
+const sweepUnresolvedIds = new Set();
+
 async function sweepUngeocodedCustomers({ limit = 25 } = {}) {
-  const rows = await db('customers')
+  const candidates = await db('customers')
     .whereNull('deleted_at')
     .where(function () {
       this.whereNull('latitude').orWhereNull('longitude');
     })
     .whereNotNull('address_line1')
     .orderBy('created_at', 'desc')
-    .limit(limit)
+    .limit(Math.max(limit * 8, 200))
     .select('id');
+  const rows = candidates.filter((r) => !sweepUnresolvedIds.has(r.id)).slice(0, limit);
 
   const results = { checked: rows.length, geocoded: 0, unresolved: 0 };
   for (const row of rows) {
     try {
       const geo = await ensureCustomerGeocoded(row.id);
-      if (geo) results.geocoded += 1;
-      else results.unresolved += 1;
+      if (geo) {
+        results.geocoded += 1;
+      } else {
+        results.unresolved += 1;
+        sweepUnresolvedIds.add(row.id);
+      }
     } catch (err) {
       results.unresolved += 1;
+      sweepUnresolvedIds.add(row.id);
       logger.error(`[geocoder] sweep failed for customer ${row.id}: ${err.message}`);
     }
   }

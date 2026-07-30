@@ -457,8 +457,9 @@ function initScheduledJobs() {
   // stops from route optimization. Sweep fills any gap within the hour.
   cron.schedule('20 * * * *', async () => {
     try {
+      const { runExclusive } = require('../utils/cron-lock');
       const { sweepUngeocodedCustomers } = require('./geocoder');
-      await sweepUngeocodedCustomers();
+      await runExclusive('geocoder-backstop', () => sweepUngeocodedCustomers());
     } catch (err) {
       logger.error(`[geocoder] backstop sweep failed: ${err.message}`);
     }
