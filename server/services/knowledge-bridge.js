@@ -150,6 +150,50 @@ function wikiIlikeQuery(term, trustedOnly, limit) {
 // generateAssessmentRecommendations for why runs must be serialized.
 const _recommendationRuns = new Map();
 
+// Persist-time guard (codex P1 #3093 r5): the applied-today prompt rule is
+// an instruction, not a guarantee. Text that advises against/defers a product
+// class the technician ALREADY applied on the visit must never be stored —
+// that's the exact AI-vs-technician contradiction this lane exists to kill.
+const TREATMENT_CLASS_TERMS = {
+  fungicide: /\bfungicid/i,
+  herbicide: /\bherbicid|\bweed\s+(?:treatment|control|application)\b/i,
+  insecticide: /\binsecticid/i,
+};
+const DEFER_LANGUAGE = /\b(?:defer|hold\s+off|wait|avoid|do\s+not\s+(?:apply|make|treat)|don['’]t\s+(?:apply|make|treat)|before\s+(?:making|applying)|not\s+(?:currently\s+)?(?:support|warrant|recommend)|until\s+.{0,50}\b(?:confirmed|verified|supports?)\b|without\s+(?:first|further))\b/i;
+
+function contradictsAppliedTreatment(text, appliedClasses) {
+  const t = String(text || '');
+  if (!t || !appliedClasses.length || !DEFER_LANGUAGE.test(t)) return false;
+  return appliedClasses.some((cls) => TREATMENT_CLASS_TERMS[cls] && TREATMENT_CLASS_TERMS[cls].test(t));
+}
+
+// Strip contradicting content from a parsed recommendations payload.
+// Violating recommendation items are dropped; violating scalar fields fall
+// back to neutral monitoring copy (nextVisitFocus) or are removed so the
+// previously stored value stands (summary/customerTip).
+function sanitizeRecommendationsAgainstTreatment(parsed, appliedProducts) {
+  const appliedClasses = Object.keys(TREATMENT_CLASS_TERMS).filter((cls) =>
+    (appliedProducts || []).some((p) => new RegExp(cls, 'i').test(String(p.product_category || ''))));
+  if (!appliedClasses.length || !parsed || typeof parsed !== 'object') return { parsed, dropped: 0 };
+  let dropped = 0;
+  if (Array.isArray(parsed.recommendations)) {
+    const kept = parsed.recommendations.filter((rec) => {
+      const bad = contradictsAppliedTreatment(`${rec?.action || ''} ${rec?.reason || ''}`, appliedClasses);
+      if (bad) dropped += 1;
+      return !bad;
+    });
+    parsed.recommendations = kept;
+  }
+  for (const key of ['summary', 'customerTip']) {
+    if (contradictsAppliedTreatment(parsed[key], appliedClasses)) { delete parsed[key]; dropped += 1; }
+  }
+  if (contradictsAppliedTreatment(parsed.nextVisitFocus, appliedClasses)) {
+    parsed.nextVisitFocus = 'Recheck the areas treated today and confirm how the lawn is responding to the applications.';
+    dropped += 1;
+  }
+  return { parsed, dropped };
+}
+
 const KnowledgeBridge = {
 
   // ────────────────────────────────────────────────────────────
@@ -606,11 +650,19 @@ Return a JSON object with:
       if (!result) return null;
 
       try {
-        const parsed = JSON.parse(result.replace(/```json|```/g, '').trim());
+        const raw = JSON.parse(result.replace(/```json|```/g, '').trim());
 
-        // Save to assessment
+        // Model output advising against a product class applied today must
+        // never persist (codex P1 r5) — the prompt rule is not a guarantee.
+        const { parsed, dropped } = sanitizeRecommendationsAgainstTreatment(raw, appliedProducts);
+        if (dropped) {
+          logger.warn(`[knowledge-bridge] dropped ${dropped} treatment-contradicting field(s) from recommendations for assessment ${assessmentId}`);
+        }
+
+        // Save to assessment (summary may have been stripped by the guard —
+        // keep the previously stored ai_summary in that case).
         await db('lawn_assessments').where({ id: assessmentId }).update({
-          ai_summary: parsed.summary,
+          ...(parsed.summary ? { ai_summary: parsed.summary } : {}),
           recommendations: JSON.stringify(parsed),
           updated_at: new Date(),
         });
@@ -798,3 +850,4 @@ Return a JSON object with:
 };
 
 module.exports = KnowledgeBridge;
+module.exports._test = { sanitizeRecommendationsAgainstTreatment, contradictsAppliedTreatment };

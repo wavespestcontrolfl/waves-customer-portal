@@ -16,6 +16,9 @@ describe('safeWaterText — rain window enforcement', () => {
     'Rain brought about 1.39 inches this cycle, a bit over target.',
     'Roughly 2 inches fell between visits, so hold off on irrigation.',
     'About 1.9 inches of rain since your last service kept things damp.',
+    'We measured 4.2 inches in the last 24 hours.',
+    'Rainfall over the past day has been heavy.',
+    'Since we last visited, about 2 inches of rain fell.',
   ])('window-violating copy falls back: %s', (bad) => {
     expect(_test.safeWaterText(bad, FALLBACK)).toBe(FALLBACK);
   });

@@ -110,7 +110,18 @@ function buildUserMessage(facts) {
 // a single day's rain is factually wrong whenever visits aren't weekly, and
 // the prompt rule alone doesn't guarantee compliance (codex P1 #3093 r3:
 // exactly this framing shipped on a live report).
-const RAIN_WINDOW_PHRASES = /\bsince\s+(?:your|the)\s+last\s+(?:visit|service)\b|\bthis\s+(?:service\s+)?cycle\b|\bbetween\s+(?:visits|services)\b|\brain(?:fall)?\s+(?:today|yesterday)\b/i;
+const RAIN_WINDOW_PHRASES = new RegExp([
+  // visit-interval framings
+  '\\bsince\\s+(?:your|the)\\s+last\\s+(?:visit|service|appointment)\\b',
+  '\\bsince\\s+we\\s+last\\s+(?:visited|serviced|stopped\\s+by)\\b',
+  '\\bthis\\s+(?:service\\s+)?cycle\\b',
+  '\\bbetween\\s+(?:visits|services|appointments)\\b',
+  // single-day / sub-weekly framings
+  '\\brain(?:fall)?\\s+(?:today|yesterday|overnight)\\b',
+  '\\b(?:last|past)\\s+24\\s*(?:hours|hrs|hour)\\b',
+  '\\b(?:last|past)\\s+48\\s*(?:hours|hrs|hour)\\b',
+  '\\b(?:over|in|during)\\s+the\\s+(?:last|past)\\s+(?:day|24\\s*hours)\\b',
+].join('|'), 'i');
 const RAIN_TERMS = /\brain|\binch|\bprecipitation|\bwater/i;
 
 // Replace a deterministic string with the model's version only if it's a

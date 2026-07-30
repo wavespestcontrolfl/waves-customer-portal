@@ -5564,19 +5564,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // service_records/service_products rows existed, so the applied-today
         // grounding in generateAssessmentRecommendations never fired (codex
         // P1 #3093). Now that the visit's applications are persisted and the
-        // assessment is back-linked, regenerate — and WAIT (bounded) before
-        // continuing: the PDF job and MMS preview queued later in this
-        // handler read ai_summary/recommendations and must not bake the
-        // stale confirm-time output (codex P1 r3). On timeout/failure the
-        // artifacts keep the confirm-time copy while the serialized run's
-        // write still heals the web report afterward.
+        // assessment is back-linked, regenerate and WAIT for it: the PDF job
+        // and MMS preview queued later in this handler read
+        // ai_summary/recommendations and must not bake the stale
+        // confirm-time output (codex P1 r3+r5 — a timeout escape hatch just
+        // reintroduced the race). Failure falls through with the
+        // confirm-time copy; generation itself is one bounded LLM call.
         const KnowledgeBridge = require('../services/knowledge-bridge');
-        const regen = KnowledgeBridge.generateAssessmentRecommendations(completedAssessment.id)
+        await KnowledgeBridge.generateAssessmentRecommendations(completedAssessment.id)
           .catch((recErr) => logger.warn(`[dispatch] post-completion recommendation regen failed (non-blocking): ${recErr.message}`));
-        await Promise.race([
-          regen,
-          new Promise((resolve) => { setTimeout(resolve, 20000).unref?.(); }),
-        ]);
       } catch (err) {
         logger.error(`[dispatch] Lawn assessment service_record link failed (non-blocking): ${err.message}`);
       }
