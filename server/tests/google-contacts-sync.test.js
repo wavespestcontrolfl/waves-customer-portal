@@ -133,8 +133,8 @@ describe('runContactsSync', () => {
     expect(body.memberships.map((m) => m.contactGroupMembership.contactGroupResourceName))
       .toEqual(['contactGroups/myContacts', 'contactGroups/starred']);
     expect(body.clientData).toEqual([{ key: 'waves_row', value: 'customers:c-1' }]);
-    const patch = state.updates.find((u) => u.table === 'customers').patch;
-    expect(patch.google_contact_id).toBe('people/abc');
+    // The durable pre-create claim lands first; the stamp follows it.
+    const patch = state.updates.find((u) => u.table === 'customers' && u.patch.google_contact_id === 'people/abc').patch;
     // Full-precision copy of updated_at — a rebound JS Date loses Postgres
     // microseconds and would wedge the ms-equality guard forever.
     expect(patch.google_contact_synced_at).toEqual(RAW_UPDATED_AT);
@@ -244,7 +244,7 @@ describe('runContactsSync', () => {
   test('a failed stamp after a FRESH create rolls the contact back — no leaked duplicate', async () => {
     setupDb({
       customers: [{ ...CUSTOMER }],
-      updateResults: { customers: [new Error('db down')] },
+      updateResults: { customers: [1, new Error('db down')] }, // claim OK, stamp fails
     });
     mockPeopleApi.people.createContact.mockResolvedValueOnce({ data: { resourceName: 'people/fresh' } });
     const counts = await runContactsSync({ gapMs: 0 });
@@ -268,7 +268,7 @@ describe('runContactsSync', () => {
   test('a raced-edit stamp veto (0 rows) compensates a fresh create — no silent success', async () => {
     setupDb({
       customers: [{ ...CUSTOMER }],
-      updateResults: { customers: [0] }, // concurrent edit vetoed the stamp
+      updateResults: { customers: [1, 0] }, // claim OK, concurrent edit vetoed the stamp
     });
     mockPeopleApi.people.createContact.mockResolvedValueOnce({ data: { resourceName: 'people/fresh' } });
     const counts = await runContactsSync({ gapMs: 0 });
@@ -348,7 +348,7 @@ describe('runContactsSync', () => {
     expect(mockPeopleApi.people.createContact).toHaveBeenCalled();
     // The watermark advances to the CHECK time — writing the old
     // updated_at back would pin the lane to the same oldest rows forever.
-    const patch = verifyState.updates.find((u) => u.table === 'customers' && u.patch.google_contact_synced_at).patch;
+    const patch = verifyState.updates.find((u) => u.table === 'customers' && u.patch.google_contact_id === 'people/reborn').patch;
     expect(patch.google_contact_synced_at).toEqual(new Date('2026-07-28T12:00:00Z'));
   });
 
@@ -357,7 +357,7 @@ describe('runContactsSync', () => {
     setupDb({
       customersSelects: [[], [], [staleVerified]],
       leadsSelects: [[], [], []],
-      updateResults: { customers: [new Error('db down')] },
+      updateResults: { customers: [1, new Error('db down')] }, // claim OK, stamp fails
     });
     const err = new Error('not found');
     err.code = 404;
@@ -551,11 +551,14 @@ describe('runContactsSync', () => {
     mockPeopleApi.people.createContact.mockRejectedValueOnce(err);
     const counts = await runContactsSync({ gapMs: 0 });
     expect(counts.failed).toBe(1);
-    const park = state.updates.find((u) => u.table === 'customers');
-    // Watermark stamped current (row leaves the batch); no recovery marker
-    // for a definitive rejection; a contact-field edit re-queues it.
-    expect(park.patch.google_contact_synced_at).toBeInstanceOf(Date);
-    expect(park.patch.google_contact_id).toBeUndefined();
+    const patches = state.updates.filter((u) => u.table === 'customers').map((u) => u.patch);
+    // The pre-create claim is rolled back (definitive rejection = Google
+    // did NOT create), then the watermark parks the row; no lasting
+    // recovery marker; a contact-field edit re-queues it.
+    expect(patches).toContainEqual({ google_contact_id: null, google_contact_synced_at: null });
+    const park = patches.find((p) => !('google_contact_id' in p));
+    expect(park.google_contact_synced_at).toBeInstanceOf(Date);
+    expect(patches[patches.length - 1]).toBe(park);
   });
 
   test('a 429 rate limit is RETRYABLE — the row is neither parked nor marked', async () => {
@@ -565,9 +568,13 @@ describe('runContactsSync', () => {
     mockPeopleApi.people.createContact.mockRejectedValueOnce(err);
     const counts = await runContactsSync({ gapMs: 0 });
     expect(counts.failed).toBe(1);
-    // No park, no recovery marker — the row stays stale and retries after
-    // the quota recovers.
-    expect(state.updates).toEqual([]);
+    // The pre-create claim round-trips (429 = Google did NOT create) and
+    // there is NO park — the row stays stale and retries after the quota
+    // recovers.
+    const patches = state.updates.filter((u) => u.table === 'customers').map((u) => u.patch);
+    expect(String(patches[0].google_contact_id)).toMatch(/^pending_create_recovery/);
+    expect(patches[1]).toEqual({ google_contact_id: null, google_contact_synced_at: null });
+    expect(patches).toHaveLength(2);
   });
 
   test('verification never lets a NON-OWNER lead overwrite the shared contact', async () => {
@@ -764,6 +771,31 @@ describe('runContactsSync', () => {
     expect(state.updates.find((u) => u.table === 'leads').patch.google_contact_id).toBeNull();
   });
 
+  test('a restore-interrupted retirement REUSES the marked contact — no delete/recreate churn', async () => {
+    const state = setupDb({
+      customers: [{ ...CUSTOMER, google_contact_id: 'pending_retire_recovery:people/keep' }],
+    });
+    mockPeopleApi.people.get.mockResolvedValueOnce({ data: { etag: 'e1', metadata: { sources: [] }, memberships: [] } });
+    mockPeopleApi.people.updateContact.mockResolvedValueOnce({ data: { resourceName: 'people/keep' } });
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(counts.synced).toBe(1);
+    // The contact (with its operator-managed labels) survives: marker
+    // unwrapped, contact refreshed in place.
+    expect(mockPeopleApi.people.deleteContact).not.toHaveBeenCalled();
+    expect(mockPeopleApi.people.createContact).not.toHaveBeenCalled();
+    expect(state.updates.find((u) => u.table === 'customers' && u.patch.google_contact_id === 'people/keep')).toBeDefined();
+  });
+
+  test('a lost pre-create claim defers the create — no blind double-mint', async () => {
+    setupDb({
+      customers: [{ ...CUSTOMER }],
+      updateResults: { customers: [0] }, // pointer moved under us
+    });
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(counts.synced).toBe(0);
+    expect(mockPeopleApi.people.createContact).not.toHaveBeenCalled();
+  });
+
   test('a crashed retirement (retire marker) is completed by the next tombstone pass', async () => {
     const state = setupDb({
       customersSelects: [[], [{ id: 'c-dead', google_contact_id: 'pending_retire_recovery:people/ghost', google_contact_synced_at: null, first_name: 'G', last_name: '', email: null, phone: null }], []],
@@ -875,8 +907,8 @@ describe('runContactsSync', () => {
   test('a failed sharer repoint falls back to a durable requeue of the stranded rows', async () => {
     const state = setupDb({
       customers: [{ ...CUSTOMER, google_contact_id: 'people/dead', google_contact_synced_at: '2026-07-01T00:00:00Z' }],
-      // stamp OK, customers repoint fails, fallback requeue succeeds
-      updateResults: { customers: [1, new Error('db blip'), 1] },
+      // claim OK, stamp OK, customers repoint fails, fallback requeue succeeds
+      updateResults: { customers: [1, 1, new Error('db blip'), 1] },
     });
     const gone = new Error('not found');
     gone.code = 404;
@@ -1066,7 +1098,10 @@ describe('runContactsSync', () => {
     mockPeopleApi.people.createContact.mockRejectedValueOnce(err);
     const counts = await runContactsSync({ gapMs: 0 });
     expect(counts.blocked).toBe('people_api_disabled');
-    expect(state.updates).toEqual([]);
+    // The pre-create claim rolls back; nothing is parked or stamped.
+    const patches = state.updates.filter((u) => u.table === 'customers').map((u) => u.patch);
+    expect(patches.some((p) => !('google_contact_id' in p))).toBe(false);
+    expect(patches[patches.length - 1]).toEqual({ google_contact_id: null, google_contact_synced_at: null });
   });
 
   test('contact info restored mid-batch keeps its Google contact (last-instant revalidation)', async () => {
@@ -1137,7 +1172,10 @@ describe('runContactsSync', () => {
     mockPeopleApi.people.createContact.mockRejectedValueOnce(err);
     const counts = await runContactsSync({ gapMs: 0 });
     expect(counts.blocked).toBe('contacts_scope_missing');
-    expect(state.updates).toEqual([]);
+    // The pre-create claim rolls back; nothing is parked or stamped.
+    const patches = state.updates.filter((u) => u.table === 'customers').map((u) => u.patch);
+    expect(patches.some((p) => !('google_contact_id' in p))).toBe(false);
+    expect(patches[patches.length - 1]).toEqual({ google_contact_id: null, google_contact_synced_at: null });
   });
 
   test('a contact deleted on the Google side is recreated (404 fallthrough)', async () => {
@@ -1148,7 +1186,7 @@ describe('runContactsSync', () => {
     mockPeopleApi.people.createContact.mockResolvedValueOnce({ data: { resourceName: 'people/new' } });
     const counts = await runContactsSync({ gapMs: 0 });
     expect(counts.synced).toBe(1);
-    expect(state.updates.find((u) => u.table === 'customers').patch.google_contact_id).toBe('people/new');
+    expect(state.updates.find((u) => u.table === 'customers' && u.patch.google_contact_id === 'people/new')).toBeDefined();
   });
 
   test('no Gmail connection = blocked, nothing attempted', async () => {

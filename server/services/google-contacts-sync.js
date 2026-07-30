@@ -483,6 +483,29 @@ async function upsertContact(people, table, row, kind, gapMs, { markerSearchKey 
       resourceName = (replacement && replacement !== deadId) ? replacement : null;
     }
   }
+  // Durable PRE-create claim: a crash after Google commits the create but
+  // before the stamp leaves no catch-path marker, so the next run would
+  // replay this as a FIRST-TIME create — no conclusive search demanded —
+  // and a truncated 30-result search can hide the committed contact,
+  // minting a duplicate. Claim first (attempt time in the watermark); the
+  // conditional may replace NULL, the row's known (dead) resource id, or
+  // an existing marker — a repeated recovery create must refresh the
+  // attempt timestamp or the next pass would trust a lagging search. The
+  // prior dead id survives via markerPriorId.
+  const claimMarker = pendingMarkerFor(row.google_contact_id || markerPriorId, markerSearchKey || rowSearchKey(row));
+  const claimed = await db(table).where({ id: row.id })
+    .where((q) => {
+      q.whereNull('google_contact_id');
+      if (row.google_contact_id) q.orWhere('google_contact_id', row.google_contact_id);
+      q.orWhere('google_contact_id', 'like', `${PENDING_CREATE}%`);
+    })
+    .update({ google_contact_id: claimMarker, google_contact_synced_at: new Date() });
+  if (!claimed) {
+    // The pointer moved under us — creating anyway could double-mint.
+    const raced = new Error('pre-create claim lost to a concurrent edit — deferred');
+    raced.searchInconclusive = true;
+    throw raced;
+  }
   let created;
   try {
     created = await people.people.createContact({
@@ -491,30 +514,17 @@ async function upsertContact(people, table, row, kind, gapMs, { markerSearchKey 
     });
   } catch (createErr) {
     // A definitive 4xx (validation, scope, permission) means Google did
-    // NOT create — only genuinely AMBIGUOUS failures (network, 5xx) may
-    // have created before the error surfaced. Mark those rows (attempt
-    // time in the watermark) so future passes demand a conclusive search
-    // + grace before creating again.
+    // NOT create — roll the claim back so the row doesn't serve a
+    // pointless conclusive-search grace window. Genuinely AMBIGUOUS
+    // failures (network, 5xx, 408 timeouts that may have reached Google)
+    // KEEP the claim, which now carries the attempt time.
     const status = createErr?.code || createErr?.response?.status;
-    // 408 is 4xx but AMBIGUOUS — the request may have reached Google
-    // before timing out, so it must enter pending-create recovery like a
-    // network error, not skip the marker like a validation rejection.
     const definitiveRejection = typeof status === 'number' && status >= 400 && status < 500 && status !== 408;
-    if (!definitiveRejection) {
-      // The conditional may replace: NULL, the row's known (dead) resource
-      // id, or an EXISTING marker — a repeated ambiguous recovery create
-      // must refresh the attempt timestamp (its grace window restarts) or
-      // the next pass would trust a still-lagging search. The prior dead
-      // id survives via markerPriorId.
-      await db(table).where({ id: row.id })
-        .where((q) => {
-          q.whereNull('google_contact_id');
-          if (row.google_contact_id) q.orWhere('google_contact_id', row.google_contact_id);
-          q.orWhere('google_contact_id', 'like', `${PENDING_CREATE}%`);
-        })
+    if (definitiveRejection) {
+      await db(table).where({ id: row.id, google_contact_id: claimMarker })
         .update({
-          google_contact_id: pendingMarkerFor(row.google_contact_id || markerPriorId, markerSearchKey || rowSearchKey(row)),
-          google_contact_synced_at: new Date(),
+          google_contact_id: row.google_contact_id || null,
+          google_contact_synced_at: row.google_contact_synced_at || null,
         })
         .catch(() => {});
     }
@@ -693,27 +703,21 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
       // NOTHING below (transfer, delete, update) treats it as one; the
       // create path gets the recovery context instead.
       if (isRetireMarker(row.google_contact_id)) {
-        // A crashed retirement whose row was RESTORED: finish deleting the
-        // marked contact (it was unshared and mid-retirement), then mint a
-        // fresh one for the live row. A failed delete keeps the marker.
+        // A retirement interrupted by a RESTORE: the marked contact was
+        // never deleted (the locked tombstone check vetoed) and may carry
+        // operator-managed labels/secondary details — deleting it here to
+        // mint a lesser copy would burn that data. Unwrap the marker and
+        // let the normal update path refresh the contact; if the external
+        // delete DID land before the interruption, the 404 path replaces
+        // it. A bare marker (no id) clears to a fresh create.
         const retiring = retireIdFromMarker(row.google_contact_id);
-        try {
-          if (retiring) await deleteContact(people, retiring);
-          // Persist the clear — the DB must not keep a retire marker the
-          // downstream recovery-marker conditionals can't match, or an
-          // ambiguous create right after this could orphan its contact.
-          await db(table).where({ id: row.id, google_contact_id: row.google_contact_id })
-            .update({ google_contact_id: null });
-          row.google_contact_id = null;
-        } catch (retireErr) {
-          if (isScopeError(retireErr)) {
-            counts.blocked = 'contacts_scope_missing';
-            return counts;
-          }
-          counts.failed += 1;
-          logger.warn(`[contacts-sync] crashed-retire cleanup failed (${table} ${row.id}) — marker retained: ${safeErr(retireErr)}`);
+        const reclaimed = await db(table).where({ id: row.id, google_contact_id: row.google_contact_id })
+          .update({ google_contact_id: retiring });
+        if (!reclaimed) {
+          counts.skipped += 1; // concurrent edit — re-resolve next tick
           continue;
         }
+        row.google_contact_id = retiring;
       }
       const pendingRecovery = isPendingMarker(row.google_contact_id);
       const recoveryAttemptAt = pendingRecovery ? row.google_contact_synced_at : null;
