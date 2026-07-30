@@ -36,7 +36,6 @@ import { createPortal } from "react-dom";
 
 import { addETDays, etDateString } from "../../lib/timezone";
 import { useFeatureFlagReady } from "../../hooks/useFeatureFlag";
-import AnnualPrepayLauncher from "../../components/schedule/AnnualPrepayLauncher";
 import useSpeechDictation from "../../hooks/useSpeechDictation";
 import { Mic, MicOff } from "lucide-react";
 import ProjectFindingFieldInput from "../../components/tech/ProjectFindingFieldInput";
@@ -8254,16 +8253,9 @@ export function CompletionPanel({
   const [aiReportIncludeComms, setAiReportIncludeComms] = useState(true);
   const [success, setSuccess] = useState(false);
   const [completionResult, setCompletionResult] = useState(null);
-  // Completion-screen annual-prepay offer (flag-gated, default off): a post-
-  // completion CTA that mints the prepay invoice and either sends it alongside
-  // the report or charges the year via Tap to Pay. Off = no change to completion.
-  const [showPrepay, setShowPrepay] = useState(false);
-  const { enabled: prepayAtCompletionFlag } = useFeatureFlagReady("prepay-at-completion");
-  // Minting an annual-prepay invoice is admin-only (requireAdmin). The admin app +
-  // flags endpoint also serve technician users, so gate the CTA on the admin role
-  // exactly like the Customer 360 prepay buttons — otherwise a tech hits a 403
-  // after filling the modal.
-  const showPrepayCta = prepayAtCompletionFlag && panelIsAdmin;
+  // The annual-prepay offer was REMOVED from the completion success screen
+  // (owner 2026-07-29: success stays minimal — service complete + delivery
+  // status only). Prepay lives in Customer 360; don't re-add a CTA here.
   const [elapsed, setElapsed] = useState("0:00");
   const [quickComplete, setQuickComplete] = useState(false);
   // Completion photos are intentionally kept out of localStorage (a handful
@@ -11060,10 +11052,7 @@ export function CompletionPanel({
       // Keep the panel open when a pest recap is pending — it renders async and the
       // tech approves/sends it from the success overlay (the approve UI is otherwise
       // unreachable once the panel auto-closes).
-      // Keep the success overlay open when the annual-prepay CTA is available so
-      // the operator can act on it — otherwise the ~1.2s auto-close unmounts the
-      // button (and the prepay modal) mid-flow on the common no-recap path.
-      if (!result?.followupSuggestion?.required && !recapEligible && !showPrepayCta) {
+      if (!result?.followupSuggestion?.required && !recapEligible) {
         setTimeout(() => onClose(true), smsNeedsAttention ? 3200 : 1200);
       }
     } catch (e) {
@@ -11504,7 +11493,10 @@ export function CompletionPanel({
           {success && (
             <div
               style={{
-                position: "absolute",
+                // Fixed, not absolute: the panel scrolls, and completion is
+                // triggered from its bottom — an absolute overlay renders at
+                // the top of the scrolled content, off-screen (owner 07-29).
+                position: "fixed",
                 inset: 0,
                 background: "rgba(250,250,250,0.96)",
                 display: "flex",
@@ -11561,31 +11553,9 @@ export function CompletionPanel({
                         : "Report saved"}{" "}
                 for {service.customerName}
               </div>{" "}
-              {/* Advisories the completion RECORDED (blackout, N-budget
-                  incl. actual-based overruns, protocol exceptions,
-                  calibration) — the operator sees them here, not only later
-                  in Customer 360. */}
-              {Array.isArray(completionResult?.completionAdvisories) &&
-                completionResult.completionAdvisories.length > 0 && (
-                  <div
-                    style={{
-                      fontFamily: font,
-                      fontSize: 12,
-                      color: M.ink3,
-                      marginTop: 8,
-                      textAlign: "left",
-                      border: `1px solid ${M.hairline}`,
-                      borderRadius: 10,
-                      padding: "8px 10px",
-                    }}
-                  >
-                    {completionResult.completionAdvisories.map((text, i) => (
-                      <div key={i} style={{ marginTop: i === 0 ? 0 : 6 }}>
-                        ⚠️ {text}
-                      </div>
-                    ))}
-                  </div>
-                )}
+              {/* completionAdvisories are deliberately NOT rendered here —
+                  the success screen stays minimal (owner 2026-07-29); they
+                  are recorded server-side and surface in Customer 360. */}
               {completionResult?.typedDeliveryMode === "internal_only" && (
                 <div
                   style={{
@@ -11605,16 +11575,7 @@ export function CompletionPanel({
                   <PestRecapCard serviceId={service.id} />
                 </div>
               )}
-              {showPrepayCta && (
-                <button
-                  type="button"
-                  onClick={() => setShowPrepay(true)}
-                  style={{ ...secondaryPill, marginTop: 16 }}
-                >
-                  Offer annual prepay
-                </button>
-              )}
-              {(recapEligible || showPrepayCta) && !completionResult?.followupSuggestion?.required && (
+              {recapEligible && !completionResult?.followupSuggestion?.required && (
                 <button
                   type="button"
                   onClick={() => onClose(true)}
@@ -11658,13 +11619,6 @@ export function CompletionPanel({
                 </div>
               )}
             </div>
-          )}
-          {showPrepay && (
-            <AnnualPrepayLauncher
-              customerId={service.customerId || service.customer_id}
-              onClose={() => setShowPrepay(false)}
-              onSaved={() => setShowPrepay(false)}
-            />
           )}
           {/* Sticky top bar — Square pattern: ← · centered title · ⋯ */}
           <div
@@ -13494,34 +13448,14 @@ export function CompletionPanel({
                 Report stored — customer delivery is off for this service type.
               </div>
             )}
-            {showPrepayCta && !completionResult?.followupSuggestion?.required && (
-              <div
-                style={{
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: 8,
-                  marginTop: 20,
-                  width: "100%",
-                  maxWidth: 360,
-                  padding: "0 24px",
-                  boxSizing: "border-box",
-                }}
+            {recapEligible && !completionResult?.followupSuggestion?.required && (
+              <button
+                type="button"
+                onClick={() => onClose(true)}
+                style={{ ...btnBase, width: "100%", maxWidth: 312, marginTop: 20, background: "transparent", color: D.text, border: `1px solid ${D.border}`, fontSize: 14 }}
               >
-                <button
-                  type="button"
-                  onClick={() => setShowPrepay(true)}
-                  style={{ ...btnBase, width: "100%", background: D.teal, color: "#fff", fontSize: 14 }}
-                >
-                  Offer annual prepay
-                </button>
-                <button
-                  type="button"
-                  onClick={() => onClose(true)}
-                  style={{ ...btnBase, width: "100%", background: "transparent", color: D.text, border: `1px solid ${D.border}`, fontSize: 14 }}
-                >
-                  Done
-                </button>
-              </div>
+                Done
+              </button>
             )}
             {completionResult?.followupSuggestion?.required && (
               <div
@@ -13573,13 +13507,6 @@ export function CompletionPanel({
               </div>
             )}
           </div>
-        )}
-        {showPrepay && (
-          <AnnualPrepayLauncher
-            customerId={service.customerId || service.customer_id}
-            onClose={() => setShowPrepay(false)}
-            onSaved={() => setShowPrepay(false)}
-          />
         )}
         {/* Header */}
         <div
