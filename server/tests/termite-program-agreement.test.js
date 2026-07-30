@@ -4,6 +4,7 @@
 // full render against the seeded template bodies proving every variable the
 // builder emits resolves (and the ruling-critical wording is present).
 const {
+  isCommercialEstimate,
   PURCHASE_TEMPLATE_KEY,
   RENTAL_TEMPLATE_KEY,
   START_DATE_FALLBACK,
@@ -14,6 +15,7 @@ const {
   systemLabelFor,
 } = require('../services/termite-program-agreement');
 const { DEFAULT_TEMPLATES } = require('../models/migrations/20260729000001_seed_termite_program_agreements');
+const { TEMPLATE_V2 } = require('../models/migrations/20260730000001_termite_program_agreements_v2');
 const {
   buildCustomerDocumentContext,
   renderDocumentTemplate,
@@ -334,6 +336,65 @@ describe('render against the seeded templates', () => {
     for (const seed of DEFAULT_TEMPLATES) {
       const used = [...new Set([...seed.body.matchAll(/\{\{\s*([a-z0-9_.]+)\s*\}\}/gi)].map((m) => m[1]))].sort();
       expect(used).toEqual([...seed.variables].sort());
+    }
+  });
+});
+
+describe('isCommercialEstimate', () => {
+  test('flags commercial inputs, property types, tier, and commercial service keys', () => {
+    expect(isCommercialEstimate({}, { inputs: { isCommercial: true } })).toBe(true);
+    expect(isCommercialEstimate({}, { inputs: { propertyType: 'Multifamily' } })).toBe(true);
+    expect(isCommercialEstimate({ waveguard_tier: 'Commercial' }, {})).toBe(true);
+    expect(isCommercialEstimate({}, { recurring: { services: [{ service: 'commercial_pest' }] } })).toBe(true);
+    expect(isCommercialEstimate({}, ownedEstData())).toBe(false);
+  });
+});
+
+describe('v2 templates (active version — owner-approved 2026-07-29)', () => {
+  const v2ByKey = Object.fromEntries(TEMPLATE_V2.map((t) => [t.template_key, t]));
+
+  function renderV2(prepared) {
+    const seed = v2ByKey[prepared.templateKey];
+    const context = buildCustomerDocumentContext(CUSTOMER, prepared.values);
+    return renderDocumentTemplate({
+      template: { template_key: seed.template_key, name: seed.title },
+      version: { title: seed.title, body: seed.body },
+      context,
+    });
+  }
+
+  test('purchase v2 resolves every variable and carries the 5E-14.105 load-bearing terms', () => {
+    const rendered = renderV2(buildTermiteProgramAgreementValues({}, ownedEstData()));
+    expect(rendered.unresolvedVariables).toEqual([]);
+    expect(rendered.body).toContain('DOES NOT COVER: DRYWOOD TERMITES');
+    expect(rendered.body).toContain('IT IS NOT A');
+    expect(rendered.body).toContain('WARRANTY OR BOND');
+    expect(rendered.body).toContain('Structural repair price under this agreement: NONE');
+    expect(rendered.body).toContain('60 days to correct the condition');
+    expect(rendered.body).toContain('TRANSFER TO A NEW OWNER');
+    expect(rendered.body).toContain('FDACS-13692');
+    expect(rendered.body).toContain('FDACS-13671');
+    expect(rendered.body).not.toMatch(/first year of (warranty )?coverage included/i);
+    expect(rendered.body).not.toContain('[OWNER/ATTORNEY DECISION');
+  });
+
+  test('rental v2 resolves every variable and carries the hardware + removal terms', () => {
+    const rendered = renderV2(buildTermiteProgramAgreementValues({}, rentedEstData()));
+    expect(rendered.unresolvedVariables).toEqual([]);
+    expect(rendered.body).toContain('remain the property of Waves Pest Control');
+    expect(rendered.body).toContain('NOT A PAYMENT PLAN');
+    expect(rendered.body).toContain('hardware replacement cost');
+    expect(rendered.body).toContain('Waves will retrieve its stations');
+    expect(rendered.body).toContain('TRANSFER TO A NEW OWNER');
+    expect(rendered.body).not.toContain('[OWNER/ATTORNEY DECISION');
+  });
+
+  test('v2 variable lists exactly match body usage (same merge fields as v1 — builder unchanged)', () => {
+    for (const seed of TEMPLATE_V2) {
+      const used = [...new Set([...seed.body.matchAll(/\{\{\s*([a-z0-9_.]+)\s*\}\}/gi)].map((m) => m[1]))].sort();
+      expect(used).toEqual([...seed.variables].sort());
+      const v1 = DEFAULT_TEMPLATES.find((t) => t.template_key === seed.template_key);
+      expect([...seed.variables].sort()).toEqual([...v1.variables].sort());
     }
   });
 });

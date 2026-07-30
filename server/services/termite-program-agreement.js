@@ -365,6 +365,24 @@ async function isAnnualPrepayAccept(estimate, billingTerm, conn = db) {
   }
 }
 
+// Commercial / multi-unit accepts never auto-draft: Florida gives them
+// different retreat windows (180 vs 90 days, Rule 5E-14.105), tenants add
+// business-interruption exposure, and the seeded residential wording
+// doesn't fit — they park for a manually tailored agreement, same posture
+// as annual prepay. Detection is deliberately broad (park = safe).
+function isCommercialEstimate(estimate = {}, estData = null) {
+  const data = estData || parseEstimateData(estimate.estimate_data) || {};
+  if (data?.inputs?.isCommercial === true || data?.engineInputs?.isCommercial === true) return true;
+  const propertyType = String(data?.inputs?.propertyType || data?.propertyType || '').toLowerCase();
+  if (/commercial|multi[- ]?family|multifamily/.test(propertyType)) return true;
+  if (String(estimate.waveguard_tier || '').toLowerCase() === 'commercial') return true;
+  try {
+    const txt = typeof estimate.estimate_data === 'string' ? estimate.estimate_data : JSON.stringify(data);
+    if (/"commercial_/.test(txt) || /commercial proposal/i.test(txt)) return true;
+  } catch { /* fall through */ }
+  return false;
+}
+
 // Create the draft agreement for an accepted termite estimate. Never throws
 // into the caller (acceptance must not fail because agreement prep did);
 // failures are retryable via reconcileTermiteProgramAgreements. Returns a
@@ -393,6 +411,18 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
     if (!facts.hasProgram) return { ok: true, skipped: 'no_termite_program' };
 
     const NotificationService = require('./notification-service');
+
+    if (isCommercialEstimate(estimate, estData)) {
+      if (notifyOnUnresolved) {
+        await ringAdminBell(NotificationService, [
+          'estimate',
+          'Termite agreement needs manual prep (commercial)',
+          `${estimate.customer_name || 'Customer'} accepted a commercial termite estimate — commercial and multi-unit structures need a tailored agreement (different statutory retreat windows, tenant considerations), so prepare it manually from the document library.`,
+          { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId } },
+        ], `manual-prep (commercial) for estimate ${estimate.id}`);
+      }
+      return { ok: false, skipped: 'commercial' };
+    }
 
     const prepay = await isAnnualPrepayAccept(estimate, billingTerm);
     if (prepay === 'error') return { ok: false, skipped: 'prepay_lookup_failed' };
@@ -642,6 +672,7 @@ async function reconcileTermiteProgramAgreements({ sinceDays = 21, limit = 25 } 
 }
 
 module.exports = {
+  isCommercialEstimate,
   PURCHASE_TEMPLATE_KEY,
   RENTAL_TEMPLATE_KEY,
   PROGRAM_TEMPLATE_KEYS,
