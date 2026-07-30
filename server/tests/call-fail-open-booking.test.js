@@ -237,6 +237,28 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     }
   });
 
+  test('an off-hour confirmed start (2:30 PM) is never demoted — windows start on the hour (P1)', () => {
+    const ex = agentCommitted();
+    ex.scheduling.confirmed_start_at = '2026-08-02T14:30:00-04:00';
+    const r = canAutoRoute(ex, opts());
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('a partially-labeled transcript (any unlabeled non-empty line) fails closed (P1)', () => {
+    const partial = TRANSCRIPT + '\nAnd we are all set for Sunday then.';
+    const r = canAutoRoute(agentCommitted(), opts({ transcript: partial }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('an agent-only-labeled transcript (no caller turns) fails closed (P1)', () => {
+    const agentOnly = ['Agent: Hello, you have reached Waves.', `Agent: ${AGENT_COMMIT_QUOTE}`].join('\n');
+    const r = canAutoRoute(agentCommitted(), opts({ transcript: agentOnly }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
   test('a trivially short quote ("sounds good") cannot ground a commitment', () => {
     const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: 'Sounds good' }), opts());
     expect(r.allowed).toBe(false);

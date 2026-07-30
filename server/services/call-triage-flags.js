@@ -369,27 +369,31 @@ function normalizeForGrounding(s) {
 // model output — untrusted; a hallucinated evidence entry must never clear a
 // hard block. So the quote must actually appear inside a single
 // "Agent:"-attributed turn of the labeled transcript we extracted from.
-// Fail closed: no transcript, an unlabeled transcript (no Agent:/Caller:
-// turn markers to ground against), or a quote found only in caller turns all
-// return false. The 12-char normalized minimum keeps trivial fillers
-// ("okay", "sounds good") from grounding a commitment claim. A quote the
-// model stitched across two turns fails per-turn containment — also closed,
-// also correct: the commitment sentence is a single agent utterance.
+// Fail closed: no transcript, a quote found only in caller turns, or ANY
+// speaker-attribution ambiguity. Labeling must be COMPLETE — every non-empty
+// line carries an Agent:/Caller: prefix, and both speakers appear (codex P1:
+// a partially-labeled transcript would otherwise let a third party's or the
+// caller's unlabeled line be attributed to the agent turn above it; and an
+// agent-only labeling is a one-sided call that cannot contain a two-party
+// commitment). A legitimately labeled multi-line turn fails this check —
+// conservative and accepted; the main transcription is one line per turn.
+// The 12-char normalized minimum keeps trivial fillers ("okay", "sounds
+// good") from grounding a commitment claim. A quote the model stitched
+// across two turns fails per-turn containment — also closed, also correct:
+// the commitment sentence is a single agent utterance.
 function agentQuoteGroundedInTranscript(quote, transcript) {
   const q = normalizeForGrounding(quote);
   if (!q || q.length < 12) return false;
   const agentTurns = [];
-  let speaker = null;
+  let sawCaller = false;
   for (const line of String(transcript || '').split(/\r?\n/)) {
+    if (!line.trim()) continue;
     const m = line.match(/^\s*(agent|caller)\s*:\s*(.*)$/i);
-    if (m) {
-      speaker = m[1].toLowerCase();
-      if (speaker === 'agent') agentTurns.push(m[2]);
-    } else if (speaker === 'agent' && line.trim()) {
-      agentTurns[agentTurns.length - 1] += ` ${line.trim()}`;
-    }
+    if (!m) return false;
+    if (m[1].toLowerCase() === 'agent') agentTurns.push(m[2]);
+    else sawCaller = true;
   }
-  if (!agentTurns.length) return false;
+  if (!agentTurns.length || !sawCaller) return false;
   return agentTurns.some((t) => normalizeForGrounding(t).includes(q));
 }
 
@@ -488,7 +492,15 @@ function canAutoRoute(extraction, opts = {}) {
   // account holder" card — book-and-flag, never book-and-hide. Every other
   // hard block (spam, out_of_service_area, do_not_contact) is untouched.
   // Independent of opts.failOpen so the two gates flip separately.
+  // On-the-hour guard (owner rule: appointment windows ALWAYS start on the
+  // hour — never :15/:30/:45). The extraction legitimately confirms times
+  // like 2:30 PM, and the booking path copies confirmed_start_at into
+  // window_start unchanged — so an off-hour agent commitment must NOT unlock
+  // the booking; it stays in triage for the office to place on an hour
+  // boundary (codex P1).
+  const commitStartMinute = String(extraction.scheduling?.confirmed_start_at || '').match(/T\d{2}:(\d{2})/);
   if (opts.agentCommitFailOpen && confirmedWithStart
+      && commitStartMinute && commitStartMinute[1] === '00'
       && extraction.scheduling?.agent_committed_booking === true
       && hasAgentCommittedEvidence(extraction, opts.transcript)) {
     appointmentBlockingFlags = appointmentBlockingFlags.filter((f) => {

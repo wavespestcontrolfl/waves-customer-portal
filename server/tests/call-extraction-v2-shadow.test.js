@@ -187,6 +187,11 @@ describe('schema version alignment', () => {
     expect(SCHEMA_VERSION).toBe('1.8.0');
   });
 
+  test('persisted schema_version enum accepts the current SCHEMA_VERSION (P1: a missing enum entry fail-closes every extraction)', () => {
+    const persistedSchema = require('../schemas/call-extraction.persisted.schema.json');
+    expect(persistedSchema.properties.meta.properties.schema_version.enum).toContain(SCHEMA_VERSION);
+  });
+
   test('prompt hash is deterministic', () => {
     const hash1 = PROMPT_HASH;
     const hash2 = PROMPT_HASH;
