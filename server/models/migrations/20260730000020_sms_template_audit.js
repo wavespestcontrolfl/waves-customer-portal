@@ -14,7 +14,6 @@
 //   3. Structure — paragraph breaks on dense prep guides, link-last on the
 //      worst offenders, card-hold policy line moved BEFORE the closing line
 //      on reminder_24h, standard "Hello {first_name}!" greeting.
-//   4. Stale variable metadata cleanup (declared-but-unused vars).
 //
 // Safety: a row whose body no longer matches the snapshot (admin edited it
 // after the audit) is NOT hand-swapped — it gets the mechanical passes only
@@ -56,18 +55,19 @@ function dropStop(body) {
     .replace(/[ \t]+\n/g, '\n')
     .trimEnd();
 }
+// STOP is dropped ONLY for keys explicitly audited as transactional — the
+// snapshot's changed keys minus the keep-list. An UNKNOWN key (a template or
+// variant created after the audit, possibly marketing) keeps its opt-out
+// line and gets typography normalization only (Codex #3080 P1: defaulting
+// unknown keys to "transactional" would strip a marketing template's
+// required disclosure).
+const DROP_STOP = new Set(TRANSFORMS.map((t) => t.key).filter((k) => !KEEP_STOP.has(k)));
+
 function mechanical(key, body) {
   let next = gsmNormalize(body);
-  if (!KEEP_STOP.has(key)) next = dropStop(next);
+  if (DROP_STOP.has(key)) next = dropStop(next);
   return next;
 }
-
-// Stale declared-but-unused variable metadata.
-const VARIABLE_CLEANUP = {
-  reminder_24h: ['reschedule_line'],
-  payment_failed: ['amount', 'card_last4'],
-  seasonal_reactivation: ['call_number'],
-};
 
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('sms_templates'))) return;
@@ -112,19 +112,6 @@ exports.up = async function up(knex) {
         await knex('sms_template_variants').where({ id: v.id }).update({ body: next, updated_at: new Date() });
       }
     }
-  }
-
-  // Stale variable metadata.
-  for (const [key, remove] of Object.entries(VARIABLE_CLEANUP)) {
-    const row = await knex('sms_templates').where({ template_key: key }).first('id', 'variables');
-    if (!row) continue;
-    try {
-      const list = Array.isArray(row.variables) ? row.variables : JSON.parse(row.variables || '[]');
-      const filtered = list.filter((v) => !remove.includes(v));
-      if (filtered.length !== list.length) {
-        await knex('sms_templates').where({ id: row.id }).update({ variables: JSON.stringify(filtered), updated_at: new Date() });
-      }
-    } catch { /* unparseable metadata — leave untouched */ }
   }
 
   // Legacy referral copy stored on referral_program_settings renders OUTSIDE
