@@ -259,16 +259,26 @@ async function p2OnlyMergeEligible(prNumber, headSha, deps = {}) {
   const parkedHead = String(state.parked_head_sha || '').trim().toLowerCase();
   const parkedOnThisHead = state.status === 'parked' && Boolean(parkedHead) && parkedHead === head;
 
-  // An UNSYNCED push of this head blocks unconditionally, whatever the park
-  // state says. This is a fact about the repository, not a verdict on a head, so
-  // unlike park_phase it deliberately survives a re-arm: the stale-'moved past'
-  // recovery clears the park, a later round can park PRE-push (round limit,
-  // no-change), and without this the bar would then see a pre-push park plus a
-  // last_push_sha matching the head and merge a commit whose portal row still
-  // holds the pre-fix body. Cleared only when a round completes its sync.
+  // ANY unfinished portal sync on this PR blocks, whatever the park state says
+  // and whichever head is under review. This is a fact about the repository, not
+  // a verdict on a head, so unlike park_phase it deliberately survives a re-arm:
+  // the stale-'moved past' recovery clears the park, a later round can park
+  // PRE-push (round limit, no-change), and without this the bar would see a
+  // pre-push park plus a last_push_sha matching the head and merge a commit
+  // whose portal row still holds the pre-fix body.
+  //
+  // NOT scoped to `=== head`, which was the first attempt: remediation pushes B,
+  // its sync fails, a human pushes descendant C. C CONTAINS B's content, so
+  // merging C ships the fix while blog_posts.content is still pre-B — and a later
+  // republish or social share rebuilds from that stale row. An ancestry check
+  // would be more precise, but it needs a GitHub compare call on the merge path,
+  // and this state means a push already failed to reconcile: extra network
+  // dependency is the wrong trade. Any pending sync holds until a round actually
+  // completes one, which is the case that should reach a human anyway (the
+  // scheduler lane has already disarmed its publishing claim by then).
   const syncPending = String(state.sync_pending_sha || '').trim().toLowerCase();
-  if (syncPending && syncPending === head) {
-    return { eligible: false, reason: `remediation push ${shortSha(syncPending)} has an unfinished portal sync (held for a human)` };
+  if (syncPending) {
+    return { eligible: false, reason: `remediation push ${shortSha(syncPending)} has an unfinished portal sync (held for a human${syncPending === head ? '' : '; it is an ancestor of the head under review'})` };
   }
 
   // A branch-mutating park on THIS head holds unconditionally — including when

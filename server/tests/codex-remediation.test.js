@@ -2636,7 +2636,10 @@ describe('sync_pending_sha survives re-arm and blocks the bar (codex P1)', () =>
     expect(r.eligible).toBe(true);
   });
 
-  test('a pending sync for a DIFFERENT (superseded) head does not block', async () => {
+  // A pending sync on an EARLIER push still blocks: a human's descendant push
+  // contains that commit's content, so merging it ships the fix while the portal
+  // row is still pre-fix and a later republish resurrects the stale body.
+  test('a pending sync on an earlier push blocks a descendant head too', async () => {
     const db = makeDb({
       codex_remediation_state: [{
         pr_number: 5, rounds: 1, status: 'remediating',
@@ -2644,7 +2647,9 @@ describe('sync_pending_sha survives re-arm and blocks the bar (codex P1)', () =>
       }],
     });
     const r = await rem.p2OnlyMergeEligible(5, HEAD, { db, gh: allP2() });
-    expect(r.eligible).toBe(true);
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toMatch(/unfinished portal sync/);
+    expect(r.reason).toMatch(/ancestor of the head under review/);
   });
 
   test('the push-time write stamps it, and only a completed sync clears it', async () => {
