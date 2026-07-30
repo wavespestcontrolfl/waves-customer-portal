@@ -3130,6 +3130,37 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // Returns {status, body} on rejection, null when valid; mutates the
     // typed* locals on success.
     const runTypedValidation = () => {
+      // Untyped completions render the same tech-entered copy on customer
+      // reports (observations feed the pest-pressure main-driver line,
+      // recommendations feed the recap, captions sit under photos) — the
+      // free-text fields must pass the same banned-copy policy as typed
+      // forms, or the untyped path becomes a compliance side door (codex
+      // pre-push P1 2026-07-30).
+      if (!typedFindingsType && !isIncompleteVisit) {
+        const untypedCopySources = [
+          ...(Array.isArray(observations) ? observations : []),
+          ...(Array.isArray(recommendations) ? recommendations : []),
+          ...(customerRecap ? [customerRecap] : []),
+          ...taggedCompletionNoteLines(technicianNotes, ['next']),
+          ...taggedCompletionNoteLines(technicianNotes, ['found']),
+          ...(Array.isArray(completionPhotos)
+            ? completionPhotos.map((p) => p?.caption).filter(Boolean)
+            : []),
+        ];
+        const untypedViolations = [...new Set(
+          untypedCopySources.flatMap((entry) => ActivityIndicators.findBannedCustomerCopy(entry)),
+        )];
+        if (untypedViolations.length) {
+          return {
+            status: 422,
+            body: {
+              error: `This completion contains wording we can't put on a customer report (${untypedViolations.join(', ')}). Describe what was observed and done today instead of absolute claims.`,
+              code: 'completion_banned_copy',
+              violations: untypedViolations,
+            },
+          };
+        }
+      }
       // Recap-only mode (the lightweight pest recap) has no findings, no
       // billing gate, and no snapshot — it must not be a side door around
       // the typed flow. Typed services complete through the full form only.
