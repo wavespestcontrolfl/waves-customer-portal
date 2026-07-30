@@ -351,6 +351,18 @@ async function activeProgramVersionIds(conn = db) {
   return new Set(rows.map((r) => r.active_version_id));
 }
 
+// Earliest publish time of the currently active versions — the rollout
+// moment. Requests that expired BEFORE it are ordinary historical expiries
+// (deliberately blockers in the main sweep), not rollout casualties.
+async function activeVersionRolloutStart(activeVersionIds, conn = db) {
+  if (!activeVersionIds?.size) return null;
+  const row = await conn('document_template_versions')
+    .whereIn('id', [...activeVersionIds])
+    .min({ published: 'published_at' })
+    .first();
+  return row?.published ? new Date(row.published) : null;
+}
+
 async function existingBlockingProgramAgreement(customerId, estimate, conn = db, activeVersionIds = null) {
   const rows = await openProgramAgreements(customerId, conn);
   const now = new Date();
@@ -765,12 +777,18 @@ async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
   // OPEN_STATUSES and blocked by the ordinary sweep's anti-join — without
   // this leg it would never receive its compliant replacement. Its token is
   // already dead, so it only needs the re-prep, not a cancel.
-  const expiredStale = await notReprocessed(db('customer_contracts')
+  // Bounded to expiries at-or-after the active-version rollout: a request
+  // that expired historically (weeks before the upgrade) was already a
+  // deliberate blocker in the ordinary sweep and must not be revived and
+  // autosent just because a newer template version exists.
+  const rolloutStart = await activeVersionRolloutStart(activeVersionIds);
+  const expiredStale = rolloutStart ? await notReprocessed(db('customer_contracts')
     .whereIn('document_template_key', PROGRAM_TEMPLATE_KEYS)
     .where('status', 'expired')
-    .whereNotIn('document_template_version_id', [...activeVersionIds]))
+    .whereNotIn('document_template_version_id', [...activeVersionIds])
+    .where('share_token_expires_at', '>=', rolloutStart))
     .select('id', 'customer_id', 'status', 'recipient_name', 'document_variables_snapshot')
-    .limit(limit);
+    .limit(limit) : [];
 
   const NotificationService = require('./notification-service');
   const seenEstimates = new Set();
@@ -932,16 +950,17 @@ async function reconcileTermiteProgramAgreements({ sinceDays = 21, limit = 25 } 
           .whereRaw('cc.customer_id = estimates.customer_id')
           .whereIn('cc.document_template_key', PROGRAM_TEMPLATE_KEYS)
           .whereRaw("cc.document_variables_snapshot->'estimate'->>'id' = estimates.id::text")
-          // ONLY compliance-superseded cancels bypass the exists-check (the
-          // estimate still needs a live agreement after a template-version
-          // retirement). Every other row blocks — a customer-declined or
+          // ONLY compliance-superseded cancels that the superseded pass has
+          // NOT yet handled bypass the exists-check (the estimate still
+          // needs a live agreement after a template-version retirement).
+          // Once handled (superseded_reprocessed stamped — replaced or
+          // parked with its bell), the row blocks again: without this, a
+          // permanently parked commercial/prepay estimate would be retried
+          // and counted failed by this sweep every day and eat the scan
+          // window. Every other row blocks — a customer-declined or
           // admin-cancelled request reflects an intentional decision, and
-          // re-creating (and with autosend, re-emailing) it would override
-          // that intent.
-          // COALESCE keeps NULL cancelled_reason rows as BLOCKERS — SQL
-          // three-valued logic would otherwise drop them from the anti-join
-          // and re-draft (and autosend) over a legacy cancellation.
-          .whereRaw("NOT (cc.status = 'cancelled' AND COALESCE(cc.cancelled_reason, '') LIKE 'Superseded by updated compliance wording%')");
+          // COALESCE keeps NULL cancelled_reason rows as blockers.
+          .whereRaw("NOT (cc.status = 'cancelled' AND COALESCE(cc.cancelled_reason, '') LIKE 'Superseded by updated compliance wording%' AND NOT EXISTS (SELECT 1 FROM customer_contract_events cce2 WHERE cce2.contract_id = cc.id AND cce2.event_type = 'superseded_reprocessed'))");
       })
       .orderBy('accepted_at', 'desc')
       .limit(PAGE_SIZE)
