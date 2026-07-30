@@ -269,6 +269,36 @@ describe('runContactsSync', () => {
     expect(state.updates.filter((u) => u.table === 'leads')).toEqual([]);
   });
 
+  test('a MISSING survivor never green-lights deleting the duplicate (the last remaining contact)', async () => {
+    setupDb({
+      leads: [{ id: 'l-1', first_name: 'Jane', email: 'jane@customer.example', phone: null, customer_id: 'c-1', google_contact_id: 'people/dup', updated_at: '2026-07-28T11:00:00Z' }],
+      firstResults: { customers: [{ id: 'c-1' }, { id: 'c-1', google_contact_id: 'people/cust' }, null], leads: [null] },
+    });
+    const gone = new Error('not found');
+    gone.code = 404;
+    mockPeopleApi.people.get
+      .mockResolvedValueOnce({ data: { etag: 'd', metadata: { sources: [] }, memberships: [], emailAddresses: [{ value: 'jane@customer.example' }] } })
+      .mockRejectedValueOnce(gone); // SURVIVOR fetch 404s
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(counts.failed).toBe(1);
+    expect(mockPeopleApi.people.deleteContact).not.toHaveBeenCalled();
+  });
+
+  test('a duplicate carrying UNMERGEABLE operator fields (notes/foreign clientData) is retained', async () => {
+    setupDb({
+      leads: [{ id: 'l-1', first_name: 'Jane', email: 'jane@customer.example', phone: null, customer_id: 'c-1', google_contact_id: 'people/dup', updated_at: '2026-07-28T11:00:00Z' }],
+      firstResults: { customers: [{ id: 'c-1' }, { id: 'c-1', google_contact_id: 'people/cust' }, null], leads: [null] },
+    });
+    mockPeopleApi.people.get.mockResolvedValueOnce({ data: {
+      etag: 'd', metadata: { sources: [] }, memberships: [],
+      biographies: [{ value: 'operator note: gate code 1234' }],
+    } });
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(counts.failed).toBe(1);
+    expect(mockPeopleApi.people.deleteContact).not.toHaveBeenCalled();
+    expect(mockPeopleApi.people.updateContact).not.toHaveBeenCalled();
+  });
+
   test('a repeat-inquiry lead ADOPTS the sibling lead contact instead of minting another', async () => {
     setupDb({
       leads: [{ id: 'l-2', first_name: 'Sam', email: 'sam@new.example', phone: '9415550101', customer_id: null, google_contact_id: null, updated_at: '2026-07-28T11:00:00Z' }],

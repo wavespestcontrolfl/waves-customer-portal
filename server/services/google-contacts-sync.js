@@ -576,16 +576,44 @@ async function upsertContact(people, table, row, kind, gapMs, { markerSearchKey 
 /**
  * Duplicate retirement WITHOUT losing operator-managed data: merge the
  * duplicate's emails/phones/addresses and group memberships into the
- * surviving contact, then delete it. If the merge cannot complete, the
- * duplicate is RETAINED (returns false) — a lingering duplicate is
- * recoverable on the next pass; deleted operator data is not.
+ * surviving contact, then delete it. Deletion is REFUSED (returns false,
+ * duplicate retained, row keeps pointing at it) when: the duplicate
+ * carries operator fields we cannot merge (notes, organizations,
+ * birthdays, URLs, events, relations, nicknames, custom fields, foreign
+ * clientData), the SURVIVOR is missing (deleting the duplicate would
+ * destroy the person's only remaining contact), or the merge write
+ * fails. A lingering duplicate is recoverable on the next pass; deleted
+ * operator data is not.
  */
+const UNMERGEABLE_FIELDS = ['organizations', 'biographies', 'birthdays', 'urls', 'events', 'relations', 'nicknames', 'userDefined', 'imClients', 'sipAddresses'];
+
 async function absorbDuplicate(people, dupId, survivorId, gapMs) {
+  let dup;
   try {
-    const dup = await people.people.get({
+    dup = await people.people.get({
       resourceName: dupId,
-      personFields: 'metadata,memberships,clientData,emailAddresses,phoneNumbers,addresses',
+      personFields: `metadata,memberships,clientData,emailAddresses,phoneNumbers,addresses,${UNMERGEABLE_FIELDS.join(',')}`,
     });
+  } catch (e) {
+    if (isScopeError(e) || isAuthError(e) || isServiceDisabledError(e)) throw e;
+    if (isGone(e)) {
+      // The DUPLICATE is already gone — nothing to preserve, nothing to
+      // delete. (Only a dup-side 404 may take this path: a missing
+      // SURVIVOR must never green-light deleting the last contact.)
+      await deleteContact(people, dupId);
+      return true;
+    }
+    logger.warn(`[contacts-sync] duplicate ${dupId} RETAINED — fetch failed: ${safeErr(e)}`);
+    return false;
+  }
+  const foreignClientData = (dup.data.clientData || []).some((c) => c.key !== 'waves_row');
+  const unmergeable = foreignClientData
+    || UNMERGEABLE_FIELDS.some((f) => Array.isArray(dup.data[f]) && dup.data[f].length > 0);
+  if (unmergeable) {
+    logger.warn(`[contacts-sync] duplicate ${dupId} RETAINED — carries operator fields the merge cannot preserve`);
+    return false;
+  }
+  try {
     const survivor = await people.people.get({
       resourceName: survivorId,
       personFields: 'metadata,memberships,clientData,emailAddresses,phoneNumbers,addresses',
@@ -607,11 +635,11 @@ async function absorbDuplicate(people, dupId, survivorId, gapMs) {
   } catch (e) {
     // Systemic failures keep their classification for the run-level abort.
     if (isScopeError(e) || isAuthError(e) || isServiceDisabledError(e)) throw e;
-    if (!isGone(e)) {
-      logger.warn(`[contacts-sync] duplicate ${dupId} RETAINED — operator-data merge into ${survivorId} failed: ${safeErr(e)}`);
-      return false;
-    }
-    // The duplicate (or survivor) is already gone — nothing to preserve.
+    // A missing survivor, a raced etag, or any other merge failure all
+    // RETAIN the duplicate — it may be the person's only surviving
+    // contact, and ownership re-resolves on the next pass either way.
+    logger.warn(`[contacts-sync] duplicate ${dupId} RETAINED — merge into ${survivorId} failed: ${safeErr(e)}`);
+    return false;
   }
   await deleteContact(people, dupId);
   return true;

@@ -25,12 +25,28 @@ exports.up = async function up(knex) {
   // account rows can hold obsolete identities that the sync would publish
   // as canonical. Reconcile each account from its most recently updated
   // LIVE customer; only rows that actually differ are touched.
+  // Per-field hygiene provenance: data-hygiene auto-apply DOES write
+  // account identity directly (data-hygiene/auto-apply.js,
+  // NORMALIZATION_TABLES.customer_account) and audits every apply with the
+  // specific field in metadata. An audited field keeps the ACCOUNT's value
+  // (a property row bumped later for unrelated reasons must never revert a
+  // hygiene fix); un-audited divergent fields still promote — an
+  // account-wide exclusion would let one old phone cleanup freeze an
+  // unrelated legacy name/email correction out of the backfill forever.
+  const auditedField = (f) => (hasAuditLog
+    ? `EXISTS (
+        SELECT 1 FROM audit_log al
+        WHERE al.action = 'data_hygiene.proposal.apply'
+          AND al.resource_type = 'customer_account'
+          AND al.resource_id = ca.id
+          AND al.metadata->>'field' = '${f}')`
+    : 'FALSE');
   await knex.raw(`
     UPDATE customer_accounts ca SET
-      first_name = c.first_name,
-      last_name  = c.last_name,
-      email      = c.email,
-      phone      = c.phone,
+      first_name = CASE WHEN ${auditedField('first_name')} THEN ca.first_name ELSE c.first_name END,
+      last_name  = CASE WHEN ${auditedField('last_name')} THEN ca.last_name ELSE c.last_name END,
+      email      = CASE WHEN ${auditedField('email')} THEN ca.email ELSE c.email END,
+      phone      = CASE WHEN ${auditedField('phone')} THEN ca.phone ELSE c.phone END,
       updated_at = now()
     FROM (
       -- Newest DIVERGENT copy per account: a sibling bumped later for
@@ -57,20 +73,15 @@ exports.up = async function up(knex) {
       -- (or requiring some sibling to still match the account) would skip
       -- precisely the rows this backfill exists to repair.
       AND c.updated_at >= ca.updated_at
-      ${hasAuditLog ? `
-      -- Field-specific provenance: data-hygiene auto-apply DOES write
-      -- account identity directly (data-hygiene/auto-apply.js,
-      -- NORMALIZATION_TABLES.customer_account) and audits every apply.
-      -- Any account with a recorded direct identity correction is
-      -- EXCLUDED wholesale — a property row bumped later for unrelated
-      -- reasons must never revert a hygiene fix. Un-audited accounts are
-      -- the pre-trigger legacy population this backfill targets.
-      AND NOT EXISTS (
-        SELECT 1 FROM audit_log al
-        WHERE al.action = 'data_hygiene.proposal.apply'
-          AND al.resource_type = 'customer_account'
-          AND al.resource_id = ca.id::text
-      )` : ''}
+      -- Only rows with at least one UN-audited divergent field — a no-op
+      -- update would still bump updated_at and needlessly requeue the
+      -- account's rows through the sync's staleness predicate.
+      AND (
+        (ca.first_name IS DISTINCT FROM c.first_name AND NOT ${auditedField('first_name')})
+        OR (ca.last_name IS DISTINCT FROM c.last_name AND NOT ${auditedField('last_name')})
+        OR (ca.email IS DISTINCT FROM c.email AND NOT ${auditedField('email')})
+        OR (ca.phone IS DISTINCT FROM c.phone AND NOT ${auditedField('phone')})
+      )
   `);
   await knex.raw(`
     CREATE OR REPLACE FUNCTION propagate_customer_identity_to_account() RETURNS trigger AS $$
