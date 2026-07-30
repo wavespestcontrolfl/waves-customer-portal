@@ -75,8 +75,47 @@ async function ensureCustomerGeocoded(customerId) {
   return result;
 }
 
+/**
+ * Backstop sweep: geocode customers whose create path left latitude/longitude
+ * NULL. Several booking/webhook create paths never call ensureCustomerGeocoded,
+ * and the paths that do fire-and-forget it, so a transient Google failure
+ * leaves the customer permanently coordinate-less — which silently drops
+ * their stops from route optimization. Newest customers first.
+ */
+async function sweepUngeocodedCustomers({ limit = 25 } = {}) {
+  const rows = await db('customers')
+    .whereNull('deleted_at')
+    .where(function () {
+      this.whereNull('latitude').orWhereNull('longitude');
+    })
+    .whereNotNull('address_line1')
+    .orderBy('created_at', 'desc')
+    .limit(limit)
+    .select('id');
+
+  const results = { checked: rows.length, geocoded: 0, unresolved: 0 };
+  for (const row of rows) {
+    try {
+      const geo = await ensureCustomerGeocoded(row.id);
+      if (geo) results.geocoded += 1;
+      else results.unresolved += 1;
+    } catch (err) {
+      results.unresolved += 1;
+      logger.error(`[geocoder] sweep failed for customer ${row.id}: ${err.message}`);
+    }
+  }
+  if (results.checked > 0) {
+    logger.info(
+      `[geocoder] backstop sweep: checked=${results.checked}, ` +
+      `geocoded=${results.geocoded}, unresolved=${results.unresolved}`,
+    );
+  }
+  return results;
+}
+
 module.exports = {
   geocodeAddress,
   ensureCustomerGeocoded,
   buildAddress,
+  sweepUngeocodedCustomers,
 };

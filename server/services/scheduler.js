@@ -451,6 +451,19 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // HOURLY :20 — geocode backstop. Several customer-create paths never call
+  // ensureCustomerGeocoded (and the ones that do swallow transient Google
+  // failures), leaving latitude/longitude NULL — which silently drops those
+  // stops from route optimization. Sweep fills any gap within the hour.
+  cron.schedule('20 * * * *', async () => {
+    try {
+      const { sweepUngeocodedCustomers } = require('./geocoder');
+      await sweepUngeocodedCustomers();
+    } catch (err) {
+      logger.error(`[geocoder] backstop sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // =========================================================================
   // DAILY 2:40AM — Knowledge-index sync (hybrid knowledge search, lane A2):
   // re-reads every corpus connector, upserts changed chunks, embeds pending
