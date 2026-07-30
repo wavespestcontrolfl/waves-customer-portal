@@ -2762,8 +2762,10 @@ export function LeadsSection() {
                                           fontSize: 13,
                                         }}
                                       />
-                                      <input
-                                        type="time"
+                                      {/* Windows start on the hour (owner rule) — an
+                                          hourly select, not a free time input; the
+                                          server rejects non-HH:00 anyway. */}
+                                      <select
                                         value={apptForm.time}
                                         onChange={(e) =>
                                           setApptForm((prev) => ({
@@ -2780,7 +2782,19 @@ export function LeadsSection() {
                                           color: C.text,
                                           fontSize: 13,
                                         }}
-                                      />
+                                      >
+                                        <option value="">Time…</option>
+                                        {Array.from({ length: 12 }, (_, i) => {
+                                          const h = i + 7; // 07:00–18:00
+                                          const value = `${String(h).padStart(2, "0")}:00`;
+                                          const label = `${((h + 11) % 12) + 1}:00 ${h < 12 ? "AM" : "PM"}`;
+                                          return (
+                                            <option key={value} value={value}>
+                                              {label}
+                                            </option>
+                                          );
+                                        })}
+                                      </select>
                                     </div>
                                     <div
                                       style={{
