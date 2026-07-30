@@ -368,9 +368,14 @@ function classifyExistingAgreement(row, estimate, now = new Date(), { activeVers
   // invariant rather than a one-shot migration snapshot: a request that
   // races past the migration is superseded on the next accept-time or
   // daily-sweep touch).
+  // A NULL version (FK ON DELETE SET NULL — the rendering version was
+  // deleted) can never be the active version: with active versions known,
+  // it is stale wording and must supersede, not block. An EMPTY active set
+  // means the templates themselves are unknown — treat staleness as
+  // unprovable rather than cancelling everything without replacements.
   const staleVersion = activeVersionIds
-    && row.document_template_version_id
-    && !activeVersionIds.has(row.document_template_version_id);
+    && activeVersionIds.size > 0
+    && !(row.document_template_version_id && activeVersionIds.has(row.document_template_version_id));
   if (staleVersion) return 'supersede';
   if (sameEstimate) return 'blocks';
   // Same or unprovable property, different estimate, current version: the
@@ -1036,7 +1041,10 @@ async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
   const staleOpen = await notReprocessed(db('customer_contracts')
     .whereIn('document_template_key', PROGRAM_TEMPLATE_KEYS)
     .whereIn('status', OPEN_STATUSES)
-    .whereNotIn('document_template_version_id', [...activeVersionIds]))
+    // NOT IN never matches NULL — a row whose rendering version was
+    // deleted (FK SET NULL) is stale wording and must be selected too.
+    .where((q) => q.whereNull('document_template_version_id')
+      .orWhereNotIn('document_template_version_id', [...activeVersionIds])))
     .select('id', 'customer_id', 'status', 'recipient_name', 'document_variables_snapshot', 'document_template_key', 'document_template_version_id', 'created_at')
     .limit(limit);
   const migrationCancelled = await notReprocessed(db('customer_contracts')
@@ -1063,7 +1071,8 @@ async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
     const rows = await notReprocessed(db('customer_contracts')
       .where('document_template_key', templateKey)
       .where('status', 'expired')
-      .whereNotIn('document_template_version_id', [...activeVersionIds])
+      .where((q) => q.whereNull('document_template_version_id')
+        .orWhereNotIn('document_template_version_id', [...activeVersionIds]))
       .where('share_token_expires_at', '>=', cutoff))
       .select('id', 'customer_id', 'status', 'recipient_name', 'document_variables_snapshot', 'document_template_key', 'document_template_version_id', 'created_at')
       .limit(limit);

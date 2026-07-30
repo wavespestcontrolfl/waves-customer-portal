@@ -434,7 +434,14 @@ exports.up = async function up(knex) {
     // Requests already rendered from the approved body (an admin-created
     // version the content lookup matched) were never superseded — their
     // signing links stay live.
-    .modify((q) => { if (seededVersionIds.length) q.whereNotIn('document_template_version_id', seededVersionIds); })
+    // NOT IN never matches NULL — a row whose rendering version was
+    // deleted (FK SET NULL) carries superseded wording and must cancel too.
+    .modify((q) => {
+      if (seededVersionIds.length) {
+        q.where((qq) => qq.whereNull('document_template_version_id')
+          .orWhereNotIn('document_template_version_id', seededVersionIds));
+      }
+    })
     // A token already dead when v2 activates needs no cancel: its link
     // 410s on its own and the delivery lifecycle will stamp the row
     // 'expired'. Cancelling it here would convert a pre-rollout expiry —
