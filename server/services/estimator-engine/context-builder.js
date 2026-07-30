@@ -94,8 +94,12 @@ async function loadCustomerByPhone(phone, extraction) {
 // existed by ~the time this call processed — a NEWER unrelated lead on a
 // shared/long-lived number must not supply the address or notification link.
 async function loadLeadForCall(call, phone, { phoneFallback = true } = {}) {
+  // twilio_call_sid is load-bearing for the foreign-call attribution guard
+  // below — omit it and every reused row reads as sid-less, silently
+  // skipping the concurrent-call check.
   const LEAD_COLS = ['id', 'first_name', 'last_name', 'phone', 'email', 'address', 'city', 'zip',
-    'service_interest', 'urgency', 'is_commercial', 'status', 'created_at', 'updated_at'];
+    'service_interest', 'urgency', 'is_commercial', 'status', 'created_at', 'updated_at',
+    'twilio_call_sid'];
   try {
     if (call?.twilio_call_sid) {
       const byCall = await db('leads')

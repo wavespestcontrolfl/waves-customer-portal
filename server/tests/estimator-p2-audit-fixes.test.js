@@ -26,8 +26,20 @@ jest.mock('../models/db', () => {
   const toTime = (v) => new Date(v).getTime();
   const makeBuilder = (table, rows) => {
     let filtered = rows.slice();
+    let projection = null;
+    const project = (r) => {
+      if (!r || !projection) return r;
+      // Honor .select() projections — a column the query never selected
+      // must come back undefined, exactly as it would from knex (this
+      // fidelity caught a real bug: a guard reading an unselected column).
+      return Object.fromEntries(projection.filter((c) => c in r).map((c) => [c, r[c]]));
+    };
     const builder = {
-      select() { return this; },
+      select(...cols) {
+        const flat = cols.flat().filter(Boolean);
+        if (flat.length) projection = flat;
+        return this;
+      },
       whereRaw() { return this; },
       whereNot(col, val) { filtered = filtered.filter((r) => r[col] !== val); return this; },
       whereNull(col) { filtered = filtered.filter((r) => r[col] == null); return this; },
@@ -69,8 +81,8 @@ jest.mock('../models/db', () => {
         return this;
       },
       limit() { return this; },
-      async first() { return filtered[0] || null; },
-      then(resolve, reject) { return Promise.resolve(filtered).then(resolve, reject); },
+      async first() { return project(filtered[0]) || null; },
+      then(resolve, reject) { return Promise.resolve(filtered.map(project)).then(resolve, reject); },
       catch() { return this; },
     };
     return builder;
