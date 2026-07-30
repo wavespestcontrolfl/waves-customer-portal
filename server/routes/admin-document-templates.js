@@ -404,7 +404,7 @@ router.post('/:key/contracts', async (req, res, next) => {
       // the v2 migration rollback. This generic issuance path must
       // serialize on the same key, or its insert can race a rollback's
       // replacement re-check and leave two live signing flows.
-      const { PROGRAM_TEMPLATE_KEYS } = require('../services/termite-program-agreement');
+      const { PROGRAM_TEMPLATE_KEYS, normalizeAddress } = require('../services/termite-program-agreement');
       if (PROGRAM_TEMPLATE_KEYS.includes(loaded.template.template_key)) {
         await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`termite-agreement:${customer.id}`]);
         // Revalidate AFTER the lock: this request may have waited behind
@@ -433,8 +433,17 @@ router.post('/:key/contracts', async (req, res, next) => {
           .whereIn('document_template_key', PROGRAM_TEMPLATE_KEYS)
           .whereIn('status', ['draft', 'sent', 'viewed'])
           .forUpdate()
-          .select('id');
+          .select('id', 'document_variables_snapshot');
+        const newAddress = normalizeAddress(context.customer?.address);
         for (const prior of openPrior) {
+          // Per-PROPERTY, mirroring classifyExistingAgreement: a provably
+          // different property's open request keeps its signing flow;
+          // unprovable addresses stay conservative (supersede — one live
+          // flow when properties can't be distinguished).
+          let ps = prior.document_variables_snapshot;
+          if (typeof ps === 'string') { try { ps = JSON.parse(ps); } catch { ps = null; } }
+          const priorAddress = normalizeAddress(ps?.estimate?.address || ps?.customer?.address);
+          if (priorAddress && newAddress && priorAddress !== newAddress) continue;
           const cancelled = await trx('customer_contracts')
             .where({ id: prior.id })
             .whereIn('status', ['draft', 'sent', 'viewed'])

@@ -1458,6 +1458,7 @@ module.exports = {
   collectTermiteFacts,
   estimateMayDiscount,
   maybeCreateTermiteProgramAgreement,
+  normalizeAddress,
   reconcileTermiteProgramAgreements,
   systemLabelFor,
 };
