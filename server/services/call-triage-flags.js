@@ -470,8 +470,20 @@ const COMMITMENT_OPENER_TOKENS = new Set([
   'so', 'ok', 'okay', 'alright', 'awesome', 'perfect', 'great', 'sounds',
   'good', 'yep', 'yes', 'and', 'then', 'all', 'right',
 ]);
+// Full head+predicate templates (codex P0, round 7f): a bare first-person
+// prefix accepted non-commitments ("we will NEED YOU TO CONFIRM…"). The
+// commitment PREDICATE is part of the template — anything after the subject
+// that isn't an explicit commitment verb phrase fails closed.
 const COMMITMENT_HEADS = [
-  'we ll ', 'we will ', 'i ll ', 'i will ', 'we re ', 'we are ',
+  'we ll see you ', 'we will see you ', 'i ll see you ', 'i will see you ',
+  'we ll confirm ', 'we will confirm ', 'i ll confirm ', 'i will confirm ',
+  'we ll be there ', 'we will be there ', 'we ll be out ', 'we will be out ',
+  'we ll come ', 'we will come ',
+  'we ll book you ', 'we will book you ',
+  'we ll get you on the schedule ', 'we will get you on the schedule ',
+  'we ll put you on the schedule ', 'we will put you on the schedule ',
+  'we ll have you down ', 'we will have you down ',
+  'we re confirmed', 'we are confirmed', 'we re on for ', 'we are on for ',
   'you re confirmed', 'you are confirmed', 'you re booked', 'you are booked',
   'you re all set', 'you are all set', 'you re on the schedule',
   'you are on the schedule', 'it s confirmed',
