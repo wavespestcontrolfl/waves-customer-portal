@@ -2784,10 +2784,13 @@ export function LeadsSection() {
                                         }}
                                       >
                                         <option value="">Time…</option>
-                                        {Array.from({ length: 12 }, (_, i) => {
-                                          const h = i + 7; // 07:00–18:00
+                                        {/* All 24 hours, mirroring the shared
+                                            CreateAppointmentModal's HOURLY_TIME_OPTIONS —
+                                            the endpoint accepts any HH:00. */}
+                                        {Array.from({ length: 24 }, (_, h) => {
                                           const value = `${String(h).padStart(2, "0")}:00`;
-                                          const label = `${((h + 11) % 12) + 1}:00 ${h < 12 ? "AM" : "PM"}`;
+                                          const hour12 = h % 12 || 12;
+                                          const label = `${hour12}:00 ${h >= 12 ? "PM" : "AM"}`;
                                           return (
                                             <option key={value} value={value}>
                                               {label}
