@@ -1447,29 +1447,23 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
     // the re-review request actually landed (recovers from a failed
     // createIssueComment on a prior tick); then wait.
     if (state.status === 'remediating') {
-      // Durable recovery for a hold whose sync completed but whose release write
-      // failed. A real-SHA hold has no age-based reconciliation, so without this a
-      // lost release would block every merge path forever on already-synced
-      // content. Both lanes' syncs are idempotent (they mirror the CURRENT body /
-      // payload), so re-running one is safe; only do it when the hold names the
-      // head under review, i.e. the content in hand is what owes the sync.
+      // NO sync replay here, deliberately. A real-SHA hold on a 'remediating' row
+      // is ambiguous: it can mean the release write failed after a COMPLETED sync,
+      // or that the process died after the push bookkeeping and BEFORE the sync ran
+      // at all. Replaying blindly cannot tell those apart — the earlier attempt at
+      // one had to pass datesRestamped:false and an empty frontmatterChanges (so
+      // scheduler rows kept stale meta/hero/date columns) and, for autonomous PRs
+      // where slug is null, resolved no markdown yet still cleared the hold. That
+      // turned a safe stalled merge into a silent stale-content publish.
+      //
+      // So the hold stands until a real round syncs and clears it. releaseSyncHold's
+      // bounded retry absorbs the transient blip this was meant to cover; a
+      // sustained failure leaves the hold for a human, which blocks a merge rather
+      // than shipping unreconciled content. Logged at warn so it is visible rather
+      // than mysterious.
       const pendingSha = String(state.sync_pending_sha || '').trim().toLowerCase();
-      if (pendingSha && pendingSha === String(headSha || '').trim().toLowerCase()) {
-        try {
-          if (typeof onRemediated === 'function') {
-            const file = await gh.getFile(pickTargetPath([], slug) || ASTRO_BLOG_DIR, branch);
-            const markdown = file && file.content ? file.content : null;
-            if (markdown) {
-              const body = String((fm.parse(markdown) || {}).content || '').trim();
-              await onRemediated({ markdown, body, newHead: headSha, round: state.rounds || 0, datesRestamped: false, frontmatterChanges: {} });
-            }
-          }
-          if (await releaseSyncHold(db, prNumber, headSha, 2)) {
-            logger.info(`[codex-remediation] re-ran the post-commit sync and released a stuck hold on PR #${prNumber} head ${shortSha(headSha)}`);
-          }
-        } catch (e) {
-          logger.warn(`[codex-remediation] could not re-run the post-commit sync for PR #${prNumber}: ${e.message} — the hold stands`);
-        }
+      if (pendingSha) {
+        logger.warn(`[codex-remediation] PR #${prNumber} still holds an unfinished portal sync (${pendingSha === SYNC_PENDING_PUSH_IN_FLIGHT ? 'push in flight' : shortSha(pendingSha)}) while awaiting re-review — merges stay blocked until a round completes the sync, or clear it by hand after reconciling the portal row`);
       }
       const issueComments = await gh.listIssueComments(prNumber);
       if (!reviewRequestedForHead(issueComments, headSha)) {

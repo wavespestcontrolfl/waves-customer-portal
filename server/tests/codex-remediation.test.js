@@ -3132,3 +3132,40 @@ describe('armPushHold preserves an existing sync hold', () => {
     expect(db._tables.codex_remediation_state.find((x) => x.pr_number === 5).sync_pending_sha).toBeNull();
   });
 });
+
+// A real-SHA hold on a 'remediating' row is AMBIGUOUS: the release write may have
+// failed after a completed sync, or the process may have died before the sync ran at
+// all. The recovery branch must not guess — a blind replay cleared the hold while
+// syncing nothing (autonomous PRs resolve no markdown) and dropped the metadata
+// delta, turning a safe stalled merge into a silent stale-content publish.
+describe('the awaiting-re-review branch never clears a sync hold', () => {
+  test('a held row is left held, and the review request still goes out', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const db = makeDb({
+      codex_remediation_state: [{
+        pr_number: 5, rounds: 1, status: 'remediating',
+        last_push_sha: HEAD, sync_pending_sha: HEAD,
+      }],
+    });
+    // No findings for the head → the recovery branch runs.
+    const gh = makeGh({ reviewComments: [], issueComments: [] });
+    const onRemediated = jest.fn();
+    const r = await runRemediationForPr({ ...CTX, onRemediated }, {
+      db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS,
+    });
+    expect(r.skipped).toBe(true);
+    expect(onRemediated).not.toHaveBeenCalled();          // no blind replay
+    expect(gh._calls.putFile).toHaveLength(0);            // nothing pushed
+    expect(db._tables.codex_remediation_state.find((x) => x.pr_number === 5).sync_pending_sha).toBe(HEAD);
+  });
+
+  test('the hold keeps blocking the merge gate while it stands', async () => {
+    const db = makeDb({
+      codex_remediation_state: [{
+        pr_number: 5, rounds: 1, status: 'remediating', last_push_sha: HEAD, sync_pending_sha: HEAD,
+      }],
+    });
+    const h = await rem.syncPendingHold(5, { db, headSha: HEAD, branch: 'content/blog-x' });
+    expect(h.pending).toBe(true);
+  });
+});
