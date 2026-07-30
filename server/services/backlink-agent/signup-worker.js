@@ -42,8 +42,11 @@ const PROFILE = {
   tagline: 'Family-Owned Pest Control & Lawn Care in Southwest Florida',
   location: 'Bradenton, FL',
   category: 'Pest Control',
-  logoUrl: process.env.BACKLINK_LOGO_URL || 'https://wavespestcontrol.com/wp-content/uploads/2024/01/waves-pest-control-logo.png',
-  screenshotUrl: process.env.BACKLINK_SCREENSHOT_URL || 'https://wavespestcontrol.com/wp-content/uploads/2024/01/waves-homepage-screenshot.png',
+  // The wp-content paths died with the WordPress → Astro migration —
+  // getLogoPath() 404s on them, so every directory signup silently ran
+  // without a logo. Point the defaults at live Astro hub assets.
+  logoUrl: process.env.BACKLINK_LOGO_URL || 'https://www.wavespestcontrol.com/images/brand/waves-logo.png',
+  screenshotUrl: process.env.BACKLINK_SCREENSHOT_URL || 'https://www.wavespestcontrol.com/images/brand/waves-og.png',
   generatePassword() {
     return crypto.randomBytes(12).toString('base64url').slice(0, 16) + '!A1';
   },
