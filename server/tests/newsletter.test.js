@@ -1800,16 +1800,25 @@ describe('uniform event treatment (owner direction 2026-07-29 v2: consistent ful
     expect(html.match(/kicker/g)).toHaveLength(5);
   });
 
-  test('TOC: fold-out with a bare read-time summary; entries are REAL event names only', async () => {
+  test('TOC: centered fold-out, bare read-time summary; witty entries that never give the events away', async () => {
     const html = await assembleBeehiivNewsletter(draft());
     expect(html).toContain('<details>');
     expect(html).toContain('~5-minute read');
+    expect(html).toMatch(/<summary[^>]*text-align:center/);
     expect(html).not.toContain('weekend pick');
     expect(html).not.toContain('North Port to Tampa');
-    expect(html).not.toContain('tap for the list');
-    expect(html).toContain('<strong>Official Event 0</strong>');
-    // No trailing curiosity-title text after the name.
-    expect(html).not.toMatch(/Official Event 0<\/strong><\/a> <em/);
+    // Curiosity titles tease; official names NEVER appear in the list
+    // (owner 2026-07-30 — supersedes the real-names directive).
+    expect(html).toMatch(/<a href="#evt-curiosity-title-0"[^>]*>🎸 <strong>Curiosity Title 0<\/strong><\/a>/);
+    expect(html).not.toMatch(/<li[^>]*>[^<]*<a[^>]*>[^<]*<strong>Official Event 0/);
+  });
+
+  test('no wave-divider squiggle in the flagship; all event visuals share one size cap', async () => {
+    const html = await assembleBeehiivNewsletter(draft());
+    expect(html).not.toContain('waves-divider');
+    // GIF fallback carries the same 280px cap as still photos.
+    const withArt = await assembleBeehiivNewsletter({ selectedSubject: 'T', events: [mk(1, { imageUrl: 'https://cdn.example.com/a.jpg' })] });
+    expect(withArt).toMatch(/<img src="https:\/\/cdn\.example\.com\/a\.jpg"[^>]*max-height:280px/);
   });
 
   test('TOC links target real anchors: <a name> + matching h2 id per event', async () => {
@@ -1975,7 +1984,7 @@ describe('newsletter greeting personalization + render polish', () => {
     expect(plainBulletText('Sit-down meal at a Cortez staple')).toBe('Sit-down meal at a Cortez staple');
   });
 
-  test('assembly: 22px greeting carries the name token; divider renders at 48px', async () => {
+  test('assembly: 22px greeting carries the name token; flagship has no divider squiggle', async () => {
     const html = await assembleBeehiivNewsletter({
       selectedSubject: 'Test',
       greeting: 'Hey there!',
@@ -1987,7 +1996,7 @@ describe('newsletter greeting personalization + render polish', () => {
     });
     expect(html).toContain(`Hey there${GREETING_NAME_TOKEN}!`);
     expect(html).toMatch(/font-size:22px[^>]*>👋/);
-    expect(html).toContain('width="48"');
+    expect(html).not.toContain('waves-divider');
     expect(html).not.toContain('width="100"');
   });
 

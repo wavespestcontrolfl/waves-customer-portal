@@ -1868,3 +1868,9 @@ Proof emails gain an INTERNAL diagnostics panel above the recipient preview (lin
 Everything else from the day's hardening stands: image-first visuals, pair-verified price sentinels, evclick-bound text exemptions, structured plain text, geo labels, unlinked dividers, forward-only share, web-version permalink.
 
 **Verification.** Rendering-contract suite updated deliberately (2-theme palette snapshot, blue/gold rotation, appBadgeCount back to 2, dark-mode layer test, logo-block assertion); newsletter suite's tiered describe replaced with uniform expectations. All suites green.
+
+## 2026-07-30 — Owner style polish on the [FINAL] preview (feat/newsletter-style-polish)
+
+**Owner directives (2026-07-30).** Six adjustments to the uniform format: (1) the "~5-minute read" fold-out summary centers below the hero image; (2) the wave-divider squiggle is retired from the flagship (plain vertical spacing separates cards; Pest Insider keeps its dividers); (3) the Homeowner Minute paragraph carries the explicit body font; (4) ALL event visuals — reaction GIFs and still photos — share one size cap (280px max-height, aspect-fit); (5) the scripted rain/roach Homeowner Minute guidance is scrapped — the prompt now varies the topic weekly with a single factual guard (never imply weather causes an indoor infestation); (6) **TOC entries are a TEASE again** — witty curiosity titles only, never official event names ("dont give away the events" — supersedes the 07-29 real-names directive; official names still lead each card and the description's inline ticket link).
+
+**Verification.** newsletter + contract + compact + proof + event-clicks suites green (390); TOC-tease, no-squiggle, and uniform-visual-cap assertions added.
