@@ -517,8 +517,8 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
   // Claim fence (Codex #3084 r27): every hold write below lands only while
   // this callback still owns the row's claim — a delay past the stale-claim
   // window hands reclaimed rows (sends AND settles) to the sweep.
-  const holdClaims = pendingConfirmation.heldNewsletterHoldClaims || {};
-  const { ownsClaim, fencedHoldWrite } = require('./lead-first-touch-resume');
+  const holdClaims = { ...(pendingConfirmation.heldNewsletterHoldClaims || {}) };
+  const { renewClaim, fencedHoldWrite } = require('./lead-first-touch-resume');
   const fenceOf = (holdId) => holdClaims[holdId] || null;
   // The captured payload can be SUPERSEDED before this callback runs
   // (Codex #3084 r18): a second correction committed in the gap rotates the
@@ -639,18 +639,26 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
       return false;
     }
   }
-  // Fence filter before anything irreversible (Codex #3084 r27): keep only
-  // holds this callback still owns; when every fenced hold was reclaimed,
-  // the sweep's own release owns the send too (and the group's skipDedupe
-  // semantics would otherwise double-mail past the dedupe guard).
-  let liveHoldIds = holdIds;
+  // Lease renewal before anything irreversible (Codex #3084 r27, CAS since
+  // r28 — a read-only check races the sweep's reclaim). The re-sent DOI is
+  // shared across the WHOLE deduped group, so ONE reclaimed sibling
+  // abandons the send (r28): its reclaimer may already have re-sent this
+  // exact pending confirmation, and this path sends directly — no dedupe
+  // guard would catch the duplicate. Holds still owned re-pend (fenced,
+  // deny-preserving) so the sweep retries promptly under the resume path's
+  // dedupe guard.
   if (holdIds.length && Object.keys(holdClaims).length) {
-    liveHoldIds = [];
+    let anyLost = false;
     for (const holdId of holdIds) {
-      if (await ownsClaim(holdId, fenceOf(holdId), conn)) liveHoldIds.push(holdId);
+      const stamp = fenceOf(holdId);
+      if (!stamp) continue; // legacy stamp-less payload — unfenced
+      const renewed = await renewClaim(holdId, stamp, conn);
+      if (renewed) holdClaims[holdId] = renewed;
+      else anyLost = true;
     }
-    if (!liveHoldIds.length) {
-      logger.info(`[email-fanout] DOI re-send claims lost to a reclaim for subscriber ${pendingConfirmation.id} — abandoning send`);
+    if (anyLost) {
+      logger.info(`[email-fanout] DOI re-send claim(s) lost to a reclaim for subscriber ${pendingConfirmation.id} — abandoning the group send`);
+      await repenHolds('claim_lost');
       return false;
     }
   }
@@ -747,7 +755,7 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
   // re-checks for work merged during the claim (Step 8 adding held_drip
   // mid-callback) exactly like the resume paths (Codex #3084 r19).
   const { repenIfWorkMergedDuringClaim } = require('./lead-first-touch-resume');
-  for (const holdId of liveHoldIds) {
+  for (const holdId of holdIds) {
     try {
       const hold = await conn('first_touch_holds').where({ id: holdId }).first('held_drip', 'released_drip');
       const dripSettled = !hold || !hold.held_drip || hold.released_drip;

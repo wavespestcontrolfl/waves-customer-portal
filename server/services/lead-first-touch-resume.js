@@ -105,20 +105,26 @@ async function claimHold(hold, dbh) {
   return claimed > 0 ? stamp : null;
 }
 
-// Read-side fence check before an irreversible side effect (Codex #3084
-// r27). Fail-closed: an unverifiable claim state reports NOT owned — the
-// worst case of a false negative is a skipped send the sweep retries,
-// while a false positive is a duplicate DOI. Callers without a stamp
-// (payloads built before the fence shipped) keep the pre-fence behavior.
-async function ownsClaim(holdId, claimStamp, dbh) {
-  if (!claimStamp) return true;
+// Atomic lease RENEWAL before an irreversible side effect (Codex #3084
+// r28): a read-only ownership check races the sweep — it can report owned
+// immediately before the sweep's conditional reclaim lands, and both
+// workers would send. The CAS bumps updated_at only while the old stamp
+// still matches; success returns the NEW stamp (the caller's fence from
+// here on) and, as a side effect, restarts the stale-claim window so the
+// sweep cannot reclaim mid-send. Zero rows or an error = lost/unverifiable
+// → null (fail-closed: worst case a skipped send the sweep retries, never
+// a duplicate DOI). Requires a stamp — legacy stamp-less payloads never
+// call this.
+async function renewClaim(holdId, claimStamp, dbh) {
   try {
-    const row = await dbh('first_touch_holds').where({ id: holdId }).first('status', 'updated_at');
-    return !!row && String(row.status) === 'releasing'
-      && +new Date(row.updated_at) === +new Date(claimStamp);
-  } catch (fenceErr) {
-    logger.warn(`[first-touch-resume] claim fence check failed: ${fenceErr.code || fenceErr.name || 'db_error'} — treating claim as lost`);
-    return false;
+    const stamp = new Date();
+    const renewed = await dbh('first_touch_holds')
+      .where({ id: holdId, status: 'releasing', updated_at: new Date(claimStamp) })
+      .update({ updated_at: stamp });
+    return renewed > 0 ? stamp : null;
+  } catch (renewErr) {
+    logger.warn(`[first-touch-resume] claim lease renewal failed: ${renewErr.code || renewErr.name || 'db_error'} — treating claim as lost`);
+    return null;
   }
 }
 
@@ -362,7 +368,7 @@ async function resumeHeldFirstTouch({
     if (!holds.length) return { ...result, newsletterResume: null, skipped: 'no_pending_hold' };
 
     for (const hold of holds) {
-      const claimStamp = await claimHold(hold, dbh);
+      let claimStamp = await claimHold(hold, dbh);
       if (!claimStamp) continue; // another release path owns it
       inFlightHoldId = hold.id;
       claimStamps.set(hold.id, claimStamp);
@@ -558,7 +564,31 @@ async function resumeHeldFirstTouch({
             // B's own enrollment sweep sees the committed insert — both
             // orders converge. A throw lands in the enroll catch below
             // (re-pend, retryable).
-            const postEnroll = await dbh('first_touch_holds').where({ id: hold.id }).first('held_email');
+            const postEnroll = await dbh('first_touch_holds').where({ id: hold.id })
+              .first('held_email', 'last_error', 'status', 'updated_at');
+            // A deny stamped while enrollCustomer ran invalidates the lease
+            // but preserves the target (Codex #3084 r28) — a target-only
+            // comparison would leave the fresh, immediately-due enrollment
+            // mailing the address the operator just rejected. Cancel it
+            // (guarded on our write) and walk away with the stamp intact.
+            if (postEnroll?.last_error === 'email_denied_await_correction') {
+              await dbh('automation_enrollments')
+                .where({ id: enroll.enrollmentId, status: 'active' })
+                .whereRaw('LOWER(email) = ?', [sendEmail])
+                .update({ status: 'cancelled', updated_at: new Date() });
+              result.skipped = result.skipped || 'email_denied';
+              continue;
+            }
+            // Fence lost WITHOUT a deny = the sweep reclaimed mid-enroll
+            // (r28): the reclaimer's own enrollCustomer hits already-
+            // enrolled and the r21 CAS keeps the enrollment converging —
+            // leave it and abandon the hold untouched.
+            if (!postEnroll || String(postEnroll.status) !== 'releasing'
+                || +new Date(postEnroll.updated_at) !== +claimStamp) {
+              logger.info('[first-touch-resume] claim lost during enroll — abandoning hold untouched');
+              result.skipped = result.skipped || 'claim_lost';
+              continue;
+            }
             const postTargetLc = String(postEnroll?.held_email || '').trim().toLowerCase();
             if (postTargetLc !== sendEmail) {
               await dbh('automation_enrollments')
@@ -611,18 +641,24 @@ async function resumeHeldFirstTouch({
           // undelivered (re-pends below) and log only a sanitized code (a
           // unique-violation message can echo the subscriber email),
           // Codex #3084 r10.
-          // Fence re-check immediately before the DOI (Codex #3084 r27):
+          // Lease renewal immediately before the DOI (Codex #3084 r27,
+          // CAS since r28 — a read-only check races the sweep's reclaim):
           // the enroll above can be slow, and this claim's snapshot may
           // carry the skipDedupe marker — a worker that lost the row to
           // the sweep's reclaim would bypass the dedupe guard and send a
-          // SECOND confirmation. A lost claim walks away; the drip work
-          // already done is recorded by the reclaimer's own release (the
-          // enroll is idempotent by template+customer).
-          if (!(await ownsClaim(hold.id, claimStamp, dbh))) {
+          // SECOND confirmation. The atomic bump also restarts the
+          // stale-claim window, so the sweep cannot reclaim mid-send. A
+          // lost lease walks away; the drip work already done is recorded
+          // by the reclaimer's own release (the enroll is idempotent by
+          // template+customer).
+          const renewedStamp = await renewClaim(hold.id, claimStamp, dbh);
+          if (!renewedStamp) {
             logger.info('[first-touch-resume] claim lost before DOI send — abandoning hold untouched');
             result.skipped = result.skipped || 'claim_lost';
             continue;
           }
+          claimStamp = renewedStamp;
+          claimStamps.set(hold.id, renewedStamp);
           let outcome = null;
           try {
             outcome = await runNewsletterResume({
@@ -871,26 +907,39 @@ async function runOnePostCommitResume(payload, holdIds, dbh, claims = new Map())
       logger.info('[first-touch-resume] post-commit target suppressed — hold(s) stay pending');
       return { skipped: 'email_suppressed' };
     }
-    // Fence check immediately before the send (Codex #3084 r27): a
-    // callback delayed past the stale-claim window lost its rows to the
-    // sweep's reclaim, whose own release owns the send — and the group's
-    // skipDedupe marker would bypass the dedupe guard and double-mail.
-    // Only holds this callback still owns are settled below; when every
-    // fenced hold is lost, there is nothing left that is ours to send.
-    let liveHoldIds = holdIds;
+    // Lease renewal immediately before the send (Codex #3084 r27, CAS
+    // since r28): a callback delayed past the stale-claim window lost its
+    // rows to the sweep's reclaim, whose own release owns the send — and
+    // the group's skipDedupe marker would bypass the dedupe guard and
+    // double-mail. The send is shared across the WHOLE group, so ONE
+    // reclaimed sibling abandons it (r28): the reclaimer may already have
+    // sent this exact DOI, and a partial group proceeding would mail it
+    // again. Holds still owned re-pend (fenced, deny-preserving) so the
+    // sweep retries them promptly under the dedupe guard.
     if (holdIds.length && claims.size) {
-      liveHoldIds = [];
+      let anyLost = false;
       for (const holdId of holdIds) {
-        if (await ownsClaim(holdId, fenceOf(holdId), dbh)) liveHoldIds.push(holdId);
+        const stamp = fenceOf(holdId);
+        if (!stamp) continue; // legacy stamp-less payload — unfenced
+        const renewed = await renewClaim(holdId, stamp, dbh);
+        if (renewed) claims.set(holdId, renewed);
+        else anyLost = true;
       }
-      if (!liveHoldIds.length) {
-        logger.info('[first-touch-resume] post-commit claim(s) lost to a reclaim — abandoning send');
+      if (anyLost) {
+        logger.info('[first-touch-resume] post-commit claim(s) lost to a reclaim — abandoning the group send');
+        for (const holdId of holdIds) {
+          try {
+            await repenHoldPreservingDeny(holdId, 'claim_lost', dbh, fenceOf(holdId));
+          } catch (repenErr) {
+            logger.warn(`[first-touch-resume] hold ${holdId} re-pend failed: ${repenErr.code || repenErr.name || 'db_error'} (stale-claim window will reclaim)`);
+          }
+        }
         return { skipped: 'claim_lost' };
       }
     }
     const outcome = await runNewsletterResume(sendPayload, dbh, { skipDedupe: holdWasDoiUnconfirmed });
     const sentEmailLc = String(sendPayload.email || '').trim().toLowerCase();
-    for (const holdId of liveHoldIds) {
+    for (const holdId of holdIds) {
       if (newsletterDelivered(outcome)) {
         const hold = await dbh('first_touch_holds').where({ id: holdId }).first('held_drip', 'released_drip');
         const dripSettled = !hold || !hold.held_drip || hold.released_drip;
@@ -1161,8 +1210,9 @@ module.exports = {
   customerCallDoNotContact,
   emailSuppressedForNewLead,
   sendFailedMarkerFor,
-  // Claim-fence primitives (Codex #3084 r27) — the fanout's coalesced
-  // resend holds claims too and must honor the same lease.
-  ownsClaim,
+  // Claim-fence primitives (Codex #3084 r27, CAS renewal since r28) — the
+  // fanout's coalesced resend holds claims too and must honor the same
+  // lease.
+  renewClaim,
   fencedHoldWrite,
 };

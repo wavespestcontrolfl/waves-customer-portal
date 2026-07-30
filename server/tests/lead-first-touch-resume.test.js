@@ -32,6 +32,7 @@ let mockRepenGuardZeroTimes = 0; // next N guarded re-pends match 0 rows (deny s
 let mockEnrollmentUpdates = []; // automation_enrollments update() patches
 let mockClaimStampById = {}; // claim fence stamps recorded per hold id (r27)
 let mockClaimLost = false; // fence reads report the claim as reclaimed (r27)
+let mockRenewLostIds = new Set(); // per-hold lease-renewal refusals (r28)
 jest.mock('../models/db', () => {
   const handler = (table) => {
     let markerFilter = false; // this chain filters on the resend marker
@@ -76,6 +77,15 @@ jest.mock('../models/db', () => {
           if (patch.status === 'releasing' && patch.updated_at && whereId != null) {
             mockClaimStampById[whereId] = patch.updated_at;
           }
+          // Lease renewal (r28): the CAS bump is the only updated_at-only
+          // write. Refuse when the claim was reclaimed; otherwise record
+          // the fresh stamp — it is NOT a settle, so it never lands in
+          // mockHoldUpdates.
+          if (patch.updated_at && Object.keys(patch).length === 1) {
+            if (mockClaimLost || mockRenewLostIds.has(whereId)) return 0;
+            if (whereId != null) mockClaimStampById[whereId] = patch.updated_at;
+            return 1;
+          }
           if (patch.status === 'released' && mockReleasedSettleZeroOnce) {
             mockReleasedSettleZeroOnce = false;
             return 0; // conditional settle: target no longer matches
@@ -105,13 +115,6 @@ jest.mock('../models/db', () => {
           if (markerFilter) {
             if (mockDoiMarkerError) throw mockDoiMarkerError;
             return mockDoiMarkerRow;
-          }
-          // ownsClaim's fence read (r27) — status+updated_at only. Echo the
-          // recorded claim stamp so a live claim verifies; mockClaimLost
-          // simulates the sweep's reclaim.
-          if (cols.length === 2 && cols[0] === 'status') {
-            if (mockClaimLost) return { status: 'pending', updated_at: new Date(0) };
-            return { status: 'releasing', updated_at: mockClaimStampById[whereId] };
           }
           if (mockHoldFirstQueue && mockHoldFirstQueue.length) {
             const next = mockHoldFirstQueue.shift();
@@ -225,6 +228,7 @@ beforeEach(() => {
   mockEnrollmentUpdates = [];
   mockClaimStampById = {};
   mockClaimLost = false;
+  mockRenewLostIds = new Set();
 });
 
 // The merge's held_email is a bound CASE since r20 (an ACTIVE claim's target
@@ -398,6 +402,45 @@ describe('resumeHeldFirstTouch (ledger release engine)', () => {
     const outcome = await resumeHeldNewsletterPostCommit(res.newsletterResume);
     expect(outcome).toEqual([{ skipped: 'claim_lost' }]);
     expect(mockNewsletter).not.toHaveBeenCalled();
+  });
+
+  test('one reclaimed sibling abandons the whole coalesced post-commit send', async () => {
+    // The DOI is shared across the group: a sibling lost to the sweep's
+    // reclaim means the reclaimer may already own that exact send, and the
+    // group's skipDedupe marker could bypass the dedupe guard — one lost
+    // lease abandons the send and re-pends the still-owned siblings for
+    // the sweep's guarded retry (Codex #3084 r28).
+    mockHolds = [
+      baseHold({ id: 'hold-1', held_drip: false }),
+      baseHold({ id: 'hold-2', call_log_id: 'call-2', held_drip: false }),
+    ];
+    const res = await resumeHeldFirstTouch({ customerId: 'cust-1', email: 'corrected@example.com', deferNewsletter: true });
+    expect(res.newsletterResume).toHaveLength(2);
+    mockRenewLostIds.add('hold-2');
+    const outcome = await resumeHeldNewsletterPostCommit(res.newsletterResume);
+    expect(outcome).toEqual([{ skipped: 'claim_lost' }]);
+    expect(mockNewsletter).not.toHaveBeenCalled();
+    const repens = mockHoldUpdates.filter((u) => u.last_error === 'claim_lost');
+    expect(repens.length).toBeGreaterThanOrEqual(1); // owned sibling re-pends (lost one is fenced out in prod)
+  });
+
+  test('a deny stamped during enrollCustomer cancels the fresh zero-delay enrollment', async () => {
+    // The denial intentionally invalidates the lease but preserves the
+    // target, so a target-only comparison would leave the newly created,
+    // immediately-due enrollment mailing the address the operator just
+    // rejected (Codex #3084 r28) — the post-enroll recheck reads the deny
+    // state too and cancels before the drip is marked released.
+    mockEnroll.mockResolvedValueOnce({ enrolled: true, enrollmentId: 'enr-new' });
+    mockHold = baseHold({ held_newsletter: false });
+    mockHoldFirstQueue = [
+      { held_email: 'confirmed@example.com', last_error: null }, // pre-send re-read
+      { held_email: 'confirmed@example.com', last_error: 'email_denied_await_correction' }, // post-enroll recheck
+    ];
+    const res = await resumeHeldFirstTouch({ callLogId: 'call-1' });
+    expect(res.skipped).toBe('email_denied');
+    expect(mockEnrollmentUpdates).toHaveLength(1);
+    expect(mockEnrollmentUpdates[0]).toMatchObject({ status: 'cancelled' });
+    expect(mockHoldUpdates).toHaveLength(1); // the claim only — the stamp survives untouched
   });
 
   test('a mid-loop failure re-pends EVERY outstanding deferred claim, not just the in-flight one', async () => {
