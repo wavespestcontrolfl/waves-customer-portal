@@ -525,13 +525,20 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
   try {
     const current = await conn('newsletter_subscribers')
       .where({ id: pendingConfirmation.id })
-      .first('email', 'confirmation_token', 'customer_id');
+      .first('email', 'confirmation_token', 'customer_id', 'status');
     subscriberCustomerId = current?.customer_id || null;
     const emailMatches = String(current?.email || '').trim().toLowerCase()
       === String(pendingConfirmation.email || '').trim().toLowerCase();
     const tokenMatches = String(current?.confirmation_token || '')
       === String(pendingConfirmation.confirmation_token || '');
-    if (!current || !emailMatches || !tokenMatches) {
+    // Only a still-PENDING subscriber gets a re-sent confirmation (Codex
+    // #3084 r24): an admin unsubscribe landing after the edit committed is
+    // an explicit opt-out, and this send deliberately bypasses SendGrid
+    // suppressions. The re-pended holds retry through runNewsletterResume,
+    // whose subscribe helper honors the unsubscribed state and settles
+    // without sending.
+    const stillPending = String(current?.status || '') === 'pending';
+    if (!current || !emailMatches || !tokenMatches || !stillPending) {
       logger.info(`[email-fanout] DOI re-send superseded for subscriber ${pendingConfirmation.id} — stale payload skipped`);
       await repenHolds('target_verify_failed');
       return false;
@@ -604,7 +611,13 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
   let stampMatched = true;
   try {
     const stamped = await conn('newsletter_subscribers')
-      .where({ id: pendingConfirmation.id, confirmation_token: pendingConfirmation.confirmation_token })
+      .where({
+        id: pendingConfirmation.id,
+        confirmation_token: pendingConfirmation.confirmation_token,
+        // Status rides the settle predicate too (Codex #3084 r24): an
+        // unsubscribe landing mid-send must not be stamped as delivered.
+        status: 'pending',
+      })
       .whereRaw('LOWER(email) = ?', [String(pendingConfirmation.email || '').trim().toLowerCase()])
       .update({ confirmation_sent_at: new Date(), updated_at: new Date() });
     stampMatched = stamped > 0;

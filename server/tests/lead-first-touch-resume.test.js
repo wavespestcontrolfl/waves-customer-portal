@@ -631,6 +631,22 @@ describe('mid-send races (r19)', () => {
     expect(last.held_email).toBeUndefined();
   });
 
+  test('the merged-work re-pend never buries a mid-settle deny stamp', async () => {
+    // Step 8 merges work during the claim AND a deny stamps between the
+    // released settle and the merged-work re-pend (Codex #3084 r24): the
+    // guarded write refuses and the fallback re-pends without a marker.
+    mockHold = baseHold({ held_newsletter: false });
+    mockHoldFirstQueue = [
+      baseHold({ held_newsletter: false }), // pre-send target re-read
+      { status: 'released', held_drip: true, released_drip: false, held_newsletter: true, released_newsletter: false }, // merged-work re-read
+    ];
+    mockRepenGuardZeroTimes = 1;
+    await resumeHeldFirstTouch({ callLogId: 'call-1' });
+    const last = mockHoldUpdates.at(-1);
+    expect(last).toMatchObject({ status: 'pending' });
+    expect(last.last_error).toBeUndefined();
+  });
+
   test('a failed pre-send re-read never buries a freshly-landed deny stamp', async () => {
     // The re-read failed, so deny state is unknown — the guarded re-pend
     // matches 0 rows (a deny stamp landed since the claim) and the recovery

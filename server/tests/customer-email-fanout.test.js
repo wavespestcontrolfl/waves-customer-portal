@@ -498,7 +498,7 @@ describe('resendPendingConfirmation', () => {
   // r18): the payload email/token must still match the row or the send is
   // skipped as superseded.
   const matchRow = (payload) => ({
-    newsletter_subscribers: { firstQueue: [{ email: payload.email, confirmation_token: payload.confirmation_token }] },
+    newsletter_subscribers: { firstQueue: [{ email: payload.email, confirmation_token: payload.confirmation_token, status: 'pending' }] },
   });
 
   test('sends to the corrected address and stamps confirmation_sent_at', async () => {
@@ -593,7 +593,7 @@ describe('resendPendingConfirmation', () => {
     const sendsBefore = sendConfirmationEmail.mock.calls.length;
     const payload = { id: 811, email: 'samtypo@example.com', confirmation_token: 'tok-1', heldNewsletterHoldIds: ['hold-1'] };
     const conn = makeConn({
-      newsletter_subscribers: { firstQueue: [{ email: payload.email, confirmation_token: payload.confirmation_token, customer_id: 'cust-1' }] },
+      newsletter_subscribers: { firstQueue: [{ email: payload.email, confirmation_token: payload.confirmation_token, customer_id: 'cust-1', status: 'pending' }] },
     });
     const ok = await resendPendingConfirmation(payload, conn);
     expect(ok).toBe(false);
@@ -620,7 +620,7 @@ describe('resendPendingConfirmation', () => {
     const payload = { id: 811, email: 'samtypo@example.com', confirmation_token: 'tok-1', heldNewsletterHoldIds: ['hold-1'] };
     const conn = makeConn({
       newsletter_subscribers: {
-        firstQueue: [{ email: payload.email, confirmation_token: payload.confirmation_token }],
+        firstQueue: [{ email: payload.email, confirmation_token: payload.confirmation_token, status: 'pending' }],
         updateCount: 0,
       },
     });
@@ -630,6 +630,23 @@ describe('resendPendingConfirmation', () => {
     expect(holdUpdates).toHaveLength(1);
     expect(holdUpdates[0].arg).toMatchObject({ status: 'pending', last_error: 'target_verify_failed' });
     expect(holdUpdates[0].arg.released_newsletter).toBeUndefined();
+  });
+
+  test('an unsubscribed row is never re-confirmed by the coalesced resend', async () => {
+    // An admin unsubscribe landing after the edit committed is an explicit
+    // opt-out — this send bypasses SendGrid suppressions, so the verify
+    // (and the delivered-stamp) require status='pending' (Codex #3084
+    // r24). The re-pended holds retry through the subscribe helper, which
+    // honors the unsubscribed state.
+    const sendsBefore = sendConfirmationEmail.mock.calls.length;
+    const payload = { id: 811, email: 'samtypo@example.com', confirmation_token: 'tok-1', heldNewsletterHoldIds: ['hold-1'] };
+    const conn = makeConn({
+      newsletter_subscribers: { firstQueue: [{ email: payload.email, confirmation_token: payload.confirmation_token, status: 'unsubscribed' }] },
+    });
+    const ok = await resendPendingConfirmation(payload, conn);
+    expect(ok).toBe(false);
+    expect(sendConfirmationEmail.mock.calls.length).toBe(sendsBefore);
+    expect(conn.__updates('first_touch_holds')[0].arg).toMatchObject({ status: 'pending', last_error: 'target_verify_failed' });
   });
 
   test('a released settle re-checks for drip work merged during the callback', async () => {

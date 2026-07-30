@@ -6041,13 +6041,14 @@ const CallRecordingProcessor = {
           createdCustomerFromCall = true;
           logger.info(`[call-proc] Created customer ${customerId} from call recording`);
 
-          // Durable call-creation provenance (Codex #3084 r23): the retry
-          // rebuild keys on THIS marker, not timestamps — a customer someone
-          // else created between the call row and the first attempt would
-          // pass a created_at comparison and get wrongly auto-subscribed.
-          // Best-effort: a missing marker means no rebuild (conservative —
-          // never a wrong subscribe), and the extraction-retry loop
-          // re-attempts the stamp with the rest of the run.
+          // Call-creation provenance (Codex #3084 r23): the retry rebuild
+          // keys on THIS marker, not timestamps — a customer someone else
+          // created between the call row and the first attempt would pass
+          // a created_at comparison and get wrongly auto-subscribed. This
+          // early copy is best-effort; the marker also rides the durable
+          // customer-link update later in the run (r24), so any state
+          // where customer_id persisted carries the marker. A missing
+          // marker means no rebuild (never a wrong subscribe).
           await db('call_log').where({ id: call.id }).update({
             metadata: db.raw(
               "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{created_customer_id}', ?::jsonb, true)",
@@ -6493,6 +6494,17 @@ const CallRecordingProcessor = {
     let finalStatus = (customerExpected && !customerLanded) ? 'customer_creation_failed' : 'processed';
     await db('call_log').where({ id: call.id }).update({
       customer_id: customerId || call.customer_id,
+      // Call-creation provenance rides the SAME durable write that links
+      // the customer (Codex #3084 r24): customer_id persisted ⇒ marker
+      // persisted, so a recovery run can never see a call-created customer
+      // whose newsletter rebuild marker is missing. (The creation-time
+      // stamp above is a best-effort early copy for mid-run readers.)
+      ...(createdCustomerFromCall && customerId ? {
+        metadata: db.raw(
+          "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{created_customer_id}', ?::jsonb, true)",
+          [JSON.stringify(String(customerId))],
+        ),
+      } : {}),
       ai_extraction: JSON.stringify(extracted),
       call_summary: extracted.call_summary || null,
       sentiment: extracted.sentiment || null,

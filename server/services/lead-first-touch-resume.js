@@ -133,8 +133,11 @@ async function repenIfWorkMergedDuringClaim(holdId, dbh) {
     .first('held_drip', 'released_drip', 'held_newsletter', 'released_newsletter', 'status');
   if (fresh && fresh.status === 'released'
       && ((fresh.held_drip && !fresh.released_drip) || (fresh.held_newsletter && !fresh.released_newsletter))) {
-    await dbh('first_touch_holds').where({ id: holdId })
-      .update({ status: 'pending', last_error: 'work_merged_during_release', updated_at: new Date() });
+    // Deny-preserving (Codex #3084 r24): a deny stamping between the
+    // released settle and this re-pend must not be replaced by the
+    // merged-work marker — the sweep excludes only the exact deny marker
+    // and would otherwise release the merged work to the rejected address.
+    await repenHoldPreservingDeny(holdId, 'work_merged_during_release', dbh);
   }
 }
 
