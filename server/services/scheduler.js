@@ -2012,7 +2012,10 @@ function initScheduledJobs() {
                   // but only when the body actually reads as an ack, so a
                   // stale "your balance is $X" can never re-authorize via
                   // the payment row (r10).
-                  const ackBody = /\b(received|processed|went through|thank(?:s| you))\b/i.test(String(msg.message_body || ''));
+                  // "payment" must appear NEAR the ack verb (Codex r12) — a
+                  // generic "Thanks for reaching out — your balance is $X"
+                  // must not unlock payment-history amounts.
+                  const ackBody = /\b(?:received|processed|went through)\b[^.\n]{0,30}\bpayment\b|\bpayment\b[^.\n]{0,30}\b(?:received|processed|went through)\b|\bthank(?:s| you)\b[^.\n]{0,25}\bpayment\b/i.test(String(msg.message_body || ''));
                   const authorized = new Set([
                     ctx?.billing?.outstandingBalance > 0 ? cents(ctx.billing.outstandingBalance) : null,
                     ctx?.billing?.openInvoice?.amountDue != null ? cents(ctx.billing.openInvoice.amountDue) : null,

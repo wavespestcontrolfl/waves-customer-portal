@@ -26,6 +26,11 @@ describe('redactAccessCodes — deterministic code masking', () => {
     expect(redactAccessCodes('close the gate so the dog stays in')).toContain('dog stays in');
   });
 
+  test('CVV/CVC values mask (codex r12)', () => {
+    expect(redactAccessCodes('my CVV is 123 on the visa')).not.toMatch(/\b123\b/);
+    expect(redactAccessCodes('security code 4321')).not.toContain('4321');
+  });
+
   test('reverse multiword + password nouns + structured identifiers (codex r11)', () => {
     expect(redactAccessCodes('four five four five is the gate code')).not.toMatch(/four|five/);
     expect(redactAccessCodes('waves is the gate password')).not.toContain('waves');

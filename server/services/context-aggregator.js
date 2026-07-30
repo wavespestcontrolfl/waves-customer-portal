@@ -61,11 +61,13 @@ const ACCESS_CODE_STOPWORDS = new Set(['gate', 'garage', 'door', 'lockbox', 'loc
 const SSN_DASHED_RE = /\b\d{3}[- ]\d{2}[- ]\d{4}\b/g;
 const SSN_KEYWORD_RE = /\b(ssn|social(?:\s+security)?(?:\s+number)?)\b([^.\n]{0,20}?)\b(\d[\d- ]{7,13}\d)\b/gi;
 const CARD_NUMBER_RE = /\b(?:\d[ -]?){12,19}\b/g;
+const CVV_RE = /\b(cvv2?|cvc|security\s+code|card\s+code)\b([^.\n]{0,15}?)\b(\d{3,4})\b/gi;
 function redactSensitiveIdentifiers(text) {
   return String(text || '')
     .replace(SSN_DASHED_RE, '[redacted]')
     .replace(SSN_KEYWORD_RE, (m, kw, mid) => `${kw}${mid}[redacted]`)
-    .replace(CARD_NUMBER_RE, (m) => (m.replace(/[^\d]/g, '').length >= 12 ? '[redacted]' : m));
+    .replace(CARD_NUMBER_RE, (m) => (m.replace(/[^\d]/g, '').length >= 12 ? '[redacted]' : m))
+    .replace(CVV_RE, (m, kw, mid) => `${kw}${mid}[redacted]`);
 }
 
 function redactAccessCodes(text) {
@@ -208,7 +210,9 @@ class ContextAggregator {
         .where({ confirmed_by_tech: true })
         .orderBy('service_date', 'asc')
         .select('service_date', 'turf_density', 'weed_suppression', 'fungus_control', 'thatch_level', 'color_health', 'overall_score', 'stress_damage')
-        .catch(() => []),
+        // FAIL CLOSED (Codex r12): a query failure must not read as "no
+        // assessments on file" — null renders a visible unavailable.
+        .catch(() => null),
       // v10: the card on file (designated autopay card first). Brand + last4
       // only — never a full number anywhere in this system.
       db('payment_methods').where({ customer_id: customer.id })
@@ -223,7 +227,12 @@ class ContextAggregator {
         // would resurrect it.
         .orderBy([{ column: 'is_default', order: 'desc' }, { column: 'created_at', order: 'desc' }])
         .first('card_brand', 'last_four', 'exp_month', 'exp_year', 'autopay_enabled', 'is_default', 'method_type')
-        .catch(() => null),
+        // FAIL CLOSED (Codex r12): customerOnAutopay swallows DB errors into
+        // "no chargeable method" → false — a transient payment_methods
+        // failure would render "Autopay: not active" as fact. Our own query
+        // hits the same table; an error sentinel here forces the UNKNOWN
+        // autopay rendering below.
+        .catch(() => 'unavailable'),
     ]);
 
     const lastService = serviceHistory[0] || null;
@@ -277,7 +286,9 @@ class ContextAggregator {
     // isPaused are the same predicates the customer autopay endpoint serves.
     // Fail-closed: an eligibility error renders the state UNKNOWN, never on.
     let autopayState = null;
+    const paymentMethodsUnavailable = cardOnFile === 'unavailable';
     try {
+      if (paymentMethodsUnavailable) throw new Error('payment_methods unreadable — autopay state unknowable');
       const paused = isPaused(customer);
       // next_charge_date is only real for the monthly-membership lane
       // (Codex r9, customer-autopay canon): per-application / prepay /
@@ -365,7 +376,7 @@ class ContextAggregator {
         // v10: payment method on file — brand/bank + last4 only, never a
         // full number. ACH methods store bank last4 with a null card_brand
         // (Codex r2) — label them a bank account, never "card".
-        cardOnFile: cardOnFile && cardOnFile.last_four ? {
+        cardOnFile: cardOnFile && cardOnFile !== 'unavailable' && cardOnFile.last_four ? {
           type: String(cardOnFile.method_type || '').toLowerCase().includes('bank') || String(cardOnFile.method_type || '').toLowerCase().includes('ach') || (!cardOnFile.card_brand && cardOnFile.method_type) ? 'bank' : 'card',
           brand: cardOnFile.card_brand || null,
           last4: cardOnFile.last_four,
@@ -380,6 +391,7 @@ class ContextAggregator {
       // v10: lawn health — latest vs baseline, same scoring the AI-number
       // assistant's get_lawn_health tool reports.
       lawnHealth: (() => {
+        if (lawnAssessments === null) return { unavailable: true };
         const rows = (lawnAssessments || []).filter((r) => r && r.service_date);
         if (!rows.length) return null;
         // Only the four technician-confirmed categories (Codex r5): fungus/

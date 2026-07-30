@@ -197,16 +197,20 @@ describe('createExamRun — guards and stamps', () => {
   test('stamps the RUNNING drafter version and defaults the baseline to the latest complete different-version same-leg run', async () => {
     const dbi = makeRunnerDb({
       runs: [
-        { id: 'r-old', status: 'complete', provider_leg: 'anthropic', prompt_version: 'house_voice_v8' },
-        { id: 'r-other-leg', status: 'complete', provider_leg: 'openai', prompt_version: 'house_voice_v8' },
-        { id: 'r-same-version', status: 'complete', provider_leg: 'anthropic', prompt_version: 'house_voice_v9_test' },
+        // model must MATCH the leg's current model (codex r12) — a
+        // different-model prior is not a valid baseline
+        { id: 'r-old-other-model', status: 'complete', provider_leg: 'anthropic', prompt_version: 'house_voice_v8', model: 'claude-old-model' },
+        { id: 'r-old', status: 'complete', provider_leg: 'anthropic', prompt_version: 'house_voice_v8', model: 'claude-sonnet-5' },
+        { id: 'r-other-leg', status: 'complete', provider_leg: 'openai', prompt_version: 'house_voice_v8', model: 'gpt-5.6-sol' },
+        { id: 'r-same-version', status: 'complete', provider_leg: 'anthropic', prompt_version: 'house_voice_v9_test', model: 'claude-sonnet-5' },
       ],
       items: [item('i1'), item('i2')],
     });
     const run = await sealedEval.createExamRun({ providerLeg: 'anthropic', dbi });
     expect(run.prompt_version).toBe('house_voice_v9_test'); // from the drafter, never a caller param
     expect(run.items_total).toBe(2);
-    expect(run.baseline_run_id).toBe('r-old'); // same leg, different version
+    expect(run.baseline_run_id).toBe('r-old'); // same leg, different version, SAME model
+    expect(run.model).toBe('claude-sonnet-5'); // runs stamp their drafting model (codex r12)
     expect(run.status).toBe('running');
     expect(run.voice_profile_version).toBeNull(); // effective profile = none in the default mock
   });

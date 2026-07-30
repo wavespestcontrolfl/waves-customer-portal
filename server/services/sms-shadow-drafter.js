@@ -358,7 +358,9 @@ function buildFactsBlock(context) {
 
   // v10: lawn health — latest vs baseline, one line (only when assessed).
   const lawn = context.lawnHealth;
-  const lawnLine = lawn && lawn.latest
+  const lawnLine = lawn && lawn.unavailable
+    ? "records unavailable right now — defer lawn-score questions and say you'll confirm"
+    : lawn && lawn.latest
     ? `overall ${lawn.latest.overall ?? '?'} as of ${formatEtDate(lawn.latest.date)} (baseline ${lawn.baseline?.overall ?? '?'} on ${formatEtDate(lawn.baseline?.date)}; turf ${lawn.latest.turfDensity ?? '?'}, weeds ${lawn.latest.weedSuppression ?? '?'}, color ${lawn.latest.colorHealth ?? '?'}, stress ${lawn.latest.stressDamage ?? '?'})`
     : null;
 

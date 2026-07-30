@@ -634,6 +634,12 @@ describe('v10 — full-account grounding', () => {
     expect(block).toContain('ants near the lanai');
   });
 
+  test('unavailable lawn records render a visible unknown, never "No assessments" (codex r12)', () => {
+    const block = buildFactsBlock({ summary: 'X', lawnHealth: { unavailable: true } });
+    expect(block).toContain('records unavailable right now');
+    expect(block).not.toContain('No assessments on file');
+  });
+
   test('unavailable billing renders a VISIBLE unknown, never "Balance: Current" (codex r11)', () => {
     const block = buildFactsBlock({ summary: 'X', billing: { unavailable: true, outstandingBalance: 0, recentPayments: [] } });
     expect(block).toContain('Billing records are unavailable right now');

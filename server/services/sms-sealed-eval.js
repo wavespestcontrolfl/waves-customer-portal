@@ -458,8 +458,12 @@ async function createExamRun({ providerLeg, baselineRunId, triggeredBy = 'manual
     }
     baseline = base.id;
   } else {
+    // Same LEG and same MODEL (Codex r12): a leg's model can change (Luna →
+    // Sol), and comparing across models would attribute the swap to the
+    // prompt. No same-model prior → no default baseline, which is honest —
+    // the first run under a new model IS the new baseline.
     const prior = await dbi('sms_sealed_eval_runs')
-      .where({ provider_leg: providerLeg, status: 'complete' })
+      .where({ provider_leg: providerLeg, status: 'complete', model: EXAM_LEG_ROUTES[providerLeg].model })
       .whereNot('prompt_version', drafter.PROMPT_VERSION)
       .orderBy('started_at', 'desc')
       .first('id');
@@ -492,6 +496,7 @@ async function createExamRun({ providerLeg, baselineRunId, triggeredBy = 'manual
         items_total: Number(activeCount),
         baseline_run_id: baseline,
         voice_profile_version: effectiveProfile?.version ?? null,
+        model: EXAM_LEG_ROUTES[providerLeg].model,
         triggered_by: String(triggeredBy || 'manual').slice(0, 100),
       })
       .returning('*');
