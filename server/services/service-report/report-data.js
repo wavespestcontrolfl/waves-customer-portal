@@ -2225,7 +2225,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     });
   }
 
-  // LAWN honesty pass (Harris audit 2026-07-30), mirroring the pest pass
+  // LAWN honesty pass (owner report audit 2026-07-30), mirroring the pest pass
   // above but keyed on treatment evidence: a "No lawn issues observed" row
   // (persisted at closeout OR the render-time fallback just above) must not
   // sit on the same page as a visit that applied corrective product classes

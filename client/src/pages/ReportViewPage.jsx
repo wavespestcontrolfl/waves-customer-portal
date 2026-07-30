@@ -782,7 +782,7 @@ function dynamicHeroSummary(data) {
   return 'Your routine service is complete.';
 }
 
-function conditionRows(conditions = {}, { weeklyRainIn = null } = {}) {
+function conditionRows(conditions = {}, { weeklyRainIn = null, weeklyRainSource = null } = {}) {
   // Lawn reports show the week's rain (the number the water card and 7-day
   // chart are built from) so every rain figure on the page agrees; other
   // lines keep the trailing-24h capture (owner 2026-07-30).
@@ -790,11 +790,13 @@ function conditionRows(conditions = {}, { weeklyRainIn = null } = {}) {
   const rainRow = usingWeeklyRain
     ? ['Rain this week', weeklyRainIn, ' in']
     : ['Rain last 24 hr', conditions.rain_24h_in, ' in'];
-  // The weekly rain figure is always the Open-Meteo property-week series —
-  // when the point capture came from another provider (FAWN), the Source row
-  // must credit both (codex P2 #3093).
-  const sourceValue = usingWeeklyRain && conditions.source && !/open-meteo/i.test(String(conditions.source))
-    ? `${conditions.source} + Open-Meteo`
+  // Credit the weekly figure's ACTUAL provider when it differs from the
+  // point-capture source — the property-week series is Open-Meteo, but the
+  // area-snapshot fallback's rainfall is local area records, not Open-Meteo
+  // (codex P2 #3093 ×2).
+  const sourceValue = usingWeeklyRain && weeklyRainSource && conditions.source
+      && !String(conditions.source).toLowerCase().includes(String(weeklyRainSource).toLowerCase())
+    ? `${conditions.source} + ${weeklyRainSource}`
     : conditions.source;
   const rows = [
     ['Air temp', conditions.temp_f ?? conditions.temp, '°F'],
@@ -1972,6 +1974,7 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
           weatherCall={data.dynamicContext?.premiumExperience?.weatherCall}
           live={mode === 'live'}
           weeklyRainIn={data.serviceLine === 'lawn' ? (data.reportV2?.water?.rainInches ?? null) : null}
+          weeklyRainSource={data.reportV2?.water?.source === 'area_snapshot' ? 'local area rain records' : 'Open-Meteo'}
         />
       </div>
     </section>
@@ -2138,8 +2141,8 @@ function ReentryReadinessCard({ context, mode, token }) {
   );
 }
 
-function HeroConditions({ conditions, weatherCall, live = false, weeklyRainIn = null }) {
-  const rows = conditionRows(conditions, { weeklyRainIn });
+function HeroConditions({ conditions, weatherCall, live = false, weeklyRainIn = null, weeklyRainSource = null }) {
+  const rows = conditionRows(conditions, { weeklyRainIn, weeklyRainSource });
   const copy = weatherCall
     ? [weatherCall.headline, weatherCall.body].filter(Boolean).join(' ')
     : conditionInterpretation(conditions);
@@ -4893,7 +4896,7 @@ function LegacyReport({ data, token, glass = false }) {
           <iframe src={pdfUrl} style={{ width: '100%', height: 620, border: 'none', background: '#fff' }} title="Service report PDF" />
         </div>
       </div>
-      <BrandFooter />
+      <BrandFooter appBadges={false} />
     </div>
   );
 }
@@ -8569,7 +8572,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             sms_preview keep the quiet document sign-off so the print
             pipeline stays byte-identical. */}
         {/* Newsletter signup lives only on the newsletter pages (owner 2026-07-09). */}
-        <BrandFooter variant={mode === 'live' ? undefined : 'document'} />
+        <BrandFooter variant={mode === 'live' ? undefined : 'document'} appBadges={false} />
       </div>
     </div>
   );

@@ -114,6 +114,19 @@ function safeText(modelValue, fallback) {
   return t;
 }
 
+// The rain figure is a past-7-days total — model output that reframes the
+// window as the visit interval ("since the last visit", "this cycle") or as
+// a single day's rain is factually wrong whenever visits aren't weekly, and
+// the prompt rule alone doesn't guarantee compliance (codex P1 #3093 r3:
+// exactly this framing shipped on a live report). Enforce at merge time:
+// window-violating water copy falls back to the deterministic sentence.
+const RAIN_WINDOW_VIOLATIONS = /\bsince\s+(?:your|the)\s+last\s+(?:visit|service)\b|\bthis\s+(?:service\s+)?cycle\b|\bbetween\s+(?:visits|services)\b|\brain(?:fall)?\s+(?:today|yesterday)\b/i;
+function safeWaterText(modelValue, fallback) {
+  const t = safeText(modelValue, fallback);
+  if (t !== fallback && RAIN_WINDOW_VIOLATIONS.test(t)) return fallback;
+  return t;
+}
+
 function mergeNarrative(v2, out) {
   if (!out || typeof out !== 'object') return v2;
   const next = JSON.parse(JSON.stringify(v2));
@@ -128,7 +141,7 @@ function mergeNarrative(v2, out) {
     const v = safeText(cats[d.key], d.explanation || d.customerExplanation);
     return { ...d, explanation: v, customerExplanation: v };
   });
-  if (next.water) next.water.explanation = safeText(out.water, next.water.explanation);
+  if (next.water) next.water.explanation = safeWaterText(out.water, next.water.explanation);
   // Photo-only rows have no measured height/status — don't let the model fill an
   // ungrounded mowing recommendation under the photo (Codex P1).
   if (next.mowing && next.mowing.measuredHeightInches != null) next.mowing.recommendation = safeText(out.mowing, next.mowing.recommendation);
@@ -192,5 +205,5 @@ async function applyLawnReportNarrative(v2, ctx = {}, deps = {}) {
 module.exports = {
   applyLawnReportNarrative,
   // exported for tests
-  _test: { groundingFacts, mergeNarrative, trendDirection, safeText, SYSTEM_PROMPT, buildUserMessage, PROMPT_VERSION },
+  _test: { groundingFacts, mergeNarrative, trendDirection, safeText, safeWaterText, SYSTEM_PROMPT, buildUserMessage, PROMPT_VERSION },
 };
