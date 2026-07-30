@@ -441,16 +441,14 @@ async function findExistingContact(people, row, tag, { queryOverride = null, req
       (p?.clientData || []).some((c) => c.key === 'waves_row' && c.value === tag)
     ));
     if (match?.resourceName) return match.resourceName;
-    if (results.length >= 30 && requireConclusive) {
-      // A FULL result set is a truncated one — absence of the tag among
-      // the first 30 hits is not proof no tagged contact exists. Only
-      // RECOVERY decisions demand that proof; a first-time create with a
-      // common name has no lost contact to find. A common recovery key
-      // (e.g. a frequent name) can stay truncated on EVERY run — treating
-      // that as inconclusive forever would park the row in recovery and
-      // fail the job indefinitely, so fall through to a conclusive
-      // full-list scan of connections matched by our tag (the primary
-      // store, not the lagging search cache).
+    if (requireConclusive) {
+      // A search miss is NEVER proof for a recovery decision — the search
+      // cache lags, and a lagging (or truncated 30-result) response can
+      // omit a contact the previous attempt actually created; creating
+      // again past the grace window would duplicate. The primary-store
+      // connections scan is the only conclusive answer. First-time
+      // creates (requireConclusive=false) skip it — they have no lost
+      // contact to find, and a full scan per create would be pure cost.
       const scanned = await findByTagFullScan(people, tag);
       return scanned || null;
     }
@@ -1277,6 +1275,13 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
         if (!(created && resourceName)) return;
         try {
           await deleteContact(people, resourceName);
+          // A CONFIRMED clean delete: drop the pre-create claim marker —
+          // leaving it would hold the row in the recovery grace window
+          // for an hour instead of re-syncing the raced edit next tick.
+          await db(table).where({ id: row.id })
+            .where('google_contact_id', 'like', `${PENDING_CREATE}%`)
+            .update({ google_contact_id: priorContactId || null, google_contact_synced_at: null })
+            .catch(() => {});
         } catch (delErr) {
           // The compensation itself is ambiguous — the contact may exist
           // with NO pointer, and next tick's lagging search could miss it
@@ -1625,6 +1630,11 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
         if (!(created && resourceName)) return;
         try {
           await deleteContact(people, resourceName);
+          // Same claim-marker release as the main lane's compensation.
+          await db(table).where({ id: row.id })
+            .where('google_contact_id', 'like', `${PENDING_CREATE}%`)
+            .update({ google_contact_id: priorContactId || null, google_contact_synced_at: null })
+            .catch(() => {});
         } catch (delErr) {
           // Inconclusive compensation — durable marker (with the dead
           // prior id + this row's identity) so recovery can find either
