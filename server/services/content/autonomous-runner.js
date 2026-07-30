@@ -991,8 +991,16 @@ class AutonomousRunner {
       // forget — a notification failure never affects the run outcome (the
       // poller retries unsent emails each cycle).
       setImmediate(() => {
-        require('./email-approvals').notifyParkedRun(run.id)
-          .catch((err) => logger.warn(`[email-approvals] notify for run ${run.id} failed: ${err.message}`));
+        // The require itself is inside the guard: this immediate can fire
+        // while the process (or a test environment) is tearing down, where
+        // a deferred module load throws synchronously — a fire-and-forget
+        // notification must never crash the runner.
+        try {
+          require('./email-approvals').notifyParkedRun(run.id)
+            .catch((err) => logger.warn(`[email-approvals] notify for run ${run.id} failed: ${err.message}`));
+        } catch (err) {
+          logger.warn(`[email-approvals] notify for run ${run.id} failed: ${err.message}`);
+        }
       });
       return finalized;
     }
