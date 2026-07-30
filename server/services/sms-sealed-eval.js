@@ -296,7 +296,10 @@ async function examOneItem({ run, item, route, client, dbi = db, voiceProfile = 
   // Same grader as the nightly judge — deterministic pairing to the frozen
   // human reply (no window heuristics needed: the pairing was decided when
   // the item was sealed).
-  const judgment = await judge.judgeOne(
+  // Judge verdicts are the flakiest link (thinking-budget truncation,
+  // provider blips): one in-place retry before the item counts as a failure
+  // — an aborted 25-item sitting costs far more than a second judge call.
+  const judgeOnce = () => judge.judgeOne(
     {
       id: item.id,
       customer_id: item.customer_id,
@@ -308,8 +311,10 @@ async function examOneItem({ run, item, route, client, dbi = db, voiceProfile = 
     },
     { id: item.human_reply_sms_id, message_body: item.human_reply_text }
   );
+  let judgment = await judgeOnce();
+  if (!judgment) judgment = await judgeOnce();
   if (!judgment) {
-    logger.warn(`[sealed-eval] judge unparseable for item ${String(item.id).slice(0, 8)}; left pending`);
+    logger.warn(`[sealed-eval] judge unparseable for item ${String(item.id).slice(0, 8)} (after retry); left pending`);
     return false;
   }
 
