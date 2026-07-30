@@ -315,7 +315,7 @@ describe('the send', () => {
       // Cancellation-fee disclosure (owner ruling 2026-07-30): rides on every
       // send that reaches the template — the $0/unpriced guard upstream is
       // what keeps it off zero-amount visits. GSM-7-safe (no em-dash).
-      cancel_fee_line: expect.stringMatching(/^\nA \$\d+(\.\d{2})? fee applies only if you cancel last-minute or no one is home - rescheduling is always free\.$/),
+      cancel_fee_line: expect.stringMatching(/^\n\$\d+(\.\d{2})? fee only for last-minute cancels or no-shows\. Rescheduling is free\.$/),
     }));
     expect(mockShorten).not.toHaveBeenCalled();
     expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
@@ -1023,6 +1023,21 @@ describe('plan-choice lane (GATE_SECURE_PLAN_CHOICE) — page payload', () => {
       // ruling) — present in ALL states, unrelated to the plan gate this test pins.
       'cancelFeeNote', 'clientSecret', 'dateDisplay', 'firstName', 'serviceType', 'setupIntentId', 'state', 'windowDisplay',
     ]);
+  });
+
+  test('unpriced visit renders CLOSED and mints no SetupIntent — live price recheck on the token (Codex #3077 P1)', async () => {
+    // A request minted before the $0/unpriced send guard existed (or a visit
+    // repriced to $0 after the link went out) must not expose the capture
+    // form or the fee disclosure.
+    mockTableHandlers = baseHandlers({
+      appointment_card_requests: { first: () => ({ ...REQUEST }) },
+      scheduled_services: { first: () => ({ ...PLAN_VISIT, estimated_price: null }) },
+      customers: { first: () => ({ ...PLAN_CUSTOMER }) },
+    });
+    const res = await loadSecureCardPageData(REQUEST.token);
+    expect(res.state).toBe('closed');
+    expect(res.cancelFeeNote).toBeNull();
+    expect(mockCreateAppointmentCardSetupIntent).not.toHaveBeenCalled();
   });
 
   describe('gate ON (fresh module graph with the env set)', () => {

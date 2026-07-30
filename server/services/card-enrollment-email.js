@@ -284,7 +284,7 @@ async function sendAutopaySetupInvitation({ customerId, scheduledServiceId, serv
       const fee = Number(cardHoldNoShowFee());
       if (fee > 0) {
         const feeText = fee % 1 ? `$${fee.toFixed(2)}` : `$${fee}`;
-        cancelFeeSentence = `A ${feeText} fee applies only if you cancel last-minute or no one is home - rescheduling is always free.`;
+        cancelFeeSentence = `A ${feeText} fee applies only for last-minute cancels or no-shows. Rescheduling is always free.`;
       }
     } catch (feeErr) {
       logger.warn(`[card-enrollment-email] cancel-fee line unavailable — omitting: ${feeErr.message}`);

@@ -119,24 +119,30 @@ function dateLineFor(scheduledDate) {
 // newline: resolves to '' when the fee is configured off, so the template
 // token vanishes cleanly. Only ever rides on priced visits — the $0/unpriced
 // guard above suppresses the whole request first.
-function cancelFeeLine() {
+function cancelFeeText() {
   try {
     const { cardHoldNoShowFee } = require('./estimate-card-holds');
     const fee = Number(cardHoldNoShowFee());
-    if (!(fee > 0)) return '';
-    const feeText = fee % 1 ? `$${fee.toFixed(2)}` : `$${fee}`;
-    // GSM-7-safe (no em-dash) — the secure_appointment_card template's
-    // per-segment budget depends on it.
-    return `\nA ${feeText} fee applies only if you cancel last-minute or no one is home - rescheduling is always free.`;
+    if (!(fee > 0)) return null;
+    return fee % 1 ? `$${fee.toFixed(2)}` : `$${fee}`;
   } catch (err) {
-    logger.warn(`[appt-card-request] cancel-fee line unavailable — omitting: ${err.message}`);
-    return '';
+    logger.warn(`[appt-card-request] cancel-fee amount unavailable — omitting disclosure: ${err.message}`);
+    return null;
   }
 }
 
-// Sentence form for the /secure page and email leg (no leading newline).
+// SMS clause — deliberately COMPACT and GSM-7-safe (no em-dash): the rendered
+// plan-choice invite must stay within the card_request three-segment target
+// (Codex #3077), so this form trades the fuller sentence for ~27 chars.
+function cancelFeeLine() {
+  const feeText = cancelFeeText();
+  return feeText ? `\n${feeText} fee only for last-minute cancels or no-shows. Rescheduling is free.` : '';
+}
+
+// Fuller sentence for the /secure page (no SMS segment budget there).
 function cancelFeeNote() {
-  return cancelFeeLine().replace(/^\n/, '');
+  const feeText = cancelFeeText();
+  return feeText ? `A ${feeText} fee applies only for last-minute cancels or no-shows. Rescheduling is always free.` : '';
 }
 
 async function renderTemplate(vars, templateKey = TEMPLATE_KEY) {
@@ -788,10 +794,14 @@ async function completeSecureCardCaptureFromWebhook(setupIntent) {
 async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, setupIntentId, ip = null, userAgent = null }) {
   const visit = await db('scheduled_services')
     .where({ id: request.scheduled_service_id })
-    .first('id', 'status', 'scheduled_date');
+    .first('id', 'status', 'scheduled_date', 'estimated_price');
   const dateOnly = visit ? callBookingDateOnly(visit.scheduled_date) : null;
+  const finishPrice = visit && visit.estimated_price != null ? Number(visit.estimated_price) : null;
   if (!visit
     || !LIVE_VISIT_STATUSES.includes(visit.status)
+    // Same price recheck as page load (Codex #3077 P1): a token minted for a
+    // since-unpriced/$0 visit must not complete a capture.
+    || !(finishPrice > 0)
     || (dateOnly && dateOnly < etDateString(new Date()))) {
     return { ok: false, code: 'no_longer_needed' };
   }
@@ -990,7 +1000,13 @@ async function loadSecureCardPageData(token) {
 
   const visit = await db('scheduled_services')
     .where({ id: request.scheduled_service_id })
-    .first('id', 'customer_id', 'status', 'scheduled_date', 'window_display', 'service_type');
+    .first('id', 'customer_id', 'status', 'scheduled_date', 'window_display', 'service_type', 'estimated_price');
+  // Live price recheck (Codex #3077 P1): a request minted before the
+  // $0/unpriced send guard existed — or a visit repriced to $0 after the
+  // link went out — must not render the capture form, mint a SetupIntent,
+  // or show a fee disclosure.
+  const visitPrice = visit && visit.estimated_price != null ? Number(visit.estimated_price) : null;
+  const visitPriced = visitPrice > 0;
   const customer = request.customer_id
     ? await db('customers').where({ id: request.customer_id }).first('id', 'first_name')
     : null;
@@ -999,7 +1015,7 @@ async function loadSecureCardPageData(token) {
     serviceType: visit?.service_type || null,
     dateDisplay: visit ? dateLineFor(visit.scheduled_date).replace(/^ on /, '') : null,
     windowDisplay: visit?.window_display || null,
-    cancelFeeNote: cancelFeeNote() || null,
+    cancelFeeNote: visitPriced ? (cancelFeeNote() || null) : null,
   };
 
   // 'completing' renders as secured too (Codex #2771 r10): the SetupIntent
@@ -1029,6 +1045,7 @@ async function loadSecureCardPageData(token) {
   const dateOnly = visit ? callBookingDateOnly(visit.scheduled_date) : null;
   if (!visit
     || !LIVE_VISIT_STATUSES.includes(visit.status)
+    || !visitPriced
     || (dateOnly && dateOnly < etDateString(new Date()))) {
     return { state: 'closed', ...base };
   }
