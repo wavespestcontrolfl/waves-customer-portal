@@ -524,6 +524,9 @@ exports.down = async function down(knex) {
       .where({ migration_name: MIGRATION_NAME, state_key: `prior_active:${seed.template_key}` })
       .first();
     if (!state) continue;
+    // Recorded state exists — restore EXACTLY what was there, including a
+    // null pointer (a template that was inactive before the migration must
+    // not stay pointed at v2 after rollback).
     const priorId = state.state_value || null;
     if (priorId) {
       const priorRow = await knex('document_template_versions').where({ id: priorId }).first('id');
@@ -533,6 +536,11 @@ exports.down = async function down(knex) {
           updated_at: knex.fn.now(),
         });
       }
+    } else {
+      await knex('document_templates').where({ id: template.id }).update({
+        active_version_id: null,
+        updated_at: knex.fn.now(),
+      });
     }
     await knex('migration_rollback_state')
       .where({ migration_name: MIGRATION_NAME, state_key: `prior_active:${seed.template_key}` })
