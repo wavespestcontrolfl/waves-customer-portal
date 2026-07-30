@@ -338,6 +338,22 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
     }
     if (savedMethod) return autoSecureFromSavedMethod({ visit, savedMethod, trigger });
 
+    // Owner rule 2026-07-30: the card ask is for FIRST-TIME customers only.
+    // An existing customer with completed service history has an established
+    // payment relationship — "add a card to finish booking" reads wrong and
+    // was never the intent. (Saved-card auto-secure above still applies to
+    // them; only the ASK is gated.) Lookup failure fails toward asking —
+    // same posture as the saved-method check.
+    try {
+      const priorCompleted = await db('scheduled_services')
+        .where({ customer_id: visit.customer_id, status: 'completed' })
+        .whereNot({ id: visit.id })
+        .first('id');
+      if (priorCompleted) return skip('existing_customer');
+    } catch (err) {
+      logger.warn(`[appt-card-request] prior-service check failed — proceeding to request: ${err.message}`);
+    }
+
     // 3. Existing pending/complete capture for this appointment. An inline
     // caller re-running (page refresh, booking retry) gets the SAME pending
     // link back — idempotent, never a second row.

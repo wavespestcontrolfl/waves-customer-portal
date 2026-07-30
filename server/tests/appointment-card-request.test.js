@@ -21,7 +21,16 @@ jest.mock('../models/db', () => {
     chain.onConflict = record('onConflict');
     chain.ignore = record('ignore');
     chain.select = (...args) => Promise.resolve(handlers.select ? handlers.select(chain, ...args) : []);
-    chain.first = (...args) => Promise.resolve(handlers.first ? handlers.first(chain, ...args) : null);
+    chain.first = (...args) => {
+      // The prior-completed-service probe (owner rule 2026-07-30) is the only
+      // scheduled_services .first() with a whereNot clause — default it to
+      // "no prior history" so every fixture stays a first-time customer;
+      // tests opt into history via handlers.priorCompletedFirst.
+      if (touch.table === 'scheduled_services' && chain.calls.some((c) => c[0] === 'whereNot')) {
+        return Promise.resolve(handlers.priorCompletedFirst ? handlers.priorCompletedFirst(chain) : null);
+      }
+      return Promise.resolve(handlers.first ? handlers.first(chain, ...args) : null);
+    };
     chain.update = (patch) => {
       chain.calls.push(['update', patch]);
       return Promise.resolve(handlers.update ? handlers.update(chain, patch) : 1);
@@ -162,6 +171,13 @@ describe('requestCardForAppointment — gate and visit eligibility', () => {
     mockTableHandlers.scheduled_services.first = () => ({ ...VISIT, estimated_price: '0.00' });
     const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1' });
     expect(res.reason).toBe('zero_price_visit');
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('existing customer (completed service history) never gets the card ask — owner rule 2026-07-30', async () => {
+    mockTableHandlers.scheduled_services.priorCompletedFirst = () => ({ id: 'svc-older' });
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1' });
+    expect(res.reason).toBe('existing_customer');
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
   });
 
