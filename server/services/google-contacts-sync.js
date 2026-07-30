@@ -585,14 +585,23 @@ async function upsertContact(people, table, row, kind, gapMs, { markerSearchKey 
  * fails. A lingering duplicate is recoverable on the next pass; deleted
  * operator data is not.
  */
-const UNMERGEABLE_FIELDS = ['organizations', 'biographies', 'birthdays', 'urls', 'events', 'relations', 'nicknames', 'userDefined', 'imClients', 'sipAddresses'];
+// EVERY user-editable Person field beyond the four lists we merge and the
+// service-owned name. Any value here (or a foreign clientData key, or a
+// non-default photo) refuses automatic deletion — the People API exposes
+// no lossless merge for them.
+const UNMERGEABLE_FIELDS = [
+  'organizations', 'biographies', 'birthdays', 'urls', 'events', 'relations',
+  'nicknames', 'userDefined', 'imClients', 'sipAddresses', 'calendarUrls',
+  'externalIds', 'genders', 'interests', 'locales', 'locations',
+  'miscKeywords', 'occupations', 'skills',
+];
 
 async function absorbDuplicate(people, dupId, survivorId, gapMs) {
   let dup;
   try {
     dup = await people.people.get({
       resourceName: dupId,
-      personFields: `metadata,memberships,clientData,emailAddresses,phoneNumbers,addresses,${UNMERGEABLE_FIELDS.join(',')}`,
+      personFields: `metadata,memberships,clientData,emailAddresses,phoneNumbers,addresses,photos,${UNMERGEABLE_FIELDS.join(',')}`,
     });
   } catch (e) {
     if (isScopeError(e) || isAuthError(e) || isServiceDisabledError(e)) throw e;
@@ -607,7 +616,8 @@ async function absorbDuplicate(people, dupId, survivorId, gapMs) {
     return false;
   }
   const foreignClientData = (dup.data.clientData || []).some((c) => c.key !== 'waves_row');
-  const unmergeable = foreignClientData
+  const operatorPhoto = (dup.data.photos || []).some((ph) => !ph.default);
+  const unmergeable = foreignClientData || operatorPhoto
     || UNMERGEABLE_FIELDS.some((f) => Array.isArray(dup.data[f]) && dup.data[f].length > 0);
   if (unmergeable) {
     logger.warn(`[contacts-sync] duplicate ${dupId} RETAINED — carries operator fields the merge cannot preserve`);
