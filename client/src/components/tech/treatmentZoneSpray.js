@@ -310,24 +310,35 @@ export function buildLawnHighlightMask({ source, points, closed, width = MAP_WID
   const out = sctx.createImageData(SW, SH);
   const litA = Math.round(HIGHLIGHT_ALPHA * 255);
   let litCount = 0;
+  let confidentCount = 0;
   let insideCount = 0;
   for (let i = 0; i < SW * SH; i += 1) {
     const o = i * 4;
     const inside = poly.data[o + 3] > 127;
     if (inside) insideCount += 1;
-    const lit = inside && isTurfPixel(img.data[o], img.data[o + 1], img.data[o + 2]);
-    if (lit) litCount += 1;
+    const r = img.data[o];
+    const g = img.data[o + 1];
+    const b = img.data[o + 2];
+    const lit = inside && isTurfPixel(r, g, b);
+    if (lit) {
+      litCount += 1;
+      // Confidently GREEN turf (excess-green), as opposed to the ambiguous
+      // warm-tan band that browning lawns share with pavers/beige surfaces.
+      if (2 * g - r - b >= 18 && b < g) confidentCount += 1;
+    }
     out.data[o] = HIGHLIGHT_RGB[0];
     out.data[o + 1] = HIGHLIGHT_RGB[1];
     out.data[o + 2] = HIGHLIGHT_RGB[2];
     out.data[o + 3] = lit ? litA : 0;
   }
-  // A mask that lights (almost) nothing — fully dormant brown lawn,
-  // washed-out imagery — must NOT count as a successful highlight: callers
-  // would skip the outline fallback and save an unmarked report while
-  // claiming the lawn was highlighted (codex P1 #3075). 1% of the loop is
-  // the floor for "we actually marked something".
+  // Confidence gates (codex P1s #3075): a mask that lights (almost) nothing
+  // (fully dormant lawn, washed-out imagery), or whose lit area is NOT
+  // dominated by confidently-green pixels (tan pavers / beige hardscape
+  // masquerading as dry turf), must not claim to be a grass highlight —
+  // return null so callers fall back to the truthful outline instead of
+  // baking hardscape into a customer report as treated lawn.
   if (!insideCount || litCount / insideCount < 0.01) return null;
+  if (confidentCount / litCount < 0.35) return null;
   const oc = document.createElement('canvas');
   oc.width = SW;
   oc.height = SH;

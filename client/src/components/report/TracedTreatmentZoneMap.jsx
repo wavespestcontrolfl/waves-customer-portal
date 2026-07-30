@@ -39,7 +39,13 @@ export default function TracedTreatmentZoneMap({ traced, live = true, variant = 
   // area" — legacy rows predate capture_mode and may be building-perimeter
   // traces, so they keep a neutral caption and skip the interior wash while
   // still getting the calmer outline presentation (codex P1 #3038).
-  const lawnCapture = traced.captureMode === 'lawn';
+  // 'lawn_highlight' = the snapshot carries the baked grass highlight —
+  // suppress the polygon overlay and say "highlighted". Plain 'lawn' rows
+  // (legacy saves + highlight-fallback saves) contain the baked OUTLINE, so
+  // they keep the outline overlay and outline language — the caption must
+  // never claim a highlight the snapshot doesn't contain (codex P1 #3075).
+  const highlightCapture = traced.captureMode === 'lawn_highlight';
+  const lawnCapture = traced.captureMode === 'lawn' || highlightCapture;
   // Interior-spray captures (owner 2026-07-29) flood the traced footprint
   // with the brand-blue wash — only rows captured that way, and only closed
   // loops, get the fill (same area-claim rule as lawn).
@@ -48,9 +54,11 @@ export default function TracedTreatmentZoneMap({ traced, live = true, variant = 
   // server label speaks perimeter language — the outline variant tells the
   // area story instead.
   const caption = outline
-    ? (lawnCapture
+    ? (highlightCapture
       ? 'Treated lawn areas highlighted on-site by your technician.'
-      : 'Service area traced on-site by your technician.')
+      : (lawnCapture
+        ? 'Treated lawn area outlined on-site by your technician.'
+        : 'Service area traced on-site by your technician.'))
     : (traced.label || 'Treated perimeter traced on-site by your technician.');
   const pathD = canReplay
     ? `M ${points.map((p) => `${Math.round(p.x)} ${Math.round(p.y)}`).join(' L ')}${traced.closedLoop ? ' Z' : ''}`
@@ -66,17 +74,20 @@ export default function TracedTreatmentZoneMap({ traced, live = true, variant = 
           className="traced-zone-image"
           src={traced.snapshotUrl}
           alt={outline
-            ? (lawnCapture
+            ? (highlightCapture
               ? 'Satellite photo of the property with the treated lawn areas highlighted'
-              : 'Satellite photo of the property with the technician-traced service area outlined')
+              : (lawnCapture
+                ? 'Satellite photo of the property with the treated lawn area outlined'
+                : 'Satellite photo of the property with the technician-traced service area outlined'))
             : (interiorCapture
               ? 'Satellite photo of the property with the treated home and perimeter highlighted'
               : 'Satellite photo of the property with the treated perimeter highlighted')}
         />
-        {/* Lawn-captured rows carry the grass HIGHLIGHT baked into the
+        {/* Highlight-captured rows carry the grass HIGHLIGHT baked into the
             snapshot (owner 2026-07-30: no box) — never draw the polygon
-            overlay on them. Legacy outline-variant rows keep the line. */}
-        {sprayLive && pathD && outline && !lawnCapture && (
+            overlay on them. Legacy 'lawn' rows and highlight-fallback rows
+            carry the baked OUTLINE and keep the animated line. */}
+        {sprayLive && pathD && outline && !highlightCapture && (
           <svg
             viewBox="0 0 1280 960"
             preserveAspectRatio="xMidYMid slice"

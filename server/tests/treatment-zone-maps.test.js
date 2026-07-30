@@ -110,6 +110,28 @@ describe('saveTreatmentZoneMap', () => {
     expect(row.id).toBe('row-1');
   });
 
+  test('lawn_highlight persists for a closed loop and drops to null when open (codex P1 #3075)', async () => {
+    const closedKnex = makeKnex();
+    await saveTreatmentZoneMap({
+      scheduledServiceId: 'svc-1',
+      pathPoints: VALID_POINTS,
+      closedLoop: true,
+      captureMode: 'lawn_highlight',
+      knex: closedKnex,
+    });
+    expect(closedKnex.state.inserted.capture_mode).toBe('lawn_highlight');
+
+    const openKnex = makeKnex();
+    await saveTreatmentZoneMap({
+      scheduledServiceId: 'svc-1',
+      pathPoints: VALID_POINTS,
+      closedLoop: false,
+      captureMode: 'lawn_highlight',
+      knex: openKnex,
+    });
+    expect(openKnex.state.inserted.capture_mode).toBe(null);
+  });
+
   test('interior capture mode persists for a closed 3+ point loop (owner 2026-07-29)', async () => {
     const knex = makeKnex();
     await saveTreatmentZoneMap({

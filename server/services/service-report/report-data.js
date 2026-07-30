@@ -2460,10 +2460,11 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
             linearFt: numberOrNull(tracedRow.linear_ft),
             closedLoop: Boolean(tracedRow.closed_loop),
             capturedAt: tracedRow.updated_at || tracedRow.created_at || null,
-            // 'lawn' | 'perimeter' | 'interior' | null (legacy rows predate
-            // the column) — the client only claims "treated lawn area" /
-            // interior coverage for rows actually captured by those
-            // workflows (codex P1 #3038; interior owner 2026-07-29).
+            // 'lawn' | 'lawn_highlight' | 'perimeter' | 'interior' | null
+            // (legacy rows predate the column) — the client only claims
+            // "highlighted"/"treated lawn area"/interior coverage for rows
+            // actually captured by those workflows (codex P1 #3038; interior
+            // owner 2026-07-29; lawn_highlight codex P1 #3075).
             captureMode: tracedRow.capture_mode || null,
             label: tracedRow.capture_mode === 'interior'
               ? 'Interior and perimeter treatment traced on-site by your technician.'
