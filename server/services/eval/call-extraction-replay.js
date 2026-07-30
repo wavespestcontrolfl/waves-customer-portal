@@ -77,7 +77,38 @@ async function defaultNotify(row) {
   await db('notifications').insert(row);
 }
 
-async function notifyFailure({ notify, finalAttempt, attempts, fixturePath }) {
+// Internal ops email (company inbox), mirroring the admin notification.
+// Set EVAL_REGRESSION_EMAIL to override the recipient, or 'off' to disable.
+// Fail-open: a send failure never breaks the eval run or its notification.
+const DEFAULT_EVAL_EMAIL = 'contact@wavespestcontrol.com';
+
+function escapeHtml(text) {
+  return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+async function defaultSendEmail(message) {
+  return require('../email').send(message);
+}
+
+async function emailFailure({ sendEmail, subject, textBody }) {
+  const recipient = process.env.EVAL_REGRESSION_EMAIL || DEFAULT_EVAL_EMAIL;
+  if (recipient === 'off') return;
+  try {
+    const result = await sendEmail({
+      to: recipient,
+      subject,
+      heading: 'Call extraction replay eval',
+      body: `<pre style="font-family:monospace;font-size:13px;white-space:pre-wrap;margin:0;">${escapeHtml(textBody)}</pre>`,
+    });
+    if (result && result.ok === false) {
+      logger.warn(`[call-replay-eval] failure email not sent: ${result.error || 'unknown error'}`);
+    }
+  } catch (err) {
+    logger.warn(`[call-replay-eval] failure email not sent: ${err?.message || err}`);
+  }
+}
+
+async function notifyFailure({ notify, sendEmail, finalAttempt, attempts, fixturePath }) {
   const finalRun = finalAttempt.run || null;
   const lines = failureLines(finalRun).slice(0, 20);
   const checked = finalRun?.summary?.checked || 0;
@@ -90,11 +121,14 @@ async function notifyFailure({ notify, finalAttempt, attempts, fixturePath }) {
         : '\n\nThe retry did not clear the failure.')
     : '';
 
+  const title = `Call extraction replay eval: ${failedExpectations + replayErrors} failure(s)`;
+  const body = `${lines.join('\n').slice(0, 1400)}${retryNote}\n\nRe-run manually: ${MANUAL_RERUN}`;
+
   await notify({
     recipient_type: 'admin',
     category: 'eval_regression',
-    title: `Call extraction replay eval: ${failedExpectations + replayErrors} failure(s)`,
-    body: `${lines.join('\n').slice(0, 1400)}${retryNote}\n\nRe-run manually: ${MANUAL_RERUN}`,
+    title,
+    body,
     icon: '\u{1F9EA}',
     link: '/admin/dashboard',
     metadata: JSON.stringify({
@@ -104,16 +138,20 @@ async function notifyFailure({ notify, finalAttempt, attempts, fixturePath }) {
       attempts: attempts.map(compactAttempt),
     }),
   });
+  await emailFailure({ sendEmail, subject: title, textBody: body });
 
   logger.warn(`[call-replay-eval] failed: checked=${checked} replayErrors=${replayErrors} failedExpectations=${failedExpectations}`);
 }
 
-async function notifyInconclusive({ notify, attempt, fixturePath }) {
+async function notifyInconclusive({ notify, sendEmail, attempt, fixturePath }) {
+  const title = 'Call extraction replay eval could not run';
+  const body = `${attempt.error?.message || 'Unknown replay error'}\n\nThe reviewed-call extraction fixture was NOT verified.\n\nRe-run manually: ${MANUAL_RERUN}`;
+
   await notify({
     recipient_type: 'admin',
     category: 'eval_regression',
-    title: 'Call extraction replay eval could not run',
-    body: `${attempt.error?.message || 'Unknown replay error'}\n\nThe reviewed-call extraction fixture was NOT verified.\n\nRe-run manually: ${MANUAL_RERUN}`,
+    title,
+    body,
     icon: '\u{1F9EA}',
     link: '/admin/dashboard',
     metadata: JSON.stringify({
@@ -121,6 +159,7 @@ async function notifyInconclusive({ notify, attempt, fixturePath }) {
       error: attempt.error || null,
     }),
   });
+  await emailFailure({ sendEmail, subject: title, textBody: body });
 
   logger.warn(`[call-replay-eval] inconclusive: ${attempt.error?.message || 'unknown error'}`);
 }
@@ -137,6 +176,7 @@ async function runCallExtractionReplayEval(opts = {}) {
   const runReplay = opts.runReplay
     || ((options) => require('../../scripts/replay-call-extraction-variance').runReplayVariance(options));
   const notify = opts.notify || defaultNotify;
+  const sendEmail = opts.sendEmail || defaultSendEmail;
   const fixturePath = opts.fixturePath || DEFAULT_FIXTURE_PATH;
   const replayOptions = {
     fixturePath,
@@ -161,9 +201,9 @@ async function runCallExtractionReplayEval(opts = {}) {
   }
 
   if (finalAttempt.status === 'fail') {
-    await notifyFailure({ notify, finalAttempt, attempts, fixturePath });
+    await notifyFailure({ notify, sendEmail, finalAttempt, attempts, fixturePath });
   } else if (finalAttempt.status === 'inconclusive') {
-    await notifyInconclusive({ notify, attempt: finalAttempt, fixturePath });
+    await notifyInconclusive({ notify, sendEmail, attempt: finalAttempt, fixturePath });
   }
 
   const summary = finalAttempt.run?.summary || {};
