@@ -402,6 +402,29 @@ function turnHasNegationOrHedge(normalizedTurn) {
   return NEGATION_HEDGE_TOKENS.some((t) => padded.includes(t));
 }
 
+// Conditional-language screen (codex P0): "If the homeowner approves, we
+// will see you Sunday at noon" is not a commitment — authorization does not
+// exist yet. A blacklist cannot anticipate every conditional phrasing, so
+// this fails CLOSED on conditional structure: any conditional token rejects
+// the turn outright, and "if" rejects unless it opens one of the benign
+// closing phrases agents actually use ("just let us know if anything
+// changes"). Everything unrecognized goes to triage.
+const CONDITIONAL_TOKENS = [
+  ' unless ', ' assuming ', ' provided ', ' as long as ', ' pending ',
+  ' depends ', ' depending ', ' when ', ' once ', ' should the ',
+];
+const BENIGN_IF_RE = /^if (anything changes|that changes|anything comes up|something comes up|you need anything|you have any questions)/;
+function turnHasUnresolvedConditional(normalizedTurn) {
+  const padded = ` ${normalizedTurn} `;
+  if (CONDITIONAL_TOKENS.some((t) => padded.includes(t))) return true;
+  let idx = padded.indexOf(' if ');
+  while (idx !== -1) {
+    if (!BENIGN_IF_RE.test(padded.slice(idx + 1))) return true;
+    idx = padded.indexOf(' if ', idx + 1);
+  }
+  return false;
+}
+
 function agentQuoteGroundedInTranscript(quote, transcript) {
   const q = normalizeForGrounding(quote);
   if (!q || q.length < 12) return false;
@@ -417,10 +440,11 @@ function agentQuoteGroundedInTranscript(quote, transcript) {
   if (!agentTurns.length || !sawCaller) return false;
   const matching = agentTurns.map((t) => normalizeForGrounding(t)).filter((t) => t.includes(q));
   if (!matching.length) return false;
-  // EVERY turn the quote grounds in must be free of negation/hedging — if a
-  // fragment appears in both a rejecting turn and a committing turn, we
-  // cannot deterministically tell which one the model meant: fail closed.
-  return matching.every((t) => !turnHasNegationOrHedge(t));
+  // EVERY turn the quote grounds in must be free of negation/hedging AND of
+  // unresolved conditional language — if a fragment appears in both a
+  // rejecting turn and a committing turn, we cannot deterministically tell
+  // which one the model meant: fail closed.
+  return matching.every((t) => !turnHasNegationOrHedge(t) && !turnHasUnresolvedConditional(t));
 }
 
 // Slot binding (codex round-2 P1): the grounded commitment quote must refer
@@ -460,16 +484,35 @@ function quoteBindsConfirmedSlot(quote, confirmedStartAt, callStartedAt) {
     dayDiff = (Date.parse(`${etYmd(start)}T00:00:00Z`) - Date.parse(`${etYmd(call)}T00:00:00Z`)) / 86400000;
   } catch { return false; }
   if (!(dayDiff >= 1 && dayDiff <= 6)) return false;
-  let weekday; let hour12; let dayPeriod;
+  let weekday; let hour12; let dayPeriod; let slotMonth; let slotDay;
   try {
     const parts = new Intl.DateTimeFormat('en-US', {
-      timeZone: 'America/New_York', weekday: 'long', hour: 'numeric', hour12: true,
+      timeZone: 'America/New_York', weekday: 'long', month: 'long', day: 'numeric', hour: 'numeric', hour12: true,
     }).formatToParts(start);
     weekday = parts.find((p) => p.type === 'weekday')?.value?.toLowerCase();
     hour12 = parts.find((p) => p.type === 'hour')?.value;
     dayPeriod = parts.find((p) => p.type === 'dayPeriod')?.value?.toLowerCase();
+    slotMonth = parts.find((p) => p.type === 'month')?.value?.toLowerCase();
+    slotDay = Number(parts.find((p) => p.type === 'day')?.value);
   } catch { return false; }
   if (!weekday || !hour12 || (dayPeriod !== 'am' && dayPeriod !== 'pm')) return false;
+  // Explicit calendar dates must match the slot (codex P1): "Sunday, August
+  // 9, at noon" shares weekday+time with an August 2 slot — the weekday
+  // window alone cannot catch it. Any month name in the quote must be the
+  // slot's ET month AND be immediately followed by the slot's day number
+  // (ordinal suffixes tolerated); any standalone ordinal day ("the 9th")
+  // must equal the slot's day. Unparseable or mismatched explicit dates
+  // fail closed.
+  const monthsInQuote = ['january', 'february', 'march', 'april', 'may', 'june', 'july',
+    'august', 'september', 'october', 'november', 'december'].filter((m) => q.includes(` ${m} `));
+  if (monthsInQuote.length) {
+    if (monthsInQuote.length > 1 || monthsInQuote[0] !== slotMonth) return false;
+    const dm = q.match(new RegExp(` ${slotMonth} (\\d{1,2})(?:st|nd|rd|th)?(?= )`));
+    if (!dm || Number(dm[1]) !== slotDay) return false;
+  }
+  for (const om of q.matchAll(/ (\d{1,2})(?:st|nd|rd|th)(?= )/g)) {
+    if (Number(om[1]) !== slotDay) return false;
+  }
   // Exact binding, not presence (codex round-5 P1): a multi-slot turn
   // ("Sunday at 10 AM won't work, but we'll see you at 11 AM") scatters
   // matching tokens without committing to them. The quote must contain

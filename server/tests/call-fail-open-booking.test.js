@@ -358,6 +358,49 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
   });
 
+  test('a CONDITIONAL commitment never books — "If the homeowner approves, we will see you Sunday at noon" (P0)', () => {
+    const conditional = "If the homeowner approves, we will see you Sunday at noon, thanks so much.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, conditional);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: conditional }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('a trailing non-benign conditional also fails — "…Sunday at noon if the buyer signs off" (P0)', () => {
+    const conditional = "So we'll see you Sunday at noon if the buyer signs off on everything.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, conditional);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: conditional }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+  });
+
+  test('the benign closer "just let us know if anything changes" still books (P0 counter-case)', () => {
+    const r = canAutoRoute(agentCommitted(), opts());
+    expect(r.allowed).toBe(true);
+  });
+
+  test('an explicit date in the quote must match the slot — "Sunday, August 9, at noon" never books an August 2 slot (P1)', () => {
+    const wrongDate = "So we'll confirm it for Sunday, August 9, at noon, and just let us know if anything changes.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, wrongDate);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: wrongDate }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('a MATCHING explicit date binds — "Sunday, August 2nd, at noon" books the August 2 slot (P1 counter-case)', () => {
+    const rightDate = "So we'll confirm it for Sunday, August 2nd, at noon, and just let us know if anything changes.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, rightDate);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: rightDate }), opts({ transcript }));
+    expect(r.allowed).toBe(true);
+    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+  });
+
+  test('a standalone mismatched ordinal day ("the 9th") fails closed (P1)', () => {
+    const ordinal = "So we'll confirm it for noon on Sunday the 9th, and just let us know if anything changes.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, ordinal);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: ordinal }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+  });
+
   test('nonzero SECONDS in confirmed_start_at fail the on-the-hour guard (round-4 P1)', () => {
     const ex = agentCommitted();
     ex.scheduling.confirmed_start_at = '2026-08-02T12:00:30-04:00';
