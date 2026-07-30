@@ -149,6 +149,26 @@ async function transitionCore({ id, nextStatus, note, assignedTo }) {
       .update({ review_status: remaining > 0 ? 'open' : nextStatus, updated_at: new Date() });
   }
 
+  // Resolving an email read-back card AS-IS ("the spelling was right") is a
+  // release point for the held first-touch sends — the email-correction
+  // fanout only runs when the address actually changes, so without this the
+  // held drip/newsletter would never start (2026-07-30 lane). Resolve only:
+  // a DISMISSED card is "not actionable", not a confirmation. Best-effort —
+  // never affects the transition result.
+  if (nextStatus === 'resolved' && item.call_log_id) {
+    try {
+      const { resumeHeldFirstTouch, EMAIL_REVIEW_REASON_CODES } = require('../services/lead-first-touch-resume');
+      if (EMAIL_REVIEW_REASON_CODES.includes(item.reason_code)) {
+        const call = await db('call_log').where({ id: item.call_log_id }).first('customer_id');
+        if (call?.customer_id) {
+          await resumeHeldFirstTouch({ customerId: call.customer_id, source: 'triage_resolve' });
+        }
+      }
+    } catch (resumeErr) {
+      logger.warn(`[admin-triage] first-touch resume failed for item ${id}: ${resumeErr.message}`);
+    }
+  }
+
   return { outcome: 'ok', item };
 }
 
@@ -258,6 +278,28 @@ router.post('/:id/verdict', async (req, res) => {
       note,
       reviewedBy: req.technicianId,
     });
+
+    // An ACCEPT verdict confirms the extraction — including any email that
+    // was under read-back — so it is a release point for the held
+    // first-touch sends (2026-07-30 lane). A DENY means the office will
+    // correct fields; the email-correction fanout resumes then. Best-effort.
+    if (verdict === 'accept') {
+      try {
+        const { resumeHeldFirstTouch, EMAIL_REVIEW_REASON_CODES } = require('../services/lead-first-touch-resume');
+        const hadEmailCard = await db('triage_items')
+          .where({ call_log_id: item.call_log_id, status: 'resolved' })
+          .whereIn('reason_code', EMAIL_REVIEW_REASON_CODES)
+          .first('id');
+        if (hadEmailCard) {
+          const call = await db('call_log').where({ id: item.call_log_id }).first('customer_id');
+          if (call?.customer_id) {
+            await resumeHeldFirstTouch({ customerId: call.customer_id, source: 'triage_verdict_accept' });
+          }
+        }
+      } catch (resumeErr) {
+        logger.warn(`[admin-triage] first-touch resume failed for call ${item.call_log_id}: ${resumeErr.message}`);
+      }
+    }
 
     return res.json({ ok: true, id, status: 'resolved', verdict, resolved_count: resolved });
   } catch (err) {

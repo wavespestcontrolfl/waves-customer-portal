@@ -1165,6 +1165,26 @@ async function shouldHoldLeadEmailEnrollment(callLogId) {
     return !!open;
   } catch (err) {
     logger.warn(`[call-proc] email-review lookup failed — holding first-touch email: ${err.message}`);
+    // Persist a recovery marker (Codex #3084): without a live card the
+    // standard resume paths (triage resolve / email correction) have nothing
+    // to release, and the lead would stay silently outside the drip forever.
+    // Best-effort — if this insert also fails, the hold stands and the
+    // warning above is the only trace.
+    try {
+      const { buildTriageItem } = require('./call-routing-gates');
+      await db('triage_items')
+        .insert(buildTriageItem({
+          callLogId: callLogId,
+          flag: 'email_unverified',
+          extraction: { meta: { call_summary: null } },
+          severity: 'advisory',
+          extraPayload: { hold_reason: 'email_review_lookup_error' },
+        }))
+        .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+        .ignore();
+    } catch (markerErr) {
+      logger.warn(`[call-proc] email-hold recovery marker insert failed: ${markerErr.message}`);
+    }
     return true;
   }
 }
@@ -9296,6 +9316,11 @@ const CallRecordingProcessor = {
     };
   },
 };
+
+// Named production export for the first-touch resume lane (2026-07-30): the
+// held newsletter subscribe is re-driven from lead-first-touch-resume once
+// the office settles the email read-back question.
+CallRecordingProcessor.resumeNewsletterForCallCustomer = subscribeNewCallCustomerToNewsletter;
 
 CallRecordingProcessor._test = {
   isImplausibleTranscript,

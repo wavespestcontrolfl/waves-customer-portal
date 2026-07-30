@@ -333,27 +333,17 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
         resolved_at: now,
         updated_at: now,
       });
-    // Resume the HELD first-touch drip (2026-07-30): the call pipeline holds
-    // new_lead enrollment while an email read-back card is open, and this
-    // operator confirmation is the release point — without it the held drip
-    // never starts. enrollCustomer carries its own dedupe (an enrollment
-    // that already exists in any status is never duplicated) and template/
-    // eligibility checks, so this is a no-op for customers who were
-    // enrolled normally.
+    // Resume the HELD first-touch sends (2026-07-30): the call pipeline
+    // holds the new_lead drip AND the newsletter DOI while an email
+    // read-back card is open; the operator's correction is a release point.
+    // The shared helper re-checks consent (do-not-contact, suppressions)
+    // and dedupes via enrollCustomer — a no-op for normally-enrolled
+    // customers. (Triage-inbox resolves without an email edit release via
+    // the same helper from admin-triage.)
     if (counts.reviewCards > 0) {
       try {
-        const AutomationRunner = require('./automation-runner');
-        const custRow = await conn('customers').where({ id: customerId }).first('id', 'first_name', 'last_name');
-        const resume = await AutomationRunner.enrollCustomer({
-          templateKey: 'new_lead',
-          customer: {
-            email: newEmail,
-            first_name: custRow?.first_name || null,
-            last_name: custRow?.last_name || null,
-            id: customerId,
-          },
-          dbh: conn,
-        });
+        const { resumeHeldFirstTouch } = require('./lead-first-touch-resume');
+        const resume = await resumeHeldFirstTouch({ customerId, email: newEmail, dbh: conn, source: 'email_corrected' });
         if (resume?.enrolled) counts.heldDripResumed = 1;
       } catch (resumeErr) {
         logger.warn(`[email-fanout] held-drip resume failed for customer ${customerId}: ${resumeErr.message}`);
