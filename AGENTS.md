@@ -299,24 +299,35 @@ finding and warns on P1. Reviewers must return JSON matching
   legitimately land off-hour (`classifySlot` in
   `estimate-slot-availability.js` produces a 10:30 end for a 90-min
   service at 09:00 — regression-asserted); never round or reject it.
+  KNOWN GAP (2026-07-29): the lead-booking path (`LeadsTabs.jsx` time
+  input → `admin-leads.js`) still accepts and stores off-hour starts — a
+  clamp fix is owed; flag diffs that extend that path without clamping.
   Customer-facing arrival copy is
   `window_start` → +120 min, DISPLAY-ONLY, via `arrivalWindowRange()`
   (`server/utils/sms-time-format.js`); never change `window_end` itself
   (it drives scheduling/overlap), and report "next appointment" displays
   follow the same +2h rule.
-- **Email-change token fanout.** EMAIL-BOUND delivery/bearer tokens
-  (newsletter engagement tokens and similar per-recipient send tokens)
-  ROTATE when a customer's email moves; never retarget unlinked sends by
-  email address alone. Permanent public artifacts are explicitly exempt —
-  `invoices.token` receipt links never rotate (see the receipt-permanence
-  P0 above).
+- **Email-change token fanout.** When a customer's email moves, the
+  fanout ROTATES email-bound subscriber tokens
+  (`newsletter_subscribers.confirmation_token` / `unsubscribe_token`,
+  `customer-email-fanout.js`); never retarget unlinked sends by email
+  address alone. KNOWN GAP (2026-07-29): per-delivery
+  `newsletter_send_deliveries.engagement_token` values are NOT yet
+  rotated — don't describe them as rotating, and flag diffs that widen
+  what an old emailed token can reach. Permanent public artifacts are
+  explicitly exempt from rotation — `invoices.token` receipt links never
+  rotate (see the receipt-permanence P0 above).
 - **Compliance language on any customer surface** (portal copy, prep
   guides, reports, estimator benefit lines, marketing): no pesticide is
   ever "safe" (incl. "pet-safe"/"family-safe"); "EPA-registered"/"EPA-
   exempt", never "EPA-approved"; never a fixed re-entry/drying minute
   figure — the idiom is "safe once dry" + technician confirms timing.
   When one instance of a banned claim class appears, sweep the whole tree
-  for the class.
+  for the class. Existing violations in untouched code are a remediation
+  backlog, not proof the rule is wrong — flag diffs that ADD or EXTEND
+  such copy. Known outstanding as of 2026-07-29: the `/api/feed/faq`
+  pet-safe/drying-minutes copy (`server/routes/feed.js` ~474) and the
+  PortalPage FAQ — a copy-sweep fix is owed.
 - **Estimate follow-up truth scope** (`estimate-followup-copy.js`):
   recurring residential lanes get the callbacks/90-day/no-contract line;
   rodent/termite/commercial/bundle/unknown packs are terms-neutral —

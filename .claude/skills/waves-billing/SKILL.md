@@ -99,9 +99,13 @@ payment path).
     never ad-hoc status lists. The no-show fee settles at FACE value
     (taxRate 0) and must NOT go through `chargeInvoiceWithSavedCard` (it
     surcharges). Receipts go through the canonical
-    `InvoiceService.sendReceipt` — never hand-rolled sends. Don't pass an
-    explicit `taxRate` to `InvoiceService.create` (it auto-computes; both
-    `commercial` AND `business` property types are taxable, county-aware).
+    `InvoiceService.sendReceipt` — never hand-rolled sends. In
+    completion/card-hold flows, don't pass an explicit `taxRate` to
+    `InvoiceService.create` (it auto-computes; both `commercial` AND
+    `business` property types are taxable, county-aware). Sanctioned
+    exception: the commercial proposal-win path (`proposal-win.js`)
+    deliberately passes a blended rate so mixed-taxability invoices match
+    the accepted proposal — don't "fix" it.
     Cancelling a card-hold visit AFTER its scheduled time via app routes
     auto-charges the $49 fee and fires the customer receipt chain — a
     silent no-fee close is a direct DB cancel + hold release, never an

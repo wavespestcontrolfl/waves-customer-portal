@@ -63,8 +63,12 @@ this skill.
   sign-off; city×service pages with >5K impressions follow the same
   per-URL rule. The `/pest-control-services-{city}-fl/` variants are NOT
   protected — 301 them to the hub family (settled; don't re-ask).
-- **GBP imagery:** NO AI-generated imagery on GBP, ever; social images
-  strip EXIF GPS before upload.
+- **GBP imagery:** NO AI-generated imagery on GBP, ever (owner rule);
+  social images strip EXIF GPS before upload. KNOWN GAP (2026-07-29): the
+  live GBP publishers still auto-generate images (`social-media.js`
+  `gbpWantsImage` path + the autonomous GBP action) — a code-side fix is
+  owed; never extend that pattern, and flag any diff adding AI imagery to
+  a GBP path.
 - **Termite copy rulings:** the warranty is an OPTIONAL annual renewable
   bond — NEVER "included in the first year". "No contracts" is a GENERAL
   brand promise allowed on termite pages, but guarantee/re-treat promises

@@ -105,11 +105,14 @@ Anton / Luckiest Guy / Baloo there. Full decisions:
 
 ## Hard lines (both systems)
 
-- 14px minimum for readable text (Virginia uses this 8 hours a day). The
-  brand gate (`npm run check:portal-brand`) enforces this on customer
-  surfaces — its floors are 16px body / 14px labels, and it also bans RAW
-  EMOJI anywhere in JSX source *including comments* (use icon components).
-  One violation kills EVERY Railway build at prebuild.
+- 14px minimum for readable text (Virginia uses this 8 hours a day).
+  POLICY on customer surfaces: 16px body / 14px label floors, and no raw
+  emoji in JSX source (including comments — use icon components). The
+  mechanical gate (`npm run check:portal-brand`, runs in Railway prebuild
+  — one violation kills EVERY build) enforces only a SUBSET: selected
+  customer directories (`components/estimate` excluded) and inline
+  `fontSize: 11`/`13` literals — so a passing gate is NOT proof of
+  compliance; the policy applies repo-wide regardless of gate coverage.
 - Never apply customer-facing brand styling (Luckiest Guy / Baloo 2 / gold
   pill / mascot) inside `/admin/*` — admin stays monochrome.
 - **iOS PWA safe areas:** `viewport-fit=cover` is global in the standalone

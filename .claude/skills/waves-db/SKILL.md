@@ -105,11 +105,13 @@ schedule inserts) and sometimes the bug (you expected a reminder to send).
 - After merging a PR that ships a migration, verify the deploy actually ran
   it (deploy log or `knex_migrations`) before relying on the new schema.
 - **The 000018 pending-count illusion.**
-  `20260415000018_pest_service_cost_truing.js` is a no-op placeholder whose
-  `knex_migrations` row is deleted by `…000019` on every run — after EVERY
-  full `migrate:latest` it re-reads as "pending", chain counts come out one
-  higher than the file count, and a following `migrate:up` runs IT, not
-  your migration. Harmless, but do NOT conclude `migrate:down` is broken
+  `20260415000018_pest_service_cost_truing.js` is a no-op placeholder
+  (source lost, recreated empty), and `…000019` deleted its
+  `knex_migrations` row ONCE when 000019 itself ran — so in an environment
+  that has run 000019, 000018 reads as pending again and the next
+  `migrate:latest` (or a `migrate:up`, instead of your migration) re-runs
+  the harmless no-op and chain counts come out one higher than expected
+  for that run. Do NOT conclude `migrate:down` is broken from any of this
   (that wrong call shipped once). To test a specific migration's up/down,
   `require()` the module and call `up(knex)`/`down(knex)` directly against
   a throwaway DB.
@@ -155,8 +157,11 @@ schedule inserts) and sometimes the bug (you expected a reminder to send).
 - **`estimates.notes` and `scheduled_services.notes` are CUSTOMER/TECH
   VISIBLE** (`estimate-public.js` serves `estimate.notes`;
   scheduled-service notes render into tech Property Alerts). Internal,
-  calibration, or ops-audit text goes in `internal_notes`, NEVER `notes`.
-  This has bitten twice.
+  calibration, or ops-audit text about a visit goes in
+  `scheduled_services.internal_notes`, NEVER `notes`. The `estimates`
+  table has NO `internal_notes` column — internal text about an estimate
+  must live outside the estimates row entirely (admin-only/audit tables),
+  never in `estimates.notes`. This has bitten twice.
 - `notification_prefs.updated_at` is published as the marketing-SMS consent
   `capturedAt` (`marketingSmsConsentBasisForContract`) — a system backfill
   must NEVER restamp it (falsifies consent provenance); it's also the only
@@ -168,7 +173,10 @@ schedule inserts) and sometimes the bug (you expected a reminder to send).
   from `service_records` (or the app) is a false-lapse signal.
 - Churn source of truth is CURRENT `pipeline_stage='churned'` — never
   `churned_at` (sparse AND sticky; survives reactivation). Churn time =
-  `pipeline_stage_changed_at`. `customer_ltv` exists but is EMPTY.
+  `pipeline_stage_changed_at`. `customer_ltv` is populated only by the
+  admin pricing-strategy recalculation action
+  (`admin-pricing-strategy.js` → `pricing-intelligence.js`) — verify row
+  counts before relying on it; it is empty unless that has been run.
 - Admin in-app notifications = the `notifications` table with
   `recipient_type='admin'`; the type column is `category`, not `type`.
 - `customers.property_sqft` = treated LAWN area per the source-arbitration
