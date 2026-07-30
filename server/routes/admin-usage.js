@@ -57,12 +57,41 @@ function isIdSegment(seg) {
 // the privacy backstop must hold against a regressed/hostile client, not
 // just against the shapes our own client produces (Codex #2961 r3).
 const ROUTE_WORD_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
-// Entity list routes whose next segment is a record identifier unless it is
-// one of that route's known static subpages — catches short lowercase
-// identifiers ('/admin/customers/acme') that are shape-indistinguishable
-// from route words.
-const ENTITY_ROUTES = new Set(['customers', 'estimates', 'invoices', 'leads', 'calls', 'technicians', 'requests']);
-const ENTITY_STATIC_SUBPAGES = new Set(['new', 'import', 'map', 'directory', 'kanban', 'search', 'settings', 'duplicates']);
+// Registry of every admin page key: the first path segment of each route
+// nested under /admin in client/src/App.jsx, plus 'dashboard' (the bare
+// /admin index) and the canonicalized 'design-system'. A matching-pair
+// payload ('/admin/alice-smith' + pageKey 'alice-smith') passes every SHAPE
+// check — only a registry can tell route structure from a name, so unknown
+// page keys are rejected outright (Codex #2961 r20). Kept in sync with the
+// route table by the drift test in admin-usage-routes.test.js, which parses
+// App.jsx — when you add an admin route, that test tells you to add it here.
+const KNOWN_PAGE_KEYS = new Set([
+  'ads', 'agent-decisions', 'agent-estimate', 'agents', 'auto-dispatch',
+  'banking', 'billing-recovery', 'blog', 'call-recordings', 'communications',
+  'compliance', 'content-engine', 'content-registry', 'contracts',
+  'credentials', 'customers', 'dashboard', 'data-hygiene', 'design-system',
+  'discounts', 'dispatch', 'document-requests', 'documents', 'email',
+  'equipment', 'equipment-calibration', 'estimates', 'fleet', 'health',
+  'inventory', 'invoices', 'knowledge', 'lawn-assessment', 'lawn-assessments',
+  'leads', 'more', 'newsletter', 'payers', 'phone-numbers', 'pipeline',
+  'ppc', 'price-change', 'price-match', 'pricing', 'pricing-logic',
+  'pricing-reality-check', 'projects', 'referrals', 'revenue', 'reviews',
+  'schedule', 'seo', 'service-library', 'settings', 'social-media', 'tax',
+  'timetracking', 'tool-health', 'turf-height',
+]);
+
+// Deep path segments that are real route structure (the route table's
+// static subpages — customers/duplicates, customers/new,
+// settings/pest-pressure, estimates/:id/proposal, design-system/flags —
+// plus the entity-subpage words retained from r3). ANY other segment after
+// the page segment collapses to ':id': a route-word-shaped name
+// ('/admin/settings/alice-smith') must not persist in the path column any
+// more than in the page key (Codex #2961 r20 generalizes the r3
+// entity-route rule to every route).
+const KNOWN_SUBPAGE_WORDS = new Set([
+  'new', 'import', 'map', 'directory', 'kanban', 'search', 'settings',
+  'duplicates', 'pest-pressure', 'proposal', 'flags',
+]);
 
 /** '/admin/customers/8f14…e9b1/notes' → '/admin/customers/:id/notes'.
  *  Returns null when the path isn't rooted at /admin. */
@@ -81,8 +110,7 @@ function stripIdSegments(path) {
     // valid-looking path.
     if (!/^[A-Za-z0-9_-]+$/.test(seg)) return seg;
     if (!ROUTE_WORD_RE.test(seg)) return ':id'; // 'John_Smith', 'Acme' — not route structure
-    const prev = i > 0 ? arr[i - 1] : null;
-    if (prev && ENTITY_ROUTES.has(prev) && !ENTITY_STATIC_SUBPAGES.has(seg)) return ':id'; // 'acme'
+    if (i > 0 && !KNOWN_SUBPAGE_WORDS.has(seg)) return ':id'; // 'acme', 'alice-smith'
     return seg;
   });
   return `/admin${rest.length ? `/${rest.join('/')}` : ''}`;
@@ -117,6 +145,13 @@ router.post('/track', async (req, res, next) => {
     const derivedKey = cleanPath.split('/').filter(Boolean)[1] || 'dashboard';
     if (pageKey !== derivedKey) {
       return res.status(400).json({ error: 'pageKey does not match path' });
+    }
+    // Shape checks can't tell 'alice-smith' the person from 'alice-smith'
+    // the page — only the route registry can. Unknown keys are rejected,
+    // not collapsed: a path that matches no admin route is not a page view
+    // (Codex #2961 r20).
+    if (!KNOWN_PAGE_KEYS.has(derivedKey)) {
+      return res.status(400).json({ error: 'Unknown page' });
     }
     if (tab != null && (typeof tab !== 'string' || !TAB_RE.test(tab))) {
       return res.status(400).json({ error: 'Invalid tab' });
@@ -237,3 +272,6 @@ router.get('/summary', async (req, res, next) => {
 });
 
 module.exports = router;
+// Exposed for the App.jsx drift test only — the registry must track the
+// client route table, and the test is what enforces that.
+module.exports.KNOWN_PAGE_KEYS = KNOWN_PAGE_KEYS;

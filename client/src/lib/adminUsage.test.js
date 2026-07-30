@@ -24,9 +24,11 @@ describe('normalizeAdminPath', () => {
   });
 
   it('strips uuid, numeric, and opaque-token segments to :id', () => {
+    // 'notes' is not a route-table subpage — deep segments collapse unless
+    // they are known structure (Codex #2961 r20).
     expect(
       normalizeAdminPath('/admin/customers/8f14e45f-ceea-4671-9aa5-1c6ff2f3e9b1/notes'),
-    ).toEqual({ pageKey: 'customers', path: '/admin/customers/:id/notes' });
+    ).toEqual({ pageKey: 'customers', path: '/admin/customers/:id/:id' });
     expect(normalizeAdminPath('/admin/estimates/12345/proposal')).toEqual({
       pageKey: 'estimates',
       path: '/admin/estimates/:id/proposal',
@@ -421,6 +423,31 @@ describe('trackAdminPageView', () => {
       tab: 'general',
       source: 'sidebar',
     });
+  });
+
+  it('a DEDUPED authoritative assertion still suppresses the raw beacon (?tab=typo revisit)', () => {
+    // /admin/agents logs its rendered 'overview' leaf…
+    trackAdminPageView({
+      pathname: '/admin/agents',
+      search: '?tab=overview',
+      authoritative: true,
+    });
+    settle();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // …then, inside the dedupe window, the user follows a ?tab=typo link.
+    // The page re-asserts its rendered 'overview' — deduped, already
+    // counted, nothing left pending — and the layout's raw 'typo' beacon
+    // must STILL be suppressed, not flushed after the self-report hold as
+    // a tab that never rendered (Codex #2961 r20).
+    vi.advanceTimersByTime(2000);
+    trackAdminPageView({
+      pathname: '/admin/agents',
+      search: '?tab=overview',
+      authoritative: true,
+    });
+    trackAdminPageView({ pathname: '/admin/agents', search: '?tab=typo' });
+    settle();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it('dedupes identical consecutive views (StrictMode double-fire)', () => {

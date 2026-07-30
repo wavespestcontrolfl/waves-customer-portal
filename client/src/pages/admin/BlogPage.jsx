@@ -2929,12 +2929,31 @@ export default function BlogPage() {
       ? paramTab
       : "posts";
 
-  // Usage beacon for the tab that actually RENDERS — legacy status deep
+  // Posts sub-filter (Published/Drafts/Queued/Ideas) is URL-backed via ?status=
+  // so it survives refresh / bookmark / share. Legacy ?tab=drafts|queued|ideas|
+  // published links still resolve (via legacyPostStatus) and stay stable on
+  // reload — no normalization needed, since postStatus is derived, not stored.
+  const VALID_POST_STATUSES = POST_STATUSES.map((s) => s.key);
+  const paramStatus = searchParams.get("status");
+  const postStatus = VALID_POST_STATUSES.includes(paramStatus)
+    ? paramStatus
+    : legacyPostStatus || "published";
+
+  // Usage beacon for the leaf that actually RENDERS — legacy status deep
   // links (?tab=drafts) and unknown values resolve to Posts without
-  // rewriting the URL (Codex #2961 r17). No active-re-click guard on
-  // setTab: clicking Posts while on a legacy status URL must still
-  // rewrite ?tab=, which a same-resolved-key guard would suppress.
-  useRenderedTabBeacon("/admin/blog", tab, [searchParams]);
+  // rewriting the URL (Codex #2961 r17). While Posts is active, the
+  // resolved ?status= sub-filter IS the rendered leaf (Published / Drafts /
+  // Queued / Ideas are distinct recurring workflows; reporting the constant
+  // 'posts' deduped them all into one row — Codex #2961 r20), matching the
+  // deepest-leaf convention of the other nested reporters. No
+  // active-re-click guard on setTab: clicking Posts while on a legacy
+  // status URL must still rewrite ?tab=, which a same-resolved-key guard
+  // would suppress.
+  useRenderedTabBeacon(
+    "/admin/blog",
+    tab === "posts" ? postStatus : tab,
+    [searchParams],
+  );
 
   const setTab = (next) =>
     setSearchParams(
@@ -2948,15 +2967,6 @@ export default function BlogPage() {
   const [selectedPost, setSelectedPost] = useState(null);
   const [counts, setCounts] = useState({});
   const [generatingIdeas, setGeneratingIdeas] = useState(false);
-  // Posts sub-filter (Published/Drafts/Queued/Ideas) is URL-backed via ?status=
-  // so it survives refresh / bookmark / share. Legacy ?tab=drafts|queued|ideas|
-  // published links still resolve (via legacyPostStatus) and stay stable on
-  // reload — no normalization needed, since postStatus is derived, not stored.
-  const VALID_POST_STATUSES = POST_STATUSES.map((s) => s.key);
-  const paramStatus = searchParams.get("status");
-  const postStatus = VALID_POST_STATUSES.includes(paramStatus)
-    ? paramStatus
-    : legacyPostStatus || "published";
   const setPostStatus = (status) =>
     setSearchParams(
       (current) => {

@@ -154,12 +154,14 @@ describe('admin usage: POST /track', () => {
       });
       // A regressed/hostile client posting a raw customer uuid must not
       // persist it — the server strips it exactly like the client normalizer.
+      // 'notes' is not a route-table subpage — deep segments collapse
+      // unless they are known structure (Codex #2961 r20).
       let res = await post({
         pageKey: 'customers',
         path: '/admin/customers/8f14e45f-ceea-4671-9aa5-1c6ff2f3e9b1/notes',
       });
       expect(res.status).toBe(204);
-      expect(chain.calls.insert.path).toBe('/admin/customers/:id/notes');
+      expect(chain.calls.insert.path).toBe('/admin/customers/:id/:id');
       // Numeric ids and opaque tokens collapse too…
       res = await post({
         pageKey: 'estimates',
@@ -201,6 +203,31 @@ describe('admin usage: POST /track', () => {
     });
   });
 
+  test('collapses route-word-shaped deep segments on NON-entity routes too', async () => {
+    const chain = makeChain();
+    db.mockImplementation(() => chain);
+    await withServer(async (baseUrl) => {
+      // '/admin/settings/alice-smith': the page key is real, the deep
+      // segment is a name in route-word clothing — it must collapse, not
+      // ride a registered page key into the path column (Codex r20).
+      let res = await fetch(`${baseUrl}/admin/usage/track`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pageKey: 'settings', path: '/admin/settings/alice-smith' }),
+      });
+      expect(res.status).toBe(204);
+      expect(chain.calls.insert.path).toBe('/admin/settings/:id');
+      // …while the route table's real static subpages stay intact.
+      res = await fetch(`${baseUrl}/admin/usage/track`, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer admin', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pageKey: 'settings', path: '/admin/settings/pest-pressure' }),
+      });
+      expect(res.status).toBe(204);
+      expect(chain.calls.insert.path).toBe('/admin/settings/pest-pressure');
+    });
+  });
+
   test('accepts hyphenated tab slugs (Settings leaf keys)', async () => {
     const chain = makeChain();
     db.mockImplementation(() => chain);
@@ -223,6 +250,9 @@ describe('admin usage: POST /track', () => {
     ['path with query string', { pageKey: 'leads', path: '/admin/leads?source_name=x' }],
     ['path outside /admin', { pageKey: 'leads', path: '/tech/route' }],
     ['pageKey/path mismatch (name-shaped key)', { pageKey: 'alice-smith', path: '/admin/customers/:id' }],
+    // A MATCHING pair still fails: 'alice-smith' passes every shape check,
+    // but only real admin routes are in the page-key registry (Codex r20).
+    ['name-shaped key with matching path', { pageKey: 'alice-smith', path: '/admin/alice-smith' }],
     ['arbitrary colon placeholder in path', { pageKey: 'customers', path: '/admin/customers/:john-smith' }],
     ['tab with spaces', { pageKey: 'leads', path: '/admin/leads', tab: 'my search' }],
     ['digits-only tab (phone-shaped)', { pageKey: 'leads', path: '/admin/leads', tab: '5551234567' }],
@@ -375,6 +405,39 @@ describe('admin usage: GET /summary', () => {
       expect(await get('?days=abc')).toBe(30);
       expect(await get('')).toBe(30);
     });
+  });
+});
+
+describe('admin usage: page-key registry tracks the App.jsx route table', () => {
+  // The registry is what lets the server tell 'alice-smith' the person
+  // from a real admin page (Codex r20) — but a hardcoded list drifts. This
+  // test parses the /admin route block out of client/src/App.jsx (all its
+  // children are self-closing, so the first </Route> after the block start
+  // closes it) and fails when a route is added or removed without updating
+  // KNOWN_PAGE_KEYS in routes/admin-usage.js.
+  test('KNOWN_PAGE_KEYS matches the /admin layout route block exactly', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(
+      path.join(__dirname, '..', '..', 'client', 'src', 'App.jsx'),
+      'utf8',
+    );
+    // 'path="/admin" ' (closing quote + space) so /admin/login and friends
+    // — standalone auth routes outside the admin layout, which never
+    // beacon — don't match.
+    const start = src.indexOf('path="/admin" ');
+    expect(start).toBeGreaterThan(-1);
+    const end = src.indexOf('</Route>', start);
+    expect(end).toBeGreaterThan(start);
+    const block = src.slice(start, end);
+    const fromRoutes = new Set(['dashboard']); // the bare /admin index
+    for (const match of block.matchAll(/<Route path="([^"]+)"/g)) {
+      const first = match[1].split('/')[0];
+      fromRoutes.add(first === '_design-system' ? 'design-system' : first);
+    }
+    expect([...fromRoutes].sort()).toEqual(
+      [...adminUsageRouter.KNOWN_PAGE_KEYS].sort(),
+    );
   });
 });
 

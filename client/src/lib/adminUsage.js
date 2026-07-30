@@ -84,6 +84,12 @@ const SELF_REPORT_SETTLE_MS = 5000;
 
 let pendingSource = null; // { source, ts }
 let lastLogged = null; // { key, ts }
+// The last page-emitted (authoritative) assertion, kept even when it
+// DEDUPED into an already-counted row: the layout's raw beacon for the
+// same page must still be suppressed, or a ?tab=typo navigation after the
+// page logged its fallback queues a leaf that never rendered
+// (Codex #2961 r20).
+let lastAuthoritative = null; // { pageKey, path, ts }
 let hasLoggedThisSession = false;
 let pendingBeacon = null; // { key, body }
 let pendingTimer = null;
@@ -98,16 +104,21 @@ export function markUsageSource(source) {
   pendingSource = { source, ts: Date.now() };
 }
 
-/** '/admin/customers/8f3…e2/notes' → { pageKey: 'customers',
- *  path: '/admin/customers/:id/notes' }. Returns null off /admin. */
+/** '/admin/customers/8f3…e2' → { pageKey: 'customers',
+ *  path: '/admin/customers/:id' }. Returns null off /admin. */
 // Route STRUCTURE is lowercase slug words; anything else is an identifier
-// regardless of length ('John_Smith'). The segment after an entity list
-// route is an identifier unless it's a known static subpage ('acme' after
-// /customers). Mirrored server-side in routes/admin-usage.js — the server
-// is the authoritative privacy backstop.
+// regardless of length ('John_Smith'). Deep segments are identifiers
+// unless they are the route table's known static subpages — a
+// route-word-shaped name ('/admin/customers/acme') is indistinguishable
+// from structure by shape alone (Codex #2961 r20 generalizes the r3
+// entity-route rule to every route). Mirrored server-side in
+// routes/admin-usage.js — the server is the authoritative privacy
+// backstop, with a full page-key registry the client doesn't duplicate.
 const ROUTE_WORD_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
-const ENTITY_ROUTES = new Set(['customers', 'estimates', 'invoices', 'leads', 'calls', 'technicians', 'requests']);
-const ENTITY_STATIC_SUBPAGES = new Set(['new', 'import', 'map', 'directory', 'kanban', 'search', 'settings', 'duplicates']);
+const KNOWN_SUBPAGE_WORDS = new Set([
+  'new', 'import', 'map', 'directory', 'kanban', 'search', 'settings',
+  'duplicates', 'pest-pressure', 'proposal', 'flags',
+]);
 
 // The one real underscore-prefixed route family: /admin/_design-system(/flags)
 // hosts the design reference and the "Early feature access" flags page linked
@@ -125,8 +136,7 @@ export function normalizeAdminPath(pathname) {
     // drop the beacon) — mirroring the server backstop.
     if (!/^[A-Za-z0-9_-]+$/.test(seg)) return seg;
     if (!ROUTE_WORD_RE.test(seg)) return ':id';
-    const prev = i > 0 ? arr[i - 1] : null;
-    if (prev && ENTITY_ROUTES.has(prev) && !ENTITY_STATIC_SUBPAGES.has(seg)) return ':id';
+    if (i > 0 && !KNOWN_SUBPAGE_WORDS.has(seg)) return ':id';
     return seg;
   });
   const first = normalized[0] || 'dashboard';
@@ -245,6 +255,7 @@ export function trackAdminPageView({ pathname, search, authoritative = false } =
     pendingTimer = null;
     pendingBeacon = null;
     lastLogged = null;
+    lastAuthoritative = null;
     hasLoggedThisSession = false;
     lastAuthToken = token;
   }
@@ -284,6 +295,27 @@ export function trackAdminPageView({ pathname, search, authoritative = false } =
     && pendingBeacon.body.path === norm.path
   ) {
     return;
+  }
+
+  // A page's authoritative assertion suppresses the layout's raw beacon
+  // for the same page even when the assertion itself DEDUPED and left
+  // nothing pending: after /admin/agents logs 'overview', a ?tab=typo
+  // navigation dedupes the page's re-asserted 'overview' — without this
+  // marker the raw 'typo' leaf would queue behind it and flush as a tab
+  // that never rendered (Codex #2961 r20). Self-reporting pages re-assert
+  // on every query change, so a fresh marker always describes the current
+  // navigation.
+  if (
+    !authoritative
+    && lastAuthoritative
+    && lastAuthoritative.pageKey === norm.pageKey
+    && lastAuthoritative.path === norm.path
+    && now - lastAuthoritative.ts < SELF_REPORT_SETTLE_MS
+  ) {
+    return;
+  }
+  if (authoritative) {
+    lastAuthoritative = { pageKey: norm.pageKey, path: norm.path, ts: now };
   }
 
   if (lastLogged && lastLogged.key === key && now - lastLogged.ts < DEDUPE_MS) {
@@ -371,6 +403,7 @@ export function __resetAdminUsageForTests() {
   if (pendingTimer) clearTimeout(pendingTimer);
   pendingSource = null;
   lastLogged = null;
+  lastAuthoritative = null;
   hasLoggedThisSession = false;
   pendingBeacon = null;
   pendingTimer = null;
