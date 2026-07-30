@@ -428,7 +428,10 @@ async function fetchManateeParcelDetails(search, address, timeoutMs, t0 = Date.n
   ]);
 
   const parsed = parseManateePaoRecord({ address, search, land, buildings, features });
-  if (!hasAnyPropertyFact(parsed)) {
+  // A multi-situs master-parcel match carries no per-unit facts BY DESIGN —
+  // it must still ship: the roll vouched for the address, and the park
+  // marker is what the panel surfaces instead of "not found on the roll".
+  if (!hasAnyPropertyFact(parsed) && !parsed._multiSitusParcel) {
     logger.info('[county-property] Manatee PAO found parcel but no usable facts', {
       elapsedMs: Date.now() - t0,
     });
@@ -448,6 +451,13 @@ async function fetchManateeParcelDetails(search, address, timeoutMs, t0 = Date.n
     buildings,
     features,
   };
+  if (parsed._multiSitusParcel) {
+    record._raw.multiSitusParcel = {
+      ...parsed._multiSitusParcel,
+      parcelId: search.parcelId,
+      situsAddress: search.situsAddress || null,
+    };
+  }
   record.addressLine1 = search.situsAddress || '';
   record.city = search.city || '';
   record.state = 'FL';
@@ -1041,6 +1051,33 @@ function attachParcelMeta(merged, parcel) {
 // Live probe 2026-07-15 against a just-platted Manatee parcel (2026 Parrish
 // subdivision): CUR_MAN_LUC_DESC "Vacant Residential Platted (1554)",
 // CUR_DOR_LUC_CODE '00', every BLDG_* field null, lot sqft on the roll.
+// Land-lease mobile-home park master parcel on the GIS side: FL DOR major
+// use code 28 ("mobile home parks") or an explicit park land-use
+// description. The park business owns ONE parcel; the homes are
+// tenant-owned and never on the real-property roll, so parcel-level facts
+// must not price a home — and major 28 sits inside the commercial band
+// (dorCodeLooksCommercial), so an unguarded park parcel would even route a
+// resident's quote down the commercial lane. Association aggregates are a
+// different shape (stacked unit parcels) and keep their own lane.
+function isMobileHomeParkParcel(parcel) {
+  if (!parcel || parcel.aggregated === true) return false;
+  const major = parseInt(dorMajorCategory(parcel.dorUseCode), 10);
+  if (major === 28) return true;
+  return /mobile\s*home\s*park/i.test(String(parcel.landUseDescription || ''));
+}
+
+// The multiSitusParcel signal a park GIS parcel contributes once its
+// parcel-level facts are dropped — mirrors the address-search marker so
+// both paths converge on the same panel flag.
+function mobileHomeParkSignalFromParcel(parcel) {
+  if (!isMobileHomeParkParcel(parcel)) return null;
+  return {
+    situsCount: Math.max(2, Number(parcel.residentialUnits) || 0),
+    parcelId: parcel.paoParcelId || parcel.parcelId || null,
+    situsAddress: null,
+  };
+}
+
 function detectUnassessedVacantParcel(record) {
   if (!record) return null;
   // Any building fact means the roll (or a stronger source, incl. a tech
@@ -1095,6 +1132,32 @@ function preserveCountyGisLandUse(merged, cadastralRecord) {
     merged._raw.landUse = `${existing} ${gisLandUse}`;
   }
   return merged;
+}
+
+// Same merge-survival problem as the GIS land-use description: the slim
+// master-parcel county record carries no facts, so it almost never wins the
+// merge — and the park signal would drop exactly when AI records fill the
+// numbers in. Copy it onto the merged record (never clobber).
+function preserveMultiSitusParcelSignal(merged, countyRecord) {
+  return stampMultiSitusParcelSignal(merged, countyRecord?._raw?.multiSitusParcel);
+}
+
+function stampMultiSitusParcelSignal(merged, signal) {
+  if (!merged || !signal) return merged;
+  merged._raw = merged._raw || {};
+  if (!merged._raw.multiSitusParcel) merged._raw.multiSitusParcel = signal;
+  return merged;
+}
+
+// Multi-situs master parcel marker (set by the Manatee PAO search when the
+// typed address matched one situs line of a parcel that carries many —
+// land-lease mobile-home parks are the common case). Stronger per-unit
+// sources (a listing, a tech override) don't clear it: the ROLL still can't
+// vouch for per-unit dimensions.
+function detectMultiSitusMasterParcel(record) {
+  const signal = record?._raw?.multiSitusParcel;
+  if (!signal || !(signal.situsCount > 1)) return null;
+  return signal;
 }
 
 // Same survival problem as the land-use description: the merge spreads only
@@ -1704,6 +1767,7 @@ async function lookupPropertyFromAITrio(address, geoContext = null) {
   // inside the shared county budget with its own (shorter) timeout; every
   // failure mode degrades to the address-search path below.
   let parcel = null;
+  let parkParcelSignal = null;
   const gisPrecision = parcelGisPrecision(geoContext);
   if (gisPrecision) {
     const gisTimeoutMs = Math.min(parcelGisTimeoutMs(), remainingCountyLookupMs(t0, countyTimeoutMs));
@@ -1722,7 +1786,19 @@ async function lookupPropertyFromAITrio(address, geoContext = null) {
           .catch(() => null);
       }
     }
-    if (parcel && parcel.aggregated === true) {
+    parkParcelSignal = mobileHomeParkSignalFromParcel(parcel);
+    if (parkParcelSignal) {
+      // Land-lease mobile-home park master parcel: the polygon genuinely
+      // contains the rooftop, but every parcel-level dimension (and the
+      // commercial-band DOR 28 code) describes the PARK, not the home.
+      // Checked BEFORE the situs guards — a blank park situs fails the
+      // mismatch guard open, and a home at the park's own situs line would
+      // pass it outright; both must still drop the parcel. Only the marker
+      // survives, so the panel explains the missing dimensions instead of
+      // "not found on the roll".
+      logger.warn('[county-property] GIS parcel is a mobile-home-park master parcel — dropping parcel-level facts, keeping the park marker');
+      parcel = null;
+    } else if (parcel && parcel.aggregated === true) {
       if (aggregateSitusVerdict(parcel, searchAddress, gisPrecision, address) === 'drop') {
         logger.warn('[county-property] association aggregate lacks a confirming building number for the typed address — degrading to address search');
         parcel = null;
@@ -1787,6 +1863,7 @@ async function lookupPropertyFromAITrio(address, geoContext = null) {
     const merged = mergePropertyRecords([countyRecord, cadastralRecord].filter(Boolean), searchAddress);
     preserveCountyGisLandUse(merged, cadastralRecord);
     preserveCountyGisImpervious(merged, cadastralRecord);
+    preserveMultiSitusParcelSignal(merged, countyRecord);
     return attachParcelMeta(applyCountyGisTypeOverride(merged, cadastralRecord), parcel);
   }
 
@@ -1820,6 +1897,12 @@ async function lookupPropertyFromAITrio(address, geoContext = null) {
   if (!records.length) return null;
   const merged = preserveCountyGisLandUse(mergePropertyRecords(records, searchAddress), cadastralRecord);
   preserveCountyGisImpervious(merged, cadastralRecord);
+  preserveMultiSitusParcelSignal(merged, countyRecord);
+  // The GIS-derived park signal only lands here, never on the county-core
+  // early return above: a FULL county record means the roll vouched for the
+  // typed address on its own parcel, and a park flag from a (possibly
+  // imprecise) rooftop point would be noise on a solved lookup.
+  stampMultiSitusParcelSignal(merged, parkParcelSignal);
   return attachParcelMeta(applyCountyGisTypeOverride(merged, cadastralRecord), parcel);
 }
 
@@ -2617,11 +2700,25 @@ function pickManateeSearchResult(data, address) {
   const targetCity = requiresCityMatch ? extractCommaCity(address) : null;
   if (requiresCityMatch && !targetCity) return null;
   const candidates = rows
-    .map((row) => ({
-      parcelId: cleanPaoCell(row[parcelIdx >= 0 ? parcelIdx : 0]),
-      situsAddress: cleanPaoCell(row[addressIdx >= 0 ? addressIdx : 3]),
-      city: cleanPaoCell(row[cityIdx >= 0 ? cityIdx : 4]),
-    }))
+    .flatMap((row) => {
+      const parcelId = cleanPaoCell(row[parcelIdx >= 0 ? parcelIdx : 0]);
+      const city = cleanPaoCell(row[cityIdx >= 0 ? cityIdx : 4]);
+      // Master parcels (land-lease mobile-home parks especially) come back as
+      // ONE row whose situs cell is a ';'-delimited list of every address on
+      // the parcel — cleanPaoCell would join the list into a single line the
+      // number/exact filters can never match, so an in-park address silently
+      // missed the roll. One candidate per situs line, each carrying how many
+      // addresses share the parcel (situsCount > 1 flips the master-parcel
+      // handling in parseManateePaoRecord). Same split rule as the audit's
+      // collect().
+      const situsLines = splitPaoSitusCell(row[addressIdx >= 0 ? addressIdx : 3]);
+      return situsLines.map((situsAddress) => ({
+        parcelId,
+        situsAddress,
+        city,
+        situsCount: situsLines.length,
+      }));
+    })
     .map((row) => ({ ...row, normalizedAddress: normalizeCountyStreetLine(row.situsAddress) }))
     .filter((row) => row.parcelId && row.situsAddress)
     .filter((row) => {
@@ -2983,6 +3080,31 @@ function charlottePoolFeatures(detailHtml) {
 }
 
 function parseManateePaoRecord({ address, search, land, buildings, features }) {
+  // Multi-situs master parcel (land-lease mobile-home park is the common
+  // case): the typed address matched ONE situs line, but every land and
+  // building row describes the WHOLE parcel — a ~47-acre park lot or another
+  // unit's building must never price a single home. Keep the identity facts
+  // (matched situs, parcel link) and leave every per-unit dimension to
+  // AI/field sources; _multiSitusParcel drives the panel's park verify-flag.
+  if ((search.situsCount || 1) > 1) {
+    return {
+      squareFootage: null,
+      lotSize: null,
+      yearBuilt: null,
+      bedrooms: null,
+      bathrooms: null,
+      stories: null,
+      propertyType: null,
+      constructionMaterial: null,
+      roofType: null,
+      source: `${MANATEE_PAO_BASE}/parcel/?parid=${encodeURIComponent(search.parcelId)}`,
+      confidence: 'high',
+      county: 'Manatee',
+      formattedAddress: [search.situsAddress, search.city, 'FL'].filter(Boolean).join(', ') || address,
+      _multiSitusParcel: { situsCount: search.situsCount },
+    };
+  }
+
   const buildingRows = parsePaoRows(buildings);
   const landRows = parsePaoRows(land);
   const primaryBuilding = pickPrimaryManateeBuilding(buildingRows);
@@ -3263,6 +3385,16 @@ function findPaoColumnIndex(cols, titles) {
 function cleanPaoCell(value) {
   if (value == null) return '';
   return String(value).replace(/^;+|;+$/g, '').replace(/;/g, '; ').replace(/\s+/g, ' ').trim();
+}
+
+// Delimited situs cell → one entry per address. Single-situs cells yield the
+// same one-element result cleanPaoCell would have produced.
+function splitPaoSitusCell(value) {
+  if (value == null) return [];
+  return String(value)
+    .split(';')
+    .map((piece) => piece.replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
 }
 
 function findHtmlTableById(html, id) {
@@ -4375,6 +4507,7 @@ module.exports = {
   hasCountyEvidence,
   buildPropertyDataQuality,
   detectUnassessedVacantParcel,
+  detectMultiSitusMasterParcel,
   canonicalLookupAddress,
   lookupStoriesFromAI,
   lookupStoriesEvidenceFromAI,
@@ -4393,6 +4526,11 @@ module.exports = {
     buildCadastralRecord,
     preserveCountyGisLandUse,
     preserveCountyGisImpervious,
+    preserveMultiSitusParcelSignal,
+    stampMultiSitusParcelSignal,
+    isMobileHomeParkParcel,
+    mobileHomeParkSignalFromParcel,
+    splitPaoSitusCell,
     buildPropertyDataQuality,
     canonicalLookupAddress,
     canUseParcelGis,
