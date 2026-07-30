@@ -378,11 +378,18 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
     // deny-safe settle would re-pend it with the stamp preserved — leaving
     // the sweep to exclude the corrected hold forever. The correction is an
     // explicit operator approval of the new address, on active claims
-    // exactly as on pending rows.
+    // exactly as on pending rows. A deny-stamped releasing row is also
+    // OWNERLESS by construction (Codex #3084 r29): the deny's updated_at
+    // bump invalidated every outstanding lease, so no worker can settle or
+    // re-pend it, and leaving it 'releasing' would park the corrected
+    // release behind the full stale-claim timeout. Flip exactly those rows
+    // back to 'pending' with the retarget, so this correction's own resume
+    // (below) claims and releases them immediately.
     await conn('first_touch_holds')
       .where({ customer_id: customerId, status: 'releasing' })
       .update({
         held_email: newEmail,
+        status: conn.raw("CASE WHEN last_error = 'email_denied_await_correction' THEN 'pending' ELSE status END"),
         last_error: conn.raw("CASE WHEN last_error = 'email_denied_await_correction' THEN NULL ELSE last_error END"),
       });
     // PENDING rows durably adopt the corrected address too, BEFORE the

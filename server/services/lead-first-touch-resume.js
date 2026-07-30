@@ -509,99 +509,84 @@ async function resumeHeldFirstTouch({
       // stored email in BOTH release kinds.
       patch.held_email = sendEmail;
       if (hold.held_drip && !hold.released_drip) {
+        // Enrollment creation and its validation are ATOMIC (Codex #3084
+        // r29, replacing the r26/r28 post-enroll repair): the fresh
+        // enrollment's first step is immediately due, and the scheduler
+        // selects due active rows independently — a repair that runs
+        // AFTER the insert commits races both the scheduler and a deny
+        // stamping just behind the recheck. Inside a transaction that
+        // locks the ledger row FOR UPDATE: the scheduler cannot see an
+        // uncommitted enrollment, and a deny stamp / correction retarget
+        // (both write this hold row) BLOCKS until commit — so validating
+        // the fence, deny state, and target BEFORE enrollCustomer is
+        // race-free by construction, and a failed validation creates no
+        // enrollment at all. On a knex transaction handle this nests as a
+        // savepoint (deferred/triage callers).
+        let dripSkip = null;
         try {
-          const AutomationRunner = require('./automation-runner');
-          const enroll = await AutomationRunner.enrollCustomer({
-            templateKey: 'new_lead',
-            customer: {
-              email: sendEmail,
-              first_name: customer.first_name || null,
-              last_name: customer.last_name || null,
-              id: holdCustomerId,
-            },
-            dbh,
-          });
-          if (!enroll?.enrolled && enroll?.enrollmentId) {
-            // Already-enrolled leaves the ACTIVE enrollment's denormalized
-            // email untouched, and the scheduler sends each remaining step
-            // to the ROW's email (Codex #3084 r20): after a superseded
-            // settle re-pends this hold, the retry must retarget that
-            // active enrollment to the address THIS release confirmed —
-            // marking the drip released while its steps continue to the
-            // superseded (possibly hard-bounced) address is the exact
-            // incident this lane exists to prevent. A thrown update lands
-            // in the enroll catch below: re-pend, retryable.
-            // CAS'd against the hold's CURRENT target (Codex #3084 r21):
-            // correction B can land between enrollCustomer and this write,
-            // retargeting both the enrollment and the hold to B — writing
-            // A back would let a due step send to A before the superseded
-            // settle's retry restores B. The scalar-subquery predicate only
-            // writes while the hold still targets A; once B commits, B's
-            // own fanout enrollment sync is the writer, so both orders
-            // converge on B.
-            await dbh('automation_enrollments')
-              .where({ id: enroll.enrollmentId, status: 'active' })
-              .whereRaw('LOWER(email) != ?', [sendEmail])
-              .whereRaw(
-                "(SELECT LOWER(COALESCE(held_email, '')) FROM first_touch_holds WHERE id = ?) = ?",
-                [hold.id, sendEmail],
-              )
-              .update({ email: sendEmail, updated_at: new Date() });
-          }
-          if (enroll?.enrolled && enroll?.enrollmentId) {
-            // NEWLY created (or reactivated) enrollments carry the address
-            // THIS release passed (Codex #3084 r26): correction B committing
-            // between the pre-send re-read and enrollCustomer found no
-            // enrollment row to sync, so this insert is a writer B never
-            // saw — and the zero-delay first step could mail the superseded
-            // address before the settle's target CAS re-pends and a retry
-            // repairs it. Re-read the hold now that the enrollment exists:
-            // if the target moved, retarget the fresh enrollment to it, or
-            // cancel it when the target went empty/invalid (correction-only
-            // rows hold no address). Guarded on the enrollment still
-            // carrying OUR write, so a corrector that already re-synced it
-            // is never clobbered; if B instead commits after this re-read,
-            // B's own enrollment sweep sees the committed insert — both
-            // orders converge. A throw lands in the enroll catch below
-            // (re-pend, retryable).
-            const postEnroll = await dbh('first_touch_holds').where({ id: hold.id })
+          await dbh.transaction(async (trx) => {
+            const locked = await trx('first_touch_holds')
+              .where({ id: hold.id })
+              .forUpdate()
               .first('held_email', 'last_error', 'status', 'updated_at');
-            // A deny stamped while enrollCustomer ran invalidates the lease
-            // but preserves the target (Codex #3084 r28) — a target-only
-            // comparison would leave the fresh, immediately-due enrollment
-            // mailing the address the operator just rejected. Cancel it
-            // (guarded on our write) and walk away with the stamp intact.
-            if (postEnroll?.last_error === 'email_denied_await_correction') {
-              await dbh('automation_enrollments')
+            if (!locked || String(locked.status) !== 'releasing'
+                || +new Date(locked.updated_at) !== +claimStamp) {
+              // A deny bump intentionally invalidates the lease (r28); a
+              // reclaim means the sweep's release owns the row. Either
+              // way: no enrollment, no writes, stamp untouched.
+              dripSkip = {
+                skipped: locked?.last_error === 'email_denied_await_correction'
+                  ? 'email_denied' : 'claim_lost',
+              };
+              return;
+            }
+            if (String(locked.held_email || '').trim().toLowerCase() !== observedEmailLc) {
+              // A correction landed between the pre-send re-read and this
+              // lock — the retry releases to the newer target with every
+              // check re-run (suppression included).
+              dripSkip = { skipped: 'superseded_during_send', repen: true };
+              return;
+            }
+            const AutomationRunner = require('./automation-runner');
+            const enroll = await AutomationRunner.enrollCustomer({
+              templateKey: 'new_lead',
+              customer: {
+                email: sendEmail,
+                first_name: customer.first_name || null,
+                last_name: customer.last_name || null,
+                id: holdCustomerId,
+              },
+              dbh: trx,
+            });
+            if (!enroll?.enrolled && enroll?.enrollmentId) {
+              // Already-enrolled leaves the ACTIVE enrollment's
+              // denormalized email untouched, and the scheduler sends each
+              // remaining step to the ROW's email (Codex #3084 r20): after
+              // a superseded settle re-pends this hold, the retry must
+              // retarget that active enrollment to the address THIS
+              // release confirmed. CAS'd against the hold's CURRENT target
+              // (r21) — under the row lock the target cannot move, so the
+              // predicate is now a pure invariant check.
+              await trx('automation_enrollments')
                 .where({ id: enroll.enrollmentId, status: 'active' })
-                .whereRaw('LOWER(email) = ?', [sendEmail])
-                .update({ status: 'cancelled', updated_at: new Date() });
-              result.skipped = result.skipped || 'email_denied';
-              continue;
+                .whereRaw('LOWER(email) != ?', [sendEmail])
+                .whereRaw(
+                  "(SELECT LOWER(COALESCE(held_email, '')) FROM first_touch_holds WHERE id = ?) = ?",
+                  [hold.id, sendEmail],
+                )
+                .update({ email: sendEmail, updated_at: new Date() });
             }
-            // Fence lost WITHOUT a deny = the sweep reclaimed mid-enroll
-            // (r28): the reclaimer's own enrollCustomer hits already-
-            // enrolled and the r21 CAS keeps the enrollment converging —
-            // leave it and abandon the hold untouched.
-            if (!postEnroll || String(postEnroll.status) !== 'releasing'
-                || +new Date(postEnroll.updated_at) !== +claimStamp) {
-              logger.info('[first-touch-resume] claim lost during enroll — abandoning hold untouched');
-              result.skipped = result.skipped || 'claim_lost';
-              continue;
+            result.enrolled = result.enrolled || !!enroll?.enrolled;
+          });
+          if (dripSkip) {
+            if (dripSkip.repen) {
+              await repenHoldPreservingDeny(hold.id, 'superseded_during_send', dbh, claimStamp);
+            } else {
+              logger.info(`[first-touch-resume] enroll skipped (${dripSkip.skipped}) — hold left to its owner`);
             }
-            const postTargetLc = String(postEnroll?.held_email || '').trim().toLowerCase();
-            if (postTargetLc !== sendEmail) {
-              await dbh('automation_enrollments')
-                .where({ id: enroll.enrollmentId, status: 'active' })
-                .whereRaw('LOWER(email) = ?', [sendEmail])
-                .update(
-                  postTargetLc && RESUME_EMAIL_RE.test(postTargetLc)
-                    ? { email: postTargetLc, updated_at: new Date() }
-                    : { status: 'cancelled', updated_at: new Date() },
-                );
-            }
+            result.skipped = result.skipped || dripSkip.skipped;
+            continue;
           }
-          result.enrolled = result.enrolled || !!enroll?.enrolled;
           patch.released_drip = true;
         } catch (enrollErr) {
           // Back to pending — the ledger row IS the retryable release.
@@ -1123,6 +1108,25 @@ async function sweepAbandonedFirstTouchHolds({ dbh = db, limit = 10 } = {}) {
   const swept = { examined: 0, released: 0 };
   try {
     if (!(await dbh.schema.hasTable('first_touch_holds'))) return swept;
+    // Recovery pre-pass (Codex #3084 r29): a transient failure in the
+    // merged-work re-pend can strand a row 'released' with unreleased held
+    // work — the outer recovery is fenced on status='releasing' and the
+    // main sweep below only looks at pending/stale-releasing rows, so
+    // nothing else would ever retry it. The CAS matches exactly that
+    // inconsistent state (a correctly released row always has its released
+    // flags covering its held flags), is deny-safe, and re-pends into the
+    // normal sweep flow.
+    try {
+      await dbh('first_touch_holds')
+        .where({ status: 'released' })
+        .whereRaw('((held_drip AND NOT released_drip) OR (held_newsletter AND NOT released_newsletter))')
+        .where(function notDenied() {
+          this.whereNull('last_error').orWhereNot('last_error', 'email_denied_await_correction');
+        })
+        .update({ status: 'pending', last_error: 'work_merged_during_release', updated_at: new Date() });
+    } catch (recoverErr) {
+      logger.warn(`[first-touch-resume] merged-work recovery pass failed: ${recoverErr.code || recoverErr.name || 'db_error'} — next sweep retries`);
+    }
     // Eligibility filters live IN the query (Codex #3084 r13): a limit
     // applied before filtering would let ten old ineligible rows (live
     // cards, never reviewed) permanently shadow eligible ones behind them.

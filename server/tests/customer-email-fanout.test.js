@@ -431,6 +431,12 @@ describe('propagateCustomerEmailChange', () => {
     // preserve the stamp and strand the corrected hold from the sweep.
     expect(String(retarget.arg.last_error.__raw)).toContain('email_denied_await_correction');
     expect(String(retarget.arg.last_error.__raw)).toContain('THEN NULL');
+    // A deny-stamped releasing row is ownerless (the deny bump invalidated
+    // every lease, Codex #3084 r29) — the retarget flips exactly those rows
+    // back to 'pending' so THIS correction's resume claims them immediately
+    // instead of waiting out the stale-claim timeout.
+    expect(String(retarget.arg.status.__raw)).toContain("WHEN last_error = 'email_denied_await_correction' THEN 'pending'");
+    expect(String(retarget.arg.status.__raw)).toContain('ELSE status');
   });
 
   test('a correction retargets PENDING holds — and lifts a deny stamp — before releasing', async () => {

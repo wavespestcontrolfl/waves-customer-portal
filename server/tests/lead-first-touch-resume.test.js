@@ -53,6 +53,7 @@ jest.mock('../models/db', () => {
       orWhereNot: jest.fn(() => chain),
       whereExists: jest.fn(() => chain),
       whereNotExists: jest.fn(() => chain),
+      forUpdate: jest.fn(() => chain),
       from: jest.fn(() => chain),
       orderBy: jest.fn(() => chain),
       limit: jest.fn(() => chain),
@@ -166,6 +167,9 @@ jest.mock('../models/db', () => {
   const db = jest.fn(handler);
   db.schema = { hasTable: jest.fn(async () => true) };
   db.raw = jest.fn((sql, bindings) => (bindings === undefined ? sql : { sql, bindings }));
+  // The r29 enroll validation wraps creation in a transaction (a savepoint
+  // on trx handles) — the stub hands back the same connection.
+  db.transaction = jest.fn(async (fn) => fn(db));
   return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -424,22 +428,25 @@ describe('resumeHeldFirstTouch (ledger release engine)', () => {
     expect(repens.length).toBeGreaterThanOrEqual(1); // owned sibling re-pends (lost one is fenced out in prod)
   });
 
-  test('a deny stamped during enrollCustomer cancels the fresh zero-delay enrollment', async () => {
-    // The denial intentionally invalidates the lease but preserves the
-    // target, so a target-only comparison would leave the newly created,
-    // immediately-due enrollment mailing the address the operator just
-    // rejected (Codex #3084 r28) — the post-enroll recheck reads the deny
-    // state too and cancels before the drip is marked released.
+  test('a deny stamped before the enroll lock creates no enrollment at all', async () => {
+    // The denial's updated_at bump invalidates the lease and preserves the
+    // target (Codex #3084 r28); with creation and validation atomic under
+    // the row lock (r29), the deny is seen BEFORE enrollCustomer — no
+    // immediately-due enrollment ever exists for the scheduler to pick up,
+    // and the stamp survives untouched. A deny landing DURING the enroll
+    // is impossible: its stamp write blocks on the same row lock until the
+    // validated enrollment commits.
     mockEnroll.mockResolvedValueOnce({ enrolled: true, enrollmentId: 'enr-new' });
     mockHold = baseHold({ held_newsletter: false });
     mockHoldFirstQueue = [
       { held_email: 'confirmed@example.com', last_error: null }, // pre-send re-read
-      { held_email: 'confirmed@example.com', last_error: 'email_denied_await_correction' }, // post-enroll recheck
+      // locked validation: deny landed — its bump broke the fence
+      { held_email: 'confirmed@example.com', last_error: 'email_denied_await_correction', status: 'releasing', updated_at: new Date(0) },
     ];
     const res = await resumeHeldFirstTouch({ callLogId: 'call-1' });
     expect(res.skipped).toBe('email_denied');
-    expect(mockEnrollmentUpdates).toHaveLength(1);
-    expect(mockEnrollmentUpdates[0]).toMatchObject({ status: 'cancelled' });
+    expect(mockEnroll).not.toHaveBeenCalled();
+    expect(mockEnrollmentUpdates).toHaveLength(0);
     expect(mockHoldUpdates).toHaveLength(1); // the claim only — the stamp survives untouched
   });
 
@@ -716,42 +723,40 @@ describe('mid-send races (r19)', () => {
     expect(mockHoldUpdates.at(-1)).toMatchObject({ status: 'released', released_drip: true });
   });
 
-  test('a correction landing during enrollCustomer retargets the newly created enrollment', async () => {
-    // Correction B commits between the pre-send re-read and enrollCustomer:
-    // B's fanout sweep found no enrollment row to sync, so the fresh insert
-    // is a writer B never saw — its zero-delay first step would mail the
-    // superseded address before the settle CAS re-pends (Codex #3084 r26).
-    // The post-enroll hold re-read catches the moved target and retargets
-    // the enrollment in place.
+  test('a correction landed before the enroll lock re-pends as superseded — no stale enrollment is ever created', async () => {
+    // Correction B commits between the pre-send re-read and the enroll
+    // transaction's row lock (Codex #3084 r26, atomic since r29): the
+    // locked validation sees B's target BEFORE enrollCustomer runs, so no
+    // enrollment for the superseded address ever exists — the scheduler
+    // has nothing stale to pick up. The hold re-pends for the sweep's
+    // retry, which re-runs every check against B's address.
     mockEnroll.mockResolvedValueOnce({ enrolled: true, enrollmentId: 'enr-new' });
     mockHold = baseHold({ held_newsletter: false });
     mockHoldFirstQueue = [
       { held_email: 'confirmed@example.com', last_error: null }, // pre-send re-read: unchanged
-      { held_email: 'newer@example.com' },                        // post-enroll: B landed mid-enroll
+      { held_email: 'newer@example.com' },                        // locked validation: B landed
     ];
-    mockReleasedSettleZeroOnce = true; // terminal CAS sees B's target and refuses
-    await resumeHeldFirstTouch({ callLogId: 'call-1' });
-    expect(mockEnrollmentUpdates).toHaveLength(1);
-    expect(mockEnrollmentUpdates[0]).toMatchObject({ email: 'newer@example.com' });
+    const res = await resumeHeldFirstTouch({ callLogId: 'call-1' });
+    expect(res.skipped).toBe('superseded_during_send');
+    expect(mockEnroll).not.toHaveBeenCalled();
+    expect(mockEnrollmentUpdates).toHaveLength(0);
     expect(mockHoldUpdates.at(-1)).toMatchObject({ status: 'pending', last_error: 'superseded_during_send' });
   });
 
-  test('a newly created enrollment is cancelled when the hold target went empty mid-enroll', async () => {
-    // A correction-only retarget can leave the hold with no usable address
-    // (held_email '' is the inert marker) — a fresh enrollment must not
-    // keep mailing the address the operator just rejected (Codex #3084
-    // r26): with nothing valid to retarget to, cancel it.
+  test('an empty (correction-only) hold target at the enroll lock re-pends without enrolling', async () => {
+    // held_email '' is the inert marker — with nothing valid to release
+    // to, the locked validation refuses before any enrollment exists
+    // (Codex #3084 r26/r29).
     mockEnroll.mockResolvedValueOnce({ enrolled: true, enrollmentId: 'enr-new' });
     mockHold = baseHold({ held_newsletter: false });
     mockHoldFirstQueue = [
       { held_email: 'confirmed@example.com', last_error: null },
       { held_email: '' },
     ];
-    mockReleasedSettleZeroOnce = true;
-    await resumeHeldFirstTouch({ callLogId: 'call-1' });
-    expect(mockEnrollmentUpdates).toHaveLength(1);
-    expect(mockEnrollmentUpdates[0]).toMatchObject({ status: 'cancelled' });
-    expect(mockEnrollmentUpdates[0].email).toBeUndefined();
+    const res = await resumeHeldFirstTouch({ callLogId: 'call-1' });
+    expect(res.skipped).toBe('superseded_during_send');
+    expect(mockEnroll).not.toHaveBeenCalled();
+    expect(mockEnrollmentUpdates).toHaveLength(0);
   });
 
   test('a deny stamp landing mid-send blocks the terminal settle and survives the re-pend', async () => {
@@ -843,6 +848,7 @@ describe('mid-send races (r19)', () => {
       // pre-send target re-read — fence fields (status/updated_at) come
       // from the mock's live-claim defaults (r27); only the target rides.
       { held_email: 'confirmed@example.com', last_error: null },
+      { held_email: 'confirmed@example.com', last_error: null }, // enroll-lock validation (r29)
       { status: 'released', held_drip: true, released_drip: false, held_newsletter: true, released_newsletter: false }, // merged-work re-read
     ];
     mockRepenGuardZeroTimes = 1;
@@ -980,6 +986,17 @@ describe('DOI dedupe guard and ledger sweep', () => {
     const swept = await sweepAbandonedFirstTouchHolds({});
     expect(swept).toMatchObject({ examined: 2, released: 0 });
     expect(mockEnroll).not.toHaveBeenCalled();
+  });
+
+  test('the sweep recovers rows stranded released with unreleased merged work', async () => {
+    // A transient failure in the merged-work re-pend leaves the row
+    // 'released' with a held flag uncovered — the fenced outer recovery
+    // needs status 'releasing' and the main sweep only scans
+    // pending/stale rows, so this pre-pass is the only path back
+    // (Codex #3084 r29). Deny-safe CAS on exactly that inconsistent state.
+    mockHolds = []; // no sweep candidates — only the recovery pass runs
+    await sweepAbandonedFirstTouchHolds({});
+    expect(mockHoldUpdates[0]).toMatchObject({ status: 'pending', last_error: 'work_merged_during_release' });
   });
 
   test('the sweep never releases when the LATEST review cycle was dismissed', async () => {
