@@ -265,12 +265,17 @@ function newsletterDelivered(outcome) {
 // arming the force-resend would double-mail it (Codex #3084 r25). Verify
 // the subscriber still carries the attempted address; rotated → the
 // superseded marker, unverifiable → the fail-closed marker (both keep the
-// dedupe guard intact on retry).
-async function sendFailedMarkerFor(sentEmailLc, dbh) {
+// dedupe guard intact on retry). Bound to the ATTEMPTED subscriber when
+// its id is known (Codex #3084 r31): a DIFFERENT subscriber claiming the
+// now-free address before the failure lands would otherwise satisfy an
+// email-only lookup and arm the force-resend for a hold that meanwhile
+// targets the rotated address — a duplicate DOI on its next release.
+async function sendFailedMarkerFor(sentEmailLc, dbh, subscriberId = null) {
   try {
-    const sub = await dbh('newsletter_subscribers')
-      .whereRaw('LOWER(email) = ?', [String(sentEmailLc || '').trim().toLowerCase()])
-      .first('id');
+    let q = dbh('newsletter_subscribers')
+      .whereRaw('LOWER(email) = ?', [String(sentEmailLc || '').trim().toLowerCase()]);
+    if (subscriberId) q = q.where({ id: subscriberId });
+    const sub = await q.first('id');
     return sub ? 'newsletter_doi_not_confirmed' : 'superseded_during_send';
   } catch (verifyErr) {
     logger.warn(`[first-touch-resume] send-failure target verify failed: ${verifyErr.code || verifyErr.name || 'db_error'}`);
@@ -665,6 +670,27 @@ async function resumeHeldFirstTouch({
           }
           claimStamp = renewedStamp;
           claimStamps.set(hold.id, renewedStamp);
+          // CONSUME the force-resend marker before the external send
+          // (Codex #3084 r31): a worker suspended AFTER a skipDedupe send
+          // but before its settle leaves the marker on the row — the
+          // sweep's reclaimer would honor it and bypass the durable
+          // confirmation_sent_at guard, mailing a second DOI. The fenced
+          // clear (no updated_at bump — the lease stays intact) hands
+          // exactly one incarnation the skipDedupe ticket; everyone else
+          // falls back to the dedupe guard, and a send FAILURE re-arms
+          // the marker through sendFailedMarkerFor below.
+          let skipDedupe = false;
+          if (hold.last_error === 'newsletter_doi_not_confirmed') {
+            const consumed = await dbh('first_touch_holds')
+              .where({
+                id: hold.id,
+                status: 'releasing',
+                updated_at: new Date(claimStamp),
+                last_error: 'newsletter_doi_not_confirmed',
+              })
+              .update({ last_error: null });
+            skipDedupe = consumed > 0;
+          }
           let outcome = null;
           try {
             outcome = await runNewsletterResume({
@@ -672,7 +698,7 @@ async function resumeHeldFirstTouch({
               email: sendEmail,
               firstName: customer.first_name || null,
               lastName: customer.last_name || null,
-            }, dbh, { skipDedupe: hold.last_error === 'newsletter_doi_not_confirmed' });
+            }, dbh, { skipDedupe });
           } catch (newsletterErr) {
             logger.warn(`[first-touch-resume] newsletter resume failed for customer ${holdCustomerId}: ${newsletterErr.code || newsletterErr.name || 'resume_failed'}`);
           }
@@ -684,8 +710,9 @@ async function resumeHeldFirstTouch({
             patch.status = 'pending';
             // retryReason (e.g. dedupe_linkage_failed) is deliberately NOT
             // the send-failed marker — it must not trigger skipDedupe.
+            // Bound to the attempted subscriber when known (r31).
             patch.last_error = outcome?.retryReason
-              || await sendFailedMarkerFor(sendEmail, dbh);
+              || await sendFailedMarkerFor(sendEmail, dbh, outcome?.subscriberId || null);
           }
         }
       }
@@ -943,7 +970,28 @@ async function runOnePostCommitResume(payload, holdIds, dbh, claims = new Map())
         return { skipped: 'claim_lost' };
       }
     }
-    const outcome = await runNewsletterResume(sendPayload, dbh, { skipDedupe: holdWasDoiUnconfirmed });
+    // CONSUME the group's force-resend marker before the send (Codex #3084
+    // r31): a callback suspended after its skipDedupe send but before the
+    // settles leaves the marker for the sweep's reclaimer, which would
+    // bypass the dedupe guard and double-mail. Exactly one incarnation
+    // wins the fenced clear; a send failure below re-arms the marker.
+    let skipDedupe = false;
+    if (holdWasDoiUnconfirmed) {
+      for (const holdId of holdIds) {
+        try {
+          const consumed = await fencedHoldWrite(
+            dbh('first_touch_holds')
+              .where({ id: holdId, last_error: 'newsletter_doi_not_confirmed' }),
+            fenceOf(holdId),
+          )
+            .update({ last_error: null });
+          if (consumed) skipDedupe = true;
+        } catch (consumeErr) {
+          logger.warn(`[first-touch-resume] resend-marker consume failed for hold ${holdId}: ${consumeErr.code || consumeErr.name || 'db_error'}`);
+        }
+      }
+    }
+    const outcome = await runNewsletterResume(sendPayload, dbh, { skipDedupe });
     const sentEmailLc = String(sendPayload.email || '').trim().toLowerCase();
     for (const holdId of holdIds) {
       if (newsletterDelivered(outcome)) {
@@ -964,9 +1012,10 @@ async function runOnePostCommitResume(payload, holdIds, dbh, claims = new Map())
         // trigger (or the ledger sweep) retries it. retryReason outcomes
         // (e.g. dedupe_linkage_failed) keep skipDedupe FALSE on retry.
         // Deny-preserving (r22); the force-resend marker only when the
-        // subscriber still carries the attempted address (r25).
+        // subscriber still carries the attempted address (r25), bound to
+        // the attempted subscriber id when known (r31).
         await repenHoldPreservingDeny(holdId, outcome?.retryReason
-          || await sendFailedMarkerFor(sentEmailLc, dbh), dbh, fenceOf(holdId));
+          || await sendFailedMarkerFor(sentEmailLc, dbh, outcome?.subscriberId || null), dbh, fenceOf(holdId));
       }
     }
     return outcome;

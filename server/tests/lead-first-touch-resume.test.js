@@ -385,6 +385,21 @@ describe('resumeHeldFirstTouch (ledger release engine)', () => {
     expect(mockHoldUpdates[0]).toMatchObject({ status: 'releasing' });
   });
 
+  test('the force-resend marker is consumed before the DOI goes out', async () => {
+    // A worker suspended AFTER its skipDedupe send but before the settle
+    // would leave the marker for the sweep's reclaimer, which would bypass
+    // the durable confirmation_sent_at guard and mail a second DOI (Codex
+    // #3084 r31). The fenced clear hands exactly one incarnation the
+    // skipDedupe ticket; a send failure re-arms it.
+    mockHold = baseHold({ held_drip: false, last_error: 'newsletter_doi_not_confirmed' });
+    const res = await resumeHeldFirstTouch({ callLogId: 'call-1' });
+    expect(res.resumed).toBe(true);
+    expect(mockNewsletter).toHaveBeenCalled();
+    // claim → marker consume ({last_error: null} only) → released settle
+    expect(mockHoldUpdates[1]).toEqual({ last_error: null });
+    expect(mockHoldUpdates.at(-1)).toMatchObject({ status: 'released', released_newsletter: true });
+  });
+
   test('a claim lost after the enroll transaction never sends the DOI', async () => {
     // In prod the enroll transaction's row lock + in-trx renewal make a
     // mid-enroll reclaim impossible (r29/r30) — this exercises the

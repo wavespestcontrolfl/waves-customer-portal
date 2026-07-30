@@ -60,9 +60,16 @@ function makeConn(cfg = {}) {
       where: (arg) => {
         calls.push({ table, op: 'where', arg });
         if (arg && arg.last_error === 'email_denied_await_correction') denyProbe = true;
+        // Grouped-where callbacks (knex style) run against the builder so
+        // their inner clauses are recorded too (r31 prior-target sweep) —
+        // both `this`-bound and parameter styles.
+        if (typeof arg === 'function') arg.call(qb, qb);
         return qb;
       },
       whereRaw: (sql, bindings) => { calls.push({ table, op: 'whereRaw', arg: { sql, bindings } }); return qb; },
+      orWhereRaw: (sql, bindings) => { calls.push({ table, op: 'orWhereRaw', arg: { sql, bindings } }); return qb; },
+      orWhereNot: () => qb,
+      orWhereNotIn: () => qb,
       whereNull: () => qb,
       whereIn: (col, vals) => { calls.push({ table, op: 'whereIn', arg: { col, vals } }); return qb; },
       whereNotIn: (col, vals) => { calls.push({ table, op: 'whereNotIn', arg: { col, vals } }); return qb; },
@@ -519,6 +526,20 @@ describe('propagateCustomerEmailChange', () => {
     });
   });
 
+  test('the post-lock enrollment sweep covers the holds\' PRIOR targets, not only the stored old email', async () => {
+    // A release enrolls at the HELD extraction, which can deliberately
+    // differ from the customer's stored old email (Codex #3084 r31): the
+    // sweep must retarget that enrollment too, or its immediately-due
+    // steps keep mailing the rejected address.
+    const conn = makeConn({
+      first_touch_holds: { rows: [{ id: 'hold-1', held_email: 'Extracted.X@example.com' }] },
+    });
+    await propagateCustomerEmailChange({ before: HOLD_BEFORE, after: HOLD_AFTER }, conn);
+    const priorTargetClause = conn.__calls.find((c) => c.table === 'automation_enrollments'
+      && c.op === 'orWhereRaw' && Array.isArray(c.arg.bindings) && c.arg.bindings[0] === 'extracted.x@example.com');
+    expect(priorTargetClause).toBeDefined();
+  });
+
   test('deferred newsletter holds pass through when no pending subscriber was moved', async () => {
     mockResume.mockResolvedValueOnce({
       resumed: true,
@@ -568,9 +589,10 @@ describe('resendPendingConfirmation', () => {
     });
     const ok = await resendPendingConfirmation(payload, conn);
     expect(ok).toBe(true);
-    const holdUpdates = conn.__updates('first_touch_holds');
-    expect(holdUpdates).toHaveLength(2);
-    for (const u of holdUpdates) {
+    // The pre-send marker consumes (r31) precede the settles.
+    const settles = conn.__updates('first_touch_holds').filter((u) => u.arg.status === 'released');
+    expect(settles).toHaveLength(2);
+    for (const u of settles) {
       expect(u.arg.released_newsletter).toBe(true);
       expect(u.arg.status).toBe('released');
     }
@@ -598,9 +620,10 @@ describe('resendPendingConfirmation', () => {
     const conn = makeConn(matchRow(payload));
     const ok = await resendPendingConfirmation(payload, conn);
     expect(ok).toBe(false);
+    // [0] is the r31 pre-send marker consume; the re-pend follows.
     const holdUpdates = conn.__updates('first_touch_holds');
-    expect(holdUpdates).toHaveLength(1);
-    expect(holdUpdates[0].arg).toMatchObject({ status: 'pending', last_error: 'newsletter_doi_not_confirmed' });
+    expect(holdUpdates).toHaveLength(2);
+    expect(holdUpdates.at(-1).arg).toMatchObject({ status: 'pending', last_error: 'newsletter_doi_not_confirmed' });
   });
 
   test('a send-failure re-pend never buries a denial stamped mid-callback', async () => {
@@ -612,11 +635,13 @@ describe('resendPendingConfirmation', () => {
     const conn = makeConn({ ...matchRow(payload), first_touch_holds: { updateCount: 0 } });
     const ok = await resendPendingConfirmation(payload, conn);
     expect(ok).toBe(false);
+    // marker consume (r31), then the guarded attempt, then the
+    // stamp-preserving fallback
     const holdUpdates = conn.__updates('first_touch_holds');
-    expect(holdUpdates).toHaveLength(2); // guarded attempt, then stamp-preserving fallback
-    expect(holdUpdates[0].arg).toMatchObject({ status: 'pending', last_error: 'newsletter_doi_not_confirmed' });
-    expect(holdUpdates[1].arg).toMatchObject({ status: 'pending' });
-    expect(holdUpdates[1].arg.last_error).toBeUndefined();
+    expect(holdUpdates).toHaveLength(3);
+    expect(holdUpdates[1].arg).toMatchObject({ status: 'pending', last_error: 'newsletter_doi_not_confirmed' });
+    expect(holdUpdates[2].arg).toMatchObject({ status: 'pending' });
+    expect(holdUpdates[2].arg.last_error).toBeUndefined();
   });
 
   test('a failed send never throws and clears the pre-stamp', async () => {
@@ -689,10 +714,11 @@ describe('resendPendingConfirmation', () => {
     const ok = await resendPendingConfirmation(payload, conn);
     expect(ok).toBe(false);
     expect(sendConfirmationEmail.mock.calls.length).toBe(sendsBefore + 1);
+    // [0] is the r31 pre-send marker consume; the re-pend follows.
     const holdUpdates = conn.__updates('first_touch_holds');
-    expect(holdUpdates).toHaveLength(1);
-    expect(holdUpdates[0].arg).toMatchObject({ status: 'pending', last_error: 'target_verify_failed' });
-    expect(holdUpdates[0].arg.released_newsletter).toBeUndefined();
+    expect(holdUpdates).toHaveLength(2);
+    expect(holdUpdates.at(-1).arg).toMatchObject({ status: 'pending', last_error: 'target_verify_failed' });
+    expect(holdUpdates.at(-1).arg.released_newsletter).toBeUndefined();
   });
 
   test('one reclaimed hold abandons the whole coalesced re-send', async () => {
@@ -725,6 +751,17 @@ describe('resendPendingConfirmation', () => {
     const repens = conn.__updates('first_touch_holds')
       .filter((u) => u.arg.last_error === 'claim_lost');
     expect(repens).toHaveLength(2);
+  });
+
+  test('a send failure binds the marker verify to the attempted subscriber id', async () => {
+    // An unrelated signup claiming the freed address must not satisfy an
+    // email-only verify and arm the force-resend for a hold that
+    // meanwhile targets the rotation (Codex #3084 r31).
+    sendConfirmationEmail.mockRejectedValueOnce(new Error('sendgrid down'));
+    const payload = { id: 811, email: 'samtypo@example.com', confirmation_token: 'tok-1', heldNewsletterHoldIds: ['hold-1'] };
+    const conn = makeConn(matchRow(payload));
+    await resendPendingConfirmation(payload, conn);
+    expect(mockSendFailedMarker).toHaveBeenCalledWith('samtypo@example.com', conn, 811);
   });
 
   test('a do-not-contact request vetoes the coalesced DOI re-send and blocks the holds', async () => {

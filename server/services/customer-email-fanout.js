@@ -112,13 +112,28 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
   // edit, or a delayed release). Take the customer's hold-row locks FIRST,
   // so both paths acquire first_touch_holds → automation_enrollments in
   // the same order. Later hold updates re-lock rows this transaction
-  // already owns.
+  // already owns. ALL of the customer's hold rows (any status): the lock
+  // wait itself is the serialization point, and a release that just
+  // settled its row mid-wait must still surface its target below.
+  // The locked rows also yield the holds' PRIOR TARGETS (Codex #3084
+  // r31): the held extraction can deliberately differ from the customer's
+  // stored old email, so an enrollment created by a release at extracted
+  // address X would be invisible to an oldEmail-only sweep — and its
+  // immediately-due steps would keep mailing the address the operator
+  // just rejected. Every distinct prior hold target joins the enrollment
+  // sweeps' match set.
+  let priorHoldTargets = [];
   if (await conn.schema.hasTable('first_touch_holds')) {
-    await conn('first_touch_holds')
+    const lockedHolds = await conn('first_touch_holds')
       .where({ customer_id: customerId })
-      .whereIn('status', ['pending', 'releasing'])
       .forUpdate()
-      .select('id');
+      .select('id', 'held_email');
+    const newEmailLc = newEmail.toLowerCase();
+    priorHoldTargets = [...new Set(
+      lockedHolds
+        .map((r) => String(r.held_email || '').trim().toLowerCase())
+        .filter((e) => e && e !== newEmailLc && e !== oldEmail),
+    )];
   }
 
   // Snapshot copies exist only when there was an old value to copy.
@@ -432,10 +447,19 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
     // fresh enrollment mailing the superseded address. This re-sweep
     // executes after the lock wait, sees the claimant's committed insert,
     // and retargets it. Idempotent with the first sweep; same ownership
-    // guard (customer-linked, active).
+    // guard (customer-linked, active). Matches the holds' PRIOR TARGETS
+    // too (Codex #3084 r31): a release enrolls at the HELD extraction,
+    // which can differ from the customer's stored old email — an
+    // oldEmail-only match would leave that enrollment mailing the
+    // rejected (possibly hard-bounced) address forever.
     counts.automations += await conn('automation_enrollments')
       .where({ customer_id: customerId, status: 'active' })
-      .whereRaw('LOWER(email) = ?', [oldEmail])
+      .where(function priorTargets() {
+        this.whereRaw('LOWER(email) = ?', [oldEmail]);
+        for (const target of priorHoldTargets) {
+          this.orWhereRaw('LOWER(email) = ?', [target]);
+        }
+      })
       .update({ email: newEmail, updated_at: now });
     const reviewedCalls = await conn('triage_items')
       .whereIn('reason_code', EMAIL_REVIEW_REASON_CODES)
@@ -727,6 +751,24 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
   // only (Codex #3084 r16): retries treat that marker as "must actually
   // re-send" (skipDedupe), so a post-send bookkeeping failure marked the
   // same way would double-mail a delivered confirmation.
+  // CONSUME any deduped hold's force-resend marker immediately before the
+  // send (Codex #3084 r31): a callback suspended after a successful send
+  // but before its settles leaves the marker for the sweep's reclaimer,
+  // which would bypass the dedupe guard and mail the DOI again. Placed
+  // AFTER the pre-stamp so its failure path (which never sent) keeps the
+  // marker; a send failure below re-arms it via sendFailedMarkerFor.
+  for (const holdId of holdIds) {
+    try {
+      await fencedHoldWrite(
+        conn('first_touch_holds')
+          .where({ id: holdId, last_error: 'newsletter_doi_not_confirmed' }),
+        fenceOf(holdId),
+      )
+        .update({ last_error: null });
+    } catch (consumeErr) {
+      logger.warn(`[email-fanout] resend-marker consume failed for hold ${holdId}: ${consumeErr.code || consumeErr.name || 'db_error'}`);
+    }
+  }
   try {
     await require('./newsletter-confirm').sendConfirmationEmail(pendingConfirmation);
   } catch (e) {
@@ -752,7 +794,10 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
     // this failure obsolete, and the rotated target's own callback owns
     // delivery.
     const { sendFailedMarkerFor } = require('./lead-first-touch-resume');
-    await repenHolds(await sendFailedMarkerFor(pendingConfirmation.email, conn));
+    // Bound to the ATTEMPTED subscriber id (r31): an unrelated signup
+    // claiming the freed address must not satisfy the verify and arm a
+    // force-resend for a hold that meanwhile targets the rotation.
+    await repenHolds(await sendFailedMarkerFor(pendingConfirmation.email, conn, pendingConfirmation.id));
     return false;
   }
   // Post-send rotation check, now read-only (the stamp already landed):
