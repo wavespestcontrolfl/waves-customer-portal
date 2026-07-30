@@ -242,6 +242,7 @@ export default function DocumentTemplatesPage() {
   const [selectedCustomer, setSelectedCustomer] = useState(null);
   const [sendValues, setSendValues] = useState(JSON.stringify(DEFAULT_SEND_VALUES, null, 2));
   const [sendAllowUnresolved, setSendAllowUnresolved] = useState(false);
+  const [sendPropertyAddress, setSendPropertyAddress] = useState("");
   const [signingUrl, setSigningUrl] = useState("");
   const [bulkAudience, setBulkAudience] = useState("active_pest");
   const [bulkGuideType, setBulkGuideType] = useState("pest");
@@ -355,6 +356,13 @@ export default function DocumentTemplatesPage() {
 
   const activeVersion = detail?.template?.activeVersion;
   const selectedCustomerId = selectedCustomer?.id || sendCustomerId.trim();
+
+  // The property override is scoped to one customer+template selection: a
+  // stale value silently carried onto the next customer would rewrite
+  // their document's address to the previous customer's property.
+  useEffect(() => {
+    setSendPropertyAddress("");
+  }, [selectedCustomerId, templateDraft?.templateKey]);
   const variableList = useMemo(() => {
     return [...new Set([
       ...(templateDraft.variables || []),
@@ -498,6 +506,7 @@ export default function DocumentTemplatesPage() {
           customerId: selectedCustomerId,
           values: parseJsonOrThrow(sendValues, "Send values"),
           allowUnresolved: sendAllowUnresolved,
+          ...(sendPropertyAddress.trim() ? { propertyAddress: sendPropertyAddress.trim() } : {}),
         },
       });
       setSigningUrl(data.signingUrl || data.contract?.signingUrl || "");
@@ -908,6 +917,13 @@ export default function DocumentTemplatesPage() {
                         <div className="text-12 text-ink-secondary">No matching customers found.</div>
                       )}
                     </div>
+                    <Field label="Property address (optional)">
+                      <TextInput
+                        value={sendPropertyAddress}
+                        onChange={(event) => setSendPropertyAddress(event.target.value)}
+                        placeholder="Overrides the customer's primary address on the document"
+                      />
+                    </Field>
                     <Field label="Values">
                       <TextArea value={sendValues} onChange={(event) => setSendValues(event.target.value)} className="min-h-32 font-mono text-12" />
                     </Field>

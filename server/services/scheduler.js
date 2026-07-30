@@ -3542,25 +3542,65 @@ function initScheduledJobs() {
   // =========================================================================
   cron.schedule('10 6 * * *', async () => {
     logger.info('Running: document request lifecycle');
+    // ORDER IS LOAD-BEARING: expiration FIRST (the termite sweeps key off
+    // 'expired' stamps), then the termite superseded reconciliation (which
+    // cancels stale-version and misissued requests), and REMINDERS LAST —
+    // a reminder processed before the superseded pass would email/text the
+    // customer a signing nudge for the very request that pass is about to
+    // cancel, pointing them at obsolete or residential-only wording.
+    const { expireDocumentRequests, processDueDocumentReminders } = require('./document-contract-delivery');
+    let expiredCount = 0;
     try {
-      const { processDocumentWorkflow } = require('./document-contract-delivery');
-      const result = await processDocumentWorkflow();
-      logger.info(`Document workflow done: ${result.expired || 0} expired, ${result.reminders?.sent || 0} reminder(s) sent, ${result.reminders?.failed || 0} failed`);
+      const expired = await expireDocumentRequests();
+      expiredCount = expired?.expired || 0;
     } catch (err) {
-      logger.error(`Document request lifecycle failed: ${err.message}`);
+      logger.error(`Document request expiration failed: ${err.message}`);
     }
     // Termite program agreement reconciliation: re-prep any recently accepted
     // termite estimate whose agreement draft failed transiently at accept
     // time (idempotent per-property dedupe; no repeat bells for unresolved
     // figures). Acceptance already committed — prep must be retryable.
     try {
-      const { reconcileTermiteProgramAgreements } = require('./termite-program-agreement');
-      const recon = await reconcileTermiteProgramAgreements();
-      if (recon.created || recon.failed) {
-        logger.info(`Termite agreement reconciliation: ${recon.checked} checked, ${recon.created} created, ${recon.failed} failed`);
-      }
+      // Advisory-locked: overlapping instances (deploy overlap, multiple
+      // dynos) would double-run the unlocked read-before-act sweeps and
+      // duplicate bells/drafts.
+      const { runExclusive } = require('../utils/cron-lock');
+      await runExclusive('termite-agreement-reconcile', async () => {
+        // Reconciliation failures must not take the unrelated document
+        // reminders down with them — the ORDERING is required (reminders
+        // after reconciliation), the coupling isn't. A reminder skipped by
+        // a transient reconcile error could hit its schedule's end and
+        // become permanently unsendable.
+        try {
+          const { reconcileSupersededProgramAgreements, reconcileTermiteProgramAgreements } = require('./termite-program-agreement');
+          // Version-upgrade retirements first (any estimate age, bells on for
+          // parked re-preps), then the standard recent-accepts sweep.
+          const superseded = await reconcileSupersededProgramAgreements();
+          if (superseded.checked) {
+            logger.info(`Termite agreement superseded-reprep: ${superseded.checked} checked, ${superseded.created} created, ${superseded.failed} failed`);
+          }
+          const recon = await reconcileTermiteProgramAgreements();
+          if (recon.created || recon.failed) {
+            logger.info(`Termite agreement reconciliation: ${recon.checked} checked, ${recon.created} created, ${recon.failed} failed`);
+          }
+        } catch (err) {
+          logger.error(`Termite agreement reconciliation failed: ${err.message}`);
+        }
+        // Reminders run INSIDE the same exclusive section, strictly after
+        // reconciliation: on a skipped tick (another dyno holds the lock)
+        // a non-holder must not nudge customers to sign requests the
+        // holder is mid-cancelling. Reminder sends are sweep-style, so a
+        // skipped tick's reminders go out with the holder's run or the
+        // next tick.
+        try {
+          const reminders = await processDueDocumentReminders();
+          logger.info(`Document workflow done: ${expiredCount} expired, ${reminders?.sent || 0} reminder(s) sent, ${reminders?.failed || 0} failed`);
+        } catch (err) {
+          logger.error(`Document request reminders failed: ${err.message}`);
+        }
+      });
     } catch (err) {
-      logger.error(`Termite agreement reconciliation failed: ${err.message}`);
+      logger.error(`Document lifecycle exclusive section failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
