@@ -5318,6 +5318,7 @@ const CallRecordingProcessor = {
           let routingResult = canAutoRoute(v2Extraction, {
             contactPhone, addressValidation,
             failOpen: failOpenBooking, callerAni: contactPhone, knownCustomer: knownCustomerForFailOpen,
+            agentCommitFailOpen: isEnabled('callAgentCommitBooking') && !isOutboundCall(call),
           });
           // Address fail-open is only safe when the on-file address really is
           // the booking address — V1-captured address evidence that conflicts
@@ -8835,6 +8836,7 @@ const CallRecordingProcessor = {
           failOpen: isEnabled('callFailOpenBooking') && !isOutboundCall(call),
           callerAni: contactPhone,
           knownCustomer: (knownCaller && knownCaller.isExistingCustomer) ? { hasAddress: knownCaller.hasAddress } : null,
+          agentCommitFailOpen: isEnabled('callAgentCommitBooking') && !isOutboundCall(call),
         });
         // Mirror the enforce path's V1 address-conflict demotion — the saved
         // shadow decision must hold exactly where enforce would hold, or

@@ -168,6 +168,72 @@ describe('canAutoRoute fail-open booking', () => {
   });
 });
 
+describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BOOKING)', () => {
+  // McHale/Stopka case (2026-07-30): realtor confirming a WDO inspection the
+  // owner verbally accepted on the call ("we'll confirm it for noon on
+  // Sunday") still parked in triage on caller_not_authorized.
+  function agentCommitted(flags = ['caller_not_authorized'], { claim = true, speaker = 'agent', quote = "So we'll confirm it for noon on Sunday, and just let us know if anything changes." } = {}) {
+    const ex = extraction(flags);
+    ex.scheduling.agent_committed_booking = claim;
+    ex.evidence = quote === null ? [] : [
+      { field_path: '/scheduling/agent_committed_booking', quote, speaker, transcript_offset_ms: null },
+    ];
+    return ex;
+  }
+
+  test('agent commitment demotes caller_not_authorized to failedOpenFlags and books', () => {
+    const r = canAutoRoute(agentCommitted(), { agentCommitFailOpen: true });
+    expect(r.allowed).toBe(true);
+    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+  });
+
+  test('gate off → caller_not_authorized still hard-blocks even with a pinned agent commitment', () => {
+    const r = canAutoRoute(agentCommitted(), {});
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('caller-attributed evidence cannot satisfy the commitment (trust boundary)', () => {
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { speaker: 'caller' }), { agentCommitFailOpen: true });
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('a bare boolean claim with no pinned evidence stays blocked', () => {
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: null }), { agentCommitFailOpen: true });
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('evidence without the claim (agent_committed_booking false) stays blocked', () => {
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { claim: false }), { agentCommitFailOpen: true });
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('an unconfirmed booking is never demoted (confirmed-with-start contract)', () => {
+    const ex = agentCommitted();
+    ex.scheduling.status = 'offered';
+    const r = canAutoRoute(ex, { agentCommitFailOpen: true });
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('other hard blocks are untouched — out_of_service_area still vetoes an agent-committed booking', () => {
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized', 'out_of_service_area']), { agentCommitFailOpen: true });
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('out_of_service_area');
+    expect(r.appointmentBlockingFlags).not.toContain('caller_not_authorized');
+  });
+
+  test('composes with contact-field fail-open: both gates demote their flags on one call', () => {
+    const ex = agentCommitted(['caller_not_authorized', 'caller_phone_missing']);
+    const r = canAutoRoute(ex, { agentCommitFailOpen: true, failOpen: true, callerAni: '+19796763069' });
+    expect(r.allowed).toBe(true);
+    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized', 'caller_phone_missing']));
+  });
+});
+
 describe('checkTcpaConsent inbound implied consent', () => {
   test('no explicit consent → canSms false by default', () => {
     expect(checkTcpaConsent({ consent: { sms_consent_given: false } }).canSms).toBe(false);

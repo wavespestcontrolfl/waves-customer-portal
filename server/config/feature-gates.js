@@ -545,6 +545,15 @@ const gates = {
   // blocks (out_of_service_area, do_not_contact, caller_not_authorized, spam)
   // stay. Creates real appointments — owner-flip only.
   callFailOpenBooking: process.env.GATE_CALL_FAIL_OPEN_BOOKING === 'true',
+  // Agent-commitment booking authorization: when OUR agent explicitly
+  // committed to the confirmed slot on the call ("we'll confirm it for noon
+  // on Sunday" — evidence-pinned to an AGENT-spoken quote), a third-party
+  // caller (realtor/PM booking for a buyer/tenant) no longer hard-blocks on
+  // caller_not_authorized: the appointment books and the flag files as an
+  // advisory "confirm the account holder" card (book-and-flag). All other
+  // hard blocks stay. Independent of callFailOpenBooking. Creates real
+  // appointments — owner-flip only.
+  callAgentCommitBooking: process.env.GATE_CALL_AGENT_COMMIT_BOOKING === 'true',
   // Implied consent for INBOUND bookings: a caller who called us and agreed to
   // a time has implied consent for the transactional confirmation SMS
   // (established business relationship). do-not-contact always overrides.

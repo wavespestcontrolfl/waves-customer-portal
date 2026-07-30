@@ -30,7 +30,12 @@ const persistedSchema = require('./call-extraction.persisted.schema.json');
 // WDO/realtor/lender arranger calls produced NO secondary_contact):
 // caller.relationship_to_property gains real_estate_agent + lender;
 // secondary_contact(.s[]).role gains lender. Older payloads still validate.
-const SCHEMA_VERSION = '1.7.0';
+// 1.8.0: additive — scheduling.agent_committed_booking boolean (OUR agent
+// explicitly committed to the confirmed slot; evidence-pinned to an
+// AGENT-spoken quote). Feeds the gated caller_not_authorized fail-open in
+// canAutoRoute (GATE_CALL_AGENT_COMMIT_BOOKING). Optional/nullable: older
+// payloads still validate.
+const SCHEMA_VERSION = '1.8.0';
 
 const ajv = new Ajv({ allErrors: true, strict: false });
 addFormats(ajv);

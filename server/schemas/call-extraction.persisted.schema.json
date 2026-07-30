@@ -931,6 +931,12 @@
           ],
           "format": "date-time"
         },
+        "agent_committed_booking": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "requested_date_range_start": {
           "type": [
             "string",

@@ -78,6 +78,7 @@ SCHEDULING STATUS — This is the most important field for downstream routing:
 - Do NOT set status to "confirmed" for unrelated business advice, SEO, marketing, construction advice, or non-Waves services.
 - DO set status to "confirmed" when a builder explicitly books a Waves pre-slab/preconstruction termite or soil-treatment field-service appointment with a specific date and time.
 - Do NOT set status to "confirmed" for admin calls about invoices, payments, receipts, compliance reports, stickers, certificates, W-9s, or paperwork — unless the caller ALSO books a new field-service visit.
+- agent_committed_booking: true ONLY when OUR agent, in the agent's OWN words, commits to the confirmed slot ("we'll confirm it for noon on Sunday", "you're on the schedule for Tuesday at 10", "we'll see you then"). The caller requesting, agreeing, or asserting that we committed is NEVER an agent commitment. Leave false/null when the agent hedges ("I'll have to check", "someone will call you back") or no specific slot was committed. When true, pin an evidence quote of the AGENT's commitment sentence with speaker "agent".
 - follow_up_mentioned: true ONLY when the agent and caller specifically discussed a SECOND/follow-up treatment visit as part of this booking (e.g. "our standard protocol is two treatments", "we'll come back in two weeks for the follow-up"). A generic "call us if it comes back" is NOT a follow-up visit.
 - follow_up_start_at: ISO 8601 Eastern Time datetime ONLY when a specific follow-up date (and time) was explicitly agreed. Most calls: null — the office schedules the follow-up at the standard interval.
 
@@ -204,6 +205,7 @@ EVIDENCE PINNING — You MUST pin evidence quotes for these routing-critical fie
 - consent.sms_consent_given (when true)
 - scheduling.status (when "confirmed")
 - scheduling.confirmed_start_at (the quote must contain the agreed date AND time)
+- scheduling.agent_committed_booking (when true — the AGENT's commitment sentence; speaker must be "agent")
 - scheduling.follow_up_start_at (when set)
 - secondary_contact.wants_notifications (when true — quote the caller directing notifications to this person)
 - service_request.quoted_price_usd (when set — quote the agent's price and the caller's acceptance)

@@ -357,6 +357,19 @@ const FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS = new Set([
   'address_unverifiable', 'missing_service_address', 'low_confidence_address', 'address_unverified',
 ]);
 
+// True only when the model pinned an AGENT-spoken evidence quote for the
+// scheduling.agent_committed_booking claim. The speaker check is the trust
+// boundary: the commitment must come from OUR side of the call — a bare
+// boolean without agent-attributed evidence never demotes the
+// caller_not_authorized hard block.
+function hasAgentCommittedEvidence(extraction) {
+  return (Array.isArray(extraction?.evidence) ? extraction.evidence : []).some((e) => (
+    String(e?.field_path || '') === '/scheduling/agent_committed_booking'
+    && String(e?.quote || '').trim().length > 0
+    && e?.speaker === 'agent'
+  ));
+}
+
 function canAutoRoute(extraction, opts = {}) {
   if (!extraction) return { allowed: false, reason: 'no_extraction' };
 
@@ -372,7 +385,9 @@ function canAutoRoute(extraction, opts = {}) {
   // or a garbled email tripped name_email_mismatch. The flag is still returned
   // (failedOpenFlags) so the office can confirm the field — it just no longer
   // holds the appointment. Hard blocks (out_of_service_area, do_not_contact,
-  // caller_not_authorized, spam) are NOT recoverable and stay in the filter.
+  // caller_not_authorized, spam) are NOT recoverable and stay in the filter —
+  // the ONE gated exception is the agent-commitment block below, which demotes
+  // caller_not_authorized (only) when OUR agent committed to the slot.
   // Fail-open exists for CONFIRMED bookings only (the feature's contract).
   // An unconfirmed call keeps every flag, so when it blocks on not_confirmed
   // the blocked branch still files the contact/address/name review cards
@@ -414,6 +429,31 @@ function canAutoRoute(extraction, opts = {}) {
       if (f === 'name_email_mismatch') { failedOpenFlags.push(f); return false; }
       if (f === 'low_extraction_confidence' && knownCustomer) { failedOpenFlags.push(f); return false; }
       if (FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS.has(f) && knownCustomerHasAddress && !newAddressGiven) { failedOpenFlags.push(f); return false; }
+      return true;
+    });
+  }
+
+  // Agent-commitment authorization (opts.agentCommitFailOpen ←
+  // GATE_CALL_AGENT_COMMIT_BOOKING): when OUR agent explicitly committed to
+  // the confirmed slot on this call ("we'll confirm it for noon on Sunday"),
+  // a third-party caller no longer hard-blocks the booking on
+  // caller_not_authorized — the business side accepting the slot IS the
+  // authorization. Grounded in a live miss (2026-07-30): a realtor confirming
+  // a WDO inspection the owner verbally accepted on the call still parked in
+  // triage, so the promised confirmation flow never ran. Guarded three ways:
+  // the extraction must claim the commitment, the claim must be evidence-
+  // pinned to an AGENT-spoken quote (a caller asserting "you'll confirm it,
+  // right?" cannot satisfy it — see hasAgentCommittedEvidence), and the
+  // booking must be confirmed with a start time. The flag is pushed to
+  // failedOpenFlags so the enforce path files the advisory "confirm the
+  // account holder" card — book-and-flag, never book-and-hide. Every other
+  // hard block (spam, out_of_service_area, do_not_contact) is untouched.
+  // Independent of opts.failOpen so the two gates flip separately.
+  if (opts.agentCommitFailOpen && confirmedWithStart
+      && extraction.scheduling?.agent_committed_booking === true
+      && hasAgentCommittedEvidence(extraction)) {
+    appointmentBlockingFlags = appointmentBlockingFlags.filter((f) => {
+      if (f === 'caller_not_authorized') { failedOpenFlags.push(f); return false; }
       return true;
     });
   }
