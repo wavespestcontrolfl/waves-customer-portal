@@ -411,6 +411,11 @@ export default function SecureAppointmentPage() {
             ? 'Your appointment is booked. Pick a plan below, add a card, and you’re all set.'
             : 'Add a card on file to secure your visit. Nothing is charged today — your card is only charged after your service is completed.'}
         </p>
+        {data?.cancelFeeNote ? (
+          <p style={{ fontSize: 14, color: S.muted, lineHeight: 1.5, marginTop: 6 }}>
+            {data.cancelFeeNote}
+          </p>
+        ) : null}
         <VisitSummary data={data} />
         {planOneTime ? (
           <div

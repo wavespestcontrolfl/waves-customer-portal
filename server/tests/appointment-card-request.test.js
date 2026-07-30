@@ -105,6 +105,7 @@ const VISIT = {
   window_display: '9:00 AM',
   service_type: 'Pest Control',
   card_link_sent_at: null,
+  estimated_price: '135.00',
 };
 const CUSTOMER = { id: 'cust-1', first_name: 'Pat', phone: '+19415551234' };
 
@@ -148,6 +149,20 @@ describe('requestCardForAppointment — gate and visit eligibility', () => {
     mockTableHandlers.scheduled_services.first = () => ({ ...VISIT, scheduled_date: '2020-01-01' });
     const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1' });
     expect(res.reason).toBe('visit_in_past');
+  });
+
+  test('unpriced visit (NULL price = quote pending) never texts — owner directive 2026-07-30', async () => {
+    mockTableHandlers.scheduled_services.first = () => ({ ...VISIT, estimated_price: null });
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1' });
+    expect(res.reason).toBe('unpriced_visit');
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('zero-price visit ($0 = charge nothing) never texts', async () => {
+    mockTableHandlers.scheduled_services.first = () => ({ ...VISIT, estimated_price: '0.00' });
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1' });
+    expect(res.reason).toBe('zero_price_visit');
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
   });
 
   test("a 'rescheduled' visit (pending-rebook placeholder, stale date on the row) never texts — closed until re-slotted", async () => {
@@ -297,6 +312,10 @@ describe('the send', () => {
       service_type: 'Pest Control',
       secure_link: expect.stringMatching(/\/secure\/[a-f0-9]{64}$/),
       date_line: expect.stringContaining(' on '),
+      // Cancellation-fee disclosure (owner ruling 2026-07-30): rides on every
+      // send that reaches the template — the $0/unpriced guard upstream is
+      // what keeps it off zero-amount visits. GSM-7-safe (no em-dash).
+      cancel_fee_line: expect.stringMatching(/^\nA \$\d+(\.\d{2})? fee applies only if you cancel last-minute or no one is home - rescheduling is always free\.$/),
     }));
     expect(mockShorten).not.toHaveBeenCalled();
     expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
@@ -1000,7 +1019,9 @@ describe('plan-choice lane (GATE_SECURE_PLAN_CHOICE) — page payload', () => {
     const res = await loadSecureCardPageData(REQUEST.token);
     expect(res.state).toBe('ready');
     expect(Object.keys(res).sort()).toEqual([
-      'clientSecret', 'dateDisplay', 'firstName', 'serviceType', 'setupIntentId', 'state', 'windowDisplay',
+      // cancelFeeNote joined the base payload 2026-07-30 (owner fee-disclosure
+      // ruling) — present in ALL states, unrelated to the plan gate this test pins.
+      'cancelFeeNote', 'clientSecret', 'dateDisplay', 'firstName', 'serviceType', 'setupIntentId', 'state', 'windowDisplay',
     ]);
   });
 

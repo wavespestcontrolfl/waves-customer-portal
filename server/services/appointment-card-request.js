@@ -92,7 +92,7 @@ function skip(reason, extra = {}) {
 async function isSecureCardLaneReady() {
   if (!isAppointmentCardRequestEnabled()) return false;
   try {
-    return !!(await renderTemplate({ first_name: 'x', service_type: 'x', date_line: '', secure_link: 'x' }));
+    return !!(await renderTemplate({ first_name: 'x', service_type: 'x', date_line: '', secure_link: 'x', cancel_fee_line: '' }));
   } catch (err) {
     logger.warn(`[appt-card-request] lane-ready template probe failed: ${err.message}`);
     return false;
@@ -110,6 +110,33 @@ function dateLineFor(scheduledDate) {
   const anchored = new Date(`${dateOnly}T12:00:00`);
   if (Number.isNaN(anchored.getTime())) return '';
   return ` on ${anchored.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'America/New_York' })}`;
+}
+
+// Cancellation-fee disclosure (owner ruling 2026-07-30): appointment-lane
+// card invites state the late-cancel/no-show fee, sourced from the same
+// pricing_config the estimate card-hold lane charges from (fallback $49) so
+// an admin fee change propagates to the copy. Clause-style with a leading
+// newline: resolves to '' when the fee is configured off, so the template
+// token vanishes cleanly. Only ever rides on priced visits — the $0/unpriced
+// guard above suppresses the whole request first.
+function cancelFeeLine() {
+  try {
+    const { cardHoldNoShowFee } = require('./estimate-card-holds');
+    const fee = Number(cardHoldNoShowFee());
+    if (!(fee > 0)) return '';
+    const feeText = fee % 1 ? `$${fee.toFixed(2)}` : `$${fee}`;
+    // GSM-7-safe (no em-dash) — the secure_appointment_card template's
+    // per-segment budget depends on it.
+    return `\nA ${feeText} fee applies only if you cancel last-minute or no one is home - rescheduling is always free.`;
+  } catch (err) {
+    logger.warn(`[appt-card-request] cancel-fee line unavailable — omitting: ${err.message}`);
+    return '';
+  }
+}
+
+// Sentence form for the /secure page and email leg (no leading newline).
+function cancelFeeNote() {
+  return cancelFeeLine().replace(/^\n/, '');
 }
 
 async function renderTemplate(vars, templateKey = TEMPLATE_KEY) {
@@ -262,12 +289,20 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
 
     const visit = await db('scheduled_services')
       .where({ id: scheduledServiceId })
-      .first('id', 'customer_id', 'status', 'scheduled_date', 'window_display', 'service_type', 'card_link_sent_at');
+      .first('id', 'customer_id', 'status', 'scheduled_date', 'window_display', 'service_type', 'card_link_sent_at', 'estimated_price');
     if (!visit) return skip('visit_not_found');
     if (!visit.customer_id) return skip('no_customer');
     if (!LIVE_VISIT_STATUSES.includes(visit.status)) return skip(`visit_not_live:${visit.status}`);
     const dateOnly = callBookingDateOnly(visit.scheduled_date);
     if (dateOnly && dateOnly < etDateString(new Date())) return skip('visit_in_past');
+
+    // Owner directive 2026-07-30: the card ask only goes out for visits with
+    // a real dollar amount. NULL price = manual quote pending (never $0 —
+    // billing rule) and 0 = charge nothing; neither should ask for a card,
+    // and suppressing the whole request also guarantees the cancellation-fee
+    // disclosure below only ever rides on priced visits.
+    const visitPrice = visit.estimated_price != null ? Number(visit.estimated_price) : null;
+    if (!(visitPrice > 0)) return skip(visitPrice == null ? 'unpriced_visit' : 'zero_price_visit');
 
     // The template is the second dark lever, and it gates EVERY side
     // effect of this funnel — auto-secure enrollment included, not just
@@ -275,7 +310,7 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
     // resolved dummy vars (getTemplate returns null when the row is
     // missing or inactive); the real body renders later with the live
     // token.
-    const templateActive = !!(await renderTemplate({ first_name: 'x', service_type: 'x', date_line: '', secure_link: 'x' }));
+    const templateActive = !!(await renderTemplate({ first_name: 'x', service_type: 'x', date_line: '', secure_link: 'x', cancel_fee_line: '' }));
     if (!templateActive) return skip('template_inactive');
 
     // 1. Policy exemption.
@@ -345,6 +380,7 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
       service_type: visit.service_type || 'service',
       date_line: dateLineFor(visit.scheduled_date),
       secure_link: secureUrl,
+      cancel_fee_line: cancelFeeLine(),
     };
     // The BASE render is the live kill-switch check at the send boundary
     // (Codex #2987 P1): it must run — and pass — before a variant body can
@@ -963,6 +999,7 @@ async function loadSecureCardPageData(token) {
     serviceType: visit?.service_type || null,
     dateDisplay: visit ? dateLineFor(visit.scheduled_date).replace(/^ on /, '') : null,
     windowDisplay: visit?.window_display || null,
+    cancelFeeNote: cancelFeeNote() || null,
   };
 
   // 'completing' renders as secured too (Codex #2771 r10): the SetupIntent
