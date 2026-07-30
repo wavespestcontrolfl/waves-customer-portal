@@ -1668,6 +1668,43 @@ describe('newsletter assembly — Beehiiv-parity event rendering', () => {
   });
 });
 
+describe('DB-locked prices vs the hallucinated-claim scan', () => {
+  const { findHallucinatedClaims } = require('../services/newsletter-validator');
+
+  test('a locked price string passes; any other dollar amount still hard-blocks', () => {
+    const body = '<p>Tickets run From $25 and the show slaps.</p>';
+    expect(findHallucinatedClaims(body, ['From $25'])).toEqual([]);
+    expect(findHallucinatedClaims(body, [])).toEqual(
+      expect.arrayContaining([expect.stringContaining('dollar amount in body')]),
+    );
+    const sneaky = '<p>Tickets run From $25 but VIP is $99.</p>';
+    expect(findHallucinatedClaims(sneaky, ['From $25'])).toEqual(
+      expect.arrayContaining([expect.stringContaining('dollar amount in body')]),
+    );
+  });
+
+  test('excision normalizes like the body scan — entity/homoglyph forms cannot dodge it', () => {
+    expect(findHallucinatedClaims('<p>Entry: From&nbsp;&#36;25</p>', ['From $25'])).toEqual([]);
+    expect(findHallucinatedClaims('<p>Free admission · paid parking</p>', ['Free admission · paid parking'])).toEqual([]);
+  });
+
+  test('assembled meta-box price validates cleanly with the lineup lock, blocks without it', async () => {
+    const { assembleBeehiivNewsletter } = require('../services/newsletter-draft');
+    const html = await assembleBeehiivNewsletter({
+      selectedSubject: 'T',
+      events: [{
+        eventId: 'a0000001-0000-4000-8000-000000000001',
+        emoji: '🎭', title: 'A Show', sourceTitle: 'The Show', description: 'The Show is on.',
+        dateStr: 'Friday, June 12', eventUrl: 'https://example.com/x',
+        isFree: false, priceText: 'From $25',
+      }],
+    });
+    expect(html).toContain('🎟️ From $25');
+    expect(findHallucinatedClaims(html, ['From $25'])).toEqual([]);
+    expect(findHallucinatedClaims(html, [])).not.toEqual([]);
+  });
+});
+
 describe('tiered event treatment (owner direction 2026-07-29)', () => {
   const { assembleBeehiivNewsletter, buildFlagshipTextBody } = require('../services/newsletter-draft');
   const mk = (n, over = {}) => ({

@@ -958,7 +958,7 @@ async function resumeCampaign(sendId) {
  */
 async function processScheduledSends() {
   const { requiresClaimValidation, FLAGSHIP_TYPE_KEY } = require('../config/newsletter-types');
-  const { validateNewsletterDraft } = require('../services/newsletter-validator');
+  const { validateNewsletterDraft, lockedPricesForSend } = require('../services/newsletter-validator');
 
   const due = await db('newsletter_sends')
     .where({ status: 'scheduled' })
@@ -1034,7 +1034,8 @@ async function processScheduledSends() {
         const recipientCount = Number(
           (await buildSubscriberQuery(row.segment_filter, await resolveSegmentCustomerIds(row.segment_filter)).count('* as c').first())?.c || 0
         );
-        const { errors } = validateNewsletterDraft(typedRow, { recipientCount });
+        const lockedPrices = await lockedPricesForSend(typedRow, db);
+        const { errors } = validateNewsletterDraft(typedRow, { recipientCount, lockedPrices });
         if (errors.length > 0) {
           logger.error(`[newsletter-scheduler] send ${row.id} blocked by validation: ${errors.join(', ')}`);
           // Same approval invalidation as the flagship revert above.

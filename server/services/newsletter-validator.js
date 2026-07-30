@@ -57,14 +57,24 @@ function decodeEntities(text) {
  * produce three error rows). HTML tags are stripped and entities decoded
  * before matching; plain text passes through unchanged.
  */
-function findHallucinatedClaims(body) {
+function findHallucinatedClaims(body, lockedPrices = []) {
   if (!body) return [];
   // NFKC folds Unicode look-alikes (fullwidth '＄', fullwidth digits, etc.)
   // down to their ASCII forms so a homoglyph "＄15" / "ｆｒｅｅ" can't render as
   // the claim to subscribers while slipping past the ASCII regexes.
-  const bodyText = decodeEntities(body.replace(/<[^>]+>/g, ' '))
+  let bodyText = decodeEntities(body.replace(/<[^>]+>/g, ' '))
     .normalize('NFKC')
     .replace(/\s+/g, ' ');
+  // DB-locked price strings (events_raw.price_text for the send's own
+  // lineup — fetched by the caller via lockedPricesForSend) are the ONE
+  // legitimate pricing source and are excised before the scan, after the
+  // SAME normalization the body got so entity/homoglyph forms can't
+  // dodge the excision. Anything priced that ISN'T the verbatim DB
+  // string still hard-blocks — the model can only "repeat" the truth.
+  for (const price of lockedPrices) {
+    const norm = decodeEntities(String(price || '')).normalize('NFKC').replace(/\s+/g, ' ').trim();
+    if (norm) bodyText = bodyText.split(norm).join(' ');
+  }
   const seen = new Set();
   const errors = [];
   for (const { pattern, label } of HALLUCINATED_CLAIM_PATTERNS) {
@@ -76,6 +86,22 @@ function findHallucinatedClaims(body) {
     }
   }
   return errors;
+}
+
+/**
+ * Fetch the DB-locked price strings for a send's own lineup — the only
+ * strings the claim scan may excise. Callers pass the result as
+ * opts.lockedPrices; fail-open to [] (scan stays maximally strict).
+ */
+async function lockedPricesForSend(send, knex) {
+  try {
+    const ids = Array.isArray(send?.event_ids) ? send.event_ids : JSON.parse(send?.event_ids || '[]');
+    if (!Array.isArray(ids) || !ids.length || !knex) return [];
+    const rows = await knex('events_raw').whereIn('id', ids).select('price_text');
+    return rows.map((r) => (typeof r.price_text === 'string' ? r.price_text.trim() : '')).filter(Boolean);
+  } catch {
+    return [];
+  }
 }
 
 function validateNewsletterDraft(send, opts = {}) {
@@ -132,10 +158,11 @@ function validateNewsletterDraft(send, opts = {}) {
   if (requiresClaimValidation(send.newsletter_type)) {
     const combinedBody = [send.subject, send.preview_text, send.html_body, send.text_body]
       .filter(Boolean).join('\n');
-    if (combinedBody) errors.push(...findHallucinatedClaims(combinedBody));
+    if (combinedBody) errors.push(...findHallucinatedClaims(combinedBody, opts.lockedPrices || []));
   }
 
   return { errors, warnings };
 }
 
-module.exports = { validateNewsletterDraft, findHallucinatedClaims };
+module.exports = {
+  lockedPricesForSend, validateNewsletterDraft, findHallucinatedClaims };
