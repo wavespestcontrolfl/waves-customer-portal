@@ -49,6 +49,18 @@ const FLAGGED_TIMING = [
   'stay off the lawn for 30 minutes',
   'you can return after 30 minutes',
   'kids should stay off the grass for an hour',
+  // Direct exclusion-period orders (codex round-8).
+  'do not enter treated areas for 30 minutes',
+  'keep pets inside for 30 minutes after treatment',
+  'avoid the treated area for one hour',
+];
+
+// Predicate-form product-safety claims (codex round-8) — caught by the
+// sentence-level co-occurrence rule, distinct issue message.
+const FLAGGED_PREDICATE = [
+  'our pesticides are safe when professionally applied',
+  'our treatments are safe when used as directed',
+  'the spray is safely applied and our products are gentle', // safely + products
 ];
 
 const CLEAN = [
@@ -66,6 +78,12 @@ const CLEAN = [
   'avoid mowing for 48 hours',
   'wait 24 hours before mowing',
   'wait 48 hours before watering the treated zone',
+  'avoid mowing the lawn for 48 hours',
+  // Cadence copy in DAYS is legal (codex round-8 false-positive fix).
+  'our technicians return after 30 days for the follow-up',
+  // Protective framing (no product word) and the approved idiom are legal.
+  'keep your home safe from termites',
+  'our treatments are safe once completely dry',
 ];
 
 describe('SAFETY_OVERCLAIMS compliance class', () => {
@@ -79,6 +97,12 @@ describe('SAFETY_OVERCLAIMS compliance class', () => {
     const result = validateContent(text, 'gbp');
     expect(result.valid).toBe(false);
     expect(result.issues.join(' ')).toMatch(/drying\/re-entry time/i);
+  });
+
+  it.each(FLAGGED_PREDICATE)('flags predicate safety claim: %s', (text) => {
+    const result = validateContent(text, 'gbp');
+    expect(result.valid).toBe(false);
+    expect(result.issues.join(' ')).toMatch(/product-safety claim/i);
   });
 
   it.each(CLEAN)('passes: %s', (text) => {

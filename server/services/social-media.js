@@ -385,7 +385,38 @@ const SAFETY_OVERCLAIMS = /\b(?:guarante(?:e[ds]?|ing)|100\s*%\s*(?:effective|sa
 // Three shapes: "30 minutes to dry"/"30-45 min drying", "dries/safe/re-enter
 // in|within|after 30 ...", "30-minute drying/re-entry (time)", plus the
 // wordy "about an hour to dry".
-const FIXED_TIMING_CLAIMS = /\b\d+\s*(?:[-–]\s*\d+\s*)?(?:minutes?|mins?|hours?|hrs?)\s+(?:to\s+dry|dry(?:ing)?(?:\s+time)?|re-?entry)|\b(?:dry|dries|drying|safe|re-?enter(?:ing)?|re-?entry)\s+(?:in|within|after)\s+(?:about\s+|around\s+|~\s*)?(?:\d+|an?\s+hour|half\s+an\s+hour)|\b\d+\s*[-–]?\s*(?:minute|min|hour|hr)s?\s+(?:dry(?:ing)?|re-?entry)\b|\babout\s+an\s+hour\s+to\s+dry\b|\b(?:wait|allow|give\s+it)\s+(?:about\s+|around\s+|~\s*)?(?:\d+\s*(?:[-–]\s*\d+\s*)?(?:minutes?|mins?|hours?|hrs?)|an?\s+hour|half\s+an\s+hour)\s+before\s+(?:re-?ent(?:er(?:ing)?|ry)|entering|going\s+back|letting|walking|using|use|kids|pets|children)|\b(?:keep|stay|remain|stays?)\b[^.!?]{0,40}?\boff\b[^.!?]{0,30}?\bfor\s+(?:about\s+|around\s+)?(?:\d+\s*(?:[-–]\s*\d+\s*)?(?:minutes?|mins?|hours?|hrs?)|an?\s+hour|half\s+an\s+hour)|\b(?:return|go\s+back|head\s+back)\s+(?:in|within|after)\s+(?:about\s+|around\s+)?(?:\d+|an?\s+hour|half\s+an\s+hour)/i;
+// Word-order enumeration proved unbounded across review rounds, so timing
+// claims are now caught by SENTENCE-LEVEL CO-OCCURRENCE (below) rather than
+// listed phrasings. These constants define the co-occurrence vocabulary.
+const TIMING_DURATION_RE = /\b(?:\d+\s*(?:[-–]\s*(?:\d+\s*)?)?(?:minutes?|mins?|hours?|hrs?)|(?:an?|one|two)\s+hours?|half\s+an\s+hour)\b/i;
+const REENTRY_CONTEXT_RE = /\bre-?ent\w*|\benter(?:ing)?\b|\b(?:dry(?:ing|s)?|dries)\b|\bsafe(?:ly|ty)?\b|\b(?:off|inside|indoors|away|out\s+of)\b[^.!?\n]*\b(?:treated|lawn|grass|yard|areas?|surfaces?)\b|\b(?:treated|lawn|grass|yard)\b[^.!?\n]*\b(?:off|inside|indoors|away|avoid\w*|back)\b|\b(?:pets?|kids?|children|famil\w+)\b[^.!?\n]*\b(?:off|inside|indoors|away|back|out(?:side)?)\b|\b(?:avoid\w*|do\s+not\s+enter|no\s+entry)\b[^.!?\n]*\b(?:treated|areas?|lawn|yard)\b|\bwalk\w*\b[^.!?\n]{0,30}\b(?:treated|lawn|grass|yard)\b|\b(?:you|your\s+family)\b[^.!?\n]{0,20}\breturn\w*\b/i;
+// Agronomic aftercare timing (mowing/watering windows) is legitimate copy,
+// and cadence copy uses days — only minute/hour figures are the banned class.
+const AGRONOMIC_EXEMPT_RE = /\b(?:mow\w*|water\w*|irrigat\w*|fertiliz\w*|seed\w*|overseed\w*|aerat\w*|rain)\b/i;
+// Safety-claim co-occurrence: "safe(ly/ty)" said about products/applications
+// in ANY word order (predicate forms included). The approved compliance idiom
+// stays legal: "safe once/until/when (completely) dry".
+const SAFETY_WORD_RE = /\bsafe(?:ly|ty)?\b/i;
+const PRODUCT_CONTEXT_RE = /\b(?:pesticides?|products?|treatments?|sprays?(?:ing)?|chemicals?|applications?|pest\s+control|exterminat\w*)\b/i;
+const SAFE_DRY_IDIOM_RE = /\bsafe\s+(?:once|until|when)\s+(?:completely\s+|fully\s+)?dry\b/i;
+
+// Sentence-level compliance check — returns the list of violated rules.
+function complianceOverclaims(text) {
+  const issues = [];
+  const sentences = String(text || '').split(/[.!?\n]+/);
+  for (const sentence of sentences) {
+    if (!sentence.trim()) continue;
+    const idiomStripped = sentence.replace(SAFE_DRY_IDIOM_RE, '');
+    if (SAFETY_WORD_RE.test(idiomStripped) && PRODUCT_CONTEXT_RE.test(sentence)) {
+      issues.push('Contains a product-safety claim — never call a pesticide/treatment "safe" (idiom: "safe once dry")');
+    }
+    if (TIMING_DURATION_RE.test(sentence) && REENTRY_CONTEXT_RE.test(sentence)
+      && !AGRONOMIC_EXEMPT_RE.test(sentence)) {
+      issues.push('Contains fixed drying/re-entry time — timing is technician-confirmed ("safe once dry")');
+    }
+  }
+  return issues;
+}
 const PHONE_PATTERN = /(?:\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}|\+1\d{10})/g;
 
 const KNOWN_PHONES = new Set();
@@ -411,8 +442,8 @@ function validateContent(text, platform) {
   if (SAFETY_OVERCLAIMS.test(text)) {
     issues.push('Contains safety overclaim (guaranteed, 100% effective, etc.)');
   }
-  if (FIXED_TIMING_CLAIMS.test(text)) {
-    issues.push('Contains fixed drying/re-entry time — timing is technician-confirmed ("safe once dry")');
+  for (const issue of new Set(complianceOverclaims(text))) {
+    issues.push(issue);
   }
 
   const phones = text.match(PHONE_PATTERN) || [];
