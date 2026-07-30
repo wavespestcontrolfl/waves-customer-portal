@@ -1095,13 +1095,28 @@ router.get('/mosquito-onetime-quote', requireAdmin, async (req, res, next) => {
 // Booking-time twin of the tier sync's evidence test (self-booking-plan-sync):
 // TRUE when the series being booked would itself count as WaveGuard plan
 // coverage — recurring, not a callback/re-service, not commercial or
-// rodent-led, and resolving to a WaveGuard plan family. The customer's tier is
-// stamped from the created rows only AFTER pricing validates (the in-
-// transaction sync below), so the "any member" discount floor must accept this
-// booking-context evidence or the member discount is rejected on the very sale
-// that enrolls the member (a new client booked onto quarterly pest control).
-function bookingCreatesWaveGuardCoverage({ isRecurring, isCallback, serviceType, serviceRecord }) {
+// rodent-led, UPCOMING (a past-dated series is data backfill, not upcoming
+// coverage), not for a commercial-sentinel customer (commercial plans are
+// flat, outside the residential tiers — enrollment fail-closes on them too),
+// and resolving to a WaveGuard plan family. The customer's tier is stamped
+// from the created rows only AFTER pricing validates (the in-transaction sync
+// below), so the "any member" discount floor must accept this booking-context
+// evidence or the member discount is rejected on the very sale that enrolls
+// the member (a new client booked onto quarterly pest control).
+//
+// Deliberately NOT mirrored: GATE_AUTO_WAVEGUARD_TIER. The gate is the kill
+// switch for AUTOMATIC tier stamping (a billing-side concern); this flag only
+// lets an operator-selected member discount through on a recurring-plan sale,
+// which is the owner's stated pricing rule (2026-07-29) independent of
+// whether the label automation is on.
+function bookingCreatesWaveGuardCoverage({ isRecurring, isCallback, serviceType, serviceRecord, customer, scheduledDate }) {
   if (!isRecurring || isCallback) return false;
+  // Same sentinel normalization as the enrollment path's commercial guard
+  // (tierSentinelKey in self-booking-plan-sync, not exported).
+  const customerTierKey = String(customer?.waveguard_tier || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '');
+  if (customerTierKey === 'commercial') return false;
+  const anchorDate = dateOnly(scheduledDate);
+  if (!anchorDate || anchorDate < etDateString()) return false;
   const row = {
     service_type: serviceType,
     service_key: serviceRecord?.service_key,
@@ -3012,6 +3027,8 @@ router.post('/', requireAdmin, async (req, res, next) => {
       isCallback: resolvedIsCallback,
       serviceType,
       serviceRecord,
+      customer,
+      scheduledDate,
     });
 
     const pricing = await buildAppointmentPricing({

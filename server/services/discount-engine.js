@@ -81,8 +81,17 @@ const DiscountEngine = {
         // the very sale that enrolls the member. Silver+ requirements stay
         // strictly tier-based — one recurring booking says nothing about
         // which tier the customer lands on.
+        //
+        // The predicate path requires an ACTIVE customer (mirrors
+        // isActivePlanCustomer): cancellation-processor churns with
+        // active=false but leaves the historical monthly_rate in place, and
+        // that stale rate must not buy a churned customer member pricing on
+        // a later one-off visit. The booking-context path deliberately has
+        // no active guard — booking a churned customer onto a NEW recurring
+        // plan is a re-enrollment sale.
         const anyMemberFloorMet = requiredIdx === 0
-          && (recurringMembershipBooking || isMembershipCustomerRow(customer || {}));
+          && (recurringMembershipBooking
+            || (customer?.active !== false && isMembershipCustomerRow(customer || {})));
         if (requiredIdx < 0 || (customerIdx < requiredIdx && !anyMemberFloorMet)) {
           failures.push(`WaveGuard ${discount.requires_waveguard_tier}`);
         }

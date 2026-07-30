@@ -42,6 +42,25 @@ describe('WaveGuard member discount tier eligibility', () => {
     })).resolves.toEqual([]);
   });
 
+  test('a churned customer keeps no member pricing off their stale monthly rate', async () => {
+    // cancellation-processor churns with active=false but leaves the
+    // historical monthly_rate populated — that rate is not live membership.
+    await expect(DiscountEngine.manualEligibilityFailures(memberDiscount(), {
+      id: 'customer-1',
+      waveguard_tier: null,
+      monthly_rate: 55,
+      active: false,
+    })).resolves.toEqual(['WaveGuard Bronze']);
+    // Booking them onto a NEW recurring plan is a re-enrollment sale and
+    // still qualifies.
+    await expect(DiscountEngine.manualEligibilityFailures(memberDiscount(), {
+      id: 'customer-1',
+      waveguard_tier: null,
+      monthly_rate: 55,
+      active: false,
+    }, { recurringMembershipBooking: true })).resolves.toEqual([]);
+  });
+
   test('non-member tier sentinels stay ineligible without booking evidence', async () => {
     await expect(DiscountEngine.manualEligibilityFailures(memberDiscount(), {
       id: 'customer-1',

@@ -102,6 +102,8 @@ describe('admin schedule appointment discount eligibility', () => {
     const quarterlyPest = {
       serviceType: 'General Pest Control',
       serviceRecord: { service_key: 'pest_general_quarterly', name: 'Quarterly Pest Control' },
+      customer: { id: 'customer-1', waveguard_tier: null },
+      scheduledDate: '2099-01-04',
     };
 
     expect(bookingCreatesWaveGuardCoverage({
@@ -119,6 +121,7 @@ describe('admin schedule appointment discount eligibility', () => {
     expect(bookingCreatesWaveGuardCoverage({
       isRecurring: true,
       isCallback: false,
+      ...quarterlyPest,
       serviceType: 'Rodent Trapping',
       serviceRecord: { service_key: 'rodent_trapping', name: 'Rodent Trapping' },
     })).toBe(false);
@@ -126,8 +129,25 @@ describe('admin schedule appointment discount eligibility', () => {
     expect(bookingCreatesWaveGuardCoverage({
       isRecurring: true,
       isCallback: false,
+      ...quarterlyPest,
       serviceType: 'Commercial Pest Control',
       serviceRecord: { service_key: 'commercial_pest', name: 'Commercial Pest Control' },
+    })).toBe(false);
+    // Commercial-sentinel customers are outside the residential tier system
+    // entirely — enrollment fail-closes on them and so does this evidence.
+    expect(bookingCreatesWaveGuardCoverage({
+      isRecurring: true,
+      isCallback: false,
+      ...quarterlyPest,
+      customer: { id: 'customer-2', waveguard_tier: 'Commercial' },
+    })).toBe(false);
+    // A past-dated series is backfill, not upcoming coverage — the tier sync
+    // only counts upcoming rows, so it must not buy member pricing either.
+    expect(bookingCreatesWaveGuardCoverage({
+      isRecurring: true, isCallback: false, ...quarterlyPest, scheduledDate: '2020-01-01',
+    })).toBe(false);
+    expect(bookingCreatesWaveGuardCoverage({
+      isRecurring: true, isCallback: false, ...quarterlyPest, scheduledDate: null,
     })).toBe(false);
   });
 
