@@ -1764,12 +1764,16 @@ async function createNewsletterDraft({
     enrichedPrompt += `\nHomeowner Minute topic: ${homeownerMinuteTopic}`;
   } else if (typeConfig?.flagship) {
     try {
-      // Bounded to weeks at or before THIS issue — operators pre-plan
-      // future calendar topics, and four planned future rows would
-      // otherwise displace all actual history.
+      // STRICTLY earlier weeks only: operators pre-plan future topics
+      // (four planned rows would displace history), and the current
+      // issue's OWN planned topic must never land in the do-not-repeat
+      // list — /draft-ai calls without homeownerMinuteTopic even when
+      // the week's calendar row has one. week_of is an ET DATE, so
+      // compare against the issue's ET date string, not the timestamp
+      // (a date < timestamp comparison would re-include same-day rows).
       const recent = await knex('newsletter_calendar')
         .whereNotNull('homeowner_minute_topic')
-        .where('week_of', '<=', editorialReference)
+        .where('week_of', '<', etDateString(editorialReference))
         .orderBy('week_of', 'desc')
         .limit(4)
         .pluck('homeowner_minute_topic');
