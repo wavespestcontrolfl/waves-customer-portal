@@ -362,6 +362,13 @@ async function assertSocialPublishingReady(platform, locationId) {
     if (!status.companyId) {
       return { ready: false, reason: 'LINKEDIN_COMPANY_ID not set' };
     }
+    // The publish loop skips a known page-admin mismatch — a connection with
+    // orgVerified === false is not publishable, so readiness must say so too
+    // (otherwise callers spend work, e.g. paid creative renders, on a post
+    // that will be skipped).
+    if (status.orgVerified === false) {
+      return { ready: false, reason: 'LinkedIn organization verification pending/failed — publish loop would skip this connection' };
+    }
   }
 
   return { ready: true };
