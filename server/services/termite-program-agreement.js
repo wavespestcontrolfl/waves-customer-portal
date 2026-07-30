@@ -814,7 +814,7 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
           .where({ customer_id: customerId, contract_type: 'document_template' })
           .whereIn('document_template_key', PROGRAM_TEMPLATE_KEYS)
           .where('status', 'signed')
-          .select('document_variables_snapshot', 'created_at');
+          .select('document_variables_snapshot', 'created_at', 'signed_at');
         const acceptedAddress = normalizeAddress(estimate.address);
         const signedAfterTs = signedAfter ? new Date(signedAfter) : null;
         const signedBlocks = signedRows.some((sr) => {
@@ -832,8 +832,12 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
           const sameProperty = (!signedAddress || !acceptedAddress) ? true : signedAddress === acceptedAddress;
           if (!sameProperty) return false;
           if (!signedAfterTs) return true; // no boundary supplied — conservative
-          const signedCreatedAt = sr.created_at ? new Date(sr.created_at) : null;
-          return !signedCreatedAt || signedCreatedAt >= signedAfterTs;
+          // Compare when the signature HAPPENED, not when its request was
+          // created — an older request signed after the boundary is this
+          // cycle's executed replacement and must block.
+          const signedTs = sr.signed_at ? new Date(sr.signed_at)
+            : (sr.created_at ? new Date(sr.created_at) : null);
+          return !signedTs || signedTs >= signedAfterTs;
         });
         if (signedBlocks) return 'signed_exists';
       }
@@ -1213,7 +1217,7 @@ async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
       .where({ customer_id: row.customer_id })
       .whereIn('document_template_key', PROGRAM_TEMPLATE_KEYS)
       .where('status', 'signed')
-      .select('document_variables_snapshot', 'created_at');
+      .select('document_variables_snapshot', 'created_at', 'signed_at');
     const signedThisCycle = signedRows.some((sr) => {
       let ss = sr.document_variables_snapshot;
       if (typeof ss === 'string') { try { ss = JSON.parse(ss); } catch { ss = null; } }
@@ -1221,9 +1225,12 @@ async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
       const signedAddress = normalizeAddress(ss?.estimate?.address || ss?.customer?.address);
       const sameProperty = (!signedAddress || !rowAddress) ? true : signedAddress === rowAddress;
       if (!sameProperty) return false;
-      const signedCreatedAt = sr.created_at ? new Date(sr.created_at) : null;
-      if (!sourceCreatedAt || !signedCreatedAt) return true; // unprovable — conservative
-      return signedCreatedAt >= sourceCreatedAt;
+      // Signature time, not request-creation time: an older request signed
+      // after this source was created is this cycle's executed replacement.
+      const signedTs = sr.signed_at ? new Date(sr.signed_at)
+        : (sr.created_at ? new Date(sr.created_at) : null);
+      if (!sourceCreatedAt || !signedTs) return true; // unprovable — conservative
+      return signedTs >= sourceCreatedAt;
     });
     if (signedThisCycle) { await markSupersededHandled(row, 'signed_same_property'); results.skipped += 1; continue; }
 

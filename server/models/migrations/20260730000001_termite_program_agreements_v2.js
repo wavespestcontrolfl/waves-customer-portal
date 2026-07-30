@@ -582,6 +582,16 @@ exports.down = async function down(knex) {
     }
     const cancelEvents = [...latestByContract.values()];
     const templateKeysForRestore = TEMPLATE_V2.map((t) => t.template_key);
+    // Active-version truth AFTER the repoint above — used to tell a genuine
+    // live replacement (still-active version) from a v2 re-prep this
+    // rollback just deactivated.
+    const activeIdsAfterRollback = new Set(
+      (await knex('document_templates')
+        .whereIn('template_key', templateKeysForRestore)
+        .select('active_version_id'))
+        .map((t) => t.active_version_id)
+        .filter(Boolean),
+    );
     // Same canonicalization as the service's normalizeAddress — '123 Main
     // Street' and '123 Main St' are the SAME property for restore
     // decisions (migrations stay self-contained, so the map is inlined).
@@ -643,18 +653,57 @@ exports.down = async function down(knex) {
         .whereIn('document_template_key', templateKeysForRestore)
         .whereNot('id', evt.contract_id)
         .whereIn('status', ['draft', 'sent', 'viewed', 'signed'])
-        .select('status', 'share_token_expires_at', 'document_variables_snapshot');
-      const replacementSameProperty = candidates.some((c) => {
-        // An open candidate whose token has expired is no coverage — its
-        // link 410s; only signed rows count regardless of token state.
-        if (c.status !== 'signed'
-          && c.share_token_expires_at && new Date(c.share_token_expires_at) < new Date()) return false;
+        .select('id', 'status', 'share_token_expires_at', 'document_variables_snapshot', 'document_template_version_id');
+      const sameProperty = (c) => {
         const cs = snapOf(c.document_variables_snapshot);
         if (cs?.estimate?.id && sourceEstimateId && String(cs.estimate.id) === String(sourceEstimateId)) return true;
         const cAddr = normAddr(cs?.estimate?.address || cs?.customer?.address);
         if (!cAddr || !sourceAddress) return true; // unprovable — conservative
         return cAddr === sourceAddress;
-      });
+      };
+      let replacementSameProperty = false;
+      for (const c of candidates) {
+        if (!sameProperty(c)) continue;
+        // Signed rows are executed contracts — coverage regardless of token.
+        if (c.status === 'signed') { replacementSameProperty = true; continue; }
+        // An open candidate whose token has expired is no coverage — its
+        // link 410s and the lifecycle pass will stamp it 'expired'.
+        if (c.share_token_expires_at && new Date(c.share_token_expires_at) < new Date()) continue;
+        // Open and still on a version that remains active after the repoint
+        // (or unclassifiable) = genuine live coverage — suppress restore.
+        if (!c.document_template_version_id || activeIdsAfterRollback.has(c.document_template_version_id)) {
+          replacementSameProperty = true;
+          continue;
+        }
+        // Open on a version this rollback just DEACTIVATED (the sweep's v2
+        // re-prep): it must not stay signable while the prior wording is
+        // authoritative again — retire it now instead of leaving it live
+        // until the next daily sweep. Conditional cancel: a signature
+        // committed concurrently wins and suppresses the restore instead.
+        const retired = await knex('customer_contracts')
+          .where({ id: c.id })
+          .whereIn('status', ['draft', 'sent', 'viewed'])
+          .update({
+            status: 'cancelled',
+            cancelled_at: knex.fn.now(),
+            // Deliberately NOT the compliance-supersession reason: this row
+            // needs no re-prep — the restored source is the live request.
+            cancelled_reason: 'Retired by v2 template rollback',
+            updated_at: knex.fn.now(),
+          });
+        if (retired) {
+          await knex('customer_contract_events').insert({
+            contract_id: c.id,
+            customer_id: source.customer_id,
+            event_type: 'cancelled',
+            actor_type: 'system',
+            actor_id: null,
+            metadata: JSON.stringify({ reason: 'v2_migration_rollback_retired_replacement', restoredSourceId: evt.contract_id }),
+          });
+        } else {
+          replacementSameProperty = true; // signed mid-rollback — executed
+        }
+      }
       if (replacementSameProperty) continue;
       const restored = await knex('customer_contracts')
         .where({ id: evt.contract_id, status: 'cancelled' })
