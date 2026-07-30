@@ -1,10 +1,11 @@
-// Call booking-miss watchdog (2026-07-30). Born from the Knorr/Riverwalk
-// miss: an outbound callback confirmed "Saturday at noon", the V2 extraction
-// captured it (scheduling.status=confirmed + confirmed_start_at), every
-// auto-booking guard parked it into a 1,700-item open triage backlog, and
-// nobody was scheduled. These tests pin the pure diff — confirmed-slot
-// parsing (object AND string-era extractions), ET date keying, grace filter,
-// unlinked-call handling — and the gate-off no-op.
+// Call booking-miss watchdog (2026-07-30). Born from a July 2026 outbound
+// callback that confirmed "Saturday at noon": the V2 extraction captured the
+// slot (scheduling.status=confirmed + confirmed_start_at), every auto-booking
+// guard parked it into a 1,700-item open triage backlog, and nobody was
+// scheduled. These tests pin the pure diff — confirmed-slot parsing (object
+// AND string-era extractions), the v2IsoToEtWallClock wall-clock contract,
+// call-linked clearing evidence, grace filter, unlinked-call handling — and
+// the gate-off no-op. All fixture identities are synthetic.
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({})) }));
@@ -13,6 +14,8 @@ const {
   runCallBookingMissWatchdog,
   computeBookingMisses,
   extractConfirmedSlot,
+  confirmedWallClockET,
+  rowClearsSlot,
   GRACE_MINUTES,
 } = require('../services/call-booking-miss-watchdog');
 
@@ -20,10 +23,10 @@ const NOW = new Date('2026-07-30T16:00:00Z');
 const OLD_ENOUGH = new Date(NOW.getTime() - (GRACE_MINUTES + 30) * 60 * 1000).toISOString();
 const TOO_RECENT = new Date(NOW.getTime() - 10 * 60 * 1000).toISOString();
 
-// The Knorr shape: outbound call, slot confirmed for Sat Aug 1 noon ET.
+// Synthetic fixture: an outbound callback that confirmed Sat Aug 1 noon ET.
 function extraction(over = {}) {
   return {
-    caller: { name_full: 'Jennifer Richard', first_name: 'Jennifer' },
+    caller: { name_full: 'Pat Sample', first_name: 'Pat' },
     service_request: { specific_service_name: 'Waves Assessment', primary_service_category: 'termite' },
     scheduling: { status: 'confirmed', confirmed_start_at: '2026-08-01T12:00:00-04:00' },
     ...over,
@@ -32,25 +35,62 @@ function extraction(over = {}) {
 
 function call(over = {}) {
   return {
-    id: 'call-1', customer_id: 'cust-1', direction: 'outbound', created_at: OLD_ENOUGH,
-    from_phone: '+19412975749', to_phone: '+19413759789',
+    id: 'call-1', twilio_call_sid: 'CAsynthetic001', customer_id: 'cust-1',
+    direction: 'outbound', created_at: OLD_ENOUGH,
+    from_phone: '+19415550100', to_phone: '+19415550111',
     ai_extraction_enriched: extraction(),
     ...over,
   };
 }
 
+function bookedRow(over = {}) {
+  return {
+    customer_id: 'cust-1', sched_date: '2026-08-01', window_start: '12:00:00',
+    created_at: new Date(NOW.getTime() - 60 * 60 * 1000).toISOString(),
+    source_call_log_id: null, notes: null,
+    ...over,
+  };
+}
+
+describe('confirmedWallClockET — v2IsoToEtWallClock contract', () => {
+  test('ET offset (correct season) keeps the wall clock verbatim', () => {
+    expect(confirmedWallClockET('2026-08-01T12:00:00-04:00')).toEqual({ dateET: '2026-08-01', minutes: 720 });
+  });
+
+  test('the seasonally WRONG ET offset still keeps the agreed wall clock (no date shift)', () => {
+    // As an instant, 23:30-05:00 in July is 00:30-04:00 the NEXT day; the
+    // wall clock the caller agreed to is 23:30 on the stated date.
+    expect(confirmedWallClockET('2026-07-31T23:30:00-05:00')).toEqual({ dateET: '2026-07-31', minutes: 23 * 60 + 30 });
+  });
+
+  test('a zone-less stamp is treated as ET wall clock verbatim', () => {
+    expect(confirmedWallClockET('2026-08-01T09:00:00')).toEqual({ dateET: '2026-08-01', minutes: 540 });
+  });
+
+  test('a true foreign instant (Z) converts to its ET wall clock', () => {
+    // 2026-08-02T02:00Z is 2026-08-01 22:00 ET.
+    expect(confirmedWallClockET('2026-08-02T02:00:00Z')).toEqual({ dateET: '2026-08-01', minutes: 22 * 60 });
+  });
+
+  test('garbage returns null', () => {
+    expect(confirmedWallClockET('saturday-ish')).toBeNull();
+    expect(confirmedWallClockET(null)).toBeNull();
+  });
+});
+
 describe('extractConfirmedSlot', () => {
   test('parses a confirmed slot from an object extraction', () => {
     const slot = extractConfirmedSlot(extraction());
-    expect(slot.name).toBe('Jennifer Richard');
+    expect(slot.name).toBe('Pat Sample');
     expect(slot.service).toBe('Waves Assessment');
-    expect(slot.startAt.toISOString()).toBe('2026-08-01T16:00:00.000Z');
+    expect(slot.dateET).toBe('2026-08-01');
+    expect(slot.minutes).toBe(720);
   });
 
   test('parses a STRING-era extraction (column stored stringified JSON historically)', () => {
     const slot = extractConfirmedSlot(JSON.stringify(extraction()));
     expect(slot).not.toBeNull();
-    expect(slot.startAt.toISOString()).toBe('2026-08-01T16:00:00.000Z');
+    expect(slot.dateET).toBe('2026-08-01');
   });
 
   test('non-confirmed, missing start, unparseable start, and garbage all return null', () => {
@@ -62,30 +102,55 @@ describe('extractConfirmedSlot', () => {
   });
 });
 
+describe('rowClearsSlot — call-linked booking evidence only', () => {
+  const slot = { dateET: '2026-08-01', minutes: 720 };
+
+  test('source_call_log_id match clears', () => {
+    expect(rowClearsSlot(bookedRow({ source_call_log_id: 'call-1', created_at: null, window_start: null }), call(), slot)).toBe(true);
+  });
+
+  test('Call SID notes marker clears', () => {
+    expect(rowClearsSlot(bookedRow({ notes: 'Booked by phone. Call SID: CAsynthetic001.', created_at: null, window_start: null }), call(), slot)).toBe(true);
+  });
+
+  test('window_start within 2h of the confirmed wall clock clears; beyond it does not', () => {
+    expect(rowClearsSlot(bookedRow({ window_start: '13:00:00', created_at: null }), call(), slot)).toBe(true);
+    expect(rowClearsSlot(bookedRow({ window_start: '08:00:00', created_at: null }), call(), slot)).toBe(false);
+  });
+
+  test('a row created AFTER the call clears (office acted); a PRE-existing row does not', () => {
+    const afterCall = bookedRow({ window_start: '08:00:00', created_at: new Date(new Date(OLD_ENOUGH).getTime() + 10 * 60 * 1000).toISOString() });
+    const beforeCall = bookedRow({ window_start: '08:00:00', created_at: new Date(new Date(OLD_ENOUGH).getTime() - 10 * 60 * 1000).toISOString() });
+    expect(rowClearsSlot(afterCall, call(), slot)).toBe(true);
+    expect(rowClearsSlot(beforeCall, call(), slot)).toBe(false);
+  });
+});
+
 describe('computeBookingMisses — confirmed-slot vs schedule diff', () => {
-  test('a confirmed slot with no booking on that ET date is a miss', () => {
-    const misses = computeBookingMisses([call()], new Set(), { now: NOW });
+  test('a confirmed slot with no booking evidence is a miss', () => {
+    const misses = computeBookingMisses([call()], [], { now: NOW });
     expect(misses).toHaveLength(1);
     expect(misses[0].serviceDateET).toBe('2026-08-01');
   });
 
-  test('a booking for that customer on the confirmed ET date clears the miss', () => {
-    const booked = new Set(['cust-1:2026-08-01']);
-    expect(computeBookingMisses([call()], booked, { now: NOW })).toHaveLength(0);
+  test('a call-linked booking on the confirmed ET date clears the miss', () => {
+    expect(computeBookingMisses([call()], [bookedRow({ source_call_log_id: 'call-1' })], { now: NOW })).toHaveLength(0);
   });
 
-  test('the ET date key survives the UTC boundary (11pm ET slot is NOT the next UTC day)', () => {
-    // 2026-08-01T23:00-04:00 is 03:00Z on Aug 2 — the booking lives on Aug 1 ET.
-    const late = call({ ai_extraction_enriched: extraction({ scheduling: { status: 'confirmed', confirmed_start_at: '2026-08-01T23:00:00-04:00' } }) });
-    expect(computeBookingMisses([late], new Set(['cust-1:2026-08-01']), { now: NOW })).toHaveLength(0);
-    expect(computeBookingMisses([late], new Set(['cust-1:2026-08-02']), { now: NOW })).toHaveLength(1);
+  test('an UNRELATED pre-existing same-day appointment does NOT suppress the miss', () => {
+    const unrelated = bookedRow({
+      window_start: '08:00:00',
+      created_at: new Date(new Date(OLD_ENOUGH).getTime() - 24 * 3600 * 1000).toISOString(),
+    });
+    expect(computeBookingMisses([call()], [unrelated], { now: NOW })).toHaveLength(1);
+  });
+
+  test('another customer\'s same-date booking never clears', () => {
+    expect(computeBookingMisses([call()], [bookedRow({ customer_id: 'cust-other', source_call_log_id: 'call-1' })], { now: NOW })).toHaveLength(1);
   });
 
   test('an UNLINKED call (customer_id null) with a confirmed slot is always a miss', () => {
-    const orphan = call({ customer_id: null });
-    // Even a same-date booking key for some other customer cannot clear it.
-    const misses = computeBookingMisses([orphan], new Set(['cust-1:2026-08-01']), { now: NOW });
-    expect(misses).toHaveLength(1);
+    expect(computeBookingMisses([call({ customer_id: null })], [bookedRow({ source_call_log_id: 'call-1' })], { now: NOW })).toHaveLength(1);
   });
 
   test('in-grace calls and non-confirmed extractions are excluded', () => {
@@ -94,7 +159,7 @@ describe('computeBookingMisses — confirmed-slot vs schedule diff', () => {
       call({ id: 'requested', ai_extraction_enriched: extraction({ scheduling: { status: 'requested', confirmed_start_at: null } }) }),
       call({ id: 'no-extraction', ai_extraction_enriched: null }),
     ];
-    expect(computeBookingMisses(rows, new Set(), { now: NOW })).toHaveLength(0);
+    expect(computeBookingMisses(rows, [], { now: NOW })).toHaveLength(0);
   });
 });
 

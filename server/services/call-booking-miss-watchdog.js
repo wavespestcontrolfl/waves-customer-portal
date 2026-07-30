@@ -2,26 +2,40 @@
  * Call booking-miss watchdog.
  *
  * Why this exists: on 2026-07-28 an outbound callback confirmed "Saturday at
- * noon" with a property manager (Knorr/Riverwalk). The V2 extraction captured
+ * noon" with a property manager. The V2 extraction captured
  * scheduling.status=confirmed with a concrete confirmed_start_at — but every
  * auto-booking guard held it back (outbound_call skip, v2 needs_review
  * routing), so it parked as triage_items among 1,700+ open low-severity
- * flags and drowned. Nothing rang; nobody was scheduled for Saturday. The
- * triage queue is a park, not a pager — this watchdog is the pager for the
- * one class that directly costs a visit: the caller was TOLD a slot and the
- * schedule has nothing on it.
+ * flags and drowned. Nothing rang; nobody was scheduled. The triage queue is
+ * a park, not a pager — this watchdog is the pager for the one class that
+ * directly costs a visit: the caller was TOLD a slot and the schedule has
+ * nothing on it.
  *
- * What counts as a miss: a call in the lookback window, past the grace
- * period, whose stored V2 extraction (v2_extraction_status = 'valid') says
- * scheduling.status === 'confirmed' with a parseable confirmed_start_at —
- * and NO non-cancelled scheduled_services row exists for that customer on
- * that ET service date. A call with no linked customer_id cannot match a
- * booking by definition and is always a miss (doubly bad: unattributed AND
- * unbooked; see call-log-relink.js for the attribution side).
+ * What counts as a miss: a fully-processed call in the lookback window, past
+ * the grace period, whose stored V2 extraction (v2_extraction_status =
+ * 'valid') says scheduling.status === 'confirmed' with a parseable
+ * confirmed_start_at — and no scheduled_services row CLEARS it. A row clears
+ * the miss only with call-linked evidence, mirroring the processor's
+ * findExistingCallAppointment contract (call-recording-processor.js:2225):
+ * same customer + same ET service date, status not cancelled/rescheduled,
+ * AND (source_call_log_id matches, or the notes carry the call's
+ * `Call SID:` marker, or window_start is within 2h of the confirmed wall
+ * clock, or the row was created after the call — the office acted). A
+ * pre-existing unrelated same-day appointment does NOT suppress the page.
+ * A call with no linked customer_id cannot match a booking by definition
+ * and is always a miss (doubly bad: unattributed AND unbooked; see
+ * call-log-relink.js for the attribution side).
+ *
+ * ET semantics: confirmed_start_at is parsed with the same wall-clock
+ * contract as the booking path's v2IsoToEtWallClock — an ET offset (either
+ * season, even the wrong one) or a zone-less stamp means the model encoded
+ * the agreed LOCAL wall clock and is kept verbatim; only a true foreign
+ * instant (Z / non-ET offset) is converted to ET. Booking dates are rendered
+ * via to_char in SQL — no JS Date round-trip across the UTC boundary.
  *
  * Alerting mirrors call-ingest-watchdog: one bell per call, deduped forever
  * via the notifications metadata dedupeKey, with a per-run cap so the first
- * enable over a backlog can't flood the bell. Dark by default behind
+ * enable over a backlog can't flood. Dark by default behind
  * GATE_CALL_BOOKING_MISS_WATCHDOG. Read-only against call_log and
  * scheduled_services; writes nothing but admin notifications.
  */
@@ -29,7 +43,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const NotificationService = require('./notification-service');
-const { etDateString } = require('../utils/datetime-et');
+const { etParts } = require('../utils/datetime-et');
 
 // How far back each run looks. Two days: long enough that a weekend outage
 // still surfaces Monday, short enough that the candidate set stays tiny.
@@ -42,12 +56,39 @@ const GRACE_MINUTES = 90;
 // rings loudly but not unreadably. Dedupe keys make the remainder ring on
 // subsequent ticks.
 const MAX_ALERTS_PER_RUN = 8;
+// A same-date row whose window starts within this many minutes of the
+// confirmed wall clock is treated as THE booking (offices book the agreed
+// noon slot as a 12:00 or 13:00 window, not to the minute).
+const WINDOW_MATCH_TOLERANCE_MINUTES = 120;
 
 // Log-safe phone rendering — full numbers belong ONLY in the admin
 // notification body (an authenticated surface); Railway logs are plaintext.
 function maskPhone(value) {
   const digits = String(value || '').replace(/\D/g, '');
   return digits ? `***${digits.slice(-4)}` : 'unknown';
+}
+
+// Same wall-clock contract as v2IsoToEtWallClock in call-recording-processor:
+// ET offsets (either season — even the seasonally WRONG one) and zone-less
+// stamps encode the agreed LOCAL wall clock, kept verbatim; a true foreign
+// instant (Z or non-ET offset) is converted to its ET wall clock. Returns
+// { dateET: 'YYYY-MM-DD', minutes: <minutes past midnight> } or null.
+function confirmedWallClockET(value) {
+  const raw = String(value || '');
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(raw)) return null;
+  const verbatim = () => ({
+    dateET: raw.slice(0, 10),
+    minutes: Number(raw.slice(11, 13)) * 60 + Number(raw.slice(14, 16)),
+  });
+  if (/(?:-04:?00|-05:?00)$/.test(raw)) return verbatim();
+  if (/(?:Z|[+-]\d{2}:?\d{2})$/i.test(raw)) {
+    const parsed = new Date(raw);
+    if (Number.isNaN(parsed.getTime())) return null;
+    const p = etParts(parsed);
+    const pad = (n) => String(n).padStart(2, '0');
+    return { dateET: `${p.year}-${pad(p.month)}-${pad(p.day)}`, minutes: p.hour * 60 + p.minute };
+  }
+  return verbatim();
 }
 
 // Parse the stored V2 extraction (jsonb object or stringified JSON — both
@@ -65,10 +106,11 @@ function extractConfirmedSlot(extractionRaw) {
   }
   const scheduling = extraction.scheduling || {};
   if (scheduling.status !== 'confirmed' || !scheduling.confirmed_start_at) return null;
-  const startAt = new Date(scheduling.confirmed_start_at);
-  if (Number.isNaN(startAt.getTime())) return null;
+  const wallClock = confirmedWallClockET(scheduling.confirmed_start_at);
+  if (!wallClock) return null;
   return {
-    startAt,
+    dateET: wallClock.dateET,
+    minutes: wallClock.minutes,
     name: extraction.caller?.name_full || extraction.caller?.first_name || 'Unknown caller',
     service: extraction.service_request?.specific_service_name
       || extraction.service_request?.primary_service_category
@@ -76,13 +118,36 @@ function extractConfirmedSlot(extractionRaw) {
   };
 }
 
+function windowStartMinutes(windowStart) {
+  const m = /^(\d{1,2}):(\d{2})/.exec(String(windowStart || ''));
+  if (!m) return null;
+  return Number(m[1]) * 60 + Number(m[2]);
+}
+
+// Call-linked booking evidence, mirroring findExistingCallAppointment
+// (call-recording-processor.js:2225): does this same-customer, same-ET-date,
+// non-cancelled/rescheduled row belong to THIS call's confirmed slot?
+function rowClearsSlot(row, call, slot) {
+  if (row.source_call_log_id && row.source_call_log_id === call.id) return true;
+  if (call.twilio_call_sid && String(row.notes || '').includes(`Call SID: ${call.twilio_call_sid}`)) return true;
+  const startMinutes = windowStartMinutes(row.window_start);
+  if (startMinutes !== null && Math.abs(startMinutes - slot.minutes) <= WINDOW_MATCH_TOLERANCE_MINUTES) return true;
+  // The office acted after the call: any same-date row created post-call is
+  // treated as the response to it (possibly at a renegotiated time). A row
+  // that PRE-dates the call is an unrelated appointment and must not
+  // suppress the page.
+  if (row.created_at && call.created_at && new Date(row.created_at) >= new Date(call.created_at)) return true;
+  return false;
+}
+
 // Pure diff, exported for tests: which calls confirmed a slot that has no
-// matching booking? `calls` are call_log rows ({ id, customer_id, direction,
-// created_at, from_phone, ai_extraction_enriched }); `bookedKeys` is a Set of
-// `${customer_id}:${YYYY-MM-DD}` for every non-cancelled scheduled_services
-// row in play (date rendered in SQL via to_char — never a JS Date round-trip,
-// which shifts the day across the UTC/ET boundary).
-function computeBookingMisses(calls, bookedKeys, { now = new Date() } = {}) {
+// call-linked booking? `calls` are call_log rows ({ id, twilio_call_sid,
+// customer_id, direction, created_at, from_phone, to_phone,
+// ai_extraction_enriched }); `bookedRows` are scheduled_services rows
+// ({ customer_id, sched_date ('YYYY-MM-DD' via to_char — never a JS Date
+// round-trip), window_start, created_at, source_call_log_id, notes }),
+// already filtered to non-cancelled/rescheduled statuses.
+function computeBookingMisses(calls, bookedRows, { now = new Date() } = {}) {
   const graceCutoff = new Date(now.getTime() - GRACE_MINUTES * 60 * 1000);
   const misses = [];
   for (const call of calls) {
@@ -90,9 +155,13 @@ function computeBookingMisses(calls, bookedKeys, { now = new Date() } = {}) {
     if (!createdAt || createdAt > graceCutoff) continue;
     const slot = extractConfirmedSlot(call.ai_extraction_enriched);
     if (!slot) continue;
-    const serviceDateET = etDateString(slot.startAt);
-    if (call.customer_id && bookedKeys.has(`${call.customer_id}:${serviceDateET}`)) continue;
-    misses.push({ call, slot, serviceDateET });
+    const cleared = !!call.customer_id && bookedRows.some((row) => (
+      row.customer_id === call.customer_id
+      && row.sched_date === slot.dateET
+      && rowClearsSlot(row, call, slot)
+    ));
+    if (cleared) continue;
+    misses.push({ call, slot, serviceDateET: slot.dateET });
   }
   return misses;
 }
@@ -122,32 +191,38 @@ async function runCallBookingMissWatchdog({ now = new Date() } = {}) {
 
 async function runInner({ now = new Date() } = {}) {
   const windowStart = new Date(now.getTime() - LOOKBACK_HOURS * 3600 * 1000);
-  // Candidate filtering happens in JS, not SQL: ai_extraction_enriched has
-  // been both json and stringified-text across its history, so a ->> filter
-  // would silently drop the string-era rows. The 48h window keeps this cheap.
+  // processing_status = 'processed' only: a delayed or force-reprocessed call
+  // persists its valid V2 extraction BEFORE the booking insert and the
+  // terminal status write — alerting mid-run would permanently ring a false
+  // "never booked" bell. Candidate filtering on the extraction happens in
+  // JS, not SQL: ai_extraction_enriched has been both json and
+  // stringified-text across its history, so a ->> filter would silently drop
+  // the string-era rows. The 48h window keeps this cheap.
   const calls = await db('call_log')
     .where('created_at', '>=', windowStart)
-    .where({ v2_extraction_status: 'valid' })
+    .where({ v2_extraction_status: 'valid', processing_status: 'processed' })
     .whereNotNull('ai_extraction_enriched')
-    .select('id', 'customer_id', 'direction', 'created_at', 'from_phone', 'to_phone', 'ai_extraction_enriched');
+    .select('id', 'twilio_call_sid', 'customer_id', 'direction', 'created_at', 'from_phone', 'to_phone', 'ai_extraction_enriched');
 
   // One pass to find the confirmed slots, then one bulk booking lookup.
-  const provisional = computeBookingMisses(calls, new Set(), { now });
+  const provisional = computeBookingMisses(calls, [], { now });
   if (!provisional.length) {
     return { skipped: false, scanned: calls.length, misses: 0, alerted: 0 };
   }
   const customerIds = [...new Set(provisional.map((m) => m.call.customer_id).filter(Boolean))];
   const dates = [...new Set(provisional.map((m) => m.serviceDateET))];
-  const bookedKeys = new Set();
+  let bookedRows = [];
   if (customerIds.length && dates.length) {
-    const booked = await db('scheduled_services')
+    bookedRows = await db('scheduled_services')
       .whereIn('customer_id', customerIds)
-      .whereNot({ status: 'cancelled' })
+      .whereNotIn('status', ['cancelled', 'rescheduled'])
       .whereRaw("to_char(scheduled_date, 'YYYY-MM-DD') = ANY(?)", [dates])
-      .select('customer_id', db.raw("to_char(scheduled_date, 'YYYY-MM-DD') AS sched_date"));
-    for (const b of booked) bookedKeys.add(`${b.customer_id}:${b.sched_date}`);
+      .select(
+        'customer_id', 'window_start', 'created_at', 'source_call_log_id', 'notes',
+        db.raw("to_char(scheduled_date, 'YYYY-MM-DD') AS sched_date"),
+      );
   }
-  const misses = computeBookingMisses(calls, bookedKeys, { now });
+  const misses = computeBookingMisses(calls, bookedRows, { now });
 
   let alerted = 0;
   for (const m of misses) {
@@ -157,10 +232,9 @@ async function runInner({ now = new Date() } = {}) {
     }
     const dedupeKey = `call-booking-miss:${m.call.id}`;
     if (await alreadyAlerted(dedupeKey)) continue;
-    const slotET = m.slot.startAt.toLocaleString('en-US', {
-      timeZone: 'America/New_York',
-      weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
-    });
+    const pad = (n) => String(n).padStart(2, '0');
+    const slotClock = `${pad(Math.floor(m.slot.minutes / 60))}:${pad(m.slot.minutes % 60)}`;
+    const slotET = `${m.slot.dateET} ${slotClock} ET`;
     const callAtET = new Date(m.call.created_at).toLocaleString('en-US', {
       timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
     });
@@ -169,7 +243,7 @@ async function runInner({ now = new Date() } = {}) {
       'alert',
       `Confirmed appointment never booked — ${m.slot.name}, ${slotET}`,
       `${m.slot.name} (${contactPhone || 'no number'}) confirmed ${m.slot.service || 'a visit'} for ${slotET} ` +
-      `on a ${m.call.direction || 'unknown-direction'} call at ${callAtET} ET, but the schedule has no appointment ` +
+      `on a ${m.call.direction || 'unknown-direction'} call at ${callAtET} ET, but the schedule has no matching appointment ` +
       `for that date${m.call.customer_id ? '' : ' — and the call is not linked to any customer'}. ` +
       'Book it in dispatch or call back to reset expectations.',
       {
@@ -178,7 +252,8 @@ async function runInner({ now = new Date() } = {}) {
           dedupeKey,
           call_log_id: m.call.id,
           customer_id: m.call.customer_id || null,
-          confirmed_start_at: m.slot.startAt.toISOString(),
+          confirmed_date_et: m.slot.dateET,
+          confirmed_time_et: slotClock,
         },
       },
     );
@@ -192,7 +267,10 @@ module.exports = {
   runCallBookingMissWatchdog,
   computeBookingMisses,
   extractConfirmedSlot,
+  confirmedWallClockET,
+  rowClearsSlot,
   LOOKBACK_HOURS,
   GRACE_MINUTES,
   MAX_ALERTS_PER_RUN,
+  WINDOW_MATCH_TOLERANCE_MINUTES,
 };
