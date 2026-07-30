@@ -106,7 +106,9 @@ describe('propagateCustomerEmailChange', () => {
       triage_items: { rows: [{ id: 'ti-1', call_log_id: 'call-1' }], countQueue: [{ n: 0 }] },
     });
     const counts = await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
-    expect(counts).toEqual({ leads: 1, estimates: 2, newsletter: 1, newsletterDeliveries: 1, automations: 1, templateRuns: 1, promoters: 1, billingPrefs: 1, contracts: 1, bookingIntents: 1, reviewCards: 1, heldDripResumed: 0 });
+    // automations: 2 — the enrollment sweep runs twice (before AND after the
+    // hold retargets, Codex #3084 r26); the stub counts each idempotent pass.
+    expect(counts).toEqual({ leads: 1, estimates: 2, newsletter: 1, newsletterDeliveries: 1, automations: 2, templateRuns: 1, promoters: 1, billingPrefs: 1, contracts: 1, bookingIntents: 1, reviewCards: 1, heldDripResumed: 0 });
 
     expect(conn.__updates('leads')[0].arg.email).toBe('charleswrobb@gmail.com');
     expect(conn.__updates('estimates')[0].arg.customer_email).toBe('charleswrobb@gmail.com');
@@ -505,11 +507,13 @@ describe('resendPendingConfirmation', () => {
   const { sendConfirmationEmail } = require('../services/newsletter-confirm');
 
   // Every send-path test seeds the subscriber verify-read (Codex #3084
-  // r18): the payload email/token must still match the row or the send is
-  // skipped as superseded.
-  const matchRow = (payload) => ({
-    newsletter_subscribers: { firstQueue: [{ email: payload.email, confirmation_token: payload.confirmation_token, status: 'pending' }] },
-  });
+  // r18) TWICE: the pre-send payload verify and the read-only post-send
+  // rotation check (r26) both re-read the row — the payload email/token
+  // must still match or the send/settle is skipped as superseded.
+  const matchRow = (payload) => {
+    const row = { email: payload.email, confirmation_token: payload.confirmation_token, status: 'pending' };
+    return { newsletter_subscribers: { firstQueue: [row, { ...row }] } };
+  };
 
   test('sends to the corrected address and stamps confirmation_sent_at', async () => {
     sendConfirmationEmail.mockResolvedValueOnce(true);
@@ -586,13 +590,80 @@ describe('resendPendingConfirmation', () => {
     expect(holdUpdates[1].arg.last_error).toBeUndefined();
   });
 
-  test('a failed send never throws and leaves the stamp alone', async () => {
+  test('a failed send never throws and clears the pre-stamp', async () => {
+    // The expiry stamp lands BEFORE the send (Codex #3084 r26); an actual
+    // send failure clears it again so the dedupe guard never buries an
+    // undelivered DOI (the canonical subscribeOrResubscribe contract).
     sendConfirmationEmail.mockRejectedValueOnce(new Error('sendgrid down'));
     const payload = { id: 739, email: 'charleswrobb@gmail.com', confirmation_token: 'tok-1' };
     const conn = makeConn(matchRow(payload));
     const ok = await resendPendingConfirmation(payload, conn);
     expect(ok).toBe(false);
-    expect(conn.__updates('newsletter_subscribers')).toHaveLength(0);
+    const nsUpdates = conn.__updates('newsletter_subscribers');
+    expect(nsUpdates).toHaveLength(2);
+    expect(nsUpdates[0].arg.confirmation_sent_at).toBeInstanceOf(Date);
+    expect(nsUpdates[1].arg.confirmation_sent_at).toBeNull();
+  });
+
+  test('the expiry stamp lands before the send — a post-send failure cannot leave a permanent token', async () => {
+    // Token rotation cleared confirmation_sent_at before this callback;
+    // lookupByToken's seven-day expiry and the stale-pending purge both
+    // apply only to non-null timestamps. Stamping after the send meant any
+    // post-send bookkeeping failure left the mailed token permanent (Codex
+    // #3084 r26) — the stamp must be durable before anything is mailed.
+    let stampsWhenSent = -1;
+    const payload = { id: 811, email: 'samtypo@example.com', confirmation_token: 'tok-1', heldNewsletterHoldIds: ['hold-1'] };
+    const conn = makeConn({
+      ...matchRow(payload),
+      first_touch_holds: { firstQueue: [{ held_drip: false, released_drip: false }] },
+    });
+    sendConfirmationEmail.mockImplementationOnce(async () => {
+      stampsWhenSent = conn.__updates('newsletter_subscribers').length;
+      return true;
+    });
+    const ok = await resendPendingConfirmation(payload, conn);
+    expect(ok).toBe(true);
+    expect(stampsWhenSent).toBe(1);
+    expect(conn.__updates('newsletter_subscribers')[0].arg.confirmation_sent_at).toBeInstanceOf(Date);
+  });
+
+  test('a pre-stamp failure re-pends retryably without sending', async () => {
+    // Nothing was mailed, so the holds keep the NON-force marker: the
+    // retry's dedupe guard re-reads a row whose stamp never landed and
+    // permits the fresh send (Codex #3084 r26).
+    const sendsBefore = sendConfirmationEmail.mock.calls.length;
+    const payload = { id: 811, email: 'samtypo@example.com', confirmation_token: 'tok-1', heldNewsletterHoldIds: ['hold-1'] };
+    const conn = makeConn({
+      newsletter_subscribers: {
+        firstQueue: [{ email: payload.email, confirmation_token: payload.confirmation_token, status: 'pending' }],
+        updateError: new Error('db down'),
+      },
+    });
+    const ok = await resendPendingConfirmation(payload, conn);
+    expect(ok).toBe(false);
+    expect(sendConfirmationEmail.mock.calls.length).toBe(sendsBefore);
+    expect(conn.__updates('first_touch_holds')[0].arg).toMatchObject({ status: 'pending', last_error: 'doi_state_unverified' });
+  });
+
+  test('a rotation after the send is caught by the read-only post-send check — nothing settles', async () => {
+    // With the stamp moved pre-send (Codex #3084 r26) the mid-send rotation
+    // detector is a read: zero rows → the link just mailed is dead, B's own
+    // callback owns delivery, holds re-pend retryably.
+    sendConfirmationEmail.mockResolvedValueOnce(true);
+    const sendsBefore = sendConfirmationEmail.mock.calls.length;
+    const payload = { id: 811, email: 'samtypo@example.com', confirmation_token: 'tok-1', heldNewsletterHoldIds: ['hold-1'] };
+    const conn = makeConn({
+      newsletter_subscribers: {
+        firstQueue: [{ email: payload.email, confirmation_token: payload.confirmation_token, status: 'pending' }, null],
+      },
+    });
+    const ok = await resendPendingConfirmation(payload, conn);
+    expect(ok).toBe(false);
+    expect(sendConfirmationEmail.mock.calls.length).toBe(sendsBefore + 1);
+    const holdUpdates = conn.__updates('first_touch_holds');
+    expect(holdUpdates).toHaveLength(1);
+    expect(holdUpdates[0].arg).toMatchObject({ status: 'pending', last_error: 'target_verify_failed' });
+    expect(holdUpdates[0].arg.released_newsletter).toBeUndefined();
   });
 
   test('a do-not-contact request vetoes the coalesced DOI re-send and blocks the holds', async () => {
@@ -622,10 +693,11 @@ describe('resendPendingConfirmation', () => {
     expect(conn.__updates('first_touch_holds')[0].arg).toMatchObject({ status: 'pending', last_error: 'email_suppressed' });
   });
 
-  test('a rotation between verify and send is caught by the conditional stamp — nothing settles', async () => {
-    // Correction B rotates email+token in the check/send gap (Codex #3084
-    // r19): the stamp's email+token predicate matches 0 rows, so the holds
-    // re-pend retryably and B's corrected row is never marked delivered.
+  test('a rotation between verify and stamp is caught by the conditional pre-stamp — nothing sends or settles', async () => {
+    // Correction B rotates email+token in the verify/stamp gap (Codex #3084
+    // r19, pre-stamp since r26): the stamp's email+token predicate matches
+    // 0 rows, so the holds re-pend retryably before anything is mailed and
+    // B's corrected row is never marked delivered.
     sendConfirmationEmail.mockResolvedValueOnce(true);
     const payload = { id: 811, email: 'samtypo@example.com', confirmation_token: 'tok-1', heldNewsletterHoldIds: ['hold-1'] };
     const conn = makeConn({

@@ -472,6 +472,35 @@ async function resumeHeldFirstTouch({
               )
               .update({ email: sendEmail, updated_at: new Date() });
           }
+          if (enroll?.enrolled && enroll?.enrollmentId) {
+            // NEWLY created (or reactivated) enrollments carry the address
+            // THIS release passed (Codex #3084 r26): correction B committing
+            // between the pre-send re-read and enrollCustomer found no
+            // enrollment row to sync, so this insert is a writer B never
+            // saw — and the zero-delay first step could mail the superseded
+            // address before the settle's target CAS re-pends and a retry
+            // repairs it. Re-read the hold now that the enrollment exists:
+            // if the target moved, retarget the fresh enrollment to it, or
+            // cancel it when the target went empty/invalid (correction-only
+            // rows hold no address). Guarded on the enrollment still
+            // carrying OUR write, so a corrector that already re-synced it
+            // is never clobbered; if B instead commits after this re-read,
+            // B's own enrollment sweep sees the committed insert — both
+            // orders converge. A throw lands in the enroll catch below
+            // (re-pend, retryable).
+            const postEnroll = await dbh('first_touch_holds').where({ id: hold.id }).first('held_email');
+            const postTargetLc = String(postEnroll?.held_email || '').trim().toLowerCase();
+            if (postTargetLc !== sendEmail) {
+              await dbh('automation_enrollments')
+                .where({ id: enroll.enrollmentId, status: 'active' })
+                .whereRaw('LOWER(email) = ?', [sendEmail])
+                .update(
+                  postTargetLc && RESUME_EMAIL_RE.test(postTargetLc)
+                    ? { email: postTargetLc, updated_at: new Date() }
+                    : { status: 'cancelled', updated_at: new Date() },
+                );
+            }
+          }
           result.enrolled = result.enrolled || !!enroll?.enrolled;
           patch.released_drip = true;
         } catch (enrollErr) {

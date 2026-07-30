@@ -400,6 +400,19 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
         last_error: conn.raw("CASE WHEN last_error = 'email_denied_await_correction' THEN NULL ELSE last_error END"),
         updated_at: now,
       });
+    // Second enrollment sweep, AFTER the hold retargets (Codex #3084 r26):
+    // the first sync above ran before these statements waited out an
+    // in-flight claimant's row lock (a transactional release claims the
+    // hold, then enrolls) — an enrollment INSERTED inside that open claim
+    // was invisible to it, and the releasing-row retarget alone leaves the
+    // fresh enrollment mailing the superseded address. This re-sweep
+    // executes after the lock wait, sees the claimant's committed insert,
+    // and retargets it. Idempotent with the first sweep; same ownership
+    // guard (customer-linked, active).
+    counts.automations += await conn('automation_enrollments')
+      .where({ customer_id: customerId, status: 'active' })
+      .whereRaw('LOWER(email) = ?', [oldEmail])
+      .update({ email: newEmail, updated_at: now });
     const reviewedCalls = await conn('triage_items')
       .whereIn('reason_code', EMAIL_REVIEW_REASON_CODES)
       .whereIn('call_log_id', conn('call_log').select('id').where({ customer_id: customerId }))
@@ -608,6 +621,43 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
       return false;
     }
   }
+  // The DOI expiry stamp lands BEFORE the send (Codex #3084 r26), mirroring
+  // subscribeOrResubscribe's pre-stamp: token rotation cleared the pending
+  // row's confirmation_sent_at, and a post-send stamp that THREW would
+  // leave it NULL with the holds already settled — lookupByToken applies
+  // the seven-day expiry and the stale-pending purge runs only on non-null
+  // timestamps, so the freshly mailed token would never expire.
+  // Pre-stamping is durable across every post-send failure; the SEND
+  // failure branch below clears it again (and the r25 force-resend marker
+  // carries the retry past a stamp that survived a failed cleanup — the
+  // r14 skipDedupe contract). Conditional on the row still matching the
+  // verified payload (Codex #3084 r19/r24, unsubscribe included): zero
+  // rows = rotated or opted out since the verify read → nothing usable to
+  // mail, and B's own callback owns delivery.
+  const sentEmailLc = String(pendingConfirmation.email || '').trim().toLowerCase();
+  const verifiedRowQuery = () => conn('newsletter_subscribers')
+    .where({
+      id: pendingConfirmation.id,
+      confirmation_token: pendingConfirmation.confirmation_token,
+      status: 'pending',
+    })
+    .whereRaw('LOWER(email) = ?', [sentEmailLc]);
+  try {
+    const stamped = await verifiedRowQuery()
+      .update({ confirmation_sent_at: new Date(), updated_at: new Date() });
+    if (!stamped) {
+      logger.info(`[email-fanout] DOI re-send superseded before send for subscriber ${pendingConfirmation.id} — holds stay retryable`);
+      await repenHolds('target_verify_failed');
+      return false;
+    }
+  } catch (stampErr) {
+    // Nothing sent yet — fail closed and retryable. The non-force marker
+    // keeps skipDedupe false on retry, and the stamp never landed, so the
+    // dedupe guard permits the fresh send.
+    logger.warn(`[email-fanout] confirmation_sent_at pre-stamp failed for subscriber ${pendingConfirmation.id}: ${stampErr.code || stampErr.name || 'db_error'} — not sending`);
+    await repenHolds('doi_state_unverified');
+    return false;
+  }
   // The 'newsletter_doi_not_confirmed' re-pend is scoped to SEND failures
   // only (Codex #3084 r16): retries treat that marker as "must actually
   // re-send" (skipDedupe), so a post-send bookkeeping failure marked the
@@ -619,6 +669,15 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
     // subscriber id and a sanitized code (this path exists BECAUSE the email
     // is being corrected; it must not leak into logs).
     logger.warn(`[email-fanout] DOI confirmation re-send failed for subscriber ${pendingConfirmation.id}: ${e.code || e.statusCode || 'send_failed'}`);
+    // The pre-stamp must not bury an undelivered DOI: clear it, conditional
+    // on the row still being OUR verified payload (a rotation landing
+    // mid-send already replaced or cleared it, and B's callback owns
+    // delivery). A failed clear is covered by the r25 marker below.
+    try {
+      await verifiedRowQuery().update({ confirmation_sent_at: null, updated_at: new Date() });
+    } catch (clearErr) {
+      logger.warn(`[email-fanout] pre-stamp clear failed for subscriber ${pendingConfirmation.id}: ${clearErr.code || clearErr.name || 'db_error'}`);
+    }
     // The deduped holds' DOI never went out — restore a retryable state so
     // the next release trigger re-sends instead of stranding the pending
     // subscriber (Codex #3084 r9). Via the deny-preserving helper (r23): a
@@ -631,36 +690,22 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
     await repenHolds(await sendFailedMarkerFor(pendingConfirmation.email, conn));
     return false;
   }
-  // Post-send bookkeeping. The stamp is CONDITIONAL on the row still
-  // matching the verified payload (Codex #3084 r19): correction B can
-  // rotate email + token between the verify read and the send, and an
-  // unconditional by-id stamp would mark B's corrected row as delivered on
-  // the strength of a dead link mailed to the superseded mailbox. Zero rows
-  // = definitely rotated → nothing usable delivered: re-pend the holds
-  // (retryable — B's rotation cleared the pending row's stamp, so the sweep
-  // retry sends a fresh DOI) and settle nothing. A THROWN stamp write keeps
-  // the r16 behavior: log and proceed — the verified send did go out, and
-  // the retry's dedupe guard covers a survived stamp.
-  let stampMatched = true;
+  // Post-send rotation check, now read-only (the stamp already landed):
+  // correction B can rotate email + token between the pre-stamp and the
+  // send, meaning the link just mailed is dead and B's own callback owns
+  // delivery — re-pend the holds and settle nothing (Codex #3084 r19).
+  // A THROWN read keeps the r16 behavior: the verified send did go out,
+  // the expiry stamp is durable, and every hold settle below is
+  // target-CAS'd on its own.
   try {
-    const stamped = await conn('newsletter_subscribers')
-      .where({
-        id: pendingConfirmation.id,
-        confirmation_token: pendingConfirmation.confirmation_token,
-        // Status rides the settle predicate too (Codex #3084 r24): an
-        // unsubscribe landing mid-send must not be stamped as delivered.
-        status: 'pending',
-      })
-      .whereRaw('LOWER(email) = ?', [String(pendingConfirmation.email || '').trim().toLowerCase()])
-      .update({ confirmation_sent_at: new Date(), updated_at: new Date() });
-    stampMatched = stamped > 0;
-  } catch (stampErr) {
-    logger.warn(`[email-fanout] confirmation_sent_at stamp failed for subscriber ${pendingConfirmation.id}: ${stampErr.code || stampErr.name || 'db_error'}`);
-  }
-  if (!stampMatched) {
-    logger.info(`[email-fanout] DOI re-send superseded mid-send for subscriber ${pendingConfirmation.id} — holds stay retryable`);
-    await repenHolds('target_verify_failed');
-    return false;
+    const live = await verifiedRowQuery().first('id');
+    if (!live) {
+      logger.info(`[email-fanout] DOI re-send superseded mid-send for subscriber ${pendingConfirmation.id} — holds stay retryable`);
+      await repenHolds('target_verify_failed');
+      return false;
+    }
+  } catch (postVerifyErr) {
+    logger.warn(`[email-fanout] post-send verify failed for subscriber ${pendingConfirmation.id}: ${postVerifyErr.code || postVerifyErr.name || 'db_error'} — proceeding on target-CAS settles`);
   }
   // This re-sent DOI IS the resume for any newsletter hold deduped against
   // it (one DOI, never two) — settle those holds only now that delivery
@@ -669,7 +714,6 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
   // re-checks for work merged during the claim (Step 8 adding held_drip
   // mid-callback) exactly like the resume paths (Codex #3084 r19).
   const { repenIfWorkMergedDuringClaim } = require('./lead-first-touch-resume');
-  const sentEmailLc = String(pendingConfirmation.email || '').trim().toLowerCase();
   for (const holdId of holdIds) {
     try {
       const hold = await conn('first_touch_holds').where({ id: holdId }).first('held_drip', 'released_drip');

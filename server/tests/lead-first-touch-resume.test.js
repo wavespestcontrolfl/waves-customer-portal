@@ -586,6 +586,44 @@ describe('mid-send races (r19)', () => {
     expect(mockHoldUpdates.at(-1)).toMatchObject({ status: 'released', released_drip: true });
   });
 
+  test('a correction landing during enrollCustomer retargets the newly created enrollment', async () => {
+    // Correction B commits between the pre-send re-read and enrollCustomer:
+    // B's fanout sweep found no enrollment row to sync, so the fresh insert
+    // is a writer B never saw — its zero-delay first step would mail the
+    // superseded address before the settle CAS re-pends (Codex #3084 r26).
+    // The post-enroll hold re-read catches the moved target and retargets
+    // the enrollment in place.
+    mockEnroll.mockResolvedValueOnce({ enrolled: true, enrollmentId: 'enr-new' });
+    mockHold = baseHold({ held_newsletter: false });
+    mockHoldFirstQueue = [
+      { held_email: 'confirmed@example.com', last_error: null }, // pre-send re-read: unchanged
+      { held_email: 'newer@example.com' },                        // post-enroll: B landed mid-enroll
+    ];
+    mockReleasedSettleZeroOnce = true; // terminal CAS sees B's target and refuses
+    await resumeHeldFirstTouch({ callLogId: 'call-1' });
+    expect(mockEnrollmentUpdates).toHaveLength(1);
+    expect(mockEnrollmentUpdates[0]).toMatchObject({ email: 'newer@example.com' });
+    expect(mockHoldUpdates.at(-1)).toMatchObject({ status: 'pending', last_error: 'superseded_during_send' });
+  });
+
+  test('a newly created enrollment is cancelled when the hold target went empty mid-enroll', async () => {
+    // A correction-only retarget can leave the hold with no usable address
+    // (held_email '' is the inert marker) — a fresh enrollment must not
+    // keep mailing the address the operator just rejected (Codex #3084
+    // r26): with nothing valid to retarget to, cancel it.
+    mockEnroll.mockResolvedValueOnce({ enrolled: true, enrollmentId: 'enr-new' });
+    mockHold = baseHold({ held_newsletter: false });
+    mockHoldFirstQueue = [
+      { held_email: 'confirmed@example.com', last_error: null },
+      { held_email: '' },
+    ];
+    mockReleasedSettleZeroOnce = true;
+    await resumeHeldFirstTouch({ callLogId: 'call-1' });
+    expect(mockEnrollmentUpdates).toHaveLength(1);
+    expect(mockEnrollmentUpdates[0]).toMatchObject({ status: 'cancelled' });
+    expect(mockEnrollmentUpdates[0].email).toBeUndefined();
+  });
+
   test('a deny stamp landing mid-send blocks the terminal settle and survives the re-pend', async () => {
     // The claim-safe merge preserves held_email, so the target CAS alone
     // would pass — the settle's deny guard refuses instead (Codex #3084
