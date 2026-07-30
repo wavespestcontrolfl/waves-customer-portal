@@ -1054,6 +1054,13 @@ const TwilioService = {
       typeof smsTemplatesRouter.getTemplate === "function"
         ? await smsTemplatesRouter.getTemplate("service_complete", {
             first_name: customer.first_name || "",
+            // The seeded body also needs {portal_url} — passing only
+            // first_name left it unresolved, and the renderer suppresses on
+            // unresolved placeholders, so this path never sent (it logged
+            // "template missing/disabled" for an active template). No live
+            // caller today, but keep the method correct.
+            service_type: service?.service_type || "service",
+            portal_url: publicPortalUrl(),
           }, { workflow: "service_complete", entity_type: "service_record", entity_id: serviceRecordId })
         : null;
     if (!body) {

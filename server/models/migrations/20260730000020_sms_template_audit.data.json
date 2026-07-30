@@ -1,0 +1,494 @@
+[
+ {
+  "key": "tech_en_route",
+  "active": true,
+  "expect": "Hello {first_name}! {tech_name} is on the way.\n\n{eta_line}{track_clause}Questions or requests? Reply here. Reply STOP to opt out.",
+  "set": "Hello {first_name}! {tech_name} is on the way.\n\n{eta_line}{track_clause}Questions or requests? Reply here."
+ },
+ {
+  "key": "tech_arrived",
+  "active": true,
+  "expect": "Hello {first_name}! {tech_name} has arrived at your property for your scheduled service.\n\nQuestions or requests? Reply to this message. Reply STOP to opt out.",
+  "set": "Hello {first_name}! {tech_name} has arrived at your property for your scheduled service.\n\nQuestions or requests? Reply to this message."
+ },
+ {
+  "key": "reminder_24h",
+  "active": true,
+  "expect": "Hello {first_name}! Your {service_type} with Waves is tomorrow. Your arrival window starts at {time}, and we\u2019ll text you a tracking link when your technician is on the way.\n\nQuestions or need to reschedule? Reply here.\n\nReply STOP to opt out.{card_hold_policy_line}",
+  "set": "Hello {first_name}! Your {service_type} with Waves is tomorrow. Your arrival window starts at {time}, and we'll text you a tracking link when your technician is on the way.{card_hold_policy_line}\n\nQuestions or need to reschedule? Reply here."
+ },
+ {
+  "key": "appointment_no_show",
+  "active": true,
+  "expect": "Hello {first_name}, it's {tech_name} from Waves Pest Control. We missed you for your service {when} at {time}. If you'd like to get back on the schedule, just reply to this message or give us a call and we'll find a new time.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}, it's {tech_name} from Waves Pest Control. We missed you for your service {when} at {time}. If you'd like to get back on the schedule, just reply to this message or give us a call and we'll find a new time."
+ },
+ {
+  "key": "rain_out_moved",
+  "active": true,
+  "expect": "Hello {first_name} \u2014 {weather_phrase} rolled through your area, so we moved your {service_type} to {new_option}.{alt_clause}{forecast_clause}\n\nQuestions or requests? Reply to this message.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name} - {weather_phrase} rolled through your area, so we moved your {service_type} to {new_option}.{alt_clause}{forecast_clause}\n\nQuestions or requests? Reply to this message."
+ },
+ {
+  "key": "appointment_rescheduled",
+  "active": true,
+  "expect": "Hello {first_name}! You're confirmed: your {service_type} with Waves is now set for {day}, {date} at {time}.\n\nNeed to change it? Visit portal.wavespestcontrol.com or reply here.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! You're confirmed: your {service_type} with Waves is now set for {day}, {date} at {time}.\n\nNeed to change it? Visit portal.wavespestcontrol.com or reply here."
+ },
+ {
+  "key": "appointment_cancelled",
+  "active": true,
+  "expect": "Hello {first_name}! Your {service_type} with Waves scheduled for {day}, {date} has been cancelled.\n\nWant to reschedule? Reply here and we'll get you back on the calendar.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! Your {service_type} with Waves scheduled for {day}, {date} has been cancelled.\n\nWant to reschedule? Reply here and we'll get you back on the calendar."
+ },
+ {
+  "key": "appointment_series_cancelled",
+  "active": true,
+  "expect": "Hello {first_name}! Your Waves {scope} for {service_type} has been cancelled.\n\nWant to reschedule? Reply here and we'll get you back on the calendar.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! Your Waves {scope} for {service_type} has been cancelled.\n\nWant to reschedule? Reply here and we'll get you back on the calendar."
+ },
+ {
+  "key": "appointment_series_rescheduled",
+  "active": true,
+  "expect": "Hello {first_name}! Your recurring Waves appointments have been rescheduled starting {start_date}{window_text}.\n\nWe'll remind you before each visit. Questions or requests? Reply here.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! Your recurring Waves appointments have been rescheduled starting {start_date}{window_text}.\n\nWe'll remind you before each visit. Questions or requests? Reply here."
+ },
+ {
+  "key": "booking_abandonment_recovery",
+  "active": true,
+  "expect": "Hello {first_name}! You were almost booked with Waves for {service_type} \u2014 your spot isn't reserved yet. Pick a time and you're all set: {booking_url}\n\nReply here with any questions.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! You were almost booked with Waves for {service_type} - your spot isn't reserved yet. Pick a time and you're all set: {booking_url}\n\nReply here with any questions.\n\nReply STOP to opt out."
+ },
+ {
+  "key": "reschedule_call_requested",
+  "active": false,
+  "expect": "No problem. We'll give you a call shortly.\n\nReply STOP to opt out.",
+  "set": "No problem. We'll give you a call shortly."
+ },
+ {
+  "key": "reschedule_confirmed_future",
+  "active": false,
+  "expect": "Confirmed. Your service is rescheduled for {date}, {time}.\n\nWe'll remind you the day before.\n\nReply STOP to opt out.",
+  "set": "Confirmed. Your service is rescheduled for {date}, {time}.\n\nWe'll remind you the day before."
+ },
+ {
+  "key": "reschedule_confirmed_today",
+  "active": false,
+  "expect": "Confirmed. Your service is rescheduled for {date}, {time}.\n\nSee you today.\n\nReply STOP to opt out.",
+  "set": "Confirmed. Your service is rescheduled for {date}, {time}.\n\nSee you today."
+ },
+ {
+  "key": "reschedule_confirmed_tomorrow",
+  "active": false,
+  "expect": "Confirmed. Your service is rescheduled for {date}, {time}.\n\nSee you tomorrow.\n\nReply STOP to opt out.",
+  "set": "Confirmed. Your service is rescheduled for {date}, {time}.\n\nSee you tomorrow."
+ },
+ {
+  "key": "autopay_charge_success",
+  "active": true,
+  "expect": "Hello {first_name}! Your WaveGuard monthly payment of ${amount} was processed. Thank you!{receipt_line}\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! Your WaveGuard monthly payment of ${amount} was processed. Thank you!{receipt_line}"
+ },
+ {
+  "key": "autopay_charge_failed",
+  "active": true,
+  "expect": "Hello {first_name}! Your WaveGuard monthly payment of ${amount} could not be processed. We'll retry in a few days. Update your card here: {update_card_url}\n\nQuestions or requests? Reply here.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! Your WaveGuard monthly payment of ${amount} could not be processed. We'll retry in a few days. Update your card here: {update_card_url}\n\nQuestions or requests? Reply here."
+ },
+ {
+  "key": "autopay_retry_success",
+  "active": true,
+  "expect": "Hello {first_name}! Your payment of ${amount} went through. Thank you for being a Waves customer!{receipt_line}\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! Your payment of ${amount} went through. Thank you for being a Waves customer!{receipt_line}"
+ },
+ {
+  "key": "autopay_retry_failed",
+  "active": true,
+  "expect": "Hello {first_name}! Your payment of ${amount} still did not go through. We'll try again in a few days, or you can update your card here: {update_card_url}\n\nQuestions or requests? Reply here.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! Your payment of ${amount} still did not go through. We'll try again in a few days, or you can update your card here: {update_card_url}\n\nQuestions or requests? Reply here."
+ },
+ {
+  "key": "autopay_retry_final_failed",
+  "active": true,
+  "expect": "Hello {first_name}! After several attempts we still could not process your payment of ${amount}. Please update your card to keep service active: {update_card_url}\n\nQuestions or requests? Reply here.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! After several attempts we still could not process your payment of ${amount}. Please update your card to keep service active: {update_card_url}\n\nQuestions or requests? Reply here."
+ },
+ {
+  "key": "autopay_pre_charge",
+  "active": true,
+  "expect": "Hello {first_name}! Your WaveGuard auto-pay will process on {charge_date}.\n\nNeed to update your card or pause? Visit portal.wavespestcontrol.com or reply here.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! Your {autopay_label} will process on {charge_date}.\n\nNeed to update your card or pause? Visit portal.wavespestcontrol.com or reply here."
+ },
+ {
+  "key": "autopay_card_expired",
+  "active": true,
+  "expect": "Hello {first_name}! Your {card_brand} card ending in {last_four} expired {exp_date}. Please update it in the portal to keep auto-pay active: portal.wavespestcontrol.com\n\nQuestions or requests? Reply here.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! Your {card_brand} card ending in {last_four} expired {exp_date}. Please update it in the portal to keep auto-pay active: portal.wavespestcontrol.com\n\nQuestions or requests? Reply here."
+ },
+ {
+  "key": "autopay_card_expiring",
+  "active": true,
+  "expect": "Hello {first_name}! Your {card_brand} card ending in {last_four} expires {exp_date}. Please update it in the portal to avoid auto-pay disruption: portal.wavespestcontrol.com\n\nQuestions or requests? Reply here.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! Your {card_brand} card ending in {last_four} expires {exp_date}. Please update it in the portal to avoid auto-pay disruption: portal.wavespestcontrol.com\n\nQuestions or requests? Reply here."
+ },
+ {
+  "key": "payment_method_expiry",
+  "active": true,
+  "expect": "Hello {first_name}! Your {card_brand} card ending in {last_four} expires {exp_date}. Update your payment method to avoid service interruption: portal.wavespestcontrol.com\n\nQuestions or requests? Reply here.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! Your {card_brand} card ending in {last_four} expires {exp_date}. Update your payment method to avoid service interruption: portal.wavespestcontrol.com\n\nQuestions or requests? Reply here."
+ },
+ {
+  "key": "ach_retry_notice",
+  "active": true,
+  "expect": "Hello {first_name}! Your bank payment did not go through. We will retry automatically in 3 business days. No action is needed right now.\n\nQuestions or requests? Reply here.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! Your bank payment did not go through. We will retry automatically in 3 business days. No action is needed right now.\n\nQuestions or requests? Reply here."
+ },
+ {
+  "key": "ach_card_fallback",
+  "active": true,
+  "expect": "Hello {first_name}! Your bank payment failed again, so we switched this payment to your card on file. Card payments include a processing fee. You can switch back to bank payment once your account is verified.\n\nQuestions or requests? Reply here.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! Your bank payment failed again, so we switched this payment to your card on file. Card payments include a processing fee. You can switch back to bank payment once your account is verified.\n\nQuestions or requests? Reply here."
+ },
+ {
+  "key": "ach_suspended",
+  "active": true,
+  "expect": "Hello {first_name}! Your bank payment failed again. We updated your default payment to your card. Card payments include a processing fee.\n\nTo pay by bank with no added fee, update your bank account here: {billing_url}\n\nQuestions or requests? Reply here.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! Your bank payment failed again. We updated your default payment to your card. Card payments include a processing fee.\n\nTo pay by bank with no added fee, update your bank account here: {billing_url}\n\nQuestions or requests? Reply here."
+ },
+ {
+  "key": "bank_verification_incomplete",
+  "active": true,
+  "expect": "Hello {first_name}! Your bank account verification is incomplete. Please finish setup here to complete your payment: {billing_url}\n\nQuestions or requests? Reply here.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! Your bank account verification is incomplete. Please finish setup here to complete your payment: {billing_url}\n\nQuestions or requests? Reply here."
+ },
+ {
+  "key": "bank_verification_failed",
+  "active": true,
+  "expect": "Hello {first_name}! We could not verify your bank account. Please try again or use a card here: {billing_url}\n\nQuestions or requests? Reply here.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! We could not verify your bank account. Please try again or use a card here: {billing_url}\n\nQuestions or requests? Reply here."
+ },
+ {
+  "key": "service_complete_paid_receipt",
+  "active": true,
+  "expect": "Hello {first_name}! Thanks for your payment today \u2014 ${amount}{card_line}. Your {service_type} service report is ready: {portal_url}\n\nReceipt: {receipt_url}\n\nQuestions or requests? Reply here.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! Thanks for your payment today - ${amount}{card_line}. Your {service_type} service report is ready: {portal_url}\n\nReceipt: {receipt_url}\n\nQuestions or requests? Reply here."
+ },
+ {
+  "key": "previsit_balance_reminder",
+  "active": true,
+  "expect": "Hello {first_name}! Ahead of your {service_type} visit on {visit_date}, a quick reminder: your account has a past-due balance of ${amount}. You can take care of it here: {billing_url}\n\nAlready handled it? Thank you \u2014 no action needed.",
+  "set": "Hello {first_name}! Ahead of your {service_type} visit on {visit_date}, a quick reminder: your account has a past-due balance of ${amount}. Already handled it? Thank you - no action needed.\n\nPay here: {billing_url}"
+ },
+ {
+  "key": "price_change_notice",
+  "active": true,
+  "expect": "Hi {first_name}, a heads-up from Waves: your recurring service price changes on {effective_date}. Details: {price_change_url}\nNo action needed. Reply with questions, or STOP to opt out.",
+  "set": "Hello {first_name}! A heads-up from Waves: your recurring service price changes on {effective_date}. No action needed - reply with any questions.\n\nDetails: {price_change_url}"
+ },
+ {
+  "key": "service_cancellation_confirmation",
+  "active": true,
+  "expect": "Hello {first_name}! We received your cancellation request. Our team will process it and follow up to confirm. Questions? Reply here.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! We received your cancellation request. Our team will process it and follow up to confirm. Questions? Reply here."
+ },
+ {
+  "key": "estimate_accepted_onetime",
+  "active": true,
+  "expect": "Hello {first_name}! Thanks for booking your {service_label} with Waves. Choose a time here: {booking_url}\n\nQuestions or requests? Reply here.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! Thanks for booking your {service_label} with Waves. Choose a time here: {booking_url}\n\nQuestions or requests? Reply here."
+ },
+ {
+  "key": "estimate_followup_deposit",
+  "active": true,
+  "expect": "Hello {first_name}! Your Waves appointment is almost reserved \u2014 your estimate is saved and just needs the ${deposit_amount} deposit to lock in your spot: {estimate_url}\n\nQuestions or requests? Reply here.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! Your Waves appointment is almost reserved - your estimate is saved and just needs the ${deposit_amount} deposit to lock in your spot: {estimate_url}\n\nQuestions or requests? Reply here.\n\nReply STOP to opt out."
+ },
+ {
+  "key": "estimate_accepted_annual_prepay",
+  "active": true,
+  "expect": "Hello {first_name}! Your {waveguard_tier} WaveGuard plan is approved. Our team will review and send your annual prepay invoice{amount_text}.\n\nQuestions or requests? Reply here.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! Your {waveguard_tier} WaveGuard plan is approved. Our team will review and send your annual prepay invoice{amount_text}.\n\nQuestions or requests? Reply here."
+ },
+ {
+  "key": "invoice_sent",
+  "active": true,
+  "expect": "Hello {first_name}! Your invoice for {service_type} completed on {service_date} is ready: {pay_url}\n\nQuestions or requests? Reply here.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! Your invoice for {service_type} completed on {service_date} is ready: {pay_url}\n\nQuestions or requests? Reply here."
+ },
+ {
+  "key": "invoice_sent_annual_prepay",
+  "active": true,
+  "expect": "Hello {first_name}! Your Waves annual prepay plan invoice is ready \u2014 it prepays {coverage_summary}.{first_visit_clause} Pay here: {pay_url}\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! Your Waves annual prepay plan invoice is ready - it prepays {coverage_summary}.{first_visit_clause} Questions? Reply here.\n\nPay here: {pay_url}"
+ },
+ {
+  "key": "payment_failed",
+  "active": true,
+  "expect": "Hello {first_name}! Your payment{card_line} for {service_type} completed on {service_date} did not go through. Please update your payment method or pay here: {pay_url}\n\nQuestions or requests? Reply here.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! Your payment{card_line} for {service_type} completed on {service_date} did not go through. Please update your payment method or pay here: {pay_url}\n\nQuestions or requests? Reply here."
+ },
+ {
+  "key": "invoice_sent_upfront",
+  "active": true,
+  "expect": "Hello {first_name}! Your invoice to get started with {service_type} is ready: {pay_url}\n\nQuestions or requests? Reply to this message. Thank you for choosing Waves!\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! Your invoice to get started with {service_type} is ready. Questions? Reply here.\n\nPay here: {pay_url}"
+ },
+ {
+  "key": "invoice_receipt",
+  "active": true,
+  "expect": "Hello {first_name}! Payment received - thank you. Invoice {invoice_number}: ${amount}{card_line}. Receipt: {receipt_url}\n\nQuestions or requests? Reply here.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! Payment received - thank you. Invoice {invoice_number}: ${amount}{card_line}. Receipt: {receipt_url}\n\nQuestions or requests? Reply here."
+ },
+ {
+  "key": "invoice_followup_3day",
+  "active": true,
+  "expect": "Hello {first_name}! Your invoice for {invoice_title} still has an open balance of ${amount}. Pay securely here: {pay_url}\n\nIf something looks off, reply and we'll sort it.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! Your invoice for {invoice_title} still has an open balance of ${amount}. Pay securely here: {pay_url}\n\nIf something looks off, reply and we'll sort it."
+ },
+ {
+  "key": "invoice_followup_7day",
+  "active": true,
+  "expect": "Hello {first_name}! Quick reminder: your Waves invoice for {invoice_title}{service_date_clause} is still open. Pay here: {pay_url}\n\nQuestions or requests? Reply here.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! Quick reminder: your Waves invoice for {invoice_title}{service_date_clause} is still open. Pay here: {pay_url}\n\nQuestions or requests? Reply here."
+ },
+ {
+  "key": "invoice_followup_14day",
+  "active": true,
+  "expect": "Hello {first_name}! Checking in on your Waves invoice for {invoice_title}{service_date_clause}. Please pay when you can: {pay_url}\n\nNeed help? Reply here.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! Checking in on your Waves invoice for {invoice_title}{service_date_clause}. Please pay when you can: {pay_url}\n\nNeed help? Reply here."
+ },
+ {
+  "key": "invoice_followup_30day",
+  "active": true,
+  "expect": "Hello {first_name}! Final notice on your Waves invoice for {invoice_title}{service_date_clause}. Please pay now to keep the account in good standing: {pay_url}\n\nNeed a payment plan? Reply here.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! Final notice on your Waves invoice for {invoice_title}{service_date_clause}. Please pay now to keep the account in good standing: {pay_url}\n\nNeed a payment plan? Reply here."
+ },
+ {
+  "key": "manual_payment_receipt",
+  "active": true,
+  "expect": "Hello {first_name}! Your payment to Waves was processed. Thank you!{receipt_line}\n\nQuestions or requests? Reply here.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! Your payment to Waves was processed. Thank you!{receipt_line}\n\nQuestions or requests? Reply here."
+ },
+ {
+  "key": "annual_prepay_payment_reminder",
+  "active": true,
+  "expect": "Hello {first_name}! A quick reminder that your Waves annual prepay invoice{amount_text} is still open ahead of your first visit on {first_visit_date}. Pay here: {pay_link}\n\nIf the prepay isn\u2019t settled before the visit, no problem \u2014 we\u2019ll simply bill that visit individually instead. Questions? Reply to this message.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! A quick reminder that your Waves annual prepay invoice{amount_text} is still open ahead of your first visit on {first_visit_date}.\n\nIf it isn't settled before the visit, no problem - we'll simply bill that visit individually instead. Questions? Reply here.\n\nPay here: {pay_link}"
+ },
+ {
+  "key": "ach_payment_processing",
+  "active": true,
+  "expect": "Hello {first_name}! Got it - we received your bank payment for invoice {invoice_number}. ACH transfers typically take 3-5 business days to clear; we'll send a receipt as soon as it does.\n\nQuestions or requests? Reply here.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! Got it - we received your bank payment for invoice {invoice_number}. ACH transfers typically take 3-5 business days to clear; we'll send a receipt as soon as it does.\n\nQuestions or requests? Reply here."
+ },
+ {
+  "key": "deposit_receipt",
+  "active": true,
+  "expect": "Hello {first_name}! We received your ${amount} deposit{charge_note} \u2014 it will be applied toward your first visit. Thank you for choosing Waves!\n\nQuestions or requests? Reply here. Reply STOP to opt out.",
+  "set": "Hello {first_name}! We received your ${amount} deposit{charge_note} - it will be applied toward your first visit. Thank you for choosing Waves!\n\nQuestions or requests? Reply here."
+ },
+ {
+  "key": "late_payment_7d",
+  "active": true,
+  "expect": "Hello {first_name}! Your Waves invoice for {invoice_title}{service_date_clause} is 7 days overdue. Please pay here: {pay_url}\n\nQuestions or requests? Reply here.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! Your Waves invoice for {invoice_title}{service_date_clause} is 7 days overdue. Please pay here: {pay_url}\n\nQuestions or requests? Reply here."
+ },
+ {
+  "key": "late_payment_14d",
+  "active": true,
+  "expect": "Hello {first_name}! Your Waves invoice for {invoice_title}{service_date_clause} is 14 days overdue. Please pay as soon as possible: {pay_url}\n\nQuestions or requests? Reply here.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! Your Waves invoice for {invoice_title}{service_date_clause} is 14 days overdue. Please pay as soon as possible: {pay_url}\n\nQuestions or requests? Reply here."
+ },
+ {
+  "key": "late_payment_30d",
+  "active": true,
+  "expect": "Hello {first_name}! Final reminder: your Waves invoice for {invoice_title}{service_date_clause} is 30 days overdue. Please pay now: {pay_url}\n\nNeed a payment plan? Reply here.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! Final reminder: your Waves invoice for {invoice_title}{service_date_clause} is 30 days overdue. Please pay now: {pay_url}\n\nNeed a payment plan? Reply here."
+ },
+ {
+  "key": "late_payment_60d",
+  "active": true,
+  "expect": "Hello {first_name}! Your Waves invoice for {invoice_title}{service_date_clause} is 60 days overdue. Please pay or contact us today to avoid further action: {pay_url}\n\nQuestions or requests? Reply here.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! Your Waves invoice for {invoice_title}{service_date_clause} is 60 days overdue. Please pay or contact us today to avoid further action: {pay_url}\n\nQuestions or requests? Reply here."
+ },
+ {
+  "key": "late_payment_90d",
+  "active": true,
+  "expect": "Hello {first_name}! Final notice: your Waves invoice for {invoice_title}{service_date_clause} is 90 days overdue and may be sent to collections. Please pay today: {pay_url}\n\nQuestions or requests? Reply here.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! Final notice: your Waves invoice for {invoice_title}{service_date_clause} is 90 days overdue and may be sent to collections. Please pay today: {pay_url}\n\nQuestions or requests? Reply here."
+ },
+ {
+  "key": "balance_reminder_gentle",
+  "active": true,
+  "expect": "Hello {first_name}! Waves here. We're scheduled to see you on {service_date}.\n\nOur records show an outstanding balance. To avoid any service interruption, please take care of it before your appointment: {pay_url}\n\nQuestions or requests? Reply here.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! Waves here. We're scheduled to see you on {service_date}.\n\nOur records show an outstanding balance. To avoid any service interruption, please take care of it before your appointment: {pay_url}\n\nQuestions or requests? Reply here."
+ },
+ {
+  "key": "balance_reminder_firm",
+  "active": true,
+  "expect": "Hello {first_name}! Quick reminder from Waves: your {service_type} is {service_timing} and there is an outstanding balance.\n\nPlease take care of it so we can keep you on schedule: {pay_url}\n\nQuestions or requests? Reply here.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! Quick reminder from Waves: your {service_type} is {service_timing} and there is an outstanding balance.\n\nPlease take care of it so we can keep you on schedule: {pay_url}\n\nQuestions or requests? Reply here."
+ },
+ {
+  "key": "balance_reminder_urgent",
+  "active": true,
+  "expect": "Hello {first_name}! Your Waves service is {service_timing} and your account has an outstanding balance.\n\nPay now to keep your appointment: {pay_url}\n\nAlready paid? Reply here and we will check it.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! Your Waves service is {service_timing} and your account has an outstanding balance.\n\nPay now to keep your appointment: {pay_url}\n\nAlready paid? Reply here and we will check it."
+ },
+ {
+  "key": "balance_payment_received",
+  "active": true,
+  "expect": "Hello {first_name}! Got it - thank you for the payment. Your account is caught up. We will see you at your next service.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! Got it - thank you for the payment. Your account is caught up. We will see you at your next service."
+ },
+ {
+  "key": "voicemail_quote_link",
+  "active": true,
+  "expect": "Hello {first_name}, it's Waves Pest Control \u2014 got your message about {service_label}. Get your quote here: {quote_url}\n\nOr reply here and we'll call you back.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}, it's Waves Pest Control - got your message about {service_label}. Get your quote here: {quote_url}\n\nOr reply here and we'll call you back.\n\nReply STOP to opt out."
+ },
+ {
+  "key": "recipient_optin_request",
+  "active": true,
+  "expect": "Hi {recipient_first_name} \u2014 {account_first_name} added you to receive appointment and service texts from Waves Pest Control for {property_address}. Reply YES to confirm, STOP to opt out, HELP for help. Msg frequency varies. Msg & data rates may apply.",
+  "set": "Hello {recipient_first_name}! {account_first_name} added you to receive appointment and service texts from Waves Pest Control for {property_address}.\n\nReply YES to confirm, STOP to opt out, HELP for help. Msg frequency varies. Msg & data rates may apply."
+ },
+ {
+  "key": "auto_bed_bug",
+  "active": true,
+  "expect": "Hello {first_name}! Let's get your home bed bug-free. We emailed your Waves treatment guide; please review it before service so we can get the best results.\n\nQuestions or requests? Reply here.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! Let's get your home bed bug-free. We emailed your Waves treatment guide; please review it before service so we can get the best results.\n\nQuestions or requests? Reply here."
+ },
+ {
+  "key": "auto_cockroach",
+  "active": true,
+  "expect": "Hello {first_name}! Let's get your home cockroach-free. We emailed your Waves treatment guide; please review it before service so we can get the best results.\n\nQuestions or requests? Reply here.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! Let's get your home cockroach-free. We emailed your Waves treatment guide; please review it before service so we can get the best results.\n\nQuestions or requests? Reply here."
+ },
+ {
+  "key": "auto_flea",
+  "active": true,
+  "expect": "Hello {first_name}! Let's get your home flea-free. We emailed your Waves treatment guide; please review it before service so we can get the best results.\n\nQuestions or requests? Reply here. Reply STOP to opt out.",
+  "set": "Hello {first_name}! Let's get your home flea-free. We emailed your Waves treatment guide; please review it before service so we can get the best results.\n\nQuestions or requests? Reply here."
+ },
+ {
+  "key": "auto_flea_no_email",
+  "active": true,
+  "expect": "Hello {first_name}! Let's get your home flea-free. Before your visit: vacuum carpets, rugs, and pet resting areas (empty the vacuum outside) and wash pet bedding on a hot cycle. Coordinate pet flea control with your vet and keep people and pets off treated areas until they're dry.\n\nQuestions or requests? Reply here. Reply STOP to opt out.",
+  "set": "Hello {first_name}! Let's get your home flea-free. Before your visit:\n\n- Vacuum carpets, rugs, and pet resting areas (empty the vacuum outside).\n- Wash pet bedding on a hot cycle.\n- Coordinate pet flea control with your vet and keep people and pets off treated areas until dry.\n\nQuestions? Reply here."
+ },
+ {
+  "key": "auto_bed_bug_no_email",
+  "active": true,
+  "expect": "Hello {first_name}! Let's get your home bed bug-free. Before your visit: launder all bedding and clothing from affected rooms in hot water and dry on the highest heat for 30+ minutes, then keep it in sealed bags. Vacuum mattresses, frames, and baseboards (bag the contents and toss them outside) and pull beds and furniture 12-18 in. from walls. Your 14-day follow-up is critical - please repeat these steps before it.\n\nQuestions or requests? Reply here. Reply STOP to opt out.",
+  "set": "Hello {first_name}! Let's get your home bed bug-free. Before your visit:\n\n- Launder bedding and clothing from affected rooms in hot water, dry on highest heat 30+ min, then seal in bags.\n- Vacuum mattresses, frames, and baseboards (empty the vacuum outside).\n- Pull beds and furniture 12-18 in. from walls.\n\nYour 14-day follow-up is critical - please repeat these steps before it. Questions? Reply here."
+ },
+ {
+  "key": "auto_cockroach_no_email",
+  "active": true,
+  "expect": "Hello {first_name}! Let's get your home cockroach-free. Before your visit: clear access under sinks, around appliances, and along pantry edges, and store food, dishes, and pet bowls away from treatment areas. Please avoid store-bought sprays before or between visits - they can scatter the activity.\n\nQuestions or requests? Reply here. Reply STOP to opt out.",
+  "set": "Hello {first_name}! Let's get your home cockroach-free. Before your visit:\n\n- Clear access under sinks, around appliances, and along pantry edges.\n- Store food, dishes, and pet bowls away from treatment areas.\n- Please avoid store-bought sprays - they can scatter the activity.\n\nQuestions? Reply here."
+ },
+ {
+  "key": "service_request_confirmation",
+  "active": true,
+  "expect": "Hello {first_name}! We received your {category} request. Our team will review it within {response_time}. We'll text you when it has been assigned to a technician.\n\nTrack progress in your customer portal or reply here.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! We received your {category} request. Our team will review it within {response_time}. We'll text you when it has been assigned to a technician.\n\nTrack progress in your customer portal or reply here."
+ },
+ {
+  "key": "auto_service_renewal",
+  "active": false,
+  "expect": "Hello {first_name}! Your Waves service is coming up for renewal. We emailed the details - take a look when you can.\n\nQuestions or requests? Reply here.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! Your Waves service is coming up for renewal. We emailed the details - take a look when you can.\n\nQuestions or requests? Reply here."
+ },
+ {
+  "key": "rain_out_moved_v2",
+  "active": true,
+  "expect": "Hello {first_name} \u2014 {weather_lead}, so we moved your {service_type} to {new_option}.{better_day_clause}{alt_clause}{efficacy_clause}{forecast_clause}\n\nQuestions or requests? Reply to this message.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name} - {weather_lead}, so we moved your {service_type} to {new_option}.{better_day_clause}{alt_clause}{efficacy_clause}{forecast_clause}\n\nQuestions or requests? Reply to this message."
+ },
+ {
+  "key": "service_complete_with_invoice",
+  "active": true,
+  "expect": "Hello {first_name}! Your {service_type} service report is ready: {portal_url}\n\nInvoice for today's visit: {pay_url}\n\nQuestions or requests? Reply here.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! Your {service_type} service report is ready: {portal_url}\n\nInvoice for today's visit: {pay_url}\n\nQuestions or requests? Reply here."
+ },
+ {
+  "key": "service_complete",
+  "active": true,
+  "expect": "Hello {first_name}! Your service report is ready: {portal_url}\n\nQuestions or requests? Reply here.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! Your service report is ready: {portal_url}\n\nQuestions or requests? Reply here."
+ },
+ {
+  "key": "service_complete_prepaid",
+  "active": true,
+  "expect": "Hello {first_name}! Thanks for your payment today. Your {service_type} service report is ready: {portal_url}\n\nQuestions or requests? Reply here.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! Thanks for your payment today. Your {service_type} service report is ready: {portal_url}\n\nQuestions or requests? Reply here."
+ },
+ {
+  "key": "service_complete_annual_prepay",
+  "active": true,
+  "expect": "Hello {first_name}! Your {service_type} service is complete and covered by your annual prepaid plan - nothing due today. Your service report is ready: {portal_url}\n\nQuestions or requests? Reply here. Reply STOP to opt out.",
+  "set": "Hello {first_name}! Your {service_type} service is complete and covered by your annual prepaid plan - nothing due today. Your service report is ready: {portal_url}\n\nQuestions or requests? Reply here."
+ },
+ {
+  "key": "service_report_v1",
+  "active": true,
+  "expect": "Hello {first_name}! Your Waves service report is ready: {report_url}{reentry_line}\n\nQuestions or requests? Reply here.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! Your Waves service report is ready: {report_url}{reentry_line}\n\nQuestions or requests? Reply here."
+ },
+ {
+  "key": "service_report_v1_with_invoice",
+  "active": true,
+  "expect": "Hello {first_name}! Your Waves service report is ready: {report_url}{reentry_line}\n\nInvoice for today's visit: {pay_url}\n\nQuestions or requests? Reply here.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! Your Waves service report is ready: {report_url}{reentry_line}\n\nInvoice for today's visit: {pay_url}\n\nQuestions or requests? Reply here."
+ },
+ {
+  "key": "project_report_ready",
+  "active": true,
+  "expect": "Hello {first_name}! Your Waves {project_type} report is ready: {report_url}\n\nQuestions or requests? Reply here.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! Your Waves {project_type} report is ready: {report_url}\n\nQuestions or requests? Reply here."
+ },
+ {
+  "key": "lawn_health_report_ready",
+  "active": true,
+  "expect": "Hello {first_name}! Your lawn health report is ready - you scored {overall_score}/100{delta_line}.{tip_line}\n\nView full report: {portal_url}\n\nQuestions or requests? Reply here.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! Your lawn health report is ready - you scored {overall_score}/100{delta_line}.{tip_line}\n\nView full report: {portal_url}\n\nQuestions or requests? Reply here."
+ },
+ {
+  "key": "billing_reminder",
+  "active": false,
+  "expect": "Hello {first_name}! Your {waveguard_tier} WaveGuard monthly charge of ${amount} will be processed on {charge_date}.\n\nManage your payment method in the customer portal.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! Your {waveguard_tier} WaveGuard monthly charge of ${amount} will be processed on {charge_date}.\n\nManage your payment method in the customer portal."
+ },
+ {
+  "key": "health_retention_offer",
+  "active": false,
+  "expect": "Hello {first_name}! Adam from Waves. We value your business and want to make sure service is working for you. Open to a quick call?\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! Adam from Waves. We value your business and want to make sure service is working for you. Open to a quick call?"
+ },
+ {
+  "key": "waveguard_upsell",
+  "active": false,
+  "expect": "Hello {first_name}! Based on your recent services, {tier_label} WaveGuard may be a better fit with unlimited coverage and predictable billing.\n\nReply INFO to learn more.\n\nReply STOP to opt out.",
+  "set": "Hello {first_name}! Based on your recent services, {tier_label} WaveGuard may be a better fit with unlimited coverage and predictable billing.\n\nReply INFO to learn more."
+ },
+ {
+  "key": "ai_approved",
+  "active": false,
+  "expect": "AI draft approved disabled\n\nReply STOP to opt out.",
+  "set": "AI draft approved disabled"
+ },
+ {
+  "key": "ai_assistant",
+  "active": false,
+  "expect": "AI assistant disabled\n\nReply STOP to opt out.",
+  "set": "AI assistant disabled"
+ },
+ {
+  "key": "ai_revised",
+  "active": false,
+  "expect": "AI draft revised disabled\n\nReply STOP to opt out.",
+  "set": "AI draft revised disabled"
+ }
+]

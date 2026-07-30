@@ -35,12 +35,11 @@ const BROKEN_RENDER_SUBSTRINGS = [
   '1970',
 ];
 
-const BLOCKED_OUTBOUND_PATTERNS = [
-  {
-    reason: 'blocked-autopay-pre-charge-waveguard',
-    re: /\bWaveGuard\s+auto-pay\s+will\s+process\b/i,
-  },
-];
+// (Empty since 2026-07-30: the 'blocked-autopay-pre-charge-waveguard'
+// stopgap is retired — autopay_pre_charge now renders a per-customer
+// {autopay_label}, so "WaveGuard auto-pay" only ever reaches actual
+// WaveGuard members and the phrase is legitimate again.)
+const BLOCKED_OUTBOUND_PATTERNS = [];
 
 function hasBrokenRender(body) {
   const lower = body.toLowerCase();

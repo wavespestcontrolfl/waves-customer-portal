@@ -42,7 +42,29 @@ function extractTemplatePlaceholders(body) {
   return [...placeholders];
 }
 
-function validateTemplateBody(body, variables) {
+function validateTemplateBody(body, variables, templateKey = null) {
+  // Double-brace tokens are the email/newsletter syntax — in an SMS body the
+  // renderer substitutes the INNER {token} and the leftover braces then read
+  // as an unresolved placeholder, silently suppressing every send of this
+  // template. Reject at write time instead of failing at send time.
+  if (/\{\{|\}\}/.test(String(body || ''))) {
+    return {
+      error: 'SMS templates use single-brace {variable} tokens — {{double braces}} would silently block every send of this template',
+    };
+  }
+  // autopay_pre_charge branding is per-customer ({autopay_label} resolves to
+  // "WaveGuard auto-pay" for members, "Waves auto-pay" otherwise). The old
+  // runtime guard that blocked the hardcoded literal is retired, so the
+  // literal is rejected at WRITE time instead — a hardcoded brand here would
+  // misbrand every tierless monthly-membership recipient.
+  // ANY hardcoded WaveGuard mention (auto-pay, autopay, Auto Pay, bare
+  // brand...) misbrands tierless monthly-membership recipients — the token
+  // is the only sanctioned way to brand this template.
+  if (templateKey === 'autopay_pre_charge' && /waveguard/i.test(String(body || ''))) {
+    return {
+      error: 'autopay_pre_charge must not hardcode WaveGuard — use {autopay_label}, which resolves per customer (WaveGuard members vs everyone else)',
+    };
+  }
   const allowed = new Set(parseTemplateVariables(variables));
   const unknown = extractTemplatePlaceholders(body).filter((key) => !allowed.has(key));
   if (!unknown.length) return null;
@@ -150,7 +172,7 @@ router.put('/:id', async (req, res, next) => {
     if (body !== undefined) {
       existing = await db('sms_templates').where({ id: req.params.id }).first();
       if (!existing) return res.status(404).json({ error: 'Template not found' });
-      const validation = validateTemplateBody(body, existing.variables);
+      const validation = validateTemplateBody(body, existing.variables, existing.template_key);
       if (validation) return res.status(400).json(validation);
       updates.body = body;
     }
@@ -169,7 +191,7 @@ router.post('/', async (req, res, next) => {
   try {
     const { template_key, name, category, body, description, variables, is_internal } = req.body;
     if (!template_key || !name || !body) return res.status(400).json({ error: 'template_key, name, and body required' });
-    const validation = validateTemplateBody(body, variables || []);
+    const validation = validateTemplateBody(body, variables || [], template_key);
     if (validation) return res.status(400).json(validation);
     const [template] = await db('sms_templates').insert({
       template_key, name, category: category || 'custom', body,
@@ -225,7 +247,7 @@ router.post('/:templateKey/variants', async (req, res, next) => {
     if (!cleanVariantKey || !body) return res.status(400).json({ error: 'variantKey and body required' });
     const template = await db('sms_templates').where({ template_key: req.params.templateKey }).first();
     if (!template) return res.status(404).json({ error: 'Template not found' });
-    const validation = validateTemplateBody(body, template.variables);
+    const validation = validateTemplateBody(body, template.variables, template.template_key);
     if (validation) return res.status(400).json(validation);
     const [variant] = await db('sms_template_variants')
       .insert({
@@ -260,7 +282,7 @@ router.put('/:templateKey/variants/:variantKey', async (req, res, next) => {
     if (req.body.body !== undefined) {
       const template = await db('sms_templates').where({ template_key: req.params.templateKey }).first();
       if (!template) return res.status(404).json({ error: 'Template not found' });
-      const validation = validateTemplateBody(req.body.body, template.variables);
+      const validation = validateTemplateBody(req.body.body, template.variables, template.template_key);
       if (validation) return res.status(400).json(validation);
     }
     for (const [inputKey, dbKey] of [

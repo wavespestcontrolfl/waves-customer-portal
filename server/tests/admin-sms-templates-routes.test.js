@@ -166,6 +166,41 @@ describe('admin SMS template routes', () => {
     });
   });
 
+  test('rejects a hardcoded WaveGuard brand in autopay_pre_charge — {autopay_label} is per-customer (2026-07-30)', async () => {
+    const updateQuery = chain();
+    setDbQueues({
+      sms_templates: [
+        chain({
+          first: {
+            id: 'sms-2',
+            template_key: 'autopay_pre_charge',
+            category: 'autopay',
+            variables: JSON.stringify(['first_name', 'charge_date', 'autopay_label']),
+          },
+        }),
+        updateQuery,
+      ],
+    });
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/sms-templates/sms-2`, {
+        method: 'PUT',
+        headers: {
+          Authorization: 'Bearer admin',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ body: 'Hello {first_name}! Your WaveGuard Auto Pay will process on {charge_date}.' }),
+      });
+      const body = await res.json();
+
+      // Spelling variants (Auto Pay / autopay / bare brand) are rejected too —
+      // the check is on any hardcoded WaveGuard mention, not one phrase.
+      expect(res.status).toBe(400);
+      expect(body.error).toContain('{autopay_label}');
+      expect(updateQuery.update).not.toHaveBeenCalled();
+    });
+  });
+
   test('accepts template body updates when placeholders are declared', async () => {
     const updateQuery = chain();
     setDbQueues({

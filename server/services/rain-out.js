@@ -98,7 +98,7 @@ function windowRainChance(hours, dateStr, windowStartHHMM) {
   return max;
 }
 
-// " Tomorrow morning looks a lot better — just a 10% chance of rain around
+// " Tomorrow morning looks a lot better - just a 10% chance of rain around
 // your new time." Only claims what the forecast supports. Preferred source
 // is the HOURLY chance scored on the actual booked arrival window (that's
 // what lets us say morning vs afternoon, and lets a same-day push say
@@ -120,8 +120,8 @@ function composeBetterDayClause({
     const startHour = Math.floor((hhmmToMinutes(windowStart) ?? 0) / 60);
     const label = isSameDay ? 'Later today' : `${day} ${partOfDay(startHour)}`;
     return windowChance <= 20
-      ? ` ${label} looks a lot better — just a ${windowChance}% chance of rain around your new time.`
-      : ` ${label} looks better — a ${windowChance}% chance of rain around your new time.`;
+      ? ` ${label} looks a lot better - just a ${windowChance}% chance of rain around your new time.`
+      : ` ${label} looks better - a ${windowChance}% chance of rain around your new time.`;
   }
 
   if (isSameDay || newChance == null || newChance > 40) return '';
@@ -129,8 +129,8 @@ function composeBetterDayClause({
   const label = dayLabel(chosenDate, todayStr);
   if (!label) return '';
   return newChance <= 20
-    ? ` ${label} looks a lot better — just a ${newChance}% chance of rain.`
-    : ` ${label} looks better — a ${newChance}% chance of rain.`;
+    ? ` ${label} looks a lot better - just a ${newChance}% chance of rain.`
+    : ` ${label} looks better - a ${newChance}% chance of rain.`;
 }
 
 // Explains WHY rain moves a spray visit. Dark until the owner flips
@@ -140,7 +140,7 @@ function composeEfficacyClause({ reasonCode, serviceType }) {
   if (process.env.GATE_RAINOUT_EFFICACY_NOTE !== 'true') return '';
   if (reasonCode !== 'weather_rain') return '';
   if (EFFICACY_EXEMPT_SERVICE.test(String(serviceType || ''))) return '';
-  return '\n\nWhy the move? Treatments need a few rain-free hours to bond — applying right before rain washes them away before they can work.';
+  return '\n\nWhy the move? Treatments need a few rain-free hours to bond - applying right before rain washes them away before they can work.';
 }
 
 // Statuses a rain-out may move. Mirrors the rebooker's reschedulable +
