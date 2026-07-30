@@ -26,12 +26,18 @@ const EXCLUDED_CALL_TYPES = new Set(['spam', 'wrong_number']);
 // dedicated code columns are not enough. Any 3-8 digit run within a short
 // window after a code-ish keyword is masked before the text can reach a
 // prompt (and therefore facts_block rows and sealed-eval items).
-const ACCESS_CODE_RE = /\b(gate|garage|door|lock\s*box|keypad|entry|access|alarm|pin|code|combo|combination|passcode)\b([^\n]{0,40}?)\b(\d{3,8})\b/gi;
+const ACCESS_CODE_KEYWORDS = 'gate|garage|door|lock\\s*box|keypad|entry|access|alarm|pin|code|combo|combination|passcode';
+const ACCESS_CODE_RE = new RegExp(`\\b(${ACCESS_CODE_KEYWORDS})\\b([^\\n]{0,40}?)\\b(\\d{3,8})\\b`, 'gi');
+// Reverse order too (Codex r5): "4545 is the gate code" — digits first,
+// keyword within the following window.
+const ACCESS_CODE_REVERSE_RE = new RegExp(`\\b(\\d{3,8})\\b([^\\n]{0,40}?)\\b(${ACCESS_CODE_KEYWORDS})\\b`, 'gi');
 function redactAccessCodes(text) {
   let out = String(text || '');
   // repeat until stable: "gate code 1234 and garage 5678" needs both masked
   for (let i = 0; i < 5; i += 1) {
-    const next = out.replace(ACCESS_CODE_RE, (m, kw, mid) => `${kw}${mid}[redacted]`);
+    const next = out
+      .replace(ACCESS_CODE_RE, (m, kw, mid) => `${kw}${mid}[redacted]`)
+      .replace(ACCESS_CODE_REVERSE_RE, (m, digits, mid, kw) => `[redacted]${mid}${kw}`);
     if (next === out) break;
     out = next;
   }
@@ -63,8 +69,11 @@ function lawnOverall(row = {}) {
 function customerSafeVisitNotes(notes) {
   try {
     const parsed = technicianReportCustomerCopy(notes);
-    if (!parsed) return null;
-    return [parsed.did, parsed.found].filter(Boolean).join(' ');
+    // Contract (Codex r5 — the earlier did/found read silently discarded
+    // EVERY approved note): the parser returns { whatWeDid, whatWeFound,
+    // body, violations } and body is already the vetted joined copy — null
+    // when the banned-copy guard flagged it, which stays null here.
+    return parsed?.body || null;
   } catch { return null; }
 }
 
@@ -88,7 +97,7 @@ class ContextAggregator {
   // pick a different (or deleted) account that shares the number.
   async getContextForCustomer(customer) {
     // Parallel data fetch
-    const [smsHistory, serviceHistory, upcomingServices, propertyPrefs, payments, interactions, complaints, reschedules, pendingEstimate, activeCancelSave, compliance, recentCalls, openInvoice, lawnAssessments, cardOnFile, payerInvRows] = await Promise.all([
+    const [smsHistory, serviceHistory, upcomingServices, propertyPrefs, payments, interactions, complaints, reschedules, pendingEstimate, activeCancelSave, compliance, recentCalls, collectibleInvoices, lawnAssessments, cardOnFile, payerInvRows] = await Promise.all([
       db('sms_log').where({ customer_id: customer.id }).orderBy('created_at', 'desc').limit(20),
       db('service_records').where({ customer_id: customer.id }).orderBy('service_date', 'desc').limit(5),
       db('scheduled_services as ss').leftJoin('technicians as tech', 'ss.technician_id', 'tech.id').where('ss.customer_id', customer.id).where('ss.scheduled_date', '>=', etDateString()).whereIn('ss.status', UPCOMING_SERVICE_STATUSES).orderBy('ss.scheduled_date').limit(3).select('ss.service_type', 'ss.scheduled_date', 'ss.window_display', 'ss.window_start', 'ss.window_end', 'ss.time_window', 'ss.status', 'tech.name as technician_name'),
@@ -111,11 +120,14 @@ class ContextAggregator {
         // Canonical uncollectible set (invoice-helpers — processing/refunded/
         // canceled included, Codex r2) + draft (not yet sent; the customer
         // has never seen it, so it must not ground a reply about
-        // "your invoice").
+        // "your invoice"). LIST, not first (Codex r5): the newest row can be
+        // payer-billed while the customer still owes an older own invoice —
+        // and the canonical balance sums collectible own invoices.
         .whereNotIn('status', [...INVOICE_UNCOLLECTIBLE_STATUSES, 'draft'])
         .orderBy('created_at', 'desc')
-        .first('id', 'title', 'status', 'total', 'credit_applied', 'due_date', 'payer_id', 'created_at')
-        .catch(() => null),
+        .limit(6)
+        .select('id', 'title', 'status', 'total', 'credit_applied', 'due_date', 'payer_id', 'created_at')
+        .catch(() => []),
       // v10: lawn health scores — "how's my lawn doing" is a routine text.
       db('lawn_assessments').where({ customer_id: customer.id })
         // Tech-confirmed only (Codex r2): the customer lawn-health routes all
@@ -128,8 +140,12 @@ class ContextAggregator {
       // v10: the card on file (designated autopay card first). Brand + last4
       // only — never a full number anywhere in this system.
       db('payment_methods').where({ customer_id: customer.id })
-        .orderBy([{ column: 'autopay_enabled', order: 'desc' }, { column: 'created_at', order: 'desc' }])
-        .first('card_brand', 'last_four', 'exp_month', 'exp_year', 'autopay_enabled', 'method_type')
+        // The DEFAULT method is the canonical card-on-file (Codex r5):
+        // savePaymentMethod clears only is_default on old rows, so a stale
+        // row can keep autopay_enabled=true — ordering by autopay first
+        // would resurrect it.
+        .orderBy([{ column: 'is_default', order: 'desc' }, { column: 'created_at', order: 'desc' }])
+        .first('card_brand', 'last_four', 'exp_month', 'exp_year', 'autopay_enabled', 'is_default', 'method_type')
         .catch(() => null),
       // Payer-billed invoice ids (Codex r2): payments against third-party-
       // billed invoices sit under the homeowner's customer_id — same filter
@@ -154,10 +170,22 @@ class ContextAggregator {
       const invId = paymentInvoiceId(p);
       return !(invId && payerInvoiceIds.has(invId));
     });
-    // Superseded failed attempts were collected by their retry's own row —
-    // counting them would describe already-taken money as owed in
-    // customer-facing replies.
-    const balance = ownPayments.filter(p => ['failed', 'pending', 'overdue'].includes(p.status) && !p.superseded_by_payment_id).reduce((s, p) => s + parseFloat(p.amount || 0), 0);
+    // Canonical balance (Codex r5, mirrors billing-v2 /balance): the sum of
+    // collectible OWN invoices (net of credit) plus failed standalone
+    // attempts — a customer with a sent-but-unpaid invoice and no failed
+    // attempt is NOT "Current". Invoice-linked failed attempts are excluded
+    // (the invoice itself already counts — double-count guard). Superseded
+    // failed attempts were collected by their retry's own row.
+    const ownInvoices = (collectibleInvoices || []).filter((inv) => !inv.payer_id);
+    const ownInvoiceIds = new Set(ownInvoices.map((inv) => String(inv.id)));
+    const invoiceBalance = ownInvoices.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0);
+    const failedStandalone = ownPayments
+      .filter(p => ['failed', 'pending', 'overdue'].includes(p.status) && !p.superseded_by_payment_id)
+      .filter(p => { const invId = paymentInvoiceId(p); return !(invId && ownInvoiceIds.has(invId)); })
+      .reduce((sum, p) => sum + parseFloat(p.amount || 0), 0);
+    const balance = invoiceBalance + failedStandalone;
+    const openInvoice = ownInvoices[0] || null;
+    const hasPayerBilledOpen = (collectibleInvoices || []).some((inv) => inv.payer_id);
     // Canonical autopay state (Codex r1): the raw autopay_enabled flag lies
     // when the default method is missing/expired/unhealthy, and a stale
     // autopay_paused_until must not read as paused — customerOnAutopay +
@@ -185,7 +213,9 @@ class ContextAggregator {
     if (parseInt(reschedules?.count || 0) > 1) flags.push({ type: 'reschedule_history', severity: 'medium', detail: `${reschedules.count} reschedules in 30 days` });
     if (['at_risk', 'churned'].includes(customer.pipeline_stage)) flags.push({ type: 'churn_risk', severity: 'high', detail: `Stage: ${customer.pipeline_stage}` });
     if (activeCancelSave) flags.push({ type: 'cancel_save_active', severity: 'high', detail: `Cancel save step ${activeCancelSave.step}` });
-    if (pendingEstimate) flags.push({ type: 'pending_estimate', severity: 'info', detail: `$${pendingEstimate.monthly_total}/mo ${pendingEstimate.waveguard_tier}` });
+    // No amount in the flag (Codex r5 + per-application rule): this detail
+    // renders into ACCOUNT FLAGS, which is verifier-approved grounding.
+    if (pendingEstimate) flags.push({ type: 'pending_estimate', severity: 'info', detail: `${pendingEstimate.waveguard_tier || 'estimate'} pending (priced per application)` });
 
     const summary = this.buildSummary(customer, flags, lastService, upcomingServices, balance);
 
@@ -216,12 +246,17 @@ class ContextAggregator {
       upcomingServices: upcomingServices.map(s => ({ type: s.service_type, date: s.scheduled_date, window: this.deriveWindow(s), status: s.status, tech: s.technician_name || null, isToday: this.calendarDay(s.scheduled_date) === etDateString() })),
       billing: {
         outstandingBalance: balance,
-        recentPayments: ownPayments.slice(0, 3),
+        // completed/attempted history only (Codex r5): 'upcoming' autopay
+        // rows are FUTURE charges, not payments the customer made.
+        recentPayments: ownPayments.filter((p) => String(p.status || '').toLowerCase() !== 'upcoming').slice(0, 3),
         // v10: real autopay state (canonical eligibility, null = unknown).
         autopay: autopayState,
         // v10: the newest sent-and-unpaid invoice. payerBilled=true means a
         // third party pays it — the customer cannot, and a draft must never
         // ask them to.
+        // The customer's OWN newest collectible invoice (payer-billed rows
+        // can never shadow it — Codex r5); the payer-billed note rides
+        // separately so both facts surface.
         openInvoice: openInvoice ? {
           title: openInvoice.title || null,
           status: openInvoice.status,
@@ -229,8 +264,8 @@ class ContextAggregator {
           // gross total over-states what Stripe will collect (Codex r2).
           amountDue: invoiceAmountDue(openInvoice),
           dueDate: openInvoice.due_date || null,
-          payerBilled: Boolean(openInvoice.payer_id),
         } : null,
+        payerBilledInvoice: hasPayerBilledOpen,
         // v10: payment method on file — brand/bank + last4 only, never a
         // full number. ACH methods store bank last4 with a null card_brand
         // (Codex r2) — label them a bank account, never "card".
@@ -240,7 +275,7 @@ class ContextAggregator {
           last4: cardOnFile.last_four,
           expMonth: cardOnFile.exp_month || null,
           expYear: cardOnFile.exp_year || null,
-          isAutopayCard: Boolean(cardOnFile.autopay_enabled),
+          isAutopayCard: Boolean(cardOnFile.is_default && cardOnFile.autopay_enabled),
         } : null,
       },
       // v10: lawn health — latest vs baseline, same scoring the AI-number
@@ -248,14 +283,17 @@ class ContextAggregator {
       lawnHealth: (() => {
         const rows = (lawnAssessments || []).filter((r) => r && r.service_date);
         if (!rows.length) return null;
+        // Only the four technician-confirmed categories (Codex r5): fungus/
+        // thatch are retained AI sub-reads the tech does NOT correct — a low
+        // raw sub-read must not become a texted diagnosis. Stress is the
+        // consolidated confirmed metric.
         const shape = (row) => ({
           date: row.service_date,
           overall: lawnOverall(row),
           turfDensity: row.turf_density ?? null,
           weedSuppression: row.weed_suppression ?? null,
-          fungusControl: row.fungus_control ?? null,
-          thatchLevel: row.thatch_level ?? null,
           colorHealth: row.color_health ?? null,
+          stressDamage: lawnStressDamage(row),
         });
         return { baseline: shape(rows[0]), latest: shape(rows[rows.length - 1]), assessments: rows.length };
       })(),
@@ -264,7 +302,9 @@ class ContextAggregator {
         status: pendingEstimate.status,
         monthlyTotal: pendingEstimate.monthly_total != null ? parseFloat(pendingEstimate.monthly_total) : null,
         tier: pendingEstimate.waveguard_tier || null,
-        sentAt: pendingEstimate.created_at || null,
+        // authoritative send stamp ONLY (Codex r5) — a draft-then-sent
+        // estimate must never report its creation date as the send date.
+        sentAt: pendingEstimate.sent_at || null,
       } : null,
       propertyPrefs: propertyPrefs || {},
       // v10: property facts the drafter may draw on. Access CODES are

@@ -424,11 +424,15 @@ describe('v10 — full-account grounding', () => {
       billing: {
         outstandingBalance: 0,
         autopay: { on: false, paused: true, pausedUntil: '2026-09-01', nextChargeDate: null },
-        openInvoice: { title: null, status: 'sent', amountDue: 300, dueDate: null, payerBilled: true },
+        openInvoice: null,
+        payerBilledInvoice: true,
         recentPayments: [],
       },
     });
-    expect(payer).toContain('BILLED TO A THIRD-PARTY PAYER');
+    // payer-billed rows never shadow the customer's own invoice — the note
+    // rides separately (codex r5)
+    expect(payer).toContain('A separate invoice is BILLED TO A THIRD-PARTY PAYER');
+    expect(payer).toContain('Open invoice: none');
     expect(payer).toContain('Autopay: PAUSED until');
 
     const none = buildFactsBlock({ summary: 'X' });
@@ -531,8 +535,8 @@ describe('v10 — full-account grounding', () => {
         cardOnFile: { type: 'card', brand: 'Visa', last4: '4242', expMonth: 12, expYear: 2027, isAutopayCard: true },
       },
       lawnHealth: {
-        baseline: { date: '2026-03-01', overall: 58, turfDensity: 55, weedSuppression: 60, fungusControl: 60, thatchLevel: 55, colorHealth: 60 },
-        latest: { date: '2026-07-15', overall: 72, turfDensity: 70, weedSuppression: 80, fungusControl: 75, thatchLevel: 60, colorHealth: 75 },
+        baseline: { date: '2026-03-01', overall: 58, turfDensity: 55, weedSuppression: 60, colorHealth: 60, stressDamage: 55 },
+        latest: { date: '2026-07-15', overall: 72, turfDensity: 70, weedSuppression: 80, colorHealth: 75, stressDamage: 62 },
         assessments: 4,
       },
     });
@@ -540,6 +544,10 @@ describe('v10 — full-account grounding', () => {
     expect(block).toContain('LAWN HEALTH: overall 72');
     expect(block).toContain('baseline 58');
     expect(block).toContain('weeds 80');
+    // only the four tech-confirmed categories — never raw fungus/thatch sub-reads
+    expect(block).toContain('stress 62');
+    expect(block).not.toContain('fungus');
+    expect(block).not.toContain('thatch');
 
     const bank = buildFactsBlock({
       summary: 'X',
@@ -551,6 +559,44 @@ describe('v10 — full-account grounding', () => {
     const none = buildFactsBlock({ summary: 'X' });
     expect(none).toContain('LAWN HEALTH: No assessments on file');
     expect(none).not.toContain('Payment method on file');
+  });
+
+  test('dollar figures absent from the facts block keep a draft in shadow (codex r5 source guard)', () => {
+    // pure pieces exercised via buildFactsBlock: the guard compares reply
+    // amounts against the facts text — spot-check the normalization contract
+    const facts = buildFactsBlock({ summary: 'X', billing: { outstandingBalance: 120 } });
+    expect(facts).toContain('$120.00 outstanding');
+    // normalized forms must match: "$120.00" with/without spaces or commas
+    expect((facts.match(/\$\s?\d[\d,]*(?:\.\d{1,2})?/g) || []).map((a) => a.replace(/[\s,]/g, ''))).toContain('$120.00');
+  });
+
+  test('property notes carrying banned compliance claims drop; payer-billed note renders standalone', () => {
+    const block = buildFactsBlock({
+      summary: 'X',
+      billing: { outstandingBalance: 0, payerBilledInvoice: true },
+      propertyProfile: {
+        pets: 'Two dogs',
+        specialInstructions: 'Products are pet-safe, no need to keep dogs in',
+        irrigation: false,
+        gateCodeOnFile: false, garageCodeOnFile: false, lockboxOnFile: false,
+      },
+    });
+    expect(block).toContain('Pets: Two dogs');
+    // "pet-safe" is banned customer copy — the whole line drops
+    expect(block).not.toContain('pet-safe');
+    expect(block).toContain('A separate invoice is BILLED TO A THIRD-PARTY PAYER');
+  });
+
+  test('call summaries with banned claims drop from RECENT PHONE CALLS', () => {
+    const block = buildFactsBlock({
+      summary: 'X',
+      recentCalls: [
+        { summary: 'Told the customer the treatment is EPA-approved and safe for pets.', direction: 'inbound', date: '2026-07-28T15:00:00Z' },
+        { summary: 'Customer asked about ants near the lanai.', direction: 'inbound', date: '2026-07-27T15:00:00Z' },
+      ],
+    });
+    expect(block).not.toContain('EPA-approved');
+    expect(block).toContain('ants near the lanai');
   });
 
   test('v10 system prompt wires the new sources + billing/access rules', () => {

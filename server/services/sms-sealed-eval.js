@@ -66,7 +66,12 @@ const MAX_CONSECUTIVE_FAILURES = envNum('SEALED_EVAL_MAX_CONSEC_FAILURES', 5);
 // router would use it.
 const EXAM_LEG_ROUTES = Object.freeze({
   anthropic: Object.freeze({ provider: MODELS.PROVIDER.ANTHROPIC, model: MODELS.SMS_SONNET }),
-  openai: Object.freeze({ provider: MODELS.PROVIDER.OPENAI, model: MODELS.OPENAI_SMS_DRAFT }),
+  // The live openai leg examines what OpenAI can actually SEND in prod: with
+  // Claude Sonnet primary on every SMS lane (owner 07-30), the only OpenAI
+  // model that drafts live is the highStakes fallback — Sol (Codex r5: an
+  // unexamined Sol could otherwise draft production replies while graduation
+  // credited Luna's exam).
+  openai: Object.freeze({ provider: MODELS.PROVIDER.OPENAI, model: MODELS.OPENAI_REPORT_WRITER }),
   // MEASUREMENT-ONLY legs (owner asks 07-30: "check gemini, rank them" +
   // "run sol, fable, opus — get the absolute best model, and fallback"):
   // each drafts the same frozen items so every candidate ranks against the
@@ -76,7 +81,7 @@ const EXAM_LEG_ROUTES = Object.freeze({
   // auto-spend. Fable here is the sanctioned deliberate opt-in the registry
   // policy requires (EXTREME is never routed automatically).
   gemini: Object.freeze({ provider: MODELS.PROVIDER.GEMINI, model: MODELS.GEMINI_TEXT_BEST }),
-  sol: Object.freeze({ provider: MODELS.PROVIDER.OPENAI, model: MODELS.OPENAI_REPORT_WRITER }),
+  luna: Object.freeze({ provider: MODELS.PROVIDER.OPENAI, model: MODELS.OPENAI_SMS_DRAFT }),
   opus: Object.freeze({ provider: MODELS.PROVIDER.ANTHROPIC, model: MODELS.FLAGSHIP }),
   fable: Object.freeze({ provider: MODELS.PROVIDER.ANTHROPIC, model: MODELS.EXTREME }),
 });

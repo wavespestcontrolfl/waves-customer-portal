@@ -184,7 +184,7 @@ describe('createExamRun — guards and stamps', () => {
 
   test('measurement legs (gemini/sol/opus/fable) are valid, but autonomy rides only on the live legs', async () => {
     // the exam accepts every candidate…
-    for (const leg of ['gemini', 'sol', 'opus', 'fable']) expect(sealedEval.EXAM_LEGS).toContain(leg);
+    for (const leg of ['gemini', 'luna', 'opus', 'fable']) expect(sealedEval.EXAM_LEGS).toContain(leg);
     const dbi = makeRunnerDb({ runs: [], items: [item('i1')] });
     const run = await sealedEval.createExamRun({ providerLeg: 'gemini', dbi });
     expect(run.provider_leg).toBe('gemini');
