@@ -539,6 +539,36 @@ function agentQuoteGroundedInTranscript(quote, transcript) {
 // conservative and accepted: the call date isn't threaded here, so relative
 // days can't be verified and those calls stay in triage.
 const WEEKDAY_NAMES = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+const MONTH_NAMES = ['january', 'february', 'march', 'april', 'may', 'june', 'july',
+  'august', 'september', 'october', 'november', 'december'];
+
+// Canonical ET wall clock (codex P0, round 7h): the BOOKING path preserves
+// the LITERAL wall clock of an ET-offset timestamp even when the seasonal
+// offset is wrong (see v2IsoToEtWallClock in call-recording-processor.js —
+// a July "12:00-05:00" books NOON, not the 13:00 EDT instant). Binding must
+// validate the same wall clock booking writes, or a quote for 1 PM could
+// authorize a visit that books at noon. Mirrors that helper exactly:
+// ET offsets → literal wall clock; Z/foreign offsets → instant rendered in
+// ET; no offset → literal. Returns "YYYY-MM-DDTHH:MM" or null.
+function etWallClockOfConfirmedStart(value) {
+  const raw = String(value || '');
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(raw)) return null;
+  if (/(?:-04:?00|-05:?00)$/.test(raw)) return raw.slice(0, 16);
+  if (/(?:Z|[+-]\d{2}:?\d{2})$/i.test(raw)) {
+    const parsed = new Date(raw);
+    if (!Number.isNaN(parsed.getTime())) {
+      try {
+        const parts = Object.fromEntries(new Intl.DateTimeFormat('en-CA', {
+          timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit',
+          hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+        }).formatToParts(parsed).map((p) => [p.type, p.value]));
+        return `${parts.year}-${parts.month}-${parts.day}T${parts.hour === '24' ? '00' : parts.hour}:${parts.minute}`;
+      } catch { return null; }
+    }
+    return null;
+  }
+  return raw.slice(0, 16);
+}
 
 function quoteBindsConfirmedSlot(quote, confirmedStartAt, callStartedAt) {
   // Punctuated day periods (codex round-6 P2): "10 a.m." normalizes to the
@@ -546,8 +576,15 @@ function quoteBindsConfirmedSlot(quote, confirmedStartAt, callStartedAt) {
   // " pm " so common transcript formats bind. Single-letter tokens only, so
   // "plan a meeting" ("a meeting") is untouched.
   const q = ` ${normalizeForGrounding(quote)} `.replace(/ ([ap]) m(?= )/g, ' $1m');
-  const start = new Date(String(confirmedStartAt || ''));
-  if (!q.trim() || Number.isNaN(start.getTime())) return false;
+  // All slot facts derive from the CANONICAL ET wall clock — the same value
+  // booking writes (see etWallClockOfConfirmedStart above).
+  const wall = etWallClockOfConfirmedStart(confirmedStartAt);
+  if (!q.trim() || !wall) return false;
+  const wallY = Number(wall.slice(0, 4));
+  const wallMo = Number(wall.slice(5, 7));
+  const wallD = Number(wall.slice(8, 10));
+  const wallH = Number(wall.slice(11, 13));
+  if (![wallY, wallMo, wallD, wallH].every(Number.isFinite)) return false;
   // Calendar disambiguation (codex round-5 P1, tightened round 7): a weekday
   // name alone cannot distinguish "this Sunday" from "next Sunday". Compare
   // ET CALENDAR dates (an absolute 168h window is not calendar-unique around
@@ -559,24 +596,20 @@ function quoteBindsConfirmedSlot(quote, confirmedStartAt, callStartedAt) {
   if (Number.isNaN(call.getTime())) return false;
   let dayDiff;
   try {
-    const etYmd = (d) => new Intl.DateTimeFormat('en-CA', {
+    const callYmd = new Intl.DateTimeFormat('en-CA', {
       timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit',
-    }).format(d);
-    dayDiff = (Date.parse(`${etYmd(start)}T00:00:00Z`) - Date.parse(`${etYmd(call)}T00:00:00Z`)) / 86400000;
+    }).format(call);
+    dayDiff = (Date.UTC(wallY, wallMo - 1, wallD) - Date.parse(`${callYmd}T00:00:00Z`)) / 86400000;
   } catch { return false; }
   if (!(dayDiff >= 1 && dayDiff <= 6)) return false;
-  let weekday; let hour12; let dayPeriod; let slotMonth; let slotDay;
-  try {
-    const parts = new Intl.DateTimeFormat('en-US', {
-      timeZone: 'America/New_York', weekday: 'long', month: 'long', day: 'numeric', hour: 'numeric', hour12: true,
-    }).formatToParts(start);
-    weekday = parts.find((p) => p.type === 'weekday')?.value?.toLowerCase();
-    hour12 = parts.find((p) => p.type === 'hour')?.value;
-    dayPeriod = parts.find((p) => p.type === 'dayPeriod')?.value?.toLowerCase();
-    slotMonth = parts.find((p) => p.type === 'month')?.value?.toLowerCase();
-    slotDay = Number(parts.find((p) => p.type === 'day')?.value);
-  } catch { return false; }
-  if (!weekday || !hour12 || (dayPeriod !== 'am' && dayPeriod !== 'pm')) return false;
+  // Weekday/hour/date facts from the canonical wall clock (a calendar date
+  // is timezone-free, so UTC day-of-week of the wall date is exact).
+  const weekday = WEEKDAY_NAMES[new Date(Date.UTC(wallY, wallMo - 1, wallD)).getUTCDay()];
+  const hour12 = String(wallH % 12 || 12);
+  const dayPeriod = wallH >= 12 ? 'pm' : 'am';
+  const slotMonth = MONTH_NAMES[wallMo - 1];
+  const slotDay = wallD;
+  if (!weekday || !slotMonth) return false;
   // Explicit calendar dates must match the slot (codex P1): "Sunday, August
   // 9, at noon" shares weekday+time with an August 2 slot — the weekday
   // window alone cannot catch it. Any month name in the quote must be the
@@ -584,8 +617,7 @@ function quoteBindsConfirmedSlot(quote, confirmedStartAt, callStartedAt) {
   // (ordinal suffixes tolerated); any standalone ordinal day ("the 9th")
   // must equal the slot's day. Unparseable or mismatched explicit dates
   // fail closed.
-  const monthsInQuote = ['january', 'february', 'march', 'april', 'may', 'june', 'july',
-    'august', 'september', 'october', 'november', 'december'].filter((m) => q.includes(` ${m} `));
+  const monthsInQuote = MONTH_NAMES.filter((m) => q.includes(` ${m} `));
   if (monthsInQuote.length) {
     if (monthsInQuote.length > 1 || monthsInQuote[0] !== slotMonth) return false;
     const dm = q.match(new RegExp(` ${slotMonth} (\\d{1,2})(?:st|nd|rd|th)?(?= )`));
@@ -599,14 +631,12 @@ function quoteBindsConfirmedSlot(quote, confirmedStartAt, callStartedAt) {
   // is not the ":00" minutes must equal the slot's ET month/day. Any 3–4
   // digit number must be the slot's ET year; anything else is an
   // unvalidated explicit date token and fails closed.
-  const slotMonthNum = start.toLocaleString('en-US', { timeZone: 'America/New_York', month: 'numeric' });
-  const slotYear = start.toLocaleString('en-US', { timeZone: 'America/New_York', year: 'numeric' });
   for (const pair of q.matchAll(/(?<= )(\d{1,2}) (\d{1,2})(?= )/g)) {
     if (pair[2] === '00') continue;
-    if (Number(pair[1]) !== Number(slotMonthNum) || Number(pair[2]) !== slotDay) return false;
+    if (Number(pair[1]) !== wallMo || Number(pair[2]) !== slotDay) return false;
   }
   for (const yr of q.matchAll(/(?<= )(\d{3,4})(?= )/g)) {
-    if (yr[1] !== slotYear) return false;
+    if (Number(yr[1]) !== wallY) return false;
   }
   // Exact binding, not presence (codex round-5 P1): a multi-slot turn
   // ("Sunday at 10 AM won't work, but we'll see you at 11 AM") scatters
@@ -740,8 +770,14 @@ function canAutoRoute(extraction, opts = {}) {
   // be zero — a schema-valid "T10:00:30" would otherwise copy a :30-second
   // start into window_start unchanged. Absent seconds count as zero.
   const commitStartMinute = String(extraction.scheduling?.confirmed_start_at || '').match(/T\d{2}:(\d{2})(?::(\d{2}))?/);
+  // BOTH the raw string AND the canonical ET wall clock must be on the hour
+  // (codex round-7h): a foreign offset like "+05:30" can carry raw ":00"
+  // minutes yet book a ":30" ET wall time — the wall clock is what booking
+  // writes, so it is the one that must be exact.
+  const commitWall = etWallClockOfConfirmedStart(extraction.scheduling?.confirmed_start_at);
   const commitStartOnTheHour = !!commitStartMinute && commitStartMinute[1] === '00'
-    && (!commitStartMinute[2] || commitStartMinute[2] === '00');
+    && (!commitStartMinute[2] || commitStartMinute[2] === '00')
+    && !!commitWall && commitWall.slice(14, 16) === '00';
   // opts.transcriptLabelsTrusted (codex round-2 P1): the Agent:/Caller:
   // prefixes the grounding relies on are themselves produced by an LLM
   // labeling pass that is explicitly told to INFER unclear identities, and

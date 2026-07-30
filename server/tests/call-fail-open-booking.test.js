@@ -461,6 +461,31 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
+  test('binding validates the CANONICAL wall clock booking writes — a July "-05:00" noon books noon and binds "noon" (P0 wall-clock)', () => {
+    // Wrong seasonal offset: the instant is 13:00 EDT but v2IsoToEtWallClock
+    // books the LITERAL wall clock (noon). The noon quote must bind.
+    const ex = agentCommitted();
+    ex.scheduling.confirmed_start_at = '2026-08-02T12:00:00-05:00';
+    const r = canAutoRoute(ex, opts());
+    expect(r.allowed).toBe(true);
+  });
+
+  test('an instant-equivalent quote does NOT bind the wall clock — "1 PM" against a "-05:00" noon stays blocked (P0 wall-clock)', () => {
+    const onePm = "So we'll see you Sunday at 1 PM, and just let us know if anything changes.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, onePm);
+    const ex = agentCommitted(['caller_not_authorized'], { quote: onePm });
+    ex.scheduling.confirmed_start_at = '2026-08-02T12:00:00-05:00';
+    const r = canAutoRoute(ex, opts({ transcript }));
+    expect(r.allowed).toBe(false);
+  });
+
+  test('a foreign offset whose ET wall clock is off-hour fails the guard — raw ":00" with "+05:30" (P0 wall-clock)', () => {
+    const ex = agentCommitted();
+    ex.scheduling.confirmed_start_at = '2026-08-02T12:00:00+05:30'; // 02:30 ET wall
+    const r = canAutoRoute(ex, opts());
+    expect(r.allowed).toBe(false);
+  });
+
   test('nonzero SECONDS in confirmed_start_at fail the on-the-hour guard (round-4 P1)', () => {
     const ex = agentCommitted();
     ex.scheduling.confirmed_start_at = '2026-08-02T12:00:30-04:00';
