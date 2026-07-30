@@ -4,6 +4,7 @@ const { detectServiceLine, getServiceLineConfig, isRodentAdjacentServiceType } =
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
 const { loadActiveConfig, loadScoreForServiceRecord, loadHistoryForCustomer } = require('../pest-pressure/store');
 const { buildPestPressureCustomerView } = require('../pest-pressure/customer-view');
+const { isOneTimePressureExcludedRecord } = require('../pest-pressure/one-time-exclusion');
 const { buildNoActivityFinding } = require('./no-activity-finding');
 const { isCardCustomerSurfaceable } = require('../lawn-recommendation-visibility');
 const { buildIrrigationAdvice } = require('./irrigation-advice');
@@ -2255,6 +2256,13 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // types can detect to the 'pest' line and slip past the recurring-label
   // gates, which would leak the pressure UI (or its insufficient-data
   // placeholder) onto e.g. a cockroach cleanout report. Explicit gate.
+  // Untyped one-time treatments get the same treatment via the resolved
+  // completion profile (codex r6): their labels carry no cadence word, so
+  // the view's label heuristic alone would render the placeholder card
+  // with a live rating picker.
+  const pestPressureOneTimeExcluded = typedSnapshot
+    ? false
+    : await isOneTimePressureExcludedRecord(service, knex);
   const pestPressure = typedSnapshot
     ? null
     : buildPestPressureCustomerView({
@@ -2262,6 +2270,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       scoreRow: pestPressureRow,
       serviceRecord: service,
       historyRows: pestPressureHistory,
+      oneTimeExcluded: pestPressureOneTimeExcluded,
     });
   const activity = typedSnapshot
     ? await loadActivityCustomerView(knex, { snapshot: typedSnapshot, service }).catch(() => null)

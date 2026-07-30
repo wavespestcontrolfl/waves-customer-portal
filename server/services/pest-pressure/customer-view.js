@@ -98,7 +98,7 @@ function shapeHistory(historyRows) {
     .reverse();
 }
 
-function buildPestPressureCustomerView({ config, scoreRow, serviceRecord = null, historyRows = null }) {
+function buildPestPressureCustomerView({ config, scoreRow, serviceRecord = null, historyRows = null, oneTimeExcluded = false }) {
   const effectiveConfig = config || DEFAULT_CONFIG;
   if (!effectiveConfig.enabled || !effectiveConfig.showOnCustomerReport) {
     return null;
@@ -108,6 +108,12 @@ function buildPestPressureCustomerView({ config, scoreRow, serviceRecord = null,
   // historical score row exists from a previous config.
   if (!isServiceLineEnabled(effectiveConfig, serviceRecord)) return null;
   if (!meetsRecurringFrequencyRequirement(effectiveConfig, serviceRecord)) return null;
+  // Profile-resolved one-time exclusion (codex r6): callers that can reach
+  // the catalog pass isOneTimePressureExcludedRecord's answer here — the
+  // label heuristic above misses one-time services whose names carry no
+  // cadence word (Fire Ant Treatment, Tick Control…). Hides the card AND
+  // disables the rating capture (the rating route reuses this view).
+  if (oneTimeExcluded) return null;
 
   const showComponentBreakdown = Boolean(effectiveConfig.showComponentBreakdownToCustomer);
   const howCalculated = effectiveConfig.showHowCalculated

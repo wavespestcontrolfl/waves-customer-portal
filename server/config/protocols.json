@@ -1165,10 +1165,10 @@
       {
         "visit": 1,
         "month": "Any",
-        "primary": "Exterior general pest perimeter\nExterior perimeter band\nApplied repellent solution with surfactant to perimeter\nApplied non-repellent solution to perimeter (6-ft band + crack & crevice)\nInterior crack-and-crevice treatment only if activity is present\nSweep eaves, windows, doors, and lanai frames",
-        "secondary": "WDG or granular bait in landscape beds\nGlue boards in garage or utility areas\nEscalate moisture, exclusion, or sanitation issues in notes",
+        "primary": "Treated exterior perimeter band\nApplied repellent solution with surfactant to perimeter\nApplied non-repellent solution to perimeter (6-ft band + crack & crevice)\nTreated interior cracks & crevices (activity present)\nSwept eaves, window frames, door frames, and lanai",
+        "secondary": "Applied WDG or granular bait in landscape beds\nPlaced glue boards in garage or utility areas\nDocumented moisture, exclusion, or sanitation conditions",
         "lineMeta": {
-          "Exterior perimeter band": {
+          "Treated exterior perimeter band": {
             "scope": "exterior",
             "treatmentApplied": true,
             "catalogProductHints": [
@@ -1191,28 +1191,28 @@
               "Alpine WSG"
             ]
           },
-          "Interior crack-and-crevice treatment only if activity is present": {
+          "Treated interior cracks & crevices (activity present)": {
             "scope": "interior",
             "treatmentApplied": true,
             "catalogProductHints": [
               "Alpine WSG"
             ]
           },
-          "Sweep eaves, windows, doors, and lanai frames": {
+          "Swept eaves, window frames, door frames, and lanai": {
             "scope": "exterior",
             "treatmentApplied": false,
             "catalogProductHints": [
               "Webster"
             ]
           },
-          "WDG or granular bait in landscape beds": {
+          "Applied WDG or granular bait in landscape beds": {
             "scope": "exterior",
             "treatmentApplied": true,
             "catalogProductHints": [
               "Advion WDG Granular"
             ]
           },
-          "Glue boards in garage or utility areas": {
+          "Placed glue boards in garage or utility areas": {
             "scope": "interior",
             "treatmentApplied": false
           }

@@ -80,6 +80,16 @@ const KNOCKDOWN_FOLLOWUP_WINDOW_DAYS = { '10–14 days': 14, '2–3 weeks': 21 }
 // an included follow-up completing must not mint a third (Codex r3).
 // Trapping programs deliberately chain and are excluded.
 const TWO_TREATMENT_PACKAGE_KEYS = new Set(['cockroach_control', 'bed_bug_treatment']);
+
+// Report/track egress (AGENTS.md): entry-code shapes that must never persist
+// into customer-visible completion text. Three shapes: a code word near a
+// location word ("gate ... code"), a code word followed by digits
+// ("pin 9921"), and the bare shorthand of a code-carrying location word
+// followed directly by a code-shaped number ("Gate 1234", "lockbox is
+// 2468" — codex r3). Ordinary copy ("entry points treated", "gate was
+// open") never trips; a street address near the word "gate" may — that
+// false positive fails closed and the tech rephrases.
+const COMPLETION_ACCESS_CODE_RE = /(?:\b(?:gate|garage|door|lock\s?box|keypad|alarm|entry|access)\b[^\n.!?]{0,40}\b(?:code|pin|combo|combination)\b|\b(?:code|pin|combo|combination)\b[^\n.!?]{0,15}[a-z]?\d{2,4}(?:[-\s]\d{2,4}){0,2}|\b(?:gate|garage|door|lock\s?box|keypad|alarm|entry|access)\b[^\n.!?]{0,12}\b(?:[a-z]?\d{3,8}|[a-z]?\d{2,4}(?:[-\s]\d{2,4}){1,2})\b)/i;
 const { buildPrepaidSeriesContext } = require('../services/prepaid-series');
 const {
   findFirstApplicationInvoiceForEstimateService,
@@ -3130,6 +3140,68 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // Returns {status, body} on rejection, null when valid; mutates the
     // typed* locals on success.
     const runTypedValidation = () => {
+      // Untyped completions render the same tech-entered copy on customer
+      // reports (observations feed the pest-pressure main-driver line,
+      // recommendations feed the recap, captions sit under photos) — the
+      // free-text fields must pass the same banned-copy policy as typed
+      // forms, or the untyped path becomes a compliance side door (codex
+      // pre-push P1 2026-07-30). Internal-only consultations are exempt
+      // (codex r7): they mint no customer report, so blocking a staff-only
+      // assessment on customer-copy rules would strand valid internal
+      // notes — same reasoning as the caption gate's fresh-consultation
+      // skip below.
+      if (!typedFindingsType && !isIncompleteVisit && !isInternalOnlyCompletion) {
+        const untypedCopySources = [
+          ...(Array.isArray(observations) ? observations : []),
+          ...(Array.isArray(recommendations) ? recommendations : []),
+          ...(customerRecap ? [customerRecap] : []),
+          ...taggedCompletionNoteLines(technicianNotes, ['next']),
+          ...taggedCompletionNoteLines(technicianNotes, ['found']),
+          ...(Array.isArray(completionPhotos)
+            ? completionPhotos.map((p) => p?.caption).filter(Boolean)
+            : []),
+        ];
+        const untypedViolations = [...new Set(
+          untypedCopySources.flatMap((entry) => ActivityIndicators.findBannedCustomerCopy(entry)),
+        )];
+        if (untypedViolations.length) {
+          return {
+            status: 422,
+            body: {
+              error: `This completion contains wording we can't put on a customer report (${untypedViolations.join(', ')}). Describe what was observed and done today instead of absolute claims.`,
+              code: 'completion_banned_copy',
+              violations: untypedViolations,
+            },
+          };
+        }
+        // Report/track egress (AGENTS.md): access/gate/lockbox codes never
+        // reach customer-facing reports. These free-text fields render
+        // verbatim (pressure driver line, photo captions), so a line that
+        // reads like an entry code fails closed instead of persisting.
+        if (untypedCopySources.some((entry) => COMPLETION_ACCESS_CODE_RE.test(String(entry || '')))) {
+          return {
+            status: 422,
+            body: {
+              error: 'This completion looks like it contains an access, gate, or lockbox code. Keep entry codes out of customer-visible fields — use the internal property notes instead.',
+              code: 'completion_access_code',
+            },
+          };
+        }
+        // A pre-untype client (panel opened before the deploy, or a restored
+        // typed draft) still submits structuredFindings for a now-untyped
+        // profile. Accepting it would silently DISCARD the typed data the
+        // tech entered (target pest, activity level, treatment...) — make
+        // the transition loud instead (codex P2).
+        if (structuredFindings != null) {
+          return {
+            status: 409,
+            body: {
+              error: 'This service now completes with the standard form. Refresh the page and complete the visit again.',
+              code: 'untyped_refresh_required',
+            },
+          };
+        }
+      }
       // Recap-only mode (the lightweight pest recap) has no findings, no
       // billing gate, and no snapshot — it must not be a side door around
       // the typed flow. Typed services complete through the full form only.
@@ -3235,6 +3307,19 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               error: `This completion contains wording we can't put on a customer report (${copyViolations.join(', ')}). Describe what was observed and done today instead of absolute claims.`,
               code: 'typed_recommendations_banned_copy',
               violations: copyViolations,
+            },
+          };
+        }
+        // Same access-code egress gate the untyped branch enforces (codex
+        // r4): typed completions carry the identical customer-visible
+        // free-text surfaces, and an entry code in any of them would
+        // persist into the report the same way.
+        if (customerCopySources.some((entry) => COMPLETION_ACCESS_CODE_RE.test(String(entry || '')))) {
+          return {
+            status: 422,
+            body: {
+              error: 'This completion looks like it contains an access, gate, or lockbox code. Keep entry codes out of customer-visible fields — use the internal property notes instead.',
+              code: 'completion_access_code',
             },
           };
         }
@@ -3536,13 +3621,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       }
     }
 
-    // Typed one-time billing profile — the exact population the billing
-    // pre-gate below governs. Hoisted to a named flag because a backfill
-    // completion skips the gate and must reach the same billing outcome
-    // through the in-transaction invoice decision instead
-    // (shouldAutoInvoiceCompletion's typedOneTimeBilling input).
-    const typedOneTimeBillingProfile = !!typedFindingsType
-      && !isIncompleteVisit
+    // One-time billing profile — the population whose completion mints the
+    // visit invoice through the in-transaction invoice decision
+    // (shouldAutoInvoiceCompletion's typedOneTimeBilling input). Keyed to
+    // the PROFILE's billing_type, not to whether the completion form is
+    // typed: untyping a one-time service's form (the 2026-07-30 pest
+    // untype migration) must not silently turn off its billing (codex P1).
+    const typedOneTimeBillingProfile = !isIncompleteVisit
       && !recapReviewOnly
       && String(completionProfile?.billingType || '').toLowerCase() === 'one_time'
       && svc.followup_included !== true;
@@ -4187,6 +4272,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             serviceType: svc.service_type,
             areasTreated: Array.isArray(areasTreated) ? areasTreated : (areasServiced || []),
             products: recapProducts,
+            // Merged observations/recommendations (chip labels + free text +
+            // tagged note lines) and the tech's activity rating ground the
+            // production recap the same way the preview path does (owner
+            // 2026-07-30).
+            observations: reportObservations,
+            recommendations: reportRecommendations,
+            pestActivityRating: Number.isInteger(clientPestRating) ? clientPestRating : null,
             visitContext: completionVisitContext,
           };
           const deterministicFallback = () => {
@@ -4772,7 +4864,17 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // history. The activity score above is their indicator instead.
         // Internal-only consultations are excluded for the same reason: an
         // advisory walkthrough must not write Pest Pressure history.
-        if (useServiceReportV1 && serviceFindingsAvailable && serviceRecordCols.pressure_index && !typedFindingsType && !isInternalOnlyCompletion) {
+        // One-time treatments are excluded FORM-INDEPENDENTLY (codex r5):
+        // the untyped pest family (tick control, fire ant, nest removals…)
+        // slips both the typed guard and review-window's one-time-label
+        // heuristic, and an isolated treatment must not seed recurring
+        // pressure history. Re-service/callback visits are the deliberate
+        // exception — extra visits on an active plan still score (see
+        // review-window.js isOneTimeServiceLabel).
+        const oneTimePressureExcluded = String(completionProfile?.billingType || '').toLowerCase() === 'one_time'
+          && completionProfile?.serviceKey !== 'pest_re_service'
+          && !svc.is_callback;
+        if (useServiceReportV1 && serviceFindingsAvailable && serviceRecordCols.pressure_index && !typedFindingsType && !isInternalOnlyCompletion && !oneTimePressureExcluded) {
           const pestPressure = await runPestPressureForServiceRecord(record.id, trx);
           if (pestPressure && pestPressure.result.displayedScore != null) {
             record.pressure_index = pestPressure.result.displayedScore;
@@ -8674,28 +8776,56 @@ router.post('/:serviceId/findings-recap/draft', async (req, res) => {
 router.post('/:serviceId/photo-analysis/draft', async (req, res) => {
   try {
     if (!(await assertRecapOwnership(req, res))) return;
-    const { photos, structuredFindings } = req.body || {};
+    const { photos, structuredFindings, context } = req.body || {};
     if (!Array.isArray(photos) || !photos.length) {
       return res.status(400).json({ error: 'photos array is required', code: 'photos_required' });
     }
     if (photos.length > 5) {
       return res.status(400).json({ error: 'At most 5 photos can be analyzed', code: 'too_many_photos' });
     }
-    const findingsType = structuredFindings?.type;
-    if (!findingsType || !ActivityIndicators.isTypedFindingsType(findingsType)) {
-      return res.status(400).json({ error: `Unknown findings type: ${findingsType}` });
-    }
-    const schema = ActivityIndicators.findingsSchemaForType(findingsType);
     const svc = await db('scheduled_services')
       .where({ id: req.params.serviceId })
       .first('id', 'customer_id', 'service_type', 'service_id');
     if (!svc) return res.status(404).json({ error: 'Service not found' });
     const photoProfile = await resolveCompletionProfileForScheduledService(svc).catch(() => null);
-    if (photoProfile?.findingsType !== findingsType) {
-      return res.status(409).json({
-        error: 'This service does not use that findings form.',
-        code: 'findings_type_mismatch',
-      });
+    const findingsType = structuredFindings?.type;
+    let schema = null;
+    const contextLines = [];
+    if (findingsType) {
+      if (!ActivityIndicators.isTypedFindingsType(findingsType)) {
+        return res.status(400).json({ error: `Unknown findings type: ${findingsType}` });
+      }
+      schema = ActivityIndicators.findingsSchemaForType(findingsType);
+      if (photoProfile?.findingsType !== findingsType) {
+        return res.status(409).json({
+          error: 'This service does not use that findings form.',
+          code: 'findings_type_mismatch',
+        });
+      }
+    } else {
+      // Basic (untyped) completions analyze photos too (owner 2026-07-30) —
+      // grounded in the tech's structured observations instead of a findings
+      // form. A typed service must send its typed findings so the summary
+      // stays grounded in the form the tech actually fills.
+      if (photoProfile?.findingsType) {
+        return res.status(409).json({
+          error: 'This service uses a findings form — send structuredFindings.',
+          code: 'findings_type_mismatch',
+        });
+      }
+      // Report/track egress (AGENTS.md): raw technician notes never reach a
+      // customer-facing LLM — the prompt context is the structured
+      // observations field only, with entry-code-shaped lines dropped.
+      const observations = Array.isArray(context?.observations)
+        ? context.observations
+          .map((o) => String(o).trim())
+          .filter(Boolean)
+          .filter((o) => !COMPLETION_ACCESS_CODE_RE.test(o))
+          .slice(0, 10)
+        : [];
+      if (observations.length) {
+        contextLines.push(`Observations: ${observations.join('; ').slice(0, 600)}`);
+      }
     }
     // Decode with the same size cap the completion upload enforces — a
     // photo too big to persist is too big to analyze (the helper default
@@ -8712,6 +8842,7 @@ router.post('/:serviceId/photo-analysis/draft', async (req, res) => {
       values: structuredFindings?.values || {},
       photoCount: photos.length,
       serviceType: svc.service_type,
+      contextLines,
     });
     const generated = await dispatchWithFallback(
       MODELS.TEXT_POLICIES.visionAnalysis,

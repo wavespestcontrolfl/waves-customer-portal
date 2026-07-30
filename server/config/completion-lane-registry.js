@@ -108,6 +108,22 @@ const RECURRING_GENERIC_BY_DESIGN = [
   'waveguard_membership',
 ];
 
+// One-time services whose GENERIC Service Report V1 is the decided lane
+// (owner ruling 2026-07-30, migration 20260730400000): the typed
+// one_time_pest_treatment form was retired for the pest family — these
+// complete through the same basic form recurring pest uses, and their
+// billing_type stays one_time (the completion mints the visit invoice from
+// the profile's billing_type, independent of form type).
+const ONE_TIME_GENERIC_BY_DESIGN = [
+  'pest_re_service',
+  'one_time_pest_control',
+  'fire_ant',
+  'tick_control',
+  'bee_wasp_removal',
+  'mud_dauber_removal',
+  'pest_initial_cleanout',
+];
+
 // Registered typed findings schemas — a typed pointer that isn't a real
 // schema strands the service (no form payload, completion validation
 // rejects the unknown type; Codex r3). project-types is a pure data module.
@@ -120,6 +136,7 @@ const ALL_LISTS = {
   cutover_in_flight: Object.keys(CUTOVER_IN_FLIGHT_KEYS),
   billing_rider: BILLING_RIDER_KEYS,
   recurring_generic_by_design: RECURRING_GENERIC_BY_DESIGN,
+  one_time_generic_by_design: ONE_TIME_GENERIC_BY_DESIGN,
 };
 
 /**
@@ -209,6 +226,18 @@ function classifyCatalogRow(row) {
       flags.push('billing_rider_has_typed_pointer');
     } else if (row.completion_mode !== 'internal_only') {
       flags.push(`billing_rider_report_lane_active:${row.completion_mode || 'none'}_expected_internal_only`);
+    }
+    return { lane, flags };
+  }
+  if (lane === 'one_time_generic_by_design') {
+    // The decided lane is the generic Service Report V1 on a one-time
+    // billing profile (owner 2026-07-30 pest untype). A typed pointer means
+    // the untype migration was reverted or an admin repointed it — either
+    // way the registry entry no longer describes reality.
+    if (row.billing_type !== 'one_time') flags.push('one_time_list_but_non_one_time_billing');
+    if (row.project_type) flags.push('one_time_generic_listed_but_typed:remove_registry_entry');
+    else if (hasProfile && row.completion_mode !== 'service_report') {
+      flags.push(`one_time_generic_unexpected_mode:${row.completion_mode || 'none'}_suppresses_the_decided_report`);
     }
     return { lane, flags };
   }

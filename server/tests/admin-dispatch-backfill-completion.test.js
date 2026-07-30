@@ -2334,8 +2334,11 @@ describe('completion route wiring (source contracts)', () => {
   });
 
   test('typed one-time billing pre-gate is REMOVED — no completion 409 detour remains; the typed population feeds the mint decision', () => {
-    // The typed population is still hoisted to a named flag…
-    expect(source).toMatch(/const typedOneTimeBillingProfile = !!typedFindingsType\s*\n\s*&& !isIncompleteVisit\s*\n\s*&& !recapReviewOnly\s*\n\s*&& String\(completionProfile\?\.billingType \|\| ''\)\.toLowerCase\(\) === 'one_time'\s*\n\s*&& svc\.followup_included !== true;/);
+    // The one-time population is still hoisted to a named flag — keyed to
+    // the PROFILE's billing_type, deliberately NOT to typedFindingsType:
+    // untyping a one-time form (the 2026-07-30 pest untype) must not turn
+    // off its billing (codex P1 on #3081).
+    expect(source).toMatch(/const typedOneTimeBillingProfile = !isIncompleteVisit\s*\n\s*&& !recapReviewOnly\s*\n\s*&& String\(completionProfile\?\.billingType \|\| ''\)\.toLowerCase\(\) === 'one_time'\s*\n\s*&& svc\.followup_included !== true;/);
     // …but the pre-gate 409 → checkout detour is gone entirely (owner
     // ruling 2026-07-27): no live completion can be stranded behind a
     // demand for a pre-existing invoice the completion itself would mint.
