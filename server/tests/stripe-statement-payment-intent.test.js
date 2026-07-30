@@ -289,18 +289,14 @@ describe('StripeService.finalizeStatementPayment stale surcharge clear', () => {
     else process.env.JWT_SECRET = originalJwtSecret;
   });
 
-  test('debit retry after a failed credit attempt clears the stale breakdown with the unset form', async () => {
-    stripeClient.paymentIntents.retrieve.mockResolvedValue({
-      id: 'pi_existing',
-      status: 'requires_payment_method',
-      amount_details: { surcharge: { amount: 725 } },
-    });
+  test('no-fee finalize clears amount_details unconditionally with the unset form (no probe — TOCTOU-proof)', async () => {
     const StripeService = require('../services/stripe');
     const result = await StripeService.finalizeStatementPayment(statementRow.id, quoteTokenFor());
 
     expect(result.surcharge).toBe(0);
-    const [, , retrieveOpts] = stripeClient.paymentIntents.retrieve.mock.calls[0];
-    expect(retrieveOpts).toEqual({ apiVersion: expect.any(String) });
+    // The statement path has no invoice-style lock, so the clear MUST ride
+    // the update itself — any probe would race a concurrent credit attempt.
+    expect(stripeClient.paymentIntents.retrieve).not.toHaveBeenCalled();
     const [, params, updateOpts] = stripeClient.paymentIntents.update.mock.calls[0];
     expect(params.amount).toBe(25000);
     expect(params.amount_details).toBe('');
@@ -308,25 +304,26 @@ describe('StripeService.finalizeStatementPayment stale surcharge clear', () => {
     expect(updateOpts).toEqual({ apiVersion: expect.any(String) });
   });
 
-  test('clean no-fee finalize stays off the preview version and passes no amount_details', async () => {
+  test('credit finalize applies the surcharge breakdown', async () => {
+    stripeClient.paymentMethods.retrieve.mockResolvedValue({ id: 'pm-card', type: 'card', card: { funding: 'credit' } });
     const StripeService = require('../services/stripe');
-    await StripeService.finalizeStatementPayment(statementRow.id, quoteTokenFor());
+    const result = await StripeService.finalizeStatementPayment(statementRow.id, quoteTokenFor());
 
-    const [, params, updateOpts] = stripeClient.paymentIntents.update.mock.calls[0];
-    expect(params.amount).toBe(25000);
-    expect(params.amount_details).toBeUndefined();
-    expect(updateOpts).toBeUndefined();
+    expect(result.surcharge).toBe(7.25);
+    const [, params] = stripeClient.paymentIntents.update.mock.calls[0];
+    expect(params.amount).toBe(25725);
+    expect(params.amount_details).toEqual({ surcharge: { amount: 725, enforce_validation: 'enabled' } });
   });
 
-  test('falls back to updating without amount_details when the unset form is rejected', async () => {
-    stripeClient.paymentIntents.retrieve.mockResolvedValue({
-      id: 'pi_existing',
-      status: 'requires_payment_method',
-      amount_details: { surcharge: { amount: 725 } },
-    });
+  test('unset-rejected fallback verifies the PI is clean before confirming', async () => {
     stripeClient.paymentIntents.update
       .mockRejectedValueOnce(new Error('amount_details unset not supported'))
       .mockResolvedValueOnce({});
+    stripeClient.paymentIntents.retrieve.mockResolvedValue({
+      id: 'pi_existing',
+      status: 'requires_payment_method',
+      amount_details: null,
+    });
     const StripeService = require('../services/stripe');
     const result = await StripeService.finalizeStatementPayment(statementRow.id, quoteTokenFor());
 
@@ -337,5 +334,21 @@ describe('StripeService.finalizeStatementPayment stale surcharge clear', () => {
     expect(fallbackParams.amount_details).toBeUndefined();
     expect(fallbackOpts).toBeUndefined();
     expect(stripeClient.paymentIntents.confirm).toHaveBeenCalled();
+  });
+
+  test('unset-rejected fallback NEVER confirms while surcharge residue remains', async () => {
+    stripeClient.paymentIntents.update
+      .mockRejectedValueOnce(new Error('amount_details unset not supported'))
+      .mockResolvedValueOnce({});
+    stripeClient.paymentIntents.retrieve.mockResolvedValue({
+      id: 'pi_existing',
+      status: 'requires_payment_method',
+      amount_details: { surcharge: { amount: 725 } },
+    });
+    const StripeService = require('../services/stripe');
+
+    await expect(StripeService.finalizeStatementPayment(statementRow.id, quoteTokenFor()))
+      .rejects.toThrow(/pending card fee/);
+    expect(stripeClient.paymentIntents.confirm).not.toHaveBeenCalled();
   });
 });
