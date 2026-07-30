@@ -2087,6 +2087,9 @@ router.get('/:serviceId/card-hold', async (req, res, next) => {
 router.put('/:serviceId/status', async (req, res, next) => {
   try {
     const { status: toStatus, notes, lat, lng, notifyCustomer, scope = 'this_only' } = req.body;
+    // Populated by the single-cancel branch when a cancellation text was
+    // requested — surfaces send failures in the response.
+    let cancelNoticeOutcome = null;
     const svc = await db('scheduled_services').where('scheduled_services.id', req.params.serviceId)
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
@@ -2505,8 +2508,13 @@ router.put('/:serviceId/status', async (req, res, next) => {
     } else if (toStatus === 'cancelled') {
       try {
         const AppointmentReminders = require('../services/appointment-reminders');
+        // Out-param so the response can tell the operator the cancel
+        // committed but the requested text didn't go out (missing reminder
+        // row/phone, consent block, provider failure).
+        cancelNoticeOutcome = notifyCustomer !== false ? {} : null;
         await AppointmentReminders.handleCancellation(svc.id, {
           sendNotification: notifyCustomer !== false,
+          ...(cancelNoticeOutcome ? { outcome: cancelNoticeOutcome } : {}),
         });
       } catch (e) { logger.error(`[admin-dispatch] cancellation reminder handling failed: ${e.message}`); }
 
@@ -2633,7 +2641,15 @@ router.put('/:serviceId/status', async (req, res, next) => {
       description: `${svc.tech_name} marked ${svc.service_type} as ${toStatus} for ${svc.first_name}`,
     });
 
-    res.json({ success: true });
+    res.json({
+      success: true,
+      ...(cancelNoticeOutcome && cancelNoticeOutcome.notificationSent !== undefined
+        ? {
+            notificationSent: cancelNoticeOutcome.notificationSent,
+            notificationError: cancelNoticeOutcome.notificationError || null,
+          }
+        : {}),
+    });
   } catch (err) { next(err); }
 });
 

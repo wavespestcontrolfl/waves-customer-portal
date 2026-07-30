@@ -144,10 +144,18 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh }
       else if (bulkAction === 'cancel') payload = { waiveCardHoldFee: bulkWaiveCardHoldFee, notifyCustomer: bulkNotify === 'text' };
       else if (bulkAction === 'mark_prepaid') payload = { totalAmount: Number(bulkPrepaidAmount), method: bulkPrepaidMethod };
 
-      await adminFetch('/admin/schedule/bulk-action', {
+      const res = await adminFetch('/admin/schedule/bulk-action', {
         method: 'POST',
         body: JSON.stringify({ action: bulkAction, serviceIds: Array.from(selected), payload }),
       });
+      // The batch itself committed, but some requested texts didn't go out —
+      // tell the operator before the selection (and its context) is cleared.
+      if (bulkNotify === 'text' && Array.isArray(res?.notificationFailures) && res.notificationFailures.length > 0) {
+        const lines = res.notificationFailures.slice(0, 8).map(f => `• ${f.reason}`);
+        window.alert(
+          `${bulkAction === 'cancel' ? 'Cancelled' : 'Rescheduled'}, but ${res.notificationFailures.length} customer(s) were not texted:\n${lines.join('\n')}`,
+        );
+      }
       setSelected(new Set());
       setBulkAction('');
       // One decision per bulk cancel: never let a checked waive leak into

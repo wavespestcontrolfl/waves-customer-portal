@@ -1588,14 +1588,17 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
 
   // The reschedule-text choice only appears (and only sends) when the save
   // actually moves the visit: a new date or a new arrival start. End-time-only
-  // resizes don't change the arrival and stay silent.
+  // resizes don't change the arrival and stay silent. A date-only visit (no
+  // arrival time picked) never offers a text — there is no arrival window to
+  // promise the customer.
   const initialScheduledDate = service.scheduledDate
     ? String(service.scheduledDate).split("T")[0]
     : "";
   const initialWindowStart = service.windowStart || "";
   const scheduleMoved =
-    form.scheduledDate !== initialScheduledDate ||
-    (form.windowStart || "") !== initialWindowStart;
+    (form.scheduledDate !== initialScheduledDate ||
+      (form.windowStart || "") !== initialWindowStart) &&
+    !!form.windowStart;
 
   const handleSave = async ({ takePayment = false } = {}) => {
     setSaving(true);
@@ -1759,7 +1762,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       return;
     }
     try {
-      await adminFetch(`/admin/dispatch/${service.id}/status`, {
+      const result = await adminFetch(`/admin/dispatch/${service.id}/status`, {
         method: "PUT",
         body: JSON.stringify({
           status: "cancelled",
@@ -1769,6 +1772,14 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
           notes: "Cancelled from Edit appointment",
         }),
       });
+      if (
+        cancelNotificationType === "text" &&
+        result?.notificationSent === false
+      ) {
+        alert(
+          `Appointment cancelled, but the text failed: ${result.notificationError || "customer was not notified"}`,
+        );
+      }
       setCancelOpen(false);
       onSaved?.();
     } catch (e) {

@@ -309,7 +309,7 @@ export default function MobileAppointmentDetailSheet({
     const { proceed, waiveCardHoldFee } = await confirmCardHoldFeeChoice(service.id);
     if (!proceed) { setActionBusy(''); return; }
     try {
-      await adminFetch(`/admin/dispatch/${service.id}/status`, {
+      const result = await adminFetch(`/admin/dispatch/${service.id}/status`, {
         method: 'PUT',
         body: JSON.stringify({
           status: 'cancelled',
@@ -317,6 +317,9 @@ export default function MobileAppointmentDetailSheet({
           waiveCardHoldFee,
         }),
       });
+      if (cancelNotificationType === 'text' && result?.notificationSent === false) {
+        alert(`Appointment cancelled, but the text failed: ${result.notificationError || 'customer was not notified'}`);
+      }
       setConfirmingCancel(false);
       onCancelled?.(service);
       onClose?.();
