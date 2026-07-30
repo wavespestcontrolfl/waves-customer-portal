@@ -1671,20 +1671,22 @@ describe('newsletter assembly — Beehiiv-parity event rendering', () => {
 describe('DB-locked prices vs the hallucinated-claim scan', () => {
   const { findHallucinatedClaims } = require('../services/newsletter-validator');
 
-  test('a locked price string passes; any other dollar amount still hard-blocks', () => {
-    const body = '<p>Tickets run From $25 and the show slaps.</p>';
-    expect(findHallucinatedClaims(body, ['From $25'])).toEqual([]);
-    expect(findHallucinatedClaims(body, [])).toEqual(
+  test('marker-bound: renderer-shaped locked prices pass; the same value bare in prose still blocks', () => {
+    expect(findHallucinatedClaims('<p>🎟️ From $25</p>', ['From $25'])).toEqual([]);
+    expect(findHallucinatedClaims('Tickets: From $25', ['From $25'])).toEqual([]);
+    // Exact-value collision in commentary is NOT excised — the model
+    // repeating the value is not the renderer emitting the field.
+    expect(findHallucinatedClaims('<p>Win $25 cash at the raffle!</p>', ['$25'])).toEqual(
       expect.arrayContaining([expect.stringContaining('dollar amount in body')]),
     );
-    const sneaky = '<p>Tickets run From $25 but VIP is $99.</p>';
+    const sneaky = '<p>🎟️ From $25 but VIP is $99.</p>';
     expect(findHallucinatedClaims(sneaky, ['From $25'])).toEqual(
       expect.arrayContaining([expect.stringContaining('dollar amount in body')]),
     );
   });
 
-  test('excision is boundary-bound: a locked prefix cannot hollow out a larger invented amount or word', () => {
-    expect(findHallucinatedClaims('<p>VIP packages hit $250 tonight.</p>', ['$25'])).toEqual(
+  test('excision is boundary-bound: a locked prefix cannot hollow out a larger invented amount', () => {
+    expect(findHallucinatedClaims('<p>🎟️ $250 tonight.</p>', ['$25'])).toEqual(
       expect.arrayContaining([expect.stringContaining('dollar amount in body')]),
     );
     expect(findHallucinatedClaims('<p>Enjoy free admission all day.</p>', ['Free'])).toEqual(
@@ -1692,9 +1694,9 @@ describe('DB-locked prices vs the hallucinated-claim scan', () => {
     );
   });
 
-  test('excision normalizes like the body scan — entity/homoglyph forms cannot dodge it', () => {
-    expect(findHallucinatedClaims('<p>Entry: From&nbsp;&#36;25</p>', ['From $25'])).toEqual([]);
-    expect(findHallucinatedClaims('<p>Free admission · paid parking</p>', ['Free admission · paid parking'])).toEqual([]);
+  test('excision normalizes like the body scan — entity forms cannot dodge it', () => {
+    expect(findHallucinatedClaims('<p>🎟️ From&nbsp;&#36;25</p>', ['From $25'])).toEqual([]);
+    expect(findHallucinatedClaims('<p>🎟️ Free admission · paid parking</p>', ['Free admission · paid parking'])).toEqual([]);
   });
 
   test('assembled meta-box price validates cleanly with the lineup lock, blocks without it', async () => {
@@ -1791,7 +1793,7 @@ describe('tiered event treatment (owner direction 2026-07-29)', () => {
       signoff: '— The Waves Team',
     });
     expect(text).toContain('== Official Event 1 ==');
-    expect(text).toContain('Friday, June 12 at 8:00 PM | Venue 1, Sarasota | From $25');
+    expect(text).toContain('Friday, June 12 at 8:00 PM | Venue 1, Sarasota | Tickets: From $25');
     expect(text).toContain('Tickets & info: https://example.com/ev1');
     expect(text).toContain('FREE');
     // Hero furniture serializes (first event only).

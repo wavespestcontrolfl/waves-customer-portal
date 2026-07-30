@@ -67,18 +67,19 @@ function findHallucinatedClaims(body, lockedPrices = []) {
     .replace(/\s+/g, ' ');
   // DB-locked price strings (events_raw.price_text for the send's own
   // lineup — fetched by the caller via lockedPricesForSend) are the ONE
-  // legitimate pricing source and are excised before the scan, after the
-  // SAME normalization the body got so entity/homoglyph forms can't
-  // dodge the excision. Excision is BOUNDARY-BOUND: only complete
-  // occurrences match — a locked "$25" can't hollow out an invented
-  // "$250" into a passing "0", and a locked "Free" can't erase the word
-  // from an unrelated claim. Anything priced that ISN'T the complete
-  // verbatim DB string still hard-blocks.
+  // legitimate pricing source. Excision is MARKER-BOUND and boundary-
+  // bound: only the renderer's own shapes are excised — "🎟️ <price>"
+  // (HTML meta box / shortlist meta line) and "Tickets: <price>" (the
+  // plain-text facts line) — with a trailing word boundary so a locked
+  // "$25" can't hollow an invented "$250". A bare exact-value collision
+  // in prose ("Win $25 cash" when some event costs $25) still blocks:
+  // the model repeating the VALUE is not the same as the renderer
+  // emitting the FIELD.
   for (const price of lockedPrices) {
     const norm = decodeEntities(String(price || '')).normalize('NFKC').replace(/\s+/g, ' ').trim();
     if (!norm) continue;
     const esc = norm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    bodyText = bodyText.replace(new RegExp(`(?<![\\w$])${esc}(?![\\w])`, 'g'), ' ');
+    bodyText = bodyText.replace(new RegExp(`(?:🎟️|Tickets:)\\s*${esc}(?![\\w])`, 'gu'), ' ');
   }
   const seen = new Set();
   const errors = [];

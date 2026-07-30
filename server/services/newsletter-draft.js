@@ -1609,7 +1609,9 @@ function buildFlagshipTextBody(draft) {
     if (ev.dateStr) facts.push(ev.timeStr ? `${ev.dateStr} at ${ev.timeStr}` : ev.dateStr);
     if (ev.location) facts.push(ev.location);
     if (ev.isFree) facts.push('FREE');
-    else if (ev.priceText) facts.push(ev.priceText);
+    // "Tickets:" marker on purpose — the claim scan only excises locked
+    // prices in the renderer's own marker-bound shapes.
+    else if (ev.priceText) facts.push(`Tickets: ${ev.priceText}`);
     if (facts.length) lines.push(facts.join(' | '));
     const url = safeUrl(ev.eventUrl);
     if (url) lines.push(`Tickets & info: ${url}`);
@@ -1898,8 +1900,14 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
   //     block draft creation — the send gate remains the hard stop.
   if (typeConfig?.flagship) {
     const { findHallucinatedClaims } = require('./newsletter-validator');
+    // Same lock list the send-time gate uses — without it every
+    // DB-rendered price would log a false hallucination warning here.
+    const draftLockedPrices = (draft.events || [])
+      .map((ev) => (typeof ev.priceText === 'string' ? ev.priceText : ''))
+      .filter(Boolean);
     const claimErrors = findHallucinatedClaims(
       [draft.htmlBody, draft.textBody].filter(Boolean).join('\n'),
+      draftLockedPrices,
     );
     if (claimErrors.length > 0) {
       draft.hallucinationErrors = claimErrors;
