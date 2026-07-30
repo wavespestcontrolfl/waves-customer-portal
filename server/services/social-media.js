@@ -1278,7 +1278,9 @@ async function watermarkGbpImage(imageUrl) {
       }])
       .jpeg({ quality: 88 })
       .toBuffer();
-    const hash = require('crypto').createHash('sha1').update(src).digest('hex').slice(0, 12);
+    // Key on source AND logo bytes — a logo-asset swap mints new objects
+    // instead of overwriting CDN-cached keys with different pixels.
+    const hash = require('crypto').createHash('sha1').update(src).update(logo).digest('hex').slice(0, 12);
     const url = await uploadImageToS3(composited.toString('base64'), `gbp-wm-${hash}.jpg`);
     const out = url || imageUrl;
     _gbpWatermarkCache.set(imageUrl, { out, at: Date.now() });
