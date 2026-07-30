@@ -21,6 +21,18 @@ const DISPLAY_DEFAULTS = {
   regular_standalone: { name: 'Cockroach Treatment', treatments: 1 },
 };
 
+// Order-insensitive structural comparison. pricing_config.data is jsonb —
+// PostgreSQL does not preserve object-key insertion order, so a plain
+// JSON.stringify equality against DISPLAY_DEFAULTS can miss an unchanged
+// block purely because the keys came back reordered.
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map((k) => `${JSON.stringify(k)}:${canonicalJson(value[k])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
 async function loadPestBase(knex) {
   if (!(await knex.schema.hasTable('pricing_config'))) return null;
   const row = await knex('pricing_config').where({ config_key: 'pest_base' }).first();
@@ -67,7 +79,8 @@ exports.up = async function up(knex) {
 
 exports.down = async function down(knex) {
   // Only strip the display block if this migration's up() created it (keyed
-  // off the audit row) AND it is still byte-identical to what up() seeded —
+  // off the audit row) AND it is still structurally identical to what up()
+  // seeded —
   // an admin who tuned the name/treatment count AFTER the migration ran must
   // keep those edits through a rollback (seed rollbacks are never
   // destructive). No audit table means no proof of ownership; leave data
@@ -83,7 +96,7 @@ exports.down = async function down(knex) {
   const { data } = loaded;
   const ir = data.initial_roach;
   if (!ir || typeof ir !== 'object' || Array.isArray(ir) || !ir.display) return;
-  if (JSON.stringify(ir.display) !== JSON.stringify(DISPLAY_DEFAULTS)) return;
+  if (canonicalJson(ir.display) !== canonicalJson(DISPLAY_DEFAULTS)) return;
   const { display, ...rest } = ir;
   const newData = { ...data, initial_roach: rest };
   await savePestBase(

@@ -17592,6 +17592,26 @@ async function buildPricingBundleInner(estimate) {
       waivedWithPrepay: enginePrepayEligible,
     });
   }
+  // Cockroach Treatment first-visit fee — mirror the v1 branch's fee card.
+  // Engine-input estimates (Agent estimates / quote wizard) carry the roach
+  // line in anchorEngineResult.lineItems; without this push the recurring
+  // view (which suppresses OneTimeBreakdownCard when the one-time choice is
+  // shown) never displays the configured name, price, or treatment count.
+  const engineRoachLine = Array.isArray(anchorEngineResult?.lineItems)
+    ? anchorEngineResult.lineItems.find((li) => li && li.service === 'pest_initial_roach' && Number(li.price) > 0)
+    : null;
+  if (engineRoachLine) {
+    const engineRoachTreatments = Number(engineRoachLine.treatments);
+    engineFirstVisitFees.push({
+      service: 'pest_initial_roach',
+      amount: Number(engineRoachLine.price) || 0,
+      label: engineRoachLine.label || engineRoachLine.name || 'Cockroach Treatment',
+      ...(Number.isFinite(engineRoachTreatments) && engineRoachTreatments > 0
+        ? { treatments: Math.round(engineRoachTreatments) }
+        : {}),
+      waivedWithPrepay: false,
+    });
+  }
 
   const payload = finalizePricingBundle(withManualDiscount({
     frequencies,

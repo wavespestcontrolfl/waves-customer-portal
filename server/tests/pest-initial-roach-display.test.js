@@ -92,6 +92,58 @@ describe('pest_initial_roach display config', () => {
     expect(item.name).toBe('Cockroach Treatment');
   });
 
+  test('db-bridge reverts a species to code defaults when the row stops carrying it', async () => {
+    const dbFor = (display) => {
+      const rows = [{ config_key: 'pest_base', data: JSON.stringify({ base: 117, initial_roach: { display } }) }];
+      const db = (table) => {
+        const query = {
+          select: jest.fn(async () => (table === 'pricing_config' ? rows : [])),
+          orderBy: jest.fn(() => query),
+          then: (resolve) => resolve([]),
+        };
+        return query;
+      };
+      db.schema = { hasTable: jest.fn(async () => true) };
+      return db;
+    };
+
+    // Sync 1: admin customized the german entry.
+    await syncConstantsFromDB(dbFor({ german: { name: 'German Roach Rescue', treatments: 3 } }));
+    expect(constants.PEST.pestInitialRoach.display.german).toEqual({ name: 'German Roach Rescue', treatments: 3 });
+
+    // Sync 2: the row no longer carries german (removed via Raw JSON). The
+    // merge rebases on the pristine in-code defaults, so the customization
+    // must revert NOW — not at the next process restart (codex P2, PR #3078).
+    await syncConstantsFromDB(dbFor({ regular: { name: 'Roach Rescue', treatments: 2 } }));
+    expect(constants.PEST.pestInitialRoach.display.german).toEqual({ name: 'German Cockroach Treatment', treatments: 1 });
+    expect(constants.PEST.pestInitialRoach.display.regular).toEqual({ name: 'Roach Rescue', treatments: 2 });
+  });
+
+  test('engine-invocation estimates surface the roach fee card with treatments', async () => {
+    // Agent estimates persist raw engineInputs (no v1 result shape), so the
+    // pricing bundle takes the engine-invocation branch — it must push the
+    // same pest_initial_roach first-visit fee the v1 branch does, or the
+    // recurring view never shows the configured name/count (codex P2).
+    const { buildPricingBundle } = require('../routes/estimate-public');
+    const bundle = await buildPricingBundle({
+      id: 'estimate-test-roach-engine-branch',
+      status: 'draft',
+      waveguard_tier: 'Bronze',
+      estimate_data: {
+        engineInputs: {
+          homeSqFt: 2000,
+          services: { pest: { frequency: 'quarterly', roachType: 'regular' } },
+        },
+      },
+    });
+    const roachFee = (bundle.firstVisitFees || []).find((f) => f.service === 'pest_initial_roach');
+    expect(roachFee).toBeTruthy();
+    expect(roachFee.amount).toBe(139);
+    expect(roachFee.label).toBe('Cockroach Treatment');
+    expect(roachFee.treatments).toBe(1);
+    expect(roachFee.waivedWithPrepay).toBe(false);
+  });
+
   test('db-bridge merges a partial display blob and ignores invalid values', async () => {
     const rows = [{
       config_key: 'pest_base',
@@ -213,6 +265,25 @@ describe('20260730110000 seed migration', () => {
     });
     await migration.down(unowned.knex);
     expect(unowned.state.updated).toBeNull();
+  });
+
+  test('down() strips a seeded block even when jsonb reordered its keys', async () => {
+    // pricing_config.data is jsonb — Postgres does not preserve object-key
+    // insertion order, so the block can come back with species (and inner
+    // keys) reordered while still being exactly what up() seeded. The
+    // rollback comparison must be structural, not string-order (codex P2).
+    const reordered = {
+      german: { treatments: 1, name: 'German Cockroach Treatment' },
+      regular_standalone: { treatments: 1, name: 'Cockroach Treatment' },
+      regular: { treatments: 1, name: 'Cockroach Treatment' },
+    };
+    const { knex, state } = fakeKnex({
+      pestBaseData: { base: 117, initial_roach: { display: reordered } },
+      auditRows: [OWNING_AUDIT_ROW],
+    });
+    await migration.down(knex);
+    expect(state.updated).toBeTruthy();
+    expect(JSON.parse(state.updated.data).initial_roach.display).toBeUndefined();
   });
 
   test('down() preserves a display block the admin edited after the migration ran', async () => {
