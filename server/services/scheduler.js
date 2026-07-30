@@ -3545,15 +3545,21 @@ function initScheduledJobs() {
         if (recon.created || recon.failed) {
           logger.info(`Termite agreement reconciliation: ${recon.checked} checked, ${recon.created} created, ${recon.failed} failed`);
         }
+        // Reminders run INSIDE the same exclusive section, strictly after
+        // reconciliation: on a skipped tick (another dyno holds the lock)
+        // a non-holder must not nudge customers to sign requests the
+        // holder is mid-cancelling. Reminder sends are sweep-style, so a
+        // skipped tick's reminders go out with the holder's run or the
+        // next tick.
+        try {
+          const reminders = await processDueDocumentReminders();
+          logger.info(`Document workflow done: ${expiredCount} expired, ${reminders?.sent || 0} reminder(s) sent, ${reminders?.failed || 0} failed`);
+        } catch (err) {
+          logger.error(`Document request reminders failed: ${err.message}`);
+        }
       });
     } catch (err) {
       logger.error(`Termite agreement reconciliation failed: ${err.message}`);
-    }
-    try {
-      const reminders = await processDueDocumentReminders();
-      logger.info(`Document workflow done: ${expiredCount} expired, ${reminders?.sent || 0} reminder(s) sent, ${reminders?.failed || 0} failed`);
-    } catch (err) {
-      logger.error(`Document request reminders failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

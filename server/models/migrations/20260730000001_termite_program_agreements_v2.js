@@ -861,6 +861,17 @@ exports.down = async function down(knex) {
           }
           continue;
         }
+        // A source whose token died while cancelled restores as 'expired',
+        // and the reconciliation anti-join then treats it as an existing
+        // contract: retiring its replacement too would leave the estimate
+        // with NO live agreement and no automatic path back. Keep the
+        // deactivated replacement as coverage instead — the daily
+        // stale-version sweep cancels and re-preps it from the restored
+        // version under full supersession discipline.
+        if (source.share_token_expires_at && new Date(source.share_token_expires_at) < new Date()) {
+          replacementSameProperty = true;
+          continue;
+        }
         // Open on a version this rollback just DEACTIVATED (the sweep's v2
         // re-prep): it must not stay signable while the prior wording is
         // authoritative again — retire it now instead of leaving it live
