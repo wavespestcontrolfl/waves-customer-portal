@@ -1827,3 +1827,88 @@ describe('estimate sent/viewed — standalone-estimate contact rescue', () => {
     expect(database._activities).toEqual([]);
   });
 });
+
+// ── stampFirstResponseByContact (loose SLA stamp, 2026-07-30) ──────────────
+// Chain-aware harness: the contact query is a thenable knex chain
+// (whereNull/whereNotNull/whereNotIn/where), unlike makeDb's lookup shapes.
+const { stampFirstResponseByContact } = require('../services/lead-estimate-link');
+
+function makeContactDb({ leads = [], estimate = null } = {}) {
+  const updates = [];
+  const activities = [];
+  const database = (table) => {
+    let lastWhere = null;
+    const q = {
+      whereNull: () => q,
+      whereNotNull: () => q,
+      whereNotIn: () => q,
+      where: (clause) => {
+        if (clause && typeof clause === 'object') lastWhere = clause;
+        return q;
+      },
+      first: async () => (table === 'estimates' ? estimate : null),
+      update: async (patch) => { updates.push({ table, clause: lastWhere, patch }); return 1; },
+      insert: async (row) => { activities.push({ table, row }); return [row]; },
+      then: (resolve, reject) => Promise.resolve(table === 'leads' ? leads : []).then(resolve, reject),
+    };
+    return q;
+  };
+  return { database, updates, activities };
+}
+
+describe('stampFirstResponseByContact', () => {
+  test('stamps EVERY open matching lead, even when the contact is ambiguous', async () => {
+    const twelveMinAgo = new Date(Date.now() - 12 * 60000).toISOString();
+    const leads = [
+      { id: 'lead-a', status: 'new', phone: '9415550101', first_contact_at: twelveMinAgo, response_time_minutes: null },
+      { id: 'lead-b', status: 'new', phone: '9415550101', first_contact_at: twelveMinAgo, response_time_minutes: null },
+    ];
+    const { database, updates, activities } = makeContactDb({ leads });
+
+    const stamped = await stampFirstResponseByContact({
+      database,
+      phone: '+1 (941) 555-0101',
+      performedBy: 'admin:tech-1',
+    });
+
+    expect(stamped).toBe(2);
+    const leadUpdates = updates.filter((u) => u.table === 'leads');
+    expect(leadUpdates).toHaveLength(2);
+    for (const u of leadUpdates) {
+      expect(u.patch).toHaveProperty('response_time_minutes');
+      expect(u.patch).not.toHaveProperty('status');
+      expect(u.patch).not.toHaveProperty('estimate_id');
+    }
+    expect(activities.filter((a) => a.table === 'lead_activities')).toHaveLength(2);
+  });
+
+  test('no-op without a phone or email, and skips already-stamped leads', async () => {
+    const { database, updates } = makeContactDb({ leads: [] });
+    expect(await stampFirstResponseByContact({ database })).toBe(0);
+    expect(updates).toHaveLength(0);
+
+    const stampedLead = {
+      id: 'lead-c', status: 'new', phone: '9415550102',
+      first_contact_at: new Date().toISOString(), response_time_minutes: 5,
+    };
+    const harness = makeContactDb({ leads: [stampedLead] });
+    // recordFirstResponseIfNeeded refuses an already-stamped lead.
+    await stampFirstResponseByContact({ database: harness.database, phone: '9415550102' });
+    expect(harness.updates.filter((u) => u.table === 'leads')).toHaveLength(0);
+  });
+
+  test('respondedAt backfills historical minutes instead of stamping from now', async () => {
+    const firstContact = new Date('2026-07-10T12:00:00Z');
+    const lead = { id: 'lead-d', status: 'new', phone: '9415550103', first_contact_at: firstContact.toISOString(), response_time_minutes: null };
+    const { database, updates } = makeContactDb({ leads: [lead] });
+
+    await stampFirstResponseByContact({
+      database,
+      phone: '9415550103',
+      respondedAt: new Date('2026-07-10T12:45:00Z'),
+    });
+
+    const [u] = updates.filter((x) => x.table === 'leads');
+    expect(u.patch.response_time_minutes).toBe(45);
+  });
+});

@@ -455,6 +455,20 @@ router.post('/sms', async (req, res, next) => {
       });
     }
 
+    // A reply from the Comms composer is a first response to any open lead
+    // with this phone — stamp the Speed-to-Lead clock (SLA truth only; lead
+    // status/linkage untouched). Operator-approved AI drafts count too: a
+    // human chose to send them. Fail-soft — bookkeeping never breaks a send.
+    try {
+      const { stampFirstResponseByContact } = require('../services/lead-estimate-link');
+      await stampFirstResponseByContact({
+        phone: to,
+        performedBy: req.technicianId ? `admin:${req.technicianId}` : 'admin',
+      });
+    } catch (stampErr) {
+      logger.warn(`[admin-communications] first-response stamp failed: ${stampErr.message}`);
+    }
+
     if (verifiedAgentDecision && verifiedAgentDraft) {
       const draftMatched = normalizeReplyForComparison(cleanBody) === normalizeReplyForComparison(verifiedAgentDraft);
       try {

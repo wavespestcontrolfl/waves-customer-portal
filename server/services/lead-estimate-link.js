@@ -300,6 +300,41 @@ async function linkRescuedLead(database, lead, estimate, performedBy) {
   return current && String(current.estimate_id) === String(estimate.id) ? 'already_ours' : 'conflict';
 }
 
+// SLA truth, decoupled from attribution. An estimate or human reply delivered
+// to a contact IS a first response to EVERY open lead carrying that phone or
+// email — even when the strict linkage tiers refuse to link/advance
+// (ambiguous match, non-originating add-on inquiry, prior won lead). Those
+// guards protect funnel attribution; they must not leave answered leads
+// counting as "still waiting" in the Speed-to-Lead backlog forever (52-lead
+// pileup found in the 2026-07-30 audit — 6 of them had sent estimates).
+// Stamps response_time_minutes only — never status, never estimate_id, never
+// the funnel bridge.
+async function stampFirstResponseByContact({ database = db, phone = null, email = null, performedBy = 'system', respondedAt = null }) {
+  const normPhone = normalizePhone(phone);
+  const normEmail = normalizeEmail(email);
+  if (!normPhone && !normEmail) return 0;
+  let stamped = 0;
+  try {
+    const leads = await database('leads')
+      .whereNull('deleted_at')
+      .whereNull('response_time_minutes')
+      .whereNotNull('first_contact_at')
+      .whereNotIn('status', [...CLOSED_LEAD_STATUSES])
+      .where(function contactMatch() {
+        if (normPhone) this.orWhereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [normPhone]);
+        if (normEmail) this.orWhereRaw("LOWER(TRIM(COALESCE(email, ''))) = ?", [normEmail]);
+      });
+    for (const lead of leads) {
+      await recordFirstResponseIfNeeded(database, lead, performedBy, respondedAt);
+      stamped += 1;
+    }
+  } catch (e) {
+    // SLA bookkeeping must never break a send.
+    logger.warn(`[lead-estimate-link] first-response contact stamp failed: ${e.message}`);
+  }
+  return stamped;
+}
+
 async function markLinkedLeadEstimateSent({ estimateId, sendMethod, performedBy = 'system', database = db, originatingNotAfter = null, respondedAt = null }) {
   if (!estimateId) return;
   const { leads, rescued, estimate } = await resolveEstimateEventLeads(database, estimateId, { originatingNotAfter });
@@ -333,6 +368,25 @@ async function markLinkedLeadEstimateSent({ estimateId, sendMethod, performedBy 
       performed_by: performedBy,
       metadata: JSON.stringify({ estimateId, sendMethod: sendMethod || 'both' }),
     });
+  }
+  // Loose SLA stamp for every OTHER open lead with this estimate's contact —
+  // the strict loop above only reaches leads the attribution guards accepted.
+  // recordFirstResponseIfNeeded no-ops on anything already stamped, so leads
+  // handled above are not double-stamped. Fail-soft like the stamp itself:
+  // SLA bookkeeping never breaks a send.
+  try {
+    const estimateRow = estimate || await database('estimates').where({ id: estimateId }).first();
+    if (estimateRow) {
+      await stampFirstResponseByContact({
+        database,
+        phone: estimateRow.customer_phone,
+        email: estimateRow.customer_email,
+        performedBy,
+        respondedAt,
+      });
+    }
+  } catch (e) {
+    logger.warn(`[lead-estimate-link] post-send contact stamp lookup failed for estimate ${estimateId}: ${e.message}`);
   }
 }
 
@@ -1179,6 +1233,7 @@ module.exports = {
   markLinkedLeadEstimateSent,
   markLinkedLeadEstimateViewed,
   markLinkedLeadEstimateAccepted,
+  stampFirstResponseByContact,
   resolveEstimateEventLeads,
   convertLeadFromEvent,
   findUnconvertedLeadsByContact,
