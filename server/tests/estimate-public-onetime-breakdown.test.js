@@ -4,7 +4,6 @@ const jwt = require('jsonwebtoken');
 const config = require('../config');
 const {
   buildAcceptNotificationPayload,
-  buildAcceptOfficeFallback,
   buildAcceptSuccessPayload,
   acceptedOneTimeChoiceListForEstimate,
   acceptanceServiceLists,
@@ -7654,64 +7653,7 @@ describe('public estimate one-time breakdown', () => {
     }));
   });
 
-  test('accept office fallback reflects one-time appointment and invoice next steps', () => {
-    expect(buildAcceptOfficeFallback({
-      customerName: 'Jane Doe',
-      address: '123 Main St',
-      serviceLabel: 'Rodent Service',
-      treatAsOneTime: true,
-      reservationCommitted: true,
-    })).toBe('One-time estimate accepted by Jane Doe at 123 Main St - Rodent Service. Appointment confirmed.');
-
-    expect(buildAcceptOfficeFallback({
-      customerName: 'Jane Doe',
-      address: '123 Main St',
-      serviceLabel: 'Rodent Service',
-      treatAsOneTime: true,
-    })).toBe('One-time estimate accepted by Jane Doe at 123 Main St - Rodent Service. Booking link sent.');
-
-    expect(buildAcceptOfficeFallback({
-      customerName: 'Jane Doe',
-      address: '123 Main St',
-      waveguardTier: 'Gold',
-      monthlyTotal: 89,
-      billByInvoice: true,
-      invoiceMode: true,
-      invoiceLinkDelivered: true,
-      invoicePayUrl: '/pay/gold-token',
-    })).toBe('Estimate accepted by Jane Doe at 123 Main St - Gold WaveGuard $89.00/mo. Invoice pay link sent.');
-
-    expect(buildAcceptOfficeFallback({
-      customerName: 'Jane Doe',
-      address: '123 Main St',
-      waveguardTier: 'Bronze',
-      billingTerm: 'prepay_annual',
-      annualPrepayAmount: 660,
-      invoiceMode: true,
-      invoicePayUrl: '/pay/annual-token',
-    })).toBe('Estimate accepted by Jane Doe at 123 Main St - Bronze WaveGuard annual prepay $660.00. Invoice created; optional pay link available.');
-
-    expect(buildAcceptOfficeFallback({
-      customerName: null,
-      address: null,
-      waveguardTier: 'Bronze',
-      monthlyTotal: 89,
-      invoiceMode: true,
-      invoicePayUrl: '/pay/setup-token',
-    })).toBe('Estimate accepted by Unknown customer at address unavailable - Bronze WaveGuard $89.00/mo. Setup + first application invoice created; optional pay link available.');
-  });
-
   test('accept copy shows the as-proposed price when the customer selected a different plan', () => {
-    expect(buildAcceptOfficeFallback({
-      customerName: 'Jane Doe',
-      address: '123 Main St',
-      waveguardTier: 'Bronze',
-      monthlyTotal: 55.3,
-      proposedMonthlyTotal: 29.67,
-      invoiceMode: true,
-      invoicePayUrl: '/pay/setup-token',
-    })).toBe('Estimate accepted by Jane Doe at 123 Main St - Bronze WaveGuard $55.30/mo (proposed at $29.67/mo). Setup + first application invoice created; optional pay link available.');
-
     const payload = buildAcceptNotificationPayload({
       customerName: 'Jane Doe',
       waveguardTier: 'Bronze',
