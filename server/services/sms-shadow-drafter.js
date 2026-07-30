@@ -491,7 +491,7 @@ function sanitizeExemplarText(text) {
 // untrusted grounding text (property notes, call summaries, transcripts)
 // drops that line/entry — the drafter must never be handed repeatable
 // prohibited language.
-const SMS_COMPLIANCE_CLAIM_RE = /\b(?:pet|child|kid|family|people|human)s?[\s-]?safe\b|\bnon[\s-]?toxic\b|\bEPA[\s-]?(?:approved|registered|certified)\b|\bsafe\s+(?:for|around|to)\b|\bre-?entry\b[^.\n]{0,30}\d+\s*(?:min|minute|hour)|\bdry(?:ing)?\s*time\b[^.\n]{0,20}\d+/i;
+const SMS_COMPLIANCE_CLAIM_RE = /\b(?:pet|child|kid|family|people|human)s?[\s-]?safe\b|\bnon[\s-]?toxic\b|\bharmless\b|\bEPA[\s-]?(?:approved|registered|certified)\b|\bsafe\s+(?:for|around|to)\b|\b(?:is|are|was|were|be|being|been|it'?s|they'?re|stays?|remains?|totally|completely|perfectly|very|100%)\s+safe\b|\b(?:treatment|product|chemical|spray|application)s?\b[^.\n]{0,25}\bsafe\b|\bre-?entry\b[^.\n]{0,30}\d+\s*(?:min|minute|hour)|\bdry(?:ing)?\s*time\b[^.\n]{0,20}\d+/i;
 
 const EXEMPLAR_INJECTION_RE = /\b(ignore|disregard|forget|override)\b[^.]{0,40}\b(previous|prior|above|earlier|instruction|instructions|prompt|context|rule|rules)\b|system\s*prompt|you are now|\bact as\b|new instructions|```|<\/?[a-z][\w-]*>|\b(assistant|system|user)\s*:/i;
 function exemplarLooksClean(inbound, reply) {
@@ -904,16 +904,22 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // maybeAutoSend still refuses amount-bearing drafts (autonomy boundary —
     // relaxing that is a separate explicit owner call).
     //
-    // DETERMINISTIC source restriction (Codex r5): the verifier treats the
-    // customer's literal words as grounding, so "I think my balance is $50"
-    // could be confirmed verbatim. Every dollar figure in a deliverable
-    // reply must appear in the FACTS BLOCK itself — not merely somewhere in
-    // the conversation — or the draft stays silent shadow.
+    // DETERMINISTIC source restriction (Codex r5+r6): the verifier treats
+    // the customer's literal words as grounding, so "I think my balance is
+    // $50" could be confirmed verbatim — and the rendered facts block
+    // CONTAINS the SMS thread, so scanning it would whitelist the
+    // customer's own figure. The whitelist is therefore built from the
+    // AUTHORITATIVE billing/estimate VALUES in context, compared numerically
+    // (so "$120" matches a $120.00 fact).
+    const centsOf = (v) => Math.round(Number(v) * 100);
+    const authorizedCents = new Set([
+      context.billing?.outstandingBalance > 0 ? centsOf(context.billing.outstandingBalance) : null,
+      context.billing?.openInvoice?.amountDue != null ? centsOf(context.billing.openInvoice.amountDue) : null,
+      ...((context.billing?.recentPayments || []).map((p) => (p?.amount != null ? centsOf(p.amount) : null))),
+    ].filter((v) => Number.isFinite(v)));
     const replyAmounts = (parsed.reply.match(/\$\s?\d[\d,]*(?:\.\d{1,2})?/g) || [])
-      .map((a) => a.replace(/[\s,]/g, ''));
-    const factsAmounts = new Set((factsForDraft.match(/\$\s?\d[\d,]*(?:\.\d{1,2})?/g) || [])
-      .map((a) => a.replace(/[\s,]/g, '')));
-    const replyHasUngroundedAmount = replyAmounts.some((a) => !factsAmounts.has(a));
+      .map((a) => centsOf(a.replace(/[^\d.]/g, '')));
+    const replyHasUngroundedAmount = replyAmounts.some((a) => !authorizedCents.has(a));
     if (replyHasUngroundedAmount) {
       logger.warn(`[sms-shadow] draft quotes an amount absent from the facts block — kept shadow (customer=${customer?.id || 'unknown'} intent=${intentName})`);
     }

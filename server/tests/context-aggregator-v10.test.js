@@ -17,6 +17,15 @@ describe('redactAccessCodes — deterministic code masking', () => {
     expect(out).toContain('gate code');
   });
 
+  test('alphanumeric credentials mask too (codex r6: "gate code BLUE")', () => {
+    const out = redactAccessCodes('TECH ONLY: gate code BLUE 1234');
+    expect(out).not.toContain('BLUE');
+    expect(out).not.toContain('1234');
+    expect(redactAccessCodes('door code Sunset22')).not.toContain('Sunset22');
+    // no code noun in the segment → no alphanumeric pass, prose survives
+    expect(redactAccessCodes('close the gate so the dog stays in')).toContain('dog stays in');
+  });
+
   test('multiple codes in one string all mask; benign digits survive', () => {
     const out = redactAccessCodes('gate code 1234 and garage 5678; visit on July 15');
     expect(out).not.toContain('1234');

@@ -561,13 +561,21 @@ describe('v10 — full-account grounding', () => {
     expect(none).not.toContain('Payment method on file');
   });
 
-  test('dollar figures absent from the facts block keep a draft in shadow (codex r5 source guard)', () => {
-    // pure pieces exercised via buildFactsBlock: the guard compares reply
-    // amounts against the facts text — spot-check the normalization contract
-    const facts = buildFactsBlock({ summary: 'X', billing: { outstandingBalance: 120 } });
-    expect(facts).toContain('$120.00 outstanding');
-    // normalized forms must match: "$120.00" with/without spaces or commas
-    expect((facts.match(/\$\s?\d[\d,]*(?:\.\d{1,2})?/g) || []).map((a) => a.replace(/[\s,]/g, ''))).toContain('$120.00');
+  test('unqualified safety claims drop from grounded text (codex r6)', () => {
+    const block = buildFactsBlock({
+      summary: 'X',
+      recentCalls: [
+        { summary: 'Tech told them the treatment is safe.', direction: 'inbound', date: '2026-07-28T15:00:00Z' },
+        { summary: 'Customer asked about ants near the lanai.', direction: 'inbound', date: '2026-07-27T15:00:00Z' },
+      ],
+      propertyProfile: {
+        specialInstructions: 'Spray is harmless to the koi pond',
+        irrigation: false, gateCodeOnFile: false, garageCodeOnFile: false, lockboxOnFile: false,
+      },
+    });
+    expect(block).not.toContain('treatment is safe');
+    expect(block).not.toContain('harmless');
+    expect(block).toContain('ants near the lanai');
   });
 
   test('property notes carrying banned compliance claims drop; payer-billed note renders standalone', () => {

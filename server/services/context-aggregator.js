@@ -31,6 +31,15 @@ const ACCESS_CODE_RE = new RegExp(`\\b(${ACCESS_CODE_KEYWORDS})\\b([^\\n]{0,40}?
 // Reverse order too (Codex r5): "4545 is the gate code" — digits first,
 // keyword within the following window.
 const ACCESS_CODE_REVERSE_RE = new RegExp(`\\b(\\d{3,8})\\b([^\\n]{0,40}?)\\b(${ACCESS_CODE_KEYWORDS})\\b`, 'gi');
+// Non-numeric credentials (Codex r6: "gate code BLUE", "door pin BLUE 1234"):
+// inside any segment that carries BOTH an access keyword and a code noun,
+// every value-shaped token (digit run, ALLCAPS word, letter+digit mix) is
+// masked. Over-redaction is the safe direction for access text; the keyword
+// words themselves stay legible.
+const ACCESS_CODE_NOUN_RE = /\b(?:code|pin|combo|combination|passcode)\b/i;
+const ACCESS_CODE_CONTEXT_RE = new RegExp(`\\b(?:${ACCESS_CODE_KEYWORDS})\\b`, 'i');
+const ACCESS_CODE_VALUE_RE = /\b(?:\d{3,8}|[A-Z]{2,10}|[A-Za-z]*\d[A-Za-z0-9#*]*)\b/g;
+const ACCESS_CODE_STOPWORDS = new Set(['gate', 'garage', 'door', 'lockbox', 'lock', 'box', 'keypad', 'entry', 'access', 'alarm', 'pin', 'code', 'combo', 'combination', 'passcode', 'is', 'the', 'a', 'an', 'use', 'tech', 'only', 'for', 'to', 'and', 'or']);
 function redactAccessCodes(text) {
   let out = String(text || '');
   // repeat until stable: "gate code 1234 and garage 5678" needs both masked
@@ -41,6 +50,13 @@ function redactAccessCodes(text) {
     if (next === out) break;
     out = next;
   }
+  // Alphanumeric credential pass, per sentence-ish segment.
+  out = out.split(/([.;\n])/).map((seg) => {
+    if (!ACCESS_CODE_CONTEXT_RE.test(seg) || !ACCESS_CODE_NOUN_RE.test(seg)) return seg;
+    return seg.replace(ACCESS_CODE_VALUE_RE, (tok) => (
+      ACCESS_CODE_STOPWORDS.has(tok.toLowerCase()) ? tok : '[redacted]'
+    ));
+  }).join('');
   return out;
 }
 
@@ -125,7 +141,11 @@ class ContextAggregator {
         // and the canonical balance sums collectible own invoices.
         .whereNotIn('status', [...INVOICE_UNCOLLECTIBLE_STATUSES, 'draft'])
         .orderBy('created_at', 'desc')
-        .limit(6)
+        // aggregate over the FULL collectible set (Codex r6 — a display-sized
+        // limit truncated the balance and could hide the customer's own
+        // invoice behind newer payer-billed rows); 100 is a sanity ceiling,
+        // far above any real account.
+        .limit(100)
         .select('id', 'title', 'status', 'total', 'credit_applied', 'due_date', 'payer_id', 'created_at')
         .catch(() => []),
       // v10: lawn health scores — "how's my lawn doing" is a routine text.
