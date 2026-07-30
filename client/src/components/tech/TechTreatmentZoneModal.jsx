@@ -17,6 +17,7 @@ import {
   MAP_HEIGHT,
   MIN_TRACE_ZOOM,
   buildAlignedBase,
+  buildLawnHighlightMask,
   buildOutlineAccum,
   buildSettledAccum,
   composeSnapshot,
@@ -159,6 +160,10 @@ export default function TechTreatmentZoneModal({
   // flooded with the brand-blue wash on top of the perimeter band. Area
   // claim ⇒ requires a closed loop, same rule as lawn outlines.
   const [interior, setInterior] = useState(false);
+  // What the lawn SAVE actually rendered: 'highlight' | 'outline' | null.
+  // The status line must never claim a highlight when the save fell back to
+  // the outline (codex P1 #3075).
+  const [lawnRender, setLawnRender] = useState(null);
   const dragRef = useRef(null); // { index, moved } while a corner drag is live
   const traceRef = useRef(null);
   const canvasRef = useRef(null);
@@ -166,6 +171,12 @@ export default function TechTreatmentZoneModal({
   // Same-origin asset — no canvas taint; engine falls back to the circle
   // head until it loads.
   const logoRef = useRef(null);
+  // True once the CURRENT trace has saved successfully — Replay is
+  // presentation-only and must not re-POST/replace the S3 snapshot/bust the
+  // PDF cache (codex P2 #3075). Reset when the tech returns to the trace
+  // step (the trace may change); a FAILED save leaves it false so Replay
+  // doubles as a retry.
+  const savedOnceRef = useRef(false);
   useEffect(() => {
     const im = new Image();
     im.onload = () => { logoRef.current = im; };
@@ -314,11 +325,13 @@ export default function TechTreatmentZoneModal({
       let pts = data.suggestion.perimeter.map((pt) => ({ x: pt.x * MAP_WIDTH, y: pt.y * MAP_HEIGHT }));
       // Align the photo with the home (owner 2026-07-29): satellite tiles are
       // north-up, so homes on angled lots render crooked. The suggested
-      // footprint gives us the home's orientation — rotate the working frame
-      // so the walls sit square, and rotate the suggestion with it. Fail-soft:
-      // any hiccup keeps the north-up frame. Lawn boundaries are organic —
-      // no meaningful orientation to align to.
-      if (!lawnMode) {
+      // footprint gives us the property's orientation — rotate the working
+      // frame so it sits square, and rotate the suggestion with it.
+      // Fail-soft: any hiccup keeps the north-up frame. Lawn included (owner
+      // 2026-07-30 "do it for lawn"): suburban turf boundaries follow the
+      // rectangular lot, so their dominant angle is just as meaningful — and
+      // a genuinely organic loop averages out below the threshold anyway.
+      {
         const tilt = dominantAngleRad(pts, true);
         if (Math.abs(tilt) > ALIGN_MIN_ANGLE) {
           try {
@@ -384,17 +397,17 @@ export default function TechTreatmentZoneModal({
     setSaveState('saving');
     try {
       const { center, zoom, url, image, angle = 0 } = mapState;
-      // Align the SAVED frame with the home (owner 2026-07-29). Manual traces
-      // usually run on the north-up display — square the snapshot to the
-      // traced loop's own dominant angle so the customer report shows the
-      // home straight-on. Display-aligned frames (auto-trace) come through
-      // with tilt ≈ 0 and skip this. Fail-soft to the north-up save. Lawn
-      // outlines are organic — nothing meaningful to align to.
+      // Align the SAVED frame with the home (owner 2026-07-29; lawn included
+      // 2026-07-30). Manual traces usually run on the north-up display —
+      // square the snapshot to the traced loop's own dominant angle so the
+      // customer report shows the property straight-on. Display-aligned
+      // frames (auto-trace) come through with tilt ≈ 0 and skip this.
+      // Fail-soft to the north-up save.
       let finalPoints = points;
       let base = image;
       let baseUrl = url;
       let totalAngle = angle;
-      if (!lawnMode && MAPS_KEY) {
+      if (MAPS_KEY) {
         const tilt = dominantAngleRad(points, closed);
         if (Math.abs(tilt) > ALIGN_MIN_ANGLE) {
           try {
@@ -409,8 +422,33 @@ export default function TechTreatmentZoneModal({
           } catch { /* save the north-up frame */ }
         }
       }
+      let lawnMask = null;
+      if (lawnMode && closed) {
+        // Grass highlight for the SAVED snapshot (no box — owner
+        // 2026-07-30), built from the same (possibly aligned) base the
+        // snapshot composes over. A tainted canvas throws — retry from a
+        // CORS-checked re-fetch of the same tile (the exact bitmap
+        // composeSnapshot's own taint fallback will compose over), so the
+        // report keeps the grass highlight instead of silently downgrading
+        // to the outline (codex P2 #3075). A null return means "no turf
+        // found" — re-fetching can't change that, so the outline fallback
+        // is correct there (codex P1 #3075).
+        const maskArgs = { points: finalPoints, closed, width: MAP_WIDTH, height: MAP_HEIGHT };
+        try {
+          lawnMask = buildLawnHighlightMask({ source: base, ...maskArgs });
+        } catch {
+          try {
+            const bitmap = await createImageBitmap(await (await fetch(baseUrl)).blob());
+            lawnMask = buildLawnHighlightMask({ source: bitmap, ...maskArgs });
+          } catch { lawnMask = null; }
+        }
+      }
+      if (lawnMode) setLawnRender(lawnMask ? 'highlight' : 'outline');
       const accum = lawnMode
-        ? buildOutlineAccum({ width: MAP_WIDTH, height: MAP_HEIGHT, points: finalPoints, closed, color: MIST_COLOR })
+        ? (lawnMask || buildOutlineAccum({
+          width: MAP_WIDTH, height: MAP_HEIGHT, points: finalPoints, closed,
+          color: MIST_COLOR,
+        }))
         : buildSettledAccum({
           width: MAP_WIDTH, height: MAP_HEIGHT, points: finalPoints, closed,
           mistColor: MIST_COLOR, interior,
@@ -432,11 +470,13 @@ export default function TechTreatmentZoneModal({
         lng: center.lng,
         zoom,
         address: address || null,
-        // Discriminates the outline workflow from the perimeter spray trace —
-        // the report only labels a trace "treated lawn area" when it was
-        // actually captured as one (codex P1 #3038). 'interior' = building
-        // footprint + interior wash (owner 2026-07-29).
-        captureMode: lawnMode ? 'lawn' : (interior ? 'interior' : 'perimeter'),
+        // Discriminates what was ACTUALLY rendered (codex P1 #3038, #3075):
+        // 'lawn_highlight' = grass mask baked into this snapshot;
+        // 'lawn' = lawn area claim that fell back to the outline;
+        // 'interior' = building footprint + interior wash (owner 2026-07-29).
+        captureMode: lawnMode
+          ? (lawnMask ? 'lawn_highlight' : 'lawn')
+          : (interior ? 'interior' : 'perimeter'),
       }));
       const token = getAdminAuthToken();
       const res = await fetch(`${API}/api/tech/services/${serviceId}/treatment-zone`, {
@@ -446,6 +486,7 @@ export default function TechTreatmentZoneModal({
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      savedOnceRef.current = true;
       setSaveState('saved');
       setExisting(data.treatmentZone || null);
       // Let the host prefill from the trace (e.g. perimeter-spray Linear ft
@@ -457,27 +498,22 @@ export default function TechTreatmentZoneModal({
   }, [mapState, points, closed, totalFeet, address, serviceId, onSaved, lawnMode, interior]);
 
   useEffect(() => {
+    // Back to trace = the trace may change; the next Play must save fresh.
+    if (step === 'trace') savedOnceRef.current = false;
+  }, [step]);
+
+  useEffect(() => {
     if (step !== 'play' || mapState.status !== 'ready') return undefined;
     const canvas = canvasRef.current;
     if (!canvas) return undefined;
-    setSaveState(null);
-    if (lawnMode) {
-      // Lawn: no spray replay — draw the settled outline immediately and save
-      // the same frame. The customer report owns the pulse animation.
-      const outline = buildOutlineAccum({
-        width: MAP_WIDTH,
-        height: MAP_HEIGHT,
-        points,
-        closed,
-        color: MIST_COLOR,
-      });
-      const ctx = canvas.getContext('2d');
-      ctx.clearRect(0, 0, MAP_WIDTH, MAP_HEIGHT);
-      ctx.drawImage(outline, 0, 0);
-      setStatus({ phase: 'settled', pct: 1, feet: totalFeet });
-      save();
-      return undefined;
+    const alreadySaved = savedOnceRef.current;
+    if (!alreadySaved) {
+      setSaveState(null);
+      setLawnRender(null);
     }
+    // Lawn animates too (owner 2026-07-30 "now lets do it for lawn"): the
+    // outline draws itself with the mascot riding the tip, then breathes —
+    // outlineMode keeps the no-smoke lawn ruling; the spray path is untouched.
     setStatus({ phase: 'spraying', pct: 0, feet: 0 });
     const totalPx = pathLengthPx(points, closed);
     const lastEmit = { ts: 0 };
@@ -490,8 +526,14 @@ export default function TechTreatmentZoneModal({
       mistColor: MIST_COLOR,
       headColor: HEAD_COLOR,
       logoImage: logoRef.current,
-      interior,
-      durationMs: Math.round(Math.min(8000, Math.max(6000, totalPx * 3))),
+      interior: !lawnMode && interior,
+      outlineMode: lawnMode,
+      baseImage: mapState.image,
+      // Lawn is a highlight fade-in — quick; the fallback outline draw and
+      // the spray keep their pacing.
+      durationMs: lawnMode
+        ? 2200
+        : Math.round(Math.min(8000, Math.max(6000, totalPx * 3))),
       totalFeet,
       reducedMotion: window.matchMedia('(prefers-reduced-motion: reduce)').matches,
       onStatus: (s) => {
@@ -506,14 +548,21 @@ export default function TechTreatmentZoneModal({
     // animation to finish let an impatient Done/backdrop tap unmount the
     // modal before onSettled fired, silently losing the trace. save() builds
     // its own fully-settled band offscreen (home-aligned when applicable).
-    save();
+    // Replay after a SUCCESSFUL save restarts only the animation — no
+    // re-POST/S3 replace/PDF cache bust (codex P2 #3075); a failed save
+    // retries on Replay.
+    if (!alreadySaved) save();
     return () => engine.stop();
     // deps intentionally omit `save`: points/closed/map are frozen while playing
   }, [step, runKey, mapState.status]);
 
   const settled = status.phase !== 'spraying';
   const statusText = lawnMode
-    ? `Treated lawn area outlined — ${Math.round(totalFeet)} linear ft`
+    ? (settled
+      ? (lawnRender === 'outline'
+        ? `Treated lawn area outlined — ${Math.round(totalFeet)} linear ft`
+        : `Lawn areas highlighted — ${Math.round(totalFeet)} ft boundary`)
+      : (lawnRender === 'outline' ? 'Outlining the treated lawn…' : 'Highlighting the lawn…'))
     : settled
       ? (interior
         ? `Home protected — interior + ${Math.round(totalFeet)} linear ft perimeter`
@@ -624,7 +673,9 @@ export default function TechTreatmentZoneModal({
           <>
             <p style={{ margin: '0 0 10px', fontSize: smallText, color: T.muted }}>
               {points.length === 0
-                ? 'Auto-trace the building outline (pool cage included), or tap the photo to drop points yourself. Photo too tight? Tap − to zoom out.'
+                ? (lawnMode
+                  ? 'Auto-trace the lawn outline, or tap the photo to drop points yourself. Photo too tight? Tap − to zoom out.'
+                  : 'Auto-trace the building outline (pool cage included), or tap the photo to drop points yourself. Photo too tight? Tap − to zoom out.')
                 : 'Tap the photo to drop points along the treated line. Drag any point to adjust it.'}
               {points.length >= 3 && !closed ? ' Tap the first point again to close the loop.' : ''}
             </p>
@@ -818,15 +869,14 @@ export default function TechTreatmentZoneModal({
               >
                 Back to trace
               </button>
-              {!lawnMode && (
-                <button
-                  style={btnStyle('ghost', saveState === 'saving')}
-                  disabled={saveState === 'saving'}
-                  onClick={() => setRunKey((k) => k + 1)}
-                >
-                  Replay
-                </button>
-              )}
+              {/* Lawn replays too now that the outline animates (2026-07-30). */}
+              <button
+                style={btnStyle('ghost', saveState === 'saving')}
+                disabled={saveState === 'saving'}
+                onClick={() => setRunKey((k) => k + 1)}
+              >
+                Replay
+              </button>
               <button
                 style={btnStyle('primary', saveState === 'saving')}
                 disabled={saveState === 'saving'}
