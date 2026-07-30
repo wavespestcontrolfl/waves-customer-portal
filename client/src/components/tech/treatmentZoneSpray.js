@@ -322,6 +322,18 @@ export function buildLawnHighlightMask({ source, points, closed, width = MAP_WID
   try { mctx.filter = 'blur(3px)'; } catch { /* older engines: unfiltered upscale */ }
   mctx.imageSmoothingEnabled = true;
   mctx.drawImage(oc, 0, 0, width, height);
+  // Hard-clip at the traced boundary: the soft-edge blur bleeds the glow
+  // past the property line onto the NEIGHBOR'S grass (owner 2026-07-30 —
+  // "not the neighbor lawn as well"). Soft edges stay inside; the boundary
+  // itself is exact.
+  try { mctx.filter = 'none'; } catch { /* mirror the guard above */ }
+  mctx.globalCompositeOperation = 'destination-in';
+  mctx.beginPath();
+  mctx.moveTo(points[0].x, points[0].y);
+  for (let i = 1; i < points.length; i += 1) mctx.lineTo(points[i].x, points[i].y);
+  mctx.closePath();
+  mctx.fill();
+  mctx.globalCompositeOperation = 'source-over';
   return mask;
 }
 const PULSE_MS = 1200;
