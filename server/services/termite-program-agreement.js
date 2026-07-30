@@ -381,7 +381,7 @@ async function openProgramAgreements(customerId, conn = db, { forUpdate = false 
     .where({ customer_id: customerId, contract_type: 'document_template' })
     .whereIn('document_template_key', PROGRAM_TEMPLATE_KEYS)
     .whereIn('status', OPEN_STATUSES)
-    .select('id', 'customer_id', 'status', 'share_token_expires_at', 'document_variables_snapshot', 'document_template_version_id');
+    .select('id', 'customer_id', 'status', 'share_token_expires_at', 'document_variables_snapshot', 'document_template_version_id', 'created_at');
   return forUpdate ? query.forUpdate() : query;
 }
 
@@ -469,6 +469,9 @@ async function isAnnualPrepayAccept(estimate, billingTerm, conn = db) {
 // as annual prepay. Detection is deliberately broad (park = safe).
 function isCommercialEstimate(estimate = {}, estData = null) {
   const data = estData || parseEstimateData(estimate.estimate_data) || {};
+  // Canonical commercial-proposal marker (estimate-proposal.js): an
+  // authored or scaffolded proposal is commercial by definition.
+  if (data?.proposal?.enabled === true || data?.proposal?.scaffold === true) return true;
   // The estimator forms persist isCommercial as the strings "YES"/"NO",
   // not booleans — normalize the same affirmative values the estimator
   // uses so an explicitly commercial accept always parks.
@@ -496,15 +499,27 @@ function isCommercialEstimate(estimate = {}, estData = null) {
 // sweeps don't try to auto-replace what the operator now owns.
 async function retireSamePropertyOpenAgreements(customerId, estimate, activeVersionIds) {
   const lockKey = `termite-agreement:${customerId}`;
+  let keptReplacement = false;
   await db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [lockKey]);
     const openRows = await openProgramAgreements(customerId, trx, { forUpdate: true });
     const nowTs = new Date();
+    const acceptedAt = estimate.accepted_at ? new Date(estimate.accepted_at) : null;
     for (const row of openRows) {
       // Everything that isn't provably another property's request retires —
       // including same-estimate current-version rows (their figures predate
       // this revised accept).
       if (classifyExistingAgreement(row, estimate, nowTs, { activeVersionIds }) === 'ignore') continue;
+      // A CURRENT-version request created AFTER this acceptance is staff's
+      // tailored response to it (checked under the same advisory lock the
+      // creation path uses) — keep it; the handoff is already complete.
+      const isCurrentVersion = row.document_template_version_id
+        && activeVersionIds && activeVersionIds.has(row.document_template_version_id);
+      const createdAt = row.created_at ? new Date(row.created_at) : null;
+      if (isCurrentVersion && acceptedAt && createdAt && createdAt >= acceptedAt) {
+        keptReplacement = true;
+        continue;
+      }
       const cancelled = await trx('customer_contracts')
         .where({ id: row.id })
         .whereIn('status', OPEN_STATUSES)
@@ -525,6 +540,7 @@ async function retireSamePropertyOpenAgreements(customerId, estimate, activeVers
       });
     }
   });
+  return { keptReplacement };
 }
 
 // Create the draft agreement for an accepted termite estimate. Never throws
@@ -559,11 +575,13 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
     if (isCommercialEstimate(estimate, estData)) {
       // Retirement failures must not swallow the operator handoff — the
       // bell still rings and the retirement retries on the next sweep.
+      let commercialReplacementKept = false;
       try {
-        await retireSamePropertyOpenAgreements(customerId, estimate, await activeProgramVersionIds());
+        ({ keptReplacement: commercialReplacementKept } = await retireSamePropertyOpenAgreements(customerId, estimate, await activeProgramVersionIds()));
       } catch (err) {
         logger.warn(`[termite-agreement] parked retirement failed for estimate ${estimate.id}: ${err.message}`);
       }
+      if (commercialReplacementKept) return { ok: false, skipped: 'commercial', belled: true };
       let belled = null;
       const commercialBellState = await manualPrepBellAlreadySent(estimate.id);
       if (commercialBellState === true) belled = true;
@@ -585,11 +603,13 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       // Fail closed: the seeded wording states per-application billing,
       // which would contradict the annual-prepay invoice. Park it for
       // manual preparation with accurate terms.
+      let prepayReplacementKept = false;
       try {
-        await retireSamePropertyOpenAgreements(customerId, estimate, await activeProgramVersionIds());
+        ({ keptReplacement: prepayReplacementKept } = await retireSamePropertyOpenAgreements(customerId, estimate, await activeProgramVersionIds()));
       } catch (err) {
         logger.warn(`[termite-agreement] parked retirement failed for estimate ${estimate.id}: ${err.message}`);
       }
+      if (prepayReplacementKept) return { ok: false, skipped: 'annual_prepay', belled: true };
       let prepayBelled = null;
       const prepayBellState = await manualPrepBellAlreadySent(estimate.id);
       if (prepayBellState === true) prepayBelled = true;
@@ -618,11 +638,13 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       // exception with the owner instead of drafting a wrong document.
       // (The reconciliation sweep passes notifyOnUnresolved=false so the
       // original accept-time bell isn't re-rung daily.)
+      let figuresReplacementKept = false;
       try {
-        await retireSamePropertyOpenAgreements(customerId, estimate, await activeProgramVersionIds());
+        ({ keptReplacement: figuresReplacementKept } = await retireSamePropertyOpenAgreements(customerId, estimate, await activeProgramVersionIds()));
       } catch (err) {
         logger.warn(`[termite-agreement] parked retirement failed for estimate ${estimate.id}: ${err.message}`);
       }
+      if (figuresReplacementKept) return { ok: false, skipped: 'figures_unresolved', belled: true };
       let figuresBelled = null;
       const figuresBellState = await manualPrepBellAlreadySent(estimate.id);
       if (figuresBellState === true) figuresBelled = true;

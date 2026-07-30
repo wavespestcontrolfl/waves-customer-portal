@@ -558,19 +558,39 @@ exports.down = async function down(knex) {
       let meta = evt.metadata;
       if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
       const priorStatus = ['draft', 'sent', 'viewed'].includes(meta?.prior_status) ? meta.prior_status : 'draft';
-      // Never reopen a source whose customer already has a replacement
-      // (open OR signed) — restoring it would put two public signing flows
-      // (or a signed contract plus a live request) in front of the customer.
-      // Those stay cancelled; the operator handles any residue manually.
-      const source = await knex('customer_contracts').where({ id: evt.contract_id }).first('customer_id');
+      // Never reopen a source whose customer already has a replacement for
+      // the SAME property (open OR signed) — restoring it would put two
+      // public signing flows (or a signed contract plus a live request) in
+      // front of the customer. A valid agreement at ANOTHER property never
+      // suppresses this one's restoration. Unprovable addresses stay
+      // conservative (suppress).
+      const source = await knex('customer_contracts')
+        .where({ id: evt.contract_id })
+        .first('customer_id', 'document_variables_snapshot');
       if (!source) continue;
-      const replacement = await knex('customer_contracts')
+      const normAddr = (v) => String(v || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+      const snapOf = (raw) => {
+        let sn = raw;
+        if (typeof sn === 'string') { try { sn = JSON.parse(sn); } catch { sn = null; } }
+        return sn;
+      };
+      const sourceSnap = snapOf(source.document_variables_snapshot);
+      const sourceEstimateId = sourceSnap?.estimate?.id || null;
+      const sourceAddress = normAddr(sourceSnap?.estimate?.address || sourceSnap?.customer?.address);
+      const candidates = await knex('customer_contracts')
         .where({ customer_id: source.customer_id })
         .whereIn('document_template_key', templateKeysForRestore)
         .whereNot('id', evt.contract_id)
         .whereIn('status', ['draft', 'sent', 'viewed', 'signed'])
-        .first('id');
-      if (replacement) continue;
+        .select('document_variables_snapshot');
+      const replacementSameProperty = candidates.some((c) => {
+        const cs = snapOf(c.document_variables_snapshot);
+        if (cs?.estimate?.id && sourceEstimateId && String(cs.estimate.id) === String(sourceEstimateId)) return true;
+        const cAddr = normAddr(cs?.estimate?.address || cs?.customer?.address);
+        if (!cAddr || !sourceAddress) return true; // unprovable — conservative
+        return cAddr === sourceAddress;
+      });
+      if (replacementSameProperty) continue;
       const restored = await knex('customer_contracts')
         .where({ id: evt.contract_id, status: 'cancelled' })
         .where('cancelled_reason', 'like', 'Superseded by updated compliance wording%')
