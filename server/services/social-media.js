@@ -1256,7 +1256,13 @@ async function watermarkGbpImage(imageUrl) {
     const src = Buffer.from(await res.arrayBuffer());
     if (!src.length) return imageUrl;
     const sharp = require('sharp');
-    const meta = await sharp(src).metadata();
+    // Normalize BEFORE measuring/compositing: .rotate() bakes the EXIF
+    // orientation into pixels (a portrait phone JPEG would otherwise publish
+    // sideways with the logo on the wrong display corner, since JPEG output
+    // strips the orientation tag), and .flatten() gives transparent PNG/WebP
+    // sources a white background instead of black through JPEG conversion.
+    const normalized = await sharp(src).rotate().flatten({ background: '#ffffff' }).toBuffer();
+    const meta = await sharp(normalized).metadata();
     if (!meta.width || !meta.height) return imageUrl;
     // ~14% of the shorter edge, 3% margin — small but legible at GBP sizes.
     const shortEdge = Math.min(meta.width, meta.height);
@@ -1264,7 +1270,7 @@ async function watermarkGbpImage(imageUrl) {
     const margin = Math.max(12, Math.round(shortEdge * 0.03));
     const logoPng = await sharp(logo).resize(logoTarget, logoTarget, { fit: 'inside' }).png().toBuffer();
     const logoMeta = await sharp(logoPng).metadata();
-    const composited = await sharp(src)
+    const composited = await sharp(normalized)
       .composite([{
         input: logoPng,
         left: meta.width - (logoMeta.width || logoTarget) - margin,
@@ -1529,6 +1535,7 @@ const SocialMediaService = {
           // uploads.
           let imageUrl = null;
           let gbpImageUrl = null;
+          let gbpImageIsCard = false; // hero photos watermark; cards are pre-branded
           if (cardsEligible) {
             // Blog shares prefer the post's own hero image (one JPEG serves
             // every platform); the brand card is the fallback when the hero
@@ -1543,7 +1550,10 @@ const SocialMediaService = {
               // 4:3 for GBP — so a single-platform deployment doesn't upload an
               // unused variant.
               if (metaReady) imageUrl = await renderBrandCardUrl(card, 'square');
-              if (gbpReady) gbpImageUrl = await renderBrandCardUrl(card, 'gbp');
+              if (gbpReady) {
+                gbpImageUrl = await renderBrandCardUrl(card, 'gbp');
+                gbpImageIsCard = !!gbpImageUrl;
+              }
               // GBP-only: reuse the 4:3 as the base image so publishToAll sees a
               // non-null image and doesn't generate an orphan AI one.
               if (!imageUrl && gbpImageUrl) imageUrl = gbpImageUrl;
@@ -1560,6 +1570,7 @@ const SocialMediaService = {
             channels: PUBLISH_PLATFORMS,
             imageUrl,
             gbpImageUrl,
+            gbpImageBranded: gbpImageIsCard,
             // Autonomous (cron) shares use the brand card or go text-only — never
             // the AI image generator (irrelevant literal images). A manual admin
             // /check-rss keeps the existing AI fallback (admin is supervising).
