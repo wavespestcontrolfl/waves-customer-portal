@@ -17,6 +17,7 @@ import {
   MAP_HEIGHT,
   MIN_TRACE_ZOOM,
   buildAlignedBase,
+  buildLawnHighlightMask,
   buildOutlineAccum,
   buildSettledAccum,
   composeSnapshot,
@@ -411,11 +412,24 @@ export default function TechTreatmentZoneModal({
           } catch { /* save the north-up frame */ }
         }
       }
+      let lawnMask = null;
+      if (lawnMode && closed) {
+        // Grass highlight for the SAVED snapshot (no box — owner
+        // 2026-07-30), built from the same (possibly aligned) base the
+        // snapshot composes over. Fail-soft to the classic outline on a
+        // tainted canvas.
+        try {
+          lawnMask = buildLawnHighlightMask({
+            source: base, points: finalPoints, closed,
+            width: MAP_WIDTH, height: MAP_HEIGHT,
+          });
+        } catch { lawnMask = null; }
+      }
       const accum = lawnMode
-        ? buildOutlineAccum({
+        ? (lawnMask || buildOutlineAccum({
           width: MAP_WIDTH, height: MAP_HEIGHT, points: finalPoints, closed,
-          color: MIST_COLOR, spotlight: true,
-        })
+          color: MIST_COLOR,
+        }))
         : buildSettledAccum({
           width: MAP_WIDTH, height: MAP_HEIGHT, points: finalPoints, closed,
           mistColor: MIST_COLOR, interior,
@@ -483,9 +497,11 @@ export default function TechTreatmentZoneModal({
       logoImage: logoRef.current,
       interior: !lawnMode && interior,
       outlineMode: lawnMode,
-      // The clean outline reads slow at spray pacing — draw it snappier.
+      baseImage: mapState.image,
+      // Lawn is a highlight fade-in — quick; the fallback outline draw and
+      // the spray keep their pacing.
       durationMs: lawnMode
-        ? Math.round(Math.min(5000, Math.max(3000, totalPx * 1.6)))
+        ? 2200
         : Math.round(Math.min(8000, Math.max(6000, totalPx * 3))),
       totalFeet,
       reducedMotion: window.matchMedia('(prefers-reduced-motion: reduce)').matches,
@@ -509,8 +525,8 @@ export default function TechTreatmentZoneModal({
   const settled = status.phase !== 'spraying';
   const statusText = lawnMode
     ? (settled
-      ? `Treated lawn area outlined — ${Math.round(totalFeet)} linear ft`
-      : `Outlining treated lawn — ${Math.round(status.pct * 100)}%`)
+      ? `Lawn areas highlighted — ${Math.round(totalFeet)} ft boundary`
+      : 'Highlighting the lawn…')
     : settled
       ? (interior
         ? `Home protected — interior + ${Math.round(totalFeet)} linear ft perimeter`

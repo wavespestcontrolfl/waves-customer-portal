@@ -49,7 +49,7 @@ export default function TracedTreatmentZoneMap({ traced, live = true, variant = 
   // area story instead.
   const caption = outline
     ? (lawnCapture
-      ? 'Treated lawn area outlined on-site by your technician.'
+      ? 'Treated lawn areas highlighted on-site by your technician.'
       : 'Service area traced on-site by your technician.')
     : (traced.label || 'Treated perimeter traced on-site by your technician.');
   const pathD = canReplay
@@ -67,13 +67,16 @@ export default function TracedTreatmentZoneMap({ traced, live = true, variant = 
           src={traced.snapshotUrl}
           alt={outline
             ? (lawnCapture
-              ? 'Satellite photo of the property with the treated lawn area outlined'
+              ? 'Satellite photo of the property with the treated lawn areas highlighted'
               : 'Satellite photo of the property with the technician-traced service area outlined')
             : (interiorCapture
               ? 'Satellite photo of the property with the treated home and perimeter highlighted'
               : 'Satellite photo of the property with the treated perimeter highlighted')}
         />
-        {sprayLive && pathD && outline && (
+        {/* Lawn-captured rows carry the grass HIGHLIGHT baked into the
+            snapshot (owner 2026-07-30: no box) — never draw the polygon
+            overlay on them. Legacy outline-variant rows keep the line. */}
+        {sprayLive && pathD && outline && !lawnCapture && (
           <svg
             viewBox="0 0 1280 960"
             preserveAspectRatio="xMidYMid slice"
