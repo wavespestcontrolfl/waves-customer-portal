@@ -1149,6 +1149,25 @@ function isNonLeadCallContent(extracted = {}) {
   return NON_LEAD_CALL_TYPES.has(callType);
 }
 
+// True when THIS run left an open email read-back card for the call — the
+// extracted address is a transcription guess and must not receive the
+// first-touch drip until the office confirms it. Fails toward HOLD on a
+// lookup error: a bounce to a wrong guess burns sender reputation and mints
+// a suppression on an address the customer may later confirm; a held drip
+// is recoverable from the review card.
+async function shouldHoldLeadEmailEnrollment(callLogId) {
+  try {
+    const open = await db('triage_items')
+      .where({ call_log_id: callLogId, status: 'open' })
+      .whereIn('reason_code', ['email_unverified', 'email_invalid'])
+      .first('id');
+    return !!open;
+  } catch (err) {
+    logger.warn(`[call-proc] email-review lookup failed — holding new_lead enroll: ${err.message}`);
+    return true;
+  }
+}
+
 // Word-of-mouth referral detection from the AI call extraction. The prompt sets
 // referred_by to the referrer's name (or 'unnamed') ONLY on an explicit referral.
 // Returns that name, or '' when there's no referral — used to override the dialed-
@@ -8695,6 +8714,15 @@ const CallRecordingProcessor = {
     if (customerId && extracted.email && v2EmailBlocked) {
       logger.info(`[call-proc] Skipping new_lead automation enroll for ${callSid}: v2 TCPA gate blocked all outbound (do_not_contact)`);
       beehiivResult = { skipped: 'v2_tcpa_gate' };
+    } else if (customerId && extracted.email && await shouldHoldLeadEmailEnrollment(call.id)) {
+      // Owner rule 2026-07-30 (Byrd bounce): a call-captured email this run
+      // flagged for read-back (email_unverified / email_invalid) is a
+      // transcription GUESS — the spelled-out address hard-bounced within a
+      // minute of the first drip send, burning sender reputation and landing
+      // a SendGrid suppression on a wrong address. Hold the first-touch drip
+      // until the office confirms the address via the open review card.
+      logger.info(`[call-proc] Skipping new_lead automation enroll for ${maskSid(callSid)}: extracted email is under read-back review`);
+      beehiivResult = { skipped: 'email_under_review' };
     } else if (customerId && extracted.email) {
       try {
         const AutomationRunner = require('./automation-runner');
@@ -9285,6 +9313,7 @@ CallRecordingProcessor._test = {
   leadContactCompleteness,
   hasWorkableLeadSignal,
   voicemailCallbackAlertPlan,
+  shouldHoldLeadEmailEnrollment,
   transcribeRecording,
   extractCallDataV2,
   CALL_EXTRACTION_ROUTE,
