@@ -1683,6 +1683,15 @@ describe('DB-locked prices vs the hallucinated-claim scan', () => {
     );
   });
 
+  test('excision is boundary-bound: a locked prefix cannot hollow out a larger invented amount or word', () => {
+    expect(findHallucinatedClaims('<p>VIP packages hit $250 tonight.</p>', ['$25'])).toEqual(
+      expect.arrayContaining([expect.stringContaining('dollar amount in body')]),
+    );
+    expect(findHallucinatedClaims('<p>Enjoy free admission all day.</p>', ['Free'])).toEqual(
+      expect.arrayContaining([expect.stringContaining('admission claim')]),
+    );
+  });
+
   test('excision normalizes like the body scan — entity/homoglyph forms cannot dodge it', () => {
     expect(findHallucinatedClaims('<p>Entry: From&nbsp;&#36;25</p>', ['From $25'])).toEqual([]);
     expect(findHallucinatedClaims('<p>Free admission · paid parking</p>', ['Free admission · paid parking'])).toEqual([]);
@@ -1770,23 +1779,41 @@ describe('tiered event treatment (owner direction 2026-07-29)', () => {
     expect(html).not.toMatch(/<a href="https:\/\/www\.wavespestcontrol\.com\/"[^>]*>\s*<img src="[^"]*divider/);
   });
 
-  test('buildFlagshipTextBody: structured sections with names, facts, full urls, and the feedback text token', () => {
+  test('buildFlagshipTextBody: content-equivalent sections — hero furniture serialized, no unreviewed CTA', () => {
     const text = buildFlagshipTextBody({
       greeting: 'Hey there!',
       introText: 'Big weekend **ahead**.',
       events: [mk(1), mk(3, { isFree: true })],
       homeownerMinute: 'Check your _screens_.',
       closingText: 'Go outside.',
+      closingChecklist: ['Hydrate like it\'s your job'],
+      ps: 'Forward this to a friend.',
       signoff: '— The Waves Team',
     });
     expect(text).toContain('== Official Event 1 ==');
     expect(text).toContain('Friday, June 12 at 8:00 PM | Venue 1, Sarasota | From $25');
     expect(text).toContain('Tickets & info: https://example.com/ev1');
     expect(text).toContain('FREE');
+    // Hero furniture serializes (first event only).
+    expect(text).toContain('- Big stage');
+    expect(text).toContain('Pro tip: Get there before 8');
+    expect(text).toContain('A kicker line.');
+    expect(text.match(/Pro tip:/g)).toHaveLength(1);
+    // Checklist + P.S. serialize; no unreviewed sales CTA.
+    expect(text).toContain("[ ] Hydrate like it's your job");
+    expect(text).toContain('P.S. Forward this to a friend.');
+    expect(text).not.toContain('Schedule a visit');
     expect(text).toContain('== Homeowner Minute ==');
-    expect(text).toContain('Big weekend ahead.');
     expect(text).not.toContain('**');
     expect(text).toContain('{{feedback-text}}');
+  });
+
+  test('sortByCallerRank re-asserts portfolio order over a reordered model echo', () => {
+    const { sortByCallerRank } = require('../services/newsletter-draft');
+    const ids = [1, 2, 3].map((n) => `a000000${n}-0000-4000-8000-00000000000${n}`);
+    const shuffled = [mk(3), mk(1), mk(2)];
+    const sorted = sortByCallerRank(shuffled, ids);
+    expect(sorted.map((e) => e.sourceTitle)).toEqual(['Official Event 1', 'Official Event 2', 'Official Event 3']);
   });
 });
 

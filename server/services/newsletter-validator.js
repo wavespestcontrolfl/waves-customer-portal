@@ -69,11 +69,16 @@ function findHallucinatedClaims(body, lockedPrices = []) {
   // lineup — fetched by the caller via lockedPricesForSend) are the ONE
   // legitimate pricing source and are excised before the scan, after the
   // SAME normalization the body got so entity/homoglyph forms can't
-  // dodge the excision. Anything priced that ISN'T the verbatim DB
-  // string still hard-blocks — the model can only "repeat" the truth.
+  // dodge the excision. Excision is BOUNDARY-BOUND: only complete
+  // occurrences match — a locked "$25" can't hollow out an invented
+  // "$250" into a passing "0", and a locked "Free" can't erase the word
+  // from an unrelated claim. Anything priced that ISN'T the complete
+  // verbatim DB string still hard-blocks.
   for (const price of lockedPrices) {
     const norm = decodeEntities(String(price || '')).normalize('NFKC').replace(/\s+/g, ' ').trim();
-    if (norm) bodyText = bodyText.split(norm).join(' ');
+    if (!norm) continue;
+    const esc = norm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    bodyText = bodyText.replace(new RegExp(`(?<![\\w$])${esc}(?![\\w])`, 'g'), ' ');
   }
   const seen = new Set();
   const errors = [];

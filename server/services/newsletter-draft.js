@@ -1268,21 +1268,26 @@ async function assembleBeehiivNewsletter(draft) {
   // Image-first visual rule (owner direction 2026-07-29): an event with
   // real still art shows THAT (the useful information), and the reaction
   // GIF is the fallback comedy device for events without art. Giphy is
-  // only queried for events that will actually render a GIF.
+  // only queried for events that will actually render a GIF — which also
+  // excludes SHORTLIST entries (index > FEATURED_MAX): their compact
+  // format renders no visual at all, so a lookup would burn requests and
+  // the shared retry budget on a discarded pick.
+  const FEATURED_MAX = 2; // [0] hero, [1..2] featured, [3..] shortlist
   const eventShowsImage = events.map((ev) => {
     const u = safeUrl(ev.imageUrl);
     return Boolean(u && !isLikelyGifUrl(u));
   });
+  const eventRendersGif = (i) => i <= FEATURED_MAX && !eventShowsImage[i];
   const [introCandidates, ...eventCandidates] = await Promise.all([
     searchGiphyCandidates(draft.introGifTerm),
-    ...events.map((ev, i) => (eventShowsImage[i] ? Promise.resolve([]) : searchGiphyCandidates(ev.gifSearchTerm))),
+    ...events.map((ev, i) => (eventRendersGif(i) ? searchGiphyCandidates(ev.gifSearchTerm) : Promise.resolve([]))),
   ]);
   const introGif = await pickUniqueGifWithRetry(draft.introGifTerm, introCandidates, usedGifIds, gifRetryBudget);
   const eventGifs = [];
   for (let i = 0; i < eventCandidates.length; i++) {
-    eventGifs.push(eventShowsImage[i]
-      ? null
-      : await pickUniqueGifWithRetry(events[i]?.gifSearchTerm, eventCandidates[i], usedGifIds, gifRetryBudget));
+    eventGifs.push(eventRendersGif(i)
+      ? await pickUniqueGifWithRetry(events[i]?.gifSearchTerm, eventCandidates[i], usedGifIds, gifRetryBudget)
+      : null);
   }
 
   // ── Hero Image ──
@@ -1339,7 +1344,7 @@ async function assembleBeehiivNewsletter(draft) {
   //   [1..2]     FEATURED:  visual + trimmed description + meta
   //   [3..]      SHORTLIST: compact entries under a single heading
   // "When everything is highlighted, nothing feels important."
-  const tierOf = (i) => (i === 0 ? 'hero' : (i <= 2 ? 'featured' : 'quick'));
+  const tierOf = (i) => (i === 0 ? 'hero' : (i <= FEATURED_MAX ? 'featured' : 'quick'));
 
   // Shared per-event pieces, computed once per iteration. Ticket links
   // render as {{evclick:<eventId>}} tokens: the live sender substitutes a
@@ -1551,6 +1556,18 @@ async function assembleBeehiivNewsletter(draft) {
   return parts.join('\n\n');
 }
 
+// Re-sort locked events into the caller's eventIds order (portfolio
+// rank). Stable for members not in the list (sorted after ranked ones,
+// original order preserved) — defensive; the lock already drops them.
+function sortByCallerRank(lockedEvents, eventIds) {
+  const ids = Array.isArray(eventIds) ? eventIds : [];
+  const rank = new Map(ids.map((id, i) => [String(id).toLowerCase(), i]));
+  return [...lockedEvents].sort((a, b) => (
+    (rank.get(String(a.eventId).toLowerCase()) ?? Number.MAX_SAFE_INTEGER)
+    - (rank.get(String(b.eventId).toLowerCase()) ?? Number.MAX_SAFE_INTEGER)
+  ));
+}
+
 // Structured plain-text body for the flagship: blank-line-separated
 // sections, official event names, date/city/price lines, and full
 // destination urls. Markdown emphasis is stripped (plain text carries no
@@ -1568,10 +1585,26 @@ function buildFlagshipTextBody(draft) {
   const out = [];
   if (draft.greeting) out.push(stripMd(greetingWithNameToken(draft.greeting)));
   if (draft.introText) out.push(stripMd(draft.introText));
-  for (const ev of (draft.events || [])) {
+  const evs = draft.events || [];
+  for (let i = 0; i < evs.length; i++) {
+    const ev = evs[i];
     const lines = [];
     lines.push(`== ${ev.sourceTitle || stripMd(ev.title)} ==`);
     if (ev.description) lines.push(stripMd(ev.description));
+    // Headliner furniture serializes too — the MIME alternatives must
+    // stay content-equivalent (same fields, nothing extra, nothing less).
+    if (i === 0) {
+      const hl = Array.isArray(ev.highlights) ? ev.highlights : [];
+      for (const h of hl) {
+        const t = plainBulletText(h);
+        if (t) lines.push(`- ${stripMd(t)}`);
+      }
+      if (ev.proTip) {
+        const tip = String(ev.proTip).replace(/^\s*(?:🚨\s*)?pro[\s-]*tip[:\s-]*/i, '').trim();
+        if (tip) lines.push(`Pro tip: ${stripMd(tip)}`);
+      }
+      if (ev.closingLine) lines.push(stripMd(ev.closingLine));
+    }
     const facts = [];
     if (ev.dateStr) facts.push(ev.timeStr ? `${ev.dateStr} at ${ev.timeStr}` : ev.dateStr);
     if (ev.location) facts.push(ev.location);
@@ -1583,10 +1616,21 @@ function buildFlagshipTextBody(draft) {
     out.push(lines.join('\n'));
   }
   if (draft.homeownerMinute) {
-    out.push(`== Homeowner Minute ==\n${stripMd(draft.homeownerMinute)}\nSchedule a visit: https://www.wavespestcontrol.com/`);
+    // No appended CTA: the HTML's schedule link is wrapper furniture the
+    // operator reviewed; injecting unreviewed sales copy into the text
+    // alternative would break the zero-sell rule AND MIME equivalence.
+    out.push(`== Homeowner Minute ==\n${stripMd(draft.homeownerMinute)}`);
   }
   if (draft.closingText) out.push(stripMd(draft.closingText));
+  const checklist = Array.isArray(draft.closingChecklist) ? draft.closingChecklist : [];
+  if (checklist.length) {
+    out.push(checklist.map((c) => `[ ] ${stripMd(c)}`).join('\n'));
+  }
   out.push(stripMd(draft.signoff || '— The Waves Team'));
+  if (draft.ps) {
+    const psText = psBodyText(draft.ps);
+    if (psText) out.push(`P.S. ${stripMd(psText)}`);
+  }
   out.push(FEEDBACK_TEXT_TOKEN);
   return out.filter(Boolean).join('\n\n');
 }
@@ -1769,7 +1813,11 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
         `but none matched the approved eventIds. Refusing to render an empty newsletter.`
       );
     }
-    draft.events = locked;
+    // Tier assignment is positional, so re-assert the CALLER's rank
+    // (portfolio order) over whatever sequence the model echoed back —
+    // a reordered-but-valid JSON must not promote an arbitrary event to
+    // headliner. Unknown ids sort last (lock already dropped them).
+    draft.events = sortByCallerRank(locked, eventIds);
   }
 
   // 4a.5 Strip stray URLs from the free-prose fields (intro / homeowner minute /
@@ -1920,6 +1968,7 @@ module.exports = {
   assembleWavesNewsletter,
   isLikelyGifUrl,
   buildFlagshipTextBody,
+  sortByCallerRank,
   deriveEventLabels,
   // Exported for unit testing the Beehiiv-parity render devices
   clockEmojiFor,

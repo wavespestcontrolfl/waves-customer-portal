@@ -326,6 +326,9 @@ async function renderSendPreview(send, toEmail) {
     preheader: send.preview_text || undefined,
     newsletterType: send.newsletter_type || undefined,
     preferredSourcesCta: true,
+    // Same web-version permalink the live campaign gets — the reviewed
+    // proof must match what recipients receive.
+    webVersionUrl: send.slug ? `https://www.wavespestcontrol.com/newsletter/archive/${send.slug}` : undefined,
   });
 
   const testSub = await db('newsletter_subscribers')
