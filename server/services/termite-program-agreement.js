@@ -378,7 +378,12 @@ async function isAnnualPrepayAccept(estimate, billingTerm, conn = db) {
 // as annual prepay. Detection is deliberately broad (park = safe).
 function isCommercialEstimate(estimate = {}, estData = null) {
   const data = estData || parseEstimateData(estimate.estimate_data) || {};
-  if (data?.inputs?.isCommercial === true || data?.engineInputs?.isCommercial === true) return true;
+  // The estimator forms persist isCommercial as the strings "YES"/"NO",
+  // not booleans — normalize the same affirmative values the estimator
+  // uses so an explicitly commercial accept always parks.
+  const commercialFlag = (value) => value === true
+    || ['true', 'yes', 'y', '1', 'commercial'].includes(String(value ?? '').trim().toLowerCase());
+  if (commercialFlag(data?.inputs?.isCommercial) || commercialFlag(data?.engineInputs?.isCommercial)) return true;
   const propertyType = String(data?.inputs?.propertyType || data?.propertyType || '').toLowerCase();
   // Persisted estimator values include the concrete multi-unit types, not
   // just the 'Multifamily' label — every multi-unit structure parks.

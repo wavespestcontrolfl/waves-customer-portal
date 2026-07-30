@@ -343,6 +343,8 @@ describe('render against the seeded templates', () => {
 describe('isCommercialEstimate', () => {
   test('flags commercial inputs, property types, tier, and commercial service keys', () => {
     expect(isCommercialEstimate({}, { inputs: { isCommercial: true } })).toBe(true);
+    expect(isCommercialEstimate({}, { inputs: { isCommercial: 'YES' } })).toBe(true);
+    expect(isCommercialEstimate({}, { inputs: { isCommercial: 'NO' } })).toBe(false);
     expect(isCommercialEstimate({}, { inputs: { propertyType: 'Multifamily' } })).toBe(true);
     expect(isCommercialEstimate({ waveguard_tier: 'Commercial' }, {})).toBe(true);
     expect(isCommercialEstimate({}, { recurring: { services: [{ service: 'commercial_pest' }] } })).toBe(true);

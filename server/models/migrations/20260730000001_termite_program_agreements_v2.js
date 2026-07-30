@@ -396,7 +396,7 @@ exports.up = async function up(knex) {
   const openRows = await knex('customer_contracts')
     .whereIn('document_template_key', templateKeys)
     .whereIn('status', ['draft', 'sent', 'viewed'])
-    .select('id', 'customer_id');
+    .select('id', 'customer_id', 'recipient_name', 'document_variables_snapshot');
   const now = new Date();
   for (const row of openRows) {
     // Conditional on the status still being open: a customer signing
@@ -423,6 +423,31 @@ exports.up = async function up(knex) {
       actor_id: null,
       metadata: JSON.stringify({ reason: 'superseded_by_v2_migration' }),
     });
+    // Service-generated requests carry the estimate id in their snapshot and
+    // the reconciliation sweep re-preps them from the v2 body automatically.
+    // MANUALLY issued requests (generic document-library route) have no
+    // estimate linkage, so reconciliation can't replace them — hand those to
+    // the operator explicitly with an admin bell per cancelled request.
+    let snapshot = row.document_variables_snapshot;
+    if (typeof snapshot === 'string') {
+      try { snapshot = JSON.parse(snapshot); } catch { snapshot = null; }
+    }
+    const serviceGenerated = !!snapshot?.estimate?.id;
+    if (!serviceGenerated) {
+      const hasNotifications = await knex.schema.hasTable('notifications');
+      if (hasNotifications) {
+        await knex('notifications').insert({
+          recipient_type: 'admin',
+          recipient_id: null,
+          category: 'estimate',
+          title: 'Re-issue termite agreement (wording updated)',
+          body: `The open termite program agreement for ${row.recipient_name || 'a customer'} was cancelled because its wording was superseded by the v2 compliance templates. It was issued manually, so re-issue it from the document library on the updated template.`,
+          icon: '\u{1F4DD}',
+          link: `/admin/customers/${row.customer_id}`,
+          metadata: JSON.stringify({ contractId: row.id, customerId: row.customer_id, reason: 'superseded_by_v2_migration' }),
+        });
+      }
+    }
   }
 };
 
