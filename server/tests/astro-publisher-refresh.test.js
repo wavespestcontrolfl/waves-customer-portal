@@ -118,8 +118,10 @@ describe('publishRefresh frontmatter freeze', () => {
     expect(data.pageType).toBe('city-hub');
     expect(data.domains).toEqual(['sarasotaflpestcontrol.com']);
 
+    // PROTECTED (owner rule 2026-07-16) — service/location metaTitle is never
+    // editable by a refresh; the draft's attempted rewrite is ignored.
+    expect(data.metaTitle).toBe('Old meta title');
     // EDITABLE — applied.
-    expect(data.metaTitle).toBe('New Sarasota meta title');
     expect(data.metaDescription).toBe('New Sarasota meta description');
     expect(content.trim()).toMatch(/Laurel Park/);
 
@@ -348,5 +350,42 @@ describe('publishRefresh blog-schema validation gate', () => {
       path: 'src/content/blog/fertilizer-blackout-sarasota-county.md',
       sha: 'blog-sha',
     }));
+  });
+});
+
+describe('publishMetadataRewrite protected metaTitle (owner rule 2026-07-16)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    gh.createBranch.mockResolvedValue({});
+    gh.getFile.mockResolvedValue({ content: EXISTING, sha: 'existing-sha' });
+    gh.putFile.mockResolvedValue({ commit: { sha: 'new-sha' } });
+    gh.createPr.mockResolvedValue({ number: 78, html_url: 'https://github.com/x/y/pull/78', head: { sha: 'h' } });
+    gh.createIssueComment.mockResolvedValue({});
+  });
+
+  const REWRITE_BRIEF = { action_type: 'rewrite_title_meta', target_url: '/pest-control-sarasota-fl/' };
+
+  test('keeps the live metaTitle on a service page; meta description still applies', async () => {
+    const res = await pub.publishMetadataRewrite({
+      type: 'metadata',
+      file_path: FILE_PATH,
+      title: 'Short Rewritten Title | Waves',
+      meta_description: 'A rewritten meta description for the Sarasota page.',
+    }, REWRITE_BRIEF);
+    expect(res.status).toBe('pr_open');
+    const { data } = fm.parse(gh.putFile.mock.calls[0][0].content);
+    expect(data.metaTitle).toBe('Old meta title'); // protected — rewrite ignored
+    expect(data.metaDescription).toBe('A rewritten meta description for the Sarasota page.');
+  });
+
+  test('no_changes when only the protected metaTitle would have changed', async () => {
+    const res = await pub.publishMetadataRewrite({
+      type: 'metadata',
+      file_path: FILE_PATH,
+      title: 'Short Rewritten Title | Waves',
+      meta_description: 'Old meta description',
+    }, REWRITE_BRIEF);
+    expect(res.status).toBe('no_changes');
+    expect(gh.putFile).not.toHaveBeenCalled();
   });
 });

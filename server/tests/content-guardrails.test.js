@@ -1970,3 +1970,49 @@ describe('footprint gate — parity pre-push hardening (mid-fragment conjunction
     }
   });
 });
+
+describe('protected metaTitle rewrite gate (owner rule 2026-07-16)', () => {
+  const LIVE = 'Pest Control Near Me in Sarasota, FL | Pest Control in Sarasota, FL | Exterminator Near Me in Sarasota, FL';
+  const base = { body: 'Refreshed Sarasota body content.', frontmatter: {} };
+
+  test('refresh draft with a different metaTitle P0s', () => {
+    const r = guardrails.evaluate(
+      { ...base, frontmatter: { metaTitle: 'Pest Control in Sarasota, FL | Waves' } },
+      { isRefresh: true, priorBody: 'old body', liveMetaTitle: LIVE },
+    );
+    const f = r.findings.find((x) => x.code === 'PROTECTED_META_TITLE_REWRITE');
+    expect(f).toBeTruthy();
+    expect(f.severity).toBe('P0');
+    expect(r.pass).toBe(false);
+  });
+
+  test('identical metaTitle passes', () => {
+    const r = guardrails.evaluate(
+      { ...base, frontmatter: { metaTitle: LIVE } },
+      { isRefresh: true, priorBody: 'old body', liveMetaTitle: LIVE },
+    );
+    expect(r.findings.some((x) => x.code === 'PROTECTED_META_TITLE_REWRITE')).toBe(false);
+  });
+
+  test('absent or blank draft metaTitle passes (publisher keeps the live value)', () => {
+    for (const fmv of [{}, { metaTitle: '' }, { metaTitle: '   ' }]) {
+      const r = guardrails.evaluate(
+        { ...base, frontmatter: fmv },
+        { isRefresh: true, priorBody: 'old body', liveMetaTitle: LIVE },
+      );
+      expect(r.findings.some((x) => x.code === 'PROTECTED_META_TITLE_REWRITE')).toBe(false);
+    }
+  });
+
+  test('inert without isRefresh or without a live value to compare', () => {
+    const rewritten = { ...base, frontmatter: { metaTitle: 'Something else' } };
+    for (const opts of [
+      { isRefresh: false, liveMetaTitle: LIVE },
+      { isRefresh: true, priorBody: 'old body', liveMetaTitle: null },
+      { isRefresh: true, priorBody: 'old body', liveMetaTitle: '  ' },
+    ]) {
+      const r = guardrails.evaluate(rewritten, opts);
+      expect(r.findings.some((x) => x.code === 'PROTECTED_META_TITLE_REWRITE')).toBe(false);
+    }
+  });
+});

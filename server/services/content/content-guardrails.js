@@ -1731,6 +1731,21 @@ function preventionPromiseFinding(text) {
   return null;
 }
 
+// Owner hard rule (2026-07-16): service/location metaTitles are never edited
+// by automation. Fires only on refresh drafts AND only when the caller
+// supplied the live metaTitle to compare against — a null liveMetaTitle means
+// either a non-service target (blog pages don't carry the protected field
+// contract) or a caller without the live page, where publishRefresh's field
+// freeze is the remaining backstop.
+function metaTitleRewriteFinding(frontmatter, { isRefresh = false, liveMetaTitle = null } = {}) {
+  if (!isRefresh || liveMetaTitle == null || !String(liveMetaTitle).trim()) return null;
+  const draftTitle = frontmatter?.metaTitle;
+  if (draftTitle === undefined || !String(draftTitle).trim()) return null; // absent → publisher keeps the live value
+  if (String(draftTitle).trim() === String(liveMetaTitle).trim()) return null;
+  return finding('P0', 'PROTECTED_META_TITLE_REWRITE',
+    `Refresh draft proposes a different metaTitle ("${String(draftTitle).trim().slice(0, 80)}") than the live page's ${String(liveMetaTitle).length}-char metaTitle — service/location metaTitles are never edited (owner rule 2026-07-16). Carry the live metaTitle unchanged or omit the field.`);
+}
+
 /**
  * evaluate(draft, { service, primaryKeyword, domains }) → { pass, findings }
  *
@@ -1759,7 +1774,7 @@ function preventionPromiseFinding(text) {
  *   citation-residue and off-footprint checks still apply in full (those are
  *   never legitimate, new or old).
  */
-function evaluate(draft, { service = null, primaryKeyword = null, domains = null, operatorFaqException = false, requiredSourceUrls = [], operatorCitations = false, allowedInternalLinks = [], isRefresh = false, priorBody = null } = {}) {
+function evaluate(draft, { service = null, primaryKeyword = null, domains = null, operatorFaqException = false, requiredSourceUrls = [], operatorCitations = false, allowedInternalLinks = [], isRefresh = false, priorBody = null, liveMetaTitle = null } = {}) {
   const body = draft?.body || draft?.content || '';
   const frontmatter = draft?.frontmatter || {};
   const kw = primaryKeyword || frontmatter.primary_keyword || frontmatter.primaryKeyword || null;
@@ -1851,6 +1866,16 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
       ...(Array.isArray(allowedInternalLinks) ? allowedInternalLinks : []),
       ...(Array.isArray(draft?.checked_existing_routes) ? draft.checked_existing_routes : []),
     ], refreshExemptRoutes),
+    // Owner hard rule (2026-07-16): service/location metaTitles — the
+    // intentional long near-me titles — are NEVER edited by automation. A
+    // refresh draft that proposes a DIFFERENT metaTitle than the live page is
+    // parked for review rather than published (found live in three parked
+    // 2026-07 drafts that would have replaced ~2,000-char metaTitles with
+    // short generic ones). Only enforceable when the caller supplied the live
+    // value (the runner's fail-closed liveFm load does); publishRefresh
+    // independently freezes the field as the last-resort backstop. An ABSENT
+    // or identical draft metaTitle is fine — the publisher keeps the live one.
+    metaTitleRewriteFinding(frontmatter, { isRefresh, liveMetaTitle }),
   ].filter(Boolean);
 
   const pass = !findings.some((f) => f.severity === 'P0' || f.severity === 'P1');
