@@ -675,6 +675,14 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       // duplicate drafts — the advisory xact lock + in-transaction re-check
       // make the dedupe atomic (pre-push P1).
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [dedupeLockKey]);
+      // Revalidate the template's active version under the lock: an admin
+      // publish/reactivation between the pre-transaction reads and here
+      // must not let us insert (and autosend) an agreement rendered from a
+      // no-longer-active version.
+      const liveTemplate = await trx('document_templates')
+        .where({ template_key: prepared.templateKey })
+        .first('active_version_id');
+      if (!liveTemplate || liveTemplate.active_version_id !== version.id) return 'version_changed';
       // FOR UPDATE: the status re-read must be current when we cancel — a
       // customer signing the older agreement concurrently would otherwise
       // commit 'signed' between our unlocked read and an unconditional
@@ -771,6 +779,10 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
     if (contract === 'signed_exists') {
       return { ok: true, skipped: 'signed_exists' };
     }
+    if (contract === 'version_changed') {
+      // Retryable: the next sweep re-reads the fresh active version.
+      return { ok: false, skipped: 'version_changed' };
+    }
     if (!contract) {
       const winner = await existingBlockingProgramAgreement(customerId, estimate);
       return { ok: true, skipped: 'already_exists', contractId: winner?.id || null };
@@ -820,6 +832,7 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
 // row for the customer always blocks re-papering — executed contracts are
 // historical records.
 const REPROCESSED_EVENT = 'superseded_reprocessed';
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // Conditionally retire a stale-open source row (no-op for rows already
 // cancelled, e.g. by the compliance migration): the superseded wording's
@@ -933,7 +946,12 @@ async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
     if (typeof snapshot === 'string') {
       try { snapshot = JSON.parse(snapshot); } catch { snapshot = null; }
     }
-    const estimateId = snapshot?.estimate?.id || null;
+    // The generic document route accepts arbitrary snapshot values, so a
+    // manually issued request can carry an untrusted estimate.id — a
+    // malformed one must not throw the whole pass, and any value that
+    // doesn't survive validation routes to the manual-handoff branch.
+    const estimateIdRaw = snapshot?.estimate?.id;
+    const estimateId = UUID_RE.test(String(estimateIdRaw || '')) ? String(estimateIdRaw) : null;
 
     if (!estimateId) {
       // MANUALLY issued stale row (no estimate linkage — e.g. one that raced
@@ -964,7 +982,7 @@ async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
     }
 
     if (seenEstimates.has(estimateId)) {
-      await cancelStaleSource(row);
+      if ((await cancelStaleSource(row)) === 'reactivated') continue;
       await markSupersededHandled(row, 'duplicate_estimate');
       continue;
     }
@@ -1004,9 +1022,13 @@ async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
     // processing it anyway would ring false manual-prep bells for parked
     // categories before maybeCreate's own dedupe runs.
     const openNow = await openProgramAgreements(row.customer_id);
+    const nowForReplacement = new Date();
     const replacementExists = openNow.some((openRow) => {
       if (openRow.id === row.id) return false;
       if (!openRow.document_template_version_id || !activeVersionIds.has(openRow.document_template_version_id)) return false;
+      // An expired-token row is no coverage: the customer's link 410s and
+      // the row leaves OPEN_STATUSES on the next lifecycle pass.
+      if (openRow.share_token_expires_at && new Date(openRow.share_token_expires_at) < nowForReplacement) return false;
       let os = openRow.document_variables_snapshot;
       if (typeof os === 'string') { try { os = JSON.parse(os); } catch { os = null; } }
       if (os?.estimate?.id && String(os.estimate.id) === String(estimateId)) return true;
@@ -1024,6 +1046,26 @@ async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
     if (!estimate || estimate.status !== 'accepted') {
       await markSupersededHandled(row, 'estimate_unavailable');
       results.skipped += 1;
+      continue;
+    }
+    // The snapshot's estimate must belong to THIS contract's customer — an
+    // untrusted id pointing at another customer's estimate must never feed
+    // figures into (or autosend) an agreement. Park it with the operator.
+    if (estimate.customer_id && String(estimate.customer_id) !== String(row.customer_id)) {
+      const mismatchBellState = await adminBellExists('Re-issue termite agreement%', 'contractId', row.id);
+      const mismatchBelled = mismatchBellState === true
+        || (mismatchBellState === false && await ringAdminBell(NotificationService, [
+          'estimate',
+          'Re-issue termite agreement (wording updated)',
+          `The cancelled termite program agreement for ${row.recipient_name || 'a customer'} referenced an estimate that does not belong to that customer, so it could not be replaced automatically. Re-issue it from the document library.`,
+          { icon: '\u{1F4DD}', link: `/admin/customers/${row.customer_id}`, metadata: { contractId: row.id, customerId: row.customer_id } },
+        ], `estimate-customer mismatch for contract ${row.id}`));
+      if (mismatchBelled) {
+        await markSupersededHandled(row, 'estimate_customer_mismatch');
+        results.skipped += 1;
+      } else {
+        results.failed += 1;
+      }
       continue;
     }
 

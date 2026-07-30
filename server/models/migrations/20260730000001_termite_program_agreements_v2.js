@@ -435,9 +435,10 @@ exports.up = async function up(knex) {
     // version the content lookup matched) were never superseded — their
     // signing links stay live.
     .modify((q) => { if (seededVersionIds.length) q.whereNotIn('document_template_version_id', seededVersionIds); })
-    .select('id', 'customer_id', 'recipient_name', 'document_variables_snapshot');
+    .select('id', 'customer_id', 'status', 'recipient_name', 'document_variables_snapshot');
   const now = new Date();
   for (const row of openRows) {
+    const priorStatus = row.status;
     // Conditional on the status still being open: a customer signing
     // concurrently with the deploy could commit 'signed' between the
     // unlocked read above and this update — an executed agreement must
@@ -460,7 +461,8 @@ exports.up = async function up(knex) {
       event_type: 'cancelled',
       actor_type: 'system',
       actor_id: null,
-      metadata: JSON.stringify({ reason: 'superseded_by_v2_migration' }),
+      // prior_status lets down() restore the request exactly as it was.
+      metadata: JSON.stringify({ reason: 'superseded_by_v2_migration', prior_status: priorStatus }),
     });
     // Service-generated requests carry the estimate id in their snapshot and
     // the reconciliation sweep re-preps them from the v2 body automatically.
@@ -535,6 +537,49 @@ exports.down = async function down(knex) {
     await knex('migration_rollback_state')
       .where({ migration_name: MIGRATION_NAME, state_key: `prior_active:${seed.template_key}` })
       .del();
+  }
+
+  // Requests up() cancelled must come back with the rollback: after the
+  // prior version is active again the sweep's reactivation guard skips
+  // them, and older estimates fall outside the ordinary window — without
+  // this, customers keep dead 410 links with no replacement. Restore each
+  // row to its recorded prior status (only if still carrying our
+  // cancellation), clear the cancellation fields, and drop any reprocessed
+  // markers so future logic re-evaluates them fresh.
+  const hasContracts = await knex.schema.hasTable('customer_contracts');
+  const hasEvents = await knex.schema.hasTable('customer_contract_events');
+  if (hasContracts && hasEvents) {
+    const cancelEvents = await knex('customer_contract_events')
+      .where({ event_type: 'cancelled', actor_type: 'system' })
+      .whereRaw("metadata->>'reason' = 'superseded_by_v2_migration'")
+      .select('contract_id', 'customer_id', 'metadata');
+    for (const evt of cancelEvents) {
+      let meta = evt.metadata;
+      if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
+      const priorStatus = ['draft', 'sent', 'viewed'].includes(meta?.prior_status) ? meta.prior_status : 'draft';
+      const restored = await knex('customer_contracts')
+        .where({ id: evt.contract_id, status: 'cancelled' })
+        .where('cancelled_reason', 'like', 'Superseded by updated compliance wording%')
+        .update({
+          status: priorStatus,
+          cancelled_at: null,
+          cancelled_reason: null,
+          updated_at: knex.fn.now(),
+        });
+      if (restored) {
+        await knex('customer_contract_events')
+          .where({ contract_id: evt.contract_id, event_type: 'superseded_reprocessed' })
+          .del();
+        await knex('customer_contract_events').insert({
+          contract_id: evt.contract_id,
+          customer_id: evt.customer_id,
+          event_type: 'reopened',
+          actor_type: 'system',
+          actor_id: null,
+          metadata: JSON.stringify({ reason: 'v2_migration_rolled_back' }),
+        });
+      }
+    }
   }
 };
 
