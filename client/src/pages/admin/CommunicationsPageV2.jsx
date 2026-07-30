@@ -97,7 +97,7 @@ import {
   DialogFooter,
   cn,
 } from "../../components/ui";
-import { trackAdminPageView } from "../../lib/adminUsage";
+import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -2534,16 +2534,8 @@ export default function CommunicationsPageV2() {
   // reaches the router — header clicks are state-only, and cross-tab deep
   // links arrive via raw window.location.hash (#tab=…, hashTo in
   // NotificationEventsTabV2), which react-router (and so the layout's
-  // raw-URL beacon) never observes (Codex #2961 r14). This page is listed
-  // in SELF_REPORTING_PAGES (lib/adminUsage.js).
-  const usageLeaf = usageLeafFor(tab, templateKind);
-  useEffect(() => {
-    trackAdminPageView({
-      pathname: "/admin/communications",
-      search: `?tab=${usageLeaf}`,
-      authoritative: true,
-    });
-  }, [usageLeaf]);
+  // raw-URL beacon) never observes (Codex #2961 r14).
+  useRenderedTabBeacon("/admin/communications", usageLeafFor(tab, templateKind));
 
   return (
     <div className="bg-surface-page min-h-full font-sans text-zinc-900 max-w-[1300px] mx-auto">

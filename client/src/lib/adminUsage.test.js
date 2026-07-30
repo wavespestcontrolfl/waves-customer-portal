@@ -271,15 +271,36 @@ describe('trackAdminPageView', () => {
     settle();
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(lastBody().tab).toBe('general');
+    // The refinement CONTINUES the raw view — it must keep the raw
+    // beacon's session-open 'load' even though it arrived aged.
+    expect(lastBody().source).toBe('load');
+  });
+
+  it("an unmarked navigation away from an aged dwell does not inherit its 'load'", () => {
+    // Cold open on a slow-loading Settings (raw beacon pending as 'load'),
+    // 2s dwell, then browser Back — an UNMARKED navigation. The dwell is
+    // flushed as its own 'load' row; the destination is a plain in-app
+    // navigation and must not become a second "app open" (Codex #2961 r15).
+    trackAdminPageView({ pathname: '/admin/settings', search: '' });
+    vi.advanceTimersByTime(2000);
+    trackAdminPageView({ pathname: '/admin/dashboard', search: '' });
+    settle();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const first = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(first).toMatchObject({ pageKey: 'settings', source: 'load' });
+    expect(lastBody()).toMatchObject({ pageKey: 'dashboard', source: 'in-app' });
   });
 
   it('holds the raw beacon for every self-reporting page, not just Settings', () => {
-    // lawn-assessments and communications adopted authoritative beacons in
-    // r14 — their raw beacons must get the same 5s refinement window, or a
-    // slow chunk records a duplicate untabbed row before the page reports.
+    // lawn-assessments/communications (r14) and agents/compliance (r15)
+    // adopted authoritative beacons — their raw beacons must get the same
+    // 5s refinement window, or a slow chunk records a duplicate untabbed
+    // row before the page reports.
     for (const [pathname, tab] of [
       ['/admin/communications', 'sms'],
       ['/admin/lawn-assessments', 'funnel'],
+      ['/admin/agents', 'overview'],
+      ['/admin/compliance', 'dashboard'],
     ]) {
       __resetAdminUsageForTests();
       fetchMock.mockClear();

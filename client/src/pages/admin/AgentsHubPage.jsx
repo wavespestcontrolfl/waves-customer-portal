@@ -35,6 +35,7 @@ import AgentOpsPage from "./AgentOpsPage";
 import AgentDecisionsPage from "./AgentDecisionsPage";
 import AgentShadowDraftsPage from "./AgentShadowDraftsPage";
 import DataHygienePage from "./DataHygienePage";
+import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 
 const TAB_KEY = "tab";
 const TABS = {
@@ -57,6 +58,9 @@ export default function AgentsHubPage() {
   const tab = VALID_TABS.includes(paramTab) ? paramTab : TABS.OVERVIEW;
   const setTab = useCallback(
     (next) => {
+      // Re-clicking the active section renders nothing new — skip the URL
+      // churn (and the usage beacon it would re-fire).
+      if (next === tab) return;
       setSearchParams(
         (current) => {
           const params = new URLSearchParams(current);
@@ -66,8 +70,14 @@ export default function AgentsHubPage() {
         { replace: true }
       );
     },
-    [setSearchParams]
+    [setSearchParams, tab]
   );
+
+  // Usage beacon for the tab that actually RENDERS: an invalid deep link
+  // (?tab=typo) falls back to Overview without rewriting the URL, so the
+  // layout's raw-query beacon would record a tab that never rendered
+  // (Codex #2961 r15).
+  useRenderedTabBeacon("/admin/agents", tab, [searchParams]);
 
   // AgentOpsPage owns its data fetch; expose a handle here so the lifted
   // Refresh pill in this header can trigger it without lifting the state

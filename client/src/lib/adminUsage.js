@@ -46,18 +46,25 @@ const DEDUPE_MS = 30000;
 // Without this, every legacy redirect route logs a phantom page and steals
 // the attribution of a core destination.
 const REDIRECT_SETTLE_MS = 800;
-// Pages that emit their own AUTHORITATIVE leaf beacon after mount —
-// Settings (validated leaf), the Assessments hub (invalid ?tab= renders a
-// fallback WITHOUT rewriting the URL), and Communications (tab state
-// lives outside the router: state-only header clicks + raw
-// window.location.hash deep links). Their raw route beacon settles
-// longer: the page chunk is lazy-loaded, and on a cold load the
-// authoritative beacon can arrive well after 800ms — flushing the raw
-// one first would record a duplicate untabbed row (or an invalid
-// deep-link tab) that the page's beacon was supposed to supersede
-// (Codex #2961 r12). Any page that adopts authoritative beacons must be
-// listed here.
-const SELF_REPORTING_PAGES = new Set(['settings', 'lawn-assessments', 'communications']);
+// Pages that emit their own AUTHORITATIVE rendered-leaf beacon
+// (hooks/useRenderedTabBeacon, or SettingsPage's bespoke selectTab flow):
+// their ?tab= can diverge from what actually renders — validated
+// fallbacks (settings, lawn-assessments, agents), role-gated tabs
+// (compliance), or tab state the router never sees at all
+// (communications: state-only header clicks + raw location.hash deep
+// links). Their raw route beacon settles longer: the page chunk is
+// lazy-loaded, and on a cold load the authoritative beacon can arrive
+// well after 800ms — flushing the raw one first would record a duplicate
+// untabbed row (or an invalid deep-link tab) that the page's beacon was
+// supposed to supersede (Codex #2961 r12). Any page that adopts
+// authoritative beacons must be listed here.
+const SELF_REPORTING_PAGES = new Set([
+  'settings',
+  'lawn-assessments',
+  'communications',
+  'agents',
+  'compliance',
+]);
 const SELF_REPORT_SETTLE_MS = 5000;
 
 let pendingSource = null; // { source, ts }
@@ -278,13 +285,28 @@ export function trackAdminPageView({ pathname, search, authoritative = false } =
     return;
   }
 
+  const pendingSamePage = !!pendingBeacon
+    && pendingBeacon.body.pageKey === norm.pageKey
+    && pendingBeacon.body.path === norm.path;
+  const pendingAged = !!pendingBeacon
+    && now - pendingBeacon.queuedAt > REDIRECT_SETTLE_MS;
+
   let source;
   if (pendingSource && now - pendingSource.ts < SOURCE_TTL_MS) {
     source = pendingSource.source;
-  } else if (pendingBeacon && pendingBeacon.body.source !== 'in-app') {
-    // Superseding a still-pending view = we're the redirect target of the
-    // navigation that queued it — inherit its source (and its session-open
-    // 'load' marker).
+  } else if (
+    pendingBeacon
+    && pendingBeacon.body.source !== 'in-app'
+    && (pendingSamePage || !pendingAged)
+  ) {
+    // Inherit the pending view's source only when this arrival CONTINUES
+    // that view: its same-page refinement (any age — a cold chunk's
+    // authoritative beacon must keep the raw beacon's 'load'), or the
+    // target of a redirect hop still inside the settle window. An AGED
+    // pending for a DIFFERENT page is a finished dwell about to be flushed
+    // as its own row — inheriting its source would relabel an unmarked
+    // navigation (browser Back off a slow Settings open) as a second
+    // 'load' and double-count "App opens land on" (Codex #2961 r15).
     source = pendingBeacon.body.source;
   } else {
     // First view of the session = the page the app was opened on (bookmark,
@@ -299,12 +321,8 @@ export function trackAdminPageView({ pathname, search, authoritative = false } =
   // (only possible under the longer self-reporting settle) — a navigation
   // to a DIFFERENT page must flush it, not swallow it. Same-page arrivals
   // (the authoritative refinement) still replace it at any age.
-  if (pendingBeacon) {
-    const samePage = pendingBeacon.body.pageKey === norm.pageKey
-      && pendingBeacon.body.path === norm.path;
-    if (!samePage && now - pendingBeacon.queuedAt > REDIRECT_SETTLE_MS) {
-      flushPendingBeacon();
-    }
+  if (pendingBeacon && !pendingSamePage && pendingAged) {
+    flushPendingBeacon();
   }
 
   if (pendingTimer) clearTimeout(pendingTimer);

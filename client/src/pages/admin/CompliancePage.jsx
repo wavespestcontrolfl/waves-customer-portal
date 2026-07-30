@@ -10,6 +10,7 @@ import {
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { getAdminAuthToken, getAdminUser } from "../../lib/adminAuth";
 import CredentialsPage from "./CredentialsPage";
+import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 
 const API = "/api/admin/compliance-v2";
 const headers = (token) => ({
@@ -889,7 +890,17 @@ export default function CompliancePage() {
   const tab = visibleTabKeys.has(requestedTab) ? requestedTab : "dashboard";
   const token = getAdminAuthToken();
 
+  // Usage beacon for the tab that actually RENDERS: this resolution is
+  // role-aware — a tech opening the admin-only ?tab=credentials (e.g. via
+  // the legacy /admin/credentials redirect) renders Dashboard, and the
+  // layout's raw-query beacon would record a tab they never saw
+  // (Codex #2961 r15).
+  useRenderedTabBeacon("/admin/compliance", tab, [searchParams]);
+
   const selectTab = (nextTab) => {
+    // Re-clicking the active section renders nothing new — skip the URL
+    // churn (and the usage beacon it would re-fire).
+    if (nextTab === tab) return;
     const nextParams = new URLSearchParams(searchParams);
     if (nextTab === "dashboard") nextParams.delete("tab");
     else nextParams.set("tab", nextTab);

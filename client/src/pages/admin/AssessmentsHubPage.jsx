@@ -14,12 +14,12 @@
  * and the Field & Equipment "Lawn Assessment" page were two top-level areas
  * for the same subject — one canonical section removes the split.
  */
-import React, { Suspense, useEffect } from "react";
+import React, { Suspense } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Camera, Leaf } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import PhotoAssessmentsPage from "./PhotoAssessmentsPage";
-import { trackAdminPageView } from "../../lib/adminUsage";
+import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 
 const LawnAssessmentPanel = React.lazy(() => import("./LawnAssessmentPanel"));
 
@@ -52,17 +52,8 @@ export default function AssessmentsHubPage() {
   // Usage beacon for the tab that actually RENDERS: an invalid deep link
   // (?tab=typo) falls back to Lead Magnets without rewriting the URL, so
   // the layout's raw-query beacon would record a tab that never rendered
-  // (Codex #2961 r14). The authoritative beacon supersedes it — this page
-  // is listed in SELF_REPORTING_PAGES (lib/adminUsage.js). searchParams is
-  // a dep so a query-only change that does NOT move the resolved tab
-  // (another bad deep link) still re-asserts the rendered tab.
-  useEffect(() => {
-    trackAdminPageView({
-      pathname: "/admin/lawn-assessments",
-      search: `?tab=${tab}`,
-      authoritative: true,
-    });
-  }, [tab, searchParams]);
+  // (Codex #2961 r14).
+  useRenderedTabBeacon("/admin/lawn-assessments", tab, [searchParams]);
 
   return (
     <div className="max-w-[1200px]">
