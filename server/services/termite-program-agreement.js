@@ -536,8 +536,22 @@ async function retireSamePropertyOpenAgreements(customerId, estimate) {
       const rowEstimateId = rowSnap?.estimate?.id || null;
       const forDifferentEstimate = rowEstimateId && estimate?.id && String(rowEstimateId) !== String(estimate.id);
       if (isCurrentVersion && acceptedAt && createdAt && createdAt >= acceptedAt && !forDifferentEstimate) {
-        keptReplacement = true;
-        continue;
+        // Only a STAFF-issued row is a tailored replacement. A row this
+        // service auto-drafted for the SAME estimate after accepted_at is
+        // the rolling-deploy misissue itself (an old instance without the
+        // park minted residential wording for this accept) — it must
+        // retire, or the incompatible request stays signable forever.
+        // Service preps stamp their 'created' event with
+        // source=estimate_accept; the document-library route writes
+        // 'created_from_document_template' as an admin actor.
+        const serviceCreated = await trx('customer_contract_events')
+          .where({ contract_id: row.id, event_type: 'created', actor_type: 'system' })
+          .whereRaw("metadata->>'source' = 'estimate_accept'")
+          .first('id');
+        if (!serviceCreated) {
+          keptReplacement = true;
+          continue;
+        }
       }
       const cancelled = await trx('customer_contracts')
         .where({ id: row.id })
@@ -593,11 +607,15 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
 
     if (isCommercialEstimate(estimate, estData)) {
       // Retirement failures must not swallow the operator handoff — the
-      // bell still rings and the retirement retries on the next sweep.
+      // bell still rings and the retirement retries on the next sweep. The
+      // failure is surfaced as retireFailed so reconciliation callers keep
+      // the row retryable instead of marking it handled on a bell alone.
       let commercialReplacementKept = false;
+      let commercialRetireFailed = false;
       try {
         ({ keptReplacement: commercialReplacementKept } = await retireSamePropertyOpenAgreements(customerId, estimate));
       } catch (err) {
+        commercialRetireFailed = true;
         logger.warn(`[termite-agreement] parked retirement failed for estimate ${estimate.id}: ${err.message}`);
       }
       if (commercialReplacementKept) return { ok: false, skipped: 'commercial', belled: true };
@@ -618,7 +636,7 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
           { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId, ...(reissueSourceContractId ? { reissueContractId: reissueSourceContractId } : {}) } },
         ], `manual-prep (commercial) for estimate ${estimate.id}`);
       }
-      return { ok: false, skipped: 'commercial', belled };
+      return { ok: false, skipped: 'commercial', belled, retireFailed: commercialRetireFailed };
     }
 
     const prepay = await isAnnualPrepayAccept(estimate, billingTerm);
@@ -628,9 +646,11 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       // which would contradict the annual-prepay invoice. Park it for
       // manual preparation with accurate terms.
       let prepayReplacementKept = false;
+      let prepayRetireFailed = false;
       try {
         ({ keptReplacement: prepayReplacementKept } = await retireSamePropertyOpenAgreements(customerId, estimate));
       } catch (err) {
+        prepayRetireFailed = true;
         logger.warn(`[termite-agreement] parked retirement failed for estimate ${estimate.id}: ${err.message}`);
       }
       if (prepayReplacementKept) return { ok: false, skipped: 'annual_prepay', belled: true };
@@ -648,7 +668,7 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
           { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId, ...(reissueSourceContractId ? { reissueContractId: reissueSourceContractId } : {}) } },
         ], `manual-prep (annual prepay) for estimate ${estimate.id}`);
       }
-      return { ok: false, skipped: 'annual_prepay', belled: prepayBelled };
+      return { ok: false, skipped: 'annual_prepay', belled: prepayBelled, retireFailed: prepayRetireFailed };
     }
 
     // The admin scheduling flow books the visit BEFORE the rows are linked
@@ -665,9 +685,11 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       // (The reconciliation sweep passes notifyOnUnresolved=false so the
       // original accept-time bell isn't re-rung daily.)
       let figuresReplacementKept = false;
+      let figuresRetireFailed = false;
       try {
         ({ keptReplacement: figuresReplacementKept } = await retireSamePropertyOpenAgreements(customerId, estimate));
       } catch (err) {
+        figuresRetireFailed = true;
         logger.warn(`[termite-agreement] parked retirement failed for estimate ${estimate.id}: ${err.message}`);
       }
       if (figuresReplacementKept) return { ok: false, skipped: 'figures_unresolved', belled: true };
@@ -685,7 +707,7 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
           { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId, ...(reissueSourceContractId ? { reissueContractId: reissueSourceContractId } : {}) } },
         ], `manual-prep (figures unresolved) for estimate ${estimate.id}`);
       }
-      return { ok: false, skipped: 'figures_unresolved', belled: figuresBelled };
+      return { ok: false, skipped: 'figures_unresolved', belled: figuresBelled, retireFailed: figuresRetireFailed };
     }
 
     const activeVersionIds = await activeProgramVersionIds();
@@ -944,14 +966,14 @@ async function cancelStaleSource(row, conn = db) {
   });
 }
 
-async function markSupersededHandled(row, outcome, conn = db) {
+async function markSupersededHandled(row, outcome, conn = db, extraMetadata = null) {
   await conn('customer_contract_events').insert({
     contract_id: row.id,
     customer_id: row.customer_id,
     event_type: REPROCESSED_EVENT,
     actor_type: 'system',
     actor_id: null,
-    metadata: JSON.stringify({ outcome }),
+    metadata: JSON.stringify({ outcome, ...(extraMetadata || {}) }),
   });
 }
 
@@ -966,11 +988,21 @@ async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
   // rows can't be re-selected forever and parked rows can't re-ring their
   // manual-prep bells every day. Only transient errors stay unmarked for a
   // retry.
+  // Rollout-window markers carry the template version they validated
+  // (versionId). Their verdict is only good for THAT version: a request
+  // marked 'rollout_window_ok' under v2 still needs reconciliation when v3
+  // publishes, so a marker whose version is no longer active does not
+  // block. Markers without a versionId are terminal outcomes recorded on
+  // already-stale rows and block permanently, as before.
   const notReprocessed = (query) => query.whereNotExists(function handled() {
     this.select(db.raw('1'))
       .from('customer_contract_events as cce')
       .whereRaw('cce.contract_id = customer_contracts.id')
-      .where('cce.event_type', REPROCESSED_EVENT);
+      .where('cce.event_type', REPROCESSED_EVENT)
+      .where(function versionScoped() {
+        this.whereRaw("(cce.metadata->>'versionId') IS NULL")
+          .orWhereIn(db.raw("cce.metadata->>'versionId'"), [...activeVersionIds]);
+      });
   });
 
   const staleOpen = await notReprocessed(db('customer_contracts')
@@ -1034,21 +1066,25 @@ async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
   const seenEstimates = new Set();
   for (const row of rolloutWindowRows) {
     if (results.checked >= limit) break;
+    // Every rollout-window marker is stamped with the version it validated
+    // so the verdict expires with that version (see notReprocessed).
+    const rolloutMeta = { versionId: row.document_template_version_id };
     let snap = row.document_variables_snapshot;
     if (typeof snap === 'string') { try { snap = JSON.parse(snap); } catch { snap = null; } }
     const rawId = snap?.estimate?.id;
     const linkedEstimateId = UUID_RE.test(String(rawId || '')) ? String(rawId) : null;
-    if (!linkedEstimateId) { await markSupersededHandled(row, 'rollout_window_manual'); continue; }
+    if (!linkedEstimateId) { await markSupersededHandled(row, 'rollout_window_manual', db, rolloutMeta); continue; }
     results.checked += 1;
     const linkedEstimate = await db('estimates').where({ id: linkedEstimateId }).first();
     if (!linkedEstimate || !linkedEstimate.customer_id
       || String(linkedEstimate.customer_id) !== String(row.customer_id)) {
-      await markSupersededHandled(row, 'rollout_window_ownership');
+      await markSupersededHandled(row, 'rollout_window_ownership', db, rolloutMeta);
       continue;
     }
     if (!isCommercialEstimate(linkedEstimate, parseEstimateData(linkedEstimate.estimate_data))) {
-      // Correctly issued under today's rules — nothing to do, never rescan.
-      await markSupersededHandled(row, 'rollout_window_ok');
+      // Correctly issued under today's rules — nothing to do until a later
+      // template version voids this verdict.
+      await markSupersededHandled(row, 'rollout_window_ok', db, rolloutMeta);
       continue;
     }
     // A commercial estimate holding a residential agreement: run it through
@@ -1062,13 +1098,16 @@ async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
       signedAfter: row.created_at || null,
       reissueSourceContractId: row.id,
     });
-    if (misissueResult.skipped === 'commercial' && misissueResult.belled !== false) {
-      await markSupersededHandled(row, 'rollout_window_commercial_reissued');
+    if (misissueResult.retireFailed || misissueResult.belled === false) {
+      // Retirement or bell missing — the residential link may still be
+      // live, so the row stays unmarked for tomorrow's retry (the
+      // reissue-scoped bell dedupes; the retirement is idempotent).
+      results.failed += 1;
+    } else if (misissueResult.skipped === 'commercial') {
+      await markSupersededHandled(row, 'rollout_window_commercial_reissued', db, rolloutMeta);
       results.skipped += 1;
-    } else if (misissueResult.belled === false) {
-      results.failed += 1; // bell missing — retry tomorrow
     } else {
-      await markSupersededHandled(row, misissueResult.skipped || 'rollout_window_processed');
+      await markSupersededHandled(row, misissueResult.skipped || 'rollout_window_processed', db, rolloutMeta);
       results.skipped += 1;
     }
   }
@@ -1231,9 +1270,10 @@ async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
       results.skipped += 1;
     } else if (parked) {
       // Parked — but the bell IS the handoff: only terminal when it landed.
-      // A failed bell leaves the source unmarked (cancelled above, so the
-      // retry is bell-only) and counts as failed for tomorrow's run.
-      if (result.belled === false) {
+      // A failed bell OR a failed same-property retirement leaves the
+      // source unmarked (cancelled above, so the retry is cheap) and
+      // counts as failed for tomorrow's run.
+      if (result.belled === false || result.retireFailed) {
         results.failed += 1;
       } else {
         await markSupersededHandled(row, result.skipped);

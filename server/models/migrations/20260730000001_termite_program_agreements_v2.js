@@ -435,6 +435,13 @@ exports.up = async function up(knex) {
     // version the content lookup matched) were never superseded — their
     // signing links stay live.
     .modify((q) => { if (seededVersionIds.length) q.whereNotIn('document_template_version_id', seededVersionIds); })
+    // A token already dead when v2 activates needs no cancel: its link
+    // 410s on its own and the delivery lifecycle will stamp the row
+    // 'expired'. Cancelling it here would convert a pre-rollout expiry —
+    // a deliberate blocker under the service's expired-recovery rule —
+    // into a migration-cancelled source the sweep re-preps (and may
+    // autosend) merely because the status stamp lagged the expiry.
+    .where((q) => q.whereNull('share_token_expires_at').orWhere('share_token_expires_at', '>', knex.fn.now()))
     .select('id', 'customer_id', 'status', 'recipient_name', 'document_variables_snapshot');
   const now = new Date();
   for (const row of openRows) {
@@ -557,10 +564,23 @@ exports.down = async function down(knex) {
   const hasContracts = await knex.schema.hasTable('customer_contracts');
   const hasEvents = await knex.schema.hasTable('customer_contract_events');
   if (hasContracts && hasEvents) {
-    const cancelEvents = await knex('customer_contract_events')
+    // Rollback leaves cancellation events in place, so an up/down/up cycle
+    // accumulates several per contract with potentially different
+    // prior_status values — only the LATEST reflects the state this
+    // migration's most recent up() actually cancelled (an older 'draft'
+    // event winning over a later 'sent' would restore a row the public
+    // signing route 409s on). Newest-first plus first-seen-wins keeps one
+    // event per contract.
+    const cancelEventsAll = await knex('customer_contract_events')
       .where({ event_type: 'cancelled', actor_type: 'system' })
       .whereRaw("metadata->>'reason' = 'superseded_by_v2_migration'")
+      .orderBy('created_at', 'desc')
       .select('contract_id', 'customer_id', 'metadata');
+    const latestByContract = new Map();
+    for (const evt of cancelEventsAll) {
+      if (!latestByContract.has(String(evt.contract_id))) latestByContract.set(String(evt.contract_id), evt);
+    }
+    const cancelEvents = [...latestByContract.values()];
     const templateKeysForRestore = TEMPLATE_V2.map((t) => t.template_key);
     // Same canonicalization as the service's normalizeAddress — '123 Main
     // Street' and '123 Main St' are the SAME property for restore
