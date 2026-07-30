@@ -66,7 +66,18 @@ const SELF_REPORTING_PAGES = new Set([
   'agents',
   'compliance',
   'newsletter',
+  'contracts',
+  'pricing-logic',
+  'blog',
+  'ppc',
+  'pipeline',
+  'customers',
+  'knowledge',
+  'service-library',
 ]);
+// NOT listed: dispatch — its URL sync-back effect rewrites ?tab= to the
+// resolved tab on mount (AdminDispatchPage), so the raw beacon
+// self-corrects inside the 800ms settle and needs no page-side report.
 const SELF_REPORT_SETTLE_MS = 5000;
 
 let pendingSource = null; // { source, ts }

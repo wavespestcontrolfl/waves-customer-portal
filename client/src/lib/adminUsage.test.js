@@ -302,6 +302,14 @@ describe('trackAdminPageView', () => {
       ['/admin/agents', 'overview'],
       ['/admin/compliance', 'dashboard'],
       ['/admin/newsletter', 'dashboard'],
+      ['/admin/contracts', 'templates'],
+      ['/admin/pricing-logic', 'logic'],
+      ['/admin/blog', 'posts'],
+      ['/admin/ppc', 'ppc-dashboard'],
+      ['/admin/pipeline', 'leads'],
+      ['/admin/customers', 'directory'],
+      ['/admin/knowledge', 'articles'],
+      ['/admin/service-library', 'catalog'],
     ]) {
       __resetAdminUsageForTests();
       fetchMock.mockClear();

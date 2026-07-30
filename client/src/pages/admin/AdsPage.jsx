@@ -18,6 +18,7 @@ import {
 } from "recharts";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { etDateString } from "../../lib/timezone";
+import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 const PPCDashboardPage = lazy(() => import("./PPCDashboardPage"));
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
@@ -4554,6 +4555,11 @@ function SiteAuditTab() {
 
 export default function AdsPage() {
   const [tab, setTab] = useState("ppc-dashboard");
+
+  // Usage beacon for the tab that actually RENDERS. PPC tabs are pure
+  // state — they never reach the router, so without this the page's tab
+  // column is impossible, same as Communications (Codex #2961 r17).
+  useRenderedTabBeacon("/admin/ppc", tab);
 
   return (
     <div>

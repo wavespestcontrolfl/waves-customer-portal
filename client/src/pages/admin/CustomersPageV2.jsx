@@ -36,6 +36,7 @@
 //   reskinned eventually but for now stylistic drift is the risk.
 import { useState, useEffect, useRef } from "react";
 import { useLocation, useSearchParams, useNavigate } from "react-router-dom";
+import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import {
   Filter,
   HeartPulse,
@@ -930,6 +931,17 @@ function pipelineCustomersFrom(data) {
   );
 }
 
+// Views with a real render conditional below — the usage beacon reports
+// only these; ?view= is otherwise unvalidated (an unknown value renders no
+// panel, so there is no leaf to report).
+const CUSTOMER_VIEW_KEYS = new Set([
+  "directory",
+  "pipeline",
+  "map",
+  "health",
+  "intelligence",
+]);
+
 export default function CustomersPageV2() {
   const isMobile = useIsMobile();
   const navigate = useNavigate();
@@ -949,6 +961,16 @@ export default function CustomersPageV2() {
     if (raw) return raw;
     return "directory";
   });
+
+  // Usage beacon for the view that actually RENDERS. `view` is taken from
+  // the URL unvalidated, and an unknown value matches none of the render
+  // conditionals — emit only views that map to a real panel, so the
+  // query-less Directory default is named and garbage never is
+  // (Codex #2961 r17).
+  useRenderedTabBeacon(
+    "/admin/customers",
+    CUSTOMER_VIEW_KEYS.has(view) ? view : null,
+  );
   const [search, setSearch] = useState("");
   const [filterStage, setFilterStage] = useState("all");
   const [filterTier, setFilterTier] = useState("all");

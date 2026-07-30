@@ -24,6 +24,7 @@ import React, { Suspense } from "react";
 import { useSearchParams } from "react-router-dom";
 import { FileClock, FileText } from "lucide-react";
 import { cn } from "../../components/ui";
+import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 
 const DocumentTemplatesPage = React.lazy(() => import("./DocumentTemplatesPage"));
 const DocumentRequestsPage = React.lazy(() => import("./DocumentRequestsPage"));
@@ -38,7 +39,14 @@ export default function ContractsPage() {
   const raw = searchParams.get("tab");
   const tab = TABS.some((t) => t.key === raw) ? raw : "templates";
 
+  // Usage beacon for the tab that actually RENDERS — an invalid or missing
+  // ?tab= resolves to Templates without rewriting the URL (Codex #2961 r17).
+  useRenderedTabBeacon("/admin/contracts", tab, [searchParams]);
+
   const setTab = (key) => {
+    // Re-clicking the active section renders nothing new — skip the URL
+    // churn (and the usage beacon it would re-fire).
+    if (key === tab) return;
     const next = new URLSearchParams(searchParams);
     next.set("tab", key);
     setSearchParams(next, { replace: true });

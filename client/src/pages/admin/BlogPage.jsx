@@ -1,5 +1,6 @@
 import { useState, useEffect, lazy, Suspense } from "react";
 import { useSearchParams } from "react-router-dom";
+import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import {
   Bot,
   CalendarDays,
@@ -2927,6 +2928,14 @@ export default function BlogPage() {
     : TABS.some((t) => t.key === paramTab)
       ? paramTab
       : "posts";
+
+  // Usage beacon for the tab that actually RENDERS — legacy status deep
+  // links (?tab=drafts) and unknown values resolve to Posts without
+  // rewriting the URL (Codex #2961 r17). No active-re-click guard on
+  // setTab: clicking Posts while on a legacy status URL must still
+  // rewrite ?tab=, which a same-resolved-key guard would suppress.
+  useRenderedTabBeacon("/admin/blog", tab, [searchParams]);
+
   const setTab = (next) =>
     setSearchParams(
       (current) => {

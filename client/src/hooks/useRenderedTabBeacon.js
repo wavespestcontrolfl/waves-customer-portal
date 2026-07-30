@@ -16,6 +16,12 @@ import { trackAdminPageView } from '../lib/adminUsage';
  */
 export default function useRenderedTabBeacon(pathname, renderedTab, extraDeps = []) {
   useEffect(() => {
+    // Falsy leaf = "not mine to report right now" — a hub deferring to the
+    // embedded child that owns the deeper leaf (ServiceLibrary → protocol
+    // command center), a child rendered outside its tracked route, or a
+    // state value that matches no rendered panel. The raw route beacon
+    // remains the fallback record in that case.
+    if (!renderedTab) return;
     trackAdminPageView({
       pathname,
       search: `?tab=${renderedTab}`,

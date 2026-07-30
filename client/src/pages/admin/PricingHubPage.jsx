@@ -4,6 +4,7 @@ import { useSearchParams } from "react-router-dom";
 import PricingLogicPage from "./PricingLogicPage";
 import PricingStrategyPage from "./PricingStrategyPage";
 import AdminPriceChangePage from "./AdminPriceChangePage";
+import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 
 export const PRICING_AREAS = [
   { key: "logic", label: "Logic & Margins", Icon: Calculator },
@@ -20,7 +21,15 @@ export default function PricingHubPage() {
     ? requestedArea
     : "logic";
 
+  // Usage beacon for the area that actually RENDERS — an invalid or
+  // missing ?area= resolves to Logic & Margins without rewriting the URL
+  // (Codex #2961 r17).
+  useRenderedTabBeacon("/admin/pricing-logic", activeArea, [searchParams]);
+
   const selectArea = (area) => {
+    // Re-clicking the active area renders nothing new — skip the URL
+    // churn (and the usage beacon it would re-fire).
+    if (area === activeArea) return;
     const nextParams = new URLSearchParams(searchParams);
     if (area === "logic") nextParams.delete("area");
     else nextParams.set("area", area);

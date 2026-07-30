@@ -15,6 +15,7 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { createPortal } from "react-dom";
 import { useSearchParams, useNavigate } from "react-router-dom";
+import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import {
   STATUS_CONFIG,
   PIPELINE_FILTERS,
@@ -4067,6 +4068,12 @@ export default function EstimatesPageV2() {
   const [activeTab, setActiveTab] = useState(
     initialTab || (hasPrefill ? "new" : "leads"),
   );
+
+  // Usage beacon for the tab that actually RENDERS. The URL only SEEDS
+  // this state (prefill/estimateId deep links resolve to a tab and the
+  // one-shot params — including ?tab= itself — are then stripped), so the
+  // query can't be trusted as the rendered leaf here (Codex #2961 r17).
+  useRenderedTabBeacon("/admin/pipeline", activeTab);
 
   // The deep-link target for the Estimates list. Captured into state (and
   // stripped from the URL by the effect below) so it's consumed exactly once —

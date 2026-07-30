@@ -1,5 +1,6 @@
 import { lazy, Suspense, useState, useEffect, useCallback, useId } from "react";
 import { useSearchParams } from "react-router-dom";
+import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import { Library, Percent, Plus, Sprout } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import { DiscountsSection } from "./DiscountsTabs";
@@ -1497,6 +1498,17 @@ export default function ServiceLibraryPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [tab, setTabState] = useState(() =>
     normalizeTab(searchParams.get("tab")),
+  );
+
+  // Usage beacon for the tab that actually RENDERS — a deep link with an
+  // unknown ?tab= resolves to Catalog without the URL being rewritten.
+  // On the Protocols tab this page defers (null) to the embedded
+  // LawnProtocolCommandCenterPage, which owns the deeper ?protocolTab=
+  // leaf and reports it itself (Codex #2961 r17).
+  useRenderedTabBeacon(
+    "/admin/service-library",
+    tab === "protocols" ? null : tab,
+    [searchParams],
   );
   // 768-1023px tablet stacked mode (separate from <768 mobile drilldown)
   const [isTablet, setIsTablet] = useState(
