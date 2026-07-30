@@ -160,6 +160,10 @@ export default function TechTreatmentZoneModal({
   // flooded with the brand-blue wash on top of the perimeter band. Area
   // claim ⇒ requires a closed loop, same rule as lawn outlines.
   const [interior, setInterior] = useState(false);
+  // What the lawn SAVE actually rendered: 'highlight' | 'outline' | null.
+  // The status line must never claim a highlight when the save fell back to
+  // the outline (codex P1 #3075).
+  const [lawnRender, setLawnRender] = useState(null);
   const dragRef = useRef(null); // { index, moved } while a corner drag is live
   const traceRef = useRef(null);
   const canvasRef = useRef(null);
@@ -433,6 +437,7 @@ export default function TechTreatmentZoneModal({
           } catch { lawnMask = null; }
         }
       }
+      if (lawnMode) setLawnRender(lawnMask ? 'highlight' : 'outline');
       const accum = lawnMode
         ? (lawnMask || buildOutlineAccum({
           width: MAP_WIDTH, height: MAP_HEIGHT, points: finalPoints, closed,
@@ -490,6 +495,7 @@ export default function TechTreatmentZoneModal({
     const canvas = canvasRef.current;
     if (!canvas) return undefined;
     setSaveState(null);
+    setLawnRender(null);
     // Lawn animates too (owner 2026-07-30 "now lets do it for lawn"): the
     // outline draws itself with the mascot riding the tip, then breathes —
     // outlineMode keeps the no-smoke lawn ruling; the spray path is untouched.
@@ -535,8 +541,10 @@ export default function TechTreatmentZoneModal({
   const settled = status.phase !== 'spraying';
   const statusText = lawnMode
     ? (settled
-      ? `Lawn areas highlighted — ${Math.round(totalFeet)} ft boundary`
-      : 'Highlighting the lawn…')
+      ? (lawnRender === 'outline'
+        ? `Treated lawn area outlined — ${Math.round(totalFeet)} linear ft`
+        : `Lawn areas highlighted — ${Math.round(totalFeet)} ft boundary`)
+      : (lawnRender === 'outline' ? 'Outlining the treated lawn…' : 'Highlighting the lawn…'))
     : settled
       ? (interior
         ? `Home protected — interior + ${Math.round(totalFeet)} linear ft perimeter`
