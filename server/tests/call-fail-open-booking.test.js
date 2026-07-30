@@ -325,6 +325,19 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(r.allowed).toBe(false);
   });
 
+  test('a SAME-ET-DAY slot is ambiguous and fails closed — "Sunday" on a Sunday could mean next week (round-7 P1)', () => {
+    const r = canAutoRoute(agentCommitted(), opts({ callStartedAt: '2026-08-02T09:00:00-04:00' }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('a day-7 slot (same weekday next week) fails closed — ET calendar-date diff, not a 168h window (round-7 P1)', () => {
+    const ex = agentCommitted();
+    ex.scheduling.confirmed_start_at = '2026-08-02T12:00:00-04:00';
+    const r = canAutoRoute(ex, opts({ callStartedAt: '2026-07-26T12:00:00-04:00' })); // prior Sunday, exactly 7 ET days
+    expect(r.allowed).toBe(false);
+  });
+
   test('a pinned FRAGMENT cannot strip negation — the whole grounding turn is screened (round-6 P1)', () => {
     const rejectingTurn = "Sunday at 10 AM won't work, but I'll ask someone to call you back.";
     const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, rejectingTurn);

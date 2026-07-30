@@ -443,14 +443,23 @@ function quoteBindsConfirmedSlot(quote, confirmedStartAt, callStartedAt) {
   const q = ` ${normalizeForGrounding(quote)} `.replace(/ ([ap]) m(?= )/g, ' $1m');
   const start = new Date(String(confirmedStartAt || ''));
   if (!q.trim() || Number.isNaN(start.getTime())) return false;
-  // Calendar disambiguation (codex round-5 P1): a weekday name alone cannot
-  // distinguish "this Sunday" from "next Sunday". Requiring the confirmed
-  // slot to fall within 7 days AFTER the call makes the spoken weekday name
-  // a UNIQUE calendar date. Commitments further out fail closed (triage).
-  const callMs = new Date(String(callStartedAt || '')).getTime();
-  if (Number.isNaN(callMs) || !(start.getTime() > callMs) || start.getTime() - callMs > 7 * 86400000) {
-    return false;
-  }
+  // Calendar disambiguation (codex round-5 P1, tightened round 7): a weekday
+  // name alone cannot distinguish "this Sunday" from "next Sunday". Compare
+  // ET CALENDAR dates (an absolute 168h window is not calendar-unique around
+  // DST transitions) and require the slot to fall 1–6 ET days after the
+  // call's ET date: same-day is rejected (a "Sunday" spoken on a Sunday is
+  // ambiguous between today and next week) and day 7 is rejected (same
+  // weekday again). Within 1–6 days every weekday names exactly one date.
+  const call = new Date(String(callStartedAt || ''));
+  if (Number.isNaN(call.getTime())) return false;
+  let dayDiff;
+  try {
+    const etYmd = (d) => new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit',
+    }).format(d);
+    dayDiff = (Date.parse(`${etYmd(start)}T00:00:00Z`) - Date.parse(`${etYmd(call)}T00:00:00Z`)) / 86400000;
+  } catch { return false; }
+  if (!(dayDiff >= 1 && dayDiff <= 6)) return false;
   let weekday; let hour12; let dayPeriod;
   try {
     const parts = new Intl.DateTimeFormat('en-US', {

@@ -278,8 +278,16 @@ router.get('/auto-routed', async (req, res) => {
       .leftJoin('call_log', 'route_decisions.call_log_id', 'call_log.id')
       .leftJoin('customers', 'call_log.customer_id', 'customers.id')
       .leftJoin('route_feedback', 'route_decisions.call_log_id', 'route_feedback.call_log_id')
-      .whereIn('route_decisions.decision_version', V2_DECISION_VERSIONS)
-      .where('route_decisions.mode', 'enforce')
+      // One row per call: a reprocessed call carries BOTH decision versions;
+      // only its NEWEST supported enforce decision represents current state.
+      // Calls that only have a pre-bump v2-1.0.0 row keep appearing (the
+      // DISTINCT ON subquery spans both versions), but a superseded stale
+      // decision never duplicates or shadows the fresh one.
+      .whereIn('route_decisions.id', db('route_decisions')
+        .select(db.raw('DISTINCT ON (call_log_id) id'))
+        .whereIn('decision_version', V2_DECISION_VERSIONS)
+        .where('mode', 'enforce')
+        .orderByRaw('call_log_id, created_at DESC'))
       .where('route_decisions.final_action_taken', 'auto_route')
       .orderBy('route_decisions.created_at', 'desc')
       .limit(limit)
