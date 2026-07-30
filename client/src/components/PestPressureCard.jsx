@@ -155,7 +155,7 @@ function SubmittedRatingNote() {
   );
 }
 
-export default function PestPressureCard({ data, token }) {
+export default function PestPressureCard({ data, token, trendSection = null }) {
   const [override, setOverride] = useState(null);
   // Reset the post-submit override whenever the report token changes —
   // in React Router v6 the same component instance can be reused across
@@ -220,7 +220,10 @@ export default function PestPressureCard({ data, token }) {
         </p>
       ) : null}
 
-      <PressureHistoryChart history={effective.history} cadence={effective.cadence} />
+      {/* One box, one chart (owner 2026-07-30): when the report supplies the
+          cross-visit trend section it embeds here — with main driver and the
+          neighborhood overlay — replacing the plain history chart. */}
+      {trendSection || <PressureHistoryChart history={effective.history} cadence={effective.cadence} />}
 
       {effective.canCaptureClientRating && token ? (
         <ClientRatingPicker

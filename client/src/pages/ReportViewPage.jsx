@@ -1486,7 +1486,11 @@ function PressureTrendCard({ context, neighborhood, mode, token, embedded = fals
       <div className="pressure-trend-layout">
         <div>
           {!embedded && <h2>{pressureHeadline}</h2>}
-          <p className="pressure-summary">{context.customerSummary}</p>
+          {/* Embedded inside the Pest Pressure gauge card the gauge's own
+              summary already tells the score story — repeat only the
+              main-driver line, not the headline/summary (owner 2026-07-30:
+              one seamless box, no duplicate copy). */}
+          {!embedded && <p className="pressure-summary">{context.customerSummary}</p>}
           {current?.mainDriver && <p className="sr-muted">Main driver this visit: {current.mainDriver}</p>}
         </div>
         <PressureTrendChart points={context.points || []} neighborhood={neighborhood} summary={context.customerSummary} />
@@ -4943,6 +4947,16 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   // slots lower down. `isV2LeadLayout` is the shared gate for that reordering.
   const isTreeShrubV2 = data.serviceLine === 'tree_shrub' && !!data.reportV2;
   const isV2LeadLayout = (isLawnReport && !!data.reportV2) || isTreeShrubV2;
+  // RULE (owner 2026-07-30): the pressure trend and the Pest Pressure gauge
+  // render as ONE box, not two stacked cards. When the gauge will render,
+  // the trend embeds inside it (replacing the gauge's own history chart);
+  // the standalone trend card remains only for layouts with no gauge.
+  const pressureGaugeVisible = !data.activity
+    && !data.pestReportV2
+    && !data.mosquitoReportV2
+    && !!data.pestPressure
+    && data.pestPressure.enabled !== false
+    && data.pestPressure.showOnCustomerReport !== false;
   const proofMoments = Array.isArray(data.proofMoments)
     ? data.proofMoments
     : (Array.isArray(data.visualServiceMoments) ? data.visualServiceMoments : []);
@@ -4994,6 +5008,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
     || Boolean(data.rodentReportRefresh && data.serviceCoverage?.enabled === false)
     || ((data.serviceLine === 'lawn'
       || /tree|shrub/.test(String(data.serviceLine || ''))
+      // Pest reports drop the generic lettered coverage card (owner
+      // 2026-07-30: "we don't use this") — the card returns only when the
+      // tech traced a real spray map, which renders in this same slot.
+      || data.serviceLine === 'pest'
       // Mosquito V2's habitat diagram replaces the lettered map the same way.
       || Boolean(data.mosquitoReportV2))
       && !data.treatmentMap?.traced?.snapshotUrl);
@@ -8100,19 +8118,20 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         {/* Staff-only shadow reports keep the internal notice on top. */}
         {mode === 'live' && data.internalOnly && <InternalReviewBar />}
 
+        {/* RULE (owner 2026-07-30, supersedes the 07-28 audit placement):
+            the report tools — Download PDF / Share / Print / Portal Login —
+            render at the TOP of EVERY service report, above the Waves AI
+            bar. */}
+        {mode === 'live' && !data.internalOnly && (
+          <ReportActionBar pdfUrl={pdfUrl} token={token} onShare={share} />
+        )}
+
         {/* Ask Waves floats with the customer: sticky under the shell header for
             the whole scroll (owner ask 2026-07-09). Live only — the pdf/static
             document keeps the legacy section below instead. */}
         <FloatingAskWaves mode={mode} token={token} serviceLine={data.serviceLine} data={data} />
 
         <ServiceStatusCard data={data} mode={mode} resultOverride={data.reportV2?.todaysResult || null} />
-
-        {/* Utility bar sits BELOW the greeting/result: on a phone the stacked
-            Download/Share/Print/Login buttons used to fill the entire first
-            screen before the customer saw their own report (audit 2026-07-28). */}
-        {mode === 'live' && !data.internalOnly && (
-          <ReportActionBar pdfUrl={pdfUrl} token={token} onShare={share} />
-        )}
 
         {/* V2 + pest: a review ask up top, location-synced to the closest GBP
             (ReviewRequestCard picks the office review URL). Self-gates on
@@ -8316,7 +8335,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             there — same pattern as LawnProgramOverviewCard below. */}
         {!data.reportV2 && <LawnProtocolCard protocol={dynamicContext.lawnProtocol} />}
 
-        {dynamicContext.pressureTrend && (
+        {dynamicContext.pressureTrend && !pressureGaugeVisible && (
           <PressureTrendCard
             context={dynamicContext.pressureTrend}
             neighborhood={dynamicContext.neighborhoodPressure}
@@ -8339,7 +8358,21 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             hero on typed visits so the reading still shows exactly once. */}
         {((data.typedReport && data.activity) || (!data.pestReportV2 && !data.mosquitoReportV2)) && (data.activity
           ? <ActivityCard data={data.activity} />
-          : <PestPressureCard data={data.pestPressure} token={mode === 'live' ? token : null} />)}
+          : (
+            <PestPressureCard
+              data={data.pestPressure}
+              token={mode === 'live' ? token : null}
+              trendSection={dynamicContext.pressureTrend && pressureGaugeVisible ? (
+                <PressureTrendCard
+                  context={dynamicContext.pressureTrend}
+                  neighborhood={dynamicContext.neighborhoodPressure}
+                  mode={mode}
+                  token={token}
+                  embedded
+                />
+              ) : null}
+            />
+          ))}
 
         {/* D2: cross-visit timeline right under the gauge — the same trend
             neighborhood. Server ships it only for typed trend programs with
