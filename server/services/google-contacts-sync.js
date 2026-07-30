@@ -85,9 +85,17 @@ const retireMarkerFor = (resourceId) => `${PENDING_RETIRE}:${resourceId}`;
 const retireIdFromMarker = (v) => (isRetireMarker(v) && v.length > PENDING_RETIRE.length + 1
   ? v.slice(PENDING_RETIRE.length + 1) : null);
 
-const rowSearchKey = (row) => String(row.email || '').trim().toLowerCase()
-  || String(row.phone || '').trim()
-  || `${String(row.first_name || '').trim()} ${String(row.last_name || '').trim()}`.trim();
+const rowSearchKey = (row) => {
+  // The create request publishes the CANONICAL identity when one is loaded
+  // — the recovery key must match what the orphan actually contains, not a
+  // stale property copy (presence semantics incl. canonical nulls).
+  const hasCanon = !!row.__canonicalIdentity;
+  const src = row.__canonicalIdentity || row;
+  const email = String((hasCanon ? src.email : row.email) || '').trim().toLowerCase();
+  const phone = String((hasCanon ? src.phone : row.phone) || '').trim();
+  const name = `${String((hasCanon ? src.first_name : row.first_name) || '').trim()} ${String((hasCanon ? src.last_name : row.last_name) || '').trim()}`.trim();
+  return email || phone || name;
+};
 
 const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
 
@@ -264,36 +272,49 @@ function mergedMemberships(current) {
  * unraced row stamps exactly (updated_at > synced_at goes false); a raced
  * edit fails the ms-truncated comparison and re-syncs next run.
  */
-/** Raced-edit guards shared by the stamps and rejection parking. */
-function applyStampGuards(q, row) {
+/** Row-level raced-edit guard (µs token when selected, ms fallback). */
+function applyRowGuard(q, row) {
   if (row.updated_at_us) {
     q.whereRaw("to_char(updated_at, 'YYYY-MM-DD HH24:MI:SS.US') = ?", [row.updated_at_us]);
   } else {
     q.whereRaw("date_trunc('milliseconds', updated_at) <= ?", [row.updated_at]);
   }
-  if (row.__canonicalIdentity?.id) {
-    if (row.__canonicalIdentity.updated_at_us) {
-      q.whereRaw(
-        "NOT EXISTS (SELECT 1 FROM customer_accounts ca WHERE ca.id = ? AND to_char(ca.updated_at, 'YYYY-MM-DD HH24:MI:SS.US') <> ?)",
-        [row.__canonicalIdentity.id, row.__canonicalIdentity.updated_at_us],
-      );
-    } else {
-      q.whereRaw(
-        "NOT EXISTS (SELECT 1 FROM customer_accounts ca WHERE ca.id = ? AND date_trunc('milliseconds', ca.updated_at) > ?)",
-        [row.__canonicalIdentity.id, row.__canonicalIdentity.updated_at],
-      );
-    }
-  }
   return q;
 }
 
+/**
+ * Guarded stamp in ONE transaction. The canonical account row is re-read
+ * FOR SHARE: an UNCOMMITTED direct account correction holds its row lock,
+ * so we BLOCK until it commits and then see its real updated_at — plain
+ * timestamp comparison can't observe an uncommitted writer (MVCC reads the
+ * old version), and its now() is transaction-start time, so it could
+ * commit BEHIND our new watermark and never requeue.
+ */
+async function guardedStamp(table, row, patch) {
+  return db.transaction(async (trx) => {
+    if (row.__canonicalIdentity?.id) {
+      const acc = await trx('customer_accounts')
+        .where({ id: row.__canonicalIdentity.id })
+        .select(trx.raw(US_TOKEN))
+        .forShare()
+        .first();
+      const expected = row.__canonicalIdentity.updated_at_us || null;
+      if (acc && expected && acc.updated_at_us !== expected) return 0; // account changed — veto
+      if (acc && !expected && row.__canonicalIdentity.updated_at
+        && new Date(acc.updated_at_us ? acc.updated_at_us.replace(' ', 'T') : 0).getTime()
+          > new Date(row.__canonicalIdentity.updated_at).getTime() + 1) return 0;
+    }
+    const q = applyRowGuard(trx(table).where({ id: row.id }), row);
+    return q.update(patch);
+  });
+}
+
 async function stampIfUnchanged(table, row, patch) {
-  const q = applyStampGuards(db(table).where({ id: row.id }), row);
   // GREATEST(updated_at, now()) — DB-side clock, skew-free: the watermark
   // must also cover the ACCOUNT staleness clause (ca.updated_at compares
   // against it), and copying updated_at alone would loop account-stale rows
   // forever.
-  return q.update({ ...patch, google_contact_synced_at: db.raw('GREATEST(updated_at, now())') });
+  return guardedStamp(table, row, { ...patch, google_contact_synced_at: db.raw('GREATEST(updated_at, now())') });
 }
 
 /**
@@ -303,8 +324,7 @@ async function stampIfUnchanged(table, row, patch) {
  * the same oldest rows forever.
  */
 async function stampVerified(table, row, resourceName, now) {
-  const q = applyStampGuards(db(table).where({ id: row.id }), row);
-  return q.update({ google_contact_id: resourceName, google_contact_synced_at: now });
+  return guardedStamp(table, row, { google_contact_id: resourceName, google_contact_synced_at: now });
 }
 
 /** True when another LIVE row still references this Google contact. */
@@ -512,9 +532,18 @@ async function resolveLeadOwnership(row) {
     if (linked) return { deferToCustomer: true, customerId: linked.id };
   }
   if (email) {
+    // Match the property copy AND the linked canonical account email —
+    // direct account corrections deliberately don't fan back to property
+    // rows, so a lead using the corrected email must still defer.
     const customer = await db('customers')
-      .whereRaw('LOWER(email) = ?', [email])
       .whereNull('deleted_at')
+      .where((q) => {
+        q.whereRaw('LOWER(email) = ?', [email])
+          .orWhereRaw(
+            'EXISTS (SELECT 1 FROM customer_accounts ca WHERE ca.id = customers.account_id AND LOWER(ca.email) = ?)',
+            [email],
+          );
+      })
       .first();
     if (customer) return { deferToCustomer: true, customerId: customer.id };
   }
@@ -900,14 +929,19 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
         // have minted the contact before the customer row existed — adopt
         // it (the lead's row keeps its shared pointer; the in-use guard
         // protects it from deletion).
-        const customerEmail = String(row.email || '').trim().toLowerCase();
-        if (customerEmail) {
+        // The minting lead may carry EITHER the property copy or the
+        // corrected canonical account email — probe both.
+        const emailCandidates = [...new Set([
+          String(row.email || '').trim().toLowerCase(),
+          String(row.__canonicalIdentity?.email || '').trim().toLowerCase(),
+        ].filter(Boolean))];
+        if (emailCandidates.length) {
           const leadOwner = await db('leads')
             .whereNull('deleted_at')
             .whereNotNull('google_contact_id')
             .whereNot('google_contact_id', 'like', `${PENDING_CREATE}%`)
-    .whereNot('google_contact_id', 'like', `${PENDING_RETIRE}%`)
-            .whereRaw('LOWER(email) = ?', [customerEmail])
+            .whereNot('google_contact_id', 'like', `${PENDING_RETIRE}%`)
+            .whereRaw(`LOWER(email) IN (${emailCandidates.map(() => '?').join(', ')})`, emailCandidates)
             .first();
           const leadContact = leadOwner?.google_contact_id || null;
           if (leadContact && leadContact !== row.google_contact_id) {
@@ -1032,8 +1066,7 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
         // account timestamp): a correction racing the rejected request —
         // on either the row or its account — must re-queue, not get
         // parked over.
-        await applyStampGuards(db(table).where({ id: row.id }), row)
-          .update({ google_contact_synced_at: new Date() })
+        await guardedStamp(table, row, { google_contact_synced_at: new Date() })
           .catch(() => {});
         logger.warn(`[contacts-sync] ${table} ${row.id} parked after deterministic rejection (${safeErr(err)}) — an edit re-queues it`);
       } else {

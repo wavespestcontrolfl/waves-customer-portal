@@ -47,9 +47,12 @@ function setupDb({
   const firstQueues = Object.fromEntries(Object.entries(firstResults).map(([t, rows]) => [t, [...rows]]));
   const updateQueues = Object.fromEntries(Object.entries(updateResults).map(([t, rows]) => [t, [...rows]]));
   db.raw = jest.fn((sql) => ({ __raw: sql }));
+  // The guarded stamp wraps its canonical re-read + update in one
+  // transaction; the mock trx proxies straight back to the builder.
+  db.transaction = jest.fn(async (cb) => cb(Object.assign((table) => db(table), { raw: db.raw })));
   db.mockImplementation((table) => {
     const builder = {};
-    for (const m of ['where', 'whereRaw', 'whereNull', 'whereNot', 'whereNotNull', 'orWhere', 'orWhereRaw', 'orderBy', 'limit', 'select']) {
+    for (const m of ['where', 'whereRaw', 'whereNull', 'whereNot', 'whereNotNull', 'orWhere', 'orWhereRaw', 'orderBy', 'limit', 'select', 'forShare']) {
       builder[m] = jest.fn((...args) => {
         if (typeof args[0] === 'function') args[0].call(builder, builder);
         return builder;
@@ -377,6 +380,40 @@ describe('runContactsSync', () => {
     // Marker carries the create-time search identity for later recovery.
     expect(marker.patch.google_contact_id).toBe('pending_create_recovery::jane%40customer.example');
     expect(marker.patch.google_contact_synced_at).toBeInstanceOf(Date);
+  });
+
+  test('an ambiguous create on an ACCOUNT row records the CANONICAL search identity, not the stale property copy', async () => {
+    const state = setupDb({
+      customers: [{ ...CUSTOMER, id: 'c-2', account_id: 'acct-1', email: 'stale@old.example' }],
+      firstResults: { customer_accounts: [{ id: 'acct-1', first_name: 'Canonical', last_name: 'Person', email: 'canon@x.example', phone: '9415550100' }] },
+    });
+    mockPeopleApi.people.createContact.mockRejectedValueOnce(new Error('socket hang up'));
+    await runContactsSync({ gapMs: 0 });
+    const marker = state.updates.find((u) => String(u.patch.google_contact_id || '').startsWith('pending_create_recovery'));
+    // The orphan (if it exists) contains the CANONICAL email — a marker
+    // keyed on the stale property copy could never find it and would mint
+    // a duplicate after the grace period.
+    expect(marker.patch.google_contact_id).toBe('pending_create_recovery::canon%40x.example');
+  });
+
+  test('the stamp re-reads the canonical account row inside the transaction — a raced account edit vetoes it', async () => {
+    const state = setupDb({
+      customers: [{ ...CUSTOMER, id: 'c-2', account_id: 'acct-1', google_contact_id: 'people/acct' }],
+      firstResults: { customer_accounts: [
+        // Aggregation read, then the guarded-stamp FOR SHARE re-read: the
+        // token moved between them (a committed writer we blocked on).
+        { id: 'acct-1', first_name: 'Canonical', last_name: 'Person', email: 'canon@x.example', phone: '9415550100', updated_at_us: '2026-07-28 11:00:00.000001' },
+        { id: 'acct-1', updated_at_us: '2026-07-28 11:30:00.000002' },
+      ] },
+    });
+    mockPeopleApi.people.get.mockResolvedValueOnce({ data: { etag: 'e1', metadata: { sources: [] }, memberships: [] } });
+    mockPeopleApi.people.updateContact.mockResolvedValueOnce({ data: { resourceName: 'people/acct' } });
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(counts.synced).toBe(0);
+    // The stale payload was pushed to Google but the watermark must NOT
+    // advance — the next incremental pass re-syncs the corrected identity.
+    expect(state.updates.filter((u) => u.table === 'customers' && u.patch.google_contact_synced_at)).toEqual([]);
+    expect(db.transaction).toHaveBeenCalled();
   });
 
   test('recovery inside the index-lag grace window defers even on a conclusively empty search', async () => {
