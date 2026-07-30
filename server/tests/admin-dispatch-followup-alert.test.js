@@ -330,3 +330,23 @@ describe('codex r4 — frozen verdict, booking race, no-show retry, IB terminal 
     expect(down).not.toContain('} catch (err) {');
   });
 });
+
+describe('codex r5 — IB idempotent retry re-park + atomic reason (source contracts)', () => {
+  test('already_cancelled retry re-attempts the re-park; reason commits with the transition', () => {
+    const ibSource = fs.readFileSync(path.join(__dirname, '../services/intelligence-bar/tools.js'), 'utf8');
+    const fn = ibSource.slice(ibSource.indexOf('async function cancelAppointment'), ibSource.indexOf('async function draftSms'));
+    // Idempotent retry path re-attempts the dedup-guarded re-park.
+    const alreadyIdx = fn.indexOf('already_cancelled: true');
+    expect(alreadyIdx).toBeGreaterThan(-1);
+    const beforeReturn = fn.slice(0, alreadyIdx);
+    expect(beforeReturn).toContain("handleFollowupChildCancellation({ jobId: appointment_id, toStatus: 'cancelled' })");
+    // Status transition and reason append share ONE caller-owned trx.
+    expect(fn).toContain('await db.transaction(async (trx) => {');
+    const trxBlock = fn.slice(fn.indexOf('await db.transaction(async (trx) => {'));
+    expect(trxBlock.indexOf('transitionJobStatus({')).toBeGreaterThan(-1);
+    expect(trxBlock).toContain('trx,');
+    expect(trxBlock.indexOf("await trx('scheduled_services')")).toBeGreaterThan(trxBlock.indexOf('transitionJobStatus({'));
+    // No stray post-commit notes write remains.
+    expect(fn).not.toContain("await db('scheduled_services').where('id', appointment_id).update({");
+  });
+});

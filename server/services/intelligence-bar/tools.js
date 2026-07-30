@@ -1584,6 +1584,15 @@ async function cancelAppointment(input) {
   // happened. Idempotent on an already-cancelled row; every other terminal
   // state is an error, matching rescheduleAppointment above.
   if (String(appt.status) === 'cancelled') {
+    // Retry of an already-committed cancellation: the post-commit re-park
+    // hook may have failed transiently on the first attempt, and this early
+    // return is the only path a retry reaches — re-attempt the
+    // dedup-guarded re-park here, exactly like the alreadyNoShow status
+    // routes (Codex r5 on PR #3091).
+    {
+      const { handleFollowupChildCancellation } = require('../typed-followup-obligation');
+      void handleFollowupChildCancellation({ jobId: appointment_id, toStatus: 'cancelled' }).catch(() => {});
+    }
     return {
       success: true,
       appointment_id,
@@ -1601,15 +1610,27 @@ async function cancelAppointment(input) {
   // cancellation behavior lives — the atomic racing-transition guard, the
   // job_status_history audit row, socket board updates, overdue-alert
   // auto-resolution, and the follow-up obligation re-park hook. A direct
-  // UPDATE silently skipped all of it.
+  // UPDATE silently skipped all of it. The reason append rides the SAME
+  // caller-owned transaction as the transition (Codex r5): a crash between
+  // separate writes would report failure for a committed cancellation, and
+  // the retry's already_cancelled return would never persist the reason.
   try {
     const { transitionJobStatus } = require('../job-status');
-    await transitionJobStatus({
-      jobId: appointment_id,
-      fromStatus: appt.status,
-      toStatus: 'cancelled',
-      transitionedBy: null,
-      notes: reason ? `Cancelled via Intelligence Bar: ${reason}` : 'Cancelled via Intelligence Bar',
+    await db.transaction(async (trx) => {
+      await transitionJobStatus({
+        jobId: appointment_id,
+        fromStatus: appt.status,
+        toStatus: 'cancelled',
+        transitionedBy: null,
+        notes: reason ? `Cancelled via Intelligence Bar: ${reason}` : 'Cancelled via Intelligence Bar',
+        trx,
+      });
+      if (reason) {
+        await trx('scheduled_services').where('id', appointment_id).update({
+          notes: `${appt.notes || ''}\nCancelled: ${reason}`.trim(),
+          updated_at: new Date(),
+        });
+      }
     });
   } catch (err) {
     if (err && err.message && err.message.includes('not in state')) {
@@ -1619,12 +1640,6 @@ async function cancelAppointment(input) {
       return { error: 'This outbound-callback booking is pending office review — confirm or reject it there instead.' };
     }
     throw err;
-  }
-  if (reason) {
-    await db('scheduled_services').where('id', appointment_id).update({
-      notes: `${appt.notes || ''}\nCancelled: ${reason}`.trim(),
-      updated_at: new Date(),
-    });
   }
 
   const customer = await db('customers').where('id', appt.customer_id).first();
