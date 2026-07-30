@@ -6041,6 +6041,21 @@ const CallRecordingProcessor = {
           createdCustomerFromCall = true;
           logger.info(`[call-proc] Created customer ${customerId} from call recording`);
 
+          // Durable call-creation provenance (Codex #3084 r23): the retry
+          // rebuild keys on THIS marker, not timestamps — a customer someone
+          // else created between the call row and the first attempt would
+          // pass a created_at comparison and get wrongly auto-subscribed.
+          // Best-effort: a missing marker means no rebuild (conservative —
+          // never a wrong subscribe), and the extraction-retry loop
+          // re-attempts the stamp with the rest of the run.
+          await db('call_log').where({ id: call.id }).update({
+            metadata: db.raw(
+              "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{created_customer_id}', ?::jsonb, true)",
+              [JSON.stringify(String(customerId))],
+            ),
+            updated_at: new Date(),
+          }).catch((e) => logger.warn(`[call-proc] call-creation provenance stamp failed for ${maskSid(callSid)}: ${e.message}`));
+
           await db('notification_prefs')
             .insert({ customer_id: customerId })
             .onConflict('customer_id')
@@ -8893,9 +8908,10 @@ const CallRecordingProcessor = {
     // whole newsletter chain below would be skipped, leaving the
     // call-created customer without a DOI or a held_newsletter flag forever
     // (Codex #3084 r20). Reconstruct the candidate for customers CREATED BY
-    // THIS CALL (created after the call row), reading the CURRENT stored
-    // email so a correction made during the failed window wins. Matched
-    // pre-existing customers keep the old behavior: no auto-subscribe.
+    // THIS CALL (durable provenance marker below, r23), reading the CURRENT
+    // stored email so a correction made during the failed window wins.
+    // Matched pre-existing customers keep the old behavior: no
+    // auto-subscribe.
     // Gated on the pre-claim processing_status (Codex #3084 r21):
     // `call.processing_status` was read BEFORE the claim, so it still says
     // whether THIS run is a recovery pass — the extraction_failed retry, or
@@ -8907,9 +8923,16 @@ const CallRecordingProcessor = {
     if (!newsletterCandidate && customerId && !createdCustomerFromCall
         && ['extraction_failed', 'processing'].includes(call.processing_status)) {
       try {
-        const custRow = await db('customers').where({ id: customerId }).first('email', 'first_name', 'last_name', 'created_at');
-        if (custRow?.created_at && call.created_at
-            && new Date(custRow.created_at) >= new Date(call.created_at)) {
+        // ACTUAL call-creation provenance, not timestamps (Codex #3084
+        // r23): the creation branch stamps created_customer_id into
+        // call_log.metadata, so a customer someone else created between
+        // the call row and the failed attempt (merely matched by it) can
+        // never be classified as call-created and auto-subscribed.
+        const rebuildMeta = typeof call.metadata === 'string'
+          ? (() => { try { return JSON.parse(call.metadata); } catch { return {}; } })()
+          : (call.metadata || {});
+        const custRow = await db('customers').where({ id: customerId }).first('email', 'first_name', 'last_name');
+        if (custRow && String(rebuildMeta?.created_customer_id || '') === String(customerId)) {
           newsletterCandidate = {
             customerId,
             email: custRow.email || extracted.email || null,

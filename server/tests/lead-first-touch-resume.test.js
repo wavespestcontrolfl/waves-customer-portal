@@ -19,18 +19,24 @@ let mockMergeArgs = [];
 let mockCustomerFirstQueue = null; // shift per customers.first(); an Error value throws
 let mockSubscriberRow = null; // newsletter_subscribers.first() (DOI dedupe guard)
 let mockSubscriberFirstError = null; // thrown by newsletter_subscribers.first()
+let mockDoiMarkerRow = null; // result of the coalesced resend-marker lookup (r23)
+let mockDoiMarkerError = null; // thrown by that lookup
 let mockSubscriberUpdates = [];
 let mockSubscriberUpdateError = null;
 let mockOnFirstTouchClaim = null; // fires when a claim update lands (race simulation)
 let mockHoldFirstQueue = null; // shift per first_touch_holds.first(); an Error value throws
 let mockTriageFirstQueue = null; // shift per triage_items.first()
 let mockReleasedSettleZeroOnce = false; // next released-settle matches 0 rows (mid-send retarget)
-let mockRepenGuardZeroOnce = false; // next guarded re-pend matches 0 rows (deny stamp landed)
+let mockRepenGuardZeroTimes = 0; // next N guarded re-pends match 0 rows (deny stamp landed)
 let mockEnrollmentUpdates = []; // automation_enrollments update() patches
 jest.mock('../models/db', () => {
   const handler = (table) => {
+    let markerFilter = false; // this chain filters on the resend marker
     const chain = {
-      where: jest.fn(() => chain),
+      where: jest.fn((arg) => {
+        if (arg && arg.last_error === 'newsletter_doi_not_confirmed') markerFilter = true;
+        return chain;
+      }),
       whereIn: jest.fn(() => chain),
       whereRaw: jest.fn(() => chain),
       whereNotNull: jest.fn(() => chain),
@@ -62,9 +68,9 @@ jest.mock('../models/db', () => {
             mockReleasedSettleZeroOnce = false;
             return 0; // conditional settle: target no longer matches
           }
-          if (patch.status === 'pending' && patch.last_error && mockRepenGuardZeroOnce) {
-            mockRepenGuardZeroOnce = false;
-            return 0; // guarded re-pend: a deny stamp landed since the claim
+          if (patch.status === 'pending' && patch.last_error && mockRepenGuardZeroTimes > 0) {
+            mockRepenGuardZeroTimes--;
+            return 0; // guarded write refused: deny stamp / target mismatch
           }
           mockHoldUpdates.push(patch);
           if (patch.status === 'releasing' && mockOnFirstTouchClaim) mockOnFirstTouchClaim();
@@ -80,6 +86,10 @@ jest.mock('../models/db', () => {
       }),
       first: jest.fn(async () => {
         if (table === 'first_touch_holds') {
+          if (markerFilter) {
+            if (mockDoiMarkerError) throw mockDoiMarkerError;
+            return mockDoiMarkerRow;
+          }
           if (mockHoldFirstQueue && mockHoldFirstQueue.length) {
             const next = mockHoldFirstQueue.shift();
             if (next instanceof Error) throw next;
@@ -167,11 +177,13 @@ beforeEach(() => {
   mockSubscriberUpdates = [];
   mockSubscriberUpdateError = null;
   mockSubscriberFirstError = null;
+  mockDoiMarkerRow = null;
+  mockDoiMarkerError = null;
   mockOnFirstTouchClaim = null;
   mockHoldFirstQueue = null;
   mockTriageFirstQueue = null;
   mockReleasedSettleZeroOnce = false;
-  mockRepenGuardZeroOnce = false;
+  mockRepenGuardZeroTimes = 0;
   mockEnrollmentUpdates = [];
 });
 
@@ -483,6 +495,27 @@ describe('resumeHeldNewsletterPostCommit failure paths', () => {
     expect(settles).toHaveLength(2);
   });
 
+  test('the resend marker is honored from ANY coalesced hold', async () => {
+    // A sibling hold's failed send (with a surviving pre-send stamp) must
+    // force the actual resend for the whole group (Codex #3084 r23).
+    mockHold = { held_drip: false, released_drip: false };
+    mockDoiMarkerRow = { id: 'hold-2' };
+    mockSubscriberRow = { status: 'pending', confirmation_sent_at: new Date() }; // stale stamp
+    await resumeHeldNewsletterPostCommit([
+      { holdId: 'hold-1', customerId: 'cust-1', email: 'same@example.com' },
+      { holdId: 'hold-2', customerId: 'cust-1', email: 'same@example.com' },
+    ]);
+    expect(mockNewsletter).toHaveBeenCalledTimes(1); // resent despite the stamp
+  });
+
+  test('an unverifiable resend-marker lookup re-pends instead of trusting the stamp', async () => {
+    mockDoiMarkerError = new Error('pool exhausted');
+    const outcome = await resumeHeldNewsletterPostCommit({ holdId: 'hold-1', customerId: 'cust-1', email: 'ok@example.com' });
+    expect(outcome).toMatchObject({ skipped: 'target_verify_failed' });
+    expect(mockNewsletter).not.toHaveBeenCalled();
+    expect(mockHoldUpdates.at(-1)).toMatchObject({ status: 'pending', last_error: 'target_verify_failed' });
+  });
+
   // BOTH outbound vetoes re-run at send time (Codex #3084 r18): the
   // callback fires after the correction transaction committed, and a
   // do-not-contact request or bounce suppression landing in that gap is
@@ -534,7 +567,7 @@ describe('mid-send races (r19)', () => {
     // would pass — the settle's deny guard refuses instead (Codex #3084
     // r21), and the deny-preserving re-pend leaves the stamp untouched.
     mockReleasedSettleZeroOnce = true; // terminal CAS refuses (deny landed)
-    mockRepenGuardZeroOnce = true; // guarded re-pend refuses too (stamp present)
+    mockRepenGuardZeroTimes = 1; // guarded re-pend refuses too (stamp present)
     await resumeHeldFirstTouch({ callLogId: 'call-1' });
     const last = mockHoldUpdates.at(-1);
     expect(last).toMatchObject({ status: 'pending' });
@@ -568,7 +601,7 @@ describe('mid-send races (r19)', () => {
     // guarded write refuses (a deny landed), and the fallback re-pends
     // without touching last_error.
     mockNewsletter.mockResolvedValueOnce({ subscribed: true, confirmationEmailSent: false });
-    mockRepenGuardZeroOnce = true;
+    mockRepenGuardZeroTimes = 2; // the r23 conditional settle AND settleHold's guard both refuse
     await resumeHeldFirstTouch({ callLogId: 'call-1' });
     const last = mockHoldUpdates.at(-1);
     expect(last).toMatchObject({ status: 'pending' });
@@ -585,12 +618,25 @@ describe('mid-send races (r19)', () => {
     expect(mockHoldUpdates.at(-1)).toMatchObject({ status: 'pending', last_error: 'doi_state_unverified' });
   });
 
+  test('a retryable settle never writes the observed target back over a mid-attempt retarget', async () => {
+    // Correction B retargets the claimed row while the DOI attempt runs
+    // and the attempt fails retryably (Codex #3084 r23): the retryable
+    // settle's target CAS refuses, and the fallback re-pends WITHOUT
+    // held_email — B's address survives for the sweep's retry.
+    mockNewsletter.mockResolvedValueOnce({ subscribed: true, confirmationEmailSent: false });
+    mockRepenGuardZeroTimes = 1; // conditional settle: target no longer matches
+    await resumeHeldFirstTouch({ callLogId: 'call-1' });
+    const last = mockHoldUpdates.at(-1);
+    expect(last).toMatchObject({ status: 'pending', last_error: 'newsletter_doi_not_confirmed' });
+    expect(last.held_email).toBeUndefined();
+  });
+
   test('a failed pre-send re-read never buries a freshly-landed deny stamp', async () => {
     // The re-read failed, so deny state is unknown — the guarded re-pend
     // matches 0 rows (a deny stamp landed since the claim) and the recovery
     // write re-pends WITHOUT touching last_error.
     mockHoldFirstQueue = [new Error('db down')];
-    mockRepenGuardZeroOnce = true;
+    mockRepenGuardZeroTimes = 1;
     await resumeHeldFirstTouch({ callLogId: 'call-1' });
     const last = mockHoldUpdates.at(-1);
     expect(last).toMatchObject({ status: 'pending' });

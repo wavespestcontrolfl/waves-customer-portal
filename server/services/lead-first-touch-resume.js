@@ -523,7 +523,23 @@ async function resumeHeldFirstTouch({
         const settled = await settleIfTargetUnchanged(hold.id, observedEmailLc, patch, dbh);
         if (settled) await repenIfWorkMergedDuringClaim(hold.id, dbh);
       } else if (Object.keys(patch).length) {
-        await settleHold(hold.id, patch, dbh);
+        // Retryable settles CAS the target too (Codex #3084 r23): a
+        // correction retargeting the claimed row mid-attempt owns
+        // held_email — writing the observed address back would point the
+        // sweep's retry at the superseded (possibly hard-bounced) value.
+        // On a mismatch (or a mid-attempt deny), everything EXCEPT
+        // held_email still settles via the deny-preserving path.
+        const settled = await dbh('first_touch_holds')
+          .where({ id: hold.id })
+          .whereRaw("LOWER(COALESCE(held_email, '')) = ?", [observedEmailLc])
+          .where(function notDenied() {
+            this.whereNull('last_error').orWhereNot('last_error', 'email_denied_await_correction');
+          })
+          .update({ ...patch, updated_at: new Date() });
+        if (!settled) {
+          const { held_email, ...rest } = patch;
+          await settleHold(hold.id, { ...rest, status: 'pending' }, dbh);
+        }
       }
 
       result.resumed = result.resumed || result.enrolled
@@ -606,11 +622,9 @@ async function runOnePostCommitResume(payload, holdIds, dbh) {
     // second correction may have superseded held_email after this payload
     // was built inside the first correction's transaction.
     let sendPayload = payload;
-    let holdWasDoiUnconfirmed = false;
     if (payload.holdId) {
       try {
         const fresh = await dbh('first_touch_holds').where({ id: payload.holdId }).first('held_email', 'last_error');
-        holdWasDoiUnconfirmed = fresh?.last_error === 'newsletter_doi_not_confirmed';
         const freshEmail = String(fresh?.held_email || '').trim().toLowerCase();
         if (freshEmail && freshEmail !== String(payload.email || '').trim().toLowerCase()
             && RESUME_EMAIL_RE.test(freshEmail)) {
@@ -625,6 +639,32 @@ async function runOnePostCommitResume(payload, holdIds, dbh) {
           try {
             // Deny-preserving (r19): the read failed, so a stamp that
             // landed since the claim must not be overwritten.
+            await repenHoldPreservingDeny(holdId, 'target_verify_failed', dbh);
+          } catch (repenErr) {
+            logger.warn(`[first-touch-resume] hold ${holdId} re-pend failed: ${repenErr.code || repenErr.name || 'db_error'} (stale-claim window will reclaim)`);
+          }
+        }
+        return { skipped: 'target_verify_failed' };
+      }
+    }
+    // The resend marker is honored from EVERY coalesced hold (Codex #3084
+    // r23): one grouped hold's failed send — with a surviving pre-send
+    // delivered-stamp — must force the actual resend for the whole group,
+    // not only when it happens to be the group's first payload.
+    // Fail-closed: an unverifiable marker state re-pends instead of
+    // trusting the stamp.
+    let holdWasDoiUnconfirmed = false;
+    if (holdIds.length) {
+      try {
+        const markerRow = await dbh('first_touch_holds')
+          .whereIn('id', holdIds)
+          .where({ last_error: 'newsletter_doi_not_confirmed' })
+          .first('id');
+        holdWasDoiUnconfirmed = !!markerRow;
+      } catch (markerErr) {
+        logger.warn(`[first-touch-resume] resend-marker lookup failed: ${markerErr.code || markerErr.name || 'db_error'} — hold(s) stay pending`);
+        for (const holdId of holdIds) {
+          try {
             await repenHoldPreservingDeny(holdId, 'target_verify_failed', dbh);
           } catch (repenErr) {
             logger.warn(`[first-touch-resume] hold ${holdId} re-pend failed: ${repenErr.code || repenErr.name || 'db_error'} (stale-claim window will reclaim)`);

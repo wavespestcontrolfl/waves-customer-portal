@@ -585,15 +585,10 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
     logger.warn(`[email-fanout] DOI confirmation re-send failed for subscriber ${pendingConfirmation.id}: ${e.code || e.statusCode || 'send_failed'}`);
     // The deduped holds' DOI never went out — restore a retryable state so
     // the next release trigger re-sends instead of stranding the pending
-    // subscriber (Codex #3084 r9).
-    for (const holdId of holdIds) {
-      try {
-        await conn('first_touch_holds').where({ id: holdId })
-          .update({ status: 'pending', last_error: 'newsletter_doi_not_confirmed', updated_at: new Date() });
-      } catch (repenErr) {
-        logger.warn(`[email-fanout] hold ${holdId} re-pend failed: ${repenErr.code || repenErr.name || 'db_error'} (stale-claim window will reclaim)`);
-      }
-    }
+    // subscriber (Codex #3084 r9). Via the deny-preserving helper (r23): a
+    // denial stamping after the veto checks must not be replaced by the
+    // send-failed marker.
+    await repenHolds('newsletter_doi_not_confirmed');
     return false;
   }
   // Post-send bookkeeping. The stamp is CONDITIONAL on the row still

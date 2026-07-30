@@ -560,6 +560,22 @@ describe('resendPendingConfirmation', () => {
     expect(holdUpdates[0].arg).toMatchObject({ status: 'pending', last_error: 'newsletter_doi_not_confirmed' });
   });
 
+  test('a send-failure re-pend never buries a denial stamped mid-callback', async () => {
+    // The send-failed marker goes through the deny-preserving repenHolds
+    // helper (Codex #3084 r23): the guarded write refuses on a stamped row
+    // and the fallback re-pends without touching last_error.
+    sendConfirmationEmail.mockRejectedValueOnce(new Error('sendgrid down'));
+    const payload = { id: 811, email: 'samtypo@example.com', confirmation_token: 'tok-1', heldNewsletterHoldIds: ['hold-1'] };
+    const conn = makeConn({ ...matchRow(payload), first_touch_holds: { updateCount: 0 } });
+    const ok = await resendPendingConfirmation(payload, conn);
+    expect(ok).toBe(false);
+    const holdUpdates = conn.__updates('first_touch_holds');
+    expect(holdUpdates).toHaveLength(2); // guarded attempt, then stamp-preserving fallback
+    expect(holdUpdates[0].arg).toMatchObject({ status: 'pending', last_error: 'newsletter_doi_not_confirmed' });
+    expect(holdUpdates[1].arg).toMatchObject({ status: 'pending' });
+    expect(holdUpdates[1].arg.last_error).toBeUndefined();
+  });
+
   test('a failed send never throws and leaves the stamp alone', async () => {
     sendConfirmationEmail.mockRejectedValueOnce(new Error('sendgrid down'));
     const payload = { id: 739, email: 'charleswrobb@gmail.com', confirmation_token: 'tok-1' };
