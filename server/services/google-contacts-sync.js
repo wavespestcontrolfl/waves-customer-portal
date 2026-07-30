@@ -582,6 +582,34 @@ async function resolveLeadOwnership(row) {
   // unrelated person's contact. They always mint their own.
   const phoneDigits = phone.replace(/\D/g, '').slice(-10);
   if (!email && phoneDigits.length < 7) return {};
+  const nameOf = (r) => `${String(r.first_name || '').trim()} ${String(r.last_name || '').trim()}`.trim().toLowerCase();
+  const rowName = nameOf(row);
+  const phoneSuffixMatch = (q, col) => q.whereRaw(
+    `(RIGHT(regexp_replace(${col}, '\\D', '', 'g'), ?) = ?`
+    + ` OR (LENGTH(regexp_replace(${col}, '\\D', '', 'g')) BETWEEN 7 AND 9`
+    + ` AND RIGHT(?, LENGTH(regexp_replace(${col}, '\\D', '', 'g'))) = regexp_replace(${col}, '\\D', '', 'g')))`,
+    [phoneDigits.length, phoneDigits, phoneDigits],
+  );
+  if (!email && phoneDigits.length >= 7) {
+    // PHONE-ONLY leads (supported by manual creation) must still defer to
+    // an existing customer on the same number — the email guard above
+    // never ran, and minting here would double-contact the person. Same
+    // compatibility rules as the sibling probe below: a shared household
+    // number with a CONFLICTING name stays a separate lead.
+    const phoneCustomer = await phoneSuffixMatch(
+      db('customers').whereNull('deleted_at'),
+      'phone',
+    )
+      .where((q) => {
+        if (rowName) q.whereRaw("(TRIM(CONCAT_WS(' ', first_name, last_name)) = '' OR LOWER(TRIM(CONCAT_WS(' ', first_name, last_name))) = ?)", [rowName]);
+      })
+      .select('id', 'email', 'first_name', 'last_name')
+      .first();
+    if (phoneCustomer) {
+      const namesConflict = !!(rowName && nameOf(phoneCustomer) && rowName !== nameOf(phoneCustomer));
+      if (!namesConflict) return { deferToCustomer: true, customerId: phoneCustomer.id };
+    }
+  }
   const siblingBase = () => db('leads')
     .whereNot('id', row.id)
     .whereNull('deleted_at')
@@ -597,8 +625,6 @@ async function resolveLeadOwnership(row) {
   // lead ingestion deliberately keeps separate leads on household/business
   // numbers (see lead-from-extraction's name-conflict guard).
   if (phoneDigits.length >= 7) {
-    const nameOf = (r) => `${String(r.first_name || '').trim()} ${String(r.last_name || '').trim()}`.trim().toLowerCase();
-    const rowName = nameOf(row);
     // Compatibility lives IN the query so a household number with several
     // people's contacts still finds the COMPATIBLE sibling instead of
     // giving up on whichever arbitrary row came first.

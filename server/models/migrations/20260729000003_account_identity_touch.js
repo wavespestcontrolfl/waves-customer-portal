@@ -32,10 +32,20 @@ exports.up = async function up(knex) {
       phone      = c.phone,
       updated_at = now()
     FROM (
-      SELECT DISTINCT ON (account_id) account_id, first_name, last_name, email, phone, updated_at
-      FROM customers
-      WHERE account_id IS NOT NULL AND deleted_at IS NULL
-      ORDER BY account_id, updated_at DESC
+      -- Newest DIVERGENT copy per account: a sibling bumped later for
+      -- unrelated reasons still MATCHES the account and must not shadow
+      -- the corrected sibling out of the candidate slot (DISTINCT ON over
+      -- all rows would pick it, the difference predicate would then see
+      -- no change, and the correction would never promote).
+      SELECT DISTINCT ON (c1.account_id) c1.account_id, c1.first_name, c1.last_name, c1.email, c1.phone, c1.updated_at
+      FROM customers c1
+      JOIN customer_accounts ca1 ON ca1.id = c1.account_id
+      WHERE c1.account_id IS NOT NULL AND c1.deleted_at IS NULL
+        AND (ca1.first_name IS DISTINCT FROM c1.first_name
+          OR ca1.last_name  IS DISTINCT FROM c1.last_name
+          OR ca1.email      IS DISTINCT FROM c1.email
+          OR ca1.phone      IS DISTINCT FROM c1.phone)
+      ORDER BY c1.account_id, c1.updated_at DESC
     ) c
     WHERE ca.id = c.account_id
       -- Timestamp-gated: a canonical correction NEWER than every customer

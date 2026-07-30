@@ -207,6 +207,30 @@ describe('runContactsSync', () => {
     expect(mockPeopleApi.people.deleteContact).toHaveBeenCalledWith({ resourceName: 'people/dup' });
   });
 
+  test('a PHONE-ONLY lead defers to the customer on the same number with a compatible name', async () => {
+    setupDb({
+      leads: [{ id: 'l-p', first_name: 'Jane', last_name: 'Customer', email: null, phone: '9415550100', customer_id: null, google_contact_id: null, updated_at: '2026-07-28T11:00:00Z' }],
+      firstResults: { customers: [{ id: 'c-1', email: 'jane@customer.example', first_name: 'Jane', last_name: 'Customer' }] },
+    });
+    const counts = await runContactsSync({ gapMs: 0 });
+    // The customer owns the person — no second Google contact minted.
+    expect(mockPeopleApi.people.createContact).not.toHaveBeenCalled();
+    expect(counts.synced).toBe(0);
+  });
+
+  test('a PHONE-ONLY lead with a CONFLICTING name keeps its own contact (household number)', async () => {
+    setupDb({
+      leads: [{ id: 'l-p2', first_name: 'Sam', last_name: 'Other', email: null, phone: '9415550100', customer_id: null, google_contact_id: null, updated_at: '2026-07-28T11:00:00Z' }],
+      // In-query compat excludes the conflicting-name customer → no match,
+      // and the sibling probes find nothing either.
+      firstResults: { customers: [null], leads: [null] },
+    });
+    mockPeopleApi.people.createContact.mockResolvedValueOnce({ data: { resourceName: 'people/own' } });
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(counts.synced).toBe(1);
+    expect(mockPeopleApi.people.createContact).toHaveBeenCalled();
+  });
+
   test('a repeat-inquiry lead ADOPTS the sibling lead contact instead of minting another', async () => {
     setupDb({
       leads: [{ id: 'l-2', first_name: 'Sam', email: 'sam@new.example', phone: '9415550101', customer_id: null, google_contact_id: null, updated_at: '2026-07-28T11:00:00Z' }],
