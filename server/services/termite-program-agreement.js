@@ -1138,7 +1138,15 @@ async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
     // NOT IN never matches NULL — a row whose rendering version was
     // deleted (FK SET NULL) is stale wording and must be selected too.
     .where((q) => q.whereNull('document_template_version_id')
-      .orWhereNotIn('document_template_version_id', [...activeVersionIds])))
+      .orWhereNotIn('document_template_version_id', [...activeVersionIds]))
+    // A dead token is not recoverable paperwork: its link already 410s,
+    // and when expireDocumentRequests' capped batch hasn't stamped the
+    // status yet, cancelling + re-prepping here would revive what the
+    // expired-recovery rule treats as a deliberate blocker. The lifecycle
+    // pass stamps it 'expired' and the expiredStale leg applies the
+    // per-template rollout cutoff.
+    .where((q) => q.whereNull('share_token_expires_at')
+      .orWhere('share_token_expires_at', '>', new Date())))
     .select('id', 'customer_id', 'status', 'recipient_name', 'document_variables_snapshot', 'document_template_key', 'document_template_version_id', 'created_at')
     .limit(limit);
   const migrationCancelled = await notReprocessed(db('customer_contracts')
@@ -1212,15 +1220,50 @@ async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
       await markSupersededHandled(row, 'rollout_window_ownership', db, rolloutMeta);
       continue;
     }
-    if (!isCommercialEstimate(linkedEstimate, parseEstimateData(linkedEstimate.estimate_data))) {
+    // Re-run TODAY'S FULL preparation predicates, not just the commercial
+    // park — an old dyno lacking any of the newer guards (non-quarterly
+    // cadence, annual prepay, discount fail-closed, ownership/template
+    // choice) can have minted this current-version agreement. 'ok' means
+    // today's flow would have produced this exact paperwork.
+    const linkedEstData = parseEstimateData(linkedEstimate.estimate_data);
+    let misissue = null; // 'park_expected' | 'template_mismatch'
+    if (isCommercialEstimate(linkedEstimate, linkedEstData)) {
+      misissue = 'park_expected';
+    } else {
+      const prepayState = await isAnnualPrepayAccept(linkedEstimate, null);
+      if (prepayState === 'error') { results.failed += 1; continue; } // retry tomorrow
+      if (prepayState) {
+        misissue = 'park_expected';
+      } else {
+        const preparedNow = buildTermiteProgramAgreementValues(linkedEstimate, linkedEstData, { startDateLabel: null });
+        if (!preparedNow) misissue = 'park_expected';
+        else if (preparedNow.templateKey !== row.document_template_key) misissue = 'template_mismatch';
+      }
+    }
+    if (!misissue) {
       // Correctly issued under today's rules — nothing to do until a later
       // template version voids this verdict.
       await markSupersededHandled(row, 'rollout_window_ok', db, rolloutMeta);
       continue;
     }
-    // A commercial estimate holding a residential agreement: run it through
-    // today's flow — the commercial branch retires the same-property open
-    // rows (including this one) and rings the reissue-scoped bell.
+    if (misissue === 'template_mismatch') {
+      // The one misissue maybeCreate can't self-heal: the existing
+      // same-estimate current-version row would classify 'blocks' inside
+      // its transaction. Retire the misissued paperwork first — the
+      // service-generated guard makes retireSamePropertyOpenAgreements
+      // cancel it rather than keep it as a staff replacement.
+      try {
+        await retireSamePropertyOpenAgreements(row.customer_id, linkedEstimate);
+      } catch (err) {
+        logger.warn(`[termite-agreement] rollout mismatch retirement failed for contract ${row.id}: ${err.message}`);
+        results.failed += 1;
+        continue;
+      }
+    }
+    // Run the misissue through today's flow — parked categories retire the
+    // same-property open rows (including this one) and ring the
+    // reissue-scoped bell; a template mismatch re-preps the correct
+    // agreement.
     const misissueResult = await maybeCreateTermiteProgramAgreement({
       estimate: linkedEstimate,
       customerId: row.customer_id,
@@ -1240,6 +1283,44 @@ async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
     } else {
       await markSupersededHandled(row, misissueResult.skipped || 'rollout_window_processed', db, rolloutMeta);
       results.skipped += 1;
+    }
+  }
+  // Signed-during-rollout audit: an old dyno can autosend superseded
+  // wording after the migration snapshot and the customer can sign it
+  // before the next sweep. Executed contracts are HISTORICAL RECORDS —
+  // never modified — but a signature on a non-active version made
+  // at/after that template's rollout needs the operator's eyes exactly
+  // once. (Legacy signatures without signed_at predate rollouts by
+  // construction and are excluded by the cutoff comparison.)
+  for (const [templateKey, cutoff] of rolloutStarts) {
+    const signedStale = await notReprocessed(db('customer_contracts')
+      .where('document_template_key', templateKey)
+      .where('status', 'signed')
+      .where((q) => q.whereNull('document_template_version_id')
+        .orWhereNotIn('document_template_version_id', [...activeVersionIds]))
+      .where('signed_at', '>=', cutoff))
+      .select('id', 'customer_id', 'recipient_name')
+      .limit(limit);
+    for (const row of signedStale) {
+      if (results.checked >= limit) break;
+      results.checked += 1;
+      const auditBelled = await ringAdminBellDeduped(NotificationService, {
+        lockKey: `termite-agreement:${row.customer_id}`,
+        titleLike: 'Termite agreement signed on superseded wording%',
+        metaKey: 'contractId',
+        metaValue: row.id,
+      }, [
+        'estimate',
+        'Termite agreement signed on superseded wording',
+        `${row.recipient_name || 'A customer'} signed a termite program agreement rendered from a superseded template version during a rollout window. The executed contract stays signed as-is — review it and issue corrected paperwork if the wording differences matter.`,
+        { icon: '\u{1F4DD}', link: `/admin/customers/${row.customer_id}`, metadata: { contractId: row.id, customerId: row.customer_id } },
+      ], `signed-on-superseded audit for contract ${row.id}`);
+      if (auditBelled) {
+        await markSupersededHandled(row, 'signed_superseded_belled');
+        results.skipped += 1;
+      } else {
+        results.failed += 1;
+      }
     }
   }
   for (const row of [...staleOpen, ...migrationCancelled, ...expiredStale]) {
@@ -1443,6 +1524,12 @@ async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
         await markSupersededHandled(row, result.skipped);
         results.skipped += 1;
       }
+    } else if (result.skipped === 'customer_not_found') {
+      // Soft-deleted customer — deterministic, not transient: mark handled
+      // so archived-customer rows stop consuming the bounded daily window.
+      // A restored customer gets fresh paperwork through a new accept.
+      await markSupersededHandled(row, 'customer_archived');
+      results.skipped += 1;
     } else {
       results.failed += 1; // transient — stays unmarked for tomorrow's retry
     }
@@ -1476,6 +1563,15 @@ async function reconcileTermiteProgramAgreements({ sinceDays = 21, limit = 25 } 
       .modify((q) => { if (beforeAcceptedAt) q.where('accepted_at', '<', beforeAcceptedAt); })
       .where((builder) => {
         builder.whereNull('accepted_service_mode').orWhereNot('accepted_service_mode', 'one_time');
+      })
+      // Soft-deleted customers can't receive paperwork — their estimates
+      // would fail customer_not_found deterministically every day and
+      // churn the bounded scan window until the 21-day cutoff.
+      .whereExists(function activeCustomer() {
+        this.select(db.raw('1'))
+          .from('customers as cust')
+          .whereRaw('cust.id = estimates.customer_id')
+          .whereNull('cust.deleted_at');
       })
       .whereRaw("estimate_data::text ILIKE '%termite%'")
       // Estimates whose agreement already exists never occupy the window.
