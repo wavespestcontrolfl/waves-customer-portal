@@ -1149,6 +1149,31 @@ function isNonLeadCallContent(extracted = {}) {
   return NON_LEAD_CALL_TYPES.has(callType);
 }
 
+// Stamp WHAT was held onto the call's live email read-back card(s) so the
+// resume paths release exactly what the pipeline withheld — the newsletter
+// DOI resumes only for calls whose candidate was actually held here, never
+// for an existing customer whose card resolution should not trigger a
+// subscribe (Codex #3084 r3). Best-effort: no card (insert failed) means
+// the drip still resumes via its unconditional dedup-safe path.
+async function markFirstTouchHeld(callLogId, patch) {
+  try {
+    const cards = await db('triage_items')
+      .where({ call_log_id: callLogId })
+      .whereIn('status', ['open', 'in_progress'])
+      .whereIn('reason_code', ['email_unverified', 'email_invalid'])
+      .select('id', 'payload');
+    for (const card of cards) {
+      let payload = {};
+      try { payload = typeof card.payload === 'string' ? JSON.parse(card.payload || '{}') : (card.payload || {}); } catch { payload = {}; }
+      await db('triage_items')
+        .where({ id: card.id })
+        .update({ payload: JSON.stringify({ ...payload, ...patch }), updated_at: new Date() });
+    }
+  } catch (err) {
+    logger.warn(`[call-proc] first-touch hold marker failed: ${err.message}`);
+  }
+}
+
 // True when the call has a live email read-back card — the extracted address
 // is a transcription guess and must not receive first-touch email until the
 // office confirms it. 'in_progress' counts as live (canonical open-review set,
@@ -8758,6 +8783,7 @@ const CallRecordingProcessor = {
       // admin force-reprocess after the run.
       logger.info(`[call-proc] Skipping new_lead automation enroll for ${maskSid(callSid)}: extracted email is under read-back review`);
       beehiivResult = { skipped: 'email_under_review' };
+      await markFirstTouchHeld(call.id, { held_drip: true });
     } else if (customerId && extracted.email) {
       try {
         const AutomationRunner = require('./automation-runner');
@@ -8847,6 +8873,7 @@ const CallRecordingProcessor = {
       // confirmation is ALSO a first-touch email to the unconfirmed address.
       logger.info(`[call-proc] Skipping newsletter subscribe for ${callSid}: extracted email is under read-back review`);
       newsletterResult = { skipped: 'email_under_review' };
+      await markFirstTouchHeld(call.id, { held_newsletter: true });
     } else if (newsletterCandidate) {
       const stillOwned = await db('call_log')
         .where({ id: call.id })
@@ -8861,6 +8888,24 @@ const CallRecordingProcessor = {
         }
       } else {
         logger.warn(`[call-proc] Skipped newsletter subscribe for ${callSid} — ownership lost (peer reclaimed via stale-lock window).`);
+      }
+    }
+
+    // Mid-run release race (Codex #3084 r3): the email review card is
+    // inserted minutes before the customer link and the holds above — an
+    // admin who accepts the visible card during THIS run resolves it while
+    // the in-run flag still forces the hold, and no later release exists.
+    // Reconcile at the end of the run: if anything was held but no live
+    // card remains, release now (consent is re-checked inside the helper).
+    if (customerId
+        && (beehiivResult?.skipped === 'email_under_review' || newsletterResult?.skipped === 'email_under_review')) {
+      try {
+        if (!(await shouldHoldLeadEmailEnrollment(call.id))) {
+          const { resumeHeldFirstTouch } = require('./lead-first-touch-resume');
+          await resumeHeldFirstTouch({ customerId, source: 'mid_run_card_release' });
+        }
+      } catch (reconcileErr) {
+        logger.warn(`[call-proc] first-touch hold reconciliation failed for ${maskSid(callSid)}: ${reconcileErr.message}`);
       }
     }
 

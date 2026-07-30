@@ -34,10 +34,32 @@ async function customerCallDoNotContact(customerId, dbh) {
   return !!row;
 }
 
-async function emailSuppressed(email, dbh) {
+// Canonical suppression semantics (Codex #3084 r3): only a suppression that
+// the automation lane itself would honor blocks the resume — a group-scoped
+// suppression for an unrelated stream (e.g. service_operational) must not
+// bury a marketing-drip release. Mirrors automation-runner's own gate.
+async function emailSuppressedForNewLead(email, dbh) {
   if (!(await dbh.schema.hasTable('email_suppressions'))) return false;
-  const row = await dbh('email_suppressions')
-    .where({ email: String(email).trim().toLowerCase(), status: 'active' })
+  const rows = await dbh('email_suppressions')
+    .whereRaw('LOWER(email) = ?', [String(email).trim().toLowerCase()])
+    .where({ status: 'active' });
+  if (!rows.length) return false;
+  const { automationSuppressionMatches } = require('./automation-runner');
+  const template = await dbh('automation_templates').where({ key: 'new_lead' }).first();
+  return rows.some((row) => automationSuppressionMatches(template || {}, row));
+}
+
+// The newsletter DOI resumes ONLY when this call actually held one — the
+// processor stamps held_newsletter on the review card at hold time. An
+// existing customer whose card resolution never held a subscribe must not
+// receive a DOI email (Codex #3084 r3); the marker also guarantees no
+// newsletter_subscribers row exists yet, so the global-connection subscribe
+// cannot collide with an uncommitted row move inside a caller's transaction.
+async function newsletterWasHeld(customerId, dbh) {
+  const row = await dbh('triage_items')
+    .whereIn('reason_code', EMAIL_REVIEW_REASON_CODES)
+    .whereRaw("payload->>'held_newsletter' = 'true'")
+    .whereIn('call_log_id', dbh('call_log').select('id').where({ customer_id: customerId }))
     .first('id');
   return !!row;
 }
@@ -57,7 +79,7 @@ async function resumeHeldFirstTouch({ customerId, email = null, dbh = db, source
       logger.info(`[first-touch-resume] customer ${customerId}: do-not-contact veto — not resuming (${source})`);
       return { ...result, skipped: 'do_not_contact' };
     }
-    if (await emailSuppressed(resumeEmail, dbh)) {
+    if (await emailSuppressedForNewLead(resumeEmail, dbh)) {
       logger.info(`[first-touch-resume] customer ${customerId}: address suppressed — not resuming (${source})`);
       return { ...result, skipped: 'email_suppressed' };
     }
@@ -75,19 +97,22 @@ async function resumeHeldFirstTouch({ customerId, email = null, dbh = db, source
     });
     result.enrolled = !!enroll?.enrolled;
 
-    // Newsletter DOI resume — the held candidate was in-memory only, so it is
-    // re-derived here. Runs on the GLOBAL connection deliberately: the DOI
-    // email is a side effect that cannot be rolled back anyway, and the
-    // subscribe helper carries its own invalid/unsubscribed/strict guards.
+    // Newsletter DOI resume — only when the pipeline actually held one for
+    // this customer's call (held_newsletter marker). Runs on the GLOBAL
+    // connection deliberately: the DOI email is a side effect that cannot be
+    // rolled back anyway, and the subscribe helper carries its own invalid/
+    // unsubscribed/strict guards.
     try {
-      const CRP = require('./call-recording-processor');
-      if (typeof CRP.resumeNewsletterForCallCustomer === 'function') {
-        result.newsletter = await CRP.resumeNewsletterForCallCustomer({
-          customerId,
-          email: resumeEmail,
-          firstName: customer.first_name || null,
-          lastName: customer.last_name || null,
-        });
+      if (await newsletterWasHeld(customerId, dbh)) {
+        const CRP = require('./call-recording-processor');
+        if (typeof CRP.resumeNewsletterForCallCustomer === 'function') {
+          result.newsletter = await CRP.resumeNewsletterForCallCustomer({
+            customerId,
+            email: resumeEmail,
+            firstName: customer.first_name || null,
+            lastName: customer.last_name || null,
+          });
+        }
       }
     } catch (newsletterErr) {
       logger.warn(`[first-touch-resume] newsletter resume failed for customer ${customerId}: ${newsletterErr.message}`);

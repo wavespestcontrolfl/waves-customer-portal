@@ -281,9 +281,16 @@ router.post('/:id/verdict', async (req, res) => {
 
     // An ACCEPT verdict confirms the extraction — including any email that
     // was under read-back — so it is a release point for the held
-    // first-touch sends (2026-07-30 lane). A DENY means the office will
-    // correct fields; the email-correction fanout resumes then. Best-effort.
-    if (verdict === 'accept') {
+    // first-touch sends (2026-07-30 lane). A DENY releases too UNLESS the
+    // denial implicates identity ('name' — the category that owns email
+    // cards) or consent: those denials lead to a correction, and the
+    // email-correction fanout resumes then. Without this, a deny about an
+    // unrelated field (service/scheduling/routing) would resolve the email
+    // card with no release path left (Codex #3084 r3). Best-effort.
+    const denyClearsEmail = verdict === 'deny'
+      && !wrongFields.includes('name')
+      && !wrongFields.includes('consent');
+    if (verdict === 'accept' || denyClearsEmail) {
       try {
         const { resumeHeldFirstTouch, EMAIL_REVIEW_REASON_CODES } = require('../services/lead-first-touch-resume');
         const hadEmailCard = await db('triage_items')

@@ -8,6 +8,7 @@
 
 let mockDncRow = null;
 let mockSuppressionRow = null;
+let mockHeldNewsletterRow = { id: 'card-1' };
 let mockCustomerRow = { id: 'cust-1', first_name: 'Pat', last_name: 'Sample', email: 'pat@example.com' };
 jest.mock('../models/db', () => {
   const handler = (table) => {
@@ -15,12 +16,19 @@ jest.mock('../models/db', () => {
       where: jest.fn(() => chain),
       whereIn: jest.fn(() => chain),
       whereRaw: jest.fn(() => chain),
+      select: jest.fn(() => chain),
       first: jest.fn(async () => {
         if (table === 'customers') return mockCustomerRow;
         if (table === 'call_log') return mockDncRow;
-        if (table === 'email_suppressions') return mockSuppressionRow;
+        if (table === 'automation_templates') return { key: 'new_lead' };
+        if (table === 'triage_items') return mockHeldNewsletterRow;
         return null;
       }),
+      // Awaiting the bare chain (the suppressions list query) resolves to
+      // table-appropriate rows.
+      then: (resolve, reject) => Promise.resolve(
+        table === 'email_suppressions' ? (mockSuppressionRow ? [mockSuppressionRow] : []) : []
+      ).then(resolve, reject),
     };
     return chain;
   };
@@ -31,7 +39,12 @@ jest.mock('../models/db', () => {
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const mockEnroll = jest.fn(async () => ({ enrolled: true }));
-jest.mock('../services/automation-runner', () => ({ enrollCustomer: (...a) => mockEnroll(...a) }));
+jest.mock('../services/automation-runner', () => ({
+  enrollCustomer: (...a) => mockEnroll(...a),
+  // Group-aware matcher stand-in: global bounce suppressions match, an
+  // unrelated group-scoped suppression does not.
+  automationSuppressionMatches: (_template, row) => String(row?.suppression_type || '') === 'bounce' || !row?.group_key,
+}));
 
 const mockNewsletter = jest.fn(async () => ({ subscribed: true }));
 jest.mock('../services/call-recording-processor', () => ({
@@ -44,6 +57,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockDncRow = null;
   mockSuppressionRow = null;
+  mockHeldNewsletterRow = { id: 'card-1' };
   mockCustomerRow = { id: 'cust-1', first_name: 'Pat', last_name: 'Sample', email: 'pat@example.com' };
 });
 
@@ -67,11 +81,24 @@ describe('resumeHeldFirstTouch', () => {
     expect(mockNewsletter).not.toHaveBeenCalled();
   });
 
-  test('an active email suppression blocks the resume', async () => {
-    mockSuppressionRow = { id: 'sup-1' };
+  test('a global bounce suppression blocks the resume', async () => {
+    mockSuppressionRow = { id: 'sup-1', suppression_type: 'bounce', group_key: null };
     const res = await resumeHeldFirstTouch({ customerId: 'cust-1' });
     expect(res).toMatchObject({ resumed: false, skipped: 'email_suppressed' });
     expect(mockEnroll).not.toHaveBeenCalled();
+  });
+
+  test('an unrelated group-scoped suppression does NOT block the resume (canonical group semantics)', async () => {
+    mockSuppressionRow = { id: 'sup-2', suppression_type: 'unsubscribe', group_key: 'service_operational' };
+    const res = await resumeHeldFirstTouch({ customerId: 'cust-1' });
+    expect(res.enrolled).toBe(true);
+  });
+
+  test('newsletter resumes only when the pipeline held one (held_newsletter marker)', async () => {
+    mockHeldNewsletterRow = null;
+    const res = await resumeHeldFirstTouch({ customerId: 'cust-1' });
+    expect(res.enrolled).toBe(true);
+    expect(mockNewsletter).not.toHaveBeenCalled();
   });
 
   test('failures degrade — an enroll error never throws into the caller', async () => {
