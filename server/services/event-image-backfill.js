@@ -131,15 +131,21 @@ async function backfillBatch({ limit = MAX_BATCH, lookup, get, knex = db } = {})
     // event it mentions (and deliberately leaves their images null — the
     // article art is ambiguous). Probing a shared url would stamp the
     // SAME article og:image onto all of them, so shared urls are skipped.
-    // Merged losers keep their event_url — only ACTIVE rows signal the
-    // article-roundup ambiguity; a survivor sharing a url with its own
-    // merged duplicate is still a genuine detail page.
+    // Only rows that are themselves ACTIVE (same predicates as this
+    // outer query) signal the article-roundup ambiguity: merged losers
+    // keep their event_url, a recurring event's expired previous
+    // occurrence shares its detail url, and rejected siblings are out of
+    // the newsletter's pool — none of those should permanently exclude
+    // the one active occurrence from backfill.
     .whereNotExists(function sharedUrl() {
       this.select(knex.raw('1'))
         .from('events_raw as dup')
         .whereRaw('dup.event_url = events_raw.event_url')
         .whereRaw('dup.id <> events_raw.id')
-        .whereRaw('dup.merged_into IS NULL');
+        .whereRaw('dup.merged_into IS NULL')
+        .whereRaw("dup.admin_status IN ('pending','approved','featured')")
+        .whereRaw("(dup.freshness_status IS NULL OR dup.freshness_status NOT IN ('expired','stale_recurring'))")
+        .whereRaw('(dup.start_at IS NULL OR dup.start_at >= now())');
     })
     .whereIn('admin_status', ['pending', 'approved', 'featured'])
     .whereNull('merged_into')
