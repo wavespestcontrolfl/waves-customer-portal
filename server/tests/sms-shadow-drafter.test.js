@@ -405,15 +405,16 @@ describe('v10 — full-account grounding', () => {
       summary: 'X',
       billing: {
         outstandingBalance: 120,
-        autopay: { enabled: true, pausedUntil: null, nextChargeDate: '2026-08-01', billingDay: 1 },
-        openInvoice: { title: 'Quarterly Pest — July', status: 'sent', total: 120, dueDate: '2026-08-05', payerBilled: false },
+        autopay: { on: true, paused: false, pausedUntil: null, nextChargeDate: '2026-08-01' },
+        openInvoice: { title: 'Quarterly Pest — July', status: 'sent', amountDue: 100, dueDate: '2026-08-05', payerBilled: false },
         recentPayments: [{ amount: 95, status: 'paid', payment_date: '2026-07-01' }],
       },
     });
     expect(block).toContain('BILLING:');
     expect(block).toContain('$120.00 outstanding');
     expect(block).toContain('Autopay: on, next charge');
-    expect(block).toContain('Open invoice: status sent, "Quarterly Pest — July", $120.00');
+    // net-of-credit amount, never the gross invoice total
+    expect(block).toContain('Open invoice: status sent, "Quarterly Pest — July", $100.00 due (net of any applied credit)');
     expect(block).toContain('Recent payments: $95.00 paid');
   });
 
@@ -422,8 +423,8 @@ describe('v10 — full-account grounding', () => {
       summary: 'X',
       billing: {
         outstandingBalance: 0,
-        autopay: { enabled: true, pausedUntil: '2026-09-01', nextChargeDate: null, billingDay: 1 },
-        openInvoice: { title: null, status: 'sent', total: 300, dueDate: null, payerBilled: true },
+        autopay: { on: false, paused: true, pausedUntil: '2026-09-01', nextChargeDate: null },
+        openInvoice: { title: null, status: 'sent', amountDue: 300, dueDate: null, payerBilled: true },
         recentPayments: [],
       },
     });
@@ -432,12 +433,14 @@ describe('v10 — full-account grounding', () => {
 
     const none = buildFactsBlock({ summary: 'X' });
     expect(none).toContain('Open invoice: none');
+    // canonical eligibility unavailable → visible unknown, never a guess
+    expect(none).toContain('Autopay: state unknown right now');
   });
 
   test('PENDING ESTIMATE and PROPERTY & PREFERENCES render as facts', () => {
     const block = buildFactsBlock({
       summary: 'X',
-      pendingEstimate: { status: 'viewed', tier: 'Gold', monthlyTotal: 89, sentAt: '2026-07-20' },
+      pendingEstimate: { status: 'viewed', tier: 'Gold', pricedPerApplication: true, sentAt: '2026-07-20T14:00:00Z' },
       propertyProfile: {
         pets: 'Two dogs, friendly',
         irrigation: true,
@@ -452,7 +455,10 @@ describe('v10 — full-account grounding', () => {
         lockboxOnFile: false,
       },
     });
-    expect(block).toContain('PENDING ESTIMATE: viewed, Gold, $89.00/mo');
+    // per-application display rule: never a monthly amount for the estimate
+    expect(block).toContain('PENDING ESTIMATE: viewed, Gold, priced per application');
+    expect(block).toContain('full breakdown is in their estimate');
+    expect(block).not.toContain('/mo');
     expect(block).toContain('Pets: Two dogs, friendly');
     expect(block).toContain('Irrigation: yes — runs Mon/Thu mornings');
     expect(block).toContain('HOA: Palm Aire HOA — no trucks before 8am');
@@ -522,7 +528,7 @@ describe('v10 — full-account grounding', () => {
       summary: 'X',
       billing: {
         outstandingBalance: 0,
-        cardOnFile: { brand: 'Visa', last4: '4242', expMonth: 12, expYear: 2027, isAutopayCard: true },
+        cardOnFile: { type: 'card', brand: 'Visa', last4: '4242', expMonth: 12, expYear: 2027, isAutopayCard: true },
       },
       lawnHealth: {
         baseline: { date: '2026-03-01', overall: 58, turfDensity: 55, weedSuppression: 60, fungusControl: 60, thatchLevel: 55, colorHealth: 60 },
@@ -530,14 +536,21 @@ describe('v10 — full-account grounding', () => {
         assessments: 4,
       },
     });
-    expect(block).toContain('Card on file: Visa ending 4242, exp 12/2027 (autopay card)');
+    expect(block).toContain('Payment method on file: Visa ending 4242, exp 12/2027 (autopay card)');
     expect(block).toContain('LAWN HEALTH: overall 72');
     expect(block).toContain('baseline 58');
     expect(block).toContain('weeds 80');
 
+    const bank = buildFactsBlock({
+      summary: 'X',
+      billing: { outstandingBalance: 0, cardOnFile: { type: 'bank', brand: null, last4: '6789', isAutopayCard: true } },
+    });
+    // ACH methods are named a bank account, never a card (codex r2)
+    expect(bank).toContain('Payment method on file: bank account ending 6789 (autopay method)');
+
     const none = buildFactsBlock({ summary: 'X' });
     expect(none).toContain('LAWN HEALTH: No assessments on file');
-    expect(none).not.toContain('Card on file');
+    expect(none).not.toContain('Payment method on file');
   });
 
   test('v10 system prompt wires the new sources + billing/access rules', () => {
