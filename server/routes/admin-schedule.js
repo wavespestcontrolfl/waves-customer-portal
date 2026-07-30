@@ -6690,6 +6690,15 @@ router.put('/:id/status', async (req, res, next) => {
     // Mirror admin-dispatch: idempotent on no_show, 409 on any other target.
     if (svc.status === 'no_show') {
       if (toStatus === 'no_show') {
+        // Only same-status retry path that SKIPS transitionJobStatus — so
+        // its post-commit follow-up re-park hook can't re-fire here. If the
+        // original no_show's re-park failed transiently, this retry is the
+        // recovery vehicle: re-attempt it directly (dedup-guarded,
+        // fire-and-forget; Codex r4). Mirrors admin-dispatch.
+        {
+          const { handleFollowupChildCancellation } = require('../services/typed-followup-obligation');
+          void handleFollowupChildCancellation({ jobId: svc.id, toStatus: 'no_show' }).catch(() => {});
+        }
         return res.json({ success: true, alreadyNoShow: true });
       }
       return res.status(409).json({

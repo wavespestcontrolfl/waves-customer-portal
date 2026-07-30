@@ -84,12 +84,19 @@ exports.down = async function down(knex) {
     await knex.raw('DROP INDEX IF EXISTS uq_scheduled_services_followup_source_open');
     // Restoring the pre-migration definition WIDENS the covered row set
     // (no_show rows re-enter). If a no_show child and its live replacement
-    // both exist by then, the strict recreate would collide — fall back to
-    // the new definition rather than leaving no index at all.
-    try {
-      await knex.raw(ORIGINAL_LINK_INDEX);
-    } catch (err) {
-      await knex.raw(NEW_LINK_INDEX);
-    }
+    // both exist by then, the strict recreate would collide — and knex runs
+    // migrations transactionally, so a thrown uniqueness violation would
+    // abort the transaction before any catch could run the fallback. Decide
+    // by CHECKING for conflicting rows first, no exception path involved.
+    const conflicting = await knex.raw(`
+      SELECT 1
+      FROM scheduled_services
+      WHERE followup_source_service_id IS NOT NULL
+        AND status NOT IN ('cancelled', 'skipped')
+      GROUP BY followup_source_service_id
+      HAVING count(*) > 1
+      LIMIT 1
+    `);
+    await knex.raw(conflicting.rows.length ? NEW_LINK_INDEX : ORIGINAL_LINK_INDEX);
   }
 };

@@ -275,3 +275,58 @@ describe('codex r3 — double-card, no_show coverage, storage-level dedupe, IB w
     expect(fn).not.toContain("status: 'cancelled',");
   });
 });
+
+describe('codex r4 — frozen verdict, booking race, no-show retry, IB terminal guard, rollback safety', () => {
+  const moduleSource = fs.readFileSync(path.join(__dirname, '../services/typed-followup-obligation.js'), 'utf8');
+
+  test('completion FREEZES its final verdict into structured_notes (both directions)', () => {
+    expect(dispatchSource).toContain('...(followupSuggestion ? { typedFollowupVerdict: followupSuggestion } : {}),');
+    // Reader replays the frozen verdict verbatim and only re-derives from
+    // the live profile for pre-freeze records.
+    const reader = moduleSource.slice(moduleSource.indexOf('async function typedFollowupObligationForCompletedSource'));
+    const frozenIdx = reader.indexOf('typedFollowupVerdict');
+    const liveIdx = reader.indexOf('resolveCompletionProfileForScheduledService');
+    expect(frozenIdx).toBeGreaterThan(-1);
+    expect(liveIdx).toBeGreaterThan(frozenIdx);
+    expect(reader).toContain("typeof frozenVerdict.required === 'boolean'");
+  });
+
+  test('park closes the booking race with a post-COMMIT cross-check (both trx and standalone paths)', () => {
+    const park = moduleSource.slice(moduleSource.indexOf('async function parkFollowupAlert'), moduleSource.indexOf('async function handleFollowupChildCancellation'));
+    expect(park).toContain('const crossCheck = async () => {');
+    expect(park).toContain('trx.executionPromise.then(crossCheck)');
+    expect(park).toContain('await crossCheck();');
+    // The cross-check resolves OUR OWN card when a child won the race.
+    expect(park).toContain('resolveAlert({ id: alertId, resolvedBy: null })');
+    expect(park).toContain('post-park cross-check failed');
+  });
+
+  test('idempotent no_show retries re-attempt the re-park in BOTH status routes', () => {
+    const scheduleSource = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
+    for (const src of [dispatchSource, scheduleSource]) {
+      const idx = src.indexOf('alreadyNoShow: true');
+      expect(idx).toBeGreaterThan(-1);
+      const before = src.slice(Math.max(0, idx - 900), idx);
+      expect(before).toContain("handleFollowupChildCancellation({ jobId: svc.id, toStatus: 'no_show' })");
+    }
+  });
+
+  test('IB cancel_appointment enforces the one-way terminal rule (idempotent on cancelled)', () => {
+    const ibSource = fs.readFileSync(path.join(__dirname, '../services/intelligence-bar/tools.js'), 'utf8');
+    const fn = ibSource.slice(ibSource.indexOf('async function cancelAppointment'), ibSource.indexOf('async function draftSms'));
+    expect(fn).toContain('already_cancelled: true');
+    expect(fn).toContain('TERMINAL_APPOINTMENT_STATUSES.includes(String(appt.status))');
+    // Guard runs BEFORE the shared-writer transition.
+    expect(fn.indexOf('TERMINAL_APPOINTMENT_STATUSES')).toBeLessThan(fn.indexOf('transitionJobStatus({'));
+  });
+
+  test('migration rollback decides the index by CHECKING rows — no exception path in a transactional migration', () => {
+    const migration = fs.readFileSync(
+      path.join(__dirname, '../models/migrations/20260730500000_typed_followup_alert_dedupe.js'), 'utf8',
+    );
+    const down = migration.slice(migration.indexOf('exports.down'));
+    expect(down).toContain('HAVING count(*) > 1');
+    expect(down).toContain('conflicting.rows.length ? NEW_LINK_INDEX : ORIGINAL_LINK_INDEX');
+    expect(down).not.toContain('} catch (err) {');
+  });
+});

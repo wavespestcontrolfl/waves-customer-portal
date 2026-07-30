@@ -2146,6 +2146,15 @@ router.put('/:serviceId/status', async (req, res, next) => {
     // no_show and transitionJobStatus's atomic guard would accept it.
     if (svc.status === 'no_show') {
       if (toStatus === 'no_show') {
+        // Only same-status retry path that SKIPS transitionJobStatus — so
+        // its post-commit follow-up re-park hook can't re-fire here. If the
+        // original no_show's re-park failed transiently, this retry is the
+        // recovery vehicle: re-attempt it directly (dedup-guarded,
+        // fire-and-forget; Codex r4).
+        {
+          const { handleFollowupChildCancellation } = require('../services/typed-followup-obligation');
+          void handleFollowupChildCancellation({ jobId: svc.id, toStatus: 'no_show' }).catch(() => {});
+        }
         return res.json({ success: true, alreadyNoShow: true });
       }
       return res.status(409).json({
@@ -4461,6 +4470,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             ...(validatedCompanions.length
               ? { companionReportDelivery: Object.fromEntries(companionDeliveryByType) }
               : {}),
+            // The completion-time follow-up verdict is FROZEN here (both
+            // directions — required and withdrawn) so later re-parks (child
+            // cancellation, deploy-boundary resume) replay the promise that
+            // was actually made, never a re-derivation from the live profile
+            // — a repointed/deactivated profile or changed interval must not
+            // silently drop (or invent) an owed included treatment
+            // (Codex r4).
+            ...(followupSuggestion ? { typedFollowupVerdict: followupSuggestion } : {}),
           };
           const serviceData = {
             protocol: {

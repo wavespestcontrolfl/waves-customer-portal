@@ -1577,6 +1577,25 @@ async function cancelAppointment(input) {
   const appt = await db('scheduled_services').where('id', appointment_id).first();
   if (!appt) return { error: 'Appointment not found' };
 
+  // Terminal statuses are one-way (#2717) — that guard lives in the ROUTE
+  // callers, not transitionJobStatus, so this tool must enforce it itself
+  // (Codex r4): cancelling a completed visit would erase delivered work and
+  // trigger the follow-up re-park hook for a treatment that already
+  // happened. Idempotent on an already-cancelled row; every other terminal
+  // state is an error, matching rescheduleAppointment above.
+  if (String(appt.status) === 'cancelled') {
+    return {
+      success: true,
+      appointment_id,
+      already_cancelled: true,
+      date: appt.scheduled_date,
+      service_type: appt.service_type,
+    };
+  }
+  if (TERMINAL_APPOINTMENT_STATUSES.includes(String(appt.status))) {
+    return { error: `This appointment is already ${appt.status} and can't be cancelled.` };
+  }
+
   // Route through the SHARED status writer, not a direct status update
   // (Codex r3 on PR #3091): transitionJobStatus is where the cross-cutting
   // cancellation behavior lives — the atomic racing-transition guard, the

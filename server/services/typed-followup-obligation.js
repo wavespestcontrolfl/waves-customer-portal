@@ -150,15 +150,29 @@ function typedFollowupVerdict({ scheduledService = {}, profile = {}, findingsTyp
  */
 async function typedFollowupObligationForCompletedSource({ scheduledService, knex = db } = {}) {
   if (!scheduledService?.id || scheduledService.status !== 'completed') return null;
-  const { resolveCompletionProfileForScheduledService } = require('./service-completion-profiles');
-  const profile = await resolveCompletionProfileForScheduledService(scheduledService, knex).catch(() => null);
-  if (!profile?.findingsType) return null;
   const record = await knex('service_records')
     .where({ scheduled_service_id: scheduledService.id })
     .orderBy('created_at', 'desc')
     .first()
     .catch(() => null);
-  const snapshot = parseJsonObjectSafe(record?.service_data).typedReportSnapshot;
+  if (!record) return null;
+
+  // The completion FROZE its final verdict into structured_notes (both
+  // directions). Replaying it verbatim is the correctness rule: the live
+  // profile is mutable — deactivating or repointing it must not drop an
+  // already-promised included treatment, and a policy newly turned on must
+  // not retroactively invent one for an old visit (Codex r4).
+  const frozenVerdict = parseJsonObjectSafe(record.structured_notes).typedFollowupVerdict;
+  if (frozenVerdict && typeof frozenVerdict.required === 'boolean') {
+    return { suggestion: frozenVerdict, profile: null, serviceRecordId: record.id, frozen: true };
+  }
+
+  // Pre-freeze records (completed before this shipped): re-derive from the
+  // committed snapshot + live profile — the best available approximation.
+  const { resolveCompletionProfileForScheduledService } = require('./service-completion-profiles');
+  const profile = await resolveCompletionProfileForScheduledService(scheduledService, knex).catch(() => null);
+  if (!profile?.findingsType) return null;
+  const snapshot = parseJsonObjectSafe(record.service_data).typedReportSnapshot;
   if (!snapshot || String(snapshot.type || '') !== String(profile.findingsType)) return null;
   const suggestion = typedFollowupVerdict({
     scheduledService,
@@ -166,7 +180,7 @@ async function typedFollowupObligationForCompletedSource({ scheduledService, kne
     findingsType: profile.findingsType,
     values: snapshot.values || {},
   });
-  return { suggestion, profile, serviceRecordId: record?.id || null };
+  return { suggestion, profile, serviceRecordId: record.id };
 }
 
 /**
@@ -233,7 +247,40 @@ async function parkFollowupAlert({
     },
     existingPayloadSource: source,
   });
-  return { created: !!result?.created, alertId: result?.row?.id || null };
+
+  // Post-COMMIT cross-check closes the booking race (Codex r4): the
+  // live-child read above and a concurrent /schedule-followup booking are
+  // not serialized, so the booking's resolve pass can run before this
+  // alert commits — leaving a live appointment plus a false open card.
+  // Every interleaving is covered by the pair of post-commit passes: if
+  // the child committed before THIS check, we resolve our own card here;
+  // if it commits after, the booking's own resolveOpenFollowupAlerts pass
+  // (which runs after ITS commit) sees our already-committed card and
+  // resolves it. Best-effort — a failure leaves an info card staff can
+  // one-click resolve, never a lost obligation.
+  const alertId = result?.row?.id || null;
+  if (result?.created && alertId) {
+    const crossCheck = async () => {
+      try {
+        const bookedChild = await knex('scheduled_services')
+          .where({ followup_source_service_id: scheduledService.id })
+          .whereNotIn('status', FOLLOWUP_CHILD_INACTIVE_STATUSES)
+          .first('id');
+        if (bookedChild) {
+          const { resolveAlert } = require('./dispatch-alerts');
+          await resolveAlert({ id: alertId, resolvedBy: null });
+        }
+      } catch (e) {
+        logger.warn(`[typed-followup] post-park cross-check failed for ${scheduledService.id}: ${e.message}`);
+      }
+    };
+    if (trx) {
+      if (trx.executionPromise) trx.executionPromise.then(crossCheck).catch(() => {});
+    } else {
+      await crossCheck();
+    }
+  }
+  return { created: !!result?.created, alertId };
 }
 
 /**
