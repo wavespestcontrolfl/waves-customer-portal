@@ -420,10 +420,17 @@ function quoteBindsConfirmedSlot(quote, confirmedStartAt) {
     hour12 = parts.find((p) => p.type === 'hour')?.value;
     dayPeriod = parts.find((p) => p.type === 'dayPeriod')?.value?.toLowerCase();
   } catch { return false; }
-  if (!weekday || !hour12) return false;
-  const hourTokens = [` ${hour12} `];
-  if (hour12 === '12') hourTokens.push(dayPeriod === 'am' ? ' midnight ' : ' noon ');
-  return q.includes(` ${weekday} `) && hourTokens.some((t) => q.includes(t));
+  if (!weekday || !hour12 || (dayPeriod !== 'am' && dayPeriod !== 'pm')) return false;
+  // AM/PM must corroborate (codex round-4 P1): a bare hour token would let
+  // "Sunday at 10 AM" authorize a 10 PM confirmed_start_at. The hour number
+  // counts only when the quote also names the CORRECT period and never the
+  // wrong one; a quote naming both ("at 10 AM, not 10 PM") stays ambiguous
+  // and fails closed. Unambiguous aliases: "noon" (12 PM) / "midnight"
+  // (12 AM). A period-less "10 o'clock" cannot bind — conservative.
+  const wrongPeriod = dayPeriod === 'am' ? ' pm ' : ' am ';
+  const hourWithPeriod = q.includes(` ${hour12} `) && q.includes(` ${dayPeriod} `) && !q.includes(wrongPeriod);
+  const alias12 = hour12 === '12' && q.includes(dayPeriod === 'am' ? ' midnight ' : ' noon ');
+  return q.includes(` ${weekday} `) && (hourWithPeriod || alias12);
 }
 
 // True only when the model pinned an AGENT-spoken evidence quote for the
@@ -529,7 +536,12 @@ function canAutoRoute(extraction, opts = {}) {
   // window_start unchanged — so an off-hour agent commitment must NOT unlock
   // the booking; it stays in triage for the office to place on an hour
   // boundary (codex P1).
-  const commitStartMinute = String(extraction.scheduling?.confirmed_start_at || '').match(/T\d{2}:(\d{2})/);
+  // Full time-component check (codex round-4 P1): minutes AND seconds must
+  // be zero — a schema-valid "T10:00:30" would otherwise copy a :30-second
+  // start into window_start unchanged. Absent seconds count as zero.
+  const commitStartMinute = String(extraction.scheduling?.confirmed_start_at || '').match(/T\d{2}:(\d{2})(?::(\d{2}))?/);
+  const commitStartOnTheHour = !!commitStartMinute && commitStartMinute[1] === '00'
+    && (!commitStartMinute[2] || commitStartMinute[2] === '00');
   // opts.transcriptLabelsTrusted (codex round-2 P1): the Agent:/Caller:
   // prefixes the grounding relies on are themselves produced by an LLM
   // labeling pass that is explicitly told to INFER unclear identities, and
@@ -542,7 +554,7 @@ function canAutoRoute(extraction, opts = {}) {
   // (owner-flip; see feature-gates.js). Fail closed by default.
   if (opts.agentCommitFailOpen && opts.transcriptLabelsTrusted === true
       && confirmedWithStart
-      && commitStartMinute && commitStartMinute[1] === '00'
+      && commitStartOnTheHour
       && extraction.scheduling?.agent_committed_booking === true
       && hasAgentCommittedEvidence(extraction, opts.transcript)) {
     appointmentBlockingFlags = appointmentBlockingFlags.filter((f) => {
@@ -552,7 +564,12 @@ function canAutoRoute(extraction, opts = {}) {
   }
 
   if (appointmentBlockingFlags.length > 0) {
-    return { allowed: false, reason: 'triage_flags', flags: finalFlags, appointmentBlockingFlags };
+    // Carry demoted flags on blocked returns too (codex round-4 P2): a call
+    // whose caller_not_authorized was demoted can STILL block on another flag
+    // — the "confirm the account holder" advisory must not vanish exactly
+    // when the office lands on the card. The processor's blocked branch files
+    // advisory cards from this array, mirroring the allowed branch.
+    return { allowed: false, reason: 'triage_flags', flags: finalFlags, appointmentBlockingFlags, failedOpenFlags: failedOpenFlags.length ? failedOpenFlags : undefined };
   }
 
   const confidence = extraction.confidence || {};
@@ -564,7 +581,7 @@ function canAutoRoute(extraction, opts = {}) {
   const failOpenLowConfidence = opts.failOpen && !!opts.knownCustomer
     && extraction.scheduling?.status === 'confirmed' && !!extraction.scheduling?.confirmed_start_at;
   if (!failOpenLowConfidence && (typeof confidence.overall !== 'number' || confidence.overall < threshold)) {
-    return { allowed: false, reason: 'low_confidence', overall: confidence.overall };
+    return { allowed: false, reason: 'low_confidence', overall: confidence.overall, failedOpenFlags: failedOpenFlags.length ? failedOpenFlags : undefined };
   }
 
   const scheduling = extraction.scheduling || {};
@@ -577,7 +594,7 @@ function canAutoRoute(extraction, opts = {}) {
   }
 
   if (extraction.consent?.do_not_contact_request === true) {
-    return { allowed: false, reason: 'do_not_contact' };
+    return { allowed: false, reason: 'do_not_contact', failedOpenFlags: failedOpenFlags.length ? failedOpenFlags : undefined };
   }
 
   return { allowed: true, flags: finalFlags, failedOpenFlags: failedOpenFlags.length ? failedOpenFlags : undefined };

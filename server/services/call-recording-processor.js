@@ -5472,6 +5472,22 @@ const CallRecordingProcessor = {
               const triageItem = buildTriageItem({ callLogId: call.id, flag, extraction: v2Extraction });
               await db('triage_items').insert(triageItem).onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
             }
+            // Demoted flags survive a block by ANOTHER gate (codex round-4
+            // P2): an agent-committed call held on e.g. address_unverified
+            // must still surface the "confirm the account holder" advisory —
+            // the demotion removed caller_not_authorized from the blocking
+            // set, so without this loop it would appear on no card at all.
+            // Mirrors the allowed branch's fail-open advisory loop; onConflict
+            // dedups against any same-reason row.
+            for (const f of (routingResult.failedOpenFlags || []).slice(0, 10)) {
+              try {
+                await db('triage_items')
+                  .insert(buildTriageItem({ callLogId: call.id, flag: f, extraction: v2Extraction, severity: 'advisory' }))
+                  .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
+              } catch (fe) {
+                logger.warn(`[call-proc-v2] blocked-branch fail-open advisory insert failed for ${maskSid(callSid)} (${f}): ${fe.message}`);
+              }
+            }
             v2RoutingBlocked = true;
             v2CanonicalWriteBlocked = hasCanonicalWriteBlock(finalFlags);
             logger.info(`[call-proc-v2] Routing blocked for ${callSid}: ${triageReasons.join(', ')}${v2CanonicalWriteBlocked ? ' (canonical-write veto)' : ''}`);
