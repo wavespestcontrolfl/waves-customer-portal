@@ -126,6 +126,12 @@ function collectTermiteFacts(estData) {
     const key = String(node.service || node.key || '').toLowerCase();
     const name = String(node.name || '').toLowerCase();
 
+    // Commercial termite lines use their own key — they mark the PROGRAM
+    // present (so the commercial park runs instead of a silent
+    // no_termite_program return) but contribute no residential figures.
+    if (key === 'commercial_termite_bait' || key.startsWith('commercial_termite')) {
+      facts.hasProgram = true;
+    }
     if (key === 'termite_bait' || (!key && /termite bait/.test(name))) {
       facts.hasProgram = true;
       // Raw engine lines carry the FINAL discounted annual in
@@ -374,7 +380,9 @@ function isCommercialEstimate(estimate = {}, estData = null) {
   const data = estData || parseEstimateData(estimate.estimate_data) || {};
   if (data?.inputs?.isCommercial === true || data?.engineInputs?.isCommercial === true) return true;
   const propertyType = String(data?.inputs?.propertyType || data?.propertyType || '').toLowerCase();
-  if (/commercial|multi[- ]?family|multifamily/.test(propertyType)) return true;
+  // Persisted estimator values include the concrete multi-unit types, not
+  // just the 'Multifamily' label — every multi-unit structure parks.
+  if (/commercial|multi[- ]?family|multifamily|duplex|triplex|quadplex|condo|town\s?home|townhouse|apartment/.test(propertyType)) return true;
   if (String(estimate.waveguard_tier || '').toLowerCase() === 'commercial') return true;
   try {
     const txt = typeof estimate.estimate_data === 'string' ? estimate.estimate_data : JSON.stringify(data);
@@ -647,7 +655,12 @@ async function reconcileTermiteProgramAgreements({ sinceDays = 21, limit = 25 } 
           .from('customer_contracts as cc')
           .whereRaw('cc.customer_id = estimates.customer_id')
           .whereIn('cc.document_template_key', PROGRAM_TEMPLATE_KEYS)
-          .whereRaw("cc.document_variables_snapshot->'estimate'->>'id' = estimates.id::text");
+          .whereRaw("cc.document_variables_snapshot->'estimate'->>'id' = estimates.id::text")
+          // Terminal-but-unsigned rows (cancelled/voided/declined/expired —
+          // e.g. v1 drafts cancelled by the v2 compliance migration) must
+          // not satisfy the exists-check: the estimate still needs a live
+          // agreement. A SIGNED row always blocks.
+          .whereNotIn('cc.status', ['cancelled', 'voided', 'declined', 'expired']);
       })
       .orderBy('accepted_at', 'desc')
       .limit(PAGE_SIZE)

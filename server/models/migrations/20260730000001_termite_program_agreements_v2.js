@@ -351,13 +351,23 @@ exports.up = async function up(knex) {
   for (const seed of TEMPLATE_V2) {
     const template = await knex('document_templates').where({ template_key: seed.template_key }).first();
     if (!template) continue;
-    let v2 = await knex('document_template_versions')
-      .where({ template_id: template.id, version_number: 2 })
-      .first();
-    if (!v2) {
-      [v2] = await knex('document_template_versions').insert({
+
+    // Identify OUR version by content, never by version number alone: an
+    // admin edit made before this migration runs would occupy version 2
+    // (the editor allocates sequentially), and treating that row as ours
+    // would silently strand the approved compliance wording. If our body
+    // isn't present, insert it at the next unused version number.
+    const versions = await knex('document_template_versions')
+      .where({ template_id: template.id })
+      .orderBy('version_number', 'asc');
+    let seededVersion = versions.find((v) => v.body === seed.body) || null;
+    if (!seededVersion) {
+      const nextNumber = versions.length
+        ? Math.max(...versions.map((v) => Number(v.version_number) || 0)) + 1
+        : 1;
+      [seededVersion] = await knex('document_template_versions').insert({
         template_id: template.id,
-        version_number: 2,
+        version_number: nextNumber,
         title: seed.title,
         body: seed.body,
         signer_disclosure: 'I agree to receive and sign this document electronically.',
@@ -366,13 +376,43 @@ exports.up = async function up(knex) {
         published_at: knex.fn.now(),
       }).returning('*');
     }
-    if (v2?.id && template.active_version_id !== v2.id) {
+    if (seededVersion?.id && template.active_version_id !== seededVersion.id) {
       await knex('document_templates').where({ id: template.id }).update({
-        active_version_id: v2.id,
+        active_version_id: seededVersion.id,
         variables: JSON.stringify(seed.variables),
         updated_at: knex.fn.now(),
       });
     }
+  }
+
+  // Open (unsigned) requests still carry the superseded v1 wording in their
+  // contract_text_snapshot — a customer could still open and SIGN the old
+  // terms after this compliance migration. Cancel them; the daily
+  // reconciliation sweep re-preps replacements from the active (v2) body,
+  // and signed rows are historical records that stay untouched.
+  const hasContracts = await knex.schema.hasTable('customer_contracts');
+  if (!hasContracts) return;
+  const templateKeys = TEMPLATE_V2.map((t) => t.template_key);
+  const openRows = await knex('customer_contracts')
+    .whereIn('document_template_key', templateKeys)
+    .whereIn('status', ['draft', 'sent', 'viewed'])
+    .select('id', 'customer_id');
+  const now = new Date();
+  for (const row of openRows) {
+    await knex('customer_contracts').where({ id: row.id }).update({
+      status: 'cancelled',
+      cancelled_at: now,
+      cancelled_reason: 'Superseded by updated compliance wording (v2 templates)',
+      updated_at: now,
+    });
+    await knex('customer_contract_events').insert({
+      contract_id: row.id,
+      customer_id: row.customer_id,
+      event_type: 'cancelled',
+      actor_type: 'system',
+      actor_id: null,
+      metadata: JSON.stringify({ reason: 'superseded_by_v2_migration' }),
+    });
   }
 };
 
@@ -386,6 +426,9 @@ exports.down = async function down(knex) {
     const v1 = await knex('document_template_versions')
       .where({ template_id: template.id, version_number: 1 })
       .first();
+    // Cancelled v1 requests stay cancelled on rollback — recreating them
+    // would resurrect superseded wording; the reconciliation sweep preps
+    // fresh ones from whatever version is active.
     if (v1?.id) {
       await knex('document_templates').where({ id: template.id }).update({
         active_version_id: v1.id,

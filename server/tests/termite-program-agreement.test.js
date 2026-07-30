@@ -348,6 +348,21 @@ describe('isCommercialEstimate', () => {
     expect(isCommercialEstimate({}, { recurring: { services: [{ service: 'commercial_pest' }] } })).toBe(true);
     expect(isCommercialEstimate({}, ownedEstData())).toBe(false);
   });
+
+  test('persisted multi-unit property types park (Duplex/condo/townhome)', () => {
+    for (const pt of ['Duplex', 'Condo', 'Townhome', 'Townhouse', 'Triplex', 'Apartment Building']) {
+      expect(isCommercialEstimate({}, { inputs: { propertyType: pt } })).toBe(true);
+    }
+    expect(isCommercialEstimate({}, { inputs: { propertyType: 'Single Family' } })).toBe(false);
+  });
+
+  test('commercial termite key marks the program present so the park runs (not no_termite_program)', () => {
+    const facts = collectTermiteFacts({
+      result: { lineItems: [{ service: 'commercial_termite_bait', monthly: 120 }] },
+    });
+    expect(facts.hasProgram).toBe(true);
+    expect(isCommercialEstimate({}, { result: { lineItems: [{ service: 'commercial_termite_bait' }] } })).toBe(true);
+  });
 });
 
 describe('v2 templates (active version — owner-approved 2026-07-29)', () => {
