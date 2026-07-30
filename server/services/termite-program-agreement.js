@@ -455,15 +455,16 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
     const NotificationService = require('./notification-service');
 
     if (isCommercialEstimate(estimate, estData)) {
+      let belled = null;
       if (notifyOnUnresolved) {
-        await ringAdminBell(NotificationService, [
+        belled = await ringAdminBell(NotificationService, [
           'estimate',
           'Termite agreement needs manual prep (commercial)',
           `${estimate.customer_name || 'Customer'} accepted a commercial termite estimate — commercial and multi-unit structures need a tailored agreement (different statutory retreat windows, tenant considerations), so prepare it manually from the document library.`,
           { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId } },
         ], `manual-prep (commercial) for estimate ${estimate.id}`);
       }
-      return { ok: false, skipped: 'commercial' };
+      return { ok: false, skipped: 'commercial', belled };
     }
 
     const prepay = await isAnnualPrepayAccept(estimate, billingTerm);
@@ -472,15 +473,16 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       // Fail closed: the seeded wording states per-application billing,
       // which would contradict the annual-prepay invoice. Park it for
       // manual preparation with accurate terms.
+      let prepayBelled = null;
       if (notifyOnUnresolved) {
-        await ringAdminBell(NotificationService, [
+        prepayBelled = await ringAdminBell(NotificationService, [
           'estimate',
           'Termite agreement needs manual prep (annual prepay)',
           `${estimate.customer_name || 'Customer'} accepted a termite estimate on annual prepay — the standard program agreement states per-application billing, so prepare the agreement manually with the prepay terms.`,
           { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId } },
         ], `manual-prep (annual prepay) for estimate ${estimate.id}`);
       }
-      return { ok: false, skipped: 'annual_prepay' };
+      return { ok: false, skipped: 'annual_prepay', belled: prepayBelled };
     }
 
     // The admin scheduling flow books the visit BEFORE the rows are linked
@@ -496,15 +498,16 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       // exception with the owner instead of drafting a wrong document.
       // (The reconciliation sweep passes notifyOnUnresolved=false so the
       // original accept-time bell isn't re-rung daily.)
+      let figuresBelled = null;
       if (notifyOnUnresolved) {
-        await ringAdminBell(NotificationService, [
+        figuresBelled = await ringAdminBell(NotificationService, [
           'estimate',
           'Termite agreement needs manual prep',
           `${estimate.customer_name || 'Customer'} accepted a termite estimate, but the program agreement couldn't be prefilled from the estimate figures. Prepare and send it from the document library.`,
           { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId } },
         ], `manual-prep (figures unresolved) for estimate ${estimate.id}`);
       }
-      return { ok: false, skipped: 'figures_unresolved' };
+      return { ok: false, skipped: 'figures_unresolved', belled: figuresBelled };
     }
 
     const activeVersionIds = await activeProgramVersionIds();
@@ -561,6 +564,26 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       const openRows = await openProgramAgreements(customerId, trx, { forUpdate: true });
       const nowTs = new Date();
       if (openRows.some((r) => classifyExistingAgreement(r, estimate, nowTs, { activeVersionIds }) === 'blocks')) return null;
+      // Signed re-check INSIDE the lock: a customer signing a (stale) request
+      // for THIS estimate between an unlocked pre-check and this transaction
+      // commits 'signed' — the row drops out of the open set above, and
+      // without this check a second agreement would be created (and
+      // autosent) on top of the executed one. Same-estimate only: a fresh
+      // accept at the same property after an older signed agreement
+      // legitimately gets a new document at the new figures.
+      if (estimate.id) {
+        const signedRows = await trx('customer_contracts')
+          .where({ customer_id: customerId, contract_type: 'document_template' })
+          .whereIn('document_template_key', PROGRAM_TEMPLATE_KEYS)
+          .where('status', 'signed')
+          .select('document_variables_snapshot');
+        const signedThisEstimate = signedRows.some((sr) => {
+          let ss = sr.document_variables_snapshot;
+          if (typeof ss === 'string') { try { ss = JSON.parse(ss); } catch { ss = null; } }
+          return ss?.estimate?.id && String(ss.estimate.id) === String(estimate.id);
+        });
+        if (signedThisEstimate) return 'signed_exists';
+      }
       // A revised estimate accepted for the same property supersedes the
       // older open draft — cancel it so exactly one live agreement exists
       // and it carries the ACCEPTED figures. The cancel stays conditional
@@ -617,6 +640,9 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       });
       return row;
     });
+    if (contract === 'signed_exists') {
+      return { ok: true, skipped: 'signed_exists' };
+    }
     if (!contract) {
       const winner = await existingBlockingProgramAgreement(customerId, estimate);
       return { ok: true, skipped: 'already_exists', contractId: winner?.id || null };
@@ -818,16 +844,48 @@ async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
       customerId: row.customer_id,
       notifyOnUnresolved: true,
     });
+    const parked = ['commercial', 'annual_prepay', 'figures_unresolved'].includes(result.skipped);
+    if (parked || (result.ok && result.contractId && !result.skipped)) {
+      // A parked or replaced STALE-OPEN source must not stay signable on the
+      // superseded wording: maybeCreate's parked branches return before its
+      // supersede transaction, so cancel the source here (conditional on
+      // still being open; migration rows are already cancelled).
+      const cancelled = await db('customer_contracts')
+        .where({ id: row.id })
+        .whereIn('status', OPEN_STATUSES)
+        .update({
+          status: 'cancelled',
+          cancelled_at: new Date(),
+          cancelled_reason: 'Superseded by updated compliance wording (v2 templates)',
+          updated_at: new Date(),
+        });
+      if (cancelled) {
+        await db('customer_contract_events').insert({
+          contract_id: row.id,
+          customer_id: row.customer_id,
+          event_type: 'cancelled',
+          actor_type: 'system',
+          actor_id: null,
+          metadata: JSON.stringify({ reason: 'superseded_stale_version' }),
+        });
+      }
+    }
     if (result.ok && result.contractId && !result.skipped) {
       await markSupersededHandled(row, 'replaced');
       results.created += 1;
     } else if (result.ok) {
       await markSupersededHandled(row, result.skipped || 'skipped');
       results.skipped += 1;
-    } else if (['commercial', 'annual_prepay', 'figures_unresolved'].includes(result.skipped)) {
-      // Parked WITH a bell — terminal for this pass; the operator owns it now.
-      await markSupersededHandled(row, result.skipped);
-      results.skipped += 1;
+    } else if (parked) {
+      // Parked — but the bell IS the handoff: only terminal when it landed.
+      // A failed bell leaves the source unmarked (cancelled above, so the
+      // retry is bell-only) and counts as failed for tomorrow's run.
+      if (result.belled === false) {
+        results.failed += 1;
+      } else {
+        await markSupersededHandled(row, result.skipped);
+        results.skipped += 1;
+      }
     } else {
       results.failed += 1; // transient — stays unmarked for tomorrow's retry
     }
@@ -877,10 +935,10 @@ async function reconcileTermiteProgramAgreements({ sinceDays = 21, limit = 25 } 
           // admin-cancelled request reflects an intentional decision, and
           // re-creating (and with autosend, re-emailing) it would override
           // that intent.
-          .whereNot(function complianceSuperseded() {
-            this.where('cc.status', 'cancelled')
-              .andWhere('cc.cancelled_reason', 'like', 'Superseded by updated compliance wording%');
-          });
+          // COALESCE keeps NULL cancelled_reason rows as BLOCKERS — SQL
+          // three-valued logic would otherwise drop them from the anti-join
+          // and re-draft (and autosend) over a legacy cancellation.
+          .whereRaw("NOT (cc.status = 'cancelled' AND COALESCE(cc.cancelled_reason, '') LIKE 'Superseded by updated compliance wording%')");
       })
       .orderBy('accepted_at', 'desc')
       .limit(PAGE_SIZE)

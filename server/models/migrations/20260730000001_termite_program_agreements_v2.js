@@ -452,6 +452,17 @@ exports.up = async function up(knex) {
           link: `/admin/customers/${row.customer_id}`,
           metadata: JSON.stringify({ contractId: row.id, customerId: row.customer_id, reason: 'superseded_by_v2_migration' }),
         });
+        // Durably mark the handoff so the daily superseded sweep doesn't
+        // ring the identical re-issue bell again tomorrow (same marker the
+        // sweep writes).
+        await knex('customer_contract_events').insert({
+          contract_id: row.id,
+          customer_id: row.customer_id,
+          event_type: 'superseded_reprocessed',
+          actor_type: 'system',
+          actor_id: null,
+          metadata: JSON.stringify({ outcome: 'manual_reissue_belled_by_migration' }),
+        });
       }
     }
   }
