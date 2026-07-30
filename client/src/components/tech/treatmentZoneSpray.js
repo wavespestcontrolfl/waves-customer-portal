@@ -291,13 +291,17 @@ export function isConfidentTurfPixel(r, g, b) {
 
 /**
  * The highlight-confidence verdict: a mask must light ≥1% of the traced
- * loop AND ≥35% of what it lights must be confidently green, or the caller
+ * loop AND ≥25% of what it lights must be confidently green, or the caller
  * falls back to the truthful outline — a paver/beige-dominated area can
- * never save as a grass highlight.
+ * never save as a grass highlight. The ratio is a secondary sanity check:
+ * region growing already guarantees every lit pixel is CONNECTED to
+ * confident green through a smooth color path. 25% calibrated on real
+ * Venice FL summer imagery, where a healthy lawn measured 30% (a 35% bar
+ * wrongly downgraded it to the outline, 2026-07-30).
  */
 export function lawnMaskPasses({ insideCount, litCount, confidentCount }) {
   if (!insideCount || !litCount || litCount / insideCount < 0.01) return false;
-  return confidentCount / litCount >= 0.35;
+  return confidentCount / litCount >= 0.25;
 }
 
 /**
