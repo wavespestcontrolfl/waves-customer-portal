@@ -70,7 +70,7 @@ describe('typed completion parks a follow_up_needed dispatch alert', () => {
 
   test('persist block sits inside the typed suggestion scope (no alerts for untyped or incomplete visits)', () => {
     const scopeStart = source.indexOf('let followupSuggestion = null;');
-    const scopeGuard = source.indexOf('if (typedFindingsType && typedFindings && !isIncompleteVisit) {', scopeStart);
+    const scopeGuard = source.indexOf('if (typedFindingsType && followupFindings && !isIncompleteVisit) {', scopeStart);
     const persistIdx = source.indexOf("if (followupSuggestion?.required) {");
     expect(scopeStart).toBeGreaterThan(-1);
     expect(scopeGuard).toBeGreaterThan(scopeStart);
@@ -82,25 +82,63 @@ describe('typed completion parks a follow_up_needed dispatch alert', () => {
     expect(persistBlockEnd).toBeGreaterThan(persistIdx);
     expect(nextRoute === -1 || nextRoute > persistBlockEnd).toBe(true);
   });
+
+  test('crash-resume rehydrates typed values from the committed snapshot (Codex r1 P2)', () => {
+    const scopeStart = source.indexOf('let followupSuggestion = null;');
+    const scopeGuard = source.indexOf('if (typedFindingsType && followupFindings && !isIncompleteVisit) {', scopeStart);
+    const rehydrate = source.slice(scopeStart, scopeGuard);
+    // Resume path bypasses runTypedValidation (typedFindings stays null) —
+    // the committed record's typedReportSnapshot supplies the values, gated
+    // on the resume flag and a type match with the resolved profile.
+    expect(rehydrate).toContain('let followupFindings = typedFindings;');
+    expect(rehydrate).toContain('resumingCommittedCompletion && typedFindingsType');
+    expect(rehydrate).toContain('typedReportSnapshot');
+    expect(rehydrate).toContain("String(resumedSnapshot.type || '') === String(typedFindingsType)");
+    // The override chain reads the rehydrated values, never bare
+    // typedFindings — otherwise a resumed German "No" could park an alert
+    // the original verdict withdrew.
+    const overrideChain = source.slice(scopeGuard, source.indexOf("if (followupSuggestion?.required) {"));
+    expect(overrideChain).not.toContain('typedFindings.values');
+    expect(overrideChain).toContain('followupFindings.values');
+  });
 });
 
 describe('schedule-followup resolves the parked alert', () => {
-  test('booking the follow-up resolves unresolved follow_up_needed alerts for the source job', () => {
+  test('resolver targets unresolved follow_up_needed alerts for the source job, best-effort', () => {
     const routeIdx = source.indexOf("router.post('/:serviceId/schedule-followup'");
     expect(routeIdx).toBeGreaterThan(-1);
     const routeTail = source.slice(routeIdx);
-    const resolveIdx = routeTail.indexOf('follow-up alert resolve failed');
-    expect(resolveIdx).toBeGreaterThan(-1);
-    const resolveBlock = routeTail.slice(0, resolveIdx);
-    expect(resolveBlock).toContain("{ type: 'follow_up_needed', job_id: svc.id }");
-    expect(resolveBlock).toContain(".whereNull('resolved_at')");
-    expect(resolveBlock).toContain('resolveAlert({ id: alert.id, resolvedBy: req.technicianId || null })');
-    // Resolution happens AFTER the booking insert — the alert only clears
-    // once the follow-up actually exists on the schedule.
+    const helperIdx = routeTail.indexOf('const resolveOpenFollowupAlerts = async () => {');
+    expect(helperIdx).toBeGreaterThan(-1);
+    const helper = routeTail.slice(helperIdx, routeTail.indexOf('};', helperIdx));
+    expect(helper).toContain("{ type: 'follow_up_needed', job_id: svc.id }");
+    expect(helper).toContain(".whereNull('resolved_at')");
+    expect(helper).toContain('resolveAlert({ id: alert.id, resolvedBy: req.technicianId || null })');
+    // Best-effort: resolution failure never fails the booking response.
+    expect(helper).toContain('logger.warn');
+    expect(helper).toContain('follow-up alert resolve failed');
+  });
+
+  test('EVERY booked-follow-up answer resolves: fresh insert, idempotent retry, 23505 race winner (Codex r1 P2)', () => {
+    const routeIdx = source.indexOf("router.post('/:serviceId/schedule-followup'");
+    const routeTail = source.slice(routeIdx);
+    const calls = routeTail.split('await resolveOpenFollowupAlerts();').length - 1;
+    expect(calls).toBe(3);
+    // Idempotent retry: the existing-booking early return resolves BEFORE
+    // answering alreadyScheduled — a crash between insert and resolve on the
+    // first attempt must not strand the alert open forever.
+    const existingIdx = routeTail.indexOf('if (existing) {');
+    const existingBlock = routeTail.slice(existingIdx, routeTail.indexOf('}', routeTail.indexOf('alreadyScheduled: true', existingIdx)));
+    expect(existingBlock).toContain('await resolveOpenFollowupAlerts();');
+    // Race loser: the 23505 winner answer resolves too.
+    const winnerIdx = routeTail.indexOf('if (winner) {');
+    const winnerBlock = routeTail.slice(winnerIdx, routeTail.indexOf('});', winnerIdx));
+    expect(winnerBlock).toContain('await resolveOpenFollowupAlerts();');
+    // Fresh booking: resolution AFTER the insert succeeds — the alert only
+    // clears once the follow-up actually exists on the schedule.
     const bookedIdx = routeTail.indexOf('follow-up ${appointment.id} booked');
     expect(bookedIdx).toBeGreaterThan(-1);
-    expect(bookedIdx).toBeLessThan(resolveIdx);
-    // Best-effort: resolution failure never fails the booking response.
-    expect(resolveBlock).toContain('logger.warn');
+    const afterBooked = routeTail.slice(bookedIdx, bookedIdx + 300);
+    expect(afterBooked).toContain('await resolveOpenFollowupAlerts();');
   });
 });

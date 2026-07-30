@@ -8009,7 +8009,20 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // default_followup_days). Cockroach only suggests for German — matched on
     // the canonical registry option value, never display-label text.
     let followupSuggestion = null;
-    if (typedFindingsType && typedFindings && !isIncompleteVisit) {
+    // Crash-resume bypasses runTypedValidation, so typedFindings stays null
+    // even though the committed record already carries the typed snapshot —
+    // without rehydration a resumed attempt would finish without parking the
+    // owed follow-up alert below (Codex r1 P2). The snapshot's values feed
+    // the same override chain (species / followup_required / followup_window
+    // / followup_needed), so the resumed verdict matches the original's.
+    let followupFindings = typedFindings;
+    if (!followupFindings && resumingCommittedCompletion && typedFindingsType) {
+      const resumedSnapshot = parseJsonObject(record?.service_data)?.typedReportSnapshot;
+      if (resumedSnapshot && String(resumedSnapshot.type || '') === String(typedFindingsType)) {
+        followupFindings = { type: typedFindingsType, values: resumedSnapshot.values || {} };
+      }
+    }
+    if (typedFindingsType && followupFindings && !isIncompleteVisit) {
       followupSuggestion = projectFollowupSuggestion({
         scheduledService: svc,
         project: {},
@@ -8022,7 +8035,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // behavior (20260712300000).
       if (followupSuggestion?.required && typedFindingsType === 'cockroach'
         && completionProfile?.serviceKey !== 'cockroach_control'
-        && String(typedFindings.values?.species || '') !== 'German') {
+        && String(followupFindings.values?.species || '') !== 'German') {
         followupSuggestion = { ...followupSuggestion, required: false, reason: 'species_not_german' };
       }
       // Two-treatment packages stop at visit 2: the included follow-up
@@ -8042,10 +8055,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // the CTA can never book a date the report copy contradicts (Codex
       // P2 rounds 3–4).
       if (followupSuggestion?.required && typedFindingsType === 'german_roach_knockdown') {
-        if (String(typedFindings.values?.followup_required || '') === 'No') {
+        if (String(followupFindings.values?.followup_required || '') === 'No') {
           followupSuggestion = { ...followupSuggestion, required: false, reason: 'tech_marked_not_required' };
         } else {
-          const windowDays = KNOCKDOWN_FOLLOWUP_WINDOW_DAYS[String(typedFindings.values?.followup_window || '')];
+          const windowDays = KNOCKDOWN_FOLLOWUP_WINDOW_DAYS[String(followupFindings.values?.followup_window || '')];
           if (windowDays && windowDays !== followupSuggestion.days) {
             followupSuggestion = projectFollowupSuggestion({
               scheduledService: svc,
@@ -8059,7 +8072,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // checklist says a follow-up IS needed the overlay must offer the
       // scheduling CTA — same 14-day default interval as German.
       if (typedFindingsType === 'palmetto_roach_knockdown'
-        && String(typedFindings.values?.followup_needed || '') === 'Yes'
+        && String(followupFindings.values?.followup_needed || '') === 'Yes'
         && !followupSuggestion?.required) {
         followupSuggestion = {
           ...projectFollowupSuggestion({
@@ -8603,12 +8616,35 @@ router.post('/:serviceId/schedule-followup', async (req, res, next) => {
       return res.status(503).json({ error: 'Follow-up booking is not available yet (pending migration).', code: 'followup_columns_missing' });
     }
 
+    // A booked follow-up clears the parked exception — resolve the
+    // completion-minted follow_up_needed alert(s) so they don't linger as
+    // stale bells for a visit that is now on the schedule. Called on EVERY
+    // path that answers "the follow-up exists" (fresh insert, idempotent
+    // retry, 23505 race winner): a crash or failed resolve after the insert
+    // must not strand the alert open forever (Codex r1 P2). Best-effort —
+    // the booking is the durable outcome and never fails on this.
+    const resolveOpenFollowupAlerts = async () => {
+      try {
+        const { resolveAlert } = require('../services/dispatch-alerts');
+        const openFollowupAlerts = await db('dispatch_alerts')
+          .where({ type: 'follow_up_needed', job_id: svc.id })
+          .whereNull('resolved_at')
+          .select('id');
+        for (const alert of openFollowupAlerts) {
+          await resolveAlert({ id: alert.id, resolvedBy: req.technicianId || null });
+        }
+      } catch (e) {
+        logger.warn(`[dispatch] follow-up alert resolve failed for ${svc.id}: ${e.message}`);
+      }
+    };
+
     const existing = await db('scheduled_services')
       .where({ followup_source_service_id: svc.id })
       .whereNotIn('status', ['cancelled', 'skipped'])
       .orderBy('created_at', 'desc')
       .first();
     if (existing) {
+      await resolveOpenFollowupAlerts();
       return res.json({ success: true, alreadyScheduled: true, appointment: { id: existing.id, scheduledDate: serviceDateOnly(existing.scheduled_date), status: existing.status } });
     }
 
@@ -8649,6 +8685,7 @@ router.post('/:serviceId/schedule-followup', async (req, res, next) => {
           .orderBy('created_at', 'desc')
           .first();
         if (winner) {
+          await resolveOpenFollowupAlerts();
           return res.json({
             success: true,
             alreadyScheduled: true,
@@ -8659,22 +8696,7 @@ router.post('/:serviceId/schedule-followup', async (req, res, next) => {
       throw err;
     }
     logger.info(`[dispatch] follow-up ${appointment.id} booked from ${svc.id} (${profile.findingsType}) for ${date}`);
-    // Booking the owed follow-up clears the parked exception — resolve the
-    // completion-minted follow_up_needed alert so it doesn't linger as a
-    // stale bell for a visit that is now on the schedule. Best-effort: the
-    // booking above is the durable outcome and must not fail on this.
-    try {
-      const { resolveAlert } = require('../services/dispatch-alerts');
-      const openFollowupAlerts = await db('dispatch_alerts')
-        .where({ type: 'follow_up_needed', job_id: svc.id })
-        .whereNull('resolved_at')
-        .select('id');
-      for (const alert of openFollowupAlerts) {
-        await resolveAlert({ id: alert.id, resolvedBy: req.technicianId || null });
-      }
-    } catch (e) {
-      logger.warn(`[dispatch] follow-up alert resolve failed for ${svc.id}: ${e.message}`);
-    }
+    await resolveOpenFollowupAlerts();
     // Without this the visit never enters appointment_reminders, so the
     // 72h/24h reminder cron can't see it (the cron reads only that table).
     // sendConfirmation:false — no immediate SMS; the customer was told about
