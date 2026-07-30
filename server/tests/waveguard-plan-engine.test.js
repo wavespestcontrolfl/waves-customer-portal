@@ -227,8 +227,8 @@ describe('waveguard-plan-engine helpers', () => {
         { id: '1', name: 'Demand CS', cost_per_unit: 5 },
         { id: '2', name: 'Unrelated Product' },
       ];
-      const meta = protocols.pest.visits[0].lineMeta['Exterior perimeter band'];
-      const line = { raw: 'Exterior perimeter band', catalogProductHints: meta.catalogProductHints };
+      const meta = protocols.pest.visits[0].lineMeta['Treated exterior perimeter band'];
+      const line = { raw: 'Treated exterior perimeter band', catalogProductHints: meta.catalogProductHints };
       expect(matchCatalogProduct(line, catalog).name).toBe('Demand CS');
       expect(meta).toMatchObject({ scope: 'exterior', treatmentApplied: true });
     });
@@ -250,7 +250,7 @@ describe('waveguard-plan-engine helpers', () => {
 
     test('a de-branded line with no hints does not falsely match a catalog product', () => {
       const catalog = [{ id: '1', name: 'Demand CS', cost_per_unit: 5 }];
-      const line = { raw: 'Sweep eaves, windows, doors, and lanai frames' };
+      const line = { raw: 'Swept eaves, window frames, door frames, and lanai' };
       expect(matchCatalogProduct(line, catalog)).toBeNull();
     });
 
