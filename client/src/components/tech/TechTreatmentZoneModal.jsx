@@ -171,6 +171,12 @@ export default function TechTreatmentZoneModal({
   // Same-origin asset — no canvas taint; engine falls back to the circle
   // head until it loads.
   const logoRef = useRef(null);
+  // True once the CURRENT trace has saved successfully — Replay is
+  // presentation-only and must not re-POST/replace the S3 snapshot/bust the
+  // PDF cache (codex P2 #3075). Reset when the tech returns to the trace
+  // step (the trace may change); a FAILED save leaves it false so Replay
+  // doubles as a retry.
+  const savedOnceRef = useRef(false);
   useEffect(() => {
     const im = new Image();
     im.onload = () => { logoRef.current = im; };
@@ -480,6 +486,7 @@ export default function TechTreatmentZoneModal({
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      savedOnceRef.current = true;
       setSaveState('saved');
       setExisting(data.treatmentZone || null);
       // Let the host prefill from the trace (e.g. perimeter-spray Linear ft
@@ -491,11 +498,19 @@ export default function TechTreatmentZoneModal({
   }, [mapState, points, closed, totalFeet, address, serviceId, onSaved, lawnMode, interior]);
 
   useEffect(() => {
+    // Back to trace = the trace may change; the next Play must save fresh.
+    if (step === 'trace') savedOnceRef.current = false;
+  }, [step]);
+
+  useEffect(() => {
     if (step !== 'play' || mapState.status !== 'ready') return undefined;
     const canvas = canvasRef.current;
     if (!canvas) return undefined;
-    setSaveState(null);
-    setLawnRender(null);
+    const alreadySaved = savedOnceRef.current;
+    if (!alreadySaved) {
+      setSaveState(null);
+      setLawnRender(null);
+    }
     // Lawn animates too (owner 2026-07-30 "now lets do it for lawn"): the
     // outline draws itself with the mascot riding the tip, then breathes —
     // outlineMode keeps the no-smoke lawn ruling; the spray path is untouched.
@@ -533,7 +548,10 @@ export default function TechTreatmentZoneModal({
     // animation to finish let an impatient Done/backdrop tap unmount the
     // modal before onSettled fired, silently losing the trace. save() builds
     // its own fully-settled band offscreen (home-aligned when applicable).
-    save();
+    // Replay after a SUCCESSFUL save restarts only the animation — no
+    // re-POST/S3 replace/PDF cache bust (codex P2 #3075); a failed save
+    // retries on Replay.
+    if (!alreadySaved) save();
     return () => engine.stop();
     // deps intentionally omit `save`: points/closed/map are frozen while playing
   }, [step, runKey, mapState.status]);
