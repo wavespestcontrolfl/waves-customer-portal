@@ -768,19 +768,25 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
         // serving data the source row no longer contains — but a SHARED
         // contact (sibling leads) belongs to the surviving rows.
         if (row.google_contact_id && !(await contactInUseElsewhere(row.google_contact_id, table, row.id))) {
-          // Revalidate the EMPTY state at the last instant — a writer
-          // restoring contact info while this batch ran must keep the
-          // contact (operator labels/secondary data on a deleted contact
-          // are unrecoverable; the conditional stamp alone only queues a
+          // Revalidate the EMPTY state under a row lock held THROUGH the
+          // destructive call — a writer restoring contact info blocks on
+          // the lock instead of committing into a SELECT→delete window
+          // (operator labels/secondary data on a deleted contact are
+          // unrecoverable; the conditional stamp alone only queues a
           // hollow recreation).
-          const fresh = await db(table).where({ id: row.id })
-            .select('email', 'phone', 'first_name', 'last_name')
-            .first();
-          const stillEmpty = !fresh
-            || !(String(fresh.email || '').trim() || String(fresh.phone || '').trim()
-              || (kind === 'lead' && `${String(fresh.first_name || '').trim()}${String(fresh.last_name || '').trim()}`));
-          if (!stillEmpty) continue; // its own edit re-queues it with data intact
-          await deleteContact(people, row.google_contact_id);
+          let restoredInfo = false;
+          await db.transaction(async (trx) => {
+            const fresh = await trx(table).where({ id: row.id })
+              .select('email', 'phone', 'first_name', 'last_name')
+              .forUpdate()
+              .first();
+            const stillEmpty = !fresh
+              || !(String(fresh.email || '').trim() || String(fresh.phone || '').trim()
+                || (kind === 'lead' && `${String(fresh.first_name || '').trim()}${String(fresh.last_name || '').trim()}`));
+            if (!stillEmpty) { restoredInfo = true; return; }
+            await deleteContact(people, row.google_contact_id);
+          });
+          if (restoredInfo) continue; // its own edit re-queues it with data intact
           await sleep(gapMs);
         }
         await stampIfUnchanged(table, row, { google_contact_id: null });
@@ -1129,15 +1135,21 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
             .whereNotNull('deleted_at')
             .update({ updated_at: new Date() });
           if (!reclaimed) continue; // restored — the main lane's handler owns it now
-          if (retiringId) {
-            // Revalidate at the last instant — a restore between the claim
-            // and this destructive call must keep its contact.
-            const stillDeleted = await db(table).where({ id: row.id }).whereNotNull('deleted_at').first();
-            if (!stillDeleted) continue;
-            await deleteContact(people, retiringId);
-            await sleep(gapMs);
-          }
-          await db(table).where({ id: row.id }).update({ google_contact_id: null, google_contact_synced_at: null });
+          // Row lock held through the destructive call — a restore blocks
+          // on it instead of committing between the tombstone re-check and
+          // the delete (same pattern as the unshared-retirement path).
+          let restoredMidRetire = false;
+          await db.transaction(async (trx) => {
+            const stillDeleted = await trx(table).where({ id: row.id })
+              .whereNotNull('deleted_at')
+              .forUpdate()
+              .first();
+            if (!stillDeleted) { restoredMidRetire = true; return; }
+            if (retiringId) await deleteContact(people, retiringId);
+            await trx(table).where({ id: row.id }).update({ google_contact_id: null, google_contact_synced_at: null });
+          });
+          if (restoredMidRetire) continue;
+          if (retiringId) await sleep(gapMs);
           counts.retired += 1;
           continue;
         }
@@ -1162,9 +1174,19 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
             const storedKey = searchKeyFromMarker(row.google_contact_id);
             const orphan = await findExistingContact(people, row, rowTag(table, row), { queryOverride: storedKey, requireConclusive: true });
             if (orphan) {
-              const stillDeleted = await db(table).where({ id: row.id }).whereNotNull('deleted_at').first();
-              if (!stillDeleted) continue;
-              await deleteContact(people, orphan);
+              // Same lock-through-the-delete pattern: a restore must not
+              // commit between the tombstone re-check and the orphan
+              // delete — the restored row may legitimately own it.
+              let restoredMidRecovery = false;
+              await db.transaction(async (trx) => {
+                const stillDeleted = await trx(table).where({ id: row.id })
+                  .whereNotNull('deleted_at')
+                  .forUpdate()
+                  .first();
+                if (!stillDeleted) { restoredMidRecovery = true; return; }
+                await deleteContact(people, orphan);
+              });
+              if (restoredMidRecovery) continue;
               await sleep(gapMs);
             }
           } catch (searchErr) {

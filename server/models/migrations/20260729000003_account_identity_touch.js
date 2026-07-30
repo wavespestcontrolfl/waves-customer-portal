@@ -41,15 +41,28 @@ exports.up = async function up(knex) {
       -- Timestamp-gated: a canonical correction NEWER than every customer
       -- copy is preserved — customers.updated_at moves for unrelated
       -- reasons, so a stale property copy must never overwrite a fresher
-      -- account row. (Residual: per-field edit history does not exist, so
-      -- a customer row touched later for non-identity reasons still wins;
-      -- that matches the pre-account-layer reality where edits only ever
-      -- landed on customers.)
+      -- account row.
       AND c.updated_at > ca.updated_at
       AND (ca.first_name IS DISTINCT FROM c.first_name
         OR ca.last_name IS DISTINCT FROM c.last_name
         OR ca.email IS DISTINCT FROM c.email
         OR ca.phone IS DISTINCT FROM c.phone)
+      -- Identity-specific evidence: only reconcile an account that still
+      -- holds an EXACT derived copy of some live linked customer — that
+      -- proves the row was never independently corrected (no app writer
+      -- updates account identity pre-trigger; a direct/manual correction
+      -- matches no property copy and is preserved). Accounts matching no
+      -- live copy are left untouched: correction vs drift is
+      -- indistinguishable without per-field history, and the trigger
+      -- below heals them on the next real identity edit.
+      AND EXISTS (
+        SELECT 1 FROM customers c2
+        WHERE c2.account_id = ca.id AND c2.deleted_at IS NULL
+          AND c2.first_name IS NOT DISTINCT FROM ca.first_name
+          AND c2.last_name  IS NOT DISTINCT FROM ca.last_name
+          AND c2.email      IS NOT DISTINCT FROM ca.email
+          AND c2.phone      IS NOT DISTINCT FROM ca.phone
+      )
   `);
   await knex.raw(`
     CREATE OR REPLACE FUNCTION propagate_customer_identity_to_account() RETURNS trigger AS $$
