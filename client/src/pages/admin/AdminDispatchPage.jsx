@@ -42,6 +42,7 @@ import {
   TrendingUp,
 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import { getAdminUser } from "../../lib/adminAuth";
 import AutoDispatchPage from "./AutoDispatchPage";
 import DispatchBoardPage from "./DispatchBoardPage";
@@ -107,6 +108,13 @@ export default function AdminDispatchPage() {
     ? searchParams.get(TAB_KEY)
     : TABS.BOARD;
   const [tab, setTab] = useState(initial);
+
+  // Report the tab that actually RENDERS: Dispatch is lazy-loaded and its
+  // default/role-gated tab is only written back to the URL by the sync
+  // effect below — on a cold load past the raw beacon's settle window the
+  // layout would otherwise record a tabless (or stale legacy-redirect)
+  // row (Codex #2961 r19).
+  useRenderedTabBeacon("/admin/dispatch", tab, [searchParams]);
 
   // DispatchPageV2 owns the "create appointment" state + modal; expose a
   // handle here so the lifted "+ Add Appointment" pill in this header can

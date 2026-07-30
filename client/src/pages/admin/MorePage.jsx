@@ -6,6 +6,7 @@ import {
 } from "lucide-react";
 import { refetchFlags, useFeatureFlag } from "../../hooks/useFeatureFlag";
 import useIsMobile from "../../hooks/useIsMobile";
+import { markUsageSource } from "../../lib/adminUsage";
 import { ADMIN_MOBILE_MORE_SECTIONS } from "../../config/adminNavigation";
 
 export default function MorePage() {
@@ -58,6 +59,12 @@ export default function MorePage() {
                 {" "}
                 <Link
                   to={path}
+                  onClick={(e) => {
+                    // Modified clicks open elsewhere and leave this tab in
+                    // place — no navigation here consumes the mark.
+                    if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+                    markUsageSource("more");
+                  }}
                   className="flex items-center gap-3 px-4 h-14 active:bg-zinc-50 text-zinc-900 no-underline"
                 >
                   {" "}

@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import {
   Activity,
@@ -21,6 +21,8 @@ import MobileSettingsPage from "../../components/admin/MobileSettingsPage";
 import useIsMobile from "../../hooks/useIsMobile";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import IntegrationHealthSection from "../../components/admin/IntegrationHealthSection";
+import PortalUsageTab from "../../components/admin/PortalUsageTab";
+import { trackAdminPageView } from "../../lib/adminUsage";
 import {
   DEFAULT_KPI_TARGETS,
   KPI_METRIC_LABELS,
@@ -145,6 +147,7 @@ const VALID_TABS = [
   "kpi-targets",
   "operating-costs",
   "system",
+  "usage",
 ];
 
 // Nav-only consolidation: the six leaf tabs collapse into four parent groups.
@@ -156,7 +159,7 @@ const SETTINGS_TAB_GROUPS = [
   { key: "service-reports", label: "Service Reports", Icon: MapPinned, tabs: ["service-reports"] },
   { key: "scheduling", label: "Scheduling", Icon: CalendarOff, tabs: ["blackout-days"] },
   { key: "financials", label: "Financials", Icon: Target, tabs: ["kpi-targets", "operating-costs"] },
-  { key: "advanced", label: "Advanced", Icon: ToggleLeft, tabs: ["gates", "system"] },
+  { key: "advanced", label: "Advanced", Icon: ToggleLeft, tabs: ["gates", "system", "usage"] },
 ];
 
 // Per-leaf nav metadata for the sub-tab pill row.
@@ -170,6 +173,7 @@ const SETTINGS_LEAF_META = {
   "operating-costs": { label: "Operating Costs", Icon: DollarSign },
   gates: { label: "Feature Gates", Icon: ToggleLeft },
   system: { label: "System", Icon: Server },
+  usage: { label: "Portal Usage", Icon: Activity },
 };
 
 export default function SettingsPage() {
@@ -184,13 +188,71 @@ export default function SettingsPage() {
     : "general";
   const [tab, setTab] = useState(initialTab);
 
+  // Desktop sub-tab switches are state-only (no URL change), so the
+  // AdminLayoutV2 route beacon can't see them — record the leaf visit
+  // explicitly or the usage report undercounts the Settings tabs it is
+  // meant to rank. Dedupe/settle in the lib absorb the ?tab= deep-link
+  // overlap (same key → dropped). Codex #2961 r2.
+  // Current leaf as a ref so the query-sync effect below can report the
+  // RENDERED leaf without depending on `tab` state.
+  const tabRef = useRef(initialTab);
+
+  const selectTab = (leafKey) => {
+    // Clicking the already-active leaf (or its parent group) changes
+    // nothing rendered — record nothing, matching the shell's no-op
+    // guards, or idle re-clicks inflate the leaf counts.
+    if (leafKey === tab) return;
+    setTab(leafKey);
+    tabRef.current = leafKey;
+    trackAdminPageView({
+      pathname: "/admin/settings",
+      search: `?tab=${leafKey}`,
+      authoritative: true,
+    });
+  };
+
   // Mobile section links change ?tab= on the already-mounted page (the mobile
   // index and the tab panel share this route/component) — sync the param into
   // state so those taps actually switch tabs instead of leaving the prior one.
+  // The same effect authoritatively records the leaf that actually RENDERS
+  // after each query change (VALID_TABS fallback applied): search-only
+  // navigations (back/forward, in-app links) never remount this page, so a
+  // mount-only beacon can't cover them, and without it the layout would
+  // record a raw invalid ?tab= the user never saw. Runs on mount too —
+  // covering the query-less desktop open (default leaf) — and before the
+  // layout's effect (child first), so the authoritative pending beacon
+  // blocks the raw one. The query-less MOBILE index renders no leaf and is
+  // skipped. Codex #2961 r4+r6.
+  // Re-run only for REAL query changes: isMobile is read here (mobile-index
+  // skip), but a breakpoint crossing must not resync state from a stale URL
+  // param — after a state-only selectTab, the URL can still say ?tab=team
+  // while Portal Usage is rendered, and a resize would eject the user and
+  // record the stale leaf (Codex #2961 r9).
+  const prevSearchRef = useRef(null);
   useEffect(() => {
+    const searchStr = searchParams.toString();
+    if (prevSearchRef.current === searchStr) return;
+    prevSearchRef.current = searchStr;
     const qp = searchParams.get("tab");
-    if (qp && VALID_TABS.includes(qp)) setTab(qp);
-  }, [searchParams]);
+    if (qp && VALID_TABS.includes(qp)) {
+      setTab(qp);
+      tabRef.current = qp;
+    } else {
+      // A REAL query-string change that removed (or mangled) ?tab= is a
+      // navigation to the Settings root — reset to the default leaf, or
+      // the previously rendered panel (e.g. Portal Usage) survives a
+      // sidebar click to /admin/settings and the beacon records the stale
+      // leaf (Codex #2961 r10).
+      setTab("general");
+      tabRef.current = "general";
+    }
+    if (isMobile && !qp) return;
+    trackAdminPageView({
+      pathname: "/admin/settings",
+      search: `?tab=${tabRef.current}`,
+      authoritative: true,
+    });
+  }, [searchParams, isMobile]);
 
   useEffect(() => {
     Promise.all([
@@ -231,7 +293,7 @@ export default function SettingsPage() {
         activeKey={activeGroup.key}
         onSectionChange={(key) => {
           const g = SETTINGS_TAB_GROUPS.find((x) => x.key === key);
-          if (g) setTab(g.tabs[0]);
+          if (g) selectTab(g.tabs[0]);
         }}
         navGridClassName="grid-cols-2 md:grid-cols-4 xl:grid-cols-4"
       />
@@ -252,7 +314,7 @@ export default function SettingsPage() {
               <button
                 key={leafKey}
                 type="button"
-                onClick={() => setTab(leafKey)}
+                onClick={() => selectTab(leafKey)}
                 style={{
                   display: "inline-flex",
                   alignItems: "center",
@@ -260,7 +322,7 @@ export default function SettingsPage() {
                   height: 36,
                   padding: "0 14px",
                   borderRadius: 6,
-                  fontSize: 12,
+                  fontSize: 14,
                   fontWeight: 700,
                   textTransform: "uppercase",
                   letterSpacing: "0.04em",
@@ -768,6 +830,7 @@ export default function SettingsPage() {
           </Card>{" "}
         </div>
       )}
+      {tab === "usage" && <PortalUsageTab canAdmin={user?.role === "admin"} />}
     </div>
   );
 }

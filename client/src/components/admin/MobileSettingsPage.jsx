@@ -53,6 +53,7 @@ const SECTIONS = [
   },
   { key: "account", label: "Account", to: "/admin/settings?tab=general" },
   { key: "system", label: "System", to: "/admin/settings?tab=system" },
+  { key: "usage", label: "Portal Usage", to: "/admin/settings?tab=usage" },
   {
     key: "feature-flags",
     label: "Early feature access",

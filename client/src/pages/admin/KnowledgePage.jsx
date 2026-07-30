@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { useSearchParams } from "react-router-dom";
+import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import {
   Activity,
   ArrowLeft,
@@ -793,6 +794,13 @@ export default function KnowledgePage({ embedded = false }) {
   const tab = availableTabs.some(({ key }) => key === requestedTab)
     ? requestedTab
     : "articles";
+
+  // Usage beacon for the leaf that actually RENDERS: this resolution is
+  // role-aware (health is admin-only) and falls back to Articles without
+  // rewriting the URL. The Knowledge HUB deliberately emits nothing — the
+  // mounted child owns the deepest leaf (Codex #2961 r17). Embedded-only:
+  // this component has no standalone route.
+  useRenderedTabBeacon("/admin/knowledge", embedded ? tab : null, [searchParams]);
   const setTab = (nextTab) => {
     const queryKey = embedded ? "wikiTab" : "tab";
     const next = new URLSearchParams(searchParams);

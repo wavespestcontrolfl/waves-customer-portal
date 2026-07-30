@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
+import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import {
   CheckCircle2,
   ClipboardList,
@@ -197,6 +198,14 @@ export default function InventoryPage() {
     ? searchParams.get("tab")
     : "products";
   const [tab, setTab] = useState(initialTab);
+
+  // Usage beacon for the tab that actually RENDERS. The URL only SEEDS
+  // this state (validated, Products default) and switches never write
+  // back, so query-less landings went unnamed and a ?tab=typo deep link
+  // recorded a leaf that never rendered (same class as the r17 sweep;
+  // found in the r19 route-key enumeration). searchParams dep per the
+  // unchanged-leaf contract: a same-route URL change re-asserts the leaf.
+  useRenderedTabBeacon("/admin/inventory", tab, [searchParams]);
   const [stats, setStats] = useState(null);
   const [toast, setToast] = useState("");
   const [productFilter, setProductFilter] = useState("all");
