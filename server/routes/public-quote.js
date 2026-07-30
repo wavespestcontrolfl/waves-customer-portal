@@ -258,7 +258,7 @@ function publicQuotePestLabel(pest = {}) {
   // normalization as the engine: raw values like 'no'/'FALSE'/garbage
   // normalize to 'none' and price no knockdown, so they must not label one.
   return normalizeRoachType(pest.roachType || 'none').roachType !== 'none'
-    ? `${base} + Roach Knockdown`
+    ? `${base} + Cockroach Treatment`
     : base;
 }
 

@@ -1590,6 +1590,11 @@ function SetupFeeCard({ fee, waiverBulletCovered = false }) {
       <div style={{ fontSize: 16, fontWeight: 700, color: ESTIMATE_TEXT, lineHeight: 1.35 }}>
         + {fmtMoney(fee.amount)} one-time {fee.label || 'first-visit setup'}
       </div>
+      {fee.treatments > 0 ? (
+        <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 2, lineHeight: 1.5 }}>
+          Includes {fee.treatments} treatment visit{fee.treatments === 1 ? '' : 's'}
+        </div>
+      ) : null}
       {fee.waivedWithPrepay ? (
         <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 2, lineHeight: 1.5 }}>
           {glassCopyActive() ? GLASS_COPY.setupWaivedNote : 'Waived when you pay the year in full up front.'}

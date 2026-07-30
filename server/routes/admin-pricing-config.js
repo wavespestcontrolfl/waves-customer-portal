@@ -333,6 +333,28 @@ function validatePricingConfigData(configKey, data, oldConfig) {
           return fail(`pest_base.initial_roach.${species}: the final bracket's sqft must be null or 'Infinity'`);
         }
       }
+      if (ir.display !== undefined) {
+        if (!ir.display || typeof ir.display !== 'object' || Array.isArray(ir.display)) {
+          return fail('pest_base.initial_roach.display must be an object keyed by species');
+        }
+        for (const species of ['regular', 'german', 'regular_standalone']) {
+          const d = ir.display[species];
+          if (d === undefined) continue;
+          if (!d || typeof d !== 'object' || Array.isArray(d)) {
+            return fail(`pest_base.initial_roach.display.${species} must be an object with name + treatments`);
+          }
+          if (typeof d.name !== 'string' || !d.name.trim()) {
+            return fail(`pest_base.initial_roach.display.${species}.name must be a non-empty string`);
+          }
+          if (d.name.trim().length > 60) {
+            return fail(`pest_base.initial_roach.display.${species}.name must be 60 characters or fewer`);
+          }
+          const treatments = strictPricingNumber(d.treatments);
+          if (!Number.isFinite(treatments) || treatments < 1 || !Number.isInteger(treatments)) {
+            return fail(`pest_base.initial_roach.display.${species}.treatments must be a whole number of visits (1 or more)`);
+          }
+        }
+      }
       // Nested drop protection: the payload must keep every species array
       // the stored row already carries — the shallow top-level drop check
       // below can't see inside initial_roach, and PUT replaces the whole

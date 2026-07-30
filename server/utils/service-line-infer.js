@@ -23,11 +23,12 @@ function inferServiceLine(interest) {
 }
 
 function inferSpecificService(interest) {
-  // ' + Roach Knockdown' is an ADD-ON marker publicQuotePestLabel appends to
-  // a recurring pest label — strip it so the PRIMARY service drives
+  // ' + Cockroach Treatment' is an ADD-ON marker publicQuotePestLabel appends
+  // to a recurring pest label (older stored interests carry the pre-rename
+  // ' + Roach Knockdown') — strip both so the PRIMARY service drives
   // classification. Left in place, 'roach' matches the cockroach case and a
   // recurring pest quote misbuckets as one_time_entry.
-  const t = (interest || '').toLowerCase().replace(/\s*\+\s*roach knockdown/g, '');
+  const t = (interest || '').toLowerCase().replace(/\s*\+\s*(roach knockdown|cockroach treatment)/g, '');
   if (t.includes('rodent exclusion') || t.includes('rat exclusion')) return 'rodent_exclusion';
   if (t.includes('bed bug')) return 'bed_bug';
   if (t.includes('termite trench')) return 'termite_trenching';

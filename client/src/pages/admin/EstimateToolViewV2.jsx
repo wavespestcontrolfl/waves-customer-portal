@@ -1465,7 +1465,7 @@ function firstVisitFeesForCustomerPreview(E, pestTier) {
   if (Number.isFinite(roachPrice) && roachPrice > 0) {
     rows.push({
       service: "pest_initial_roach",
-      name: roachItem.displayName || roachItem.label || roachItem.name || "Initial Roach Knockdown",
+      name: roachItem.displayName || roachItem.label || roachItem.name || "Cockroach Treatment",
       price: roachPrice,
       detail: roachItem.detail || roachItem.det || roachItem.note || "",
       waivedWithPrepay: false,
@@ -5582,7 +5582,7 @@ export default function EstimateToolViewV2({
                         ]}
                       />
                     </FieldV2>{" "}
-                    <FieldV2 label="Roach Activity on Initial Visit">
+                    <FieldV2 label="Roach Activity">
                       <SelectV2
                         k="roachModifier"
                         options={[
@@ -5600,7 +5600,7 @@ export default function EstimateToolViewV2({
                     </FieldV2>{" "}
                   </div>{" "}
                   <div className="text-11 text-ink-secondary mt-2">
-                    Adds a one-time Initial Roach Knockdown line to recurring pest. This is not a recurring per-visit multiplier.
+                    Adds a one-time Cockroach Treatment line to recurring pest. This is not a recurring per-visit multiplier.
                   </div>
                 </div>
               )}
@@ -8271,7 +8271,7 @@ export default function EstimateToolViewV2({
                           {(pm.skippedServices || []).map((item, i) => (
                             <div key={`skip-${i}`} className="text-ink-secondary">
                               {item.skippedReason === "recurring_pest_initial_roach_already_covers_regular_roach"
-                                ? "Skipped standalone native cockroach charge because recurring pest already includes Initial Native Roach Knockdown."
+                                ? "Skipped standalone native cockroach charge because recurring pest already includes the Cockroach Treatment."
                                 : item.skippedReason}
                             </div>
                           ))}

@@ -3352,7 +3352,7 @@ function EstimateToolView() {
                         ]}
                       />
                     </Field>{" "}
-                    <Field label="Roach Activity on Initial Visit">
+                    <Field label="Roach Activity">
                       <Select
                         k="roachModifier"
                         options={[
@@ -3370,7 +3370,7 @@ function EstimateToolView() {
                     </Field>{" "}
                   </div>{" "}
                   <div style={{ fontSize: 11, color: C.muted, marginTop: 8 }}>
-                    Adds a one-time Initial Roach Knockdown line to recurring pest. This is not a recurring per-visit multiplier.
+                    Adds a one-time Cockroach Treatment line to recurring pest. This is not a recurring per-visit multiplier.
                   </div>
                 </div>
               )}
@@ -5076,8 +5076,9 @@ function EstimateToolView() {
                                 {R.pestRoachMod === "GERMAN"
                                   ? "German"
                                   : "Native"}{" "}
-                                roach initial is added as a one-time knockdown,
-                                not a recurring per-visit premium.
+                                cockroach treatment is added as a one-time
+                                first-visit charge, not a recurring per-visit
+                                premium.
                               </div>
                             )}
                           </div>
@@ -5575,7 +5576,7 @@ function EstimateToolView() {
                           {(pm.skippedServices || []).map((item, i) => (
                             <div key={`skip-${i}`} style={{ color: C.muted }}>
                               {item.skippedReason === "recurring_pest_initial_roach_already_covers_regular_roach"
-                                ? "Skipped standalone native cockroach charge because recurring pest already includes Initial Native Roach Knockdown."
+                                ? "Skipped standalone native cockroach charge because recurring pest already includes the Cockroach Treatment."
                                 : item.skippedReason}
                             </div>
                           ))}

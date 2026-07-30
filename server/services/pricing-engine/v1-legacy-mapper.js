@@ -153,7 +153,7 @@ const SERVICE_LABEL = {
   flea_package: 'Flea Treatment Package',
   german_roach: 'German Roach',
   german_roach_initial: 'German Roach Initial (3-Visit)',
-  pest_initial_roach: 'Initial Roach Knockdown',
+  pest_initial_roach: 'Cockroach Treatment',
   stinging: 'Stinging Insect',
   exclusion: 'Exclusion',
   rodent_trapping: 'Rodent Trapping',
@@ -792,10 +792,10 @@ function mapV1ToLegacyShape(v1Result) {
   lineItems.forEach(li => {
     if (RECURRING_SERVICES.has(li.service) && !isUnpricedCommercialManual(li)) return;
     // Prefer the engine's own label when present (e.g. pest_initial_roach
-    // emits 'Initial Native Roach Knockdown' vs 'Initial German Roach
-    // Knockdown' — SERVICE_LABEL flattens both to a generic name and would
-    // drop the species distinction). Fall back to the SERVICE_LABEL map for
-    // legacy services that don't set a label themselves.
+    // emits the admin-configured display name, 'Cockroach Treatment' vs
+    // 'German Cockroach Treatment' — SERVICE_LABEL flattens both to a
+    // generic name and would drop the species distinction). Fall back to
+    // the SERVICE_LABEL map for legacy services that don't set a label.
     const name = li.display?.name || li.label || labelFor(li.service);
     const quoteRequired = !!li.quoteRequired || !!li.requiresCustomQuote;
     const price = quoteRequired ? null : effectiveOneTimePrice(li);

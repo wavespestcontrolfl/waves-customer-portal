@@ -11645,9 +11645,16 @@ function findInitialRoachItem(_pestTiers, estData) {
       return ROACH_NAME_RX.test(name);
     });
     if (hit && hit.price) {
+      const treatments = Number(hit.treatments);
       return {
         price: Number(hit.price) || 0,
-        label: hit.label || hit.name || 'Initial Roach Knockdown',
+        // Label comes from the saved line item, which carries the
+        // admin-configured display name (pest_base.initial_roach.display).
+        // The fallback covers legacy payloads saved before labels persisted.
+        label: hit.label || hit.name || 'Cockroach Treatment',
+        // Treatment-visit count for the fee card's sub-line. Absent on
+        // payloads saved before the engine emitted `treatments`.
+        treatments: Number.isFinite(treatments) && treatments > 0 ? Math.round(treatments) : null,
       };
     }
   }
@@ -17314,7 +17321,8 @@ async function buildPricingBundleInner(estimate) {
       firstVisitFees.push({
         service: 'pest_initial_roach',
         amount: initialRoachItem.price,
-        label: initialRoachItem.label || 'Initial Roach Knockdown',
+        label: initialRoachItem.label || 'Cockroach Treatment',
+        ...(initialRoachItem.treatments ? { treatments: initialRoachItem.treatments } : {}),
         waivedWithPrepay: false,
       });
     }

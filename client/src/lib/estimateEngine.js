@@ -1924,8 +1924,8 @@ export function calculateEstimate(inputs) {
   if (isRC) addMod('one-time', 'Recurring customer: -15% one-time services', null, 'down');
 
   // Roach modifier — first-visit knockdown fee; recurring per-visit stays clean.
-  if (svcPest && roachMod === 'GERMAN') addMod('one-time', 'Initial German roach knockdown: one-time fee', null, 'up');
-  else if (svcPest && roachMod === 'REGULAR') addMod('one-time', 'Initial native roach knockdown: one-time fee', null, 'up');
+  if (svcPest && roachMod === 'GERMAN') addMod('one-time', 'German cockroach treatment: one-time fee', null, 'up');
+  else if (svcPest && roachMod === 'REGULAR') addMod('one-time', 'Native cockroach treatment: one-time fee', null, 'up');
 
   /* ═══════════ RECURRING ═══════════ */
   let hasRec = false;
@@ -2882,14 +2882,17 @@ export function calculateEstimate(inputs) {
     otItems.push({ name: 'Trapping', price: fp, detail: 'Setup + check visits' });
   }
 
-  /* ── Initial Roach Knockdown (from pest roach modifier) ─── */
+  /* ── Cockroach Treatment (from pest roach modifier) ──────── */
   if (R.pest && (roachMod === 'GERMAN' || roachMod === 'REGULAR')) {
     hasOT = true;
     const fpEff = footprint > 0 ? footprint : 2500;
     const fp = initialRoachPrice(roachMod, fpEff, false);
     otItems.push({
       service: 'pest_initial_roach',
-      name: roachMod === 'GERMAN' ? 'Initial German Roach Knockdown' : 'Initial Native Roach Knockdown',
+      // Static mirror of the server default (pest_base.initial_roach.display).
+      // Saved estimates always use the server engine's config-driven label —
+      // this local preview does not read pricing_config.
+      name: roachMod === 'GERMAN' ? 'German Cockroach Treatment' : 'Cockroach Treatment',
       price: fp,
       detail: roachMod === 'GERMAN' ? 'First-visit gel bait + IGR' : 'First-visit knockdown',
       requestedRoachType: roachMod,
@@ -2960,7 +2963,7 @@ export function calculateEstimate(inputs) {
         const fpEff = footprint > 0 ? footprint : 2500;
         specItems.push({
           service: 'pest_initial_roach',
-          name: 'Standalone Native Cockroach Treatment',
+          name: 'Cockroach Treatment',
           price: initialRoachPrice(rt, fpEff, true),
           det: 'Standalone knockdown',
           source: 'standalone_native_cockroach_treatment',

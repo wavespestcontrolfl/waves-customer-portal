@@ -156,6 +156,13 @@ function validatePestPricingConfig(snapshot = constants) {
       allowTerminalInfinity: true,
       requireTerminalInfinity: true,
     });
+    const display = PEST.pestInitialRoach?.display?.[scale];
+    if (!display || typeof display.name !== 'string' || !display.name.trim()) {
+      errors.push(`PEST.pestInitialRoach.display.${scale}.name must be a non-empty string`);
+    }
+    if (!isPositiveNumber(display?.treatments)) {
+      errors.push(`PEST.pestInitialRoach.display.${scale}.treatments must be positive`);
+    }
   }
   const diag = PEST.productionDiagnostics || {};
   for (const key of ['baseStopMinutes', 'manualReviewLotSqFt', 'lowConfidenceLotSqFt', 'manualReviewMinutes', 'lowConfidenceMinutes']) {
@@ -895,6 +902,28 @@ async function syncConstantsFromDB(dbInstance) {
               price: money(b.price),
             }));
           }
+        }
+        // Customer-facing name + treatment-visit count per scale key. Merged
+        // field-by-field over the in-code defaults so a row written before
+        // this key existed (or carrying only one species) keeps sane values
+        // for the rest — an empty name or non-positive treatments never
+        // reaches the engine.
+        if (ir.display && typeof ir.display === 'object' && !Array.isArray(ir.display)) {
+          const display = { ...next.display };
+          for (const species of ['regular', 'german', 'regular_standalone']) {
+            const d = ir.display[species];
+            if (!d || typeof d !== 'object' || Array.isArray(d)) continue;
+            const name = typeof d.name === 'string' && d.name.trim() ? d.name.trim() : null;
+            const treatments = Number.isFinite(Number(d.treatments)) && Number(d.treatments) > 0
+              ? Math.round(Number(d.treatments))
+              : null;
+            display[species] = {
+              ...display[species],
+              ...(name ? { name } : {}),
+              ...(treatments ? { treatments } : {}),
+            };
+          }
+          next.display = display;
         }
         constants.PEST.pestInitialRoach = next;
       }

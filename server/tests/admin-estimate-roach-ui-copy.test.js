@@ -14,10 +14,10 @@ describe('admin estimate roach UI copy', () => {
   test.each(files)('%s separates recurring roach activity from standalone cleanouts', (relativePath) => {
     const source = readRepoFile(relativePath);
 
-    expect(source).toContain('Roach Activity on Initial Visit');
+    expect(source).toContain('label="Roach Activity"');
     expect(source).toContain('Native / Palmetto / American roaches');
     expect(source).toContain('German roaches');
-    expect(source).toContain('Adds a one-time Initial Roach Knockdown line to recurring pest.');
+    expect(source).toContain('Adds a one-time Cockroach Treatment line to recurring pest.');
     expect(source).toContain('This is not a recurring per-visit multiplier.');
 
     expect(source).toContain('Standalone Native Cockroach Treatment');
