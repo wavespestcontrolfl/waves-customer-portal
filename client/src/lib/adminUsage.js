@@ -49,10 +49,11 @@ const REDIRECT_SETTLE_MS = 800;
 // Pages that emit their own AUTHORITATIVE rendered-leaf beacon
 // (hooks/useRenderedTabBeacon, or SettingsPage's bespoke selectTab flow):
 // their ?tab= can diverge from what actually renders — validated
-// fallbacks (settings, lawn-assessments, agents), role-gated tabs
-// (compliance), or tab state the router never sees at all
-// (communications: state-only header clicks + raw location.hash deep
-// links). Their raw route beacon settles longer: the page chunk is
+// fallbacks and query-less default landings (settings, lawn-assessments,
+// agents, newsletter), role-gated tabs (compliance), or tab state the
+// router never sees at all (communications: state-only header clicks +
+// raw location.hash deep links). Their raw route beacon settles longer:
+// the page chunk is
 // lazy-loaded, and on a cold load the authoritative beacon can arrive
 // well after 800ms — flushing the raw one first would record a duplicate
 // untabbed row (or an invalid deep-link tab) that the page's beacon was
@@ -64,6 +65,7 @@ const SELF_REPORTING_PAGES = new Set([
   'communications',
   'agents',
   'compliance',
+  'newsletter',
 ]);
 const SELF_REPORT_SETTLE_MS = 5000;
 
