@@ -100,6 +100,9 @@ async function main() {
             performedBy: PERFORMED_BY,
             respondedAt: eventTime,
             originatingNotAfter: eventTime,
+            // Repair job: failures must surface in summary.errors and the
+            // nonzero exit, not silently zero the stamp count.
+            failSoft: false,
           });
           if (stamped) {
             summary.contactStamped = (summary.contactStamped || 0) + stamped;
@@ -144,7 +147,46 @@ async function main() {
     }
   }
 
-  logger.info(`[backfill-2214] done — scanned=${summary.scanned} advanced=${summary.advanced} linkedOnly=${summary.linkedOnly} noEligibleMatch=${summary.noEligibleMatch} errors=${summary.errors}${COMMIT ? '' : ' (DRY-RUN — no writes)'}`);
+  // Second pass — loose stamp only. Estimates WITH an FK-linked lead were
+  // excluded above (their linked lead advanced on the original send), but a
+  // SECOND same-contact open lead answered by that same send has no other
+  // repair path. Contact-wide stamp with the same historical timing and
+  // cutoff; never links, never advances status. COMMIT-only like the first
+  // pass's loose stamp.
+  const linkedCandidates = await db('estimates')
+    .whereIn('status', ['sent', 'viewed'])
+    .whereNull('archived_at')
+    .whereExists(function whereFkLinkedLead() {
+      this.select(db.raw('1')).from('leads').whereRaw('leads.estimate_id = estimates.id');
+    })
+    .orderBy('created_at', 'asc')
+    .limit(LIMIT)
+    .select('id', 'created_at', 'sent_at', 'customer_phone', 'customer_email');
+  logger.info(`[backfill-2214] second pass — ${linkedCandidates.length} FK-linked sent/viewed estimate(s) checked for extra same-contact open leads`);
+  for (const est of linkedCandidates) {
+    const eventTime = est.sent_at || est.created_at;
+    try {
+      if (COMMIT) {
+        const stamped = await stampFirstResponseByContact({
+          phone: est.customer_phone,
+          email: est.customer_email,
+          performedBy: PERFORMED_BY,
+          respondedAt: eventTime,
+          originatingNotAfter: eventTime,
+          failSoft: false,
+        });
+        if (stamped) {
+          summary.contactStamped = (summary.contactStamped || 0) + stamped;
+          logger.info(`[backfill-2214] est ${shortId(est.id)}: loose stamp on ${stamped} extra same-contact open lead(s)`);
+        }
+      }
+    } catch (err) {
+      summary.errors += 1;
+      logger.warn(`[backfill-2214] est ${shortId(est.id)} second-pass stamp failed: ${err.message}`);
+    }
+  }
+
+  logger.info(`[backfill-2214] done — scanned=${summary.scanned} advanced=${summary.advanced} linkedOnly=${summary.linkedOnly} noEligibleMatch=${summary.noEligibleMatch} contactStamped=${summary.contactStamped || 0} errors=${summary.errors}${COMMIT ? '' : ' (DRY-RUN — no writes)'}`);
   return summary;
 }
 

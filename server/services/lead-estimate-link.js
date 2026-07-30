@@ -317,7 +317,7 @@ async function linkRescuedLead(database, lead, estimate, performedBy) {
 // pileup found in the 2026-07-30 audit — 6 of them had sent estimates).
 // Stamps response_time_minutes only — never status, never estimate_id, never
 // the funnel bridge.
-async function stampFirstResponseByContact({ database = db, phone = null, email = null, performedBy = 'system', respondedAt = null, originatingNotAfter = null }) {
+async function stampFirstResponseByContact({ database = db, phone = null, email = null, performedBy = 'system', respondedAt = null, originatingNotAfter = null, failSoft = true }) {
   const normPhone = normalizePhone(phone);
   const normEmail = normalizeEmail(email);
   if (!normPhone && !normEmail) return 0;
@@ -366,8 +366,11 @@ async function stampFirstResponseByContact({ database = db, phone = null, email 
       stamped += (await recordFirstResponseIfNeeded(database, lead, performedBy, respondedAt)) ? 1 : 0;
     }
   } catch (e) {
-    // SLA bookkeeping must never break a send.
+    // SLA bookkeeping must never break a live send — but repair jobs (the
+    // backfill) pass failSoft:false so a swallowed failure can't report a
+    // clean run while eligible leads stay unstamped.
     logger.warn(`[lead-estimate-link] first-response contact stamp failed: ${e.message}`);
+    if (!failSoft) throw e;
   }
   return stamped;
 }
@@ -417,8 +420,10 @@ async function markLinkedLeadEstimateSent({ estimateId, sendMethod, performedBy 
       // Only contacts a channel actually REACHED count as answered: an
       // SMS-only send (or a partial 'both' where the email leg failed) must
       // not stamp an email-only matching lead. Callers with per-channel
-      // outcomes pass sentChannels; sendMethod is the fallback.
-      const channels = Array.isArray(sentChannels) && sentChannels.length
+      // outcomes pass sentChannels — an EMPTY array means nothing real
+      // delivered (e.g. a sentinel-suppressed sms leg) and stamps nothing;
+      // only a missing array falls back to sendMethod.
+      const channels = Array.isArray(sentChannels)
         ? sentChannels
         : (sendMethod === 'sms' ? ['sms'] : sendMethod === 'email' ? ['email'] : ['sms', 'email']);
       await stampFirstResponseByContact({
