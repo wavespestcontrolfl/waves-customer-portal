@@ -253,6 +253,11 @@ router.post('/:key/versions', async (req, res, next) => {
     const payload = validateVersionPayload(req.body || {});
     const publish = req.body?.publish !== false;
     const version = await db.transaction(async (trx) => {
+      // Serialize version-number allocation on the template row: the v2
+      // compliance migration locks it the same way before computing
+      // MAX(version_number)+1, so concurrent allocators can't pick the
+      // same number and abort on the unique constraint.
+      await trx('document_templates').where({ id: loaded.template.id }).forUpdate().first('id');
       const versionNumber = await nextVersionNumber(loaded.template.id, trx);
       const [row] = await trx('document_template_versions').insert({
         template_id: loaded.template.id,
@@ -393,6 +398,16 @@ router.post('/:key/contracts', async (req, res, next) => {
     const recipientPhone = cleanRecipientName(req.body?.recipientPhone) || customer.phone || null;
 
     const contract = await db.transaction(async (trx) => {
+      // Termite program agreements carry a service-wide invariant (one
+      // live request per property) enforced under a per-customer advisory
+      // lock by the accept-time service, the reconciliation sweeps, and
+      // the v2 migration rollback. This generic issuance path must
+      // serialize on the same key, or its insert can race a rollback's
+      // replacement re-check and leave two live signing flows.
+      const { PROGRAM_TEMPLATE_KEYS } = require('../services/termite-program-agreement');
+      if (PROGRAM_TEMPLATE_KEYS.includes(loaded.template.template_key)) {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`termite-agreement:${customer.id}`]);
+      }
       const [row] = await trx('customer_contracts').insert({
         customer_id: customer.id,
         created_by: req.technicianId || null,

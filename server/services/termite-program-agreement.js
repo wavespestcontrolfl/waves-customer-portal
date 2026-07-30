@@ -997,6 +997,15 @@ async function cancelStaleSource(row, conn = db) {
         .first('active_version_id');
       if (template?.active_version_id === row.document_template_version_id) return 'reactivated';
     }
+    // Row lock + fresh status read: the recorded prior_status must be the
+    // status the cancel actually replaced (the caller's selected row can be
+    // minutes stale) — the v2 migration's down() restores service-driven
+    // compliance cancels from this event exactly like its own.
+    const current = await trx('customer_contracts')
+      .where({ id: row.id })
+      .forUpdate()
+      .first('status');
+    if (!current || !OPEN_STATUSES.includes(String(current.status || '').toLowerCase())) return false;
     const cancelled = await trx('customer_contracts')
       .where({ id: row.id })
       .whereIn('status', OPEN_STATUSES)
@@ -1013,7 +1022,7 @@ async function cancelStaleSource(row, conn = db) {
       event_type: 'cancelled',
       actor_type: 'system',
       actor_id: null,
-      metadata: JSON.stringify({ reason: 'superseded_stale_version' }),
+      metadata: JSON.stringify({ reason: 'superseded_stale_version', prior_status: current.status }),
     });
     return true;
   });

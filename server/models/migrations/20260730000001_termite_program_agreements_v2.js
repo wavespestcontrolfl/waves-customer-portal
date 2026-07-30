@@ -364,7 +364,14 @@ exports.up = async function up(knex) {
   const MIGRATION_NAME = '20260730000001_termite_program_agreements_v2';
   const seededVersionIds = [];
   for (const seed of TEMPLATE_V2) {
-    const template = await knex('document_templates').where({ template_key: seed.template_key }).first();
+    // FOR UPDATE: version-number allocation reads MAX(version_number) and
+    // inserts — the admin version editor locks this same template row
+    // before allocating, so a concurrent admin save can't pick the same
+    // number and abort this migration on the unique constraint.
+    const template = await knex('document_templates')
+      .where({ template_key: seed.template_key })
+      .forUpdate()
+      .first();
     if (!template) continue;
 
     // Identify OUR version by content, never by version number alone: an
@@ -523,6 +530,47 @@ exports.down = async function down(knex) {
   if (!hasTemplates) return;
   const MIGRATION_NAME = '20260730000001_termite_program_agreements_v2';
   const hasState = await knex.schema.hasTable('migration_rollback_state');
+  const hasContracts = await knex.schema.hasTable('customer_contracts');
+  const hasEvents = await knex.schema.hasTable('customer_contract_events');
+
+  // Load the compliance cancellations FIRST and take the per-customer
+  // advisory locks BEFORE touching any template row. Two reasons:
+  // (1) atomicity — the replacement re-check below must not race a
+  //     concurrent program-agreement insert (the accept-time service, the
+  //     sweeps, and the generic admin issuance path all serialize on this
+  //     same `termite-agreement:<customerId>` key);
+  // (2) lock ORDER — every live writer takes the advisory lock before
+  //     template row locks, so this rollback must too, or a concurrent
+  //     prep could deadlock against the repoint below.
+  // BOTH cancellation flavors restore: up()'s own cancels AND the sweep's
+  // cancelStaleSource cancels (reason superseded_stale_version — a v1
+  // request that raced past the migration snapshot and was retired by
+  // reconciliation before this rollback ran). Locks release at migration
+  // commit; customer ids are sorted for a deterministic acquisition order.
+  let cancelEvents = [];
+  if (hasContracts && hasEvents) {
+    // Rollback leaves cancellation events in place, so an up/down/up cycle
+    // accumulates several per contract with potentially different
+    // prior_status values — only the LATEST reflects the state the most
+    // recent cancellation actually observed (an older 'draft' event
+    // winning over a later 'sent' would restore a row the public signing
+    // route 409s on). Newest-first plus first-seen-wins keeps one event
+    // per contract.
+    const cancelEventsAll = await knex('customer_contract_events')
+      .where({ event_type: 'cancelled', actor_type: 'system' })
+      .whereRaw("metadata->>'reason' in (?, ?)", ['superseded_by_v2_migration', 'superseded_stale_version'])
+      .orderBy('created_at', 'desc')
+      .select('contract_id', 'customer_id', 'metadata');
+    const latestByContract = new Map();
+    for (const evt of cancelEventsAll) {
+      if (!latestByContract.has(String(evt.contract_id))) latestByContract.set(String(evt.contract_id), evt);
+    }
+    cancelEvents = [...latestByContract.values()];
+    const customerIds = [...new Set(cancelEvents.map((e) => String(e.customer_id)))].sort();
+    for (const customerId of customerIds) {
+      await knex.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`termite-agreement:${customerId}`]);
+    }
+  }
   for (const seed of TEMPLATE_V2) {
     const template = await knex('document_templates').where({ template_key: seed.template_key }).first();
     if (!template) continue;
@@ -568,26 +616,7 @@ exports.down = async function down(knex) {
   // row to its recorded prior status (only if still carrying our
   // cancellation), clear the cancellation fields, and drop any reprocessed
   // markers so future logic re-evaluates them fresh.
-  const hasContracts = await knex.schema.hasTable('customer_contracts');
-  const hasEvents = await knex.schema.hasTable('customer_contract_events');
   if (hasContracts && hasEvents) {
-    // Rollback leaves cancellation events in place, so an up/down/up cycle
-    // accumulates several per contract with potentially different
-    // prior_status values — only the LATEST reflects the state this
-    // migration's most recent up() actually cancelled (an older 'draft'
-    // event winning over a later 'sent' would restore a row the public
-    // signing route 409s on). Newest-first plus first-seen-wins keeps one
-    // event per contract.
-    const cancelEventsAll = await knex('customer_contract_events')
-      .where({ event_type: 'cancelled', actor_type: 'system' })
-      .whereRaw("metadata->>'reason' = 'superseded_by_v2_migration'")
-      .orderBy('created_at', 'desc')
-      .select('contract_id', 'customer_id', 'metadata');
-    const latestByContract = new Map();
-    for (const evt of cancelEventsAll) {
-      if (!latestByContract.has(String(evt.contract_id))) latestByContract.set(String(evt.contract_id), evt);
-    }
-    const cancelEvents = [...latestByContract.values()];
     const templateKeysForRestore = TEMPLATE_V2.map((t) => t.template_key);
     // Active-version truth AFTER the repoint above — used to tell a genuine
     // live replacement (still-active version) from a v2 re-prep this
