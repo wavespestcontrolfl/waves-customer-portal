@@ -1101,13 +1101,17 @@ function gifBlock(url, caption, { capHeight = false } = {}) {
   if (!safeGifUrl) return '';
   // capHeight: EVENT visuals only (owner 2026-07-30 — GIFs and photos
   // share one 280px aspect-fit box). Intro and Pest Insider GIFs keep
-  // their natural sizing.
+  // their natural sizing. Capped visuals are mso-hidden like the still
+  // photos (#3033 contract): Outlook's Word engine ignores max-height
+  // and would render a tall GIF at natural size — Outlook readers keep
+  // the caption and full card content.
   const sizing = capHeight
     ? 'max-width:100%;max-height:280px;width:auto;height:auto;'
     : 'max-width:100%;height:auto;';
-  let html = `<div style="text-align:center;margin:12px 0 8px 0;">
+  const imgHtml = `<div style="text-align:center;margin:12px 0 8px 0;">
 <img src="${safeGifUrl}" alt="" style="${sizing}border-radius:10px;display:block;margin:0 auto;" />
 </div>`;
+  let html = capHeight ? `<!--[if !mso]><!-->${imgHtml}<!--<![endif]-->` : imgHtml;
   if (caption) {
     html += `\n<p style="text-align:center;margin:0 0 16px 0;font-size:14px;font-style:italic;color:${COLORS.muted};line-height:1.4;">${escapeHtml(caption)}</p>`;
   }
@@ -1308,10 +1312,15 @@ async function assembleBeehiivNewsletter(draft) {
   // is scannable — the curiosity headline rides second.
   // Owner 2026-07-30 (supersedes the real-names directive): the list is
   // a TEASE — witty curiosity titles only, never the official event
-  // names, so the fold-out doesn't give the issue away.
-  const tocItems = events.map(ev =>
-    `<li style="margin:0 0 6px 0;"><a href="#evt-${slugify(ev.title)}" class="dm-link" style="color:${COLORS.blue};text-decoration:none;">${escapeHtml(ev.emoji || '🎯')} <strong>${markdownToHtml(ev.title)}</strong></a></li>`,
-  );
+  // names, so the fold-out doesn't give the issue away. ENFORCED: a
+  // model title that just echoes the DB-locked official name falls back
+  // to a generic no-spoilers entry.
+  const normTitle = (t) => String(t || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const tocItems = events.map((ev, i) => {
+    const leaks = ev.sourceTitle && normTitle(ev.title) === normTitle(ev.sourceTitle);
+    const tease = leaks ? `Weekend pick #${i + 1}` : markdownToHtml(ev.title);
+    return `<li style="margin:0 0 6px 0;"><a href="#evt-${slugify(ev.title)}" class="dm-link" style="color:${COLORS.blue};text-decoration:none;">${escapeHtml(ev.emoji || '🎯')} <strong>${tease}</strong></a></li>`;
+  });
   if (draft.homeownerMinute) {
     tocItems.push(`<li style="margin:0 0 6px 0;"><a href="#homeowner-minute" style="color:${COLORS.blue};text-decoration:none;font-weight:500;">🏠 Homeowner Minute</a></li>`);
   }
@@ -1980,6 +1989,7 @@ module.exports = {
   // Exported for unit testing the Beehiiv-parity render devices
   clockEmojiFor,
   // GIF dedupe (one issue never repeats a GIF)
+  gifBlock,
   searchGiphyCandidates,
   pickUniqueGif,
   pickUniqueGifWithRetry,

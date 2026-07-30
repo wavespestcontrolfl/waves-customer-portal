@@ -1811,6 +1811,14 @@ describe('uniform event treatment (owner direction 2026-07-29 v2: consistent ful
     // (owner 2026-07-30 — supersedes the real-names directive).
     expect(html).toMatch(/<a href="#evt-curiosity-title-0"[^>]*>🎸 <strong>Curiosity Title 0<\/strong><\/a>/);
     expect(html).not.toMatch(/<li[^>]*>[^<]*<a[^>]*>[^<]*<strong>Official Event 0/);
+    // ENFORCED tease: a model title echoing the official name falls back
+    // to a generic no-spoilers entry.
+    const leaky = await assembleBeehiivNewsletter({
+      selectedSubject: 'T',
+      events: [mk(1, { title: 'Official Event 1' })],
+    });
+    expect(leaky).toContain('Weekend pick #1');
+    expect(leaky).not.toMatch(/<a[^>]*>🎭 <strong>Official Event 1<\/strong><\/a>/);
   });
 
   test('no wave-divider squiggle in the flagship; all event visuals share one size cap', async () => {
@@ -1819,6 +1827,16 @@ describe('uniform event treatment (owner direction 2026-07-29 v2: consistent ful
     // GIF fallback carries the same 280px cap as still photos.
     const withArt = await assembleBeehiivNewsletter({ selectedSubject: 'T', events: [mk(1, { imageUrl: 'https://cdn.example.com/a.jpg' })] });
     expect(withArt).toMatch(/<img src="https:\/\/cdn\.example\.com\/a\.jpg"[^>]*max-height:280px/);
+    // Capped event GIFs are mso-hidden like still photos — Word ignores
+    // max-height and would render them at natural size. Intro/PI GIFs
+    // stay uncapped and mso-visible.
+    const { gifBlock } = require('../services/newsletter-draft');
+    const capped = gifBlock('https://media2.giphy.com/media/x/g.gif', 'cap', { capHeight: true });
+    expect(capped).toContain('<!--[if !mso]><!-->');
+    expect(capped).toContain('max-height:280px');
+    const natural = gifBlock('https://media2.giphy.com/media/x/g.gif', 'cap');
+    expect(natural).not.toContain('[if !mso]');
+    expect(natural).not.toContain('max-height');
   });
 
   test('TOC links target real anchors: <a name> + matching h2 id per event', async () => {
