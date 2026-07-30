@@ -99,21 +99,41 @@ async function ensureCustomerGeocoded(customerId) {
  * leaves the customer permanently coordinate-less — which silently drops
  * their stops from route optimization. Newest customers first.
  */
-// Ids that failed to resolve during this process's sweeps. Skipped on later
-// passes so a block of permanently bad addresses at the top of the
-// newest-first ordering can't starve older customers out of the batch.
-// Process restart clears it, giving stuck rows a fresh retry each deploy;
-// admin address edits re-geocode directly so a fix never waits on this set.
-const sweepUnresolvedIds = new Set();
+// Customers whose CURRENT address permanently failed to geocode
+// (ZERO_RESULTS), keyed id → the address string that failed. Skipped on
+// later passes so a block of bad addresses at the top of the newest-first
+// ordering can't starve older customers out of the batch. Exclusions are
+// pruned as soon as the customer's address no longer matches the failed
+// one, so an address fix re-enters the sweep without waiting for a
+// restart. Process restart clears it entirely (stuck rows retry).
+const sweepUnresolved = new Map();
 
 const SWEEP_UNRESOLVED_CAP = 2000;
+
+// Drop exclusions whose customer address has changed since the failure —
+// the corrected address deserves a fresh geocode attempt.
+async function pruneStaleExclusions() {
+  if (!sweepUnresolved.size) return;
+  const ids = Array.from(sweepUnresolved.keys());
+  const rows = await db('customers')
+    .whereIn('id', ids)
+    .select('id', 'address_line1', 'city', 'state', 'zip');
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  for (const [id, failedAddress] of sweepUnresolved) {
+    const current = byId.get(id);
+    if (!current || buildAddress(current) !== failedAddress) {
+      sweepUnresolved.delete(id);
+    }
+  }
+}
 
 async function sweepUngeocodedCustomers({ limit = 25 } = {}) {
   // Excluding in the query (not post-filter) so a backlog of unresolvable
   // rows can never crowd eligible older customers out of the batch. The
-  // set is capped; clearing it just means stuck rows get retried.
-  if (sweepUnresolvedIds.size > SWEEP_UNRESOLVED_CAP) sweepUnresolvedIds.clear();
-  const excluded = Array.from(sweepUnresolvedIds);
+  // map is capped; clearing it just means stuck rows get retried.
+  if (sweepUnresolved.size > SWEEP_UNRESOLVED_CAP) sweepUnresolved.clear();
+  await pruneStaleExclusions();
+  const excluded = Array.from(sweepUnresolved.keys());
   const rows = await db('customers')
     .whereNull('deleted_at')
     .where(function () {
@@ -136,20 +156,30 @@ async function sweepUngeocodedCustomers({ limit = 25 } = {}) {
         results.geocoded += 1;
         continue;
       }
-      const { location, permanent } = await geocodeAddressWithStatus(buildAddress(c));
+      const address = buildAddress(c);
+      const { location, permanent } = await geocodeAddressWithStatus(address);
       if (location) {
-        await db('customers').where({ id: row.id }).update({
+        // Guard against a concurrent address edit: only write if the address
+        // we geocoded is still the customer's address and coordinates are
+        // still unset. A raced row counts as unresolved and retries next pass.
+        let guarded = db('customers').where({ id: row.id }).whereNull('latitude');
+        for (const col of ['address_line1', 'city', 'state', 'zip']) {
+          guarded = c[col] == null ? guarded.whereNull(col) : guarded.where(col, c[col]);
+        }
+        const written = await guarded.update({
           latitude: location.lat,
           longitude: location.lng,
           updated_at: new Date(),
         });
-        results.geocoded += 1;
+        if (written) results.geocoded += 1;
+        else results.unresolved += 1;
       } else {
         results.unresolved += 1;
-        // Only permanent failures (bad address / ZERO_RESULTS) are excluded
-        // from future sweeps; transient failures (quota, network, config)
-        // stay eligible and retry on the next hourly pass.
-        if (permanent) sweepUnresolvedIds.add(row.id);
+        // Only permanent failures (ZERO_RESULTS for this exact address) are
+        // excluded from future sweeps — and only while the address still
+        // matches (see pruneStaleExclusions). Transient failures (quota,
+        // network, config) stay eligible and retry on the next hourly pass.
+        if (permanent) sweepUnresolved.set(row.id, address);
       }
     } catch (err) {
       results.unresolved += 1;

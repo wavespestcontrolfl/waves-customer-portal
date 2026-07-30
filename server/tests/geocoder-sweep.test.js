@@ -16,7 +16,7 @@ function installDb({ listRows, customersById }) {
       where: jest.fn((arg) => {
         if (typeof arg === 'function') {
           arg.call(chain);
-        } else if (arg && arg.id) {
+        } else if (arg && typeof arg === 'object' && arg.id) {
           chain._id = arg.id;
         }
         return chain;
@@ -31,7 +31,16 @@ function installDb({ listRows, customersById }) {
         chain._excluded = ids;
         return chain;
       }),
-      select: jest.fn(async () => listRows.filter((r) => !(chain._excluded || []).includes(r.id))),
+      whereIn: jest.fn((col, ids) => {
+        chain._whereInIds = ids;
+        return chain;
+      }),
+      select: jest.fn(async () => {
+        if (chain._whereInIds) {
+          return chain._whereInIds.map((id) => customersById[id]).filter(Boolean);
+        }
+        return listRows.filter((r) => !(chain._excluded || []).includes(r.id));
+      }),
       first: jest.fn(async () => customersById[chain._id] || null),
       update: jest.fn(async (patch) => {
         updates.push({ id: chain._id, patch });
@@ -75,11 +84,12 @@ describe('sweepUngeocodedCustomers', () => {
   });
 
   it('counts un-geocodable addresses as unresolved without writing', async () => {
+    const customersById = {
+      'cust-3': { id: 'cust-3', latitude: null, longitude: null, address_line1: 'Nowhere At All', city: 'Bradenton', state: 'FL', zip: '34211' },
+    };
     const updates = installDb({
       listRows: [{ id: 'cust-3' }],
-      customersById: {
-        'cust-3': { id: 'cust-3', latitude: null, longitude: null, address_line1: 'Nowhere At All', city: 'Bradenton', state: 'FL', zip: '34211' },
-      },
+      customersById,
     });
     mockGoogle('ZERO_RESULTS');
 
@@ -92,6 +102,14 @@ describe('sweepUngeocodedCustomers', () => {
     // batch — the same candidate list now yields nothing to check.
     const second = await sweepUngeocodedCustomers();
     expect(second).toEqual({ checked: 0, geocoded: 0, unresolved: 0 });
+
+    // But an address EDIT lifts the exclusion — the corrected address gets
+    // a fresh attempt on the next sweep.
+    customersById['cust-3'].address_line1 = '3 Corrected Ave';
+    mockGoogle('OK', { lat: 27.7, lng: -82.3 });
+    const third = await sweepUngeocodedCustomers();
+    expect(third).toEqual({ checked: 1, geocoded: 1, unresolved: 0 });
+    expect(updates).toHaveLength(1);
   });
 
   it('retries transient failures on later sweeps instead of excluding them', async () => {
