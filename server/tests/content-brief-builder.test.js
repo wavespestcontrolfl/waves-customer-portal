@@ -279,9 +279,18 @@ describe('WORD_COUNT_TARGET map', () => {
 });
 
 describe('SERVICE_HUB_LINKS', () => {
-  test('every service maps to ≥1 hub link', () => {
+  // Deliberately EMPTY where no hub-level page exists. tree-shrub: the bare
+  // /tree-shrub-care/ route this map used to carry 404s. lawn: the Manatee-county
+  // fertilizer guide that stood in here became the ONE accepted hub link for every
+  // lawn topic once the gate went service-specific — wrong for most Sarasota and
+  // non-fertilizer subjects. Both are satisfied instead by their real city-service
+  // pages via checkHubLinkPresent's hubless carve-out; a city-less draft parks on
+  // hub_link_present, which is visible.
+  const NO_HUB_PAGE = new Set(['tree-shrub', 'lawn']);
+
+  test('every service with a hub page maps to ≥1 real hub link', () => {
     for (const svc of Object.keys(SERVICE_HUB_LINKS)) {
-      expect(SERVICE_HUB_LINKS[svc].length).toBeGreaterThan(0);
+      if (!NO_HUB_PAGE.has(svc)) expect(SERVICE_HUB_LINKS[svc].length).toBeGreaterThan(0);
       expect(SERVICE_HUB_LINKS[svc].every((l) => l.startsWith('/'))).toBe(true);
     }
   });
@@ -448,14 +457,40 @@ describe('_internalLinksFor conversion link', () => {
     expect(pest).toContain('/pest-control-bradenton-fl/');
     expect(pest.length).toBeLessThanOrEqual(5);
 
+    // The hub links asserted here used to be '/lawn-care/' and
+    // '/tree-shrub-care/' — both 404 (verified against the live hub
+    // 2026-07-29; only city-scoped versions exist). A brief's
+    // internal_links_to_add is a binding writer instruction that also exempts
+    // the route from the dead-link gate, so this test was pinning a defect in
+    // place. It now asserts the real replacements AND that the dead routes are
+    // gone.
     const lawn = builder._internalLinksFor({ city: 'Venice', service: 'lawn-care' }, 'supporting-blog');
     expect(lawn).toContain('/contact/');
-    expect(lawn).toContain('/lawn-care/');
     expect(lawn).toContain('/lawn-care-venice-fl/');
+    expect(lawn).not.toContain('/lawn-care/');
+    // No county-specific guide mandated into a Venice topic.
+    expect(lawn).not.toContain('/lawn-care/fertilizer-blackout-manatee-county/');
 
     const trees = builder._internalLinksFor({ city: null, service: 'tree-shrub-care' }, 'supporting-blog');
-    expect(trees).toContain('/contact/');
-    expect(trees).toContain('/tree-shrub-care/');
+    expect(trees).toContain('/contact/'); // conversion link, from SERVICE_CONVERSION_LINK
+    expect(trees).not.toContain('/tree-shrub-care/');
+
+    // Tree & shrub city pages use the `tree-and-shrub-care` spelling (all eight
+    // cities verified 200 on 2026-07-29) — the real replacement for the dead
+    // bare hub route.
+    const treesCity = builder._internalLinksFor({ city: 'Venice', service: 'tree-shrub' }, 'supporting-blog');
+    expect(treesCity).toContain('/tree-and-shrub-care-venice-fl/');
+  });
+
+  // /contact/ must never sit in SERVICE_HUB_LINKS: checkHubLinkPresent accepts
+  // the union of that map for EVERY service, so a conversion route there would
+  // let any supporting blog pass the relevant-hub hard check with a generic CTA.
+  test('SERVICE_HUB_LINKS contains no conversion routes', () => {
+    const { SERVICE_HUB_LINKS } = require('../services/content/content-brief-builder')._internals;
+    const hubs = new Set(Object.values(SERVICE_HUB_LINKS).flat());
+    for (const conversion of ['/contact/', '/book/', '/quote/', '/pest-control-quote/']) {
+      expect(hubs.has(conversion)).toBe(false);
+    }
   });
 
   test('non-blog page types keep their existing link shape', () => {

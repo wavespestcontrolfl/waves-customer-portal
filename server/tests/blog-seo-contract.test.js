@@ -291,3 +291,81 @@ describe('blog SEO contract helpers', () => {
     expect(contract.breadcrumbs[0]).toEqual({ name: 'Home', url: '/' });
   });
 });
+
+// Tree & shrub city pages ship as `tree-and-shrub-care-{city}-fl`. When these
+// classifiers didn't know that spelling, the city recommendation pointed at
+// /service-areas/{city}/ and the REAL city link classified as 'service' — which
+// P1s a city topic for a missing city link.
+describe('tree & shrub city links classify as city links', () => {
+  const contract = require('../services/content/blog-seo-contract');
+  const { inferLinkReason, buildCityTarget, normalizeService } = contract._internals;
+
+  test('normalizeService maps every tree/shrub spelling to one key', () => {
+    for (const raw of ['tree-shrub', 'tree-shrub-care', 'tree and shrub care', 'tree-and-shrub-care', 'tree_shrub']) {
+      expect(normalizeService(raw)).toBe('tree-shrub');
+    }
+  });
+
+  test('the city target is the real page, not the service-areas fallback', () => {
+    expect(buildCityTarget('Venice', 'tree-shrub').url).toBe('/tree-and-shrub-care-venice-fl/');
+    expect(buildCityTarget('Lakewood Ranch', 'tree-shrub').url).toBe('/tree-and-shrub-care-lakewood-ranch-fl/');
+  });
+
+  test('inferLinkReason calls it a city link', () => {
+    expect(inferLinkReason('/tree-and-shrub-care-venice-fl/')).toBe('city');
+    expect(inferLinkReason('/tree-and-shrub-care-port-charlotte-fl/')).toBe('city');
+  });
+
+  test('the existing verticals are unchanged', () => {
+    expect(inferLinkReason('/pest-control-venice-fl/')).toBe('city');
+    expect(inferLinkReason('/lawn-care-sarasota-fl/')).toBe('city');
+    expect(inferLinkReason('/pest-control-services/')).toBe('service');
+    expect(inferLinkReason('/contact/')).toBe('conversion');
+  });
+});
+
+// reviewFlags feed the autonomous review queue, so they must agree with the
+// completion gate. A hubless vertical that passes the gate on its city page was
+// still shipping reviewFlags: ['missing_service_link'] — a permanent false alarm on
+// every lawn and tree/shrub post.
+describe('reviewFlags: hubless verticals do not false-flag missing_service_link', () => {
+  const contract = require('../services/content/blog-seo-contract');
+
+  const draftLinking = (url) => ({
+    frontmatter: {
+      title: 'Chinch Bugs in Sarasota Lawns',
+      slug: '/lawn-care/chinch-bugs-sarasota-fl/',
+      meta_description: 'Sarasota homeowners can spot chinch bug damage and know when to call Waves for help with it.',
+      category: 'lawn-care',
+      schema_types: ['Article', 'BreadcrumbList'],
+    },
+    body: `Chinch bugs in Sarasota lawns spread fast.\n\n[Sarasota lawn care](${url}) explains the program. [Get a quote](/contact/).`,
+  });
+  const brief = { page_type: 'supporting-blog', action_type: 'new_supporting_blog', city: 'Sarasota', service: 'lawn' };
+
+  const flagsFor = (url, over = {}) => {
+    const { validation } = contract.buildBlogSeoContract({ draft: draftLinking(url), brief: { ...brief, ...over } });
+    return validation.reviewFlags || [];
+  };
+
+  test('the service city page clears the flag for lawn', () => {
+    expect(flagsFor('/lawn-care-sarasota-fl/')).not.toContain('missing_service_link');
+  });
+
+  test('tree & shrub behaves the same on its own route', () => {
+    expect(flagsFor('/tree-and-shrub-care-sarasota-fl/', { service: 'tree-shrub' })).not.toContain('missing_service_link');
+  });
+
+  test("another service's city page does NOT clear it", () => {
+    expect(flagsFor('/pest-control-sarasota-fl/')).toContain('missing_service_link');
+  });
+
+  test('the wrong town does NOT clear it', () => {
+    expect(flagsFor('/lawn-care-venice-fl/')).toContain('missing_service_link');
+  });
+
+  test('a hub-having vertical still needs its hub link', () => {
+    expect(flagsFor('/pest-control-sarasota-fl/', { service: 'pest' })).toContain('missing_service_link');
+    expect(flagsFor('/pest-control-services/', { service: 'pest' })).not.toContain('missing_service_link');
+  });
+});

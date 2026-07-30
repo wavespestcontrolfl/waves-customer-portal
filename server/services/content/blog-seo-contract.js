@@ -15,22 +15,92 @@ const BLOG_CATEGORY_BY_SERVICE = {
   specialty: { value: 'pest-control', label: 'Pest Control', url: '/blog/category/pest-control/' },
 };
 
+// This map supplies the REQUIRED service-link recommendation, so a dead url here
+// is handed to the writer as a mandate. Four of these were 404s (/lawn-care/,
+// /mosquito-control/, /rodent-control/, /tree-shrub-care/ — no bare hub pages
+// exist; verified by live fetch 2026-07-29). Mosquito and rodent now point at the
+// pest services hub that actually covers them; lawn and tree & shrub have NO
+// hub-level page at all, so they carry url: null and are satisfied by their
+// city-service page instead (see hublessService below and the matching
+// SERVICE_HUB_LINKS entries in content-brief-builder).
 const SERVICE_TARGETS = {
   pest: { name: 'Pest Control', slug: 'pest-control', url: '/pest-control-services/' },
-  lawn: { name: 'Lawn Care', slug: 'lawn-care', url: '/lawn-care/' },
+  lawn: { name: 'Lawn Care', slug: 'lawn-care', url: null },
   termite: { name: 'Termite Control', slug: 'termite-control', url: '/termite-control/' },
-  mosquito: { name: 'Mosquito Control', slug: 'mosquito-control', url: '/mosquito-control/' },
-  rodent: { name: 'Rodent Control', slug: 'rodent-control', url: '/rodent-control/' },
-  'tree-shrub': { name: 'Tree & Shrub Care', slug: 'tree-shrub-care', url: '/tree-shrub-care/' },
+  mosquito: { name: 'Mosquito Control', slug: 'mosquito-control', url: '/pest-control-services/' },
+  rodent: { name: 'Rodent Control', slug: 'rodent-control', url: '/pest-control-services/' },
+  'tree-shrub': { name: 'Tree & Shrub Care', slug: 'tree-shrub-care', url: null },
   specialty: { name: 'Pest Control', slug: 'pest-control', url: '/pest-control-services/' },
 };
 
+/**
+ * A vertical with no hub-level page. Its city-service page is the most specific
+ * real page it has, so that page satisfies BOTH the city and the service link
+ * requirements — otherwise a fully compliant lawn or tree/shrub draft raises
+ * P1_MISSING_SERVICE_LINK forever, and with AUTONOMOUS_CONTENT_MAX_P1_FINDINGS=0
+ * it can never publish.
+ */
+function hublessService(serviceKey) {
+  const target = SERVICE_TARGETS[serviceKey];
+  return Boolean(target) && !target.url;
+}
+
+/**
+ * The city-service route for a service + city, or null when either is unknown.
+ *
+ * One builder so every gate asks the same question. Checking only the service
+ * prefix let a Sarasota lawn brief satisfy its requirement with
+ * /lawn-care-venice-fl/ — the right service, the wrong town, and the generic
+ * city-reason check waves it through too.
+ */
+/** The normalized service key for a brief (frontmatter fallback mirrors the contract builder). */
+function serviceKeyFor(brief = {}) {
+  return normalizeService(brief.service);
+}
+
+/**
+ * Does the contract include the brief's own service+city route? Shared with the
+ * completion gate's stand-in rule, so the queue flag and the gate agree.
+ */
+function hasCityServiceLink(contract, brief) {
+  const links = [
+    ...(Array.isArray(contract.includedInternalLinks) ? contract.includedInternalLinks : []),
+    ...(Array.isArray(contract.internalLinks) ? contract.internalLinks : []),
+  ];
+  if (!links.length) return false;
+  const service = serviceKeyFor(brief);
+  const exact = cityServiceRoute(service, brief.city);
+  if (exact) {
+    const want = exact.replace(/\/$/, '');
+    return links.some((l) => String(l.url || '').replace(/\/$/, '') === want);
+  }
+  const slug = CITY_SERVICE_SLUG[service];
+  if (!slug) return false;
+  const anyCity = new RegExp(`^/${slug}-[a-z][a-z0-9-]*-fl/?$`);
+  return links.some((l) => anyCity.test(String(l.url || '')));
+}
+
+function cityServiceRoute(serviceKey, city) {
+  const slug = CITY_SERVICE_SLUG[serviceKey];
+  const citySlug = slugify(city);
+  if (!slug || !citySlug) return null;
+  return `/${slug}-${citySlug}-fl/`;
+}
+
+// Must stay in step with content-brief-builder's SERVICE_CITY_SLUG — this map
+// decides which URL a city recommendation points at, and inferLinkReason below
+// decides whether a link COUNTS as the city link. Tree & shrub city pages ship as
+// `tree-and-shrub-care-{city}-fl` (all eight cities verified 200 on 2026-07-29);
+// omitting it here sent the recommendation to /service-areas/{city}/ and made the
+// real city link classify as 'service', which P1s a city topic for a missing city
+// link.
 const CITY_SERVICE_SLUG = {
   pest: 'pest-control',
   lawn: 'lawn-care',
   mosquito: 'mosquito-control',
   termite: 'termite-control',
   rodent: 'rodent-control',
+  'tree-shrub': 'tree-and-shrub-care',
 };
 
 const CONTENT_CLUSTERS = [
@@ -213,7 +283,16 @@ function validateBlogSeoContract(contract = {}, { brief = {} } = {}) {
   }
 
   if (brief.city && !hasRequiredLink(contract.internalLinks, 'city')) reviewFlags.add('missing_city_link');
-  if (brief.service && !hasRequiredLink(contract.internalLinks, 'service')) reviewFlags.add('missing_service_link');
+  // Same carve-out the completion gate applies: a hubless vertical (lawn, tree &
+  // shrub) has no hub-level service page, so its own city-service route IS the
+  // service link. Without this, a compliant hubless draft passes the gate but still
+  // shows reviewFlags: ['missing_service_link'] in the autonomous review queue —
+  // a permanent false alarm on every lawn and tree/shrub post.
+  const hublessServiceCityLink = hublessService(serviceKeyFor(brief))
+    && hasCityServiceLink(contract, brief);
+  if (brief.service && !hasRequiredLink(contract.internalLinks, 'service') && !hublessServiceCityLink) {
+    reviewFlags.add('missing_service_link');
+  }
   if (!hasRequiredLink(contract.internalLinks, 'conversion')) reviewFlags.add('missing_conversion_cta');
   if (isPestPracticeTopic(brief) && !pestPracticesComplete(contract.pestPractices)) {
     reviewFlags.add('missing_pest_practices');
@@ -298,7 +377,10 @@ function recommendationsFromBrief(brief = {}, { city, primaryService } = {}) {
       required: true,
     });
   }
-  if (primaryService) {
+  // A hubless vertical has no service URL to recommend — recommending the old
+  // bare route handed the writer a 404 as a REQUIRED link. Its city page (already
+  // recommended above) doubles as the service link; see hublessService.
+  if (primaryService && primaryService.url) {
     links.push({
       url: primaryService.url,
       anchorText: primaryService.name.toLowerCase(),
@@ -442,13 +524,18 @@ function normalizeService(service) {
   if (raw === 'termite-control' || raw === 'termite control' || raw === 'termites') return 'termite';
   if (raw === 'mosquito-control' || raw === 'mosquito control' || raw === 'mosquitoes') return 'mosquito';
   if (raw === 'rodents') return 'rodent';
+  // Brief/frontmatter spell this several ways; all must reach the 'tree-shrub' key
+  // the maps above use, or a tree & shrub topic silently loses its city link.
+  if (raw === 'tree-shrub-care' || raw === 'tree and shrub care' || raw === 'tree-and-shrub-care' || raw === 'tree_shrub') return 'tree-shrub';
   return raw || 'pest';
 }
 
 function inferLinkReason(url) {
   const path = normalizeUrl(url);
   if (/\/contact\/|quote|estimate|calculator/.test(path)) return 'conversion';
-  if (/^\/(?:pest-control|lawn-care|mosquito-control|termite-control|rodent-control)-[a-z0-9-]+-fl\/?$/.test(path)) return 'city';
+  // Alternation is LONGEST-FIRST so 'tree-and-shrub-care' cannot be shadowed by a
+  // shorter prefix, and mirrors CITY_SERVICE_SLUG above.
+  if (/^\/(?:tree-and-shrub-care|pest-control|lawn-care|mosquito-control|termite-control|rodent-control)-[a-z0-9-]+-fl\/?$/.test(path)) return 'city';
   if (/\/blog\/|\/[a-z0-9-]+\/?$/.test(path) && !/control|care|inspection|services/.test(path)) return 'related_blog';
   if (/control|care|inspection|services|rodent|termite|mosquito|lawn/.test(path)) return 'service';
   return 'hub';
@@ -553,6 +640,10 @@ module.exports = {
   inferContentCluster,
   normalizeInternalLinks,
   pestPracticesComplete,
+  hublessService,
+  normalizeService,
+  CITY_SERVICE_SLUG,
+  cityServiceRoute,
   _internals: {
     buildDefaultBlogBreadcrumbs,
     buildCityTarget,
@@ -565,5 +656,7 @@ module.exports = {
     normalizeSlug,
     normalizeUrl,
     inferLinkReason,
+    normalizeService,
+    CITY_SERVICE_SLUG,
   },
 };

@@ -191,14 +191,213 @@ function findingSeverity(body) {
   return m ? `P${m[1]}` : 'P1';
 }
 
+// park() phases, persisted in codex_remediation_state.park_phase. The single
+// question the P2-only merge bar asks about a parked PR: had the round already
+// mutated the branch?
+//
+//   POST_PUSH — the fix commit IS on the branch but the post-commit
+//   sync/revalidation didn't finish, so portal state may not match what a merge
+//   would ship. Divergence, not fix quality. A human reconciles; the bar stays
+//   shut.
+//
+//   PRE_PUSH — remediation looked at the fix and declined to commit it
+//   (frontmatter whitelist, no-change round, failed content gates, schema/MDX
+//   guards, unresolvable target...). The head is still exactly the content Codex
+//   reviewed, untouched, so a P2-only review of it is as mergeable as it was
+//   before remediation tried. That is what the owner directive asks for.
+const PARK_PRE_PUSH = 'pre_push';
+const PARK_POST_PUSH = 'post_push';
+
+// Written to sync_pending_sha before gh.putFile, when a commit is about to exist
+// but its SHA isn't known yet. Carries the PRE-push head so the sentinel is
+// self-reconciling: if the process dies before the push, comparing the branch ref
+// to this head proves whether anything landed, and a stuck sentinel can be
+// released instead of holding every merge forever. Deliberately not SHA-shaped so
+// it can never be mistaken for a commit; ~56 chars, inside varchar(64).
+const SYNC_PENDING_PUSH_IN_FLIGHT = 'push_in_flight';
+// How long an in-flight sentinel must sit untouched before the merge gate may
+// treat it as abandoned. Generously above the real stamp→putFile window (one
+// GitHub write, seconds) so a healthy round is never reconciled out from under
+// itself, and well under a human's response time so a genuinely dead round
+// doesn't wedge the PR for long. Override for tests, not for prod tuning.
+const STALE_IN_FLIGHT_MS = Math.max(
+  60_000,
+  parseInt(process.env.CODEX_REMEDIATION_STALE_PUSH_MS || '', 10) || 900_000,
+);
+const inFlightSentinel = (preHeadSha) => (preHeadSha
+  ? `${SYNC_PENDING_PUSH_IN_FLIGHT}:${String(preHeadSha).trim().toLowerCase()}`
+  : SYNC_PENDING_PUSH_IN_FLIGHT);
+const parseInFlightSentinel = (value) => {
+  const v = String(value || '').trim().toLowerCase();
+  if (v === SYNC_PENDING_PUSH_IN_FLIGHT) return { inFlight: true, preHead: null };
+  if (v.startsWith(`${SYNC_PENDING_PUSH_IN_FLIGHT}:`)) {
+    return { inFlight: true, preHead: v.slice(SYNC_PENDING_PUSH_IN_FLIGHT.length + 1) || null };
+  }
+  return { inFlight: false, preHead: null };
+};
+
+// LEGACY ROWS ONLY. park_phase (a persisted column, written at every park call
+// site) is the real signal; this regex is the fallback for rows parked before
+// that column existed, which carry park_phase = NULL.
+//
+// Prose must not BE the safety boundary — renaming a reason string or adding a
+// post-push failure path would silently reclassify a branch-mutating park as
+// pre-push and allow a merge against unsynchronized portal state. That is the
+// mirror image of the bug that starved this bar twice (#394–#398 on 07-22,
+// astro #409 on 07-27), where an accepted-reasons whitelist made new pre-push
+// classes unmergeable. Structured phase for new rows, allow-by-default on the
+// closed set of three for old ones.
+const POST_PUSH_PARK_RE = /^(?:pr head moved past the remediation push|post-push PR revalidation failed|portal row sync failed after fix commit)/;
+
+/**
+ * Did this park happen AFTER the branch was mutated (so a merge could ship
+ * content the portal never synced)?
+ *
+ * Reads the structured park_phase and falls back to the reason prefix only when
+ * it is absent. Fails CLOSED on an unrecognized phase value: an unknown phase
+ * is treated as branch-mutating, so a future phase name can never accidentally
+ * open the merge bar.
+ */
+function isPostPushPark(state) {
+  // Back-compat: earlier callers (and tests) passed the reason string directly.
+  const row = typeof state === 'string' || state == null ? { park_reason: state } : state;
+  const phase = String(row.park_phase || '').trim().toLowerCase();
+  if (phase === PARK_POST_PUSH) return true;
+  if (phase === PARK_PRE_PUSH) return false;
+  if (phase) return true; // unknown phase → fail closed
+  return POST_PUSH_PARK_RE.test(String(row.park_reason || ''));
+}
+
+/**
+ * syncPendingHold(prNumber, { db?, headSha? }) → { pending, sha?, reason? }
+ *
+ * Does a remediation push on this PR still owe its portal sync? If so NOTHING
+ * may merge it — this is a property of the PR, independent of what Codex said.
+ *
+ * It must be asserted on EVERY merge path, not just the P2 one. p2OnlyMergeEligible
+ * is only consulted after assertCodexReviewClear REJECTS, so a hold checked only
+ * there is invisible to the far more common case: a clean review merging through
+ * the normal path while blog_posts.content is still pre-fix, which a later
+ * republish or social share then resurrects. Callers: autonomous-pr-poller
+ * (before its codex gate) and astro-publisher mergeAstro (the scheduler lane).
+ *
+ * Fails CLOSED on a lookup error. This is a merge-safety gate, and the pollers
+ * retry every couple of minutes, so a transient database blip costs one deferred
+ * tick — whereas proceeding could merge stale portal state permanently.
+ *
+ * A `push_in_flight:<pre-push head>` sentinel is RECONCILED when gh + branch are
+ * supplied: if the branch ref still matches the recorded pre-push head, no commit
+ * ever landed (the process died between the stamp and gh.putFile), so the hold is
+ * released and cleared. Without that reconciliation a pre-push crash would hold
+ * every merge on the PR forever, since a clean review never re-enters remediation
+ * and nothing else clears the column.
+ */
+async function syncPendingHold(prNumber, {
+  db: injectedDb = null, headSha = null, gh: injectedGh = null, branch = null,
+} = {}) {
+  const db = injectedDb || dbDefault;
+  let state;
+  try {
+    state = await getState(db, prNumber);
+  } catch (e) {
+    logger.warn(`[codex-remediation] sync-hold lookup failed for PR #${prNumber}: ${e.message} — holding the merge (fail closed)`);
+    return { pending: true, reason: `could not read the remediation sync state (${e.message}) — holding the merge until it is readable` };
+  }
+  const sha = String(state.sync_pending_sha || '').trim().toLowerCase();
+  if (!sha) return { pending: false };
+
+  // Recover a hold whose sync is RECORDED complete and whose release write was
+  // simply lost. This has to happen HERE, not only in remediation's recovery
+  // branch: this gate returns pending before the Codex check, so a PR with a clean
+  // review never re-enters remediation at all — a stuck hold would block it
+  // forever. No replay and no inference, just the release that failed earlier.
+  const syncedSha = String(state.synced_sha || '').trim().toLowerCase();
+  if (syncedSha && syncedSha === sha) {
+    if (await releaseSyncedHoldCas(db, prNumber, sha)) {
+      logger.info(`[codex-remediation] released a stuck sync hold on PR #${prNumber} from the merge gate: the sync for ${shortSha(sha)} was already recorded complete`);
+      return { pending: false };
+    }
+    // Either the write failed or a concurrent round re-armed the row. Both mean
+    // "do not merge on this snapshot"; the next tick reads the new state.
+    return { pending: true, sha, reason: `the sync for ${shortSha(sha)} completed but its hold was not released (write failed or the row was re-armed) — re-checking next tick` };
+  }
+
+  const head = String(headSha || '').trim().toLowerCase();
+  const { inFlight, preHead } = parseInFlightSentinel(sha);
+
+  if (inFlight && preHead && branch) {
+    // "Branch still at the pre-push head" is NOT proof the writer died — there is
+    // a legitimate interval between the stamp and gh.putFile where exactly that is
+    // true of a healthy round. This gate runs from the merge path, which is not
+    // serialized against remediation (a manual mergeAstro isn't under the
+    // scheduler's advisory lock), so clearing on the ref alone could release the
+    // hold mid-round; if the push then landed and the process died before
+    // recording the SHA, an unsynced fix would sit on the branch with no hold at
+    // all. Require the sentinel to be OLDER than any round could still be in that
+    // window before treating it as abandoned. Nothing else writes the row while a
+    // round is stuck there, so updated_at is the stamp time.
+    // NOT `Date.parse(x || 0)`: that coerces a missing value to the STRING "0",
+    // which parses as the year 2000 — so an absent updated_at would read as
+    // ancient and auto-release every sentinel, defeating this gate entirely.
+    // Absent or unparseable means "cannot prove staleness", which must hold.
+    const stampedAt = state.updated_at ? (Date.parse(state.updated_at) || 0) : 0;
+    const age = stampedAt ? Date.now() - stampedAt : 0;
+    if (!stampedAt || age < STALE_IN_FLIGHT_MS) {
+      return {
+        pending: true,
+        sha,
+        reason: `a fix push is in flight (pre-push head ${shortSha(preHead)}${stampedAt ? `, ${Math.round(age / 1000)}s old` : ', age unknown'}) — holding until it completes or goes stale`,
+      };
+    }
+    const gh = injectedGh || ghDefault;
+    let refHead = null;
+    try { refHead = String((await gh.getBranchSha(branch)) || '').trim().toLowerCase(); } catch (_) { refHead = null; }
+    if (refHead && refHead === preHead) {
+      // Old enough that no live round could still be pre-push, AND the branch
+      // never moved: the round died before its push. Nothing is unsynced, so
+      // release the hold rather than wedging the PR forever.
+      //
+      // COMPARE-AND-SET, not a blanket clear. Every check above ran against a
+      // snapshot, and a fresh round can stamp a new sentinel and start pushing in
+      // the meantime — a blanket clear would then erase a LIVE hold, and if that
+      // push landed and crashed before recording its SHA, a later clean review
+      // could merge unsynchronized content. Only clear the exact row state we
+      // judged; a lost CAS means someone else moved it, so report pending and let
+      // the next tick re-evaluate the new state.
+      // The age predicate is re-asserted IN SQL rather than by comparing the
+      // updated_at we read: NOW() writes microsecond precision, the pg driver
+      // truncates to milliseconds, so round-tripping the timestamp almost never
+      // compares equal and the abandoned sentinel would hold forever — silently
+      // defeating this whole recovery path. Matching on the sentinel VALUE plus
+      // "still older than the staleness window" is the same guarantee without the
+      // precision trap: any refresh by a new round bumps updated_at and fails it.
+      const cleared = await db('codex_remediation_state')
+        .where({ pr_number: prNumber, sync_pending_sha: sha })
+        .whereRaw(`updated_at < NOW() - (? * interval '1 millisecond')`, [STALE_IN_FLIGHT_MS])
+        .update({ sync_pending_sha: null, updated_at: new Date() });
+      if (!cleared) {
+        logger.info(`[codex-remediation] stale in-flight sync hold on PR #${prNumber} changed under us — leaving it held for the next tick`);
+        return { pending: true, sha, reason: 'the remediation sync state changed while it was being evaluated — holding until the next check' };
+      }
+      logger.info(`[codex-remediation] released a stale in-flight sync hold on PR #${prNumber}: branch still at the pre-push head ${shortSha(preHead)} after ${Math.round(age / 60000)}m, no commit landed`);
+      return { pending: false };
+    }
+    // Ref moved (a push DID land) or is unreadable → keep holding.
+  }
+
+  const which = inFlight
+    ? `a fix push was in flight and never confirmed${preHead ? ` (pre-push head ${shortSha(preHead)})` : ''}`
+    : `remediation push ${shortSha(sha)}${head && sha !== head ? ' (an ancestor of the head under review)' : ''}`;
+  return { pending: true, sha, reason: `${which} has an unfinished portal sync (held for a human)` };
+}
+
 /**
  * p2OnlyMergeEligible(prNumber, headSha) → { eligible, p2Count?, rounds?, reason? }
  * eligible=true means: Codex HAS reviewed this exact head (findings tied to
- * it exist), every current-head finding is a P2, and codex_remediation_state
- * records BOTH >= 1 remediation round spent AND that the current head IS the
- * remediation commit this loop last pushed (last_push_sha). Callers still
- * run their own merge guards (deploy-green, hub-only, sha-pinned merge,
- * queue re-checks).
+ * it exist), every current-head finding is a P2, and remediation has had its
+ * shot at this head — either it PUSHED the head (last_push_sha) or it parked
+ * on a pre-push verdict (isPostPushPark excluded). Callers still run their own
+ * merge guards (deploy-green, hub-only, sha-pinned merge, queue re-checks).
  */
 async function p2OnlyMergeEligible(prNumber, headSha, deps = {}) {
   if (!p2MergeEnabled()) return { eligible: false, reason: 'disabled (AUTONOMOUS_CODEX_P2_MERGE=false)' };
@@ -206,28 +405,59 @@ async function p2OnlyMergeEligible(prNumber, headSha, deps = {}) {
   const db = deps.db || dbDefault;
   const gh = deps.gh || ghDefault;
   const state = await getState(db, prNumber);
+  const head = String(headSha).trim().toLowerCase();
+  const lastPush = String(state.last_push_sha || '').trim().toLowerCase();
+  const parkedHead = String(state.parked_head_sha || '').trim().toLowerCase();
+  const parkedOnThisHead = state.status === 'parked' && Boolean(parkedHead) && parkedHead === head;
+
+  // ANY unfinished portal sync on this PR blocks, whatever the park state says
+  // and whichever head is under review. This is a fact about the repository, not
+  // a verdict on a head, so unlike park_phase it deliberately survives a re-arm:
+  // the stale-'moved past' recovery clears the park, a later round can park
+  // PRE-push (round limit, no-change), and without this the bar would see a
+  // pre-push park plus a last_push_sha matching the head and merge a commit
+  // whose portal row still holds the pre-fix body.
+  //
+  // NOT scoped to `=== head`, which was the first attempt: remediation pushes B,
+  // its sync fails, a human pushes descendant C. C CONTAINS B's content, so
+  // merging C ships the fix while blog_posts.content is still pre-B — and a later
+  // republish or social share rebuilds from that stale row. An ancestry check
+  // would be more precise, but it needs a GitHub compare call on the merge path,
+  // and this state means a push already failed to reconcile: extra network
+  // dependency is the wrong trade. Any pending sync holds until a round actually
+  // completes one, which is the case that should reach a human anyway (the
+  // scheduler lane has already disarmed its publishing claim by then).
+  const hold = await syncPendingHold(prNumber, { db, headSha });
+  if (hold.pending) return { eligible: false, reason: hold.reason };
+
+  // A branch-mutating park on THIS head holds unconditionally — including when
+  // last_push_sha equals the head (it now always does for these, since the
+  // round bookkeeping is written at push time). The park exists because portal
+  // state may not match what a merge would ship, and no amount of "remediation
+  // had its shot" makes that divergence safe to merge. Checked FIRST so it
+  // can't be short-circuited by the improved/declined tests below.
+  if (parkedOnThisHead && isPostPushPark(state)) {
+    return { eligible: false, reason: `parked after a branch-mutating round (held for a human): ${String(state.park_reason || '').slice(0, 160)}` };
+  }
+
   // Two ways remediation "had its shot" (the bar's precondition under the
   // owner directive):
   //   IMPROVED — the head under review IS a remediation commit this loop
-  //   pushed (last_push_sha equals the current head; failed attempts never
-  //   write it, and a park re-arm resets rounds but keeps last_push_sha as
-  //   history, so presence alone is not enough — Round-9, Codex P2).
-  //   DECLINED — remediation ATTEMPTED this head and parked with one of its
-  //   own fix-safety verdicts (frontmatter-whitelist violation or a
-  //   no-change round): the P2s are real but not auto-fixable within the
-  //   whitelist. Observed 2026-07-22: every open content PR (#394–#398)
-  //   carried ONLY P2/P3 findings yet sat unmergeable because the declined
-  //   park kept last_push_sha ≠ head forever — the fixer's safety whitelist
-  //   starved the very bar the "no gates on the auto blog" directive added.
-  //   Scoped to the CURRENT head and to the two decline classes only —
-  //   infrastructure parks (sync failures, unresolvable targets, exhausted
-  //   rounds) keep holding for a human.
-  const head = String(headSha).trim().toLowerCase();
-  const lastPush = String(state.last_push_sha || '').trim().toLowerCase();
+  //   pushed (last_push_sha equals the current head; failed pre-push attempts
+  //   never write it, and a park re-arm resets rounds but keeps last_push_sha
+  //   as history, so presence alone is not enough — Round-9, Codex P2).
+  //   DECLINED — remediation ATTEMPTED this head and parked on a PRE-PUSH
+  //   verdict, so the head is still the unmodified content Codex reviewed.
+  //   Observed 2026-07-22: every open content PR (#394–#398) carried ONLY
+  //   P2/P3 findings yet sat unmergeable because a declined park kept
+  //   last_push_sha ≠ head forever — the fixer's safety envelope starved the
+  //   very bar the "no gates on the auto blog" directive added. That was
+  //   patched by naming two park reasons; astro #409 (07-27) then stalled 2
+  //   days on a THIRD ("fix failed content gates" — a guardrails
+  //   false-positive on a real route), which is why this is now the
+  //   complement of isPostPushPark instead of a list of accepted prose.
   const remediationImproved = Boolean(lastPush) && lastPush === head;
-  const remediationDeclined = state.status === 'parked'
-    && String(state.parked_head_sha || '').trim().toLowerCase() === head
-    && /^(?:fix changed frontmatter beyond the whitelist|remediation produced no change)/.test(String(state.park_reason || ''));
+  const remediationDeclined = parkedOnThisHead;
   if (!remediationImproved && !remediationDeclined) {
     if ((state.rounds || 0) < 1) return { eligible: false, reason: 'no remediation round spent yet' };
     if (!lastPush) {
@@ -1002,15 +1232,138 @@ function reviewRequestedForHead(issueComments = [], headSha = null) {
   });
 }
 
-async function park(db, prNumber, reason, onPark, headSha = null) {
-  // Persist the reason and the head the verdict applied to — the reason used
-  // to live only in logs (short retention: three parked autonomous PRs were
-  // undiagnosable after the fact), and the head is what lets a later push
-  // re-arm the loop (a park is a verdict on a specific head, not on the PR).
+// `phase` is REQUIRED and has no default. Every call site names it, and
+// anything this function doesn't recognize — a typo, or a future post-push exit
+// that forgets the argument — is persisted as POST_PUSH, i.e. fail closed with
+// the merge bar shut. Defaulting to PARK_PRE_PUSH (as this did originally) made
+// the permissive value the fallback, so a new branch-mutating park that omitted
+// the phase would have opened the bar against unsynchronized state — the exact
+// thing isPostPushPark's unknown-value handling exists to prevent.
+/**
+ * Arm a round for its push: mark 'remediating' and take the sync hold, in ONE
+ * statement.
+ *
+ * An existing pending SHA is preserved rather than replaced, but ONLY when it is a
+ * genuine unsynced hold. Overwriting one lost real state: if push B never synced, a
+ * human then advanced the branch to C, and remediation's push from C failed before
+ * committing, the new in-flight sentinel would later be reconciled away as
+ * "nothing landed" — forgetting that B is still unsynced, letting C merge and a
+ * rebuild resurrect the pre-B portal content.
+ *
+ * A hold that already EQUALS synced_sha is different: it is a completed sync whose
+ * release write was lost, so it must NOT be preserved. A plain COALESCE kept it,
+ * and then the deferred recovery (which clears when pending == synced) would erase
+ * the hold this arm was supposed to install — leaving the imminent push unguarded.
+ * The CASE installs the fresh sentinel in that case, which also makes pending no
+ * longer equal synced, so the recovery path can no longer fire against it.
+ *
+ * The new commit only becomes the hold once a push is CONFIRMED (the push-time
+ * write), and the hold clears only after a content sync succeeds — which resolves
+ * any earlier pending push too, since the sync mirrors the full current body.
+ *
+ * Returns false when the row is terminal (merged/closed won the race), matching
+ * saveState's contract so callers stop before pushing.
+ */
+async function armPushHold(db, prNumber, branch, preHeadSha) {
+  const res = await db.raw(
+    `INSERT INTO codex_remediation_state
+       (pr_number, branch, status, rounds, sync_pending_sha, created_at, updated_at)
+     VALUES (?, ?, 'remediating', 0, ?, NOW(), NOW())
+     ON CONFLICT (pr_number) DO UPDATE
+       SET branch = EXCLUDED.branch,
+           status = 'remediating',
+           sync_pending_sha = CASE
+             WHEN codex_remediation_state.sync_pending_sha IS NOT NULL
+              AND codex_remediation_state.sync_pending_sha
+                  IS DISTINCT FROM codex_remediation_state.synced_sha
+             THEN codex_remediation_state.sync_pending_sha
+             ELSE EXCLUDED.sync_pending_sha
+           END,
+           updated_at = NOW()
+       WHERE codex_remediation_state.status NOT IN ('merged', 'closed')`,
+    [prNumber, branch, inFlightSentinel(preHeadSha)],
+  );
+  return (res?.rowCount ?? 0) > 0;
+}
+
+/**
+ * Release the sync hold after a completed sync. Bounded retry, never throws.
+ *
+ * A real-SHA hold has no age-based reconciliation (only the in-flight sentinel
+ * does), so losing this write would block every merge path forever on a PR whose
+ * content is actually synced. Retries absorb a transient blip; a total failure is
+ * logged loudly and recovered on a later tick by re-running the idempotent sync.
+ */
+async function releaseSyncHold(db, prNumber, newHead, attempts = 3) {
+  // Record that the sync PROVABLY completed for this commit BEFORE clearing the
+  // hold, and in a separate write. That ordering is what makes a lost release
+  // recoverable: the window where synced_sha is set but the hold still stands is
+  // exactly the state a later tick can resolve — clear the hold, replay nothing,
+  // guess nothing. (One combined write would give no marker to recover from.)
+  const marked = await retryWrite(db, prNumber, { synced_sha: newHead || null }, attempts, 'sync-complete mark');
+  const released = await retryWrite(db, prNumber, { sync_pending_sha: null }, attempts, 'sync-hold release');
+  if (!released) {
+    logger.error(`[codex-remediation] could not release the sync hold for PR #${prNumber} after ${attempts} attempts — the fix commit ${shortSha(newHead)} IS synced${marked ? ', and that is recorded, so a later tick will clear the hold automatically' : ' but the marker write ALSO failed, so the hold needs clearing by hand after checking the portal row'}`);
+  }
+  return released;
+}
+
+/**
+ * Clear a hold ONLY while it still equals the recorded completed sync.
+ *
+ * A compare-and-set, because the decision is made from a snapshot: a concurrent
+ * armPushHold can install a fresh sentinel in between, and a blind clear would erase
+ * the hold guarding that new push. Matching both columns means the row must still be
+ * in the exact "synced but unreleased" state we judged.
+ */
+async function releaseSyncedHoldCas(db, prNumber, sha, attempts = 2) {
+  for (let i = 1; i <= attempts; i += 1) {
+    try {
+      const n = await db('codex_remediation_state')
+        .where({ pr_number: prNumber, sync_pending_sha: sha, synced_sha: sha })
+        .update({ sync_pending_sha: null, updated_at: new Date() });
+      return n > 0;
+    } catch (e) {
+      if (i === attempts) {
+        logger.warn(`[codex-remediation] deferred sync-hold release failed for PR #${prNumber} after ${attempts} attempts: ${e.message}`);
+        return false;
+      }
+    }
+  }
+  return false;
+}
+
+async function retryWrite(db, prNumber, patch, attempts, label) {
+  for (let i = 1; i <= attempts; i += 1) {
+    try {
+      await saveState(db, prNumber, patch);
+      return true;
+    } catch (e) {
+      if (i === attempts) {
+        logger.warn(`[codex-remediation] ${label} failed for PR #${prNumber} after ${attempts} attempts: ${e.message}`);
+        return false;
+      }
+      logger.warn(`[codex-remediation] ${label} attempt ${i} failed for PR #${prNumber}: ${e.message} — retrying`);
+    }
+  }
+  return false;
+}
+
+async function park(db, prNumber, reason, onPark, headSha, phase) {
+  // Persist the reason, the head the verdict applied to, and the round PHASE —
+  // the reason used to live only in logs (short retention: three parked
+  // autonomous PRs were undiagnosable after the fact), the head is what lets a
+  // later push re-arm the loop (a park is a verdict on a specific head, not on
+  // the PR), and the phase is what the merge bar reads.
+  const resolvedPhase = phase === PARK_PRE_PUSH ? PARK_PRE_PUSH : PARK_POST_PUSH;
+  if (phase !== PARK_PRE_PUSH && phase !== PARK_POST_PUSH) {
+    logger.warn(`[codex-remediation] park for PR #${prNumber} passed an unrecognized phase (${JSON.stringify(phase)}) — persisting '${PARK_POST_PUSH}' (fail closed, merge bar stays shut): ${reason}`);
+  }
   const wrote = await saveState(db, prNumber, {
     status: 'parked',
     park_reason: String(reason || '').slice(0, 1000),
     parked_head_sha: headSha ? String(headSha).trim().toLowerCase() : null,
+    park_phase: resolvedPhase,
   });
   if (!wrote) {
     // The PR merged/closed while this round ran — the row is terminal and a
@@ -1055,7 +1408,10 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
     // here because this is the one sanctioned closed→live transition).
     await db('codex_remediation_state')
       .where({ pr_number: prNumber, status: 'closed' })
-      .update({ status: 'active', rounds: 0, park_reason: null, parked_head_sha: null, updated_at: new Date() });
+      .update({
+        status: 'active', rounds: 0, park_reason: null, parked_head_sha: null,
+        park_phase: null, updated_at: new Date(),
+      });
     state.status = 'active';
     state.rounds = 0;
     logger.info(`[codex-remediation] re-armed closed-tombstoned PR #${prNumber}: PR observed open again (reopened)`);
@@ -1128,9 +1484,25 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
       }
       return { skipped: true, reason: 'parked' };
     }
-    await saveState(db, prNumber, { status: 'active', rounds: 0, park_reason: null, parked_head_sha: null });
+    // Fresh rounds are the reward for a NEW head — a human or agent pushed
+    // something new, so the loop gets another budget to carry it. The
+    // stale-'moved past' contradiction re-arm is NOT that: the head is
+    // unchanged and its round really was spent, so resetting the counter there
+    // hands out unlimited rounds on one head AND (now that last_push_sha is
+    // written at push time) leaves the P2 bar reading rounds=0 with
+    // last_push_sha == head, i.e. "no remediation round spent yet" forever.
+    // That combination is exactly how astro #409 spent two rounds and still
+    // reported none. Keep the count on a same-head re-arm.
+    const rearmRounds = staleMovedPastPark ? (state.rounds || 0) : 0;
+    await saveState(db, prNumber, {
+      status: 'active', rounds: rearmRounds, park_reason: null, parked_head_sha: null,
+      // Clear the phase with the rest of the park verdict — a stale 'post_push'
+      // left behind would keep the merge bar shut for a head this row no longer
+      // has a verdict on.
+      park_phase: null,
+    });
     state.status = 'active';
-    state.rounds = 0;
+    state.rounds = rearmRounds;
     logger.info(staleMovedPastPark
       ? `[codex-remediation] re-armed parked PR #${prNumber}: 'moved past' park contradicted — the branch head IS the parked push ${currentHead.slice(0, 7)} (stale read at park time)`
       : `[codex-remediation] re-armed parked PR #${prNumber}: head advanced ${parkedHead ? `${parkedHead.slice(0, 7)} → ` : ''}${currentHead.slice(0, 7)}`);
@@ -1144,6 +1516,32 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
     // the re-review request actually landed (recovers from a failed
     // createIssueComment on a prior tick); then wait.
     if (state.status === 'remediating') {
+      // NO sync replay here, deliberately. A real-SHA hold on a 'remediating' row
+      // is ambiguous: it can mean the release write failed after a COMPLETED sync,
+      // or that the process died after the push bookkeeping and BEFORE the sync ran
+      // at all. Replaying blindly cannot tell those apart — the earlier attempt at
+      // one had to pass datesRestamped:false and an empty frontmatterChanges (so
+      // scheduler rows kept stale meta/hero/date columns) and, for autonomous PRs
+      // where slug is null, resolved no markdown yet still cleared the hold. That
+      // turned a safe stalled merge into a silent stale-content publish.
+      //
+      // So the hold stands until a real round syncs and clears it. releaseSyncHold's
+      // bounded retry absorbs the transient blip this was meant to cover; a
+      // sustained failure leaves the hold for a human, which blocks a merge rather
+      // than shipping unreconciled content. Logged at warn so it is visible rather
+      // than mysterious.
+      const pendingSha = String(state.sync_pending_sha || '').trim().toLowerCase();
+      const syncedSha = String(state.synced_sha || '').trim().toLowerCase();
+      if (pendingSha && syncedSha && syncedSha === pendingSha) {
+        // Not ambiguous: the sync for THIS commit is recorded as complete, so only
+        // the release write was lost. Clear the hold — nothing to replay, nothing
+        // to infer. This is the automatic recovery the marker exists for.
+        if (await releaseSyncedHoldCas(db, prNumber, pendingSha)) {
+          logger.info(`[codex-remediation] released a stuck sync hold on PR #${prNumber}: the sync for ${shortSha(pendingSha)} was already recorded complete`);
+        }
+      } else if (pendingSha) {
+        logger.warn(`[codex-remediation] PR #${prNumber} still holds an unfinished portal sync (${pendingSha === SYNC_PENDING_PUSH_IN_FLIGHT ? 'push in flight' : shortSha(pendingSha)}) while awaiting re-review — merges stay blocked until a round completes the sync, or clear it by hand after reconciling the portal row`);
+      }
       const issueComments = await gh.listIssueComments(prNumber);
       if (!reviewRequestedForHead(issueComments, headSha)) {
         await gh.createIssueComment(prNumber, buildReviewRequestBody(headSha));
@@ -1168,14 +1566,14 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
 
   // Fresh findings on the current head.
   if (atRoundLimit(state.rounds)) {
-    return park(db, prNumber, `exhausted ${MAX_ROUNDS} remediation rounds`, onPark, headSha);
+    return park(db, prNumber, `exhausted ${MAX_ROUNDS} remediation rounds`, onPark, headSha, PARK_PRE_PUSH);
   }
 
   const targetPath = pickTargetPath(findings, slug);
-  if (!targetPath) return park(db, prNumber, 'could not resolve target markdown file', onPark, headSha);
+  if (!targetPath) return park(db, prNumber, 'could not resolve target markdown file', onPark, headSha, PARK_PRE_PUSH);
 
   const file = await gh.getFile(targetPath, branch);
-  if (!file || !file.content) return park(db, prNumber, `file not found on branch: ${targetPath}`, onPark, headSha);
+  if (!file || !file.content) return park(db, prNumber, `file not found on branch: ${targetPath}`, onPark, headSha, PARK_PRE_PUSH);
 
   // Deterministic date-restamp carve-out: resolve date-stamp findings in code
   // (today ET), and only send the REMAINING findings to the body-only LLM fix.
@@ -1206,11 +1604,11 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
     // round limit so the PR reaches human review instead of looping.
     const attempt = (state.rounds || 0) + 1;
     await saveState(db, prNumber, { branch, rounds: attempt });
-    if (atRoundLimit(attempt)) return park(db, prNumber, 'LLM produced no valid fix after max attempts', onPark, headSha);
+    if (atRoundLimit(attempt)) return park(db, prNumber, 'LLM produced no valid fix after max attempts', onPark, headSha, PARK_PRE_PUSH);
     return { skipped: true, reason: 'no valid LLM fix (will retry)' };
   }
   if (fixed.trim() === String(file.content).trim()) {
-    return park(db, prNumber, 'remediation produced no change (likely false-positive findings)', onPark, headSha);
+    return park(db, prNumber, 'remediation produced no change (likely false-positive findings)', onPark, headSha, PARK_PRE_PUSH);
   }
   // Frontmatter is immutable during remediation outside the validated
   // meta_description / hero_image.alt whitelist — any other added/removed/
@@ -1221,7 +1619,7 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   // whitelist are the ONLY frontmatter deltas that can ever pass.
   const fmDelta = frontmatterFixViolation(baseline, fixed, findings);
   if (fmDelta.violation) {
-    return park(db, prNumber, `fix changed frontmatter beyond the whitelist: ${fmDelta.violation}`, onPark, headSha);
+    return park(db, prNumber, `fix changed frontmatter beyond the whitelist: ${fmDelta.violation}`, onPark, headSha, PARK_PRE_PUSH);
   }
   // Scheduler-lane metadata quality re-check (the autonomous lane covers
   // this inside revalidateFix — validateAutonomousRunGates swaps the
@@ -1229,7 +1627,7 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   if (typeof revalidateFix !== 'function' && fmDelta.changed.meta_description !== undefined) {
     const metaVerdict = validateRewrittenMeta(fmDelta.changed.meta_description, factContext, deps);
     if (!metaVerdict.ok) {
-      return park(db, prNumber, `rewritten meta_description failed metadata quality checks: ${metaVerdict.reason}`, onPark, headSha);
+      return park(db, prNumber, `rewritten meta_description failed metadata quality checks: ${metaVerdict.reason}`, onPark, headSha, PARK_PRE_PUSH);
     }
   }
   // The frozen frontmatter must still DESCRIBE the fixed body: schema_types is
@@ -1238,7 +1636,7 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   // content that isn't there. Park — restamping schema is a human call.
   const schemaChanged = deps.schemaShapeChanged || schemaShapeChanged;
   if (schemaChanged(file.content, fixed, deps)) {
-    return park(db, prNumber, 'fix changes the body-derived schema types (frontmatter schema is frozen)', onPark, headSha);
+    return park(db, prNumber, 'fix changes the body-derived schema types (frontmatter schema is frozen)', onPark, headSha, PARK_PRE_PUSH);
   }
   // An un-interpolated {{token}} in an .mdx body crashes the MDX compile —
   // publishOrUpdatePage blocks these before opening a PR (astro-publisher
@@ -1249,22 +1647,22 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
     if (!tokenOf) {
       try { tokenOf = require('../content-astro/astro-publisher')._internals.mdxBreakingToken; } catch (_) { tokenOf = null; }
     }
-    if (typeof tokenOf !== 'function') return park(db, prNumber, 'mdx token guard unavailable (fail closed)', onPark, headSha);
+    if (typeof tokenOf !== 'function') return park(db, prNumber, 'mdx token guard unavailable (fail closed)', onPark, headSha, PARK_PRE_PUSH);
     let token = null;
-    try { token = tokenOf(String((fm.parse(fixed) || {}).content || '')); } catch (e) { return park(db, prNumber, `mdx token guard failed: ${e.message}`, onPark, headSha); }
-    if (token) return park(db, prNumber, `fix introduces an MDX-breaking token (${token})`, onPark, headSha);
+    try { token = tokenOf(String((fm.parse(fixed) || {}).content || '')); } catch (e) { return park(db, prNumber, `mdx token guard failed: ${e.message}`, onPark, headSha, PARK_PRE_PUSH); }
+    if (token) return park(db, prNumber, `fix introduces an MDX-breaking token (${token})`, onPark, headSha, PARK_PRE_PUSH);
   }
 
   // Re-run the publisher's content-safety gates on the fix before committing —
   // a fix that fails them is worse than the original finding, so park it.
   const validate = deps.validateFixedBlogFile || validateFixedBlogFile;
   const gate = await validate(fixed, { service, factContext, operatorFaqException, guardContext }, deps);
-  if (!gate || !gate.ok) return park(db, prNumber, `fix failed content gates: ${gate && gate.reason}`, onPark, headSha);
+  if (!gate || !gate.ok) return park(db, prNumber, `fix failed content gates: ${gate && gate.reason}`, onPark, headSha, PARK_PRE_PUSH);
   // A passing fix that INTRODUCES a named-competitor comparison still needs a
   // human: the merge stamps enforcing that sign-off (astro_requires_human_merge
   // / named_competitor_review) predate the fix and are never restamped here.
   if (gate.requiresHumanReview === true) {
-    return park(db, prNumber, 'fix introduces named-competitor content (requires human sign-off)', onPark, headSha);
+    return park(db, prNumber, 'fix introduces named-competitor content (requires human sign-off)', onPark, headSha, PARK_PRE_PUSH);
   }
 
   // Lane-specific gate re-run (autonomous lane: uniqueness / quality /
@@ -1273,7 +1671,7 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
     let recheck;
     try { recheck = await revalidateFix(fixed); } catch (e) { recheck = { ok: false, reason: e.message }; }
     if (!recheck || recheck.ok !== true) {
-      return park(db, prNumber, `fix failed lane gates: ${(recheck && recheck.reason) || 'no result'}`, onPark, headSha);
+      return park(db, prNumber, `fix failed lane gates: ${(recheck && recheck.reason) || 'no result'}`, onPark, headSha, PARK_PRE_PUSH);
     }
   }
 
@@ -1295,19 +1693,83 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   // A false return means markPrTerminal won (the PR merged/closed while
   // this round was in flight) — stop BEFORE gh.putFile so we never push
   // fixes to a branch whose PR already left the open state.
-  const armed = await saveState(db, prNumber, { branch, status: 'remediating' });
+  // The sync hold is taken BEFORE the push, not after it. gh.putFile returning
+  // and the bookkeeping write are two steps: a process death (or a deploy) in
+  // between used to leave the row merely 'remediating' with no hold, and the
+  // recovery branch only re-requests review — it never re-runs onRemediated. A
+  // subsequent clean review would then merge via the normal path with
+  // blog_posts.content still pre-fix, and a later republish resurrects it.
+  // SYNC_PENDING_PUSH_IN_FLIGHT is a non-SHA sentinel; the bar blocks on ANY
+  // non-empty value, so the hold is live from here on.
+  const armed = await armPushHold(db, prNumber, branch, headSha);
   if (!armed) return { skipped: true, reason: 'pr left the open state during remediation (terminal row)' };
 
-  const commit = await gh.putFile({
-    path: targetPath,
-    content: fixed,
-    message: `fix(blog): address Codex review findings (round ${round})`,
-    branch,
-    sha: file.sha,
-  });
+  let commit;
+  try {
+    commit = await gh.putFile({
+      path: targetPath,
+      content: fixed,
+      message: `fix(blog): address Codex review findings (round ${round})`,
+      branch,
+      sha: file.sha,
+    });
+  } catch (e) {
+    // A putFile throw is AMBIGUOUS — GitHub may have committed the write and
+    // failed the response — and a ref read taken immediately afterwards can
+    // still serve the OLD head (the same read-after-write staleness the
+    // post-push checks already defend against). So one unchanged-ref read is
+    // NOT proof nothing landed, and clearing the hold on it would drop the
+    // all-paths merge guard for a commit that later turns out to exist.
+    //
+    // Keep the sentinel on every failure and let syncPendingHold's aged
+    // reconciliation resolve it: once it has sat untouched past
+    // STALE_IN_FLIGHT_MS *and* the ref still reports the pre-push head, the
+    // release is safe. That path already exists, so this one only has to avoid
+    // being clever.
+    logger.warn(`[codex-remediation] fix push failed for PR #${prNumber} — keeping the in-flight sync hold (a commit may have landed despite the error; the aged-sentinel check will release it if not): ${e.message}`);
+    throw e;
+  }
   const newHead = (commit && commit.commit && commit.commit.sha)
     || (commit && commit.content && commit.content.sha)
     || (await gh.getBranchSha(branch));
+
+  // Record the round the INSTANT the push lands, before any post-push
+  // revalidation that can park. Previously this lived at the end of the
+  // function, so every park between here and there discarded the fact that a
+  // round had run at all: rounds stayed 0 and last_push_sha stayed null even
+  // though a commit was on the branch. astro #409 burned two full LLM rounds
+  // that way — a stale getPr read parked it "moved past" its own push, the
+  // contradiction check re-armed it with rounds reset to 0, and both fix
+  // commits ended up labelled "round 1" while the P2 bar saw no round spent
+  // and no pushed commit forever.
+  //
+  // Two invariants this restores: round accounting BOUNDS LLM spend (an
+  // unrecorded round is a free retry, so the MAX_ROUNDS ceiling never
+  // arrives), and last_push_sha is the bar's proof the loop improved this
+  // head — which is true as soon as the commit exists, not once the sync
+  // finishes. Divergence from a post-push park is held by isPostPushPark at
+  // the bar, not by withholding the bookkeeping.
+  //
+  // sync_pending_sha is UPGRADED here from the pre-push sentinel to the real
+  // commit, so the hold names the commit that owes a sync. The hold itself has
+  // been live since before the push, which is what makes a crash in this window
+  // safe. The success path clears it once onRemediated returns.
+  //
+  // The return value is load-bearing, exactly as it is for the pre-push save: a
+  // false means markPrTerminal won the race and the row is already merged/closed.
+  // Continuing would let a stale GitHub read pass the revalidation below and
+  // hand onRemediated a fix commit that never entered main, mirroring it into
+  // portal state that nothing re-checks. Stop here instead.
+  const recorded = await saveState(db, prNumber, {
+    rounds: round,
+    last_push_sha: newHead || null,
+    last_findings: JSON.stringify(findings),
+    sync_pending_sha: newHead || null,
+  });
+  if (!recorded) {
+    logger.warn(`[codex-remediation] PR #${prNumber} left the open state during the fix push — skipping post-commit sync (fix commit ${shortSha(newHead)} may not be in main)`);
+    return { skipped: true, reason: 'pr left the open state during remediation (terminal row at push-time bookkeeping)' };
+  }
 
   // Post-push revalidation: the PR can merge/close in the window between the
   // pre-push saveState and gh.putFile. The push itself is then inert (the
@@ -1343,7 +1805,7 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
         // pushed head, so the parked row re-arms on the very next blocked
         // tick (branch head ≠ parked head) and remediation re-evaluates the
         // newer content with fresh rounds instead of going silent.
-        return park(db, prNumber, `pr head moved past the remediation push (${shortSha(newHead)} → ${shortSha(refHead || fresh.head.sha)}); sync withheld`, onPark, newHead);
+        return park(db, prNumber, `pr head moved past the remediation push (${shortSha(newHead)} → ${shortSha(refHead || fresh.head.sha)}); sync withheld`, onPark, newHead, PARK_POST_PUSH);
       }
       // The ref confirms our push IS the branch head — but the snapshot that
       // misreported the head may misreport PR state too (a close landing
@@ -1365,7 +1827,7 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
       // contradiction check (the ref will again confirm our push is the tip).
       if (!recheck.head?.sha
         || String(recheck.head.sha).trim().toLowerCase() !== String(newHead).trim().toLowerCase()) {
-        return park(db, prNumber, `pr head moved past the remediation push (${shortSha(newHead)} → ${shortSha(recheck.head?.sha)}); sync withheld`, onPark, newHead);
+        return park(db, prNumber, `pr head moved past the remediation push (${shortSha(newHead)} → ${shortSha(recheck.head?.sha)}); sync withheld`, onPark, newHead, PARK_POST_PUSH);
       }
       // Open AND at our head on the re-read → proceed with the round.
     }
@@ -1377,7 +1839,7 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
     // it cannot re-run the sync — so park instead: sync withheld, the lane's
     // onPark disarms/annotates, and a human (or a re-arm on a new head)
     // reconciles. Stamped with newHead so our own push can't self-re-arm.
-    return park(db, prNumber, `post-push PR revalidation failed (fix commit ${shortSha(newHead)} pushed, sync withheld): ${e.message}`, onPark, newHead || headSha);
+    return park(db, prNumber, `post-push PR revalidation failed (fix commit ${shortSha(newHead)} pushed, sync withheld): ${e.message}`, onPark, newHead || headSha, PARK_POST_PUSH);
   }
 
   // Lane-specific post-commit sync (scheduler lane: mirror the fixed body into
@@ -1394,14 +1856,25 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
       // is already on the branch, so a headSha stamp would make the re-arm
       // logic read our own push as "head advanced" next tick and un-park the
       // exact divergence this park exists to hold for a human.
-      return park(db, prNumber, `portal row sync failed after fix commit ${shortSha(newHead)}: ${e.message}`, onPark, newHead || headSha);
+      return park(db, prNumber, `portal row sync failed after fix commit ${shortSha(newHead)}: ${e.message}`, onPark, newHead || headSha, PARK_POST_PUSH);
     }
   }
 
-  // last_push_sha is the P2-only merge bar's proof that a remediation round
-  // actually PUSHED (round 9) — only this success path may write it; the
-  // no-valid-fix retry path spends rounds without it.
-  await saveState(db, prNumber, { rounds: round, last_push_sha: newHead || null, last_findings: JSON.stringify(findings) });
+  // The sync (if this lane has one) completed, so the pushed commit no longer
+  // owes one — release the divergence hold that the push-time write took. This
+  // is the ONLY place it is cleared: every other exit above left the branch
+  // mutated with the portal row unreconciled.
+  //
+  // A transient failure here would leave a real-SHA hold, which has no age-based
+  // reconciliation, on a PR whose content IS synced — blocking every merge path
+  // forever. Retry a few times to absorb a blip; if it still fails, the recovery
+  // branch above re-runs the (idempotent) sync and re-clears on a later tick, so
+  // this is no longer terminal.
+  await releaseSyncHold(db, prNumber, newHead);
+
+  // Round bookkeeping (rounds / last_push_sha / last_findings) was already
+  // written at push time above — a park between the push and here must not
+  // discard it. All that remains is asking Codex to review the new head.
   await gh.createIssueComment(prNumber, buildReviewRequestBody(newHead));
 
   logger.info(`[codex-remediation] round ${round} pushed for PR #${prNumber}: ${findings.length} finding(s) → ${shortSha(newHead)}`);
@@ -1504,6 +1977,61 @@ async function maybeRemediateBlogPost(post, deps = {}) {
   }, deps);
 }
 
+/**
+ * Mirror whitelisted frontmatter fixes into an autonomous run's draft_payload.
+ *
+ * The poller's finalize path reads draft_payload.frontmatter.meta_description as
+ * the social-share excerpt, so an unmirrored fix posts the exact snippet Codex
+ * flagged. This lane is fail-SOFT (unlike the scheduler lane's row sync, where a
+ * throw parks): a caption is not worth parking a pushed fix over.
+ *
+ * The documented degradation is a title-only card — but that only fires on an
+ * ABSENT excerpt. So when the mirror write fails, the STALE description is
+ * removed rather than left in place, which is what makes the claimed fallback
+ * real instead of publishing pre-fix copy. Never throws.
+ */
+async function mirrorFrontmatterToDraftPayload(db, runId, prNumber, frontmatterChanges) {
+  if (!frontmatterChanges
+    || (frontmatterChanges.meta_description === undefined && frontmatterChanges.hero_alt === undefined)) return;
+  try {
+    const fresh = await db('autonomous_runs').where({ id: runId }).first();
+    if (!fresh || !fresh.draft_payload) return;
+    const payload = typeof fresh.draft_payload === 'string' ? JSON.parse(fresh.draft_payload) : fresh.draft_payload;
+    if (!payload || typeof payload !== 'object') return;
+    payload.frontmatter = payload.frontmatter && typeof payload.frontmatter === 'object' ? payload.frontmatter : {};
+    if (frontmatterChanges.meta_description !== undefined) {
+      payload.frontmatter.meta_description = frontmatterChanges.meta_description;
+    }
+    if (frontmatterChanges.hero_alt !== undefined) {
+      payload.frontmatter.hero_image = {
+        ...(payload.frontmatter.hero_image && typeof payload.frontmatter.hero_image === 'object' ? payload.frontmatter.hero_image : {}),
+        alt: frontmatterChanges.hero_alt,
+      };
+    }
+    await db('autonomous_runs').where({ id: runId }).update({
+      draft_payload: JSON.stringify(payload),
+      updated_at: new Date(),
+    });
+  } catch (e) {
+    logger.warn(`[codex-remediation] draft_payload mirror failed for PR #${prNumber}: ${e.message} — clearing the stale excerpt so the share degrades to title-only`);
+    if (frontmatterChanges.meta_description === undefined) return;
+    try {
+      const again = await db('autonomous_runs').where({ id: runId }).first();
+      const payload = typeof again?.draft_payload === 'string' ? JSON.parse(again.draft_payload) : again?.draft_payload;
+      if (!payload || typeof payload !== 'object' || !payload.frontmatter
+        || typeof payload.frontmatter !== 'object'
+        || payload.frontmatter.meta_description === undefined) return;
+      delete payload.frontmatter.meta_description;
+      await db('autonomous_runs').where({ id: runId }).update({
+        draft_payload: JSON.stringify(payload),
+        updated_at: new Date(),
+      });
+    } catch (inner) {
+      logger.warn(`[codex-remediation] could not clear the stale excerpt for PR #${prNumber}: ${inner.message} — the social share may use the pre-fix description`);
+    }
+  }
+}
+
 /** Autonomous lane (autonomous-pr-poller): a run with a live PR, no blog_posts row. */
 async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
   if (!remediationEnabled()) return { skipped: true, reason: 'disabled' };
@@ -1581,32 +2109,9 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
     // lane's row sync (runRemediationForPr parks when onRemediated throws):
     // a stale caption degrades to the title-only fallback, never a wrong
     // route — not worth parking a pushed fix over, so failures only warn.
-    onRemediated: run && run.id ? async ({ frontmatterChanges }) => {
-      if (!frontmatterChanges
-        || (frontmatterChanges.meta_description === undefined && frontmatterChanges.hero_alt === undefined)) return;
-      try {
-        const fresh = await db('autonomous_runs').where({ id: run.id }).first();
-        if (!fresh || !fresh.draft_payload) return;
-        const payload = typeof fresh.draft_payload === 'string' ? JSON.parse(fresh.draft_payload) : fresh.draft_payload;
-        if (!payload || typeof payload !== 'object') return;
-        payload.frontmatter = payload.frontmatter && typeof payload.frontmatter === 'object' ? payload.frontmatter : {};
-        if (frontmatterChanges.meta_description !== undefined) {
-          payload.frontmatter.meta_description = frontmatterChanges.meta_description;
-        }
-        if (frontmatterChanges.hero_alt !== undefined) {
-          payload.frontmatter.hero_image = {
-            ...(payload.frontmatter.hero_image && typeof payload.frontmatter.hero_image === 'object' ? payload.frontmatter.hero_image : {}),
-            alt: frontmatterChanges.hero_alt,
-          };
-        }
-        await db('autonomous_runs').where({ id: run.id }).update({
-          draft_payload: JSON.stringify(payload),
-          updated_at: new Date(),
-        });
-      } catch (e) {
-        logger.warn(`[codex-remediation] draft_payload mirror failed for PR #${pr && pr.number}: ${e.message} — social caption may use the pre-fix value`);
-      }
-    } : null,
+    onRemediated: run && run.id
+      ? ({ frontmatterChanges }) => mirrorFrontmatterToDraftPayload(db, run.id, pr && pr.number, frontmatterChanges)
+      : null,
     // Re-run the runner's publish gates on the rewritten body before it can
     // commit — the run's uniqueness/quality/SEO/visibility verdicts covered
     // the ORIGINAL body only. Missing run row fails closed inside (parks).
@@ -1634,12 +2139,15 @@ module.exports = {
   schemaShapeChanged,
   isDateStampFinding,
   restampFrontmatterDates,
-  _internals: { saveState, getState },
+  _internals: { saveState, getState, park, PARK_PRE_PUSH, PARK_POST_PUSH },
   stripCodeFence,
   atRoundLimit,
   remediationEnabled,
   p2MergeEnabled,
   p2OnlyMergeEligible,
+  syncPendingHold,
+  mirrorFrontmatterToDraftPayload,
   findingSeverity,
+  isPostPushPark,
   MAX_ROUNDS,
 };

@@ -912,3 +912,101 @@ describe('checkMetaDescriptionComplete — refresh target typing (Codex round 12
     expect(camel.ok).toBe(true);
   });
 });
+
+// Tree & shrub has no hub-level page, so SERVICE_HUB_LINKS['tree-shrub'] is empty
+// and the union check can never satisfy it. Without the hubless carve-out EVERY
+// tree/shrub supporting blog parked on hub_link_present — including city-scoped
+// drafts that followed their brief exactly.
+describe('checkHubLinkPresent — hubless verticals accept their city-service page', () => {
+  const gate = require('../services/content/content-quality-gate');
+  const run = (body, brief) => gate._internals.checkHubLinkPresent({ body }, brief);
+
+  test('a tree-shrub draft linking its city page passes', () => {
+    const body = 'Palms in Venice need care — see our [tree and shrub care in Venice](/tree-and-shrub-care-venice-fl/) page.';
+    expect(run(body, { service: 'tree-shrub', page_type: 'supporting-blog' }).ok).toBe(true);
+  });
+
+  test('the alias spelling resolves too', () => {
+    const body = 'See [our page](/tree-and-shrub-care-sarasota-fl/).';
+    expect(run(body, { service: 'tree-shrub-care', page_type: 'supporting-blog' }).ok).toBe(true);
+  });
+
+  test('a tree-shrub draft with NO city page and no hub link still fails', () => {
+    const body = 'Generic advice with only a [contact link](/contact/).';
+    expect(run(body, { service: 'tree-shrub', page_type: 'supporting-blog' }).ok).toBe(false);
+  });
+
+  test('a vertical that HAS a hub page cannot substitute a city page', () => {
+    // pest has real hub links, so the carve-out must not apply to it.
+    const body = 'Only a city link here: [pest control in Venice](/pest-control-venice-fl/).';
+    expect(run(body, { service: 'pest', page_type: 'supporting-blog' }).ok).toBe(false);
+    const withHub = `${body} And our [services](/pest-control-services/).`;
+    expect(run(withHub, { service: 'pest', page_type: 'supporting-blog' }).ok).toBe(true);
+  });
+
+  test('a curated operator hub link still wins outright', () => {
+    const brief = { service: 'tree-shrub', page_type: 'supporting-blog', voice_constraints: { operator_brief: { hub_link: '/pest-control-sarasota-fl/' } } };
+    expect(run('no links at all', brief).ok).toBe(false);
+    expect(run('see [here](/pest-control-sarasota-fl/)', brief).ok).toBe(true);
+  });
+});
+
+// Lawn joined tree-shrub as hubless once the gate went service-specific: its only
+// entry was a Manatee-county fertilizer guide, which is the wrong required link for
+// a Sarasota or non-fertilizer lawn topic and nudges county-specific dates into the
+// wrong locale.
+describe('checkHubLinkPresent — lawn is hubless and uses its city page', () => {
+  const gate = require('../services/content/content-quality-gate');
+  const run = (body, brief) => gate._internals.checkHubLinkPresent({ body }, brief);
+
+  test('a lawn draft linking its city page passes', () => {
+    const body = 'Sarasota lawns differ — see [lawn care in Sarasota](/lawn-care-sarasota-fl/).';
+    expect(run(body, { service: 'lawn', page_type: 'supporting-blog' }).ok).toBe(true);
+    expect(run(body, { service: 'lawn-care', page_type: 'supporting-blog' }).ok).toBe(true);
+  });
+
+  test('the Manatee blackout guide alone no longer satisfies a lawn topic', () => {
+    const body = 'See the [fertilizer blackout guide](/lawn-care/fertilizer-blackout-manatee-county/).';
+    expect(run(body, { service: 'lawn', page_type: 'supporting-blog' }).ok).toBe(false);
+  });
+
+  test('it is still an allowed LINK, just not a mandated hub', () => {
+    const guardrails = require('../services/content/content-guardrails');
+    expect(guardrails.ALLOWED_INTERNAL_LINKS).toContain('/lawn-care/fertilizer-blackout-manatee-county/');
+    const r = guardrails.evaluate({ body: 'Manatee dates: [blackout guide](/lawn-care/fertilizer-blackout-manatee-county/).' }, {});
+    expect(r.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
+  });
+});
+
+// Right service, WRONG town must not satisfy either gate: a Sarasota lawn brief
+// linking /lawn-care-venice-fl/ used to pass both, because the service prefix matched
+// and the generic city-reason check only looks at URL shape.
+describe('the stand-in city link must match the brief CITY too', () => {
+  const gate = require('../services/content/content-quality-gate');
+  const hub = (body, brief) => gate._internals.checkHubLinkPresent({ body }, brief);
+
+  test('quality gate: wrong town fails, right town passes', () => {
+    const brief = { service: 'lawn', city: 'Sarasota', page_type: 'supporting-blog' };
+    expect(hub('See [Venice lawn care](/lawn-care-venice-fl/).', brief).ok).toBe(false);
+    expect(hub('See [Sarasota lawn care](/lawn-care-sarasota-fl/).', brief).ok).toBe(true);
+  });
+
+  test('quality gate: a city-less brief still accepts any of its city pages', () => {
+    const brief = { service: 'lawn', page_type: 'supporting-blog' };
+    expect(hub('See [Venice lawn care](/lawn-care-venice-fl/).', brief).ok).toBe(true);
+  });
+
+  test('quality gate: multi-word cities slugify correctly', () => {
+    const brief = { service: 'tree-shrub', city: 'Lakewood Ranch', page_type: 'supporting-blog' };
+    expect(hub('See [our page](/tree-and-shrub-care-lakewood-ranch-fl/).', brief).ok).toBe(true);
+    expect(hub('See [our page](/tree-and-shrub-care-venice-fl/).', brief).ok).toBe(false);
+  });
+
+  test('cityServiceRoute builds the shared expectation', () => {
+    const { cityServiceRoute } = require('../services/content/blog-seo-contract');
+    expect(cityServiceRoute('lawn', 'Sarasota')).toBe('/lawn-care-sarasota-fl/');
+    expect(cityServiceRoute('tree-shrub', 'Lakewood Ranch')).toBe('/tree-and-shrub-care-lakewood-ranch-fl/');
+    expect(cityServiceRoute('lawn', null)).toBeNull();
+    expect(cityServiceRoute('specialty', 'Sarasota')).toBeNull(); // no city-service slug
+  });
+});

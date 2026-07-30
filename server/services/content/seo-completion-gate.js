@@ -12,6 +12,10 @@ const {
   buildSeoRequirements,
   extractVisibleFaqs,
   pestPracticesComplete,
+  hublessService,
+  normalizeService,
+  CITY_SERVICE_SLUG,
+  cityServiceRoute,
 } = require('./blog-seo-contract');
 const { isFaqBlockedService, findHardcodedPrice } = require('./content-guardrails');
 
@@ -99,7 +103,19 @@ function evaluate(input = {}) {
   if (requirements.articleSchemaRequired && contract.schema?.article !== true) {
     findings.push(finding('P1', 'P1_MISSING_ARTICLE_SCHEMA', 'Article or BlogPosting schema is not requested.', 'Include Article or BlogPosting structured data for the blog post.'));
   }
-  if (brief.service && !hasIncludedLinkReason(contract, 'service')) {
+  // Lawn and tree & shrub have no hub-level service page, so their city-service
+  // page is the most specific real page they have and satisfies BOTH requirements.
+  // Without this a fully compliant draft raises P1_MISSING_SERVICE_LINK forever,
+  // and with AUTONOMOUS_CONTENT_MAX_P1_FINDINGS=0 it can never publish.
+  //
+  // The link must be THIS service's city page, not any city-shaped URL:
+  // hasIncludedLinkReason only classifies by shape, so a lawn draft linking
+  // /pest-control-sarasota-fl/ would otherwise satisfy the lawn service
+  // requirement while containing no lawn link at all. Same specificity
+  // checkHubLinkPresent applies.
+  const serviceSatisfiedByCity = hublessService(normalizeService(brief.service))
+    && hasServiceCityLink(contract, brief);
+  if (brief.service && !hasIncludedLinkReason(contract, 'service') && !serviceSatisfiedByCity) {
     findings.push(finding('P1', 'P1_MISSING_SERVICE_LINK', 'Required service link is not included in the draft body.', 'Add one relevant service/hub link using descriptive anchor text.'));
   }
   if (brief.city && !hasIncludedLinkReason(contract, 'city')) {
@@ -195,6 +211,33 @@ function hasCode(findings, code) {
 function hasLinkReason(contract, reason) {
   return Array.isArray(contract.internalLinks)
     && contract.internalLinks.some((link) => link.reason === reason);
+}
+
+/**
+ * Is one of the draft's links THIS brief's own city-service page?
+ *
+ * Stricter than hasIncludedLinkReason(contract, 'city'), which classifies purely by
+ * URL shape — so /pest-control-sarasota-fl/ counts as "a city link" in a lawn
+ * draft. Used where the city page has to stand in for the service link, which is
+ * only true when it is the right service's page.
+ */
+function hasServiceCityLink(contract, brief) {
+  if (!Array.isArray(contract.includedInternalLinks)) return false;
+  const service = normalizeService(brief.service);
+  // Prefer the exact service+city route. Matching the service prefix alone let a
+  // Sarasota lawn brief pass on /lawn-care-venice-fl/ — right service, wrong town.
+  const exact = cityServiceRoute(service, brief.city);
+  if (exact) {
+    const want = exact.replace(/\/$/, '');
+    return contract.includedInternalLinks
+      .some((link) => String(link.url || '').replace(/\/$/, '') === want);
+  }
+  // No city on the brief: nothing to match against, so any of this service's city
+  // pages is as specific as the brief itself is.
+  const slug = CITY_SERVICE_SLUG[service];
+  if (!slug) return false;
+  const anyCity = new RegExp(`^/${slug}-[a-z][a-z0-9-]*-fl/?$`);
+  return contract.includedInternalLinks.some((link) => anyCity.test(String(link.url || '')));
 }
 
 function hasIncludedLinkReason(contract, reason) {
