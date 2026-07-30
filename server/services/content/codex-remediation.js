@@ -259,6 +259,18 @@ async function p2OnlyMergeEligible(prNumber, headSha, deps = {}) {
   const parkedHead = String(state.parked_head_sha || '').trim().toLowerCase();
   const parkedOnThisHead = state.status === 'parked' && Boolean(parkedHead) && parkedHead === head;
 
+  // An UNSYNCED push of this head blocks unconditionally, whatever the park
+  // state says. This is a fact about the repository, not a verdict on a head, so
+  // unlike park_phase it deliberately survives a re-arm: the stale-'moved past'
+  // recovery clears the park, a later round can park PRE-push (round limit,
+  // no-change), and without this the bar would then see a pre-push park plus a
+  // last_push_sha matching the head and merge a commit whose portal row still
+  // holds the pre-fix body. Cleared only when a round completes its sync.
+  const syncPending = String(state.sync_pending_sha || '').trim().toLowerCase();
+  if (syncPending && syncPending === head) {
+    return { eligible: false, reason: `remediation push ${shortSha(syncPending)} has an unfinished portal sync (held for a human)` };
+  }
+
   // A branch-mutating park on THIS head holds unconditionally — including when
   // last_push_sha equals the head (it now always does for these, since the
   // round bookkeeping is written at push time). The park exists because portal
@@ -1417,13 +1429,22 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   // finishes. Divergence from a post-push park is held by isPostPushPark at
   // the bar, not by withholding the bookkeeping.
   //
+  // sync_pending_sha is stamped in the SAME write: from this instant the commit
+  // exists on the branch but its portal sync has not run, and every exit between
+  // here and the sync leaves it that way. Stamping it up front (rather than only
+  // in the park paths) means no exit — park, throw, or process death mid-round —
+  // can lose the fact. The success path clears it once onRemediated returns.
+  //
   // The return value is load-bearing, exactly as it is for the pre-push save: a
   // false means markPrTerminal won the race and the row is already merged/closed.
   // Continuing would let a stale GitHub read pass the revalidation below and
   // hand onRemediated a fix commit that never entered main, mirroring it into
   // portal state that nothing re-checks. Stop here instead.
   const recorded = await saveState(db, prNumber, {
-    rounds: round, last_push_sha: newHead || null, last_findings: JSON.stringify(findings),
+    rounds: round,
+    last_push_sha: newHead || null,
+    last_findings: JSON.stringify(findings),
+    sync_pending_sha: newHead || null,
   });
   if (!recorded) {
     logger.warn(`[codex-remediation] PR #${prNumber} left the open state during the fix push — skipping post-commit sync (fix commit ${shortSha(newHead)} may not be in main)`);
@@ -1518,6 +1539,12 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
       return park(db, prNumber, `portal row sync failed after fix commit ${shortSha(newHead)}: ${e.message}`, onPark, newHead || headSha, PARK_POST_PUSH);
     }
   }
+
+  // The sync (if this lane has one) completed, so the pushed commit no longer
+  // owes one — release the divergence hold that the push-time write took. This
+  // is the ONLY place it is cleared: every other exit above left the branch
+  // mutated with the portal row unreconciled.
+  await saveState(db, prNumber, { sync_pending_sha: null });
 
   // Round bookkeeping (rounds / last_push_sha / last_findings) was already
   // written at push time above — a park between the push and here must not

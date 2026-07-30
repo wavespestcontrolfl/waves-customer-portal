@@ -2600,3 +2600,97 @@ describe('push-time bookkeeping respects a terminal row', () => {
     expect(db._tables.codex_remediation_state.find((x) => x.pr_number === 5).status).toBe('merged');
   });
 });
+
+// An unsynced push is a fact about the repo, not a verdict on a head, so it must
+// outlive the park that noticed it. Codex's scenario: a post-push park withholds
+// onRemediated, the stale-'moved past' recovery clears the park, a later round
+// parks PRE-push on the same head, and the bar would then merge a commit whose
+// portal row still holds the pre-fix body.
+describe('sync_pending_sha survives re-arm and blocks the bar (codex P1)', () => {
+  const p2Body = (t) => `**<sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub>  ${t}**\n\nd`;
+  const allP2 = () => makeGh({ reviewComments: [finding({ body: p2Body('a') })], reviews: [codexReview()] });
+
+  test('a pre-push park on a head whose push never synced still blocks', async () => {
+    const db = makeDb({
+      codex_remediation_state: [{
+        pr_number: 5, rounds: 3, status: 'parked', parked_head_sha: HEAD,
+        park_phase: 'pre_push', park_reason: 'exhausted 3 remediation rounds',
+        last_push_sha: HEAD,
+        sync_pending_sha: HEAD, // withheld by an earlier post-push park
+      }],
+    });
+    const r = await rem.p2OnlyMergeEligible(5, HEAD, { db, gh: allP2() });
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toMatch(/unfinished portal sync/);
+  });
+
+  test('with the sync completed, the same row IS eligible', async () => {
+    const db = makeDb({
+      codex_remediation_state: [{
+        pr_number: 5, rounds: 3, status: 'parked', parked_head_sha: HEAD,
+        park_phase: 'pre_push', park_reason: 'exhausted 3 remediation rounds',
+        last_push_sha: HEAD, sync_pending_sha: null,
+      }],
+    });
+    const r = await rem.p2OnlyMergeEligible(5, HEAD, { db, gh: allP2() });
+    expect(r.eligible).toBe(true);
+  });
+
+  test('a pending sync for a DIFFERENT (superseded) head does not block', async () => {
+    const db = makeDb({
+      codex_remediation_state: [{
+        pr_number: 5, rounds: 1, status: 'remediating',
+        last_push_sha: HEAD, sync_pending_sha: 'oldpush000111',
+      }],
+    });
+    const r = await rem.p2OnlyMergeEligible(5, HEAD, { db, gh: allP2() });
+    expect(r.eligible).toBe(true);
+  });
+
+  test('the push-time write stamps it, and only a completed sync clears it', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    // Withheld sync (row-sync throw) → stamped and left set.
+    const withheld = makeDb();
+    await runRemediationForPr(
+      { ...CTX, onRemediated: async () => { throw new Error('row sync boom'); } },
+      { db: withheld, gh: makeGh(), callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS },
+    );
+    expect(withheld._tables.codex_remediation_state.find((x) => x.pr_number === 5).sync_pending_sha)
+      .toBe('newcommit999aaa');
+
+    // Completed sync → cleared.
+    const ok = makeDb();
+    const onRemediated = jest.fn();
+    const r = await runRemediationForPr({ ...CTX, onRemediated }, {
+      db: ok, gh: makeGh(), callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS,
+    });
+    expect(r.remediated).toBe(true);
+    expect(onRemediated).toHaveBeenCalled();
+    expect(ok._tables.codex_remediation_state.find((x) => x.pr_number === 5).sync_pending_sha ?? null).toBeNull();
+  });
+
+  test('a stale-moved-past re-arm clears the park but NOT the pending sync', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const db = makeDb({
+      codex_remediation_state: [{
+        pr_number: 5, rounds: 2, status: 'parked',
+        parked_head_sha: 'newcommit999aaa', last_push_sha: 'newcommit999aaa',
+        park_phase: 'post_push', sync_pending_sha: 'newcommit999aaa',
+        park_reason: 'pr head moved past the remediation push (newcomm → older1); sync withheld',
+      }],
+    });
+    // No findings for the re-armed head → the round no-ops, so nothing re-syncs.
+    const gh = makeGh({
+      reviewComments: [],
+      gh: { getPr: async () => ({ state: 'open', head: { sha: 'newcommit999aaa', ref: 'content/blog-x' } }) },
+    });
+    await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
+    const row = db._tables.codex_remediation_state.find((x) => x.pr_number === 5);
+    expect(row.park_phase ?? null).toBeNull();      // park verdict released
+    expect(row.sync_pending_sha).toBe('newcommit999aaa'); // divergence hold kept
+    // And the bar honors it on that head.
+    const r = await rem.p2OnlyMergeEligible(5, 'newcommit999aaa', { db, gh: allP2() });
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toMatch(/unfinished portal sync/);
+  });
+});
