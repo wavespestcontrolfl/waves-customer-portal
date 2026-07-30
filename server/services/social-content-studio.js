@@ -1509,6 +1509,7 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
       channels: plan.channels,
       imageUrl,
       gbpImageUrl,
+      gbpImageBranded: true, // deterministic card render — chrome carries the logo
       noAiImage: true, // brand card only — never a literal AI image
       gbpLocationIds: finalPreview.inputs?.locationId ? [finalPreview.inputs.locationId] : [locationForCity(plan.city).id],
     });
@@ -1725,6 +1726,7 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
         // publish AI imagery to GBP on approval. publishToAll posts GBP
         // text-only when the card is absent.
         gbpImageUrl: httpUrlOrNull(preview.visual?.gbpImageUrl),
+        gbpImageBranded: true, // stored deterministic card — already logo'd
         videoUrl: chosenVideoUrl,
         noAiImage: true, // stored visual only — never a fresh literal AI image
         gbpLocationIds: [gbpLocationId],
