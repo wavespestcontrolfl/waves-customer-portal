@@ -37,7 +37,7 @@ class ContextAggregator {
   // pick a different (or deleted) account that shares the number.
   async getContextForCustomer(customer) {
     // Parallel data fetch
-    const [smsHistory, serviceHistory, upcomingServices, propertyPrefs, payments, interactions, complaints, reschedules, pendingEstimate, activeCancelSave, compliance, recentCalls] = await Promise.all([
+    const [smsHistory, serviceHistory, upcomingServices, propertyPrefs, payments, interactions, complaints, reschedules, pendingEstimate, activeCancelSave, compliance, recentCalls, openInvoice] = await Promise.all([
       db('sms_log').where({ customer_id: customer.id }).orderBy('created_at', 'desc').limit(20),
       db('service_records').where({ customer_id: customer.id }).orderBy('service_date', 'desc').limit(5),
       db('scheduled_services as ss').leftJoin('technicians as tech', 'ss.technician_id', 'tech.id').where('ss.customer_id', customer.id).where('ss.scheduled_date', '>=', etDateString()).whereIn('ss.status', UPCOMING_SERVICE_STATUSES).orderBy('ss.scheduled_date').limit(3).select('ss.service_type', 'ss.scheduled_date', 'ss.window_display', 'ss.window_start', 'ss.window_end', 'ss.time_window', 'ss.status', 'tech.name as technician_name'),
@@ -52,6 +52,17 @@ class ContextAggregator {
       db('sms_sequences').where({ customer_id: customer.id, sequence_type: 'cancellation_save', status: 'active' }).first(),
       this.getCompliance(customer.id),
       this.getRecentCalls(customer.id),
+      // Newest invoice a customer could actually be asked about: unpaid and
+      // not voided. payer_id kept in the row — a third-party-billed invoice
+      // is a FACT the drafter needs (the customer cannot pay it), never a
+      // reason to hide it. Fail-soft like every other leg.
+      db('invoices').where({ customer_id: customer.id })
+        // draft = not yet sent — a customer has never seen it, so it must
+        // not ground a reply about "your invoice".
+        .whereNotIn('status', ['paid', 'prepaid', 'void', 'draft'])
+        .orderBy('created_at', 'desc')
+        .first('id', 'title', 'status', 'total', 'due_date', 'payer_id', 'created_at')
+        .catch(() => null),
     ]);
 
     const lastService = serviceHistory[0] || null;
@@ -85,12 +96,66 @@ class ContextAggregator {
       },
       smsHistory: smsHistory.map(m => ({ direction: m.direction, body: m.message_body, date: m.created_at, type: m.message_type })),
       lastService: lastService ? { type: lastService.service_type, date: lastService.service_date, notes: lastService.technician_notes } : null,
+      // v10 grounding: the last few visits with fuller notes + areas — "what
+      // did you do last time / the time before" is a routine customer text.
+      serviceHistory: serviceHistory.slice(0, 3).map(s => ({
+        type: s.service_type,
+        date: s.service_date,
+        notes: s.technician_notes || null,
+        areasServiced: Array.isArray(s.areas_serviced) ? s.areas_serviced : null,
+      })),
       upcomingServices: upcomingServices.map(s => ({ type: s.service_type, date: s.scheduled_date, window: this.deriveWindow(s), status: s.status, tech: s.technician_name || null, isToday: this.calendarDay(s.scheduled_date) === etDateString() })),
-      billing: { outstandingBalance: balance, recentPayments: payments.slice(0, 3) },
+      billing: {
+        outstandingBalance: balance,
+        recentPayments: payments.slice(0, 3),
+        // v10: real autopay state — invented "your card will be charged"
+        // claims were a live judge failure class; now the truth is on file.
+        autopay: {
+          enabled: Boolean(customer.autopay_enabled),
+          pausedUntil: customer.autopay_paused_until || null,
+          nextChargeDate: customer.next_charge_date || null,
+          billingDay: customer.billing_day || null,
+        },
+        // v10: the newest sent-and-unpaid invoice. payerBilled=true means a
+        // third party pays it — the customer cannot, and a draft must never
+        // ask them to.
+        openInvoice: openInvoice ? {
+          title: openInvoice.title || null,
+          status: openInvoice.status,
+          total: openInvoice.total != null ? parseFloat(openInvoice.total) : null,
+          dueDate: openInvoice.due_date || null,
+          payerBilled: Boolean(openInvoice.payer_id),
+        } : null,
+      },
+      // v10: pending estimate as a first-class fact (was only a flag detail).
+      pendingEstimate: pendingEstimate ? {
+        status: pendingEstimate.status,
+        monthlyTotal: pendingEstimate.monthly_total != null ? parseFloat(pendingEstimate.monthly_total) : null,
+        tier: pendingEstimate.waveguard_tier || null,
+        sentAt: pendingEstimate.created_at || null,
+      } : null,
       propertyPrefs: propertyPrefs || {},
+      // v10: property facts the drafter may draw on. Access CODES are
+      // presence-booleans ONLY — the values never enter a prompt (they would
+      // persist into facts_block rows and sealed-eval items; "it's on file"
+      // is the only customer-facing answer anyway).
+      propertyProfile: propertyPrefs ? {
+        pets: propertyPrefs.pet_details || null,
+        petsSecuredPlan: propertyPrefs.pets_secured_plan || null,
+        irrigation: Boolean(propertyPrefs.irrigation_system),
+        irrigationNotes: propertyPrefs.irrigation_schedule_notes || null,
+        hoaName: propertyPrefs.hoa_name || null,
+        hoaRestrictions: propertyPrefs.hoa_restrictions || null,
+        accessNotes: propertyPrefs.access_notes || null,
+        parkingNotes: propertyPrefs.parking_notes || null,
+        specialInstructions: propertyPrefs.special_instructions || null,
+        gateCodeOnFile: Boolean(propertyPrefs.property_gate_code || propertyPrefs.neighborhood_gate_code),
+        garageCodeOnFile: Boolean(propertyPrefs.garage_code),
+        lockboxOnFile: Boolean(propertyPrefs.lockbox_code),
+      } : null,
       flags, compliance,
       recentInteractions: interactions.slice(0, 5).map(i => ({ type: i.interaction_type, subject: i.subject, date: i.created_at })),
-      recentCalls: recentCalls.map(c => ({ summary: c.call_summary, direction: c.direction, outcome: c.call_outcome, date: c.created_at })),
+      recentCalls: recentCalls.map(c => ({ summary: c.call_summary, direction: c.direction, outcome: c.call_outcome, date: c.created_at, transcript: c.transcript || null })),
       summary,
     };
   }
@@ -105,7 +170,9 @@ class ContextAggregator {
     try {
       const rows = await db('call_log')
         .where({ customer_id: customerId })
-        .where('created_at', '>', new Date(Date.now() - 30 * 86400000))
+        // v10: 60-day window, 4 calls — customers reference calls older than
+        // a month ("when we talked last month about the ants…").
+        .where('created_at', '>', new Date(Date.now() - 60 * 86400000))
         .whereNotNull('call_summary')
         .whereRaw("length(trim(call_summary)) > 0")
         // The voice webhook links customer_id by caller ID BEFORE the call is
@@ -119,10 +186,21 @@ class ContextAggregator {
         // over-fetch: the extraction-classified misdials below are filtered
         // in JS (ai_extraction is a TEXT column in prod — casting to jsonb in
         // SQL throws on any malformed row), and a filtered row must not
-        // silently shrink the pick below 2 real calls.
-        .limit(6)
-        .select('direction', 'call_outcome', 'call_summary', 'created_at', 'ai_extraction', 'processing_status');
-      return rows.filter((r) => !this.isExcludedCall(r)).slice(0, 2);
+        // silently shrink the pick below 4 real calls.
+        .limit(10)
+        .select('direction', 'call_outcome', 'call_summary', 'created_at', 'ai_extraction', 'processing_status', 'transcription');
+      const eligible = rows.filter((r) => !this.isExcludedCall(r)).slice(0, 4);
+      // v10: the NEWEST call also carries its transcript (owner directive:
+      // the drafter should see what was actually said, not only the
+      // summary). One call only — transcripts are long — and capped here to
+      // bound the context object; the drafter caps and sanitizes again at
+      // render. Older calls stay summary-only.
+      return eligible.map((r, i) => ({
+        ...r,
+        transcript: i === 0 && typeof r.transcription === 'string' && r.transcription.trim()
+          ? r.transcription.slice(0, 4000)
+          : null,
+      }));
     } catch (err) {
       logger.warn(`[context] recent-call lookup failed for customer ${customerId}: ${err.message}`);
       return [];
