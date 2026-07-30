@@ -699,6 +699,12 @@ const gates = {
   // dev; page_type stays 'supporting-blog' so every existing quality/SEO gate
   // and the Codex publish review apply untouched. Kill switch: unset.
   listicleBriefs: isProd ? process.env.GATE_LISTICLE_BRIEFS === 'true' : true,
+  // Email-reply approval loop for parked autonomous content runs (owner
+  // directive 2026-07-28). Explicit opt-in in EVERY environment — a dev
+  // server with real SMTP/IMAP creds must never email the real owner inbox
+  // or poll the shared mailbox (same posture as the auto-send policy
+  // above). Kill switch = unset.
+  contentEmailApprovals: process.env.GATE_CONTENT_EMAIL_APPROVALS === 'true',
 
   // Data Hygiene Agent — split into sub-gates so each phase ships
   // independently. All default OFF in prod, ON in dev — except auto-apply,

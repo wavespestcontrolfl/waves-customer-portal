@@ -295,3 +295,45 @@ describe('run observability exposure', () => {
     expect(soft.run.astro_pr_url).toContain('/pull/377');
   });
 });
+
+describe('decision transactions re-select the current run (Codex #3024 r19)', () => {
+  const db = require('../models/db');
+  const { decideReviewItem } = require('../services/content/autonomous-review-queue');
+
+  // Pre-transaction reads saw OLD-RUN parked; by the time the transaction
+  // runs, a requeue + replacement park committed and NEW-RUN is current.
+  function mockReplacedRun({ decision }) {
+    const oldRun = { id: 'old-run', outcome: 'completed_pending_review', shadow_mode: false, skip_reason: 'trust_build_1_of_5', reviewer_notes: null };
+    const newRun = { id: 'new-run', outcome: 'completed_pending_review', shadow_mode: false, skip_reason: 'trust_build_1_of_5', reviewer_notes: null };
+    const oppUpdates = [];
+    const chainFor = (result) => {
+      const chain = {
+        where: jest.fn(function () { return this; }),
+        orderBy: jest.fn(function () { return this; }),
+        forUpdate: jest.fn(function () { return this; }),
+        first: jest.fn(() => Promise.resolve(result)),
+        update: jest.fn((p) => { oppUpdates.push(p); return Promise.resolve(1); }),
+      };
+      return chain;
+    };
+    db.mockImplementation((table) => chainFor(
+      table === 'opportunity_queue' ? { id: 'opp-1', status: 'pending_review' } : oldRun,
+    ));
+    db.transaction = jest.fn(async (cb) => cb(
+      (table) => chainFor(table === 'opportunity_queue' ? { id: 'opp-1', status: 'pending_review' } : newRun),
+    ));
+    return { oppUpdates, run: () => decideReviewItem('opp-1', { decision, reviewer: 'owner' }) };
+  }
+
+  test('trust-build approval 409s instead of stamping the OLD run against the replacement opportunity', async () => {
+    const { oppUpdates, run } = mockReplacedRun({ decision: 'approve_trust_build' });
+    await expect(run()).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/newer run replaced/) });
+    expect(oppUpdates.find((u) => u.status === 'done')).toBeFalsy(); // opportunity untouched
+  });
+
+  test('dismiss 409s instead of skipping a replacement the reviewer never saw', async () => {
+    const { oppUpdates, run } = mockReplacedRun({ decision: 'dismiss' });
+    await expect(run()).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/newer run replaced/) });
+    expect(oppUpdates.find((u) => u.status === 'skipped')).toBeFalsy();
+  });
+});

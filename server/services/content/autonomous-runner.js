@@ -986,6 +986,22 @@ class AutonomousRunner {
         reviewer_notes: [this._summarizeForReviewer(uniquenessResult, qualityResult, seoCompletionResult, brief), trustBuildNote].filter(Boolean).join(' | '),
       });
       await this._pendingReviewClaimOrThrow(queue, opp.id, reason, { claimToken });
+      // Owner email-approval loop (2026-07-28): approvable kinds notify the
+      // owner's inbox; the emailed reply executes the decision. Fire-and-
+      // forget — a notification failure never affects the run outcome (the
+      // poller retries unsent emails each cycle).
+      setImmediate(() => {
+        // The require itself is inside the guard: this immediate can fire
+        // while the process (or a test environment) is tearing down, where
+        // a deferred module load throws synchronously — a fire-and-forget
+        // notification must never crash the runner.
+        try {
+          require('./email-approvals').notifyParkedRun(run.id)
+            .catch((err) => logger.warn(`[email-approvals] notify for run ${run.id} failed: ${err.message}`));
+        } catch (err) {
+          logger.warn(`[email-approvals] notify for run ${run.id} failed: ${err.message}`);
+        }
+      });
       return finalized;
     }
 
@@ -2482,20 +2498,20 @@ class AutonomousRunner {
   // statusCode) on any guard/gate/publish failure so the caller leaves the
   // opportunity pending. Idempotent-ish: a second approval after a live publish
   // is rejected because the run is no longer 'named_competitor_review'.
-  async approveAndPublishNamedCompetitor(opportunityId, { runId = null, approvedBy = 'operator' } = {}) {
+  async approveAndPublishNamedCompetitor(opportunityId, { runId = null, approvedBy = 'operator', expectedDraftSha = null } = {}) {
     if (!opportunityId) { const e = new Error('opportunityId required'); e.statusCode = 400; throw e; }
     // Serialize with runDaily / runCatchUp / admin run-now behind the engine
     // advisory lock so the canary-cap read + publish can't interleave with
     // another publisher and blow past the per-day/week caps or overlap publishes.
     const result = await this._withEngineLock('approveNamedCompetitor',
-      () => this._approveNamedCompetitorLocked(opportunityId, { runId, approvedBy }));
+      () => this._approveNamedCompetitorLocked(opportunityId, { runId, approvedBy, expectedDraftSha }));
     if (result && result.skipped && result.reason === 'engine_locked') {
       const e = new Error('Autonomous publisher is busy; retry in a moment'); e.statusCode = 409; throw e;
     }
     return result;
   }
 
-  async _approveNamedCompetitorLocked(opportunityId, { runId = null, approvedBy = 'operator' } = {}) {
+  async _approveNamedCompetitorLocked(opportunityId, { runId = null, approvedBy = 'operator', expectedDraftSha = null } = {}) {
     // Publish the EXACT run the operator reviewed. A requeue can leave an older
     // run still parked while a newer run parks for the same opportunity, so
     // resolve by runId when given and verify it belongs to this opportunity;
@@ -2529,6 +2545,19 @@ class AutonomousRunner {
     }
     const draft = parseJsonMaybe(run.draft_payload);
     if (!draft || !draft.body) { const e = new Error('Stored draft is missing or empty'); e.statusCode = 422; throw e; }
+    // Email-approval snapshot binding, asserted HERE — under the engine
+    // lock, against the freshly reloaded run — so no concurrent
+    // draft_payload edit can slip between the caller's check and this
+    // publish (Codex #3024 r14). Callers that reviewed elsewhere (portal)
+    // pass no sha and skip the check.
+    if (expectedDraftSha) {
+      const { draftPreview } = require('./email-approvals')._internals;
+      const currentSha = draftPreview(run).sha;
+      if (currentSha !== expectedDraftSha) {
+        const e = new Error('Draft content changed since it was reviewed; refresh and review again');
+        e.statusCode = 409; e.isOperational = true; throw e;
+      }
+    }
     // Use the brief the reviewed draft was generated against (run.brief_id), not
     // the latest — a requeue/recompose must not swap action_type/target while a
     // stale approval publishes the old body.
