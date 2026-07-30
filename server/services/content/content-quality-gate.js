@@ -112,6 +112,7 @@ const PAGE_TYPE_CHECKS = {
     // Owner rule 2026-07-29: non-blog metas carry {{cityPhone}} — weight 0
     // like title_meta_spam_free (pure hard gate, thresholds unchanged).
     { name: 'meta_phone_token_present', weight: 0, isHard: true, evaluate: checkCityServiceMetaPhone },
+    { name: 'meta_rendered_length_in_bounds', weight: 0, isHard: true, evaluate: checkAuthoredMetaLength },
     // Hard: city-service bodies are built from customer-derived signals
     // (FAQ-from-calls, local proof) exactly like customer-question pages,
     // but this was the ONE body-writing lane with no publish-time PII
@@ -151,6 +152,7 @@ const PAGE_TYPE_CHECKS = {
     // gate — without it a freshly authored blog meta bypassed the metadata-
     // lane check entirely.
     { name: 'blog_meta_contract', weight: 0, isHard: true, evaluate: checkBlogMetaContract },
+    { name: 'meta_rendered_length_in_bounds', weight: 0, isHard: true, evaluate: checkAuthoredMetaLength },
   ],
   metadata: [
     { name: 'title_length_in_bounds', weight: 6, isHard: true, evaluate: checkTitleLengthBounds },
@@ -1074,6 +1076,16 @@ function checkCityServiceMetaPhone(draft) {
   return pageMetaPhoneResult(m);
 }
 
+// Authoring bundles: rendered-length hard check for NEW drafts. The blog
+// schema and the spam gate measure LITERAL length (spam gate soft-warns
+// 161-190), so a 156-char template carrying {{brandName}} could render 161+
+// and publish. Empty defers — presence is other gates' job.
+function checkAuthoredMetaLength(draft, brief, context) {
+  const raw = (draft.meta_description || draft.frontmatter?.meta_description || draft.frontmatter?.metaDescription || '').trim();
+  if (!raw) return { ok: true, reason: 'no_meta_to_check' };
+  return checkMetaLengthBounds(draft, brief, context);
+}
+
 // supporting-blog bundle: newly authored blog posts get the full blog meta
 // contract (no phone, nothing salesy, soft CTA) — without this, a fresh blog
 // draft bypassed the metadata-lane check entirely and could auto-publish a
@@ -1117,4 +1129,5 @@ module.exports._internals = {
   checkTitleLengthBounds, checkMetaLengthBounds,
   checkPrimaryKeywordInTitle, checkNoDuplicateTitle,
   checkMetaPhoneTokenPresent, checkCityServiceMetaPhone, checkBlogMetaContract,
+  checkAuthoredMetaLength,
 };

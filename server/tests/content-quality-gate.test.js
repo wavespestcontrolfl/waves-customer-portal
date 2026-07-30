@@ -1035,3 +1035,23 @@ describe('soft CTA final sentence must BE a CTA (round-5 hardening)', () => {
     expect(r.ok).toBe(false);
   });
 });
+
+describe('meta contract round-6 hardening (Codex findings)', () => {
+  const { checkBlogMetaContract, checkAuthoredMetaLength } = require('../services/content/content-quality-gate')._internals;
+
+  test('abbreviation periods are not sentence boundaries — St. Augustine CTA passes', () => {
+    const r = checkBlogMetaContract({ meta_description: 'What summer heat does to Southwest Florida turf and how to help it recover. Learn more about St. Augustine grass on the Waves blog.' });
+    expect(r.ok).toBe(true);
+  });
+
+  test('authoring bundles bound RENDERED length — {{brandName}} expansion over 160 fails', () => {
+    // 156 literal chars incl {{brandName}} (13) → renders 161 (+5) — over.
+    const base = '{{brandName}} explains what summer heat does to Southwest Florida turf and how recovery works across a season. ';
+    const meta = base.padEnd(156, 'x');
+    const r = checkAuthoredMetaLength({ meta_description: meta });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/^meta_rendered_length_161/);
+    // Empty defers — presence is other gates' job.
+    expect(checkAuthoredMetaLength({ frontmatter: {} }).ok).toBe(true);
+  });
+});

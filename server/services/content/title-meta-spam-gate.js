@@ -188,14 +188,19 @@ const SOFT_CTA_RE = /\b(learn\s+(more|how|why|what)|read\s+(more|on|the\s+full)|
 // "Read more" / "Read on" / "Find out more|how|why|what", optionally with
 // an "about <topic>" clause, optionally closed by a neutral pointer
 // ("on the Waves blog", "on our blog", "in our/the guide", "here").
-const SOFT_CTA_SENTENCE_RE = /^(learn\s+more|read\s+more|read\s+on|find\s+out\s+(?:more|how|why|what))(?:\s+about\s+[\w\s,'’-]{1,50})?(?:\s+(?:on\s+the\s+waves\s+blog|on\s+our\s+blog|in\s+(?:our|the)\s+(?:full\s+)?guide|here))?$/i;
+const SOFT_CTA_SENTENCE_RE = /^(learn\s+more|read\s+more|read\s+on|find\s+out\s+(?:more|how|why|what))(?:\s+about\s+[\w\s,.'’-]{1,50})?(?:\s+(?:on\s+the\s+waves\s+blog|on\s+our\s+blog|in\s+(?:our|the)\s+(?:full\s+)?guide|here))?$/i;
 // Money/deal terms can't ride in via the about-clause either
 // ("Learn more about saving big with Waves").
 const CTA_SALES_TERMS_RE = /\b(sav(?:e|ing|ings)|deal|offer|price|pricing|discount|percent|quote|estimate)\b|[%$]/i;
+// Abbreviation periods are NOT sentence boundaries — "Learn more about
+// St. Augustine grass." must keep its CTA sentence intact (St. Augustine is
+// the dominant SWFL turf, so this is the common case, not the edge).
+const ABBREV_DOT_RE = /\b(St|Dr|Mt|Ft|Mr|Mrs|Ms|vs|No)\./gi;
 function endsWithSoftCta(text) {
   const t = String(text || '').trim();
   if (!t) return false;
-  const sentences = t.split(/[.!?]+/).map((s) => s.trim()).filter(Boolean);
+  const masked = t.replace(ABBREV_DOT_RE, (m) => m.replace('.', '\u0001'));
+  const sentences = masked.split(/[.!?]+/).map((s) => s.replace(/\u0001/g, '.').trim()).filter(Boolean);
   const last = sentences[sentences.length - 1] || '';
   if (CTA_SALES_TERMS_RE.test(last)) return false;
   return SOFT_CTA_SENTENCE_RE.test(last);
