@@ -326,9 +326,13 @@ async function renderSendPreview(send, toEmail) {
     preheader: send.preview_text || undefined,
     newsletterType: send.newsletter_type || undefined,
     preferredSourcesCta: true,
-    // Same web-version permalink the live campaign gets — the reviewed
-    // proof must match what recipients receive.
-    webVersionUrl: send.slug ? `https://www.wavespestcontrol.com/newsletter/archive/${send.slug}` : undefined,
+    // Same web-version permalink the live campaign gets — but only once
+    // the archive can actually serve it (getPostBySlug requires
+    // sending/sent). A pre-send draft proof omits the link rather than
+    // handing the owner a guaranteed 404.
+    webVersionUrl: (send.slug && ['sending', 'sent'].includes(send.status))
+      ? `https://www.wavespestcontrol.com/newsletter/archive/${send.slug}`
+      : undefined,
   });
 
   const testSub = await db('newsletter_subscribers')

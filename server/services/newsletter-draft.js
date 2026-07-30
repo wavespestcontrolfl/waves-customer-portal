@@ -1588,6 +1588,7 @@ function buildFlagshipTextBody(draft) {
   const out = [];
   if (draft.greeting) out.push(stripMd(greetingWithNameToken(draft.greeting)));
   if (draft.introText) out.push(stripMd(draft.introText));
+  if (draft.transitionLine) out.push(stripMd(draft.transitionLine));
   const evs = draft.events || [];
   for (let i = 0; i < evs.length; i++) {
     const ev = evs[i];
@@ -1616,8 +1617,15 @@ function buildFlagshipTextBody(draft) {
     // prices in the renderer's own marker-bound shapes.
     else if (ev.priceText) facts.push(`Tickets: ${ev.priceText}`);
     if (facts.length) lines.push(facts.join(' | '));
+    // Same evclick token as the HTML links — sendCampaign applies the
+    // per-recipient substitution to BOTH MIME parts, so text clicks
+    // attribute too; proof/archive rendering resolves tokens back to
+    // the direct url.
     const url = safeUrl(ev.eventUrl);
-    if (url) lines.push(`Tickets & info: ${url}`);
+    if (url) {
+      const href = ev.eventId ? `{{evclick:${String(ev.eventId).toLowerCase()}}}` : url;
+      lines.push(`Tickets & info: ${href}`);
+    }
     out.push(lines.join('\n'));
   }
   if (draft.homeownerMinute) {
@@ -1626,6 +1634,7 @@ function buildFlagshipTextBody(draft) {
     // alternative would break the zero-sell rule AND MIME equivalence.
     out.push(`== Homeowner Minute ==\n${stripMd(draft.homeownerMinute)}`);
   }
+  if (draft.closingHeading) out.push(`== ${stripMd(draft.closingHeading)} ==`);
   if (draft.closingText) out.push(stripMd(draft.closingText));
   const checklist = Array.isArray(draft.closingChecklist) ? draft.closingChecklist : [];
   if (checklist.length) {

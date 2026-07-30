@@ -1802,8 +1802,10 @@ describe('tiered event treatment (owner direction 2026-07-29)', () => {
     const text = buildFlagshipTextBody({
       greeting: 'Hey there!',
       introText: 'Big weekend **ahead**.',
+      transitionLine: "Let's get into it",
       events: [mk(1), mk(3, { isFree: true })],
       homeownerMinute: 'Check your _screens_.',
+      closingHeading: 'That is the scoop, crew',
       closingText: 'Go outside.',
       closingChecklist: ['Hydrate like it\'s your job'],
       ps: 'Forward this to a friend.',
@@ -1811,7 +1813,10 @@ describe('tiered event treatment (owner direction 2026-07-29)', () => {
     });
     expect(text).toContain('== Official Event 1 ==');
     expect(text).toContain('Friday, June 12 at 8:00 PM | Venue 1, Sarasota | Tickets: From $25');
-    expect(text).toContain('Tickets & info: https://example.com/ev1');
+    // evclick token — sendCampaign substitutes both MIME parts.
+    expect(text).toContain('Tickets & info: {{evclick:a0000001-0000-4000-8000-000000000001}}');
+    expect(text).toContain("Let's get into it");
+    expect(text).toContain('== That is the scoop, crew ==');
     expect(text).toContain('FREE');
     // Hero furniture serializes (first event only).
     expect(text).toContain('- Big stage');
