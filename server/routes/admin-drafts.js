@@ -735,15 +735,21 @@ router.put('/:id/approve', async (req, res, next) => {
       });
     }
 
-    // An approved draft delivered to the customer is a first response for any
-    // open lead on this phone (SLA truth only; status/linkage untouched).
+    // An approved REPLY draft delivered to the customer is a first response
+    // for any open lead on this phone (SLA truth only; status/linkage
+    // untouched). Campaign drafts (seasonal reactivation / upsell) are
+    // PROACTIVE marketing, not replies — they never stamp. Gated on a real
+    // provider send: suppression paths report sent:true with a sentinel id.
     // Fail-soft — bookkeeping never breaks the approval.
     try {
-      const { stampFirstResponseByContact } = require('../services/lead-estimate-link');
-      await stampFirstResponseByContact({
-        phone: toPhone,
-        performedBy: req.technicianId ? `admin:${req.technicianId}` : 'admin',
-      });
+      const { isRealProviderSend } = require('../services/sms-auto-send');
+      if (!draft.campaign_type && isRealProviderSend(smsResult)) {
+        const { stampFirstResponseByContact } = require('../services/lead-estimate-link');
+        await stampFirstResponseByContact({
+          phone: toPhone,
+          performedBy: req.technicianId ? `admin:${req.technicianId}` : 'admin',
+        });
+      }
     } catch (stampErr) {
       logger.warn(`[admin-drafts] first-response stamp failed: ${stampErr.message}`);
     }
@@ -876,13 +882,17 @@ router.put('/:id/revise', async (req, res, next) => {
     }
 
     // Same first-response stamp as the approve route — an edited-and-sent
-    // draft is still an operator reply.
+    // REPLY draft is still an operator reply; campaign drafts never stamp,
+    // and suppression sentinels don't count as sends.
     try {
-      const { stampFirstResponseByContact } = require('../services/lead-estimate-link');
-      await stampFirstResponseByContact({
-        phone: toPhone,
-        performedBy: req.technicianId ? `admin:${req.technicianId}` : 'admin',
-      });
+      const { isRealProviderSend } = require('../services/sms-auto-send');
+      if (!draft.campaign_type && isRealProviderSend(smsResult)) {
+        const { stampFirstResponseByContact } = require('../services/lead-estimate-link');
+        await stampFirstResponseByContact({
+          phone: toPhone,
+          performedBy: req.technicianId ? `admin:${req.technicianId}` : 'admin',
+        });
+      }
     } catch (stampErr) {
       logger.warn(`[admin-drafts] first-response stamp failed: ${stampErr.message}`);
     }

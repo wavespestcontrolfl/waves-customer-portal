@@ -323,18 +323,31 @@ async function stampFirstResponseByContact({ database = db, phone = null, email 
   if (!normPhone && !normEmail) return 0;
   let stamped = 0;
   try {
+    // Positive membership (OPEN_LEAD_STATUSES), not NOT-IN(closed): a
+    // negative filter silently re-includes any status it forgot (cancelled /
+    // spam leads are not closed-set members but are not answerable either).
+    const { OPEN_LEAD_STATUSES } = require('./lead-statuses');
     const query = database('leads')
       .whereNull('deleted_at')
       .whereNull('response_time_minutes')
       .whereNotNull('first_contact_at')
-      .whereNotIn('status', [...CLOSED_LEAD_STATUSES])
+      .whereIn('status', OPEN_LEAD_STATUSES)
       .where(function contactMatch() {
         if (normPhone) {
           // normalizePhone yields 10 digits for NANP; anything longer is an
           // international E.164 tail — match the FULL digit string there, or
           // a +44 caller would stamp the US lead sharing its last ten digits.
+          // The NANP branch guards the STORED side the same way: only
+          // NANP-shaped rows (10 digits, or 11 leading with 1) suffix-match,
+          // so a US reply can't stamp an international lead sharing its tail.
           if (normPhone.length === 10) {
-            this.orWhereRaw("RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?", [normPhone]);
+            this.orWhereRaw(
+              "(RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?"
+              + " AND (char_length(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g')) = 10"
+              + " OR (char_length(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g')) = 11"
+              + " AND LEFT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 1) = '1')))",
+              [normPhone],
+            );
           } else {
             this.orWhereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') = ?", [normPhone]);
           }
@@ -359,7 +372,7 @@ async function stampFirstResponseByContact({ database = db, phone = null, email 
   return stamped;
 }
 
-async function markLinkedLeadEstimateSent({ estimateId, sendMethod, performedBy = 'system', database = db, originatingNotAfter = null, respondedAt = null }) {
+async function markLinkedLeadEstimateSent({ estimateId, sendMethod, performedBy = 'system', database = db, originatingNotAfter = null, respondedAt = null, sentChannels = null }) {
   if (!estimateId) return;
   const { leads, rescued, estimate } = await resolveEstimateEventLeads(database, estimateId, { originatingNotAfter });
   for (const lead of leads) {
@@ -401,10 +414,17 @@ async function markLinkedLeadEstimateSent({ estimateId, sendMethod, performedBy 
   try {
     const estimateRow = estimate || await database('estimates').where({ id: estimateId }).first();
     if (estimateRow) {
+      // Only contacts a channel actually REACHED count as answered: an
+      // SMS-only send (or a partial 'both' where the email leg failed) must
+      // not stamp an email-only matching lead. Callers with per-channel
+      // outcomes pass sentChannels; sendMethod is the fallback.
+      const channels = Array.isArray(sentChannels) && sentChannels.length
+        ? sentChannels
+        : (sendMethod === 'sms' ? ['sms'] : sendMethod === 'email' ? ['email'] : ['sms', 'email']);
       await stampFirstResponseByContact({
         database,
-        phone: estimateRow.customer_phone,
-        email: estimateRow.customer_email,
+        phone: channels.includes('sms') ? estimateRow.customer_phone : null,
+        email: channels.includes('email') ? estimateRow.customer_email : null,
         performedBy,
         respondedAt,
         // The backfill's cutoff rides through — a newer inquiry sharing this

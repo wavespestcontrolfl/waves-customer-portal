@@ -983,7 +983,9 @@ async function sendEstimateNow(estimate, sendMethod, options = {}) {
   }
 
   try {
-    await markLinkedLeadEstimateSent({ estimateId: estimate.id, sendMethod });
+    // sentChannels: only channels that actually delivered gate the loose
+    // first-response stamp (partial 'both' sends are permitted above).
+    await markLinkedLeadEstimateSent({ estimateId: estimate.id, sendMethod, sentChannels });
   } catch (e) {
     logger.warn(`[admin-estimates] linked lead status update failed for estimate ${estimate.id}: ${e.message}`);
   }

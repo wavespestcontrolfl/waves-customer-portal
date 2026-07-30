@@ -39,6 +39,7 @@ const logger = require('../services/logger');
 const {
   resolveEstimateEventLeads,
   markLinkedLeadEstimateSent,
+  stampFirstResponseByContact,
   markLinkedLeadEstimateViewed,
 } = require('../services/lead-estimate-link');
 
@@ -68,7 +69,7 @@ async function main() {
     })
     .orderBy('created_at', 'asc')
     .limit(LIMIT)
-    .select('id', 'status', 'created_at', 'sent_at');
+    .select('id', 'status', 'created_at', 'sent_at', 'customer_phone', 'customer_email');
 
   const summary = { scanned: candidates.length, advanced: 0, linkedOnly: 0, noEligibleMatch: 0, errors: 0 };
   logger.info(`[backfill-2214] ${COMMIT ? 'COMMIT' : 'DRY-RUN'} — scanning ${candidates.length} standalone sent/viewed estimate(s) (limit ${LIMIT})`);
@@ -84,7 +85,29 @@ async function main() {
       // commit). Pre-filtered to estimates with no FK-linked lead, so a result
       // here is the mirror/contact rescue path: rescued=true + one lead, or none.
       const { leads, rescued } = await resolveEstimateEventLeads(db, est.id, { originatingNotAfter: eventTime });
-      if (!rescued || leads.length !== 1) { summary.noEligibleMatch += 1; continue; }
+      if (!rescued || leads.length !== 1) {
+        summary.noEligibleMatch += 1;
+        // Strict rescue declined (ambiguous contact, add-on inquiry, prior
+        // won lead) — exactly the population the loose SLA stamp exists for.
+        // Stamp response_time only (never link/status/funnel), timed from the
+        // historical send and bounded by the same cutoff. COMMIT-only: the
+        // preview counts strict outcomes; loose stamping is reported by its
+        // own counter at commit.
+        if (COMMIT) {
+          const stamped = await stampFirstResponseByContact({
+            phone: est.customer_phone,
+            email: est.customer_email,
+            performedBy: PERFORMED_BY,
+            respondedAt: eventTime,
+            originatingNotAfter: eventTime,
+          });
+          if (stamped) {
+            summary.contactStamped = (summary.contactStamped || 0) + stamped;
+            logger.info(`[backfill-2214] est ${shortId(est.id)}: loose first-response stamp on ${stamped} lead(s) (no strict rescue)`);
+          }
+        }
+        continue;
+      }
       const lead = leads[0];
 
       // Mirror the SQL gate the mark fns apply, so the preview counts match the

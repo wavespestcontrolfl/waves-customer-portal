@@ -1849,6 +1849,7 @@ function makeContactDb({ leads = [], estimate = null } = {}) {
       whereNull: () => q,
       whereNotNull: () => q,
       whereNotIn: () => q,
+      whereIn: () => q,
       where: (clause) => {
         if (clause && typeof clause === 'object') lastWhere = clause;
         return q;
@@ -1928,6 +1929,7 @@ describe('stampFirstResponseByContact', () => {
         whereNull: () => q,
         whereNotNull: () => q,
         whereNotIn: () => q,
+        whereIn: () => q,
         where: (...args) => { whereCalls.push(args); return q; },
         then: (resolve, reject) => Promise.resolve([]).then(resolve, reject),
       };
@@ -1957,6 +1959,7 @@ describe('stampFirstResponseByContact', () => {
         whereNull: () => q,
         whereNotNull: () => q,
         whereNotIn: () => q,
+        whereIn: () => q,
         where: (fn) => { if (typeof fn === 'function') fn.call({ orWhereRaw: (sql, binds) => { raws.push({ sql, binds }); } }); return q; },
         then: (resolve, reject) => Promise.resolve([]).then(resolve, reject),
       };
