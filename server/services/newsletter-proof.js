@@ -102,7 +102,7 @@ async function buildProofDiagnosticsHtml(send, lineupEvents, scheduledFor) {
       ? alternates.map((a) => `${esc(a.title)} (${a.editorial_score ?? '—'})`).join(' · ')
       : 'none stored';
 
-    return `<div style="margin:0 0 20px 0;padding:14px 16px;background:#EEF3F8;border:1px solid #C9D6E2;border-radius:8px;font-family:monospace;font-size:12px;line-height:1.6;color:#26364A;">
+    return `<div class="dm-box" style="margin:0 0 20px 0;padding:14px 16px;background:#EEF3F8;border:1px solid #C9D6E2;border-radius:8px;font-family:monospace;font-size:12px;line-height:1.6;color:#26364A;">
 <div style="font-weight:700;margin-bottom:6px;">INTERNAL DIAGNOSTICS — not sent to subscribers</div>
 <div style="margin-bottom:6px;">Scores shown are the STORED rubric scores; the lineup order already reflects any listwise nudge (±3, in-memory at selection time).</div>
 Selected: ${ordered.length} &nbsp;·&nbsp; Qualified pool (≥${featureScoreFloor()}): ${qualifiedPool} of ${pool.length} approved &nbsp;·&nbsp; Weekend events: ${weekendCount} &nbsp;·&nbsp; Zones: ${zones.length} (${esc(zones.join(', ') || '—')})<br/>
@@ -363,7 +363,7 @@ async function renderSendPreview(send, toEmail) {
 }
 
 function proofBannerHtml(recipientCount) {
-  return `<div style="border:2px solid #04395E;border-radius:8px;padding:14px 16px;margin:0 0 20px;background:#f4f8fb;font-family:Arial,Helvetica,sans-serif;">
+  return `<div class="dm-box" style="border:2px solid #04395E;border-radius:8px;padding:14px 16px;margin:0 0 20px;background:#f4f8fb;font-family:Arial,Helvetica,sans-serif;">
 <p style="margin:0 0 6px;font-size:15px;font-weight:bold;color:#04395E;">Proof — not yet sent to the list</p>
 <p style="margin:0;font-size:14px;color:#1f2937;">Reply <strong>APPROVED</strong> to queue this issue for <strong>Tuesday at 6:00 AM ET</strong> to <strong>${recipientCount}</strong> active subscribers. Any other reply — or no reply — and it stays a draft in the composer.</p>
 </div>\n`;
