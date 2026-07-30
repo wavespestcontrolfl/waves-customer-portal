@@ -836,6 +836,7 @@ function ElectronicAuthorizationContractV2({
     inspectionDate: "",
   });
   const [documentAllowUnresolved, setDocumentAllowUnresolved] = useState(false);
+  const [documentPropertyAddress, setDocumentPropertyAddress] = useState("");
   const [documentSigningUrl, setDocumentSigningUrl] = useState("");
   const [documentAction, setDocumentAction] = useState("");
   const [documentErr, setDocumentErr] = useState("");
@@ -1060,6 +1061,9 @@ function ElectronicAuthorizationContractV2({
             customerId: customer.id,
             values: documentValues,
             allowUnresolved: documentAllowUnresolved,
+            ...(documentPropertyAddress.trim()
+              ? { propertyAddress: documentPropertyAddress.trim() }
+              : {}),
           }),
         },
       );
@@ -1348,6 +1352,17 @@ function ElectronicAuthorizationContractV2({
                   updateDocumentValue("serviceDate", e.target.value);
                   updateDocumentValue("inspectionDate", e.target.value);
                 }}
+                className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-13 text-zinc-900"
+              />
+            </label>
+            <label className="block sm:col-span-2">
+              <div className="u-label text-ink-secondary mb-1">
+                Property address (optional)
+              </div>
+              <input
+                value={documentPropertyAddress}
+                onChange={(e) => setDocumentPropertyAddress(e.target.value)}
+                placeholder="Overrides the customer's primary address on the document"
                 className="w-full h-9 rounded-sm border-hairline border-zinc-300 bg-white px-3 text-13 text-zinc-900"
               />
             </label>

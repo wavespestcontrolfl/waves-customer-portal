@@ -1313,6 +1313,15 @@ async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
       let os = openRow.document_variables_snapshot;
       if (typeof os === 'string') { try { os = JSON.parse(os); } catch { os = null; } }
       if (os?.estimate?.id && String(os.estimate.id) === String(estimateId)) return true;
+      // Cycle boundary, mirroring the signed check above: an open request
+      // CREATED BEFORE this source is an older estimate's paperwork, not
+      // this supersession's replacement (deploy overlap can leave a
+      // current-version request for older estimate A open while revised
+      // estimate B's v1 gets cancelled — treating A as coverage would
+      // strand B's figures behind A's obsolete ones forever). Unprovable
+      // timestamps stay conservative (treat as covering).
+      const openCreatedAt = openRow.created_at ? new Date(openRow.created_at) : null;
+      if (sourceCreatedAt && openCreatedAt && openCreatedAt < sourceCreatedAt) return false;
       const openAddress = normalizeAddress(os?.estimate?.address || os?.customer?.address);
       if (!openAddress || !rowAddress) return true; // unprovable — treat as covering
       return openAddress === rowAddress;

@@ -431,6 +431,15 @@ exports.up = async function up(knex) {
           state_key: `prior_active:${seed.template_key}`,
           state_value: template.active_version_id || '',
         });
+        // The seeded version's ID is recorded so down() can verify the
+        // pointer still targets EXACTLY this migration's activation —
+        // body-equal matching would mistake a post-migration admin
+        // publication that reuses the approved body for the seed.
+        await knex('migration_rollback_state').insert({
+          migration_name: MIGRATION_NAME,
+          state_key: `seeded_version:${seed.template_key}`,
+          state_value: seededVersion.id,
+        });
       }
       // Activation IS the rollout moment: the expired-recovery cutoff reads
       // the active version's published_at, so a reused (older or never-published)
@@ -643,16 +652,20 @@ exports.down = async function down(knex) {
     // newer version) is authoritative: restoring the recorded pre-v2
     // pointer over it would deactivate the admin's version and get its
     // open requests cancelled as "deactivated replacements" below. Only
-    // repoint while the template still points at THIS migration's seeded
-    // wording — identified by content, the same way up() identifies it.
-    // The stale rollback state is dropped either way (once superseded by
-    // an explicit publication, the pre-v2 pointer is not a valid target).
-    const activeNow = template.active_version_id
-      ? await knex('document_template_versions').where({ id: template.active_version_id }).first('body')
-      : null;
-    if (!activeNow || activeNow.body !== seed.body) {
+    // repoint while the template still points at the EXACT version this
+    // migration activated — recorded BY ID at up() time, because a
+    // body-equal admin publication with different title/disclosure/
+    // variables is an explicit publication, not the seed. Diverged or
+    // unknown pointers are preserved and the stale state dropped (the
+    // pre-v2 pointer stops being a valid restore target).
+    const seededState = await knex('migration_rollback_state')
+      .where({ migration_name: MIGRATION_NAME, state_key: `seeded_version:${seed.template_key}` })
+      .first();
+    const seededVersionId = seededState?.state_value || null;
+    if (!seededVersionId || template.active_version_id !== seededVersionId) {
       await knex('migration_rollback_state')
-        .where({ migration_name: MIGRATION_NAME, state_key: `prior_active:${seed.template_key}` })
+        .where({ migration_name: MIGRATION_NAME })
+        .whereIn('state_key', [`prior_active:${seed.template_key}`, `seeded_version:${seed.template_key}`])
         .del();
       continue;
     }
@@ -677,7 +690,8 @@ exports.down = async function down(knex) {
       repointedTemplateKeys.add(seed.template_key);
     }
     await knex('migration_rollback_state')
-      .where({ migration_name: MIGRATION_NAME, state_key: `prior_active:${seed.template_key}` })
+      .where({ migration_name: MIGRATION_NAME })
+      .whereIn('state_key', [`prior_active:${seed.template_key}`, `seeded_version:${seed.template_key}`])
       .del();
   }
 
