@@ -1013,3 +1013,25 @@ describe('meta contract round-3 hardening (Codex findings)', () => {
     expect(checkMetaPhoneTokenPresent(withPhoneTitle, PAGE, { protectedTitle: true }).ok).toBe(true);
   });
 });
+
+describe('soft CTA final sentence must BE a CTA (round-5 hardening)', () => {
+  const { checkBlogMetaContract } = require('../services/content/content-quality-gate')._internals;
+  const LEAD = 'What chinch bug damage looks like in Southwest Florida turf and how full recovery works across a season of treatments. ';
+
+  test('a promotional sentence that merely contains a CTA verb fails', () => {
+    const r = checkBlogMetaContract({ meta_description: `${LEAD}See how much you can save with Waves.` });
+    expect(r.ok).toBe(false);
+  });
+
+  test('sanctioned shapes pass: bare, about-clause, and blog pointer', () => {
+    for (const tail of ['Learn more.', 'Read more.', 'Learn more about chinch bugs on the Waves blog.', 'Find out more in our guide.']) {
+      const r = checkBlogMetaContract({ meta_description: `${LEAD}${tail}` });
+      expect(r.ok).toBe(true);
+    }
+  });
+
+  test('sales terms cannot ride in through the about-clause', () => {
+    const r = checkBlogMetaContract({ meta_description: `${LEAD}Learn more about saving big with Waves.` });
+    expect(r.ok).toBe(false);
+  });
+});

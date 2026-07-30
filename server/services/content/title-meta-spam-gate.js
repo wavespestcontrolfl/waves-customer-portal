@@ -179,19 +179,26 @@ function renderMetaTokens(text) {
 // no sales copy, and they END with a soft CTA like "Learn more on the Waves
 // blog." Shared here (like renderMetaTokens) so the quality gate and the
 // guardrails enforce the SAME sales-copy/CTA definitions and can't drift.
-const SALESY_META_RE = /free\s+(estimate|quote|inspection)|call\s+(now|today|us)\b|book\s+(now|today|online)\b|schedule\s+(service|now|today|your)\b|(request|get)\s+a\s+(free\s+)?quote\b|contact\s+us\b|save\s+(on|up\s+to|\$|\d+\s*%)|\d+\s*%\s*off|discount|special\s+offer|act\s+now|limited\s+time/i;
+const SALESY_META_RE = /free\s+(estimate|quote|inspection)|call\s+(now|today|us)\b|book\s+(now|today|online)\b|schedule\s+(service|now|today|your)\b|(request|get)\s+a\s+(free\s+)?quote\b|contact\s+us\b|save\s+(on|up\s+to|with|big|money|\$|\d+\s*%)|you\s+can\s+save\b|\d+\s*%\s*off|discount|special\s+offer|act\s+now|limited\s+time/i;
 const SOFT_CTA_RE = /\b(learn\s+(more|how|why|what)|read\s+(more|on|the\s+full)|find\s+out\s+(more|how|why|what)|see\s+(how|what|why))\b/i;
 
-// The soft CTA must be where the owner rule puts it — at the END of the
-// meta. Presence alone let "Learn more about chinch bugs. Professional
-// treatment is available…" pass while ending on promotional copy, so the
-// check runs against the meta's LAST sentence.
+// The meta's LAST sentence must BE a sanctioned soft CTA — not merely
+// contain a CTA-ish verb ("See how much you can save with Waves" contains
+// "see how" but is a sales pitch). Sanctioned shapes: "Learn more" /
+// "Read more" / "Read on" / "Find out more|how|why|what", optionally with
+// an "about <topic>" clause, optionally closed by a neutral pointer
+// ("on the Waves blog", "on our blog", "in our/the guide", "here").
+const SOFT_CTA_SENTENCE_RE = /^(learn\s+more|read\s+more|read\s+on|find\s+out\s+(?:more|how|why|what))(?:\s+about\s+[\w\s,'’-]{1,50})?(?:\s+(?:on\s+the\s+waves\s+blog|on\s+our\s+blog|in\s+(?:our|the)\s+(?:full\s+)?guide|here))?$/i;
+// Money/deal terms can't ride in via the about-clause either
+// ("Learn more about saving big with Waves").
+const CTA_SALES_TERMS_RE = /\b(sav(?:e|ing|ings)|deal|offer|price|pricing|discount|percent|quote|estimate)\b|[%$]/i;
 function endsWithSoftCta(text) {
   const t = String(text || '').trim();
   if (!t) return false;
   const sentences = t.split(/[.!?]+/).map((s) => s.trim()).filter(Boolean);
   const last = sentences[sentences.length - 1] || '';
-  return SOFT_CTA_RE.test(last);
+  if (CTA_SALES_TERMS_RE.test(last)) return false;
+  return SOFT_CTA_SENTENCE_RE.test(last);
 }
 
 module.exports = {
