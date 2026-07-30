@@ -216,3 +216,126 @@ describe('StripeService.createStatementPaymentIntent', () => {
     expect(updateStatement).not.toHaveBeenCalled();
   });
 });
+
+// Mirrors the finalizeInvoicePayment stale-surcharge-clear contract (see
+// stripe-invoice-payment-intent.test.js): a failed credit attempt strands
+// amount_details.surcharge on the statement PI, and a debit/prepaid retry is
+// rejected by Stripe unless the no-fee finalize unsets it.
+describe('StripeService.finalizeStatementPayment stale surcharge clear', () => {
+  const crypto = require('crypto');
+  let originalJwtSecret;
+  let statementRow;
+  let stripeClient;
+
+  const quoteTokenFor = () => {
+    const payload = JSON.stringify({
+      statementId: statementRow.id,
+      paymentMethodId: 'pm-card',
+      statementTotal: 250,
+      quotedAt: Date.now(),
+    });
+    const signature = crypto.createHmac('sha256', process.env.JWT_SECRET).update(payload).digest('base64url');
+    return `${Buffer.from(payload).toString('base64url')}.${signature}`;
+  };
+
+  beforeEach(() => {
+    jest.resetModules();
+    originalJwtSecret = process.env.JWT_SECRET;
+    process.env.JWT_SECRET = 'statement-finalize-secret';
+
+    statementRow = {
+      id: 'stmt_123',
+      payer_id: 'payer_123',
+      status: 'viewed',
+      total: '250.00',
+      stripe_payment_intent_id: 'pi_existing',
+    };
+    stripeClient = {
+      paymentMethods: {
+        retrieve: jest.fn().mockResolvedValue({ id: 'pm-card', type: 'card', card: { funding: 'debit' } }),
+      },
+      paymentIntents: {
+        retrieve: jest.fn().mockResolvedValue({ id: 'pi_existing', status: 'requires_payment_method', amount_details: null }),
+        update: jest.fn().mockResolvedValue({}),
+        confirm: jest.fn().mockResolvedValue({ id: 'pi_existing', status: 'succeeded', client_secret: 'pi_existing_secret' }),
+      },
+    };
+
+    const rootStatementQuery = {
+      where: jest.fn(() => rootStatementQuery),
+      first: jest.fn().mockResolvedValue(statementRow),
+    };
+    const dbMock = jest.fn(table => {
+      if (table === 'payer_statements') return rootStatementQuery;
+      throw new Error(`Unexpected db table: ${table}`);
+    });
+
+    jest.doMock('stripe', () => jest.fn(() => stripeClient));
+    jest.doMock('../config', () => ({}));
+    jest.doMock('../config/stripe-config', () => ({
+      secretKey: 'sk_test_mock',
+      publishableKey: 'pk_test_mock',
+    }));
+    jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+    jest.doMock('../models/db', () => dbMock);
+    jest.doMock('../services/payer-statement-settle', () => ({
+      PAYABLE_STATEMENT_STATUSES: new Set(['finalized', 'sent', 'viewed']),
+      isPayableStatementStatus: status => ['finalized', 'sent', 'viewed'].includes(status),
+    }));
+  });
+
+  afterEach(() => {
+    if (originalJwtSecret == null) delete process.env.JWT_SECRET;
+    else process.env.JWT_SECRET = originalJwtSecret;
+  });
+
+  test('debit retry after a failed credit attempt clears the stale breakdown with the unset form', async () => {
+    stripeClient.paymentIntents.retrieve.mockResolvedValue({
+      id: 'pi_existing',
+      status: 'requires_payment_method',
+      amount_details: { surcharge: { amount: 725 } },
+    });
+    const StripeService = require('../services/stripe');
+    const result = await StripeService.finalizeStatementPayment(statementRow.id, quoteTokenFor());
+
+    expect(result.surcharge).toBe(0);
+    const [, , retrieveOpts] = stripeClient.paymentIntents.retrieve.mock.calls[0];
+    expect(retrieveOpts).toEqual({ apiVersion: expect.any(String) });
+    const [, params, updateOpts] = stripeClient.paymentIntents.update.mock.calls[0];
+    expect(params.amount).toBe(25000);
+    expect(params.amount_details).toBe('');
+    expect(params.metadata.card_surcharge).toBe('0');
+    expect(updateOpts).toEqual({ apiVersion: expect.any(String) });
+  });
+
+  test('clean no-fee finalize stays off the preview version and passes no amount_details', async () => {
+    const StripeService = require('../services/stripe');
+    await StripeService.finalizeStatementPayment(statementRow.id, quoteTokenFor());
+
+    const [, params, updateOpts] = stripeClient.paymentIntents.update.mock.calls[0];
+    expect(params.amount).toBe(25000);
+    expect(params.amount_details).toBeUndefined();
+    expect(updateOpts).toBeUndefined();
+  });
+
+  test('falls back to updating without amount_details when the unset form is rejected', async () => {
+    stripeClient.paymentIntents.retrieve.mockResolvedValue({
+      id: 'pi_existing',
+      status: 'requires_payment_method',
+      amount_details: { surcharge: { amount: 725 } },
+    });
+    stripeClient.paymentIntents.update
+      .mockRejectedValueOnce(new Error('amount_details unset not supported'))
+      .mockResolvedValueOnce({});
+    const StripeService = require('../services/stripe');
+    const result = await StripeService.finalizeStatementPayment(statementRow.id, quoteTokenFor());
+
+    expect(result.status).toBe('succeeded');
+    expect(stripeClient.paymentIntents.update).toHaveBeenCalledTimes(2);
+    const [, fallbackParams, fallbackOpts] = stripeClient.paymentIntents.update.mock.calls[1];
+    expect(fallbackParams.amount).toBe(25000);
+    expect(fallbackParams.amount_details).toBeUndefined();
+    expect(fallbackOpts).toBeUndefined();
+    expect(stripeClient.paymentIntents.confirm).toHaveBeenCalled();
+  });
+});

@@ -4183,7 +4183,24 @@ const StripeService = {
     const { baseCents, surchargeCents, totalCents, rateBps, policyVersion } = chargeInfo;
 
     const surchargeDetails = buildSurchargeAmountDetails(surchargeCents);
-    const usePreview = !!surchargeDetails;
+    // A failed surcharged attempt (bad CVC / decline on a credit card) leaves
+    // a stale Stripe-side surcharge breakdown on the PI; a no-fee retry (the
+    // customer switches to debit/prepaid) must clear it or Stripe rejects the
+    // confirm — "A surcharge amount can only be provided with the following
+    // card funding types: credit" — hard-blocking the surcharge-free path
+    // (2026-07-28 pay-page class; same fix as finalizeEstimateDepositPayment,
+    // Codex #2705 r2 P2). The probe needs the preview version: amount_details
+    // is invisible on the default API version.
+    let staleDetails = false;
+    if (!surchargeDetails) {
+      const priorPi = await stripe.paymentIntents.retrieve(
+        invoice.stripe_payment_intent_id,
+        {},
+        { apiVersion: SURCHARGE_API_VERSION },
+      );
+      staleDetails = Number(priorPi.amount_details?.surcharge?.amount || 0) > 0;
+    }
+    const usePreview = !!surchargeDetails || staleDetails;
     // Payer invoices never save the payer's card to the homeowner account.
     const saveCard = !!opts.saveCard && !invoice.payer_id;
 
@@ -4205,6 +4222,8 @@ const StripeService = {
     };
 
     if (surchargeDetails) updateParams.amount_details = surchargeDetails;
+    // Empty string is Stripe's unset form (deposit-lane precedent).
+    else if (staleDetails) updateParams.amount_details = '';
 
     if (saveCard && invoice.customer_id) {
       updateParams.customer = await this.ensureStripeCustomer(invoice.customer_id);
@@ -4235,11 +4254,21 @@ const StripeService = {
         // so a claim cannot appear after the assertion but before money moves.
         await assertNoInvoiceChargeReconciliationPending(invoiceId, finalizeTrx);
 
-        await stripe.paymentIntents.update(
-          lockedInvoice.stripe_payment_intent_id,
-          updateParams,
-          usePreview ? { apiVersion: SURCHARGE_API_VERSION } : undefined,
-        );
+        try {
+          await stripe.paymentIntents.update(
+            lockedInvoice.stripe_payment_intent_id,
+            updateParams,
+            usePreview ? { apiVersion: SURCHARGE_API_VERSION } : undefined,
+          );
+        } catch (updateErr) {
+          // The amount_details unset is a preview param — if this account/
+          // version rejects the empty-string form, retry without it rather
+          // than blocking a valid no-fee payment on breakdown hygiene.
+          if (!staleDetails) throw updateErr;
+          logger.warn(`[stripe] Invoice finalize amount_details unset rejected for ${lockedInvoice.stripe_payment_intent_id} (${updateErr.message}) — retrying without`);
+          const { amount_details: _drop, ...withoutDetails } = updateParams;
+          await stripe.paymentIntents.update(lockedInvoice.stripe_payment_intent_id, withoutDetails);
+        }
 
         // Confirm the PI server-side (attaches PM + charges the card).
         return stripe.paymentIntents.confirm(
@@ -4573,7 +4602,20 @@ const StripeService = {
 
     const { baseCents, surchargeCents, totalCents, rateBps, policyVersion } = computeChargeAmount(baseAmount, pm.type || 'card', { funding });
     const surchargeDetails = buildSurchargeAmountDetails(surchargeCents);
-    const usePreview = !!surchargeDetails;
+    // Same stale-surcharge clear as finalizeInvoicePayment: a failed credit
+    // attempt strands amount_details.surcharge on the PI and a debit/prepaid
+    // retry is rejected by Stripe unless it's unset. Preview version needed —
+    // amount_details is invisible on the default API version.
+    let staleDetails = false;
+    if (!surchargeDetails) {
+      const priorPi = await stripe.paymentIntents.retrieve(
+        statement.stripe_payment_intent_id,
+        {},
+        { apiVersion: SURCHARGE_API_VERSION },
+      );
+      staleDetails = Number(priorPi.amount_details?.surcharge?.amount || 0) > 0;
+    }
+    const usePreview = !!surchargeDetails || staleDetails;
     const saveCard = !!opts.saveCard;
 
     const updateParams = {
@@ -4592,9 +4634,21 @@ const StripeService = {
       setup_future_usage: saveCard ? 'off_session' : '',
     };
     if (surchargeDetails) updateParams.amount_details = surchargeDetails;
+    // Empty string is Stripe's unset form (deposit-lane precedent).
+    else if (staleDetails) updateParams.amount_details = '';
 
     try {
-      await stripe.paymentIntents.update(statement.stripe_payment_intent_id, updateParams, usePreview ? { apiVersion: SURCHARGE_API_VERSION } : undefined);
+      try {
+        await stripe.paymentIntents.update(statement.stripe_payment_intent_id, updateParams, usePreview ? { apiVersion: SURCHARGE_API_VERSION } : undefined);
+      } catch (updateErr) {
+        // The amount_details unset is a preview param — if this account/
+        // version rejects the empty-string form, retry without it rather
+        // than blocking a valid no-fee payment on breakdown hygiene.
+        if (!staleDetails) throw updateErr;
+        logger.warn(`[stripe] Statement finalize amount_details unset rejected for ${statement.stripe_payment_intent_id} (${updateErr.message}) — retrying without`);
+        const { amount_details: _drop, ...withoutDetails } = updateParams;
+        await stripe.paymentIntents.update(statement.stripe_payment_intent_id, withoutDetails);
+      }
       const confirmed = await stripe.paymentIntents.confirm(statement.stripe_payment_intent_id, {}, usePreview ? { apiVersion: SURCHARGE_API_VERSION } : undefined);
       logger.info(`[stripe] Finalized statement S-${statementId}: funding=${funding} surcharge=${surchargeCents}c total=${totalCents}c PI=${confirmed.id} status=${confirmed.status}`);
       return {
