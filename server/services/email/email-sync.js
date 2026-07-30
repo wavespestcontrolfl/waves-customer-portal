@@ -286,8 +286,19 @@ async function upsertEmail(parsed) {
     }
   }
 
+  // Approval-control replies ([EA-…] subjects) are exempt from blocklist
+  // trashing — a blocklisted-but-allowlisted approver's decision must
+  // never be removed from INBOX before the approval poller reads it
+  // (Codex #3024 r7). The poller's own sender allowlist + DMARC check
+  // remain the authorization gate.
+  let approvalControlEarly = false;
+  try {
+    const { isApprovalControlMessage } = require('../content/email-approvals');
+    approvalControlEarly = await isApprovalControlMessage({ subject: parsed.subject, from_address: parsed.from_address });
+  } catch { /* module unavailable — fall through to normal handling */ }
+
   // Check blocklist before inserting — skip blocked senders
-  if (await isBlocked(parsed.from_address, { gmailId: parsed.gmail_id })) {
+  if (!approvalControlEarly && await isBlocked(parsed.from_address, { gmailId: parsed.gmail_id })) {
     // Auto-trash without wasting a Sonnet call
     try { await gmailClient.trashMessage(parsed.gmail_id); } catch (e) { /* non-critical */ }
     emailData.is_archived = true;
@@ -339,8 +350,16 @@ async function upsertEmail(parsed) {
     logger.error(`[email-sync] Proof-approval check failed for ${email.id}: ${err?.message || err}`);
   }
 
+  // Content-approval replies ([EA-xxxxxxxx] subjects) are control messages
+  // too: the IMAP poller owns the decision — they must never burn a
+  // classifier call or risk an auto-action archiving/answering them. The
+  // EARLY verdict (computed before the blocklist branch) is reused so a
+  // decision the poller executed between the two points can't flip this
+  // to false (Codex r10).
+  const approvalControl = approvalControlEarly;
+
   // Classify in background (don't block sync)
-  if (!proofHandled && (!email.classification || email.classification === 'vendor')) {
+  if (!proofHandled && !approvalControl && (!email.classification || email.classification === 'vendor')) {
     setImmediate(() => {
       (async () => {
         const { classifyEmail } = require('./email-classifier');

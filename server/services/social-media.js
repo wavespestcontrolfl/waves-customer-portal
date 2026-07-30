@@ -296,7 +296,11 @@ const PLATFORM_FLAG_MAP = {
 
 const PLATFORM_ENV_REQS = {
   facebook: ['FACEBOOK_ACCESS_TOKEN', 'FACEBOOK_PAGE_ID'],
-  instagram: ['FACEBOOK_ACCESS_TOKEN', 'INSTAGRAM_ACCOUNT_ID'],
+  // FACEBOOK_PAGE_ID: the IG Graph call itself doesn't need it, but the
+  // publishToAll loop gates Instagram on igReady = fbReady && … — readiness
+  // must agree with the actual publish predicate or callers (e.g. the studio
+  // creative engine) spend work on a post the loop will skip.
+  instagram: ['FACEBOOK_ACCESS_TOKEN', 'FACEBOOK_PAGE_ID', 'INSTAGRAM_ACCOUNT_ID'],
   gbp: [],
   linkedin: [], // OAuth tokens live in system_settings (like GBP), not env
 };
@@ -361,6 +365,13 @@ async function assertSocialPublishingReady(platform, locationId) {
     }
     if (!status.companyId) {
       return { ready: false, reason: 'LINKEDIN_COMPANY_ID not set' };
+    }
+    // The publish loop skips a known page-admin mismatch — a connection with
+    // orgVerified === false is not publishable, so readiness must say so too
+    // (otherwise callers spend work, e.g. paid creative renders, on a post
+    // that will be skipped).
+    if (status.orgVerified === false) {
+      return { ready: false, reason: 'LinkedIn organization verification pending/failed — publish loop would skip this connection' };
     }
   }
 
@@ -1650,7 +1661,12 @@ const SocialMediaService = {
         const linkedinStatus = await require('./linkedin').getStatus();
         linkedinWantsHero = !!linkedinStatus.connected && linkedinStatus.orgVerified !== false;
       }
-      if (requestedPlatforms.has('gbp') && SOCIAL_FLAGS.gbpEnabled
+      // GBP never consumes AI-generated imagery (owner rule) — its only
+      // legitimate image sources are the blog hero and the brand card, both
+      // of which live in the noAiImage branch below. In AI-allowed (manual)
+      // runs, don't count GBP as an image consumer: it can't use what would
+      // be generated, so a GBP-only manual run shouldn't burn image credits.
+      if (noAiImage && requestedPlatforms.has('gbp') && SOCIAL_FLAGS.gbpEnabled
         && (requestedGbpLocations === null || requestedGbpLocations.size > 0)) {
         const configured = await gbpService.getConfiguredLocations();
         gbpWantsImage = configured.some((loc) => !requestedGbpLocations || requestedGbpLocations.has(loc.id));
@@ -1689,7 +1705,7 @@ const SocialMediaService = {
             const filename = `post-${Date.now()}.jpg`;
             const s3Url = await uploadImageToS3(img.base64, filename);
             if (s3Url) {
-              generatedImageUrl = s3Url;
+              generatedImageUrl = s3Url; // FB/IG only — GBP never reads this
             }
           }
         } catch { /* non-critical */ }
@@ -1928,14 +1944,13 @@ const SocialMediaService = {
           continue;
         }
 
-        // Reuse the image already generated + uploaded to the CDN for this
-        // run (see generatedImageUrl above) so GBP posts carry a photo too —
-        // a GBP local post without media renders as a flat text card and its
-        // "Learn more" CTA is easy to miss. Same public URL Instagram uses.
-        // Prefer a GBP-specific image (4:3, no center-crop of the card's logo/
-        // CTA); fall back to the shared square image when none was supplied.
-        const gbpImg = (typeof resolvedGbpImageUrl === 'string' && resolvedGbpImageUrl)
-          || (typeof generatedImageUrl === 'string' ? generatedImageUrl : null);
+        // GBP posts use ONLY the explicit GBP image channel
+        // (resolvedGbpImageUrl: caller gbpImageUrl, blog hero, or the 4:3
+        // brand card). NO fallback to the shared/generic image — provenance
+        // of a caller-supplied imageUrl is unknowable here (approved studio
+        // drafts re-enter with an AI scene as imageUrl), and the owner rule
+        // is NO AI imagery on GBP, ever. No explicit GBP image → text-only.
+        const gbpImg = (typeof resolvedGbpImageUrl === 'string' && resolvedGbpImageUrl) || null;
         let r = await postToGBP(loc.id, gbpContent, link, gbpImg);
         // Media is best-effort: if Google rejects or can't fetch the image,
         // retry text-only so an image problem doesn't block a post that would
@@ -2142,6 +2157,10 @@ module.exports.uploadImageToS3 = uploadImageToS3;
 module.exports.uploadVideoToS3 = uploadVideoToS3;
 module.exports.postToGBP = postToGBP;
 module.exports.isGbpMediaError = isGbpMediaError;
+// Deterministic on-brand card (SVG -> JPEG -> CDN) — the only image source
+// besides real photos/blog heroes that GBP posts may use (no AI imagery on
+// GBP, owner rule). Consumed by autonomous-runner's GBP action.
+module.exports.renderBrandCardUrl = renderBrandCardUrl;
 module.exports.normalizePublishChannels = normalizePublishChannels;
 module.exports.normalizeGbpLocationIds = normalizeGbpLocationIds;
 module.exports.checkAndRaiseAlert = checkAndRaiseAlert;

@@ -2460,11 +2460,14 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
             linearFt: numberOrNull(tracedRow.linear_ft),
             closedLoop: Boolean(tracedRow.closed_loop),
             capturedAt: tracedRow.updated_at || tracedRow.created_at || null,
-            // 'lawn' | 'perimeter' | null (legacy rows predate the column) —
-            // the client only claims "treated lawn area" for rows actually
-            // captured by the lawn outline workflow (codex P1 #3038).
+            // 'lawn' | 'perimeter' | 'interior' | null (legacy rows predate
+            // the column) — the client only claims "treated lawn area" /
+            // interior coverage for rows actually captured by those
+            // workflows (codex P1 #3038; interior owner 2026-07-29).
             captureMode: tracedRow.capture_mode || null,
-            label: 'Treated perimeter traced on-site by your technician.',
+            label: tracedRow.capture_mode === 'interior'
+              ? 'Interior and perimeter treatment traced on-site by your technician.'
+              : 'Treated perimeter traced on-site by your technician.',
             // Traced path in snapshot pixel space (1280x960) so the report
             // can REPLAY the spray application the tech saw (owner
             // 2026-07-21) — px only, the customer surface never needs the

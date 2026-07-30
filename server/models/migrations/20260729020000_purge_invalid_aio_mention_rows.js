@@ -25,7 +25,7 @@ exports.up = async function up(knex) {
       this.whereNull('response_raw').orWhere('response_raw', '');
     })
     .del();
-  // eslint-disable-next-line no-console
+   
   console.log(`[migration] purged ${deleted} invalid google_ai_overview mention rows`);
 };
 

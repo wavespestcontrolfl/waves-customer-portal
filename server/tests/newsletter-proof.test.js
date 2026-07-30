@@ -34,6 +34,7 @@ jest.mock('../services/newsletter-sender', () => ({
 }));
 jest.mock('../services/newsletter-validator', () => ({
   validateNewsletterDraft: mockValidate,
+  lockedPricesForSend: jest.fn(async () => []),
 }));
 jest.mock('../services/newsletter-event-selection', () => ({
   validateFlagshipEventSelection: mockValidateEventSelection,
@@ -43,6 +44,7 @@ jest.mock('../services/notification-triggers', () => ({
 }));
 jest.mock('../services/email-template', () => ({
   wrapNewsletter: ({ body }) => `<wrapped>${body}</wrapped>`,
+  bodyIsDarkAware: () => true,
   // The reaction footer is ensured on every proof body and neutralized by
   // applyTokens; its neutral render resolves colors through this palette.
   newsletterPalette: () => ({

@@ -37,7 +37,7 @@ const {
   weekLockKey,
 } = require('../services/event-freshness');
 const { parseETDateTime, addETDays, etDateString, etParts } = require('../utils/datetime-et');
-const { validateNewsletterDraft } = require('../services/newsletter-validator');
+const { validateNewsletterDraft, lockedPricesForSend } = require('../services/newsletter-validator');
 const { createNewsletterDraft, persistNewsletterDraft } = require('../services/newsletter-draft');
 const {
   validateFlagshipEventSelection,
@@ -896,7 +896,8 @@ router.post('/sends/:id/send', async (req, res) => {
       const recipientCount = force ? 1 : Number(
         (await NewsletterSender.buildSubscriberQuery(send.segment_filter, await NewsletterSender.resolveSegmentCustomerIds(send.segment_filter)).count('* as c').first())?.c || 0
       );
-      const { errors } = validateNewsletterDraft(typedSend, { recipientCount });
+      const lockedPrices = await lockedPricesForSend(typedSend, db);
+      const { errors } = validateNewsletterDraft(typedSend, { recipientCount, lockedPrices });
       if (errors.length > 0) {
         return res.status(400).json({ error: 'Validation failed', errors });
       }
@@ -1102,12 +1103,15 @@ router.post('/preview', async (req, res) => {
     // surface operators review, so its links must open the real pages.
     const { resolveEvclickFromBody } = require('../services/newsletter-event-clicks');
     const resolvedBody = await resolveEvclickFromBody(ensureFeedbackToken({ html: htmlBody || '' }).html);
+    const { bodyIsDarkAware } = require('../services/email-template');
     const html = wrapNewsletter({
       body: stripPersonalizationTokens(resolvedBody),
       unsubscribeUrl: demoUrl,
       preheader: previewText ? stripPersonalizationTokens(previewText) : undefined,
       newsletterType: newsletterType || undefined,
       preferredSourcesCta: true,
+      // Legacy/operator-authored bodies without dm-* hooks stay light.
+      darkAwareBody: bodyIsDarkAware(resolvedBody),
     });
     res.json({ html });
   } catch (err) {
@@ -2001,7 +2005,8 @@ router.post('/sends/:id/validate', async (req, res, next) => {
       logger.error(`[newsletter] validate subscriber count failed: ${queryErr.message}`);
       return res.status(500).json({ error: 'Could not verify subscriber count — try again' });
     }
-    const { errors, warnings } = validateNewsletterDraft(send, { recipientCount });
+    const lockedPrices = await lockedPricesForSend(send, db);
+    const { errors, warnings } = validateNewsletterDraft(send, { recipientCount, lockedPrices });
     res.json({ valid: errors.length === 0, errors, warnings });
   } catch (err) { next(err); }
 });

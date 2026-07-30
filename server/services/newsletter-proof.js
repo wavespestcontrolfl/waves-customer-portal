@@ -20,8 +20,8 @@ const db = require('../models/db');
 const logger = require('./logger');
 const sendgrid = require('./sendgrid-mail');
 const NewsletterSender = require('./newsletter-sender');
-const { wrapNewsletter } = require('./email-template');
-const { validateNewsletterDraft } = require('./newsletter-validator');
+const { wrapNewsletter, bodyIsDarkAware } = require('./email-template');
+const { validateNewsletterDraft, lockedPricesForSend } = require('./newsletter-validator');
 const { requiresClaimValidation, isFlagshipType } = require('../config/newsletter-types');
 const { isFlagshipTargetForWeek } = require('./event-freshness');
 const { validateFlagshipEventSelection, parseLockedEventIds } = require('./newsletter-event-selection');
@@ -102,7 +102,7 @@ async function buildProofDiagnosticsHtml(send, lineupEvents, scheduledFor) {
       ? alternates.map((a) => `${esc(a.title)} (${a.editorial_score ?? '—'})`).join(' · ')
       : 'none stored';
 
-    return `<div style="margin:0 0 20px 0;padding:14px 16px;background:#EEF3F8;border:1px solid #C9D6E2;border-radius:8px;font-family:monospace;font-size:12px;line-height:1.6;color:#26364A;">
+    return `<div class="dm-box" style="margin:0 0 20px 0;padding:14px 16px;background:#EEF3F8;border:1px solid #C9D6E2;border-radius:8px;font-family:monospace;font-size:12px;line-height:1.6;color:#26364A;">
 <div style="font-weight:700;margin-bottom:6px;">INTERNAL DIAGNOSTICS — not sent to subscribers</div>
 <div style="margin-bottom:6px;">Scores shown are the STORED rubric scores; the lineup order already reflects any listwise nudge (±3, in-memory at selection time).</div>
 Selected: ${ordered.length} &nbsp;·&nbsp; Qualified pool (≥${featureScoreFloor()}): ${qualifiedPool} of ${pool.length} approved &nbsp;·&nbsp; Weekend events: ${weekendCount} &nbsp;·&nbsp; Zones: ${zones.length} (${esc(zones.join(', ') || '—')})<br/>
@@ -326,6 +326,18 @@ async function renderSendPreview(send, toEmail) {
     preheader: send.preview_text || undefined,
     newsletterType: send.newsletter_type || undefined,
     preferredSourcesCta: true,
+    // Same web-version permalink the live campaign gets — but only once
+    // the archive can actually serve it (getPostBySlug requires
+    // sending/sent). A pre-send draft proof omits the link rather than
+    // handing the owner a guaranteed 404.
+    webVersionUrl: (send.slug && ['sending', 'sent', 'failed'].includes(send.status))
+      ? `https://www.wavespestcontrol.com/newsletter/archive/${send.slug}`
+      : undefined,
+    // Legacy bodies (persisted before the dark-mode layer) stay light.
+    // Inspect ONLY the persisted body: the composed preview prepends the
+    // proof banner/diagnostics, which carry their own dm-box hooks and
+    // would make every legacy draft look dark-capable.
+    darkAwareBody: bodyIsDarkAware(send.html_body),
   });
 
   const testSub = await db('newsletter_subscribers')
@@ -354,7 +366,7 @@ async function renderSendPreview(send, toEmail) {
 }
 
 function proofBannerHtml(recipientCount) {
-  return `<div style="border:2px solid #04395E;border-radius:8px;padding:14px 16px;margin:0 0 20px;background:#f4f8fb;font-family:Arial,Helvetica,sans-serif;">
+  return `<div class="dm-box" style="border:2px solid #04395E;border-radius:8px;padding:14px 16px;margin:0 0 20px;background:#f4f8fb;font-family:Arial,Helvetica,sans-serif;">
 <p style="margin:0 0 6px;font-size:15px;font-weight:bold;color:#04395E;">Proof — not yet sent to the list</p>
 <p style="margin:0;font-size:14px;color:#1f2937;">Reply <strong>APPROVED</strong> to queue this issue for <strong>Tuesday at 6:00 AM ET</strong> to <strong>${recipientCount}</strong> active subscribers. Any other reply — or no reply — and it stays a draft in the composer.</p>
 </div>\n`;
@@ -417,7 +429,8 @@ async function sendNewsletterProof(sendId) {
     return { skipped: true, reason: 'zero_recipients' };
   }
   if (requiresClaimValidation(send.newsletter_type)) {
-    const { errors } = validateNewsletterDraft(send, { recipientCount });
+    const lockedPrices = await lockedPricesForSend(send, db);
+    const { errors } = validateNewsletterDraft(send, { recipientCount, lockedPrices });
     if (errors.length > 0) {
       await notifyProof('newsletter_proof_blocked', { subject: send.subject, errors });
       return { skipped: true, reason: 'validation_failed', errors };
@@ -615,7 +628,8 @@ async function maybeHandleProofApproval(email) {
     return true;
   }
   if (requiresClaimValidation(send.newsletter_type)) {
-    const { errors } = validateNewsletterDraft(send, { recipientCount });
+    const lockedPrices = await lockedPricesForSend(send, db);
+    const { errors } = validateNewsletterDraft(send, { recipientCount, lockedPrices });
     if (errors.length > 0) {
       await notifyProof('newsletter_proof_blocked', {
         subject: send.subject,

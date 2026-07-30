@@ -1,6 +1,7 @@
 const {
   newsletterPalette,
   wrapNewsletter,
+  wrapEmail,
 } = require('../services/email-template');
 const {
   assembleBeehiivNewsletter,
@@ -39,7 +40,7 @@ function renderedThemeNames(html, idPattern) {
     theme.name,
   ]));
 
-  return [...html.matchAll(new RegExp(`<h2 id="${idPattern}" style="([^"]+)"`, 'g'))]
+  return [...html.matchAll(new RegExp(`<h2 id="${idPattern}"(?: class="[^"]*")? style="([^"]+)"`, 'g'))]
     .map((match) => {
       const style = match[1];
       const colors = /color:(#[0-9A-F]{6});background:(#[0-9A-F]{6});border-left:4px solid (#[0-9A-F]{6});/i.exec(style);
@@ -125,9 +126,42 @@ describe('newsletter rendering contract', () => {
     expect(html).toContain('width="20" height="20"');
   });
 
+  test('dark-mode layer: designed dark overrides + hooks ship on every glass page; only the newsletter opts its cards in', () => {
+    const html = wrapNewsletter({ body: '<p>x</p>', newsletterType: 'local-weekly-fresh-events' });
+    expect(html).toContain('name="color-scheme" content="light dark"');
+    expect(html).toContain('@media (prefers-color-scheme: dark)');
+    expect(html).toContain('[data-ogsc]');
+    expect(html).toContain('class="dm-body"');
+    expect(html).toContain('class="dm-page"');
+    expect(html).toContain('class="dm-card"');
+    // Heading darkening is SCOPED to dark-aware cards — transactional
+    // emails keep light cards, so their navy headings must stay navy.
+    expect(html).toContain('.dm-card h1, .dm-card h2');
+    const transactional = wrapEmail({ heading: 'Invoice ready', intro: 'Hi.', lines: [['Total', '$10']] });
+    expect(transactional).not.toContain('class="dm-card"');
+    // Transactional glass cards force the OPAQUE white fallback in dark
+    // mode — rgba would composite over the dark page into a mid-grey.
+    expect(transactional).toContain('class="dm-lightcard"');
+    expect(transactional).toContain('.dm-lightcard { background: #FFFFFF !important; }');
+    expect(transactional).toContain('class="dm-ink"');
+    expect(transactional).toContain('class="dm-page-text"');
+    // Every anchor inside the dark-aware newsletter card recolors.
+    expect(html).toContain('.dm-card a { color: #6CC1F0 !important; }');
+    // Legacy bodies without dm-* hooks stay on the light card.
+    const { bodyIsDarkAware } = require('../services/email-template');
+    expect(bodyIsDarkAware('<div class="dm-box">x</div>')).toBe(true);
+    expect(bodyIsDarkAware('<p style="background:#F2F8F0">legacy</p>')).toBe(false);
+    const legacy = wrapNewsletter({ body: '<p>legacy</p>', newsletterType: 'local-weekly-fresh-events', darkAwareBody: false });
+    expect(legacy).toContain('class="dm-lightcard"');
+    expect(legacy).not.toContain('class="dm-card"');
+    // Logo sits in its own block row ABOVE the masthead title.
+    expect(html).toMatch(/<div style="display:block;text-align:center;"><a [^>]+><img [^>]*waves[^>]*><\/a><\/div>\s*<h1 class="dm-ink"/i);
+  });
+
   test('keeps every canonical Waves section theme at WCAG AA contrast', () => {
     const themes = newsletterPalette().sectionHeaders;
 
+    // Owner directive 2026-07-29: Waves blue + gold/yellow ONLY.
     expect(themes).toMatchInlineSnapshot(`
       [
         {
@@ -137,22 +171,10 @@ describe('newsletter rendering contract', () => {
           "text": "#04395E",
         },
         {
-          "accent": "#1B2C5B",
-          "background": "#F0F7FC",
-          "name": "deep-water",
-          "text": "#1B2C5B",
-        },
-        {
           "accent": "#F4B014",
           "background": "#FFF9D6",
           "name": "sunshine",
           "text": "#664500",
-        },
-        {
-          "accent": "#C8102E",
-          "background": "#FDECEF",
-          "name": "waves-red",
-          "text": "#C8102E",
         },
       ]
     `);
@@ -190,17 +212,17 @@ describe('newsletter rendering contract', () => {
       {
         "flagship": [
           "waves-blue",
-          "deep-water",
           "sunshine",
-          "waves-red",
+          "waves-blue",
+          "sunshine",
         ],
         "pestInsider": [
           "waves-blue",
-          "deep-water",
           "sunshine",
-          "waves-red",
           "waves-blue",
-          "deep-water",
+          "sunshine",
+          "waves-blue",
+          "sunshine",
         ],
       }
     `);

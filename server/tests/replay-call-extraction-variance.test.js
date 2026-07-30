@@ -92,6 +92,62 @@ describe('call extraction replay variance reporting', () => {
     ]);
   });
 
+  test('checks call-nature and recommended-disposition membership expectations', () => {
+    const result = validResult({
+      current: {
+        status: 'valid',
+        wouldAutoRoute: false,
+        flags: ['voicemail'],
+        schedulingStatus: 'none',
+        callNature: 'new_lead',
+        recommendedDisposition: 'callback_task_created',
+      },
+    });
+
+    expect(evaluateFixtureExpectation(result, {
+      expect: {
+        current_call_nature_in: ['new_lead', 'voicemail_message'],
+        current_recommended_disposition_in: ['callback_task_created', 'lead_response_flow_triggered'],
+      },
+    })).toMatchObject({
+      status: 'pass',
+      checked: 2,
+      failures: [],
+    });
+
+    const miss = evaluateFixtureExpectation(result, {
+      expect: {
+        current_call_nature_in: ['spam_solicitation'],
+        current_recommended_disposition_in: ['booked'],
+      },
+    });
+    expect(miss.status).toBe('fail');
+    expect(miss.failures.map((failure) => failure.name)).toEqual([
+      'current_call_nature_in',
+      'current_recommended_disposition_in',
+    ]);
+
+    // Older extractions predate call_nature (schema 1.6.0) — a null never matches.
+    const nullNature = evaluateFixtureExpectation(validResult(), {
+      expect: { current_call_nature_in: ['new_lead'] },
+    });
+    expect(nullNature.status).toBe('fail');
+    expect(nullNature.failures[0]).toMatchObject({ name: 'current_call_nature_in', actual: undefined });
+
+    expect(evaluateFixtureExpectation(validResult(), {
+      expect: {
+        current_call_nature_in: [],
+        current_recommended_disposition_in: 'booked',
+      },
+    })).toMatchObject({
+      status: 'fail',
+      failures: expect.arrayContaining([
+        expect.objectContaining({ name: 'fixture_error:invalid_current_call_nature_in' }),
+        expect.objectContaining({ name: 'fixture_error:invalid_current_recommended_disposition_in' }),
+      ]),
+    });
+  });
+
   test('fails fixture expectations with empty, unknown, or invalid checks', () => {
     expect(evaluateFixtureExpectation(validResult(), { expect: {} })).toMatchObject({
       status: 'fail',

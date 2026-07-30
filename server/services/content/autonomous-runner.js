@@ -986,6 +986,22 @@ class AutonomousRunner {
         reviewer_notes: [this._summarizeForReviewer(uniquenessResult, qualityResult, seoCompletionResult, brief), trustBuildNote].filter(Boolean).join(' | '),
       });
       await this._pendingReviewClaimOrThrow(queue, opp.id, reason, { claimToken });
+      // Owner email-approval loop (2026-07-28): approvable kinds notify the
+      // owner's inbox; the emailed reply executes the decision. Fire-and-
+      // forget — a notification failure never affects the run outcome (the
+      // poller retries unsent emails each cycle).
+      setImmediate(() => {
+        // The require itself is inside the guard: this immediate can fire
+        // while the process (or a test environment) is tearing down, where
+        // a deferred module load throws synchronously — a fire-and-forget
+        // notification must never crash the runner.
+        try {
+          require('./email-approvals').notifyParkedRun(run.id)
+            .catch((err) => logger.warn(`[email-approvals] notify for run ${run.id} failed: ${err.message}`));
+        } catch (err) {
+          logger.warn(`[email-approvals] notify for run ${run.id} failed: ${err.message}`);
+        }
+      });
       return finalized;
     }
 
@@ -2231,25 +2247,45 @@ class AutonomousRunner {
       };
     }
 
-    // Best-effort image so the GBP post isn't a flat text card. The image
-    // pipeline (generate -> S3 -> CDN) is the same one publishToAll uses for
-    // Instagram; on any failure we fall through to a text-only post (the
-    // prior behavior) rather than blocking the publish. Gate on image hosting
-    // first — uploadImageToS3 returns null without S3 + a CDN domain, so
-    // generating without it would just burn credits.
+    // Best-effort image so the GBP post isn't a flat text card. GBP never
+    // posts AI-generated imagery (owner rule) — use the same deterministic
+    // on-brand card the blog shares use, 4:3 so Google doesn't center-crop
+    // the logo/CTA. renderBrandCardUrl returns null on any failure (no
+    // S3/CDN, render error), falling through to a text-only post rather
+    // than blocking the publish.
     const imageHostingReady =
       !!process.env.S3_BUCKET && !!process.env.AWS_ACCESS_KEY_ID
       && !!process.env.AWS_SECRET_ACCESS_KEY && !!process.env.SOCIAL_MEDIA_CDN_DOMAIN;
     let gbpImageUrl = null;
     try {
-      if (imageHostingReady && social.generateImage && social.uploadImageToS3) {
-        const img = await social.generateImage(title);
-        if (img?.base64) {
-          gbpImageUrl = await social.uploadImageToS3(img.base64, `gbp-${location.id}-${Date.now()}.jpg`);
+      if (imageHostingReady && social.renderBrandCardUrl) {
+        // The card headline is customer-derived (target_keyword can carry the
+        // opportunity query verbatim) — gate it through the same deterministic
+        // validator as the post copy before rendering it onto a public image.
+        // On top of that, a CATEGORICAL headline rule: a card headline never
+        // legitimately needs the word "safe(ty)" or a time-figure at all, and
+        // regex-enumerating English phrasings of banned claims is unbounded —
+        // so any such headline posts text-only, full stop.
+        // An invalid headline just means a text-only post. Explicit eyebrow:
+        // these are location posts, not blog shares — never let the card
+        // default to "From the Waves blog".
+        const HEADLINE_RISK_RE = /\bsafe(?:ty|ly)?\b|\d\s*(?:minutes?|mins?|hours?|hrs?)\b/i;
+        const titleCheck = social.validateContent
+          ? social.validateContent(title, 'gbp')
+          : { valid: true };
+        if (HEADLINE_RISK_RE.test(title)) {
+          logger.warn('[autonomous-runner] GBP card headline contains safety/timing language (posting text-only)');
+        } else if (titleCheck.valid) {
+          gbpImageUrl = await social.renderBrandCardUrl(
+            { variant: 'blog', title, excerpt: content, cta: 'Learn more', eyebrow: 'Waves Pest Control' },
+            'gbp',
+          );
+        } else {
+          logger.warn(`[autonomous-runner] GBP card headline failed validation (posting text-only): ${titleCheck.issues?.join('; ')}`);
         }
       }
     } catch (err) {
-      logger.warn(`[autonomous-runner] GBP image generation failed (posting text-only): ${err.message}`);
+      logger.warn(`[autonomous-runner] GBP brand-card render failed (posting text-only): ${err.message}`);
     }
 
     const t2 = Date.now();
@@ -2479,20 +2515,20 @@ class AutonomousRunner {
   // statusCode) on any guard/gate/publish failure so the caller leaves the
   // opportunity pending. Idempotent-ish: a second approval after a live publish
   // is rejected because the run is no longer 'named_competitor_review'.
-  async approveAndPublishNamedCompetitor(opportunityId, { runId = null, approvedBy = 'operator' } = {}) {
+  async approveAndPublishNamedCompetitor(opportunityId, { runId = null, approvedBy = 'operator', expectedDraftSha = null } = {}) {
     if (!opportunityId) { const e = new Error('opportunityId required'); e.statusCode = 400; throw e; }
     // Serialize with runDaily / runCatchUp / admin run-now behind the engine
     // advisory lock so the canary-cap read + publish can't interleave with
     // another publisher and blow past the per-day/week caps or overlap publishes.
     const result = await this._withEngineLock('approveNamedCompetitor',
-      () => this._approveNamedCompetitorLocked(opportunityId, { runId, approvedBy }));
+      () => this._approveNamedCompetitorLocked(opportunityId, { runId, approvedBy, expectedDraftSha }));
     if (result && result.skipped && result.reason === 'engine_locked') {
       const e = new Error('Autonomous publisher is busy; retry in a moment'); e.statusCode = 409; throw e;
     }
     return result;
   }
 
-  async _approveNamedCompetitorLocked(opportunityId, { runId = null, approvedBy = 'operator' } = {}) {
+  async _approveNamedCompetitorLocked(opportunityId, { runId = null, approvedBy = 'operator', expectedDraftSha = null } = {}) {
     // Publish the EXACT run the operator reviewed. A requeue can leave an older
     // run still parked while a newer run parks for the same opportunity, so
     // resolve by runId when given and verify it belongs to this opportunity;
@@ -2526,6 +2562,19 @@ class AutonomousRunner {
     }
     const draft = parseJsonMaybe(run.draft_payload);
     if (!draft || !draft.body) { const e = new Error('Stored draft is missing or empty'); e.statusCode = 422; throw e; }
+    // Email-approval snapshot binding, asserted HERE — under the engine
+    // lock, against the freshly reloaded run — so no concurrent
+    // draft_payload edit can slip between the caller's check and this
+    // publish (Codex #3024 r14). Callers that reviewed elsewhere (portal)
+    // pass no sha and skip the check.
+    if (expectedDraftSha) {
+      const { draftPreview } = require('./email-approvals')._internals;
+      const currentSha = draftPreview(run).sha;
+      if (currentSha !== expectedDraftSha) {
+        const e = new Error('Draft content changed since it was reviewed; refresh and review again');
+        e.statusCode = 409; e.isOperational = true; throw e;
+      }
+    }
     // Use the brief the reviewed draft was generated against (run.brief_id), not
     // the latest — a requeue/recompose must not swap action_type/target while a
     // stale approval publishes the old body.

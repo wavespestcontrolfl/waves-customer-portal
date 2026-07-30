@@ -220,7 +220,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
   const thankYouEscaped = thankYouNote
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   const thankYouHtml = thankYouNote
-    ? `<div style="margin-top:16px;font-family:${colors.FONT};font-size:14px;line-height:1.55;color:${colors.BODY};white-space:pre-wrap;">${thankYouEscaped}</div>`
+    ? `<div class="dm-page-text" style="margin-top:16px;font-family:${colors.FONT};font-size:14px;line-height:1.55;color:${colors.BODY};white-space:pre-wrap;">${thankYouEscaped}</div>`
     : '';
   const introWithSummary = `${intro}${summaryHtml}${thankYouHtml}`;
   const lines = [

@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { useSearchParams } from "react-router-dom";
+import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import { BookOpen, Brain, Gauge, Plus, ShieldCheck, Sprout } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 
@@ -126,6 +127,12 @@ export default function KnowledgeBasePage({ embedded = false }) {
   const queryKey = embedded ? "kbTab" : "tab";
   const requestedTab = searchParams.get(queryKey);
   const tab = KB_TAB_KEYS.has(requestedTab) ? requestedTab : "browse";
+
+  // Usage beacon for the leaf that actually RENDERS — invalid or missing
+  // ?kbTab= resolves to Browse without rewriting the URL. The Knowledge
+  // HUB deliberately emits nothing; the mounted child owns the deepest
+  // leaf (Codex #2961 r17). Embedded-only: no standalone route.
+  useRenderedTabBeacon("/admin/knowledge", embedded ? tab : null, [searchParams]);
   const setTab = (nextTab) => {
     const next = new URLSearchParams(searchParams);
     if (nextTab === "browse") next.delete(queryKey);

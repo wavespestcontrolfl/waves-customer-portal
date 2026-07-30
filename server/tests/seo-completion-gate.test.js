@@ -312,3 +312,255 @@ describe('autonomous-lane draft shape (no seo_contract) — breadcrumb false pos
     expect(result.findings.map((f) => f.code)).toContain('P1_MISSING_CONVERSION_CTA');
   });
 });
+
+// Lawn and tree & shrub have no hub-level service page. Once SERVICE_HUB_LINKS
+// went empty for them, SERVICE_TARGETS still recommended the dead bare routes as
+// the REQUIRED service link, and the gate demanded a distinct 'service' link — so
+// a fully compliant draft raised P1_MISSING_SERVICE_LINK forever. With
+// AUTONOMOUS_CONTENT_MAX_P1_FINDINGS=0 that means it could never publish.
+describe('hubless verticals: the city-service page satisfies the service link', () => {
+  const lawnDraft = (cityLink) => ({
+    type: 'draft',
+    frontmatter: {
+      title: 'Chinch Bugs in Sarasota St. Augustine Lawns',
+      slug: '/lawn-care/chinch-bugs-sarasota-fl/',
+      canonical: 'https://www.wavespestcontrol.com/lawn-care/chinch-bugs-sarasota-fl/',
+      meta_description: 'Sarasota homeowners can spot chinch bug damage in St. Augustine grass, tell it from drought stress, and know when to call Waves.',
+      primary_keyword: 'chinch bugs Sarasota',
+      category: 'lawn-care',
+      schema_types: ['Article', 'BreadcrumbList'],
+      hero_image: { src: '/images/blog/chinch/hero.webp', alt: 'Chinch bug damage in a Sarasota lawn' },
+    },
+    body: [
+      'Chinch bugs in Sarasota St. Augustine lawns leave straw-colored patches that spread in the afternoon sun.',
+      '',
+      'Want it checked? [Request a lawn care quote](/contact/).',
+      '',
+      '## What Homeowners Can Check First',
+      '',
+      'Part the grass at the edge of a dying patch in Sarasota and look for small insects moving at the soil line.',
+      '',
+      '## Why This Happens in Southwest Florida',
+      '',
+      'SWFL heat and sandy soil dry the turf fast, and chinch bugs concentrate along sidewalks and driveways.',
+      '',
+      '## What Not to Do',
+      '',
+      "Don't water on a fixed schedule regardless of rain because that masks the damage pattern.",
+      '',
+      '## When to Call Waves',
+      '',
+      'Call a professional when patches keep spreading after correcting irrigation. Waves can confirm the pest and treat it.',
+      '',
+      `Compare options on our [${cityLink.label}](${cityLink.url}) page.`,
+      '',
+      'Ready for help? [Contact Waves](/contact/) for a lawn evaluation.',
+    ].join('\n'),
+    seo_contract: {
+      breadcrumbs: [
+        { name: 'Home', url: '/' },
+        { name: 'Waves Blog', url: '/blog/' },
+        { name: 'Chinch Bugs in Sarasota St. Augustine Lawns', url: '/lawn-care/chinch-bugs-sarasota-fl/' },
+      ],
+    },
+  });
+
+  const lawnBrief = {
+    action_type: 'new_supporting_blog',
+    page_type: 'supporting-blog',
+    city: 'Sarasota',
+    service: 'lawn',
+    target_keyword: 'chinch bugs Sarasota',
+    required_sections: ['pest-practices homeowner guidance'],
+    internal_links_to_add: ['/lawn-care-sarasota-fl/', '/contact/'],
+  };
+
+  const codesFor = (result) => (result.findings || []).map((f) => f.code);
+
+  test('a lawn draft linking only its city page raises no service-link P1', async () => {
+    const draft = lawnDraft({ url: '/lawn-care-sarasota-fl/', label: 'Sarasota lawn care' });
+    const r = await SeoCompletionGate.evaluate({ draft, brief: lawnBrief });
+    expect(codesFor(r)).not.toContain('P1_MISSING_SERVICE_LINK');
+    expect(codesFor(r)).not.toContain('P1_MISSING_CITY_LINK_WHEN_CITY_TOPIC');
+  });
+
+  test('a lawn draft with NO city or service link still raises the service P1', async () => {
+    const draft = lawnDraft({ url: '/contact/', label: 'contact us' });
+    const r = await SeoCompletionGate.evaluate({ draft, brief: lawnBrief });
+    expect(codesFor(r)).toContain('P1_MISSING_SERVICE_LINK');
+  });
+
+  test('a HUB-having vertical still needs its own service link', async () => {
+    // pest is not hubless, so a city link alone must not satisfy the requirement.
+    const draft = lawnDraft({ url: '/pest-control-sarasota-fl/', label: 'Sarasota pest control' });
+    const r = await SeoCompletionGate.evaluate({
+      draft,
+      brief: { ...lawnBrief, service: 'pest', internal_links_to_add: ['/pest-control-sarasota-fl/'] },
+    });
+    expect(codesFor(r)).toContain('P1_MISSING_SERVICE_LINK');
+  });
+
+  test('no dead bare route is recommended as the required service link', () => {
+    const { SERVICE_TARGETS } = require('../services/content/blog-seo-contract');
+    const dead = ['/lawn-care/', '/mosquito-control/', '/rodent-control/', '/tree-shrub-care/'];
+    for (const t of Object.values(SERVICE_TARGETS)) {
+      if (t.url) expect(dead).not.toContain(t.url);
+    }
+  });
+});
+
+// A hubless vertical's city page stands in for the service link only when it is
+// THAT service's city page. hasIncludedLinkReason classifies by URL shape alone, so
+// a lawn draft linking /pest-control-sarasota-fl/ would otherwise satisfy the lawn
+// service requirement while containing no lawn link at all.
+describe('the stand-in city link must match the brief service', () => {
+  const draftWith = (url, label) => ({
+    type: 'draft',
+    frontmatter: {
+      title: 'Chinch Bugs in Sarasota Lawns',
+      slug: '/lawn-care/chinch-bugs-sarasota-fl/',
+      canonical: 'https://www.wavespestcontrol.com/lawn-care/chinch-bugs-sarasota-fl/',
+      meta_description: 'Sarasota homeowners can spot chinch bug damage in St. Augustine grass and know when to call Waves for help.',
+      primary_keyword: 'chinch bugs Sarasota',
+      category: 'lawn-care',
+      schema_types: ['Article', 'BreadcrumbList'],
+      hero_image: { src: '/images/blog/chinch/hero.webp', alt: 'Chinch bug damage' },
+    },
+    body: [
+      'Chinch bugs in Sarasota St. Augustine lawns leave straw-colored patches near hot pavement.',
+      '',
+      'Want it checked? [Request a lawn care quote](/contact/).',
+      '',
+      '## What Homeowners Can Check First',
+      '',
+      'Part the grass at a dying edge in Sarasota and look for insects at the soil line.',
+      '',
+      '## Why This Happens in Southwest Florida',
+      '',
+      'SWFL heat and sandy soil dry turf quickly, concentrating chinch bugs along driveways.',
+      '',
+      '## What Not to Do',
+      '',
+      "Don't water on a fixed schedule regardless of rain because it masks the pattern.",
+      '',
+      '## When to Call Waves',
+      '',
+      'Call a professional when patches spread after correcting irrigation. Waves can confirm and treat it.',
+      '',
+      `Compare options on our [${label}](${url}) page.`,
+      '',
+      'Ready for help? [Contact Waves](/contact/) for a lawn evaluation.',
+    ].join('\n'),
+    seo_contract: {
+      breadcrumbs: [
+        { name: 'Home', url: '/' },
+        { name: 'Waves Blog', url: '/blog/' },
+        { name: 'Chinch Bugs in Sarasota Lawns', url: '/lawn-care/chinch-bugs-sarasota-fl/' },
+      ],
+    },
+  });
+  const lawnBrief = {
+    action_type: 'new_supporting_blog',
+    page_type: 'supporting-blog',
+    city: 'Sarasota',
+    service: 'lawn',
+    target_keyword: 'chinch bugs Sarasota',
+    required_sections: ['pest-practices homeowner guidance'],
+    internal_links_to_add: ['/lawn-care-sarasota-fl/', '/contact/'],
+  };
+  const codes = (r) => (r.findings || []).map((f) => f.code);
+
+  test("another service's city page does NOT satisfy the lawn service link", async () => {
+    const r = await SeoCompletionGate.evaluate({
+      draft: draftWith('/pest-control-sarasota-fl/', 'Sarasota pest control'),
+      brief: lawnBrief,
+    });
+    expect(codes(r)).toContain('P1_MISSING_SERVICE_LINK');
+  });
+
+  test("the service's OWN city page does satisfy it", async () => {
+    const r = await SeoCompletionGate.evaluate({
+      draft: draftWith('/lawn-care-sarasota-fl/', 'Sarasota lawn care'),
+      brief: lawnBrief,
+    });
+    expect(codes(r)).not.toContain('P1_MISSING_SERVICE_LINK');
+  });
+
+  test('tree & shrub uses its tree-and-shrub-care city page', async () => {
+    const brief = { ...lawnBrief, service: 'tree-shrub', internal_links_to_add: ['/tree-and-shrub-care-sarasota-fl/'] };
+    const ok = await SeoCompletionGate.evaluate({ draft: draftWith('/tree-and-shrub-care-sarasota-fl/', 'Sarasota tree and shrub care'), brief });
+    expect(codes(ok)).not.toContain('P1_MISSING_SERVICE_LINK');
+    const wrong = await SeoCompletionGate.evaluate({ draft: draftWith('/lawn-care-sarasota-fl/', 'Sarasota lawn care'), brief });
+    expect(codes(wrong)).toContain('P1_MISSING_SERVICE_LINK');
+  });
+});
+
+// SEO gate half of the same rule: right service, wrong town must still raise the
+// service-link P1 for a hubless vertical.
+describe('SEO gate: the stand-in city link must match the brief CITY', () => {
+  const draftLinking = (url, label) => ({
+    type: 'draft',
+    frontmatter: {
+      title: 'Chinch Bugs in Sarasota Lawns',
+      slug: '/lawn-care/chinch-bugs-sarasota-fl/',
+      canonical: 'https://www.wavespestcontrol.com/lawn-care/chinch-bugs-sarasota-fl/',
+      meta_description: 'Sarasota homeowners can spot chinch bug damage in St. Augustine grass and know when to call Waves for help.',
+      primary_keyword: 'chinch bugs Sarasota',
+      category: 'lawn-care',
+      schema_types: ['Article', 'BreadcrumbList'],
+      hero_image: { src: '/images/blog/chinch/hero.webp', alt: 'Chinch bug damage' },
+    },
+    body: [
+      'Chinch bugs in Sarasota St. Augustine lawns leave straw-colored patches near hot pavement.',
+      '',
+      'Want it checked? [Request a lawn care quote](/contact/).',
+      '',
+      '## What Homeowners Can Check First',
+      '',
+      'Part the grass at a dying edge in Sarasota and look for insects at the soil line.',
+      '',
+      '## Why This Happens in Southwest Florida',
+      '',
+      'SWFL heat and sandy soil dry turf quickly, concentrating chinch bugs along driveways.',
+      '',
+      '## What Not to Do',
+      '',
+      "Don't water on a fixed schedule regardless of rain because it masks the pattern.",
+      '',
+      '## When to Call Waves',
+      '',
+      'Call a professional when patches spread after correcting irrigation. Waves can confirm and treat it.',
+      '',
+      `Compare options on our [${label}](${url}) page.`,
+      '',
+      'Ready for help? [Contact Waves](/contact/) for a lawn evaluation.',
+    ].join('\n'),
+    seo_contract: {
+      breadcrumbs: [
+        { name: 'Home', url: '/' },
+        { name: 'Waves Blog', url: '/blog/' },
+        { name: 'Chinch Bugs in Sarasota Lawns', url: '/lawn-care/chinch-bugs-sarasota-fl/' },
+      ],
+    },
+  });
+  const brief = {
+    action_type: 'new_supporting_blog',
+    page_type: 'supporting-blog',
+    city: 'Sarasota',
+    service: 'lawn',
+    target_keyword: 'chinch bugs Sarasota',
+    required_sections: ['pest-practices homeowner guidance'],
+    internal_links_to_add: ['/lawn-care-sarasota-fl/', '/contact/'],
+  };
+  const codes = (r) => (r.findings || []).map((f) => f.code);
+
+  test('right service, WRONG town still raises the service-link P1', async () => {
+    const r = await SeoCompletionGate.evaluate({ draft: draftLinking('/lawn-care-venice-fl/', 'Venice lawn care'), brief });
+    expect(codes(r)).toContain('P1_MISSING_SERVICE_LINK');
+  });
+
+  test('right service AND town clears it', async () => {
+    const r = await SeoCompletionGate.evaluate({ draft: draftLinking('/lawn-care-sarasota-fl/', 'Sarasota lawn care'), brief });
+    expect(codes(r)).not.toContain('P1_MISSING_SERVICE_LINK');
+  });
+});

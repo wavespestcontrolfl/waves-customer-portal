@@ -114,11 +114,11 @@ const GLASS_THEME = {
     // Deterministic section bands for generated newsletters. Each pairing
     // keeps at least WCAG AA contrast for normal text while extending the
     // Waves coastal palette beyond a wall of identical navy headings.
+    // Owner directive 2026-07-29: headers render in the Waves blue and
+    // gold/yellow ONLY — the deep-water and red bands are retired.
     sectionHeaders: [
       { name: 'waves-blue', text: '#04395E', background: '#E3F5FD', accent: '#009CDE' },
-      { name: 'deep-water', text: '#1B2C5B', background: '#F0F7FC', accent: '#1B2C5B' },
       { name: 'sunshine', text: '#664500', background: '#FFF9D6', accent: '#F4B014' },
-      { name: 'waves-red', text: '#C8102E', background: '#FDECEF', accent: '#C8102E' },
     ],
   },
 };
@@ -190,7 +190,7 @@ function ctaButton(href, label) {
     <table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:0 auto;${block ? 'width:100%;' : ''}">
       <tr>
         <td ${block ? 'align="center" ' : ''}style="border-radius:${T.ctaRadius};background:${T.ctaBg};${T.ctaBgImage ? `background-image:${T.ctaBgImage};` : ''}border:1px solid ${T.ctaBorder};${T.ctaShadow ? `box-shadow:${T.ctaShadow};` : ''}">
-          <a href="${href}" style="display:${block ? 'block' : 'inline-block'};padding:${T.ctaPad};font-family:${T.font};font-size:${T.ctaSize};font-weight:${T.ctaWeight};color:${T.ctaText};text-decoration:none;letter-spacing:0;line-height:1.1;${block ? 'text-align:center;' : ''}">
+          <a href="${href}" class="dm-gold" style="display:${block ? 'block' : 'inline-block'};padding:${T.ctaPad};font-family:${T.font};font-size:${T.ctaSize};font-weight:${T.ctaWeight};color:${T.ctaText};text-decoration:none;letter-spacing:0;line-height:1.1;${block ? 'text-align:center;' : ''}">
             ${label}
           </a>
         </td>
@@ -242,7 +242,7 @@ function appFooterHtml(T) {
   // its baked-in 41px margin) runs visually denser — 36px next to Apple's
   // 40px is the optical match. The 16px bottom margin keeps the badges
   // clear of the business fine-print lines that follow.
-  return `<div style="margin:14px 0 10px 0;font-family:${T.font};font-size:14px;font-weight:700;color:${T.ink};text-align:center;">
+  return `<div class="dm-page-text" style="margin:14px 0 10px 0;font-family:${T.font};font-size:14px;font-weight:700;color:${T.ink};text-align:center;">
             Track visits, reports &amp; payments in the Waves app
           </div>
           <div style="text-align:center;margin:0 0 16px 0;">
@@ -268,7 +268,7 @@ function ctaChip(href, label) {
     <table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:0 auto;">
       <tr>
         <td style="border-radius:${T.ctaRadius};background:#FFFFFF;${T.cardGlassBg ? `background:rgba(255,255,255,0.6);` : ''}border:1px solid ${T.cardGlassBg ? T.cardBorder : T.ink};">
-          <a href="${href}" style="display:inline-block;padding:12px 22px;font-family:${T.font};font-size:14px;font-weight:700;color:${T.ink};text-decoration:none;letter-spacing:0;line-height:1.1;">
+          <a href="${href}" class="dm-gold" style="display:inline-block;padding:12px 22px;font-family:${T.font};font-size:14px;font-weight:700;color:${T.ink};text-decoration:none;letter-spacing:0;line-height:1.1;">
             ${label}
           </a>
         </td>
@@ -303,9 +303,20 @@ function glassPillHeader(T) {
       </table>`;
 }
 
-function glassCard(T, innerHtml, padding = '22px 26px') {
-  return `<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background:${T.card};background:${T.cardGlassBg};border:1px solid ${T.cardBorder};border-radius:${T.cardRadius};box-shadow:${T.cardShadow};">
-            <tr><td style="padding:${padding};">${innerHtml}</td></tr>
+function glassCard(T, innerHtml, padding = '22px 26px', { darkAware = false } = {}) {
+  // darkAware: ONLY the newsletter wrapper opts its cards into the dark
+  // theme — its body markup carries dm-* hooks throughout. Transactional
+  // cards (invoices, contracts, appointments, renderBlocks tables) keep
+  // their light surface in dark mode: their inline light-theme colors
+  // stay readable as a white card on the darkened page.
+  // Non-dark-aware cards still need ONE dark rule: the glass surface is
+  // semi-transparent rgba, which composites over the darkened page into
+  // an unreadable mid-grey — dm-lightcard forces the opaque white
+  // fallback so the light-theme inline colors keep their contrast.
+  const cardClass = darkAware ? ' class="dm-card"' : ' class="dm-lightcard"';
+  const tdClass = darkAware ? ' class="dm-text"' : '';
+  return `<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"${cardClass} style="background:${T.card};background:${T.cardGlassBg};border:1px solid ${T.cardBorder};border-radius:${T.cardRadius};box-shadow:${T.cardShadow};">
+            <tr><td${tdClass} style="padding:${padding};">${innerHtml}</td></tr>
           </table>`;
 }
 
@@ -329,7 +340,7 @@ function glassFinePrint(T, extra = '') {
   // read vertically; email clients can't be trusted with media queries,
   // so the stack applies everywhere — centered, it reads intentional on
   // desktop too).
-  return `${extra}<div style="font-family:${T.font};font-size:14px;letter-spacing:0.01em;color:${T.muted};line-height:1.65;text-align:center;">
+  return `${extra}<div class="dm-muted" style="font-family:${T.font};font-size:14px;letter-spacing:0.01em;color:${T.muted};line-height:1.65;text-align:center;">
             ${WAVES_BUSINESS_NAME}<br/>${WAVES_ADDRESS_LINE}<br/><a href="${WAVES_WEBSITE_URL}" style="color:${T.muted};text-decoration:none;">${WAVES_WEBSITE_HOST}</a><br/><a href="mailto:contact@wavespestcontrol.com" style="color:${T.muted};text-decoration:none;">contact@wavespestcontrol.com</a><br/><a href="tel:${WAVES_SUPPORT_PHONE_E164}" style="color:${T.muted};text-decoration:none;">${WAVES_SUPPORT_PHONE_DISPLAY}</a><br/>${WAVES_FL_LICENSE_LINE}
           </div>
           ${socialRowHtml()}
@@ -338,8 +349,12 @@ function glassFinePrint(T, extra = '') {
 
 // The complete universal Waves footer. Wrappers call this helper instead of
 // independently composing app links, company details, social links, and logo.
-function universalWavesFooterHtml(T) {
-  return glassFinePrint(T, appFooterHtml(T));
+function universalWavesFooterHtml(T, { appPromo = true } = {}) {
+  // appPromo:false → the newsletter lane. The customer-app pitch has no
+  // relevance to a general local-newsletter subscriber (owner-accepted
+  // critique 2026-07-29); it stays in the transactional/service wrappers,
+  // where every recipient is a customer.
+  return glassFinePrint(T, appPromo ? appFooterHtml(T) : '');
 }
 
 // Web-page variant for server-rendered customer pages (newsletter confirm /
@@ -365,16 +380,58 @@ function glassPage(T, { preheader, title, contentHtml, msoWidth = 640 }) {
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<meta name="color-scheme" content="light" />
-<meta name="supported-color-schemes" content="light" />
+<meta name="color-scheme" content="light dark" />
+<meta name="supported-color-schemes" content="light dark" />
 <title>${title || 'Waves Pest Control'}</title>
 <style>
   h1, h2, h3, h4 { color: ${T.ink}; font-family: ${T.headingFont}; }
+  /* Designed dark theme (owner 2026-07-29: "renders funny" on dark-mode
+     phones). Clients honoring prefers-color-scheme (Apple Mail, most
+     webmail) get a deliberate navy night render instead of auto-
+     inversion; Outlook's dark engines hit the same rules via the
+     [data-ogsc]/[data-ogsb] attributes it stamps. !important is required
+     — these must beat the inline light styles. Gmail's app applies its
+     own color transform regardless; explicit colors everywhere keep that
+     transform sane. */
+  @media (prefers-color-scheme: dark) {
+    body, .dm-body { background: #071F30 !important; }
+    .dm-page { background: #071F30 !important; background-image: none !important; }
+    .dm-card { background: #0C2B42 !important; border-color: #1E4460 !important; }
+    .dm-card a { color: #6CC1F0 !important; }
+    .dm-card a.dm-gold, a.dm-gold { color: #1B2C5B !important; }
+    .dm-card a.dm-onnavy, a.dm-onnavy { color: #FFFFFF !important; }
+    .dm-box span.dm-chip-lite { color: #04395E !important; }
+    .dm-lightcard { background: #FFFFFF !important; }
+    .dm-text, .dm-text p, .dm-text li { color: #DCE9F3 !important; }
+    .dm-card h1, .dm-card h2, .dm-card h3, .dm-card h4, .dm-ink { color: #EAF4FB !important; }
+    .dm-muted, .dm-muted a { color: #9DB4C6 !important; }
+    .dm-page-text { color: #DCE9F3 !important; }
+    .dm-box { background: #12354F !important; }
+    .dm-box, .dm-box p, .dm-box li { color: #DCE9F3 !important; }
+    .dm-chip { background: #12354F !important; color: #CFE6F5 !important; }
+    a.dm-link { color: #6CC1F0 !important; }
+  }
+  [data-ogsc] body, [data-ogsb] body, [data-ogsc] .dm-body { background: #071F30 !important; }
+  [data-ogsc] .dm-page, [data-ogsb] .dm-page { background: #071F30 !important; background-image: none !important; }
+  [data-ogsc] .dm-card, [data-ogsb] .dm-card { background: #0C2B42 !important; border-color: #1E4460 !important; }
+  [data-ogsc] .dm-card a { color: #6CC1F0 !important; }
+  [data-ogsc] .dm-card a.dm-gold, [data-ogsc] a.dm-gold { color: #1B2C5B !important; }
+  [data-ogsc] .dm-card a.dm-onnavy, [data-ogsc] a.dm-onnavy { color: #FFFFFF !important; }
+  [data-ogsc] .dm-box span.dm-chip-lite { color: #04395E !important; }
+  [data-ogsc] .dm-lightcard, [data-ogsb] .dm-lightcard { background: #FFFFFF !important; }
+  [data-ogsc] .dm-text, [data-ogsc] .dm-text p, [data-ogsc] .dm-text li { color: #DCE9F3 !important; }
+  [data-ogsc] .dm-card h1, [data-ogsc] .dm-card h2, [data-ogsc] .dm-card h3, [data-ogsc] .dm-card h4, [data-ogsc] .dm-ink { color: #EAF4FB !important; }
+  [data-ogsc] .dm-muted, [data-ogsc] .dm-muted a { color: #9DB4C6 !important; }
+  [data-ogsc] .dm-page-text { color: #DCE9F3 !important; }
+  [data-ogsc] .dm-box, [data-ogsb] .dm-box { background: #12354F !important; }
+  [data-ogsc] .dm-box, [data-ogsc] .dm-box p, [data-ogsc] .dm-box li { color: #DCE9F3 !important; }
+  [data-ogsc] .dm-chip, [data-ogsb] .dm-chip { background: #12354F !important; color: #CFE6F5 !important; }
+  [data-ogsc] a.dm-link { color: #6CC1F0 !important; }
 </style>
 </head>
-<body style="margin:0;padding:0;background:${T.pageBg};font-family:${T.font};color:${T.body};">
+<body class="dm-body" style="margin:0;padding:0;background:${T.pageBg};font-family:${T.font};color:${T.body};">
   ${preheader ? `<div style="display:none;max-height:0;overflow:hidden;color:${T.pageBg};">${preheader}${PREHEADER_PAD}</div>` : ''}
-  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="${pageBgStyle(T)}">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" class="dm-page" style="${pageBgStyle(T)}">
     <tr><td align="center" style="padding:26px 18px 44px 18px;">
       <!--[if mso]><table role="presentation" width="${msoWidth}" align="center" cellspacing="0" cellpadding="0" border="0"><tr><td><![endif]-->
       ${contentHtml}
@@ -397,8 +454,8 @@ function glassEmail({ preheader, heading, intro, lines, ctaHref, ctaLabel, foote
   const contentHtml = `${glassPillHeader(T)}
       <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="max-width:560px;">
         <tr><td align="left" style="padding:30px 4px 0 4px;">
-          <h1 style="margin:0 0 14px 0;font-family:${T.headingFont};font-size:34px;line-height:1.08;letter-spacing:-0.03em;color:${T.ink};font-weight:700;">${heading}</h1>
-          <div style="font-family:${T.font};font-size:15px;line-height:1.6;color:${T.body};">
+          <h1 class="dm-ink" style="margin:0 0 14px 0;font-family:${T.headingFont};font-size:34px;line-height:1.08;letter-spacing:-0.03em;color:${T.ink};font-weight:700;">${heading}</h1>
+          <div class="dm-page-text" style="font-family:${T.font};font-size:15px;line-height:1.6;color:${T.body};">
             ${intro}
           </div>
         </td></tr>
@@ -412,7 +469,7 @@ function glassEmail({ preheader, heading, intro, lines, ctaHref, ctaLabel, foote
         </td></tr>` : ''}
         ${footerNote ? `
         <tr><td align="center" style="padding:28px 4px 0 4px;">
-          <div style="font-family:${T.font};font-size:13px;line-height:1.6;color:${T.muted};text-align:center;">
+          <div class="dm-muted" style="font-family:${T.font};font-size:13px;line-height:1.6;color:${T.muted};text-align:center;">
             ${footerNote}
           </div>
         </td></tr>` : ''}
@@ -436,7 +493,7 @@ function glassServiceEmail({ preheader, body, footerNote } = {}) {
         </td></tr>
         ${footerNote ? `
         <tr><td align="center" style="padding:24px 4px 0 4px;">
-          <div style="font-family:${T.font};font-size:13px;line-height:1.6;color:${T.muted};text-align:center;">
+          <div class="dm-muted" style="font-family:${T.font};font-size:13px;line-height:1.6;color:${T.muted};text-align:center;">
             ${footerNote}
           </div>
         </td></tr>` : ''}
@@ -447,14 +504,19 @@ function glassServiceEmail({ preheader, body, footerNote } = {}) {
   return glassPage(T, { preheader, contentHtml, msoWidth: 620 });
 }
 
-function glassNewsletter({ body, unsubscribeUrl, preheader, footerNote, preferredSourcesCta, newsletterType } = {}) {
+function glassNewsletter({ body, unsubscribeUrl, preheader, footerNote, preferredSourcesCta, newsletterType, webVersionUrl, darkAwareBody = true } = {}) {
   const T = GLASS_THEME;
   const identity = newsletterIdentity(newsletterType);
   const unsubscribeLine = unsubscribeUrl
-    ? `<div style="font-family:${T.font};font-size:14px;line-height:1.6;color:${T.muted};text-align:center;"><a href="${unsubscribeUrl}" style="color:${T.muted};text-decoration:underline;">Unsubscribe</a></div>`
+    ? `<div class="dm-muted" style="font-family:${T.font};font-size:14px;line-height:1.6;color:${T.muted};text-align:center;"><a href="${unsubscribeUrl}" style="color:${T.muted};text-decoration:underline;">Unsubscribe</a></div>`
+    : '';
+  // Real web-version permalink (the Astro archive page) — the honest
+  // "share the link" affordance the old social-icon share block implied.
+  const webVersionLine = webVersionUrl
+    ? `<div class="dm-muted" style="margin-bottom:10px;font-family:${T.font};font-size:14px;line-height:1.6;color:${T.muted};text-align:center;"><a href="${webVersionUrl}" style="color:${T.link};text-decoration:underline;">Read this issue on the web</a></div>`
     : '';
   const preferredSourcesLine = preferredSourcesCta
-    ? `<div style="margin-bottom:10px;font-family:${T.font};font-size:14px;line-height:1.6;color:${T.body};text-align:center;">
+    ? `<div class="dm-muted" style="margin-bottom:10px;font-family:${T.font};font-size:14px;line-height:1.6;color:${T.body};text-align:center;">
             Like what we send? <a href="https://www.google.com/preferences/source?q=${WAVES_WEBSITE_HOST}" style="color:${T.link};text-decoration:underline;font-weight:600;">Make Waves a preferred source on Google</a> — one tap, and you'll see more of us in your searches.
           </div>`
     : '';
@@ -462,12 +524,14 @@ function glassNewsletter({ body, unsubscribeUrl, preheader, footerNote, preferre
   // Per-lane masthead: 2026 Waves logo + the lane's title/tagline. The same
   // logo repeats small in the universal footer — that mirrors the reference
   // editions, where header art and footer brand were both fixed furniture.
-  const heroBlock = `<a href="${WAVES_WEBSITE_URL}" style="text-decoration:none;display:inline-block;"><img src="${GLASS_LOGO_IMG}" alt="${identity.title}" width="72" height="72" style="display:inline-block;width:72px;height:72px;max-width:100%;border:0;" /></a>
-          <h1 style="margin:8px 0 0 0;font-family:${T.headingFont};font-size:20px;line-height:1.2;letter-spacing:-0.02em;color:${T.ink};font-weight:700;">${identity.title}</h1>${identity.tagline ? `
-          <p style="margin:6px 0 0 0;font-family:${T.font};font-size:15px;line-height:1.5;color:${T.muted};">${identity.tagline}</p>` : ''}`;
+  // Logo in its OWN block row so it always sits ABOVE the masthead title
+  // (owner 2026-07-29), never beside it in narrow/quirky clients.
+  const heroBlock = `<div style="display:block;text-align:center;"><a href="${WAVES_WEBSITE_URL}" style="text-decoration:none;display:inline-block;"><img src="${GLASS_LOGO_IMG}" alt="${identity.title}" width="72" height="72" style="display:block;width:72px;height:72px;max-width:100%;border:0;margin:0 auto;" /></a></div>
+          <h1 class="dm-ink" style="margin:8px 0 0 0;font-family:${T.headingFont};font-size:20px;line-height:1.2;letter-spacing:-0.02em;color:${T.ink};font-weight:700;">${identity.title}</h1>${identity.tagline ? `
+          <p class="dm-muted" style="margin:6px 0 0 0;font-family:${T.font};font-size:15px;line-height:1.5;color:${T.muted};">${identity.tagline}</p>` : ''}`;
 
-  const footerExtras = `${preferredSourcesLine}${unsubscribeLine}${footerNote
-    ? `<div style="margin-top:8px;font-family:${T.font};font-size:14px;color:${T.muted};text-align:center;">${footerNote}</div>`
+  const footerExtras = `${webVersionLine}${preferredSourcesLine}${unsubscribeLine}${footerNote
+    ? `<div class="dm-muted" style="margin-top:8px;font-family:${T.font};font-size:14px;color:${T.muted};text-align:center;">${footerNote}</div>`
     : ''}`;
 
   const contentHtml = `<table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="max-width:640px;">
@@ -475,7 +539,7 @@ function glassNewsletter({ body, unsubscribeUrl, preheader, footerNote, preferre
           ${heroBlock}
         </td></tr>
         <tr><td style="padding:24px 0 0 0;">
-          ${glassCard(T, `<div style="font-family:${T.font};font-size:15px;line-height:1.6;color:${T.body};">${body || ''}</div>`, '26px 28px')}
+          ${glassCard(T, `<div style="font-family:${T.font};font-size:15px;line-height:1.6;color:${T.body};">${body || ''}</div>`, '26px 28px', { darkAware: darkAwareBody })}
         </td></tr>
         ${footerExtras ? `<tr><td align="center" style="padding:24px 4px 0 4px;">${footerExtras}</td></tr>` : ''}
         <tr><td align="center" style="padding:16px 4px 0 4px;">
@@ -557,8 +621,18 @@ function wrapServiceEmail({ preheader, body, footerNote } = {}) {
  *                                  // generic publication identity.
  * }} opts
  */
-function wrapNewsletter({ body, unsubscribeUrl, preheader, footerNote, preferredSourcesCta, newsletterType } = {}) {
-  return glassNewsletter({ body, unsubscribeUrl, preheader, footerNote, preferredSourcesCta, newsletterType });
+/**
+ * A persisted body is dark-capable only if the assembler that generated
+ * it emitted the dm-* hooks — bodies saved before the dark-mode layer
+ * (or authored elsewhere) must stay on the opaque light card, or their
+ * un-hooked tinted panels re-create the unreadable contrast.
+ */
+function bodyIsDarkAware(body) {
+  return /class="dm-/.test(String(body || ''));
+}
+
+function wrapNewsletter({ body, unsubscribeUrl, preheader, footerNote, preferredSourcesCta, newsletterType, webVersionUrl, darkAwareBody } = {}) {
+  return glassNewsletter({ body, unsubscribeUrl, preheader, footerNote, preferredSourcesCta, newsletterType, webVersionUrl, darkAwareBody });
 }
 
 /**
@@ -617,6 +691,7 @@ function ensureLegalTextFooter(text, opts = {}) {
 }
 
 module.exports = {
+  bodyIsDarkAware,
   wrapEmail,
   wrapServiceEmail,
   wrapNewsletter,

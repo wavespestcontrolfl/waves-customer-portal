@@ -19,6 +19,7 @@ import { useSearchParams } from "react-router-dom";
 import { Camera, Leaf } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import PhotoAssessmentsPage from "./PhotoAssessmentsPage";
+import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 
 const LawnAssessmentPanel = React.lazy(() => import("./LawnAssessmentPanel"));
 
@@ -40,10 +41,19 @@ export default function AssessmentsHubPage() {
   const tab = VALID_TABS.includes(requested) ? requested : TABS.FUNNEL;
 
   const setTab = (key) => {
+    // Re-clicking the active section renders nothing new — skip the URL
+    // churn (and the usage beacon it would re-fire), matching Settings.
+    if (key === tab) return;
     const next = new URLSearchParams(searchParams);
     next.set(TAB_KEY, key);
     setSearchParams(next, { replace: true });
   };
+
+  // Usage beacon for the tab that actually RENDERS: an invalid deep link
+  // (?tab=typo) falls back to Lead Magnets without rewriting the URL, so
+  // the layout's raw-query beacon would record a tab that never rendered
+  // (Codex #2961 r14).
+  useRenderedTabBeacon("/admin/lawn-assessments", tab, [searchParams]);
 
   return (
     <div className="max-w-[1200px]">

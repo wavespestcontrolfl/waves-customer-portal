@@ -23,7 +23,7 @@ const db = require('../models/db');
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
 const crypto = require('crypto');
-const { wrapNewsletter, ensureLegalTextFooter } = require('./email-template');
+const { wrapNewsletter, ensureLegalTextFooter, bodyIsDarkAware } = require('./email-template');
 const { recordTouchpoint } = require('./conversations');
 const { GREETING_NAME_TOKEN, greetingNameValueFor, stripPersonalizationTokens, CITY_TOKEN, GRASS_TYPE_TOKEN, DEFAULT_CITY_LABEL, DEFAULT_GRASS_LABEL, decodeEscapedEntities } = require('./newsletter-draft');
 const { selectAudience, SELLABLE_LINES } = require('./newsletter-audience-profiles');
@@ -560,6 +560,11 @@ async function sendCampaign(sendId, opts = {}) {
     preheader: send.preview_text || undefined,
     newsletterType: send.newsletter_type || undefined,
     preferredSourcesCta: true,
+    // Web-version permalink — the Astro archive page for this issue.
+    webVersionUrl: send.slug ? `https://www.wavespestcontrol.com/newsletter/archive/${send.slug}` : undefined,
+    // Legacy bodies (persisted before the dark-mode layer) carry no dm-*
+    // hooks and must stay on the light card.
+    darkAwareBody: bodyIsDarkAware(bodyHtml),
   });
 
   let accepted = 0, failed = 0;
@@ -956,7 +961,7 @@ async function resumeCampaign(sendId) {
  */
 async function processScheduledSends() {
   const { requiresClaimValidation, FLAGSHIP_TYPE_KEY } = require('../config/newsletter-types');
-  const { validateNewsletterDraft } = require('../services/newsletter-validator');
+  const { validateNewsletterDraft, lockedPricesForSend } = require('../services/newsletter-validator');
 
   const due = await db('newsletter_sends')
     .where({ status: 'scheduled' })
@@ -1032,7 +1037,8 @@ async function processScheduledSends() {
         const recipientCount = Number(
           (await buildSubscriberQuery(row.segment_filter, await resolveSegmentCustomerIds(row.segment_filter)).count('* as c').first())?.c || 0
         );
-        const { errors } = validateNewsletterDraft(typedRow, { recipientCount });
+        const lockedPrices = await lockedPricesForSend(typedRow, db);
+        const { errors } = validateNewsletterDraft(typedRow, { recipientCount, lockedPrices });
         if (errors.length > 0) {
           logger.error(`[newsletter-scheduler] send ${row.id} blocked by validation: ${errors.join(', ')}`);
           // Same approval invalidation as the flagship revert above.

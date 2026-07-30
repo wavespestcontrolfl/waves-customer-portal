@@ -94,8 +94,12 @@ async function loadCustomerByPhone(phone, extraction) {
 // existed by ~the time this call processed — a NEWER unrelated lead on a
 // shared/long-lived number must not supply the address or notification link.
 async function loadLeadForCall(call, phone, { phoneFallback = true } = {}) {
+  // twilio_call_sid is load-bearing for the foreign-call attribution guard
+  // below — omit it and every reused row reads as sid-less, silently
+  // skipping the concurrent-call check.
   const LEAD_COLS = ['id', 'first_name', 'last_name', 'phone', 'email', 'address', 'city', 'zip',
-    'service_interest', 'urgency', 'is_commercial', 'status', 'created_at', 'updated_at'];
+    'service_interest', 'urgency', 'is_commercial', 'status', 'created_at', 'updated_at',
+    'twilio_call_sid'];
   try {
     if (call?.twilio_call_sid) {
       const byCall = await db('leads')
@@ -117,8 +121,16 @@ async function loadLeadForCall(call, phone, { phoneFallback = true } = {}) {
     // claim any lead touched in the days since — a later unrelated
     // interaction's lead would get current-call priority AND be mutated via
     // leads.estimate_id. Outside the window the lead falls to the byPhone
-    // path (forThisCall=false), which is the conservative direction;
-    // processor-CREATED leads are sid-stamped and already claimed above.
+    // path (forThisCall=false), which is the conservative direction.
+    // A lead sid-stamped for a DIFFERENT call AND created inside this
+    // call's window is provably a CONCURRENT call's creation (the processor
+    // stamps twilio_call_sid only on insert), so it must not be claimed
+    // here: on a shared line it would otherwise supply the address,
+    // customer_email, and leads.estimate_id linkage for the WRONG caller.
+    // But a different-sid lead created BEFORE this call is the normal
+    // reuse case — the processor reuses prior leads without restamping the
+    // sid while refreshing updated_at — so it keeps current-call priority.
+    // This call's own sid was already claimed by the byCall branch above.
     if (call?.created_at) {
       const processedBy = new Date(new Date(call.created_at).getTime() + 2 * 3600 * 1000);
       const reused = await db('leads')
@@ -127,9 +139,50 @@ async function loadLeadForCall(call, phone, { phoneFallback = true } = {}) {
         .whereNull('deleted_at')
         .where('updated_at', '>=', call.created_at)
         .where('updated_at', '<=', processedBy)
+        .where((qb) => {
+          qb.whereNull('twilio_call_sid')
+            .orWhere('created_at', '<', call.created_at);
+          if (call?.twilio_call_sid) qb.orWhere('twilio_call_sid', call.twilio_call_sid);
+        })
         .orderBy('updated_at', 'desc')
         .first();
-      if (reused) return { lead: reused, forThisCall: true };
+      if (reused) {
+        const ownSid = reused.twilio_call_sid && call?.twilio_call_sid
+          && reused.twilio_call_sid === call.twilio_call_sid;
+        if (ownSid) return { lead: reused, forThisCall: true };
+        // ANY reused row not stamped with THIS call's sid — an older
+        // foreign-sid lead or an unstamped web/manual lead — was most
+        // likely touched by this call's processing, but on a shared line a
+        // CONCURRENT call could have reused it instead, and updated_at
+        // cannot say who. Attribute it to this call only when no other
+        // call from this line overlaps the window. The overlap check looks
+        // back 2h before this call's start: a call that began earlier can
+        // still be live or processing inside this call's window. On
+        // ambiguity the lead falls through to the byPhone path as prior
+        // history (the conservative direction — never current-call
+        // address/email/estimate-linkage trust on ambiguous attribution).
+        const lookback = new Date(new Date(call.created_at).getTime() - 2 * 3600 * 1000);
+        let concurrentQ = db('call_log')
+          .select('id')
+          .where((qb) => {
+            qb.whereRaw("regexp_replace(coalesce(from_phone, ''), '\\D', '', 'g') LIKE ?", [`%${digits}`])
+              .orWhereRaw("regexp_replace(coalesce(to_phone, ''), '\\D', '', 'g') LIKE ?", [`%${digits}`]);
+          })
+          .where('created_at', '>=', lookback)
+          .where('created_at', '<=', processedBy);
+        if (call?.twilio_call_sid) concurrentQ = concurrentQ.whereNot('twilio_call_sid', call.twilio_call_sid);
+        if (call?.id) concurrentQ = concurrentQ.whereNot('id', call.id);
+        const concurrentCall = await concurrentQ.first();
+        if (!concurrentCall) return { lead: reused, forThisCall: true };
+        // Ambiguous attribution on an actively-shared line: demoting the
+        // lead to the byPhone fallback is not enough — addressFromContext
+        // still lets a history lead supply the quote address for a new
+        // caller, so the wrong caller's parcel could still be priced. With
+        // overlapping calls on one line, no phone-matched lead is
+        // trustworthy at all: return none, and let the call transcript
+        // establish the address itself (or the draft red-lanes).
+        return { lead: null, forThisCall: false };
+      }
     }
     if (!phoneFallback) return { lead: null, forThisCall: false };
     let q = db('leads')
@@ -140,6 +193,16 @@ async function loadLeadForCall(call, phone, { phoneFallback = true } = {}) {
     if (call?.created_at) {
       const cutoff = new Date(new Date(call.created_at).getTime() + 2 * 3600 * 1000);
       q = q.where('created_at', '<=', cutoff);
+      // A lead sid-stamped for ANOTHER call but created inside this call's
+      // window is a concurrent caller's lead on a shared line — known
+      // foreign, and by created_at desc it would win this fallback and hand
+      // the composer the wrong address/contact. Exclude it entirely. Leads
+      // sid-stamped by OLDER calls remain legitimate prior phone history.
+      q = q.where((qb) => {
+        qb.whereNull('twilio_call_sid')
+          .orWhere('created_at', '<', call.created_at);
+        if (call?.twilio_call_sid) qb.orWhere('twilio_call_sid', call.twilio_call_sid);
+      });
     }
     const byPhone = await q.first();
     // Touched-since-call leads were already claimed above — anything left is

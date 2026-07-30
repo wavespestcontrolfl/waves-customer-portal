@@ -418,22 +418,55 @@ function applyV2ToPropertyFacts(propertyFacts, v2) {
 
   // V2 may resolve the lot to NULL for a no-lot property (condo unit on a
   // common master parcel) — that resolved null must WIN over a V1 lot that
-  // leaked in from the development's parcel.
+  // leaked in from the development's parcel. But only cases where the priced
+  // property genuinely has no individual lot may clear a V1-resolved lot:
+  // - a leased_land tenant of an ENTIRE residential structure (single-family
+  //   rental) sits on a real parcel that lot-driven services still treat —
+  //   not owning the lot is not evidence it is absent. A leased_land tenant
+  //   in a UNIT scope (apartment/condo — inferOwnershipType maps residential
+  //   tenants to leased_land before the unit check) must still clear: the
+  //   only V1 lot available there is the development's master parcel.
+  // - an unresolved private_parcel value is missing data, not a resolved
+  //   "no lot" — clearing it stamped a false high-confidence source.
   if (facts.lot && facts.lot.applicability !== 'unknown') {
-    propertyFacts.lot = legacy.lotSize
-      ? {
+    // Positive whole-structure evidence required: entire_residential_
+    // structure is also inferServiceScope's FALLBACK for a missing or
+    // generic property type, and a tenant behind that fallback may really
+    // be an apartment renter whose only V1 lot is the development's county
+    // master parcel. Only a subtype that positively names a whole
+    // residential structure lets a leased_land tenant keep the lot.
+    const WHOLE_STRUCTURE_SUBTYPES = /single_?family|duplex|triplex|quadplex|townhou|villa|mobile_?home|manufactured/;
+    const positiveWholeStructure = facts.serviceScope === 'entire_residential_structure'
+      && WHOLE_STRUCTURE_SUBTYPES.test(String(facts.propertySubtype || ''));
+    const keepsRealParcel = (facts.lot.applicability === 'leased_land' && positiveWholeStructure)
+      || facts.lot.applicability === 'private_parcel';
+    if (legacy.lotSize) {
+      propertyFacts.lot = {
         value: legacy.lotSize,
         source: v1SourceForSelection(facts, facts.lot),
         confidence: facts.confidenceLevel,
         ...(propertyFacts.lot?.disputed ? { disputed: true } : {}),
         rejected: propertyFacts.lot?.rejected || [],
-      }
-      : {
+      };
+    } else if (!keepsRealParcel) {
+      propertyFacts.lot = {
         value: null,
         source: `no_individual_lot:${facts.lot.applicability}`,
         confidence: 'high',
         rejected: propertyFacts.lot?.rejected || [],
       };
+    } else if (facts.lot.applicability === 'private_parcel'
+      && positive(propertyFacts.lot?.value)) {
+      // V2 REQUIRED a private-lot measurement here and could not resolve
+      // one — the retained V1 value (which can be a medium-confidence
+      // profile lot) survives as data, not as confidence: mark it low so
+      // classifyLane parks lot-driven drafts for review instead of
+      // green-laning on a measurement V2 explicitly failed to confirm.
+      propertyFacts.lot = { ...propertyFacts.lot, confidence: 'low' };
+    }
+    // leased_land entire-structure keep: the V1 lot (and its own
+    // confidence — county high stays green, caller-stated low parks) is
+    // untouched; V2 never required a private-lot measurement there.
   }
   if (legacy.stories) propertyFacts.stories = legacy.stories;
   return propertyFacts;

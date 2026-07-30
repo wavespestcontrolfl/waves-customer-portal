@@ -929,9 +929,44 @@ function checkHubLinkPresent(draft, brief) {
       ? { ok: true }
       : { ok: false, reason: 'no_curated_hub_link_found' };
   }
-  const { SERVICE_HUB_LINKS } = require('./content-brief-builder')._internals;
-  const hubs = [...new Set(Object.values(SERVICE_HUB_LINKS).flat())];
-  if (hubs.some((h) => body.includes(h))) return { ok: true };
+  const { SERVICE_HUB_LINKS, SERVICE_CITY_SLUG, SERVICE_ID_ALIASES } = require('./content-brief-builder')._internals;
+  // Resolve the brief's service FIRST and check only ITS hubs. Testing the union
+  // of every service's hubs let any vertical satisfy a check named
+  // "relevant hub" with an unrelated one — and it made the hubless carve-out
+  // below dead code, since a tree/shrub draft linking /pest-control-services/
+  // passed before the carve-out was ever reached.
+  const service = SERVICE_ID_ALIASES[brief?.service] || brief?.service;
+  const serviceHubs = service ? SERVICE_HUB_LINKS[service] : null;
+
+  // Unknown or absent service: fall back to the union. The service is what makes
+  // "relevant" meaningful, so without it there is nothing stricter to assert, and
+  // failing here would park briefs that simply carry no service.
+  if (!Array.isArray(serviceHubs)) {
+    const anyHub = [...new Set(Object.values(SERVICE_HUB_LINKS).flat())];
+    return anyHub.some((h) => body.includes(h))
+      ? { ok: true }
+      : { ok: false, reason: 'no_hub_link_found' };
+  }
+
+  if (serviceHubs.some((h) => body.includes(h))) return { ok: true };
+
+  // A vertical with NO hub-level page (tree & shrub: /tree-shrub-care/ does not
+  // exist, only /tree-and-shrub-care-{city}-fl/) has an empty SERVICE_HUB_LINKS
+  // entry, so no hub link can ever satisfy it and EVERY such draft parked —
+  // including city-scoped ones that followed their brief exactly. For those
+  // services the city-service page IS the most relevant local page the brief
+  // mandates, so accept it. Scoped to hubless services only: a vertical that HAS
+  // a hub must link it rather than substituting a city page.
+  if (!serviceHubs.length) {
+    // Same specificity the SEO gate applies: prefer the brief's exact service+city
+    // route, since the service prefix alone accepts any town's page.
+    const { cityServiceRoute } = require('./blog-seo-contract');
+    const city = brief?.city || brief?.voice_constraints?.operator_brief?.city;
+    const exact = cityServiceRoute(service, city);
+    if (exact) return body.includes(exact) ? { ok: true } : { ok: false, reason: 'no_hub_link_found' };
+    const citySlug = SERVICE_CITY_SLUG[service];
+    if (citySlug && new RegExp(`/${citySlug}-[a-z][a-z0-9-]*-fl/`).test(body)) return { ok: true };
+  }
   return { ok: false, reason: 'no_hub_link_found' };
 }
 

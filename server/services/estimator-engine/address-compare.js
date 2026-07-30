@@ -43,7 +43,18 @@ function sameStreetAddress(a, b, { requireExactUnit = false } = {}) {
     .join(' ');
   const parsed = (s) => parseRawAddress(String(s || ''));
   const streetAndUnit = (s) => {
-    const line = parsed(s).line1 || String(s || '').split(',')[0];
+    const firstSeg = String(s || '').split(',')[0].trim();
+    let line = parsed(s).line1 || firstSeg;
+    // parseRawAddress on a comma-free address treats a leading 5-digit
+    // house number as the ZIP and strips it from line1 ("12345 Example
+    // Trl" → line1 "Example Trl", zip "12345"). Restore the house number
+    // so the bare form compares like-for-like with its ZIP-carrying form —
+    // otherwise the same parcel reads as a different street and the
+    // duplicate guard is bypassed.
+    if (line && !/^\d/.test(line) && /^\d/.test(firstSeg)
+      && firstSeg.toLowerCase().endsWith(String(line).toLowerCase())) {
+      line = firstSeg;
+    }
     const split = splitStreetLineUnit(line);
     return {
       street: normSegment(split.street),
@@ -63,7 +74,18 @@ function sameStreetAddress(a, b, { requireExactUnit = false } = {}) {
   // compares equal conservatively. Only two explicit, different unit IDs are
   // proven separate service addresses.
   if (aa.unit && bb.unit && aa.unit !== bb.unit) return false;
-  const zip = (s) => (String(s || '').match(/\b(\d{5})\b(?!.*\b\d{5}\b)/) || [])[1] || null;
+  // Last 5-digit token = ZIP — EXCEPT when it is the address's leading
+  // house number ("12345 Tamiami Trl" with no real ZIP): treating the house
+  // number as a ZIP made the same parcel compare unequal against its stored
+  // ZIP-carrying form, bypassing the duplicate guard. A missing ZIP must
+  // compare conservatively equal, per the design note above.
+  const zip = (s) => {
+    const str = String(s || '').trim();
+    const m = str.match(/\b(\d{5})\b(?!.*\b\d{5}\b)/);
+    if (!m) return null;
+    if (m.index === 0 && !/^\d{5}$/.test(str)) return null;
+    return m[1];
+  };
   const [za, zb] = [zip(a), zip(b)];
   if (za && zb && za !== zb) return false;
   // Full-city equality, not token overlap — North Port vs Port Charlotte

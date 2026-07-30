@@ -45,6 +45,7 @@ import {
 import { ComposeView, HistoryView, SubscribersView } from "./NewsletterTabs";
 import EmailAutomationsPanelV2 from "./EmailAutomationsPanelV2";
 import { NEWSLETTER_UI_COPY } from "./newsletterUiCopy";
+import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -1551,6 +1552,15 @@ export default function NewsletterPage() {
     const requested = searchParams.get("tab");
     return TABS.find((t) => t.key === requested)?.key || "dashboard";
   }, [searchParams]);
+
+  // Usage beacon for the leaf that actually RENDERS: the ordinary
+  // query-less landing resolves to 'dashboard' here, which the layout's
+  // raw ?tab= beacon can't see — without this, explicit ?tab= leaves
+  // outrank the actual default in the Portal Usage report (Codex #2961
+  // r16). Deliberately NO active-re-click guard on setTab below: same-tab
+  // calls carry real side effects there (New Campaign clears ?draftId);
+  // the lib's dedupe absorbs repeated beacon assertions instead.
+  useRenderedTabBeacon("/admin/newsletter", tab, [searchParams]);
 
   // Cross-tab handoff for "Draft newsletter" clicks on EventCard.
   // DashboardView calls onDraftFromEvent(event) → we stash the event +

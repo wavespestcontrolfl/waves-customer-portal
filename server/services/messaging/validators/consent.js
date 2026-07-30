@@ -14,6 +14,7 @@
 
 const db = require('../../../models/db');
 const logger = require('../../logger');
+const { toE164 } = require('../../../utils/phone');
 
 /**
  * @param {import('../policy').SendCustomerMessageInput} input
@@ -48,9 +49,19 @@ async function checkConsentForPurpose(input, policy, contactState) {
     };
   }
 
-  // Anonymous leads with no customer record can receive transactional
-  // conversational replies — they wrote in, they expect a reply. Anything
-  // beyond that needs a customer record + sms_enabled=true.
+  // Recipients with no notification_prefs row can still receive transactional
+  // conversational REPLIES — they wrote in, they expect a reply. A missing
+  // row means "never opted out": STOP handling upserts a prefs row with
+  // sms_enabled=false (twilio-webhook), so any real opt-out is caught by the
+  // sms_enabled gate below, never by row absence. Customers created through
+  // paths that don't seed notification_prefs were previously stranded here
+  // (NO_CONSENT_RECORD on manual replies from Communications/tech Messages).
+  // Reply evidence is required for non-lead audiences (hasInboundHistory —
+  // a prior inbound sms_log row from this phone, loaded by loadContactState):
+  // purpose 'conversational' is reused by flows that can START a thread, and
+  // a cold outbound to a no-row recipient must not bypass consent (Codex P1
+  // on PR #3057). Anything beyond conversational still needs a prefs row +
+  // sms_enabled=true.
   if (!contactState || !contactState.prefs) {
     if (
       input.audience === 'lead' &&
@@ -66,6 +77,32 @@ async function checkConsentForPurpose(input, policy, contactState) {
       input.purpose === 'conversational'
     ) {
       return { ok: true };
+    }
+    if (
+      policy.requireConsent === 'transactional' &&
+      input.purpose === 'conversational' &&
+      contactState
+    ) {
+      // The exception only fires on POSITIVELY loaded suppression state
+      // (suppressionLoaded is set by loadSuppressionState only when its
+      // query succeeded). Suppression fails open for recipients with a
+      // prefs row (sms_enabled still catches the common STOP case), but
+      // here the prefs row is absent — a pre-customer STOP lives ONLY in
+      // messaging_suppression (or, in the migration-not-applied state,
+      // only as the inbound sms_log row that would read as reply
+      // evidence), so unknown suppression state — transient DB error OR
+      // missing table — must return the retryable code instead of
+      // granting the exception (Codex P1 on 92cb96ae4 + P2 on 2396f5557).
+      if (contactState.suppressionLoaded !== true) {
+        return {
+          ok: false,
+          code: 'CONSENT_LOOKUP_FAILED',
+          reason: 'messaging_suppression state not positively loaded (lookup error or table missing) — required before the no-prefs conversational exception; retry advised',
+        };
+      }
+      if (contactState.hasInboundHistory === true) {
+        return { ok: true };
+      }
     }
     return {
       ok: false,
@@ -215,6 +252,55 @@ async function loadContactState(input) {
     } catch (err) {
       logger.warn(`[messaging:consent] phone-match lookup failed: ${err.message}`);
       state.lookupFailed = true;
+    }
+  }
+
+  // Reply evidence for the no-prefs-row conversational exception: has this
+  // phone ever texted US? Only queried when the consent decision actually
+  // depends on it — prefs row missing, purpose conversational, and an
+  // audience that requires the evidence (leads are exempted by the branch
+  // above without it, and internal/tech/admin bypass consent entirely), so
+  // the normal path and lead sends never pay for the un-indexed from_phone
+  // scan (Codex P2 on 92cb96ae4). On query error we set lookupFailed so the
+  // validator returns the retryable CONSENT_LOOKUP_FAILED instead of the
+  // definitive NO_CONSENT_RECORD — a legit reply suppressed by a DB blip
+  // must be retried, not dropped (Codex P1 on 92cb96ae4).
+  state.hasInboundHistory = false;
+  const needsReplyEvidence = !state.prefs
+    && !state.lookupFailed
+    && input.purpose === 'conversational'
+    && !['lead', 'internal', 'tech', 'admin'].includes(input.audience);
+  if (needsReplyEvidence) {
+    // Twilio records sms_log.from_phone in canonical E.164, but input.to /
+    // customer.phone can carry stored formatting (e.g. '+44 20 7946 0958',
+    // '(941) 555-1234') that an exact match would miss — blocking the very
+    // reply this evidence exists to allow (Codex P2 on 5fbf59c8b). Query
+    // both the raw and toE164 forms of each candidate.
+    //
+    // Evidence must come from the ACTUAL destination: customer.phone only
+    // contributes alternate formatting when it canonicalizes to the same
+    // number as input.to. If they differ (e.g. the scheduled-replay path
+    // sends a queued to_phone after the customer changed numbers), an
+    // inbound on the customer's new number must not authorize the stale,
+    // possibly reassigned destination (Codex P2 on 2396f5557).
+    const custPhone = state.customer?.phone;
+    const sameNumber = custPhone && input.to && toE164(custPhone) === toE164(input.to);
+    const phones = [...new Set(
+      [input.to, ...(sameNumber ? [custPhone] : [])]
+        .flatMap((p) => [p, toE164(p)])
+        .filter(Boolean),
+    )];
+    if (phones.length) {
+      try {
+        const inbound = await db('sms_log')
+          .where({ direction: 'inbound' })
+          .whereIn('from_phone', phones)
+          .first('id');
+        state.hasInboundHistory = Boolean(inbound);
+      } catch (err) {
+        logger.warn(`[messaging:consent] inbound-history lookup failed: ${err.message}`);
+        state.lookupFailed = true;
+      }
     }
   }
 

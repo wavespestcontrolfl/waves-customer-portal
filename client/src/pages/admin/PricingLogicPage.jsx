@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { useSearchParams } from "react-router-dom";
+import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import {
   Calculator,
   ClipboardList,
@@ -1363,6 +1364,13 @@ export default function PricingLogicPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const requestedSection = sectionFromSearchParams(searchParams);
   const [activeSection, setActiveSection] = useState(requestedSection);
+
+  // Usage beacon for the section that actually RENDERS — invalid or
+  // missing ?section= resolves to Margins without rewriting the URL. The
+  // Pricing hub defers to this page while the Logic area is active, so
+  // the deepest rendered leaf is what lands in the report
+  // (Codex #2961 r18).
+  useRenderedTabBeacon("/admin/pricing-logic", activeSection, [searchParams]);
   const focusedService = searchParams.get("service");
   const focus = searchParams.get("focus");
   const serviceLabel = focusedService ? focusedService.replace(/_/g, " ") : "";

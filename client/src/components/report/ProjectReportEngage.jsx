@@ -7,6 +7,7 @@
  */
 import { useState } from 'react';
 import { COLORS as B } from '../../theme-brand';
+import useStickyStuck from '../../hooks/useStickyStuck';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -37,6 +38,9 @@ function reviewLocationForProject(data = {}) {
 
 const ASK_CSS = `
 .project-ask-wrap { position: sticky; top: 57px; z-index: 8; margin: 0 0 18px; }
+/* stuck-detection sentinel (useStickyStuck) — 1px tall so IntersectionObserver
+   tracks it reliably, margin cancels the height */
+.project-ask-sentinel { height: 1px; margin-bottom: -1px; }
 .project-ask-bar {
   position: relative;
   display: grid;
@@ -91,6 +95,10 @@ const ASK_CSS = `
 .project-ask-dismiss { border: 0; background: none; cursor: pointer; font-size: 13px; color: var(--muted, #475569); }
 @media (max-width: 720px) {
   .project-ask-bar { grid-template-areas: 'title form' 'pills pills'; grid-template-columns: auto 1fr; }
+  /* While pinned on a phone, collapse to the slim ask row — the two-row bar
+     hid a third of the screen over the report (owner screenshot 2026-07-29). */
+  .project-ask-wrap[data-stuck] .project-ask-pills { display: none; }
+  .project-ask-wrap[data-stuck] .project-ask-bar { grid-template-areas: 'title form'; }
 }
 @media print { .project-ask-wrap { display: none !important; } }
 `;
@@ -99,6 +107,9 @@ export function ProjectAskWaves({ token }) {
   const [question, setQuestion] = useState('');
   const [answer, setAnswer] = useState('');
   const [asking, setAsking] = useState(false);
+  // 57 = the wrap's sticky `top`. Mirrors FloatingAskWaves (ReportViewPage):
+  // while pinned on a phone the bar collapses to the slim ask row.
+  const [stuck, sentinelRef] = useStickyStuck(57);
 
   const ask = async (text) => {
     const q = String((text ?? question) || '').trim();
@@ -123,7 +134,9 @@ export function ProjectAskWaves({ token }) {
   };
 
   return (
-    <div className="project-ask-wrap">
+    <>
+      <div ref={sentinelRef} className="project-ask-sentinel" aria-hidden="true" />
+      <div className="project-ask-wrap" data-stuck={stuck ? '' : undefined}>
       <style>{ASK_CSS}</style>
       <section data-glass="card" className="project-ask-bar" aria-label="Waves AI — ask about this report">
         <span className="project-ask-title">Waves AI</span>
@@ -171,7 +184,8 @@ export function ProjectAskWaves({ token }) {
           </div>
         )}
       </section>
-    </div>
+      </div>
+    </>
   );
 }
 

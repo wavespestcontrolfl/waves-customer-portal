@@ -36,6 +36,7 @@
 //   reskinned eventually but for now stylistic drift is the risk.
 import { useState, useEffect, useRef } from "react";
 import { useLocation, useSearchParams, useNavigate } from "react-router-dom";
+import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import {
   Filter,
   HeartPulse,
@@ -930,6 +931,17 @@ function pipelineCustomersFrom(data) {
   );
 }
 
+// Views with a real render conditional below — the usage beacon reports
+// only these; ?view= is otherwise unvalidated (an unknown value renders no
+// panel, so there is no leaf to report).
+const CUSTOMER_VIEW_KEYS = new Set([
+  "directory",
+  "pipeline",
+  "map",
+  "health",
+  "intelligence",
+]);
+
 export default function CustomersPageV2() {
   const isMobile = useIsMobile();
   const navigate = useNavigate();
@@ -949,6 +961,26 @@ export default function CustomersPageV2() {
     if (raw) return raw;
     return "directory";
   });
+
+  // Usage beacon for the view that actually RENDERS. `view` is taken from
+  // the URL unvalidated, and an unknown value matches none of the render
+  // conditionals — real views report their leaf; an unknown view reports
+  // the authoritative TAB-LESS beacon ('') so the page view still counts
+  // while the raw ?view=garbage beacon is superseded instead of flushing
+  // a leaf nobody saw (Codex #2961 r17/r18).
+  // searchParams is a dep so a query-only hop between two INVALID views
+  // (?view=garbage → ?view=typo) re-asserts the tab-less beacon even
+  // though the rendered leaf ('') did not change — without it, the raw
+  // 'typo' beacon outlives the suppression marker and flushes
+  // (Codex #2961 r21). location.pathname, not a hardcoded string: this
+  // component also renders at /admin/customers/new (App.jsx), and
+  // suppression requires the authoritative beacon to match the layout
+  // beacon's page key AND path (Codex #2961 r22).
+  useRenderedTabBeacon(
+    location.pathname,
+    CUSTOMER_VIEW_KEYS.has(view) ? view : "",
+    [searchParams],
+  );
   const [search, setSearch] = useState("");
   const [filterStage, setFilterStage] = useState("all");
   const [filterTier, setFilterTier] = useState("all");

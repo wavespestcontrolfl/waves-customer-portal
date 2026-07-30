@@ -1,6 +1,6 @@
 {
   "schemaVersion": "call-extraction-reviewed-calls.v1",
-  "description": "Reviewed call-recording replay cases from the June 2026 v2 extraction hardening pass. Cases reference call_log ids only; no transcript text or customer PII is stored here.",
+  "description": "Reviewed call-recording replay cases: June 2026 v2 hardening pass plus the July 2026 regression-net expansion mined from call_audit_findings, route_decisions, and triage_items. Cases reference call_log ids only; no transcript text or customer PII is stored here.",
   "cases": [
     {
       "id": "name-email-address-ground-truth",
@@ -72,6 +72,293 @@
         "appointment_candidate_changed_vs_legacy": true,
         "current_flags_include": [
           "missing_service_address"
+        ]
+      }
+    },
+    {
+      "id": "missed-booking-end-of-day-tomorrow",
+      "call_log_id": "8b28fa7c-c7b3-4e7d-a55e-2824cc5c9262",
+      "reviewed_at": "2026-07-30",
+      "reviewed_outcome": "Caller and agent verbally agreed to an end-of-day-tomorrow visit that production never created. At minimum the replay must recognize a new lead with a promised quote; whether the vague verbal agreement should book outright is tracked separately.",
+      "expect": {
+        "current_status": "valid",
+        "current_call_nature_in": [
+          "new_lead"
+        ],
+        "current_flags_include": [
+          "quote_promised"
+        ]
+      }
+    },
+    {
+      "id": "booking-agreed-not-created-may13",
+      "call_log_id": "daf65e59-0156-4e56-83ce-391b4114f15c",
+      "reviewed_at": "2026-07-30",
+      "reviewed_outcome": "Appointment was verbally agreed during the call but no scheduled service was created. Replay must classify scheduling as confirmed.",
+      "expect": {
+        "current_status": "valid",
+        "current_scheduling_status": "confirmed",
+        "legacy_scheduled_created": false
+      }
+    },
+    {
+      "id": "phantom-appointment-guard-may01",
+      "call_log_id": "6ebbb09c-3f20-4718-b28d-508790660d0c",
+      "reviewed_at": "2026-07-30",
+      "reviewed_outcome": "Re-analysis found NO appointment was actually agreed despite appointment-like legacy signals. Replay must NOT auto-route a booking.",
+      "expect": {
+        "current_status": "valid",
+        "current_would_auto_route": false
+      }
+    },
+    {
+      "id": "phantom-appointment-guard-may18",
+      "call_log_id": "d49e5b59-687c-4f02-a5d2-8a0cb50a20f8",
+      "reviewed_at": "2026-07-30",
+      "reviewed_outcome": "Same class: appointment_agreed re-analyzed to false. No unattended booking.",
+      "expect": {
+        "current_status": "valid",
+        "current_would_auto_route": false
+      }
+    },
+    {
+      "id": "spam-fp-callback-request",
+      "call_log_id": "d8ca0f81-5d6d-4afd-be82-06d3f7eb305a",
+      "reviewed_at": "2026-07-30",
+      "reviewed_outcome": "Genuine caller asking for a callback was classified spam and dropped (lost revenue). Replay must not flag spam.",
+      "expect": {
+        "current_status": "valid",
+        "current_flags_exclude": [
+          "spam_or_wrong_number"
+        ]
+      }
+    },
+    {
+      "id": "spam-fp-schedule-coordination",
+      "call_log_id": "88a51229-de7e-4608-8705-c9ba8270fef6",
+      "reviewed_at": "2026-07-30",
+      "reviewed_outcome": "Existing job coordination call (keep work on schedule) was classified spam (customer harm). Replay must not flag spam.",
+      "expect": {
+        "current_status": "valid",
+        "current_flags_exclude": [
+          "spam_or_wrong_number"
+        ]
+      }
+    },
+    {
+      "id": "spam-fp-apr22",
+      "call_log_id": "2a8f0006-14fc-4f18-bd40-20ef8814e8cb",
+      "reviewed_at": "2026-07-30",
+      "reviewed_outcome": "Legitimate call classified spam by the old pipeline. Replay must not flag spam.",
+      "expect": {
+        "current_status": "valid",
+        "current_flags_exclude": [
+          "spam_or_wrong_number"
+        ]
+      }
+    },
+    {
+      "id": "voicemail-callback-number-captured",
+      "call_log_id": "b699b50f-ccae-4f7d-953f-bfd9c78e5a40",
+      "reviewed_at": "2026-07-30",
+      "reviewed_outcome": "Voicemail with an explicit callback number was mishandled. Replay must flag voicemail and never auto-route.",
+      "expect": {
+        "current_status": "valid",
+        "current_flags_include": [
+          "voicemail"
+        ],
+        "current_would_auto_route": false
+      }
+    },
+    {
+      "id": "voicemail-urgency-callback-missed",
+      "call_log_id": "21fb5e61-e598-463d-be30-30d09d3a3bbe",
+      "reviewed_at": "2026-07-30",
+      "reviewed_outcome": "Voicemail requesting an urgent callback; production missed the callback number and urgency. Replay must flag voicemail.",
+      "expect": {
+        "current_status": "valid",
+        "current_flags_include": [
+          "voicemail"
+        ],
+        "current_would_auto_route": false
+      }
+    },
+    {
+      "id": "emergency-infestation-lead",
+      "call_log_id": "d5ece154-e5ee-48b8-ac87-5a402fcba8d7",
+      "reviewed_at": "2026-07-30",
+      "reviewed_outcome": "After-hours voicemail describing an active roach infestation; production parked it. Replay must flag voicemail and recognize a lead needing callback.",
+      "expect": {
+        "current_status": "valid",
+        "current_flags_include": [
+          "voicemail"
+        ],
+        "current_recommended_disposition_in": [
+          "callback_task_created",
+          "lead_response_flow_triggered"
+        ]
+      }
+    },
+    {
+      "id": "quote-promised-not-tracked-jun15",
+      "call_log_id": "6c2bea9a-ecab-4e6f-bab4-eaec61def782",
+      "reviewed_at": "2026-07-30",
+      "reviewed_outcome": "Agent promised to send a quarterly estimate on the call; no follow-up was tracked. Replay must raise the quote_promised flag.",
+      "expect": {
+        "current_status": "valid",
+        "current_flags_include": [
+          "quote_promised"
+        ]
+      }
+    },
+    {
+      "id": "quote-promised-followup-jun09",
+      "call_log_id": "d3de6699-cdae-426c-b3a5-61ffd169af50",
+      "reviewed_at": "2026-07-30",
+      "reviewed_outcome": "Caller chased an estimate that was promised the previous day (unresolved complaint context). Replay must flag voicemail and prior unresolved complaint.",
+      "expect": {
+        "current_status": "valid",
+        "current_flags_include": [
+          "voicemail",
+          "prior_complaint_unresolved"
+        ]
+      }
+    },
+    {
+      "id": "wdo-inspection-inquiry-lead",
+      "call_log_id": "f863e042-2a08-4351-8b63-bb2621e8bf47",
+      "reviewed_at": "2026-07-30",
+      "reviewed_outcome": "Realtor asked whether we do WDO inspection reports; production never surfaced a lead. Requires NEW call-nature key.",
+      "expect": {
+        "current_status": "valid",
+        "current_would_auto_route": false,
+        "current_call_nature_in": [
+          "new_lead"
+        ],
+        "current_recommended_disposition_in": [
+          "estimate_send",
+          "lead_response_flow_triggered",
+          "callback_task_created"
+        ]
+      }
+    },
+    {
+      "id": "decision-maker-callback-lead",
+      "call_log_id": "9d6f5199-f832-41b7-835b-7daf554199c4",
+      "reviewed_at": "2026-07-30",
+      "reviewed_outcome": "Caller ended with talking to spouse then calling back — a live lead, not a dead end. Requires NEW call-nature key.",
+      "expect": {
+        "current_status": "valid",
+        "current_would_auto_route": false,
+        "current_flags_exclude": [
+          "spam_or_wrong_number"
+        ],
+        "current_call_nature_in": [
+          "new_lead"
+        ]
+      }
+    },
+    {
+      "id": "springtail-infestation-lead-apr14",
+      "call_log_id": "0dfc3125-05c3-40f8-b640-bf86da41031a",
+      "reviewed_at": "2026-07-30",
+      "reviewed_outcome": "Active springtail infestation inquiry that legacy never marked as a lead. Requires NEW call-nature key.",
+      "expect": {
+        "current_status": "valid",
+        "current_flags_exclude": [
+          "spam_or_wrong_number"
+        ],
+        "current_call_nature_in": [
+          "new_lead"
+        ]
+      }
+    },
+    {
+      "id": "termite-lead-apr22",
+      "call_log_id": "300fc9cb-a779-4a78-9588-553f7775b9e2",
+      "reviewed_at": "2026-07-30",
+      "reviewed_outcome": "New termite service request never marked as a lead. Requires NEW call-nature key.",
+      "expect": {
+        "current_status": "valid",
+        "current_flags_exclude": [
+          "spam_or_wrong_number"
+        ],
+        "current_call_nature_in": [
+          "new_lead"
+        ]
+      }
+    },
+    {
+      "id": "oosa-guard-stays",
+      "call_log_id": "7313062a-a93a-422d-9e69-4f9cf9c8c2fb",
+      "reviewed_at": "2026-06-02",
+      "reviewed_outcome": "Out-of-service-area gate correctly parked this ant-problem lead; operator override created the customer deliberately. The gate must keep firing.",
+      "expect": {
+        "current_status": "valid",
+        "current_would_auto_route": false,
+        "current_flags_include": [
+          "out_of_service_area"
+        ]
+      }
+    },
+    {
+      "id": "commercial-condo-assoc-quote",
+      "call_log_id": "888229ef-f46e-4f23-9527-10a086d9593b",
+      "reviewed_at": "2026-07-30",
+      "reviewed_outcome": "Condominium association inquiry — commercial, requires quote path, never an unattended residential booking.",
+      "expect": {
+        "current_status": "valid",
+        "current_would_auto_route": false,
+        "current_flags_include": [
+          "commercial_requires_quote"
+        ]
+      }
+    },
+    {
+      "id": "email-initial-misread-guard",
+      "call_log_id": "3d53bf59-f9a7-46af-9bb4-2d8a8bdfd922",
+      "reviewed_at": "2026-07-13",
+      "reviewed_outcome": "Spoken middle-initial was misread into the email; the email-verification triage correctly held routing until the caller confirmed spelling. Routing must stay held and quote intent must stay captured.",
+      "expect": {
+        "current_status": "valid",
+        "current_would_auto_route": false,
+        "current_flags_include": [
+          "quote_promised"
+        ]
+      }
+    },
+    {
+      "id": "wrong-number-robocall-stays-blocked",
+      "call_log_id": "bb77c2a4-9583-43a1-a40b-06129fd8727d",
+      "reviewed_at": "2026-07-30",
+      "reviewed_outcome": "Automated school-attendance robocall left on the line (wrong number). A July 2026 mining pass mislabeled it a spam false positive; owner review confirmed the block is correct and must keep firing.",
+      "expect": {
+        "current_status": "valid",
+        "current_would_auto_route": false,
+        "current_flags_include": [
+          "spam_or_wrong_number"
+        ],
+        "current_call_nature_in": [
+          "wrong_number",
+          "spam_solicitation",
+          "robocall"
+        ]
+      }
+    },
+    {
+      "id": "existing-customer-followup-routed",
+      "call_log_id": "8c0e5059-362d-4d77-a792-f531388f71e8",
+      "reviewed_at": "2026-07-30",
+      "reviewed_outcome": "Existing customer follow-up where the owner handled the visit personally on the call. Correct behavior is existing-customer routing with no unattended booking; a mining pass mislabeled this a missed booking.",
+      "expect": {
+        "current_status": "valid",
+        "current_would_auto_route": false,
+        "current_call_nature_in": [
+          "existing_customer_service",
+          "existing_customer_scheduling"
+        ],
+        "current_recommended_disposition_in": [
+          "existing_customer_routed"
         ]
       }
     }

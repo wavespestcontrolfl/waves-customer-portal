@@ -11,6 +11,7 @@ jest.mock('../services/social-media', () => ({
   postToGBP: jest.fn(),
   generateImage: jest.fn(),
   uploadImageToS3: jest.fn(),
+  renderBrandCardUrl: jest.fn(),
   isGbpMediaError: (e) => /media|photo|image|download|fetch/i.test(String(e || '')),
   assertSocialPublishingReady: jest.fn(),
   SOCIAL_FLAGS: { dryRun: false },
@@ -70,8 +71,11 @@ beforeEach(() => {
   social.SOCIAL_FLAGS.dryRun = false;
   social.generateContent.mockResolvedValue('Sarasota ghost ants are peaking. Schedule an inspection.');
   social.validateContent.mockReturnValue({ valid: true, issues: [] });
-  // Default: image generation yields nothing → posts go out text-only (the
+  // Default: brand-card render yields nothing → posts go out text-only (the
   // pre-existing behavior). The image-attached path is covered explicitly below.
+  // GBP never uses AI imagery (owner rule) — generateImage stays mocked only
+  // to prove it is never called from this action.
+  social.renderBrandCardUrl.mockResolvedValue(null);
   social.generateImage.mockResolvedValue(null);
   social.uploadImageToS3.mockResolvedValue(null);
   social.assertSocialPublishingReady.mockResolvedValue({ ready: true });
@@ -215,27 +219,31 @@ describe('_handleGbpPostAction', () => {
     expect(social.postToGBP).toHaveBeenCalledWith('sarasota', expect.any(String), null, null);
   });
 
-  test('attaches a generated CDN image to the GBP post when image generation succeeds', async () => {
+  test('attaches the on-brand card to the GBP post — never an AI image', async () => {
     process.env.AUTO_PUBLISH_GBP_POST = 'true';
     mockDb();
-    social.generateImage.mockResolvedValue({ base64: 'ZmFrZQ==', mimeType: 'image/jpeg' });
-    social.uploadImageToS3.mockResolvedValue('https://cdn.example.com/social-media/gbp.jpg');
+    social.renderBrandCardUrl.mockResolvedValue('https://cdn.example.com/social-media/gbp-card.jpg');
     await runner._handleGbpPostAction(baseBrief(), { shadow_mode: false });
 
-    expect(social.uploadImageToS3).toHaveBeenCalledTimes(1);
+    expect(social.renderBrandCardUrl).toHaveBeenCalledWith(
+      // Explicit eyebrow: location posts must not default to "From the Waves blog".
+      expect.objectContaining({ variant: 'blog', title: 'pest control sarasota', eyebrow: 'Waves Pest Control' }),
+      'gbp'
+    );
+    // Owner rule: no AI imagery on GBP — the AI generator must never run here.
+    expect(social.generateImage).not.toHaveBeenCalled();
     expect(social.postToGBP).toHaveBeenCalledWith(
       'sarasota',
       expect.any(String),
       'https://www.wavespestcontrol.com/pest-control-sarasota-fl/',
-      'https://cdn.example.com/social-media/gbp.jpg'
+      'https://cdn.example.com/social-media/gbp-card.jpg'
     );
   });
 
   test('image-attached post that Google rejects retries text-only and completes', async () => {
     process.env.AUTO_PUBLISH_GBP_POST = 'true';
     mockDb();
-    social.generateImage.mockResolvedValue({ base64: 'ZmFrZQ==', mimeType: 'image/jpeg' });
-    social.uploadImageToS3.mockResolvedValue('https://cdn.example.com/social-media/gbp.jpg');
+    social.renderBrandCardUrl.mockResolvedValue('https://cdn.example.com/social-media/gbp.jpg');
     social.postToGBP
       .mockResolvedValueOnce({ platform: 'gbp', location: 'sarasota', success: false, error: 'media fetch failed' })
       .mockResolvedValueOnce({ platform: 'gbp', location: 'sarasota', success: true, postId: 'accounts/1/locations/2/localPosts/3' });
@@ -248,13 +256,14 @@ describe('_handleGbpPostAction', () => {
     expect(result.patch.outcome).toBe('completed_published');
   });
 
-  test('skips image generation when image hosting is not configured (no CDN)', async () => {
+  test('skips the card render when image hosting is not configured (no CDN)', async () => {
     process.env.AUTO_PUBLISH_GBP_POST = 'true';
     delete process.env.SOCIAL_MEDIA_CDN_DOMAIN;
     mockDb();
-    social.generateImage.mockResolvedValue({ base64: 'ZmFrZQ==', mimeType: 'image/jpeg' });
+    social.renderBrandCardUrl.mockResolvedValue('https://cdn.example.com/social-media/gbp.jpg');
     await runner._handleGbpPostAction(baseBrief(), { shadow_mode: false });
 
+    expect(social.renderBrandCardUrl).not.toHaveBeenCalled();
     expect(social.generateImage).not.toHaveBeenCalled();
     expect(social.postToGBP).toHaveBeenCalledWith('sarasota', expect.any(String), expect.any(String), null);
   });
@@ -262,8 +271,7 @@ describe('_handleGbpPostAction', () => {
   test('non-media post failure does NOT retry text-only (auth/quota would just fail again)', async () => {
     process.env.AUTO_PUBLISH_GBP_POST = 'true';
     mockDb();
-    social.generateImage.mockResolvedValue({ base64: 'ZmFrZQ==', mimeType: 'image/jpeg' });
-    social.uploadImageToS3.mockResolvedValue('https://cdn.example.com/social-media/gbp.jpg');
+    social.renderBrandCardUrl.mockResolvedValue('https://cdn.example.com/social-media/gbp.jpg');
     social.postToGBP.mockResolvedValue({ platform: 'gbp', location: 'sarasota', success: false, error: 'PERMISSION_DENIED' });
     const result = await runner._handleGbpPostAction(baseBrief(), { shadow_mode: false });
 
@@ -272,10 +280,42 @@ describe('_handleGbpPostAction', () => {
     expect(result.patch.outcome).toBe('failed_publish');
   });
 
-  test('image generation failure still posts (text-only), does not block publish', async () => {
+  test('a card headline that fails content validation posts text-only (no card render)', async () => {
     process.env.AUTO_PUBLISH_GBP_POST = 'true';
     mockDb();
-    social.generateImage.mockRejectedValue(new Error('image provider down'));
+    social.renderBrandCardUrl.mockResolvedValue('https://cdn.example.com/social-media/gbp.jpg');
+    // First validateContent call = the post copy (valid); second = the card
+    // headline (customer-derived target_keyword — here a banned safety claim).
+    social.validateContent
+      .mockReturnValueOnce({ valid: true, issues: [] })
+      .mockReturnValueOnce({ valid: false, issues: ['Contains safety overclaim'] });
+    const result = await runner._handleGbpPostAction(baseBrief({ target_keyword: 'pet-safe pest control' }), { shadow_mode: false });
+
+    expect(social.renderBrandCardUrl).not.toHaveBeenCalled();
+    expect(result.claim).toBe('complete');
+    expect(social.postToGBP).toHaveBeenCalledWith('sarasota', expect.any(String), expect.any(String), null);
+  });
+
+  test('headline with safety/timing language posts text-only even when the validator passes it', async () => {
+    process.env.AUTO_PUBLISH_GBP_POST = 'true';
+    mockDb();
+    social.renderBrandCardUrl.mockResolvedValue('https://cdn.example.com/social-media/gbp.jpg');
+    // validateContent passes everything here — the CATEGORICAL headline rule
+    // (no "safe(ty)"/time-figures on a public card, ever) must catch it alone.
+    const result = await runner._handleGbpPostAction(
+      baseBrief({ target_keyword: 'pest safety tips sarasota' }),
+      { shadow_mode: false },
+    );
+
+    expect(social.renderBrandCardUrl).not.toHaveBeenCalled();
+    expect(result.claim).toBe('complete');
+    expect(social.postToGBP).toHaveBeenCalledWith('sarasota', expect.any(String), expect.any(String), null);
+  });
+
+  test('card render failure still posts (text-only), does not block publish', async () => {
+    process.env.AUTO_PUBLISH_GBP_POST = 'true';
+    mockDb();
+    social.renderBrandCardUrl.mockRejectedValue(new Error('renderer down'));
     const result = await runner._handleGbpPostAction(baseBrief(), { shadow_mode: false });
 
     expect(result.claim).toBe('complete');
@@ -309,9 +349,9 @@ describe('_handleGbpPostAction', () => {
     process.env.AUTO_PUBLISH_GBP_POST = 'true';
     mockDb();
     // Image hosting is fully configured (beforeEach), so the readiness gate is
-    // the only thing that can stop generation — postToGBP would otherwise fail
-    // with "No GBP credentials for location" after credits were already spent.
-    social.generateImage.mockResolvedValue({ base64: 'ZmFrZQ==', mimeType: 'image/jpeg' });
+    // the only thing that can stop the render — postToGBP would otherwise fail
+    // with "No GBP credentials for location" after the render was already spent.
+    social.renderBrandCardUrl.mockResolvedValue('https://cdn.example.com/social-media/gbp.jpg');
     social.assertSocialPublishingReady.mockResolvedValue({
       ready: false,
       reason: 'GBP OAuth client credentials not configured for any location',
@@ -320,6 +360,7 @@ describe('_handleGbpPostAction', () => {
 
     expect(result.claim).toBe('pending');
     expect(result.patch.skip_reason).toBe('gbp_post_social_not_ready');
+    expect(social.renderBrandCardUrl).not.toHaveBeenCalled();
     expect(social.generateImage).not.toHaveBeenCalled();
     expect(social.postToGBP).not.toHaveBeenCalled();
   });

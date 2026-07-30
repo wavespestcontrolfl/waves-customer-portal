@@ -1202,22 +1202,33 @@ function offFootprintCityFinding(text) {
 // (internal_links_to_add, curated operator hub_link) are threaded in per-draft
 // via the allowedInternalLinks option — they are binding writer instructions,
 // exactly like requiredSourceUrls on the external gate.
+// GROUND TRUTH: every entry below was fetched against the live hub on
+// 2026-07-29 and returned 200. Four entries were REMOVED in that sweep
+// because they 404 — '/lawn-care/', '/mosquito-control/', '/rodent-control/'
+// and '/tree-shrub-care/' have no bare hub page (only city-scoped ones, which
+// CITY_SERVICE_LINK_RE below already covers). Allowlisting a dead route is
+// strictly worse than omitting a live one: it inverts the gate, waving the
+// exact dead links it exists to catch straight through to publish. Re-verify
+// with a live fetch before adding an entry — never from memory of the astro
+// tree, and never to silence a finding.
 const ALLOWED_INTERNAL_LINKS = Object.freeze([
   '/',
   '/book/',
   '/contact/',
+  '/quote/',
   '/pest-control-quote/',
   '/pest-control-calculator/',
   // hub service pages (superset of content-brief-builder SERVICE_HUB_LINKS)
   '/pest-control-services/',
   '/waveguard-memberships/',
   '/pest-library/',
-  '/lawn-care/',
   '/lawn-care/fertilizer-blackout-manatee-county/',
-  '/mosquito-control/',
   '/termite-inspection/',
-  '/rodent-control/',
-  '/tree-shrub-care/',
+  // Real page (200, verified 2026-07-29) that was missing here, so a draft
+  // linking it was P0'd as an invented route — the same false positive that
+  // stalled astro #409 on /quote/. Found by live-auditing every route the seed
+  // manifest mandates, not by reading code.
+  '/termite-control/',
   // hub pages the legacy writer prompts already reference
   '/service-areas/',
   '/pest-control-deals/',
@@ -1326,6 +1337,34 @@ function collectInternalDestinations(text) {
     if (norm) normalized.push({ dest, norm });
   }
   return normalized;
+}
+
+/**
+ * isKnownGoodInternalRoute(dest) → boolean
+ *
+ * True when a site-relative destination is a route this repo can PROVE exists:
+ * an allowlist entry, or a city-service URL whose city actually has a
+ * published page. This is the same test internalRouteFinding applies below —
+ * exported so the brief builder can refuse to MANDATE a route the gate would
+ * reject, instead of handing the writer a dead link plus an exemption for it.
+ *
+ * Absolute hub URLs and dot segments normalize first, matching the body scan.
+ */
+function isKnownGoodInternalRoute(dest) {
+  let candidate = String(dest || '');
+  if (!candidate) return false;
+  try {
+    const u = new URL(candidate);
+    if (!hubHostSet().has(u.hostname.toLowerCase())) return false; // off-site: not ours to vouch for
+    candidate = u.pathname || '/';
+  } catch { /* not absolute — use as-is */ }
+  let resolved = candidate;
+  try { resolved = new URL(candidate, 'https://resolve.invalid').pathname || candidate; } catch { /* keep raw */ }
+  const norm = normalizeInternalPath(resolved);
+  if (!norm) return false;
+  if (new Set(ALLOWED_INTERNAL_LINKS).has(norm)) return true;
+  const citySlug = CITY_SERVICE_LINK_RE.exec(norm)?.[1];
+  return Boolean(citySlug && PAGE_CITY_SLUGS.has(citySlug));
 }
 
 // exemptRouteCounts: refresh grandfathering, by OCCURRENCE COUNT — a refresh
@@ -1982,6 +2021,7 @@ module.exports = {
   // what these gates enforce at publish.
   SAFE_MDX_COMPONENTS,
   ALLOWED_INTERNAL_LINKS,
+  isKnownGoodInternalRoute,
   PAGE_CITY_SLUGS,
   OUT_OF_AREA_CITY_CANDIDATES,
   outOfAreaCities,

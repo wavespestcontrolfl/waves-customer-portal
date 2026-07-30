@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
+import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import {
   AlertTriangle,
   Beaker,
@@ -311,6 +312,17 @@ export default function LawnProtocolCommandCenterPage({ embedded = false }) {
   const [searchParams, setSearchParams] = useSearchParams();
   const queryKey = embedded ? "protocolTab" : "tab";
   const activeTab = normalizeProtocolTab(searchParams.get(queryKey));
+
+  // Usage beacon for the leaf that actually RENDERS — invalid or missing
+  // ?protocolTab= resolves to Overview without rewriting the URL. The
+  // Service Library host defers to this page for its deepest leaf,
+  // matching the nested-*Tab convention (Codex #2961 r17). Embedded-only:
+  // the standalone route was retired.
+  useRenderedTabBeacon(
+    "/admin/service-library",
+    embedded ? activeTab : null,
+    [searchParams],
+  );
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
