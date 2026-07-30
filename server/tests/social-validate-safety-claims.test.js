@@ -23,6 +23,7 @@ const FLAGGED_OVERCLAIM = [
   'safe for your pet',
   'EPA-approved products only',
   'EPA approved and effective',
+  'Our products are approved by the EPA', // passive form (r1)
   'guaranteed elimination',
   '100% effective against roaches',
   'completely safe once applied',
@@ -39,6 +40,8 @@ const FLAGGED_PRODUCT_SAFETY = [
   'our pesticides are safe when professionally applied',
   'our treatments are safe when used as directed',
   'the spray is safely applied and our products are gentle',
+  // #3066 r1: protective carve-out must not eat a separate product claim.
+  'Keep your home safe from ants with safe products',
 ];
 
 // Fixed drying/re-entry timing co-occurrence.
@@ -64,6 +67,12 @@ const FLAGGED_TIMING = [
   'avoid the treated area for one hour',
   // Round-9 P1: agronomic clause must not mask the re-entry clause.
   'Keep pets off treated areas for 30 minutes, and avoid watering for 24 hours.',
+  // #3066 r1: conjunction-joined clauses, word-form durations, bare returns.
+  'Keep pets off treated areas for 30 minutes and avoid watering for 24 hours',
+  'Allow a one-hour drying time',
+  'Allow a half-hour drying time',
+  'Return after 30 minutes',
+  'Residents may return after 30 minutes',
 ];
 
 const CLEAN = [
@@ -89,6 +98,11 @@ const CLEAN = [
   'keep your home safe from termites',
   'Keep your home safe from termites with professional pest control.',
   'our products keep your home safe from ants',
+  // #3066 r1: punctuated idiom, contest CTA, worker-safety mention.
+  'Our treatments are safe—once dry',
+  'Our treatments are safe, once dry',
+  'Enter within 24 hours for a chance to win',
+  'Technicians wear protective equipment to stay safe while applying pesticides',
 ];
 
 describe('compliance-language classes in validateContent', () => {

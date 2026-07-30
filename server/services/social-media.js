@@ -383,12 +383,12 @@ const PRICING_PATTERNS = /\$\d+(?:\.\d{2})?(?:\s*\/\s*(?:mo(?:nth)?|yr|year|visi
 // Includes the compliance-language class (AGENTS.md): no pesticide is ever
 // blanket-"safe" (pet-safe / family-safe / safe for kids), and it's
 // "EPA-registered", never "EPA-approved".
-const SAFETY_OVERCLAIMS = /\b(?:guarante(?:e[ds]?|ing)|100\s*%\s*(?:effective|safe|eliminat)|completely\s+safe|risk[\s-]*free|no\s+side\s+effects|(?:pet|kid|child|family)[\s-]*(?:and[\s-]*(?:pet|kid|child|family)[\s-]*)?safe|safe\s+(?:for|around)\s+(?:your\s+|the\s+|our\s+)?(?:pets?|kids?|children|famil(?:y|ies))|EPA[\s-]*approved)\b/i;
+const SAFETY_OVERCLAIMS = /\b(?:guarante(?:e[ds]?|ing)|100\s*%\s*(?:effective|safe|eliminat)|completely\s+safe|risk[\s-]*free|no\s+side\s+effects|(?:pet|kid|child|family)[\s-]*(?:and[\s-]*(?:pet|kid|child|family)[\s-]*)?safe|safe\s+(?:for|around)\s+(?:your\s+|the\s+|our\s+)?(?:pets?|kids?|children|famil(?:y|ies))|EPA[\s-]*approved|approved\s+by\s+(?:the\s+)?EPA)\b/i;
 // Word-order enumeration of banned claims proved unbounded across review
 // rounds (#3059 r2-r9), so the timing and product-safety classes are caught
 // by CLAUSE-LEVEL CO-OCCURRENCE instead. These constants are the vocabulary.
-const TIMING_DURATION_RE = /\b(?:\d+\s*(?:[-–]\s*(?:\d+\s*)?)?(?:minutes?|mins?|hours?|hrs?)|(?:an?|one|two)\s+hours?|half\s+an\s+hour)\b/i;
-const REENTRY_CONTEXT_RE = /\bre-?ent\w*|\benter(?:ing)?\b|\b(?:dry(?:ing|s)?|dries)\b|\bsafe(?:ly|ty)?\b|\b(?:off|inside|indoors|away|out\s+of)\b[^.!?\n]*\b(?:treated|lawn|grass|yard|areas?|surfaces?)\b|\b(?:treated|lawn|grass|yard)\b[^.!?\n]*\b(?:off|inside|indoors|away|avoid\w*|back)\b|\b(?:pets?|kids?|children|famil\w+)\b[^.!?\n]*\b(?:off|inside|indoors|away|back|out(?:side)?)\b|\b(?:avoid\w*|do\s+not\s+enter|no\s+entry)\b[^.!?\n]*\b(?:treated|areas?|lawn|yard)\b|\bwalk\w*\b[^.!?\n]{0,30}\b(?:treated|lawn|grass|yard)\b|\b(?:you|your\s+family)\b[^.!?\n]{0,20}\breturn\w*\b/i;
+const TIMING_DURATION_RE = /\b(?:\d+\s*(?:[-–]\s*(?:\d+\s*)?)?(?:minutes?|mins?|hours?|hrs?)|(?:an?|one|two)[\s-]+hours?|half[\s-]+(?:an[\s-]+)?hour)\b/i;
+const REENTRY_CONTEXT_RE = /\bre-?ent\w*|\b(?:dry(?:ing|s)?|dries)\b|\bsafe(?:ly|ty)?\b|\benter(?:ing)?\b[^.!?\n]{0,30}\b(?:treated|areas?|lawn|yard|home|house)\b|\b(?:treated|areas?|lawn|yard|home|house)\b[^.!?\n]{0,30}\benter(?:ing)?\b|\b(?:off|inside|indoors|away|out\s+of)\b[^.!?\n]*\b(?:treated|lawn|grass|yard|areas?|surfaces?)\b|\b(?:treated|lawn|grass|yard)\b[^.!?\n]*\b(?:off|inside|indoors|away|avoid\w*|back)\b|\b(?:pets?|kids?|children|famil\w+)\b[^.!?\n]*\b(?:off|inside|indoors|away|back|out(?:side)?)\b|\b(?:avoid\w*|no\s+entry)\b[^.!?\n]*\b(?:treated|areas?|lawn|yard)\b|\bwalk\w*\b[^.!?\n]{0,30}\b(?:treated|lawn|grass|yard)\b|\b(?:you|your\s+family|residents?|occupants?|everyone)\b[^.!?\n]{0,20}\breturn\w*\b|^\s*return(?:ing)?\b/i;
 // Agronomic aftercare timing (mowing/watering windows) is legitimate copy,
 // and cadence copy uses days — only minute/hour figures are the banned class.
 const AGRONOMIC_EXEMPT_RE = /\b(?:mow\w*|water\w*|irrigat\w*|fertiliz\w*|seed\w*|overseed\w*|aerat\w*|rain)\b/i;
@@ -400,8 +400,11 @@ const AGRONOMIC_EXEMPT_RE = /\b(?:mow\w*|water\w*|irrigat\w*|fertiliz\w*|seed\w*
 // professional pest control" stays legal.
 const SAFETY_WORD_RE = /\bsafe(?:ly|ty)?\b/i;
 const PRODUCT_CONTEXT_RE = /\b(?:pesticides?|products?|treatments?|sprays?(?:ing)?|chemicals?|applications?|pest\s+control|exterminat\w*)\b/i;
-const SAFE_DRY_IDIOM_RE = /\bsafe\s+(?:once|until|when)\s+(?:completely\s+|fully\s+)?dry\b/gi;
-const SAFE_FROM_PEST_RE = /\bsafe(?:ly|ty)?\s+from\b[^,;.!?\n]*/gi;
+const SAFE_DRY_IDIOM_RE = /\bsafe\s*[—–,-]?\s*(?:once|until|when)\s+(?:completely\s+|fully\s+)?dry\b/gi;
+const SAFE_FROM_PEST_RE = /\bsafe(?:ly|ty)?\s+from\s+[\w'-]+(?:\s+(?:and|or)\s+[\w'-]+)?/gi;
+// Worker-safety mentions ("technicians ... stay safe while applying") are
+// about the crew's PPE, not a product claim — stripped before testing.
+const WORKER_SAFETY_RE = /\b(?:technicians?|applicators?|staff|crew|team)\b[^.!?\n]*\b(?:stay(?:ing)?|keep(?:ing)?|remain(?:ing)?|be)\s+safe(?:ly)?\b/gi;
 
 // Clause-level compliance check — returns the violated-rule messages.
 function complianceOverclaims(text) {
@@ -409,14 +412,19 @@ function complianceOverclaims(text) {
   const sentences = String(text || '').split(/[.!?\n]+/);
   for (const sentence of sentences) {
     if (!sentence.trim()) continue;
-    const safetyScope = sentence.replace(SAFE_DRY_IDIOM_RE, '').replace(SAFE_FROM_PEST_RE, '');
+    const safetyScope = sentence
+      .replace(SAFE_DRY_IDIOM_RE, '')
+      .replace(SAFE_FROM_PEST_RE, '')
+      .replace(WORKER_SAFETY_RE, '');
     if (SAFETY_WORD_RE.test(safetyScope) && PRODUCT_CONTEXT_RE.test(safetyScope)) {
       issues.push('Contains a product-safety claim — never call a pesticide/treatment "safe" (idiom: "safe once dry")');
     }
     // The agronomic exemption applies per CLAUSE, not per sentence — "keep
     // pets off treated areas for 30 minutes, and avoid watering for 24
     // hours" must still flag on its first clause.
-    for (const clause of sentence.split(/[,;]/)) {
+    // Coordinating conjunctions split clauses too — "… for 30 minutes and
+    // avoid watering …" must not let the aftercare half exempt the first.
+    for (const clause of sentence.split(/[,;]+|\s+(?:and|but|while|then)\s+/i)) {
       if (TIMING_DURATION_RE.test(clause) && REENTRY_CONTEXT_RE.test(clause)
         && !AGRONOMIC_EXEMPT_RE.test(clause)) {
         issues.push('Contains fixed drying/re-entry time — timing is technician-confirmed ("safe once dry")');
