@@ -316,6 +316,20 @@ router.post('/:id/verdict', async (req, res) => {
       } catch (resumeErr) {
         logger.warn(`[admin-triage] first-touch resume failed for call ${item.call_log_id}: ${resumeErr.message}`);
       }
+    } else if (verdict === 'deny' && liveEmailCard) {
+      // The deny resolved the email card WITHOUT approving the address —
+      // stamp the hold so the ledger sweep (which releases answered
+      // questions by resolved-card presence) never reads this resolution
+      // as confirmation (Codex #3084 r13). The correction fanout still
+      // releases it: findPendingHolds ignores last_error, and a successful
+      // release clears it.
+      try {
+        await db('first_touch_holds')
+          .where({ call_log_id: item.call_log_id, status: 'pending' })
+          .update({ last_error: 'email_denied_await_correction', updated_at: new Date() });
+      } catch (stampErr) {
+        logger.warn(`[admin-triage] deny stamp failed for call ${item.call_log_id}: ${stampErr.code || stampErr.name || 'db_error'}`);
+      }
     }
 
     // A surviving bounce card keeps the call visible in review.

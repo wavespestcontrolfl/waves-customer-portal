@@ -131,8 +131,11 @@ function newsletterDelivered(outcome) {
 // A pending subscriber whose DOI went out within this window was already
 // resumed by an earlier release — a post-send settle failure or a sibling
 // hold for the same recipient must not fire the confirmation again
-// (Codex #3084 r12). subscribeOrResubscribe stamps confirmation_sent_at on
-// every send, so the stamp IS the delivery record.
+// (Codex #3084 r12). subscribeOrResubscribe pre-stamps confirmation_sent_at,
+// but the resume path CLEARS the stamp when the actual send fails
+// (subscribeNewCallCustomerToNewsletter, Codex #3084 r13) — so a present,
+// recent stamp means a send that did not visibly fail, and this guard never
+// buries an undelivered DOI.
 const RESUME_DOI_DEDUPE_MS = 24 * 60 * 60 * 1000;
 
 async function runNewsletterResume(payload, dbh = db) {
@@ -216,6 +219,28 @@ async function resumeHeldFirstTouch({
         continue;
       }
 
+      // Re-read the target immediately before any send (Codex #3084 r13):
+      // a SECOND correction supersedes a claimed row's held_email, and a
+      // value that CHANGED since our claim-time snapshot is newer than even
+      // this release's own email param. A changed address gets its own
+      // suppression re-check.
+      let sendEmail = resumeEmail;
+      try {
+        const freshRow = await dbh('first_touch_holds').where({ id: hold.id }).first('held_email');
+        const freshEmail = String(freshRow?.held_email || '').trim().toLowerCase();
+        if (freshEmail && freshEmail !== String(hold.held_email || '').trim().toLowerCase()
+            && RESUME_EMAIL_RE.test(freshEmail)) {
+          sendEmail = freshEmail;
+        }
+      } catch (rereadErr) {
+        logger.warn(`[first-touch-resume] pre-send target re-read failed: ${rereadErr.code || rereadErr.name || 'db_error'} — using claim-time target`);
+      }
+      if (sendEmail !== resumeEmail && await emailSuppressedForNewLead(sendEmail, dbh)) {
+        await settleHold(hold.id, { status: 'pending', last_error: 'email_suppressed' }, dbh);
+        result.skipped = result.skipped || 'email_suppressed';
+        continue;
+      }
+
       const patch = {};
       // The ledger's held_email becomes the address this release actually
       // targets (Codex #3084 r10) — after a correction that's the corrected
@@ -223,14 +248,14 @@ async function resumeHeldFirstTouch({
       // the same call (Step 8 newsletter after a mid-run release) reads it
       // back, so the confirmed address wins over a matched customer's stale
       // stored email in BOTH release kinds.
-      patch.held_email = resumeEmail;
+      patch.held_email = sendEmail;
       if (hold.held_drip && !hold.released_drip) {
         try {
           const AutomationRunner = require('./automation-runner');
           const enroll = await AutomationRunner.enrollCustomer({
             templateKey: 'new_lead',
             customer: {
-              email: resumeEmail,
+              email: sendEmail,
               first_name: customer.first_name || null,
               last_name: customer.last_name || null,
               id: holdCustomerId,
@@ -262,7 +287,7 @@ async function resumeHeldFirstTouch({
           result.newsletterResume.push({
             holdId: hold.id,
             customerId: holdCustomerId,
-            email: resumeEmail,
+            email: sendEmail,
             firstName: customer.first_name || null,
             lastName: customer.last_name || null,
           });
@@ -277,7 +302,7 @@ async function resumeHeldFirstTouch({
           try {
             outcome = await runNewsletterResume({
               customerId: holdCustomerId,
-              email: resumeEmail,
+              email: sendEmail,
               firstName: customer.first_name || null,
               lastName: customer.last_name || null,
             }, dbh);
@@ -371,7 +396,23 @@ async function resumeHeldNewsletterPostCommit(payloadOrList, dbh = db) {
 
 async function runOnePostCommitResume(payload, holdIds, dbh) {
   try {
-    const outcome = await runNewsletterResume(payload, dbh);
+    // Re-read the freshest target before sending (Codex #3084 r13): a
+    // second correction may have superseded held_email after this payload
+    // was built inside the first correction's transaction.
+    let sendPayload = payload;
+    if (payload.holdId) {
+      try {
+        const fresh = await dbh('first_touch_holds').where({ id: payload.holdId }).first('held_email');
+        const freshEmail = String(fresh?.held_email || '').trim().toLowerCase();
+        if (freshEmail && freshEmail !== String(payload.email || '').trim().toLowerCase()
+            && RESUME_EMAIL_RE.test(freshEmail)) {
+          sendPayload = { ...payload, email: freshEmail };
+        }
+      } catch (rereadErr) {
+        logger.warn(`[first-touch-resume] post-commit target re-read failed: ${rereadErr.code || rereadErr.name || 'db_error'} — using payload target`);
+      }
+    }
+    const outcome = await runNewsletterResume(sendPayload, dbh);
     for (const holdId of holdIds) {
       if (newsletterDelivered(outcome)) {
         const hold = await dbh('first_touch_holds').where({ id: holdId }).first('held_drip', 'released_drip');
@@ -526,6 +567,12 @@ async function sweepAbandonedFirstTouchHolds({ dbh = db, limit = 10 } = {}) {
   const swept = { examined: 0, released: 0 };
   try {
     if (!(await dbh.schema.hasTable('first_touch_holds'))) return swept;
+    // Eligibility filters live IN the query (Codex #3084 r13): a limit
+    // applied before filtering would let ten old ineligible rows (live
+    // cards, never reviewed) permanently shadow eligible ones behind them.
+    // A deny that resolved the card WITHOUT approving the address stamps
+    // 'email_denied_await_correction' — those wait for the correction
+    // fanout, never the sweep.
     const candidates = await dbh('first_touch_holds')
       .where(function scope() {
         this.where({ status: 'pending' })
@@ -535,11 +582,28 @@ async function sweepAbandonedFirstTouchHolds({ dbh = db, limit = 10 } = {}) {
           });
       })
       .whereNotNull('call_log_id')
+      .where(function notDenied() {
+        this.whereNull('last_error').orWhereNot('last_error', 'email_denied_await_correction');
+      })
+      .whereExists(function answered() {
+        this.select(1).from('triage_items')
+          .whereRaw('triage_items.call_log_id = first_touch_holds.call_log_id')
+          .whereIn('reason_code', EMAIL_REVIEW_REASON_CODES)
+          .where('status', 'resolved');
+      })
+      .whereNotExists(function stillLive() {
+        this.select(1).from('triage_items')
+          .whereRaw('triage_items.call_log_id = first_touch_holds.call_log_id')
+          .whereIn('reason_code', EMAIL_REVIEW_REASON_CODES)
+          .whereIn('status', ['open', 'in_progress']);
+      })
       .orderBy('updated_at', 'asc')
       .limit(limit)
       .select('id', 'call_log_id');
     for (const row of candidates) {
       swept.examined += 1;
+      // Re-checked per row (belt over the query filters — a card can change
+      // between the select and this release).
       const live = await dbh('triage_items')
         .where({ call_log_id: row.call_log_id })
         .whereIn('reason_code', EMAIL_REVIEW_REASON_CODES)

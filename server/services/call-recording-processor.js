@@ -2137,6 +2137,19 @@ async function subscribeNewCallCustomerToNewsletter({ customerId, email, firstNa
     } catch (e) {
       logger.warn(`[call-proc] Newsletter confirmation email failed for customer ${customerId}`);
       confirmationEmailSent = false;
+      // subscribeOrResubscribe stamps confirmation_sent_at BEFORE the send —
+      // clear it on failure so retry paths (the first-touch-resume DOI
+      // dedupe guard, the stale-pending sweep) never read the pre-send
+      // stamp as delivery (Codex #3084 r13).
+      if (result.subscriber?.id) {
+        try {
+          await db('newsletter_subscribers')
+            .where({ id: result.subscriber.id })
+            .update({ confirmation_sent_at: null, updated_at: new Date() });
+        } catch (clearErr) {
+          logger.warn(`[call-proc] confirmation_sent_at clear failed for subscriber ${result.subscriber.id}: ${clearErr.code || clearErr.name || 'db_error'}`);
+        }
+      }
     }
   }
 

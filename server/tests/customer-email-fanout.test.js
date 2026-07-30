@@ -67,6 +67,11 @@ function makeConn(cfg = {}) {
 const BEFORE = { id: 'cust-1', email: 'charlesw.robb@gmail.com' };
 const AFTER = { id: 'cust-1', email: 'charleswrobb@gmail.com' };
 
+// Synthetic pair for the 2026-07-30 hold-lane tests — the production-derived
+// address above must not grow new occurrences (AGENTS.md PII rule).
+const HOLD_BEFORE = { id: 'cust-1', email: 'sam.typo@example.com' };
+const HOLD_AFTER = { id: 'cust-1', email: 'samtypo@example.com' };
+
 describe('propagateCustomerEmailChange', () => {
   test('syncs lead, estimate, and newsletter copies and resolves the email review card', async () => {
     const conn = makeConn({
@@ -330,11 +335,11 @@ describe('propagateCustomerEmailChange', () => {
     // happens; the ledger row — not the card — carries the pending state, so
     // the correction must attempt the release unconditionally.
     const conn = makeConn(); // no triage rows → reviewCards stays 0
-    const counts = await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
+    const counts = await propagateCustomerEmailChange({ before: HOLD_BEFORE, after: HOLD_AFTER }, conn);
     expect(counts.reviewCards).toBe(0);
     expect(mockResume).toHaveBeenCalledWith(expect.objectContaining({
       customerId: 'cust-1',
-      email: 'charleswrobb@gmail.com',
+      email: HOLD_AFTER.email,
       deferNewsletter: true,
     }));
   });
@@ -348,19 +353,19 @@ describe('propagateCustomerEmailChange', () => {
       resumed: true,
       enrolled: true,
       newsletterResume: [
-        { holdId: 'hold-1', customerId: 'cust-1', email: 'charleswrobb@gmail.com' },
-        { holdId: 'hold-2', customerId: 'cust-1', email: 'charleswrobb@gmail.com' },
+        { holdId: 'hold-1', customerId: 'cust-1', email: HOLD_AFTER.email },
+        { holdId: 'hold-2', customerId: 'cust-1', email: HOLD_AFTER.email },
       ],
     });
     const conn = makeConn({
       newsletter_subscribers: {
         firstQueue: [
-          { id: 739, email: 'charlesw.robb@gmail.com', customer_id: 'cust-1', status: 'pending', confirmation_token: 'tok-1', first_name: 'Charles' },
+          { id: 811, email: HOLD_BEFORE.email, customer_id: 'cust-1', status: 'pending', confirmation_token: 'tok-1', first_name: 'Sam' },
           null,
         ],
       },
     });
-    const result = await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
+    const result = await propagateCustomerEmailChange({ before: HOLD_BEFORE, after: HOLD_AFTER }, conn);
     expect(result.pendingConfirmation.heldNewsletterHoldIds).toEqual(['hold-1', 'hold-2']);
     expect(result.heldNewsletterResume).toBeUndefined();
     // Nothing CONSUMED in-trx (the releasing-claim retarget is not a consume).
@@ -369,8 +374,8 @@ describe('propagateCustomerEmailChange', () => {
 
   test('a newer correction retargets claims already in flight', async () => {
     const conn = makeConn();
-    await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
-    const retarget = conn.__updates('first_touch_holds').find((u) => u.arg.held_email === 'charleswrobb@gmail.com');
+    await propagateCustomerEmailChange({ before: HOLD_BEFORE, after: HOLD_AFTER }, conn);
+    const retarget = conn.__updates('first_touch_holds').find((u) => u.arg.held_email === HOLD_AFTER.email);
     expect(retarget).toBeDefined();
     // Scoped to active claims only, and updated_at untouched — never extend
     // a possibly-dead claimant's stale-claim window.
@@ -392,13 +397,13 @@ describe('propagateCustomerEmailChange', () => {
         ],
       },
     });
-    const counts = await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
+    const counts = await propagateCustomerEmailChange({ before: HOLD_BEFORE, after: HOLD_AFTER }, conn);
     expect(counts.reviewCards).toBe(0);
     const inserts = conn.__calls.filter((c) => c.table === 'first_touch_holds' && c.op === 'insert');
     expect(inserts).toHaveLength(1);
     expect(inserts[0].arg).toMatchObject({
       call_log_id: 'call-1',
-      held_email: 'charleswrobb@gmail.com',
+      held_email: HOLD_AFTER.email,
       status: 'released',
     });
   });
@@ -412,12 +417,12 @@ describe('propagateCustomerEmailChange', () => {
     const conn = makeConn({
       triage_items: { rows: [{ id: 'ti-1', call_log_id: 'call-1' }], countQueue: [{ n: 0 }] },
     });
-    await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
+    await propagateCustomerEmailChange({ before: HOLD_BEFORE, after: HOLD_AFTER }, conn);
     const inserts = conn.__calls.filter((c) => c.table === 'first_touch_holds' && c.op === 'insert');
     expect(inserts).toHaveLength(1);
     expect(inserts[0].arg).toMatchObject({
       call_log_id: 'call-1',
-      held_email: 'charleswrobb@gmail.com',
+      held_email: HOLD_AFTER.email,
       held_drip: false,
       held_newsletter: false,
       status: 'released',
@@ -428,10 +433,10 @@ describe('propagateCustomerEmailChange', () => {
     mockResume.mockResolvedValueOnce({
       resumed: true,
       enrolled: false,
-      newsletterResume: [{ holdId: 'hold-1', customerId: 'cust-1', email: 'charleswrobb@gmail.com' }],
+      newsletterResume: [{ holdId: 'hold-1', customerId: 'cust-1', email: HOLD_AFTER.email }],
     });
     const conn = makeConn();
-    const result = await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
+    const result = await propagateCustomerEmailChange({ before: HOLD_BEFORE, after: HOLD_AFTER }, conn);
     expect(result.heldNewsletterResume).toEqual([expect.objectContaining({ holdId: 'hold-1' })]);
     expect(conn.__updates('first_touch_holds').filter((u) => u.arg.released_newsletter)).toHaveLength(0);
   });
@@ -461,7 +466,7 @@ describe('resendPendingConfirmation', () => {
       },
     });
     const ok = await resendPendingConfirmation(
-      { id: 739, email: 'charleswrobb@gmail.com', confirmation_token: 'tok-1', heldNewsletterHoldIds: ['hold-1', 'hold-2'] }, conn);
+      { id: 811, email: 'samtypo@example.com', confirmation_token: 'tok-1', heldNewsletterHoldIds: ['hold-1', 'hold-2'] }, conn);
     expect(ok).toBe(true);
     const holdUpdates = conn.__updates('first_touch_holds');
     expect(holdUpdates).toHaveLength(2);
@@ -475,7 +480,7 @@ describe('resendPendingConfirmation', () => {
     sendConfirmationEmail.mockRejectedValueOnce(new Error('sendgrid down'));
     const conn = makeConn();
     const ok = await resendPendingConfirmation(
-      { id: 739, email: 'charleswrobb@gmail.com', confirmation_token: 'tok-1', heldNewsletterHoldIds: ['hold-1'] }, conn);
+      { id: 811, email: 'samtypo@example.com', confirmation_token: 'tok-1', heldNewsletterHoldIds: ['hold-1'] }, conn);
     expect(ok).toBe(false);
     const holdUpdates = conn.__updates('first_touch_holds');
     expect(holdUpdates).toHaveLength(1);
