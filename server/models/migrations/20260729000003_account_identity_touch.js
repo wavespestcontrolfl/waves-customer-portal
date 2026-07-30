@@ -33,31 +33,45 @@ exports.up = async function up(knex) {
   // hygiene fix); un-audited divergent fields still promote — an
   // account-wide exclusion would let one old phone cleanup freeze an
   // unrelated legacy name/email correction out of the backfill forever.
+  // Hygiene provenance is authoritative only while it is the LATEST word
+  // on the field: an audited apply older than the newest divergent copy's
+  // updated_at is superseded by that later customer correction. (A legacy
+  // no-bump admin save can't be ordered against the audit — the >= gate
+  // below then lets the customer win, matching the pre-account-layer
+  // reality that identity edits always landed on customers.)
   const auditedField = (f) => (hasAuditLog
     ? `EXISTS (
         SELECT 1 FROM audit_log al
         WHERE al.action = 'data_hygiene.proposal.apply'
           AND al.resource_type = 'customer_account'
           AND al.resource_id = ca.id
-          AND al.metadata->>'field' = '${f}')`
+          AND al.metadata->>'field' = '${f}'
+          AND al.created_at >= COALESCE((
+            SELECT c.updated_at FROM customers c
+            WHERE c.account_id = ca.id AND c.deleted_at IS NULL
+              AND c.${f} IS DISTINCT FROM ca.${f}
+              AND c.updated_at >= ca.updated_at
+            ORDER BY c.updated_at DESC LIMIT 1), 'epoch'::timestamptz))`
     : 'FALSE');
   // PER-FIELD candidate selection: sibling A may hold a legacy email
   // correction while sibling B holds a later phone correction — a single
   // newest-divergent ROW would copy all four fields from B and revert or
   // miss A's email. Each field independently promotes from the newest
-  // live copy that diverges in THAT field (still gated on the account not
-  // being strictly newer, and on the field having no hygiene provenance).
-  const fieldPick = (f) => `CASE WHEN ${auditedField(f)} THEN ca.${f} ELSE COALESCE((
+  // live copy that diverges in THAT field. The promoted value may be an
+  // intentional NULL (a cleared email/phone), so eligibility — not
+  // COALESCE — decides whether the account keeps its own value.
+  const fieldEligible = (f) => `(EXISTS (
+        SELECT 1 FROM customers c
+        WHERE c.account_id = ca.id AND c.deleted_at IS NULL
+          AND c.${f} IS DISTINCT FROM ca.${f}
+          AND c.updated_at >= ca.updated_at)
+        AND NOT ${auditedField(f)})`;
+  const fieldPick = (f) => `CASE WHEN ${fieldEligible(f)} THEN (
         SELECT c.${f} FROM customers c
         WHERE c.account_id = ca.id AND c.deleted_at IS NULL
           AND c.${f} IS DISTINCT FROM ca.${f}
           AND c.updated_at >= ca.updated_at
-        ORDER BY c.updated_at DESC LIMIT 1), ca.${f}) END`;
-  const fieldEligible = (f) => `EXISTS (
-        SELECT 1 FROM customers c
-        WHERE c.account_id = ca.id AND c.deleted_at IS NULL
-          AND c.${f} IS DISTINCT FROM ca.${f}
-          AND c.updated_at >= ca.updated_at)${hasAuditLog ? ` AND NOT ${auditedField(f)}` : ''}`;
+        ORDER BY c.updated_at DESC LIMIT 1) ELSE ca.${f} END`;
   await knex.raw(`
     UPDATE customer_accounts ca SET
       first_name = ${fieldPick('first_name')},
@@ -65,18 +79,18 @@ exports.up = async function up(knex) {
       email      = ${fieldPick('email')},
       phone      = ${fieldPick('phone')},
       updated_at = now()
-    -- Only accounts with at least one un-audited divergent field from an
-    -- eligible copy — a no-op update would still bump updated_at and
-    -- needlessly requeue the account's rows through the sync's staleness
-    -- predicate. Equality (>=) must qualify: the legacy admin path edited
-    -- identity WITHOUT bumping customers.updated_at, so a single-property
-    -- account seeded from its customer shares the exact timestamp while
-    -- the customer holds the correction. An account STRICTLY newer than
-    -- every divergent copy has no eligible candidates and is preserved.
-    WHERE (${fieldEligible('first_name')})
-       OR (${fieldEligible('last_name')})
-       OR (${fieldEligible('email')})
-       OR (${fieldEligible('phone')})
+    -- Only accounts with at least one eligible field — a no-op update
+    -- would still bump updated_at and needlessly requeue the account's
+    -- rows through the sync's staleness predicate. Equality (>=) must
+    -- qualify: the legacy admin path edited identity WITHOUT bumping
+    -- customers.updated_at, so a single-property account seeded from its
+    -- customer shares the exact timestamp while the customer holds the
+    -- correction. An account STRICTLY newer than every divergent copy has
+    -- no eligible candidates and is preserved.
+    WHERE ${fieldEligible('first_name')}
+       OR ${fieldEligible('last_name')}
+       OR ${fieldEligible('email')}
+       OR ${fieldEligible('phone')}
   `);
   await knex.raw(`
     CREATE OR REPLACE FUNCTION propagate_customer_identity_to_account() RETURNS trigger AS $$

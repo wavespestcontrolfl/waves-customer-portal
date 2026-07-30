@@ -299,11 +299,27 @@ const STAMP_VETO = Symbol('stampVeto');
  * would deadlock against it. A stale-account veto therefore has to ROLL
  * BACK the already-applied stamp instead of skipping it.
  */
-async function guardedStamp(table, row, patch, { repoint = null } = {}) {
+async function guardedStamp(table, row, patch, { repoint = null, requireLiveCustomer = null } = {}) {
   try {
     return await db.transaction(async (trx) => {
       const q = applyRowGuard(trx(table).where({ id: row.id }), row);
       const n = await q.update(patch);
+      if (n && requireLiveCustomer) {
+        // FOR SHARE: a concurrent soft-delete of the destination customer
+        // blocks on this lock (its UPDATE needs the row) until the stamp
+        // commits — or, having already committed, reads as absent here
+        // and vetoes the stamp.
+        const dest = await trx('customers')
+          .where({ id: requireLiveCustomer })
+          .whereNull('deleted_at')
+          .forShare()
+          .first();
+        if (!dest) {
+          const veto = new Error('transfer destination tombstoned mid-stamp');
+          veto[STAMP_VETO] = true;
+          throw veto;
+        }
+      }
       if (n && row.__canonicalIdentity?.id) {
         const acc = await trx('customer_accounts')
           .where({ id: row.__canonicalIdentity.id })
@@ -1025,6 +1041,17 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
               // pointing at it — retried next run instead of orphaned.
               if (existingContact !== row.google_contact_id
                 && !(await contactInUseElsewhere(row.google_contact_id, table, row.id))) {
+                // Claim the lead's UNCHANGED state (row-token conditional)
+                // before the destructive absorb — an identity edit that
+                // committed after ownership resolved may no longer match
+                // this customer, and the later stamp veto can't undo an
+                // external delete.
+                const leadUnchanged = await applyRowGuard(db(table).where({ id: row.id }), row)
+                  .update({ updated_at: db.raw('updated_at') });
+                if (!leadUnchanged) {
+                  counts.failed += 1;
+                  continue; // edited mid-run — ownership re-resolves next tick
+                }
                 if (!(await absorbDuplicate(people, row.google_contact_id, existingContact, gapMs))) {
                   counts.failed += 1;
                   continue;
@@ -1043,30 +1070,29 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
               if (transferred && queued && !queued.google_contact_id) queued.google_contact_id = row.google_contact_id;
             }
           }
-          // Revalidate destination liveness before stamping the lead away
-          // from its contact — a customer soft-deleted mid-run means no
-          // live owner exists; leave the lead unstamped so the next tick
-          // re-resolves ownership (and mints its own if the link is gone).
-          const destStillLive = await db('customers')
-            .where({ id: ownership.customerId })
-            .whereNull('deleted_at')
-            .first();
-          if (!destStillLive) {
+          // Destination liveness is verified INSIDE the stamp transaction
+          // (FOR SHARE on the customer row) — an unlocked pre-read left a
+          // window where a soft-delete could commit before the stamp,
+          // stranding a live lead with a null pointer while the tombstone
+          // lane retired the destination's contact.
+          const stampedAway = await stampIfUnchanged(table, row, { google_contact_id: null }, { requireLiveCustomer: ownership.customerId });
+          if (!stampedAway) {
             counts.failed += 1;
-            logger.warn(`[contacts-sync] transfer destination customer tombstoned mid-run (${table} ${row.id}) — lead re-resolves next tick`);
+            logger.warn(`[contacts-sync] lead stamp vetoed (destination tombstoned or raced edit) (${table} ${row.id}) — re-resolves next tick`);
             continue;
           }
-          await stampIfUnchanged(table, row, { google_contact_id: null });
           counts.skipped += 1;
           continue;
         }
         if (ownership.adoptContactId && !row.google_contact_id) {
           row.google_contact_id = ownership.adoptContactId;
-        } else if (row.__recoveredFresh && ownership.adoptContactId
+        } else if (ownership.adoptContactId
           && ownership.adoptContactId !== row.google_contact_id) {
-          // Recovered orphan vs an established sibling contact: the
-          // sibling's wins; the orphan's operator data is absorbed into it
-          // before retirement (unless shared).
+          // The ownership probe selected a DIFFERENT established contact —
+          // a recovered orphan, or an ordinary identity edit that moved
+          // this lead onto a sibling's identity. Reconcile the two
+          // contacts (absorb ours into the sibling's, unless shared)
+          // instead of leaving both permanently active.
           if (!(await contactInUseElsewhere(row.google_contact_id, table, row.id))) {
             if (!(await absorbDuplicate(people, row.google_contact_id, ownership.adoptContactId, gapMs))) {
               counts.failed += 1;
@@ -1158,7 +1184,7 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
             .whereNotNull('address_line1')
             .orderBy('id', 'asc')
             .select('address_line1', 'address_line2', 'city', 'state', 'zip');
-          if (props.length) row.__accountAddresses = props.slice(0, 8);
+          if (props.length) row.__accountAddresses = props;
           // Canonical identity: the customer_accounts row IS the person;
           // property rows are copies that can drift.
           const account = await db('customer_accounts')
@@ -1556,7 +1582,7 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
             .whereNotNull('address_line1')
             .orderBy('id', 'asc')
             .select('address_line1', 'address_line2', 'city', 'state', 'zip');
-          if (props.length) row.__accountAddresses = props.slice(0, 8);
+          if (props.length) row.__accountAddresses = props;
           // Canonical identity: the customer_accounts row IS the person;
           // property rows are copies that can drift.
           const account = await db('customer_accounts')
@@ -1578,10 +1604,15 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
         const ownership = await resolveLeadOwnership(row);
         const sharedElsewhere = await contactInUseElsewhere(row.google_contact_id, table, row.id);
         const nonOwner = ownership.deferToCustomer
+          || (ownership.adoptContactId && ownership.adoptContactId !== row.google_contact_id)
           || (sharedElsewhere && ownership.adoptContactId !== row.google_contact_id);
         if (nonOwner) {
-          const advanced = await stampVerified(table, row, row.google_contact_id, now);
-          if (advanced) counts.verified += 1;
+          // NOT verified — a non-owner (or re-owned) lead is MAIN-lane
+          // work: transfer/absorb must reconcile the duplicate contacts.
+          // Advancing the watermark here would page a live duplicate out
+          // of every future verification pass.
+          const requeued = await guardedStamp(table, row, { google_contact_synced_at: null });
+          if (requeued) counts.skipped += 1;
           continue;
         }
       }

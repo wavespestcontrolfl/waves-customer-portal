@@ -278,8 +278,9 @@ describe('runContactsSync', () => {
     const counts = await runContactsSync({ gapMs: 0 });
     expect(counts.failed).toBe(1);
     expect(mockPeopleApi.people.deleteContact).not.toHaveBeenCalled();
-    // The lead was NOT stamped away from its (still live) duplicate.
-    expect(state.updates.filter((u) => u.table === 'leads')).toEqual([]);
+    // The lead was NOT stamped away from its (still live) duplicate —
+    // only the no-op unchanged-state claim touched the row.
+    expect(state.updates.filter((u) => u.table === 'leads' && 'google_contact_id' in u.patch)).toEqual([]);
   });
 
   test('a MISSING survivor never green-lights deleting the duplicate (the last remaining contact)', async () => {
@@ -693,12 +694,15 @@ describe('runContactsSync', () => {
       firstResults: { customers: [{ id: 'c-1' }] },
     });
     const counts = await runContactsSync({ gapMs: 0, now: new Date('2026-07-28T12:00:00Z') });
-    // Watermark advanced, contact untouched — the OWNER's verification
-    // maintains it.
-    expect(counts.verified).toBe(1);
+    // Contact untouched; the non-owner lead is REQUEUED into the main
+    // lane (synced_at cleared) so transfer/absorb reconciles ownership —
+    // advancing the watermark would page a live duplicate out of every
+    // future verification pass.
+    expect(counts.verified).toBe(0);
+    expect(counts.skipped).toBe(1);
     expect(mockPeopleApi.people.get).not.toHaveBeenCalled();
     expect(mockPeopleApi.people.updateContact).not.toHaveBeenCalled();
-    expect(state.updates.find((u) => u.table === 'leads').patch.google_contact_synced_at).toEqual(new Date('2026-07-28T12:00:00Z'));
+    expect(state.updates.find((u) => u.table === 'leads').patch.google_contact_synced_at).toBeNull();
   });
 
   test('retiring a shared contact requeues a surviving owner to scrub the dead row PII', async () => {
