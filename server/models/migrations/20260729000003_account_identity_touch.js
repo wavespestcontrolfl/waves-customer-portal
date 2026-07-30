@@ -41,47 +41,42 @@ exports.up = async function up(knex) {
           AND al.resource_id = ca.id
           AND al.metadata->>'field' = '${f}')`
     : 'FALSE');
+  // PER-FIELD candidate selection: sibling A may hold a legacy email
+  // correction while sibling B holds a later phone correction — a single
+  // newest-divergent ROW would copy all four fields from B and revert or
+  // miss A's email. Each field independently promotes from the newest
+  // live copy that diverges in THAT field (still gated on the account not
+  // being strictly newer, and on the field having no hygiene provenance).
+  const fieldPick = (f) => `CASE WHEN ${auditedField(f)} THEN ca.${f} ELSE COALESCE((
+        SELECT c.${f} FROM customers c
+        WHERE c.account_id = ca.id AND c.deleted_at IS NULL
+          AND c.${f} IS DISTINCT FROM ca.${f}
+          AND c.updated_at >= ca.updated_at
+        ORDER BY c.updated_at DESC LIMIT 1), ca.${f}) END`;
+  const fieldEligible = (f) => `EXISTS (
+        SELECT 1 FROM customers c
+        WHERE c.account_id = ca.id AND c.deleted_at IS NULL
+          AND c.${f} IS DISTINCT FROM ca.${f}
+          AND c.updated_at >= ca.updated_at)${hasAuditLog ? ` AND NOT ${auditedField(f)}` : ''}`;
   await knex.raw(`
     UPDATE customer_accounts ca SET
-      first_name = CASE WHEN ${auditedField('first_name')} THEN ca.first_name ELSE c.first_name END,
-      last_name  = CASE WHEN ${auditedField('last_name')} THEN ca.last_name ELSE c.last_name END,
-      email      = CASE WHEN ${auditedField('email')} THEN ca.email ELSE c.email END,
-      phone      = CASE WHEN ${auditedField('phone')} THEN ca.phone ELSE c.phone END,
+      first_name = ${fieldPick('first_name')},
+      last_name  = ${fieldPick('last_name')},
+      email      = ${fieldPick('email')},
+      phone      = ${fieldPick('phone')},
       updated_at = now()
-    FROM (
-      -- Newest DIVERGENT copy per account: a sibling bumped later for
-      -- unrelated reasons still MATCHES the account and must not shadow
-      -- the corrected sibling out of the candidate slot (DISTINCT ON over
-      -- all rows would pick it, the difference predicate would then see
-      -- no change, and the correction would never promote).
-      SELECT DISTINCT ON (c1.account_id) c1.account_id, c1.first_name, c1.last_name, c1.email, c1.phone, c1.updated_at
-      FROM customers c1
-      JOIN customer_accounts ca1 ON ca1.id = c1.account_id
-      WHERE c1.account_id IS NOT NULL AND c1.deleted_at IS NULL
-        AND (ca1.first_name IS DISTINCT FROM c1.first_name
-          OR ca1.last_name  IS DISTINCT FROM c1.last_name
-          OR ca1.email      IS DISTINCT FROM c1.email
-          OR ca1.phone      IS DISTINCT FROM c1.phone)
-      ORDER BY c1.account_id, c1.updated_at DESC
-    ) c
-    WHERE ca.id = c.account_id
-      -- Promote unless the ACCOUNT row is STRICTLY newer than the newest
-      -- divergent copy. Equality must promote: the legacy admin path
-      -- edited identity WITHOUT bumping customers.updated_at, so a
-      -- single-property account seeded from its customer shares the exact
-      -- timestamp while the customer holds the correction — a strict gate
-      -- (or requiring some sibling to still match the account) would skip
-      -- precisely the rows this backfill exists to repair.
-      AND c.updated_at >= ca.updated_at
-      -- Only rows with at least one UN-audited divergent field — a no-op
-      -- update would still bump updated_at and needlessly requeue the
-      -- account's rows through the sync's staleness predicate.
-      AND (
-        (ca.first_name IS DISTINCT FROM c.first_name AND NOT ${auditedField('first_name')})
-        OR (ca.last_name IS DISTINCT FROM c.last_name AND NOT ${auditedField('last_name')})
-        OR (ca.email IS DISTINCT FROM c.email AND NOT ${auditedField('email')})
-        OR (ca.phone IS DISTINCT FROM c.phone AND NOT ${auditedField('phone')})
-      )
+    -- Only accounts with at least one un-audited divergent field from an
+    -- eligible copy — a no-op update would still bump updated_at and
+    -- needlessly requeue the account's rows through the sync's staleness
+    -- predicate. Equality (>=) must qualify: the legacy admin path edited
+    -- identity WITHOUT bumping customers.updated_at, so a single-property
+    -- account seeded from its customer shares the exact timestamp while
+    -- the customer holds the correction. An account STRICTLY newer than
+    -- every divergent copy has no eligible candidates and is preserved.
+    WHERE (${fieldEligible('first_name')})
+       OR (${fieldEligible('last_name')})
+       OR (${fieldEligible('email')})
+       OR (${fieldEligible('phone')})
   `);
   await knex.raw(`
     CREATE OR REPLACE FUNCTION propagate_customer_identity_to_account() RETURNS trigger AS $$

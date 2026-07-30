@@ -718,18 +718,40 @@ async function resolveLeadOwnership(row) {
     // never ran, and minting here would double-contact the person. Same
     // compatibility rules as the sibling probe below: a shared household
     // number with a CONFLICTING name stays a separate lead.
-    const phoneCustomer = await phoneSuffixMatch(
-      db('customers').whereNull('deleted_at'),
-      'phone',
-    )
+    // Match the property phone AND the linked canonical account phone —
+    // hygiene corrections land on the account without fanning back, so a
+    // lead using the corrected number must still find the customer.
+    const accountPhoneSuffix = `EXISTS (SELECT 1 FROM customer_accounts ca WHERE ca.id = customers.account_id`
+      + ` AND (RIGHT(regexp_replace(ca.phone, '\\D', '', 'g'), ?) = ?`
+      + ` OR (LENGTH(regexp_replace(ca.phone, '\\D', '', 'g')) BETWEEN 7 AND 9`
+      + ` AND RIGHT(?, LENGTH(regexp_replace(ca.phone, '\\D', '', 'g'))) = regexp_replace(ca.phone, '\\D', '', 'g'))))`;
+    const phoneCustomer = await db('customers')
+      .whereNull('deleted_at')
       .where((q) => {
-        if (rowName) q.whereRaw("(TRIM(CONCAT_WS(' ', first_name, last_name)) = '' OR LOWER(TRIM(CONCAT_WS(' ', first_name, last_name))) = ?)", [rowName]);
+        phoneSuffixMatch(q, 'customers.phone')
+          .orWhereRaw(accountPhoneSuffix, [phoneDigits.length, phoneDigits, phoneDigits]);
       })
-      .select('id', 'email', 'first_name', 'last_name')
+      .where((q) => {
+        if (rowName) {
+          q.whereRaw(
+            "(TRIM(CONCAT_WS(' ', first_name, last_name)) = '' OR LOWER(TRIM(CONCAT_WS(' ', first_name, last_name))) = ?"
+            + " OR EXISTS (SELECT 1 FROM customer_accounts ca2 WHERE ca2.id = customers.account_id"
+            + " AND LOWER(TRIM(CONCAT_WS(' ', ca2.first_name, ca2.last_name))) = ?))",
+            [rowName, rowName],
+          );
+        }
+      })
+      .select('id', 'email', 'first_name', 'last_name', 'account_id')
       .first();
     if (phoneCustomer) {
-      const namesConflict = !!(rowName && nameOf(phoneCustomer) && rowName !== nameOf(phoneCustomer));
-      if (!namesConflict) return { deferToCustomer: true, customerId: phoneCustomer.id };
+      // Defense-in-depth: a conflicting PROPERTY name may still be a
+      // match on the CANONICAL account identity (the person's real name).
+      let compatible = !(rowName && nameOf(phoneCustomer) && rowName !== nameOf(phoneCustomer));
+      if (!compatible && phoneCustomer.account_id) {
+        const acc = await db('customer_accounts').where({ id: phoneCustomer.account_id }).first();
+        compatible = !!(acc && nameOf(acc) && nameOf(acc) === rowName);
+      }
+      if (compatible) return { deferToCustomer: true, customerId: phoneCustomer.id };
     }
   }
   const siblingBase = () => db('leads')
@@ -967,7 +989,14 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
             // contact OR by its ACCOUNT's (another property row): a naive
             // whereNull transfer would hand a multi-property account a
             // second contact.
-            const freshCustomer = await db('customers').where({ id: ownership.customerId }).first();
+            // whereNull(deleted_at): a customer tombstoned since ownership
+            // resolved must not have the lead's contact absorbed into its
+            // (soon-retired) contact — a dead read falls through to the
+            // transfer conditional and the pre-stamp liveness check, both
+            // of which refuse.
+            const freshCustomer = await db('customers').where({ id: ownership.customerId })
+              .whereNull('deleted_at')
+              .first();
             let existingContact = freshCustomer?.google_contact_id || null;
             if (!existingContact && freshCustomer?.account_id) {
               const accSibling = await db('customers')

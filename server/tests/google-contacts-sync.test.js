@@ -224,6 +224,19 @@ describe('runContactsSync', () => {
     expect(counts.synced).toBe(0);
   });
 
+  test('a PHONE-ONLY lead matches the CANONICAL account name when the property copy conflicts', async () => {
+    setupDb({
+      leads: [{ id: 'l-p3', first_name: 'Jane', last_name: 'Customer', email: null, phone: '9415550100', customer_id: null, google_contact_id: null, updated_at: '2026-07-28T11:00:00Z' }],
+      firstResults: {
+        customers: [{ id: 'c-1', email: null, first_name: 'Property', last_name: 'Mgmt', account_id: 'acct-1' }],
+        customer_accounts: [{ id: 'acct-1', first_name: 'Jane', last_name: 'Customer' }],
+      },
+    });
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(mockPeopleApi.people.createContact).not.toHaveBeenCalled();
+    expect(counts.synced).toBe(0);
+  });
+
   test('a PHONE-ONLY lead with a CONFLICTING name keeps its own contact (household number)', async () => {
     setupDb({
       leads: [{ id: 'l-p2', first_name: 'Sam', last_name: 'Other', email: null, phone: '9415550100', customer_id: null, google_contact_id: null, updated_at: '2026-07-28T11:00:00Z' }],
