@@ -291,3 +291,35 @@ describe('blog SEO contract helpers', () => {
     expect(contract.breadcrumbs[0]).toEqual({ name: 'Home', url: '/' });
   });
 });
+
+// Tree & shrub city pages ship as `tree-and-shrub-care-{city}-fl`. When these
+// classifiers didn't know that spelling, the city recommendation pointed at
+// /service-areas/{city}/ and the REAL city link classified as 'service' — which
+// P1s a city topic for a missing city link.
+describe('tree & shrub city links classify as city links', () => {
+  const contract = require('../services/content/blog-seo-contract');
+  const { inferLinkReason, buildCityTarget, normalizeService } = contract._internals;
+
+  test('normalizeService maps every tree/shrub spelling to one key', () => {
+    for (const raw of ['tree-shrub', 'tree-shrub-care', 'tree and shrub care', 'tree-and-shrub-care', 'tree_shrub']) {
+      expect(normalizeService(raw)).toBe('tree-shrub');
+    }
+  });
+
+  test('the city target is the real page, not the service-areas fallback', () => {
+    expect(buildCityTarget('Venice', 'tree-shrub').url).toBe('/tree-and-shrub-care-venice-fl/');
+    expect(buildCityTarget('Lakewood Ranch', 'tree-shrub').url).toBe('/tree-and-shrub-care-lakewood-ranch-fl/');
+  });
+
+  test('inferLinkReason calls it a city link', () => {
+    expect(inferLinkReason('/tree-and-shrub-care-venice-fl/')).toBe('city');
+    expect(inferLinkReason('/tree-and-shrub-care-port-charlotte-fl/')).toBe('city');
+  });
+
+  test('the existing verticals are unchanged', () => {
+    expect(inferLinkReason('/pest-control-venice-fl/')).toBe('city');
+    expect(inferLinkReason('/lawn-care-sarasota-fl/')).toBe('city');
+    expect(inferLinkReason('/pest-control-services/')).toBe('service');
+    expect(inferLinkReason('/contact/')).toBe('conversion');
+  });
+});

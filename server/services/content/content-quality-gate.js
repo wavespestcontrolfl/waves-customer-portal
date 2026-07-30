@@ -913,9 +913,23 @@ function checkHubLinkPresent(draft, brief) {
       ? { ok: true }
       : { ok: false, reason: 'no_curated_hub_link_found' };
   }
-  const { SERVICE_HUB_LINKS } = require('./content-brief-builder')._internals;
+  const { SERVICE_HUB_LINKS, SERVICE_CITY_SLUG, SERVICE_ID_ALIASES } = require('./content-brief-builder')._internals;
   const hubs = [...new Set(Object.values(SERVICE_HUB_LINKS).flat())];
   if (hubs.some((h) => body.includes(h))) return { ok: true };
+  // A vertical with NO hub-level page (tree & shrub: /tree-shrub-care/ does not
+  // exist, only /tree-and-shrub-care-{city}-fl/) has an empty SERVICE_HUB_LINKS
+  // entry, so the union above can never satisfy it and EVERY such draft parked —
+  // including city-scoped ones that followed their brief exactly. For those
+  // services the city-service page IS the most relevant local page the brief
+  // mandates, so accept it. Scoped to services with no hub link: a vertical that
+  // HAS one must still link it rather than substituting a city page.
+  const service = SERVICE_ID_ALIASES[brief?.service] || brief?.service;
+  const citySlug = service ? SERVICE_CITY_SLUG[service] : null;
+  const hubless = service ? !(SERVICE_HUB_LINKS[service] || []).length : false;
+  if (hubless && citySlug) {
+    const cityRoute = new RegExp(`/${citySlug}-[a-z][a-z0-9-]*-fl/`);
+    if (cityRoute.test(body)) return { ok: true };
+  }
   return { ok: false, reason: 'no_hub_link_found' };
 }
 

@@ -912,3 +912,41 @@ describe('checkMetaDescriptionComplete — refresh target typing (Codex round 12
     expect(camel.ok).toBe(true);
   });
 });
+
+// Tree & shrub has no hub-level page, so SERVICE_HUB_LINKS['tree-shrub'] is empty
+// and the union check can never satisfy it. Without the hubless carve-out EVERY
+// tree/shrub supporting blog parked on hub_link_present — including city-scoped
+// drafts that followed their brief exactly.
+describe('checkHubLinkPresent — hubless verticals accept their city-service page', () => {
+  const gate = require('../services/content/content-quality-gate');
+  const run = (body, brief) => gate._internals.checkHubLinkPresent({ body }, brief);
+
+  test('a tree-shrub draft linking its city page passes', () => {
+    const body = 'Palms in Venice need care — see our [tree and shrub care in Venice](/tree-and-shrub-care-venice-fl/) page.';
+    expect(run(body, { service: 'tree-shrub', page_type: 'supporting-blog' }).ok).toBe(true);
+  });
+
+  test('the alias spelling resolves too', () => {
+    const body = 'See [our page](/tree-and-shrub-care-sarasota-fl/).';
+    expect(run(body, { service: 'tree-shrub-care', page_type: 'supporting-blog' }).ok).toBe(true);
+  });
+
+  test('a tree-shrub draft with NO city page and no hub link still fails', () => {
+    const body = 'Generic advice with only a [contact link](/contact/).';
+    expect(run(body, { service: 'tree-shrub', page_type: 'supporting-blog' }).ok).toBe(false);
+  });
+
+  test('a vertical that HAS a hub page cannot substitute a city page', () => {
+    // pest has real hub links, so the carve-out must not apply to it.
+    const body = 'Only a city link here: [pest control in Venice](/pest-control-venice-fl/).';
+    expect(run(body, { service: 'pest', page_type: 'supporting-blog' }).ok).toBe(false);
+    const withHub = `${body} And our [services](/pest-control-services/).`;
+    expect(run(withHub, { service: 'pest', page_type: 'supporting-blog' }).ok).toBe(true);
+  });
+
+  test('a curated operator hub link still wins outright', () => {
+    const brief = { service: 'tree-shrub', page_type: 'supporting-blog', voice_constraints: { operator_brief: { hub_link: '/pest-control-sarasota-fl/' } } };
+    expect(run('no links at all', brief).ok).toBe(false);
+    expect(run('see [here](/pest-control-sarasota-fl/)', brief).ok).toBe(true);
+  });
+});

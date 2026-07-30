@@ -947,6 +947,8 @@ module.exports._internals = {
   SCHEMA_TYPES,
   WORD_COUNT_TARGET,
   SERVICE_HUB_LINKS,
+  SERVICE_CITY_SLUG,
+  SERVICE_ID_ALIASES,
   buildSeoRequirements,
   nextWeekday9amET,
   applyAeoTreatment,

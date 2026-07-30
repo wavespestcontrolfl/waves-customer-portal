@@ -25,12 +25,20 @@ const SERVICE_TARGETS = {
   specialty: { name: 'Pest Control', slug: 'pest-control', url: '/pest-control-services/' },
 };
 
+// Must stay in step with content-brief-builder's SERVICE_CITY_SLUG — this map
+// decides which URL a city recommendation points at, and inferLinkReason below
+// decides whether a link COUNTS as the city link. Tree & shrub city pages ship as
+// `tree-and-shrub-care-{city}-fl` (all eight cities verified 200 on 2026-07-29);
+// omitting it here sent the recommendation to /service-areas/{city}/ and made the
+// real city link classify as 'service', which P1s a city topic for a missing city
+// link.
 const CITY_SERVICE_SLUG = {
   pest: 'pest-control',
   lawn: 'lawn-care',
   mosquito: 'mosquito-control',
   termite: 'termite-control',
   rodent: 'rodent-control',
+  'tree-shrub': 'tree-and-shrub-care',
 };
 
 const CONTENT_CLUSTERS = [
@@ -442,13 +450,18 @@ function normalizeService(service) {
   if (raw === 'termite-control' || raw === 'termite control' || raw === 'termites') return 'termite';
   if (raw === 'mosquito-control' || raw === 'mosquito control' || raw === 'mosquitoes') return 'mosquito';
   if (raw === 'rodents') return 'rodent';
+  // Brief/frontmatter spell this several ways; all must reach the 'tree-shrub' key
+  // the maps above use, or a tree & shrub topic silently loses its city link.
+  if (raw === 'tree-shrub-care' || raw === 'tree and shrub care' || raw === 'tree-and-shrub-care' || raw === 'tree_shrub') return 'tree-shrub';
   return raw || 'pest';
 }
 
 function inferLinkReason(url) {
   const path = normalizeUrl(url);
   if (/\/contact\/|quote|estimate|calculator/.test(path)) return 'conversion';
-  if (/^\/(?:pest-control|lawn-care|mosquito-control|termite-control|rodent-control)-[a-z0-9-]+-fl\/?$/.test(path)) return 'city';
+  // Alternation is LONGEST-FIRST so 'tree-and-shrub-care' cannot be shadowed by a
+  // shorter prefix, and mirrors CITY_SERVICE_SLUG above.
+  if (/^\/(?:tree-and-shrub-care|pest-control|lawn-care|mosquito-control|termite-control|rodent-control)-[a-z0-9-]+-fl\/?$/.test(path)) return 'city';
   if (/\/blog\/|\/[a-z0-9-]+\/?$/.test(path) && !/control|care|inspection|services/.test(path)) return 'related_blog';
   if (/control|care|inspection|services|rodent|termite|mosquito|lawn/.test(path)) return 'service';
   return 'hub';
@@ -565,5 +578,7 @@ module.exports = {
     normalizeSlug,
     normalizeUrl,
     inferLinkReason,
+    normalizeService,
+    CITY_SERVICE_SLUG,
   },
 };
