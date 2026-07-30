@@ -83,7 +83,7 @@ export default function TracedTreatmentZoneMap({ traced, live = true, variant = 
               ? 'Satellite photo of the property with the treated home and perimeter highlighted'
               : 'Satellite photo of the property with the treated perimeter highlighted')}
         />
-        {/* Highlight-captured rows: the snapshot carries the baked green
+        {/* Highlight-captured rows: the snapshot carries the baked highlight
             baseline (PDF/static-safe); live viewers get the transparent
             highlight layer PULSING on top — the treated turf breathes
             (owner 2026-07-30 "the goal is to show where we sprayed").
