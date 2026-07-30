@@ -373,6 +373,12 @@ const PRICING_PATTERNS = /\$\d+(?:\.\d{2})?(?:\s*\/\s*(?:mo(?:nth)?|yr|year|visi
 // blanket-"safe" (pet-safe / family-safe / safe for kids), and it's
 // "EPA-registered", never "EPA-approved".
 const SAFETY_OVERCLAIMS = /\b(?:guarante(?:e[ds]?|ing)|100\s*%\s*(?:effective|safe|eliminat)|completely\s+safe|risk[\s-]*free|no\s+side\s+effects|(?:pet|kid|child|family)[\s-]*(?:and[\s-]*(?:pet|kid|child|family)[\s-]*)?safe|safe\s+(?:for|around)\s+(?:your\s+|the\s+|our\s+)?(?:pets?|kids?|children|famil(?:y|ies))|safe\s+(?:pesticides?|products?|treatments?|sprays?|chemicals?|applications?)|EPA[\s-]*approved)\b/i;
+// Fixed re-entry/drying-time claims (compliance rule: never a minute/hour
+// figure — timing is technician-confirmed, the idiom is "safe once dry").
+// Three shapes: "30 minutes to dry"/"30-45 min drying", "dries/safe/re-enter
+// in|within|after 30 ...", "30-minute drying/re-entry (time)", plus the
+// wordy "about an hour to dry".
+const FIXED_TIMING_CLAIMS = /\b\d+\s*(?:[-–]\s*\d+\s*)?(?:minutes?|mins?|hours?|hrs?)\s+(?:to\s+dry|dry(?:ing)?(?:\s+time)?|re-?entry)|\b(?:dry|dries|drying|safe|re-?enter(?:ing)?|re-?entry)\s+(?:in|within|after)\s+(?:about\s+|around\s+|~\s*)?(?:\d+|an?\s+hour|half\s+an\s+hour)|\b\d+\s*[-–]?\s*(?:minute|min|hour|hr)s?\s+(?:dry(?:ing)?|re-?entry)\b|\babout\s+an\s+hour\s+to\s+dry\b/i;
 const PHONE_PATTERN = /(?:\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}|\+1\d{10})/g;
 
 const KNOWN_PHONES = new Set();
@@ -397,6 +403,9 @@ function validateContent(text, platform) {
   }
   if (SAFETY_OVERCLAIMS.test(text)) {
     issues.push('Contains safety overclaim (guaranteed, 100% effective, etc.)');
+  }
+  if (FIXED_TIMING_CLAIMS.test(text)) {
+    issues.push('Contains fixed drying/re-entry time — timing is technician-confirmed ("safe once dry")');
   }
 
   const phones = text.match(PHONE_PATTERN) || [];

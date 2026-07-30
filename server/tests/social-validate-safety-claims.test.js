@@ -28,6 +28,17 @@ const FLAGGED = [
   'targeted, safe application practices',
 ];
 
+const FLAGGED_TIMING = [
+  'safe after 30 minutes',
+  '30-minute drying time',
+  're-enter after 45 minutes',
+  'dries in 30-45 min',
+  'usually 30-60 minutes to dry',
+  'about an hour to dry',
+  'safe within an hour',
+  'dry within 20 minutes',
+];
+
 const CLEAN = [
   'EPA-registered products applied by licensed technicians',
   'a failsafe scheduling process',
@@ -35,6 +46,10 @@ const CLEAN = [
   'keep pets off treated areas until completely dry',
   'Safe once dry — technician confirms timing', // the approved idiom
   'review the safety data sheet before mixing',
+  // Durations OUTSIDE the drying/re-entry context stay legal copy.
+  'visits typically take about 45 minutes',
+  'we respond within 24 hours',
+  'mosquito barrier lasts 21-30 days',
 ];
 
 describe('SAFETY_OVERCLAIMS compliance class', () => {
@@ -42,6 +57,12 @@ describe('SAFETY_OVERCLAIMS compliance class', () => {
     const result = validateContent(text, 'gbp');
     expect(result.valid).toBe(false);
     expect(result.issues.join(' ')).toMatch(/safety overclaim/i);
+  });
+
+  it.each(FLAGGED_TIMING)('flags fixed timing: %s', (text) => {
+    const result = validateContent(text, 'gbp');
+    expect(result.valid).toBe(false);
+    expect(result.issues.join(' ')).toMatch(/drying\/re-entry time/i);
   });
 
   it.each(CLEAN)('passes: %s', (text) => {

@@ -1412,9 +1412,15 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
     // GBP never posts AI imagery (owner rule): creative variants are AI photo
     // scenes, so the engine is asked for no GBP (4:3) scene at all — GBP takes
     // the deterministic card render below, same as the non-creative branches.
-    const creativeVariants = await creativeVariantsForRun(plan, preview, {
-      isReviewRun, wantsGbp: false, effectiveMode, now: startedAt,
-    });
+    // A GBP-ONLY run skips the engine entirely: nothing would consume the
+    // square scenes, so generating them just burns paid image credits.
+    const hasNonGbpChannel = Array.isArray(plan.channels)
+      && plan.channels.some((c) => c !== 'gbp');
+    const creativeVariants = hasNonGbpChannel
+      ? await creativeVariantsForRun(plan, preview, {
+        isReviewRun, wantsGbp: false, effectiveMode, now: startedAt,
+      })
+      : [];
     if (creativeVariants.length) {
       imageUrl = creativeVariants[0].imageUrl;
       if (wantsGbp) {
@@ -1773,6 +1779,10 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
     // stays the still (thumbnails/GBP) and videoUrl records the published Reel.
     const approvedPreview = previewWithVisual(preview, {
       imageUrl: chosenImageUrl || preview.visual?.imageUrl,
+      // Carry the deterministic GBP card forward — a failed attempt stays
+      // draft_created and a RETRY re-reads preview.visual.gbpImageUrl; losing
+      // it here would demote the retry's GBP post to text-only.
+      gbpImageUrl: imageVariant?.gbpImageUrl || preview.visual?.gbpImageUrl || null,
       variant: preview.visual?.variant || 'campaign',
       templateKey: preview.visual?.templateKey,
       creative: chosen.conceptKey ? { conceptKey: chosen.conceptKey, sceneModel: chosen.sceneModel || null } : preview.visual?.creative,
