@@ -108,7 +108,7 @@ describe('fetchSuggestOutcomes — cohort filter reaches the query', () => {
 describe('fetchLiveJudgeSignals — cohort filter reaches the queries', () => {
   test('an active cohort filters BOTH the totals and the recent backstop to md.prompt_version', async () => {
     const dbi = makeFakeDb([]);
-    await fetchLiveJudgeSignals(dbi, { cohortVersions: [CURRENT] });
+    await fetchLiveJudgeSignals(dbi, { cohortVersions: [CURRENT], voiceProfileVersion: null });
     // liveOnly runs once for totals and once for the ranked-backstop CTE.
     expect(filterCalls(dbi, 'whereIn', 'md.prompt_version')).toEqual([
       ['whereIn', ['md.prompt_version', [CURRENT]]],
@@ -122,9 +122,45 @@ describe('fetchLiveJudgeSignals — cohort filter reaches the queries', () => {
 
   test('all_live keeps live-only semantics but drops the version filters', async () => {
     const dbi = makeFakeDb([]);
-    await fetchLiveJudgeSignals(dbi, { cohortVersions: null });
+    await fetchLiveJudgeSignals(dbi, { cohortVersions: null, voiceProfileVersion: null });
     expect(filterCalls(dbi, 'whereIn', 'md.prompt_version')).toEqual([]);
     expect(filterCalls(dbi, 'whereNotIn', 'md.prompt_version')).toEqual([]);
     expect(dbi.calls.some(([m, args]) => m === 'whereRaw' && /NOT LIKE '%backfill'/.test(args[0]))).toBe(true);
+  });
+});
+
+describe('fetchLiveJudgeSignals — voice-profile pin reaches the readiness queries (v9)', () => {
+  const pinCalls = (dbi) => dbi.calls.filter(([m, args]) => m === 'whereRaw' && /voice_profile_version/.test(args[0]));
+
+  test('a live approved profile pins totals AND recent backstop to its version', async () => {
+    const dbi = makeFakeDb([]);
+    await fetchLiveJudgeSignals(dbi, { cohortVersions: [CURRENT], voiceProfileVersion: 3 });
+    const calls = pinCalls(dbi);
+    // liveOnly runs once for totals, once for the ranked-backstop CTE
+    expect(calls).toHaveLength(2);
+    for (const [, args] of calls) expect(args[1]).toEqual(['3']);
+  });
+
+  test('no approved profile pins to the no-profile sentinel — profiled drafts drop out', async () => {
+    const dbi = makeFakeDb([]);
+    await fetchLiveJudgeSignals(dbi, { cohortVersions: [CURRENT], voiceProfileVersion: null });
+    const calls = pinCalls(dbi);
+    expect(calls).toHaveLength(2);
+    for (const [, args] of calls) expect(args[1]).toEqual(['__none__']);
+  });
+
+  test('the informational prior-version count is NOT profile-pinned', async () => {
+    const dbi = makeFakeDb([]);
+    await fetchLiveJudgeSignals(dbi, { cohortVersions: [CURRENT], voiceProfileVersion: 3 });
+    // exactly the two liveOnly applications — no third from the informational queries
+    expect(pinCalls(dbi)).toHaveLength(2);
+  });
+
+  test('pin resolution failure propagates (callers fail closed to judgeAvailable=false)', async () => {
+    const dbi = makeFakeDb([]);
+    // omitting voiceProfileVersion forces resolution via getApprovedVoiceProfile,
+    // whose builder chain (.first) the capturing fake deliberately lacks —
+    // standing in for any resolver error. It must throw, not silently unpin.
+    await expect(fetchLiveJudgeSignals(dbi, { cohortVersions: [CURRENT] })).rejects.toThrow();
   });
 });

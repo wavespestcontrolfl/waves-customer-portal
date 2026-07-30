@@ -180,11 +180,31 @@ function evaluateRung({ mode = 'shadow', locked = false, judge = {}, suggest = {
  * backfillJudged / priorVersionJudged are informational: they explain a 0/40
  * cohort count to the operator ("you have N backfill and M prior-version
  * samples, but graduation needs current-version live ones").
+ *
+ * The readiness cohort is additionally pinned to the CURRENTLY approved
+ * voice-profile version (see the pin comment in the function body) — a
+ * profile swap resets readiness evidence the same way a prompt bump does.
  */
-async function fetchLiveJudgeSignals(dbi = db, { recentWindow = THRESHOLDS.suggestToAutosend.recentWindow, cohortVersions } = {}) {
+async function fetchLiveJudgeSignals(dbi = db, { recentWindow = THRESHOLDS.suggestToAutosend.recentWindow, cohortVersions, voiceProfileVersion } = {}) {
   const cohort = cohortVersions === undefined ? resolveCohortVersions() : cohortVersions;
+  // v9 voice-profile pin: the weekly distiller can swap the approved voice
+  // profile WITHOUT a prompt-version bump, and the profile changes generation
+  // — so readiness evidence earned under profile A must not carry a newly
+  // approved profile B toward autonomy (Codex P1). The pin scopes the
+  // readiness cohort to drafts stamped with the CURRENTLY approved profile
+  // version (voice_profile_version in intended_actions; '__none__' when the
+  // draft — or the present state — has no profile). A resolution failure
+  // propagates to the callers' existing judgeAvailable=false fail-closed
+  // path: with an unknowable pin, the safety backstop is blind and autonomy
+  // stays blocked. Safe cast: every cohort-version row is drafter-authored
+  // JSON (the pin key ships with the same version that stamps it).
+  const pin = voiceProfileVersion !== undefined
+    ? voiceProfileVersion
+    : (await require('./voice-profile-distiller').getApprovedVoiceProfile({ dbi }))?.version ?? null;
+  const pinValue = pin == null ? '__none__' : String(pin);
   const liveOnly = function () {
     this.whereNotNull('j.intent').whereRaw("md.prompt_version NOT LIKE '%backfill'");
+    this.whereRaw("COALESCE(md.intended_actions::jsonb->>'voice_profile_version', '__none__') = ?", [pinValue]);
     if (cohort) this.whereIn('md.prompt_version', cohort);
   };
 
