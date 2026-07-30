@@ -9706,6 +9706,17 @@ export function CompletionPanel({
               applicationMethod: p.applicationMethod || null,
               targets: Array.isArray(p.targets) ? p.targets.slice(0, 6) : [],
             })),
+            // Observations/recommendations/rating ground the recap the same
+            // way they ground the AI report (owner 2026-07-30).
+            observations: [
+              ...activeSelectedLabels(selectedObservationLabels),
+              ...freeTextLines(observationsText),
+            ],
+            recommendations: [
+              ...activeSelectedLabels(selectedRecommendationLabels),
+              ...freeTextLines(recommendationsText),
+            ],
+            pestActivityRating: clientPestRating,
             willInvoice,
             willReview: reviewSendsWithCompletionSms,
           }),
@@ -9740,6 +9751,9 @@ export function CompletionPanel({
     recapProductsKey,
     visitOutcome,
     areasServiced,
+    observationsText,
+    recommendationsText,
+    clientPestRating,
     service.serviceType,
     customerInteraction,
     willInvoice,
@@ -9780,6 +9794,15 @@ export function CompletionPanel({
             applicationMethod: p.applicationMethod || null,
             targets: Array.isArray(p.targets) ? p.targets.slice(0, 6) : [],
           })),
+          observations: [
+            ...activeSelectedLabels(selectedObservationLabels),
+            ...freeTextLines(observationsText),
+          ],
+          recommendations: [
+            ...activeSelectedLabels(selectedRecommendationLabels),
+            ...freeTextLines(recommendationsText),
+          ],
+          pestActivityRating: clientPestRating,
           willInvoice,
           willReview: reviewSendsWithCompletionSms,
           force: true,
@@ -11141,9 +11164,13 @@ export function CompletionPanel({
   }
   // Optional AI photo analysis — sends the attached photos (still local
   // data-URLs pre-submit) for a customer-facing summary + per-photo
-  // captions. Failures surface inline and never block submit.
+  // captions. Failures surface inline and never block submit. Typed
+  // completions ground the vision prompt in the findings form; basic
+  // completions (owner 2026-07-30) ground it in the notes/observations,
+  // and the tech can pull the summary into the notes.
   async function handlePhotoAnalyze() {
-    if (photoAnalyzing || !typedFindingsSchema || !servicePhotos.length) return;
+    if (photoAnalyzing || !servicePhotos.length) return;
+    if (isTypedFindings && !typedFindingsSchema) return;
     setPhotoAiError("");
     setPhotoAnalyzing(true);
     // Snapshot the analyzed photo identities: photos can be added/removed
@@ -11161,10 +11188,19 @@ export function CompletionPanel({
               data: photo.data,
               name: photo.name || `service-photo-${index + 1}.jpg`,
             })),
-            structuredFindings: {
-              type: typedFindingsSchema.type,
-              values: findingsValues,
-            },
+            ...(isTypedFindings
+              ? {
+                  structuredFindings: {
+                    type: typedFindingsSchema.type,
+                    values: findingsValues,
+                  },
+                }
+              : {
+                  context: {
+                    notes: stripChipTagLines(notes),
+                    observations: freeTextLines(observationsText),
+                  },
+                }),
           }),
         },
       );
@@ -12220,9 +12256,10 @@ export function CompletionPanel({
                     ))}
                   </div>
                 )}
-                {/* AI photo analysis — typed services only (the summary
-                    persists via the typedReportSnapshot). */}
-                {isTypedFindings && servicePhotos.length > 0 && (
+                {/* AI photo analysis — typed services persist the summary via
+                    the typedReportSnapshot; basic completions (owner
+                    2026-07-30) let the tech pull it into the notes. */}
+                {servicePhotos.length > 0 && (
                   <div style={{ marginTop: 12 }}>
                     <button
                       type="button"
@@ -12244,7 +12281,9 @@ export function CompletionPanel({
                     {typedPhotoSummary !== "" && (
                       <div style={{ marginTop: 10 }}>
                         <div style={{ fontSize: 14, fontWeight: 500, color: M.ink, marginBottom: 4 }}>
-                          Photo summary (appears on the customer report)
+                          {isTypedFindings
+                            ? "Photo summary (appears on the customer report)"
+                            : "Photo summary — review, then add to notes if useful"}
                         </div>
                         <textarea
                           value={typedPhotoSummary}
@@ -12263,6 +12302,26 @@ export function CompletionPanel({
                             resize: "vertical",
                           }}
                         />
+                        {!isTypedFindings && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const summary = typedPhotoSummary.trim();
+                              if (!summary) return;
+                              setNotes((prev) =>
+                                prev.trim() ? `${prev.trimEnd()}\n\n${summary}` : summary,
+                              );
+                            }}
+                            disabled={!typedPhotoSummary.trim() || generating}
+                            style={{
+                              ...secondaryPill,
+                              marginTop: 8,
+                              opacity: !typedPhotoSummary.trim() || generating ? 0.5 : 1,
+                            }}
+                          >
+                            Add to technician notes
+                          </button>
+                        )}
                       </div>
                     )}
                   </div>
@@ -14060,9 +14119,10 @@ export function CompletionPanel({
                   ))}
                 </div>
               )}
-              {/* AI photo analysis — typed services only (the summary
-                  persists via the typedReportSnapshot). */}
-              {isTypedFindings && servicePhotos.length > 0 && (
+              {/* AI photo analysis — typed services persist the summary via
+                  the typedReportSnapshot; basic completions (owner
+                  2026-07-30) let the tech pull it into the notes. */}
+              {servicePhotos.length > 0 && (
                 <div style={{ marginTop: 12 }}>
                   <button
                     type="button"
@@ -14089,7 +14149,9 @@ export function CompletionPanel({
                   {typedPhotoSummary !== "" && (
                     <div style={{ marginTop: 10 }}>
                       <div style={{ fontSize: 14, fontWeight: 500, color: D.text, marginBottom: 4 }}>
-                        Photo summary (appears on the customer report)
+                        {isTypedFindings
+                          ? "Photo summary (appears on the customer report)"
+                          : "Photo summary — review, then add to notes if useful"}
                       </div>
                       <textarea
                         value={typedPhotoSummary}
@@ -14108,6 +14170,32 @@ export function CompletionPanel({
                           resize: "vertical",
                         }}
                       />
+                      {!isTypedFindings && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const summary = typedPhotoSummary.trim();
+                            if (!summary) return;
+                            setNotes((prev) =>
+                              prev.trim() ? `${prev.trimEnd()}\n\n${summary}` : summary,
+                            );
+                          }}
+                          disabled={!typedPhotoSummary.trim() || generating}
+                          style={{
+                            background: "transparent",
+                            color: D.teal,
+                            border: `1px solid ${D.teal}`,
+                            borderRadius: 8,
+                            padding: "8px 14px",
+                            fontSize: 14,
+                            marginTop: 8,
+                            cursor: "pointer",
+                            opacity: !typedPhotoSummary.trim() || generating ? 0.5 : 1,
+                          }}
+                        >
+                          Add to technician notes
+                        </button>
+                      )}
                     </div>
                   )}
                 </div>

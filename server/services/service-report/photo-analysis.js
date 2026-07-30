@@ -15,14 +15,19 @@ const { findBannedCustomerCopy } = require('./activity-indicators');
 const MAX_PHOTO_SUMMARY_CHARS = 600;
 const MAX_PHOTO_CAPTION_CHARS = 200;
 
-function buildPhotoAnalysisPrompt({ schema, values = {}, photoCount = 0, serviceType = '' }) {
-  const fieldLines = (schema?.fields || [])
-    .map((field) => {
-      const value = values?.[field.key];
-      if (value == null || String(value).trim() === '') return null;
-      return `${field.label}: ${String(value).trim()}`;
-    })
-    .filter(Boolean);
+function buildPhotoAnalysisPrompt({ schema, values = {}, photoCount = 0, serviceType = '', contextLines = [] }) {
+  // Typed completions ground the prompt in the findings form; basic
+  // completions pass free-form context lines (notes/observations) instead.
+  const fieldLines = [
+    ...(schema?.fields || [])
+      .map((field) => {
+        const value = values?.[field.key];
+        if (value == null || String(value).trim() === '') return null;
+        return `${field.label}: ${String(value).trim()}`;
+      })
+      .filter(Boolean),
+    ...(Array.isArray(contextLines) ? contextLines.filter(Boolean) : []),
+  ];
   return `You are reviewing ${photoCount} field photo${photoCount === 1 ? '' : 's'} a pest-control technician attached to today's service visit, in the order shown.
 
 Write customer-facing copy for the service report's photo section as STRICT JSON (no markdown, no code fences):

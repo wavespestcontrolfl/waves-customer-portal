@@ -4187,6 +4187,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             serviceType: svc.service_type,
             areasTreated: Array.isArray(areasTreated) ? areasTreated : (areasServiced || []),
             products: recapProducts,
+            // Merged observations/recommendations (chip labels + free text +
+            // tagged note lines) and the tech's activity rating ground the
+            // production recap the same way the preview path does (owner
+            // 2026-07-30).
+            observations: reportObservations,
+            recommendations: reportRecommendations,
+            pestActivityRating: Number.isInteger(clientPestRating) ? clientPestRating : null,
             visitContext: completionVisitContext,
           };
           const deterministicFallback = () => {
@@ -8674,28 +8681,51 @@ router.post('/:serviceId/findings-recap/draft', async (req, res) => {
 router.post('/:serviceId/photo-analysis/draft', async (req, res) => {
   try {
     if (!(await assertRecapOwnership(req, res))) return;
-    const { photos, structuredFindings } = req.body || {};
+    const { photos, structuredFindings, context } = req.body || {};
     if (!Array.isArray(photos) || !photos.length) {
       return res.status(400).json({ error: 'photos array is required', code: 'photos_required' });
     }
     if (photos.length > 5) {
       return res.status(400).json({ error: 'At most 5 photos can be analyzed', code: 'too_many_photos' });
     }
-    const findingsType = structuredFindings?.type;
-    if (!findingsType || !ActivityIndicators.isTypedFindingsType(findingsType)) {
-      return res.status(400).json({ error: `Unknown findings type: ${findingsType}` });
-    }
-    const schema = ActivityIndicators.findingsSchemaForType(findingsType);
     const svc = await db('scheduled_services')
       .where({ id: req.params.serviceId })
       .first('id', 'customer_id', 'service_type', 'service_id');
     if (!svc) return res.status(404).json({ error: 'Service not found' });
     const photoProfile = await resolveCompletionProfileForScheduledService(svc).catch(() => null);
-    if (photoProfile?.findingsType !== findingsType) {
-      return res.status(409).json({
-        error: 'This service does not use that findings form.',
-        code: 'findings_type_mismatch',
-      });
+    const findingsType = structuredFindings?.type;
+    let schema = null;
+    const contextLines = [];
+    if (findingsType) {
+      if (!ActivityIndicators.isTypedFindingsType(findingsType)) {
+        return res.status(400).json({ error: `Unknown findings type: ${findingsType}` });
+      }
+      schema = ActivityIndicators.findingsSchemaForType(findingsType);
+      if (photoProfile?.findingsType !== findingsType) {
+        return res.status(409).json({
+          error: 'This service does not use that findings form.',
+          code: 'findings_type_mismatch',
+        });
+      }
+    } else {
+      // Basic (untyped) completions analyze photos too (owner 2026-07-30) —
+      // grounded in the tech's notes/observations instead of a findings
+      // form. A typed service must send its typed findings so the summary
+      // stays grounded in the form the tech actually fills.
+      if (photoProfile?.findingsType) {
+        return res.status(409).json({
+          error: 'This service uses a findings form — send structuredFindings.',
+          code: 'findings_type_mismatch',
+        });
+      }
+      const notes = String(context?.notes || '').trim().slice(0, 1500);
+      if (notes) contextLines.push(`Technician notes: ${notes}`);
+      const observations = Array.isArray(context?.observations)
+        ? context.observations.map((o) => String(o).trim()).filter(Boolean).slice(0, 10)
+        : [];
+      if (observations.length) {
+        contextLines.push(`Observations: ${observations.join('; ').slice(0, 600)}`);
+      }
     }
     // Decode with the same size cap the completion upload enforces — a
     // photo too big to persist is too big to analyze (the helper default
@@ -8712,6 +8742,7 @@ router.post('/:serviceId/photo-analysis/draft', async (req, res) => {
       values: structuredFindings?.values || {},
       photoCount: photos.length,
       serviceType: svc.service_type,
+      contextLines,
     });
     const generated = await dispatchWithFallback(
       MODELS.TEXT_POLICIES.visionAnalysis,
