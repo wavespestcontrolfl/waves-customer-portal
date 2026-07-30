@@ -169,10 +169,21 @@ describe('canAutoRoute fail-open booking', () => {
 });
 
 describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BOOKING)', () => {
-  // McHale/Stopka case (2026-07-30): realtor confirming a WDO inspection the
-  // owner verbally accepted on the call ("we'll confirm it for noon on
-  // Sunday") still parked in triage on caller_not_authorized.
-  function agentCommitted(flags = ['caller_not_authorized'], { claim = true, speaker = 'agent', quote = "So we'll confirm it for noon on Sunday, and just let us know if anything changes." } = {}) {
+  // Live miss 2026-07-30: a third-party arranger (realtor booking a WDO
+  // inspection for a buyer) confirmed a slot the agent verbally accepted on
+  // the call ("we'll confirm it for noon on Sunday") — the booking still
+  // parked in triage on caller_not_authorized. All names/quotes here are
+  // synthetic.
+  const AGENT_COMMIT_QUOTE = "So we'll confirm it for noon on Sunday, and just let us know if anything changes.";
+  const TRANSCRIPT = [
+    'Caller: Hi, I want to confirm the inspection for noon on Sunday.',
+    'Agent: Sounds good, let me grab the address.',
+    'Caller: 100 Example Street in Venice.',
+    `Agent: ${AGENT_COMMIT_QUOTE}`,
+    'Caller: Okay, thank you.',
+  ].join('\n');
+
+  function agentCommitted(flags = ['caller_not_authorized'], { claim = true, speaker = 'agent', quote = AGENT_COMMIT_QUOTE } = {}) {
     const ex = extraction(flags);
     ex.scheduling.agent_committed_booking = claim;
     ex.evidence = quote === null ? [] : [
@@ -180,33 +191,66 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     ];
     return ex;
   }
+  const opts = (extra = {}) => ({ agentCommitFailOpen: true, transcript: TRANSCRIPT, ...extra });
 
   test('agent commitment demotes caller_not_authorized to failedOpenFlags and books', () => {
-    const r = canAutoRoute(agentCommitted(), { agentCommitFailOpen: true });
+    const r = canAutoRoute(agentCommitted(), opts());
     expect(r.allowed).toBe(true);
     expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
   });
 
   test('gate off → caller_not_authorized still hard-blocks even with a pinned agent commitment', () => {
-    const r = canAutoRoute(agentCommitted(), {});
+    const r = canAutoRoute(agentCommitted(), { transcript: TRANSCRIPT });
     expect(r.allowed).toBe(false);
     expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
   test('caller-attributed evidence cannot satisfy the commitment (trust boundary)', () => {
-    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { speaker: 'caller' }), { agentCommitFailOpen: true });
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { speaker: 'caller' }), opts());
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('a hallucinated quote that never appears in the transcript stays blocked (P0: evidence is untrusted)', () => {
+    const r = canAutoRoute(
+      agentCommitted(['caller_not_authorized'], { quote: "You're all booked for Sunday at noon, guaranteed." }),
+      opts()
+    );
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('a quote spoken by the CALLER cannot ground even with an agent speaker label (P0)', () => {
+    const r = canAutoRoute(
+      agentCommitted(['caller_not_authorized'], { quote: 'Hi, I want to confirm the inspection for noon on Sunday.' }),
+      opts()
+    );
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('no transcript / unlabeled transcript → fail closed', () => {
+    for (const transcript of [null, '', 'we will confirm it for noon on Sunday and just let us know if anything changes']) {
+      const r = canAutoRoute(agentCommitted(), opts({ transcript }));
+      expect(r.allowed).toBe(false);
+      expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+    }
+  });
+
+  test('a trivially short quote ("sounds good") cannot ground a commitment', () => {
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: 'Sounds good' }), opts());
     expect(r.allowed).toBe(false);
     expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
   test('a bare boolean claim with no pinned evidence stays blocked', () => {
-    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: null }), { agentCommitFailOpen: true });
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: null }), opts());
     expect(r.allowed).toBe(false);
     expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
   test('evidence without the claim (agent_committed_booking false) stays blocked', () => {
-    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { claim: false }), { agentCommitFailOpen: true });
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { claim: false }), opts());
     expect(r.allowed).toBe(false);
     expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
@@ -214,13 +258,13 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
   test('an unconfirmed booking is never demoted (confirmed-with-start contract)', () => {
     const ex = agentCommitted();
     ex.scheduling.status = 'offered';
-    const r = canAutoRoute(ex, { agentCommitFailOpen: true });
+    const r = canAutoRoute(ex, opts());
     expect(r.allowed).toBe(false);
     expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
   test('other hard blocks are untouched — out_of_service_area still vetoes an agent-committed booking', () => {
-    const r = canAutoRoute(agentCommitted(['caller_not_authorized', 'out_of_service_area']), { agentCommitFailOpen: true });
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized', 'out_of_service_area']), opts());
     expect(r.allowed).toBe(false);
     expect(r.appointmentBlockingFlags).toContain('out_of_service_area');
     expect(r.appointmentBlockingFlags).not.toContain('caller_not_authorized');
@@ -228,7 +272,7 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
 
   test('composes with contact-field fail-open: both gates demote their flags on one call', () => {
     const ex = agentCommitted(['caller_not_authorized', 'caller_phone_missing']);
-    const r = canAutoRoute(ex, { agentCommitFailOpen: true, failOpen: true, callerAni: '+19796763069' });
+    const r = canAutoRoute(ex, opts({ failOpen: true, callerAni: '+19415550100' }));
     expect(r.allowed).toBe(true);
     expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized', 'caller_phone_missing']));
   });

@@ -357,16 +357,53 @@ const FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS = new Set([
   'address_unverifiable', 'missing_service_address', 'low_confidence_address', 'address_unverified',
 ]);
 
+// Normalization for quote↔transcript grounding: case-, punctuation- and
+// whitespace-insensitive so transcription formatting differences don't break
+// a genuine verbatim match.
+function normalizeForGrounding(s) {
+  return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+// Grounds a claimed AGENT quote against the SOURCE transcript's speaker
+// turns. The extraction's evidence objects (quote AND speaker label) are
+// model output — untrusted; a hallucinated evidence entry must never clear a
+// hard block. So the quote must actually appear inside a single
+// "Agent:"-attributed turn of the labeled transcript we extracted from.
+// Fail closed: no transcript, an unlabeled transcript (no Agent:/Caller:
+// turn markers to ground against), or a quote found only in caller turns all
+// return false. The 12-char normalized minimum keeps trivial fillers
+// ("okay", "sounds good") from grounding a commitment claim. A quote the
+// model stitched across two turns fails per-turn containment — also closed,
+// also correct: the commitment sentence is a single agent utterance.
+function agentQuoteGroundedInTranscript(quote, transcript) {
+  const q = normalizeForGrounding(quote);
+  if (!q || q.length < 12) return false;
+  const agentTurns = [];
+  let speaker = null;
+  for (const line of String(transcript || '').split(/\r?\n/)) {
+    const m = line.match(/^\s*(agent|caller)\s*:\s*(.*)$/i);
+    if (m) {
+      speaker = m[1].toLowerCase();
+      if (speaker === 'agent') agentTurns.push(m[2]);
+    } else if (speaker === 'agent' && line.trim()) {
+      agentTurns[agentTurns.length - 1] += ` ${line.trim()}`;
+    }
+  }
+  if (!agentTurns.length) return false;
+  return agentTurns.some((t) => normalizeForGrounding(t).includes(q));
+}
+
 // True only when the model pinned an AGENT-spoken evidence quote for the
-// scheduling.agent_committed_booking claim. The speaker check is the trust
-// boundary: the commitment must come from OUR side of the call — a bare
-// boolean without agent-attributed evidence never demotes the
-// caller_not_authorized hard block.
-function hasAgentCommittedEvidence(extraction) {
+// scheduling.agent_committed_booking claim AND that quote grounds against an
+// agent turn of the source transcript (see agentQuoteGroundedInTranscript).
+// The speaker label alone is NOT the trust boundary — it is model output like
+// the rest of the extraction; the transcript grounding is what makes the
+// commitment verifiable.
+function hasAgentCommittedEvidence(extraction, transcript) {
   return (Array.isArray(extraction?.evidence) ? extraction.evidence : []).some((e) => (
     String(e?.field_path || '') === '/scheduling/agent_committed_booking'
-    && String(e?.quote || '').trim().length > 0
     && e?.speaker === 'agent'
+    && agentQuoteGroundedInTranscript(e?.quote, transcript)
   ));
 }
 
@@ -442,16 +479,18 @@ function canAutoRoute(extraction, opts = {}) {
   // a WDO inspection the owner verbally accepted on the call still parked in
   // triage, so the promised confirmation flow never ran. Guarded three ways:
   // the extraction must claim the commitment, the claim must be evidence-
-  // pinned to an AGENT-spoken quote (a caller asserting "you'll confirm it,
-  // right?" cannot satisfy it — see hasAgentCommittedEvidence), and the
-  // booking must be confirmed with a start time. The flag is pushed to
+  // pinned to an AGENT-spoken quote that GROUNDS against an agent turn of the
+  // source transcript (evidence objects are untrusted model output — a
+  // hallucinated quote or speaker label cannot clear a hard block; see
+  // hasAgentCommittedEvidence), and the booking must be confirmed with a
+  // start time. The flag is pushed to
   // failedOpenFlags so the enforce path files the advisory "confirm the
   // account holder" card — book-and-flag, never book-and-hide. Every other
   // hard block (spam, out_of_service_area, do_not_contact) is untouched.
   // Independent of opts.failOpen so the two gates flip separately.
   if (opts.agentCommitFailOpen && confirmedWithStart
       && extraction.scheduling?.agent_committed_booking === true
-      && hasAgentCommittedEvidence(extraction)) {
+      && hasAgentCommittedEvidence(extraction, opts.transcript)) {
     appointmentBlockingFlags = appointmentBlockingFlags.filter((f) => {
       if (f === 'caller_not_authorized') { failedOpenFlags.push(f); return false; }
       return true;

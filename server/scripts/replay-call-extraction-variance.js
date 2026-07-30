@@ -30,6 +30,7 @@ const FIELD_GROUPS = {
   high: [
     'appointment_confirmed',
     'preferred_date_time',
+    'agent_committed_booking',
     'is_spam',
     'is_voicemail',
     'matched_service',

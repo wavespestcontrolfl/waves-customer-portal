@@ -5319,6 +5319,9 @@ const CallRecordingProcessor = {
             contactPhone, addressValidation,
             failOpen: failOpenBooking, callerAni: contactPhone, knownCustomer: knownCustomerForFailOpen,
             agentCommitFailOpen: isEnabled('callAgentCommitBooking') && !isOutboundCall(call),
+            // Grounds the agent-commitment evidence quote against the labeled
+            // source transcript — evidence objects are untrusted model output.
+            transcript: transcription,
           });
           // Address fail-open is only safe when the on-file address really is
           // the booking address — V1-captured address evidence that conflicts
@@ -8837,6 +8840,7 @@ const CallRecordingProcessor = {
           callerAni: contactPhone,
           knownCustomer: (knownCaller && knownCaller.isExistingCustomer) ? { hasAddress: knownCaller.hasAddress } : null,
           agentCommitFailOpen: isEnabled('callAgentCommitBooking') && !isOutboundCall(call),
+          transcript: transcription,
         });
         // Mirror the enforce path's V1 address-conflict demotion — the saved
         // shadow decision must hold exactly where enforce would hold, or
