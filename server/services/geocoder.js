@@ -129,9 +129,12 @@ async function pruneStaleExclusions() {
 
 async function sweepUngeocodedCustomers({ limit = 25 } = {}) {
   // Excluding in the query (not post-filter) so a backlog of unresolvable
-  // rows can never crowd eligible older customers out of the batch. The
-  // map is capped; clearing it just means stuck rows get retried.
-  if (sweepUnresolved.size > SWEEP_UNRESOLVED_CAP) sweepUnresolved.clear();
+  // rows can never crowd eligible older customers out of the batch. The map
+  // is capped by evicting the OLDEST exclusions (Map preserves insertion
+  // order) — a full clear would reset traversal to the same newest rows.
+  while (sweepUnresolved.size > SWEEP_UNRESOLVED_CAP) {
+    sweepUnresolved.delete(sweepUnresolved.keys().next().value);
+  }
   await pruneStaleExclusions();
   const excluded = Array.from(sweepUnresolved.keys());
   const rows = await db('customers')
