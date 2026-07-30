@@ -837,6 +837,12 @@ function ElectronicAuthorizationContractV2({
   });
   const [documentAllowUnresolved, setDocumentAllowUnresolved] = useState(false);
   const [documentPropertyAddress, setDocumentPropertyAddress] = useState("");
+  // Scoped to the profiled customer: if this panel survives a customer
+  // switch, a stale override must not rewrite the next customer's
+  // document address.
+  useEffect(() => {
+    setDocumentPropertyAddress("");
+  }, [customer?.id]);
   const [documentSigningUrl, setDocumentSigningUrl] = useState("");
   const [documentAction, setDocumentAction] = useState("");
   const [documentErr, setDocumentErr] = useState("");

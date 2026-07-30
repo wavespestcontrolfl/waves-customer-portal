@@ -356,6 +356,13 @@ export default function DocumentTemplatesPage() {
 
   const activeVersion = detail?.template?.activeVersion;
   const selectedCustomerId = selectedCustomer?.id || sendCustomerId.trim();
+
+  // The property override is scoped to one customer+template selection: a
+  // stale value silently carried onto the next customer would rewrite
+  // their document's address to the previous customer's property.
+  useEffect(() => {
+    setSendPropertyAddress("");
+  }, [selectedCustomerId, templateDraft?.templateKey]);
   const variableList = useMemo(() => {
     return [...new Set([
       ...(templateDraft.variables || []),

@@ -765,10 +765,14 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       return { ok: false, skipped: 'figures_unresolved', belled: figuresBelled, retireFailed: figuresRetireFailed };
     }
 
-    const activeVersionIds = await activeProgramVersionIds();
-    const existing = await existingBlockingProgramAgreement(customerId, estimate, db, activeVersionIds);
-    if (existing) return { ok: true, skipped: 'already_exists', contractId: existing.id };
-
+    // Deliberately NO pre-transaction "already exists" fast path: a blocker
+    // verdict depends on the ACTIVE version set, and a version published
+    // between an unlocked read and the return would leave a superseded
+    // request classified as blocking — signable until the next sweep. The
+    // in-transaction check below re-reads the active set under the locked
+    // template rows and is the only place that decision is safe; an
+    // existing draft costs one redundant render before returning
+    // 'already_exists' from there.
     const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first();
     if (!customer) return { ok: false, skipped: 'customer_not_found' };
 

@@ -828,10 +828,28 @@ exports.down = async function down(knex) {
         // An open candidate whose token has expired is no coverage — its
         // link 410s and the lifecycle pass will stamp it 'expired'.
         if (c.share_token_expires_at && new Date(c.share_token_expires_at) < new Date()) continue;
-        // Open and still on a version that remains active after the repoint
-        // (or unclassifiable) = genuine live coverage — suppress restore.
-        if (!c.document_template_version_id || activeIdsAfterRollback.has(c.document_template_version_id)) {
+        // An open row with NO version (deleted rendering version) is
+        // unclassifiable — conservative suppress: it can't be proven stale
+        // to retire, and restoring beside it would stack two live flows.
+        if (!c.document_template_version_id) {
           replacementSameProperty = true;
+          continue;
+        }
+        // Open and still on a version that remains active after the
+        // repoint = live coverage — but cycle-bound like the signed
+        // branch: an active-version row CREATED BEFORE this source (e.g.
+        // an older same-property source this loop already restored) is an
+        // earlier cycle's paperwork and must not keep the newer source's
+        // link dead. Same estimate or unprovable timestamps suppress.
+        if (activeIdsAfterRollback.has(c.document_template_version_id)) {
+          const cSnap = snapOf(c.document_variables_snapshot);
+          const cSameEstimate = !!(cSnap?.estimate?.id && sourceEstimateId
+            && String(cSnap.estimate.id) === String(sourceEstimateId));
+          const cCreatedAt = c.created_at ? new Date(c.created_at) : null;
+          const srcCreatedAt = source.created_at ? new Date(source.created_at) : null;
+          if (cSameEstimate || !cCreatedAt || !srcCreatedAt || cCreatedAt >= srcCreatedAt) {
+            replacementSameProperty = true;
+          }
           continue;
         }
         // Open on a version this rollback just DEACTIVATED (the sweep's v2
