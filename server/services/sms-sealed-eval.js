@@ -67,8 +67,18 @@ const MAX_CONSECUTIVE_FAILURES = envNum('SEALED_EVAL_MAX_CONSEC_FAILURES', 5);
 const EXAM_LEG_ROUTES = Object.freeze({
   anthropic: Object.freeze({ provider: MODELS.PROVIDER.ANTHROPIC, model: MODELS.SMS_SONNET }),
   openai: Object.freeze({ provider: MODELS.PROVIDER.OPENAI, model: MODELS.OPENAI_SMS_DRAFT }),
+  // MEASUREMENT-ONLY leg (owner ask 07-30: "check gemini, rank them"): drafts
+  // the same frozen items so Gemini ranks against the two live providers with
+  // zero live exposure — exam drafts are structurally unsendable. Excluded
+  // from the graduation gate and the nightly auto-sweep below: an
+  // experimental leg must neither block autonomy nor auto-spend.
+  gemini: Object.freeze({ provider: MODELS.PROVIDER.GEMINI, model: MODELS.GEMINI_TEXT_BEST }),
 });
 const EXAM_LEGS = Object.freeze(Object.keys(EXAM_LEG_ROUTES));
+// The legs autonomy decisions ride on — the two LIVE SMS drafting providers.
+// evaluateExamGate requires these (and only these); runAutoExamSweep
+// auto-baselines these (and only these). The gemini leg runs manually.
+const LIVE_EXAM_LEGS = Object.freeze(['anthropic', 'openai']);
 
 /* ── Freezer ──────────────────────────────────────────────────────────── */
 
@@ -725,7 +735,7 @@ async function evaluateExamGate({ dbi = db } = {}) {
   // (graduation ← auto-send ← drafter ← this module).
   const maxUnsafeRate = require('./sms-graduation').THRESHOLDS.shadowToSuggest.maxUnsafeRate;
   const blockers = [];
-  for (const leg of EXAM_LEGS) {
+  for (const leg of LIVE_EXAM_LEGS) {
     const run = summary.legs[leg];
     if (!run) {
       blockers.push(`Sealed exam: no completed ${leg} run for ${summary.currentVersion}.`);
@@ -831,7 +841,7 @@ async function runAutoExamSweep({ dbi = db, examRunner = runSealedExam, summaryF
   const [{ count: activeCount }] = await dbi('sms_sealed_eval_items').where('active', true).count('* as count');
   const active = Number(activeCount) || 0;
 
-  for (const leg of EXAM_LEGS) {
+  for (const leg of LIVE_EXAM_LEGS) {
     if (legs[leg]) continue; // settled by stranded recovery above
     // A completed run for this (leg, version) always wins — a NEWER failed
     // manual rerun must not trick the sweep into re-spending on a version
@@ -903,7 +913,7 @@ async function runAutoExamSweep({ dbi = db, examRunner = runSealedExam, summaryF
   if (ran > 0) {
     try {
       const summary = await summaryFn({ dbi });
-      const lines = EXAM_LEGS.map((leg) => {
+      const lines = LIVE_EXAM_LEGS.map((leg) => {
         const run = summary.legs[leg];
         if (!run) return `${leg}: no completed run yet`;
         const pct = run.unsafeRate != null ? ` (${Math.round(run.unsafeRate * 100)}%)` : '';
@@ -951,6 +961,7 @@ module.exports = {
   evaluateExamGate,
   runAutoExamSweep,
   EXAM_LEGS,
+  LIVE_EXAM_LEGS,
   EXAM_LEG_ROUTES,
   SEALED_EVAL_TARGET,
   _test: {

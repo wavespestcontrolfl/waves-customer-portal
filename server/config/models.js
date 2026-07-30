@@ -112,6 +112,13 @@ const OPENAI_BEST          = OPENAI_BALANCED;
 const OPENAI_REPORT_WRITER = process.env.MODEL_OPENAI_REPORT_WRITER || 'gpt-5.6-sol';
 const GEMINI_VISION_BEST   = process.env.MODEL_GEMINI_VISION        || 'gemini-3.5-flash';
 
+// Gemini TEXT drafting — MEASUREMENT-ONLY today: the sealed-eval exam's
+// experimental third leg drafts with it so Gemini can be ranked against the
+// two live SMS providers on identical frozen items. No live text lane routes
+// to it (generated text stays on the two-provider Claude/OpenAI policies);
+// promoting it would be a deliberate registry change, not a fallback edit.
+const GEMINI_TEXT_BEST = process.env.MODEL_GEMINI_TEXT || 'gemini-3.5-flash';
+
 // Gemini vision FALLBACK — the prior GA model the customer vision services
 // (pest-identification.js, lawn-assessment.js) retry when GEMINI_VISION_BEST
 // misses, so a live-model entitlement/availability issue never costs the
@@ -240,6 +247,7 @@ module.exports = {
   EMBEDDING_DIMS,
   SMS_SONNET,
   GEMINI_VISION_BEST,
+  GEMINI_TEXT_BEST,
   GEMINI_VISION_FALLBACK,
   GEMINI_IMAGE_BEST,
   GEMINI_IMAGE_STABLE,

@@ -178,8 +178,20 @@ describe('createExamRun — guards and stamps', () => {
 
   test('unknown leg is rejected before any DB work', async () => {
     const dbi = makeRunnerDb({});
-    await expect(sealedEval.createExamRun({ providerLeg: 'gemini', dbi }))
+    await expect(sealedEval.createExamRun({ providerLeg: 'mistral', dbi }))
       .rejects.toThrow(/unknown sealed-eval provider leg/);
+  });
+
+  test('gemini is a valid MEASUREMENT leg, but autonomy rides only on the live legs', async () => {
+    // the exam accepts it…
+    expect(sealedEval.EXAM_LEGS).toContain('gemini');
+    const dbi = makeRunnerDb({ runs: [], items: [item('i1')] });
+    const run = await sealedEval.createExamRun({ providerLeg: 'gemini', dbi });
+    expect(run.provider_leg).toBe('gemini');
+    // …while the graduation gate and the nightly auto-sweep are pinned to
+    // the two LIVE SMS providers — an experimental leg must neither block
+    // autonomy nor auto-spend.
+    expect(sealedEval.LIVE_EXAM_LEGS).toEqual(['anthropic', 'openai']);
   });
 
   test('stamps the RUNNING drafter version and defaults the baseline to the latest complete different-version same-leg run', async () => {
