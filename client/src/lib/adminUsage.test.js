@@ -316,6 +316,9 @@ describe('trackAdminPageView', () => {
       ['/admin/ppc', 'ppc-dashboard'],
       ['/admin/pipeline', 'leads'],
       ['/admin/customers', 'directory'],
+      ['/admin/equipment', 'assets'],
+      ['/admin/dispatch', 'board'],
+      ['/admin/inventory', 'products'],
       ['/admin/knowledge', 'articles'],
       ['/admin/service-library', 'catalog'],
     ]) {

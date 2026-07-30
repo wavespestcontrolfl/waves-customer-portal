@@ -968,9 +968,18 @@ export default function CustomersPageV2() {
   // the authoritative TAB-LESS beacon ('') so the page view still counts
   // while the raw ?view=garbage beacon is superseded instead of flushing
   // a leaf nobody saw (Codex #2961 r17/r18).
+  // searchParams is a dep so a query-only hop between two INVALID views
+  // (?view=garbage → ?view=typo) re-asserts the tab-less beacon even
+  // though the rendered leaf ('') did not change — without it, the raw
+  // 'typo' beacon outlives the suppression marker and flushes
+  // (Codex #2961 r21). location.pathname, not a hardcoded string: this
+  // component also renders at /admin/customers/new (App.jsx), and
+  // suppression requires the authoritative beacon to match the layout
+  // beacon's page key AND path (Codex #2961 r22).
   useRenderedTabBeacon(
-    "/admin/customers",
+    location.pathname,
     CUSTOMER_VIEW_KEYS.has(view) ? view : "",
+    [searchParams],
   );
   const [search, setSearch] = useState("");
   const [filterStage, setFilterStage] = useState("all");

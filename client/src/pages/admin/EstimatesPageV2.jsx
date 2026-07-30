@@ -4080,7 +4080,13 @@ export default function EstimatesPageV2() {
   // this state (prefill/estimateId deep links resolve to a tab and the
   // one-shot params — including ?tab= itself — are then stripped), so the
   // query can't be trusted as the rendered leaf here (Codex #2961 r17).
-  useRenderedTabBeacon("/admin/pipeline", activeTab);
+  // searchParams is a dep so a same-route handoff that does NOT move the
+  // tab (?estimateId= while already on Estimates, a new prefill while on
+  // Create Estimate) re-asserts the rendered leaf — the watcher below
+  // strips those params, and without the re-assertion the layout's
+  // search-change beacons persist a tabless row once the suppression
+  // marker expires (Codex #2961 r22).
+  useRenderedTabBeacon("/admin/pipeline", activeTab, [searchParams]);
 
   // The deep-link target for the Estimates list. Captured into state (and
   // stripped from the URL by the effect below) so it's consumed exactly once —

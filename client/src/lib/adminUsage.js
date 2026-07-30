@@ -80,6 +80,7 @@ const SELF_REPORTING_PAGES = new Set([
   'knowledge',
   'equipment',
   'dispatch',
+  'inventory',
   'service-library',
 ]);
 const SELF_REPORT_SETTLE_MS = 5000;
