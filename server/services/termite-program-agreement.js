@@ -83,10 +83,6 @@ async function adminBellExists(titleLike, metaKey, metaValue, conn = db) {
   }
 }
 
-async function manualPrepBellAlreadySent(estimateId, conn = db) {
-  return adminBellExists('Termite agreement needs manual prep%', 'estimateId', estimateId, conn);
-}
-
 function autosendGateOn() {
   return ['1', 'true', 'on'].includes(String(process.env.GATE_TERMITE_PROGRAM_AGREEMENT_AUTOSEND || '').toLowerCase());
 }
@@ -590,6 +586,40 @@ async function ringAdminBell(NotificationService, args, context) {
   return !!bell;
 }
 
+// Exactly-once bells under concurrency: the history lookup and the insert
+// run in ONE transaction holding the per-customer advisory lock, so an
+// accept-time caller overlapping the reconciliation cron cannot both
+// observe "no bell" and both insert. Each attempt is a fresh transaction
+// (an insert failure aborts the tx, so an in-tx retry would be dead on
+// arrival); two attempts preserve ringAdminBell's ring-twice posture.
+// Returns true when a bell exists or landed, false otherwise (lookup
+// error, insert failure) — callers treat false as retry-later.
+async function ringAdminBellDeduped(NotificationService, { lockKey, titleLike, metaKey, metaValue }, args, context) {
+  const attempt = async () => {
+    try {
+      return await db.transaction(async (trx) => {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [lockKey]);
+        const exists = await adminBellExists(titleLike, metaKey, metaValue, trx);
+        if (exists === true) return true;
+        if (exists === 'error') return 'error';
+        const [category, title, body, opts = {}] = args;
+        const bell = await NotificationService.notifyAdmin(category, title, body, { ...opts, connection: trx });
+        return bell ? true : 'insert_failed';
+      });
+    } catch (err) {
+      logger.warn(`[termite-agreement] deduped bell attempt failed (${context}): ${err.message}`);
+      return 'error';
+    }
+  };
+  let outcome = await attempt();
+  if (outcome !== true) outcome = await attempt();
+  if (outcome !== true) {
+    logger.error(`[termite-agreement] admin bell failed twice — ${context}`);
+    return false;
+  }
+  return true;
+}
+
 async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = {}, notifyOnUnresolved = true, billingTerm = null, startDateLabel: startDateLabelOverride = null, signedBlockScope = 'estimate', reissueSourceContractId = null, signedAfter = null }) {
   try {
     if (!estimate || !customerId) return { ok: false, skipped: 'missing_inputs' };
@@ -619,23 +649,21 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
         logger.warn(`[termite-agreement] parked retirement failed for estimate ${estimate.id}: ${err.message}`);
       }
       if (commercialReplacementKept) return { ok: false, skipped: 'commercial', belled: true };
-      let belled = null;
       // Compliance reissues dedupe on the SUPERSEDED CONTRACT, not the
       // acceptance — the original accept-time bell may already be resolved,
       // so a rollout-driven re-park must ring its own handoff once.
-      const commercialBellState = reissueSourceContractId
-        ? await adminBellExists('Termite agreement needs manual prep%', 'reissueContractId', reissueSourceContractId)
-        : await manualPrepBellAlreadySent(estimate.id);
-      if (commercialBellState === true) belled = true;
-      else if (commercialBellState === 'error') belled = false;
-      else {
-        belled = await ringAdminBell(NotificationService, [
-          'estimate',
-          'Termite agreement needs manual prep (commercial)',
-          `${estimate.customer_name || 'Customer'} accepted a commercial termite estimate — commercial and multi-unit structures need a tailored agreement (different statutory retreat windows, tenant considerations), so prepare it manually from the document library.`,
-          { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId, ...(reissueSourceContractId ? { reissueContractId: reissueSourceContractId } : {}) } },
-        ], `manual-prep (commercial) for estimate ${estimate.id}`);
-      }
+      const belled = await ringAdminBellDeduped(NotificationService, {
+        lockKey: `termite-agreement:${customerId}`,
+        titleLike: 'Termite agreement needs manual prep%',
+        ...(reissueSourceContractId
+          ? { metaKey: 'reissueContractId', metaValue: reissueSourceContractId }
+          : { metaKey: 'estimateId', metaValue: estimate.id }),
+      }, [
+        'estimate',
+        'Termite agreement needs manual prep (commercial)',
+        `${estimate.customer_name || 'Customer'} accepted a commercial termite estimate — commercial and multi-unit structures need a tailored agreement (different statutory retreat windows, tenant considerations), so prepare it manually from the document library.`,
+        { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId, ...(reissueSourceContractId ? { reissueContractId: reissueSourceContractId } : {}) } },
+      ], `manual-prep (commercial) for estimate ${estimate.id}`);
       return { ok: false, skipped: 'commercial', belled, retireFailed: commercialRetireFailed };
     }
 
@@ -654,20 +682,18 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
         logger.warn(`[termite-agreement] parked retirement failed for estimate ${estimate.id}: ${err.message}`);
       }
       if (prepayReplacementKept) return { ok: false, skipped: 'annual_prepay', belled: true };
-      let prepayBelled = null;
-      const prepayBellState = reissueSourceContractId
-        ? await adminBellExists('Termite agreement needs manual prep%', 'reissueContractId', reissueSourceContractId)
-        : await manualPrepBellAlreadySent(estimate.id);
-      if (prepayBellState === true) prepayBelled = true;
-      else if (prepayBellState === 'error') prepayBelled = false;
-      else {
-        prepayBelled = await ringAdminBell(NotificationService, [
-          'estimate',
-          'Termite agreement needs manual prep (annual prepay)',
-          `${estimate.customer_name || 'Customer'} accepted a termite estimate on annual prepay — the standard program agreement states per-application billing, so prepare the agreement manually with the prepay terms.`,
-          { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId, ...(reissueSourceContractId ? { reissueContractId: reissueSourceContractId } : {}) } },
-        ], `manual-prep (annual prepay) for estimate ${estimate.id}`);
-      }
+      const prepayBelled = await ringAdminBellDeduped(NotificationService, {
+        lockKey: `termite-agreement:${customerId}`,
+        titleLike: 'Termite agreement needs manual prep%',
+        ...(reissueSourceContractId
+          ? { metaKey: 'reissueContractId', metaValue: reissueSourceContractId }
+          : { metaKey: 'estimateId', metaValue: estimate.id }),
+      }, [
+        'estimate',
+        'Termite agreement needs manual prep (annual prepay)',
+        `${estimate.customer_name || 'Customer'} accepted a termite estimate on annual prepay — the standard program agreement states per-application billing, so prepare the agreement manually with the prepay terms.`,
+        { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId, ...(reissueSourceContractId ? { reissueContractId: reissueSourceContractId } : {}) } },
+      ], `manual-prep (annual prepay) for estimate ${estimate.id}`);
       return { ok: false, skipped: 'annual_prepay', belled: prepayBelled, retireFailed: prepayRetireFailed };
     }
 
@@ -693,20 +719,18 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
         logger.warn(`[termite-agreement] parked retirement failed for estimate ${estimate.id}: ${err.message}`);
       }
       if (figuresReplacementKept) return { ok: false, skipped: 'figures_unresolved', belled: true };
-      let figuresBelled = null;
-      const figuresBellState = reissueSourceContractId
-        ? await adminBellExists('Termite agreement needs manual prep%', 'reissueContractId', reissueSourceContractId)
-        : await manualPrepBellAlreadySent(estimate.id);
-      if (figuresBellState === true) figuresBelled = true;
-      else if (figuresBellState === 'error') figuresBelled = false;
-      else {
-        figuresBelled = await ringAdminBell(NotificationService, [
-          'estimate',
-          'Termite agreement needs manual prep',
-          `${estimate.customer_name || 'Customer'} accepted a termite estimate, but the program agreement couldn't be prefilled from the estimate figures. Prepare and send it from the document library.`,
-          { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId, ...(reissueSourceContractId ? { reissueContractId: reissueSourceContractId } : {}) } },
-        ], `manual-prep (figures unresolved) for estimate ${estimate.id}`);
-      }
+      const figuresBelled = await ringAdminBellDeduped(NotificationService, {
+        lockKey: `termite-agreement:${customerId}`,
+        titleLike: 'Termite agreement needs manual prep%',
+        ...(reissueSourceContractId
+          ? { metaKey: 'reissueContractId', metaValue: reissueSourceContractId }
+          : { metaKey: 'estimateId', metaValue: estimate.id }),
+      }, [
+        'estimate',
+        'Termite agreement needs manual prep',
+        `${estimate.customer_name || 'Customer'} accepted a termite estimate, but the program agreement couldn't be prefilled from the estimate figures. Prepare and send it from the document library.`,
+        { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId, ...(reissueSourceContractId ? { reissueContractId: reissueSourceContractId } : {}) } },
+      ], `manual-prep (figures unresolved) for estimate ${estimate.id}`);
       return { ok: false, skipped: 'figures_unresolved', belled: figuresBelled, retireFailed: figuresRetireFailed };
     }
 
@@ -1139,14 +1163,17 @@ async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
       // retry just re-rings the bell). A bell that already landed (e.g. the
       // durable marker write failed after a successful insert) counts as
       // landed — never duplicated.
-      const reissueBellState = await adminBellExists('Re-issue termite agreement%', 'contractId', row.id);
-      const belled = reissueBellState === true
-        || (reissueBellState === false && await ringAdminBell(NotificationService, [
-          'estimate',
-          'Re-issue termite agreement (wording updated)',
-          `The open termite program agreement for ${row.recipient_name || 'a customer'} was cancelled because its wording was superseded by the v2 compliance templates. It was issued manually, so re-issue it from the document library on the updated template.`,
-          { icon: '\u{1F4DD}', link: `/admin/customers/${row.customer_id}`, metadata: { contractId: row.id, customerId: row.customer_id } },
-        ], `manual stale-version re-issue for contract ${row.id}`));
+      const belled = await ringAdminBellDeduped(NotificationService, {
+        lockKey: `termite-agreement:${row.customer_id}`,
+        titleLike: 'Re-issue termite agreement%',
+        metaKey: 'contractId',
+        metaValue: row.id,
+      }, [
+        'estimate',
+        'Re-issue termite agreement (wording updated)',
+        `The open termite program agreement for ${row.recipient_name || 'a customer'} was cancelled because its wording was superseded by the v2 compliance templates. It was issued manually, so re-issue it from the document library on the updated template.`,
+        { icon: '\u{1F4DD}', link: `/admin/customers/${row.customer_id}`, metadata: { contractId: row.id, customerId: row.customer_id } },
+      ], `manual stale-version re-issue for contract ${row.id}`);
       if (belled) await markSupersededHandled(row, 'manual_reissue_belled');
       else results.failed += 1;
       if (belled) results.skipped += 1;
@@ -1236,14 +1263,17 @@ async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
     // untrusted id pointing at another customer's estimate must never feed
     // figures into (or autosend) an agreement. Park it with the operator.
     if (!estimate.customer_id || String(estimate.customer_id) !== String(row.customer_id)) {
-      const mismatchBellState = await adminBellExists('Re-issue termite agreement%', 'contractId', row.id);
-      const mismatchBelled = mismatchBellState === true
-        || (mismatchBellState === false && await ringAdminBell(NotificationService, [
-          'estimate',
-          'Re-issue termite agreement (wording updated)',
-          `The cancelled termite program agreement for ${row.recipient_name || 'a customer'} referenced an estimate that does not belong to that customer, so it could not be replaced automatically. Re-issue it from the document library.`,
-          { icon: '\u{1F4DD}', link: `/admin/customers/${row.customer_id}`, metadata: { contractId: row.id, customerId: row.customer_id } },
-        ], `estimate-customer mismatch for contract ${row.id}`));
+      const mismatchBelled = await ringAdminBellDeduped(NotificationService, {
+        lockKey: `termite-agreement:${row.customer_id}`,
+        titleLike: 'Re-issue termite agreement%',
+        metaKey: 'contractId',
+        metaValue: row.id,
+      }, [
+        'estimate',
+        'Re-issue termite agreement (wording updated)',
+        `The cancelled termite program agreement for ${row.recipient_name || 'a customer'} referenced an estimate that does not belong to that customer, so it could not be replaced automatically. Re-issue it from the document library.`,
+        { icon: '\u{1F4DD}', link: `/admin/customers/${row.customer_id}`, metadata: { contractId: row.id, customerId: row.customer_id } },
+      ], `estimate-customer mismatch for contract ${row.id}`);
       if (mismatchBelled) {
         await markSupersededHandled(row, 'estimate_customer_mismatch');
         results.skipped += 1;
