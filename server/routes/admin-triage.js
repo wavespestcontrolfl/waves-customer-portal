@@ -161,7 +161,7 @@ async function transitionCore({ id, nextStatus, note, assignedTo }) {
       if (EMAIL_REVIEW_REASON_CODES.includes(item.reason_code)) {
         const call = await db('call_log').where({ id: item.call_log_id }).first('customer_id');
         if (call?.customer_id) {
-          await resumeHeldFirstTouch({ customerId: call.customer_id, source: 'triage_resolve' });
+          await resumeHeldFirstTouch({ customerId: call.customer_id, callLogId: item.call_log_id, source: 'triage_resolve' });
         }
       }
     } catch (resumeErr) {
@@ -305,7 +305,7 @@ router.post('/:id/verdict', async (req, res) => {
         {
           const call = await db('call_log').where({ id: item.call_log_id }).first('customer_id');
           if (call?.customer_id) {
-            await resumeHeldFirstTouch({ customerId: call.customer_id, source: 'triage_verdict_accept' });
+            await resumeHeldFirstTouch({ customerId: call.customer_id, callLogId: item.call_log_id, source: 'triage_verdict_accept' });
           }
         }
       } catch (resumeErr) {

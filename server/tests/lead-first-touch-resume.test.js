@@ -104,10 +104,12 @@ describe('resumeHeldFirstTouch', () => {
     expect(mockNewsletter).not.toHaveBeenCalled();
   });
 
-  test('failures degrade — an enroll error never throws into the caller', async () => {
+  test('an enroll error never throws — it leaves a retryable release instead', async () => {
     mockEnroll.mockRejectedValueOnce(new Error('automation db down'));
     const res = await resumeHeldFirstTouch({ customerId: 'cust-1' });
-    expect(res).toMatchObject({ resumed: false, skipped: 'error' });
+    // The card is already resolved by resume time, so the failure persists a
+    // fresh advisory card (retryable release) rather than vanishing.
+    expect(res).toMatchObject({ resumed: false, skipped: 'enroll_failed' });
   });
 
   test('no email anywhere → skip without side effects', async () => {

@@ -1157,9 +1157,11 @@ function isNonLeadCallContent(extracted = {}) {
 // the drip still resumes via its unconditional dedup-safe path.
 async function markFirstTouchHeld(callLogId, patch) {
   try {
+    // ALL statuses deliberately (Codex #3084 r5): a card the admin resolved
+    // mid-run must still record what was held, or the end-of-run
+    // reconciliation resumes the drip but silently drops the newsletter.
     const cards = await db('triage_items')
       .where({ call_log_id: callLogId })
-      .whereIn('status', ['open', 'in_progress'])
       .whereIn('reason_code', ['email_unverified', 'email_invalid'])
       .select('id', 'payload');
     for (const card of cards) {

@@ -371,6 +371,27 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
     // Counts only — never the email values (PII stays out of logs).
     logger.info(`[email-fanout] customer ${customerId}: synced ${counts.leads} lead(s), ${counts.estimates} estimate(s), ${counts.newsletter} newsletter (${counts.newsletterDeliveries} delivery token(s) rotated), ${counts.automations} enrollment(s), ${counts.templateRuns} template run(s), ${counts.promoters} promoter(s), ${counts.billingPrefs} billing pref(s), ${counts.contracts} contract(s), ${counts.bookingIntents} booking intent(s); resolved ${counts.reviewCards} email review card(s)`);
   }
+  // One DOI, never two (Codex #3084 r5): if the customer publicly
+  // subscribed while the call's newsletter was held, the moved pending row's
+  // re-sent confirmation IS the resume — drop the held payload and consume
+  // its markers so a later cycle cannot re-fire it.
+  if (pendingConfirmation && heldNewsletterResume) {
+    try {
+      if (Array.isArray(heldNewsletterResume.cardIds) && heldNewsletterResume.cardIds.length) {
+        const heldCards = await conn('triage_items').whereIn('id', heldNewsletterResume.cardIds).select('id', 'payload');
+        for (const card of heldCards) {
+          let payload = {};
+          try { payload = typeof card.payload === 'string' ? JSON.parse(card.payload || '{}') : (card.payload || {}); } catch { payload = {}; }
+          await conn('triage_items')
+            .where({ id: card.id })
+            .update({ payload: JSON.stringify({ ...payload, held_newsletter: false, held_newsletter_resumed_at: now.toISOString() }), updated_at: now });
+        }
+      }
+    } catch (dedupeErr) {
+      logger.warn(`[email-fanout] held-newsletter dedupe failed for customer ${customerId}: ${dedupeErr.message}`);
+    }
+    heldNewsletterResume = null;
+  }
   const extras = {};
   if (pendingConfirmation) extras.pendingConfirmation = pendingConfirmation;
   if (heldNewsletterResume) extras.heldNewsletterResume = heldNewsletterResume;

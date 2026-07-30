@@ -82,7 +82,7 @@ async function consumeHeldNewsletterMarkers(cards, dbh) {
   }
 }
 
-async function resumeHeldFirstTouch({ customerId, email = null, dbh = db, source = 'email_review_resolved', deferNewsletter = false }) {
+async function resumeHeldFirstTouch({ customerId, email = null, callLogId = null, dbh = db, source = 'email_review_resolved', deferNewsletter = false }) {
   const result = { resumed: false, enrolled: false, newsletter: null, newsletterResume: null, skipped: null };
   try {
     if (!customerId) return { ...result, skipped: 'no_customer' };
@@ -90,7 +90,21 @@ async function resumeHeldFirstTouch({ customerId, email = null, dbh = db, source
       .where({ id: customerId })
       .first('id', 'first_name', 'last_name', 'email');
     if (!customer) return { ...result, skipped: 'customer_not_found' };
-    const resumeEmail = String(email || customer.email || '').trim().toLowerCase();
+    // Prefer the address CONFIRMED on the call (Codex #3084 r5 P1): a
+    // matched existing customer keeps their stored email, but the held
+    // enrollment was for the call's extracted address — resolving the card
+    // confirms THAT one. Explicit email (the fanout's corrected value) wins;
+    // the customer's stored email is the last resort.
+    let callEmail = null;
+    if (!email && callLogId) {
+      try {
+        const callRow = await dbh('call_log')
+          .where({ id: callLogId })
+          .first(dbh.raw("ai_extraction_enriched->'caller'->>'email' AS extracted_email"));
+        callEmail = callRow?.extracted_email || null;
+      } catch { callEmail = null; }
+    }
+    const resumeEmail = String(email || callEmail || customer.email || '').trim().toLowerCase();
     if (!resumeEmail) return { ...result, skipped: 'no_email' };
     if (!RESUME_EMAIL_RE.test(resumeEmail)) return { ...result, skipped: 'invalid_email' };
 
@@ -104,17 +118,27 @@ async function resumeHeldFirstTouch({ customerId, email = null, dbh = db, source
     }
 
     const AutomationRunner = require('./automation-runner');
-    const enroll = await AutomationRunner.enrollCustomer({
-      templateKey: 'new_lead',
-      customer: {
-        email: resumeEmail,
-        first_name: customer.first_name || null,
-        last_name: customer.last_name || null,
-        id: customerId,
-      },
-      dbh,
-    });
-    result.enrolled = !!enroll?.enrolled;
+    try {
+      const enroll = await AutomationRunner.enrollCustomer({
+        templateKey: 'new_lead',
+        customer: {
+          email: resumeEmail,
+          first_name: customer.first_name || null,
+          last_name: customer.last_name || null,
+          id: customerId,
+        },
+        dbh,
+      });
+      result.enrolled = !!enroll?.enrolled;
+    } catch (enrollErr) {
+      // The card is already resolved by the time this runs — without a
+      // persisted retryable release the lead would be permanently outside
+      // the drip (Codex #3084 r5). Re-open an advisory review card so the
+      // office sees the failure and re-resolving retries the release.
+      logger.warn(`[first-touch-resume] enroll failed for customer ${customerId} — leaving a retryable release card: ${enrollErr.message}`);
+      await leaveRetryableReleaseCard({ customerId, callLogId, dbh });
+      return { ...result, skipped: 'enroll_failed' };
+    }
 
     // Newsletter DOI resume — only when the pipeline actually held one for
     // this customer's call (held_newsletter marker). A TRANSACTIONAL caller
@@ -156,6 +180,37 @@ async function resumeHeldFirstTouch({ customerId, email = null, dbh = db, source
   } catch (err) {
     logger.warn(`[first-touch-resume] failed for customer ${customerId}: ${err.message}`);
     return { ...result, skipped: 'error' };
+  }
+}
+
+// Persist a retryable release when the resume itself fails AFTER the review
+// card resolved: a fresh advisory card puts the customer back in the Needs
+// Review inbox, and resolving it re-runs this release path. Best-effort.
+async function leaveRetryableReleaseCard({ customerId, callLogId, dbh }) {
+  try {
+    let targetCall = callLogId;
+    if (!targetCall) {
+      const card = await dbh('triage_items')
+        .whereIn('reason_code', EMAIL_REVIEW_REASON_CODES)
+        .whereIn('call_log_id', dbh('call_log').select('id').where({ customer_id: customerId }))
+        .orderBy('created_at', 'desc')
+        .first('call_log_id');
+      targetCall = card?.call_log_id || null;
+    }
+    if (!targetCall) return;
+    const { buildTriageItem } = require('./call-routing-gates');
+    await dbh('triage_items')
+      .insert(buildTriageItem({
+        callLogId: targetCall,
+        flag: 'email_unverified',
+        extraction: { meta: { call_summary: null } },
+        severity: 'advisory',
+        extraPayload: { hold_reason: 'first_touch_resume_failed' },
+      }))
+      .onConflict(dbh.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+      .ignore();
+  } catch (err) {
+    logger.warn(`[first-touch-resume] retryable release card failed for customer ${customerId}: ${err.message}`);
   }
 }
 
