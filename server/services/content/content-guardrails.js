@@ -1224,6 +1224,11 @@ const ALLOWED_INTERNAL_LINKS = Object.freeze([
   '/pest-library/',
   '/lawn-care/fertilizer-blackout-manatee-county/',
   '/termite-inspection/',
+  // Real page (200, verified 2026-07-29) that was missing here, so a draft
+  // linking it was P0'd as an invented route — the same false positive that
+  // stalled astro #409 on /quote/. Found by live-auditing every route the seed
+  // manifest mandates, not by reading code.
+  '/termite-control/',
   // hub pages the legacy writer prompts already reference
   '/service-areas/',
   '/pest-control-deals/',

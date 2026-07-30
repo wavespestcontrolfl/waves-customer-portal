@@ -2429,3 +2429,109 @@ describe('same-head contradiction re-arm preserves the round count (astro #409)'
     expect(row2.rounds).toBe(1); // reset, then this round
   });
 });
+
+// park_phase replaces prose-matching as the merge-safety boundary (Codex P1 on
+// this change). Whether a P2-only head may merge must not hinge on a park_reason
+// string prefix: rename a reason or add a post-push failure path and a
+// branch-mutating park would silently read as pre-push.
+describe('park_phase is the structured merge-safety boundary', () => {
+  const p2Body = (t) => `**<sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub>  ${t}**\n\nd`;
+  const allP2 = () => makeGh({ reviewComments: [finding({ body: p2Body('a') })], reviews: [codexReview()] });
+  const row = (over) => makeDb({
+    codex_remediation_state: [{ pr_number: 5, rounds: 1, status: 'parked', parked_head_sha: HEAD, ...over }],
+  });
+
+  test('park_phase=post_push blocks even when the reason prose looks pre-push', async () => {
+    const db = row({ park_phase: 'post_push', park_reason: 'totally renamed reason nobody enumerated' });
+    const r = await rem.p2OnlyMergeEligible(5, HEAD, { db, gh: allP2() });
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toMatch(/branch-mutating/);
+  });
+
+  test('park_phase=pre_push opens the bar even when the prose looks post-push', async () => {
+    const db = row({ park_phase: 'pre_push', park_reason: 'portal row sync failed after fix commit abc: misleading' });
+    const r = await rem.p2OnlyMergeEligible(5, HEAD, { db, gh: allP2() });
+    expect(r.eligible).toBe(true);
+  });
+
+  test('an UNKNOWN phase fails closed (treated as branch-mutating)', async () => {
+    const db = row({ park_phase: 'some_future_phase', park_reason: 'fix failed content gates: x' });
+    const r = await rem.p2OnlyMergeEligible(5, HEAD, { db, gh: allP2() });
+    expect(r.eligible).toBe(false);
+    expect(r.reason).toMatch(/branch-mutating/);
+  });
+
+  test('NULL phase (legacy row) falls back to the reason prefix, both ways', async () => {
+    const pre = row({ park_phase: null, park_reason: 'fix failed content gates: guardrails UNKNOWN_INTERNAL_ROUTE' });
+    expect((await rem.p2OnlyMergeEligible(5, HEAD, { db: pre, gh: allP2() })).eligible).toBe(true);
+    const post = row({ park_phase: null, park_reason: `portal row sync failed after fix commit ${HEAD.slice(0, 7)}: boom` });
+    expect((await rem.p2OnlyMergeEligible(5, HEAD, { db: post, gh: allP2() })).eligible).toBe(false);
+  });
+
+  test('isPostPushPark prefers the column over the prose, and fails closed on unknowns', () => {
+    expect(rem.isPostPushPark({ park_phase: 'post_push', park_reason: 'fix failed content gates: x' })).toBe(true);
+    expect(rem.isPostPushPark({ park_phase: 'pre_push', park_reason: 'portal row sync failed after fix commit a: b' })).toBe(false);
+    expect(rem.isPostPushPark({ park_phase: 'nonsense' })).toBe(true);
+    expect(rem.isPostPushPark({ park_phase: null, park_reason: 'post-push PR revalidation failed (x)' })).toBe(true);
+    expect(rem.isPostPushPark({ park_phase: null, park_reason: 'remediation produced no change' })).toBe(false);
+    expect(rem.isPostPushPark('post-push PR revalidation failed (x)')).toBe(true); // legacy string arg
+  });
+});
+
+// Every park call site must stamp a phase, and the phase must match where in the
+// round it fired — otherwise the column silently degrades to the legacy path.
+describe('park() stamps the correct phase at each call site', () => {
+  test('a PRE-push gate failure stamps pre_push', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const db = makeDb();
+    const gh = makeGh();
+    await runRemediationForPr(CTX, {
+      db, gh, callAnthropic: makeCall('FIXED'),
+      validateFixedBlogFile: () => ({ ok: false, reason: 'guardrails UNKNOWN_INTERNAL_ROUTE' }),
+    });
+    const r = db._tables.codex_remediation_state.find((x) => x.pr_number === 5);
+    expect(r.park_phase).toBe('pre_push');
+    expect(gh._calls.putFile).toHaveLength(0);
+  });
+
+  test('a POST-push revalidation failure stamps post_push', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const db = makeDb();
+    const gh = makeGh();
+    gh.getPr = async () => {
+      if (gh._calls.putFile.length) throw new Error('gh 502');
+      return { state: 'open', head: { sha: HEAD, ref: 'content/blog-x' } };
+    };
+    await runRemediationForPr(CTX, { db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
+    const r = db._tables.codex_remediation_state.find((x) => x.pr_number === 5);
+    expect(r.park_phase).toBe('post_push');
+    expect(gh._calls.putFile).toHaveLength(1);
+  });
+
+  test('a POST-push row-sync failure stamps post_push', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const db = makeDb();
+    await runRemediationForPr(
+      { ...CTX, onRemediated: async () => { throw new Error('row sync boom'); } },
+      { db, gh: makeGh(), callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS },
+    );
+    const r = db._tables.codex_remediation_state.find((x) => x.pr_number === 5);
+    expect(r.park_phase).toBe('post_push');
+  });
+
+  test('a re-arm clears the phase with the rest of the park verdict', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const db = makeDb({
+      codex_remediation_state: [{
+        pr_number: 5, rounds: 1, status: 'parked', parked_head_sha: 'oldhead111',
+        park_phase: 'post_push', park_reason: 'portal row sync failed after fix commit old: boom',
+      }],
+    });
+    await runRemediationForPr(CTX, { db, gh: makeGh(), callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS });
+    const r = db._tables.codex_remediation_state.find((x) => x.pr_number === 5);
+    // Head advanced → re-armed and this round pushed; the stale post_push must
+    // not survive to keep the bar shut on a head it no longer judges.
+    expect(r.park_phase ?? null).toBeNull();
+    expect(r.status).toBe('remediating');
+  });
+});

@@ -1525,7 +1525,6 @@
         "Pull UF/IFAS rodent identification guidance (roof rat / Norway rat / house mouse); verify droppings and behavior claims; snapshot at draft."
       ],
       "internal_links": [
-        "/rodent-control/",
         "/pest-control/roof-rats-biology/",
         "/pest-control/get-rid-of-rats-in-bradenton/"
       ],
@@ -1662,8 +1661,7 @@
         "Pull UF/IFAS Featured Creatures profiles for Aedes aegypti, Aedes albopictus, and Culex species; verify markings, biting time, breeding claims; disease claims only as stated by UF/IFAS or FDOH; snapshot at draft."
       ],
       "internal_links": [
-        "/mosquito/professional-mosquito-treatment/",
-        "/pest-control/plants-that-keep-mosquitoes-away/"
+        "/mosquito/professional-mosquito-treatment/"
       ],
       "verify_notes": [
         "Every identification measurement/mark and every interesting-fact item must be verified against the cited UF/IFAS page at draft; if a claim cannot be verified, OMIT it.",

@@ -191,29 +191,53 @@ function findingSeverity(body) {
   return m ? `P${m[1]}` : 'P1';
 }
 
-// Parks that happened AFTER the branch was mutated. These are the only park
-// classes that must keep the P2-only merge bar shut, and the reason is
-// divergence, not fix quality: the fix commit IS on the branch, but the
-// post-commit sync/revalidation didn't finish, so portal state may not match
-// what a merge would ship. A human reconciles those.
+// park() phases, persisted in codex_remediation_state.park_phase. The single
+// question the P2-only merge bar asks about a parked PR: had the round already
+// mutated the branch?
 //
-// Every OTHER park is a PRE-PUSH verdict — remediation looked at the fix and
-// declined to commit it (frontmatter whitelist, no-change round, failed
-// content gates, schema/MDX guards, unresolvable target...). The head is
-// still exactly the content Codex reviewed, untouched, so a P2-only review of
-// it is as mergeable as it was before remediation tried. That is what the
-// owner directive asks for.
+//   POST_PUSH — the fix commit IS on the branch but the post-commit
+//   sync/revalidation didn't finish, so portal state may not match what a merge
+//   would ship. Divergence, not fix quality. A human reconciles; the bar stays
+//   shut.
 //
-// Deliberately an ALLOW-BY-DEFAULT test on a closed set of three, not a
-// whitelist of accepted reasons. The whitelist form is what broke: it listed
-// two pre-push classes by prose prefix, so every pre-push class added later
-// silently starved the bar — first #394–#398 (07-22), then astro #409 (07-27)
-// on "fix failed content gates". New pre-push classes now open the bar by
-// default; only a new branch-mutating park needs to be added here.
+//   PRE_PUSH — remediation looked at the fix and declined to commit it
+//   (frontmatter whitelist, no-change round, failed content gates, schema/MDX
+//   guards, unresolvable target...). The head is still exactly the content Codex
+//   reviewed, untouched, so a P2-only review of it is as mergeable as it was
+//   before remediation tried. That is what the owner directive asks for.
+const PARK_PRE_PUSH = 'pre_push';
+const PARK_POST_PUSH = 'post_push';
+
+// LEGACY ROWS ONLY. park_phase (a persisted column, written at every park call
+// site) is the real signal; this regex is the fallback for rows parked before
+// that column existed, which carry park_phase = NULL.
+//
+// Prose must not BE the safety boundary — renaming a reason string or adding a
+// post-push failure path would silently reclassify a branch-mutating park as
+// pre-push and allow a merge against unsynchronized portal state. That is the
+// mirror image of the bug that starved this bar twice (#394–#398 on 07-22,
+// astro #409 on 07-27), where an accepted-reasons whitelist made new pre-push
+// classes unmergeable. Structured phase for new rows, allow-by-default on the
+// closed set of three for old ones.
 const POST_PUSH_PARK_RE = /^(?:pr head moved past the remediation push|post-push PR revalidation failed|portal row sync failed after fix commit)/;
 
-function isPostPushPark(parkReason) {
-  return POST_PUSH_PARK_RE.test(String(parkReason || ''));
+/**
+ * Did this park happen AFTER the branch was mutated (so a merge could ship
+ * content the portal never synced)?
+ *
+ * Reads the structured park_phase and falls back to the reason prefix only when
+ * it is absent. Fails CLOSED on an unrecognized phase value: an unknown phase
+ * is treated as branch-mutating, so a future phase name can never accidentally
+ * open the merge bar.
+ */
+function isPostPushPark(state) {
+  // Back-compat: earlier callers (and tests) passed the reason string directly.
+  const row = typeof state === 'string' || state == null ? { park_reason: state } : state;
+  const phase = String(row.park_phase || '').trim().toLowerCase();
+  if (phase === PARK_POST_PUSH) return true;
+  if (phase === PARK_PRE_PUSH) return false;
+  if (phase) return true; // unknown phase → fail closed
+  return POST_PUSH_PARK_RE.test(String(row.park_reason || ''));
 }
 
 /**
@@ -241,7 +265,7 @@ async function p2OnlyMergeEligible(prNumber, headSha, deps = {}) {
   // state may not match what a merge would ship, and no amount of "remediation
   // had its shot" makes that divergence safe to merge. Checked FIRST so it
   // can't be short-circuited by the improved/declined tests below.
-  if (parkedOnThisHead && isPostPushPark(state.park_reason)) {
+  if (parkedOnThisHead && isPostPushPark(state)) {
     return { eligible: false, reason: `parked after a branch-mutating round (held for a human): ${String(state.park_reason || '').slice(0, 160)}` };
   }
 
@@ -1037,15 +1061,17 @@ function reviewRequestedForHead(issueComments = [], headSha = null) {
   });
 }
 
-async function park(db, prNumber, reason, onPark, headSha = null) {
-  // Persist the reason and the head the verdict applied to — the reason used
-  // to live only in logs (short retention: three parked autonomous PRs were
-  // undiagnosable after the fact), and the head is what lets a later push
-  // re-arm the loop (a park is a verdict on a specific head, not on the PR).
+async function park(db, prNumber, reason, onPark, headSha = null, phase = PARK_PRE_PUSH) {
+  // Persist the reason, the head the verdict applied to, and the round PHASE —
+  // the reason used to live only in logs (short retention: three parked
+  // autonomous PRs were undiagnosable after the fact), the head is what lets a
+  // later push re-arm the loop (a park is a verdict on a specific head, not on
+  // the PR), and the phase is what the merge bar reads.
   const wrote = await saveState(db, prNumber, {
     status: 'parked',
     park_reason: String(reason || '').slice(0, 1000),
     parked_head_sha: headSha ? String(headSha).trim().toLowerCase() : null,
+    park_phase: phase === PARK_POST_PUSH ? PARK_POST_PUSH : PARK_PRE_PUSH,
   });
   if (!wrote) {
     // The PR merged/closed while this round ran — the row is terminal and a
@@ -1090,7 +1116,10 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
     // here because this is the one sanctioned closed→live transition).
     await db('codex_remediation_state')
       .where({ pr_number: prNumber, status: 'closed' })
-      .update({ status: 'active', rounds: 0, park_reason: null, parked_head_sha: null, updated_at: new Date() });
+      .update({
+        status: 'active', rounds: 0, park_reason: null, parked_head_sha: null,
+        park_phase: null, updated_at: new Date(),
+      });
     state.status = 'active';
     state.rounds = 0;
     logger.info(`[codex-remediation] re-armed closed-tombstoned PR #${prNumber}: PR observed open again (reopened)`);
@@ -1173,7 +1202,13 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
     // That combination is exactly how astro #409 spent two rounds and still
     // reported none. Keep the count on a same-head re-arm.
     const rearmRounds = staleMovedPastPark ? (state.rounds || 0) : 0;
-    await saveState(db, prNumber, { status: 'active', rounds: rearmRounds, park_reason: null, parked_head_sha: null });
+    await saveState(db, prNumber, {
+      status: 'active', rounds: rearmRounds, park_reason: null, parked_head_sha: null,
+      // Clear the phase with the rest of the park verdict — a stale 'post_push'
+      // left behind would keep the merge bar shut for a head this row no longer
+      // has a verdict on.
+      park_phase: null,
+    });
     state.status = 'active';
     state.rounds = rearmRounds;
     logger.info(staleMovedPastPark
@@ -1406,7 +1441,7 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
         // pushed head, so the parked row re-arms on the very next blocked
         // tick (branch head ≠ parked head) and remediation re-evaluates the
         // newer content with fresh rounds instead of going silent.
-        return park(db, prNumber, `pr head moved past the remediation push (${shortSha(newHead)} → ${shortSha(refHead || fresh.head.sha)}); sync withheld`, onPark, newHead);
+        return park(db, prNumber, `pr head moved past the remediation push (${shortSha(newHead)} → ${shortSha(refHead || fresh.head.sha)}); sync withheld`, onPark, newHead, PARK_POST_PUSH);
       }
       // The ref confirms our push IS the branch head — but the snapshot that
       // misreported the head may misreport PR state too (a close landing
@@ -1428,7 +1463,7 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
       // contradiction check (the ref will again confirm our push is the tip).
       if (!recheck.head?.sha
         || String(recheck.head.sha).trim().toLowerCase() !== String(newHead).trim().toLowerCase()) {
-        return park(db, prNumber, `pr head moved past the remediation push (${shortSha(newHead)} → ${shortSha(recheck.head?.sha)}); sync withheld`, onPark, newHead);
+        return park(db, prNumber, `pr head moved past the remediation push (${shortSha(newHead)} → ${shortSha(recheck.head?.sha)}); sync withheld`, onPark, newHead, PARK_POST_PUSH);
       }
       // Open AND at our head on the re-read → proceed with the round.
     }
@@ -1440,7 +1475,7 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
     // it cannot re-run the sync — so park instead: sync withheld, the lane's
     // onPark disarms/annotates, and a human (or a re-arm on a new head)
     // reconciles. Stamped with newHead so our own push can't self-re-arm.
-    return park(db, prNumber, `post-push PR revalidation failed (fix commit ${shortSha(newHead)} pushed, sync withheld): ${e.message}`, onPark, newHead || headSha);
+    return park(db, prNumber, `post-push PR revalidation failed (fix commit ${shortSha(newHead)} pushed, sync withheld): ${e.message}`, onPark, newHead || headSha, PARK_POST_PUSH);
   }
 
   // Lane-specific post-commit sync (scheduler lane: mirror the fixed body into
@@ -1457,7 +1492,7 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
       // is already on the branch, so a headSha stamp would make the re-arm
       // logic read our own push as "head advanced" next tick and un-park the
       // exact divergence this park exists to hold for a human.
-      return park(db, prNumber, `portal row sync failed after fix commit ${shortSha(newHead)}: ${e.message}`, onPark, newHead || headSha);
+      return park(db, prNumber, `portal row sync failed after fix commit ${shortSha(newHead)}: ${e.message}`, onPark, newHead || headSha, PARK_POST_PUSH);
     }
   }
 
