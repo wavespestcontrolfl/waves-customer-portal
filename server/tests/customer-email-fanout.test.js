@@ -62,7 +62,7 @@ describe('propagateCustomerEmailChange', () => {
       triage_items: { rows: [{ id: 'ti-1', call_log_id: 'call-1' }], countQueue: [{ n: 0 }] },
     });
     const counts = await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
-    expect(counts).toEqual({ leads: 1, estimates: 2, newsletter: 1, automations: 1, templateRuns: 1, promoters: 1, billingPrefs: 1, contracts: 1, bookingIntents: 1, reviewCards: 1 });
+    expect(counts).toEqual({ leads: 1, estimates: 2, newsletter: 1, newsletterDeliveries: 1, automations: 1, templateRuns: 1, promoters: 1, billingPrefs: 1, contracts: 1, bookingIntents: 1, reviewCards: 1 });
 
     expect(conn.__updates('leads')[0].arg.email).toBe('charleswrobb@gmail.com');
     expect(conn.__updates('estimates')[0].arg.customer_email).toBe('charleswrobb@gmail.com');
@@ -111,7 +111,7 @@ describe('propagateCustomerEmailChange', () => {
       before: { id: 'cust-1', email: 'Charleswrobb@Gmail.com' },
       after: AFTER,
     }, conn);
-    expect(counts).toEqual({ leads: 0, estimates: 0, newsletter: 0, automations: 0, templateRuns: 0, promoters: 0, billingPrefs: 0, contracts: 0, bookingIntents: 0, reviewCards: 0 });
+    expect(counts).toEqual({ leads: 0, estimates: 0, newsletter: 0, newsletterDeliveries: 0, automations: 0, templateRuns: 0, promoters: 0, billingPrefs: 0, contracts: 0, bookingIntents: 0, reviewCards: 0 });
     expect(conn.__calls).toHaveLength(0);
   });
 
@@ -121,7 +121,7 @@ describe('propagateCustomerEmailChange', () => {
       before: BEFORE,
       after: { id: 'cust-1', email: null },
     }, conn);
-    expect(counts).toEqual({ leads: 0, estimates: 0, newsletter: 0, automations: 0, templateRuns: 0, promoters: 0, billingPrefs: 0, contracts: 0, bookingIntents: 0, reviewCards: 0 });
+    expect(counts).toEqual({ leads: 0, estimates: 0, newsletter: 0, newsletterDeliveries: 0, automations: 0, templateRuns: 0, promoters: 0, billingPrefs: 0, contracts: 0, bookingIntents: 0, reviewCards: 0 });
     expect(conn.__calls).toHaveLength(0);
   });
 
@@ -139,6 +139,16 @@ describe('propagateCustomerEmailChange', () => {
     expect(conn.__calls.some((c) => c.table === 'newsletter_subscribers' && c.op === 'del')).toBe(true);
     // A row linked to ANOTHER customer is never re-linked.
     expect(conn.__updates('newsletter_subscribers')).toHaveLength(0);
+    // Delivered engagement tokens rotate BEFORE the del() — the delete sets
+    // subscriber_id NULL, after which the rows would be unreachable by id.
+    const rotation = conn.__updates('newsletter_send_deliveries')[0];
+    expect(rotation.arg.engagement_token.__raw).toContain('gen_random_uuid()');
+    const rotationIdx = conn.__calls.findIndex((c) => c.table === 'newsletter_send_deliveries' && c.op === 'update');
+    const delIdx = conn.__calls.findIndex((c) => c.table === 'newsletter_subscribers' && c.op === 'del');
+    expect(rotationIdx).toBeGreaterThan(-1);
+    expect(rotationIdx).toBeLessThan(delIdx);
+    const rotationScope = conn.__calls.find((c) => c.table === 'newsletter_send_deliveries' && c.op === 'where');
+    expect(rotationScope.arg).toEqual({ subscriber_id: 739 });
   });
 
   test('newsletter: an UNLINKED row on the corrected spelling is adopted before the misspelled row is deleted', async () => {
@@ -214,6 +224,9 @@ describe('propagateCustomerEmailChange', () => {
     const moved = conn.__updates('newsletter_subscribers')[0].arg;
     expect(moved.unsubscribe_token).toMatch(/^[0-9a-f-]{36}$/);
     expect(moved.confirmation_token).toMatch(/^[0-9a-f-]{36}$/);
+    // Already-delivered quiz/feedback/event links rotate on the move too.
+    const rotation = conn.__updates('newsletter_send_deliveries')[0];
+    expect(rotation.arg.engagement_token.__raw).toContain('gen_random_uuid()');
   });
 
   test('an ACTIVE subscriber move carries no pendingConfirmation', async () => {
@@ -261,7 +274,7 @@ describe('propagateCustomerEmailChange', () => {
       before: BEFORE,
       after: { id: 'cust-1', email: 'foo@bar' },
     }, conn);
-    expect(counts).toEqual({ leads: 0, estimates: 0, newsletter: 0, automations: 0, templateRuns: 0, promoters: 0, billingPrefs: 0, contracts: 0, bookingIntents: 0, reviewCards: 0 });
+    expect(counts).toEqual({ leads: 0, estimates: 0, newsletter: 0, newsletterDeliveries: 0, automations: 0, templateRuns: 0, promoters: 0, billingPrefs: 0, contracts: 0, bookingIntents: 0, reviewCards: 0 });
     expect(conn.__calls).toHaveLength(0);
   });
 
