@@ -415,6 +415,7 @@ router.post('/:key/contracts', async (req, res, next) => {
         // reissues from the now-active version.
         const live = await trx('document_templates')
           .where({ id: loaded.template.id })
+          .forUpdate()
           .first('active_version_id', 'status');
         if (!live || live.status !== 'active' || live.active_version_id !== loaded.activeVersion.id) {
           const staleErr = new Error('Document template changed while issuing — reload and try again.');

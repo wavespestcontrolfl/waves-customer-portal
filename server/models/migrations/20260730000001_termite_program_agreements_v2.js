@@ -363,6 +363,12 @@ exports.up = async function up(knex) {
   }
   const MIGRATION_NAME = '20260730000001_termite_program_agreements_v2';
   const seededVersionIds = [];
+  // Template status at rollout time: an admin-paused/archived template
+  // still gets its v1 requests cancelled (the superseded wording must not
+  // stay signable), but the sweep cannot create replacements while the
+  // template is disabled (maybeCreate requires status='active'), so those
+  // rows are handed to the operator explicitly below instead of stranding.
+  const templateStatusByKey = new Map();
   for (const seed of TEMPLATE_V2) {
     // FOR UPDATE: version-number allocation reads MAX(version_number) and
     // inserts — the admin version editor locks this same template row
@@ -373,6 +379,7 @@ exports.up = async function up(knex) {
       .forUpdate()
       .first();
     if (!template) continue;
+    templateStatusByKey.set(seed.template_key, String(template.status || ''));
 
     // Identify OUR version by content, never by version number alone: an
     // admin edit made before this migration runs would occupy version 2
@@ -456,7 +463,7 @@ exports.up = async function up(knex) {
     // into a migration-cancelled source the sweep re-preps (and may
     // autosend) merely because the status stamp lagged the expiry.
     .where((q) => q.whereNull('share_token_expires_at').orWhere('share_token_expires_at', '>', knex.fn.now()))
-    .select('id', 'customer_id', 'status', 'recipient_name', 'document_variables_snapshot');
+    .select('id', 'customer_id', 'status', 'recipient_name', 'document_variables_snapshot', 'document_template_key');
   const now = new Date();
   for (const row of openRows) {
     const priorStatus = row.status;
@@ -495,7 +502,13 @@ exports.up = async function up(knex) {
       try { snapshot = JSON.parse(snapshot); } catch { snapshot = null; }
     }
     const serviceGenerated = !!snapshot?.estimate?.id;
-    if (!serviceGenerated) {
+    const templateStatus = templateStatusByKey.get(row.document_template_key) || '';
+    const templateDisabled = templateStatus !== 'active';
+    // Two explicit-handoff cases: manually issued rows (no estimate
+    // linkage — the sweep can't replace them) and ANY row under a
+    // disabled template (the sweep's maybeCreate requires status='active',
+    // so no replacement can be prepared until the owner re-activates it).
+    if (!serviceGenerated || templateDisabled) {
       const hasNotifications = await knex.schema.hasTable('notifications');
       if (hasNotifications) {
         await knex('notifications').insert({
@@ -503,7 +516,9 @@ exports.up = async function up(knex) {
           recipient_id: null,
           category: 'estimate',
           title: 'Re-issue termite agreement (wording updated)',
-          body: `The open termite program agreement for ${row.recipient_name || 'a customer'} was cancelled because its wording was superseded by the v2 compliance templates. It was issued manually, so re-issue it from the document library on the updated template.`,
+          body: templateDisabled
+            ? `The open termite program agreement for ${row.recipient_name || 'a customer'} was cancelled because its wording was superseded by the v2 compliance templates, but the template is currently ${templateStatus || 'inactive'} so no replacement could be prepared automatically. Re-activate the template and re-issue from the document library.`
+            : `The open termite program agreement for ${row.recipient_name || 'a customer'} was cancelled because its wording was superseded by the v2 compliance templates. It was issued manually, so re-issue it from the document library on the updated template.`,
           icon: '\u{1F4DD}',
           link: `/admin/customers/${row.customer_id}`,
           metadata: JSON.stringify({ contractId: row.id, customerId: row.customer_id, reason: 'superseded_by_v2_migration' }),
