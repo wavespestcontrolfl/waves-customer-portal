@@ -94,6 +94,28 @@ describe('sweepUngeocodedCustomers', () => {
     expect(second).toEqual({ checked: 0, geocoded: 0, unresolved: 0 });
   });
 
+  it('retries transient failures on later sweeps instead of excluding them', async () => {
+    const updates = installDb({
+      listRows: [{ id: 'cust-4' }],
+      customersById: {
+        'cust-4': { id: 'cust-4', latitude: null, longitude: null, address_line1: '4 Sweep Test Ln', city: 'Venice', state: 'FL', zip: '34293' },
+      },
+    });
+    global.fetch = jest.fn(async () => {
+      throw new Error('network down');
+    });
+
+    const first = await sweepUngeocodedCustomers();
+    expect(first).toEqual({ checked: 1, geocoded: 0, unresolved: 1 });
+    expect(updates).toHaveLength(0);
+
+    // Google recovers — the same customer is still eligible and resolves.
+    mockGoogle('OK', { lat: 27.6, lng: -82.5 });
+    const second = await sweepUngeocodedCustomers();
+    expect(second).toEqual({ checked: 1, geocoded: 1, unresolved: 0 });
+    expect(updates).toHaveLength(1);
+  });
+
   it('returns zero counts when no customers are missing coordinates', async () => {
     installDb({ listRows: [], customersById: {} });
     mockGoogle('OK', { lat: 0, lng: 0 });

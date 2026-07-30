@@ -17,14 +17,22 @@ function buildAddress(c) {
 }
 
 /**
- * Geocode a free-form address string. Returns { lat, lng } or null.
+ * Geocode a free-form address string, reporting whether a failure is
+ * permanent. Returns { location: {lat,lng}|null, permanent: boolean } —
+ * `permanent` is true only for answers that will never change without an
+ * address edit (empty address, ZERO_RESULTS); quota / config / network
+ * failures are transient and safe to retry.
  */
-async function geocodeAddress(address) {
-  if (!address) return null;
-  if (memo.has(address)) return memo.get(address);
+async function geocodeAddressWithStatus(address) {
+  if (!address) return { location: null, permanent: true };
+  if (memo.has(address)) {
+    const cached = memo.get(address);
+    // memo only ever stores null for ZERO_RESULTS, so a cached null is permanent.
+    return { location: cached, permanent: cached === null };
+  }
   if (!GOOGLE_KEY) {
     logger.warn('[geocoder] GOOGLE_API_KEY not set');
-    return null;
+    return { location: null, permanent: false };
   }
   try {
     const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}&key=${GOOGLE_KEY}`;
@@ -34,7 +42,7 @@ async function geocodeAddress(address) {
       const { lat, lng } = data.results[0].geometry.location;
       const result = { lat, lng };
       memo.set(address, result);
-      return result;
+      return { location: result, permanent: false };
     }
     logger.warn(`[geocoder] Geocoding failed: ${data.status}`);
     // Only memoize ZERO_RESULTS — Google saying "this address truly
@@ -46,12 +54,21 @@ async function geocodeAddress(address) {
     // address as null in-process until restart.
     if (data.status === 'ZERO_RESULTS') {
       memo.set(address, null);
+      return { location: null, permanent: true };
     }
-    return null;
+    return { location: null, permanent: false };
   } catch (err) {
     logger.error(`[geocoder] Geocoding error: ${err.message}`);
-    return null;
+    return { location: null, permanent: false };
   }
+}
+
+/**
+ * Geocode a free-form address string. Returns { lat, lng } or null.
+ */
+async function geocodeAddress(address) {
+  const { location } = await geocodeAddressWithStatus(address);
+  return location;
 }
 
 /**
@@ -113,16 +130,29 @@ async function sweepUngeocodedCustomers({ limit = 25 } = {}) {
   const results = { checked: rows.length, geocoded: 0, unresolved: 0 };
   for (const row of rows) {
     try {
-      const geo = await ensureCustomerGeocoded(row.id);
-      if (geo) {
+      const c = await db('customers').where({ id: row.id }).first();
+      if (!c) continue;
+      if (c.latitude != null && c.longitude != null) {
+        results.geocoded += 1;
+        continue;
+      }
+      const { location, permanent } = await geocodeAddressWithStatus(buildAddress(c));
+      if (location) {
+        await db('customers').where({ id: row.id }).update({
+          latitude: location.lat,
+          longitude: location.lng,
+          updated_at: new Date(),
+        });
         results.geocoded += 1;
       } else {
         results.unresolved += 1;
-        sweepUnresolvedIds.add(row.id);
+        // Only permanent failures (bad address / ZERO_RESULTS) are excluded
+        // from future sweeps; transient failures (quota, network, config)
+        // stay eligible and retry on the next hourly pass.
+        if (permanent) sweepUnresolvedIds.add(row.id);
       }
     } catch (err) {
       results.unresolved += 1;
-      sweepUnresolvedIds.add(row.id);
       logger.error(`[geocoder] sweep failed for customer ${row.id}: ${err.message}`);
     }
   }
@@ -137,6 +167,7 @@ async function sweepUngeocodedCustomers({ limit = 25 } = {}) {
 
 module.exports = {
   geocodeAddress,
+  geocodeAddressWithStatus,
   ensureCustomerGeocoded,
   buildAddress,
   sweepUngeocodedCustomers,
