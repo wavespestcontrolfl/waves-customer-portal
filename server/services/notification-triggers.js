@@ -149,6 +149,28 @@ const TRIGGER_REGISTRY = {
       link: p.threadId ? `/admin/communications?thread=${p.threadId}` : '/admin/communications',
     }),
   },
+  // Fired by call-recording-processor (GATE_VOICEMAIL_CALLBACK_ALERT) for a
+  // voicemail with concrete service intent that did NOT take the workable
+  // lead path — usually an existing customer asking for service. Without
+  // this, such voicemails end terminal and are only visible by scrolling
+  // the comms inbox.
+  customer_voicemail_callback: {
+    label: 'Voicemail needs callback',
+    category: 'voicemail_callback',
+    priority: 'high',
+    group: 'Communication',
+    build: (p) => {
+      const who = p.name || (p.phone ? maskPhone(p.phone) : 'Unknown caller');
+      const bodyParts = [who];
+      if (p.service) bodyParts.push(`Asked about ${p.service}`);
+      if (p.phone) bodyParts.push(`Callback: ${maskPhone(p.phone)}`);
+      return {
+        title: 'Voicemail callback needed',
+        body: bodyParts.join(' - '),
+        link: p.customerId ? `/admin/communications?thread=${p.customerId}` : '/admin/communications',
+      };
+    },
+  },
   // Fired by estimate-converter when a paid acceptance deposit could not be
   // credited to the first invoice — the money sits on the deposit ledger
   // until someone reconciles it manually.
