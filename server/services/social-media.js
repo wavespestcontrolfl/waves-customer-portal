@@ -780,7 +780,10 @@ Article title: ${safeTitle}
 Article summary: ${safeDesc}`,
   };
 
-  const prompt = prompts[platform] || prompts.facebook;
+  // Owner style block (07-30): applies to every content/GBP caption —
+  // autonomous GBP posts route through here too (autonomous-runner).
+  const { HUMAN_PROSE_RULES } = require('./llm/human-prose-rules');
+  const prompt = `${prompts[platform] || prompts.facebook}\n\n${HUMAN_PROSE_RULES}`;
 
   // Final public post copy is VOICE-owned customer-facing brand copy
   // (models.js registry): the customerCopy policy — MODEL_VOICE first, OpenAI
@@ -865,8 +868,9 @@ ${grounding}`,
   // Final public campaign copy is VOICE-owned customer-facing brand copy
   // (models.js registry): the customerCopy policy — MODEL_VOICE first, OpenAI
   // Terra backup — same lane as the blog-share path above.
+  const { HUMAN_PROSE_RULES: campaignProseRules } = require('./llm/human-prose-rules');
   const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.customerCopy, {
-    text: prompts[platform] || prompts.facebook,
+    text: `${prompts[platform] || prompts.facebook}\n\n${campaignProseRules}`,
     jsonMode: false,
     maxTokens: 600,
   });

@@ -18,13 +18,14 @@
  * noted follow-up.)
  */
 
+const { HUMAN_PROSE_RULES } = require('../llm/human-prose-rules');
 const crypto = require('crypto');
 const MODELS = require('../../config/models');
 const logger = require('../logger');
 const { dispatchWithFallback } = require('../llm/call');
 const { findBannedCustomerCopy } = require('./activity-indicators');
 
-const PROMPT_VERSION = 'lawn_report_v2_narrative_v2';
+const PROMPT_VERSION = 'lawn_report_v2_narrative_v3'; // v3: + HUMAN_PROSE_RULES (owner style block 07-30)
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const _cache = new Map();
 
@@ -64,6 +65,9 @@ function trendDirection(points) {
 }
 
 const SYSTEM_PROMPT = `# LAWN REPORT V2 — CUSTOMER COPY (VOICE)
+
+${HUMAN_PROSE_RULES}
+
 
 You rewrite the customer-facing copy for a post-service LAWN report for Waves Pest Control & Lawn Care (Southwest Florida). You are given the STRUCTURED FACTS for ONE visit. Turn them into warm, precise, plain-English copy that reads written for THIS exact visit.
 
