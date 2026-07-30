@@ -218,6 +218,23 @@ describe('audit P2: reused-lead window vs foreign-sid leads', () => {
     expect(lead?.id).toBe('lead-history');
   });
 
+  test('an older sid-stamped lead REUSED by this call (updated_at refreshed in-window) keeps current-call priority', async () => {
+    // The processor reuses prior leads without restamping twilio_call_sid —
+    // a different sid with created_at BEFORE the call is the normal reuse
+    // case, not a concurrent caller's creation.
+    mockLeadRows = [{
+      id: 'lead-reused-old-sid',
+      phone: '+19415550123',
+      twilio_call_sid: 'CA-two-weeks-ago',
+      deleted_at: null,
+      created_at: '2026-06-17T09:00:00.000Z',
+      updated_at: '2026-07-01T17:06:00.000Z',
+    }];
+    const { lead, forThisCall } = await ctxPriv.loadLeadForCall(CALL, '+19415550123');
+    expect(forThisCall).toBe(true);
+    expect(lead.id).toBe('lead-reused-old-sid');
+  });
+
   test('an unstamped reused lead touched inside the window keeps current-call priority', async () => {
     mockLeadRows = [{
       id: 'lead-reused',
