@@ -379,6 +379,14 @@ router.post('/:key/contracts', async (req, res, next) => {
 
     const values = req.body?.values || {};
     const context = buildCustomerDocumentContext(customer, values);
+    // The agreement may cover a property that differs from the customer's
+    // primary address (rental/second property): buildCustomerDocumentContext
+    // rebuilds customer.address from the row, so an explicit
+    // propertyAddress override is the only way a manual issue can name the
+    // accepted property — same override the accept-time service applies
+    // from estimate.address. Manual-prep bells carry the address to paste.
+    const propertyAddress = String(req.body?.propertyAddress || '').trim();
+    if (propertyAddress) context.customer = { ...context.customer, address: propertyAddress };
     const rendered = renderDocumentTemplate({
       template: loaded.template,
       version: loaded.activeVersion,

@@ -656,6 +656,16 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
 
     const NotificationService = require('./notification-service');
 
+    // Manual-prep handoffs must carry the ACCEPTED property: the generic
+    // document flow rebuilds customer.address from the customer row, so
+    // without this the operator would issue a rental/second-property
+    // agreement naming the wrong property. The issuance API accepts a
+    // propertyAddress override for exactly this.
+    const propertyClause = estimate.address
+      ? ` The accepted property is ${estimate.address} — issue the agreement with that property address, not the account's primary address.`
+      : '';
+    const propertyMeta = estimate.address ? { propertyAddress: estimate.address } : {};
+
     if (isCommercialEstimate(estimate, estData)) {
       // Retirement failures must not swallow the operator handoff — the
       // bell still rings and the retirement retries on the next sweep. The
@@ -682,8 +692,8 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       }, [
         'estimate',
         'Termite agreement needs manual prep (commercial)',
-        `${estimate.customer_name || 'Customer'} accepted a commercial termite estimate — commercial and multi-unit structures need a tailored agreement (different statutory retreat windows, tenant considerations), so prepare it manually from the document library.`,
-        { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId, ...(reissueSourceContractId ? { reissueContractId: reissueSourceContractId } : {}) } },
+        `${estimate.customer_name || 'Customer'} accepted a commercial termite estimate — commercial and multi-unit structures need a tailored agreement (different statutory retreat windows, tenant considerations), so prepare it manually from the document library.${propertyClause}`,
+        { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId, ...propertyMeta, ...(reissueSourceContractId ? { reissueContractId: reissueSourceContractId } : {}) } },
       ], `manual-prep (commercial) for estimate ${estimate.id}`);
       return { ok: false, skipped: 'commercial', belled, retireFailed: commercialRetireFailed };
     }
@@ -712,8 +722,8 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       }, [
         'estimate',
         'Termite agreement needs manual prep (annual prepay)',
-        `${estimate.customer_name || 'Customer'} accepted a termite estimate on annual prepay — the standard program agreement states per-application billing, so prepare the agreement manually with the prepay terms.`,
-        { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId, ...(reissueSourceContractId ? { reissueContractId: reissueSourceContractId } : {}) } },
+        `${estimate.customer_name || 'Customer'} accepted a termite estimate on annual prepay — the standard program agreement states per-application billing, so prepare the agreement manually with the prepay terms.${propertyClause}`,
+        { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId, ...propertyMeta, ...(reissueSourceContractId ? { reissueContractId: reissueSourceContractId } : {}) } },
       ], `manual-prep (annual prepay) for estimate ${estimate.id}`);
       return { ok: false, skipped: 'annual_prepay', belled: prepayBelled, retireFailed: prepayRetireFailed };
     }
@@ -749,8 +759,8 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       }, [
         'estimate',
         'Termite agreement needs manual prep',
-        `${estimate.customer_name || 'Customer'} accepted a termite estimate, but the program agreement couldn't be prefilled from the estimate figures. Prepare and send it from the document library.`,
-        { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId, ...(reissueSourceContractId ? { reissueContractId: reissueSourceContractId } : {}) } },
+        `${estimate.customer_name || 'Customer'} accepted a termite estimate, but the program agreement couldn't be prefilled from the estimate figures. Prepare and send it from the document library.${propertyClause}`,
+        { icon: '\u{1F4DD}', link: `/admin/customers/${customerId}`, metadata: { estimateId: estimate.id, customerId, ...propertyMeta, ...(reissueSourceContractId ? { reissueContractId: reissueSourceContractId } : {}) } },
       ], `manual-prep (figures unresolved) for estimate ${estimate.id}`);
       return { ok: false, skipped: 'figures_unresolved', belled: figuresBelled, retireFailed: figuresRetireFailed };
     }

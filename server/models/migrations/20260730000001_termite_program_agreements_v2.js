@@ -479,13 +479,20 @@ exports.up = async function up(knex) {
     .select('id', 'customer_id', 'status', 'recipient_name', 'document_variables_snapshot', 'document_template_key');
   const now = new Date();
   for (const row of openRows) {
-    const priorStatus = row.status;
-    // Conditional on the status still being open: a customer signing
-    // concurrently with the deploy could commit 'signed' between the
-    // unlocked read above and this update — an executed agreement must
-    // never be overwritten as cancelled (same guard as the service's
-    // supersession path). The event is recorded only when the cancel
-    // actually landed.
+    // Lock and re-read before cancelling: a delivery racing this loop can
+    // move draft → sent (minting the public token) between the selection
+    // and this update, and a customer signing concurrently could commit
+    // 'signed' — the recorded prior_status must be the status the cancel
+    // ACTUALLY replaced (down() restoring a stale 'draft' for a delivered
+    // link would 409 on signing: contracts-public only transitions
+    // sent/viewed), and an executed agreement must never be overwritten
+    // as cancelled. The event is recorded only when the cancel landed.
+    const current = await knex('customer_contracts')
+      .where({ id: row.id })
+      .forUpdate()
+      .first('status');
+    if (!current || !['draft', 'sent', 'viewed'].includes(current.status)) continue;
+    const priorStatus = current.status;
     const cancelled = await knex('customer_contracts')
       .where({ id: row.id })
       .whereIn('status', ['draft', 'sent', 'viewed'])
@@ -575,26 +582,33 @@ exports.down = async function down(knex) {
   // request that raced past the migration snapshot and was retired by
   // reconciliation before this rollback ran). Locks release at migration
   // commit; customer ids are sorted for a deterministic acquisition order.
-  let cancelEvents = [];
-  if (hasContracts && hasEvents) {
-    // Rollback leaves cancellation events in place, so an up/down/up cycle
-    // accumulates several per contract with potentially different
-    // prior_status values — only the LATEST reflects the state the most
-    // recent cancellation actually observed (an older 'draft' event
-    // winning over a later 'sent' would restore a row the public signing
-    // route 409s on). Newest-first plus first-seen-wins keeps one event
-    // per contract.
-    const cancelEventsAll = await knex('customer_contract_events')
+  // Rollback leaves cancellation events in place, so an up/down/up cycle
+  // accumulates several per contract with potentially different
+  // prior_status values — only the LATEST reflects the state the most
+  // recent cancellation actually observed (an older 'draft' event winning
+  // over a later 'sent' would restore a row the public signing route 409s
+  // on). Newest-first plus first-seen-wins keeps one event per contract.
+  const loadCancelEvents = async () => {
+    const all = await knex('customer_contract_events')
       .where({ event_type: 'cancelled', actor_type: 'system' })
       .whereRaw("metadata->>'reason' in (?, ?)", ['superseded_by_v2_migration', 'superseded_stale_version'])
       .orderBy('created_at', 'desc')
       .select('contract_id', 'customer_id', 'metadata');
     const latestByContract = new Map();
-    for (const evt of cancelEventsAll) {
+    for (const evt of all) {
       if (!latestByContract.has(String(evt.contract_id))) latestByContract.set(String(evt.contract_id), evt);
     }
-    cancelEvents = [...latestByContract.values()];
-    const customerIds = [...new Set(cancelEvents.map((e) => String(e.customer_id)))].sort();
+    return [...latestByContract.values()];
+  };
+  if (hasContracts && hasEvents) {
+    // Pre-repoint snapshot ONLY drives advisory-lock acquisition; the
+    // restore pass re-reads the events AFTER the repoint, when the set is
+    // frozen. Customers whose cancellations commit between this snapshot
+    // and the repoint get no advisory lock here — that is safe because the
+    // issuance path revalidates the template row FOR UPDATE, which the
+    // repoint holds locked until this migration commits, so no issuance
+    // can insert beside those late restores either.
+    const customerIds = [...new Set((await loadCancelEvents()).map((e) => String(e.customer_id)))].sort();
     for (const customerId of customerIds) {
       await knex.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`termite-agreement:${customerId}`]);
     }
@@ -605,7 +619,13 @@ exports.down = async function down(knex) {
   // signal in the restore pass below.
   const repointedTemplateKeys = new Set();
   for (const seed of TEMPLATE_V2) {
-    const template = await knex('document_templates').where({ template_key: seed.template_key }).first();
+    // FOR UPDATE: serialize with the publish endpoint (which also locks
+    // the template row) so the diverged-pointer check below can't race an
+    // admin publication.
+    const template = await knex('document_templates')
+      .where({ template_key: seed.template_key })
+      .forUpdate()
+      .first();
     if (!template) continue;
     // Restore the RECORDED pre-migration active version — never inferred
     // from version numbers (that can activate an unapproved draft). No
@@ -619,6 +639,23 @@ exports.down = async function down(knex) {
       .where({ migration_name: MIGRATION_NAME, state_key: `prior_active:${seed.template_key}` })
       .first();
     if (!state) continue;
+    // A pointer that DIVERGED after this migration (an admin published a
+    // newer version) is authoritative: restoring the recorded pre-v2
+    // pointer over it would deactivate the admin's version and get its
+    // open requests cancelled as "deactivated replacements" below. Only
+    // repoint while the template still points at THIS migration's seeded
+    // wording — identified by content, the same way up() identifies it.
+    // The stale rollback state is dropped either way (once superseded by
+    // an explicit publication, the pre-v2 pointer is not a valid target).
+    const activeNow = template.active_version_id
+      ? await knex('document_template_versions').where({ id: template.active_version_id }).first('body')
+      : null;
+    if (!activeNow || activeNow.body !== seed.body) {
+      await knex('migration_rollback_state')
+        .where({ migration_name: MIGRATION_NAME, state_key: `prior_active:${seed.template_key}` })
+        .del();
+      continue;
+    }
     // Recorded state exists — restore EXACTLY what was there, including a
     // null pointer (a template that was inactive before the migration must
     // not stay pointed at v2 after rollback).
@@ -652,6 +689,14 @@ exports.down = async function down(knex) {
   // cancellation), clear the cancellation fields, and drop any reprocessed
   // markers so future logic re-evaluates them fresh.
   if (hasContracts && hasEvents) {
+    // Re-read AFTER the repoint: the template rows are now locked, so an
+    // old dyno's superseded sweep can no longer commit a new
+    // cancelStaleSource cancellation for these templates (in-flight ones
+    // block on the template lock and observe the restored version as
+    // 'reactivated' after commit). A cancellation that landed between the
+    // pre-lock snapshot and the repoint is picked up here instead of
+    // being stranded cancelled with a dead 410 link.
+    const cancelEvents = await loadCancelEvents();
     const templateKeysForRestore = TEMPLATE_V2.map((t) => t.template_key);
     // Active-version truth AFTER the repoint above — used to tell a genuine
     // live replacement (still-active version) from a v2 re-prep this
