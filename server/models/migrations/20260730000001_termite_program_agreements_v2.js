@@ -348,6 +348,7 @@ const TEMPLATE_V2 = [
 exports.up = async function up(knex) {
   const hasTemplates = await knex.schema.hasTable('document_templates');
   if (!hasTemplates) return;
+  const seededVersionIds = [];
   for (const seed of TEMPLATE_V2) {
     const template = await knex('document_templates').where({ template_key: seed.template_key }).first();
     if (!template) continue;
@@ -376,6 +377,7 @@ exports.up = async function up(knex) {
         published_at: knex.fn.now(),
       }).returning('*');
     }
+    if (seededVersion?.id) seededVersionIds.push(seededVersion.id);
     if (seededVersion?.id && template.active_version_id !== seededVersion.id) {
       await knex('document_templates').where({ id: template.id }).update({
         active_version_id: seededVersion.id,
@@ -396,6 +398,10 @@ exports.up = async function up(knex) {
   const openRows = await knex('customer_contracts')
     .whereIn('document_template_key', templateKeys)
     .whereIn('status', ['draft', 'sent', 'viewed'])
+    // Requests already rendered from the approved body (an admin-created
+    // version the content lookup matched) were never superseded — their
+    // signing links stay live.
+    .modify((q) => { if (seededVersionIds.length) q.whereNotIn('document_template_version_id', seededVersionIds); })
     .select('id', 'customer_id', 'recipient_name', 'document_variables_snapshot');
   const now = new Date();
   for (const row of openRows) {

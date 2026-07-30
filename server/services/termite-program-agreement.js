@@ -744,16 +744,21 @@ async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
             actor_id: null,
             metadata: JSON.stringify({ reason: 'superseded_stale_version' }),
           });
-          await ringAdminBell(NotificationService, [
-            'estimate',
-            'Re-issue termite agreement (wording updated)',
-            `The open termite program agreement for ${row.recipient_name || 'a customer'} was cancelled because its wording was superseded by the v2 compliance templates. It was issued manually, so re-issue it from the document library on the updated template.`,
-            { icon: '\u{1F4DD}', link: `/admin/customers/${row.customer_id}`, metadata: { contractId: row.id, customerId: row.customer_id } },
-          ], `manual stale-version re-issue for contract ${row.id}`);
         }
       }
-      await markSupersededHandled(row, 'manual_reissue_belled');
-      results.skipped += 1;
+      // The bell IS the handoff — the row is only marked handled when it
+      // actually landed; a double notify failure leaves the row eligible
+      // for tomorrow's retry (the cancel above is conditional, so the
+      // retry just re-rings the bell).
+      const belled = await ringAdminBell(NotificationService, [
+        'estimate',
+        'Re-issue termite agreement (wording updated)',
+        `The open termite program agreement for ${row.recipient_name || 'a customer'} was cancelled because its wording was superseded by the v2 compliance templates. It was issued manually, so re-issue it from the document library on the updated template.`,
+        { icon: '\u{1F4DD}', link: `/admin/customers/${row.customer_id}`, metadata: { contractId: row.id, customerId: row.customer_id } },
+      ], `manual stale-version re-issue for contract ${row.id}`);
+      if (belled) await markSupersededHandled(row, 'manual_reissue_belled');
+      else results.failed += 1;
+      if (belled) results.skipped += 1;
       continue;
     }
 
@@ -778,6 +783,28 @@ async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
       return signedAddress === rowAddress;
     });
     if (signedSameProperty) { await markSupersededHandled(row, 'signed_same_property'); results.skipped += 1; continue; }
+
+    // Staff may have re-issued a replacement before this sweep (manually or
+    // via a fresh accept): an OPEN request on the CURRENT template version
+    // for the same estimate/property means the source row is fully handled —
+    // processing it anyway would ring false manual-prep bells for parked
+    // categories before maybeCreate's own dedupe runs.
+    const openNow = await openProgramAgreements(row.customer_id);
+    const replacementExists = openNow.some((openRow) => {
+      if (openRow.id === row.id) return false;
+      if (!openRow.document_template_version_id || !activeVersionIds.has(openRow.document_template_version_id)) return false;
+      let os = openRow.document_variables_snapshot;
+      if (typeof os === 'string') { try { os = JSON.parse(os); } catch { os = null; } }
+      if (os?.estimate?.id && String(os.estimate.id) === String(estimateId)) return true;
+      const openAddress = normalizeAddress(os?.estimate?.address || os?.customer?.address);
+      if (!openAddress || !rowAddress) return true; // unprovable — treat as covering
+      return openAddress === rowAddress;
+    });
+    if (replacementExists) {
+      await markSupersededHandled(row, 'replacement_exists');
+      results.skipped += 1;
+      continue;
+    }
 
     const estimate = await db('estimates').where({ id: estimateId }).first();
     if (!estimate || estimate.status !== 'accepted') {
@@ -844,11 +871,16 @@ async function reconcileTermiteProgramAgreements({ sinceDays = 21, limit = 25 } 
           .whereRaw('cc.customer_id = estimates.customer_id')
           .whereIn('cc.document_template_key', PROGRAM_TEMPLATE_KEYS)
           .whereRaw("cc.document_variables_snapshot->'estimate'->>'id' = estimates.id::text")
-          // Terminal-but-unsigned rows (cancelled/voided/declined/expired —
-          // e.g. v1 drafts cancelled by the v2 compliance migration) must
-          // not satisfy the exists-check: the estimate still needs a live
-          // agreement. A SIGNED row always blocks.
-          .whereNotIn('cc.status', ['cancelled', 'voided', 'declined', 'expired']);
+          // ONLY compliance-superseded cancels bypass the exists-check (the
+          // estimate still needs a live agreement after a template-version
+          // retirement). Every other row blocks — a customer-declined or
+          // admin-cancelled request reflects an intentional decision, and
+          // re-creating (and with autosend, re-emailing) it would override
+          // that intent.
+          .whereNot(function complianceSuperseded() {
+            this.where('cc.status', 'cancelled')
+              .andWhere('cc.cancelled_reason', 'like', 'Superseded by updated compliance wording%');
+          });
       })
       .orderBy('accepted_at', 'desc')
       .limit(PAGE_SIZE)
