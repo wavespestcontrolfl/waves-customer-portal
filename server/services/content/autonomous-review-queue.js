@@ -102,6 +102,43 @@ async function getReviewItem(opportunityId) {
   return buildReviewItem({ opportunity, brief, run, remediation, includeDraftBody: true });
 }
 
+/**
+ * Lock the opportunity and reselect its CURRENT run inside a decision
+ * transaction. The run selected before the transaction can be replaced by
+ * a committed requeue + replacement park between that read and the
+ * transaction — without this, a trust-build approval could mark the
+ * replacement's opportunity done while stamping the OLD run, and a dismiss
+ * could skip a replacement the reviewer never saw (Codex #3024 r19).
+ * Locking the opportunity row FIRST serializes against the runner's park
+ * path (which updates the opportunity), so the run reselect that follows
+ * sees the true current run.
+ */
+async function lockCurrentRun(trx, opportunityId, run, expectedRunId) {
+  const lockedOpp = await trx('opportunity_queue').where({ id: opportunityId }).forUpdate().first();
+  if (!lockedOpp || lockedOpp.status !== 'pending_review') {
+    const err = new Error('Opportunity review state changed; refresh before applying a decision');
+    err.statusCode = 409;
+    err.isOperational = true;
+    throw err;
+  }
+  const current = await trx('autonomous_runs')
+    .where('opportunity_id', opportunityId)
+    .orderBy('claimed_at', 'desc')
+    .forUpdate()
+    .first();
+  const boundRunId = expectedRunId || run?.id || null;
+  const replaced = boundRunId
+    ? (!current || current.id !== boundRunId)
+    : !!current; // pre-read saw NO run; one parked since — also stale
+  if (replaced) {
+    const err = new Error('This item changed since you opened it (a newer run replaced the reviewed one); refresh and review again');
+    err.statusCode = 409;
+    err.isOperational = true;
+    throw err;
+  }
+  return current;
+}
+
 async function decideReviewItem(opportunityId, { decision, note, reviewer, expectedRunId = null, expectedDraftSha = null } = {}) {
   const normalizedDecision = normalizeDecision(decision);
   const reviewerName = normalizeReviewer(reviewer);
@@ -133,13 +170,22 @@ async function decideReviewItem(opportunityId, { decision, note, reviewer, expec
   if (normalizedDecision === 'approve_trust_build') {
     assertTrustBuildRun(run);
     await db.transaction(async (trx) => {
+      // Reselect + lock the current run and re-assert its state on the
+      // LOCKED copy — the pre-transaction read can be stale (Codex r19).
+      const currentRun = await lockCurrentRun(trx, opportunityId, run, expectedRunId);
+      assertTrustBuildRun(currentRun);
+      if (currentRun.trust_build_approved_at) {
+        const err = new Error('This item was already decided; refresh before applying a decision');
+        err.statusCode = 409;
+        err.isOperational = true;
+        throw err;
+      }
       // Email-approval snapshot binding (Codex #3024 r15): asserted under
       // the row lock so a concurrent draft edit can't credit content the
       // owner never read. Portal callers pass no sha.
-      if (expectedDraftSha && run?.id) {
-        const lockedRun = await trx('autonomous_runs').where({ id: run.id }).forUpdate().first();
+      if (expectedDraftSha) {
         const { draftPreview } = require('./email-approvals')._internals;
-        if (lockedRun && draftPreview(lockedRun).sha !== expectedDraftSha) {
+        if (draftPreview(currentRun).sha !== expectedDraftSha) {
           const err = new Error('Draft content changed since it was reviewed; refresh and review again');
           err.statusCode = 409;
           err.isOperational = true;
@@ -152,10 +198,10 @@ async function decideReviewItem(opportunityId, { decision, note, reviewer, expec
         completed_at: new Date(),
         updated_at: new Date(),
       });
-      await trx('autonomous_runs').where('id', run.id).update({
+      await trx('autonomous_runs').where('id', currentRun.id).update({
         trust_build_approved_at: new Date(),
         trust_build_approved_by: reviewerName,
-        reviewer_notes: appendReviewerNote(run.reviewer_notes, {
+        reviewer_notes: appendReviewerNote(currentRun.reviewer_notes, {
           decision: normalizedDecision,
           reviewer: reviewerName,
           note: cleanNote,
@@ -217,9 +263,12 @@ async function decideReviewItem(opportunityId, { decision, note, reviewer, expec
       // strand the PR and skip a published-in-flight item. Asserted INSIDE
       // the transaction under a row lock so a concurrent approval can't
       // slip between a pre-read and the update (Codex #3024 r10 + r11).
-      if (run?.id) {
-        const lockedRun = await trx('autonomous_runs').where({ id: run.id }).forUpdate().first();
-        if (lockedRun && (lockedRun.outcome !== 'completed_pending_review' || lockedRun.skip_reason === 'astro_pr_pending_merge')) {
+      // Reselect + lock the current run — a dismiss must act on the run
+      // the reviewer saw, not silently skip a replacement that parked
+      // after the pre-transaction read (Codex r19).
+      const currentRun = await lockCurrentRun(trx, opportunityId, run, expectedRunId);
+      if (currentRun) {
+        if (currentRun.outcome !== 'completed_pending_review' || currentRun.skip_reason === 'astro_pr_pending_merge') {
           const err = new Error('This item was already decided (a publish is in flight or completed); refresh before applying a decision');
           err.statusCode = 409;
           err.isOperational = true;
@@ -228,9 +277,9 @@ async function decideReviewItem(opportunityId, { decision, note, reviewer, expec
         // Email-approval snapshot binding (Codex #3024 r15): a dismissal
         // bound to an emailed snapshot must not dismiss content the owner
         // never saw. Portal callers pass no sha.
-        if (expectedDraftSha && lockedRun) {
+        if (expectedDraftSha) {
           const { draftPreview } = require('./email-approvals')._internals;
-          if (draftPreview(lockedRun).sha !== expectedDraftSha) {
+          if (draftPreview(currentRun).sha !== expectedDraftSha) {
             const err = new Error('Draft content changed since it was reviewed; refresh and review again');
             err.statusCode = 409;
             err.isOperational = true;
@@ -244,9 +293,9 @@ async function decideReviewItem(opportunityId, { decision, note, reviewer, expec
         completed_at: new Date(),
         updated_at: new Date(),
       });
-      if (run?.id) {
-        await trx('autonomous_runs').where('id', run.id).update({
-          reviewer_notes: appendReviewerNote(run.reviewer_notes, {
+      if (currentRun?.id) {
+        await trx('autonomous_runs').where('id', currentRun.id).update({
+          reviewer_notes: appendReviewerNote(currentRun.reviewer_notes, {
             decision: normalizedDecision,
             reviewer: reviewerName,
             note: cleanNote,

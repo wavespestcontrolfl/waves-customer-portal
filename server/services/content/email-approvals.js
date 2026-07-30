@@ -454,6 +454,36 @@ function renderApprovalEmail({ run, row, opportunity = null, preview = null }) {
 }
 
 /**
+ * Was this item decided anywhere OUTSIDE this email flow (portal decision,
+ * trust-build stamp, requeue replacement)? Always reads FRESH rows — the
+ * same predicate gates both sides of the SMTP call, so a portal decision
+ * landing before OR during the send marks the row superseded instead of
+ * confirming an obsolete actionable email as the live request (Codex r12 +
+ * r13 + r19).
+ */
+async function decidedOutsideEmail(run, row) {
+  const freshRun = await db('autonomous_runs').where({ id: run.id }).first() || run;
+  const opp = row.opportunity_id ? await db('opportunity_queue').where({ id: row.opportunity_id }).first() : null;
+  // A requeue leaves the OLD run's outcome/skip_reason untouched while a
+  // replacement run parks for the same opportunity — the old run must
+  // not be (re)emailed as if it were still the live decision (Codex r16).
+  const newerParked = freshRun.opportunity_id ? await db('autonomous_runs')
+    .where({ opportunity_id: freshRun.opportunity_id, outcome: 'completed_pending_review', shadow_mode: false })
+    .where('created_at', '>', freshRun.created_at || new Date(0))
+    .first() : null;
+  const decided = (opp && opp.status !== 'pending_review')
+    || !!freshRun.trust_build_approved_at
+    || freshRun.outcome !== 'completed_pending_review'
+    || freshRun.skip_reason !== row.kind
+    || !!newerParked;
+  return {
+    decided,
+    opp,
+    reason: `opp ${opp?.status || '?'}, run ${freshRun.skip_reason || freshRun.outcome || '?'}${freshRun.trust_build_approved_at ? ', trust-build approved' : ''}`,
+  };
+}
+
+/**
  * Send (or re-send after a send failure) the approval email for a parked
  * run. Idempotent per run — a second call returns the existing row and only
  * re-sends when the first send never went out.
@@ -477,67 +507,78 @@ async function sendApprovalRequest(run, opportunity = null) {
   }
   if (!row || row.email_sent_at) return { row, skipped: row ? 'already_sent' : 'insert_failed' };
 
-  // Revalidate before (re)sending — against FRESH rows, not the caller's
+  // Atomic RECOVERABLE send claim, taken BEFORE revalidation so the
+  // decided-elsewhere check runs UNDER the claim — with the old order a
+  // portal decision landing between the check and the claim was emailed
+  // anyway (Codex r19). email_sent_at is set only AFTER SMTP confirms, so
+  // a crash mid-send leaves a stale sending claim that becomes reclaimable
+  // after the staleness window instead of stranding the row forever.
+  const claimStaleBefore = new Date(Date.now() - SEND_CLAIM_STALE_MINUTES * 60_000);
+  const myClaimStamp = new Date();
+  // Fresh pre-claim read: a non-null email_sending_at we are about to
+  // override is a PRIOR attempt whose SMTP may have completed before its
+  // confirmation write was lost — its token must not survive into this
+  // send (Codex r19), and its token/draft_sha are the values our
+  // ownership-conditioned rebind below must match against.
+  const preClaim = await db('content_email_approvals').where({ id: row.id }).first();
+  if (!preClaim || preClaim.email_sent_at || preClaim.status !== 'awaiting_reply') {
+    return { row: preClaim || row, skipped: preClaim?.email_sent_at ? 'already_sent' : 'not_awaiting_reply' };
+  }
+  const hadUnconfirmedAttempt = !!preClaim.email_sending_at;
+  const sendClaimed = await db('content_email_approvals')
+    .where({ id: row.id, status: 'awaiting_reply' })
+    .whereNull('email_sent_at')
+    .where((q) => q.whereNull('email_sending_at').orWhere('email_sending_at', '<', claimStaleBefore))
+    .update({ email_sending_at: myClaimStamp, updated_at: new Date() });
+  if (!sendClaimed) return { row, skipped: 'send_claimed_elsewhere' };
+
+  // Revalidate UNDER the claim — against FRESH rows, not the caller's
   // copies: a failed first send can be retried AFTER the item was decided
   // in the portal. Trust-build approvals stamp the run and complete the
   // opportunity without changing skip_reason; a named-competitor portal
   // approval re-parks the run as astro_pr_pending_merge while the
   // OPPORTUNITY stays pending_review — a stale run object would miss it
   // (Codex r12 + r13). A decided item's row is superseded, never
-  // re-emailed.
-  {
-    const freshRun = await db('autonomous_runs').where({ id: run.id }).first() || run;
-    const opp = row.opportunity_id ? await db('opportunity_queue').where({ id: row.opportunity_id }).first() : null;
-    // A requeue leaves the OLD run's outcome/skip_reason untouched while a
-    // replacement run parks for the same opportunity — the old run must
-    // not be (re)emailed as if it were still the live decision (Codex r16).
-    const newerParked = freshRun.opportunity_id ? await db('autonomous_runs')
-      .where({ opportunity_id: freshRun.opportunity_id, outcome: 'completed_pending_review', shadow_mode: false })
-      .where('created_at', '>', freshRun.created_at || new Date(0))
-      .first() : null;
-    const decidedElsewhere = (opp && opp.status !== 'pending_review')
-      || !!freshRun.trust_build_approved_at
-      || freshRun.outcome !== 'completed_pending_review'
-      || freshRun.skip_reason !== row.kind
-      || !!newerParked;
-    if (decidedElsewhere) {
-      await db('content_email_approvals').where({ id: row.id, status: 'awaiting_reply' })
-        .update({ status: 'superseded', last_error: `decided before email could send (opp ${opp?.status || '?'}, run ${freshRun.skip_reason || freshRun.outcome || '?'}${freshRun.trust_build_approved_at ? ', trust-build approved' : ''})`, updated_at: new Date() });
-      return { row, skipped: 'decided_before_send' };
-    }
+  // re-emailed (the status-conditioned claim above keeps it that way).
+  const preSend = await decidedOutsideEmail(run, row);
+  if (preSend.decided) {
+    await db('content_email_approvals').where({ id: row.id, status: 'awaiting_reply' })
+      .update({ status: 'superseded', last_error: `decided before email could send (${preSend.reason})`, updated_at: new Date() });
+    return { row, skipped: 'decided_before_send' };
   }
-
-  // Atomic RECOVERABLE send claim: the runner hook and the ten-minute sweep
-  // race on the same unsent row — whoever stamps email_sending_at first
-  // sends. email_sent_at is set only AFTER SMTP confirms, so a crash
-  // mid-send leaves a stale sending claim that becomes reclaimable after
-  // the staleness window instead of stranding the row forever.
-  const claimStaleBefore = new Date(Date.now() - SEND_CLAIM_STALE_MINUTES * 60_000);
-  const myClaimStamp = new Date();
-  const sendClaimed = await db('content_email_approvals')
-    .where({ id: row.id })
-    .whereNull('email_sent_at')
-    .where((q) => q.whereNull('email_sending_at').orWhere('email_sending_at', '<', claimStaleBefore))
-    .update({ email_sending_at: myClaimStamp, updated_at: new Date() });
-  if (!sendClaimed) return { row, skipped: 'send_claimed_elsewhere' };
 
   const email = require('../email');
   const { title, body: draftBody, truncated, metadata, sha } = draftPreview(run);
-  // Bind this request to the exact content being shown. If a PRIOR send
-  // attempt bound a DIFFERENT snapshot (SMTP may have delivered it even
-  // though the confirmation write was lost), the old token must die with
-  // it — otherwise a reply to the delivered draft-A email would approve
-  // the edited draft B under the same token (Codex r8).
-  const rebindingChangedDraft = row.draft_sha && row.draft_sha !== sha;
-  if (rebindingChangedDraft) {
-    row.token = newToken();
+  // Bind this request to the exact content being shown — conditioned on
+  // still holding the claim AND the token we read: a sender that stalled
+  // past the staleness window resumes here after a reclaimer rotated the
+  // binding, and must not overwrite the reclaimer's token/draft_sha with
+  // its own (Codex r19). The token dies whenever (a) a PRIOR attempt bound
+  // a DIFFERENT snapshot (a reply to delivered draft A must not approve
+  // edited draft B — Codex r8), or (b) a prior attempt's delivery is
+  // UNCONFIRMED (its SMTP may have completed; a retry can render a
+  // different truncation verdict from the same sha when opportunity state
+  // moved, and a reply to the first message must never be evaluated under
+  // this send's verdict — Codex r19).
+  const previousToken = preClaim.token;
+  const rebindingChangedDraft = preClaim.draft_sha && preClaim.draft_sha !== sha;
+  const nextToken = (rebindingChangedDraft || hadUnconfirmedAttempt) ? newToken() : previousToken;
+  // (email_sending_at = OUR stamp already implies unsent: nobody else can
+  // confirm delivery under a stamp they don't hold.)
+  const rebound = await db('content_email_approvals')
+    .where({ id: row.id, token: previousToken, email_sending_at: myClaimStamp, status: 'awaiting_reply' })
+    .update({ draft_sha: sha, token: nextToken, updated_at: new Date() });
+  if (!rebound) {
+    logger.warn(`[email-approvals] ${previousToken}: claim lost before send (rebound elsewhere) — aborting this send`);
+    return { row, sent: false, skipped: 'claim_lost_before_send' };
   }
-  await db('content_email_approvals').where({ id: row.id }).update({
-    draft_sha: sha,
-    ...(rebindingChangedDraft ? { token: row.token } : {}),
-    updated_at: new Date(),
-  });
-  const rendered = renderApprovalEmail({ run, row, opportunity, preview: { title, body: draftBody, truncated, metadata } });
+  row.token = nextToken;
+  row.draft_sha = sha;
+  // Render against the FRESH opportunity from revalidation — a retry
+  // caller that passes no opportunity must not produce a different
+  // presentation (and truncation verdict) than the original send did
+  // (Codex r19).
+  const rendered = renderApprovalEmail({ run, row, opportunity: preSend.opp || opportunity, preview: { title, body: draftBody, truncated, metadata } });
   const subject = `[${row.token}] Approve? ${title}`;
 
   const result = await email.send({
@@ -556,13 +597,33 @@ async function sendApprovalRequest(run, opportunity = null) {
       .update({ email_sending_at: null, last_error: String(result.error || 'send failed').slice(0, 500), updated_at: new Date() });
     return { row, sent: false, error: result.error };
   }
-  // Confirm delivery ONLY while this is still OUR claim and OUR token: an
-  // SMTP call that outlived the staleness window may have been reclaimed
-  // (token rotated for an edited draft) — the stale sender must not stamp
-  // the NEW token as delivered when it actually sent the OLD content
-  // (Codex r17).
+  // The item can be decided in the portal DURING the SMTP call. The
+  // delivered email can't be retracted, but it must not be confirmed as
+  // the live request — mark the row superseded (honestly stamping that the
+  // obsolete email WAS delivered) so sweeps stop and the decided-elsewhere
+  // guard in executeDecision remains the only path a reply can take
+  // (Codex r19).
+  const postSend = await decidedOutsideEmail(run, row);
+  if (postSend.decided) {
+    await db('content_email_approvals')
+      .where({ id: row.id, token: row.token, email_sending_at: myClaimStamp, status: 'awaiting_reply' })
+      .update({
+        status: 'superseded',
+        email_sent_at: new Date(),
+        email_truncated: rendered.truncated,
+        last_error: `decided in portal during send (${postSend.reason}); delivered email is obsolete — replies are rejected by the decided-elsewhere guard`,
+        updated_at: new Date(),
+      });
+    logger.warn(`[email-approvals] ${row.token}: item decided during send — delivered email superseded, replies will be rejected`);
+    return { row, sent: true, skipped: 'decided_during_send' };
+  }
+  // Confirm delivery ONLY while this is still OUR claim, OUR token, and an
+  // UNDECIDED row: an SMTP call that outlived the staleness window may
+  // have been reclaimed (token rotated for an edited draft) — the stale
+  // sender must not stamp the NEW token as delivered when it actually sent
+  // the OLD content (Codex r17).
   const confirmed = await db('content_email_approvals')
-    .where({ id: row.id, token: row.token, email_sending_at: myClaimStamp })
+    .where({ id: row.id, token: row.token, email_sending_at: myClaimStamp, status: 'awaiting_reply' })
     // Persist the truncation verdict of the email AS DELIVERED — inputs
     // are mutable (reseeds update opportunity.query), so decision-time
     // recomputation could diverge from what the owner actually saw

@@ -498,7 +498,7 @@ describe('round-5 hardening (Codex r5)', () => {
     const gates = require('../config/feature-gates');
     const gateSpy = jest.spyOn(gates, 'isEnabled').mockReturnValue(true);
     const updates = [];
-    const row = { id: 'x', token: 'EA-oldtoken1', run_id: 'r', opportunity_id: 'o', kind: 'named_competitor_review', email_sent_at: null, email_sending_at: null, draft_sha: 'sha-of-DELIVERED-draft-A' };
+    const row = { id: 'x', token: 'EA-oldtoken1', run_id: 'r', opportunity_id: 'o', kind: 'named_competitor_review', status: 'awaiting_reply', email_sent_at: null, email_sending_at: null, draft_sha: 'sha-of-DELIVERED-draft-A' };
     db.mockImplementation((table) => {
       const chain = {
         first: jest.fn().mockResolvedValue(
@@ -621,7 +621,7 @@ describe('round-12 hardening (Codex r12)', () => {
     const gates = require('../config/feature-gates');
     const gateSpy = jest.spyOn(gates, 'isEnabled').mockReturnValue(true);
     const updates = [];
-    const row = { id: 'x', token: 'EA-deadbeef', run_id: 'r', opportunity_id: 'o', kind: 'named_competitor_review', email_sent_at: null, email_sending_at: null, draft_sha: null };
+    const row = { id: 'x', token: 'EA-deadbeef', run_id: 'r', opportunity_id: 'o', kind: 'named_competitor_review', status: 'awaiting_reply', email_sent_at: null, email_sending_at: null, draft_sha: null };
     db.mockImplementation((table) => {
       const chain = {
         first: jest.fn().mockResolvedValue(
@@ -658,7 +658,7 @@ describe('round-12 hardening (Codex r12)', () => {
     const gates = require('../config/feature-gates');
     const gateSpy = jest.spyOn(gates, 'isEnabled').mockReturnValue(true);
     const updates = [];
-    const row = { id: 'x', token: 'EA-deadbeef', run_id: 'r', opportunity_id: 'o', kind: 'trust_build_2_of_5', email_sent_at: null, email_sending_at: null, draft_sha: null };
+    const row = { id: 'x', token: 'EA-deadbeef', run_id: 'r', opportunity_id: 'o', kind: 'trust_build_2_of_5', status: 'awaiting_reply', email_sent_at: null, email_sending_at: null, draft_sha: null };
     db.mockImplementation((table) => {
       const chain = {
         first: jest.fn().mockResolvedValue(
@@ -680,6 +680,114 @@ describe('round-12 hardening (Codex r12)', () => {
       expect(result.skipped).toBe('decided_before_send');
       expect(email.send).not.toHaveBeenCalled();
       expect(updates.find((u) => u.status === 'superseded')).toBeTruthy();
+    } finally {
+      gateSpy.mockRestore();
+    }
+  });
+});
+
+describe('round-19 hardening (Codex r19)', () => {
+  const gates = require('../config/feature-gates');
+
+  test('a reclaimed UNCONFIRMED send rotates the token even when the draft is unchanged', async () => {
+    const db = require('../models/db');
+    const email = require('../services/email');
+    email.send = jest.fn().mockResolvedValue({ ok: true });
+    const gateSpy = jest.spyOn(gates, 'isEnabled').mockReturnValue(true);
+    const run = { id: 'r', outcome: 'completed_pending_review', skip_reason: 'named_competitor_review', opportunity_id: null, trust_build_approved_at: null, draft_payload: JSON.stringify({ title: 'T', body: 'SAME draft' }) };
+    const { sha } = approvals._internals.draftPreview(run);
+    const updates = [];
+    // Prior attempt claimed 25 minutes ago and never confirmed — its SMTP
+    // may have delivered. Same sha, so the pre-r19 rebind kept the token.
+    const row = { id: 'x', token: 'EA-oldtoken1', run_id: 'r', opportunity_id: null, kind: 'named_competitor_review', status: 'awaiting_reply', email_sent_at: null, email_sending_at: new Date(Date.now() - 25 * 60_000), draft_sha: sha };
+    db.mockImplementation((table) => {
+      const chain = {
+        first: jest.fn().mockResolvedValue(
+          table === 'content_email_approvals' ? row
+            : table === 'autonomous_runs' ? { ...run } : null
+        ),
+        update: jest.fn().mockImplementation((p) => { updates.push(p); return Promise.resolve(1); }),
+        whereNull: jest.fn().mockReturnValue({ where: jest.fn().mockReturnValue({ update: jest.fn().mockResolvedValue(1) }) }),
+      };
+      chain.where = jest.fn().mockReturnValue(chain);
+      return { where: jest.fn().mockReturnValue(chain) };
+    });
+    try {
+      const result = await approvals.sendApprovalRequest(run);
+      expect(result.sent).toBe(true);
+      const rebind = updates.find((u) => u.draft_sha);
+      expect(rebind).toBeTruthy();
+      expect(rebind.draft_sha).toBe(sha); // content unchanged…
+      expect(rebind.token).toBeTruthy(); // …but the token still rotates:
+      expect(rebind.token).not.toBe('EA-oldtoken1'); // a reply to the maybe-delivered first email must die
+    } finally {
+      gateSpy.mockRestore();
+    }
+  });
+
+  test('a stalled sender whose claim was reclaimed aborts at the rebind instead of overwriting it', async () => {
+    const db = require('../models/db');
+    const email = require('../services/email');
+    email.send = jest.fn().mockResolvedValue({ ok: true });
+    const gateSpy = jest.spyOn(gates, 'isEnabled').mockReturnValue(true);
+    const row = { id: 'x', token: 'EA-senderA00', run_id: 'r', opportunity_id: null, kind: 'named_competitor_review', status: 'awaiting_reply', email_sent_at: null, email_sending_at: null, draft_sha: null };
+    db.mockImplementation((table) => {
+      const chain = {
+        first: jest.fn().mockResolvedValue(
+          table === 'content_email_approvals' ? row
+            : table === 'autonomous_runs' ? { id: 'r', outcome: 'completed_pending_review', skip_reason: 'named_competitor_review', opportunity_id: null, trust_build_approved_at: null, created_at: new Date() } : null
+        ),
+        // The ownership-conditioned rebind matches ZERO rows: sender B
+        // reclaimed and rotated the binding while A was stalled.
+        update: jest.fn().mockResolvedValue(0),
+        whereNull: jest.fn().mockReturnValue({ where: jest.fn().mockReturnValue({ update: jest.fn().mockResolvedValue(1) }) }),
+      };
+      chain.where = jest.fn().mockReturnValue(chain);
+      return { where: jest.fn().mockReturnValue(chain) };
+    });
+    try {
+      const result = await approvals.sendApprovalRequest({ id: 'r', outcome: 'completed_pending_review', skip_reason: 'named_competitor_review', opportunity_id: null, trust_build_approved_at: null, draft_payload: '{}' });
+      expect(result.skipped).toBe('claim_lost_before_send');
+      expect(email.send).not.toHaveBeenCalled(); // B's binding survives; A sends nothing
+    } finally {
+      gateSpy.mockRestore();
+    }
+  });
+
+  test('an item decided DURING the SMTP call is superseded, never confirmed as the live request', async () => {
+    const db = require('../models/db');
+    const email = require('../services/email');
+    email.send = jest.fn().mockResolvedValue({ ok: true });
+    const gateSpy = jest.spyOn(gates, 'isEnabled').mockReturnValue(true);
+    const updates = [];
+    const row = { id: 'x', token: 'EA-deadbeef', run_id: 'r', opportunity_id: null, kind: 'trust_build_2_of_5', status: 'awaiting_reply', email_sent_at: null, email_sending_at: null, draft_sha: null };
+    const parked = { id: 'r', outcome: 'completed_pending_review', skip_reason: 'trust_build_2_of_5', opportunity_id: null, trust_build_approved_at: null, created_at: new Date() };
+    // Pre-send revalidation sees the run still parked; the post-send
+    // recheck sees the portal trust-build approval that landed mid-SMTP.
+    const runReads = jest.fn()
+      .mockResolvedValueOnce({ ...parked })
+      .mockResolvedValue({ ...parked, trust_build_approved_at: new Date() });
+    db.mockImplementation((table) => {
+      const chain = {
+        first: jest.fn().mockImplementation(() => (
+          table === 'content_email_approvals' ? Promise.resolve(row)
+            : table === 'autonomous_runs' ? runReads() : Promise.resolve(null)
+        )),
+        update: jest.fn().mockImplementation((p) => { updates.push(p); return Promise.resolve(1); }),
+        whereNull: jest.fn().mockReturnValue({ where: jest.fn().mockReturnValue({ update: jest.fn().mockResolvedValue(1) }) }),
+      };
+      chain.where = jest.fn().mockReturnValue(chain);
+      return { where: jest.fn().mockReturnValue(chain) };
+    });
+    try {
+      const result = await approvals.sendApprovalRequest({ ...parked });
+      expect(email.send).toHaveBeenCalledTimes(1); // the email DID go out — that can't be retracted
+      expect(result.skipped).toBe('decided_during_send');
+      const superseded = updates.find((u) => u.status === 'superseded');
+      expect(superseded).toBeTruthy();
+      expect(superseded.email_sent_at).toBeTruthy(); // honest: it was delivered…
+      // …but it is never confirmed as the LIVE request (confirm clears last_error).
+      expect(updates.find((u) => u.email_sent_at && u.last_error === null)).toBeFalsy();
     } finally {
       gateSpy.mockRestore();
     }
