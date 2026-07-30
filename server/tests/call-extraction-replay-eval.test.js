@@ -61,6 +61,11 @@ function failingRun() {
   });
 }
 
+// Every runCallExtractionReplayEval call in this suite must inject sendEmail —
+// otherwise a test environment with GOOGLE_SMTP_PASSWORD set would fall
+// through to the real SMTP sender and email false regression alerts.
+const failIfRealEmail = async () => { throw new Error('test fell through to default email sender'); };
+
 describe('call extraction replay scheduled eval', () => {
   test('green replay passes without notifying', async () => {
     const notifications = [];
@@ -69,6 +74,7 @@ describe('call extraction replay scheduled eval', () => {
     const result = await runCallExtractionReplayEval({
       runReplay,
       notify: async (row) => { notifications.push(row); },
+      sendEmail: failIfRealEmail,
     });
 
     expect(result).toMatchObject({
@@ -90,6 +96,7 @@ describe('call extraction replay scheduled eval', () => {
     const result = await runCallExtractionReplayEval({
       runReplay,
       notify: async (row) => { notifications.push(row); },
+      sendEmail: failIfRealEmail,
     });
 
     expect(result.status).toBe('pass');
@@ -106,6 +113,7 @@ describe('call extraction replay scheduled eval', () => {
     const result = await runCallExtractionReplayEval({
       runReplay,
       notify: async (row) => { notifications.push(row); },
+      sendEmail: failIfRealEmail,
     });
 
     expect(result.status).toBe('fail');
@@ -134,6 +142,7 @@ describe('call extraction replay scheduled eval', () => {
     const result = await runCallExtractionReplayEval({
       runReplay,
       notify: async (row) => { notifications.push(row); },
+      sendEmail: failIfRealEmail,
     });
 
     expect(result.status).toBe('fail');
@@ -151,6 +160,7 @@ describe('call extraction replay scheduled eval', () => {
     const result = await runCallExtractionReplayEval({
       runReplay,
       notify: async (row) => { notifications.push(row); },
+      sendEmail: failIfRealEmail,
     });
 
     expect(result.status).toBe('inconclusive');
