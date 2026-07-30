@@ -33,7 +33,7 @@
  */
 
 const { THRESHOLDS } = require('./scoring-config');
-const { evaluateTitleMetaSpam } = require('./title-meta-spam-gate');
+const { evaluateTitleMetaSpam, renderMetaTokens } = require('./title-meta-spam-gate');
 const { isFaqBlockedService } = require('./content-guardrails');
 
 // Compute the achievable maximum score PER PAGE TYPE so the pass
@@ -149,6 +149,12 @@ const PAGE_TYPE_CHECKS = {
     { name: 'meta_length_in_bounds', weight: 6, isHard: true, evaluate: checkMetaLengthBounds },
     { name: 'primary_keyword_in_title', weight: 6, evaluate: checkPrimaryKeywordInTitle },
     { name: 'no_duplicate_title', weight: 8, isHard: true, evaluate: checkNoDuplicateTitle },
+    // Owner rule 2026-07-29: every meta carries the page's phone — as the
+    // {{cityPhone}} TOKEN (pages render on many domains with different
+    // tracking numbers; a typed-out number shows the wrong phone). Weight 0
+    // like title_meta_spam_free: pure hard gate, no score contribution, so
+    // the metadata threshold math is unchanged.
+    { name: 'meta_phone_token_present', weight: 0, isHard: true, evaluate: checkMetaPhoneTokenPresent },
   ],
   links: [],
   gbp: [],
@@ -977,9 +983,13 @@ function checkTitleLengthBounds(draft, brief, context) {
 }
 
 function checkMetaLengthBounds(draft) {
-  const m = (draft.meta_description || draft.frontmatter?.meta_description || '').trim();
-  if (!m) return { ok: false, reason: 'no_meta_description' };
-  if (m.length < 115 || m.length > 160) return { ok: false, reason: `meta_length_${m.length}_outside_115-160` };
+  const raw = (draft.meta_description || draft.frontmatter?.meta_description || '').trim();
+  if (!raw) return { ok: false, reason: 'no_meta_description' };
+  // Bound the RENDERED length — metas carry per-domain tokens ({{cityPhone}},
+  // {{brandShort}}) and Google measures what renders, not the template
+  // (owner rule 2026-07-29: never over 160 rendered characters).
+  const m = renderMetaTokens(raw).trim();
+  if (m.length < 115 || m.length > 160) return { ok: false, reason: `meta_rendered_length_${m.length}_outside_115-160` };
   return { ok: true };
 }
 
@@ -995,6 +1005,18 @@ function checkPrimaryKeywordInTitle(draft, brief, context) {
   if (matched < Math.max(1, kwTokens.length - 1)) {
     return { ok: false, reason: `title_missing_keyword_tokens_(${matched}/${kwTokens.length})` };
   }
+  return { ok: true };
+}
+
+// Literal phone shapes: "(941) 555-1234", "941-555-1234", "941.555.1234".
+// Meta text must use the {{cityPhone}} token instead — see the bundle entry.
+const LITERAL_PHONE_IN_META_RE = /\(\d{3}\)\s*\d{3}[-.\s]?\d{4}|\b\d{3}[-.]\d{3}[-.]\d{4}\b/;
+
+function checkMetaPhoneTokenPresent(draft) {
+  const m = (draft.meta_description || draft.frontmatter?.meta_description || draft.frontmatter?.metaDescription || '').trim();
+  if (!m) return { ok: false, reason: 'no_meta_description' };
+  if (!m.includes('{{cityPhone}}')) return { ok: false, reason: 'meta_missing_cityPhone_token' };
+  if (LITERAL_PHONE_IN_META_RE.test(m)) return { ok: false, reason: 'literal_phone_in_meta_use_cityPhone_token' };
   return { ok: true };
 }
 
@@ -1028,4 +1050,5 @@ module.exports._internals = {
   checkHubLinkPresent, checkTwoPlusCityMentions, checkFaqSectionPresent, checkVoiceMatch,
   checkTitleLengthBounds, checkMetaLengthBounds,
   checkPrimaryKeywordInTitle, checkNoDuplicateTitle,
+  checkMetaPhoneTokenPresent,
 };

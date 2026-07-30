@@ -2794,6 +2794,7 @@ class AutonomousRunner {
   async _deriveGuardrailOptions(opp, brief) {
     let liveDomains = null;
     let liveMetaTitle = null;
+    let liveMetaDescription = null;
     if (brief.action_type === 'refresh_existing_page') {
       const publisher = getAstroPublisher();
       if (publisher?.getLiveFrontmatter) {
@@ -2826,6 +2827,12 @@ class AutonomousRunner {
         liveMetaTitle = !liveIsBlog && liveFm.metaTitle != null && String(liveFm.metaTitle).trim()
           ? String(liveFm.metaTitle)
           : null;
+        // Owner rule 2026-07-29: a refresh that CHANGES the meta description
+        // must carry {{cityPhone}} and stay ≤160 rendered — the guardrail
+        // compares against the live value so an unchanged carried-over meta
+        // is grandfathered. All target types (blog included).
+        const liveMeta = liveFm.metaDescription ?? liveFm.meta_description;
+        liveMetaDescription = liveMeta != null ? String(liveMeta) : null;
       }
     }
     const operatorBrief = opp.bucket === OPERATOR_INTERCEPT_BUCKET
@@ -2898,6 +2905,7 @@ class AutonomousRunner {
       isRefresh,
       priorBody,
       liveMetaTitle,
+      liveMetaDescription,
     };
   }
 

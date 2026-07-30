@@ -912,3 +912,37 @@ describe('checkMetaDescriptionComplete — refresh target typing (Codex round 12
     expect(camel.ok).toBe(true);
   });
 });
+
+describe('meta phone-token contract (owner rule 2026-07-29)', () => {
+  const { checkMetaPhoneTokenPresent } = require('../services/content/content-quality-gate')._internals;
+  const PAD = 'Chinch bugs, sod webworms and fire ants handled by local techs. ';
+
+  test('meta with the {{cityPhone}} token passes', () => {
+    const m = `${PAD}Call ☎️ {{cityPhone}} for a FREE estimate today.`;
+    expect(checkMetaPhoneTokenPresent({ meta_description: m }).ok).toBe(true);
+  });
+
+  test('meta without any phone fails', () => {
+    const r = checkMetaPhoneTokenPresent({ meta_description: `${PAD}Get a free estimate today.` });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('meta_missing_cityPhone_token');
+  });
+
+  test('typed-out phone number fails even alongside the token', () => {
+    const r = checkMetaPhoneTokenPresent({ meta_description: `${PAD}Call (941) 297-2606 or {{cityPhone}} now.` });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('literal_phone_in_meta_use_cityPhone_token');
+  });
+
+  test('meta_length_in_bounds measures RENDERED length (tokens expanded)', () => {
+    // Literal 150 chars incl. {{cityPhone}} (13) → rendered 151 (+1) — in bounds.
+    const base = 'Call {{cityPhone}} for lawn pest control. '; // 42 literal → 43 rendered
+    const inBounds = base + 'x'.repeat(108); // 150 literal → 151 rendered
+    expect(checkMetaLengthBounds({ meta_description: inBounds }).ok).toBe(true);
+    // Literal 159 chars, but {{brandName}} (13) renders as 18 (+5) → 164 — over.
+    const over = '{{brandName}} treats lawns. '.padEnd(159, 'y');
+    const r = checkMetaLengthBounds({ meta_description: over });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/^meta_rendered_length_164/);
+  });
+});

@@ -1746,6 +1746,36 @@ function metaTitleRewriteFinding(frontmatter, { isRefresh = false, liveMetaTitle
     `Refresh draft proposes a different metaTitle ("${String(draftTitle).trim().slice(0, 80)}") than the live page's ${String(liveMetaTitle).length}-char metaTitle — service/location metaTitles are never edited (owner rule 2026-07-16). Carry the live metaTitle unchanged or omit the field.`);
 }
 
+// Owner rule 2026-07-29: every meta description carries the page's phone as
+// the {{cityPhone}} TOKEN (pages render on many domains with different
+// tracking numbers — a typed-out number shows the wrong phone), and never
+// exceeds 160 rendered characters. Enforced here for REFRESH drafts that
+// CHANGE the meta (an unchanged carried-over meta is grandfathered — most
+// legacy blog metas predate the rule, and parking a body-only refresh on an
+// untouched meta would block the whole refresh lane). The metadata-rewrite
+// lane gets the same contract from the quality gate's
+// meta_phone_token_present + meta_length_in_bounds hard checks.
+const LITERAL_PHONE_IN_META_RE = /\(\d{3}\)\s*\d{3}[-.\s]?\d{4}|\b\d{3}[-.]\d{3}[-.]\d{4}\b/;
+function metaDescriptionContractFinding(frontmatter, { isRefresh = false, liveMetaDescription = null } = {}) {
+  if (!isRefresh) return null;
+  const draftMeta = frontmatter?.metaDescription ?? frontmatter?.meta_description;
+  if (draftMeta === undefined || !String(draftMeta).trim()) return null; // absent → publisher keeps the live value
+  const draftTrim = String(draftMeta).trim();
+  if (liveMetaDescription != null && draftTrim === String(liveMetaDescription).trim()) return null; // unchanged → grandfathered
+  if (!draftTrim.includes('{{cityPhone}}')) {
+    return finding('P1', 'META_MISSING_PHONE_TOKEN', 'Rewritten meta description must contain the {{cityPhone}} token (owner rule 2026-07-29: every meta carries the page\'s own phone number).');
+  }
+  if (LITERAL_PHONE_IN_META_RE.test(draftTrim)) {
+    return finding('P1', 'LITERAL_PHONE_IN_META', 'Meta description contains a typed-out phone number — use the {{cityPhone}} token so each domain renders its own tracking number.');
+  }
+  const { renderMetaTokens } = require('./title-meta-spam-gate');
+  const rendered = renderMetaTokens(draftTrim).trim();
+  if (rendered.length > 160) {
+    return finding('P1', 'META_OVER_160_RENDERED', `Rewritten meta description renders at ${rendered.length} characters — the cap is 160 (owner rule 2026-07-29).`);
+  }
+  return null;
+}
+
 /**
  * evaluate(draft, { service, primaryKeyword, domains }) → { pass, findings }
  *
@@ -1774,7 +1804,7 @@ function metaTitleRewriteFinding(frontmatter, { isRefresh = false, liveMetaTitle
  *   citation-residue and off-footprint checks still apply in full (those are
  *   never legitimate, new or old).
  */
-function evaluate(draft, { service = null, primaryKeyword = null, domains = null, operatorFaqException = false, requiredSourceUrls = [], operatorCitations = false, allowedInternalLinks = [], isRefresh = false, priorBody = null, liveMetaTitle = null } = {}) {
+function evaluate(draft, { service = null, primaryKeyword = null, domains = null, operatorFaqException = false, requiredSourceUrls = [], operatorCitations = false, allowedInternalLinks = [], isRefresh = false, priorBody = null, liveMetaTitle = null, liveMetaDescription = null } = {}) {
   const body = draft?.body || draft?.content || '';
   const frontmatter = draft?.frontmatter || {};
   const kw = primaryKeyword || frontmatter.primary_keyword || frontmatter.primaryKeyword || null;
@@ -1876,6 +1906,9 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     // independently freezes the field as the last-resort backstop. An ABSENT
     // or identical draft metaTitle is fine — the publisher keeps the live one.
     metaTitleRewriteFinding(frontmatter, { isRefresh, liveMetaTitle }),
+    // Owner rule 2026-07-29: a refresh that CHANGES the meta description must
+    // carry {{cityPhone}}, never a literal number, and stay ≤160 rendered.
+    metaDescriptionContractFinding(frontmatter, { isRefresh, liveMetaDescription }),
   ].filter(Boolean);
 
   const pass = !findings.some((f) => f.severity === 'P0' || f.severity === 'P1');

@@ -2016,3 +2016,46 @@ describe('protected metaTitle rewrite gate (owner rule 2026-07-16)', () => {
     }
   });
 });
+
+describe('meta description contract on refresh (owner rule 2026-07-29)', () => {
+  const LIVE_META = 'Lawn care nearby in Sarasota, FL — {{brandShort}} targets chinch bugs. Call ☎️ {{cityPhone}} for a FREE lawn care estimate.';
+  const base = { body: 'Refreshed body.', frontmatter: {} };
+  const opts = (fmv, extra = {}) => ({ isRefresh: true, priorBody: 'old body', liveMetaDescription: LIVE_META, ...extra });
+
+  test('changed meta without the {{cityPhone}} token P1s', () => {
+    const r = guardrails.evaluate(
+      { ...base, frontmatter: { metaDescription: 'Fresh Sarasota lawn care from local techs. Free estimates in about sixty seconds, chinch bug and sod webworm coverage included today.' } },
+      opts(),
+    );
+    expect(r.findings.some((f) => f.code === 'META_MISSING_PHONE_TOKEN' && f.severity === 'P1')).toBe(true);
+  });
+
+  test('typed-out phone number in a changed meta P1s', () => {
+    const r = guardrails.evaluate(
+      { ...base, frontmatter: { metaDescription: 'Sarasota lawn care with chinch bug coverage — call (941) 297-2606 and {{cityPhone}} for a free estimate from our local team today.' } },
+      opts(),
+    );
+    expect(r.findings.some((f) => f.code === 'LITERAL_PHONE_IN_META')).toBe(true);
+  });
+
+  test('changed meta over 160 rendered characters P1s', () => {
+    const long = `Sarasota lawn care built for chinch bugs, sod webworms, and the county fertilizer blackout. Call ☎️ {{cityPhone}} for a FREE estimate from techs on local routes daily.`;
+    const r = guardrails.evaluate({ ...base, frontmatter: { metaDescription: long } }, opts());
+    expect(r.findings.some((f) => f.code === 'META_OVER_160_RENDERED')).toBe(true);
+  });
+
+  test('unchanged carried-over meta is grandfathered; absent meta passes', () => {
+    for (const fmv of [{ metaDescription: LIVE_META }, {}]) {
+      const r = guardrails.evaluate({ ...base, frontmatter: fmv }, opts());
+      expect(r.findings.some((f) => String(f.code).startsWith('META_'))).toBe(false);
+    }
+  });
+
+  test('inert outside refresh', () => {
+    const r = guardrails.evaluate(
+      { ...base, frontmatter: { metaDescription: 'No phone here at all but this is a NEW page draft, not a refresh — different lane, different contract, no meta finding expected.' } },
+      { isRefresh: false },
+    );
+    expect(r.findings.some((f) => String(f.code).startsWith('META_'))).toBe(false);
+  });
+});

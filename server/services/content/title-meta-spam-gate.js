@@ -156,8 +156,28 @@ function slugReason(value) {
   return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
 }
 
+// Rendered-length approximation for meta text carrying per-domain tokens —
+// Google measures what RENDERS, not the template. Hub token widths; spoke
+// brand/phone values land within a few characters. Single source of truth
+// for the meta length contract (owner rule 2026-07-29: every meta carries
+// the {{cityPhone}} token and never exceeds 160 rendered characters) —
+// consumed by content-quality-gate and content-guardrails so the two
+// enforcement points can never drift.
+const META_TOKEN_RENDERINGS = [
+  [/\{\{cityPhone\}\}/g, '(941) 297-2606'],
+  [/\{\{phone\}\}/g, '(941) 297-2606'],
+  [/\{\{brandShort\}\}/g, 'Waves'],
+  [/\{\{brandName\}\}/g, 'Waves Pest Control'],
+];
+function renderMetaTokens(text) {
+  let s = String(text || '');
+  for (const [re, v] of META_TOKEN_RENDERINGS) s = s.replace(re, v);
+  return s;
+}
+
 module.exports = {
   evaluateTitleMetaSpam,
+  renderMetaTokens,
   HYPE_TERMS,
   COMMERCIAL_TERMS,
   _internals: {
