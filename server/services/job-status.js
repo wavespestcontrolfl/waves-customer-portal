@@ -377,6 +377,24 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
     emitToAdmins(adminPayload);
   }
 
+  function maybeReparkFollowupObligation() {
+    // Cancelling/skipping a completion-linked follow-up child resurfaces
+    // the source visit's owed follow-up as a fresh dispatch alert — the
+    // booking resolved it, and without this an ordinary cancellation left
+    // the obligation with neither an appointment nor an open alert. Runs
+    // POST-COMMIT, fire-and-forget: it must never block or poison the
+    // cancellation transaction (an error inside a Postgres trx aborts every
+    // later statement), and the park is dedup-guarded so a same-status
+    // cancel re-send safely re-attempts it. Guarded here (the one shared
+    // status writer) so EVERY cancellation surface is covered. Lazy
+    // require: the module's dependency chain reaches back into job-status.
+    if (!['cancelled', 'skipped'].includes(String(toStatus || ''))) return;
+    const { handleFollowupChildCancellation } = require('./typed-followup-obligation');
+    void handleFollowupChildCancellation({ jobId, toStatus }).catch((e) => {
+      logger.warn(`[job-status] follow-up re-park hook failed for ${jobId}: ${e.message}`);
+    });
+  }
+
   if (trx) {
     // Caller-owned trx. Do the writes; defer both emits until the
     // caller's outer transaction resolves. trx.executionPromise is
@@ -385,7 +403,10 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
     const { customerId, customerPayload, adminPayload } = await doWrites(trx);
     if (trx.executionPromise) {
       trx.executionPromise
-        .then(() => emitBoth(customerId, customerPayload, adminPayload))
+        .then(() => {
+          emitBoth(customerId, customerPayload, adminPayload);
+          maybeReparkFollowupObligation();
+        })
         .catch(() => {
           // Rollback path. Caller will see the rejection on their
           // db.transaction() promise; we just suppress both emits.
@@ -407,6 +428,7 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
   });
   // trx committed by here.
   emitBoth(captured.customerId, captured.customerPayload, captured.adminPayload);
+  maybeReparkFollowupObligation();
   return {
     customerPayload: captured.customerPayload,
     adminPayload: captured.adminPayload,

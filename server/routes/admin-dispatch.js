@@ -68,18 +68,17 @@ const {
 const ActivityIndicators = require('../services/service-report/activity-indicators');
 const { technicianReportCustomerCopy } = require('../services/service-report/technician-report-copy');
 const CompanionCompletions = require('../services/service-report/companion-completions');
+// The follow-up override chain (German knockdown windows, two-treatment
+// package rules, species gating) lives in ONE place — the obligation module
+// — shared by /complete, /schedule-followup, and the shared status writer's
+// cancellation re-park hook. Route-local copies drifted (Codex r1–r2 on
+// PR #3091 found four leak shapes between them).
 const {
-  projectFollowupSuggestion,
-} = require('../services/project-completion');
-// German knockdown follow-up window → suggestion interval (owner spec §8B).
-// 'As needed' intentionally absent: it keeps the profile's default interval
-// (the report copy for it is interval-free, so no date can contradict it).
-const KNOCKDOWN_FOLLOWUP_WINDOW_DAYS = { '10–14 days': 14, '2–3 weeks': 21 };
-// Two-treatment package keys (20260712300000 cutover): the ALERT follow-up
-// policy means visit 1 owes an included second visit — and ONLY visit 1;
-// an included follow-up completing must not mint a third (Codex r3).
-// Trapping programs deliberately chain and are excluded.
-const TWO_TREATMENT_PACKAGE_KEYS = new Set(['cockroach_control', 'bed_bug_treatment']);
+  typedFollowupVerdict,
+  typedFollowupObligationForCompletedSource,
+  parkFollowupAlert,
+  TWO_TREATMENT_PACKAGE_KEYS,
+} = require('../services/typed-followup-obligation');
 
 // Report/track egress (AGENTS.md): entry-code shapes that must never persist
 // into customer-visible completion text. Three shapes: a code word near a
@@ -4197,6 +4196,25 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // completion. Race rejection → no completion → no MOA alert.
     const fromStatus = svc.status;
     const { transitionJobStatus } = require('../services/job-status');
+    // Final follow-up verdict for typed completions (profiles
+    // followup_policy / default_followup_days, adjusted by the shared
+    // override chain). Computed BEFORE the durable transaction so the
+    // follow_up_needed alert parks ATOMICALLY with the completion below —
+    // a post-commit best-effort write that failed was unrecoverable once
+    // the attempt finalized (Codex r2), and the pre-cutover project flow
+    // parked inside its transaction too (createProjectFollowupAlert). The
+    // resume path re-derives from the committed snapshot instead (its
+    // original transaction already parked or skipped the alert).
+    let followupSuggestion = null;
+    if (typedFindingsType && typedFindings && !isIncompleteVisit && claim.action === 'proceed') {
+      followupSuggestion = typedFollowupVerdict({
+        scheduledService: svc,
+        profile: completionProfile,
+        findingsType: typedFindingsType,
+        values: typedFindings.values || {},
+      });
+    }
+
     let record;
     let turfOcrReadingId = null; // set when a gauge photo was captured → async OCR post-commit
     let linkedLawnAssessmentId = null;
@@ -4720,6 +4738,27 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // old (customer_id, technician_id, service_date) soft-join
         // collided on same-day same-customer-same-tech double visits.
         [record] = await trx('service_records').insert(recordInsert).returning('*');
+
+        // Park the owed follow-up's dispatch alert ATOMICALLY with the
+        // completion (same trx — a completion that commits can never lack
+        // its durable follow-up trace, and an alert-write failure rolls the
+        // whole completion back into a retryable state; Codex r2). The
+        // helper skips when a live linked child already covers the
+        // obligation (the call pipeline pre-books visit 2 — alerting on a
+        // booked follow-up parks a false exception; Codex r2) or an
+        // unresolved alert already exists (visit-outcome path). Emit
+        // defers to commit via createAlertOnce's trx handling.
+        if (followupSuggestion?.required) {
+          await parkFollowupAlert({
+            scheduledService: svc,
+            suggestion: followupSuggestion,
+            serviceRecordId: record.id,
+            serviceName: completionProfile?.serviceName || null,
+            customerName: [svc.first_name, svc.last_name].filter(Boolean).join(' ').trim() || null,
+            source: 'typed_completion',
+            trx,
+          });
+        }
 
         // Before/progress photos captured from Tech Home predate the immutable
         // service_record. Attach them inside this transaction so a failed
@@ -8005,122 +8044,35 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       );
     } catch (e) { logger.error(`[dispatch] Job costing require failed: ${e.message}`); }
 
-    // Follow-up suggestion for typed completions (profiles followup_policy /
-    // default_followup_days). Cockroach only suggests for German — matched on
-    // the canonical registry option value, never display-label text.
-    let followupSuggestion = null;
-    // Crash-resume bypasses runTypedValidation, so typedFindings stays null
-    // even though the committed record already carries the typed snapshot —
-    // without rehydration a resumed attempt would finish without parking the
-    // owed follow-up alert below (Codex r1 P2). The snapshot's values feed
-    // the same override chain (species / followup_required / followup_window
-    // / followup_needed), so the resumed verdict matches the original's.
-    let followupFindings = typedFindings;
-    if (!followupFindings && resumingCommittedCompletion && typedFindingsType) {
-      const resumedSnapshot = parseJsonObject(record?.service_data)?.typedReportSnapshot;
-      if (resumedSnapshot && String(resumedSnapshot.type || '') === String(typedFindingsType)) {
-        followupFindings = { type: typedFindingsType, values: resumedSnapshot.values || {} };
-      }
-    }
-    if (typedFindingsType && followupFindings && !isIncompleteVisit) {
-      followupSuggestion = projectFollowupSuggestion({
-        scheduledService: svc,
-        project: {},
-        profile: completionProfile,
-      });
-      // cockroach_control is exempt from the German-only rule: it is sold
-      // as a two-treatment package (profile alert/14d,
-      // services.requires_follow_up) — the included second visit applies
-      // regardless of species, matching its pre-cutover project-flow
-      // behavior (20260712300000).
-      if (followupSuggestion?.required && typedFindingsType === 'cockroach'
-        && completionProfile?.serviceKey !== 'cockroach_control'
-        && String(followupFindings.values?.species || '') !== 'German') {
-        followupSuggestion = { ...followupSuggestion, required: false, reason: 'species_not_german' };
-      }
-      // Two-treatment packages stop at visit 2: the included follow-up
-      // (followup_included, minted by /schedule-followup) resolves the same
-      // ALERT profile on ITS completion, which would suggest — and let the
-      // CTA mint — a third $0 visit, then a fourth (Codex r3). Trapping
-      // programs deliberately chain and are not in this set.
-      if (followupSuggestion?.required
-        && TWO_TREATMENT_PACKAGE_KEYS.has(completionProfile?.serviceKey)
-        && svc.followup_included === true) {
-        followupSuggestion = { ...followupSuggestion, required: false, reason: 'included_followup_visit' };
-      }
-      // German knockdown: the tech's explicit follow-up selection wins over
-      // the profile's standing ALERT policy — a "No" must not leave the
-      // success overlay demanding a follow-up the customer report says is
-      // not needed, and the selected window drives the suggested date so
-      // the CTA can never book a date the report copy contradicts (Codex
-      // P2 rounds 3–4).
-      if (followupSuggestion?.required && typedFindingsType === 'german_roach_knockdown') {
-        if (String(followupFindings.values?.followup_required || '') === 'No') {
-          followupSuggestion = { ...followupSuggestion, required: false, reason: 'tech_marked_not_required' };
-        } else {
-          const windowDays = KNOCKDOWN_FOLLOWUP_WINDOW_DAYS[String(followupFindings.values?.followup_window || '')];
-          if (windowDays && windowDays !== followupSuggestion.days) {
-            followupSuggestion = projectFollowupSuggestion({
+    // Follow-up suggestion for the RESPONSE (success-overlay CTA). On the
+    // normal path this is the pre-transaction verdict whose alert already
+    // parked atomically inside the completion trx above. On crash-resume,
+    // runTypedValidation was bypassed (typedFindings stays null) and the
+    // original transaction already parked-or-skipped the alert — so
+    // re-derive the verdict from the committed snapshot purely so the
+    // resumed response still carries the CTA, and best-effort re-park to
+    // cover completions committed before the in-trx park deployed (the
+    // dedup + live-child guards make this a no-op everywhere else).
+    if (resumingCommittedCompletion && typedFindingsType && !isIncompleteVisit && !followupSuggestion) {
+      try {
+        const obligation = await typedFollowupObligationForCompletedSource({
+          scheduledService: { ...svc, status: 'completed' },
+        });
+        if (obligation?.suggestion) {
+          followupSuggestion = obligation.suggestion;
+          if (followupSuggestion.required) {
+            await parkFollowupAlert({
               scheduledService: svc,
-              project: {},
-              profile: { ...completionProfile, followupPolicy: 'alert', defaultFollowupDays: windowDays },
+              suggestion: followupSuggestion,
+              serviceRecordId: obligation.serviceRecordId || record?.id || null,
+              serviceName: completionProfile?.serviceName || null,
+              customerName: [svc.first_name, svc.last_name].filter(Boolean).join(' ').trim() || null,
+              source: 'typed_completion',
             });
           }
         }
-      }
-      // Palmetto knockdown: the profile policy is 'none', but when the
-      // checklist says a follow-up IS needed the overlay must offer the
-      // scheduling CTA — same 14-day default interval as German.
-      if (typedFindingsType === 'palmetto_roach_knockdown'
-        && String(followupFindings.values?.followup_needed || '') === 'Yes'
-        && !followupSuggestion?.required) {
-        followupSuggestion = {
-          ...projectFollowupSuggestion({
-            scheduledService: svc,
-            project: {},
-            profile: { ...completionProfile, followupPolicy: 'alert', defaultFollowupDays: completionProfile?.defaultFollowupDays ?? 14 },
-          }),
-          reason: 'tech_marked_needed',
-        };
-      }
-      // An owed follow-up must outlive the success overlay: the CTA is the
-      // only place the suggestion surfaces, so tapping "Done" used to drop
-      // the follow-up with no durable trace — nothing parks it and no sweep
-      // re-finds it. Persist the same follow_up_needed dispatch alert the
-      // pre-cutover project flow wrote (createProjectFollowupAlert), deduped
-      // against any unresolved alert on this job (incl. the
-      // visit-outcome=follow_up_needed path). The completion is already
-      // durable here, so a failed alert write logs instead of failing the
-      // response; /schedule-followup resolves the alert when the CTA books.
-      if (followupSuggestion?.required) {
-        try {
-          const { createAlertOnce } = require('../services/dispatch-alerts');
-          const existingFollowupAlert = await db('dispatch_alerts')
-            .where({ type: 'follow_up_needed', job_id: svc.id })
-            .whereNull('resolved_at')
-            .first('id');
-          if (!existingFollowupAlert) {
-            await createAlertOnce({
-              type: 'follow_up_needed',
-              severity: 'info',
-              techId: svc.technician_id || null,
-              jobId: svc.id,
-              payload: {
-                source: 'typed_completion',
-                serviceRecordId: record?.id || null,
-                serviceType: svc.service_type || completionProfile?.serviceName || null,
-                customerId: svc.customer_id || null,
-                customerName: [svc.first_name, svc.last_name].filter(Boolean).join(' ').trim() || null,
-                followupPolicy: followupSuggestion.policy,
-                followupDays: followupSuggestion.days,
-                suggestedFollowupDate: followupSuggestion.suggestedDate,
-              },
-              existingPayloadSource: 'typed_completion',
-            });
-          }
-        } catch (e) {
-          logger.warn(`[dispatch] follow-up alert persist failed for ${svc.id}: ${e.message}`);
-        }
+      } catch (e) {
+        logger.warn(`[dispatch] resumed follow-up derivation failed for ${svc.id}: ${e.message}`);
       }
     }
 
@@ -8549,52 +8501,18 @@ router.post('/:serviceId/schedule-followup', async (req, res, next) => {
         code: 'followup_no_typed_completion',
       });
     }
-    let suggestion = projectFollowupSuggestion({ scheduledService: svc, project: {}, profile });
-    let followupRequired = !!suggestion?.required;
-    // Mirrors /complete: cockroach_control's two-treatment package is exempt
-    // from the German-only rule (20260712300000).
-    if (followupRequired && profile.findingsType === 'cockroach'
-      && profile.serviceKey !== 'cockroach_control') {
-      if (String(snapshot?.values?.species || '') !== 'German') followupRequired = false;
-    }
-    // Mirrors /complete: two-treatment packages stop at visit 2 — an
-    // included follow-up visit never mints another included follow-up
-    // (Codex r3).
-    if (followupRequired
-      && TWO_TREATMENT_PACKAGE_KEYS.has(profile.serviceKey)
-      && svc.followup_included === true) {
-      followupRequired = false;
-    }
-    // Knockdown typed-value overrides mirror /complete (Codex P2 rounds
-    // 3–4): the stored snapshot's explicit German "No" wins over the
-    // profile's ALERT policy, the selected window drives the bookable date,
-    // and a palmetto "Yes" earns the CTA the none-policy profile would
-    // withhold (same 14-day default interval as German).
-    if (followupRequired && profile.findingsType === 'german_roach_knockdown') {
-      if (String(snapshot?.values?.followup_required || '') === 'No') {
-        followupRequired = false;
-      } else {
-        const windowDays = KNOCKDOWN_FOLLOWUP_WINDOW_DAYS[String(snapshot?.values?.followup_window || '')];
-        if (windowDays && windowDays !== suggestion?.days) {
-          suggestion = projectFollowupSuggestion({
-            scheduledService: svc,
-            project: {},
-            profile: { ...profile, followupPolicy: 'alert', defaultFollowupDays: windowDays },
-          });
-          followupRequired = !!suggestion?.required;
-        }
-      }
-    }
-    if (!followupRequired && profile.findingsType === 'palmetto_roach_knockdown'
-      && String(snapshot?.values?.followup_needed || '') === 'Yes') {
-      suggestion = projectFollowupSuggestion({
-        scheduledService: svc,
-        project: {},
-        profile: { ...profile, followupPolicy: 'alert', defaultFollowupDays: profile.defaultFollowupDays ?? 14 },
-      });
-      followupRequired = !!suggestion?.required;
-    }
-    if (!followupRequired) {
+    // The SAME override chain the completion ran (shared module) — the
+    // stored snapshot's values drive it, so a stale or crafted POST can't
+    // mint an included $0 follow-up the completion's verdict withheld
+    // (species rule incl. the cockroach_control exemption, two-treatment
+    // visit-2 stop, German "No"/window selection, palmetto "Yes" upgrade).
+    const suggestion = typedFollowupVerdict({
+      scheduledService: svc,
+      profile,
+      findingsType: profile.findingsType,
+      values: snapshot?.values || {},
+    });
+    if (!suggestion?.required) {
       return res.status(409).json({
         error: 'This completed visit does not call for a follow-up appointment.',
         code: 'followup_not_required',
