@@ -1718,10 +1718,13 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
         customContent: preview.drafts,
         channels: remainingChannels,
         imageUrl: chosenImageUrl,
-        // Per-variant GBP image if one exists, else the run's stored
-        // deterministic GBP card. publishToAll posts GBP text-only when both
-        // are absent — it never falls back to the (possibly AI) imageUrl.
-        gbpImageUrl: httpUrlOrNull(imageVariant?.gbpImageUrl || preview.visual?.gbpImageUrl),
+        // ONLY the run-level deterministic GBP card — never the per-variant
+        // gbpImageUrl. Post-deploy, creative variants carry no GBP URL at all
+        // (wantsGbp:false), so a variant-level value can only be a LEGACY
+        // pre-deploy AI 4:3 scene queued in an old draft — reading it would
+        // publish AI imagery to GBP on approval. publishToAll posts GBP
+        // text-only when the card is absent.
+        gbpImageUrl: httpUrlOrNull(preview.visual?.gbpImageUrl),
         videoUrl: chosenVideoUrl,
         noAiImage: true, // stored visual only — never a fresh literal AI image
         gbpLocationIds: [gbpLocationId],
@@ -1796,8 +1799,9 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
       imageUrl: chosenImageUrl || preview.visual?.imageUrl,
       // Carry the deterministic GBP card forward — a failed attempt stays
       // draft_created and a RETRY re-reads preview.visual.gbpImageUrl; losing
-      // it here would demote the retry's GBP post to text-only.
-      gbpImageUrl: imageVariant?.gbpImageUrl || preview.visual?.gbpImageUrl || null,
+      // it here would demote the retry's GBP post to text-only. Run-level
+      // ONLY: a per-variant gbpImageUrl is a legacy pre-deploy AI scene.
+      gbpImageUrl: preview.visual?.gbpImageUrl || null,
       variant: preview.visual?.variant || 'campaign',
       templateKey: preview.visual?.templateKey,
       creative: chosen.conceptKey ? { conceptKey: chosen.conceptKey, sceneModel: chosen.sceneModel || null } : preview.visual?.creative,
