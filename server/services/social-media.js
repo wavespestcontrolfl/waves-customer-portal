@@ -1217,14 +1217,41 @@ async function postToTwitter(text, link) {
 // image beats a failed post, so any error returns the original URL.
 // Cache is per source URL — a 4-location fan-out composites once; bounded
 // by process lifetime at a few posts/day.
+// SSRF guard: the watermark fetch runs SERVER-side on a caller-supplied URL
+// (admin publish-single accepts arbitrary strings), so only our own image
+// hosts are ever fetched — the social CDN and wavespestcontrol.com. Anything
+// else skips watermarking and posts the ORIGINAL URL (Google fetches that,
+// not us), so loopback/private/metadata endpoints are unreachable and
+// redirects are refused outright (our hosts don't redirect).
+function isTrustedImageHost(value) {
+  try {
+    const url = new URL(String(value));
+    if (url.protocol !== 'https:') return false;
+    const host = url.hostname.toLowerCase();
+    const cdn = String(process.env.SOCIAL_MEDIA_CDN_DOMAIN || '')
+      .toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+    if (cdn && host === cdn) return true;
+    return host === 'wavespestcontrol.com' || host.endsWith('.wavespestcontrol.com');
+  } catch {
+    return false;
+  }
+}
+
+// Cache is TTL'd, not process-lifetime: a 4-location fan-out (seconds apart)
+// composites once, but a stable-URL source whose CONTENT changed (blog hero
+// replaced, then force re-shared) re-fetches. The S3 key hashes the fetched
+// BYTES, so a changed hero mints a new object instead of overwriting.
 const _gbpWatermarkCache = new Map();
+const GBP_WATERMARK_CACHE_TTL_MS = 10 * 60 * 1000;
 async function watermarkGbpImage(imageUrl) {
   try {
-    if (_gbpWatermarkCache.has(imageUrl)) return _gbpWatermarkCache.get(imageUrl);
+    if (!isTrustedImageHost(imageUrl)) return imageUrl;
+    const cached = _gbpWatermarkCache.get(imageUrl);
+    if (cached && (Date.now() - cached.at) < GBP_WATERMARK_CACHE_TTL_MS) return cached.out;
     const SocialCardRenderer = require('./social-card-renderer');
     const logo = await SocialCardRenderer.getLogoPngBuffer();
     if (!logo) return imageUrl;
-    const res = await fetch(imageUrl, { redirect: 'follow', signal: AbortSignal.timeout(10000) });
+    const res = await fetch(imageUrl, { redirect: 'error', signal: AbortSignal.timeout(10000) });
     if (!res.ok) return imageUrl;
     const src = Buffer.from(await res.arrayBuffer());
     if (!src.length) return imageUrl;
@@ -1245,10 +1272,10 @@ async function watermarkGbpImage(imageUrl) {
       }])
       .jpeg({ quality: 88 })
       .toBuffer();
-    const hash = require('crypto').createHash('sha1').update(imageUrl).digest('hex').slice(0, 12);
+    const hash = require('crypto').createHash('sha1').update(src).digest('hex').slice(0, 12);
     const url = await uploadImageToS3(composited.toString('base64'), `gbp-wm-${hash}.jpg`);
     const out = url || imageUrl;
-    _gbpWatermarkCache.set(imageUrl, out);
+    _gbpWatermarkCache.set(imageUrl, { out, at: Date.now() });
     return out;
   } catch (err) {
     logger.warn(`[social] GBP watermark failed (posting original image): ${err.message}`);
