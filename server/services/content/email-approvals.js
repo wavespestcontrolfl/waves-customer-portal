@@ -484,10 +484,18 @@ async function sendApprovalRequest(run, opportunity = null) {
   {
     const freshRun = await db('autonomous_runs').where({ id: run.id }).first() || run;
     const opp = row.opportunity_id ? await db('opportunity_queue').where({ id: row.opportunity_id }).first() : null;
+    // A requeue leaves the OLD run's outcome/skip_reason untouched while a
+    // replacement run parks for the same opportunity — the old run must
+    // not be (re)emailed as if it were still the live decision (Codex r16).
+    const newerParked = freshRun.opportunity_id ? await db('autonomous_runs')
+      .where({ opportunity_id: freshRun.opportunity_id, outcome: 'completed_pending_review', shadow_mode: false })
+      .where('created_at', '>', freshRun.created_at || new Date(0))
+      .first() : null;
     const decidedElsewhere = (opp && opp.status !== 'pending_review')
       || !!freshRun.trust_build_approved_at
       || freshRun.outcome !== 'completed_pending_review'
-      || freshRun.skip_reason !== row.kind;
+      || freshRun.skip_reason !== row.kind
+      || !!newerParked;
     if (decidedElsewhere) {
       await db('content_email_approvals').where({ id: row.id, status: 'awaiting_reply' })
         .update({ status: 'superseded', last_error: `decided before email could send (opp ${opp?.status || '?'}, run ${freshRun.skip_reason || freshRun.outcome || '?'}${freshRun.trust_build_approved_at ? ', trust-build approved' : ''})`, updated_at: new Date() });
@@ -581,6 +589,11 @@ async function sweepUnnotifiedRuns() {
     .where('r.outcome', 'completed_pending_review')
     .where('r.shadow_mode', false)
     .where('o.status', 'pending_review')
+    // Approvable kinds filtered IN SQL and oldest-first, so a pile of
+    // gate_fail/brief_requires_human_review parks can't starve the LIMIT
+    // (Codex r16).
+    .whereRaw("r.skip_reason ~ '^(named_competitor_review|trust_build_[0-9]+_of_[0-9]+)$'")
+    .orderBy('r.created_at', 'asc')
     .limit(50)
     // Only the LATEST parked run per opportunity: a requeue leaves the old
     // run parked too, and emailing both would offer the owner a decision

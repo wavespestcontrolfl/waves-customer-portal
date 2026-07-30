@@ -491,20 +491,24 @@ describe('round-5 hardening (Codex r5)', () => {
     const gateSpy = jest.spyOn(gates, 'isEnabled').mockReturnValue(true);
     const updates = [];
     const row = { id: 'x', token: 'EA-oldtoken1', run_id: 'r', opportunity_id: 'o', kind: 'named_competitor_review', email_sent_at: null, email_sending_at: null, draft_sha: 'sha-of-DELIVERED-draft-A' };
-    db.mockImplementation((table) => ({
-      where: jest.fn().mockReturnValue({
+    db.mockImplementation((table) => {
+      const chain = {
         first: jest.fn().mockResolvedValue(
           table === 'content_email_approvals' ? row
-            : table === 'autonomous_runs' ? { id: 'r', outcome: 'completed_pending_review', skip_reason: 'named_competitor_review', trust_build_approved_at: null }
+            : table === 'autonomous_runs' ? { id: 'r', opportunity_id: null, outcome: 'completed_pending_review', skip_reason: 'named_competitor_review', trust_build_approved_at: null, created_at: new Date() }
             : table === 'opportunity_queue' ? { status: 'pending_review' } : null
         ),
         whereNull: jest.fn().mockReturnValue({
           where: jest.fn().mockReturnValue({ update: jest.fn().mockImplementation((p) => { updates.push(p); return Promise.resolve(1); }) }),
         }),
         update: jest.fn().mockImplementation((p) => { updates.push(p); return Promise.resolve(1); }),
-      }),
-      insert: jest.fn().mockReturnValue({ onConflict: jest.fn().mockReturnValue({ ignore: jest.fn().mockReturnValue({ returning: jest.fn().mockResolvedValue([row]) }) }) }),
-    }));
+      };
+      chain.where = jest.fn().mockReturnValue(chain);
+      return {
+        where: jest.fn().mockReturnValue(chain),
+        insert: jest.fn().mockReturnValue({ onConflict: jest.fn().mockReturnValue({ ignore: jest.fn().mockReturnValue({ returning: jest.fn().mockResolvedValue([row]) }) }) }),
+      };
+    });
     try {
       await approvals.sendApprovalRequest({ id: 'r', outcome: 'completed_pending_review', skip_reason: 'named_competitor_review', opportunity_id: 'o', trust_build_approved_at: null, draft_payload: JSON.stringify({ title: 'T', body: 'EDITED draft B' }) });
       const rebind = updates.find((u) => u.draft_sha && u.token);
@@ -610,20 +614,24 @@ describe('round-12 hardening (Codex r12)', () => {
     const gateSpy = jest.spyOn(gates, 'isEnabled').mockReturnValue(true);
     const updates = [];
     const row = { id: 'x', token: 'EA-deadbeef', run_id: 'r', opportunity_id: 'o', kind: 'named_competitor_review', email_sent_at: null, email_sending_at: null, draft_sha: null };
-    db.mockImplementation((table) => ({
-      where: jest.fn().mockReturnValue({
+    db.mockImplementation((table) => {
+      const chain = {
         first: jest.fn().mockResolvedValue(
           table === 'content_email_approvals' ? row
             // FRESH run: portal approval re-parked it as astro_pr_pending_merge
-            : table === 'autonomous_runs' ? { id: 'r', outcome: 'completed_pending_review', skip_reason: 'astro_pr_pending_merge' }
+            : table === 'autonomous_runs' ? { id: 'r', opportunity_id: 'o', outcome: 'completed_pending_review', skip_reason: 'astro_pr_pending_merge', created_at: new Date() }
             // opportunity deliberately still pending_review in the PR flow
             : table === 'opportunity_queue' ? { status: 'pending_review' } : null
         ),
         update: jest.fn().mockImplementation((p) => { updates.push(p); return Promise.resolve(1); }),
         whereNull: jest.fn().mockReturnValue({ where: jest.fn().mockReturnValue({ update: jest.fn().mockResolvedValue(1) }) }),
-      }),
-      insert: jest.fn().mockReturnValue({ onConflict: jest.fn().mockReturnValue({ ignore: jest.fn().mockReturnValue({ returning: jest.fn().mockResolvedValue([row]) }) }) }),
-    }));
+      };
+      chain.where = jest.fn().mockReturnValue(chain);
+      return {
+        where: jest.fn().mockReturnValue(chain),
+        insert: jest.fn().mockReturnValue({ onConflict: jest.fn().mockReturnValue({ ignore: jest.fn().mockReturnValue({ returning: jest.fn().mockResolvedValue([row]) }) }) }),
+      };
+    });
     try {
       // Caller passes the STALE pre-approval run object.
       const result = await approvals.sendApprovalRequest({ id: 'r', skip_reason: 'named_competitor_review', outcome: 'completed_pending_review', opportunity_id: 'o', trust_build_approved_at: null, draft_payload: '{}' });
@@ -643,17 +651,22 @@ describe('round-12 hardening (Codex r12)', () => {
     const gateSpy = jest.spyOn(gates, 'isEnabled').mockReturnValue(true);
     const updates = [];
     const row = { id: 'x', token: 'EA-deadbeef', run_id: 'r', opportunity_id: 'o', kind: 'trust_build_2_of_5', email_sent_at: null, email_sending_at: null, draft_sha: null };
-    db.mockImplementation((table) => ({
-      where: jest.fn().mockReturnValue({
+    db.mockImplementation((table) => {
+      const chain = {
         first: jest.fn().mockResolvedValue(
           table === 'content_email_approvals' ? row
+            : table === 'autonomous_runs' ? { id: 'r', opportunity_id: 'o', outcome: 'completed_pending_review', skip_reason: 'trust_build_2_of_5', trust_build_approved_at: null, created_at: new Date() }
             : table === 'opportunity_queue' ? { status: 'done' } : null
         ),
         update: jest.fn().mockImplementation((p) => { updates.push(p); return Promise.resolve(1); }),
         whereNull: jest.fn().mockReturnValue({ where: jest.fn().mockReturnValue({ update: jest.fn().mockResolvedValue(1) }) }),
-      }),
-      insert: jest.fn().mockReturnValue({ onConflict: jest.fn().mockReturnValue({ ignore: jest.fn().mockReturnValue({ returning: jest.fn().mockResolvedValue([row]) }) }) }),
-    }));
+      };
+      chain.where = jest.fn().mockReturnValue(chain);
+      return {
+        where: jest.fn().mockReturnValue(chain),
+        insert: jest.fn().mockReturnValue({ onConflict: jest.fn().mockReturnValue({ ignore: jest.fn().mockReturnValue({ returning: jest.fn().mockResolvedValue([row]) }) }) }),
+      };
+    });
     try {
       const result = await approvals.sendApprovalRequest({ id: 'r', skip_reason: 'trust_build_2_of_5', opportunity_id: 'o', trust_build_approved_at: null, draft_payload: '{}' });
       expect(result.skipped).toBe('decided_before_send');
