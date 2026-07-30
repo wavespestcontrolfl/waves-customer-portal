@@ -1096,13 +1096,17 @@ function linkifyFirst(html, text, url) {
   return `${html.slice(0, idx)}<a href="${url}" style="color:${COLORS.blue};text-decoration:underline;font-weight:600;">${matched}</a>${html.slice(idx + needle.length)}`;
 }
 
-function gifBlock(url, caption) {
+function gifBlock(url, caption, { capHeight = false } = {}) {
   const safeGifUrl = safeUrl(url);
   if (!safeGifUrl) return '';
-  // Same size box as the still-photo visuals (owner 2026-07-30: all
-  // event visuals render at a consistent size).
+  // capHeight: EVENT visuals only (owner 2026-07-30 — GIFs and photos
+  // share one 280px aspect-fit box). Intro and Pest Insider GIFs keep
+  // their natural sizing.
+  const sizing = capHeight
+    ? 'max-width:100%;max-height:280px;width:auto;height:auto;'
+    : 'max-width:100%;height:auto;';
   let html = `<div style="text-align:center;margin:12px 0 8px 0;">
-<img src="${safeGifUrl}" alt="" style="max-width:100%;max-height:280px;width:auto;height:auto;border-radius:10px;display:block;margin:0 auto;" />
+<img src="${safeGifUrl}" alt="" style="${sizing}border-radius:10px;display:block;margin:0 auto;" />
 </div>`;
   if (caption) {
     html += `\n<p style="text-align:center;margin:0 0 16px 0;font-size:14px;font-style:italic;color:${COLORS.muted};line-height:1.4;">${escapeHtml(caption)}</p>`;
@@ -1410,7 +1414,7 @@ async function assembleBeehiivNewsletter(draft) {
       return html;
     }
     const eventGif = eventGifs[i];
-    return eventGif ? gifBlock(eventGif, ev.gifCaption) : '';
+    return eventGif ? gifBlock(eventGif, ev.gifCaption, { capHeight: true }) : '';
   };
 
   // No wave-divider squiggle between sections (owner 2026-07-30) —
