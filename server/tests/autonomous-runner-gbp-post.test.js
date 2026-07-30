@@ -226,7 +226,8 @@ describe('_handleGbpPostAction', () => {
     await runner._handleGbpPostAction(baseBrief(), { shadow_mode: false });
 
     expect(social.renderBrandCardUrl).toHaveBeenCalledWith(
-      expect.objectContaining({ variant: 'blog', title: 'pest control sarasota' }),
+      // Explicit eyebrow: location posts must not default to "From the Waves blog".
+      expect.objectContaining({ variant: 'blog', title: 'pest control sarasota', eyebrow: 'Waves Pest Control' }),
       'gbp'
     );
     // Owner rule: no AI imagery on GBP — the AI generator must never run here.
@@ -277,6 +278,22 @@ describe('_handleGbpPostAction', () => {
     expect(social.postToGBP).toHaveBeenCalledTimes(1);
     expect(result.claim).toBe('release');
     expect(result.patch.outcome).toBe('failed_publish');
+  });
+
+  test('a card headline that fails content validation posts text-only (no card render)', async () => {
+    process.env.AUTO_PUBLISH_GBP_POST = 'true';
+    mockDb();
+    social.renderBrandCardUrl.mockResolvedValue('https://cdn.example.com/social-media/gbp.jpg');
+    // First validateContent call = the post copy (valid); second = the card
+    // headline (customer-derived target_keyword — here a banned safety claim).
+    social.validateContent
+      .mockReturnValueOnce({ valid: true, issues: [] })
+      .mockReturnValueOnce({ valid: false, issues: ['Contains safety overclaim'] });
+    const result = await runner._handleGbpPostAction(baseBrief({ target_keyword: 'pet-safe pest control' }), { shadow_mode: false });
+
+    expect(social.renderBrandCardUrl).not.toHaveBeenCalled();
+    expect(result.claim).toBe('complete');
+    expect(social.postToGBP).toHaveBeenCalledWith('sarasota', expect.any(String), expect.any(String), null);
   });
 
   test('card render failure still posts (text-only), does not block publish', async () => {

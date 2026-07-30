@@ -1405,12 +1405,19 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
     // gated by SOCIAL_CREATIVE_ENGINE_ENABLED). An empty result — engine off,
     // provider outage, upload failure — falls through to the legacy SVG brand
     // card below, so the engine can only ever upgrade a post, never block one.
+    // GBP never posts AI imagery (owner rule): creative variants are AI photo
+    // scenes, so the engine is asked for no GBP (4:3) scene at all — GBP takes
+    // the deterministic card render below, same as the non-creative branches.
     const creativeVariants = await creativeVariantsForRun(plan, preview, {
-      isReviewRun, wantsGbp, effectiveMode, now: startedAt,
+      isReviewRun, wantsGbp: false, effectiveMode, now: startedAt,
     });
     if (creativeVariants.length) {
       imageUrl = creativeVariants[0].imageUrl;
-      gbpImageUrl = creativeVariants[0].gbpImageUrl || null;
+      if (wantsGbp) {
+        gbpImageUrl = isReviewRun
+          ? await renderReviewGraphicImageUrl(plan.reviewGraphic, 'gbp')
+          : await renderCampaignImageUrl(plan, preview, 'gbp');
+      }
       finalPreview = previewWithVisual(preview, {
         imageUrl,
         variant: isReviewRun ? 'review' : 'campaign',

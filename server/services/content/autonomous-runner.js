@@ -2209,10 +2209,23 @@ class AutonomousRunner {
     let gbpImageUrl = null;
     try {
       if (imageHostingReady && social.renderBrandCardUrl) {
-        gbpImageUrl = await social.renderBrandCardUrl(
-          { variant: 'blog', title, excerpt: content, cta: 'Learn more' },
-          'gbp',
-        );
+        // The card headline is customer-derived (target_keyword can carry the
+        // opportunity query verbatim) — gate it through the same deterministic
+        // validator as the post copy before rendering it onto a public image.
+        // An invalid headline just means a text-only post. Explicit eyebrow:
+        // these are location posts, not blog shares — never let the card
+        // default to "From the Waves blog".
+        const titleCheck = social.validateContent
+          ? social.validateContent(title, 'gbp')
+          : { valid: true };
+        if (titleCheck.valid) {
+          gbpImageUrl = await social.renderBrandCardUrl(
+            { variant: 'blog', title, excerpt: content, cta: 'Learn more', eyebrow: 'Waves Pest Control' },
+            'gbp',
+          );
+        } else {
+          logger.warn(`[autonomous-runner] GBP card headline failed validation (posting text-only): ${titleCheck.issues?.join('; ')}`);
+        }
       }
     } catch (err) {
       logger.warn(`[autonomous-runner] GBP brand-card render failed (posting text-only): ${err.message}`);
