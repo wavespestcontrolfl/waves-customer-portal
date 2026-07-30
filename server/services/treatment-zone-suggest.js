@@ -22,7 +22,7 @@ const GEMINI_KEY = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '
 const GEMINI_VISION_MODEL = process.env.GEMINI_VISION_MODEL || MODELS.GEMINI_VISION_BEST;
 const GEMINI_VISION_FALLBACK_MODEL = MODELS.GEMINI_VISION_FALLBACK;
 
-const SUGGEST_PROMPT = `You are analyzing a satellite photo of a single residential property for a pest-control perimeter treatment. Identify the OUTER perimeter of the main residence, following the building's outer wall line.
+const SUGGEST_PROMPT = `You are analyzing a satellite photo of a single residential property for a pest-control perimeter treatment. The property being serviced is at the CENTER of the image — neighboring homes are usually visible at the edges; NEVER trace a neighboring building. Identify the OUTER perimeter of the main residence at the center, following the building's outer wall line.
 
 The perimeter MUST include, as one continuous loop:
 - the house itself and any attached garage
@@ -46,7 +46,7 @@ Rules for "perimeter":
 // Lawn visits outline the treated TURF, not the building (owner 2026-07-28):
 // suggesting the residence footprint in lawn mode would save a building
 // perimeter labeled "treated lawn area" on the customer report.
-const LAWN_SUGGEST_PROMPT = `You are analyzing a satellite photo of a single residential property for a lawn-care service. Identify the OUTER boundary of THIS property's maintained lawn (turf/grass) as one continuous loop.
+const LAWN_SUGGEST_PROMPT = `You are analyzing a satellite photo of a single residential property for a lawn-care service. The property being serviced is at the CENTER of the image — neighboring lots are usually visible at the edges. Identify the OUTER boundary of THIS property's maintained lawn (turf/grass) as one continuous loop.
 
 The loop should:
 - Follow the outer edge of the property's grass — where turf meets the street, sidewalk, driveway, landscape beds, fences, or the neighboring lot.
@@ -109,6 +109,94 @@ function normalizeSuggestion(parsed) {
     includesPoolEnclosure: Boolean(parsed.includes_pool_enclosure),
     confidence: Number.isFinite(Number(parsed.confidence)) ? Math.max(0, Math.min(1, Number(parsed.confidence))) : null,
   };
+}
+
+// The map PNG is 1280x960 — angles computed on normalized 0-1 coords would be
+// distorted by the 4:3 frame, so geometry runs in aspect-true space.
+const FRAME_ASPECT = 1280 / 960;
+
+/**
+ * Square up a vision-suggested BUILDING footprint (owner 2026-07-29: raw
+ * model corners wander a few degrees per edge and the trace reads sloppy).
+ * Finds the footprint's dominant orientation, then snaps every edge within
+ * SNAP_DEG of that axis pair to exactly horizontal/vertical in the rotated
+ * frame; genuinely diagonal edges (bay windows, angled lanais) are left
+ * alone. Lawn boundaries are organic — never orthogonalize those.
+ */
+function orthogonalizePerimeter(points) {
+  const SNAP_DEG = 20;
+  const SNAP_RAD = (SNAP_DEG * Math.PI) / 180;
+  if (!Array.isArray(points) || points.length < 4) return points;
+  const px = points.map((p) => ({ x: p.x * FRAME_ASPECT, y: p.y }));
+  const n = px.length;
+
+  // Dominant orientation: length-weighted circular mean of edge angles in the
+  // 90°-periodic domain (multiply angles by 4 so perpendicular edges agree).
+  let sx = 0;
+  let sy = 0;
+  for (let i = 0; i < n; i += 1) {
+    const a = px[i];
+    const b = px[(i + 1) % n];
+    const len = Math.hypot(b.x - a.x, b.y - a.y);
+    const ang = Math.atan2(b.y - a.y, b.x - a.x);
+    sx += len * Math.cos(4 * ang);
+    sy += len * Math.sin(4 * ang);
+  }
+  if (sx === 0 && sy === 0) return points;
+  const theta = Math.atan2(sy, sx) / 4;
+
+  const cosT = Math.cos(-theta);
+  const sinT = Math.sin(-theta);
+  const rot = px.map((p) => ({ x: p.x * cosT - p.y * sinT, y: p.x * sinT + p.y * cosT }));
+
+  // Relaxation passes: each near-axis edge pulls both endpoints onto the
+  // shared coordinate; shared vertices converge geometrically across passes
+  // (8 passes ≈ sub-pixel residual at frame scale).
+  const angleToAxis = (ang) => {
+    // distance to the nearest multiple of 90°
+    const m = Math.abs(ang) % (Math.PI / 2);
+    return Math.min(m, Math.PI / 2 - m);
+  };
+  for (let pass = 0; pass < 8; pass += 1) {
+    for (let i = 0; i < n; i += 1) {
+      const a = rot[i];
+      const b = rot[(i + 1) % n];
+      const ang = Math.atan2(b.y - a.y, b.x - a.x);
+      if (angleToAxis(ang) > SNAP_RAD) continue;
+      const horizontal = Math.abs(Math.cos(ang)) >= Math.abs(Math.sin(ang));
+      if (horizontal) {
+        const my = (a.y + b.y) / 2;
+        a.y = my;
+        b.y = my;
+      } else {
+        const mx = (a.x + b.x) / 2;
+        a.x = mx;
+        b.x = mx;
+      }
+    }
+  }
+
+  const cosB = Math.cos(theta);
+  const sinB = Math.sin(theta);
+  const clamp01 = (v) => Math.max(0, Math.min(1, v));
+  const out = rot.map((p) => ({
+    x: clamp01((p.x * cosB - p.y * sinB) / FRAME_ASPECT),
+    y: clamp01(p.x * sinB + p.y * cosB),
+  }));
+  if (out.some((p) => !Number.isFinite(p.x) || !Number.isFinite(p.y))) return points;
+
+  // Snapping commonly leaves collinear runs along one wall — merge them so
+  // the tech gets true corners to drag, not a bead chain. Keep at least 4.
+  const merged = out.filter((p, i) => {
+    const prev = out[(i - 1 + out.length) % out.length];
+    const next = out[(i + 1) % out.length];
+    const inAng = Math.atan2((p.y - prev.y), (p.x - prev.x) * FRAME_ASPECT);
+    const outAng = Math.atan2((next.y - p.y), (next.x - p.x) * FRAME_ASPECT);
+    let turn = Math.abs(outAng - inAng);
+    if (turn > Math.PI) turn = 2 * Math.PI - turn;
+    return turn > (3 * Math.PI) / 180;
+  });
+  return merged.length >= 4 ? merged : out;
 }
 
 async function geminiSuggest(model, base64Png, prompt) {
@@ -174,7 +262,12 @@ async function suggestTreatmentZone(pngBuffer, opts = {}) {
   for (const attempt of attempts) {
     try {
       const suggestion = normalizeSuggestion(await attempt());
-      if (suggestion) return suggestion;
+      if (suggestion) {
+        if (opts.mode !== 'lawn') {
+          suggestion.perimeter = orthogonalizePerimeter(suggestion.perimeter);
+        }
+        return suggestion;
+      }
     } catch (err) {
       logger.warn(`[treatment-zone-suggest] attempt failed: ${err.message}`);
     }
@@ -182,4 +275,10 @@ async function suggestTreatmentZone(pngBuffer, opts = {}) {
   return null;
 }
 
-module.exports = { suggestTreatmentZone, normalizeSuggestion, SUGGEST_PROMPT, LAWN_SUGGEST_PROMPT };
+module.exports = {
+  suggestTreatmentZone,
+  normalizeSuggestion,
+  orthogonalizePerimeter,
+  SUGGEST_PROMPT,
+  LAWN_SUGGEST_PROMPT,
+};

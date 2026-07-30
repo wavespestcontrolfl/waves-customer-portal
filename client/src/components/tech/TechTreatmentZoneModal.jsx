@@ -15,16 +15,27 @@ import { getAdminAuthToken } from '../../lib/adminAuth';
 import {
   MAP_WIDTH,
   MAP_HEIGHT,
+  MIN_TRACE_ZOOM,
+  buildAlignedBase,
   buildOutlineAccum,
   buildSettledAccum,
   composeSnapshot,
+  dominantAngleRad,
   loadBestMapImage,
+  loadMapImage,
   pathLengthPx,
   pixelToLatLng,
   pxToFeet,
+  rescalePointsForZoom,
+  rotatePointsAboutCenter,
   startSprayEngine,
+  staticMapUrl,
+  unrotatePointAboutCenter,
   exportMapPng,
 } from './treatmentZoneSpray';
+
+// Below this, the home already reads square — don't churn the frame. Radians.
+const ALIGN_MIN_ANGLE = (4 * Math.PI) / 180;
 
 // Two appearances, one component. `dark` is the tech-portal chrome (that
 // surface stays Montserrat + dark palette by rule — see TechHomePage.jsx).
@@ -71,7 +82,11 @@ const LIGHT = {
 
 // Spray visuals stay in customer brand colors (mist + sprayer head), separate
 // from the DARK chrome above — the snapshot lands on the customer report.
-const MIST_COLOR = '#2FA89D';
+// Mist is the bright waves blue (owner 2026-07-29; was teal #2FA89D, then
+// glass navy #04395E which read like a shadow — "friendly, inviting" won).
+// Keep in sync with TracedTreatmentZoneMap.jsx, which replays over the same
+// snapshot.
+const MIST_COLOR = '#0A7EC2';
 const HEAD_COLOR = '#E8622C';
 
 const API = import.meta.env.VITE_API_URL || '';
@@ -136,9 +151,26 @@ export default function TechTreatmentZoneModal({
   // (incl. attached lanai / pool cage) the tech adjusts by dragging corners.
   const [suggesting, setSuggesting] = useState(false);
   const [suggestNote, setSuggestNote] = useState('');
+  // Zoom stepper (owner 2026-07-29): the default frame is sometimes too tight
+  // to finish the trace. `maxZoom` is whatever the initial imagery probe
+  // accepted — deeper was already tried and rejected.
+  const [zoomBusy, setZoomBusy] = useState(false);
+  // Interior spray showcase (owner 2026-07-29): renders the traced footprint
+  // flooded with the brand-blue wash on top of the perimeter band. Area
+  // claim ⇒ requires a closed loop, same rule as lawn outlines.
+  const [interior, setInterior] = useState(false);
   const dragRef = useRef(null); // { index, moved } while a corner drag is live
   const traceRef = useRef(null);
   const canvasRef = useRef(null);
+  // Waves mascot rides the spray line as the emitter (owner 2026-07-29).
+  // Same-origin asset — no canvas taint; engine falls back to the circle
+  // head until it loads.
+  const logoRef = useRef(null);
+  useEffect(() => {
+    const im = new Image();
+    im.onload = () => { logoRef.current = im; };
+    im.src = '/waves-logo.png';
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -192,7 +224,9 @@ export default function TechTreatmentZoneModal({
         }
         if (!center) throw new Error('No location on file for this visit.');
         const { image, url, zoom } = await loadBestMapImage(center.lat, center.lng, MAPS_KEY);
-        if (!cancelled) setMapState({ status: 'ready', center, zoom, url, image });
+        // angle = how far the displayed frame is rotated from north-up (rad).
+        // 0 until auto-trace finds the home's orientation and squares it up.
+        if (!cancelled) setMapState({ status: 'ready', center, zoom, maxZoom: zoom, url, image, angle: 0 });
       } catch (err) {
         if (!cancelled) setMapState({ status: 'error', message: err.message || 'Map failed to load.' });
       }
@@ -272,7 +306,28 @@ export default function TechTreatmentZoneModal({
           ? 'Could not detect the lawn outline — trace it manually.'
           : 'Could not detect the building outline — trace it manually.'));
       }
-      setPoints(data.suggestion.perimeter.map((pt) => ({ x: pt.x * MAP_WIDTH, y: pt.y * MAP_HEIGHT })));
+      let pts = data.suggestion.perimeter.map((pt) => ({ x: pt.x * MAP_WIDTH, y: pt.y * MAP_HEIGHT }));
+      // Align the photo with the home (owner 2026-07-29): satellite tiles are
+      // north-up, so homes on angled lots render crooked. The suggested
+      // footprint gives us the home's orientation — rotate the working frame
+      // so the walls sit square, and rotate the suggestion with it. Fail-soft:
+      // any hiccup keeps the north-up frame. Lawn boundaries are organic —
+      // no meaningful orientation to align to.
+      if (!lawnMode) {
+        const tilt = dominantAngleRad(pts, true);
+        if (Math.abs(tilt) > ALIGN_MIN_ANGLE) {
+          try {
+            const { center, zoom, angle = 0 } = mapState;
+            const aligned = await buildAlignedBase(center.lat, center.lng, zoom, MAPS_KEY, angle + tilt);
+            const rotated = rotatePointsAboutCenter(pts, tilt);
+            if (rotated.every((p) => p.x >= 0 && p.y >= 0 && p.x <= MAP_WIDTH && p.y <= MAP_HEIGHT)) {
+              setMapState((prev) => ({ ...prev, image: aligned.image, url: aligned.url, angle: angle + tilt }));
+              pts = rotated;
+            }
+          } catch { /* keep the north-up frame */ }
+        }
+      }
+      setPoints(pts);
       setClosed(true);
       setSuggestNote(data.suggestion.includesPoolEnclosure
         ? `Auto-traced — pool enclosure included. Drag any corner to adjust, then ${lawnMode ? 'Set outline' : 'Play spray'}.`
@@ -284,15 +339,85 @@ export default function TechTreatmentZoneModal({
     }
   };
 
-  const save = useCallback(async (accum) => {
+  // Step the map zoom in place. The Static Map re-centers on the same
+  // lat/lng, so dropped points re-project exactly (pure 2× scale per step) —
+  // linear-ft and lat/lng math follow mapState.zoom automatically.
+  const changeZoom = async (delta) => {
+    if (zoomBusy || step !== 'trace' || mapState.status !== 'ready') return;
+    const target = mapState.zoom + delta;
+    if (target < MIN_TRACE_ZOOM || target > mapState.maxZoom) return;
+    const scaled = rescalePointsForZoom(points, delta);
+    // Zooming in pushes points outward — never let a dropped point leave the
+    // frame where it becomes untappable and undraggable.
+    if (delta > 0 && scaled.some((p) => p.x < 0 || p.y < 0 || p.x > MAP_WIDTH || p.y > MAP_HEIGHT)) {
+      setSuggestNote('Your trace fills the frame — finish it at this zoom.');
+      return;
+    }
+    setZoomBusy(true);
+    try {
+      let next;
+      if (mapState.angle) {
+        // Aligned frame: rebuild the rotated crop at the new zoom.
+        next = await buildAlignedBase(mapState.center.lat, mapState.center.lng, target, MAPS_KEY, mapState.angle);
+      } else {
+        const url = staticMapUrl(mapState.center.lat, mapState.center.lng, target, MAPS_KEY);
+        next = { url, image: await loadMapImage(url) };
+      }
+      setMapState((prev) => ({ ...prev, zoom: target, url: next.url, image: next.image }));
+      setPoints(scaled);
+    } catch {
+      setSuggestNote('That zoom level failed to load — try again.');
+    } finally {
+      setZoomBusy(false);
+    }
+  };
+
+  const save = useCallback(async () => {
     setSaveState('saving');
     try {
-      const { center, zoom, url, image } = mapState;
-      const blob = await composeSnapshot(image, accum, url);
+      const { center, zoom, url, image, angle = 0 } = mapState;
+      // Align the SAVED frame with the home (owner 2026-07-29). Manual traces
+      // usually run on the north-up display — square the snapshot to the
+      // traced loop's own dominant angle so the customer report shows the
+      // home straight-on. Display-aligned frames (auto-trace) come through
+      // with tilt ≈ 0 and skip this. Fail-soft to the north-up save. Lawn
+      // outlines are organic — nothing meaningful to align to.
+      let finalPoints = points;
+      let base = image;
+      let baseUrl = url;
+      let totalAngle = angle;
+      if (!lawnMode && MAPS_KEY) {
+        const tilt = dominantAngleRad(points, closed);
+        if (Math.abs(tilt) > ALIGN_MIN_ANGLE) {
+          try {
+            const aligned = await buildAlignedBase(center.lat, center.lng, zoom, MAPS_KEY, angle + tilt);
+            const rotated = rotatePointsAboutCenter(points, tilt);
+            if (rotated.every((p) => p.x >= 0 && p.y >= 0 && p.x <= MAP_WIDTH && p.y <= MAP_HEIGHT)) {
+              base = aligned.image;
+              baseUrl = aligned.url;
+              finalPoints = rotated;
+              totalAngle = angle + tilt;
+            }
+          } catch { /* save the north-up frame */ }
+        }
+      }
+      const accum = lawnMode
+        ? buildOutlineAccum({ width: MAP_WIDTH, height: MAP_HEIGHT, points: finalPoints, closed, color: MIST_COLOR })
+        : buildSettledAccum({
+          width: MAP_WIDTH, height: MAP_HEIGHT, points: finalPoints, closed,
+          mistColor: MIST_COLOR, interior,
+        });
+      const blob = await composeSnapshot(base, accum, baseUrl);
       const fd = new FormData();
       fd.append('snapshot', blob, 'treatment-zone.png');
       fd.append('payload', JSON.stringify({
-        pathPoints: points.map((p) => ({ px: p, latLng: pixelToLatLng(p, center, zoom) })),
+        // px lives in the (possibly rotated) snapshot's space — the report
+        // replay overlays it on that snapshot. lat/lng is true ground truth:
+        // the point is un-rotated back to north-up map space first.
+        pathPoints: finalPoints.map((p) => ({
+          px: p,
+          latLng: pixelToLatLng(unrotatePointAboutCenter(p, totalAngle), center, zoom),
+        })),
         closedLoop: closed,
         linearFt: Math.round(totalFeet),
         lat: center.lat,
@@ -301,8 +426,9 @@ export default function TechTreatmentZoneModal({
         address: address || null,
         // Discriminates the outline workflow from the perimeter spray trace —
         // the report only labels a trace "treated lawn area" when it was
-        // actually captured as one (codex P1 #3038).
-        captureMode: lawnMode ? 'lawn' : 'perimeter',
+        // actually captured as one (codex P1 #3038). 'interior' = building
+        // footprint + interior wash (owner 2026-07-29).
+        captureMode: lawnMode ? 'lawn' : (interior ? 'interior' : 'perimeter'),
       }));
       const token = getAdminAuthToken();
       const res = await fetch(`${API}/api/tech/services/${serviceId}/treatment-zone`, {
@@ -320,7 +446,7 @@ export default function TechTreatmentZoneModal({
     } catch (err) {
       setSaveState(err.message || 'Save failed');
     }
-  }, [mapState, points, closed, totalFeet, address, serviceId, onSaved]);
+  }, [mapState, points, closed, totalFeet, address, serviceId, onSaved, lawnMode, interior]);
 
   useEffect(() => {
     if (step !== 'play' || mapState.status !== 'ready') return undefined;
@@ -341,7 +467,7 @@ export default function TechTreatmentZoneModal({
       ctx.clearRect(0, 0, MAP_WIDTH, MAP_HEIGHT);
       ctx.drawImage(outline, 0, 0);
       setStatus({ phase: 'settled', pct: 1, feet: totalFeet });
-      save(outline);
+      save();
       return undefined;
     }
     setStatus({ phase: 'spraying', pct: 0, feet: 0 });
@@ -355,6 +481,8 @@ export default function TechTreatmentZoneModal({
       closed,
       mistColor: MIST_COLOR,
       headColor: HEAD_COLOR,
+      logoImage: logoRef.current,
+      interior,
       durationMs: Math.round(Math.min(8000, Math.max(6000, totalPx * 3))),
       totalFeet,
       reducedMotion: window.matchMedia('(prefers-reduced-motion: reduce)').matches,
@@ -366,17 +494,11 @@ export default function TechTreatmentZoneModal({
       },
       onSettled: () => {},
     });
-    // Save IMMEDIATELY with a fully-settled offscreen band — the on-screen
-    // spray is presentation. Waiting for the animation to finish let an
-    // impatient Done/backdrop tap unmount the modal before onSettled fired,
-    // silently losing the trace.
-    save(buildSettledAccum({
-      width: MAP_WIDTH,
-      height: MAP_HEIGHT,
-      points,
-      closed,
-      mistColor: MIST_COLOR,
-    }));
+    // Save IMMEDIATELY — the on-screen spray is presentation. Waiting for the
+    // animation to finish let an impatient Done/backdrop tap unmount the
+    // modal before onSettled fired, silently losing the trace. save() builds
+    // its own fully-settled band offscreen (home-aligned when applicable).
+    save();
     return () => engine.stop();
     // deps intentionally omit `save`: points/closed/map are frozen while playing
   }, [step, runKey, mapState.status]);
@@ -385,7 +507,9 @@ export default function TechTreatmentZoneModal({
   const statusText = lawnMode
     ? `Treated lawn area outlined — ${Math.round(totalFeet)} linear ft`
     : settled
-      ? `Barrier set — ${Math.round(totalFeet)} linear ft treated`
+      ? (interior
+        ? `Home protected — interior + ${Math.round(totalFeet)} linear ft perimeter`
+        : `Barrier set — ${Math.round(totalFeet)} linear ft treated`)
       : `Applying perimeter barrier — ${Math.round(status.pct * 100)}%`;
 
   // Every close path locks while the upload is in flight (same reason
@@ -492,7 +616,7 @@ export default function TechTreatmentZoneModal({
           <>
             <p style={{ margin: '0 0 10px', fontSize: smallText, color: T.muted }}>
               {points.length === 0
-                ? 'Auto-trace the building outline (pool cage included), or tap the photo to drop points yourself.'
+                ? 'Auto-trace the building outline (pool cage included), or tap the photo to drop points yourself. Photo too tight? Tap − to zoom out.'
                 : 'Tap the photo to drop points along the treated line. Drag any point to adjust it.'}
               {points.length >= 3 && !closed ? ' Tap the first point again to close the loop.' : ''}
             </p>
@@ -500,21 +624,38 @@ export default function TechTreatmentZoneModal({
               <p style={{ margin: '0 0 10px', fontSize: smallText, fontWeight: light ? 500 : 600, color: T.accent }}>{suggestNote}</p>
             ) : null}
             {mapFrame(
+              <>
               <svg
                 viewBox={`0 0 ${MAP_WIDTH} ${MAP_HEIGHT}`}
                 aria-hidden="true"
                 style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'none' }}
               >
+                {/* Closed loop pulses (owner 2026-07-29): dashed while
+                    tracing, solid + breathing once the loop completes. The
+                    brand-navy line rides a white casing — navy alone sinks
+                    into satellite imagery. */}
+                {closed && (
+                  <style>{'@keyframes tzLoopPulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }'}</style>
+                )}
                 {points.length > 1 && (
-                  <polyline
-                    points={(closed ? [...points, points[0]] : points).map((p) => `${p.x},${p.y}`).join(' ')}
-                    fill="none"
-                    stroke={MIST_COLOR}
-                    strokeWidth={5}
-                    strokeDasharray="14 12"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
+                  <g style={closed ? { animation: 'tzLoopPulse 2s ease-in-out infinite' } : undefined}>
+                    {[
+                      { stroke: '#FFFFFF', width: closed ? 16 : 10, opacity: 0.85 },
+                      { stroke: MIST_COLOR, width: closed ? 9 : 5, opacity: 1 },
+                    ].map((line) => (
+                      <polyline
+                        key={line.stroke}
+                        points={(closed ? [...points, points[0]] : points).map((p) => `${p.x},${p.y}`).join(' ')}
+                        fill="none"
+                        stroke={line.stroke}
+                        strokeOpacity={line.opacity}
+                        strokeWidth={line.width}
+                        strokeDasharray={closed ? undefined : '14 12'}
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    ))}
+                  </g>
                 )}
                 {points.map((p, i) => (
                   <g key={i}>
@@ -528,7 +669,34 @@ export default function TechTreatmentZoneModal({
                     />
                   </g>
                 ))}
-              </svg>,
+              </svg>
+              <div style={{ position: 'absolute', top: 8, right: 8, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {[
+                  { label: '+', delta: 1, blocked: mapState.zoom >= mapState.maxZoom },
+                  { label: '−', delta: -1, blocked: mapState.zoom <= MIN_TRACE_ZOOM },
+                ].map(({ label, delta, blocked }) => (
+                  <button
+                    key={label}
+                    type="button"
+                    aria-label={delta > 0 ? 'Zoom in' : 'Zoom out'}
+                    disabled={blocked || zoomBusy}
+                    // The frame's pointerdown drops trace points — the zoom
+                    // buttons must never bubble into it.
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onClick={(e) => { e.stopPropagation(); changeZoom(delta); }}
+                    style={{
+                      width: 40, height: 40, borderRadius: 8, border: 'none',
+                      background: 'rgba(15,25,35,0.72)', color: '#fff',
+                      fontSize: 22, lineHeight: 1, fontWeight: 600,
+                      cursor: blocked || zoomBusy ? 'default' : 'pointer',
+                      opacity: blocked ? 0.35 : 1, touchAction: 'manipulation',
+                    }}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              </>,
               { cursor: 'crosshair', touchAction: 'none' },
             )}
             <p style={{ margin: '10px 0', fontSize: smallText, fontWeight: strong, color: T.text }}>
@@ -565,19 +733,36 @@ export default function TechTreatmentZoneModal({
               {/* A lawn OUTLINE is an area claim — it needs a closed loop of
                   3+ points before it can be set; an open 2-point line would
                   save captureMode 'lawn' and read as a treated lawn area on
-                  the report (codex P2 #3038). Perimeter mode keeps its
-                  open-path spray behavior. */}
+                  the report (codex P2 #3038). Interior spray is an area
+                  claim too, so it carries the same closed-loop gate.
+                  Plain perimeter keeps its open-path spray behavior. */}
               <button
-                style={btnStyle('primary', lawnMode ? (points.length < 3 || !closed) : points.length < 2)}
-                disabled={lawnMode ? (points.length < 3 || !closed) : points.length < 2}
+                style={btnStyle('primary', (lawnMode || interior) ? (points.length < 3 || !closed) : points.length < 2)}
+                disabled={(lawnMode || interior) ? (points.length < 3 || !closed) : points.length < 2}
                 onClick={() => setStep('play')}
               >
                 {lawnMode ? 'Set outline' : 'Play spray'}
               </button>
             </div>
-            {lawnMode && points.length >= 3 && !closed && (
+            {!lawnMode && (
+              /* Interior spray showcase (owner 2026-07-29): also flood the
+                 traced footprint with the brand-blue wash on the report. */
+              <label style={{
+                display: 'flex', alignItems: 'center', gap: 8, margin: '10px 0 0',
+                fontSize: smallText, color: T.text, cursor: 'pointer', width: 'fit-content',
+              }}>
+                <input
+                  type="checkbox"
+                  checked={interior}
+                  onChange={(e) => setInterior(e.target.checked)}
+                  style={{ width: 18, height: 18, accentColor: light ? LIGHT.accent : DARK.accent }}
+                />
+                Interior spray too — shade the whole home as treated
+              </label>
+            )}
+            {(lawnMode || interior) && points.length >= 3 && !closed && (
               <p style={{ margin: '8px 0 0', fontSize: smallText, color: T.muted }}>
-                Tap Close loop to finish the lawn outline.
+                Tap Close loop to finish the {lawnMode ? 'lawn outline' : 'home footprint'}.
               </p>
             )}
           </>
