@@ -18,6 +18,7 @@
 
 const db = require('../../../models/db');
 const logger = require('../../logger');
+const { toE164 } = require('../../../utils/phone');
 
 /**
  * @param {import('../policy').SendCustomerMessageInput} input
@@ -82,20 +83,54 @@ async function checkSuppression(input, _policy, contactState) {
 async function loadSuppressionState(input, contactState) {
   if (!input || !input.to) return contactState;
   try {
+    // Suppression rows written by the Twilio webhook carry the canonical
+    // E.164 sender value, but input.to can arrive formatted (e.g.
+    // '+44 20 7946 0958' survives normalizeRecipient). Query both forms —
+    // an exact-only match would miss an ACTIVE STOP while the (equally
+    // canonicalized) inbound-history evidence matches, and the consent
+    // validator's no-prefs exception would send to an opted-out number
+    // (Codex P1 on PR #3057, 2396f5557).
+    const candidates = [...new Set([input.to, toE164(input.to)].filter(Boolean))];
     const row = await db('messaging_suppression')
-      .where({ phone: input.to, active: true })
+      .whereIn('phone', candidates)
+      .where({ active: true })
       .first();
     if (row) {
       contactState.suppression = row;
     }
+    // Positive-load marker: the query SUCCEEDED (row or clean no-row).
+    // The consent validator's no-prefs conversational exception requires
+    // this — transient errors and the missing-table state both leave it
+    // unset, so unknown suppression state can never authorize that
+    // exception even though legacy paths below stay fail-open.
+    contactState.suppressionLoaded = true;
   } catch (err) {
-    if (err && /relation .* does not exist|messaging_suppression/i.test(err.message)) {
-      // Migration not yet applied. Fail open — the consent validator's
-      // sms_enabled=false path still catches the most common opt-out case
-      // (which the existing twilio-webhook STOP handler already writes).
+    // ONLY the undefined-relation error (Postgres 42P01) means "migration
+    // not yet applied" and may fail open. Matching any error that merely
+    // mentions the table name (e.g. "permission denied for table
+    // messaging_suppression") would skip the failure flag below and let
+    // the consent validator's no-prefs exception send to a possibly
+    // suppressed number (Codex P1 on 5fbf59c8b).
+    if (err && (err.code === '42P01' || /relation .* does not exist/i.test(err.message || ''))) {
+      // Migration not yet applied. Fail open for the legacy paths — the
+      // consent validator's sms_enabled=false path still catches the most
+      // common opt-out case (which the existing twilio-webhook STOP handler
+      // already writes). suppressionLoaded stays unset though: in this state
+      // a pre-customer STOP may exist ONLY as an inbound sms_log row
+      // (recordSuppression had no table to write to), which the no-prefs
+      // exception would read as positive reply evidence — so that exception
+      // must treat missing-table as unknown, not clean (Codex P2 on
+      // 2396f5557).
       return contactState;
     }
     logger.warn(`[messaging:suppression] lookup failed: ${err.message}`);
+    // Transient failure: suppression state is UNKNOWN, not empty.
+    // checkSuppression keeps failing open here (recipients with a prefs
+    // row still have the sms_enabled gate), but the consent validator's
+    // no-prefs conversational exception requires positively loaded
+    // suppression state and turns this flag into the retryable
+    // CONSENT_LOOKUP_FAILED (Codex P1 on PR #3057, 92cb96ae4).
+    contactState.suppressionLookupFailed = true;
   }
   return contactState;
 }
