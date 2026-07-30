@@ -311,7 +311,9 @@ describe('cockroach chip path — roachType reaches the engine (2026-07-05)', ()
     const { publicQuotePestLabel } = _internals;
     expect(publicQuotePestLabel({ frequency: 'quarterly', roachType: 'regular' })).toBe('Quarterly Pest Control + Cockroach Treatment');
     expect(publicQuotePestLabel({ frequency: 'quarterly', roachType: 'palmetto' })).toBe('Quarterly Pest Control + Cockroach Treatment');
-    expect(publicQuotePestLabel({ frequency: 'quarterly', roachType: 'german' })).toBe('Quarterly Pest Control + Cockroach Treatment');
+    // German resolves its own configured display name (codex #3078 r3 —
+    // the generic suffix mislabeled German-roach quotes).
+    expect(publicQuotePestLabel({ frequency: 'quarterly', roachType: 'german' })).toBe('Quarterly Pest Control + German Cockroach Treatment');
     // The engine normalizes these to 'none' and prices NO knockdown line —
     // a raw truthiness check would still have appended the label.
     for (const junk of ['false', 'no', 'NONE', 'not-a-roach-type']) {
