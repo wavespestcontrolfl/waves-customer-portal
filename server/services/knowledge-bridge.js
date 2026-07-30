@@ -519,6 +519,30 @@ const KnowledgeBridge = {
         season: assessment.season,
       };
 
+      // Today's treatment context — what was ACTUALLY applied on the linked
+      // visit, plus the technician's own notes. The recommendations must never
+      // advise against or defer a product class the technician already applied
+      // today (owner audit 2026-07-30: "field observations do not currently
+      // support active disease treatment" rendered on the same report as that
+      // day's fungicide application). Fail-soft: missing link/tables just mean
+      // no treatment block in the prompt.
+      let appliedProducts = [];
+      let technicianNotes = '';
+      if (assessment.service_record_id) {
+        try {
+          const serviceRecord = await db('service_records')
+            .where({ id: assessment.service_record_id })
+            .select('technician_notes')
+            .first();
+          technicianNotes = String(serviceRecord?.technician_notes || '').slice(0, 800);
+          appliedProducts = await db('service_products')
+            .where({ service_record_id: assessment.service_record_id })
+            .select('product_name', 'product_category');
+        } catch (treatmentErr) {
+          logger.warn(`[knowledge-bridge] treatment context unavailable for assessment ${assessmentId}: ${treatmentErr.message}`);
+        }
+      }
+
       const month = new Date().getMonth() + 1;
       const monthName = ['January','February','March','April','May','June','July','August','September','October','November','December'][month - 1];
 
@@ -535,10 +559,16 @@ Current Scores (all 0-100, higher = healthier):
 - Weed Suppression: ${scores.weed_suppression}%
 - Color Health: ${scores.color_health}%${scores.stress_damage != null ? `
 - Stress / Damage (TECH-CONFIRMED, consolidates disease, thatch, insect, drought & mechanical): ${scores.stress_damage}%
-  ↳ Fungus Control ${scores.fungus_control}% and Thatch Level ${scores.thatch_level}% are the AI's raw sub-reads only. When the tech-confirmed Stress/Damage is healthy, do NOT recommend fungicide/dethatch treatments those raw sub-reads might otherwise imply; when it is low but fungus/thatch look fine, the damage is drought/mechanical/insect — recommend accordingly.` : `
+  ↳ Fungus Control ${scores.fungus_control}% and Thatch Level ${scores.thatch_level}% are the AI's raw sub-reads only. When the tech-confirmed Stress/Damage is healthy, do NOT recommend NEW fungicide/dethatch treatments those raw sub-reads might otherwise imply (but never contradict an application that already happened today — see the applied-today rule below); when it is low but fungus/thatch look fine, the damage is drought/mechanical/insect — recommend accordingly.` : `
 - Fungus Control: ${scores.fungus_control}%
 - Thatch Level: ${scores.thatch_level}%`}
 - Observations: ${scores.observations || 'None'}
+${appliedProducts.length ? `
+Applied TODAY on this visit (already done — authoritative):
+${appliedProducts.map((p) => `- ${p.product_name}${p.product_category ? ` (${p.product_category})` : ''}`).join('\n')}
+HARD RULE: these applications have already been made. Never recommend against, question, or defer a product class applied today (no "before making a fungicide application" when a fungicide was applied) — frame follow-up as monitoring the lawn's response to today's treatment.` : ''}${technicianNotes ? `
+Technician visit notes (authoritative over photo-derived reads where they conflict):
+${technicianNotes}` : ''}
 
 Protocol References (from Claudeopedia):
 ${protocolEntries.map(e => `[${e.category}] ${e.title}: ${(e.content || '').substring(0, 300)}`).join('\n')}

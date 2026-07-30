@@ -782,12 +782,18 @@ function dynamicHeroSummary(data) {
   return 'Your routine service is complete.';
 }
 
-function conditionRows(conditions = {}) {
+function conditionRows(conditions = {}, { weeklyRainIn = null } = {}) {
+  // Lawn reports show the week's rain (the number the water card and 7-day
+  // chart are built from) so every rain figure on the page agrees; other
+  // lines keep the trailing-24h capture (owner 2026-07-30).
+  const rainRow = Number.isFinite(Number(weeklyRainIn))
+    ? ['Rain this week', weeklyRainIn, ' in']
+    : ['Rain last 24 hr', conditions.rain_24h_in, ' in'];
   const rows = [
     ['Air temp', conditions.temp_f ?? conditions.temp, '°F'],
     ['Humidity', conditions.humidity_pct ?? conditions.humidity, '%'],
     ['Wind', conditions.wind_mph ?? conditions.wind, ' mph'],
-    ['Rain last 24 hr', conditions.rain_24h_in, ' in'],
+    rainRow,
     ['Sky', conditions.sky ?? conditions.cloudCover, ''],
     ['Source', conditions.source, ''],
   ];
@@ -1958,6 +1964,7 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
           conditions={data.conditions || {}}
           weatherCall={data.dynamicContext?.premiumExperience?.weatherCall}
           live={mode === 'live'}
+          weeklyRainIn={data.reportV2?.water?.rainInches ?? null}
         />
       </div>
     </section>
@@ -2124,8 +2131,8 @@ function ReentryReadinessCard({ context, mode, token }) {
   );
 }
 
-function HeroConditions({ conditions, weatherCall, live = false }) {
-  const rows = conditionRows(conditions);
+function HeroConditions({ conditions, weatherCall, live = false, weeklyRainIn = null }) {
+  const rows = conditionRows(conditions, { weeklyRainIn });
   const copy = weatherCall
     ? [weatherCall.headline, weatherCall.body].filter(Boolean).join(' ')
     : conditionInterpretation(conditions);

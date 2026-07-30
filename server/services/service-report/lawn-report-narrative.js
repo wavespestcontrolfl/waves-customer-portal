@@ -25,7 +25,7 @@ const logger = require('../logger');
 const { dispatchWithFallback } = require('../llm/call');
 const { findBannedCustomerCopy } = require('./activity-indicators');
 
-const PROMPT_VERSION = 'lawn_report_v2_narrative_v3'; // v3: + HUMAN_PROSE_RULES (owner style block 07-30)
+const PROMPT_VERSION = 'lawn_report_v2_narrative_v4'; // v4: rain window rule — weekly total, never "since the last visit" (owner audit 07-30)
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const _cache = new Map();
 
@@ -45,7 +45,7 @@ function groundingFacts(v2, ctx) {
     overallStatus: v2.snapshot?.status ?? null,
     grassLabel: ctx.grassLabel || 'lawn',
     diagnosis: (v2.diagnosis || []).map((d) => ({ key: d.key, label: d.label, score: d.score, status: d.status })),
-    water: v2.water ? { status: v2.water.status, rain: v2.water.rainInches, irrigation: v2.water.irrigationInches, total: v2.water.totalInches, target: v2.water.targetInches, confidence: v2.water.confidence } : null,
+    water: v2.water ? { status: v2.water.status, rain: v2.water.rainInches, irrigation: v2.water.irrigationInches, total: v2.water.totalInches, target: v2.water.targetInches, confidence: v2.water.confidence, rainWindow: 'past 7 days ending on the visit date' } : null,
     mowing: v2.mowing && v2.mowing.measuredHeightInches != null ? { status: v2.mowing.status, measured: v2.mowing.measuredHeightInches, idealMin: v2.mowing.idealMinInches, idealMax: v2.mowing.idealMaxInches } : null,
     treatment: v2.treatment ? { focus: v2.treatment.focus, products: (v2.treatment.products || []).map((p) => ({ name: p.name, activeIngredient: p.activeIngredient, kind: p.kind, whatItDoes: p.whatItDoes, targets: p.targets })) } : null,
     trendDirection: trendDirection(v2.trends?.overall),
@@ -82,6 +82,7 @@ You rewrite the customer-facing copy for a post-service LAWN report for Waves Pe
 3. Photo AI shows PATTERNS, not confirmed diagnoses. Never assert a specific disease or insect as confirmed — say "signals"/"patterns we're watching" unless a fact marks it tech-confirmed.
 4. Never say the lawn is "improving"/"recovering"/"better" unless trendDirection is "up". If "down", be honest but calm; if "none", don't reference a trend.
 5. Water: if water.status is "balanced" or "high", do NOT tell the customer to water more — point to coverage or easing back. Only suggest more water when status is "low".
+5b. The rain number is a PAST-7-DAYS total ending on the visit date. Describe the window as "this week" or "the past week" — NEVER "since the last visit", "this cycle", "between visits", or any wording tied to the visit schedule (visits are not weekly), and never present it as a single day's rain.
 6. Mowing: Waves does NOT mow. Frame mowing as how the lawn is being kept and a suggestion to the customer; never say Waves will fix it.
 7. Use active-ingredient names or plain descriptions for products — never hype. Lead with the product's plain-language role and never make a bare chemical name the subject of an instruction to the homeowner ("water in the clothianidin" → "water in today's treatment").
 8. Plain text only. No markdown, no emojis, no headers inside values.

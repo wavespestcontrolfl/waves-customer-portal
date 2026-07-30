@@ -361,7 +361,10 @@ function buildRootCause({ effectiveWaterStatus, coverageWatch, overwatering, mow
   const mowShort = mowing && mowing.status === 'too_short';
   const damage = (diagnosis || []).find((c) => c.key === 'damage_disease_signals');
   const damageBad = damage && (damage.status === 'needs_attention' || damage.status === 'watch');
-  if (overwatering || effectiveWaterStatus === 'surplus') {
+  // A vision-only overwatering flag must not override an active coverage
+  // (dry-spots) story — the two are contradictory on the same page; only a
+  // measured surplus may carry the "too much water" claim alongside it.
+  if (effectiveWaterStatus === 'surplus' || (overwatering && !coverageWatch)) {
     return 'The main driver looks like too much water — easing back on irrigation should do more for fungus, mushrooms, and weed pressure than any single treatment.';
   }
   if (effectiveWaterStatus === 'deficit' && !coverageWatch) {
@@ -371,7 +374,12 @@ function buildRootCause({ effectiveWaterStatus, coverageWatch, overwatering, mow
     return 'The dry-looking areas are most likely uneven sprinkler coverage plus mowing a notch too short — not the whole lawn needing more water.';
   }
   if (coverageWatch) {
-    return 'Total water is on target, so the lighter areas point to uneven sprinkler coverage rather than the lawn needing more water overall.';
+    // "Total water is on target" is a measurement claim — only make it when
+    // the week's water was actually measured as balanced. Unknown rain weeks
+    // get the coverage observation without the on-target assertion.
+    return effectiveWaterStatus === 'balanced'
+      ? 'Total water is on target, so the lighter areas point to uneven sprinkler coverage rather than the lawn needing more water overall.'
+      : 'A few lighter areas are worth watching — that pattern usually points to uneven sprinkler coverage rather than the whole lawn needing more water.';
   }
   if (mowShort && damageBad) {
     return 'Short mowing is likely amplifying heat and stress in the thinner areas — raising the cut height should help them recover.';

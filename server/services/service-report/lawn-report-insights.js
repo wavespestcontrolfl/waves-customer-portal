@@ -65,7 +65,11 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
     cards.push({
       category: 'water', status: 'watch', confidence: 'area_estimated',
       headline: 'Water coverage is the main thing to watch',
-      whatWeSaw: 'Total water for the week looks on target, but one area still reads off.',
+      // "on target" is a measurement claim — only when the week actually
+      // measured balanced; unknown-rain weeks describe the photo read only.
+      whatWeSaw: water && water.status === 'balanced'
+        ? 'Total water for the week looks on target, but one area still reads off.'
+        : 'One area reads drier than the rest of the lawn in today’s photos.',
       whyItMatters: 'That pattern usually points to uneven sprinkler coverage, not the whole lawn needing more water.',
       wavesAction: 'Flagged the area and will recheck it next visit.',
       customerAction: 'Check sprinkler coverage in that area rather than watering the whole yard more.',

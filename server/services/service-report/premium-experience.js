@@ -254,12 +254,14 @@ function buildAiSummaryPersonalityContext({
   primaryMove,
   findings = [],
   applications = [],
+  serviceLine = 'pest',
   now = new Date(),
 } = {}) {
   const inputHash = sha256(stableStringify({
     aiSummary,
     pressureTrend,
     primaryMove,
+    serviceLine,
     findings: findings.map((finding) => ({
       id: finding.id,
       title: finding.title,
@@ -276,12 +278,18 @@ function buildAiSummaryPersonalityContext({
 
   const mainFinding = [...findings].sort(compareFindingPriority)[0];
   const pressureLine = pressureTrend?.customerSummary || 'Service is complete.';
+  // Dedupe methods (mirrors applicationSummary in ai-summary.js) — two products
+  // sharing broadcast_spray must not read "broadcast spray and broadcast spray".
+  const treatedMethods = [...new Set(applications.map((app) => app.methodLabel.toLowerCase()).filter(Boolean))];
   const treatedLine = applications.length
-    ? `We completed ${applications.map((app) => app.methodLabel.toLowerCase()).filter(Boolean).slice(0, 2).join(' and ')} for this visit.`
+    ? `We completed ${treatedMethods.slice(0, 2).join(' and ')} for this visit.`
     : 'We documented today’s service and recommendations.';
+  const punctuated = (text) => (/[.!?]$/.test(text.trim()) ? text.trim() : `${text.trim()}.`);
   const findingLine = mainFinding
-    ? `${mainFinding.title}${mainFinding.detail ? `. ${mainFinding.detail}` : ''}`
-    : 'No material pest activity was documented today.';
+    ? punctuated(`${mainFinding.title}${mainFinding.detail ? `. ${mainFinding.detail}` : ''}`)
+    : (serviceLine === 'lawn'
+      ? 'Routine lawn care was completed today.'
+      : 'No material pest activity was documented today.');
   const moveLine = primaryMove?.title || 'Keep an eye on the areas documented in this report.';
 
   const variants = {
@@ -301,7 +309,9 @@ function buildAiSummaryPersonalityContext({
         : 'Today’s service is wrapped.',
       body: `${findingLine} ${treatedLine}`,
       bullets: [
-        sourceBacked('Lower pressure is better.', ['pressure_trend']),
+        // "Lower pressure is better" is pest-pressure framing — meaningless on
+        // lawn reports, which have no pressure gauge.
+        serviceLine === 'lawn' ? null : sourceBacked('Lower pressure is better.', ['pressure_trend']),
         primaryMove ? sourceBacked(moveLine, primaryMove.sourceKeys) : null,
       ].filter(Boolean),
     },
@@ -669,6 +679,7 @@ async function buildPremiumExperienceContext({
     primaryMove,
     findings: rows.findings,
     applications: rows.applications,
+    serviceLine: record.service_line || 'pest',
     now,
   });
   const propertyDefenseStatus = buildPropertyDefenseStatusContext({
@@ -744,6 +755,7 @@ module.exports = {
         primaryMove,
         findings: normalizedFindings,
         applications: normalizedApplications,
+        serviceLine: record.service_line || 'pest',
         now,
       }),
       primaryMove,
