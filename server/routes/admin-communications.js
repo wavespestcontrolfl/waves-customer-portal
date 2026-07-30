@@ -455,6 +455,26 @@ router.post('/sms', async (req, res, next) => {
       });
     }
 
+    // A reply from the Comms composer is a first response to any open lead
+    // with this phone — stamp the Speed-to-Lead clock (SLA truth only; lead
+    // status/linkage untouched). Operator-approved AI drafts count too: a
+    // human chose to send them. Gated on a REAL provider send —
+    // sendCustomerMessage reports sent:true with a sentinel providerMessageId
+    // on suppression paths (gate off, template disabled, owner-SMS kill)
+    // where nothing actually left. Fail-soft — bookkeeping never breaks a send.
+    try {
+      const { isRealProviderSend } = require('../services/sms-auto-send');
+      if (isRealProviderSend(result)) {
+        const { stampFirstResponseByContact } = require('../services/lead-estimate-link');
+        await stampFirstResponseByContact({
+          phone: to,
+          performedBy: req.technicianId ? `admin:${req.technicianId}` : 'admin',
+        });
+      }
+    } catch (stampErr) {
+      logger.warn(`[admin-communications] first-response stamp failed: ${stampErr.message}`);
+    }
+
     if (verifiedAgentDecision && verifiedAgentDraft) {
       const draftMatched = normalizeReplyForComparison(cleanBody) === normalizeReplyForComparison(verifiedAgentDraft);
       try {
@@ -1619,6 +1639,21 @@ router.post('/schedule-sms', async (req, res, next) => {
     } catch (scheduleErr) {
       if (scheduleErr.statusCode === 409) return res.status(409).json({ error: scheduleErr.message });
       throw scheduleErr;
+    }
+
+    // Scheduling a reply is the operator's response act — stamp the
+    // Speed-to-Lead clock NOW (the scheduled-SMS cron replays human and
+    // automation rows under one entry point, so fire time can't tell them
+    // apart; the decision to respond already happened here). If the queued
+    // send later fails, the failure alert lane surfaces it.
+    try {
+      const { stampFirstResponseByContact } = require('../services/lead-estimate-link');
+      await stampFirstResponseByContact({
+        phone: to,
+        performedBy: req.technicianId ? `admin:${req.technicianId}` : 'admin',
+      });
+    } catch (stampErr) {
+      logger.warn(`[admin-communications] scheduled-reply first-response stamp failed: ${stampErr.message}`);
     }
 
     res.json({ success: true, id: row?.id, scheduledFor: sendAt.toISOString() });

@@ -78,22 +78,30 @@ function performedByFromTechnician(technician) {
 // old send is timed from first_contact_at → sent_at, not first_contact_at → today
 // (which would stamp a wildly inflated response_time_minutes onto the KPI).
 async function recordFirstResponseIfNeeded(database, lead, performedBy = 'system', respondedAt = null) {
-  if (!lead || lead.response_time_minutes != null || !lead.first_contact_at) return;
+  if (!lead || lead.response_time_minutes != null || !lead.first_contact_at) return false;
   const firstContact = new Date(lead.first_contact_at);
   const respondedMs = respondedAt ? new Date(respondedAt).getTime() : Date.now();
   const minutes = Math.max(0, Math.round((respondedMs - firstContact.getTime()) / 60000));
-  if (!Number.isFinite(minutes)) return;
+  if (!Number.isFinite(minutes)) return false;
 
-  await database('leads').where({ id: lead.id }).update({
-    response_time_minutes: minutes,
-    updated_at: new Date(),
-  });
+  // Atomic claim: the loaded row may be stale when two responses land
+  // concurrently (Comms reply racing an estimate send) — condition on the
+  // CURRENT null so exactly one caller stamps and writes the activity row.
+  const updated = await database('leads')
+    .where({ id: lead.id })
+    .whereNull('response_time_minutes')
+    .update({
+      response_time_minutes: minutes,
+      updated_at: new Date(),
+    });
+  if (!updated) return false;
   await database('lead_activities').insert({
     lead_id: lead.id,
     activity_type: 'first_response',
     description: `First response in ${minutes} minutes`,
     performed_by: performedBy,
   });
+  return true;
 }
 
 async function attachLeadToEstimate({
@@ -300,7 +308,74 @@ async function linkRescuedLead(database, lead, estimate, performedBy) {
   return current && String(current.estimate_id) === String(estimate.id) ? 'already_ours' : 'conflict';
 }
 
-async function markLinkedLeadEstimateSent({ estimateId, sendMethod, performedBy = 'system', database = db, originatingNotAfter = null, respondedAt = null }) {
+// SLA truth, decoupled from attribution. An estimate or human reply delivered
+// to a contact IS a first response to EVERY open lead carrying that phone or
+// email — even when the strict linkage tiers refuse to link/advance
+// (ambiguous match, non-originating add-on inquiry, prior won lead). Those
+// guards protect funnel attribution; they must not leave answered leads
+// counting as "still waiting" in the Speed-to-Lead backlog forever (52-lead
+// pileup found in the 2026-07-30 audit — 6 of them had sent estimates).
+// Stamps response_time_minutes only — never status, never estimate_id, never
+// the funnel bridge.
+async function stampFirstResponseByContact({ database = db, phone = null, email = null, performedBy = 'system', respondedAt = null, originatingNotAfter = null, failSoft = true }) {
+  const normPhone = normalizePhone(phone);
+  const normEmail = normalizeEmail(email);
+  if (!normPhone && !normEmail) return 0;
+  let stamped = 0;
+  try {
+    // Positive membership (OPEN_LEAD_STATUSES), not NOT-IN(closed): a
+    // negative filter silently re-includes any status it forgot (cancelled /
+    // spam leads are not closed-set members but are not answerable either).
+    const { OPEN_LEAD_STATUSES } = require('./lead-statuses');
+    const query = database('leads')
+      .whereNull('deleted_at')
+      .whereNull('response_time_minutes')
+      .whereNotNull('first_contact_at')
+      .whereIn('status', OPEN_LEAD_STATUSES)
+      .where(function contactMatch() {
+        if (normPhone) {
+          // normalizePhone yields 10 digits for NANP; anything longer is an
+          // international E.164 tail — match the FULL digit string there, or
+          // a +44 caller would stamp the US lead sharing its last ten digits.
+          // The NANP branch guards the STORED side the same way: only
+          // NANP-shaped rows (10 digits, or 11 leading with 1) suffix-match,
+          // so a US reply can't stamp an international lead sharing its tail.
+          if (normPhone.length === 10) {
+            this.orWhereRaw(
+              "(RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 10) = ?"
+              + " AND (char_length(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g')) = 10"
+              + " OR (char_length(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g')) = 11"
+              + " AND LEFT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 1) = '1')))",
+              [normPhone],
+            );
+          } else {
+            this.orWhereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') = ?", [normPhone]);
+          }
+        }
+        if (normEmail) this.orWhereRaw("LOWER(TRIM(COALESCE(email, ''))) = ?", [normEmail]);
+      });
+    // A response cannot precede the inquiry: on historical replays
+    // (respondedAt from the backfill) only leads that already existed at the
+    // response moment are answered by it. originatingNotAfter (the backfill's
+    // cutoff) narrows the same way — a newer open inquiry sharing the contact
+    // must keep its live SLA clock.
+    if (respondedAt) query.where('first_contact_at', '<=', new Date(respondedAt));
+    if (originatingNotAfter) query.where('first_contact_at', '<=', new Date(originatingNotAfter));
+    const leads = await query;
+    for (const lead of leads) {
+      stamped += (await recordFirstResponseIfNeeded(database, lead, performedBy, respondedAt)) ? 1 : 0;
+    }
+  } catch (e) {
+    // SLA bookkeeping must never break a live send — but repair jobs (the
+    // backfill) pass failSoft:false so a swallowed failure can't report a
+    // clean run while eligible leads stay unstamped.
+    logger.warn(`[lead-estimate-link] first-response contact stamp failed: ${e.message}`);
+    if (!failSoft) throw e;
+  }
+  return stamped;
+}
+
+async function markLinkedLeadEstimateSent({ estimateId, sendMethod, performedBy = 'system', database = db, originatingNotAfter = null, respondedAt = null, sentChannels = null }) {
   if (!estimateId) return;
   const { leads, rescued, estimate } = await resolveEstimateEventLeads(database, estimateId, { originatingNotAfter });
   for (const lead of leads) {
@@ -333,6 +408,37 @@ async function markLinkedLeadEstimateSent({ estimateId, sendMethod, performedBy 
       performed_by: performedBy,
       metadata: JSON.stringify({ estimateId, sendMethod: sendMethod || 'both' }),
     });
+  }
+  // Loose SLA stamp for every OTHER open lead with this estimate's contact —
+  // the strict loop above only reaches leads the attribution guards accepted.
+  // recordFirstResponseIfNeeded no-ops on anything already stamped, so leads
+  // handled above are not double-stamped. Fail-soft like the stamp itself:
+  // SLA bookkeeping never breaks a send.
+  try {
+    const estimateRow = estimate || await database('estimates').where({ id: estimateId }).first();
+    if (estimateRow) {
+      // Only contacts a channel actually REACHED count as answered: an
+      // SMS-only send (or a partial 'both' where the email leg failed) must
+      // not stamp an email-only matching lead. Callers with per-channel
+      // outcomes pass sentChannels — an EMPTY array means nothing real
+      // delivered (e.g. a sentinel-suppressed sms leg) and stamps nothing;
+      // only a missing array falls back to sendMethod.
+      const channels = Array.isArray(sentChannels)
+        ? sentChannels
+        : (sendMethod === 'sms' ? ['sms'] : sendMethod === 'email' ? ['email'] : ['sms', 'email']);
+      await stampFirstResponseByContact({
+        database,
+        phone: channels.includes('sms') ? estimateRow.customer_phone : null,
+        email: channels.includes('email') ? estimateRow.customer_email : null,
+        performedBy,
+        respondedAt,
+        // The backfill's cutoff rides through — a newer inquiry sharing this
+        // contact must not be stamped by a historical replay.
+        originatingNotAfter,
+      });
+    }
+  } catch (e) {
+    logger.warn(`[lead-estimate-link] post-send contact stamp lookup failed for estimate ${estimateId}: ${e.message}`);
   }
 }
 
@@ -1179,6 +1285,7 @@ module.exports = {
   markLinkedLeadEstimateSent,
   markLinkedLeadEstimateViewed,
   markLinkedLeadEstimateAccepted,
+  stampFirstResponseByContact,
   resolveEstimateEventLeads,
   convertLeadFromEvent,
   findUnconvertedLeadsByContact,
