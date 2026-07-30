@@ -294,7 +294,7 @@ function normalizeAddress(value) {
 //                fresh agreement drafted (pre-push P0: a revised accept must
 //                never leave the old-priced legal draft as the live one).
 //  'ignore'    — terminal/expired, or a different property.
-function classifyExistingAgreement(row, estimate, now = new Date()) {
+function classifyExistingAgreement(row, estimate, now = new Date(), { activeVersionIds = null } = {}) {
   if (!row) return 'ignore';
   const status = String(row.status || '').toLowerCase();
   if (!OPEN_STATUSES.includes(status)) return 'ignore';
@@ -305,6 +305,16 @@ function classifyExistingAgreement(row, estimate, now = new Date()) {
     try { snapshot = JSON.parse(snapshot); } catch { snapshot = null; }
   }
   const snapEstimateId = snapshot?.estimate?.id || null;
+  // An open request rendered from a SUPERSEDED template version never
+  // blocks — it must be cancelled and re-prepped from the active body,
+  // even for the same estimate (this is what makes v1 retirement a durable
+  // invariant rather than a one-shot migration snapshot: a request that
+  // races past the migration is superseded on the next accept-time or
+  // daily-sweep touch).
+  const staleVersion = activeVersionIds
+    && row.document_template_version_id
+    && !activeVersionIds.has(row.document_template_version_id);
+  if (staleVersion) return 'supersede';
   if (snapEstimateId && estimate?.id && String(snapEstimateId) === String(estimate.id)) return 'blocks';
 
   const snapAddress = normalizeAddress(snapshot?.estimate?.address || snapshot?.customer?.address);
@@ -318,14 +328,24 @@ async function openProgramAgreements(customerId, conn = db, { forUpdate = false 
     .where({ customer_id: customerId, contract_type: 'document_template' })
     .whereIn('document_template_key', PROGRAM_TEMPLATE_KEYS)
     .whereIn('status', OPEN_STATUSES)
-    .select('id', 'customer_id', 'status', 'share_token_expires_at', 'document_variables_snapshot');
+    .select('id', 'customer_id', 'status', 'share_token_expires_at', 'document_variables_snapshot', 'document_template_version_id');
   return forUpdate ? query.forUpdate() : query;
 }
 
-async function existingBlockingProgramAgreement(customerId, estimate, conn = db) {
+// Active version ids for the two program templates — rows rendered from any
+// other version are stale and get superseded on sight.
+async function activeProgramVersionIds(conn = db) {
+  const rows = await conn('document_templates')
+    .whereIn('template_key', PROGRAM_TEMPLATE_KEYS)
+    .whereNotNull('active_version_id')
+    .select('active_version_id');
+  return new Set(rows.map((r) => r.active_version_id));
+}
+
+async function existingBlockingProgramAgreement(customerId, estimate, conn = db, activeVersionIds = null) {
   const rows = await openProgramAgreements(customerId, conn);
   const now = new Date();
-  return rows.find((row) => classifyExistingAgreement(row, estimate, now) === 'blocks') || null;
+  return rows.find((row) => classifyExistingAgreement(row, estimate, now, { activeVersionIds }) === 'blocks') || null;
 }
 
 // First upcoming non-cancelled visit booked from this estimate — the honest
@@ -478,7 +498,8 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       return { ok: false, skipped: 'figures_unresolved' };
     }
 
-    const existing = await existingBlockingProgramAgreement(customerId, estimate);
+    const activeVersionIds = await activeProgramVersionIds();
+    const existing = await existingBlockingProgramAgreement(customerId, estimate, db, activeVersionIds);
     if (existing) return { ok: true, skipped: 'already_exists', contractId: existing.id };
 
     const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first();
@@ -530,12 +551,12 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       // update, and the completed signature would be clobbered 'cancelled'.
       const openRows = await openProgramAgreements(customerId, trx, { forUpdate: true });
       const nowTs = new Date();
-      if (openRows.some((r) => classifyExistingAgreement(r, estimate, nowTs) === 'blocks')) return null;
+      if (openRows.some((r) => classifyExistingAgreement(r, estimate, nowTs, { activeVersionIds }) === 'blocks')) return null;
       // A revised estimate accepted for the same property supersedes the
       // older open draft — cancel it so exactly one live agreement exists
       // and it carries the ACCEPTED figures. The cancel stays conditional
       // on the row still being open (belt + braces with the row lock).
-      const stale = openRows.filter((r) => classifyExistingAgreement(r, estimate, nowTs) === 'supersede');
+      const stale = openRows.filter((r) => classifyExistingAgreement(r, estimate, nowTs, { activeVersionIds }) === 'supersede');
       for (const staleRow of stale) {
         const cancelled = await trx('customer_contracts')
           .where({ id: staleRow.id })
@@ -625,6 +646,71 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
   }
 }
 
+// Superseded-request reconciliation: replaces requests retired by a
+// template-version upgrade regardless of estimate age. Covers (a) rows the
+// compliance migration cancelled — including estimates older than the main
+// sweep's window — and (b) open rows still carrying a stale version (e.g. a
+// request that raced past the migration during deploy; superseded in-txn by
+// maybeCreate's version-aware classify). Runs with bells ON so re-preps
+// that park (commercial/multi-unit, annual prepay, unresolved figures)
+// hand off to the operator instead of vanishing silently. A SIGNED program
+// row for the customer always blocks re-papering — executed contracts are
+// historical records.
+async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
+  const activeVersionIds = await activeProgramVersionIds();
+  const results = { checked: 0, created: 0, skipped: 0, failed: 0 };
+  if (!activeVersionIds.size) return results;
+
+  const staleOpen = await db('customer_contracts')
+    .whereIn('document_template_key', PROGRAM_TEMPLATE_KEYS)
+    .whereIn('status', OPEN_STATUSES)
+    .whereNotIn('document_template_version_id', [...activeVersionIds])
+    .select('id', 'customer_id', 'status', 'document_variables_snapshot')
+    .limit(limit);
+  const migrationCancelled = await db('customer_contracts')
+    .whereIn('document_template_key', PROGRAM_TEMPLATE_KEYS)
+    .where('status', 'cancelled')
+    .where('cancelled_reason', 'like', 'Superseded by updated compliance wording%')
+    .select('id', 'customer_id', 'status', 'document_variables_snapshot')
+    .limit(limit);
+
+  const seenEstimates = new Set();
+  for (const row of [...staleOpen, ...migrationCancelled]) {
+    if (results.checked >= limit) break;
+    let snapshot = row.document_variables_snapshot;
+    if (typeof snapshot === 'string') {
+      try { snapshot = JSON.parse(snapshot); } catch { snapshot = null; }
+    }
+    const estimateId = snapshot?.estimate?.id || null;
+    if (!estimateId || seenEstimates.has(estimateId)) continue; // manual issues were belled by the migration
+    seenEstimates.add(estimateId);
+    results.checked += 1;
+
+    // Executed v1 agreements stay executed — never re-paper a customer who
+    // already signed.
+    const signed = await db('customer_contracts')
+      .where({ customer_id: row.customer_id })
+      .whereIn('document_template_key', PROGRAM_TEMPLATE_KEYS)
+      .where('status', 'signed')
+      .first('id');
+    if (signed) { results.skipped += 1; continue; }
+
+    const estimate = await db('estimates').where({ id: estimateId }).first();
+    if (!estimate || estimate.status !== 'accepted') { results.skipped += 1; continue; }
+
+    const result = await maybeCreateTermiteProgramAgreement({
+      estimate,
+      customerId: row.customer_id,
+      notifyOnUnresolved: true,
+    });
+    if (result.ok && result.contractId && !result.skipped) results.created += 1;
+    else if (result.ok) results.skipped += 1;
+    else if (['commercial', 'annual_prepay', 'figures_unresolved'].includes(result.skipped)) results.skipped += 1;
+    else results.failed += 1;
+  }
+  return results;
+}
+
 // Daily reconciliation (scheduler, document-lifecycle cron): re-prep any
 // recently accepted termite estimate that has no program agreement —
 // acceptance already committed, so a transient prep failure must not
@@ -691,6 +777,7 @@ async function reconcileTermiteProgramAgreements({ sinceDays = 21, limit = 25 } 
 
 module.exports = {
   isCommercialEstimate,
+  reconcileSupersededProgramAgreements,
   PURCHASE_TEMPLATE_KEY,
   RENTAL_TEMPLATE_KEY,
   PROGRAM_TEMPLATE_KEYS,

@@ -3522,7 +3522,13 @@ function initScheduledJobs() {
     // time (idempotent per-property dedupe; no repeat bells for unresolved
     // figures). Acceptance already committed — prep must be retryable.
     try {
-      const { reconcileTermiteProgramAgreements } = require('./termite-program-agreement');
+      const { reconcileSupersededProgramAgreements, reconcileTermiteProgramAgreements } = require('./termite-program-agreement');
+      // Version-upgrade retirements first (any estimate age, bells on for
+      // parked re-preps), then the standard recent-accepts sweep.
+      const superseded = await reconcileSupersededProgramAgreements();
+      if (superseded.checked) {
+        logger.info(`Termite agreement superseded-reprep: ${superseded.checked} checked, ${superseded.created} created, ${superseded.failed} failed`);
+      }
       const recon = await reconcileTermiteProgramAgreements();
       if (recon.created || recon.failed) {
         logger.info(`Termite agreement reconciliation: ${recon.checked} checked, ${recon.created} created, ${recon.failed} failed`);

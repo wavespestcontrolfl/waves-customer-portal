@@ -288,6 +288,14 @@ describe('classifyExistingAgreement', () => {
     expect(classifyExistingAgreement(row, estimate)).toBe('ignore');
   });
 
+  test('an open row on a STALE template version supersedes even for the same estimate', () => {
+    const active = new Set(['v2-id']);
+    const row = openRow({ document_template_version_id: 'v1-id' });
+    expect(classifyExistingAgreement(row, estimate, new Date(), { activeVersionIds: active })).toBe('supersede');
+    const current = openRow({ document_template_version_id: 'v2-id' });
+    expect(classifyExistingAgreement(current, estimate, new Date(), { activeVersionIds: active })).toBe('blocks');
+  });
+
   test('matching estimate id blocks regardless of address text', () => {
     const row = openRow({
       document_variables_snapshot: JSON.stringify({ estimate: { id: 'est-1', address: 'totally different text' } }),
