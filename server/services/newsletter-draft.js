@@ -169,7 +169,7 @@ Return STRICT JSON (no HTML, no prose outside the JSON):
       "gifCaption": "string (caption-genre punchline, max 12 words)",
       "description": "string (2-4 sentences, includes the event's official name once verbatim — vibe only, no logistics)",
       "scoopLabel": "string (rotating lead-in for highlights)",
-      "highlights": ["string (plain text, no emoji, no bullet marker)"] or null,
+      "highlights": ["string (plain text, no emoji, no bullet marker)"] (REQUIRED, 3-4 items, EVERY event),
       "proTip": "string or null (no 'Pro tip' prefix)",
       "linkText": "string (rotating ticket-link anchor text)",
       "closingLine": "string (bold punchy kicker)"
@@ -1565,7 +1565,9 @@ function buildFlagshipTextBody(draft) {
     // alternatives stay content-equivalent (same fields, nothing extra,
     // nothing less).
     {
-      const hl = Array.isArray(ev.highlights) ? ev.highlights : [];
+      const hl = Array.isArray(ev.highlights)
+        ? ev.highlights
+        : (typeof ev.highlights === 'string' ? [ev.highlights] : []);
       if (hl.length && ev.scoopLabel) lines.push(stripMd(ev.scoopLabel));
       for (const h of hl) {
         const t = plainBulletText(h);

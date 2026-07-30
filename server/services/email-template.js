@@ -398,6 +398,8 @@ function glassPage(T, { preheader, title, contentHtml, msoWidth = 640 }) {
     .dm-page { background: #071F30 !important; background-image: none !important; }
     .dm-card { background: #0C2B42 !important; border-color: #1E4460 !important; }
     .dm-card a { color: #6CC1F0 !important; }
+    .dm-card a.dm-gold, a.dm-gold { color: #1B2C5B !important; }
+    .dm-card a.dm-onnavy, a.dm-onnavy { color: #FFFFFF !important; }
     .dm-lightcard { background: #FFFFFF !important; }
     .dm-text, .dm-text p, .dm-text li { color: #DCE9F3 !important; }
     .dm-card h1, .dm-card h2, .dm-card h3, .dm-card h4, .dm-ink { color: #EAF4FB !important; }
@@ -412,6 +414,8 @@ function glassPage(T, { preheader, title, contentHtml, msoWidth = 640 }) {
   [data-ogsc] .dm-page, [data-ogsb] .dm-page { background: #071F30 !important; background-image: none !important; }
   [data-ogsc] .dm-card, [data-ogsb] .dm-card { background: #0C2B42 !important; border-color: #1E4460 !important; }
   [data-ogsc] .dm-card a { color: #6CC1F0 !important; }
+  [data-ogsc] .dm-card a.dm-gold, [data-ogsc] a.dm-gold { color: #1B2C5B !important; }
+  [data-ogsc] .dm-card a.dm-onnavy, [data-ogsc] a.dm-onnavy { color: #FFFFFF !important; }
   [data-ogsc] .dm-lightcard, [data-ogsb] .dm-lightcard { background: #FFFFFF !important; }
   [data-ogsc] .dm-text, [data-ogsc] .dm-text p, [data-ogsc] .dm-text li { color: #DCE9F3 !important; }
   [data-ogsc] .dm-card h1, [data-ogsc] .dm-card h2, [data-ogsc] .dm-card h3, [data-ogsc] .dm-card h4, [data-ogsc] .dm-ink { color: #EAF4FB !important; }
