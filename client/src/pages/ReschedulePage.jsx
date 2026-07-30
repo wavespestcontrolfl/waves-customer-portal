@@ -16,6 +16,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useParams, useSearchParams } from 'react-router-dom';
+import useStickyStuck from '../hooks/useStickyStuck';
 import { COLORS, FONTS } from '../theme-brand';
 import { FS, FW, LH, SP } from '../theme-doc';
 import { CUSTOMER_SURFACE } from '../theme-customer';
@@ -380,6 +381,9 @@ function V2FloatingAsk({ onSearch, aiFiltered, onShowAll }) {
   const [question, setQuestion] = useState('');
   const [asking, setAsking] = useState(false);
   const [notice, setNotice] = useState(null); // { text, isError }
+  // 57 = the wrap's sticky `top`. Mirrors FloatingAskWaves (ReportViewPage):
+  // while pinned on a phone the bar collapses to the slim ask row.
+  const [stuck, sentinelRef] = useStickyStuck(57);
 
   const ask = async (text) => {
     const q = String((text ?? question) || '').trim();
@@ -397,7 +401,9 @@ function V2FloatingAsk({ onSearch, aiFiltered, onShowAll }) {
   };
 
   return (
-    <div className="rsv2-ask-wrap">
+    <>
+      <div ref={sentinelRef} className="rsv2-ask-sentinel" aria-hidden="true" />
+      <div className="rsv2-ask-wrap" data-stuck={stuck ? '' : undefined}>
       <section data-glass="card" className="rsv2-ask-bar" aria-label="Waves AI — search for a day or time">
         <span className="rsv2-ask-title">Waves AI</span>
         <div className="rsv2-ask-pills" aria-label="Example searches">
@@ -454,7 +460,8 @@ function V2FloatingAsk({ onSearch, aiFiltered, onShowAll }) {
           </div>
         ) : null}
       </section>
-    </div>
+      </div>
+    </>
   );
 }
 
@@ -679,6 +686,9 @@ function V2Styles() {
       .rsv2-hero-meta strong { color: ${S.text}; }
 
       .rsv2-ask-wrap { position: sticky; top: 57px; z-index: 8; margin-bottom: 16px; }
+      /* stuck-detection sentinel (useStickyStuck) — 1px tall so
+         IntersectionObserver tracks it reliably, margin cancels the height */
+      .rsv2-ask-sentinel { height: 1px; margin-bottom: -1px; }
       .rsv2-ask-bar {
         position: relative;
         display: grid;
@@ -794,6 +804,10 @@ function V2Styles() {
           grid-template-columns: auto minmax(0, 1fr);
           border-radius: 16px;
         }
+        /* While pinned on a phone, collapse to the slim ask row — the two-row
+           bar hid a third of the screen (owner screenshot 2026-07-29). */
+        .rsv2-ask-wrap[data-stuck] .rsv2-ask-pills { display: none; }
+        .rsv2-ask-wrap[data-stuck] .rsv2-ask-bar { grid-template-areas: 'title form'; }
       }
 
       .rsv2-best-row { display: flex; flex-direction: column; gap: 8px; }

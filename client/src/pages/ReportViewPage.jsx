@@ -11,6 +11,7 @@ import { PestCustomerConcern } from '../components/report/pestV2/PestReportV2';
 import TracedTreatmentZoneMap from '../components/report/TracedTreatmentZoneMap';
 import MosquitoReportV2Section from '../components/report/mosquitoV2/MosquitoReportV2Section';
 import TreeShrubReportV2Section from '../components/report/treeShrubV2/TreeShrubReportV2Section';
+import useStickyStuck from '../hooks/useStickyStuck';
 import {
   AlertTriangle,
   CheckCircle2,
@@ -2275,6 +2276,10 @@ function FloatingAskWaves({ mode, token, serviceLine, data }) {
   const [question, setQuestion] = useState('');
   const [answer, setAnswer] = useState('');
   const [asking, setAsking] = useState(false);
+  // 57 = the wrap's sticky `top`. While pinned on a phone the bar collapses
+  // to the slim ask row (owner screenshot 2026-07-29: the two-row bar hid a
+  // third of the screen while scrolling).
+  const [stuck, sentinelRef] = useStickyStuck(57);
 
   const ask = async (text) => {
     const q = String((text ?? question) || '').trim();
@@ -2301,7 +2306,9 @@ function FloatingAskWaves({ mode, token, serviceLine, data }) {
   if (mode !== 'live') return null;
 
   return (
-    <div className="floating-ask-wrap">
+    <>
+      <div ref={sentinelRef} className="floating-ask-sentinel" aria-hidden="true" />
+      <div className="floating-ask-wrap" data-stuck={stuck ? '' : undefined}>
       <section data-glass="card" className="floating-ask-bar" aria-label="Waves AI — ask about this report">
         <span className="floating-ask-title">Waves AI</span>
 
@@ -2352,7 +2359,8 @@ function FloatingAskWaves({ mode, token, serviceLine, data }) {
           </div>
         )}
       </section>
-    </div>
+      </div>
+    </>
   );
 }
 
@@ -6539,6 +6547,12 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           z-index: 8;
           margin-top: 20px;
         }
+        /* stuck-detection sentinel (useStickyStuck) — 1px tall so
+           IntersectionObserver tracks it reliably, margin cancels the height */
+        .floating-ask-sentinel {
+          height: 1px;
+          margin-bottom: -1px;
+        }
         .floating-ask-bar {
           display: grid;
           grid-template-areas: 'title pills form';
@@ -6679,6 +6693,13 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               'pills pills';
             grid-template-columns: auto minmax(0, 1fr);
             border-radius: 16px;
+          }
+          /* While pinned on a phone, collapse to the slim ask row — the
+             two-row bar hid a third of the screen over the report content
+             (owner screenshot 2026-07-29). Pills return at the top. */
+          .floating-ask-wrap[data-stuck] .floating-ask-pills { display: none; }
+          .floating-ask-wrap[data-stuck] .floating-ask-bar {
+            grid-template-areas: 'title form';
           }
         }
         /* animated weather mark — live only; the media block below parks it */
