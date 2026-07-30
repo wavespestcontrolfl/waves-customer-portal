@@ -198,6 +198,26 @@ function newsletterDelivered(outcome) {
   return outcome.confirmationEmailSent !== false;
 }
 
+// The send-failed marker ('newsletter_doi_not_confirmed') forces an
+// unconditional resend on retry (skipDedupe) — but when a correction has
+// rotated the subscriber AWAY from the address THIS attempt targeted, the
+// failure is obsolete: the rotated target's own callback owns delivery, and
+// arming the force-resend would double-mail it (Codex #3084 r25). Verify
+// the subscriber still carries the attempted address; rotated → the
+// superseded marker, unverifiable → the fail-closed marker (both keep the
+// dedupe guard intact on retry).
+async function sendFailedMarkerFor(sentEmailLc, dbh) {
+  try {
+    const sub = await dbh('newsletter_subscribers')
+      .whereRaw('LOWER(email) = ?', [String(sentEmailLc || '').trim().toLowerCase()])
+      .first('id');
+    return sub ? 'newsletter_doi_not_confirmed' : 'superseded_during_send';
+  } catch (verifyErr) {
+    logger.warn(`[first-touch-resume] send-failure target verify failed: ${verifyErr.code || verifyErr.name || 'db_error'}`);
+    return 'doi_state_unverified';
+  }
+}
+
 // A pending subscriber whose DOI went out within this window was already
 // resumed by an earlier release — a post-send settle failure or a sibling
 // hold for the same recipient must not fire the confirmation again
@@ -507,7 +527,8 @@ async function resumeHeldFirstTouch({
             patch.status = 'pending';
             // retryReason (e.g. dedupe_linkage_failed) is deliberately NOT
             // the send-failed marker — it must not trigger skipDedupe.
-            patch.last_error = outcome?.retryReason || 'newsletter_doi_not_confirmed';
+            patch.last_error = outcome?.retryReason
+              || await sendFailedMarkerFor(sendEmail, dbh);
           }
         }
       }
@@ -659,6 +680,24 @@ async function runOnePostCommitResume(payload, holdIds, dbh) {
     let holdWasDoiUnconfirmed = false;
     if (holdIds.length) {
       try {
+        // Deny veto BEFORE the send, not only in the settle (Codex #3084
+        // r25): a force-reprocess verdict can stamp a still-releasing hold
+        // between the correction's defer and this callback with the target
+        // unchanged — the conditional settlement would preserve the stamp
+        // only AFTER the prohibited DOI went out. Any grouped hold's deny
+        // vetoes the group's send; the plain re-pend touches no last_error.
+        const denyRow = await dbh('first_touch_holds')
+          .whereIn('id', holdIds)
+          .where({ last_error: 'email_denied_await_correction' })
+          .first('id');
+        if (denyRow) {
+          for (const holdId of holdIds) {
+            await dbh('first_touch_holds').where({ id: holdId })
+              .update({ status: 'pending', updated_at: new Date() });
+          }
+          logger.info('[first-touch-resume] post-commit deny veto — hold(s) stay pending');
+          return { skipped: 'email_denied' };
+        }
         const markerRow = await dbh('first_touch_holds')
           .whereIn('id', holdIds)
           .where({ last_error: 'newsletter_doi_not_confirmed' })
@@ -719,8 +758,10 @@ async function runOnePostCommitResume(payload, holdIds, dbh) {
         // Back to pending — the DOI never confirmed; the next release
         // trigger (or the ledger sweep) retries it. retryReason outcomes
         // (e.g. dedupe_linkage_failed) keep skipDedupe FALSE on retry.
-        // Deny-preserving (r22): a stamp landing mid-callback survives.
-        await repenHoldPreservingDeny(holdId, outcome?.retryReason || 'newsletter_doi_not_confirmed', dbh);
+        // Deny-preserving (r22); the force-resend marker only when the
+        // subscriber still carries the attempted address (r25).
+        await repenHoldPreservingDeny(holdId, outcome?.retryReason
+          || await sendFailedMarkerFor(sentEmailLc, dbh), dbh);
       }
     }
     return outcome;
@@ -961,4 +1002,5 @@ module.exports = {
   repenIfWorkMergedDuringClaim,
   customerCallDoNotContact,
   emailSuppressedForNewLead,
+  sendFailedMarkerFor,
 };

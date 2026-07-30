@@ -20,6 +20,7 @@ let mockCustomerFirstQueue = null; // shift per customers.first(); an Error valu
 let mockSubscriberRow = null; // newsletter_subscribers.first() (DOI dedupe guard)
 let mockSubscriberFirstError = null; // thrown by newsletter_subscribers.first()
 let mockDoiMarkerRow = null; // result of the coalesced resend-marker lookup (r23)
+let mockDenyMarkerRow = null; // result of the coalesced deny-veto lookup (r25)
 let mockDoiMarkerError = null; // thrown by that lookup
 let mockSubscriberUpdates = [];
 let mockSubscriberUpdateError = null;
@@ -32,9 +33,11 @@ let mockEnrollmentUpdates = []; // automation_enrollments update() patches
 jest.mock('../models/db', () => {
   const handler = (table) => {
     let markerFilter = false; // this chain filters on the resend marker
+    let denyFilter = false; // this chain filters on the deny stamp
     const chain = {
       where: jest.fn((arg) => {
         if (arg && arg.last_error === 'newsletter_doi_not_confirmed') markerFilter = true;
+        if (arg && arg.last_error === 'email_denied_await_correction') denyFilter = true;
         return chain;
       }),
       whereIn: jest.fn(() => chain),
@@ -86,6 +89,10 @@ jest.mock('../models/db', () => {
       }),
       first: jest.fn(async () => {
         if (table === 'first_touch_holds') {
+          if (denyFilter) {
+            if (mockDoiMarkerError) throw mockDoiMarkerError;
+            return mockDenyMarkerRow;
+          }
           if (markerFilter) {
             if (mockDoiMarkerError) throw mockDoiMarkerError;
             return mockDoiMarkerRow;
@@ -173,11 +180,14 @@ beforeEach(() => {
   mockMergeFailures = 0;
   mockMergeArgs = [];
   mockCustomerFirstQueue = null;
-  mockSubscriberRow = null;
+  // Default: the subscriber still carries the attempted address, so the
+  // r25 send-failure verify arms the genuine force-resend marker.
+  mockSubscriberRow = { id: 'sub-1' };
   mockSubscriberUpdates = [];
   mockSubscriberUpdateError = null;
   mockSubscriberFirstError = null;
   mockDoiMarkerRow = null;
+  mockDenyMarkerRow = null;
   mockDoiMarkerError = null;
   mockOnFirstTouchClaim = null;
   mockHoldFirstQueue = null;
@@ -508,6 +518,20 @@ describe('resumeHeldNewsletterPostCommit failure paths', () => {
     expect(mockNewsletter).toHaveBeenCalledTimes(1); // resent despite the stamp
   });
 
+  test('a deny stamped on a still-releasing hold vetoes the post-commit send', async () => {
+    // A force-reprocess verdict can stamp the claimed hold between the
+    // correction's defer and this callback with the target unchanged
+    // (Codex #3084 r25) — the veto runs BEFORE the send, and the plain
+    // re-pend leaves the stamp intact.
+    mockDenyMarkerRow = { id: 'hold-1' };
+    const outcome = await resumeHeldNewsletterPostCommit({ holdId: 'hold-1', customerId: 'cust-1', email: 'ok@example.com' });
+    expect(outcome).toMatchObject({ skipped: 'email_denied' });
+    expect(mockNewsletter).not.toHaveBeenCalled();
+    const last = mockHoldUpdates.at(-1);
+    expect(last).toMatchObject({ status: 'pending' });
+    expect(last.last_error).toBeUndefined();
+  });
+
   test('an unverifiable resend-marker lookup re-pends instead of trusting the stamp', async () => {
     mockDoiMarkerError = new Error('pool exhausted');
     const outcome = await resumeHeldNewsletterPostCommit({ holdId: 'hold-1', customerId: 'cust-1', email: 'ok@example.com' });
@@ -606,6 +630,17 @@ describe('mid-send races (r19)', () => {
     const last = mockHoldUpdates.at(-1);
     expect(last).toMatchObject({ status: 'pending' });
     expect(last.last_error).toBeUndefined();
+  });
+
+  test('a send failure to a rotated-away address never arms the force-resend marker', async () => {
+    // Correction B rotated the subscriber away from the attempted address
+    // mid-send — B's own callback owns delivery, and arming the
+    // force-resend (skipDedupe) here would double-mail it (Codex #3084
+    // r25). The superseded marker keeps the retry's dedupe guard intact.
+    mockNewsletter.mockResolvedValueOnce({ subscribed: true, confirmationEmailSent: false });
+    mockSubscriberRow = null; // no subscriber row carries the attempted address
+    await resumeHeldFirstTouch({ callLogId: 'call-1' });
+    expect(mockHoldUpdates.at(-1)).toMatchObject({ status: 'pending', last_error: 'superseded_during_send' });
   });
 
   test('an unverifiable DOI-dedupe lookup fails closed instead of sending', async () => {

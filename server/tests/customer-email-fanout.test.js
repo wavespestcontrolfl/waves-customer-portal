@@ -13,17 +13,20 @@ const mockResume = jest.fn();
 const mockRepenMerged = jest.fn();
 const mockDnc = jest.fn();
 const mockSuppressed = jest.fn();
+const mockSendFailedMarker = jest.fn();
 jest.mock('../services/lead-first-touch-resume', () => ({
   resumeHeldFirstTouch: (...a) => mockResume(...a),
   repenIfWorkMergedDuringClaim: (...a) => mockRepenMerged(...a),
   customerCallDoNotContact: (...a) => mockDnc(...a),
   emailSuppressedForNewLead: (...a) => mockSuppressed(...a),
+  sendFailedMarkerFor: (...a) => mockSendFailedMarker(...a),
 }));
 beforeEach(() => {
   mockResume.mockReset().mockResolvedValue({ resumed: false, enrolled: false, newsletterResume: null });
   mockRepenMerged.mockReset().mockResolvedValue(undefined);
   mockDnc.mockReset().mockResolvedValue(false);
   mockSuppressed.mockReset().mockResolvedValue(false);
+  mockSendFailedMarker.mockReset().mockResolvedValue('newsletter_doi_not_confirmed');
 });
 
 const { propagateCustomerEmailChange, resendPendingConfirmation, emailKey } = require('../services/customer-email-fanout');
@@ -43,8 +46,13 @@ function makeConn(cfg = {}) {
   const conn = (table) => {
     const t = cfg[table] || {};
     let counting = false;
+    let denyProbe = false;
     const qb = {
-      where: (arg) => { calls.push({ table, op: 'where', arg }); return qb; },
+      where: (arg) => {
+        calls.push({ table, op: 'where', arg });
+        if (arg && arg.last_error === 'email_denied_await_correction') denyProbe = true;
+        return qb;
+      },
       whereRaw: (sql, bindings) => { calls.push({ table, op: 'whereRaw', arg: { sql, bindings } }); return qb; },
       whereNull: () => qb,
       whereIn: (col, vals) => { calls.push({ table, op: 'whereIn', arg: { col, vals } }); return qb; },
@@ -53,7 +61,9 @@ function makeConn(cfg = {}) {
       count: () => { counting = true; return qb; },
       first: () => Promise.resolve(counting
         ? ((t.countQueue || []).shift() ?? { n: 0 })
-        : ((t.firstQueue || []).shift() ?? null)),
+        : denyProbe
+          ? (t.denyRow ?? null)
+          : ((t.firstQueue || []).shift() ?? null)),
       update: (patch) => {
         calls.push({ table, op: 'update', arg: patch });
         if (t.updateError) return Promise.reject(t.updateError);
@@ -662,6 +672,25 @@ describe('resendPendingConfirmation', () => {
     const ok = await resendPendingConfirmation(payload, conn);
     expect(ok).toBe(true);
     expect(mockRepenMerged).toHaveBeenCalledWith('hold-1', conn);
+  });
+
+  test('a deny stamped on a deduped hold vetoes the DOI re-send', async () => {
+    // A force-reprocess verdict can stamp a deduped hold between the
+    // correction's commit and this callback (Codex #3084 r25): the veto
+    // runs before the send, and the plain re-pend keeps the stamp.
+    const sendsBefore = sendConfirmationEmail.mock.calls.length;
+    const payload = { id: 811, email: 'samtypo@example.com', confirmation_token: 'tok-1', heldNewsletterHoldIds: ['hold-1'] };
+    const conn = makeConn({
+      ...matchRow(payload),
+      first_touch_holds: { denyRow: { id: 'hold-1' } },
+    });
+    const ok = await resendPendingConfirmation(payload, conn);
+    expect(ok).toBe(false);
+    expect(sendConfirmationEmail.mock.calls.length).toBe(sendsBefore);
+    const holdUpdates = conn.__updates('first_touch_holds');
+    expect(holdUpdates).toHaveLength(1);
+    expect(holdUpdates[0].arg).toMatchObject({ status: 'pending' });
+    expect(holdUpdates[0].arg.last_error).toBeUndefined();
   });
 
   test('a superseded subscriber row skips the stale send and re-pends retryably', async () => {

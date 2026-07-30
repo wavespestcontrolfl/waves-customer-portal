@@ -579,6 +579,35 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
     await repenHolds('target_verify_failed');
     return false;
   }
+  // Deny veto BEFORE the send (Codex #3084 r25): a force-reprocess verdict
+  // can stamp a deduped hold between the correction's commit and this
+  // callback — the deny-preserving settles would only keep the stamp AFTER
+  // the prohibited DOI went out. A deny on ANY deduped hold vetoes the
+  // send; the plain re-pend touches no last_error. Fail-closed.
+  if (holdIds.length) {
+    try {
+      const denyRow = await conn('first_touch_holds')
+        .whereIn('id', holdIds)
+        .where({ last_error: 'email_denied_await_correction' })
+        .first('id');
+      if (denyRow) {
+        logger.info(`[email-fanout] DOI re-send vetoed for subscriber ${pendingConfirmation.id}: hold denied — awaiting correction`);
+        for (const holdId of holdIds) {
+          try {
+            await conn('first_touch_holds').where({ id: holdId })
+              .update({ status: 'pending', updated_at: new Date() });
+          } catch (repenErr) {
+            logger.warn(`[email-fanout] hold ${holdId} re-pend failed: ${repenErr.code || repenErr.name || 'db_error'} (stale-claim window will reclaim)`);
+          }
+        }
+        return false;
+      }
+    } catch (denyErr) {
+      logger.warn(`[email-fanout] DOI re-send deny check failed for subscriber ${pendingConfirmation.id}: ${denyErr.code || denyErr.name || 'db_error'} — not sending`);
+      await repenHolds('target_verify_failed');
+      return false;
+    }
+  }
   // The 'newsletter_doi_not_confirmed' re-pend is scoped to SEND failures
   // only (Codex #3084 r16): retries treat that marker as "must actually
   // re-send" (skipDedupe), so a post-send bookkeeping failure marked the
@@ -594,8 +623,12 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
     // the next release trigger re-sends instead of stranding the pending
     // subscriber (Codex #3084 r9). Via the deny-preserving helper (r23): a
     // denial stamping after the veto checks must not be replaced by the
-    // send-failed marker.
-    await repenHolds('newsletter_doi_not_confirmed');
+    // send-failed marker. The force-resend marker only when the subscriber
+    // still carries the attempted address (r25) — a rotation mid-send makes
+    // this failure obsolete, and the rotated target's own callback owns
+    // delivery.
+    const { sendFailedMarkerFor } = require('./lead-first-touch-resume');
+    await repenHolds(await sendFailedMarkerFor(pendingConfirmation.email, conn));
     return false;
   }
   // Post-send bookkeeping. The stamp is CONDITIONAL on the row still

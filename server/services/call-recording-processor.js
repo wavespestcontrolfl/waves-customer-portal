@@ -6018,44 +6018,47 @@ const CallRecordingProcessor = {
             phone,
             email: extracted.email || null,
           });
-          const [newCust] = await db('customers').insert(applyContactNormalization({
-            account_id: account.accountId,
-            is_primary_profile: !account.existingCustomer,
-            profile_label: account.existingCustomer ? 'Additional property' : 'Primary',
-            first_name: extracted.first_name,
-            last_name: extracted.last_name || null,
-            phone,
-            email: extracted.email || null,
-            address_line1: addrLine || null,
-            city: addrCity || null,
-            state: addrState,
-            zip: addrZip || null,
-            referral_code: code,
-            lead_source: leadSource.source || 'phone_call',
-            lead_source_detail: leadSource.detail || numberConfig?.domain || 'inbound call',
-            pipeline_stage: 'new_lead',
-            pipeline_stage_changed_at: new Date(),
-            nearest_location_id: loc.id,
-          })).returning('*');
+          // Customer creation and its call-creation provenance marker are
+          // ONE transaction (Codex #3084 r23/r25): a crash before the
+          // Step-4 link update leaves the new customer matchable by phone,
+          // and the reclaiming run (createdCustomerFromCall=false) could
+          // never prove authorship — the rebuild would skip the newsletter
+          // DOI forever. Customer row exists ⇒ marker exists; the marker
+          // keys the retry rebuild (never timestamps — a customer someone
+          // else created in the window must not be auto-subscribed). The
+          // customer-link update later in the run re-asserts it (r24).
+          let newCust;
+          await db.transaction(async (trx) => {
+            [newCust] = await trx('customers').insert(applyContactNormalization({
+              account_id: account.accountId,
+              is_primary_profile: !account.existingCustomer,
+              profile_label: account.existingCustomer ? 'Additional property' : 'Primary',
+              first_name: extracted.first_name,
+              last_name: extracted.last_name || null,
+              phone,
+              email: extracted.email || null,
+              address_line1: addrLine || null,
+              city: addrCity || null,
+              state: addrState,
+              zip: addrZip || null,
+              referral_code: code,
+              lead_source: leadSource.source || 'phone_call',
+              lead_source_detail: leadSource.detail || numberConfig?.domain || 'inbound call',
+              pipeline_stage: 'new_lead',
+              pipeline_stage_changed_at: new Date(),
+              nearest_location_id: loc.id,
+            })).returning('*');
+            await trx('call_log').where({ id: call.id }).update({
+              metadata: trx.raw(
+                "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{created_customer_id}', ?::jsonb, true)",
+                [JSON.stringify(String(newCust.id))],
+              ),
+              updated_at: new Date(),
+            });
+          });
           customerId = newCust.id;
           createdCustomerFromCall = true;
           logger.info(`[call-proc] Created customer ${customerId} from call recording`);
-
-          // Call-creation provenance (Codex #3084 r23): the retry rebuild
-          // keys on THIS marker, not timestamps — a customer someone else
-          // created between the call row and the first attempt would pass
-          // a created_at comparison and get wrongly auto-subscribed. This
-          // early copy is best-effort; the marker also rides the durable
-          // customer-link update later in the run (r24), so any state
-          // where customer_id persisted carries the marker. A missing
-          // marker means no rebuild (never a wrong subscribe).
-          await db('call_log').where({ id: call.id }).update({
-            metadata: db.raw(
-              "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{created_customer_id}', ?::jsonb, true)",
-              [JSON.stringify(String(customerId))],
-            ),
-            updated_at: new Date(),
-          }).catch((e) => logger.warn(`[call-proc] call-creation provenance stamp failed for ${maskSid(callSid)}: ${e.message}`));
 
           await db('notification_prefs')
             .insert({ customer_id: customerId })
