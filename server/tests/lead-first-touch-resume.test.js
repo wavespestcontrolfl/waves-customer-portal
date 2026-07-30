@@ -26,8 +26,11 @@ jest.mock('../models/db', () => {
       }),
       // Awaiting the bare chain (the suppressions list query) resolves to
       // table-appropriate rows.
+      update: jest.fn(async () => 1),
       then: (resolve, reject) => Promise.resolve(
-        table === 'email_suppressions' ? (mockSuppressionRow ? [mockSuppressionRow] : []) : []
+        table === 'email_suppressions' ? (mockSuppressionRow ? [mockSuppressionRow] : [])
+          : table === 'triage_items' ? (mockHeldNewsletterRow ? [mockHeldNewsletterRow] : [])
+            : []
       ).then(resolve, reject),
     };
     return chain;

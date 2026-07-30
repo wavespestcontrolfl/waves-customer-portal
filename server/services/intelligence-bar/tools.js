@@ -1077,7 +1077,12 @@ async function updateCustomer(customerId, updates) {
   // MUST NOT ride into the tool result: everything returned below reaches
   // model context and is recorded in ib_pending_actions.result. Only the
   // numeric counts are exposed.
-  const { pendingConfirmation: emailPendingConfirmation, ...emailSyncCounts } = emailSync || {};
+  const { pendingConfirmation: emailPendingConfirmation, heldNewsletterResume: emailHeldNewsletterResume, ...emailSyncCounts } = emailSync || {};
+  if (emailHeldNewsletterResume) {
+    // Deferred held-newsletter DOI (2026-07-30 lane) — post-commit,
+    // fire-and-forget, never throws.
+    void require('../lead-first-touch-resume').resumeHeldNewsletterPostCommit(emailHeldNewsletterResume);
+  }
   if (emailPendingConfirmation) {
     // The moved DOI row's confirmation went to the old typo — re-send to the
     // corrected address now that the edit is committed (fire-and-forget; the

@@ -26,6 +26,12 @@
 const db = require('../models/db');
 const logger = require('./logger');
 
+const EMAIL_REVIEW_REASON_CODES = ['email_unverified', 'email_invalid'];
+// Same permissive-but-real syntax class the fanout uses — the resume is also
+// reached when an email_invalid card is resolved as-is, and enrollCustomer
+// performs no syntax validation of its own (Codex #3084 r4).
+const RESUME_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+
 async function customerCallDoNotContact(customerId, dbh) {
   const row = await dbh('call_log')
     .where({ customer_id: customerId })
@@ -55,17 +61,29 @@ async function emailSuppressedForNewLead(email, dbh) {
 // receive a DOI email (Codex #3084 r3); the marker also guarantees no
 // newsletter_subscribers row exists yet, so the global-connection subscribe
 // cannot collide with an uncommitted row move inside a caller's transaction.
-async function newsletterWasHeld(customerId, dbh) {
-  const row = await dbh('triage_items')
+async function heldNewsletterCards(customerId, dbh) {
+  return dbh('triage_items')
     .whereIn('reason_code', EMAIL_REVIEW_REASON_CODES)
     .whereRaw("payload->>'held_newsletter' = 'true'")
     .whereIn('call_log_id', dbh('call_log').select('id').where({ customer_id: customerId }))
-    .first('id');
-  return !!row;
+    .select('id', 'payload');
 }
 
-async function resumeHeldFirstTouch({ customerId, email = null, dbh = db, source = 'email_review_resolved' }) {
-  const result = { resumed: false, enrolled: false, newsletter: null, skipped: null };
+// The marker is CONSUMED on successful resume (Codex #3084 r4) — a later
+// call's card resolution must not re-trigger a DOI from a stale historical
+// marker.
+async function consumeHeldNewsletterMarkers(cards, dbh) {
+  for (const card of cards) {
+    let payload = {};
+    try { payload = typeof card.payload === 'string' ? JSON.parse(card.payload || '{}') : (card.payload || {}); } catch { payload = {}; }
+    await dbh('triage_items')
+      .where({ id: card.id })
+      .update({ payload: JSON.stringify({ ...payload, held_newsletter: false, held_newsletter_resumed_at: new Date().toISOString() }), updated_at: new Date() });
+  }
+}
+
+async function resumeHeldFirstTouch({ customerId, email = null, dbh = db, source = 'email_review_resolved', deferNewsletter = false }) {
+  const result = { resumed: false, enrolled: false, newsletter: null, newsletterResume: null, skipped: null };
   try {
     if (!customerId) return { ...result, skipped: 'no_customer' };
     const customer = await dbh('customers')
@@ -74,6 +92,7 @@ async function resumeHeldFirstTouch({ customerId, email = null, dbh = db, source
     if (!customer) return { ...result, skipped: 'customer_not_found' };
     const resumeEmail = String(email || customer.email || '').trim().toLowerCase();
     if (!resumeEmail) return { ...result, skipped: 'no_email' };
+    if (!RESUME_EMAIL_RE.test(resumeEmail)) return { ...result, skipped: 'invalid_email' };
 
     if (await customerCallDoNotContact(customerId, dbh)) {
       logger.info(`[first-touch-resume] customer ${customerId}: do-not-contact veto — not resuming (${source})`);
@@ -98,20 +117,31 @@ async function resumeHeldFirstTouch({ customerId, email = null, dbh = db, source
     result.enrolled = !!enroll?.enrolled;
 
     // Newsletter DOI resume — only when the pipeline actually held one for
-    // this customer's call (held_newsletter marker). Runs on the GLOBAL
-    // connection deliberately: the DOI email is a side effect that cannot be
-    // rolled back anyway, and the subscribe helper carries its own invalid/
-    // unsubscribed/strict guards.
+    // this customer's call (held_newsletter marker). A TRANSACTIONAL caller
+    // (the email-correction fanout) must not fire the DOI mid-transaction
+    // (Codex #3084 r4): with deferNewsletter the payload is RETURNED for the
+    // caller to execute post-commit via resumeHeldNewsletterPostCommit —
+    // the same contract as the fanout's pendingConfirmation.
     try {
-      if (await newsletterWasHeld(customerId, dbh)) {
-        const CRP = require('./call-recording-processor');
-        if (typeof CRP.resumeNewsletterForCallCustomer === 'function') {
-          result.newsletter = await CRP.resumeNewsletterForCallCustomer({
-            customerId,
-            email: resumeEmail,
-            firstName: customer.first_name || null,
-            lastName: customer.last_name || null,
-          });
+      const heldCards = await heldNewsletterCards(customerId, dbh);
+      if (heldCards.length) {
+        const newsletterPayload = {
+          customerId,
+          email: resumeEmail,
+          firstName: customer.first_name || null,
+          lastName: customer.last_name || null,
+          cardIds: heldCards.map((c) => c.id),
+        };
+        if (deferNewsletter) {
+          result.newsletterResume = newsletterPayload;
+        } else {
+          const CRP = require('./call-recording-processor');
+          if (typeof CRP.resumeNewsletterForCallCustomer === 'function') {
+            result.newsletter = await CRP.resumeNewsletterForCallCustomer(newsletterPayload);
+            if (result.newsletter && !result.newsletter.skipped) {
+              await consumeHeldNewsletterMarkers(heldCards, dbh);
+            }
+          }
         }
       }
     } catch (newsletterErr) {
@@ -129,6 +159,24 @@ async function resumeHeldFirstTouch({ customerId, email = null, dbh = db, source
   }
 }
 
-const EMAIL_REVIEW_REASON_CODES = ['email_unverified', 'email_invalid'];
+// Post-commit companion for transactional callers (same contract as the
+// fanout's resendPendingConfirmation): execute the deferred newsletter DOI
+// after the edit commits, then consume the markers. Never throws.
+async function resumeHeldNewsletterPostCommit(payload, dbh = db) {
+  if (!payload) return null;
+  try {
+    const CRP = require('./call-recording-processor');
+    if (typeof CRP.resumeNewsletterForCallCustomer !== 'function') return null;
+    const outcome = await CRP.resumeNewsletterForCallCustomer(payload);
+    if (outcome && !outcome.skipped && Array.isArray(payload.cardIds)) {
+      const cards = await dbh('triage_items').whereIn('id', payload.cardIds).select('id', 'payload');
+      await consumeHeldNewsletterMarkers(cards, dbh);
+    }
+    return outcome;
+  } catch (err) {
+    logger.warn(`[first-touch-resume] post-commit newsletter resume failed for customer ${payload.customerId}: ${err.message}`);
+    return null;
+  }
+}
 
-module.exports = { resumeHeldFirstTouch, EMAIL_REVIEW_REASON_CODES };
+module.exports = { resumeHeldFirstTouch, resumeHeldNewsletterPostCommit, EMAIL_REVIEW_REASON_CODES };

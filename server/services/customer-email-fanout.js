@@ -91,6 +91,7 @@ function emailKey(value) {
 async function propagateCustomerEmailChange({ before, after, source = 'customer edit' }, conn = db) {
   const counts = { leads: 0, estimates: 0, newsletter: 0, newsletterDeliveries: 0, automations: 0, templateRuns: 0, promoters: 0, billingPrefs: 0, contracts: 0, bookingIntents: 0, reviewCards: 0, heldDripResumed: 0 };
   let pendingConfirmation = null;
+  let heldNewsletterResume = null;
   const customerId = (after && after.id) || (before && before.id);
   // OLD is a loose match key (the stored copy may itself be malformed — that
   // is exactly what gets corrected); NEW must be a syntactically VALID
@@ -343,8 +344,13 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
     if (counts.reviewCards > 0) {
       try {
         const { resumeHeldFirstTouch } = require('./lead-first-touch-resume');
-        const resume = await resumeHeldFirstTouch({ customerId, email: newEmail, dbh: conn, source: 'email_corrected' });
+        // deferNewsletter: this runs inside the caller's edit transaction —
+        // the DOI (an unrollbackable send) executes post-commit via
+        // resumeHeldNewsletterPostCommit, same contract as
+        // pendingConfirmation below.
+        const resume = await resumeHeldFirstTouch({ customerId, email: newEmail, dbh: conn, source: 'email_corrected', deferNewsletter: true });
         if (resume?.enrolled) counts.heldDripResumed = 1;
+        if (resume?.newsletterResume) heldNewsletterResume = resume.newsletterResume;
       } catch (resumeErr) {
         logger.warn(`[email-fanout] held-drip resume failed for customer ${customerId}: ${resumeErr.message}`);
       }
@@ -365,7 +371,10 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
     // Counts only — never the email values (PII stays out of logs).
     logger.info(`[email-fanout] customer ${customerId}: synced ${counts.leads} lead(s), ${counts.estimates} estimate(s), ${counts.newsletter} newsletter (${counts.newsletterDeliveries} delivery token(s) rotated), ${counts.automations} enrollment(s), ${counts.templateRuns} template run(s), ${counts.promoters} promoter(s), ${counts.billingPrefs} billing pref(s), ${counts.contracts} contract(s), ${counts.bookingIntents} booking intent(s); resolved ${counts.reviewCards} email review card(s)`);
   }
-  return pendingConfirmation ? { ...counts, pendingConfirmation } : counts;
+  const extras = {};
+  if (pendingConfirmation) extras.pendingConfirmation = pendingConfirmation;
+  if (heldNewsletterResume) extras.heldNewsletterResume = heldNewsletterResume;
+  return Object.keys(extras).length ? { ...counts, ...extras } : counts;
 }
 
 /**

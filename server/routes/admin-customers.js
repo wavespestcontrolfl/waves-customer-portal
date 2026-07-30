@@ -2828,6 +2828,11 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
         }
         return next(e);
       }
+      if (emailSync?.heldNewsletterResume) {
+        // Deferred held-newsletter DOI (2026-07-30 lane) — execute now that
+        // the edit committed (fire-and-forget; never throws).
+        void require('../services/lead-first-touch-resume').resumeHeldNewsletterPostCommit(emailSync.heldNewsletterResume);
+      }
       if (emailSync?.pendingConfirmation) {
         // The moved DOI row's confirmation went to the old typo — re-send to
         // the corrected address now that the edit is committed

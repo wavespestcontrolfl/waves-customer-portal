@@ -244,6 +244,15 @@ router.post('/:id/verdict', async (req, res) => {
     // reviewer sees 0 open rows, gets a 409, and writes no feedback.
     // email_bounce_reverify rows are excluded: the reviewer is judging the
     // CALL, and a pending bounce follow-up must survive that judgment.
+    // Captured BEFORE the bulk resolve (Codex #3084 r4): the release below
+    // must key on a LIVE email card this verdict is closing — a historical
+    // resolved card from an earlier review cycle must not re-trigger sends.
+    const liveEmailCard = await db('triage_items')
+      .where({ call_log_id: item.call_log_id })
+      .whereIn('reason_code', ['email_unverified', 'email_invalid'])
+      .whereIn('status', OPEN_STATES)
+      .first('id');
+
     const resolved = await db('triage_items')
       .where({ call_log_id: item.call_log_id })
       .whereNot('reason_code', 'email_bounce_reverify')
@@ -290,14 +299,10 @@ router.post('/:id/verdict', async (req, res) => {
     const denyClearsEmail = verdict === 'deny'
       && !wrongFields.includes('name')
       && !wrongFields.includes('consent');
-    if (verdict === 'accept' || denyClearsEmail) {
+    if ((verdict === 'accept' || denyClearsEmail) && liveEmailCard) {
       try {
-        const { resumeHeldFirstTouch, EMAIL_REVIEW_REASON_CODES } = require('../services/lead-first-touch-resume');
-        const hadEmailCard = await db('triage_items')
-          .where({ call_log_id: item.call_log_id, status: 'resolved' })
-          .whereIn('reason_code', EMAIL_REVIEW_REASON_CODES)
-          .first('id');
-        if (hadEmailCard) {
+        const { resumeHeldFirstTouch } = require('../services/lead-first-touch-resume');
+        {
           const call = await db('call_log').where({ id: item.call_log_id }).first('customer_id');
           if (call?.customer_id) {
             await resumeHeldFirstTouch({ customerId: call.customer_id, source: 'triage_verdict_accept' });

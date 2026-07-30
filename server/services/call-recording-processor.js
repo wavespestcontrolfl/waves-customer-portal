@@ -8901,8 +8901,32 @@ const CallRecordingProcessor = {
         && (beehiivResult?.skipped === 'email_under_review' || newsletterResult?.skipped === 'email_under_review')) {
       try {
         if (!(await shouldHoldLeadEmailEnrollment(call.id))) {
-          const { resumeHeldFirstTouch } = require('./lead-first-touch-resume');
-          await resumeHeldFirstTouch({ customerId, source: 'mid_run_card_release' });
+          // No LIVE card. Two very different reasons (Codex #3084 r4):
+          //   - an admin resolved the card mid-run → release now;
+          //   - the card insert FAILED, so no card ever existed → the
+          //     address is still unverified; persist the recovery marker
+          //     and stay held (the standard resume paths release it).
+          const resolvedCard = await db('triage_items')
+            .where({ call_log_id: call.id })
+            .whereIn('reason_code', ['email_unverified', 'email_invalid'])
+            .whereIn('status', ['resolved'])
+            .first('id');
+          if (resolvedCard) {
+            const { resumeHeldFirstTouch } = require('./lead-first-touch-resume');
+            await resumeHeldFirstTouch({ customerId, source: 'mid_run_card_release' });
+          } else {
+            const { buildTriageItem } = require('./call-routing-gates');
+            await db('triage_items')
+              .insert(buildTriageItem({
+                callLogId: call.id,
+                flag: 'email_unverified',
+                extraction: { meta: { call_summary: extracted.call_summary || null } },
+                severity: 'advisory',
+                extraPayload: { hold_reason: 'review_card_insert_failed', held_drip: beehiivResult?.skipped === 'email_under_review', held_newsletter: newsletterResult?.skipped === 'email_under_review' },
+              }))
+              .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+              .ignore();
+          }
         }
       } catch (reconcileErr) {
         logger.warn(`[call-proc] first-touch hold reconciliation failed for ${maskSid(callSid)}: ${reconcileErr.message}`);
