@@ -304,7 +304,9 @@ describe('saveVerifiedOverride', () => {
 
     const merged = await saveVerifiedOverride('100 Main St', {
       squareFootage: -5,
-      lotSize: 9999999,
+      // Above even the typo-guard ceiling (10M sqft ≈ 230 acres) — a
+      // verified 40-acre ranch lot is a FACT and persists; this is not.
+      lotSize: 99999999,
       // 90 is out of range even for a high-rise; single-digit story counts
       // are now VALID (mid-rise associations — codex P2 #2721).
       stories: 90,

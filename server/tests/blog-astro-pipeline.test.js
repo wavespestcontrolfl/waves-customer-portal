@@ -2480,7 +2480,7 @@ describe('publishMetadataRewrite casing-aware meta fields', () => {
     gh.createIssueComment.mockResolvedValue({});
   });
 
-  test('writes metaTitle/metaDescription on a camelCase service page and never adds title/meta_description duplicates', async () => {
+  test('keeps the protected service metaTitle, writes metaDescription, and never adds title/meta_description duplicates', async () => {
     gh.getFile.mockResolvedValue({ sha: 'svc-sha', content: SERVICE_PAGE });
 
     const res = await AstroPublisher.publishMetadataRewrite({
@@ -2491,19 +2491,21 @@ describe('publishMetadataRewrite casing-aware meta fields', () => {
 
     expect(res.status).toBe('pr_open');
     const { data, content } = fmModule.parse(gh.putFile.mock.calls[0][0].content);
-    // Rendered fields updated…
-    expect(data.metaTitle).toBe('Pest Control Sarasota FL | Waves Pest Control');
+    // PROTECTED (owner rule 2026-07-16): service metaTitle is never rewritten
+    // by automation — the live value is kept, only the description ships.
+    expect(data.metaTitle).toBe('Old Sarasota Service Meta Title');
     expect(data.metaDescription).toBe('New Sarasota service meta description that will actually render.');
     // …and NO dead snake_case duplicates created.
     expect(data.title).toBeUndefined();
     expect(data.meta_description).toBeUndefined();
-    // Body untouched; rendered change → legitimate `modified` bump.
+    // Body untouched; rendered change (description) → legitimate `modified` bump.
     expect(content).toContain('Service body that must not change.');
     expect(data.modified).not.toBe('2026-01-01T12:00:00');
     expect(String(data.modified)).toMatch(/^\d{4}-\d{2}-\d{2}T12:00:00$/);
-    // PR title/body reflect the field that was actually written.
+    // PR title reflects the field that actually ships (the kept live title);
+    // the body diff table shows the metaTitle row unchanged.
     expect(gh.createPr).toHaveBeenCalledWith(expect.objectContaining({
-      title: expect.stringContaining('SEO metadata: Pest Control Sarasota FL'),
+      title: expect.stringContaining('SEO metadata: Old Sarasota Service Meta Title'),
       body: expect.stringContaining('| metaTitle |'),
     }));
   });

@@ -59,11 +59,15 @@ function primeDb(results) {
   return capture;
 }
 
-// Distinguish the two db('leads') generators by their unique chain calls.
-// (Both apply the internal-lead whereNotIn now, so key on the unattributed
-// generator's whereNull('lead_source_id') instead.)
-const leadsResult = ({ waiting, unattributed }) => (calls) => {
+// Distinguish the db('leads') generators by their unique chain calls.
+// (All apply the internal-lead whereNotIn, so key on each generator's own
+// signature: unattributed filters whereNull('lead_source_id'), the builder
+// warranty queue filters whereNotNull('builder_warranty_expires_on').)
+const leadsResult = ({ waiting, unattributed, builderWarranty }) => (calls) => {
   if (calls.some((c) => c.method === 'whereNull' && c.args[0] === 'lead_source_id')) return unattributed;
+  if (calls.some((c) => c.method === 'whereNotNull' && c.args[0] === 'leads.builder_warranty_expires_on')) {
+    return builderWarranty;
+  }
   return waiting;
 };
 
@@ -172,6 +176,64 @@ describe('Action Inbox generators', () => {
         && c.args[1] === INTERNAL_TEST_CUSTOMERS,
     );
     expect(exclusions).toHaveLength(2);
+  });
+
+  test('builder_warranty_expiring: warn action on open leads inside the ET window; absent when empty', async () => {
+    const { INTERNAL_TEST_CUSTOMERS } = require('../services/internal-test-customers');
+    const capture = primeDb({
+      leads: leadsResult({
+        waiting: [],
+        unattributed: { count: 0 },
+        builderWarranty: [{ id: 'lead-bw-2' }, { id: 'lead-bw-1' }],
+      }),
+    });
+    const { alerts } = await computeDashboardAlertsUncached();
+
+    const item = alerts.find((a) => a.id === 'builder_warranty_expiring');
+    expect(item).toMatchObject({
+      kind: 'action',
+      severity: 'warn',
+      count: 2,
+      members: ['lead-bw-1', 'lead-bw-2'], // sorted membership for dismissal checks
+      href: '/admin/leads?builder_warranty=expiring',
+    });
+    expect(item.label).toContain('builder termite warranty');
+
+    // Window bounds must be ET date STRINGS compared against the DATE column —
+    // a Date object (or UTC ISO slice) here would shift the boundary day for
+    // 4-5 hours around midnight ET.
+    const bounds = capture.filter(
+      (c) => c.table === 'leads' && c.method === 'where'
+        && c.args[0] === 'leads.builder_warranty_expires_on',
+    );
+    expect(bounds).toHaveLength(2);
+    for (const bound of bounds) expect(bound.args[2]).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+
+    // POSITIVE open-status membership (codex P2): a whereNotIn built from a
+    // closed-status list silently re-includes any status it forgot
+    // (unresponsive/disqualified were nagging as action items).
+    const { OPEN_LEAD_STATUSES } = require('../services/lead-statuses');
+    const statusMembership = capture.find(
+      (c) => c.table === 'leads' && c.method === 'whereIn' && c.args[0] === 'leads.status',
+    );
+    expect(statusMembership).toBeDefined();
+    expect(statusMembership.args[1]).toEqual(OPEN_LEAD_STATUSES);
+
+    // Internal-test and soft-deleted leads never page the operator.
+    expect(capture.find(
+      (c) => c.table === 'leads' && c.method === 'whereNotIn'
+        && c.args[1] === INTERNAL_TEST_CUSTOMERS,
+    )).toBeDefined();
+    expect(capture.find(
+      (c) => c.table === 'leads' && c.method === 'whereNull' && c.args[0] === 'leads.deleted_at',
+    )).toBeDefined();
+
+    // Empty window → no alert at all (not a zero-count row).
+    primeDb({
+      leads: leadsResult({ waiting: [], unattributed: { count: 0 }, builderWarranty: [] }),
+    });
+    const { alerts: quiet } = await computeDashboardAlertsUncached();
+    expect(quiet.find((a) => a.id === 'builder_warranty_expiring')).toBeUndefined();
   });
 
   test('at_risk_mrr: reuses the shared at-risk account list; absent when nothing is at risk', async () => {

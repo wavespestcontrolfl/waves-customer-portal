@@ -621,6 +621,11 @@ function SmsTab() {
   const [sending, setSending] = useState(false);
   const [sendResult, setSendResult] = useState(null);
   const [aiDrafting, setAiDrafting] = useState(false);
+  const [insertingResched, setInsertingResched] = useState(false);
+  // The last inserted reschedule link and the recipient it was minted for:
+  // { url, recipientKey, customerId }. The bearer link must not outlive its
+  // recipient — the effect below strips it from the body if To changes.
+  const [insertedResched, setInsertedResched] = useState(null);
   const [rewritingSms, setRewritingSms] = useState(false);
   const [agentDraft, setAgentDraft] = useState(null);
   const [agentDraftLoading, setAgentDraftLoading] = useState(false);
@@ -1179,6 +1184,132 @@ function SmsTab() {
       setAiDrafting(false);
     }
   };
+
+  // Insert the recipient's self-serve reschedule link (their next upcoming
+  // visit's tokened /reschedule page) into the message body. The server
+  // resolves WHICH visit; feedback lands in the sendResult line under the
+  // buttons so the operator can see what the link points to before sending.
+  const handleInsertRescheduleLink = async () => {
+    const requestRecipient = toNumber.trim();
+    if (!requestRecipient || insertingResched) return;
+    const requestRecipientKey = smsThreadKey(requestRecipient);
+    const requestCustomerId = selectedCustomerId || null;
+    const requestThreadKey = activeThread?.contactPhone
+      ? smsThreadKey(activeThread.contactPhone)
+      : "";
+    // Stale-response guard (mirrors handleRewriteSms): the operator may
+    // switch threads or edit the recipient while the request is in flight —
+    // applying the response then would drop THIS customer's bearer link (or
+    // its error) into a message addressed to someone else. Discard silently.
+    const rescheduleContextChanged = () => {
+      const latest = rewriteContextRef.current;
+      const latestRecipient = latest.toNumber.trim();
+      const latestRecipientKey = latestRecipient
+        ? smsThreadKey(latestRecipient)
+        : "";
+      return (
+        latestRecipientKey !== requestRecipientKey ||
+        (latest.selectedCustomerId || null) !== requestCustomerId ||
+        latest.activeThreadKey !== requestThreadKey
+      );
+    };
+    setInsertingResched(true);
+    setSendResult(null);
+    try {
+      // POST body, never a query string — the request logger's redacted-url
+      // does not treat `phone` as sensitive, so a GET would write the
+      // customer's number to the request logs on every click.
+      const d = await adminFetch("/admin/communications/reschedule-link", {
+        method: "POST",
+        body: JSON.stringify({
+          phone: requestRecipient,
+          customerId: requestCustomerId || undefined,
+        }),
+      });
+      if (rescheduleContextChanged()) return;
+      const clause = (d.line || "").trim() || `Reschedule online: ${d.url}`;
+      // Replace-don't-stack: every lookup mints a FRESH short code, and the
+      // strip-on-recipient-change effect only knows the one tracked URL — a
+      // second click stacking a second clause would leave the first link
+      // unstrippable. Drop any line carrying the previously tracked URL
+      // before appending. (Inserts are serialized by the insertingResched
+      // guard, so the click-time snapshot of insertedResched is current; if
+      // the operator already deleted that line, the filter is a no-op.)
+      const prevUrl = insertedResched?.url || null;
+      setMsgBody((b) => {
+        const base = prevUrl
+          ? b
+              .split("\n")
+              .filter((l) => !l.includes(prevUrl))
+              .join("\n")
+              .replace(/\n{3,}/g, "\n\n")
+              .trim()
+          : b;
+        return base.trim() ? `${base.replace(/\s+$/, "")}\n\n${clause}` : clause;
+      });
+      setInsertedResched({
+        url: d.url,
+        recipientKey: requestRecipientKey,
+        customerId: requestCustomerId,
+      });
+      // Noon anchor keeps the Y-M-D string on its own calendar day in every
+      // US zone (same idiom as the server's reschedule confirmation copy).
+      const day = new Date(
+        `${d.appointment.scheduledDate}T12:00:00`,
+      ).toLocaleDateString("en-US", {
+        weekday: "short",
+        month: "short",
+        day: "numeric",
+      });
+      setSendResult({
+        ok: true,
+        text: `Reschedule link added — points to the ${day}${
+          d.appointment.serviceType ? ` ${d.appointment.serviceType}` : ""
+        } visit.`,
+      });
+    } catch (e) {
+      if (!rescheduleContextChanged()) {
+        setSendResult({ ok: false, text: e.message });
+      }
+    } finally {
+      setInsertingResched(false);
+    }
+  };
+
+  // An inserted reschedule link is a bearer credential for ONE customer's
+  // visit — it must not survive a recipient change. If To (or the selected
+  // customer) no longer matches what the link was minted for, strip the
+  // link's line from the body and say so. Also forgets the tracked link once
+  // the operator deletes it (or the body clears on send).
+  useEffect(() => {
+    if (!insertedResched) return;
+    if (!msgBody.includes(insertedResched.url)) {
+      setInsertedResched(null);
+      return;
+    }
+    const currentRecipient = toNumber.trim();
+    const currentRecipientKey = currentRecipient
+      ? smsThreadKey(currentRecipient)
+      : "";
+    if (
+      currentRecipientKey !== insertedResched.recipientKey ||
+      (selectedCustomerId || null) !== insertedResched.customerId
+    ) {
+      setMsgBody((b) =>
+        b
+          .split("\n")
+          .filter((l) => !l.includes(insertedResched.url))
+          .join("\n")
+          .replace(/\n{3,}/g, "\n\n")
+          .trim(),
+      );
+      setInsertedResched(null);
+      setSendResult({
+        ok: true,
+        text: "Reschedule link removed — the recipient changed.",
+      });
+    }
+  }, [insertedResched, msgBody, toNumber, selectedCustomerId]);
 
   const handleRewriteSms = async () => {
     const cleanBody = msgBody.trim();
@@ -1890,7 +2021,7 @@ function SmsTab() {
             )}
           />
         )}
-        <div className="flex gap-2 items-center">
+        <div className="flex flex-wrap gap-2 items-center">
           {/* Plus — attachment menu */}
           <div className="relative">
             {" "}
@@ -1955,6 +2086,10 @@ function SmsTab() {
               sending ||
               uploading ||
               rewritingSms ||
+              // Mid-lookup send would go out WITHOUT the link the operator
+              // just asked for (and clearing the recipient on send discards
+              // the response) — wait out the reschedule-link fetch.
+              insertingResched ||
               !toNumber.trim() ||
               (!msgBody.trim() && attachments.length === 0)
             }
@@ -1977,6 +2112,14 @@ function SmsTab() {
             disabled={aiDrafting || !toNumber.trim()}
           >
             {aiDrafting ? "Drafting…" : "AI Draft"}
+          </Button>{" "}
+          <Button
+            variant="secondary"
+            onClick={handleInsertRescheduleLink}
+            disabled={insertingResched || !toNumber.trim()}
+            title="Insert this customer's self-serve reschedule link"
+          >
+            {insertingResched ? "Adding…" : "Reschedule Link"}
           </Button>{" "}
         </div>
         {sendResult && (

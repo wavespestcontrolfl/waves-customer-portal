@@ -471,12 +471,12 @@ const FAQ_DATA = [
   {
     category: 'Pest Control', icon: '🐜',
     questions: [
-      { q: 'Is it safe for my pets after you spray?', a: 'Yes — once the product dries (usually 30-60 minutes), it\'s safe for pets and kids. We use targeted, EPA-registered products applied by licensed technicians. If you have concerns about a specific product, just ask your tech.' },
-      { q: 'How long should I stay off the lawn after treatment?', a: 'Give it about an hour to dry. Once it\'s dry, you\'re good. We\'ll always let you know if a specific treatment needs longer.' },
+      { q: 'Is it safe for my pets after you spray?', a: 'Keep pets and kids off treated areas until everything is completely dry — drying time depends on the products and the weather that day, and your technician will tell you what to expect for your visit. We use targeted, EPA-registered products applied by licensed technicians. If you have concerns about a specific product, just ask your tech.' },
+      { q: 'How long should I stay off the lawn after treatment?', a: 'Stay off until the treatment is completely dry. Drying time varies with the product and the weather, so your technician will let you know what to expect — and we\'ll always tell you if a specific treatment needs longer.' },
       { q: 'Do I need to be home when you come?', a: 'Nope. Most of our services are exterior-only. If we need interior access, we\'ll coordinate with you ahead of time. Just make sure gates are unlocked and pets are secured.' },
       { q: 'What if I see bugs between visits?', a: 'Text us a photo! Some activity between quarterly treatments is normal — especially after heavy rain. If it\'s unusual, we\'ll come back at no extra charge. That\'s the Waves guarantee.' },
       { q: 'What\'s the difference between German and American roaches?', a: 'German roaches are small (half inch), light brown, and live INSIDE — kitchens and bathrooms. They\'re a sanitation issue. American roaches (palmetto bugs) are big, dark, and mostly outdoor creatures that wander inside. Different bugs, different treatments.' },
-      { q: 'Are your products safe for kids?', a: 'Absolutely. We use targeted applications in specific areas — we\'re not carpet-bombing your yard. All our products are EPA-registered and applied according to label directions by licensed professionals.' },
+      { q: 'Are your products safe for kids?', a: 'We use targeted applications in specific areas — we\'re not blanketing your yard. All our products are EPA-registered and applied according to label directions by licensed professionals, and we\'ll tell you when treated areas are completely dry and ready to use again. Ask your tech about anything specific.' },
     ],
   },
   {

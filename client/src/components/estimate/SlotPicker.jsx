@@ -125,6 +125,10 @@ export default function SlotPicker({
   refreshSignal,
   serviceMode = 'recurring',
   selectedFrequency = null,
+  // Bundle combo axes ({ mosquito: 'seasonal9' }): the mosquito tier changes
+  // the server's seasonal slot filter/horizon while selectedFrequency stays
+  // the pest cadence.
+  serviceCadences = null,
   onFirstSlotDate = null,
   cityLabel = null,
   quickPick = false,
@@ -228,19 +232,56 @@ export default function SlotPicker({
     if (serviceMode !== 'one_time' && selectedFrequency) {
       params.set('selectedFrequency', selectedFrequency);
     }
+    if (serviceMode !== 'one_time' && serviceCadences) {
+      params.set('serviceCadences', JSON.stringify(serviceCadences));
+    }
     const query = params.toString();
     fetch(`${API_BASE}/public/estimates/${token}/available-slots${query ? `?${query}` : ''}`)
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error('slot fetch failed'))))
       .then((body) => { if (!cancelled) { setData(body); setLoading(false); } })
       .catch((err) => { if (!cancelled) { setError(err.message); setLoading(false); } });
     return () => { cancelled = true; };
-  }, [token, refreshSignal, serviceMode, selectedFrequency]);
+  }, [token, refreshSignal, serviceMode, selectedFrequency, serviceCadences]);
 
   // ── custom date/time finder ──
   const pad2 = (n) => String(n).padStart(2, '0');
   const toYmd = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
   const browseMin = toYmd(new Date());
-  const browseMax = (() => { const d = new Date(); d.setDate(d.getDate() + 90); return toYmd(d); })();
+  const browseMax = (() => {
+    // Mirror of the server's seasonalMaxHorizonDays (codex r19 P2): a
+    // seasonal (Feb–Oct) mosquito selection in the Nov–Jan gap may browse
+    // through the season opener + the default window — on Nov 1–2 the next
+    // Feb 1 sits past the standard 90 days and the picker would otherwise
+    // block dates the API and reservation now accept.
+    const seasonalSelected = serviceMode !== 'one_time'
+      && ([selectedFrequency, serviceCadences?.mosquito]
+        .some((v) => ['seasonal9', 'seasonal', 'seasonal_feb_oct']
+          .includes(String(v || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_'))));
+    let horizonDays = 90;
+    if (seasonalSelected) {
+      // Walk to the date that gives a full 90-day complement of IN-SEASON
+      // days (Feb–Oct), crossing the Nov–Jan gap — mirror of the server's
+      // seasonalMaxHorizonDays, so the picker bound matches what the API's
+      // browse clamp and the reservation gate accept (an Oct 31 customer
+      // must reach February; a wide window may extend into spring).
+      const inSeasonMonth = (d) => { const m = d.getMonth(); return m >= 1 && m <= 9; };
+      const at = new Date(); at.setHours(12, 0, 0, 0);
+      let counted = 0;
+      let steps = 0;
+      while (steps < 320) {
+        if (inSeasonMonth(at)) {
+          counted += 1;
+          if (counted >= 91) break;
+        }
+        at.setDate(at.getDate() + 1);
+        steps += 1;
+      }
+      horizonDays = Math.max(90, steps);
+    }
+    const d = new Date();
+    d.setDate(d.getDate() + horizonDays);
+    return toYmd(d);
+  })();
 
   const formatPickedDate = (ymd) => {
     try {
@@ -256,6 +297,7 @@ export default function SlotPicker({
     const p = new URLSearchParams();
     p.set('serviceMode', serviceMode === 'one_time' ? 'one_time' : 'recurring');
     if (serviceMode !== 'one_time' && selectedFrequency) p.set('selectedFrequency', selectedFrequency);
+    if (serviceMode !== 'one_time' && serviceCadences) p.set('serviceCadences', JSON.stringify(serviceCadences));
     return p;
   };
 
@@ -266,7 +308,7 @@ export default function SlotPicker({
         'Content-Type': 'application/json',
         ...(askToken ? { 'X-Estimate-Ask-Token': askToken } : {}),
       },
-      body: JSON.stringify({ query, serviceMode, selectedFrequency }),
+      body: JSON.stringify({ query, serviceMode, selectedFrequency, ...(serviceCadences ? { serviceCadences } : {}) }),
     });
     const body = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(body.error || 'search failed');

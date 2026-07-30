@@ -40,6 +40,20 @@ function estimatorEngineEnabled() {
   return flag === '1' || flag === 'true' || flag === 'on';
 }
 
+// Headline amount for the draft bell. One-time work (fire ant treatment, a
+// single ant job) prices entirely into oneTime with monthly=0, so keying the
+// title off monthly alone rendered real $242–$301 jobs as "$0/mo" in the
+// review queue — the title is the triage signal, and a $0 draft reads as
+// nothing to send. Recurring still leads with /mo; a genuinely unpriced draft
+// says so instead of quoting zero.
+function draftAmountLabel({ monthly, oneTime }) {
+  const mo = Number(monthly) || 0;
+  const once = Number(oneTime) || 0;
+  if (mo) return `$${mo}/mo`;
+  if (once) return `$${once} one-time`;
+  return 'amount TBD';
+}
+
 function addressFromContext(context) {
   const sa = context.extraction?.property?.service_address;
   if (sa?.street_line_1) {
@@ -347,7 +361,7 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
           lane: existingMeta.lane,
           quotePromised,
           estimateId: existing.id,
-          title: `AI estimate draft ${existingMeta.lane === 'green' ? 'ready' : 'needs review'} — $${existing.monthly_total || 0}/mo`,
+          title: `AI estimate draft ${existingMeta.lane === 'green' ? 'ready' : 'needs review'} — ${draftAmountLabel({ monthly: existing.monthly_total, oneTime: existing.onetime_total })}`,
           body: `${callerLabel(null, context)}: an estimate draft from this call is waiting (${String(existingMeta.lane).toUpperCase()}). Review in admin/estimates and send.`,
         });
         return result;
@@ -465,6 +479,25 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
       subdivisionMedian: effectiveSignals.subdivisionMedian,
     });
     result.propertyFacts = propertyFacts;
+
+    // Property Facts V2 — scoped measurement selection. Shadow by default:
+    // computed and stored on the draft for evaluation, never priced from
+    // until GATE_PROPERTY_FACTS_V2 flips. Fail-open (returns null on error).
+    // Gate ON: applyV2ToPropertyFacts follows the V2 selection — including
+    // CLEARING the V1 area when V2 deliberately left an ambiguous scope
+    // unresolved (an arbitrary building must not auto-price).
+    const { computePropertyFactsV2Shadow, propertyFactsV2Enabled, applyV2ToPropertyFacts } = require('./property-facts-shadow');
+    const propertyFactsV2 = computePropertyFactsV2Shadow({
+      propertyRecord: effectiveSignals.propertyRecord,
+      extraction: context.extraction,
+      intent,
+      propertyFacts,
+      address: intent.address || result.addressUsed || address,
+    });
+    result.propertyFactsV2 = propertyFactsV2;
+    if (propertyFactsV2 && propertyFactsV2Enabled()) {
+      applyV2ToPropertyFacts(propertyFacts, propertyFactsV2);
+    }
 
     // Existing-customer pricing context: qualifying services for the combined
     // WaveGuard tier (the snapshot itself is computed AFTER pricing — it
@@ -657,7 +690,7 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
 
     const draft = await createDraftEstimate({
       intent, engineInput, engineResult, totals, lane, laneReasons: reasons,
-      propertyFacts, comps, calibration, model, call: context.call, context,
+      propertyFacts, propertyFactsV2, comps, calibration, model, call: context.call, context,
       membershipSnapshot, priorQualifyingServices, origin,
     });
 
@@ -689,7 +722,7 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
       quotePromised,
       threadKey,
       estimateId: draft.estimate.id,
-      title: `AI estimate draft ${lane === LANES.GREEN ? 'ready' : 'needs review'} — $${totals.monthly}/mo`,
+      title: `AI estimate draft ${lane === LANES.GREEN ? 'ready' : 'needs review'} — ${draftAmountLabel(totals)}`,
       body: `${callerLabel(intent, context)}: ${intent.service_interest_label || 'estimate'} drafted from the ${origin.noun} (${lane.toUpperCase()} — ${laneWord}). `
         + `$${totals.monthly}/mo · $${totals.annual}/yr${totals.oneTime ? ` · $${totals.oneTime} one-time` : ''}. `
         + `${lane === LANES.YELLOW ? `Flags: ${reasons.slice(0, 3).join('; ')}. ` : ''}Review in admin/estimates and send.`,

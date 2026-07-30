@@ -1074,10 +1074,28 @@ function CallLogTab() {
       </div>
     );
 
+  // Screen-abandoned calls: the pre-connect caller screen challenged this
+  // caller (metadata.preconnect_screen === 'gated') and they hung up without
+  // pressing a key or reaching voicemail. Robocall noise — kept out of the
+  // Missed count and shown muted as "Screened" under All. 'passed'/'failed'
+  // stamps mean the call continued and is judged by its real outcome.
+  const isScreenAbandoned = (c) => {
+    if (c.direction !== "inbound") return false;
+    let meta = c.metadata;
+    if (typeof meta === "string") {
+      try {
+        meta = JSON.parse(meta);
+      } catch {
+        meta = null;
+      }
+    }
+    return meta?.preconnect_screen === "gated";
+  };
   const answered = calls.filter((c) => c.answered_by === "human").length;
   const voicemail = calls.filter((c) => c.answered_by === "voicemail").length;
   const missed = calls.filter(
-    (c) => !c.answered_by || c.answered_by === "missed",
+    (c) =>
+      (!c.answered_by || c.answered_by === "missed") && !isScreenAbandoned(c),
   ).length;
 
   // Source number analytics — calls per source number this month
@@ -1513,23 +1531,32 @@ function CallLogTab() {
                 if (callFilter === "voicemail")
                   return c.answered_by === "voicemail";
                 if (callFilter === "missed")
-                  return !c.answered_by || c.answered_by === "missed";
+                  return (
+                    (!c.answered_by || c.answered_by === "missed") &&
+                    !isScreenAbandoned(c)
+                  );
                 return true;
               })
               .map((c) => {
-                const isMissed = !c.answered_by || c.answered_by === "missed";
+                const abandoned = isScreenAbandoned(c);
+                const isMissed =
+                  (!c.answered_by || c.answered_by === "missed") && !abandoned;
                 const answeredColor =
                   c.answered_by === "human"
                     ? D.green
                     : c.answered_by === "voicemail"
                       ? D.amber
-                      : D.red;
+                      : abandoned
+                        ? D.muted
+                        : D.red;
                 const answeredLabel =
                   c.answered_by === "human"
                     ? "Answered"
                     : c.answered_by === "voicemail"
                       ? "Voicemail"
-                      : "Missed";
+                      : abandoned
+                        ? "Screened"
+                        : "Missed";
                 const dur = c.duration_seconds
                   ? `${Math.floor(c.duration_seconds / 60)}:${String(c.duration_seconds % 60).padStart(2, "0")}`
                   : "--";

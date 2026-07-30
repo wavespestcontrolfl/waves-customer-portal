@@ -3,6 +3,12 @@ const db = require('../models/db');
 const MONTH_RECURRENCE_INTERVALS = {
   monthly_nth_weekday: 1,
   monthly: 1,
+  // Seasonal mosquito (9x Feb–Oct): monthly spacing IN season, so the 1-month
+  // too-close threshold (21 days) applies; the Oct→Feb winter gap is longer
+  // than any threshold and can never false-positive (the checks only flag
+  // gaps SMALLER than the minimum). Absent from this map the inner join
+  // dropped every seasonal row before the duplicate/too-close checks ran.
+  seasonal_feb_oct: 1,
   bimonthly: 2,
   quarterly: 3,
   triannual: 4,

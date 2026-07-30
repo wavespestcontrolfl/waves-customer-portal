@@ -12,6 +12,7 @@ jest.mock('../services/sms-template-renderer', () => ({
 }));
 jest.mock('../services/customer-contact', () => ({
   getServiceContact: jest.fn(),
+  getServiceContactSmsRecipient: jest.fn(),
   firstNameFrom: jest.requireActual('../services/customer-contact').firstNameFrom,
 }));
 jest.mock('../services/short-url', () => ({
@@ -21,7 +22,7 @@ jest.mock('../services/short-url', () => ({
 const db = require('../models/db');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderSmsTemplate } = require('../services/sms-template-renderer');
-const { getServiceContact } = require('../services/customer-contact');
+const { getServiceContact, getServiceContactSmsRecipient } = require('../services/customer-contact');
 const { shortenOrPassthrough } = require('../services/short-url');
 const ReviewService = require('../services/review-request');
 
@@ -113,6 +114,7 @@ describe('review request follow-up flow', () => {
     // Service contact stored as a full name — the {first_name} slot must be the
     // first token only ("Jamie"), not "Jamie Rios".
     getServiceContact.mockReturnValue({ phone: '+19415550123', name: 'Jamie Rios' });
+    getServiceContactSmsRecipient.mockReturnValue({ phone: '+19415550123', name: 'Jamie Rios' });
     renderSmsTemplate.mockResolvedValue('Please review us');
     sendCustomerMessage.mockResolvedValue({ sent: true, auditLogId: 'audit-1' });
 
@@ -172,6 +174,7 @@ describe('review request follow-up flow', () => {
       throw new Error(`Unexpected table query: ${table}`);
     });
     getServiceContact.mockReturnValue({ phone: '+19415550123', name: 'Jamie' });
+    getServiceContactSmsRecipient.mockReturnValue({ phone: '+19415550123', name: 'Jamie' });
     renderSmsTemplate.mockResolvedValue('Please review us');
     sendCustomerMessage.mockResolvedValue({
       sent: false,
@@ -224,6 +227,7 @@ describe('review request follow-up flow', () => {
       throw new Error(`Unexpected table query: ${table}`);
     });
     getServiceContact.mockReturnValue({ phone: '+19415550123', name: 'Jamie' });
+    getServiceContactSmsRecipient.mockReturnValue({ phone: '+19415550123', name: 'Jamie' });
     renderSmsTemplate.mockResolvedValue('Please review us');
     sendCustomerMessage.mockResolvedValue({
       sent: false,

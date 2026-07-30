@@ -24,7 +24,7 @@ const logger = require('../logger');
 const { dispatchWithFallback } = require('../llm/call');
 const { findBannedCustomerCopy } = require('./activity-indicators');
 
-const PROMPT_VERSION = 'lawn_report_v2_narrative_v1';
+const PROMPT_VERSION = 'lawn_report_v2_narrative_v2';
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const _cache = new Map();
 
@@ -79,8 +79,9 @@ You rewrite the customer-facing copy for a post-service LAWN report for Waves Pe
 4. Never say the lawn is "improving"/"recovering"/"better" unless trendDirection is "up". If "down", be honest but calm; if "none", don't reference a trend.
 5. Water: if water.status is "balanced" or "high", do NOT tell the customer to water more — point to coverage or easing back. Only suggest more water when status is "low".
 6. Mowing: Waves does NOT mow. Frame mowing as how the lawn is being kept and a suggestion to the customer; never say Waves will fix it.
-7. Use active-ingredient names or plain descriptions for products — never hype.
+7. Use active-ingredient names or plain descriptions for products — never hype. Lead with the product's plain-language role and never make a bare chemical name the subject of an instruction to the homeowner ("water in the clothianidin" → "water in today's treatment").
 8. Plain text only. No markdown, no emojis, no headers inside values.
+9. A product's "targets" list is what it is designed to control — NOT what was observed. Never say a pest or disease was found/observed unless the observations say so; frame targeted products as seasonal protection otherwise.
 
 ## OUTPUT — JSON ONLY, exactly this shape (no prose outside it):
 {

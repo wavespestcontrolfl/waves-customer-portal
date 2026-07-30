@@ -78,7 +78,8 @@ const {
   pricePestControl, pricePestInitialRoach, priceLawnCare, priceTreeShrub,
   priceCommercialLawn, priceCommercialTreeShrub, priceCommercialPest,
   priceCommercialMosquito, priceCommercialTermiteBait, priceCommercialRodentBait, pricePalmInjection,
-  priceMosquito, priceTermiteBait, priceTermiteBond, priceRodentBait, priceRodentTrapping,
+  priceMosquito, priceTermiteBait, priceTermiteBond, priceTermiteStationRental,
+  priceRodentBait, priceRodentTrapping,
   priceRodentTrappingFollowups, priceSanitation, priceBaitSetup,
   priceRodentInspection, priceTrapOnlyRetainer, priceRodentWireMesh, priceRodentBirdBoxes,
   selectRodentBundle, applyRodentBundle,
@@ -362,10 +363,13 @@ function isAnnualPrepayBilling(input = {}) {
   return candidates.some((value) => value === 'prepay_annual' || value === 'annual' || value === 'prepay' || value === 'annual_prepay');
 }
 
+// Eligibility requirements on a discount are informational only — the
+// requires_* warning lanes annotate the estimate for the operator, but they
+// never block applying the discount (owner directive 2026-07-24: no
+// confirmation/approval step on discounts).
 function manualDiscountEligibilityWarnings(md = {}, input = {}) {
   const eligibility = md.eligibility || {};
   const warnings = [...(md.warnings || [])];
-  const confirmed = md.eligibilityConfirmed === true;
   const annualPrepay = isAnnualPrepayBilling(input);
   const add = (warning) => warnings.push(warning);
 
@@ -378,29 +382,14 @@ function manualDiscountEligibilityWarnings(md = {}, input = {}) {
     eligibility.requiresSenior ||
     eligibility.requiresNewCustomer
   );
-  const requiresAny = requiresPrepay || requiresReferral || requiresMultiHome
-    || requiresCustomerStatus || requiresWaveGuardTier;
 
   if (requiresPrepay && !annualPrepay) add('manual_discount_requires_prepay');
   if (requiresReferral) add('manual_discount_requires_referral');
   if (requiresMultiHome) add('manual_discount_requires_multi_home');
   if (requiresCustomerStatus) add('manual_discount_requires_customer_status');
   if (requiresWaveGuardTier) add('manual_discount_requires_waveguard_tier');
-  if (requiresAny && !confirmed) add('manual_discount_eligibility_not_confirmed');
 
   return uniqueStrings(warnings);
-}
-
-function assertManualDiscountEligibility(md = {}, input = {}) {
-  const warnings = manualDiscountEligibilityWarnings(md, input);
-  const requiresConfirmation = warnings.includes('manual_discount_eligibility_not_confirmed');
-  if (requiresConfirmation) {
-    const err = new Error('Manual discount eligibility must be confirmed before applying this discount');
-    err.code = 'MANUAL_DISCOUNT_ELIGIBILITY_REQUIRED';
-    err.warnings = warnings;
-    throw err;
-  }
-  return warnings;
 }
 
 function normalizeCommercialFlag(value) {
@@ -730,7 +719,12 @@ function generateEstimate(input) {
     } else {
       const result = pricePestControl(property, {
         frequency: services.pest.frequency || 'quarterly',
-        pricingVersion: services.pest.version || 'v1',
+        // No caller-provided version → defer to pricePestControl's own live
+        // default (v2 curve). The old `|| 'v1'` fallback silently pinned
+        // EVERY engine quote to the retired curve since no caller sets
+        // services.pest.version (codex #2966 P1). Explicit versions still
+        // pass through — that is the legacy-replay channel.
+        pricingVersion: services.pest.version || undefined,
         roachType: services.pest.roachType || 'none',
         modifiers,
         pestProgramFloorArmed,
@@ -945,10 +939,17 @@ function generateEstimate(input) {
       }
     } else {
       const termiteOptions = serviceOptions(termiteBaitService);
+      // Station rental (owner 2026-07-26) is dark-shipped like the bond
+      // rider: with GATE_TERMITE_STATION_RENTAL off, a 'rent' request is
+      // ignored and the program prices as outright purchase, exactly as it
+      // did before this lane. Kill = unset the var.
+      const rentalGateOn = ['1', 'true', 'on'].includes(String(process.env.GATE_TERMITE_STATION_RENTAL || '').toLowerCase());
+      const wantsRental = rentalGateOn && String(termiteOptions.ownership || '').toLowerCase() === 'rent';
       const result = priceTermiteBait(property, {
         ...termiteOptions,
-        system: termiteOptions.system || 'advance',
+        system: termiteOptions.system || 'trelona',
         monitoringTier: termiteOptions.monitoringTier || 'basic',
+        ownership: wantsRental ? 'rent' : 'own',
         modifiers,
       });
       result.annual = Math.round(result.annual);
@@ -963,6 +964,42 @@ function generateEstimate(input) {
       lineItems.push(result);
       if (!result.quoteRequired && !result.requiresMeasurement) {
         activeServiceKeys.push('termite_bait');
+        // Station rental uplift — standalone recurring line beside the bond
+        // rider, for the same reason: it is hardware cost recovery, so it is
+        // NOT tier-counted and NOT bundle-discountable
+        // (excludedFromPercentDiscount.termite_station_rental). Amortizes the
+        // install price the customer did not pay at signing.
+        if (wantsRental) {
+          const rental = priceTermiteStationRental(result.installation?.retailValue);
+          if (rental) {
+            lineItems.push(rental);
+            result.stationRental = {
+              perApp: rental.perApp,
+              annual: rental.annual,
+              monthly: rental.monthly,
+              retailValue: rental.retailValue,
+              recoveryQuarters: rental.recoveryQuarters,
+            };
+          } else {
+            // FAIL CLOSED (codex P1). The bait line has ALREADY been priced
+            // as a rental — install zeroed — so simply omitting the recovery
+            // line would hand over the stations for free AND collect nothing
+            // back, forever. That is reachable from a legal admin config: an
+            // absurd-but-accepted recovery_quarters makes
+            // round(installPrice / quarters) zero. Revert the whole quote to
+            // outright purchase (the install charge comes back) and flag it
+            // for review rather than quietly selling free hardware.
+            result.ownership = 'own';
+            result.stationsOwnedBy = 'customer';
+            result.installation.price = result.installation.retailValue;
+            result.stationRental = null;
+            result.requiresManualReview = true;
+            result.manualReviewReasons = [...new Set([
+              ...(result.manualReviewReasons || []),
+              'termite_rental_uplift_unpriceable',
+            ])];
+          }
+        }
         // Termite bond rider (owner 2026-07-20): only alongside a PRICED
         // bait program — the warranty rides the bait stations' quarterly
         // check. NOT added to activeServiceKeys (no WaveGuard tier) and
@@ -1821,7 +1858,7 @@ function generateEstimate(input) {
   const md = input.manualDiscount;
   if (md && Number(md.value) > 0) {
     const v = Number(md.value);
-    const manualWarnings = assertManualDiscountEligibility(md, input);
+    const manualWarnings = manualDiscountEligibilityWarnings(md, input);
     let requestedAmount;
     if (md.type === 'PERCENT') {
       if (v > 100) throw new Error('Manual percentage discount cannot exceed 100');

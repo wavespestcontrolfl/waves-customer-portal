@@ -29,7 +29,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { findAvailableSlots } = require('./scheduling/find-time');
-const { addETDays, etDateString, etParts } = require('../utils/datetime-et');
+const { addETDays, etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { signSlotOffer, appendOfferToSlotId } = require('../utils/slot-offer-token');
 const { resolveEstimateZone, zoneSlugOf } = require('./slot-zone');
 const { isEnabled } = require('../config/feature-gates');
@@ -517,12 +517,115 @@ function oneTimeProfileServices(estimate = {}, estData = {}) {
   return rows;
 }
 
+// A seasonal (Feb–Oct) mosquito selection must never book its FIRST visit in
+// the Nov–Jan gap: the converter seeds the series from the booked date, and a
+// winter parent counts as one of the nine — one prohibited winter treatment
+// and only eight in-season (codex r8 P1). The profile's services carry the
+// SELECTED frequency's rows, so a mosquito row at nine visits/year identifies
+// the seasonal program (the converter forces the same rule at seeding).
+// Admin/office bookings don't come through this service and keep their
+// explicit override.
+function seasonalSelectionProfile(serviceProfile = {}) {
+  if (serviceProfile.serviceMode === 'one_time') return false;
+  return (serviceProfile.services || []).some(
+    (row) => row.service === 'mosquito' && Number(row.visitsPerYear) === 9,
+  );
+}
+
+function inMosquitoSeason(dateStr) {
+  const month = Number(String(dateStr || '').slice(5, 7));
+  return month >= 2 && month <= 10;
+}
+
+function filterSeasonalSlots(slots = [], serviceProfile) {
+  if (!seasonalSelectionProfile(serviceProfile)) return slots;
+  return slots.filter((slot) => inMosquitoSeason(slot.date));
+}
+
+// First day of the mosquito season on/after the given ET date string: an
+// in-season date passes through; Nov/Dec resolve to the FOLLOWING Feb 1,
+// January to its own Feb 1.
+function nextSeasonStartFrom(dateStr) {
+  const m = Number(String(dateStr || '').slice(5, 7));
+  if (m >= 2 && m <= 10) return String(dateStr);
+  const y = Number(String(dateStr).slice(0, 4));
+  return `${m === 1 ? y : y + 1}-02-01`;
+}
+
+// The end of a seasonal browse window opening at `from`: the date reached
+// after consuming `days` further IN-SEASON days (Nov–Jan don't count), so the
+// window always carries a full complement of offerable days. Matches
+// etDateRange's `start + windowDays` shape when the tail is long enough, and
+// crosses the winter gap when it isn't — an Oct 31 start would otherwise
+// hold a single filtered day (codex #3000 post-merge P2). Bounded walk.
+function seasonalWindowEnd(from, days) {
+  const target = Math.max(1, Number(days) || DEFAULT_OPTS.windowDays) + 1;
+  let at = parseETDateTime(`${String(from).slice(0, 10)}T12:00`);
+  let counted = 0;
+  for (let i = 0; i < 220; i++) {
+    const dateStr = etDateString(at);
+    if (inMosquitoSeason(dateStr)) {
+      counted += 1;
+      if (counted >= target) return dateStr;
+    }
+    at = addETDays(at, 1);
+  }
+  return etDateString(at);
+}
+
+// How many days out the seasonal offer surfaces may reach: far enough to
+// cover the END of the WIDEST seasonal browse window the public route
+// permits (?windowDays clamps to MAX_SLOT_HORIZON_DAYS), counted in
+// IN-SEASON days across the Nov–Jan gap (codex r10 P2 + #3000 post-merge P2
+// + #3005 P2 — a horizon keyed to the 14-day default would let a wide
+// straddling window offer slots the reservation gate then rejects). In
+// mid-season with a long tail this equals the standard horizon exactly.
+function seasonalMaxHorizonDays(now = new Date()) {
+  const today = etDateString(now);
+  const windowEnd = seasonalWindowEnd(nextSeasonStartFrom(today), MAX_SLOT_HORIZON_DAYS);
+  const daysOut = Math.round(
+    (new Date(`${windowEnd}T12:00:00Z`) - new Date(`${today}T12:00:00Z`)) / 86400000,
+  );
+  return Math.max(MAX_SLOT_HORIZON_DAYS, daysOut);
+}
+
+// In-season sub-ranges of a window. A straddling window (late-October start
+// crossing to February) must reach the slot GENERATORS as separate segments:
+// their candidate caps apply during date enumeration, so a continuous
+// Oct–Feb range would spend the whole cap on Nov–Jan days the seasonal
+// filter then discards, leaving February with no fallback slots (codex
+// #3005 P2). Non-seasonal callers and non-straddling windows keep the
+// single original range.
+function seasonalDateSegments(dateFrom, dateTo, seasonal) {
+  const from = String(dateFrom).slice(0, 10);
+  const to = String(dateTo).slice(0, 10);
+  if (!seasonal) return [[from, to]];
+  const segments = [];
+  let segStart = null;
+  let segEnd = null;
+  let at = parseETDateTime(`${from}T12:00`);
+  for (let i = 0; i < 400; i++) {
+    const d = etDateString(at);
+    if (inMosquitoSeason(d)) {
+      if (!segStart) segStart = d;
+      segEnd = d;
+    } else if (segStart) {
+      segments.push([segStart, segEnd]);
+      segStart = null;
+    }
+    if (d >= to) break;
+    at = addETDays(at, 1);
+  }
+  if (segStart) segments.push([segStart, segEnd]);
+  return segments.length ? segments : [[from, to]];
+}
+
 function resolveEstimateSlotProfile(estimate = {}, userOpts = {}) {
   const estData = parseEstimateData(estimate.estimate_data);
   const serviceMode = userOpts.serviceMode === 'one_time' ? 'one_time' : 'recurring';
   const selectedFrequency = userOpts.selectedFrequency || '';
 
-  const services = serviceMode === 'one_time'
+  let services = serviceMode === 'one_time'
     ? oneTimeProfileServices(estimate, estData)
     : recurringRowsForEstimate(estimate, estData, selectedFrequency)
       .map((row) => {
@@ -535,6 +638,39 @@ function resolveEstimateSlotProfile(estimate = {}, userOpts = {}) {
         };
       })
       .filter((row) => row.service && row.label);
+  // Mosquito ladder selections (seasonal9 / monthly12) carry no
+  // perServiceTreatments, so recurringRowsForEstimate falls back to the
+  // STORED row — a monthly-default estimate selected as seasonal9 would
+  // profile 12 visits and slip past every seasonal guard downstream (winter
+  // slots listed, reserved, and seeded — codex r13 P0). Override the mosquito
+  // row's visit count from the selected tier token itself. In a bundle the
+  // mosquito tier travels as a combo axis (serviceCadences.mosquito) while
+  // selectedFrequency stays the pest cadence — honor that axis too (r14 P1).
+  if (serviceMode !== 'one_time') {
+    const cadences = userOpts.serviceCadences && typeof userOpts.serviceCadences === 'object'
+      && !Array.isArray(userOpts.serviceCadences)
+      ? userOpts.serviceCadences
+      : null;
+    const selToken = normalizeSelectionToken(cadences?.mosquito || '')
+      || normalizeSelectionToken(selectedFrequency);
+    const tierVisits = selToken === 'seasonal9' || selToken === 'seasonal_feb_oct' ? 9
+      : selToken === 'monthly12' ? 12
+        : null;
+    if (tierVisits != null) {
+      services = services.map((row) => (row.service === 'mosquito'
+        ? {
+          ...row,
+          visitsPerYear: tierVisits,
+          // Restamp the LABEL with the selected tier too (codex #3000
+          // post-merge P2): the stored default's label would otherwise
+          // produce profiles like "9x Monthly Mosquito Control", which
+          // slot-reservation persists into the appointment notes dispatch
+          // reads.
+          label: tierVisits === 9 ? 'Seasonal Mosquito Control' : 'Monthly Mosquito Control',
+        }
+        : row));
+    }
+  }
 
   // Owner directive (2026-07-03): every service call books at the flat
   // 60-minute default — techs adjust individual appointments afterward.
@@ -549,6 +685,15 @@ function resolveEstimateSlotProfile(estimate = {}, userOpts = {}) {
   return {
     serviceMode,
     selectedFrequency: normalizeFrequencyKey(selectedFrequency) || null,
+    // The bundle mosquito axis, when sent — part of the wrapper-cache key so
+    // a seasonal-axis slot list can never be served from the pest-frequency
+    // cache bucket (and vice versa).
+    mosquitoCadence: normalizeSelectionToken(
+      (userOpts.serviceCadences && typeof userOpts.serviceCadences === 'object'
+        && !Array.isArray(userOpts.serviceCadences)
+        ? userOpts.serviceCadences.mosquito
+        : '') || '',
+    ) || null,
     durationMinutes,
     serviceLabel,
     services,
@@ -1312,6 +1457,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     opts.includeWeekends ? 'weekends' : 'weekdays',
     serviceProfile.serviceMode,
     serviceProfile.selectedFrequency || 'default',
+    serviceProfile.mosquitoCadence || 'noaxis',
     serviceProfile.durationMinutes,
     opts.minimumLeadMinutes,
     opts.dateFrom || 'auto',
@@ -1366,9 +1512,20 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
 
   // A caller-supplied explicit window (specific date or AI-parsed range)
   // overrides the rolling windowDays lookahead.
-  const { dateFrom, dateTo } = (opts.dateFrom && opts.dateTo)
+  let { dateFrom, dateTo } = (opts.dateFrom && opts.dateTo)
     ? { dateFrom: opts.dateFrom, dateTo: opts.dateTo }
     : etDateRange(opts.windowDays);
+  // Seasonal selection: the DEFAULT rolling window opens at the season start
+  // (bookable all winter — codex r10 P2) and always ENDS on the date that
+  // gives it a full complement of in-season days, crossing the Nov–Jan gap
+  // when the season's tail is shorter than the window (an Oct 31 start would
+  // otherwise filter down to a single, usually lead-time-blocked day —
+  // codex #3000 post-merge P2). Explicit/AI windows keep their requested
+  // dates — an all-winter search legitimately returns nothing.
+  if (!(opts.dateFrom && opts.dateTo) && seasonalSelectionProfile(serviceProfile)) {
+    dateFrom = nextSeasonStartFrom(dateFrom);
+    dateTo = seasonalWindowEnd(dateFrom, Number(opts.windowDays) || DEFAULT_OPTS.windowDays);
+  }
   const TARGET_TOTAL = opts.maxResults + opts.expanderMaxResults;
   // Resolved once per (uncached) generation and threaded through every
   // filterCollidingSlots pass — reserveSlot resolves the same zone (same
@@ -1385,19 +1542,27 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // If we can't resolve coords, degrade gracefully: return empty primary,
   // no route-proximity tags. Getting the customer on the calendar still
   // matters more than withholding slots because geocoding failed.
+  // Straddling seasonal windows feed the generators per in-season segment
+  // (see seasonalDateSegments) — single-range for everything else.
+  const slotSegments = seasonalDateSegments(
+    dateFrom, dateTo, seasonalSelectionProfile(serviceProfile),
+  );
   if (!coords) {
-    const asapRaw = await buildAsapCapacitySlots({
-      dateFrom,
-      dateTo,
+    const asapRaw = (await Promise.all(slotSegments.map(([segFrom, segTo]) => buildAsapCapacitySlots({
+      dateFrom: segFrom,
+      dateTo: segTo,
       durationMinutes: serviceProfile.durationMinutes,
       includeWeekends: opts.includeWeekends,
       maxCandidates: Math.max(TARGET_TOTAL * 6, 24),
       minimumLeadMinutes: opts.minimumLeadMinutes,
-    });
+    })))).flat();
     const asap = await filterCollidingSlots(asapRaw, { dateFrom, dateTo, estimateZone });
     const spread = dedupeSlots(spreadWindowsAcrossDay(asap.sort(compareCustomerFacingSlots), serviceProfile.durationMinutes, { minimumLeadMinutes: opts.minimumLeadMinutes }));
     const filtered = await filterCollidingSlots(spread, { dateFrom, dateTo, estimateZone });
-    const bookable = filterPastSlotsForToday(filtered, { minimumLeadMinutes: opts.minimumLeadMinutes });
+    const bookable = filterSeasonalSlots(
+      filterPastSlotsForToday(filtered, { minimumLeadMinutes: opts.minimumLeadMinutes }),
+      serviceProfile,
+    );
     const selected = selectCustomerFacingSlots(filterTimeOfDay(bookable, opts.timeOfDay), TARGET_TOTAL);
     const { primary, expander } = splitSlotResults(selected, opts.maxResults, opts.expanderMaxResults);
     const rainOutlook = rainOutlookPromise ? await rainOutlookPromise : null;
@@ -1428,25 +1593,27 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // Pull a generous topN so we can split customer-facing slots post-hoc
   // without a second call. find-time sorts by score (detour + day penalty)
   // ascending, so this includes far more candidates than we'll surface.
-  const [raw, asapRaw] = await Promise.all([
-    findAvailableSlots({
+  const [rawLists, asapLists] = await Promise.all([
+    Promise.all(slotSegments.map(([segFrom, segTo]) => findAvailableSlots({
       lat: coords.lat,
       lng: coords.lng,
       durationMinutes: serviceProfile.durationMinutes,
-      dateFrom,
-      dateTo,
+      dateFrom: segFrom,
+      dateTo: segTo,
       topN: Number.MAX_SAFE_INTEGER,
       includeWeekends: opts.includeWeekends,
-    }),
-    buildAsapCapacitySlots({
-      dateFrom,
-      dateTo,
+    }))),
+    Promise.all(slotSegments.map(([segFrom, segTo]) => buildAsapCapacitySlots({
+      dateFrom: segFrom,
+      dateTo: segTo,
       durationMinutes: serviceProfile.durationMinutes,
       includeWeekends: opts.includeWeekends,
       maxCandidates: Math.max(TARGET_TOTAL * 6, 24),
       minimumLeadMinutes: opts.minimumLeadMinutes,
-    }),
+    }))),
   ]);
+  const raw = { slots: rawLists.flatMap((r) => r?.slots || []) };
+  const asapRaw = asapLists.flat();
 
   const classifiedRaw = (raw?.slots || [])
     .map((s) => classifySlot(s, opts.proximityDriveMinutes, serviceProfile.durationMinutes));
@@ -1469,7 +1636,10 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // Trim any window that has already passed (or is inside the booking lead
   // time) on today's date — covers route-aware and spread-reassigned slots
   // that buildAsapCapacitySlots' own guard never saw.
-  const bookable = filterPastSlotsForToday(filtered, { minimumLeadMinutes: opts.minimumLeadMinutes });
+  const bookable = filterSeasonalSlots(
+    filterPastSlotsForToday(filtered, { minimumLeadMinutes: opts.minimumLeadMinutes }),
+    serviceProfile,
+  );
   // Route-first ordering only on the coords path — the no-coords fallback
   // above has no detour data, so its ordering is unchanged either way.
   const selected = selectCustomerFacingSlots(filterTimeOfDay(bookable, opts.timeOfDay), TARGET_TOTAL, {
@@ -1522,16 +1692,31 @@ async function findEstimateSlots(estimateId, userOpts = {}) {
   const { parseWhen, summarizeWindow } = require('./scheduling/parse-when');
   const query = String(userOpts.query || '').trim();
 
+  // Seasonal selections may search across the winter gap ("February") even
+  // when the standard 90-day horizon ends before the season opens.
+  let maxDaysOut = MAX_SLOT_HORIZON_DAYS;
+  try {
+    const estimateRow = await db('estimates').where({ id: estimateId }).first();
+    if (estimateRow && seasonalSelectionProfile(resolveEstimateSlotProfile(estimateRow, {
+      serviceMode: userOpts.serviceMode,
+      selectedFrequency: userOpts.selectedFrequency,
+      serviceCadences: userOpts.serviceCadences,
+    }))) {
+      maxDaysOut = seasonalMaxHorizonDays();
+    }
+  } catch { /* fall back to the standard horizon */ }
+
   const when = await parseWhen(query, {
     now: new Date(),
     minDaysOut: 0,
-    maxDaysOut: MAX_SLOT_HORIZON_DAYS,
+    maxDaysOut,
     defaultWindowDays: DEFAULT_OPTS.windowDays,
   });
 
   const result = await getAvailableSlots(estimateId, {
     serviceMode: userOpts.serviceMode,
     selectedFrequency: userOpts.selectedFrequency,
+    serviceCadences: userOpts.serviceCadences,
     dateFrom: when.dateFrom,
     dateTo: when.dateTo,
     timeOfDay: when.timeOfDay,
@@ -1658,6 +1843,12 @@ module.exports = {
   invalidateEstimate,
   invalidateAllEstimates,
   resolveEstimateSlotProfile,
+  seasonalSelectionProfile,
+  inMosquitoSeason,
+  nextSeasonStartFrom,
+  seasonalWindowEnd,
+  seasonalDateSegments,
+  seasonalMaxHorizonDays,
   // Business bounds shared with slot-reservation's server-side validation
   // and the public route's windowDays clamp.
   SLOT_DAY_START_MINUTES,
@@ -1665,6 +1856,7 @@ module.exports = {
   MAX_SLOT_HORIZON_DAYS,
   // Exposed for tests — don't rely on them in app code.
   _internals: {
+    filterSeasonalSlots,
     parseAnchorTime,
     pickNearbyAnchor,
     classifySlot,

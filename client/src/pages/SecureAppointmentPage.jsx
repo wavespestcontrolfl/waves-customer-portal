@@ -26,6 +26,8 @@ import { WavesShell } from '../components/brand';
 import BrandFooter from '../components/BrandFooter';
 import { useGlassSurface } from '../glass/glass-engine';
 import InlineAutoPayCapture from '../components/estimate/InlineAutoPayCapture';
+import SecurePlanChoice from '../components/estimate/SecurePlanChoice';
+import { fmtMoney } from '../lib/money';
 import { loadStripeSdk } from '../lib/stripeLoader';
 import {
   WAVES_SUPPORT_PHONE_TEL,
@@ -105,12 +107,33 @@ export default function SecureAppointmentPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   useGlassSurface(true, 'full');
 
-  const [state, setState] = useState('loading'); // loading | notfound | closed | unavailable | ready | secured
+  const [state, setState] = useState('loading'); // loading | notfound | closed | unavailable | ready | secured | prepay_selected
   const [data, setData] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [captureState, setCaptureState] = useState({ ready: false, agreed: false, loadFailed: false });
   const captureRef = useRef(null);
+  // Plan-choice lane (payload carries planContext only while the gate is
+  // on). selectedPlan mirrors the server's recorded choice; per-application
+  // must be picked before the card form appears on plan-bearing pages.
+  const [selectedPlan, setSelectedPlan] = useState(null);
+  const [planBusy, setPlanBusy] = useState(false);
+
+  // Re-pull the page payload (plan availability can change under us — the
+  // office edits the visit, a term appears). Server truth wins.
+  const refresh = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/public/secure-card/${token}`);
+      if (res.status === 404) { setState('notfound'); return; }
+      if (!res.ok) throw new Error('load_failed');
+      const payload = await res.json();
+      setData(payload);
+      setSelectedPlan(payload.planContext?.selected || null);
+      setState(payload.state === 'ready' ? 'ready' : payload.state);
+    } catch {
+      setState('unavailable');
+    }
+  }, [token]);
 
   const complete = useCallback(async (setupIntentId) => {
     const res = await fetch(`${API_BASE}/public/secure-card/${token}/complete`, {
@@ -153,6 +176,7 @@ export default function SecureAppointmentPage() {
         const payload = await res.json();
         if (cancelled) return;
         setData(payload);
+        setSelectedPlan(payload.planContext?.selected || null);
         setState(payload.state === 'ready' ? 'ready' : payload.state);
       } catch {
         if (!cancelled) setState('unavailable');
@@ -189,11 +213,61 @@ export default function SecureAppointmentPage() {
         setState('secured');
         return;
       }
+      // The server requires a recorded plan selection before the capture
+      // may complete (another tab may have changed it) — re-pull so the
+      // plan choice renders with current truth.
+      if (err?.code === 'plan_required') {
+        await refresh();
+        setError('Please choose how you’d like to pay, then save your card.');
+        return;
+      }
       setError('We could not finish saving your card. Please try again, or text us and we’ll help.');
     } finally {
       setBusy(false);
     }
-  }, [busy, complete]);
+  }, [busy, complete, refresh]);
+
+  const selectPlan = useCallback(async (plan) => {
+    if (planBusy) return;
+    setPlanBusy(true);
+    setError(null);
+    try {
+      const res = await fetch(`${API_BASE}/public/secure-card/${token}/select-plan`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ plan }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (res.ok) {
+        if (plan === 'prepay_annual' && body.payUrl) {
+          // Payment happens on the invoice pay page — hand the customer off.
+          window.location.assign(body.payUrl);
+          return;
+        }
+        if (state === 'prepay_selected') {
+          // Switching back to per-application retired the prepay invoice
+          // server-side — re-pull so the page renders the ready plan view
+          // with the selection recorded.
+          await refresh();
+          return;
+        }
+        setSelectedPlan(plan);
+        return;
+      }
+      if (body.code === 'no_longer_needed') { setState('closed'); return; }
+      if (body.code === 'already_secured') { setState('secured'); return; }
+      // plan_unavailable / conflicts: the server state moved — re-render truth.
+      const wasSwitch = state === 'prepay_selected';
+      await refresh();
+      if (wasSwitch) {
+        setError('That change couldn’t be completed — if you just paid your annual invoice you’re all set; otherwise please try again in a moment.');
+      }
+    } catch {
+      setError('We could not save your choice. Please try again, or text us and we’ll help.');
+    } finally {
+      setPlanBusy(false);
+    }
+  }, [planBusy, token, refresh, state]);
 
   const greeting = data?.firstName ? `${data.firstName}, you` : 'You';
 
@@ -253,6 +327,52 @@ export default function SecureAppointmentPage() {
     );
   }
 
+  if (state === 'prepay_selected') {
+    return (
+      <Shell>
+        <Card>
+          <h1 style={{ fontFamily: FONTS.heading, fontSize: 22, margin: 0, color: S.text }}>
+            {data?.firstName ? `${data.firstName}, you chose the annual plan` : 'You chose the annual plan'}
+          </h1>
+          <p style={{ fontSize: 15, color: S.body, lineHeight: 1.55, marginTop: 10 }}>
+            Your annual prepay invoice is ready. Pay it once and every visit
+            this year is covered — no charges after your visits.
+          </p>
+          {data ? <VisitSummary data={data} /> : null}
+          <a href={data?.payUrl} data-glass-accent="" style={{ ...PRIMARY_CTA, marginTop: 16 }}>
+            Pay your annual invoice
+          </a>
+          {/* The card form is deliberately NOT rendered here: switching to
+              per-visit must first succeed server-side (it voids the pending
+              annual invoice and cancels its term). On success selectPlan
+              re-pulls the payload and the page renders the ready plan view
+              with the capture form; on refusal the error shows instead —
+              never a card save recorded against a live annual selection. */}
+          <button
+            type="button"
+            onClick={() => selectPlan('per_application')}
+            disabled={planBusy}
+            style={{
+              ...PRIMARY_CTA,
+              marginTop: 10,
+              background: '#FFFFFF',
+              color: S.text,
+              border: `1px solid ${S.border}`,
+              fontWeight: 700,
+              opacity: planBusy ? 0.55 : 1,
+            }}
+          >
+            {planBusy ? 'Switching…' : 'Save a card and pay per visit instead'}
+          </button>
+          {error ? (
+            <div role="alert" style={{ color: '#C8312F', fontSize: 14, lineHeight: 1.5, marginTop: 12 }}>{error}</div>
+          ) : null}
+          <ContactRow />
+        </Card>
+      </Shell>
+    );
+  }
+
   if (state !== 'ready' || !data?.clientSecret) {
     return (
       <Shell>
@@ -268,47 +388,99 @@ export default function SecureAppointmentPage() {
     );
   }
 
+  // Plan-choice lane: planContext rides the payload only while the gate is
+  // on AND the booked series priced soundly — its absence renders the
+  // original card-only page unchanged.
+  const planContext = data?.planContext || null;
+  const planRecurring = planContext?.mode === 'recurring';
+  const planOneTime = planContext?.mode === 'one_time';
+  // Recurring plan pages hold the card form back until a plan is picked;
+  // everything else (one-time, gate off) shows it immediately as today.
+  const showCapture = !planRecurring || selectedPlan === 'per_application';
+
   return (
     <Shell>
       <Card>
         <h1 style={{ fontFamily: FONTS.heading, fontSize: 22, margin: 0, color: S.text }}>
-          {greeting}&rsquo;re one step from all set
+          {planRecurring
+            ? (data?.firstName ? `${data.firstName}, choose how you’d like to pay` : 'Choose how you’d like to pay')
+            : <>{greeting}&rsquo;re one step from all set</>}
         </h1>
         <p style={{ fontSize: 15, color: S.body, lineHeight: 1.55, marginTop: 10 }}>
-          Add a card on file to secure your visit. Nothing is charged today —
-          your card is only charged after your service is completed.
+          {planRecurring
+            ? 'Your appointment is booked. Pick a plan below, add a card, and you’re all set.'
+            : 'Add a card on file to secure your visit. Nothing is charged today — your card is only charged after your service is completed.'}
         </p>
         <VisitSummary data={data} />
-        <InlineAutoPayCapture
-          ref={captureRef}
-          intent={{ clientSecret: data.clientSecret, publishableKey: data.publishableKey }}
-          loadStripeSdk={loadStripeSdk}
-          busy={busy}
-          onStateChange={setCaptureState}
-        />
-        {error ? (
-          <div role="alert" style={{ color: '#C8312F', fontSize: 14, lineHeight: 1.5, marginTop: 12 }}>{error}</div>
+        {planOneTime ? (
+          <div
+            data-glass="soft"
+            style={{
+              background: '#F8FCFE',
+              border: '1px solid #CFE7F5',
+              borderRadius: 10,
+              padding: '14px 16px',
+              marginTop: 12,
+              display: 'flex',
+              alignItems: 'baseline',
+              justifyContent: 'space-between',
+            }}
+          >
+            <span style={{ fontSize: 14.5, fontWeight: 700, color: S.text }}>Your service total</span>
+            <span style={{ fontSize: 22, fontWeight: 800, color: S.text }}>{fmtMoney(planContext.perVisit)}</span>
+          </div>
         ) : null}
-        <button
-          type="button"
-          data-glass-accent=""
-          onClick={handleSave}
-          disabled={busy || !(captureState.ready && captureState.agreed)}
-          style={{
-            ...PRIMARY_CTA,
-            marginTop: 16,
-            opacity: busy || !(captureState.ready && captureState.agreed) ? 0.55 : 1,
-            cursor: busy || !(captureState.ready && captureState.agreed) ? 'default' : 'pointer',
-          }}
-        >
-          {busy ? 'Saving…' : 'Save card & secure my visit'}
-        </button>
-        {captureState.loadFailed ? (
-          <p style={{ fontSize: 14, color: S.body, lineHeight: 1.5, marginTop: 12 }}>
-            Having trouble with the card form? Text or call us and we&rsquo;ll
-            send a fresh link.
-          </p>
+        {planRecurring ? (
+          <SecurePlanChoice
+            planContext={planContext}
+            selected={selectedPlan}
+            onSelect={selectPlan}
+            disabled={planBusy || busy}
+          />
         ) : null}
+        {showCapture ? (
+          <>
+            <InlineAutoPayCapture
+              ref={captureRef}
+              intent={{ clientSecret: data.clientSecret, publishableKey: data.publishableKey }}
+              loadStripeSdk={loadStripeSdk}
+              busy={busy}
+              onStateChange={setCaptureState}
+            />
+            {error ? (
+              <div role="alert" style={{ color: '#C8312F', fontSize: 14, lineHeight: 1.5, marginTop: 12 }}>{error}</div>
+            ) : null}
+            <button
+              type="button"
+              data-glass-accent=""
+              onClick={handleSave}
+              disabled={busy || !(captureState.ready && captureState.agreed)}
+              style={{
+                ...PRIMARY_CTA,
+                marginTop: 16,
+                opacity: busy || !(captureState.ready && captureState.agreed) ? 0.55 : 1,
+                cursor: busy || !(captureState.ready && captureState.agreed) ? 'default' : 'pointer',
+              }}
+            >
+              {busy ? 'Saving…' : (planRecurring ? 'Save card & confirm my plan' : 'Save card & secure my visit')}
+            </button>
+            {(planRecurring || planOneTime) ? (
+              <p style={{ textAlign: 'center', fontSize: 12.5, color: S.muted, marginTop: 10, marginBottom: 0 }}>
+                Nothing is charged today.
+              </p>
+            ) : null}
+            {captureState.loadFailed ? (
+              <p style={{ fontSize: 14, color: S.body, lineHeight: 1.5, marginTop: 12 }}>
+                Having trouble with the card form? Text or call us and we&rsquo;ll
+                send a fresh link.
+              </p>
+            ) : null}
+          </>
+        ) : (
+          error ? (
+            <div role="alert" style={{ color: '#C8312F', fontSize: 14, lineHeight: 1.5, marginTop: 12 }}>{error}</div>
+          ) : null
+        )}
       </Card>
     </Shell>
   );

@@ -2028,6 +2028,8 @@ function ServiceRowV2({ service: s, initiallyExpanded = false }) {
   const [expanded, setExpanded] = useState(initiallyExpanded);
   const structuredNotes = parseStructuredNotes(s.structured_notes);
   const managerApproval = structuredNotes.waveguardManagerApproval;
+  const blackoutApproval = structuredNotes.waveguardBlackoutApproval;
+  const nLimitApproval = structuredNotes.waveguardNLimitApproval;
   const tankCleanout = structuredNotes.waveguardTankCleanout;
   const isProjectCompletion = structuredNotes.projectCompletion === true;
   const projectReportUrl = isProjectCompletion ? projectReportUrlFromNotes(structuredNotes) : null;
@@ -2035,7 +2037,11 @@ function ServiceRowV2({ service: s, initiallyExpanded = false }) {
     ? structuredNotes.inventoryDeductions
     : [];
   const hasWaveGuardAudit =
-    !!managerApproval || !!tankCleanout || inventoryDeductions.length > 0;
+    !!managerApproval ||
+    !!blackoutApproval ||
+    !!nLimitApproval ||
+    !!tankCleanout ||
+    inventoryDeductions.length > 0;
   return (
     <div className="bg-zinc-50 border-hairline border-zinc-200 rounded-sm overflow-hidden mb-1.5">
       {" "}
@@ -2122,16 +2128,30 @@ function ServiceRowV2({ service: s, initiallyExpanded = false }) {
               <div className="flex items-center gap-2 text-zinc-900 font-medium mb-1">
                 {" "}
                 <ShieldCheck size={14} strokeWidth={1.75} />{" "}
-                <span>Manager Approval</span>{" "}
+                {/* Advisory records (no approval ceremony — PR #3022) must
+                    never read as an approval in the audit history. */}
+                <span>
+                  {managerApproval.advisory
+                    ? "Protocol Exception (advisory)"
+                    : "Manager Approval"}
+                </span>{" "}
               </div>{" "}
               <div className="text-ink-secondary">
-                {approvalCodeLabel(managerApproval.reasonCode)}
-                {managerApproval.approvedByRole
-                  ? ` by ${managerApproval.approvedByRole}`
-                  : ""}
-                {managerApproval.approvedAt
-                  ? ` on ${fmtDate(managerApproval.approvedAt)}`
-                  : ""}
+                {managerApproval.advisory
+                  ? `Recorded without approval ceremony${
+                      managerApproval.recordedAt
+                        ? ` on ${fmtDate(managerApproval.recordedAt)}`
+                        : ""
+                    }`
+                  : `${approvalCodeLabel(managerApproval.reasonCode)}${
+                      managerApproval.approvedByRole
+                        ? ` by ${managerApproval.approvedByRole}`
+                        : ""
+                    }${
+                      managerApproval.approvedAt
+                        ? ` on ${fmtDate(managerApproval.approvedAt)}`
+                        : ""
+                    }`}
               </div>
               {managerApproval.note && (
                 <div className="text-zinc-900 mt-1">{managerApproval.note}</div>
@@ -2153,6 +2173,57 @@ function ServiceRowV2({ service: s, initiallyExpanded = false }) {
                 )}
             </div>
           )}
+          {[
+            ["Fertilizer Blackout", blackoutApproval],
+            ["Annual N Budget", nLimitApproval],
+          ].map(([label, record]) =>
+            record ? (
+              <div
+                key={label}
+                className="mt-2 rounded-sm border-hairline border-zinc-200 bg-white p-2.5"
+              >
+                {" "}
+                <div className="flex items-center gap-2 text-zinc-900 font-medium mb-1">
+                  {" "}
+                  <ShieldCheck size={14} strokeWidth={1.75} />{" "}
+                  <span>
+                    {record.advisory
+                      ? `${label} (advisory)`
+                      : `${label} Approval`}
+                  </span>{" "}
+                </div>{" "}
+                <div className="text-ink-secondary">
+                  {record.advisory
+                    ? `Recorded without approval ceremony${
+                        record.recordedAt
+                          ? ` on ${fmtDate(record.recordedAt)}`
+                          : ""
+                      }`
+                    : `${approvalCodeLabel(record.reasonCode)}${
+                        record.approvedByRole
+                          ? ` by ${record.approvedByRole}`
+                          : ""
+                      }${
+                        record.approvedAt
+                          ? ` on ${fmtDate(record.approvedAt)}`
+                          : ""
+                      }`}
+                </div>
+                {record.note && (
+                  <div className="text-zinc-900 mt-1">{record.note}</div>
+                )}
+                {Array.isArray(record.blocks) && record.blocks.length > 0 && (
+                  <div className="mt-2 space-y-1">
+                    {record.blocks.map((block, idx) => (
+                      <div key={idx} className="text-ink-secondary">
+                        {block.message || approvalCodeLabel(block.code)}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ) : null,
+          )}
           {tankCleanout && (
             <div className="mt-2 rounded-sm border-hairline border-zinc-200 bg-white p-2.5">
               {" "}
@@ -2172,9 +2243,15 @@ function ServiceRowV2({ service: s, initiallyExpanded = false }) {
                 <div>
                   Cleanout:{" "}
                   <span className="text-zinc-900">
+                    {/* Advisory-only records (no equipment step in the
+                        closeout) carry no attestation — "Not completed"
+                        would turn an uncollected answer into an affirmative
+                        claim the tech failed to clean the tank. */}
                     {tankCleanout.cleanoutCompleted
                       ? "Completed"
-                      : "Not completed"}
+                      : tankCleanout.cleanoutCompleted == null
+                        ? "Not recorded"
+                        : "Not completed"}
                   </span>
                 </div>{" "}
                 <div>
@@ -6529,7 +6606,7 @@ export default function Customer360ProfileV2({
                     type="checkbox"
                     disabled={!isAdmin}
                     className="mt-0.5"
-                    checked={notificationPrefs.appointment_notify_primary === true}
+                    checked={notificationPrefs.appointment_notify_primary !== false}
                     onChange={(e) =>
                       updateNotificationPrefs({
                         appointmentNotifyPrimary: e.target.checked,
@@ -6543,9 +6620,9 @@ export default function Customer360ProfileV2({
                       Also send appointment SMS to the account owner
                     </div>{" "}
                     <div className="text-12 text-ink-secondary">
-                      When an on-location contact has a different phone, they
-                      receive appointment reminders by default. Turn this on to
-                      copy the payer too.
+                      On by default. On-location contacts receive appointment
+                      reminders too. Turn this off only if the account owner
+                      should stop receiving them.
                     </div>{" "}
                   </div>{" "}
                 </label>{" "}
@@ -6557,7 +6634,7 @@ export default function Customer360ProfileV2({
                     type="checkbox"
                     disabled={!isAdmin}
                     className="mt-0.5"
-                    checked={notificationPrefs.service_report_notify_primary === true}
+                    checked={notificationPrefs.service_report_notify_primary !== false}
                     onChange={(e) =>
                       updateNotificationPrefs({
                         serviceReportNotifyPrimary: e.target.checked,
@@ -6571,8 +6648,9 @@ export default function Customer360ProfileV2({
                       Also email service reports to the account owner
                     </div>{" "}
                     <div className="text-12 text-ink-secondary">
-                      If off, a distinct service-contact email receives the
-                      report and the payer stays on billing-only messages.
+                      On by default. Turn this off only if the account owner
+                      should stop receiving reports — a distinct
+                      service-contact email then receives them instead.
                     </div>{" "}
                   </div>{" "}
                 </label>{" "}

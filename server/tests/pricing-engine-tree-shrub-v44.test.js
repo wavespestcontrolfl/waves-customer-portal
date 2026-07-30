@@ -13,10 +13,14 @@ describe('Tree & Shrub Pricing v4.4', () => {
     constants.WAVEGUARD.tiers.platinum.discount = originalPlatinumDiscount;
   });
 
-  test('active customer-facing tiers include only light and standard', () => {
-    expect(Object.keys(constants.TREE_SHRUB.tiers)).toEqual(['light', 'standard']);
-    expect(constants.TREE_SHRUB.tiers.enhanced).toBeUndefined();
+  test('active customer-facing tiers are light, standard, and enhanced (9x un-retired 2026-07-23)', () => {
+    expect(Object.keys(constants.TREE_SHRUB.tiers)).toEqual(['light', 'standard', 'enhanced']);
+    expect(constants.TREE_SHRUB.tiers.enhanced).toEqual(expect.objectContaining({ frequency: 9 }));
     expect(constants.TREE_SHRUB.tiers.premium).toBeUndefined();
+    // Standard remains the mandated default + recommendation — Enhanced is
+    // an upsell only.
+    expect(constants.TREE_SHRUB.defaultTier).toBe('standard');
+    expect(constants.TREE_SHRUB.recommendedTier).toBe('standard');
   });
 
   test('legacy premium request maps to the 6-visit standard plan with warning', () => {
@@ -28,13 +32,14 @@ describe('Tree & Shrub Pricing v4.4', () => {
     expect(quote.warnings).toContain('Premium Tree & Shrub has been retired; the 6-visit Standard plan was used.');
   });
 
-  test('legacy enhanced request maps to the 6-visit standard plan with warning', () => {
+  test('enhanced request prices the active 9-visit tier at 1.25x standard material', () => {
     const quote = priceTreeShrub({ bedArea: 2000, treeCount: 0 }, { tier: 'enhanced' });
 
-    expect(quote.legacyTierRequested).toBe('enhanced');
-    expect(quote.tier).toBe('standard');
-    expect(quote.frequency).toBe(6);
-    expect(quote.warnings).toContain('Enhanced (9-visit) Tree & Shrub has been retired; the 6-visit Standard plan was used.');
+    expect(quote.legacyTierRequested).toBeFalsy();
+    expect(quote.tier).toBe('enhanced');
+    expect(quote.frequency).toBe(9);
+    expect(quote.materialModel.tierFactor).toBe(1.25);
+    expect(quote.warnings).not.toContain('Enhanced (9-visit) Tree & Shrub has been retired; the 6-visit Standard plan was used.');
   });
 
   test('standard 2,000 sqft worked example (v4.6)', () => {
@@ -301,7 +306,7 @@ describe('Tree & Shrub Pricing v4.4', () => {
     const quote = priceTreeShrub({ bedArea: 1000 }, { tier: 'light' });
     expect(quote.tier).toBe('light');
     expect(quote.frequency).toBe(4);
-    expect(quote.availableTiers).toEqual(['light', 'standard']);
+    expect(quote.availableTiers).toEqual(['light', 'standard', 'enhanced']);
   });
 
   test('estimatedBedArea alias is normalized before turf fallback math', () => {
@@ -636,10 +641,9 @@ describe('Tree & Shrub estimator hardening', () => {
     });
   });
 
-  describe('retired tier deprecation (enhanced + premium → standard)', () => {
-    test('active tier list excludes enhanced and premium', () => {
-      expect(Object.keys(constants.TREE_SHRUB.tiers).sort()).toEqual(['light', 'standard']);
-      expect(constants.TREE_SHRUB.tiers.enhanced).toBeUndefined();
+  describe('tier lineup (9x enhanced un-retired 2026-07-23; premium stays retired)', () => {
+    test('active tier list is light, standard, enhanced', () => {
+      expect(Object.keys(constants.TREE_SHRUB.tiers).sort()).toEqual(['enhanced', 'light', 'standard']);
       expect(constants.TREE_SHRUB.tiers.premium).toBeUndefined();
     });
 
@@ -653,26 +657,23 @@ describe('Tree & Shrub estimator hardening', () => {
       expect(TS_PREMIUM_DEPRECATED_WARNING_CODE).toBe('tree_shrub_premium_deprecated_mapped_to_standard');
     });
 
-    test('incoming enhanced tier maps to standard with a structured warning code', () => {
+    test('incoming enhanced tier prices the 9-visit tier with no deprecation warning', () => {
       const quote = priceTreeShrub({ bedArea: 2000 }, { tier: 'enhanced' });
-      expect(quote.tier).toBe('standard');
-      expect(quote.frequency).toBe(6);
-      expect(quote.legacyTierRequested).toBe('enhanced');
-      expect(quote.warningCodes).toContain(TS_ENHANCED_DEPRECATED_WARNING_CODE);
-      expect(TS_ENHANCED_DEPRECATED_WARNING_CODE).toBe('tree_shrub_enhanced_deprecated_mapped_to_standard');
+      expect(quote.tier).toBe('enhanced');
+      expect(quote.frequency).toBe(9);
+      expect(quote.legacyTierRequested).toBeFalsy();
+      expect(quote.warningCodes || []).not.toContain(TS_ENHANCED_DEPRECATED_WARNING_CODE);
     });
 
-    test('retired tier requests price identically to the active 6x standard plan', () => {
-      const premium = priceTreeShrub({ bedArea: 2000, treeCount: 0 }, { tier: 'premium' });
+    test('enhanced prices above standard: 9 visits of labor + 1.25x material', () => {
       const enhanced = priceTreeShrub({ bedArea: 2000, treeCount: 0 }, { tier: 'enhanced' });
       const standard = priceTreeShrub({ bedArea: 2000, treeCount: 0 }, { tier: 'standard' });
-      expect(premium.monthly).toBe(standard.monthly);
-      expect(enhanced.monthly).toBe(standard.monthly);
-      expect(premium.frequency).toBe(6);
-      expect(enhanced.frequency).toBe(6);
-      // Standard runs the full material model (no Light tier factor).
-      expect(premium.materialModel.tierFactor).toBe(1);
-      expect(enhanced.materialModel.tierFactor).toBe(1);
+      expect(enhanced.monthly).toBeGreaterThan(standard.monthly);
+      expect(enhanced.materialModel.tierFactor).toBe(1.25);
+      expect(standard.materialModel.tierFactor).toBe(1);
+      // Per-visit stays cheaper than standard per-visit is NOT guaranteed
+      // (labor dominates); the invariant that matters is annual ordering.
+      expect(enhanced.annual).toBeGreaterThan(standard.annual);
     });
   });
 
@@ -738,8 +739,8 @@ describe('Tree & Shrub estimator hardening', () => {
       expect(legacyValue('MARGIN_FLOOR')).toBe(constants.GLOBAL.MARGIN_FLOOR);
     });
 
-    test('retired tiers are not instantiated as active', () => {
-      expect(constants.TREE_SHRUB.tiers.enhanced).toBeUndefined();
+    test('premium stays retired; enhanced is active (un-retired 2026-07-23)', () => {
+      expect(constants.TREE_SHRUB.tiers.enhanced).toEqual(expect.objectContaining({ frequency: 9 }));
       expect(constants.TREE_SHRUB.tiers.premium).toBeUndefined();
     });
   });

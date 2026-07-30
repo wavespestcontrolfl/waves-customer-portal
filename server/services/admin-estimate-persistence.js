@@ -14,6 +14,7 @@ const {
   normalizeContactEmail,
 } = require('./lead-estimate-link');
 const { clearEstimatePricingCache } = require('./estimate-pricing-cache');
+const { resolveStoredPestPricingVersion } = require('./estimate-pricing-bundle-utils');
 const { recordPreSendRevision } = require('./estimate-learning');
 const { inferEstimateServiceInterest } = require('./estimate-service-lines');
 const logger = require('./logger');
@@ -99,10 +100,21 @@ function estimateResultRoot(estimateData) {
 // Manual discounts are warn-only and their computed amount is kept as-is.
 const PEST_APPS_TO_FREQUENCY = { 4: 'quarterly', 6: 'bimonthly', 12: 'monthly' };
 // round(89 × v1 mult) per cadence — the exact values the client literal produces.
-const CLIENT_PEST_FLOOR_PA_LITERALS = new Set([89, 75.65, 62.30]);
+// Pre-stamp client saves floor at 89 × the client mirror's cadence mult.
+// The v1-era literals (89/75.65/62.30) are recognized GLOBALLY — ancient
+// pre-flag client payloads predate both the isClientEngineResult flag and
+// any server v2 stamping, so they cannot collide with a server snapshot.
+// The v2 literals (78.32/69.42) are recognized ONLY on flagged client-engine
+// payloads: armed server-priced v2 estimates stamp the same default values,
+// and classifying those as client stamps would let a floor-config change
+// rewrite/reject a server snapshot instead of leaving it untouched
+// (codex #2966 r2 P2).
+const CLIENT_PEST_FLOOR_PA_LITERALS_V1 = new Set([89, 75.65, 62.30]);
+const CLIENT_PEST_FLOOR_PA_LITERALS_V2 = new Set([78.32, 69.42]);
 // The client fallback's own cadence multipliers (pestFrequencyTiers ft.disc)
 // — used to recognize CONFIGURED-floor client stamps below.
 const CLIENT_PEST_V1_MULTS = { 4: 1.0, 6: 0.85, 12: 0.7 };
+const CLIENT_PEST_V2_MULTS = { 4: 1.0, 6: 0.88, 12: 0.78 };
 function pestFloorLiftForAnnual(pestAnn, discountPct, floorAnn) {
   if (!(discountPct > 0) || !Number.isFinite(pestAnn) || pestAnn <= 0) return 0;
   if (!Number.isFinite(floorAnn) || floorAnn <= 0) return 0;
@@ -139,10 +151,16 @@ function normalizeClientPestFloorMetadata(estimateData, { liveConfigVerified = t
   // client floor metadata as if it were a server snapshot (codex P2
   // round 11). The 89-literal set still covers pre-stamp client saves.
   const clientFloorBase = Number(root?.pricingMetadata?.pestProgramFloorPerVisit);
-  const clientStampForRow = (row) => {
-    const mult = CLIENT_PEST_V1_MULTS[Number(row.apps ?? row.v)];
-    if (!mult || !Number.isFinite(clientFloorBase) || clientFloorBase <= 0) return null;
-    return Math.round(clientFloorBase * mult * 100) / 100;
+  // Recognize stamps from BOTH client curve generations: the v2 mirror ships
+  // with this change, but a cached pre-v2 client keeps stamping v1 mults
+  // until refresh — either is a CLIENT stamp, never a server snapshot
+  // (codex #2966 P2).
+  const clientStampsForRow = (row) => {
+    if (!Number.isFinite(clientFloorBase) || clientFloorBase <= 0) return [];
+    const apps = Number(row.apps ?? row.v);
+    return [CLIENT_PEST_V1_MULTS[apps], CLIENT_PEST_V2_MULTS[apps]]
+      .filter((mult) => Number.isFinite(mult) && mult > 0)
+      .map((mult) => Math.round(clientFloorBase * mult * 100) / 100);
   };
 
   // Fail-closed gates BEFORE any mutation (pre-push P0s on the main-merge).
@@ -167,15 +185,29 @@ function normalizeClientPestFloorMetadata(estimateData, { liveConfigVerified = t
       if (!row || typeof row !== 'object') continue;
       const stampedPa = Number(row.floorPa);
       const hasMetadata = Number.isFinite(stampedPa);
+      // EVERYTHING in this payload is caller-controlled — there is no in-band
+      // signal that trustably proves server provenance, and a spoofed
+      // pricingVersion must never skip the armed-floor validation
+      // (codex #2966 r4 P1). So the split is: VALIDATION runs for client
+      // stamps AND for v2-stamped unmarked rows (a genuine server v2 snapshot
+      // at/above the live floor passes untouched; a forged below-floor row
+      // 409s); RESTAMPING below stays client-only, so genuine server
+      // metadata is never rewritten (r3).
       const isClientStamped = hasMetadata && (
-        CLIENT_PEST_FLOOR_PA_LITERALS.has(stampedPa)
-        || (isClientEngineResult && stampedPa === clientStampForRow(row))
+        CLIENT_PEST_FLOOR_PA_LITERALS_V1.has(stampedPa)
+        || (isClientEngineResult && (CLIENT_PEST_FLOOR_PA_LITERALS_V2.has(stampedPa) || clientStampsForRow(row).includes(stampedPa)))
       );
-      if (hasMetadata && !isClientStamped) continue; // server snapshot — untouched below
+      const isV2StampedUnmarked = hasMetadata && !isClientEngineResult && row.pricingVersion === 'v2';
+      if (hasMetadata && !isClientStamped && !isV2StampedUnmarked) continue; // server snapshot — untouched below
       if (!hasMetadata && !isClientEngineResult) continue; // legacy no-flag — untouched below
       const frequencyKey = PEST_APPS_TO_FREQUENCY[Number(row.apps ?? row.v)];
       if (!frequencyKey) continue; // stripped below, never stamped
-      const freqMult = (PEST.frequencyDiscounts?.v1 || {})[frequencyKey] || 1.0;
+      // Row-curve-aware (codex r10 P1): a legacy v1 row at its own v1 floor
+      // must not 409 against the v2 multiplier when config never changed —
+      // a regenerate of a REPLAY prices on the sold curve (r7-r9), so
+      // validation and restamps compare against the row's own curve.
+      const rowCurve = row.pricingVersion === 'v2' ? 'v2' : 'v1';
+      const freqMult = (PEST.frequencyDiscounts?.[rowCurve] || {})[frequencyKey] || 1.0;
       const liveFloorPa = pricingEngine.pestProgramFloorPerVisit(freqMult);
       if (liveFloorPa !== null && Number.isFinite(Number(row.pa))
         && Number(row.pa) < liveFloorPa - 0.005) {
@@ -188,9 +220,14 @@ function normalizeClientPestFloorMetadata(estimateData, { liveConfigVerified = t
     if (!row || typeof row !== 'object') continue;
     const stampedPa = Number(row.floorPa);
     const hasMetadata = Number.isFinite(stampedPa);
-    const isClientStamped = hasMetadata && (
-      CLIENT_PEST_FLOOR_PA_LITERALS.has(stampedPa)
-      || (isClientEngineResult && stampedPa === clientStampForRow(row))
+    // RESTAMPING stays client-only: a v2-stamped row with no client marker is
+    // either a genuine server snapshot (metadata must survive untouched) or a
+    // forgery the armed-floor gate above already 409'd when it mattered
+    // (below floor). Either way it is never rewritten here (r3 + r4).
+    const isServerV2Snapshot = !isClientEngineResult && row.pricingVersion === 'v2';
+    const isClientStamped = hasMetadata && !isServerV2Snapshot && (
+      CLIENT_PEST_FLOOR_PA_LITERALS_V1.has(stampedPa)
+      || (isClientEngineResult && (CLIENT_PEST_FLOOR_PA_LITERALS_V2.has(stampedPa) || clientStampsForRow(row).includes(stampedPa)))
     );
     if (hasMetadata && !isClientStamped) continue; // server-stamped — snapshot, leave alone
     // Metadata-less rows get stamped only on client-engine payloads, where the
@@ -204,7 +241,9 @@ function normalizeClientPestFloorMetadata(estimateData, { liveConfigVerified = t
     if (!PEST.enforceFloorPostDiscount) continue;
     const frequencyKey = PEST_APPS_TO_FREQUENCY[Number(row.apps ?? row.v)];
     if (!frequencyKey) continue;
-    const freqMult = (PEST.frequencyDiscounts?.v1 || {})[frequencyKey] || 1.0;
+    // Row-curve-aware restamp (codex r10 P1) — same rule as the gate above.
+    const rowCurve = row.pricingVersion === 'v2' ? 'v2' : 'v1';
+    const freqMult = (PEST.frequencyDiscounts?.[rowCurve] || {})[frequencyKey] || 1.0;
     const floorAnn = pricingEngine.pestProgramFloorAnnual(freqMult, Number(row.apps ?? row.v));
     if (floorAnn === null) continue;
     row.floorPa = pricingEngine.pestProgramFloorPerVisit(freqMult);
@@ -540,6 +579,29 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
     if (typeof needsSync === 'function' && needsSync() && typeof syncConstantsFromDB === 'function') {
       await syncConstantsFromDB();
     }
+    // REPLAY-vs-NEW curve normalization (codex #2966 r7-r9 P1s): pre-stamp
+    // replay shapes carry no services.pest.version — stored engineInputs AND
+    // persisted Admin-V2 engineRequests (translateV2CallToV1Input emits no
+    // stamp) — and forwarding them unchanged would silently reprice an
+    // already-SOLD bi-monthly/monthly pest quote on the v2 default at the
+    // next save / membership reconcile / revision. The provenance signal is
+    // the STORED RESULT: an unstamped pest input with a priced stored pest
+    // line is a replay of that line's curve (unstamped line = v1),
+    // regardless of which replay shape carried it. No stored pest line =
+    // pest was just added: genuinely new, keeps the live v2 default. The
+    // caller's write-back then persists the resolved curve into engineInputs
+    // so future replays are stamped at the source.
+    if (v1Input?.services?.pest && typeof v1Input.services.pest === 'object'
+      && !v1Input.services.pest.version) {
+      // Shared with the public read path (estimate-public extractEngineInputs)
+      // so save-time and view-time replays resolve the same curve from the
+      // same stored-result evidence — incl. raw agent-draft engineResult
+      // lineItems (codex #2966 r8 P1).
+      const resolvedVersion = resolveStoredPestPricingVersion(estimateData);
+      if (resolvedVersion) {
+        v1Input.services.pest.version = resolvedVersion;
+      }
+    }
     const v1 = generateEstimate(v1Input);
     // True setup-fee waiver: the legacy mapper counts the pest line's
     // initialFee into oneTime.total/year1, which would reintroduce the
@@ -555,7 +617,13 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
     }
     const serverResult = mapResult(v1);
     const serverTotals = deriveTotalsFromEstimateData({ result: serverResult });
-    return { recomputed: true, source, serverResult, serverTotals };
+    // The curve the recompute actually priced pest with — persisted into the
+    // replayable engineInputs by the caller so a later stored-inputs replay
+    // reprices on the SAME curve (codex #2966 r2 P1).
+    const pestPricingVersion = (Array.isArray(v1?.lineItems)
+      ? v1.lineItems.find((li) => li?.service === 'pest_control')?.pricingVersion
+      : null) || null;
+    return { recomputed: true, source, serverResult, serverTotals, pestPricingVersion };
   } catch (error) {
     return { recomputed: false, reason: 'ENGINE_ERROR', error };
   }
@@ -591,6 +659,19 @@ async function resolveServerAuthoritativePricing({ estimateData, clientPreview, 
     // Overwrite the embedded result so the stored blob and the persisted
     // columns agree — blob/column divergence is exactly the bug class this fixes.
     estimateData.result = result.serverResult;
+    // Stamp the priced pest curve into the replayable engineInputs: replay
+    // sites treat UNSTAMPED saved inputs as legacy v1, so every new save must
+    // carry the version it was actually priced with or a stored-inputs replay
+    // would reprice a v2 quote on the v1 curve (codex #2966 r2 P1).
+    if (result.pestPricingVersion && estimateData.engineInputs && typeof estimateData.engineInputs === 'object') {
+      estimateData.engineInputs.services = estimateData.engineInputs.services || {};
+      const pestInput = estimateData.engineInputs.services.pest;
+      if (pestInput && typeof pestInput === 'object') {
+        pestInput.version = result.pestPricingVersion;
+      } else if (pestInput) {
+        estimateData.engineInputs.services.pest = { version: result.pestPricingVersion };
+      }
+    }
     // An authoritative reprice supersedes the lapse-reconcile's fail-closed
     // quote-required flag (set when a lapsed member's row could not be
     // repriced) — otherwise a revised/re-saved estimate stays permanently
@@ -721,6 +802,60 @@ function assertNoDarkTermiteBondPayload(estimateData) {
   }
 }
 
+// Station-rental twin of the bond guard above (codex P2, #2998 round 3):
+// the engine enforces GATE_TERMITE_STATION_RENTAL only when IT prices, but
+// client-priced payloads (no replayable engineRequest) fall back to their
+// embedded result — without this check a fallback-shaped payload carrying a
+// termite_station_rental row could be persisted, sent, accepted, and billed
+// while the kill switch is off. Scans both the mapped rows and raw engine
+// line items, same sweep as the bond selector.
+function selectedTermiteStationRentalRows(estimateData) {
+  const mapped = [estimateData?.result?.recurring?.services, estimateData?.recurring?.services]
+    .flatMap((list) => (Array.isArray(list) ? list : []));
+  const raw = [estimateData?.engineResult?.lineItems, estimateData?.result?.lineItems]
+    .flatMap((list) => (Array.isArray(list) ? list : []));
+  return [...mapped, ...raw].filter((svc) => String(svc?.service || '').toLowerCase() === 'termite_station_rental'
+    || /termite station rental/i.test(String(svc?.name || '')));
+}
+
+function assertNoDarkTermiteRentalPayload(estimateData) {
+  const gateOn = ['1', 'true', 'on'].includes(String(process.env.GATE_TERMITE_STATION_RENTAL || '').toLowerCase());
+  if (gateOn) return;
+  if (selectedTermiteStationRentalRows(estimateData).length > 0) {
+    throw errorWithStatus('Termite station rental is disabled (GATE_TERMITE_STATION_RENTAL) — switch the estimate to purchased stations and save again.', 422);
+  }
+}
+
+// Rental twin of assertLiveTermiteBondRates (codex P1, round 4): a
+// client-priced save without a replayable engineRequest carries the uplift
+// the CLIENT computed — if pricing_config.termite_rental changed since that
+// bundle loaded, the stale horizon would be persisted and billed. The
+// unconditional syncConstantsFromDB has already refreshed
+// TERMITE.rental.recoveryQuarters; fail the save closed on any mismatch
+// between the row's uplift and round(retailValue / live horizon) — never
+// silently rewrite a line the operator saw priced.
+function assertLiveTermiteRentalRates(estimateData, { liveConfigVerified = false } = {}) {
+  const { TERMITE } = require('./pricing-engine/constants');
+  const rentalRows = selectedTermiteStationRentalRows(estimateData);
+  if (!rentalRows.length) return;
+  const staleError = () => errorWithStatus('Termite station rental pricing has changed — recalculate the estimate before saving.', 422);
+  // Fail closed when the live config could not be loaded (codex P1, round
+  // 5): with the sync down, the cached recoveryQuarters may itself be the
+  // stale value another pod already replaced — "matches the cache" proves
+  // nothing. Same unverifiable-config posture as the pest floor normalizer.
+  if (!liveConfigVerified) {
+    throw errorWithStatus('Live rental pricing could not be verified — try the save again in a moment.', 422);
+  }
+  const quarters = Number(TERMITE.rental?.recoveryQuarters);
+  if (!(quarters > 0)) throw staleError();
+  for (const row of rentalRows) {
+    const retail = Number(row.retailValue);
+    const rowPerApp = Number(row.perTreatment ?? row.perApp);
+    if (!(retail > 0) || !(rowPerApp > 0)) throw staleError();
+    if (Math.abs(rowPerApp - Math.round(retail / quarters)) > 0.005) throw staleError();
+  }
+}
+
 // Client-priced saves can't server-recompute (the legacy builder ships no
 // replayable engineRequest), so a stale client bundle could persist
 // yesterday's bond rates after an admin edits pricing_config.termite_bond
@@ -810,7 +945,9 @@ async function resolveEstimateWritePayload({
   }
   normalizeClientPestFloorMetadata(trustedEstimateData, { liveConfigVerified });
   assertNoDarkTermiteBondPayload(trustedEstimateData);
+  assertNoDarkTermiteRentalPayload(trustedEstimateData);
   assertLiveTermiteBondRates(trustedEstimateData);
+  assertLiveTermiteRentalRates(trustedEstimateData, { liveConfigVerified });
   const quoteRequired = estimateDataHasQuoteRequirement(trustedEstimateData) ||
     estimateDataHasUnresolvedManagerApproval(trustedEstimateData);
   const clientPreview = resolveBillableTotals(body, trustedEstimateData, quoteRequired);
@@ -1321,6 +1458,8 @@ async function reviseAdminEstimate({
 module.exports = {
   assertLiveTermiteBondRates,
   assertNoDarkTermiteBondPayload,
+  assertNoDarkTermiteRentalPayload,
+  assertLiveTermiteRentalRates,
   buildEstimatePersistenceFields,
   createOrReuseAdminEstimate,
   estimateExpiresAt,

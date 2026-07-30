@@ -427,17 +427,24 @@ function summarizeProposal(toolName, params) {
     }
   }
   let summary = flat.length ? `${toolName} — ${flat.join(', ')}` : toolName;
-  // Disclose the deterministic ripple of an email change (see
-  // customer-email-fanout): the operator's Confirm covers these too. The
-  // ripple note is appended AFTER the length cap so long notes/many fields
-  // can never truncate the disclosure off the confirmation card.
-  const ripple = toolName === 'update_customer' && params?.updates?.email
-    ? ` — ${require('../services/customer-email-fanout').EMAIL_FANOUT_DISCLOSURE}`
-    : '';
-  // The ripple is long by design (it names every synced surface) — widen the
-  // total budget when it applies so the base summary (who + what changes)
-  // stays readable alongside the always-intact disclosure.
-  const cap = (ripple ? 400 : 300) - ripple.length;
+  // Disclose the deterministic ripple of an email/name/phone change (see
+  // customer-email-fanout / customer-contact-fanout): the operator's Confirm
+  // covers these too. The ripple note is appended AFTER the length cap so
+  // long notes/many fields can never truncate the disclosure off the
+  // confirmation card.
+  const rippleParts = [];
+  if (toolName === 'update_customer' && params?.updates?.email) {
+    rippleParts.push(require('../services/customer-email-fanout').EMAIL_FANOUT_DISCLOSURE);
+  }
+  if (toolName === 'update_customer'
+    && (params?.updates?.first_name !== undefined || params?.updates?.last_name !== undefined || params?.updates?.phone !== undefined)) {
+    rippleParts.push(require('../services/customer-contact-fanout').CONTACT_FANOUT_DISCLOSURE);
+  }
+  const ripple = rippleParts.length ? ` — ${rippleParts.join('; ')}` : '';
+  // The ripple is long by design (it names every synced surface) and sits
+  // OUTSIDE the cap — the base summary (who + what changes) keeps its full
+  // budget alongside the always-intact disclosure(s).
+  const cap = 300;
   if (summary.length > cap) summary = `${summary.slice(0, cap - 3)}...`;
   return summary + ripple;
 }

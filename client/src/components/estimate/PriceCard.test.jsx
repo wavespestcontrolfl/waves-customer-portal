@@ -89,7 +89,7 @@ describe('PriceCard — narrow low-confidence commercial range', () => {
     expect(screen.getByText('$1,200.00')).toBeInTheDocument();
   });
 
-  it('never derives a cadence-key visit count over multiple treatment rows', () => {
+  it('never renders an "applications per year included" headline line (owner 2026-07-23)', () => {
     render(
       <PriceCard
         frequency={{
@@ -103,14 +103,16 @@ describe('PriceCard — narrow low-confidence commercial range', () => {
       />,
     );
 
-    // Rows differ (8 vs 12) — no single "N applications per year" line.
     expect(screen.queryByText(/applications per year included/i)).toBeNull();
+    // The count still shows per row, where it belongs.
+    expect(screen.getByText(/8 applications\/year/)).toBeInTheDocument();
+    expect(screen.getByText(/12 applications\/year/)).toBeInTheDocument();
   });
 
-  it('keeps the cadence-key visit count when there are no treatment rows', () => {
+  it('no visit-count headline even when a cadence-key count exists and there are no treatment rows', () => {
     render(<PriceCard frequency={{ key: 'quarterly', monthly: 50 }} />);
 
-    expect(screen.getByText(/4 applications per year included/i)).toBeInTheDocument();
+    expect(screen.queryByText(/applications per year included/i)).toBeNull();
   });
 
   it('renders the exact price (no range) when the marker is absent', () => {
@@ -270,7 +272,7 @@ describe('PriceCard — manual discount is not double-reported in-card', () => {
   });
 });
 
-describe('PriceCard — termite monitoring billing note', () => {
+describe('PriceCard — no monthly billing note (owner 2026-07-23: billing is always per application)', () => {
   const termiteFrequency = (overrides = {}) => ({
     key: 'recurring',
     label: 'Termite Bait Monitoring',
@@ -281,15 +283,87 @@ describe('PriceCard — termite monitoring billing note', () => {
     ...overrides,
   });
 
-  it('legacy payloads (monthly-billed) keep the "Billed $X/mo" note under the per-application headline', () => {
+  it('legacy monthly-billed payloads keep a factual "Billed $X/mo" note — without the retired "spread across the year" framing (codex P1)', () => {
     render(<PriceCard frequency={termiteFrequency()} preferPerApplicationPrice />);
-    expect(screen.getByText(/Billed \$35\.00\/mo, spread across the year/)).toBeInTheDocument();
-  });
-
-  it('billedPerApplication payloads (owner 2026-07-20) drop the monthly note — the headline IS the charge', () => {
-    render(<PriceCard frequency={termiteFrequency({ billedPerApplication: true })} preferPerApplicationPrice />);
     expect(screen.queryByText(/spread across the year/)).toBeNull();
     expect(screen.getByText('$105.00')).toBeInTheDocument();
-    expect(screen.getByText(/4 applications per year included/)).toBeInTheDocument();
+    // The charge on accept is still a flat monthly for unflagged legacy rows
+    // (estimate-public frequencyFromTreatmentRow) — the card must say so.
+    expect(screen.getByText(/Billed \$35\.00\/mo/)).toBeInTheDocument();
+  });
+
+  it('billedPerApplication payloads render no monthly note — the headline IS the charge', () => {
+    render(<PriceCard frequency={termiteFrequency({ billedPerApplication: true })} preferPerApplicationPrice />);
+    expect(screen.queryByText(/spread across the year/)).toBeNull();
+    expect(screen.queryByText(/Billed \$/)).toBeNull();
+    expect(screen.getByText('$105.00')).toBeInTheDocument();
+    expect(screen.queryByText(/applications per year included/)).toBeNull();
+  });
+
+  it('tier-ladder shape at a 6-visit cadence (monthly ≠ per-app, the #2965 regression) shows no monthly note', () => {
+    // Mirrors the server lawn/T&S ladder contract: tier plans bill per
+    // application (converter plan annual ÷ visits), so the server stamps
+    // billedPerApplication on every tier entry (estimator audit 2026-07-24).
+    // The pre-fix bug: only the 12-visit tier was tested, where monthly ==
+    // per-app hides the note arithmetically.
+    render(
+      <PriceCard
+        frequency={{
+          key: 'standard',
+          label: 'Bi-monthly (6 visits)',
+          serviceCategory: 'lawn_care',
+          monthly: 55.5,
+          annual: 666,
+          perTreatment: 111,
+          visitsPerYear: 6,
+          billingFrequencyKey: 'monthly',
+          billedPerApplication: true,
+          perServiceTreatments: [{
+            service: 'lawn_care', label: 'Lawn Care', perTreatment: 111, displayPrice: 111, visitsPerYear: 6,
+          }],
+        }}
+        preferPerApplicationPrice
+      />,
+    );
+    // Headline + the per-row sub-label both carry the per-app figure.
+    expect(screen.getAllByText('$111.00').length).toBeGreaterThan(0);
+    expect(screen.queryByText(/Billed \$/)).toBeNull();
+    expect(screen.queryByText(/spread across the year/)).toBeNull();
+  });
+
+  it('rowless per-application cards show a muted cadence count, never the "included" headline (codex P2)', () => {
+    render(<PriceCard frequency={termiteFrequency({ billedPerApplication: true })} preferPerApplicationPrice />);
+    expect(screen.getByText(/4 applications per year/)).toBeInTheDocument();
+    expect(screen.queryByText(/applications per year included/)).toBeNull();
+  });
+
+  it('cards WITH treatment rows never show the rowless cadence line — the count lives on the rows', () => {
+    render(
+      <PriceCard
+        preferPerApplicationPrice
+        frequency={{
+          key: 'quarterly',
+          monthly: 31.17,
+          perServiceTreatments: [
+            { service: 'pest', label: 'Quarterly application', displayPrice: 93.5, visitsPerYear: 4 },
+          ],
+        }}
+      />,
+    );
+    expect(screen.queryByText(/applications per year(?! included)/)).toBeNull();
+    expect(screen.getByText(/4 applications\/year/)).toBeInTheDocument();
+  });
+});
+
+describe('guarantee line fully retired (owner 2026-07-24)', () => {
+  it('never renders the risk-free line — the CTA micro is the one sanctioned guarantee claim', () => {
+    render(
+      <PriceCard
+        frequency={{ key: 'quarterly', label: 'Quarterly', monthly: 39, annual: 468, perTreatment: 117, visitsPerYear: 4 }}
+        preferPerApplicationPrice
+      />,
+    );
+    expect(screen.queryByText(/risk-free/i)).toBeNull();
+    expect(screen.queryByText(/money-back/i)).toBeNull();
   });
 });

@@ -18,12 +18,14 @@ Ship code changes through the Waves review/deploy pipeline without triggering th
 ### 1. Start clean
 - Work in a worktree, never in the bare host repo (`~/waves-customer-portal` is a bare/stale host): `git -C ~/waves-customer-portal fetch origin main && git -C ~/waves-customer-portal worktree add ~/wt-<slug> -b <branch> origin/main`.
 - Branch off `origin/main`, never local main (base contamination). Audits and reviews also run against `origin/main`, not the current checkout — stale feature branches produce phantom findings; verify the ref before fanning out review agents.
+- An audit finding needs TWO proofs before it's reported as live: it exists on `origin/main` AND it's reachable (page routed in `App.jsx`, function imported outside tests, path actually fires in prod). One phantom finding → re-verify every other finding in the same batch.
 - Fresh portal worktrees need `npm ci` before tests — `@waves/*` workspace packages are absolute symlinks; an interrupted install makes jest hang silently (fix: `rm -rf node_modules && npm ci`).
 - Edit/Write files at the WORKTREE path. Writing to the original repo path edits the wrong branch's tree.
 
 ### 2. Before every commit
 - `git branch --show-current` — auto-applied CLAUDE.md edits and parallel sessions can silently flip HEAD.
-- Stage explicit paths. Never `git add -A` (the external Codex process leaves stray files).
+- Stage explicit paths. Never `git add -A` (the external Codex process leaves stray files, and a live-edit fetch-stub under `client/public/__stub/` is REAL prod payload — a stub once reached the public repo and forced a token rotation; gitignore `client/public/__stub/` in every worktree that uses the rig BEFORE the first commit).
+- Write the commit message from a FILE (`git commit -F`), never reconstructed from `git log` — squash-merge uses the COMMIT MESSAGE, not the PR title, so this text is what lands on main.
 
 ### 3. Before every push
 - If the diff touches `client/`: `npm run check:portal-brand` — one violation kills EVERY Railway build for everyone.
@@ -44,6 +46,8 @@ Ship code changes through the Waves review/deploy pipeline without triggering th
   - During Codex usage limits, a bounced re-tag is not queued — post a fresh one after reset. >15–20 min of silence on a heavy day usually means limits, not clean.
 
 ### 5. Merge and verify
+- **Merging is Adam's step.** A self-authored PR stops at MERGE-READY unless Adam explicitly authorized merging in this session — "ok go" on a build plan authorizes building and opening the PR, not merging it.
+- Under a standing "merge when clean" authorization, clean = a review round with ZERO findings on the final HEAD. Fixing-or-rebutting findings completes the REVIEW round (§4), but a round that needed rebuttals does NOT satisfy "merge when clean" — push the fix, get a zero-comment round, or hand the non-converging loop back to Adam. Never self-merge on a rebutted round.
 - After merge: confirm your final commit actually landed — "PR merged" doesn't prove it. Squash merges rewrite SHAs, so ancestry checks fail even on success: check `gh pr view <n> --json state,headRefOid,mergeCommit` and confirm `headRefOid` equals your final push SHA. Only for true merge commits does `git merge-base --is-ancestor <final-sha> <merge-sha>` apply. If your last push isn't in the merged head, recover via cherry-pick.
 - Confirm the Railway deploy went green before reporting done. A merged PR with a red deploy is not shipped.
 - Clean up the worktree when the lane closes: `git worktree remove ~/wt-<slug>`.
@@ -67,6 +71,8 @@ Before reporting a shipped change as done, all of: final-commit-in-merge check p
 
 ## Failure Modes
 - Merging on a stale clean signal (Codex reviewed an earlier commit).
+- Self-merging without in-session authorization, or treating a rebutted round as "merge when clean".
+- Piping jest through `grep`/`tail` for pass/fail — it masks the exit code (a failing test shipped this way once). Run bare and check the exit code.
 - Trusting "PR merged" as proof your last push landed.
 - Pushing client/ changes without the brand check.
 - Editing files in the bare host or another worktree's path.
@@ -74,4 +80,4 @@ Before reporting a shipped change as done, all of: final-commit-in-merge check p
 - `git checkout <ref> -- <path>` to read an old version (overwrites working tree) — use `git show <ref>:<path>`.
 
 ## Escalation
-Ask Adam only for: gate flips on customer-facing features, pushes to main without a PR (requires his explicit "push to main"), and anything that would send customer-facing communications.
+Ask Adam only for: merging a self-authored PR (unless authorized in-session — see §5), gate flips on customer-facing features, pushes to main without a PR (requires his explicit "push to main"), and anything that would send customer-facing communications.

@@ -1,6 +1,6 @@
 import { COLORS as B, FONTS } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
-import { WAVES_ADDRESS_LINE, WAVES_FL_LICENSE_LINE, WAVES_PRODUCTS_SAFETY_URL } from '../constants/business';
+import { WAVES_ADDRESS_LINE, WAVES_FL_LICENSE_LINE } from '../constants/business';
 import { isNativeApp } from '../native/platform';
 import { useWavesShell } from './brand/WavesShellContext';
 import { glassCopyActive, GLASS_FOOTER_CITY_LINKS } from '../lib/estimate-glass-copy';
@@ -265,10 +265,9 @@ export default function BrandFooter({ borderColor, variant }) {
             {dot}
             <a href="https://www.wavespestcontrol.com" target="_blank" rel="noopener noreferrer" style={contactLink}>wavespestcontrol.com</a>
           </span>
-          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 10, whiteSpace: 'nowrap' }}>
-            {dot}
-            <a href={WAVES_PRODUCTS_SAFETY_URL} target="_blank" rel="noopener noreferrer" style={contactLink}>Products &amp; Safety</a>
-          </span>
+          {/* Products & Safety intentionally NOT in the footer (owner
+              2026-07-23) — the estimate's in-content safety link (#2890)
+              is the one sanctioned surface for it. */}
         </div>
         <div style={{ fontSize: 13, fontWeight: 500, color: headingColor, lineHeight: 1.4 }}>
           <ServiceAreaLinks color={headingColor} />

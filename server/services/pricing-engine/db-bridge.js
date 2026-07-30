@@ -4,6 +4,11 @@
 // Called on server startup; re-syncs every 60s on next estimate
 // ============================================================
 const constants = require('./constants');
+// Pristine in-code mosquito brackets, captured at module load. `constants` is a
+// mutable singleton that every sync writes through, so rejecting a bad DB row has
+// to ASSIGN these back — merely skipping the assignment leaves whatever a prior
+// sync applied live while the DB and admin UI show the rejected values.
+const MOSQUITO_DEFAULT_LOT_CATEGORIES = constants.MOSQUITO.lotCategories.map(c => ({ ...c }));
 const r = (val) => Math.round(val * constants.PROCESSING_ADJUSTMENT);
 const money = (val) => Math.round(Number(val) * constants.PROCESSING_ADJUSTMENT * 100) / 100;
 
@@ -299,10 +304,16 @@ function validatePestPricingConfig(snapshot = constants) {
       }
     }
   }
-  for (const tier of ['basic', 'premier']) {
-    if (!isPositiveNumber(TERMITE.monitoring?.[tier]?.monthly)) {
-      errors.push(`TERMITE.monitoring.${tier}.monthly must be positive`);
-    }
+  // Bracketed station-check pricing (owner 2026-07-28): base + step must be
+  // positive/non-negative or every termite quote prices NaN.
+  if (!isPositiveNumber(TERMITE.monitoring?.baseMonthly)) {
+    errors.push('TERMITE.monitoring.baseMonthly must be positive');
+  }
+  if (!isNonNegativeNumber(TERMITE.monitoring?.stepMonthly)) {
+    errors.push('TERMITE.monitoring.stepMonthly must be non-negative');
+  }
+  if (!isPositiveNumber(TERMITE.monitoring?.bracketStations)) {
+    errors.push('TERMITE.monitoring.bracketStations must be positive');
   }
 
   const trenching = SPECIALTY.trenching || {};
@@ -935,6 +946,12 @@ async function syncConstantsFromDB(dbInstance) {
         if (Number(rates.light_factor) > 0 && Number(rates.light_factor) <= 1) {
           model.lightFactor = Number(rates.light_factor);
         }
+        // Enhanced (9x) scales material UP from the Standard budget; a value
+        // below 1 would price 9 visits on less product than 6, and anything
+        // past 3x is a fat-finger, not a program.
+        if (Number(rates.enhanced_factor) >= 1 && Number(rates.enhanced_factor) <= 3) {
+          model.enhancedFactor = Number(rates.enhanced_factor);
+        }
       }
     }
     if (config.ts_monthly_floors) {
@@ -994,7 +1011,12 @@ async function syncConstantsFromDB(dbInstance) {
     if (config.termite_install) {
       const t = config.termite_install;
       setNumber(constants.TERMITE, 'installMultiplier', t.multiplier ?? t.install_multiplier, Number);
-      setNumber(constants.TERMITE, 'stationSpacing', t.station_spacing_ft ?? t.stationSpacing, Number);
+      // station_spacing_ft is RETIRED (owner 2026-07-28): spacing is
+      // per-system LABEL truth (Trelona 15 ft, Advance 10 — systems[].spacingFt
+      // in constants), so every normalized system bypasses the global
+      // fallback and syncing this key would change nothing while the admin
+      // UI reported success. The admin PUT strips the key on save
+      // (normalizeIncomingConfigData) for the same reason.
       setNumber(constants.TERMITE, 'minStations', t.min_stations ?? t.minStations, Number);
       setNumber(constants.TERMITE.systems.advance, 'stationCost', t.advance_bait ?? t.advance_station_cost, Number);
       setNumber(constants.TERMITE.systems.trelona, 'stationCost', t.trelona_bait ?? t.trelona_station_cost, Number);
@@ -1009,8 +1031,26 @@ async function syncConstantsFromDB(dbInstance) {
       }
     }
     if (config.termite_monitoring) {
-      if (config.termite_monitoring.basic) constants.TERMITE.monitoring.basic.monthly = r(config.termite_monitoring.basic);
-      if (config.termite_monitoring.premier) constants.TERMITE.monitoring.premier.monthly = r(config.termite_monitoring.premier);
+      const tm = config.termite_monitoring;
+      // Bracketed shape (owner 2026-07-28): base_monthly + step_monthly per
+      // bracket_stations. The legacy flat keys (basic/premier) are IGNORED —
+      // they priced a retired model, and honoring `basic` as a bracket base
+      // would silently double the small-home rate ($35 vs $19). The
+      // migration rewrites the prod row to the new shape; an un-migrated
+      // row simply leaves the in-code bracket defaults in force.
+      // WHOLE dollars (matches the admin validator): the engine's annual is
+      // whole-dollar by design, so cents here would make monthly x 12 /
+      // monthly x 3 disagree across server, client fallback, and persisted
+      // payloads. A legacy/hand-edited cent row rounds rather than desyncs.
+      if (isPositiveNumber(Number(tm.base_monthly))) {
+        constants.TERMITE.monitoring.baseMonthly = Math.round(money(Number(tm.base_monthly)));
+      }
+      if (isNonNegativeNumber(Number(tm.step_monthly))) {
+        constants.TERMITE.monitoring.stepMonthly = Math.round(money(Number(tm.step_monthly)));
+      }
+      if (isPositiveNumber(Number(tm.bracket_stations))) {
+        constants.TERMITE.monitoring.bracketStations = Math.round(Number(tm.bracket_stations));
+      }
     }
     if (config.termite_bond) {
       const tb = config.termite_bond;
@@ -1029,6 +1069,19 @@ async function syncConstantsFromDB(dbInstance) {
       if (tb1) constants.TERMITE.bond['1yr'].quarterly = tb1;
       if (tb5) constants.TERMITE.bond['5yr'].quarterly = tb5;
       if (tb10) constants.TERMITE.bond['10yr'].quarterly = tb10;
+    }
+    if (config.termite_rental) {
+      // Amortization horizon for the station-rental uplift. Same posture as
+      // the bond rates: only a strictly-positive finite value overwrites the
+      // runtime constant, so a hand-edited row can never sync a zero (which
+      // would divide the install price by nothing) or a negative (which would
+      // pay the customer to rent). Whole quarters — a fractional horizon has
+      // no business meaning and would only add rounding noise to the uplift.
+      const quarters = Number(config.termite_rental.recovery_quarters
+        ?? config.termite_rental.recoveryQuarters);
+      if (Number.isFinite(quarters) && quarters > 0) {
+        constants.TERMITE.rental.recoveryQuarters = Math.round(quarters);
+      }
     }
 
     // ── Rodent ───────────────────────────────────────────────
@@ -1235,11 +1288,26 @@ async function syncConstantsFromDB(dbInstance) {
       }
     }
     if (config.mosquito_lot_sizes) {
+      // MOSQUITO.lotCategories brackets TREATABLE sf (footprint + hardscape
+      // already subtracted), but the original April 2026 seed stored GROSS lot
+      // acreage (1/4 acre = 10889 ... 1 acre = 43559). Applying those widens
+      // every bracket ~36% and drops most homes a bracket. Migration
+      // 20260724130000 rewrote the row to treatable-sf values, so this guard is
+      // inert on any migrated DB — it stays only to protect a DB that somehow
+      // still carries the acreage seed. `validatePestPricingConfig` cannot
+      // catch it: the acreage values are ascending and finite, so they pass.
       const smallMax = Number(config.mosquito_lot_sizes.SMALL?.maxSqFt ?? config.mosquito_lot_sizes.SMALL?.max_sqft);
       const halfMax = Number(config.mosquito_lot_sizes.HALF?.maxSqFt ?? config.mosquito_lot_sizes.HALF?.max_sqft);
       const isLegacyGrossLotSeed = smallMax === 10889 && halfMax === 43559;
-      if (!isLegacyGrossLotSeed) {
-        const next = constants.MOSQUITO.lotCategories.map(c => ({ ...c }));
+      if (isLegacyGrossLotSeed) {
+        // Kill-value pattern: reject the row AND reassert the in-code brackets.
+        // Skipping the assignment would leave thresholds from an earlier sync
+        // live on this mutable singleton — the admin PUT re-runs this sync, so a
+        // save of the legacy seed would otherwise keep quoting the previous
+        // custom brackets until the process restarted.
+        constants.MOSQUITO.lotCategories = MOSQUITO_DEFAULT_LOT_CATEGORIES.map(c => ({ ...c }));
+      } else {
+        const next = MOSQUITO_DEFAULT_LOT_CATEGORIES.map(c => ({ ...c }));
         for (const c of next) {
           const cfg = config.mosquito_lot_sizes[c.key];
           const maxSqFt = cfg?.maxSqFt ?? cfg?.max_sqft;

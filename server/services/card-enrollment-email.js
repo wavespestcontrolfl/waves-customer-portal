@@ -230,7 +230,7 @@ async function sendAutopayEnrollmentConfirmation({ customerId, paymentMethodRowI
 // every eligibility rule stays enforced in one place. Idempotent per visit:
 // a stale-claim retry that re-enters the funnel can't double-send the
 // email any more than it can re-text.
-async function sendAutopaySetupInvitation({ customerId, scheduledServiceId, serviceType, dateLine = '', secureUrl } = {}) {
+async function sendAutopaySetupInvitation({ customerId, scheduledServiceId, serviceType, dateLine = '', secureUrl, planChoice = false } = {}) {
   try {
     if (!emailsEnabled() || !customerId || !scheduledServiceId || !secureUrl) return null;
     const { customer, email } = await loadCustomerEmail(customerId);
@@ -238,13 +238,44 @@ async function sendAutopaySetupInvitation({ customerId, scheduledServiceId, serv
       logger.info(`[card-enrollment-email] no usable email for customer ${customerId}; skipping setup invitation`);
       return null;
     }
+    // Plan-choice copy variant (owner-approved 2026-07-24): planChoice=true
+    // means the SMS leg ALREADY carried the plan-choice copy, so this email
+    // must match it or not go at all — the base email's "add a card" +
+    // per-service timing copy contradicts the prepay pitch the same
+    // customer just received (Codex #2987: archiving the variant is a
+    // supported admin action, so a fallback to base copy would silently
+    // split the invite). Missing/archived variant, or a failed lookup →
+    // SUPPRESS the email leg; the SMS remains the invite of record, and
+    // the email leg is best-effort by contract. The idempotency key stays
+    // the BASE key: one invitation per visit ever, whichever copy carries
+    // it.
+    let templateKey = 'autopay.setup_invitation';
+    if (planChoice) {
+      let variant = null;
+      try {
+        variant = await db('email_templates')
+          .where({ template_key: 'autopay.plan_choice_invitation', status: 'active' })
+          .whereNotNull('active_version_id')
+          .first('id');
+      } catch (variantErr) {
+        logger.warn(`[card-enrollment-email] plan-choice variant lookup failed — suppressing email leg: ${variantErr.message}`);
+      }
+      if (!variant) {
+        logger.info(`[card-enrollment-email] plan-choice variant unavailable — email leg suppressed for visit ${scheduledServiceId} (base copy would contradict the plan-choice SMS)`);
+        return null;
+      }
+      templateKey = 'autopay.plan_choice_invitation';
+    }
     // Billing-mode-aware timing copy (Codex #2952): a monthly-membership
     // customer who saves this card is charged monthly dues on their
     // billing day — a hard-coded "only charged after a completed service"
-    // sentence would misstate when they're charged.
+    // sentence would misstate when they're charged. (The plan-choice
+    // variant conditions its timing claim on the pay-per-visit choice and
+    // is only ever selected for lanes the plan page accepts, but the line
+    // is still composed and passed either way — the template decides.)
     const timingLine = await chargeTimingLine(customerId);
     const result = await EmailTemplateLibrary.sendTemplate({
-      templateKey: 'autopay.setup_invitation',
+      templateKey,
       to: email,
       payload: {
         first_name: clean(customer.first_name) || 'there',

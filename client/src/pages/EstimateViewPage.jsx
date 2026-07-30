@@ -57,6 +57,7 @@ import {
   glassCtaMicroForKeys,
   glassDayLinesFor,
   glassEstimateCopyFor,
+  glassOneTimeHeroOverlay,
   glassServiceSlug,
   glassTierDisplay,
   setGlassDefault,
@@ -205,8 +206,14 @@ function GetServiceTodayCta({ showGuaranteeMicro = false, slotMeta = null, micro
       {/* Terms microcopy is opt-in per call site, and the line itself is
           category-aware (glassCtaMicroFor): recurring plans carry the
           contract/callback/guarantee terms, one-time projects carry the
-          license + satisfaction-guarantee line instead. */}
-      {glass && showGuaranteeMicro ? (
+          license + satisfaction-guarantee line instead. Renders in BOTH
+          copy modes (owner 2026-07-24 + codex on #2993): with the retired
+          PriceCard/standalone fallbacks gone, this micro line is the page's
+          single sanctioned guarantee claim — a category-gated non-glass
+          page must not lose the terms entirely. The terms are claims, not
+          tone; the demotion logic in glassCtaMicroForKeys already keeps
+          them truthful per category. */}
+      {showGuaranteeMicro ? (
         <div style={{ marginTop: 12, fontSize: 14, color: ESTIMATE_MUTED, textAlign: 'center', lineHeight: 1.5 }}>
           {microText || GLASS_COPY.ctaMicro}
         </div>
@@ -273,6 +280,14 @@ function selectedPricingFrequencyKey(pricing = {}, services = [], selected = {})
   if (!frequencies.length) return sectionKey;
   if (frequencies.some((frequency) => frequency.key === sectionKey)) return sectionKey;
   return frequencies[0]?.key || null;
+}
+
+// A bundle combo-axis map requesting the seasonal mosquito cadence — prepay
+// is rejected for it server-side (accept + /deposit-intent use the same
+// token set), so the option must not be advertised for that selection.
+function cadencesRequestSeasonal(cadences) {
+  return !!cadences && Object.values(cadences).some((value) => ['seasonal9', 'seasonal', 'seasonal_feb_oct']
+    .includes(String(value || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_')));
 }
 
 function selectedCombinedFrequency(pricing = {}, selectedFrequencyKey) {
@@ -1119,9 +1134,12 @@ function MembershipCard({ membership }) {
               <span style={labelStyle}>{s.label}</span>
               <span style={valStyle}>
                 +{s.extraDiscountPct}% off
-                {Number(s.perVisitSavings) > 0 ? ` · save ${money(s.perVisitSavings)}/visit` : ''}
+                {/* "per application", matching the This-estimate rows below —
+                    owner ruling 2026-07-24: one pricing noun on every
+                    customer surface, existing-member rows included. */}
+                {Number(s.perVisitSavings) > 0 ? ` · save ${money(s.perVisitSavings)} per application` : ''}
                 {(Number(s.perVisitSavings) > 0 && s.remainingVisits > 0)
-                  ? ` on your ${s.remainingVisits === 1 ? '' : `${s.remainingVisits} `}remaining${s.prepaid ? ' prepaid' : ''} ${s.remainingVisits === 1 ? 'visit' : 'visits'}`
+                  ? ` on your ${s.remainingVisits === 1 ? '' : `${s.remainingVisits} `}remaining${s.prepaid ? ' prepaid' : ''} ${s.remainingVisits === 1 ? 'application' : 'applications'}`
                   : ''}
               </span>
             </div>
@@ -1754,13 +1772,21 @@ export function oneTimeRowIdentityKey(item = {}) {
   return `row:${item?.service || ''}|${label}|${Number.isFinite(amount) ? amount : ''}|${quoteState}`;
 }
 
-export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWaivedServices = [] }) {
+export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWaivedServices = [], headlineTotal = null }) {
   // excludeServices accepts plain service keys (setup-fee callers) and
   // oneTimeRowIdentityKey values (embedded-row callers) — check both.
   const excluded = new Set(excludeServices.filter(Boolean));
   const items = (Array.isArray(breakdown?.items) ? breakdown.items : [])
     .filter((item) => !excluded.has(item?.service) && !excluded.has(oneTimeRowIdentityKey(item)));
   if (items.length === 0) return null;
+  // One-time-ONLY pages pass headlineTotal (the big price card's figure).
+  // With a single billable row matching it, the row's amount and the total
+  // row are pure repeats of the headline (owner 2026-07-23: "$257.00" read
+  // three times) — keep the row for the service NAME, drop its dollars.
+  const singleHeadlineMatch = headlineTotal != null
+    && items.length === 1
+    && items[0]?.quoteRequired !== true && items[0]?.kind !== 'quote_required'
+    && Math.abs((Number(items[0]?.amount) || 0) - Number(headlineTotal)) < 0.005;
   // Rows whose fee disappears with annual prepay (the WaveGuard setup fee) —
   // fed by pricing.firstVisitFees so the note only shows when the server says
   // the fee is actually waivable. Legacy label-only setup rows carry no
@@ -1815,28 +1841,36 @@ export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWa
                   </div>
                 ) : null}
               </div>
-              <div style={{
-                fontSize: 14, fontWeight: 700,
-                color: isQuoteRequired ? W.red : (isDiscount || isIncluded ? W.green : COLORS.navy),
-                whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums',
-              }}>
-                {isQuoteRequired ? 'Quote Required' : (isIncluded ? 'Included' : (isDiscount ? fmtMoneySigned(-Math.abs(amount)) : fmtMoney(Math.abs(amount))))}
-                {showPrepayWaiverNote ? '*' : ''}
-              </div>
+              {singleHeadlineMatch ? null : (
+                <div style={{
+                  fontSize: 14, fontWeight: 700,
+                  color: isQuoteRequired ? W.red : (isDiscount || isIncluded ? W.green : COLORS.navy),
+                  whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums',
+                }}>
+                  {isQuoteRequired ? 'Quote Required' : (isIncluded ? 'Included' : (isDiscount ? fmtMoneySigned(-Math.abs(amount)) : fmtMoney(Math.abs(amount))))}
+                  {showPrepayWaiverNote ? '*' : ''}
+                </div>
+              )}
             </div>
           );
         })}
       </div>
-      <div style={{
-        display: 'flex', justifyContent: 'space-between', gap: 12,
-        borderTop: `1px solid ${ESTIMATE_BORDER}`, marginTop: 12, paddingTop: 12,
-        fontSize: 15, fontWeight: 700, color: COLORS.navy, fontVariantNumeric: 'tabular-nums',
-      }}>
-        <span>{totalIsQuoteRequired ? 'Quote status' : 'One-time total'}</span>
-        <span style={totalIsQuoteRequired ? { color: W.red } : null}>
-          {totalIsQuoteRequired ? 'Quote Required' : fmtMoney(total)}
-        </span>
-      </div>
+      {/* Single-item breakdowns skip the total row (owner 2026-07-23): the
+          item line already states the price, so "$199.00 / One-time total
+          $199.00" read twice. Quote-required singles keep the status row —
+          it carries information the item line doesn't. */}
+      {items.length > 1 || totalIsQuoteRequired ? (
+        <div style={{
+          display: 'flex', justifyContent: 'space-between', gap: 12,
+          borderTop: `1px solid ${ESTIMATE_BORDER}`, marginTop: 12, paddingTop: 12,
+          fontSize: 15, fontWeight: 700, color: COLORS.navy, fontVariantNumeric: 'tabular-nums',
+        }}>
+          <span>{totalIsQuoteRequired ? 'Quote status' : 'One-time total'}</span>
+          <span style={totalIsQuoteRequired ? { color: W.red } : null}>
+            {totalIsQuoteRequired ? 'Quote Required' : fmtMoney(total)}
+          </span>
+        </div>
+      ) : null}
       {totalIsQuoteRequired ? (
         <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 8, lineHeight: 1.5 }}>
           Waves will confirm final pricing before this can be accepted online.
@@ -1992,9 +2026,9 @@ export function CombinedRecurringPriceCard({ combined, selectedFrequency, waveGu
 // credit (e.g. Referral Credit). The per-service cards quote their WaveGuard-net
 // price PRE credit — the credit is applied to the combined plan, not baked into
 // each row — so this is the one place the customer sees list subtotal → credit →
-// the net they actually pay. Renders ONLY when there's a credit to itemize: the
-// standalone "Recurring total" card was removed (owner directive 2026-07-07), so
-// a no-credit multi-service plan stays summary-free and unchanged.
+// the net they actually pay. Renders ONLY when there's a credit to itemize:
+// customer-facing estimates never show a combined "Plan total" (owner rule
+// 2026-07-07, re-affirmed 2026-07-23 after a brief same-day reversal).
 export function PlanTotalSummary({ combined, selectedFrequency = null, preCreditMonthly = null, planDiscount = null }) {
   if (!combined) return null;
   // The live discount object (selected row first — the server nulls
@@ -2016,6 +2050,10 @@ export function PlanTotalSummary({ combined, selectedFrequency = null, preCredit
     || selectedFrequency?.manualDiscountSuppressed === true
     || Boolean(combined.manualDiscount)
     || Boolean(planDiscount);
+  // No combined total on a creditless plan — owner rule, re-affirmed
+  // 2026-07-23 after a brief same-day reversal: customer-facing estimates
+  // never show a "Plan total $X/mo"; the per-application service cards are
+  // the only prices. This card exists ONLY to itemize a plan-wide credit.
   if (!planHasCredit) return null;
   const creditLabel = (manual || selectedFrequency?.manualDiscount || combined.manualDiscount || planDiscount)?.label || 'Discount';
   // Quote-required selection: the rest of the estimate hides exact dollars for a
@@ -3327,6 +3365,7 @@ export function ServiceSection({
   ctaSlotMeta = null,
   oneTimeEmbed = null,
   serviceDetailsRequest = null,
+  termiteComparison = null,
   onSelectBondTerm = null,
   bondBusy = false,
 }) {
@@ -3395,31 +3434,22 @@ export function ServiceSection({
             </span>
           </div>
         ) : null}
-        {servicesLength > 1 ? (
-          <h3 style={{
-            fontSize: 18,
-            color: ESTIMATE_TEXT,
-            margin: '0 0 16px',
-            // Keep clear of the absolutely-positioned corner badge — sized
-            // for the widest chip ("WaveGuard Platinum" at 14px/700 + pill
-            // padding + the 16px corner inset). No clearance needed when the
-            // badge stacks in flow on phones.
-            paddingRight: showTierBadge && !compactTierBadge ? 170 : 0,
-            fontWeight: 800,
-          }}>
-            {displayServiceLabel(section.label) || 'Service'}
-          </h3>
-        ) : null}
-
         {/* Every service box leads with its own service-related headline —
             the "HOW OFTEN?" eyebrow is gone and no-selector services
-            (termite monitoring) get a headline too (owner 2026-07-10). */}
+            (termite monitoring) get a headline too (owner 2026-07-10). The
+            small service-name subheader that used to precede this on
+            multi-service estimates is gone too (owner 2026-07-23): the
+            headline already names the service, so "Tree & Shrub" over
+            "Tree & Shrub Care by Waves" read double. */}
         <h2 style={{
           fontSize: 20, fontWeight: 500, lineHeight: 1.2,
           color: '#04395E', margin: '0 0 4px',
-          // Same corner-badge clearance as the h3 above; only needed when
-          // this headline is the first line in the card (single-service).
-          paddingRight: servicesLength > 1 || !showTierBadge || compactTierBadge ? 0 : 170,
+          // Corner-badge clearance — the headline is now the first line in
+          // the card on every composition, so it always needs to clear the
+          // absolutely-positioned WaveGuard chip (sized for the widest chip,
+          // "WaveGuard Platinum"). None needed when the badge stacks in
+          // flow on phones.
+          paddingRight: showTierBadge && !compactTierBadge ? 170 : 0,
         }}>
           {SERVICE_CARD_HEADLINES[sectionSlug] || 'Same protection — pick the rhythm that fits your home'}
         </h2>
@@ -3479,7 +3509,12 @@ export function ServiceSection({
             // (anchor−cadence delta misattributed to the tier; owner
             // directive to remove).
             showSavings={servicesLength === 1 || section?.waveGuardTierEligible !== false}
-            showGuarantee={servicesLength === 1}
+            // Guarantee line off under glass (owner 2026-07-23) — the approve
+            // CTA's glass micro line states the same 90-day guarantee
+            // immediately below, so the in-card line read twice. Non-glass
+            // single-service cards keep it: the CTA micro is glass-gated, so
+            // removing it there would drop the page's only guarantee claim
+            // (codex P2 r3).
           />
         ) : null}
 
@@ -3532,6 +3567,24 @@ export function ServiceSection({
             // Staff draft preview: render for parity, but inert (no sends).
             preview={serviceDetailsRequest.preview === true}
           />
+        ) : null}
+
+        {/* Buy-vs-rent options sheet (GATE_TERMITE_COMPARISON_SHEET, dark).
+            Same tokenized-PDF pattern as the details packet above; the
+            server's fail-closed builder 404s when the rental can't actually
+            price, so this link only ships where both columns are real. */}
+        {termiteComparison ? (
+          <div style={{ marginTop: 10, textAlign: 'center' }}>
+            <a
+              href={termiteComparison.preview ? undefined : `${API_BASE}/estimates/${termiteComparison.token}/warranty-comparison/pdf`}
+              target={termiteComparison.preview ? undefined : '_blank'}
+              rel={termiteComparison.preview ? undefined : 'noopener noreferrer'}
+              onClick={termiteComparison.preview ? (e) => e.preventDefault() : undefined}
+              style={{ fontSize: 14, fontWeight: 600, color: ESTIMATE_TEXT, textDecoration: 'underline', cursor: 'pointer' }}
+            >
+              Buying vs. renting your bait stations — see both side by side (PDF)
+            </a>
+          </div>
         ) : null}
 
         {showGetServiceCta ? (
@@ -4172,6 +4225,11 @@ function EstimateViewPageInner() {
       if (serviceModeForAttempt !== 'one_time' && selectedFrequencyForAttempt) {
         reservePayload.selectedFrequency = selectedFrequencyForAttempt;
       }
+      // Bundle combo axes: the mosquito tier travels here (not in the pest
+      // selectedFrequency) — the server's seasonal redemption check needs it.
+      if (serviceModeForAttempt !== 'one_time' && serviceCadences) {
+        reservePayload.serviceCadences = serviceCadences;
+      }
       const r = await fetch(`${API_BASE}/public/estimates/${token}/reserve`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -4209,7 +4267,7 @@ function EstimateViewPageInner() {
       setError(err.message);
       setCtaPhase('configure');
     }
-  }, [adminDraftPreview, existingAppointment, invoiceOnlyAccept, manualScheduleAccept, loadEstimate, releaseHeldReservation, selectedSlotId, serviceMode, selectedFrequency, token]);
+  }, [adminDraftPreview, existingAppointment, invoiceOnlyAccept, manualScheduleAccept, loadEstimate, releaseHeldReservation, selectedSlotId, serviceMode, selectedFrequency, serviceCadences, token]);
 
   const handleFrequencyChange = useCallback((sectionKey, nextFrequency) => {
     reserveAttemptRef.current += 1;
@@ -4536,7 +4594,15 @@ function EstimateViewPageInner() {
         const r = await fetch(`${API_BASE}/public/estimates/${token}/deposit-intent`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ serviceMode, paymentMethodPreference: paymentPreference }),
+          // selectedFrequency + serviceCadences let the server apply per-tier
+          // prepay rules (mosquito seasonal9 — top-level OR a bundle combo
+          // axis — refuses the prepay deposit BEFORE money moves).
+          body: JSON.stringify({
+            serviceMode,
+            paymentMethodPreference: paymentPreference,
+            ...(selectedFrequency ? { selectedFrequency } : {}),
+            ...(serviceCadences ? { serviceCadences } : {}),
+          }),
         });
         const body = await r.json().catch(() => ({}));
         if (r.status === 409 && body.exemptReason) {
@@ -4755,6 +4821,35 @@ function EstimateViewPageInner() {
     }
   }, [adminDraftPreview, addServiceOffer, addServiceRequestState.status, token]);
 
+  // Mirror of the bond-rider reset (codex #2915 r3): switching to a tier that
+  // can't prepay (mosquito seasonal9) while annual prepay is chosen must send
+  // the customer back through the payment choice — the next confirm would 400
+  // mid-flow against a combination the server rejects. ABOVE the loading/
+  // error early returns (hooks must run on every render — codex r11 P1);
+  // inputs derive from state, tolerating missing data during load.
+  useEffect(() => {
+    if (paymentPreference !== 'prepay_annual') return;
+    const pricingState = data?.pricing || {};
+    const frequency = selectedCombinedFrequency(pricingState, selectedFrequency);
+    // Same adjudication order as annualPrepayEligibleEffective below: the
+    // matched combo's server-stamped flag wins (codex r18 P1), a seasonal
+    // axis without one disables, then the tier/estimate-level flags.
+    let eligible;
+    if (selectedCombo && typeof selectedCombo.annualPrepayEligible === 'boolean') {
+      eligible = selectedCombo.annualPrepayEligible;
+    } else {
+      eligible = !cadencesRequestSeasonal(serviceCadences)
+        && (typeof frequency?.annualPrepayEligible === 'boolean'
+          ? frequency.annualPrepayEligible
+          : pricingState.annualPrepayEligible === true);
+    }
+    if (!eligible) {
+      setPaymentPreference(null);
+      setCtaPhase('configure');
+      setError('Annual prepay isn’t available for the seasonal program — pick a payment option again.');
+    }
+  }, [data?.pricing, selectedFrequency, serviceCadences, selectedCombo, paymentPreference]);
+
   if (loading) {
     return (
       <Page>
@@ -4816,7 +4911,14 @@ function EstimateViewPageInner() {
   // bundle pack), and every use below still falls back to the standard copy
   // when glass is off. `glassContent` alone gates the service-agnostic swaps.
   const glassContent = glassCopyActive();
-  const glassPack = glassEstimateCopyFor(serviceCategory);
+  // One-time-only estimates overlay a terms-neutral hero on the category
+  // pack — the packs' recurring promises (unlimited callbacks, 90-day
+  // guarantee) don't apply to a one-visit quote (owner 2026-07-23).
+  // Review-gated quotes get the confirm-with-you variant instead of
+  // "approve online and pick a day" (codex P2 r3).
+  const glassPack = estimate.isOneTimeOnly === true
+    ? glassOneTimeHeroOverlay(glassEstimateCopyFor(serviceCategory), { reviewBeforeBooking })
+    : glassEstimateCopyFor(serviceCategory);
   // Personalization tokens (owner 2026-07-06): {city} from the service
   // address, {date} from the first open slot (SlotPicker reports it up via
   // onFirstSlotDate; 'tomorrow' until it loads). {first} stays Header's job.
@@ -4891,6 +4993,36 @@ function EstimateViewPageInner() {
       sameDayTreatmentTotal: selectedCombo.sameDayTreatmentTotal ?? combinedBaseFrequency?.sameDayTreatmentTotal,
     }
     : combinedBaseFrequency;
+  // Per-tier prepay override (codex r10 P1): mosquito ladder entries carry
+  // their own annualPrepayEligible (seasonal9 can't prepay; monthly12 can) —
+  // the estimate-level flag only reflects the stored default row. The server
+  // enforces the same per-tier rule at accept and /deposit-intent.
+  // The mosquito tier can arrive on the top-level frequency (solo mosquito —
+  // stamped per tier) OR as a bundle combo axis (codex r14 P1). The matched
+  // combo's server-stamped flag is authoritative when present (codex r18 P1:
+  // it can RESTORE prepay for a monthly12 axis on a seasonal-default
+  // estimate, which the estimate-level flag alone cannot); a seasonal axis
+  // without a stamped combo still disables prepay.
+  const annualPrepayEligibleEffective = (() => {
+    if (selectedCombo && typeof selectedCombo.annualPrepayEligible === 'boolean') {
+      return selectedCombo.annualPrepayEligible;
+    }
+    if (cadencesRequestSeasonal(serviceCadences)) return false;
+    if (typeof combinedFrequency?.annualPrepayEligible === 'boolean') {
+      return combinedFrequency.annualPrepayEligible;
+    }
+    return pricing.annualPrepayEligible === true;
+  })();
+  // The WaveGuard setup fee's waiver disclosure follows the SELECTED tier,
+  // not the stored default (codex r11 P1): a monthly-default estimate
+  // switched to seasonal9 must not promise "waived when you pay the year"
+  // (prepay is rejected for it), and a seasonal-default estimate switched to
+  // monthly12 earns the waiver its stored flag doesn't carry. Other fees
+  // (roach knockdown) keep their server-stated flag.
+  const tierAwareFee = (fee) => (fee && fee.service === 'waveguard_setup'
+    ? { ...fee, waivedWithPrepay: annualPrepayEligibleEffective }
+    : fee);
+  const setupFeeEffective = tierAwareFee(pricing.setupFee || null);
   // A recurring section that isn't a combo axis (e.g. mosquito when only
   // lawn/tree are independently selectable) mirrors the pest cadence and is
   // locked from direct change — its slider would otherwise let the customer
@@ -4926,12 +5058,14 @@ function EstimateViewPageInner() {
   const renderQuoteDetailCards = (readOnly = false, modeOverride = null) => {
     const cardsDisabled = readOnly || ctaPhase === 'submitting';
     const mode = modeOverride || serviceMode;
+    // Tier-aware waiver disclosure — see tierAwareFee at component scope.
+    const feeList = (pricing.firstVisitFees && pricing.firstVisitFees.length > 0
+      ? pricing.firstVisitFees
+      : (pricing.setupFee ? [pricing.setupFee] : [])).map(tierAwareFee);
     // Service keys whose one-time fee is waived with annual prepay (the
     // WaveGuard setup fee) — the breakdown card marks these rows with an
     // asterisk + waiver note when they render inside the one-time list.
-    const prepayWaivedServices = (pricing.firstVisitFees && pricing.firstVisitFees.length > 0
-      ? pricing.firstVisitFees
-      : (pricing.setupFee ? [pricing.setupFee] : []))
+    const prepayWaivedServices = feeList
       .filter((fee) => fee?.waivedWithPrepay === true)
       .map((fee) => fee.service);
     if (mode === 'recurring') {
@@ -4946,9 +5080,7 @@ function EstimateViewPageInner() {
           <div>
           {services.map((section) => {
             const setupFees = renderFlags.showWaveGuardSetupFee && section.setupFee
-              ? (pricing.firstVisitFees && pricing.firstVisitFees.length > 0
-                ? pricing.firstVisitFees
-                : (pricing.setupFee ? [pricing.setupFee] : []))
+              ? feeList
               : [];
             const afterPrice = services.length === 1 ? (
               <>
@@ -4995,6 +5127,17 @@ function EstimateViewPageInner() {
                 serviceDetailsRequest={renderFlags.showServiceDetailsRequest && section.isRecurring && !readOnly
                   ? { token, customerEmail: estimate.customerEmail, customerPhone: estimate.customerPhone, disabled: cardsDisabled, preview: adminDraftPreview }
                   : null}
+                // Buy-vs-rent options sheet link (GATE_TERMITE_COMPARISON_SHEET,
+                // dark). RAW key on purpose, like the details row above —
+                // commercial termite (commercial_termite_bait) has no rental
+                // option and must not link. Unsplit bundles carry the real
+                // services in memberKeys, so a bundled termite program still
+                // links from its bundle card (codex P2).
+                termiteComparison={renderFlags.showTermiteComparison && !readOnly
+                  && (section.key === 'termite_bait'
+                    || (Array.isArray(section.memberKeys) && section.memberKeys.includes('termite_bait')))
+                  ? { token, preview: adminDraftPreview }
+                  : null}
                 afterPrice={afterPrice}
                 showGetServiceCta={!readOnly && canShowSlotPicker && services.length === 1}
                 // Glass removes the customize section everywhere — including
@@ -5006,13 +5149,11 @@ function EstimateViewPageInner() {
           })}
           </div>
 
-          {/* The combined "Recurring total" card was removed (owner directive
-              2026-07-07) — the per-service boxes and the sticky book bar carry
-              the bundle's monthly price. It returns ONLY to itemize a plan-wide
-              credit (e.g. Referral Credit) and show the net: the per-service
-              cards are pre-credit, so without this the credit + final price
-              would never appear on a split multi-service plan. Renders nothing
-              when there's no credit, so no-credit bundles stay unchanged. */}
+          {/* No combined "Plan total" on customer estimates (owner rule
+              2026-07-07, re-affirmed 2026-07-23) — the per-service boxes and
+              the sticky book bar carry the plan's price. This renders ONLY
+              to itemize a plan-wide credit (e.g. Referral Credit) and its
+              net; creditless bundles render nothing here. */}
           {services.length > 1 ? (
             <PlanTotalSummary
               combined={pricing.combinedRecurring}
@@ -5035,20 +5176,23 @@ function EstimateViewPageInner() {
             />
           ) : null}
 
-          {/* One guarantee line for the whole plan — not one per box. */}
-          {services.length > 1 ? (
-            <div style={{ textAlign: 'center', fontSize: 16, color: ESTIMATE_TEXT, marginTop: 12, lineHeight: 1.5 }}>
-              Try us risk-free — 90-day money-back guarantee.
-            </div>
-          ) : null}
+          {/* The standalone "Try us risk-free — 90-day money-back guarantee."
+              line is fully retired (owner 2026-07-24, extending the 2026-07-23
+              glass dedupe): the approve CTA's micro line is the one sanctioned
+              plan-level guarantee claim. The non-glass fallback rendered dead
+              code in prod (glass active for all categories) and contradicted
+              the standing dedupe ruling. */}
 
           {!readOnly && canShowSlotPicker && services.length > 1 ? <GetServiceTodayCta showGuaranteeMicro slotMeta={glassContent ? selectedSlotMeta : null} microText={glassCtaMicroForKeys(services.map((s) => s?.key || s?.label))} /> : null}
 
           {services.length > 1 && renderFlags.showWaveGuardSetupFee ? (
+            // Tier-aware fee state on the plan-level card too (codex r24 P2):
+            // a combo selection that disables prepay must not keep promising
+            // the waiver — or, under glass, suppress the fee card entirely.
             (pricing.firstVisitFees && pricing.firstVisitFees.length > 0
               ? pricing.firstVisitFees
               : (pricing.setupFee ? [pricing.setupFee] : [])
-            ).map((fee, i) => <SetupFeeCard key={`${fee.label || 'fee'}-${i}`} fee={fee} waiverBulletCovered={services.some((s) => s?.isPest === true)} />)
+            ).map(tierAwareFee).map((fee, i) => <SetupFeeCard key={`${fee.label || 'fee'}-${i}`} fee={fee} waiverBulletCovered={services.some((s) => s?.isPest === true)} />)
           ) : null}
 
           {services.length > 1 && !estimate.showOneTimeOption ? (
@@ -5061,7 +5205,12 @@ function EstimateViewPageInner() {
               // keeps one-time work that has no rendered service section,
               // and hides entirely when nothing is left.
               excludeServices={[
+                // Tier-aware fees here too (codex r25 P2): the card above
+                // renders from tierAwareFee, so the exclusion must judge the
+                // SAME waivedWithPrepay or a non-prepay combo shows the
+                // setup fee twice (card + breakdown row).
                 ...(pricing.firstVisitFees || [])
+                  .map(tierAwareFee)
                   .filter((fee) => !(glassContent && fee.waivedWithPrepay && services.some((s) => s?.isPest === true)))
                   .map((fee) => fee.service),
                 // Identity keys, not bare service strings — embedded rows
@@ -5089,7 +5238,13 @@ function EstimateViewPageInner() {
           breakdown={pricing.oneTimeBreakdown}
         />
         {!readOnly && canShowSlotPicker ? <GetServiceTodayCta slotMeta={glassContent ? selectedSlotMeta : null} /> : null}
-        <OneTimeBreakdownCard breakdown={pricing.oneTimeBreakdown} />
+        {/* headlineTotal: a single-item breakdown matching the price card
+            above keeps the service NAME but drops its repeated dollars
+            (owner 2026-07-23). */}
+        <OneTimeBreakdownCard
+          breakdown={pricing.oneTimeBreakdown}
+          headlineTotal={pricing.anchorOneTimePrice || pricing.oneTimeBreakdown?.total || 0}
+        />
         {!readOnly && !glassContent && renderFlags.showOneTimePestAddOns === true ? (
           services
             .filter((section) => section.isPest)
@@ -5315,8 +5470,8 @@ function EstimateViewPageInner() {
                 disabled={adminDraftPreview || ctaPhase === 'submitting' || inlineConfirmBusy}
                 serviceMode={serviceMode}
                 oneTimeExtrasTotal={oneTimeExtrasForPaymentNote(pricing, estimate, serviceMode)}
-                setupFee={pricing.setupFee || null}
-                annualPrepayEligible={pricing.annualPrepayEligible === true}
+                setupFee={setupFeeEffective}
+                annualPrepayEligible={annualPrepayEligibleEffective}
                 invoiceMode={!!estimate.billByInvoice}
                 siteConfirmationHold={!!estimate.siteConfirmationHold}
                 selectedFrequency={combinedFrequency}
@@ -5382,7 +5537,9 @@ function EstimateViewPageInner() {
             submittingLabel={seamlessAutoPay && !invoiceOnlyAccept ? 'Booking your visit…' : null}
             prefSwitch={seamlessAutoPay && !existingAppointment && serviceMode !== 'one_time'
               && !estimate.billByInvoice && !estimate.siteConfirmationHold
-              && (pricing.annualPrepayEligible === true || pricing.setupFee?.waivedWithPrepay)
+              // Tier-aware: the stored setupFee flag reflects the default
+              // tier; the effective flag already folds the selected one in.
+              && annualPrepayEligibleEffective
               ? (
                 <button
                   type="button"
@@ -5506,6 +5663,7 @@ function EstimateViewPageInner() {
                   refreshSignal={slotsRefreshSignal}
                   serviceMode={serviceMode}
                   selectedFrequency={selectedFrequency}
+                  serviceCadences={serviceCadences}
                   onFirstSlotDate={setFirstSlotDate}
                   cityLabel={estimateCity}
                   quickPick={seamlessAutoPay}
@@ -5555,8 +5713,8 @@ function EstimateViewPageInner() {
                 disabled={adminDraftPreview || ctaPhase === 'submitting'}
                 serviceMode={serviceMode}
                 oneTimeExtrasTotal={oneTimeExtrasForPaymentNote(pricing, estimate, serviceMode)}
-                setupFee={pricing.setupFee || null}
-                annualPrepayEligible={pricing.annualPrepayEligible === true}
+                setupFee={setupFeeEffective}
+                annualPrepayEligible={annualPrepayEligibleEffective}
                 invoiceMode={!!estimate.billByInvoice}
                 invoiceOnly={invoiceOnlyAccept}
                 siteConfirmationHold={!!estimate.siteConfirmationHold}

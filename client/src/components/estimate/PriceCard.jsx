@@ -89,9 +89,10 @@ function isSeparateServiceCadence(frequency = {}) {
     && !!frequency.label;
 }
 
+// The standalone guarantee line is retired (owner 2026-07-24): the approve
+// CTA's micro line is the one sanctioned plan-level guarantee claim.
 const DEFAULT_WORDING = {
   dayLine: "That's just {amount}/day for complete home protection.",
-  guaranteeLine: 'Try us risk-free — 90-day money-back guarantee.',
 };
 
 // The glass day-lines (wording.dayLineByKey) anchor on concrete cheap items
@@ -197,7 +198,7 @@ export function perApplicationNetForFrequency(frequency) {
   return pt > 0 && Number.isFinite(visits) && visits > 0 ? round2(pt) : null;
 }
 
-export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_WORDING, showSavings = true, showGuarantee = true, glassSetupBullet = false, preferPerApplicationPrice = false, perApplicationNoun = 'application', showTierBadge = true }) {
+export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_WORDING, showSavings = true, glassSetupBullet = false, preferPerApplicationPrice = false, perApplicationNoun = 'application', showTierBadge = true }) {
   if (!frequency) return null;
 
   // Glass copy pack (PR B): tier display + pest inclusion swaps
@@ -226,7 +227,9 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
   const savings = rawSavings >= SAVINGS_ROUNDING_NOISE ? rawSavings : 0;
   // True daily rate: annual cost / 365 (monthly * 12 / 365).
   const dayPrice = quoteRequired || monthly == null ? null : Math.round((Number(monthly) * 12 / 365) * 100) / 100;
-  // Applications-per-year highlight — only when the count is unambiguous.
+  // Applications-per-year count — only when unambiguous. Feeds the anchor
+  // math below; the count itself renders only in the per-row sub-label
+  // (owner 2026-07-23: no "N applications per year included" headline line).
   const CADENCE_VISITS = { quarterly: 4, bi_monthly: 6, monthly: 12 };
   const treatmentVisitRows = Array.isArray(frequency.perServiceTreatments)
     ? frequency.perServiceTreatments.filter((row) => Number(row?.visitsPerYear) > 0)
@@ -239,7 +242,6 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
     : (treatmentVisitRows.length === 1
       ? Number(treatmentVisitRows[0].visitsPerYear)
       : (treatmentVisitRows.length === 0 ? (CADENCE_VISITS[frequency.key] || null) : null));
-  const showVisitsLine = !quoteRequired && Number.isFinite(visitsPerYear) && visitsPerYear > 0;
   // A narrow low-confidence commercial line prices as a ±pct RANGE tied to the
   // displayed cadence price ("$X–$Y/mo, confirmed on site"). The server flags the
   // frequency with lowConfidenceRangePct; the WIDE case is already quote-required
@@ -322,15 +324,24 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
     ? round2(perAppAnchor - perAppNet - manualDiscountPerApplication)
     : 0;
   const perAppSavings = perAppSavingsRaw >= SAVINGS_ROUNDING_NOISE ? perAppSavingsRaw : 0;
-  // Programs billed monthly whose flat monthly differs from the per-app figure
-  // (mosquito seasonal: 9 visits spread over 12 payments; legacy termite
-  // monitoring payloads: quarterly checks billed monthly) — say so under the
-  // headline so the number the card leads with never contradicts the charge.
-  // billedPerApplication (new termite payloads, owner 2026-07-20) means the
-  // charge IS the per-application headline — a monthly note would misstate it.
+  // Legacy monthly-billed rows (no billedPerApplication flag: mosquito
+  // seasonal spreads, pre-flag termite monitoring payloads) still CHARGE a
+  // flat monthly on accept (estimate-public.js frequencyFromTreatmentRow) —
+  // a bare per-application headline would misstate the charge (codex P1).
+  // Flagged per-application rows bill exactly the headline: no note. The
+  // phrasing drops the retired "spread across the year" framing (owner
+  // 2026-07-23); the fact that the charge is monthly stays.
   const showBilledMonthlyNote = perAppNet != null && intervalMonths === 1
     && !frequency.billedPerApplication
     && cadencePrice != null && Math.abs(cadencePrice - perAppNet) >= SAVINGS_ROUNDING_NOISE;
+  // Rowless per-application cards (split-section entries carry visitsPerYear
+  // on the frequency itself, no treatment rows) have no per-row sub-label to
+  // show cadence — without a count line the customer can't tell 4 from 12
+  // applications/year (codex P2). Muted count only, no "included" phrasing;
+  // the bold headline stays removed (owner 2026-07-23).
+  const showRowlessCadenceLine = perAppNet != null
+    && (!Array.isArray(frequency.perServiceTreatments) || frequency.perServiceTreatments.length === 0)
+    && Number.isFinite(visitsPerYear) && visitsPerYear > 0;
 
   return (
     <div style={{
@@ -398,16 +409,15 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
         ) : null}
       </div>
 
-      {showVisitsLine ? (
-        <div style={{ marginTop: 12, color: W.blueDeeper, fontSize: 15, fontWeight: 700 }}>
-          <span aria-hidden="true" style={{ color: W.green, marginRight: 8 }}>&#10003;</span>
-          {visitsPerYear} {perApplicationNoun}{visitsPerYear === 1 ? '' : 's'} per year included
+      {showBilledMonthlyNote ? (
+        <div style={{ fontSize: 14, color: CUSTOMER_SURFACE.muted, marginTop: 8, fontVariantNumeric: 'tabular-nums' }}>
+          Billed {fmtMoney(cadencePrice)}/mo
         </div>
       ) : null}
 
-      {showBilledMonthlyNote ? (
-        <div style={{ fontSize: 14, color: CUSTOMER_SURFACE.muted, marginTop: 8, fontVariantNumeric: 'tabular-nums' }}>
-          Billed {fmtMoney(cadencePrice)}/mo, spread across the year
+      {showRowlessCadenceLine ? (
+        <div style={{ fontSize: 14, color: CUSTOMER_SURFACE.muted, marginTop: 8 }}>
+          {visitsPerYear} {perApplicationNoun}{visitsPerYear === 1 ? '' : 's'} per year
         </div>
       ) : null}
 
@@ -460,12 +470,6 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
             || wording?.dayLine
             || DEFAULT_WORDING.dayLine
           ).replace('{amount}', fmtMoney(dayPrice))}
-        </div>
-      ) : null}
-
-      {showGuarantee ? (
-        <div style={{ fontSize: 15, color: W.blueDeeper, marginTop: 12, lineHeight: 1.5 }}>
-          {wording?.guaranteeLine || DEFAULT_WORDING.guaranteeLine}
         </div>
       ) : null}
 

@@ -47,6 +47,7 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
         ? 'Applied a fungicide and adjusted today’s plan toward drying things out.'
         : 'Documented the moisture and adjusted today’s plan toward drying things out.',
       customerAction: 'Ease back on irrigation by one cycle and let us know if it stays soggy.',
+      nextVisitPlan: 'Recheck moisture and fungus signs next visit to confirm the drier schedule is working.',
       confidenceNote: null,
     });
   } else if (water && water.status === 'deficit') {
@@ -57,6 +58,7 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
       whyItMatters: 'Under-watered turf shows heat and drought stress faster and thins out.',
       wavesAction: 'Noted the shortfall and set the watering target on the report.',
       customerAction: `Add a little irrigation time to reach the seasonal target for your ${grassLabel}.`,
+      nextVisitPlan: 'Recheck moisture and color next visit to confirm the added water is landing.',
     });
   } else if (water.localizedDry || (waterCat && (waterCat.status === 'watch' || waterCat.status === 'needs_attention'))) {
     // Balanced total but a localized dry/wet read — coverage, NOT "water more".
@@ -67,6 +69,7 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
       whyItMatters: 'That pattern usually points to uneven sprinkler coverage, not the whole lawn needing more water.',
       wavesAction: 'Flagged the area and will recheck it next visit.',
       customerAction: 'Check sprinkler coverage in that area rather than watering the whole yard more.',
+      nextVisitPlan: 'Recheck the flagged area next visit to see whether coverage evened out.',
     });
   }
 
@@ -129,6 +132,7 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
         : 'Tall mowing can shade the base of the turf and hold moisture.',
       wavesAction: 'Logged the height for your file — we don’t mow, so this is a heads-up.',
       customerAction: short ? 'Raise the mower one setting.' : 'Lower the mower one setting.',
+      nextVisitPlan: 'Re-measure the height of cut next visit.',
     });
   }
 

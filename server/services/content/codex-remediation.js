@@ -56,6 +56,7 @@ const fm = require('../content-astro/frontmatter');
 const { assertValidBlogFrontmatter } = require('../content-astro/schema-validator');
 const { SPOKE_SITE_KEYS } = require('../content-astro/spoke-sites');
 const contentGuardrails = require('./content-guardrails');
+const { refineFootprintFindings } = require('./footprint-claim-classifier');
 const comparisonTableGate = require('./comparison-table-gate');
 const factCheckGate = require('./fact-check-gate');
 const { etDateString } = require('../../utils/datetime-et');
@@ -421,7 +422,11 @@ async function validateFixedBlogFile(markdown, opts = {}, deps = {}) {
     },
   );
   if (!guardrails.pass) {
-    const blocking = (guardrails.findings || []).filter((f) => f.severity === 'P0' || f.severity === 'P1');
+    // Same refinement the publisher applies: a false-positive footprint
+    // claim must not park a remediation the classifier can clear; any
+    // classifier failure keeps the deterministic verdict (fail closed).
+    const refined = await refineFootprintFindings(guardrails.findings || []);
+    const blocking = refined.filter((f) => f.severity === 'P0' || f.severity === 'P1');
     if (blocking.length) return { ok: false, reason: `guardrails ${blocking.map((f) => f.code).join(',')}` };
   }
 
@@ -828,9 +833,15 @@ async function validateAutonomousRunGates(fixedMarkdown, run, deps = {}) {
     if (!opp) return { ok: false, reason: 'opportunity row unavailable for guardrail context' };
     const guardOptions = await runner._deriveGuardrailOptions(opp, brief);
     const guardResult = guardrailsMod.evaluate(draft, guardOptions);
-    if (!guardResult || guardResult.pass !== true) {
-      const codes = (((guardResult && guardResult.findings) || []).filter((f) => f.severity === 'P0' || f.severity === 'P1')).map((f) => `${f.severity} ${f.code}`);
-      return { ok: false, reason: `run-context guardrails: ${codes.join('; ') || 'no result'}` };
+    if (!guardResult) return { ok: false, reason: 'run-context guardrails: no result' };
+    if (guardResult.pass !== true) {
+      // Same footprint refinement validateFixedBlogFile applies — the
+      // run-context revalidation must not re-park a fix on a false positive
+      // the classifier already clears; classifier failure keeps the
+      // deterministic findings (fail closed).
+      const refined = await refineFootprintFindings(guardResult.findings || []);
+      const codes = refined.filter((f) => f.severity === 'P0' || f.severity === 'P1').map((f) => `${f.severity} ${f.code}`);
+      if (codes.length) return { ok: false, reason: `run-context guardrails: ${codes.join('; ')}` };
     }
     let namedCompetitorEnabled = false;
     try { namedCompetitorEnabled = require('../../config/feature-gates').isEnabled('namedCompetitorComparison') === true; } catch (_) { namedCompetitorEnabled = false; }

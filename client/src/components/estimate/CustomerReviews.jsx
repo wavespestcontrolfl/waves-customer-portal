@@ -24,7 +24,9 @@ function pageSizeForViewport() {
 const ROTATE_MS = 6000;
 
 // All four GBP profiles (owner directive 2026-07-10) — same list the
-// server-rendered page falls back to.
+// server-rendered page falls back to. No `location` on these cards: the
+// profile name already names the location, so "Waves Venice · Venice" read
+// double (owner directive 2026-07-23).
 const REVIEW_FALLBACKS = [
   { name: 'Lakewood Ranch', placeId: 'ChIJVbBOKGYyTCgRVFz8_lu61Mw' },
   { name: 'Parrish', placeId: 'ChIJM32aQRIlw4gRr7goqhbAVpw' },
@@ -33,7 +35,6 @@ const REVIEW_FALLBACKS = [
 ].map((l) => ({
   reviewerName: `Waves ${l.name}`,
   text: `Read current Google reviews for our ${l.name} location.`,
-  location: l.name,
   url: `https://www.google.com/maps/place/?q=place_id:${l.placeId}`,
   fallback: true,
 }));
@@ -50,7 +51,10 @@ function Stars({ rating }) {
 function ReviewCard({ review }) {
   return (
     <div style={estimateInnerBox({ padding: 16, display: 'flex', flexDirection: 'column', minHeight: 150 })}>
-      <Stars rating={review.starRating} />
+      {/* Fallback cards are profile LINKS, not reviews — a fabricated
+          five-star row (and its "Rated 5 out of 5 stars" aria-label) on
+          them misrepresents an unrated card (estimator audit 2026-07-24). */}
+      {review.fallback ? null : <Stars rating={review.starRating} />}
       <p style={{
         fontSize: 14, margin: '0 0 12px', lineHeight: 1.5, color: W.textBody,
         fontStyle: review.fallback ? 'normal' : 'italic', flex: 1,

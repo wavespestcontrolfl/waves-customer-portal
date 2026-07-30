@@ -12,6 +12,7 @@ const logger = require('./logger');
 const AvailabilityEngine = require('./availability');
 const { WAVEGUARD, ANNUAL_PREPAY_DISCOUNT_PCT, LAWN_PRICING_V2 } = require('./pricing-engine/constants');
 const {
+  customerPreservesMonthlyMembership,
   inferFrequencyKeyFromEstimateData,
   perApplicationChargeAmount,
   resolveBillingCadence,
@@ -83,10 +84,20 @@ async function pickFirstServiceDate(customer, estimateId) {
     logger.error(`[estimate-converter] Availability lookup failed, falling back: ${e.message}`);
   }
 
-  // Fallback — today + 7, snap off Sunday
+  // Fallback — today + 7, nudged off closed days (weekly days off + one-off
+  // blackouts) via the shared helper; was a Sunday-only snap before the
+  // weekly-days-off setting existed. Bounded walk, fail-open like the helper.
   const fallback = new Date(Date.now() + 7 * 86400000);
-  while (fallback.getDay() === 0) fallback.setDate(fallback.getDate() + 1);
-  const dateStr = fallback.toISOString().split('T')[0];
+  let dateStr = fallback.toISOString().split('T')[0];
+  try {
+    const { isBlackoutDate } = require('./scheduling/blackout-dates');
+    for (let i = 0; i < 14 && (await isBlackoutDate(dateStr)); i++) {
+      fallback.setDate(fallback.getDate() + 1);
+      dateStr = fallback.toISOString().split('T')[0];
+    }
+  } catch (e) {
+    logger.warn(`[estimate-converter] closed-day nudge failed (failing open): ${e.message}`);
+  }
   logger.info(`[estimate-converter] No route-day match for city "${customer.city || '(empty)'}", using fallback ${dateStr}`);
   return dateStr;
 }
@@ -1290,15 +1301,87 @@ function recurringServiceForScheduledRow(recurringServices = [], scheduledRow = 
     || { service_type: scheduledRow.service_type };
 }
 
+// Termite billing riders ride the bait visit instead of being units of
+// their own: the bond via its combined route, the station rental with no
+// row at all. Both must stay out of every unit count, or a bait+rider plan
+// reads as multi-unit and nulls the whole-plan per-application fee.
+function isTermiteStationRentalLine(svc = {}) {
+  return recurringServiceKey(svc) === 'termite_station_rental';
+}
+
+function isTermiteBillingRiderLine(svc = {}) {
+  const key = String(recurringServiceKey(svc) || '');
+  return key.startsWith('termite_bond') || key === 'termite_station_rental';
+}
+
+// Drop the rental rider from the conversion set WITHOUT losing its money
+// (codex P1, round 4). The rider is never a scheduling unit — but on a
+// multi-unit plan (pest + termite) the whole-plan per_application_fee and
+// row prices go per-row/manual, and a silently-dropped rental line left no
+// billing carrier for the uplift: termite completions could never collect
+// the hardware-recovery charge. Fold the rider's amounts into the bait
+// line's billing fields FIRST (per-application, monthly, exact annual), so
+// every downstream reader of the bait unit — row pricing, manual
+// allocation, seeding — sees the true bait+rental amount, then drop the
+// rider row. Single-unit plans are unaffected: their fee derives from the
+// plan-level totals, which always included the uplift.
+function foldTermiteRentalIntoBait(services = []) {
+  const rental = services.find(isTermiteStationRentalLine);
+  const rest = services.filter((svc) => !isTermiteStationRentalLine(svc));
+  if (!rental) return rest;
+  const round2 = (n) => Math.round(Number(n) * 100) / 100;
+  const upliftPerApp = Number(rental.perTreatment ?? rental.perApp) || 0;
+  const upliftAnnual = Number(rental.annual)
+    || round2(upliftPerApp * (Number(rental.visitsPerYear) || 4));
+  const upliftMonthly = Number(rental.mo ?? rental.monthly) || 0;
+  return rest.map((svc) => {
+    if (recurringServiceKey(svc) !== 'termite_bait') return svc;
+    return {
+      ...svc,
+      perTreatment: round2((Number(svc.perTreatment) || 0) + upliftPerApp),
+      mo: round2((Number(svc.mo ?? svc.monthly) || 0) + upliftMonthly),
+      monthly: round2((Number(svc.monthly ?? svc.mo) || 0) + upliftMonthly),
+      // Exact-annual sum (the rider's annual is exact even when its rounded
+      // monthly is not — same drift the mapper's annualTotal fix addresses).
+      annual: round2((Number(svc.annual) || 0) + upliftAnnual),
+      // Audit breadcrumb: how much of this line is hardware recovery.
+      termiteStationRentalFoldedPerApp: upliftPerApp,
+    };
+  });
+}
+
+// The customers.termite_stations_rented patch for an accept (owner
+// 2026-07-26; codex P1 rounds 1+2). Three-way, evidence-driven:
+//   rental line present        → true  (the accepted agreement is the only
+//                                place that knows Waves keeps title; the
+//                                install visit that creates the pins can't
+//                                see it)
+//   purchased bait, no rental  → false (a former renter buying outright must
+//                                not keep the renter flag — new pins would
+//                                stamp owned_by='waves' and mark customer
+//                                hardware for "recovery")
+//   no termite line at all     → {}    (an unrelated accept is not an owner
+//                                action on station title)
+// Read from the UNfiltered recurring lines — conversion drops the rental
+// rider from its service set before scheduling, so this must run first.
+function termiteStationsRentedUpdate(recurringServices = [], { suppressRecurringConversion = false } = {}) {
+  if (suppressRecurringConversion) return {};
+  if (recurringServices.some(isTermiteStationRentalLine)) return { termite_stations_rented: true };
+  if (recurringServices.some((svc) => recurringServiceKey(svc) === 'termite_bait')) {
+    return { termite_stations_rented: false };
+  }
+  return {};
+}
+
 // The per-application charge divides the plan annual by the SINGLE unit's
-// visit count. Termite-bond riders are unit-count-exempt, so the single
-// unit is the non-bond line set (codex #2915 r6) — bait+bond derives 4
-// from the bait line; true multi-unit plans still return null.
+// visit count. Termite riders are unit-count-exempt, so the single unit is
+// the non-rider line set (codex #2915 r6) — bait+bond derives 4 from the
+// bait line; true multi-unit plans still return null.
 function riderAwareSingleUnitVisits(recurringLines = [], supplementUnitCount = 0) {
-  const nonBond = (Array.isArray(recurringLines) ? recurringLines : [])
-    .filter((svc) => !String(recurringServiceKey(svc) || '').startsWith('termite_bond'));
-  if (nonBond.length !== 1 || supplementUnitCount !== 0) return null;
-  return visitsPerYearForRecurringService(nonBond[0]);
+  const nonRider = (Array.isArray(recurringLines) ? recurringLines : [])
+    .filter((svc) => !isTermiteBillingRiderLine(svc));
+  if (nonRider.length !== 1 || supplementUnitCount !== 0) return null;
+  return visitsPerYearForRecurringService(nonRider[0]);
 }
 
 function supportsConverterFollowUpSeeding(svc = {}, parentRow = {}, pattern = null) {
@@ -1330,14 +1413,32 @@ function supportsConverterFollowUpSeeding(svc = {}, parentRow = {}, pattern = nu
   // Tree & Shrub programs (owner six-visit mandate; T&S audit 2026-07-18 P1:
   // a sold program produced ONE visit and no series). The 6x Standard accept
   // restamps to the bi-monthly catalog row and the 4x Light downsell to
-  // quarterly — seed those. The retired 9-visit 6-week tier has no
-  // month-interval pattern (visit-count inference would mislabel it
-  // bimonthly and seed 2-month gaps), so a legacy accept still leaves
-  // scheduling to the office — the visits check keeps it out.
+  // quarterly — seed those. The un-retired 9x Enhanced (2026-07-24) restamps
+  // frequency 'every_6_weeks' + visitsPerYear 9 and seeds 42-day gaps; the
+  // explicit-visits check keeps LEGACY 9-visit rows (no every_6_weeks
+  // frequency text — they infer bimonthly and would seed 2-month gaps) with
+  // office scheduling exactly as before.
   if (key === 'tree_shrub') {
     const visits = visitsPerYearForRecurringService(svc);
+    if (pattern === 'every_6_weeks') return visits === 9;
     if (pattern === 'bimonthly') return visits == null || visits === 6;
     if (pattern === 'quarterly') return visits == null || visits === 4;
+    return false;
+  }
+  // Mosquito (owner 2026-07-27). Neither program seeded before this, so a sold
+  // plan booked its FIRST visit and never created the rest — the customer was
+  // billed monthly for a series they did not get. Same failure the T&S audit
+  // found; monthly mosquito was already live and bookable when this shipped.
+  //
+  // Seasonal is gated on the EXPLICIT seasonal cadence, never on a bare
+  // 9-visit count: numeric 9-visit inference resolves to 'bimonthly', and
+  // seeding a 9-visit seasonal plan at 2-month gaps would be the wrong cadence
+  // AND the wrong dates. A legacy row that reaches here as bimonthly keeps
+  // office scheduling, exactly as before.
+  if (key === 'mosquito') {
+    const visits = visitsPerYearForRecurringService(svc);
+    if (pattern === RecurringAppointmentSeeder.SEASONAL_FEB_OCT) return visits === 9;
+    if (pattern === 'monthly') return visits == null || visits === 12;
     return false;
   }
   return false;
@@ -1395,12 +1496,67 @@ function cadenceFallbackForSeeding(svc = {}, fallbackFrequency) {
 }
 
 function converterFollowUpSeedingPattern(svc = {}, parentRow = {}, fallbackFrequency) {
+  // A 9-visit mosquito line has exactly ONE valid cadence, so resolve it before
+  // generic inference rather than as a fallback. Inference reads cadence FIELDS
+  // and display text first, so any stray or legacy frequency on the row —
+  // 'bimonthly' from the numeric rule, an every_6_weeks copied from the T&S
+  // restamp, anything — would otherwise win and then be rejected by the gate
+  // below, silently leaving the plan with no series at all. Nine visits at any
+  // other cadence is wrong by construction, so there is nothing to preserve.
+  if (RecurringAppointmentSeeder.serviceKeyFor(svc) === 'mosquito'
+    && visitsPerYearForRecurringService(svc) === 9) {
+    return RecurringAppointmentSeeder.SEASONAL_FEB_OCT;
+  }
   const pattern = RecurringAppointmentSeeder.inferRecurringPattern({
     service: { ...svc, service_type: parentRow?.service_type },
     fallbackFrequency: cadenceFallbackForSeeding(svc, fallbackFrequency),
   });
   if (!pattern || !supportsConverterFollowUpSeeding(svc, parentRow, pattern)) return null;
   return pattern;
+}
+
+// The cadence an annual-prepay term would record for its coverage. MUST apply
+// the same forced-mosquito rule as converterFollowUpSeedingPattern above:
+// seasonal quote rows carry frequencyKey 'every_6_weeks' (the estimate-public
+// tier map), which raw inference would return — a cadence the prepay layer
+// SUPPORTS — while the actual series seeds seasonal_feb_oct. The term would
+// then hold a 42-day cadence and the payment-time coverage refresh would seed
+// mismatched winter visits over the real series. The caller rejects
+// SEASONAL_FEB_OCT (annual-prepay renewal doesn't support the season walk yet)
+// so seasonal prepay fails closed on every acceptance path, matching the
+// prepay-on-book and /secure lanes (prepayCoverageCadenceForPattern → null).
+function annualPrepayCoverageCadence(svc = {}, fallbackFrequency) {
+  if (RecurringAppointmentSeeder.serviceKeyFor(svc) === 'mosquito'
+    && visitsPerYearForRecurringService(svc) === 9) {
+    return RecurringAppointmentSeeder.SEASONAL_FEB_OCT;
+  }
+  return RecurringAppointmentSeeder.inferRecurringPattern({
+    service: svc,
+    fallbackFrequency,
+  }) || null;
+}
+
+// Roll a seasonal first visit into Feb–Oct and re-nudge it off closed days
+// and weekends (bounded, fail-open — codex r8 P2). Shared by the
+// auto-schedule loop and the reserved-bundle mosquito promotion; in-season
+// bases pass through untouched.
+async function rolledSeasonalFirstDate(baseDateStr) {
+  let out = RecurringAppointmentSeeder.firstInSeasonDate(baseDateStr);
+  if (out === baseDateStr) return out;
+  try {
+    const { isBlackoutDate } = require('./scheduling/blackout-dates');
+    const { parseETDateTime, etParts, addETDays } = require('../utils/datetime-et');
+    for (let nudge = 0; nudge < 14; nudge++) {
+      const at = parseETDateTime(`${out}T12:00`);
+      const { dayOfWeek } = etParts(at);
+      const closed = dayOfWeek === 0 || dayOfWeek === 6 || (await isBlackoutDate(out));
+      if (!closed) break;
+      out = etDateString(addETDays(at, 1));
+    }
+  } catch (nudgeErr) {
+    logger.warn(`[estimate-converter] rolled-date closed-day nudge failed (failing open): ${nudgeErr.message}`);
+  }
+  return out;
 }
 
 async function seedRecurringFollowUpsForParent(database, parentRow, svc = {}, opts = {}) {
@@ -1513,7 +1669,30 @@ const EstimateConverter = {
       recurringServices,
       estimateData,
     });
-    const recurringServicesForConversion = suppressRecurringConversion ? [] : recurringServices;
+    // Station rental (owner 2026-07-26) is a pure BILLING rider, and unlike
+    // the bond rider it is NOT a scheduling unit under any route. The bond
+    // needs a visit identity — its "%Termite Bond% (N-Year Term)" name is
+    // the termite_bonds lifecycle-sync contract — so it rides a combined
+    // route. The rental has no lifecycle table and no name contract: the
+    // stations it pays for are checked on the bait visit that already
+    // exists, so there is nothing for a second row to do.
+    //
+    // Leaving the line in the conversion set breaks billing three ways
+    // (codex P0 on this PR): scheduling turns it into a phantom "Termite
+    // Station Rental" appointment, the plan reads as multi-unit so
+    // riderAwareSingleUnitVisits returns null, and per_application_fee +
+    // both rows' estimated_price go null — completion then invoices
+    // NOTHING, monitoring included. But a bare drop loses the uplift on
+    // MULTI-unit plans (codex P1 round 4), so the rider's amounts are
+    // folded into the bait line's billing fields before the row goes —
+    // single-unit fees still derive from the rental-inclusive plan totals.
+    const recurringServicesForConversion = suppressRecurringConversion
+      ? []
+      : foldTermiteRentalIntoBait(recurringServices);
+    // Read BEFORE the filter drops the line — this is the only signal that
+    // the sold program rents its stations, and it has to outlive conversion
+    // (see the customers.termite_stations_rented stamp below).
+    const stationsRentedPatch = termiteStationsRentedUpdate(recurringServices, { suppressRecurringConversion });
     // FAIL-CLOSED money guard: annual-prepay coverage is a per-TERM fact and an
     // annual_prepay_terms row carries exactly ONE coverage service
     // (coverage_service_type / coverage_visit_count / coverage_cadence). A
@@ -1549,6 +1728,8 @@ const EstimateConverter = {
     // flip a bait+bond plan to "multi-unit" and null out the whole-plan
     // per-application fee/row price that the single combined visit must
     // carry ($150/application = monitoring + bond, whole plan ÷ 4).
+    // (Station-rental lines are already filtered out of
+    // recurringServicesForConversion above — they are never units.)
     const isTermiteBondLine = (svc) => String(recurringServiceKey(svc) || '').startsWith('termite_bond');
     const hasTermiteBondLine = recurringServicesForConversion.some(isTermiteBondLine);
     const recurringUnitCount = recurringServicesForConversion.filter((svc) => !isTermiteBondLine(svc)).length
@@ -1657,14 +1838,10 @@ const EstimateConverter = {
     // else (new signups, leads, churned/dormant re-signups) converts to
     // per-visit billing per the owner ruling; annual-prepay accepts are
     // re-stamped at the term choke point either way.
-    const preservesExistingMembership = ['active_customer', 'won', 'at_risk'].includes(customer.pipeline_stage)
-      && Number(customer.monthly_rate) > 0
-      // Only NULL (legacy) or an explicit monthly_membership preserves — any
-      // explicit non-monthly lane (per_application/annual_prepay/per_visit/
-      // one_time) converts per the owner ruling; lingering tier/rate fields
-      // on an explicit per-visit customer must not resurrect membership
-      // billing (Codex #2836 r3).
-      && (customer.billing_mode == null || customer.billing_mode === 'monthly_membership');
+    // Shared predicate (billing-cadence.js) — the estimate display surfaces
+    // read the same function so the "Billed $X/mo" disclosure can never
+    // drift from the billing behavior decided here.
+    const preservesExistingMembership = customerPreservesMonthlyMembership(customer);
     // Pre-migration compatibility (Codex round-8): billing_mode +
     // per_application_fee ship in migration 20260709000010 — on a database
     // that hasn't run it (preview env, deploy window) the update keys would
@@ -1752,6 +1929,15 @@ const EstimateConverter = {
           } : {}),
           active: true,
           deleted_at: null,
+          // Station rental (owner 2026-07-26): the accepted agreement is the
+          // only place that knows Waves keeps title to the hardware, and the
+          // stations themselves are not created until the install visit — a
+          // completion-sync/office code path with no view of this estimate.
+          // Stamping the customer here is what lets upsertStationsForCustomer
+          // default new stations to owned_by='waves' (codex P1). See
+          // termiteStationsRentedUpdate for the three-way rule (rental →
+          // true, purchased bait → false, no termite line → untouched).
+          ...stationsRentedPatch,
           // Reactivating to active_customer — clear any churn stamp so a former
           // (churned/dormant) customer who accepts a recurring estimate isn't
           // still counted as churned by churned_at-based queries (e.g. MRR trend).
@@ -1894,6 +2080,38 @@ const EstimateConverter = {
               await addUnit(reservedStart.service_type, null, reservedStart.service_id || null);
               for (const combo of combos) await addUnit(combo.route.name, combo.route.catalogServiceKey);
             }
+            // Promoted `remaining` units (termite/bond + mosquito) take their
+            // series locks inside the reservation loop — they must join this
+            // sorted pre-pass union or two concurrent accepts can invert
+            // family lock order and deadlock (codex r17 P2: one reserves
+            // termite and promotes mosquito while the other does the
+            // reverse). Mirrors the loop's own name/key derivations.
+            for (const svc of remaining) {
+              const key = String(recurringServiceKey(svc) || '');
+              if ((key === 'termite_bait' || key.startsWith('termite_bond'))
+                && visitsPerYearForRecurringService(svc) === 4) {
+                const isBond = key.startsWith('termite_bond');
+                await addUnit(
+                  svc.name || svc.serviceName || svc.service_name || (isBond ? 'Termite Bond' : 'Termite Bait'),
+                  isBond ? (svc.service || null) : 'termite_bait',
+                );
+                continue;
+              }
+              if (RecurringAppointmentSeeder.serviceKeyFor(svc) === 'mosquito') {
+                const svcName = svc.name || svc.serviceName || svc.service_name || 'Mosquito';
+                const mosquitoPattern = converterFollowUpSeedingPattern(
+                  svc, { service_type: svcName }, inferredFrequencyKey,
+                );
+                if (mosquitoPattern) {
+                  await addUnit(
+                    svcName,
+                    mosquitoPattern === RecurringAppointmentSeeder.SEASONAL_FEB_OCT
+                      ? 'mosquito_seasonal'
+                      : 'mosquito_monthly',
+                  );
+                }
+              }
+            }
           } else {
             for (const combo of combos) await addUnit(combo.route.name, combo.route.catalogServiceKey);
             for (const unit of standalone) await addUnit(unit.service.name, unit.catalogServiceKey);
@@ -1981,26 +2199,69 @@ const EstimateConverter = {
               catalogServiceKey: isBond ? (line.service || null) : 'termite_bait',
             };
           });
-        for (const unit of [...(reservedStandalone || []), ...promotedTermiteUnits]) {
+        // Mosquito promotion (codex r16 P1): a recurring mosquito line beside
+        // a non-combining plan (pest + mosquito share no cadence route) sits
+        // in `remaining` and — per the adjudicated 2026-06-12 semantic — was
+        // never scheduled on the reservation path, even though the plan
+        // bills it monthly. Same remedy shape as the termite/bond
+        // promotions: a billed program must schedule. Monthly rides the
+        // reserved visit's slot (same trip); seasonal anchors its own first
+        // visit rolled into Feb–Oct — a reserved winter pest date must not
+        // seed a winter mosquito treatment.
+        const promotedMosquitoUnits = (remaining || [])
+          .filter((line) => {
+            if (RecurringAppointmentSeeder.serviceKeyFor(line) !== 'mosquito') return false;
+            const lineName = line.name || line.serviceName || line.service_name || 'Mosquito';
+            return !!converterFollowUpSeedingPattern(line, { service_type: lineName }, inferredFrequencyKey);
+          })
+          .map((line) => {
+            const lineName = line.name || line.serviceName || line.service_name || 'Mosquito';
+            const seasonal = converterFollowUpSeedingPattern(line, { service_type: lineName }, inferredFrequencyKey)
+              === RecurringAppointmentSeeder.SEASONAL_FEB_OCT;
+            return {
+              // Normalized name ON the unit (codex r17 P1): the insert below
+              // reads only unit.service.name, and a line carrying its label in
+              // serviceName/service_name would insert a NULL service_type —
+              // an error the per-unit catch swallows, completing an accept
+              // that bills mosquito while scheduling nothing.
+              service: { ...line, name: lineName },
+              catalogServiceKey: seasonal ? 'mosquito_seasonal' : 'mosquito_monthly',
+              seasonalMosquito: seasonal,
+              noteKind: 'mosquito program',
+            };
+          });
+        for (const unit of [...(reservedStandalone || []), ...promotedTermiteUnits, ...promotedMosquitoUnits]) {
           if (!reservedStart?.scheduled_date) break;
           // A reserved row already covering this program means nothing to add.
           const unitKey = recurringServiceKey({ name: unit.service.name });
           const alreadyReserved = reservedRows.some((row) => recurringServiceKey({ name: row.service_type }) === unitKey);
           if (alreadyReserved) continue;
           try {
-            // Copy the customer's picked slot onto the bait row (Codex r2):
+            // Copy the customer's picked slot onto the added row (Codex r2):
             // same trip, same window, same tech/zone — otherwise dispatch
-            // sees an un-slotted job floating on that day.
+            // sees an un-slotted job floating on that day. A SEASONAL
+            // mosquito unit whose first visit rolled into Feb–Oct is a
+            // different day, so it keeps only the zone and books unslotted
+            // (office assigns the window when February routing exists).
+            const unitDate = unit.seasonalMosquito
+              ? await rolledSeasonalFirstDate(scheduledDateOnly(reservedStart.scheduled_date))
+              : scheduledDateOnly(reservedStart.scheduled_date);
+            const sameTrip = unitDate === scheduledDateOnly(reservedStart.scheduled_date);
+            // Row notes are customer-visible — a seasonal line's raw
+            // every_6_weeks frequency must not leak into them.
+            const unitFrequencyLabel = unit.seasonalMosquito
+              ? 'seasonal (Feb–Oct)'
+              : (unit.service.frequency || 'recurring');
             const standaloneRow = {
               customer_id: customerId,
-              scheduled_date: reservedStart.scheduled_date,
-              ...(reservedStart.window_start ? { window_start: reservedStart.window_start } : {}),
-              ...(reservedStart.window_end ? { window_end: reservedStart.window_end } : {}),
-              ...(reservedStart.technician_id ? { technician_id: reservedStart.technician_id } : {}),
+              scheduled_date: unitDate,
+              ...(sameTrip && reservedStart.window_start ? { window_start: reservedStart.window_start } : {}),
+              ...(sameTrip && reservedStart.window_end ? { window_end: reservedStart.window_end } : {}),
+              ...(sameTrip && reservedStart.technician_id ? { technician_id: reservedStart.technician_id } : {}),
               ...(reservedStart.zone ? { zone: reservedStart.zone } : {}),
               service_type: unit.service.name,
               status: 'pending',
-              notes: `Auto-scheduled from estimate #${estimateId} (standalone bait program alongside reserved visit). Frequency: ${unit.service.frequency}.`,
+              notes: `Auto-scheduled from estimate #${estimateId} (${unit.noteKind || 'standalone bait program'} alongside reserved visit). Frequency: ${unitFrequencyLabel}.`,
               source_estimate_id: estimateId,
             };
             try {
@@ -2128,8 +2389,36 @@ const EstimateConverter = {
       }
 
       if (reservedStart) {
+        // Codex r8 P1 (last hole in the class): the slot list and reserve
+        // are season-filtered for seasonal selections, but the reservation
+        // is not re-validated when the FREQUENCY changes after reserving —
+        // a slot held under monthly12 (winter dates legitimately offered)
+        // then accepted as seasonal9 would seed the series from a Nov–Jan
+        // parent, counting a prohibited winter visit toward the nine.
+        // Refuse and roll the accept back; the customer re-picks a date
+        // (the hold expires on its own). Office/admin bookings never come
+        // through the reservation path. OUTSIDE the seeding try below — its
+        // catch is deliberately fail-soft (log and keep the acceptance),
+        // which would swallow this refusal and complete the accept anyway
+        // (pre-push P0 r9).
+        const reservedGuardSvc = reservedSeedSvc
+          || recurringServiceForScheduledRow(recurringServicesForConversion, reservedStart);
+        const reservedSeedingPattern = converterFollowUpSeedingPattern(
+          reservedGuardSvc || {}, reservedStart, inferredFrequencyKey,
+        );
+        if (reservedSeedingPattern === RecurringAppointmentSeeder.SEASONAL_FEB_OCT) {
+          const reservedMonth = Number(String(scheduledDateOnly(reservedStart.scheduled_date) || '').slice(5, 7));
+          if (reservedMonth < 2 || reservedMonth > 10) {
+            const err = new Error('This seasonal program runs February through October — pick an in-season visit date to finish accepting.');
+            err.code = 'SEASONAL_RESERVATION_OFF_SEASON';
+            err.isOperational = true;
+            err.status = 409;
+            err.statusCode = 409;
+            throw err;
+          }
+        }
         try {
-          const seedSvc = reservedSeedSvc || recurringServiceForScheduledRow(recurringServicesForConversion, reservedStart);
+          const seedSvc = reservedGuardSvc;
           // Duplicate-series guard on the RESERVED-slot path (P0): this
           // branch — the common public-accept path — seeded with NO guard,
           // so a customer already holding an active series of the family
@@ -2141,7 +2430,7 @@ const EstimateConverter = {
           // never seed a series don't take the lock or write skip notes.
           // Guard re-check + seeding share one locked transaction
           // (runSeedingStep) so concurrent creators serialize.
-          if (converterFollowUpSeedingPattern(seedSvc || {}, reservedStart, inferredFrequencyKey)) {
+          if (reservedSeedingPattern) {
             const outcome = await runSeedingStep(async (trx) => {
               const { matches, guardError } = await RecurringAppointmentSeeder.checkActiveSeriesLocked(trx, {
                 customerId,
@@ -2195,6 +2484,9 @@ const EstimateConverter = {
     } else {
       const firstServiceDate = await pickFirstServiceDate(customer, estimateId);
       termStartDate = firstServiceDate;
+      // Earliest date actually inserted by the loop below — replaces the
+      // picked date when a seasonal roll moved the real first visit.
+      let earliestScheduledUnitDate = null;
 
       // Combined-service routing: matching-cadence pairs schedule as ONE
       // combined service; standalone rewrites (e.g. rodent bait) schedule
@@ -2238,7 +2530,18 @@ const EstimateConverter = {
           // the plan cadence (codex #2911 r3 P1).
           fallbackFrequency: cadenceFallbackForSeeding(svc, inferredFrequencyKey),
         });
-        const frequency = svc.frequency || pattern || 'monthly';
+        // The pattern the seeder will ACTUALLY use — for seasonal mosquito the
+        // forced rule diverges from raw inference (the row carries
+        // every_6_weeks). Resolved against the prospective parent's
+        // service_type, which is exactly what seedRecurringFollowUpsForParent
+        // sees after the insert below.
+        const seedingPattern = converterFollowUpSeedingPattern(
+          svc, { service_type: serviceName }, inferredFrequencyKey,
+        );
+        const seasonalUnit = seedingPattern === RecurringAppointmentSeeder.SEASONAL_FEB_OCT;
+        // Row notes are customer-visible — say "seasonal (Feb–Oct)", not the
+        // raw every_6_weeks the quote row carries or the internal token.
+        const frequency = seasonalUnit ? 'seasonal (Feb–Oct)' : (svc.frequency || pattern || 'monthly');
         // recurringUnitCount, not raw line count (Codex P1): with a
         // standalone bait unit beside one pest line, stamping the whole
         // plan amount on BOTH rows would double-charge at completion.
@@ -2254,9 +2557,21 @@ const EstimateConverter = {
               .map((s) => s.name || s.serviceName || s.service_name || recurringServiceKey(s))
               .join(' + ')} — one visit, one report.`
             : '';
+          // Codex r5 P1: an auto-picked Nov–Jan first date on a seasonal plan
+          // would put a winter treatment on a Feb–Oct program AND count toward
+          // the nine, leaving only eight in-season visits. Roll it to February;
+          // every other unit keeps the picked date. (Office-booked off-season
+          // parents are the operator's choice and are not moved.) Codex r8 P2:
+          // pickFirstServiceDate's blackout/weekday validation ran on the
+          // ORIGINAL date, so re-nudge the rolled date off closed days and
+          // weekends — bounded and fail-open like the fallback nudge, and a
+          // February date + 14 days can never leave the season.
+          const unitFirstDate = seasonalUnit
+            ? await rolledSeasonalFirstDate(firstServiceDate)
+            : firstServiceDate;
           const row = {
             customer_id: customerId,
-            scheduled_date: firstServiceDate,
+            scheduled_date: unitFirstDate,
             service_type: serviceName,
             status: 'pending',
             notes: `Auto-scheduled from estimate #${estimateId}. Frequency: ${frequency}.${combinedNote}`,
@@ -2320,6 +2635,10 @@ const EstimateConverter = {
             continue;
           }
           if (!firstScheduledServiceId && outcome.insertedId) firstScheduledServiceId = outcome.insertedId;
+          if (outcome.insertedId && unitFirstDate
+            && (!earliestScheduledUnitDate || unitFirstDate < earliestScheduledUnitDate)) {
+            earliestScheduledUnitDate = unitFirstDate;
+          }
           let insertedFollowUps = 0;
           if (outcome.seedResult) {
             if (deferFollowUpReminderRegistration && Array.isArray(outcome.seedResult.insertedRows)) {
@@ -2334,6 +2653,13 @@ const EstimateConverter = {
           logger.error(`[estimate-converter] Failed to create scheduled_service: ${e.message}`);
         }
       }
+      // The membership term/email start must reflect what was ACTUALLY
+      // scheduled: a solo seasonal plan accepted in Nov–Jan rolls its first
+      // visit to February, so the pre-roll firstServiceDate would tell the
+      // customer their membership starts on a winter date with no service
+      // (codex r15 P2). A mixed plan keeps its earliest real visit date;
+      // if nothing inserted (duplicate-series keeps), the picked date stands.
+      if (earliestScheduledUnitDate) termStartDate = earliestScheduledUnitDate;
     }
 
     // 3. Log conversion in activity_log
@@ -2524,6 +2850,7 @@ const EstimateConverter = {
           let coverageServiceType;
           let coverageVisitCount;
           let coverageCadence;
+          let seasonalPrepayCoverageUnsupported = false;
           if (annualPrepayCoverageOverride && recurringServicesForConversion.length === 1) {
             // Prepay-on-book: the caller (admin-schedule accept-on-book) already
             // created the coverage series with the BOOKED service_type/cadence
@@ -2538,28 +2865,37 @@ const EstimateConverter = {
           } else if (recurringServicesForConversion.length === 1) {
             const coverageSvc = recurringServicesForConversion[0];
             const svcType = coverageSvc.name || coverageSvc.serviceName || coverageSvc.service_name || null;
-            const cadence = RecurringAppointmentSeeder.inferRecurringPattern({
-              service: coverageSvc,
-              fallbackFrequency: inferredFrequencyKey,
-            }) || null;
-            // Visits/year: prefer the line's explicit count (the series' own
-            // source); else map from cadence. Values mirror inferCoverageCadence
-            // (annual-prepay-renewals.js) so coverage aligns with the seeded series.
-            const CADENCE_VISITS = {
-              monthly: 12, bimonthly: 6, every_6_weeks: 9, quarterly: 4, triannual: 3, semiannual: 2, annual: 1,
-            };
-            const visits = visitsPerYearForRecurringService(coverageSvc) || CADENCE_VISITS[cadence] || null;
-            if (svcType && visits > 0) {
-              coverageServiceType = svcType;
-              coverageVisitCount = visits;
-              coverageCadence = cadence || undefined; // absent → applyPrepaidCoverageForTerm infers from visit count
+            const cadence = annualPrepayCoverageCadence(coverageSvc, inferredFrequencyKey);
+            if (cadence === RecurringAppointmentSeeder.SEASONAL_FEB_OCT) {
+              // seasonal_feb_oct is UNSUPPORTED as a prepay coverage cadence
+              // (see prepayCoverageCadenceForPattern): the coverage seeder fills
+              // remaining visits with same-day-of-month math from one stored
+              // cadence and would place prepaid visits in Nov–Jan, which then
+              // complete-bill again. The seeded series meanwhile IS seasonal
+              // (converterFollowUpSeedingPattern forces it), so recording the
+              // raw inferred cadence here would diverge from the real series.
+              // Fail closed via the guard in the term-creation try below.
+              seasonalPrepayCoverageUnsupported = true;
             } else {
-              // Coverage service type / visit count could not be derived (e.g. a
-              // sparse line with no name/serviceName/service_name — the seeded
-              // visits then fall back to the generic 'Service' label). We must NOT
-              // create an unstampable term; the guard at the top of the
-              // term-creation try fails closed (routes to manual).
-              logger.warn(`[estimate-converter] annual-prepay coverage underivable for estimate ${estimateId} (serviceType=${svcType}, visits=${visits}) — will fail closed`);
+              // Visits/year: prefer the line's explicit count (the series' own
+              // source); else map from cadence. Values mirror inferCoverageCadence
+              // (annual-prepay-renewals.js) so coverage aligns with the seeded series.
+              const CADENCE_VISITS = {
+                monthly: 12, bimonthly: 6, every_6_weeks: 9, quarterly: 4, triannual: 3, semiannual: 2, annual: 1,
+              };
+              const visits = visitsPerYearForRecurringService(coverageSvc) || CADENCE_VISITS[cadence] || null;
+              if (svcType && visits > 0) {
+                coverageServiceType = svcType;
+                coverageVisitCount = visits;
+                coverageCadence = cadence || undefined; // absent → applyPrepaidCoverageForTerm infers from visit count
+              } else {
+                // Coverage service type / visit count could not be derived (e.g. a
+                // sparse line with no name/serviceName/service_name — the seeded
+                // visits then fall back to the generic 'Service' label). We must NOT
+                // create an unstampable term; the guard at the top of the
+                // term-creation try fails closed (routes to manual).
+                logger.warn(`[estimate-converter] annual-prepay coverage underivable for estimate ${estimateId} (serviceType=${svcType}, visits=${visits}) — will fail closed`);
+              }
             }
           } else if (recurringServicesForConversion.length === 0 && supplementStandaloneUnits.length === 1) {
             // Supplemental-only accept (Codex r2 on the pest+rodent removal):
@@ -2602,6 +2938,16 @@ const EstimateConverter = {
             // it IS set stamping matches; when it can't be, refuse and route to
             // manual rather than ship an unstampable term. The catch below voids
             // the draft invoice; the enclosing transaction rolls back the rest.
+            if (seasonalPrepayCoverageUnsupported) {
+              const err = new Error(
+                `Annual prepay isn't supported for the seasonal (Feb–Oct) mosquito program yet — the renewal seeder can't represent its cadence and would place prepaid visits in winter. Convert as monthly or bill the prepay manually.`
+              );
+              err.code = 'ANNUAL_PREPAY_SEASONAL_CADENCE_UNSUPPORTED';
+              err.isOperational = true;
+              err.status = 422;
+              err.statusCode = 422;
+              throw err;
+            }
             if ((recurringServicesForConversion.length === 1
               || (recurringServicesForConversion.length === 0 && supplementStandaloneUnits.length === 1))
               && !coverageServiceType) {
@@ -2950,6 +3296,12 @@ module.exports.determineTier = determineTier;
 module.exports.hasWaveGuardSetupService = hasWaveGuardSetupService;
 module.exports.nonDiscountableRecurringAnnualFloor = nonDiscountableRecurringAnnualFloor;
 module.exports.recurringServiceKey = recurringServiceKey;
+module.exports.termiteStationsRentedUpdate = termiteStationsRentedUpdate;
+module.exports.foldTermiteRentalIntoBait = foldTermiteRentalIntoBait;
+// The $99 WaveGuard setup fee — exported so the /secure plan-choice lane
+// (secure-appointment-plans.js) discloses/stamps the SAME fee this converter
+// invoices on standard accepts. Never hardcode 99 elsewhere.
+module.exports.WAVEGUARD_SETUP_FEE = WAVEGUARD_SETUP_FEE;
 // Annual prepay supports exactly ONE recurring coverage unit — the same math
 // as convertEstimate's fail-closed ANNUAL_PREPAY_MULTI_SERVICE_UNSUPPORTED
 // guard (recurring.services lines + any supplemental companion a solo primary
@@ -2961,7 +3313,10 @@ module.exports.annualPrepayRecurringUnitCount = function annualPrepayRecurringUn
   // prepay deposit that acceptance later 422s (Codex r2 on the pest+rodent
   // removal). Same source of truth: recurring lines + fromSupplement
   // standalone units (combine dedupes a line + duplicate scalar to one).
-  const recurring = recurringServicesFromEstimateData(estimateData);
+  // The rental rider is folded/dropped exactly as conversion does (codex P1
+  // round 5): counting the raw rider row read a rental-only bait estimate
+  // as a two-unit plan and rejected the prepay conversion actually allows.
+  const recurring = foldTermiteRentalIntoBait(recurringServicesFromEstimateData(estimateData));
   const { standalone } = combineRecurringServicesForScheduling(recurring, {
     acceptFrequency: estimateData?.customerSelection?.frequency || null,
     supplementalCompanions: supplementalCompanionLines(estimateData),
@@ -2997,4 +3352,5 @@ module.exports.estimateOperatorSetupFeeWaived = estimateOperatorSetupFeeWaived;
 module.exports.recurringMixHasMembershipFeeService = recurringMixHasMembershipFeeService;
 module.exports.shouldCreateDraftInvoiceForRecurring = shouldCreateDraftInvoiceForRecurring;
 module.exports.converterFollowUpSeedingPattern = converterFollowUpSeedingPattern;
+module.exports.annualPrepayCoverageCadence = annualPrepayCoverageCadence;
 module.exports.riderAwareSingleUnitVisits = riderAwareSingleUnitVisits;

@@ -33,6 +33,23 @@ function cleanEmail(v) {
   return clean(v).toLowerCase();
 }
 
+// Sentinel for "we could not READ the preferences", as distinct from "there is
+// no preference row". Callers wrap their notification_prefs lookup in
+// `.catch(() => PREFS_UNAVAILABLE)`; the notify-primary resolvers then fail
+// CLOSED rather than treating an unreadable row as the default.
+//
+// Why this matters (codex #2992 P1): under the old opt-IN default a failed
+// lookup produced `{}` and excluded the account holder, so an error could only
+// drop a message. Under opt-OUT semantics the same `{}` would ADD the holder —
+// silently overriding a stored `false` and texting someone who opted out. For
+// every other field the sentinel behaves exactly like the `{}` these callers
+// already passed (all reads undefined), so nothing else changes behavior.
+const PREFS_UNAVAILABLE = Object.freeze({ __prefsUnavailable: true });
+
+function prefsUnavailable(prefs) {
+  return prefs === PREFS_UNAVAILABLE || prefs?.__prefsUnavailable === true;
+}
+
 function sameEmail(a, b) {
   const ea = cleanEmail(a);
   const eb = cleanEmail(b);
@@ -80,6 +97,14 @@ function getServiceContactSlots(customer) {
   }));
 }
 
+// SMS to a service contact requires the row-level consent artifact
+// (#2948). Shared by every phone-resolving path in this module. Kill
+// switch: DISABLE_CONTACT_CONSENT_GATE=1.
+function serviceContactsConsented(customer = {}) {
+  return !!customer.service_contacts_consent_at
+    || process.env.DISABLE_CONTACT_CONSENT_GATE === '1';
+}
+
 function getServiceContact(customer) {
   if (!customer) return { phone: '', email: '', name: '', role: 'service_contact' };
   const svcPhone = clean(customer.service_contact_phone);
@@ -92,6 +117,20 @@ function getServiceContact(customer) {
     name: svcName || primary.name,
     role: 'service_contact',
   };
+}
+
+// SMS-channel resolver for the single review/ask recipient: the slot-1
+// service contact WHEN the row carries the consent artifact, else the
+// primary account holder as a coherent identity (phone AND name together —
+// never the primary's phone addressed with the contact's name). Email
+// callers keep getServiceContact, which stays ungated.
+function getServiceContactSmsRecipient(customer) {
+  if (!customer) return { phone: '', email: '', name: '', role: 'service_contact' };
+  const svcPhone = clean(customer.service_contact_phone);
+  if (svcPhone && !serviceContactsConsented(customer)) {
+    return { ...getPrimaryContact(customer), role: 'primary' };
+  }
+  return getServiceContact(customer);
 }
 
 function getBillingContact(customer, prefs = {}) {
@@ -114,25 +153,53 @@ function samePhone(a, b) {
   return !!da && !!db && da === db;
 }
 
-function getAppointmentContacts(customer, prefs = {}) {
+function getAppointmentContacts(customer, prefs = {}, { skipConsentGate = false } = {}) {
   if (!customer) return [];
   const primary = getPrimaryContact(customer);
   const contacts = [];
 
-  for (const slot of getServiceContactSlots(customer)) {
-    const distinct = !!slot.phone
-      && !samePhone(slot.phone, primary.phone)
-      && !contacts.some(c => samePhone(c.phone, slot.phone));
-    if (!distinct) continue;
-    contacts.push({
-      phone: slot.phone,
-      email: slot.email || primary.email,
-      name: slot.name || primary.name,
-      role: slot.role,
-    });
+  // Consent gate (#2948 follow-up, owner-authorized 2026-07-23): service
+  // contacts are texting targets, so they only fan out when the customer
+  // row carries a consent artifact (portal attestation or the grandfather
+  // backfill — every row with contacts has one as of 20260723000003).
+  // Rows without a stamp fall back to texting the primary account holder
+  // only. Kill switch: DISABLE_CONTACT_CONSENT_GATE=1 restores the old
+  // ungated fanout. The artifact attests to TEXTS specifically, so the
+  // email resolver passes skipConsentGate — without it, an unstamped row
+  // rerouted email to the primary against appointment_notify_primary=false
+  // AND double-delivered via the slot sweep (main regression 2026-07-23).
+  if (skipConsentGate || serviceContactsConsented(customer)) {
+    for (const slot of getServiceContactSlots(customer)) {
+      const distinct = !!slot.phone
+        && !samePhone(slot.phone, primary.phone)
+        && !contacts.some(c => samePhone(c.phone, slot.phone));
+      if (!distinct) continue;
+      contacts.push({
+        phone: slot.phone,
+        email: slot.email || primary.email,
+        name: slot.name || primary.name,
+        role: slot.role,
+      });
+    }
   }
 
-  const notifyPrimary = !contacts.length || prefs.appointment_notify_primary === true;
+  // Opt-OUT, not opt-in: the account holder is always a legitimate recipient of
+  // their own appointment info (own number, own consent validated at send time),
+  // so only an EXPLICIT false removes them. Default-on because the opt-in
+  // default failed silently — naming a spouse switched off the old
+  // `!contacts.length` safety net and the holder stopped getting texts with no
+  // signal to them or the owner (5 accounts hit this by 2026-07-24).
+  //
+  // That safety net is deliberately GONE rather than OR'd in (codex #2992 P1):
+  // `!contacts.length || …` overrode an explicit `false`, so unchecking the
+  // toggle did nothing for an account with no distinct consented contact — the
+  // UI promised an opt-out the send path ignored. Under opt-out semantics the
+  // net is redundant anyway: an absent preference already resolves to true.
+  //
+  // Safe for the legacy `false` rows only because 20260725000002 backfills them
+  // BEFORE this code serves traffic — Railway runs migrations pre-deploy and a
+  // failed migration blocks the deploy, so this cannot go live without it.
+  const notifyPrimary = !prefsUnavailable(prefs) && prefs.appointment_notify_primary !== false;
   if (notifyPrimary && primary.phone && !contacts.some(c => samePhone(c.phone, primary.phone))) {
     contacts.push({ ...primary, role: 'primary' });
   }
@@ -175,7 +242,14 @@ function getServiceReportEmailRecipients(customer, prefs = {}) {
     });
   }
 
-  const notifyPrimary = !recipients.length || prefs.service_report_notify_primary === true;
+  // Opt-OUT, same as getAppointmentContacts — including dropping the old
+  // `!recipients.length` net so an explicit false is actually honored, and
+  // failing closed when the preferences could not be read. The opt-in default
+  // failed the same silent way here: adding a contact EMAIL switched the net
+  // off. This path is MORE exposed than the appointment one because it is not
+  // behind the consent artifact, so an unstamped row dropped the holder too
+  // (3 accounts were live in that state on 2026-07-24).
+  const notifyPrimary = !prefsUnavailable(prefs) && prefs.service_report_notify_primary !== false;
   // Billing-recipient copy is only meaningful when a billing_email is set —
   // without one the billing contact IS the primary, which the notify-primary
   // toggle already covers.
@@ -219,11 +293,14 @@ function isServiceContactRole(role) {
 }
 
 module.exports = {
+  PREFS_UNAVAILABLE,
+  prefsUnavailable,
   SERVICE_CONTACT_SLOTS,
   SERVICE_CONTACT_COLUMNS,
   firstNameFrom,
   getPrimaryContact,
   getServiceContact,
+  getServiceContactSmsRecipient,
   getServiceContactSlots,
   isServiceContactRole,
   getBillingContact,

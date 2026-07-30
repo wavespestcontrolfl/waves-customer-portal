@@ -4183,7 +4183,6 @@ const StripeService = {
     const { baseCents, surchargeCents, totalCents, rateBps, policyVersion } = chargeInfo;
 
     const surchargeDetails = buildSurchargeAmountDetails(surchargeCents);
-    const usePreview = !!surchargeDetails;
     // Payer invoices never save the payer's card to the homeowner account.
     const saveCard = !!opts.saveCard && !invoice.payer_id;
 
@@ -4204,7 +4203,17 @@ const StripeService = {
       },
     };
 
-    if (surchargeDetails) updateParams.amount_details = surchargeDetails;
+    // The no-fee update clears amount_details UNCONDITIONALLY (empty string
+    // is Stripe's unset form): a failed credit attempt strands its surcharge
+    // breakdown on the PI and Stripe then rejects a debit/prepaid confirm —
+    // "A surcharge amount can only be provided with the following card
+    // funding types: credit" — hard-blocking the surcharge-free path
+    // (2026-07-28 pay-page class). Probe-then-clear was rejected in review
+    // (Codex #3046 r1 P1 TOCTOU): a concurrent credit finalize can stamp a
+    // surcharge between any probe and this update; the unconditional clear
+    // has no window. Preview version required on the update/confirm —
+    // amount_details is invisible and unsettable on the default version.
+    updateParams.amount_details = surchargeDetails || '';
 
     if (saveCard && invoice.customer_id) {
       updateParams.customer = await this.ensureStripeCustomer(invoice.customer_id);
@@ -4235,17 +4244,38 @@ const StripeService = {
         // so a claim cannot appear after the assertion but before money moves.
         await assertNoInvoiceChargeReconciliationPending(invoiceId, finalizeTrx);
 
-        await stripe.paymentIntents.update(
-          lockedInvoice.stripe_payment_intent_id,
-          updateParams,
-          usePreview ? { apiVersion: SURCHARGE_API_VERSION } : undefined,
-        );
+        try {
+          await stripe.paymentIntents.update(
+            lockedInvoice.stripe_payment_intent_id,
+            updateParams,
+            { apiVersion: SURCHARGE_API_VERSION },
+          );
+        } catch (updateErr) {
+          // The empty-string unset is a preview param — if this account/
+          // version rejects it, retry without amount_details, then VERIFY
+          // nothing stale remains before any money moves: confirming with a
+          // stranded surcharge either rejects (debit/prepaid) or misstates
+          // the charge breakdown (Codex #3046 r1 P1 — never confirm an
+          // unverified intent).
+          if (surchargeDetails) throw updateErr;
+          logger.warn(`[stripe] Invoice finalize amount_details unset rejected for ${lockedInvoice.stripe_payment_intent_id} (${updateErr.message}) — retrying without`);
+          const { amount_details: _drop, ...withoutDetails } = updateParams;
+          await stripe.paymentIntents.update(lockedInvoice.stripe_payment_intent_id, withoutDetails);
+          const verifyPi = await stripe.paymentIntents.retrieve(
+            lockedInvoice.stripe_payment_intent_id,
+            {},
+            { apiVersion: SURCHARGE_API_VERSION },
+          );
+          if (Number(verifyPi.amount_details?.surcharge?.amount || 0) > 0) {
+            throw new Error('A previous card attempt left a pending card fee on this payment — please call or text us and we will clear it.');
+          }
+        }
 
         // Confirm the PI server-side (attaches PM + charges the card).
         return stripe.paymentIntents.confirm(
           lockedInvoice.stripe_payment_intent_id,
           {},
-          usePreview ? { apiVersion: SURCHARGE_API_VERSION } : undefined,
+          { apiVersion: SURCHARGE_API_VERSION },
         );
       });
 
@@ -4573,7 +4603,6 @@ const StripeService = {
 
     const { baseCents, surchargeCents, totalCents, rateBps, policyVersion } = computeChargeAmount(baseAmount, pm.type || 'card', { funding });
     const surchargeDetails = buildSurchargeAmountDetails(surchargeCents);
-    const usePreview = !!surchargeDetails;
     const saveCard = !!opts.saveCard;
 
     const updateParams = {
@@ -4591,11 +4620,30 @@ const StripeService = {
       },
       setup_future_usage: saveCard ? 'off_session' : '',
     };
-    if (surchargeDetails) updateParams.amount_details = surchargeDetails;
+    // Same unconditional clear as finalizeInvoicePayment: a failed credit
+    // attempt strands amount_details.surcharge on the PI and Stripe rejects a
+    // debit/prepaid confirm unless it's unset (empty string). Unconditional —
+    // this path has no invoice-style lock, so any probe-then-clear would race
+    // a concurrent credit finalize (Codex #3046 r1 P1 TOCTOU).
+    updateParams.amount_details = surchargeDetails || '';
 
     try {
-      await stripe.paymentIntents.update(statement.stripe_payment_intent_id, updateParams, usePreview ? { apiVersion: SURCHARGE_API_VERSION } : undefined);
-      const confirmed = await stripe.paymentIntents.confirm(statement.stripe_payment_intent_id, {}, usePreview ? { apiVersion: SURCHARGE_API_VERSION } : undefined);
+      try {
+        await stripe.paymentIntents.update(statement.stripe_payment_intent_id, updateParams, { apiVersion: SURCHARGE_API_VERSION });
+      } catch (updateErr) {
+        // Preview-param fallback with post-verify, mirroring the invoice
+        // path: never confirm while an unverified surcharge may remain
+        // (Codex #3046 r1 P1).
+        if (surchargeDetails) throw updateErr;
+        logger.warn(`[stripe] Statement finalize amount_details unset rejected for ${statement.stripe_payment_intent_id} (${updateErr.message}) — retrying without`);
+        const { amount_details: _drop, ...withoutDetails } = updateParams;
+        await stripe.paymentIntents.update(statement.stripe_payment_intent_id, withoutDetails);
+        const verifyPi = await stripe.paymentIntents.retrieve(statement.stripe_payment_intent_id, {}, { apiVersion: SURCHARGE_API_VERSION });
+        if (Number(verifyPi.amount_details?.surcharge?.amount || 0) > 0) {
+          throw new Error('A previous card attempt left a pending card fee on this payment — please call or text us and we will clear it.');
+        }
+      }
+      const confirmed = await stripe.paymentIntents.confirm(statement.stripe_payment_intent_id, {}, { apiVersion: SURCHARGE_API_VERSION });
       logger.info(`[stripe] Finalized statement S-${statementId}: funding=${funding} surcharge=${surchargeCents}c total=${totalCents}c PI=${confirmed.id} status=${confirmed.status}`);
       return {
         paymentIntentId: confirmed.id,

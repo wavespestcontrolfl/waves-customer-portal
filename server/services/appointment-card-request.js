@@ -46,6 +46,10 @@ const { callBookingDateOnly } = require('./call-booking-catalog');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 
 const TEMPLATE_KEY = 'secure_appointment_card';
+// Plan-choice copy variant (owner-approved 2026-07-24): used only when the
+// link will open the plan picker AND the variant is active — never a lever
+// for the lane itself.
+const PLAN_TEMPLATE_KEY = 'secure_appointment_card_plans';
 // Deliberately NOT 'rescheduled' (Codex #2821 P1): the customer-portal
 // reschedule request (routes/schedule.js) flips the visit to 'rescheduled'
 // while leaving the ORIGINAL date/window on the row — it is a pending-
@@ -108,17 +112,47 @@ function dateLineFor(scheduledDate) {
   return ` on ${anchored.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'America/New_York' })}`;
 }
 
-async function renderTemplate(vars) {
+async function renderTemplate(vars, templateKey = TEMPLATE_KEY) {
   try {
     const smsTemplatesRouter = require('../routes/admin-sms-templates');
     if (typeof smsTemplatesRouter.getTemplate === 'function') {
-      const body = await smsTemplatesRouter.getTemplate(TEMPLATE_KEY, vars);
+      const body = await smsTemplatesRouter.getTemplate(templateKey, vars);
       if (body) return body;
     }
   } catch (err) {
-    logger.warn(`[appt-card-request] template ${TEMPLATE_KEY} lookup failed: ${err.message}`);
+    logger.warn(`[appt-card-request] template ${templateKey} lookup failed: ${err.message}`);
   }
   return null;
+}
+
+// Send-time probe for the plan-choice copy variants (owner-approved
+// 2026-07-24): true only when the /secure link will open the plan picker —
+// same derivation the page runs (gate off, one-time visits, non-whitelisted
+// services, covered lanes all return false and keep the base copy, which
+// stays accurate for them). The EXISTING pending request (an inline /book
+// row being reused for the one allowed SMS) rides along so its own
+// selection state is honored: a request that already picked prepay carries
+// its payment_pending term, and without the request the overlap check
+// would read that term as external coverage and fall back to the base
+// "only charged after service" copy — the one message that is FALSE on the
+// prepay_selected page the link opens (Codex #2987). The variant is also
+// withheld when the plan carries NO incentive (discount class with
+// ANNUAL_PREPAY_DISCOUNT_PCT configured to 0 and no fee waiver) — "prepay
+// the year and save" must never promise savings the page won't show
+// (Codex #2987). Availability stays live-derived on BOTH ends, so a change
+// between send and click degrades to the card-only page; the variant copy
+// is written to stay truthful in that case (no dollar amounts, and adding
+// a card with nothing charged today remains exactly what the page offers).
+async function planInviteApplies(visitId, request = null) {
+  try {
+    const { buildSecurePlanContext } = require('./secure-appointment-plans');
+    const planCtx = await buildSecurePlanContext({ request, visitId });
+    return planCtx?.mode === 'recurring'
+      && !!(planCtx.setupFee?.waivedWithPrepay || Number(planCtx.prepay?.discount) > 0);
+  } catch (err) {
+    logger.warn(`[appt-card-request] plan-invite probe failed for visit ${visitId} — using base copy: ${err.message}`);
+    return false;
+  }
 }
 
 // Check 1 — policy exemption. Payer check fails toward EXEMPT (never risk
@@ -264,7 +298,7 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
     // link back — idempotent, never a second row.
     const existing = await db('appointment_card_requests')
       .where({ scheduled_service_id: visit.id })
-      .first('id', 'status', 'token');
+      .first('id', 'status', 'token', 'selected_plan', 'annual_prepay_term_id');
     let reuseToken = null;
     if (existing) {
       if (existing.status === 'pending' && existing.token) {
@@ -306,13 +340,33 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
     // template is inactive (template active + env gate = the documented
     // two-switch launch), and an SMS claim must never be consumed for a
     // send that can't render.
-    const body = await renderTemplate({
+    const templateVars = {
       first_name: customer?.first_name || 'there',
       service_type: visit.service_type || 'service',
       date_line: dateLineFor(visit.scheduled_date),
       secure_link: secureUrl,
-    });
-    if (!body) return skip('template_inactive');
+    };
+    // The BASE render is the live kill-switch check at the send boundary
+    // (Codex #2987 P1): it must run — and pass — before a variant body can
+    // be accepted, so deactivating secure_appointment_card between the
+    // early probe and this point still blocks the send, variant active or
+    // not. Only then is the plan-choice OVERLAY considered: probed for the
+    // SMS/email delivery only (inline hands back a URL, no copy), with the
+    // EXISTING pending request passed through so a reused link that
+    // already selected a plan gets copy matching the page it opens (Codex
+    // #2987: the request's own pending term must not read as an external
+    // overlap). An inactive variant silently keeps the approved base copy.
+    const body0 = await renderTemplate(templateVars);
+    if (!body0) return skip('template_inactive');
+    let body = body0;
+    let usedTemplateKey = TEMPLATE_KEY;
+    if (delivery !== 'inline' && await planInviteApplies(visit.id, existing || null)) {
+      const variantBody = await renderTemplate(templateVars, PLAN_TEMPLATE_KEY);
+      if (variantBody) {
+        body = variantBody;
+        usedTemplateKey = PLAN_TEMPLATE_KEY;
+      }
+    }
 
     // Inline delivery: the customer is ON the booking surface — create the
     // tokenized capture and hand the URL back for the wizard's card step.
@@ -485,7 +539,7 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
         metadata: {
           scheduled_service_id: visit.id,
           trigger,
-          original_message_type: TEMPLATE_KEY,
+          original_message_type: usedTemplateKey,
         },
       });
     } catch (sendErr) {
@@ -532,6 +586,12 @@ async function requestCardForAppointment({ scheduledServiceId, trigger = 'unspec
         serviceType: visit.service_type || 'service',
         dateLine: dateLineFor(visit.scheduled_date),
         secureUrl,
+        // The email variant follows the copy that ACTUALLY went out on the
+        // SMS leg — not the raw probe — so the two legs of one invite can
+        // never contradict each other (base SMS's unconditional "only
+        // charged after service" next to a prepay pitch). Activating the
+        // SMS variant in /admin templates is the single copy lever.
+        planChoice: usedTemplateKey === PLAN_TEMPLATE_KEY,
       }).catch((emailErr) => {
         logger.warn(`[appt-card-request] invitation email leg failed for visit ${visit.id}: ${emailErr.message}`);
       });
@@ -712,6 +772,25 @@ async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, set
     return { ok: false, code: 'completion_failed' };
   }
 
+  // Plan-choice lane (Codex #2980 r3): a plan-bearing RECURRING request
+  // must carry a durable per_application selection before a card capture
+  // may complete — otherwise a token holder could POST /complete directly
+  // (or an earlier tab's SetupIntent could land via the webhook) and
+  // bypass the required choice and its setup-fee stamp, or complete a
+  // capture against a live prepay selection. One-time and context-less
+  // requests (gate off, unsound pricing) keep today's behavior; the
+  // refusal leaves the request pending, so completing is a matter of
+  // making the selection and re-submitting (the SetupIntent stays
+  // succeeded at Stripe). buildSecurePlanContext never throws.
+  {
+    const { buildSecurePlanContext } = require('./secure-appointment-plans');
+    const planCtx = await buildSecurePlanContext({ request, visitId: request.scheduled_service_id });
+    if (planCtx?.mode === 'recurring' && request.selected_plan !== 'per_application') {
+      logger.warn(`[appt-card-request] capture refused for request ${request.id}: plan selection required (selected: ${request.selected_plan || 'none'})`);
+      return { ok: false, code: 'plan_required' };
+    }
+  }
+
   // Claim the request BEFORE the side effects run (Codex #2771 r3): the
   // page POST and the setup_intent.succeeded webhook can overlap — the
   // save is idempotent, but recordConsent / enrollConsentedMethod would
@@ -720,9 +799,19 @@ async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, set
   // fresh status and either acks (already done) or retries
   // (completion_in_progress → the webhook branch throws so Stripe's retry
   // schedule re-runs it; the page returns a retryable 409).
-  let claimed = await db('appointment_card_requests')
-    .where({ id: request.id, status: 'pending' })
-    .update({ status: 'completing', updated_at: new Date() });
+  // The claim is PLAN-VALUE-GUARDED (Codex #2980 r4): the plan check above
+  // validated the selection this function READ — if a concurrent
+  // select-plan switched it (e.g. to prepay_annual) after that read, the
+  // guard makes this claim miss and the retry re-reads the fresh request,
+  // whose plan_required refusal then applies. selected_plan can only
+  // change while the row is 'pending', so the completing lease below never
+  // needs the guard.
+  let claimQuery = db('appointment_card_requests')
+    .where({ id: request.id, status: 'pending' });
+  claimQuery = request.selected_plan == null
+    ? claimQuery.whereNull('selected_plan')
+    : claimQuery.where({ selected_plan: request.selected_plan });
+  let claimed = await claimQuery.update({ status: 'completing', updated_at: new Date() });
   if (claimed !== 1) {
     const fresh = await db('appointment_card_requests').where({ id: request.id }).first('status', 'updated_at');
     if (fresh?.status === 'completed' || fresh?.status === 'satisfied') return { ok: true, alreadyCompleted: true };
@@ -813,6 +902,29 @@ async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, set
       return { ok: false, code: 'completion_failed' };
     }
 
+    // Plan-choice lane: an explicit per-application selection moves the
+    // customer onto the per_application billing lane once the card is
+    // actually enrolled — dispatch's completion auto-charge is gated on
+    // that lane, so without the stamp the plan page's "charged
+    // automatically after each completed service" would silently degrade
+    // to invoice-on-complete. Runs BEFORE the completed flip and a failure
+    // keeps the completion retryable (Codex #2980 r3): a completed row
+    // short-circuits every later retry, which would strand the customer
+    // off the promised lane forever. Idempotent — a retry that finds the
+    // lane already stamped no-ops.
+    if (request.selected_plan === 'per_application') {
+      const { applyPerApplicationLaneStamp } = require('./secure-appointment-plans');
+      const laneStamped = await applyPerApplicationLaneStamp({
+        customerId: request.customer_id,
+        scheduledServiceId: request.scheduled_service_id,
+      });
+      if (!laneStamped) {
+        logger.warn(`[appt-card-request] per-application lane stamp failed for request ${request.id} — completion stays retryable`);
+        await revertClaim();
+        return { ok: false, code: 'completion_failed' };
+      }
+    }
+
     await db('appointment_card_requests')
       .where({ id: request.id, status: 'completing' })
       .update({
@@ -860,6 +972,21 @@ async function loadSecureCardPageData(token) {
   // If the in-flight attempt fails and reverts, the durable webhook retry
   // converges the row to completed.
   if (request.status === 'completed' || request.status === 'satisfied' || request.status === 'completing') {
+    return { state: 'secured', ...base };
+  }
+
+  // Plan-choice lane (GATE_SECURE_PLAN_CHOICE; both helpers return null
+  // while the gate is off, keeping this payload byte-identical to today).
+  // A prepay selection whose invoice settled means the year is covered —
+  // heal the pending row to satisfied (mirrors the autopay heal below) and
+  // render secured; a live unpaid prepay invoice renders the
+  // prepay_selected state at the bottom (pay link + card fallback).
+  const { prepaySelectionState, buildSecurePlanContext } = require('./secure-appointment-plans');
+  const planState = await prepaySelectionState(request);
+  if (planState?.state === 'secured') {
+    await db('appointment_card_requests')
+      .where({ id: request.id, status: 'pending' })
+      .update({ status: 'satisfied', completed_at: new Date(), updated_at: new Date() });
     return { state: 'secured', ...base };
   }
   const dateOnly = visit ? callBookingDateOnly(visit.scheduled_date) : null;
@@ -924,7 +1051,29 @@ async function loadSecureCardPageData(token) {
 
   const intent = await createSecureCardSetupIntent(request);
   if (!intent) return { state: 'unavailable', ...base };
-  return { state: 'ready', ...base, clientSecret: intent.clientSecret, setupIntentId: intent.setupIntentId };
+  // planContext is attached ONLY when the plan-choice gate is on and the
+  // booked series yields sound pricing (buildSecurePlanContext returns null
+  // otherwise) — its absence is the client's signal to render the original
+  // card-only page. prepay_selected keeps the SetupIntent alive so the
+  // "save a card and pay per visit instead" fallback works on that state.
+  const planContext = await buildSecurePlanContext({ request, visitId: request.scheduled_service_id });
+  if (planState?.state === 'prepay_selected') {
+    return {
+      state: 'prepay_selected',
+      ...base,
+      payUrl: planState.payUrl,
+      clientSecret: intent.clientSecret,
+      setupIntentId: intent.setupIntentId,
+      ...(planContext ? { planContext } : {}),
+    };
+  }
+  return {
+    state: 'ready',
+    ...base,
+    clientSecret: intent.clientSecret,
+    setupIntentId: intent.setupIntentId,
+    ...(planContext ? { planContext } : {}),
+  };
 }
 
 module.exports = {

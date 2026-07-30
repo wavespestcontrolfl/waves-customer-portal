@@ -1714,7 +1714,7 @@ describe('public estimate one-time breakdown', () => {
     expect(payload.services[0].frequencies).toEqual([
       expect.objectContaining({
         key: 'standard',
-        label: 'Bi-monthly',
+        label: 'Bi-monthly (6 visits)',
         monthly: 72,
         annual: 864,
         perTreatment: 144,
@@ -1724,7 +1724,7 @@ describe('public estimate one-time breakdown', () => {
       }),
       expect.objectContaining({
         key: 'enhanced',
-        label: 'Every 6 weeks',
+        label: 'Every 6 weeks (9 visits)',
         monthly: 96,
         annual: 1152,
         perTreatment: 128,
@@ -1898,7 +1898,7 @@ describe('public estimate one-time breakdown', () => {
 
     expect(standard).toEqual(expect.objectContaining({
       key: 'standard',
-      label: 'Bi-monthly',
+      label: 'Bi-monthly (6 visits)',
       billingFrequencyKey: 'monthly',
     }));
     expect(service).toEqual(expect.objectContaining({
@@ -1914,7 +1914,7 @@ describe('public estimate one-time breakdown', () => {
       visitsPerYear: 6,
       frequency: 'bi_monthly',
       tierKey: 'standard',
-      tierLabel: 'Bi-monthly',
+      tierLabel: 'Bi-monthly (6 visits)',
       billingFrequencyKey: 'monthly',
     }));
     expect(nextData.result.recurring).toEqual(expect.objectContaining({
@@ -2124,6 +2124,21 @@ describe('public estimate one-time breakdown', () => {
     expect(payload.askChips).toContain('How long does each visit last?');
     expect(payload.askChips).toContain('What about my pool area?');
     expect(payload.askChips).not.toContain('What products do you use?');
+    // Seasonal mosquito (codex r8): annual prepay is NOT offered (the
+    // converter would fail it closed), but the $99 setup is still charged at
+    // accept — so the card renders NON-waivable instead of disappearing.
+    expect(payload.firstVisitFees).toEqual([
+      expect.objectContaining({ service: 'waveguard_setup', waivedWithPrepay: false }),
+    ]);
+    expect(payload.setupFee).toEqual(expect.objectContaining({ service: 'waveguard_setup' }));
+    // Per-tier eligibility (codex r10 P1): the customer switches tiers live,
+    // so each mosquito ladder entry carries its own flag — seasonal9 can't
+    // prepay, monthly12 can — regardless of which row is the stored default.
+    // Client, accept, and /deposit-intent all resolve from the SELECTED tier.
+    expect(payload.services[0].frequencies.find((f) => f.key === 'seasonal9'))
+      .toEqual(expect.objectContaining({ annualPrepayEligible: false }));
+    expect(payload.services[0].frequencies.find((f) => f.key === 'monthly12'))
+      .toEqual(expect.objectContaining({ annualPrepayEligible: true }));
   });
 
   test('German Roach Cleanout contract surfaces roach specialty chips, not generic ant chips', async () => {
@@ -2584,7 +2599,7 @@ describe('public estimate one-time breakdown', () => {
     expect(frequencies.map((frequency) => frequency.key)).toEqual(['standard', 'enhanced', 'premium']);
     expect(frequencies[0]).toMatchObject({
       key: 'standard',
-      label: 'Bi-monthly',
+      label: 'Bi-monthly (6 visits)',
       serviceCategory: 'lawn_care',
       serviceTierKey: 'standard',
       monthly: 90,
@@ -4935,7 +4950,6 @@ describe('public estimate one-time breakdown', () => {
     expect(payload.metrics).toEqual(expect.arrayContaining([
       { label: 'Home', value: '2,100 sq ft' },
       { label: 'Lot', value: '8,400 sq ft' },
-      { label: 'Pool/Lanai', value: 'No' },
       { label: 'Ornamental beds', value: '1,800 sq ft' },
       { label: 'Trees/Shrubs', value: '6 trees, Heavy shrubs' },
       { label: 'Complexity', value: 'Complex' },
@@ -4995,7 +5009,10 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
-    expect(payload.metrics).toHaveLength(5);
+    // Pool/Lanai is pest-only (owner 2026-07-23), so this lawn+termite
+    // bundle carries 4 tiles.
+    expect(payload.metrics).toHaveLength(4);
+    expect(payload.metrics.some((metric) => metric.label === 'Pool/Lanai')).toBe(false);
     expect(payload.metrics).toEqual(expect.arrayContaining([
       { label: 'Termite perimeter', value: '180 linear ft' },
     ]));
@@ -5090,8 +5107,9 @@ describe('public estimate one-time breakdown', () => {
       { label: 'Mosquito treatment area', value: '7,800 sq ft' },
       { label: 'Mosquito program', value: 'Monthly (12 visits/year)' },
       { label: 'Mosquito pressure', value: '1.35x' },
-      { label: 'Pool/Lanai', value: 'Yes (Large cage)' },
     ]));
+    // Pool/Lanai is pest-only (owner 2026-07-23) — never on mosquito-only.
+    expect(payload.metrics.some((metric) => metric.label === 'Pool/Lanai')).toBe(false);
     expect(payload.metrics.some((metric) => metric.label === 'Treatable lawn')).toBe(false);
     expect(payload.metrics.some((metric) => metric.label === 'Grass type')).toBe(false);
     expect(payload.metrics.some((metric) => metric.label === 'Termite perimeter')).toBe(false);
@@ -5969,10 +5987,17 @@ describe('public estimate one-time breakdown', () => {
     })).toBe(350.1);
   });
 
-  test('selected-frequency preference discounts respect the pest monthly floor', () => {
+  test('selected-frequency preference discounts respect the VERSIONED pest monthly floor', () => {
     const prefs = { interior_spray: false, exterior_sweep: false };
 
+    // Version-aware (codex #2966 P2): the floor tracks the curve the quote
+    // was priced under, never unconditionally v2.
+    // Unstamped = legacy v1 quote: floor 89 x 0.70 = $62.30/mo, so a $70
+    // base keeps its full $7.70 of headroom.
     expect(preferenceMonthlyOffForPestVisits(prefs, 12, 70)).toBe(7.7);
+    // v2-stamped quote: floor 89 x 0.78 = $69.42/mo → only $0.58 headroom.
+    expect(preferenceMonthlyOffForPestVisits(prefs, 12, 70, 'v2')).toBe(0.58);
+    expect(preferenceMonthlyOffForPestVisits(prefs, 12, 150, 'v2')).toBe(20);
     expect(preferenceMonthlyOffForPestVisits(prefs, 12, 150)).toBe(20);
   });
 
@@ -6536,7 +6561,11 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('Prepay discount (5%)');
     expect(html).toContain('One-time items (billed separately)');
     expect(html).toContain('Termite bait installation');
-    expect(html).toContain('One-time total</strong></td><td style="text-align:right"><strong>$420.00</strong>');
+    // The install is the card's only visible row (the WaveGuard setup item is
+    // filtered out for termite) — single-item breakdowns skip the total row
+    // (#2969 React parity; the item line already states the price).
+    expect(html).toContain('$420.00');
+    expect(html).not.toContain('One-time total</strong>');
     expect(html).toContain('What your termite protection plan includes');
     expect(html).toContain('Ready to start termite protection?');
     expect(html).toContain('How does the bait work?');
@@ -7419,6 +7448,31 @@ describe('public estimate one-time breakdown', () => {
     expect(isAnnualPrepayEligibleServiceMix([
       { service: 'mosquito', name: 'Mosquito' },
     ], [])).toBe(true);
+    // Bundle combo axes (codex r16 P2): the mosquito tier arrives as a
+    // serviceCadences token, and eligibility must follow the AXIS, not the
+    // stored row — monthly12 on a seasonal-default estimate is a valid
+    // prepay; seasonal9 on a monthly-default one is not.
+    const { mosquitoTierForAxisToken, annualPrepayEligibleForMosquitoTier } = require('../routes/estimate-public');
+    expect(mosquitoTierForAxisToken('monthly12')).toEqual(expect.objectContaining({ visitsPerYear: 12 }));
+    expect(mosquitoTierForAxisToken('seasonal9')).toEqual(expect.objectContaining({ visitsPerYear: 9 }));
+    expect(mosquitoTierForAxisToken('quarterly')).toBe(null);
+    const seasonalDefaultData = {
+      result: {
+        recurring: {
+          services: [{ service: 'mosquito_seasonal', name: 'Seasonal Mosquito Control', frequency: 'every_6_weeks', visitsPerYear: 9 }],
+        },
+      },
+    };
+    expect(annualPrepayEligibleForMosquitoTier(seasonalDefaultData, mosquitoTierForAxisToken('monthly12'))).toBe(true);
+    expect(annualPrepayEligibleForMosquitoTier(seasonalDefaultData, mosquitoTierForAxisToken('seasonal9'))).toBe(false);
+    // …EXCEPT seasonal mosquito (9x Feb–Oct, codex r8 P1): the converter fails
+    // that prepay closed (ANNUAL_PREPAY_SEASONAL_CADENCE_UNSUPPORTED) after a
+    // deposit may already be collected, so the shared gate — SSR CTA, /data
+    // flag, accept preflight, /deposit-intent — must never offer it. Monthly
+    // mosquito (12x) stays eligible above.
+    expect(isAnnualPrepayEligibleServiceMix([
+      { service: 'mosquito_seasonal', name: 'Seasonal Mosquito Control', frequency: 'every_6_weeks', visitsPerYear: 9 },
+    ], [])).toBe(false);
     expect(isAnnualPrepayEligibleServiceMix([
       { service: 'tree_shrub', name: 'Tree & Shrub' },
       { service: 'palm_injection', name: 'Palm Injection' },
@@ -7838,5 +7892,168 @@ describe('resolveEstimateQuoteRequirement — commercial risk-type gate (public 
     expect(resolveEstimateQuoteRequirement(null, {
       result: { lineItems: [{ service: 'commercial_lawn', annual: 1200 }] },
     })).toEqual(expect.objectContaining({ quoteRequired: false }));
+  });
+});
+
+describe('SSR copy parity with the React page (#2969 dedupe; estimator audit 2026-07-24)', () => {
+  test('recurring pest hero: factual assurance line, standalone risk-free/90-day duplicate gone page-wide', () => {
+    const html = renderPage('ssr-parity-recurring-token', {
+      id: 'estimate-ssr-parity-rec',
+      status: 'sent',
+      customerName: 'Pat Customer',
+      address: '123 Main St',
+      monthlyTotal: 95,
+      annualTotal: 1140,
+      onetimeTotal: 0,
+      tier: 'Silver',
+    }, {
+      result: {
+        recurring: { services: [{ name: 'Pest Control', mo: 95 }] },
+        oneTime: { items: [] },
+        results: { pestTiers: [{ label: 'Quarterly', mo: 95, pa: 285, apps: 4 }] },
+      },
+    });
+    // The assurance slot survives with factual copy…
+    expect(html).toContain('class="mini-guarantee"');
+    expect(html).toContain('Your plan includes scheduled pest treatments');
+    // …but the standalone guarantee line is gone everywhere: the plan-terms
+    // strip is the page's one money-back-guarantee claim, matching the React
+    // page after #2969's dedupe.
+    expect(html).not.toContain('risk-free');
+  });
+
+  test('one-time-only single-item page: row keeps the name, drops the repeated dollars, no Total row (#2969 parity)', () => {
+    const html = renderPage('ssr-parity-onetime-token', {
+      id: 'estimate-ssr-parity-ot',
+      status: 'sent',
+      customerName: 'Pat Customer',
+      address: '123 Main St',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 257,
+      tier: 'One-Time',
+    }, {
+      result: {
+        recurring: { services: [] },
+        oneTime: {
+          total: 257,
+          items: [{ service: 'flea_treatment', name: 'Flea Cleanout', price: 257 }],
+          specItems: [],
+        },
+        specItems: [],
+      },
+    });
+    expect(html).toContain('Flea Cleanout');
+    // Empty price cell — the lone row's amount is a pure repeat of the hero.
+    expect(html).toContain('<td style="text-align:right"></td>');
+    expect(html).not.toMatch(/<strong>Total<\/strong>/);
+  });
+
+  test('a lone service row netted by a discount row keeps its amount AND the net Total row (codex r1)', () => {
+    // Trenching $2,210 + one_time_adjustment −$110: the discount row never
+    // renders as a table row and is not manualDiscount, but accept charges
+    // the NET $2,100 — the page must state it, so the single-row dedupe
+    // must not treat this as a single undiscounted item.
+    const html = renderPage('ssr-parity-netted-token', {
+      id: 'estimate-ssr-parity-netted',
+      status: 'sent',
+      customerName: 'Pat Customer',
+      address: '123 Main St',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 2100,
+      tier: 'One-Time',
+    }, {
+      result: {
+        recurring: { services: [] },
+        oneTime: {
+          total: 2100,
+          items: [
+            { service: 'termite_trenching', name: 'Termite Trenching Treatment', price: 2210 },
+            { service: 'one_time_adjustment', name: 'Member adjustment', price: -110 },
+          ],
+          specItems: [],
+        },
+        specItems: [],
+      },
+    });
+    expect(html).toContain('$2,210.00');
+    expect(html).toMatch(/<strong>Total<\/strong>/);
+    expect(html).toContain('$2,100.00');
+  });
+
+  test('one-time-only page with multiple items keeps every amount and the Total row', () => {
+    const html = renderPage('ssr-parity-onetime-multi-token', {
+      id: 'estimate-ssr-parity-ot-multi',
+      status: 'sent',
+      customerName: 'Pat Customer',
+      address: '123 Main St',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 457,
+      tier: 'One-Time',
+    }, {
+      result: {
+        recurring: { services: [] },
+        oneTime: {
+          total: 457,
+          items: [
+            { service: 'flea_treatment', name: 'Flea Cleanout', price: 257 },
+            { service: 'one_time_adjustment', name: 'Additional treatment area', price: 200 },
+          ],
+          specItems: [],
+        },
+        specItems: [],
+      },
+    });
+    expect(html).toContain('$257.00');
+    expect(html).toContain('$200.00');
+    expect(html).toMatch(/<strong>Total<\/strong>/);
+    expect(html).toContain('$457.00');
+  });
+});
+
+describe('sanitizePublicOneTimeBreakdown — review-lane enums stay server-side on priced items (estimator audit 2026-07-24)', () => {
+  const { sanitizePublicOneTimeBreakdown } = require('../routes/estimate-public');
+
+  test('priced items drop warning/warnings/manualReviewReasons/measurementWarnings; quote-required items keep them for the reason note', () => {
+    const out = sanitizePublicOneTimeBreakdown({
+      total: 450,
+      items: [
+        {
+          service: 'flea_treatment', name: 'Flea Cleanout', amount: 450,
+          warning: 'stories_estimated',
+          warnings: ['footprint_unknown_field_measurement_required'],
+          manualReviewReasons: ['large_lot'],
+          measurementWarnings: ['trenching_lf_sum_mismatch'],
+          detail: 'Whole-home flea program',
+        },
+        {
+          service: 'flea_package', name: 'Flea Treatment Package', amount: null,
+          kind: 'quote_required', quoteRequired: true,
+          customQuoteReason: 'Exterior yard area exceeds automatic quote threshold.',
+          manualReviewReasons: ['large_lot'],
+        },
+      ],
+    });
+    const priced = out.items[0];
+    expect(priced.warning).toBeUndefined();
+    expect(priced.warnings).toBeUndefined();
+    expect(priced.manualReviewReasons).toBeUndefined();
+    expect(priced.measurementWarnings).toBeUndefined();
+    // Customer-facing fields survive.
+    expect(priced.detail).toBe('Whole-home flea program');
+    expect(priced.amount).toBe(450);
+    // Quote-required items keep their reason material — the client's
+    // quoteRequiredReasonCandidates humanizes it into the customer note.
+    const qr = out.items[1];
+    expect(qr.manualReviewReasons).toEqual(['large_lot']);
+    expect(qr.customQuoteReason).toBe('Exterior yard area exceeds automatic quote threshold.');
+  });
+
+  test('shapes without items pass through untouched', () => {
+    expect(sanitizePublicOneTimeBreakdown(null)).toBeNull();
+    const noItems = { total: 0 };
+    expect(sanitizePublicOneTimeBreakdown(noItems)).toBe(noItems);
   });
 });

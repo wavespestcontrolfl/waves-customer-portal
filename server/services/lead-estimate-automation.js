@@ -170,7 +170,8 @@ function mapServiceInterestToEstimateServices(serviceInterest) {
 
   if (wants(/\btermite\b/)) {
     if (/\bmonitoring\b|\bprotection\b|\bbait\b/.test(text) || recurring) {
-      services.termite = { system: 'advance', monitoringTier: 'basic' };
+      // Trelona-only menu (owner 2026-07-28); 'advance' is replay-only.
+      services.termite = { system: 'trelona', monitoringTier: 'basic' };
     } else {
       return {
         services,
@@ -306,6 +307,11 @@ function compactLineItem(item = {}) {
     // long-enough slot instead of defaulting to quarterly / the generic window.
     cadence: item.cadence ?? null,
     estimatedDurationMinutes: item.estimatedDurationMinutes ?? null,
+    // Curve stamp for the version-aware pest floors: the public preference/
+    // accept reconstruction treats an unstamped line as legacy v1, which
+    // would clamp a v2 automated draft's opt-outs at the lower v1 floor
+    // (codex #2966 r6 P1 — same contract as the quote-wizard mirror).
+    pricingVersion: item.pricingVersion ?? undefined,
     quoteRequired: item.quoteRequired || item.requiresManualReview || item.requiresMeasurement || false,
     reason: item.reason || item.manualReviewReason || item.manualReviewReasons?.[0] || null,
   };

@@ -12,6 +12,8 @@ import {
   applyServerLawnPricingConfig,
   applyServerPestPricingConfig,
   applyServerTermiteBondPricingConfig,
+  applyServerTermiteRentalPricingConfig,
+  applyServerTermiteMonitoringPricingConfig,
   calculateEstimate,
   collectMarginReviewNotes,
   fmt,
@@ -812,6 +814,7 @@ function EstimateToolView() {
     hasPoolCage: "NO",
     poolCageSize: "MEDIUM",
     hasLargeDriveway: "NO",
+    hasAttachedGarage: "NO",
     shrubDensity: "MODERATE",
     treeDensity: "MODERATE",
     landscapeComplexity: "MODERATE",
@@ -1300,25 +1303,45 @@ function EstimateToolView() {
             headers: authHeaders,
             signal: ctrl.signal,
           });
-          if (r.status === 404) return { ok: true, data: null };
-          if (!r.ok) return { ok: false, data: null };
-          return { ok: true, data: (await r.json())?.data ?? null };
+          if (r.status === 404) return { ok: true, data: null, featureAvailable: false };
+          if (!r.ok) return { ok: false, data: null, featureAvailable: false };
+          const body = await r.json();
+          // featureAvailable is the SERVER's word on whether the engine will
+          // honor this feature (env gate), distinct from the row existing.
+          // Absent on ungated keys → treat as available.
+          return {
+            ok: true,
+            data: body?.data ?? null,
+            featureAvailable: body?.featureAvailable !== false,
+          };
         } catch {
-          return { ok: false, data: null }; /* last applied state stands */
+          return { ok: false, data: null, featureAvailable: false }; /* last applied state stands */
         } finally {
           clearTimeout(timer);
         }
       };
-      const [lawnRow, pestRow, bondRow] = await Promise.all([
+      const [lawnRow, pestRow, bondRow, rentalRow, monitoringRow] = await Promise.all([
         fetchConfigRow("lawn_pricing_v2"),
         fetchConfigRow("pest_base"),
         fetchConfigRow("termite_bond"),
+        fetchConfigRow("termite_rental"),
+        fetchConfigRow("termite_monitoring"),
       ]);
       if (lawnRow.ok) applyServerLawnPricingConfig(lawnRow.data);
       if (pestRow.ok) applyServerPestPricingConfig(pestRow.data);
       // Bond rates are save-validated against the live DB values, so the
       // fallback preview must price from them too (pre-push P1 on #2915).
       if (bondRow.ok) applyServerTermiteBondPricingConfig(bondRow.data);
+      // Rental horizon: same reason as the bond rates — the fallback preview
+      // has to amortize over what the server will use. NOT part of the
+      // readiness return: termite_rental is a new key, so an env that has not
+      // run the seed migration yet would otherwise report pricing config
+      // permanently unready and block every estimate, not just termite ones.
+      // A missing row leaves the in-code default in place.
+      if (rentalRow.ok) applyServerTermiteRentalPricingConfig(rentalRow.data);
+      // Station-check brackets: same live-rates posture as the rental horizon
+      // above, and same not-part-of-readiness reasoning (new row shape).
+      if (monitoringRow.ok) applyServerTermiteMonitoringPricingConfig(monitoringRow.data);
       return lawnRow.ok && pestRow.ok && bondRow.ok;
     })();
     pricingConfigReadyRef.current = run;
@@ -1473,6 +1496,11 @@ function EstimateToolView() {
       if (ep.poolCageSize && ep.poolCageSize !== "NONE")
         upd.poolCageSize = ep.poolCageSize;
       if (ep.largeDriveway) upd.hasLargeDriveway = "YES";
+      // detectAttachedGarage always returns a boolean — assign BOTH outcomes
+      // so a prior property's YES can never survive into the next lookup and
+      // bill its $5/visit against the wrong home (hook P0 on #3040 r3).
+      if (typeof ep.hasAttachedGarage === "boolean")
+        upd.hasAttachedGarage = ep.hasAttachedGarage ? "YES" : "NO";
       if (ep.shrubDensity) upd.shrubDensity = ep.shrubDensity;
       if (ep.treeDensity) upd.treeDensity = ep.treeDensity;
       if (ep.landscapeComplexity)
@@ -2026,6 +2054,10 @@ function EstimateToolView() {
           ? "manual"
           : profile.storiesSource;
         profile.hasLargeDriveway = form.hasLargeDriveway === "YES";
+        // Server key: translateV2CallToV1Input forwards `attachedGarage`
+        // (property-lookup-v2), not hasAttachedGarage — the wrong key would
+        // silently drop the $5/visit adjustment on the authoritative path.
+        profile.attachedGarage = form.hasAttachedGarage === "YES";
         profile.shrubDensity = form.shrubDensity || profile.shrubDensity;
         profile.treeDensity = form.treeDensity || profile.treeDensity;
         profile.landscapeComplexity =
@@ -2212,6 +2244,7 @@ function EstimateToolView() {
       hasPool: yesNo(form.hasPool),
       hasPoolCage: yesNo(form.hasPoolCage),
       hasLargeDriveway: yesNo(form.hasLargeDriveway),
+      attachedGarage: yesNo(form.hasAttachedGarage),
       nearWater: yesNo(form.nearWater),
       isAfterHours: yesNo(form.isAfterHours),
       isRecurringCustomer: yesNo(form.isRecurringCustomer),
@@ -2386,6 +2419,7 @@ function EstimateToolView() {
       hasPoolCage: "NO",
       poolCageSize: "MEDIUM",
       hasLargeDriveway: "NO",
+      hasAttachedGarage: "NO",
       nearWater: "NO",
       shrubDensity: "MODERATE",
       treeDensity: "MODERATE",
@@ -2637,6 +2671,7 @@ function EstimateToolView() {
                       hasPoolCage: "NO",
                       poolCageSize: "MEDIUM",
                       hasLargeDriveway: "NO",
+                      hasAttachedGarage: "NO",
                       shrubDensity: "MODERATE",
                       treeDensity: "MODERATE",
                       landscapeComplexity: "MODERATE",

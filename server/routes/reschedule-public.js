@@ -215,6 +215,7 @@ async function loadByToken(token) {
       's.service_type',
       's.estimated_duration_minutes',
       's.is_recurring',
+      's.recurring_pattern',
       's.recurring_parent_id',
       's.self_booking_id',
       'c.first_name as cust_first_name',
@@ -272,7 +273,7 @@ async function buildAvailabilityForService(svc, { rangeFrom, rangeTo, config, ti
   if (!lat || !lng) return null;
 
   const duration = svc.estimated_duration_minutes || config.slot_duration_minutes || 60;
-  return buildBookingAvailability({
+  const availability = await buildBookingAvailability({
     lat,
     lng,
     duration,
@@ -283,6 +284,16 @@ async function buildAvailabilityForService(svc, { rangeFrom, rangeTo, config, ti
     excludeServiceIds: [svc.id],
     ...(timeOfDay ? { timeOfDay } : {}),
   });
+  // A seasonal (Feb–Oct) series visit must not be OFFERED a Nov–Jan target —
+  // the commit path (SmartRebooker.reschedule / rescheduleSeries) refuses
+  // them for self-serve callers, so listing them would only 409 at commit
+  // (codex r10 P1). Filters every caller: the GET list, find-slots search.
+  if (availability && svc.recurring_pattern === 'seasonal_feb_oct') {
+    const inSeason = (d) => { const m = Number(String(d || '').slice(5, 7)); return m >= 2 && m <= 10; };
+    availability.days = (availability.days || []).filter((day) => inSeason(day.date));
+    availability.slots = (availability.slots || []).filter((slot) => inSeason(slot.date || slot.day));
+  }
+  return availability;
 }
 
 router.get('/:token', async (req, res, next) => {

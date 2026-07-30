@@ -1,4 +1,13 @@
-# "Fresh This Week" Style Guide — the Beehiiv-Era Formula
+# Waves Newsletter Style Guide — the Beehiiv-Era Formula
+
+> **Identity update (owner directive 2026-07-28):** the public-facing
+> masthead is now **"Waves Newsletter"** — no "The", no subtitle,
+> rendered small (20px). The
+> "Fresh This Week / A local weekend guide from the Waves crew" identity
+> (2026-07-17) is retired and must not resurrect. Internal keys
+> (`local-weekly-fresh-events`, `fresh_this_week`, this filename) are
+> stable and deliberately unchanged. Everything below about structure,
+> voice, and imagery still applies.
 
 Distilled from exhaustive teardowns of the shipped Beehiiv archive
 (waves-pest-newsletter.beehiiv.com), 2026-06-11. The owner's direction:
@@ -45,16 +54,21 @@ Everything kept through July is load-bearing. Everything dropped
      venue, 🎟️ **FREE** celebrated loudly (paid: link only — never
      invent prices).
    - Rotating lead-in ("Here's the scoop:" / "Here's the deal:" /
-     "Why it's a vibe:" …) + 3–5 bullets, each opening with its own
-     thematic emoji.
+     "Why it's a vibe:" …) + 3–5 bullets. The Beehiiv archive opened
+     each bullet with a thematic emoji; the generator does NOT — plain
+     "•" bullets, no emoji (owner decision 2026-06-12), and the
+     renderer strips any leading emoji the model emits anyway.
    - Optional 👉 pro-tip line(s).
    - **Bold one-line kicker**: "This is **Bradenton's Fourth of July
      mic drop.**"
 6. **Outro** — "That's the scoop, crew" + callback triad referencing the
    actual lineup + ✔️ checklist (practical + absurd: "Hydrate like it's
    your job" / "Don't underestimate the power of a funnel cake").
-7. **Sign-off** — "Catch you out there!" / "— The Waves Pest Control
-   Team 🌊" (owner decision 2026-06-11: Team form, not "Waves crew").
+7. **Sign-off** — the assembler renders a bold "**Catch you out there
+   this week.**" line, then an unbolded "— The Waves Team 🌊" (the 🌊 is
+   renderer-appended — don't type it in Compose). Owner decisions:
+   Team form, not "Waves crew" (2026-06-11); shortened from "— The
+   Waves Pest Control Team" (2026-07-17).
 8. **P.S. two-branch forward joke** — "If you loved this, forward it to
    a friend who [hyper-specific persona]. If you didn't… [reverse-blame
    punchline] 🎪" — referencing this issue's events.
@@ -159,6 +173,43 @@ mature voice.
 The weekly guide's **Homeowner Minute** is where this themed energy
 lives today: same bold-facts/italic-jokes separation, biological
 urgency, optional "Hot tip:" closer, zero pitch.
+
+## The 2026-07-28 editorial overhaul (what changed around the formula)
+
+One day in July 2026 the flagship briefly shipped a "compact" format
+(official-name-first cards, no comedic devices, <900-word budget). The
+owner reversed it the same evening after seeing the render — **the
+compact format is retired; do not re-propose it** (see DECISIONS.md,
+2026-07-28 entries; `assembleWavesNewsletter` remains in the codebase
+unused). The Beehiiv formula in this guide is canonical again, with two
+additions that survived from the overhaul:
+
+- **Real event thumbnail per card, in ADDITION to the reaction GIF** —
+  rendered after the hype paragraph **when the event has art**; an
+  imageless event simply renders no thumbnail (never a placeholder).
+  The GIF stays the joke; the thumbnail is the event's own art —
+  feed-supplied, or filled by the daily og:image backfill of imageless
+  events' pages (#3036). Still images only — GIF-shaped urls are
+  rejected. Standards clients cap height at 220px and bound width to
+  the card (`max-width:100%`), with no upscaling of small art;
+  **desktop Outlook gets no thumbnail by design** (Word can't
+  aspect-fit a bounded image box) and keeps the GIF + full card
+  content.
+- **Ticket links are click-tracked** — at draft time ticket links
+  render as `{{evclick:<eventId>}}` tokens; the live sender substitutes
+  a per-recipient tracking redirect, while proof/preview/archive
+  resolve them back to the direct event url. The 🔗 fact-line link
+  always carries the token; the inline event-name link is conditional —
+  it only renders when the hype paragraph contains the official name
+  verbatim (prompt-encouraged, not validator-enforced), so a paraphrase
+  means the fact-line link is that card's only ticket link. Click rates
+  feed a bounded (±5) scoring adjustment.
+
+Everything upstream of drafting also changed (100-pt curation rubric,
+8-event portfolio selection with audience/geography coverage, listwise
+re-rank, a diagnostics panel on the proof email) — none of it alters
+this guide's voice or anatomy; it changes WHICH events arrive at the
+prompt, not how they're written up.
 
 ## What the generator enforces that the human era couldn't
 

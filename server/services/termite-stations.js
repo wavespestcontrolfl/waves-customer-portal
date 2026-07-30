@@ -17,9 +17,13 @@
 // lockstep: 'ok' | 'activity' | 'serviced' | 'inaccessible'.
 //
 // Write payload contract (completion `termiteStations` and the office PUT):
-//   { shape, status?, label? }            → create a station (+ visit check)
+//   { shape, status?, label?, ownedBy? }  → create a station (+ visit check)
 //   { id, shape?, status?, label? }       → move/relabel and/or check
 //   { id, retire: true }                  → retire (number is never reused)
+// ownedBy ('customer' | 'waves') is CREATE-only and optional: it overrides
+// the program/customer default so a rental customer can record an added
+// station they bought outright. It is rejected on an existing station —
+// ownership changes by owner action, never as a side effect of a pin move.
 // Creates allocate station_number sequentially in payload order, so the
 // client's provisional numbering (max existing + position) matches what the
 // server persists.
@@ -29,6 +33,12 @@ const { resolveZoneRowsImageDrift } = require('./service-report/zone-drift');
 const { parseETDateTime } = require('../utils/datetime-et');
 
 const STATION_STATUSES = ['ok', 'activity', 'serviced', 'inaccessible'];
+// Who owns a station. Matches the termite_stations.owned_by CHECK exactly —
+// widening the vocabulary is a migration, not a new string at a call site
+// (same house rule as the status set above). Only ever supplied on a CREATE:
+// ownership of an existing station changes by a deliberate owner action, not
+// as a side effect of a tech moving a pin.
+const STATION_OWNERS = ['customer', 'waves'];
 // Sized to the worst LEGAL payload, not the active cap: a full relayout of a
 // capped property sends a status for every surviving station plus a retire
 // AND a create for every replaced one — up to 3 × MAX_ACTIVE_STATIONS
@@ -163,7 +173,7 @@ function sanitizeActions(value) {
 // string (400 material) or null when acceptable. `allowStatus: false` is the
 // office desk flow — there is no visit to hang a check on, so a status there
 // would silently vanish; reject it instead.
-function validateStationEntriesBody(entries, { allowStatus = true } = {}) {
+function validateStationEntriesBody(entries, { allowStatus = true, program = null } = {}) {
   if (entries == null) return null;
   if (!Array.isArray(entries)) return 'termiteStations must be an array';
   if (entries.length > MAX_STATION_ENTRIES) {
@@ -215,6 +225,27 @@ function validateStationEntriesBody(entries, { allowStatus = true } = {}) {
       }
       if (entry.actions != null && !Array.isArray(entry.actions)) {
         return 'station actions must be an array of strings';
+      }
+      // Explicit ownership overrides the program/customer default, so a
+      // rental customer can have an added station recorded as one they
+      // BOUGHT (codex P2 — the mixed-set case the schema documents). Creates
+      // only: re-stamping an existing row from a routine geometry save is
+      // how a bought station would silently become a rented one. Termite
+      // only (codex P2, round 3): rodent/trapping hardware is never sold, so
+      // an ownedBy on those programs would relabel company traps as customer
+      // property and drop them from the recovery index. The insert path
+      // enforces the same rule unconditionally for callers that validate
+      // without program context.
+      if (entry.ownedBy != null) {
+        if (hasId) {
+          return 'station ownership is set when the station is created — it cannot be changed by a move or status save';
+        }
+        if (program && program !== 'termite') {
+          return 'station ownedBy applies to termite bait stations only — rodent and trapping hardware is always Waves-owned';
+        }
+        if (!STATION_OWNERS.includes(entry.ownedBy)) {
+          return `station ownedBy must be one of: ${STATION_OWNERS.join(', ')}`;
+        }
       }
     }
     if (hasId) {
@@ -299,6 +330,30 @@ async function upsertStationsForCustomer(trx, { customerId, entries = [], progra
     && entry.shape != null);
   if (hasGeometryWrites) {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`termite_stations:${customerId}:${stationProgram}`]);
+  }
+
+  // Who owns stations created in THIS write (owner 2026-07-26).
+  //
+  //  - rodent / trapping: ALWAYS Waves. That hardware is never sold — it is
+  //    placed, serviced, and retrieved by us, so it belongs in the
+  //    Waves-owned asset/recovery set unconditionally (codex P1: the earlier
+  //    termite-only branch left it stamped 'customer', silently omitting
+  //    every rodent station and trap from those counts).
+  //  - termite: the only program with a purchase-vs-rent choice. Rented
+  //    programs are stamped on the customer at estimate conversion, because
+  //    the install visit that creates the pins has no view of the agreement
+  //    that sold them.
+  //
+  // An explicit per-entry ownedBy still wins over both (see the create
+  // below) so mixed sets — a renter buying an added station — are real and
+  // not just aspirational. Fail-soft on the customer read: a row we cannot
+  // load falls back to purchase rather than blocking the field save.
+  let createdOwnedBy = stationProgram === 'termite' ? 'customer' : 'waves';
+  if (stationProgram === 'termite') {
+    try {
+      const owner = await trx('customers').where({ id: customerId }).first('termite_stations_rented');
+      if (owner?.termite_stations_rented) createdOwnedBy = 'waves';
+    } catch (_err) { /* column not migrated yet / unreadable — keep the default */ }
   }
 
   // Program-scoped throughout: numbering, ownership, dedupe, occupancy and
@@ -433,6 +488,14 @@ async function upsertStationsForCustomer(trx, { customerId, entries = [], progra
         program: stationProgram,
         label: normalizeLabel(entry.label),
         geometry_image: JSON.stringify(shape),
+        // Validated per-entry override wins over the program/customer
+        // default; absent, the default applies. TERMITE ONLY (codex P2,
+        // round 3): enforced here as well as in the validator, because the
+        // completion path validates without program context — rodent and
+        // trapping hardware must never be recordable as customer property.
+        owned_by: (stationProgram === 'termite' && STATION_OWNERS.includes(entry.ownedBy))
+          ? entry.ownedBy
+          : createdOwnedBy,
       })
       .returning('*');
     nextNumber += 1;
@@ -759,6 +822,7 @@ function buildStationMapCurrentContext({
 
 module.exports = {
   STATION_STATUSES,
+  STATION_OWNERS,
   STATION_PROGRAMS,
   MAX_STATION_ENTRIES,
   MAX_ACTIVE_STATIONS,

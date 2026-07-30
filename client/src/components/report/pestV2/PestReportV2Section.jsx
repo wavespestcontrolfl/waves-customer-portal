@@ -14,6 +14,7 @@ import {
   PestStatusHero,
   PestProtectionMap,
   PestPrimaryMove,
+  PestCustomerConcern,
 } from './PestReportV2';
 import TracedTreatmentZoneMap from '../TracedTreatmentZoneMap';
 
@@ -38,6 +39,9 @@ export default function PestReportV2Section({ data, print = false, token = null,
           centerpiece renders only for visits without a trace. */}
       {!tracedMap && data.defense ? <PestProtectionMap defense={data.defense} print={print} /> : null}
       {data.primaryMove ? <PestPrimaryMove primaryMove={data.primaryMove} /> : null}
+      {/* What the homeowner flagged during the visit — acknowledged as its own
+          card so it never reads as ignored (owner audit 2026-07-29). */}
+      {data.customerConcern ? <PestCustomerConcern concern={data.customerConcern} /> : null}
       {/* Bug files, seasonal outlook, and the WaveGuard receipt were removed from
           the composed section (owner 2026-07-09) — the components remain exported
           from PestReportV2 for any future re-mount. */}

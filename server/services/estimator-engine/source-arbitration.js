@@ -319,6 +319,16 @@ function resolvePropertyFacts({ extraction, propertyRecord, customer, isCommerci
     // footprint/perimeter/turf from homeSqFt ÷ stories, so flattening a
     // two-story house to 1 story doubles its assumed ground footprint.
     stories: positive(propertyRecord?.stories) || null,
+    // Story provenance: the stories-fallback evidence (confidence/basis)
+    // when the count came from the AI fallback, plus the field-evidence
+    // source type when the full lookup found it. A low-confidence inference
+    // must flag itself downstream instead of pricing as a looked-up fact.
+    storiesEvidence: propertyRecord?._storiesEvidence || null,
+    storiesFieldSourceType: (() => {
+      const items = propertyRecord?._fieldEvidence?.stories;
+      const first = Array.isArray(items) ? items[0] : items;
+      return first?.sourceType || null;
+    })(),
     tenant: isTenant(extraction),
     countyParcel: parcel ? {
       county: parcel.county || null,

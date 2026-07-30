@@ -184,6 +184,27 @@ describe('inspection snapshot', () => {
   });
 });
 
+describe('bed bug required core', () => {
+  test('rooms_treated is required — the only location capture with the areas picker hidden (codex P2 on #2963)', () => {
+    const missing = validateTypedFindings({
+      type: 'bed_bug',
+      values: { evidence_level: 'Low (few bugs)', treatment_method: 'Chemical only' },
+      expectedType: 'bed_bug',
+      enforceRequired: true,
+    });
+    expect(missing.ok).toBe(false);
+    expect(missing.missing).toContain('rooms_treated');
+
+    const complete = validateTypedFindings({
+      type: 'bed_bug',
+      values: { rooms_treated: 'Primary bedroom', evidence_level: 'Low (few bugs)', treatment_method: 'Chemical only' },
+      expectedType: 'bed_bug',
+      enforceRequired: true,
+    });
+    expect(complete.ok).toBe(true);
+  });
+});
+
 describe('cockroach + bed bug + palm + lawn snapshots', () => {
   test('cockroach work sentence + prep copy', () => {
     const snapshot = buildTypedReportSnapshot({
@@ -216,7 +237,6 @@ describe('cockroach + bed bug + palm + lawn snapshots', () => {
       serviceLabel: 'Bed Bug Treatment',
       values: {
         rooms_treated: 'Primary bedroom',
-        areas_inspected: 'Mattress seams, Headboard, Baseboards',
         evidence_level: 'Low (few bugs)',
         evidence_observed: 'Fecal spotting, Live bed bugs',
         treatment_method: 'Chemical only',

@@ -3,6 +3,7 @@ const {
   isFlagshipSend,
   filterPreviouslyFeaturedIdentities,
   filterRepeatedDateIdentities,
+  loadRoutineIdentityPool,
 } = require('../services/newsletter-event-selection');
 
 describe('star and debut carve-outs in the identity filters', () => {
@@ -229,5 +230,146 @@ describe('flagship final event-selection gate', () => {
     const result = assessFlagshipEventSelection(send([ID_1, ID_2]), [first, second], REFERENCE);
     expect(result.valid).toBe(false);
     expect(result.errors).toContain('Flagship draft contains duplicate event identities.');
+  });
+});
+
+describe('series-debut first-occurrence rule (owner spec 2026-07-28)', () => {
+  const debutOccurrence = (id, start) => event(id, {
+    title: 'Downtown Night Market',
+    description: 'Grand opening of the new weekly market.',
+    event_type: 'recurring_series',
+    recurrence_type: 'weekly',
+    freshness_status: 'fresh_series_launch',
+    start_at: start,
+  });
+
+  test('pre-draft filter keeps only the EARLIEST occurrence of a debut series', async () => {
+    const first = debutOccurrence(ID_1, '2026-07-25T22:00:00Z');
+    const second = debutOccurrence(ID_2, '2026-08-01T22:00:00Z');
+    const rows = await filterRepeatedDateIdentities([first, second], {
+      reference: REFERENCE,
+      identityPool: [first, second],
+    });
+    expect(rows).toEqual([first]);
+  });
+
+  test('a debut row that cannot prove a start date loses the carve-out (fail closed)', async () => {
+    // Two dated siblings make the title a repeated identity; the dateless
+    // debut row can't prove it is first, so the carve-out is denied and the
+    // repeated-title exclusion applies to it like any routine row.
+    const dateless = debutOccurrence(ID_1, null);
+    const sibling1 = debutOccurrence(ID_2, '2026-07-25T22:00:00Z');
+    const sibling2 = debutOccurrence('33333333-3333-4333-8333-333333333333', '2026-08-01T22:00:00Z');
+    const rows = await filterRepeatedDateIdentities([dateless], {
+      reference: REFERENCE,
+      identityPool: [dateless, sibling1, sibling2],
+    });
+    expect(rows).toEqual([]);
+  });
+
+  test('final gate rejects a locked debut occurrence with an earlier sibling in the pool', () => {
+    const secondOccurrence = debutOccurrence(ID_1, '2026-07-25T22:00:00Z');
+    const earlierSibling = debutOccurrence(ID_2, '2026-07-18T22:00:00Z');
+    const result = assessFlagshipEventSelection(
+      send(),
+      [secondOccurrence],
+      REFERENCE,
+      [],
+      [secondOccurrence, earlierSibling],
+    );
+    expect(result.valid).toBe(false);
+    expect(result.errors.join(' ')).toContain('Downtown Night Market');
+  });
+
+  test('final gate still accepts the true first occurrence over its later siblings', () => {
+    const first = debutOccurrence(ID_1, '2026-07-25T22:00:00Z');
+    const laterSibling = debutOccurrence(ID_2, '2026-08-01T22:00:00Z');
+    const result = assessFlagshipEventSelection(
+      send(),
+      [first],
+      REFERENCE,
+      [],
+      [first, laterSibling],
+    );
+    expect(result.valid).toBe(true);
+  });
+
+  test('an unrelated same-title series at a DIFFERENT venue does not deny debut status', async () => {
+    const first = { ...debutOccurrence(ID_1, '2026-07-25T22:00:00Z'), venue_name: 'Harbor Pavilion', city: 'venice' };
+    const otherVenueEarlier = {
+      ...debutOccurrence(ID_2, '2026-07-18T22:00:00Z'),
+      venue_name: 'Riverwalk Stage',
+      city: 'bradenton',
+    };
+    const result = assessFlagshipEventSelection(
+      send(),
+      [first],
+      REFERENCE,
+      [],
+      [first, otherVenueEarlier],
+    );
+    expect(result.valid).toBe(true);
+
+    // Same venue = same series: the later occurrence is still denied.
+    const sameVenueEarlier = { ...otherVenueEarlier, venue_name: 'Harbor Pavilion' };
+    const denied = assessFlagshipEventSelection(
+      send(),
+      [first],
+      REFERENCE,
+      [],
+      [first, sameVenueEarlier],
+    );
+    expect(denied.valid).toBe(false);
+  });
+
+  test('identity pool spans max(issue, reference) in BOTH directions (Monday lower-bound gap)', async () => {
+    // Monday run: the active issue Tuesday is TOMORROW, so an issue-anchored
+    // lower bound would start a day after reference − 90d.
+    const mondayReference = new Date('2026-07-27T12:00:00Z');
+    const bounds = { lower: [], upper: [] };
+    const query = {
+      select: jest.fn(),
+      whereNull: jest.fn(),
+      where: jest.fn(),
+      then: (resolve, reject) => Promise.resolve([]).then(resolve, reject),
+    };
+    query.select.mockReturnValue(query);
+    query.whereNull.mockReturnValue(query);
+    query.where.mockImplementation((col, op, value) => {
+      if (col === 'start_at' && op === '>=') bounds.lower.push(value);
+      if (col === 'start_at' && op === '<=') bounds.upper.push(value);
+      return query;
+    });
+    const knex = jest.fn(() => query);
+
+    await loadRoutineIdentityPool(knex, mondayReference);
+    const maxLower = new Date(mondayReference.getTime() - 90 * 24 * 3600 * 1000);
+    expect(bounds.lower[0].getTime()).toBeLessThanOrEqual(maxLower.getTime());
+  });
+
+  test('identity pool reaches curation\'s own horizon on late-week runs (reference + 90d)', async () => {
+    // Sunday run: the active issue Tuesday is 5 days back. Anchored only to
+    // the Tuesday, the pool would stop 5 days short of curation's
+    // reference + 90d candidate horizon and hide a debut's tail siblings.
+    const sundayReference = new Date('2026-08-02T12:00:00Z');
+    const bounds = [];
+    const query = {
+      select: jest.fn(),
+      whereNull: jest.fn(),
+      where: jest.fn(),
+      then: (resolve, reject) => Promise.resolve([]).then(resolve, reject),
+    };
+    query.select.mockReturnValue(query);
+    query.whereNull.mockReturnValue(query);
+    query.where.mockImplementation((col, op, value) => {
+      if (col === 'start_at' && op === '<=') bounds.push(value);
+      return query;
+    });
+    const knex = jest.fn(() => query);
+
+    await loadRoutineIdentityPool(knex, sundayReference);
+    expect(bounds).toHaveLength(1);
+    const minimumEnd = new Date(sundayReference.getTime() + 90 * 24 * 3600 * 1000);
+    expect(bounds[0].getTime()).toBeGreaterThanOrEqual(minimumEnd.getTime() - 24 * 3600 * 1000);
   });
 });

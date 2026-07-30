@@ -102,9 +102,12 @@ function sanitizeVerifiedValue(field, value) {
     // the enriched profile publishes summed living area up to 200k
     // (AGGREGATE_DIM_CAP_SQFT), and a 50k cap silently dropped a rep's
     // downward correction on any complex bigger than that, so the county
-    // aggregate won every re-lookup (codex P2 #2721).
-    case 'squareFootage': return intInRange(value, 100, 200000);
-    case 'lotSize': return intInRange(value, 100, 200000);
+    // aggregate won every re-lookup (codex P2 #2721). The range is a typo
+    // guard, NOT a pricing bound — a tech's verified 270k warehouse or
+    // 40-acre parcel is a fact and must not be silently discarded; pricing
+    // clamps apply downstream.
+    case 'squareFootage': return intInRange(value, 100, 2000000);
+    case 'lotSize': return intInRange(value, 100, 10000000);
     // Mid/high-rise condo associations exceed 4 stories, and a verified
     // story count is exactly how an unknown-stories aggregate resolves —
     // dropping a tech's "6" here would pin footprintUnknown forever.

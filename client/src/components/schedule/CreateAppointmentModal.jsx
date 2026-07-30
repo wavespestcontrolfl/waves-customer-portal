@@ -53,11 +53,16 @@ function adminFetch(path, options = {}) {
   }).then(async r => {
     if (!r.ok) {
       let message = `HTTP ${r.status}`;
+      let parsedBody = null;
       try {
-        const body = await r.json();
-        if (body?.error) message = body.error;
+        parsedBody = await r.json();
+        if (parsedBody?.error) message = parsedBody.error;
       } catch { /* keep status fallback */ }
-      throw new Error(message);
+      const err = new Error(message);
+      // Structured payload for callers that adjudicate specific rejections
+      // (e.g. the split-save duplicate-series recovery below).
+      err.body = parsedBody;
+      throw err;
     }
     return r.json();
   });
@@ -81,6 +86,7 @@ const CADENCE_OPTIONS = [
   { value: 'semiannual', label: 'Semiannual' },
   { value: 'annual', label: 'Annual' },
   { value: 'monthly_nth_weekday', label: 'Monthly (Nth weekday)' },
+  { value: 'seasonal_feb_oct', label: 'Seasonal (Feb–Oct, monthly)' },
   { value: 'custom', label: 'Custom (every N days)' },
 ];
 
@@ -136,6 +142,14 @@ function inferServiceCadence(service) {
     .replace(/[\s-]+/g, '_');
   const visitsPerYear = Number(typeof service === 'object' ? service?.visits_per_year : null);
   if (billingType && billingType !== 'recurring') return { cadence: 'one_time', intervalDays: 30 };
+  // Seasonal mosquito (9 visits) before the every-6-weeks checks: its rows
+  // carry frequency 'every_6_weeks', but nine mosquito visits have exactly one
+  // valid cadence — the Feb–Oct walk. Mirrors the server's forced rule
+  // (cadenceFromEstimateLine / converterFollowUpSeedingPattern).
+  if (/mosquito/.test(name) && (visitsPerYear === 9 || /\bseasonal\b/.test(name))) {
+    return { cadence: 'seasonal_feb_oct', intervalDays: 30 };
+  }
+  if (frequency === 'seasonal_feb_oct') return { cadence: 'seasonal_feb_oct', intervalDays: 30 };
   if (/\bevery[_\s-]*6[_\s-]*weeks?\b/.test(frequency)) return { cadence: 'custom', intervalDays: 42 };
   if (['bimonthly', 'bi_monthly', 'every_2_months'].includes(frequency)) return { cadence: 'bimonthly', intervalDays: 30 };
   if (['quarterly', 'every_3_months'].includes(frequency)) return { cadence: 'quarterly', intervalDays: 30 };
@@ -189,6 +203,25 @@ function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
     const d = nthWeekdayOfMonth(base.getFullYear(), base.getMonth() + i, nthNum, wdayNum);
     return isNaN(d.getTime()) ? base : d;
   }
+  // Seasonal (Feb–Oct): walk the 9-month season ordinally, then convert back
+  // to a plain month delta so day semantics match the other month cadences.
+  // Mirrors the server's seasonalFebOctDate INCLUDING seasonOrdinalForBase's
+  // off-season normalization — Nov/Dec/Jan anchors all sit one slot before
+  // the coming February, so occurrence 1 lands on that February (a raw month
+  // offset made a December anchor preview March while the server saved Feb).
+  if (pattern === 'seasonal_feb_oct') {
+    if (i === 0) return base; // the anchor itself is never renormalized for display
+    const SEASON_MONTHS = 9; // Feb..Oct
+    const m1 = base.getMonth() + 1;
+    const y = base.getFullYear();
+    const baseOrdinal = m1 < 2 ? y * SEASON_MONTHS - 1
+      : m1 > 10 ? (y + 1) * SEASON_MONTHS - 1
+        : y * SEASON_MONTHS + (m1 - 2);
+    const ordinal = baseOrdinal + i;
+    const targetYear = Math.floor(ordinal / SEASON_MONTHS);
+    const targetMonth1 = ((ordinal % SEASON_MONTHS) + SEASON_MONTHS) % SEASON_MONTHS + 2;
+    return addCalendarMonthsByWeekday(base, (targetYear - y) * 12 + (targetMonth1 - m1));
+  }
   const monthIntervals = { monthly: 1, bimonthly: 2, quarterly: 3, triannual: 4, semiannual: 6, biannual: 6, annual: 12, yearly: 12 };
   if (monthIntervals[pattern]) {
     return addCalendarMonthsByWeekday(base, monthIntervals[pattern] * i);
@@ -214,6 +247,26 @@ function shiftPastWeekendClient(d, skip, direction) {
   return out;
 }
 
+// Client mirror of the server's clampDateToSeason: a weekend-shifted seasonal
+// date that crossed the season edge (Oct 31 Sat → Nov 2) walks back into
+// Feb–Oct so the preview chips match the saved dates.
+function clampSeasonClient(d, pattern, skip) {
+  if (pattern !== 'seasonal_feb_oct' || !d || isNaN(d.getTime())) return d;
+  const m = d.getMonth(); // 0-indexed: Feb=1 … Oct=9
+  if (m >= 1 && m <= 9) return d;
+  const step = m === 0 ? 1 : -1; // Jan undershoot → forward; Nov/Dec → back
+  const out = new Date(d);
+  for (let n = 0; n < 75; n++) {
+    out.setDate(out.getDate() + step);
+    const mm = out.getMonth();
+    if (mm < 1 || mm > 9) continue;
+    const day = out.getDay();
+    if (skip && (day === 0 || day === 6)) continue;
+    return out;
+  }
+  return d;
+}
+
 export function findScheduleEstimateById(estimates = [], estimateId) {
   return estimates.find((estimate) => String(estimate?.id) === String(estimateId)) || null;
 }
@@ -232,6 +285,9 @@ function visitsPerYearForCadence(cadence) {
     // NO monthly_nth_weekday case: one-step prepay doesn't support it (the
     // server's coverage seeder can't reproduce an nth-weekday schedule), and
     // a null here is what disables the prepay choice for that cadence.
+    // NO seasonal_feb_oct case either: prepay coverage can't represent the
+    // Feb–Oct walk (the server rejects it the same way), so seasonal series
+    // fall to the null default and the prepay choice stays disabled.
     case 'monthly': return 12;
     case 'every_6_weeks': return 9;
     case 'bimonthly': case 'bi_monthly': return 6;
@@ -302,6 +358,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // the operator creates one (prefilled from the quote — see the estimate-load
   // effect) rather than booking against a null id.
   const [selectedCustomer, setSelectedCustomer] = useState(defaultCustomer?.id ? defaultCustomer : null);
+  // Live server quote for a blank-priced one-time mosquito line:
+  // { customerId, status: 'loading' | 'ready' | 'error', price } — price is
+  // null only on an authoritative 'ready' response for a customer with no
+  // usable lot size (catalog fallback applies); 'loading'/'error' must never
+  // show a substitute amount or allow submission of an auto line.
+  const [mosquitoQuote, setMosquitoQuote] = useState(null);
   const [showQuickAdd, setShowQuickAdd] = useState(false);
   const [quickAdd, setQuickAdd] = useState({ firstName: '', lastName: '', phone: '', email: '', address: '', city: '', state: 'FL', zip: '', profileLabel: '' });
 
@@ -358,6 +420,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         const r = await adminFetch(`/admin/services?${params}`);
         setServiceResults((r.services || []).map((s) => ({
           id: s.id,
+          service_key: s.service_key,
           name: s.name,
           category: s.category,
           billing_type: s.billing_type,
@@ -556,7 +619,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     setLineDiscountOpenIdx((current) => (current === idx ? null : current));
   };
   const addServiceFromCatalog = (svc) => {
-    const defaultPrice = svc.priceMin || svc.base_price || '';
+    // One-time mosquito is priced by the lot-based ladder on the server when
+    // no price is typed (owner decision 2026-07-28) — leave the field empty so
+    // the server computes it from the customer's lot size; typing still wins.
+    const defaultPrice = isOneTimeMosquitoLine(svc)
+      ? ''
+      : (svc.priceMin || svc.base_price || '');
     const inferred = inferServiceCadence(svc);
     setServices((arr) => [
       ...arr,
@@ -703,8 +771,56 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     }
     return Math.min(baseAmount, Math.max(0, Math.round(dollars * 100) / 100));
   };
-  const lineDiscountAmount = (svc) => previewLineDiscount(svc?.lineDiscount, lineBaseAmount(svc));
+  // Discount previews use the EFFECTIVE base (entered price, or the auto
+  // lot-based mosquito amount) so a discount on an auto line previews the
+  // same dollars the server will apply against the ladder price.
+  const lineDiscountAmount = (svc) => previewLineDiscount(svc?.lineDiscount, lineEffectiveBaseAmount(svc));
   const lineNetAmount = (svc) => Math.max(0, Math.round((lineBaseAmount(svc) - lineDiscountAmount(svc)) * 100) / 100);
+  // Catalog-searched lines carry `service_key`; estimate-loaded lines
+  // (applyScheduleEstimate) carry `serviceKey`. Normalize so BOTH hit the
+  // auto-pricing path — otherwise an estimate-loaded mosquito line with a
+  // cleared price would show $0 while the server stamps the ladder charge.
+  const isOneTimeMosquitoLine = (svc) => (svc?.service_key ?? svc?.serviceKey) === 'mosquito_one_time';
+  // A price counts as "entered" when the field holds any finite number —
+  // including an explicit 0 (a deliberate waiver). Only a genuinely blank
+  // field activates the automatic lot-based mosquito price.
+  const lineHasEnteredPrice = (svc) => {
+    if (svc?.price === '' || svc?.price == null) return false;
+    const n = parseFloat(svc.price);
+    // Non-negative only: a negative input displays as $0 but must not count
+    // as an entered price (it would suppress the auto quote while the server
+    // stamps the ladder charge).
+    return Number.isFinite(n) && n >= 0;
+  };
+  // Auto (lot-based) one-time mosquito charge the server will stamp when the
+  // field is left blank — quoted from the server (same helper + live
+  // DB-authoritative pricing config the booking path uses, so admin pricing
+  // edits are reflected immediately) and shown before scheduling. Fallback
+  // order mirrors booking exactly: server lot-ladder quote, then the
+  // catalog base price when the customer has no usable lot size.
+  const mosquitoAutoAmount = (svc) => {
+    if (!isOneTimeMosquitoLine(svc) || lineHasEnteredPrice(svc)) return null;
+    if (mosquitoQuote?.customerId !== selectedCustomer?.id || mosquitoQuote?.status !== 'ready') {
+      // Pending or failed quote: never substitute a possibly-wrong amount —
+      // the hint shows the state and handleSubmit blocks until resolved.
+      return null;
+    }
+    // The quote endpoint always answers with the authoritative amount
+    // (engine default or the CURRENT catalog base) — never substitute the
+    // line's cached base_price, which for estimate-loaded lines carries the
+    // estimate's quoted price rather than the live catalog value.
+    return Number(mosquitoQuote.price) > 0 ? Number(mosquitoQuote.price) : null;
+  };
+  const mosquitoQuotePending = (svc) => (
+    isOneTimeMosquitoLine(svc)
+    && !lineHasEnteredPrice(svc)
+    && !!selectedCustomer?.id
+    && (mosquitoQuote?.customerId !== selectedCustomer.id || mosquitoQuote?.status !== 'ready')
+  );
+  const lineEffectiveBaseAmount = (svc) => (
+    lineHasEnteredPrice(svc) ? lineBaseAmount(svc) : (mosquitoAutoAmount(svc) ?? 0)
+  );
+  const lineEffectiveNetAmount = (svc) => Math.max(0, Math.round((lineEffectiveBaseAmount(svc) - lineDiscountAmount(svc)) * 100) / 100);
   const matchingLineDiscounts = (idx) => {
     const svc = services[idx];
     const key = svc?.lineId || idx;
@@ -715,7 +831,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       .slice(0, 10);
   };
   const applyLineDiscount = (idx, discount) => {
-    const base = lineBaseAmount(services[idx]);
+    const base = lineEffectiveBaseAmount(services[idx]);
     if (base <= 0) {
       setToast('Enter a price before applying a line discount');
       setTimeout(() => setToast(''), 2400);
@@ -768,17 +884,19 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const clearLineDiscount = (idx) => {
     setServices((arr) => arr.map((s, i) => (i === idx ? { ...s, lineDiscount: null } : s)));
   };
+  // Display totals use the EFFECTIVE amounts (entered price, or the auto
+  // lot-based mosquito charge) so the operator always sees what will bill.
   const subtotal = useMemo(() => {
     return services.reduce((sum, s) => {
-      return sum + lineBaseAmount(s);
+      return sum + lineEffectiveBaseAmount(s);
     }, 0);
-  }, [services]);
+  }, [services, selectedCustomer, mosquitoQuote]);
   const lineDiscountTotal = useMemo(() => {
     return services.reduce((sum, s) => sum + lineDiscountAmount(s), 0);
-  }, [services]);
+  }, [services, selectedCustomer, mosquitoQuote]);
   const netSubtotal = useMemo(() => {
-    return services.reduce((sum, s) => sum + lineNetAmount(s), 0);
-  }, [services]);
+    return services.reduce((sum, s) => sum + lineEffectiveNetAmount(s), 0);
+  }, [services, selectedCustomer, mosquitoQuote]);
   const totalDuration = useMemo(() => {
     if (services.length === 0) return defaultDurationMinutes || 60;
     return services.reduce((sum, s) => sum + (s.duration || s.default_duration_minutes || 30), 0);
@@ -810,6 +928,39 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // and "No matches" states — without them, a slow network or zero-hit
   // query looks identical to a broken search (no UI ever appears) and
   // operators report it as "the search vanished".
+  // Fetch the live server quote for the auto one-time mosquito amount
+  // whenever a blank-priced mosquito line exists for the selected customer.
+  // Works for search-selected and preselected customers alike (the server
+  // loads lot size itself).
+  const hasAutoMosquitoLine = services.some((s) => isOneTimeMosquitoLine(s) && !lineHasEnteredPrice(s));
+  // Dedupe by ref, not by the state this effect sets: setting the loading
+  // state re-runs the effect, and a cleanup-based `cancelled` flag would
+  // cancel our own in-flight request and strand the quote on 'loading'
+  // forever. Stale responses after a customer switch are ignored by the
+  // functional set matching customerId instead.
+  const mosquitoQuoteReqRef = useRef(null);
+  useEffect(() => {
+    const id = selectedCustomer?.id;
+    if (!id || !hasAutoMosquitoLine) return;
+    if (mosquitoQuoteReqRef.current === id && mosquitoQuote?.customerId === id) return;
+    mosquitoQuoteReqRef.current = id;
+    setMosquitoQuote({ customerId: id, status: 'loading', price: null });
+    (async () => {
+      try {
+        const r = await adminFetch(`/admin/schedule/mosquito-onetime-quote?customerId=${encodeURIComponent(id)}`);
+        setMosquitoQuote((prev) => (prev?.customerId === id
+          ? { customerId: id, status: 'ready', price: r?.price != null ? Number(r.price) : null }
+          : prev));
+      } catch {
+        // Leave the ref set so a failure doesn't auto-retry in a loop; the
+        // submit handler clears both ref and state for a manual retry.
+        setMosquitoQuote((prev) => (prev?.customerId === id
+          ? { customerId: id, status: 'error', price: null }
+          : prev));
+      }
+    })();
+  }, [selectedCustomer?.id, hasAutoMosquitoLine, mosquitoQuote]);
+
   const doSearch = async (val) => {
     setCustomerSearch(val);
     if (val.length >= 2) {
@@ -923,6 +1074,14 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const groupKey = (group) => {
     if (group.cadence === 'custom') return `custom:${group.intervalDays}`;
     if (group.cadence === 'monthly_nth_weekday') return `nth:${group.nth}:${group.weekday}`;
+    // Seasonal groups are split ONE PER LINE, so the cadence alone would
+    // collide: after the first POST the second seasonal group's identical key
+    // read as already-created and it silently skipped (codex r24 P2). Key on
+    // the primary line's identity as well.
+    if (group.cadence === 'seasonal_feb_oct') {
+      const primary = group.lines?.[0] || {};
+      return `seasonal_feb_oct:${primary.lineId || primary.id || primary.serviceKey || primary.name || ''}`;
+    }
     return group.cadence;
   };
   const groupLabel = (group) => {
@@ -944,6 +1103,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     const months = {
       monthly: 30,
       monthly_nth_weekday: 30,
+      seasonal_feb_oct: 30, // monthly in season — ranks with the monthly cadences
       bimonthly: 60,
       quarterly: 90,
       triannual: 120,
@@ -965,21 +1125,58 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     };
   };
   const groupServicesForAppointmentSubmit = (rows) => {
-    const sorted = [...rows].sort((a, b) => {
-      const rank = cadenceRankDays(a) - cadenceRankDays(b);
-      if (rank !== 0) return rank;
-      return rows.indexOf(a) - rows.indexOf(b);
+    const buildGroup = (subset) => {
+      const sorted = [...subset].sort((a, b) => {
+        const rank = cadenceRankDays(a) - cadenceRankDays(b);
+        if (rank !== 0) return rank;
+        return subset.indexOf(a) - subset.indexOf(b);
+      });
+      const primary = sorted[0] || subset[0];
+      if (!primary) return null;
+      const cfg = serviceCadenceConfig(primary);
+      return {
+        cadence: primary.cadence || 'one_time',
+        intervalDays: cfg.recurringIntervalDays,
+        nth: cfg.recurringNth,
+        weekday: cfg.recurringWeekday,
+        lines: [primary, ...sorted.filter((s) => s !== primary)],
+      };
+    };
+    // Seasonal (Feb–Oct) lines can share a parent with year-round RECURRING
+    // services in NEITHER direction (codex r19 P1): as parent they'd starve
+    // companions of Nov–Jan visits (addons attach only to parent-generated
+    // dates); as an addon they'd ride winter dates. Each seasonal line books
+    // its own series. ONE-TIME lines are different (codex r23 P2): they ride
+    // whichever group carries the first visit as add-ons — the server's
+    // lineDueOnRecurringDate already excludes one_time add-ons from
+    // follow-ups — so a seasonal + one-time save stays ONE dispatch job.
+    const seasonalRows = rows.filter((s) => s.cadence === 'seasonal_feb_oct');
+    if (!seasonalRows.length) {
+      const solo = buildGroup(rows);
+      return solo ? [solo] : [];
+    }
+    const oneTimeRows = rows.filter((s) => (s.cadence || 'one_time') === 'one_time');
+    const yearRoundRecurring = rows.filter(
+      (s) => s.cadence !== 'seasonal_feb_oct' && (s.cadence || 'one_time') !== 'one_time',
+    );
+    const groups = [];
+    if (yearRoundRecurring.length) {
+      groups.push(buildGroup([...yearRoundRecurring, ...oneTimeRows]));
+    }
+    const [firstSeasonal, ...restSeasonal] = seasonalRows;
+    // seasonalIndex = this group's position among the SAME-FAMILY seasonal
+    // series this save creates — the duplicate-guard recovery needs it to
+    // tell "my series already exists" apart from "the guard is seeing my
+    // earlier sibling" (codex r26 P1).
+    const firstGroup = buildGroup(yearRoundRecurring.length
+      ? [firstSeasonal]
+      : [firstSeasonal, ...oneTimeRows]);
+    if (firstGroup) groups.push({ ...firstGroup, seasonalIndex: 0 });
+    restSeasonal.forEach((row, i) => {
+      const g = buildGroup([row]);
+      if (g) groups.push({ ...g, seasonalIndex: i + 1 });
     });
-    const primary = sorted[0] || rows[0];
-    if (!primary) return [];
-    const cfg = serviceCadenceConfig(primary);
-    return [{
-      cadence: primary.cadence || 'one_time',
-      intervalDays: cfg.recurringIntervalDays,
-      nth: cfg.recurringNth,
-      weekday: cfg.recurringWeekday,
-      lines: [primary, ...sorted.filter((s) => s !== primary)],
-    }];
+    return groups.filter(Boolean);
   };
 
   // Tracks cadence-group keys already POSTed during this modal session.
@@ -1025,7 +1222,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         const opts = { intervalDays: group.intervalDays, nth: group.nth, weekday: group.weekday };
         const raw = nextRecurringDate(apptDate, group.cadence, attempt, opts);
         attempt++;
-        const shifted = shiftPastWeekendClient(raw, !!skipWeekends, dir);
+        const shifted = clampSeasonClient(
+          shiftPastWeekendClient(raw, !!skipWeekends, dir), group.cadence, !!skipWeekends,
+        );
         const key = shifted.toISOString().split('T')[0];
         if (seen.has(key)) continue;
         seen.add(key);
@@ -1046,6 +1245,43 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // Submit
   const handleSubmit = async () => {
     if (!selectedCustomer || services.length === 0) return;
+    // An auto-priced mosquito line must not be booked until the live server
+    // quote resolved — otherwise the operator confirms a total that omits (or
+    // misstates) what the server will stamp. On a failed quote, clear the
+    // state so the fetch effect retries.
+    if (services.some((s) => mosquitoQuotePending(s))) {
+      if (mosquitoQuote?.status === 'error') {
+        mosquitoQuoteReqRef.current = null;
+        setMosquitoQuote(null);
+        setToast('Mosquito price quote failed — retrying; submit again in a moment or enter a price');
+      } else {
+        setToast('Fetching the lot-based mosquito price — try again in a moment or enter a price');
+      }
+      setTimeout(() => setToast(''), 2800);
+      return;
+    }
+    // Revalidate a cached quote at the moment of booking: lot data or the
+    // live pricing config may have changed while the modal sat open, and the
+    // POST recalculates server-side — the operator must confirm the amount
+    // that will actually be stamped.
+    if (services.some((s) => isOneTimeMosquitoLine(s) && !lineHasEnteredPrice(s))) {
+      try {
+        const fresh = await adminFetch(`/admin/schedule/mosquito-onetime-quote?customerId=${encodeURIComponent(selectedCustomer.id)}`);
+        const freshPrice = fresh?.price != null ? Number(fresh.price) : null;
+        if (freshPrice !== mosquitoQuote?.price) {
+          setMosquitoQuote({ customerId: selectedCustomer.id, status: 'ready', price: freshPrice });
+          setToast('The lot-based mosquito price changed — totals updated, review and submit again');
+          setTimeout(() => setToast(''), 3200);
+          return;
+        }
+      } catch {
+        mosquitoQuoteReqRef.current = null;
+        setMosquitoQuote(null);
+        setToast('Could not re-verify the mosquito price — retrying; submit again in a moment or enter a price');
+        setTimeout(() => setToast(''), 3200);
+        return;
+      }
+    }
     setSaving(true);
     const groups = groupServicesForAppointmentSubmit(services);
     const results = [];
@@ -1059,9 +1295,15 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       // Skip groups already created in a prior attempt of this submit
       // session — a retry after partial failure shouldn't duplicate them.
       if (createdGroupKeysRef.current.has(key)) continue;
+      // Only the FIRST created group of a booking asks for the customer
+      // confirmation text — a split seasonal/year-round save posts multiple
+      // series for the same picked slot, and each would otherwise send its
+      // own confirmation (codex r20 P2). Same first-group rule the
+      // card-on-file link already uses.
+      const firstGroupOfBooking = results.length === 0 && createdGroupKeysRef.current.size === 0;
       try {
         const [primary, ...extras] = group.lines;
-        const groupSubtotal = group.lines.reduce((sum, s) => sum + lineNetAmount(s), 0);
+        const groupSubtotal = group.lines.reduce((sum, s) => sum + lineEffectiveNetAmount(s), 0);
         const groupHasPrice = group.lines.some((s) => {
           const n = parseFloat(s.price);
           return Number.isFinite(n) && n >= 0 && s.price !== '' && s.price != null;
@@ -1070,12 +1312,17 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         const addons = extras.map((s) => {
           const basePrice = lineBaseAmount(s);
           const p = lineNetAmount(s);
+          // One-time mosquito add-on lines: an ENTERED 0 (deliberate waiver)
+          // must reach the server as 0 — the `> 0 ? : null` coercion below
+          // would otherwise turn it into null and the server would stamp the
+          // lot-ladder charge instead. Blank stays null so the ladder applies.
+          const preserveZero = isOneTimeMosquitoLine(s) && lineHasEnteredPrice(s);
           return {
             serviceId: s.id || null,
             serviceName: s.name,
             name: s.name,
-            basePrice: basePrice > 0 ? basePrice : null,
-            price: p > 0 ? p : null,
+            basePrice: preserveZero ? basePrice : (basePrice > 0 ? basePrice : null),
+            price: preserveZero ? p : (p > 0 ? p : null),
             discountId: s.lineDiscount?.id || null,
             discountName: s.lineDiscount?.name || null,
             discountType: s.lineDiscount?.discount_type || null,
@@ -1105,7 +1352,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           scheduledDate: apptDate,
           serviceType: primary.name,
           serviceId: primary.id || null,
-          primaryLinePrice: groupHasPrice ? lineBaseAmount(primary) : null,
+          // Blank-priced one-time mosquito must reach the server as null so
+          // the lot-ladder default applies — groupHasPrice would otherwise
+          // coerce it to 0 when another line in the group carries a price. An
+          // ENTERED 0 (deliberate waiver) still goes through as 0.
+          primaryLinePrice: (isOneTimeMosquitoLine(primary) && !lineHasEnteredPrice(primary))
+            ? null
+            : (groupHasPrice ? lineBaseAmount(primary) : null),
           primaryLineDiscount: primary.lineDiscount ? {
             discountId: primary.lineDiscount.id || null,
             discountName: primary.lineDiscount.name || null,
@@ -1137,7 +1390,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           urgency: 'routine',
           notes: customerNotes || undefined,
           internalNotes: internalNotes || undefined,
-          sendConfirmationSms: sendSms,
+          sendConfirmationSms: firstGroupOfBooking ? sendSms : false,
           // Only the FIRST appointment created by this submit (including
           // across a retry after a partial failure) carries the card-link
           // flag — a lawn + tree&shrub booking split into two cadence
@@ -1172,7 +1425,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               })()
             : undefined,
           createInvoice: true,
-          sendConfirmation: sendSms,
+          sendConfirmation: firstGroupOfBooking ? sendSms : false,
           prepaid: collectPrepay && isRecurring ? {
             totalAmount: groupSubtotal * (hasFiniteRecurringCount ? parsedRecurringCount : 4),
             method: prepayMethod,
@@ -1190,6 +1443,41 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         createdGroupKeysRef.current.add(key);
         results.push(r);
       } catch (e) {
+        // Idempotent retry recovery, PROVEN only (codex r20 P1 + r21 P0): a
+        // prior partial split save can lose createdGroupKeysRef when the
+        // modal closes between POSTs, and the retry then dies on group one's
+        // duplicate-series rejection — stranding the later seasonal group
+        // behind an already-accepted estimate. Recover ONLY when the
+        // server's conflict payload shows the existing series came from THIS
+        // booking's linked estimate — that series IS the one this group
+        // would create. Any other duplicate rejection (a genuinely
+        // pre-existing program) surfaces as the error it is.
+        const dupBody = e?.body?.code === 'duplicate_recurring_series' ? e.body : null;
+        const ownSeriesCount = !!dupBody && !!linkedEstimate?.id && Array.isArray(dupBody.existingSeries)
+          ? dupBody.existingSeries.filter(
+            (s) => s?.sourceEstimateId != null && String(s.sourceEstimateId) === String(linkedEstimate.id),
+          ).length
+          : 0;
+        if (ownSeriesCount > 0) {
+          // The guard matches by service FAMILY, so with multiple seasonal
+          // lines the first sibling's series also conflicts with the second
+          // group (codex r26 P1). Recovery skips ONLY when the owned-series
+          // count exceeds this group's position among same-family groups —
+          // that count proves this group's own series exists. When it
+          // doesn't, the duplicate error surfaces with the server's guidance
+          // (extend the series, or intentionally run a second program) —
+          // never an automatic allowDuplicateSeries override, whose
+          // client-side count proof is not atomic and could double-book
+          // under concurrent retries (codex r27 P0). Multiple same-family
+          // seasonal lines on one estimate are not producible by the
+          // estimate builder today, so this conservative surface is the
+          // operator-decides path, not a workflow regression.
+          const familyIndex = Number.isInteger(group.seasonalIndex) ? group.seasonalIndex : 0;
+          if (ownSeriesCount > familyIndex) {
+            createdGroupKeysRef.current.add(key);
+            continue;
+          }
+        }
         firstError = { label: groupLabel(group), message: e.message };
         break;
       }
@@ -1769,10 +2057,22 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                     type="number"
                     value={svc.price ?? ''}
                     onChange={(e) => updateServicePrice(idx, e.target.value)}
-                    placeholder="0.00"
+                    placeholder={isOneTimeMosquitoLine(svc) ? 'Auto (lot-based)' : '0.00'}
                     step="0.01"
                     style={{ ...inputStyle, paddingLeft: 24 }}
                   />
+                  {mosquitoAutoAmount(svc) != null && (
+                    <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
+                      Auto: ${mosquitoAutoAmount(svc).toFixed(2)} (lot-based)
+                    </div>
+                  )}
+                  {mosquitoQuotePending(svc) && (
+                    <div style={{ fontSize: 11, color: D.muted, marginTop: 2 }}>
+                      {mosquitoQuote?.status === 'error'
+                        ? 'Auto quote failed — enter a price or resubmit to retry'
+                        : 'Auto: fetching lot-based price…'}
+                    </div>
+                  )}
                 </div>
 
                 <div style={{ gridColumn: isMobile ? '1 / -1' : undefined }}>

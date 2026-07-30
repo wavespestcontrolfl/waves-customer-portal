@@ -11,6 +11,21 @@ const {
   addETMonthsByWeekday, etNthWeekdayOfMonth, sameDayWindowElapsed,
 } = require('../utils/datetime-et');
 
+// Seasonal mosquito cadence lives in the seeder — single source of truth for
+// the Feb-Oct walk, so this file's own nextRecurringDate cannot drift from it.
+const { SEASONAL_FEB_OCT, seasonalFebOctDate, clampDateToSeason } = require('./recurring-appointment-seeder');
+
+// Patterns whose dates are month-anchored (nth-weekday semantics): a series
+// re-anchor must recompute and persist recurring_nth/recurring_weekday from
+// the new anchor date, or moving the anchor to a new weekday would keep
+// projecting siblings on the OLD weekday. seasonal_feb_oct qualifies —
+// seasonalFebOctDate resolves via the same nth/weekday month math. Exported
+// for tests.
+function isMonthBasedRecurrence(pattern) {
+  return pattern === 'monthly_nth_weekday' || pattern === SEASONAL_FEB_OCT
+    || !!MONTH_RECURRENCE_INTERVALS[pattern];
+}
+
 const MONTH_RECURRENCE_INTERVALS = {
   monthly: 1, bimonthly: 2, quarterly: 3, triannual: 4,
   semiannual: 6, biannual: 6, annual: 12, yearly: 12,
@@ -83,6 +98,12 @@ function nextRecurringDate(baseDateStr, pattern, i, opts = {}) {
     return etDateString(etNthWeekdayOfMonth(targetYear, targetMonth1, nthNum, wdayNum));
   }
 
+  // Seasonal mosquito (9x Feb-Oct) is neither a month-interval nor a fixed
+  // day-gap cadence — its gap is 1 month in season and 4 across the winter.
+  // Delegate to the seeder so extension/reschedule here cannot drift from the
+  // dates the series was seeded with (it would otherwise take the generic
+  // 91-day fallback below and schedule winter visits).
+  if (pattern === SEASONAL_FEB_OCT) return seasonalFebOctDate(safe, i, opts);
   if (MONTH_RECURRENCE_INTERVALS[pattern]) {
     return etDateString(addETMonthsByWeekday(base, MONTH_RECURRENCE_INTERVALS[pattern] * i, opts));
   }
@@ -157,6 +178,18 @@ class SmartRebooker {
 
       const dateStr = etDateString(candidateDate);
       if (blackout.has(dateStr)) continue;
+      // A seasonal (Feb–Oct) visit must not be OFFERED a Nov–Jan option to
+      // flows that commit with a non-admin initiator: rain-out calls
+      // reschedule() as 'tech', whose season guard would reject the target —
+      // recording failures and leaving the job unmoved (codex r14 P1).
+      // Late-October rain-outs simply offer the remaining in-season days.
+      // The ADMIN dispatch picker calls this generator with NO reason and
+      // commits as 'admin', which deliberately allows off-season exceptions —
+      // its options stay unfiltered (codex r15 P2).
+      if (reason && service.recurring_pattern === SEASONAL_FEB_OCT) {
+        const month = Number(dateStr.slice(5, 7));
+        if (month < 2 || month > 10) continue;
+      }
 
       const dayLoad = await db('scheduled_services')
         .where('scheduled_date', dateStr)
@@ -243,6 +276,22 @@ class SmartRebooker {
           statusCode: 409,
           isOperational: true,
           code: 'SLOT_TAKEN',
+        });
+      }
+    }
+    // A single occurrence of a seasonal (Feb–Oct) series must not move into
+    // the Nov–Jan gap either (codex r10 P1 — small moves skip the series
+    // re-anchor and its guard entirely): an October visit postponed into
+    // November is a prohibited winter treatment. Both parents and seeded
+    // children carry recurring_pattern, so the row's own column decides.
+    // Admin moves stay allowed — an off-season visit is an office decision.
+    if (initiatedBy !== 'admin' && service.recurring_pattern === SEASONAL_FEB_OCT) {
+      const month = Number(newDateStr.slice(5, 7));
+      if (month < 2 || month > 10) {
+        throw Object.assign(new Error('This seasonal program runs February through October — winter dates are not available for this visit. Contact the office if you need an exception.'), {
+          statusCode: 409,
+          isOperational: true,
+          code: 'OFF_SEASON',
         });
       }
     }
@@ -533,6 +582,21 @@ class SmartRebooker {
         });
       }
     }
+    // A seasonal (Feb–Oct) series must not re-anchor into the winter gap: the
+    // anchor would sit in Nov–Jan while the walk resumes in February,
+    // displacing the October visit (codex r7 P1 — the public pull-forward
+    // route reaches this method). Operators may still override — an
+    // off-season anchor is an office decision everywhere else in this lane.
+    if (initiatedBy !== 'admin' && parent.recurring_pattern === SEASONAL_FEB_OCT) {
+      const month = Number(seriesDateStr.slice(5, 7));
+      if (month < 2 || month > 10) {
+        throw Object.assign(new Error('This seasonal program runs February through October — winter dates are not available for this series. Contact the office if you need an exception.'), {
+          statusCode: 409,
+          isOperational: true,
+          code: 'OFF_SEASON',
+        });
+      }
+    }
     if (sameDayWindowElapsed(seriesDateStr, win.end || service.window_end || win.start || service.window_start)) {
       throw Object.assign(new Error('That window has already passed today'), {
         statusCode: 409,
@@ -541,7 +605,29 @@ class SmartRebooker {
       });
     }
     const pattern = parent.recurring_pattern;
-    const isMonthBasedPattern = pattern === 'monthly_nth_weekday' || !!MONTH_RECURRENCE_INTERVALS[pattern];
+    const isMonthBasedPattern = isMonthBasedRecurrence(pattern);
+    // Seasonal series keep their seeded weekend/season contract on re-anchor
+    // (codex r15 P2): conversion seeds seasonal series with skip_weekends,
+    // but a weekend anchor (public availability can offer weekends) would
+    // otherwise project every later occurrence onto weekends — and a shifted
+    // date can cross the season edge (Oct 31 Sat → Nov 2). The customer's
+    // picked anchor date itself is honored as-is; only projected siblings
+    // shift. Scoped to seasonal so every other cadence keeps its
+    // long-standing unshifted re-anchor behavior.
+    const projectSeriesDate = (raw) => {
+      if (pattern !== SEASONAL_FEB_OCT) return raw;
+      let out = String(raw).split('T')[0];
+      if (parent.skip_weekends) {
+        const at = parseETDateTime(`${out}T12:00`);
+        const { dayOfWeek } = etParts(at);
+        if (dayOfWeek === 0 || dayOfWeek === 6) {
+          const back = parent.weekend_shift === 'back';
+          const delta = back ? (dayOfWeek === 6 ? -1 : -2) : (dayOfWeek === 6 ? 2 : 1);
+          out = etDateString(addETDays(at, delta));
+        }
+      }
+      return clampDateToSeason(SEASONAL_FEB_OCT, out, { skipWeekends: !!parent.skip_weekends });
+    };
     const opts = {
       ...(isMonthBasedPattern
         ? recurrenceOrdinalOptions(newDate)
@@ -655,7 +741,7 @@ class SmartRebooker {
           const oi = i - startIdx;
           projectedDates.push(oi === 0
             ? String(newDate).split('T')[0]
-            : nextRecurringDate(newDate, parent.recurring_pattern, oi, opts));
+            : projectSeriesDate(nextRecurringDate(newDate, parent.recurring_pattern, oi, opts)));
         }
         if (projectedDates.length) {
           // Date-wide occupancy locks for EVERY target date this sweep will
@@ -728,7 +814,7 @@ class SmartRebooker {
         const isAnchor = occurrenceIndex === 0;
         const date = isAnchor
           ? newDate
-          : nextRecurringDate(newDate, parent.recurring_pattern, occurrenceIndex, opts);
+          : projectSeriesDate(nextRecurringDate(newDate, parent.recurring_pattern, occurrenceIndex, opts));
 
         const updateData = {
           scheduled_date: date,
@@ -1061,3 +1147,4 @@ module.exports.LIVE_LIFECYCLE_RESET = LIVE_LIFECYCLE_RESET;
 module.exports.applyLiveMoveSideEffects = applyLiveMoveSideEffects;
 module.exports.applyLiveMoveHistory = applyLiveMoveHistory;
 module.exports.applyLiveMovePostCommitEffects = applyLiveMovePostCommitEffects;
+module.exports.isMonthBasedRecurrence = isMonthBasedRecurrence;

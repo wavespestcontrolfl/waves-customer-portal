@@ -59,10 +59,12 @@ const effectiveOneTimePrice = (li = {}) => {
   );
 };
 
-const TREE_SHRUB_LEGACY_TIERS = ['light', 'standard'];
+const TREE_SHRUB_LEGACY_TIERS = ['light', 'standard', 'enhanced'];
 
 function treeShrubTierLabel(tier) {
-  return tier === 'light' ? 'Light' : 'Standard';
+  if (tier === 'light') return 'Light';
+  if (tier === 'enhanced') return 'Enhanced';
+  return 'Standard';
 }
 
 function treeShrubQuoteInput(v1Result = {}, tsLI = {}) {
@@ -387,6 +389,7 @@ function mapV1ToLegacyShape(v1Result) {
   const mqLI = lineItems.find(l => l.service === 'mosquito');
   const tbLI = lineItems.find(l => l.service === 'termite_bait');
   const tbBondLI = lineItems.find(l => l.service === 'termite_bond');
+  const tbRentLI = lineItems.find(l => l.service === 'termite_station_rental');
   const rbLI = lineItems.find(l => l.service === 'rodent_bait');
   const foamRecLI = lineItems.find(l => l.service === 'foam_recurring');
   // Commercial auto-priced recurring lines (guard on .annual so a manual
@@ -414,6 +417,7 @@ function mapV1ToLegacyShape(v1Result) {
       pa: t.perApp, apps: t.freq, ann: t.annual, mo: t.monthly,
       init: pestLI.initialFee || 0, rOG: pestLI.roachAddOn || 0,
       label: t.label, recommended: !!t.recommended, dimmed: !t.recommended,
+      ...(pestLI.pricingVersion ? { pricingVersion: pestLI.pricingVersion } : {}),
       ...floorFields(t),
     }));
     const sel = (pestLI.tiers || []).find(t => t.recommended) || (pestLI.tiers || [])[0] || {};
@@ -425,6 +429,7 @@ function mapV1ToLegacyShape(v1Result) {
       init: pestLI.initialFee || 0,
       rOG: pestLI.roachAddOn || 0,
       label: sel.label || 'Quarterly',
+      ...(pestLI.pricingVersion ? { pricingVersion: pestLI.pricingVersion } : {}),
       ...floorFields(sel),
       // Report-only low-margin signals (owner ruling 2026-07-17: margins
       // are surfaced, never enforced) — the estimator shows these so the
@@ -599,8 +604,13 @@ function mapV1ToLegacyShape(v1Result) {
       monitoringTier: tbLI.monitoringTier || tbLI.selectedMonitoringTier || null,
       ai: selectedSystem === 'advance' ? installPrice : null,
       ti: selectedSystem === 'trelona' ? installPrice : null,
-      bmo: tbLI.monitoringTier === 'basic' ? monMonthly : 35,
-      pmo: tbLI.monitoringTier === 'premier' ? monMonthly : 65,
+      // Bracketed station-check monthly (owner 2026-07-28): tiers are
+      // retired, so both legacy fields carry the line's priced monthly, and
+      // monMonthly is the canonical name the V2 results panel reads (the
+      // client fallback engine emits the same field).
+      monMonthly,
+      bmo: monMonthly,
+      pmo: monMonthly,
       perim: tbLI.perimeter || 0,
       sta: tbLI.stations || 0,
       measurements: tbLI.measurements || null,
@@ -653,7 +663,11 @@ function mapV1ToLegacyShape(v1Result) {
     pricingVersion: lawnLI?.pricingVersion,
     pricingSource: lawnLI?.pricingSource,
   });
-  svcAdd('Pest Control', pestLI, { service: 'pest_control' });
+  // pricingVersion identifies the cadence curve the pest line was priced
+  // under — the public preference/floor clamps read it off the stored row
+  // (unstamped rows are treated as legacy v1, so every new mapped row must
+  // carry it; codex #2966 r2 P2).
+  svcAdd('Pest Control', pestLI, { service: 'pest_control', pricingVersion: pestLI?.pricingVersion });
   svcAdd('Tree & Shrub', tsLI, { service: 'tree_shrub' });
   if (mqLI) {
     const selectedTier = (mqLI.tiers || []).find(t => t.tier === mqLI.tier)
@@ -690,6 +704,23 @@ function mapV1ToLegacyShape(v1Result) {
         bondTerm: tbBondLI.bondTerm,
         bondYears: tbBondLI.bondYears,
         annual: Number(tbBondLI.annual) || null,
+        discountable: false,
+        discountEligible: false,
+        waveGuardDiscountEligible: false,
+        countsTowardWaveGuardTier: false,
+      });
+    }
+    // Station rental uplift (owner 2026-07-26) — same posture as the bond
+    // rider: standalone recurring line, in the totals, but never tier-counted
+    // and never bundle-discountable. This is hardware cost recovery on
+    // stations Waves still owns, so a WaveGuard percentage applied here would
+    // discount the stations themselves rather than a margin.
+    if (tbRentLI) {
+      svcAdd(tbRentLI.name || 'Termite Station Rental', tbRentLI, {
+        service: 'termite_station_rental',
+        annual: Number(tbRentLI.annual) || null,
+        detail: `${tbLI.stations} rented stations · Waves-owned`,
+        retailValue: tbRentLI.retailValue,
         discountable: false,
         discountEligible: false,
         waveGuardDiscountEligible: false,
@@ -995,6 +1026,14 @@ function mapV1ToLegacyShape(v1Result) {
       annualBeforeDiscount: suppressRecurringTotals ? 0 : recurringAnnualBefore,
       grandTotal: suppressRecurringTotals ? 0 : year2Monthly,
       monthlyTotal: suppressRecurringTotals ? 0 : recurringMonthly,
+      // EXACT full recurring annual (codex P2 on #2998 round 3): the
+      // persistence path's deriveTotalsFromEstimateData prefers
+      // recurring.annualTotal and previously fell through to
+      // round(year2/12) * 12, which drifts whenever a line's annual isn't
+      // divisible by 12 (station rental: $100/yr rides as $8.33/mo →
+      // $519.96 persisted vs the $520 the line items promise, and
+      // conversion then bills $129.99/application instead of $130).
+      annualTotal: suppressRecurringTotals ? 0 : year2,
       annualAfterDiscount: suppressRecurringTotals ? 0 : recurringAnnual,
       savings: roundMoney((summary.waveGuardSavings || 0) - palmFlatCreditAnnual),
       rodentBaitMo: rodentBaitMonthly,

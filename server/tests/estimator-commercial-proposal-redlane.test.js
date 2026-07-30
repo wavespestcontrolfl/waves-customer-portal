@@ -294,6 +294,40 @@ test('re-entry recovery: generic existing draft keeps the classic bell (regressi
   expect(opts.link).toBe('/admin/estimates');
 });
 
+// One-time work prices entirely into onetime_total with monthly_total 0, so
+// keying the bell title off monthly alone showed real one-time jobs (observed
+// range roughly $240–$300) in the review queue as "$0/mo" drafts — which reads
+// as nothing worth sending.
+test('re-entry recovery: one-time-only draft leads with the one-time amount, not $0/mo', async () => {
+  const { maybeDraftEstimateForCall } = require('../services/estimator-engine');
+  mockBuildCallContext.mockResolvedValue({ ...CONTEXT });
+  mockExistingDraftForCall.mockResolvedValue({
+    id: 'est-79',
+    monthly_total: 0,
+    onetime_total: 242,
+    estimate_data: JSON.stringify({ estimatorEngine: { lane: 'yellow' } }),
+  });
+
+  await maybeDraftEstimateForCall({ callLogId: 'call-1' });
+  const [, title] = mockNotifyAdmin.mock.calls[0];
+  expect(title).toBe('AI estimate draft needs review — $242 one-time');
+});
+
+test('re-entry recovery: a genuinely unpriced draft says so instead of quoting $0', async () => {
+  const { maybeDraftEstimateForCall } = require('../services/estimator-engine');
+  mockBuildCallContext.mockResolvedValue({ ...CONTEXT });
+  mockExistingDraftForCall.mockResolvedValue({
+    id: 'est-80',
+    monthly_total: null,
+    onetime_total: null,
+    estimate_data: JSON.stringify({ estimatorEngine: { lane: 'yellow' } }),
+  });
+
+  await maybeDraftEstimateForCall({ callLogId: 'call-1' });
+  const [, title] = mockNotifyAdmin.mock.calls[0];
+  expect(title).toBe('AI estimate draft needs review — amount TBD');
+});
+
 test('request-only red WITHOUT a scaffold stays silent (no false owed-quote task)', async () => {
   mockProposalsEnabled.mockReturnValue(false);
   const result = await runDraftPipeline({

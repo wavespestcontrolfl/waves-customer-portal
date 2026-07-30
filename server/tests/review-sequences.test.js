@@ -15,6 +15,13 @@ jest.mock('../services/customer-contact', () => ({
     email: c.email !== undefined ? c.email : 'x@y.com',
     name: c.first_name || 'Stan',
   }),
+  // The SMS resolver mirrors getServiceContact in these fixtures (no
+  // service-contact phones are modeled, so gating never diverges).
+  getServiceContactSmsRecipient: (c) => ({
+    phone: c.phone !== undefined ? c.phone : '+19410000000',
+    email: c.email !== undefined ? c.email : 'x@y.com',
+    name: c.first_name || 'Stan',
+  }),
   firstNameFrom: (v) => String(v == null ? '' : v).trim().split(/\s+/)[0] || '',
 }));
 

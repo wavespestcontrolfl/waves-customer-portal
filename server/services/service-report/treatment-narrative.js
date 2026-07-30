@@ -15,7 +15,7 @@ const { dispatchWithFallback } = require('../llm/call');
 const { buildTreatmentSummary, METHOD_PHRASES } = require('./treatment-summary');
 const { findBannedCustomerCopy } = require('./activity-indicators');
 
-const PROMPT_VERSION = 'treatment_narrative_v1';
+const PROMPT_VERSION = 'treatment_narrative_v2';
 
 // Request-path budget: a report read ships the deterministic sentence after
 // this long and lets generation finish in the background.
@@ -81,6 +81,7 @@ Rules:
 - NEVER include application rates, quantities, prices, EPA details, or the word "chemical".
 - Never say safe, non-toxic, eliminated, guaranteed, pest-free, or cured. Never promise results — use "designed to", "should", "you can expect".
 - Ground every claim in the findings and products below. Do not invent findings, pests, or products.
+- A product's target list describes what that product is designed to control — NOT what was observed. Never say a pest, disease, or activity was "found", "observed", or "seen" unless it appears in "What we found on this visit". On a routine visit with no significant findings, frame targeted products as protection ("applied to protect against chinch bugs during their peak season"), never as a response to activity.
 
 What we found on this visit:
 ${findingsText || '[routine visit — no significant findings recorded]'}

@@ -10,7 +10,7 @@
  *   - Gemini   → Google google_search grounding tool (live web) [GEMINI_API_KEY]
  *   - Claude   → Anthropic web_search tool (live web)           [ANTHROPIC_API_KEY]
  *   - Google AI Overview → DataForSEO SERP AI overview          [DATAFORSEO_*]
- *   - Perplexity → DEFERRED until PERPLEXITY_API_KEY is provisioned.
+ *   - Perplexity → Sonar search-grounded model (live web)       [PERPLEXITY_API_KEY]
  *
  * A platform whose key/gate is missing is skipped silently — the run degrades
  * to whatever providers are configured rather than failing.
@@ -21,6 +21,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const dataforseo = require('./dataforseo');
 const MODELS = require('../../config/models');
+const { stripThinkingBlocks } = require('../llm/deep');
 const twilioNumbers = require('../../config/twilio-numbers');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 
@@ -182,27 +183,77 @@ class LLMMentionProber {
 
   async probeGoogleAIOverview(query) {
     try {
-      const data = await dataforseo.request('/serp/google/ai_overview/live/advanced', [{
+      // AI Overviews arrive as an `ai_overview` item inside the ORGANIC SERP
+      // response — there is no /serp/google/ai_overview/ endpoint. The old
+      // path 404'd at the task level ("Invalid Path", status 40402) on every
+      // probe since 2026-05-30, and those errors were recorded as legitimate
+      // "no overview" observations (the 0/1092 finding, purged by migration
+      // 20260729020000). load_async_ai_overview makes DataForSEO wait for the
+      // async-loaded overview content instead of returning a stub.
+      const data = await dataforseo.request('/serp/google/organic/live/advanced', [{
         keyword: query,
         location_name: 'Bradenton,Florida,United States',
         language_name: 'English',
+        load_async_ai_overview: true,
       }]);
       // null = not attempted (unconfigured / gate off / request error) → caller
-      // skips, no cost, retries next run. A returned response means the paid
-      // lookup happened, so even "no AI overview present" must be recorded as a
-      // real no-mention observation — otherwise idempotency never fires and the
-      // same paid miss is re-run every day, blowing past MAX_PROBES_PER_RUN.
+      // skips, no cost, retries next run.
       if (data == null) return null;
-      const items = data?.tasks?.[0]?.result?.[0]?.items || [];
+      const task = data?.tasks?.[0];
+      // Task-level error (bad path/params/quota) is NOT an observation — the
+      // lookup didn't measure the SERP, so recording it would poison the
+      // share-of-voice series exactly like the Invalid Path incident did.
+      if (task?.status_code !== 20000) {
+        logger.warn(`[llm-mentions] AI Overview task error ${task?.status_code} (${task?.status_message}) for "${query}"`);
+        return null;
+      }
+      // A successful SERP with no ai_overview item is a real paid observation:
+      // Google showed no overview for this query. It must be recorded so
+      // idempotency fires — otherwise the same paid miss re-runs every day,
+      // blowing past MAX_PROBES_PER_RUN.
+      const items = task?.result?.[0]?.items || [];
       const aio = items.find(i => i.type === 'ai_overview');
       if (!aio) return { text: '', citedUrls: [], model: 'dataforseo:ai_overview', grounded: true };
-      const text = JSON.stringify(aio);
-      const citedUrls = (aio.references || aio.items || [])
+      const text = aio.markdown || JSON.stringify(aio);
+      const citedUrls = [...(aio.references || []), ...(aio.items || [])]
         .map(r => r?.url)
         .filter(Boolean);
       return { text, citedUrls, model: 'dataforseo:ai_overview', grounded: true };
     } catch (err) {
       logger.warn(`[llm-mentions] AI Overview probe failed: ${err.message}`);
+      return null;
+    }
+  }
+
+  async probePerplexity(query) {
+    if (!process.env.PERPLEXITY_API_KEY) return null;
+    // Sonar models are search-grounded by default — every answer is a live-web
+    // answer, which is exactly what a Perplexity user sees.
+    const model = process.env.PERPLEXITY_MENTIONS_MODEL || 'sonar';
+    try {
+      const res = await fetch('https://api.perplexity.ai/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${process.env.PERPLEXITY_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model,
+          messages: [{ role: 'user', content: query }],
+        }),
+      });
+      if (!res.ok) { logger.warn(`[llm-mentions] Perplexity ${res.status} for "${query}"`); return null; }
+      const data = await res.json();
+      const text = data?.choices?.[0]?.message?.content || '';
+      // Citations: legacy top-level `citations` (URL strings) and the newer
+      // `search_results` ({title,url,date}) — harvest both, parse() dedupes.
+      const citedUrls = [
+        ...(Array.isArray(data?.citations) ? data.citations : []),
+        ...(Array.isArray(data?.search_results) ? data.search_results.map(r => r?.url) : []),
+      ].filter(u => typeof u === 'string' && u);
+      return { text, citedUrls, model, grounded: true };
+    } catch (err) {
+      logger.warn(`[llm-mentions] Perplexity probe failed: ${err.message}`);
       return null;
     }
   }
@@ -214,6 +265,7 @@ class LLMMentionProber {
       gemini: q => this.probeGemini(q),
       claude: q => this.probeClaude(q),
       google_ai_overview: q => this.probeGoogleAIOverview(q),
+      perplexity: q => this.probePerplexity(q),
     };
   }
 
@@ -269,7 +321,10 @@ class LLMMentionProber {
           content: `An AI answer mentioned "Waves Pest Control" like this:\n"""${context}"""\nReply with ONE word — positive, neutral, or negative — for how it portrays Waves.`,
         }],
       });
-      const word = (resp.content?.[0]?.text || '').toLowerCase().trim();
+  // Thinking-block guard: WORKHORSE/FAST resolve to a model that can lead
+  // with a thinking block (no .text) on larger inputs, which made a blind
+  // content[0] read return '' — see event-ingestion.js for the incident.
+      const word = (stripThinkingBlocks(resp).content?.[0]?.text || '').toLowerCase().trim();
       return ['positive', 'negative', 'neutral'].find(s => word.includes(s)) || 'neutral';
     } catch {
       return 'neutral';

@@ -3620,7 +3620,7 @@ function RegistryTab({ showToast }) {
                     </div>
                     <div>
                       <label style={{ fontSize: 10, color: D.muted, display: "block", marginBottom: 2 }}>Pet/Kid Guidance</label>
-                      <textarea value={form.petKidGuidanceText} onChange={(e) => setForm((f) => ({ ...f, petKidGuidanceText: e.target.value }))} rows={2} placeholder="Safe once dry, typically 15-30 minutes" style={{ ...sInput, resize: "vertical" }} />
+                      <textarea value={form.petKidGuidanceText} onChange={(e) => setForm((f) => ({ ...f, petKidGuidanceText: e.target.value }))} rows={2} placeholder="Safe once dry — technician confirms timing" style={{ ...sInput, resize: "vertical" }} />
                     </div>
                   </div>
 

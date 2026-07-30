@@ -17,6 +17,7 @@ const { detectServiceLine } = require('./service-line-configs');
 const { etDateString } = require('../../utils/datetime-et');
 const { loadActiveConfig } = require('../pest-pressure/store');
 const { buildPestPressureCustomerView } = require('../pest-pressure/customer-view');
+const { lawnScoreValue, resolveStressDamage, loadLinkedLawnAssessment } = require('./report-data');
 
 function cleanText(value) {
   return String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
@@ -123,6 +124,133 @@ async function loadCustomer(customerId, knex) {
     logger.warn(`[report-copy-context] customer load failed: ${err.message}`);
     return null;
   }
+}
+
+// Photo-scored lawn assessment (the closeout's "Analyze lawn" flow). Only
+// tech-confirmed rows count — the raw model pass without a tech's confirm is
+// not a fact yet. "Today" resolves strictly through the visit linkage
+// (loadLinkedLawnAssessment's no-customer-fallback rule): a customer/date
+// query could grab an unrelated same-day row and mislabel it as this visit's
+// result. The prior row (strictly before the service date) is customer-scoped
+// history for trend framing.
+async function loadLawnAssessments({ customerId, scheduledServiceId, lawnAssessmentId, serviceYmd, knex }) {
+  if (!customerId || !serviceYmd) return { today: null, prior: null };
+  try {
+    // The closeout's confirmation state is authoritative when provided: an
+    // id grounds exactly that row, explicit null means a retake is pending
+    // (the previously confirmed row is superseded and must NOT be labeled
+    // today's result). Only legacy callers (field absent) fall back to the
+    // visit-linked lookup.
+    let today = null;
+    if (lawnAssessmentId && scheduledServiceId) {
+      // The id must belong to THIS visit — scheduledServiceId is already
+      // authorized/canonical, so a stale or crafted id linked to a different
+      // visit is rejected rather than labeled as today's result.
+      today = await knex('lawn_assessments')
+        .where({
+          id: lawnAssessmentId,
+          customer_id: customerId,
+          confirmed_by_tech: true,
+          service_id: scheduledServiceId,
+        })
+        .first() || null;
+    } else if (lawnAssessmentId === undefined && scheduledServiceId) {
+      today = await loadLinkedLawnAssessment(
+        { customer_id: customerId, service_id: scheduledServiceId },
+        knex,
+      );
+    }
+    if (today && scheduledServiceId) {
+      // Supersession check for BOTH resolution branches: ANY newer row on the
+      // same visit — an unconfirmed retake in progress OR a retake another
+      // tab already confirmed — supersedes the resolved row (whether it came
+      // from the omitted-field fallback or a stale-but-legitimate explicit
+      // id). Presenting the old scores as this visit's result would
+      // resurrect exactly what the retake replaced. (The fallback path
+      // already resolves the LATEST confirmed row, so this only nulls it for
+      // a genuinely in-progress retake; the explicit-id path fails toward
+      // suppression until the client refreshes.)
+      const newerAssessment = await knex('lawn_assessments')
+        .where({
+          customer_id: customerId,
+          service_id: scheduledServiceId,
+        })
+        .where('created_at', '>', today.created_at)
+        .first('id')
+        .catch(() => null);
+      if (newerAssessment) today = null;
+    }
+    // The prior row is bounded by the linked VISIT's scheduled_date, not the
+    // assessment run date — lawn_assessments.service_date is when the photos
+    // were scored, which lands out of schedule order on backfills (mirrors
+    // the canonical prior-summary lookup in admin-lawn-assessment.js). Rows
+    // without a visit link fall back to their run date, and the current
+    // visit's own row is always excluded.
+    const prior = await knex('lawn_assessments as la')
+      .leftJoin('scheduled_services as ss', 'la.service_id', 'ss.id')
+      .where('la.customer_id', customerId)
+      .where('la.confirmed_by_tech', true)
+      .where(function priorBound() {
+        this.where('ss.scheduled_date', '<', serviceYmd)
+          .orWhere(function unlinked() {
+            this.whereNull('la.service_id').andWhere('la.service_date', '<', serviceYmd);
+          });
+      })
+      .modify((q) => {
+        if (scheduledServiceId) {
+          q.andWhere(function notThisVisit() {
+            this.whereNull('la.service_id').orWhereNot('la.service_id', scheduledServiceId);
+          });
+        }
+      })
+      .orderByRaw('COALESCE(ss.scheduled_date, la.service_date) DESC')
+      // Retake-then-reconfirm can leave two confirmed rows on the same visit
+      // date — take the LATEST confirmation (mirrors loadLinkedLawnAssessment).
+      .orderBy('la.confirmed_at', 'desc')
+      .orderBy('la.created_at', 'desc')
+      .first(
+        // History is labeled by the VISIT date the row belongs to — the
+        // assessment run date can be a later backfill day ("vs Jul 28" for a
+        // June visit). Aliased as service_date so the label formatters keep
+        // one field.
+        knex.raw('COALESCE(ss.scheduled_date, la.service_date) as service_date'),
+        'la.is_baseline',
+        'la.turf_density', 'la.weed_suppression', 'la.color_health',
+        'la.fungus_control', 'la.thatch_level', 'la.stress_damage',
+      ) || null;
+    return { today, prior };
+  } catch (err) {
+    logger.warn(`[report-copy-context] lawn assessment load failed: ${err.message}`);
+    return { today: null, prior: null };
+  }
+}
+
+// The four consolidated categories the tech actually reviews and confirms —
+// stress/damage via resolveStressDamage (fungus/thatch are its underlying
+// AI sub-reads, not tech-confirmed facts on their own). lawnScoreValue keeps
+// unscored (null/'') categories out entirely instead of coercing them to 0.
+function lawnAssessmentEntries(row) {
+  return [
+    ['turf density', lawnScoreValue(row?.turf_density)],
+    ['weed suppression', lawnScoreValue(row?.weed_suppression)],
+    ['color health', lawnScoreValue(row?.color_health)],
+    ['stress/damage control', resolveStressDamage(row || {})],
+  ];
+}
+
+function lawnAssessmentLine(row, prior) {
+  const priorEntries = prior ? Object.fromEntries(lawnAssessmentEntries(prior)) : {};
+  const parts = [];
+  for (const [label, value] of lawnAssessmentEntries(row)) {
+    if (value == null) continue;
+    const prev = priorEntries[label];
+    // A delta is meaningful only when BOTH visits scored the category.
+    const delta = prev != null && prev !== value
+      ? ` (${value > prev ? '+' : ''}${value - prev} vs ${formatShortDate(prior.service_date)})`
+      : '';
+    parts.push(`${label} ${value}/100${delta}`);
+  }
+  return parts.join(', ');
 }
 
 // Last N completed visits on the same service line, summarized by their structured
@@ -275,6 +403,8 @@ function conditionsLine(conditions) {
 //  - signals: compact object for response caching + diagnostics
 async function buildReportCopyContext({
   customerId,
+  scheduledServiceId = null,
+  lawnAssessmentId,
   serviceType,
   serviceLine,
   suppressPressureTrend = false,
@@ -302,7 +432,7 @@ async function buildReportCopyContext({
   const lng = finiteOrNull(customer?.longitude);
 
   // Fan out the independent loads concurrently; each is individually fail-soft.
-  const [priorVisits, productSafety, property, conditions, weekWeather, pressureTrend, ppConfig] = await Promise.all([
+  const [priorVisits, productSafety, property, conditions, weekWeather, pressureTrend, ppConfig, lawnAssessments] = await Promise.all([
     loadPriorVisits({ customerId, serviceLine: line, serviceType, beforeDate: serviceYmd, knex }),
     loadProductSafety(productList, knex),
     loadPropertyContext(customerId, knex),
@@ -320,6 +450,9 @@ async function buildReportCopyContext({
       }).catch(() => null)
       : Promise.resolve(null),
     loadActiveConfig(knex).catch(() => null),
+    line === 'lawn'
+      ? loadLawnAssessments({ customerId, scheduledServiceId, lawnAssessmentId, serviceYmd, knex })
+      : Promise.resolve({ today: null, prior: null }),
   ]);
 
   // Respect the same customer-visibility gate the normal report paths use: when
@@ -360,6 +493,36 @@ async function buildReportCopyContext({
 
   if (targets.length) {
     sections.push(`TARGETS TAGGED TODAY (tech-tagged, per product — pests, weeds/diseases, or nutrition goals): ${targets.join(', ')}`);
+  }
+
+  // Photo-scored lawn assessment (tech-confirmed scores only — the free-text
+  // vision observations are deliberately NOT grounded: the confirm UI never
+  // shows them to the tech, so an unreviewed photo diagnosis must not become
+  // a technician-observed finding in customer copy). Today's scores are facts
+  // about THIS visit; deltas vs the prior assessment let the copy speak to
+  // measurable change. A baseline visit suppresses deltas — an admin baseline
+  // reset intentionally supersedes the earlier trend line. When only a prior
+  // assessment exists, present it as history — never as today's reading.
+  if (lawnAssessments?.today) {
+    const isBaseline = !!lawnAssessments.today.is_baseline;
+    const scoreLine = lawnAssessmentLine(
+      lawnAssessments.today,
+      isBaseline ? null : lawnAssessments.prior,
+    );
+    if (scoreLine) {
+      sections.push(
+        // "THIS VISIT", not "today" — office closeouts and backfills score
+        // the photos days after the visit date the report describes.
+        `LAWN ASSESSMENT (photo-scored for THIS VISIT, tech-confirmed; 0–100, higher is better${isBaseline ? '; baseline visit — no comparison to earlier visits' : ''}): ${scoreLine}`,
+      );
+    }
+  } else if (lawnAssessments?.prior) {
+    const scoreLine = lawnAssessmentLine(lawnAssessments.prior, null);
+    if (scoreLine) {
+      sections.push(
+        `LAST LAWN ASSESSMENT (photo-scored ${formatShortDate(lawnAssessments.prior.service_date)}, tech-confirmed; 0–100, higher is better — history, NOT this visit's reading): ${scoreLine}`,
+      );
+    }
   }
 
   // The current visit isn't scored at generate time, so buildPressureTrendContext
@@ -443,6 +606,10 @@ async function buildReportCopyContext({
     productSafetyCount: productSafety.length,
     hasConditions: !!condLine,
     hasPressureTrend: !!pressureLine,
+    hasLawnAssessment: !!(lawnAssessments?.today || lawnAssessments?.prior),
+    // CURRENT-visit grounding specifically — the scores-only gate must not be
+    // satisfied by history when today's row failed or is retake-pending.
+    hasCurrentLawnAssessment: !!lawnAssessments?.today,
     targets,
     monthNum,
   };

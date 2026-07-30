@@ -184,7 +184,7 @@ describe('ServiceSection', () => {
     expect(screen.getAllByText('$71.10').length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText('$79.00 / application')).toBeInTheDocument();
     expect(screen.queryByText('/mo')).not.toBeInTheDocument();
-    expect(screen.getByText(/12 applications per year included/)).toBeInTheDocument();
+    expect(screen.queryByText(/applications per year included/)).not.toBeInTheDocument();
   });
 
   it('keeps the combined /mo total on a bundle section with a single itemized service (no per-application headline)', () => {
@@ -226,11 +226,9 @@ describe('ServiceSection', () => {
 
     // Combined cadence total leads with a standalone "/mo" suffix. Were the
     // bundle wrongly treated per-application, the headline would be the lone
-    // pest price ("/ application" suffix) plus a "Billed $130.00/mo, spread across
-    // the year" note — so the note's absence is the real discriminator.
+    // pest price ("/ application" suffix) instead of the combined "/mo" total.
     expect(screen.getByText('$130.00')).toBeInTheDocument();
     expect(screen.getByText('/mo')).toBeInTheDocument();
-    expect(screen.queryByText(/spread across the year/)).not.toBeInTheDocument();
   });
 
   it('shows the selected quote-required frequency reason', () => {
@@ -328,8 +326,10 @@ describe('OneTimeBreakdownCard', () => {
     );
 
     expect(screen.queryByText(/waived/i)).not.toBeInTheDocument();
-    // Both the row amount and the one-time total render plain $99.00 — no asterisk.
-    expect(screen.getAllByText('$99.00').length).toBe(2);
+    // The row amount renders plain $99.00 — no asterisk. Single-item
+    // breakdowns no longer repeat it as a total row (owner 2026-07-23).
+    expect(screen.getAllByText('$99.00').length).toBe(1);
+    expect(screen.queryByText('One-time total')).not.toBeInTheDocument();
     expect(screen.queryByText((_, el) => el?.textContent === '$99.00*' && el?.children.length === 0)).not.toBeInTheDocument();
   });
 
@@ -826,7 +826,7 @@ describe('PlanTotalSummary — plan-level referral credit + net', () => {
     expect(text).not.toContain('/ year');
   });
 
-  it('renders nothing when there is no credit to itemize (unchanged no-referral plans)', () => {
+  it('renders nothing when there is no credit to itemize (owner rule re-affirmed 2026-07-23: no Plan total on customer estimates)', () => {
     const { container } = render(<PlanTotalSummary combined={{ monthlySubtotal: 82, annualSubtotal: 984, waveGuardTierLabel: 'Silver' }} preCreditMonthly={84.08} />);
     expect(container).toBeEmptyDOMElement();
   });

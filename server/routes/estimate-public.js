@@ -80,6 +80,7 @@ const {
 } = require('../constants/business');
 const {
   pricingBundleMatchesEstimateTotals,
+  resolveStoredPestPricingVersion,
 } = require('../services/estimate-pricing-bundle-utils');
 const {
   estimateDataHasUnresolvedManagerApproval,
@@ -122,6 +123,19 @@ const bondTermSwitchLimiter = rateLimit({
   // infrastructure behind the kill switch, so the limiter engages only when
   // the feature is on. 30/hr comfortably covers a customer comparing terms.
   skip: () => !['1', 'true', 'on'].includes(String(process.env.GATE_TERMITE_BOND_OPTION || '').toLowerCase()),
+  keyGenerator: require('../middleware/rate-limit-key').rateLimitKey,
+  message: { error: 'Too many changes in a short time. Please wait a moment and try again.' },
+});
+
+// Token-holder toggle endpoints (tier picker, preference switches): every
+// call is a DB write and select-tier used to ring an admin bell per call —
+// a looping client could spam bells and writes. 30/hr comfortably covers a
+// customer comparing options (estimator audit 2026-07-24).
+const estimateToggleLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
   keyGenerator: require('../middleware/rate-limit-key').rateLimitKey,
   message: { error: 'Too many changes in a short time. Please wait a moment and try again.' },
 });
@@ -1398,7 +1412,7 @@ function detectPestRecurring(recurring) {
   if (!pest.length) return null;
   const vpy = pest.reduce((acc, s) => Math.max(acc, visitsPerYearFromFrequency(s.frequency || s.billing || s.cadence)), 0) || 4;
   const monthlyBase = pest.reduce((acc, s) => acc + Number(s.mo || s.monthly || 0), 0);
-  return { count: pest.length, visitsPerYear: vpy, monthlyBase };
+  return { count: pest.length, visitsPerYear: vpy, monthlyBase, pricingVersion: pestPricingVersionOf(...pest) };
 }
 
 // The interior-spray / exterior-eave-sweep preference toggles describe the
@@ -1566,16 +1580,30 @@ function buildEstimateAskPrompts(recurring = [], oneTimeItems = [], pestRecurrin
 // derived from the engine's own floor rather than a chosen fraction.
 // Mirrors service-pricing.js `pricePestControl`: basePrice is floored
 // at PEST.floor, then multiplied by the cadence's frequency multiplier
-// before being turned into a monthly. Defaults to v1 rates (the live
-// shape for admin-created estimates); v2 multipliers are slightly
-// gentler so falling back to v1 just makes the floor a touch lower,
-// which is the safer direction.
-function pestMonthlyFloor(visitsPerYear) {
+// before being turned into a monthly. VERSION-AWARE (codex #2966 P2):
+// this floor caps opt-out discounts on ALREADY-SENT estimates, so it must
+// track the curve the quote was actually priced under — a v1 monthly quote
+// clamped against the higher v2 floor would rewrite its stored totals
+// upward. Lines stamped 'v2' (every engine quote since the v2 default)
+// use v2; unstamped legacy lines predate the stamp and were priced v1.
+function pestMonthlyFloor(visitsPerYear, pricingVersion = 'v1') {
   const freqKey = visitsPerYear >= 12 ? 'monthly'
                 : visitsPerYear >= 6  ? 'bimonthly'
                 : 'quarterly';
-  const freqMult = PEST.frequencyDiscounts.v1?.[freqKey] ?? 1.0;
+  const curve = pricingVersion === 'v2' ? PEST.frequencyDiscounts.v2 : PEST.frequencyDiscounts.v1;
+  const freqMult = curve?.[freqKey] ?? 1.0;
   return PEST.floor * freqMult * visitsPerYear / 12;
+}
+
+// The pest curve version a stored pest line/row was priced under: its own
+// stamp when present, else 'v1' (stamps ship with the v2-default engine, so
+// an unstamped line predates the curve change).
+function pestPricingVersionOf(...candidates) {
+  for (const c of candidates) {
+    const v = c && typeof c === 'object' ? c.pricingVersion : c;
+    if (v === 'v1' || v === 'v2') return v;
+  }
+  return 'v1';
 }
 
 function normalizePrefs(raw) {
@@ -1861,7 +1889,7 @@ function computePrefDiscount(prefs, pestRecurring, hasPestOneTime, pestOneTimeTo
     }
   }
   if (pestRecurring) {
-    const floor = pestMonthlyFloor(pestRecurring.visitsPerYear);
+    const floor = pestMonthlyFloor(pestRecurring.visitsPerYear, pestRecurring.pricingVersion);
     const pestMonthlyBase = Number(pestRecurring.monthlyBase || 0);
     const maxMonthlyOff = Math.max(0, pestMonthlyBase - floor);
     monthlyOff = Math.min(monthlyOff, maxMonthlyOff);
@@ -1876,7 +1904,7 @@ function computePrefDiscount(prefs, pestRecurring, hasPestOneTime, pestOneTimeTo
   };
 }
 
-function preferenceMonthlyOffForPestVisits(prefs, visitsPerYear, monthlyBase = null) {
+function preferenceMonthlyOffForPestVisits(prefs, visitsPerYear, monthlyBase = null, pricingVersion = 'v1') {
   const visits = Number(visitsPerYear || 0);
   if (!(visits > 0)) return 0;
   const p = normalizePrefs(prefs);
@@ -1886,7 +1914,7 @@ function preferenceMonthlyOffForPestVisits(prefs, visitsPerYear, monthlyBase = n
   const base = Number(monthlyBase);
   let cappedOff = monthlyOff;
   if (Number.isFinite(base) && base > 0) {
-    const floor = pestMonthlyFloor(visits);
+    const floor = pestMonthlyFloor(visits, pricingVersion);
     if (base - cappedOff < floor) {
       cappedOff = Math.max(0, base - floor);
     }
@@ -2217,7 +2245,7 @@ function pestRecurringForPricingRows(rows = []) {
     const visits = treatmentVisitsForPricingRow(row) || visitsPerYear;
     return amount && visits ? sum + ((amount * visits) / 12) : sum;
   }, 0);
-  return { count: pestRows.length, visitsPerYear, monthlyBase };
+  return { count: pestRows.length, visitsPerYear, monthlyBase, pricingVersion: pestPricingVersionOf(...pestRows) };
 }
 
 function sameDayVisitTotalForPricingFrequency(frequency = {}, opts = {}) {
@@ -2658,7 +2686,39 @@ function isAnnualPrepayEligibleServiceMix(recurring = [], oneTimeItems = []) {
   if (recurringRows.some((svc) => String(recurringServiceKey(svc) || '').startsWith('termite_bond'))) {
     return false;
   }
+  // Seasonal mosquito (9x Feb–Oct) can't annual-prepay yet either (codex r8
+  // P1): prepayCoverageCadenceForPattern rejects seasonal_feb_oct — the
+  // coverage seeder would place prepaid visits in winter — and the converter
+  // fails that conversion closed (ANNUAL_PREPAY_SEASONAL_CADENCE_UNSUPPORTED
+  // 422) AFTER a deposit may have been collected. Same shared-gate rule as
+  // termite bonds: this predicate feeds the SSR CTA, the /data flag, the
+  // accept preflight, AND /deposit-intent, so the option never shows and no
+  // money is taken for an acceptance shape the converter refuses.
+  if (recurringMixHasSeasonalMosquito(recurringRows)) return false;
   return true;
+}
+
+// The recurring mix carries the seasonal mosquito program (9x Feb–Oct):
+// mosquito + nine visits/year has exactly one cadence — the converter forces
+// the seasonal walk at seeding (converterFollowUpSeedingPattern). Resolved
+// through the seeder directly: the converter module is jest-mocked in
+// acceptance tests and must not be a dependency of these predicates. NOTE:
+// this is the ONE mix that is annual-prepay-INELIGIBLE while still owing the
+// WaveGuard setup fee at accept — everywhere else prepay-ineligible implies
+// the fee isn't charged (existing customers get it waived outright; termite
+// bonds carry no membership-fee mix) — so the fee-card sites must keep
+// showing the card for it, un-waivable.
+function recurringMixHasSeasonalMosquito(recurring = []) {
+  const rows = Array.isArray(recurring) ? recurring : [];
+  const RecurringAppointmentSeeder = require('../services/recurring-appointment-seeder');
+  return rows.some((svc) => {
+    if (RecurringAppointmentSeeder.serviceKeyFor(svc) !== 'mosquito') return false;
+    // First positive visits field, same order as the converter's
+    // visitsPerYearForRecurringService.
+    const visits = [svc.visitsPerYear, svc.appsPerYear, svc.visits, svc.apps, svc.treatmentsPerYear]
+      .map(Number).find((v) => Number.isFinite(v) && v > 0);
+    return visits === 9;
+  });
 }
 
 function mergeSupplementalRecurringRow(existing = {}, supplemental = {}) {
@@ -3171,6 +3231,15 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
     && serviceKeys.every((key) => key === 'tree_shrub');
   const isBoraCareOnly = oneTimeCategories.has('bora_care')
     && hasOnlyBoraCareServiceMix(recurringServices, intelligenceOneTimeItems);
+  // Pool/Lanai is a PEST pricing input (pool-cage adjustment) — owner
+  // 2026-07-23: the tile renders only when the estimate actually includes
+  // pest control (recurring or one-time), never on tree & shrub / termite /
+  // rodent-only compositions.
+  const hasPest = serviceKeys.includes('pest_control')
+    || !!inputServices.pest
+    || !!engineServices.pest
+    || inputs.svcPest === true
+    || oneTimeCategories.has('pest_control');
 
   const stories = firstPositiveNumber(inputs.stories, property.stories) || 1;
   const homeSqFt = firstPositiveNumber(
@@ -3228,23 +3297,27 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
     || engineServices.treeShrub
     || engineServices.tree_shrub
     || {};
-  const treeShrubBedArea = isTreeShrubOnly
+  // Tree & shrub tiles render on ANY mix that includes T&S (owner
+  // 2026-07-23: T&S estimates lead with tree/shrub density and bed area,
+  // not pool/lanai) — previously T&S-only.
+  const treeShrubBedArea = hasTreeShrub
     ? treeShrubBedAreaMetricValue({ treeShrubInputs, inputs, property, resultStats })
     : null;
-  const treeShrubProfile = isTreeShrubOnly
+  const treeShrubProfile = hasTreeShrub
     ? treeShrubProfileMetricValue({ treeShrubInputs, inputs, inputFeatures, property, propertyFeatures, resultStats })
     : null;
-  // Lawn estimates price off the treatable turf, so Pool/Lanai (lawn-only,
-  // owner ask 2026-07-09) and landscape Complexity (ANY mix including lawn —
-  // extended to pest+lawn bundles, owner ask 2026-07-10) read as irrelevant
-  // noise there.
+  // Landscape Complexity is suppressed on ANY mix including lawn (owner ask
+  // 2026-07-10) — lawn estimates price off treatable turf, so it reads as
+  // irrelevant noise there.
   const complexity = hasLawn ? null : prettySignalValue(
     aiAnalysis.landscape_complexity
     || aiAnalysis.landscapeComplexity
     || property.landscapeComplexity
     || inputs.landscapeComplexity
   );
-  const poolLanaiValue = isLawnOnly ? null : poolLanaiMetricValue({
+  // Pool/Lanai is a PEST pricing input (pool-cage adjustment) — pest
+  // compositions only (owner 2026-07-23; was everything-except-lawn-only).
+  const poolLanaiValue = !hasPest ? null : poolLanaiMetricValue({
     pool: firstFeaturePresence(
       inputs.pool,
       inputs.hasPool,
@@ -3274,6 +3347,49 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
       || propertyFeatures.poolCageSize
       || aiAnalysis.poolCageSize,
   });
+  // Mosquito estimates surface the near-water signal instead — standing
+  // water is the pressure/pricing driver there (owner 2026-07-23). Tile
+  // renders only when the signal is actually known. Real parcel/AI inputs
+  // often store ENUM strings (POND_ON_PROPERTY / CANAL_ADJACENT / CLOSE /
+  // waterProximity values), not yes/no booleans (codex P2 r3) — any
+  // non-empty value that isn't an explicit negative counts as present.
+  const nearWaterEnumPresence = (value) => {
+    const raw = String(value ?? '').trim();
+    if (!raw) return null;
+    const norm = raw.toUpperCase().replace(/[^A-Z0-9]+/g, '_');
+    if (/^(UNKNOWN|N_A|NULL|UNDEFINED)$/.test(norm)) return null;
+    if (/^(NONE|NO|FALSE|0|NOT_NEAR|NOT_NEAR_WATER|NO_WATER|FAR)$/.test(norm)) return 'no';
+    return 'yes';
+  };
+  const nearWaterCandidates = hasMosquito ? [
+    inputs.nearWater,
+    inputs.near_water,
+    inputs.waterProximity,
+    inputs.water_proximity,
+    inputFeatures.nearWater,
+    inputFeatures.waterProximity,
+    property.nearWater,
+    property.near_water,
+    property.waterProximity,
+    property.water_proximity,
+    propertyFeatures.nearWater,
+    propertyFeatures.waterProximity,
+    aiAnalysis.nearWater,
+    aiAnalysis.near_water,
+    aiAnalysis.waterProximity,
+    aiAnalysis.water_proximity,
+  ] : [];
+  // Boolean/yes-no shapes first (they're unambiguous); enum strings fall
+  // back to the presence mapping above — first decisive answer wins.
+  const nearWaterPresence = hasMosquito
+    ? (firstFeaturePresence(...nearWaterCandidates)
+      || nearWaterCandidates.map(nearWaterEnumPresence).find(Boolean)
+      || null)
+    : null;
+  const nearWaterValue = nearWaterPresence === 'yes' ? 'Yes'
+    : nearWaterPresence === 'possible' ? 'Possible'
+    : nearWaterPresence === 'no' ? 'No'
+    : null;
 
   const dedupeMetrics = (items) => {
     const seen = new Set();
@@ -3293,6 +3409,7 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
     mosquitoTreatmentAreaSqFt ? { label: 'Mosquito treatment area', value: `${Math.round(mosquitoTreatmentAreaSqFt).toLocaleString()} sq ft` } : null,
     mosquitoProgram ? { label: 'Mosquito program', value: mosquitoProgram } : null,
     mosquitoPressure ? { label: 'Mosquito pressure', value: mosquitoPressure } : null,
+    nearWaterValue ? { label: 'Near water', value: nearWaterValue } : null,
     poolLanaiValue ? { label: 'Pool/Lanai', value: poolLanaiValue } : null,
     treeShrubBedArea ? { label: 'Ornamental beds', value: `${Math.round(treeShrubBedArea).toLocaleString()} sq ft` } : null,
     treeShrubProfile ? { label: 'Trees/Shrubs', value: treeShrubProfile } : null,
@@ -3578,8 +3695,8 @@ function renderMembershipBlockHtml(membership) {
           <span class="wg-row-label">${escapeHtml(s.label)}</span>
           <span class="wg-row-val">
             +${s.extraDiscountPct}% off${Number(s.perVisitSavings) > 0
-              ? ` &middot; save ${money(s.perVisitSavings)}/visit${s.remainingVisits > 0
-                ? ` on your ${s.remainingVisits === 1 ? '' : `${s.remainingVisits} `}remaining${s.prepaid ? ' prepaid' : ''} ${s.remainingVisits === 1 ? 'visit' : 'visits'}`
+              ? ` &middot; save ${money(s.perVisitSavings)} per application${s.remainingVisits > 0
+                ? ` on your ${s.remainingVisits === 1 ? '' : `${s.remainingVisits} `}remaining${s.prepaid ? ' prepaid' : ''} ${s.remainingVisits === 1 ? 'application' : 'applications'}`
                 : ''}`
               : ''}
           </span>
@@ -3832,7 +3949,12 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
                 finalBody: 'No payment today.',
               }
             : {
-              recurringAssurance: 'Try us risk-free — 90-day money-back guarantee.',
+              // #2969 parity (owner 2026-07-23): the standalone risk-free /
+              // 90-day line was removed from the React page as a duplicate —
+              // the plan-terms strip below already carries the money-back
+              // guarantee. Factual assurance copy, matching the other
+              // categories' recurringAssurance lines.
+              recurringAssurance: 'Your plan includes scheduled pest treatments, visit notes, and treatment timing matched to Southwest Florida conditions.',
               aggregateDayLabel: 'complete home protection',
               billingHeading: 'Choose how you want to pay',
               billingLede: null,
@@ -4501,15 +4623,17 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     const price = oneTimeItemAmount(it);
     return price ? Math.round((sum + price) * 100) / 100 : sum;
   }, 0);
-  const realOneTimeRows = displayableOneTimeItems.map((it) => {
-    const price = oneTimeItemAmount(it);
-    const includedByServiceCredit = it.serviceSpecificDiscountApplied === true;
-    if (price <= 0 && !includedByServiceCredit) return '';
-    const detail = isTermiteInstallItem(it) ? formatTermiteBaitDetail(R.tmBait, it.detail) : it.detail;
-    const priceHtml = includedByServiceCredit ? 'Included' : fmtMoney(price);
-    return `<tr><td>${escapeHtml(friendlyOneTimeRowName(it) || 'One-time service')}${detail ? `<div class="sub">${escapeHtml(detail)}</div>` : ''}</td><td style="text-align:right">${priceHtml}</td></tr>`;
-  }).filter(Boolean).join('');
-  const hasRealOneTime = realOneTimeRows.length > 0;
+  const billableOneTimeItems = displayableOneTimeItems.filter((it) => (
+    oneTimeItemAmount(it) > 0 || it.serviceSpecificDiscountApplied === true
+  ));
+  const hasRealOneTime = billableOneTimeItems.length > 0;
+  // #2969 SSR parity (owner 2026-07-23): the React OneTimeBreakdownCard
+  // drops the total row on single-item breakdowns (the item line already
+  // states the price) and, on one-time-ONLY pages, also drops the lone
+  // row's dollars when they just repeat the hero figure — the row survives
+  // for the service NAME. A manual one-time discount re-introduces real
+  // arithmetic, so the full table stays; quote-required pages never reach
+  // here (displayableOneTimeItems is [] when quoteRequired).
   // Net the manual/custom one-time discount slice into the legacy (non-React)
   // HTML card so its itemized total matches the already-discounted hero and
   // accept totals. The slice never covers the termite install fee (kept at full
@@ -4517,6 +4641,30 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const manualOneTimeDiscount = (!quoteRequired && hasRealOneTime)
     ? Math.min(separatelyBilledOneTimeTotal, Math.max(0, Number(manualDiscount?.oneTimeAmount) || 0))
     : 0;
+  // "Single undiscounted row" requires the card's NET total to equal the
+  // lone billable row's amount: an engine/member discount row (e.g.
+  // one_time_adjustment −$110) isn't rendered as a row and isn't
+  // manualDiscount either, but it nets separatelyBilledOneTimeTotal below
+  // the gross row price — dropping the total row there would leave the page
+  // stating only the gross while accept charges the net (codex #2979 r1).
+  const loneBillableOneTimeAmount = billableOneTimeItems.length === 1
+    ? oneTimeItemAmount(billableOneTimeItems[0])
+    : null;
+  const oneTimeSingleRowNoDiscount = loneBillableOneTimeAmount != null
+    && manualOneTimeDiscount === 0
+    && Math.abs(separatelyBilledOneTimeTotal - loneBillableOneTimeAmount) < 0.005;
+  const suppressLoneOneTimeRowAmount = isOneTimeOnly
+    && oneTimeSingleRowNoDiscount
+    && billableOneTimeItems[0].serviceSpecificDiscountApplied !== true
+    && Math.abs(loneBillableOneTimeAmount - onetimeTotal) < 0.005;
+  const realOneTimeRows = billableOneTimeItems.map((it) => {
+    const price = oneTimeItemAmount(it);
+    const includedByServiceCredit = it.serviceSpecificDiscountApplied === true;
+    const detail = isTermiteInstallItem(it) ? formatTermiteBaitDetail(R.tmBait, it.detail) : it.detail;
+    const priceHtml = includedByServiceCredit ? 'Included' : fmtMoney(price);
+    const priceCell = suppressLoneOneTimeRowAmount ? '' : priceHtml;
+    return `<tr><td>${escapeHtml(friendlyOneTimeRowName(it) || 'One-time service')}${detail ? `<div class="sub">${escapeHtml(detail)}</div>` : ''}</td><td style="text-align:right">${priceCell}</td></tr>`;
+  }).join('');
   const manualOneTimeDiscountRowHtml = manualOneTimeDiscount > 0
     ? `<tr><td>${escapeHtml(manualDiscount.label || 'Discount')}<div class="sub">one-time</div></td><td style="text-align:right">−${fmtMoney(manualOneTimeDiscount)}</td></tr>`
     : '';
@@ -4528,7 +4676,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   <div class="card"${canChooseOneTime ? ' data-mode-only="recurring"' : ''} style="margin-top:24px">
     <h3>${isOneTimeOnly ? 'Service details' : 'One-time items (billed separately)'}</h3>
     <table>${oneTimeRows}${manualOneTimeDiscountRowHtml}
-      <tr><td><strong>${isOneTimeOnly ? 'Total' : 'One-time total'}</strong></td><td style="text-align:right"><strong>${fmtMoney(oneTimeRowsTotal)}</strong></td></tr>
+      ${oneTimeSingleRowNoDiscount ? '' : `<tr><td><strong>${isOneTimeOnly ? 'Total' : 'One-time total'}</strong></td><td style="text-align:right"><strong>${fmtMoney(oneTimeRowsTotal)}</strong></td></tr>`}
     </table>
     ${hasRealOneTime && !isOneTimeOnly ? `<p style="font-size:13px;opacity:.65;margin:12px 0 0">These are scheduled after your recurring service starts. The WaveGuard member rate includes 15% off any one-time treatment.</p>` : ''}
   </div>` : '';
@@ -4541,10 +4689,11 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     .map((p) => `<li>${escapeHtml(p)}</li>`)
     .join('');
   // All four GBP profiles (owner directive 2026-07-10 — was the first three).
+  // No `location`: the profile name already names it — "Waves Venice ·
+  // Venice" read double (owner directive 2026-07-23).
   const reviewFallbacks = LOCATIONS.map((l) => ({
     reviewerName: `Waves ${l.name}`,
     text: `Read current Google reviews for our ${l.name} location.`,
-    location: l.name,
     url: `https://www.google.com/maps/place/?q=place_id:${l.placeId}`,
     fallback: true,
   }));
@@ -5340,8 +5489,6 @@ ${shellTopBar()}
       <a href="mailto:${COMPANY.email}">${COMPANY.email}</a>
       <span class="dot">&middot;</span>
       <a href="tel:${COMPANY.phoneRaw}">${COMPANY.phone}</a>
-      <span class="dot">&middot;</span>
-      <a href="${WAVES_PRODUCTS_SAFETY_URL}" target="_blank" rel="noopener noreferrer">Products &amp; Safety</a>
     </div>
     <div class="site-footer-contact">${escapeHtml(COMPANY.address)}</div>
     <div class="site-footer-legal">&copy; ${new Date().getFullYear()} ${COMPANY.legalName}. All rights reserved.</div>
@@ -8021,9 +8168,11 @@ router.put('/:token/accept', async (req, res, next) => {
       }
     }
 
-    if (annualPrepaySelected && !isAnnualPrepayEligibleServiceMix(recurringSvcList, oneTimeList)) {
-      return res.status(400).json({ error: 'annual prepay is not available for this estimate' });
-    }
+    // Annual-prepay service-mix eligibility is adjudicated BELOW, after
+    // selectedFrequency resolves — a mosquito ladder pick overrides the
+    // stored default row in both directions (codex r10 P1): seasonal9 can't
+    // prepay even when the stored row is monthly, and monthly12 CAN prepay
+    // even when the stored row is seasonal.
     // Existing customers are pay-per-application only — the page never offers
     // prepay, but a stale/crafted client could still POST it. Reject so
     // EstimateConverter can't open an annual prepay invoice/term for them.
@@ -8047,6 +8196,29 @@ router.put('/:token/accept', async (req, res, next) => {
       || null;
     if (selectedFrequencyKey && !treatAsOneTime && !selectedFrequency) {
       return res.status(400).json({ error: 'selectedFrequency is not available for this estimate' });
+    }
+    // Tier-aware annual-prepay eligibility (codex r10 P1). Mosquito ladder
+    // entries carry their own annualPrepayEligible (finalizePricingBundle);
+    // that flag decides for the SELECTED tier — the stored-mix rule remains
+    // for everything else. Runs before any billing side effects.
+    if (annualPrepaySelected) {
+      // No raw serviceCadences adjudication here AT ALL (codex r21 P0 +
+      // r22 P2): with no combos this route IGNORES the map and books the
+      // selected/default tier, so a stale seasonal9 token must neither buy
+      // NOR block prepay — eligibility follows the selected frequency's
+      // stamped flag or the stored mix. When combos exist, the MATCHED
+      // combo's stamped flag is enforced right after combo resolution below
+      // (combos are always prepay-ineligible today), and an unmatched map
+      // 400s there.
+      const tierPrepayFlag = selectedFrequency && typeof selectedFrequency.annualPrepayEligible === 'boolean'
+        ? selectedFrequency.annualPrepayEligible
+        : null;
+      const prepayMixEligible = tierPrepayFlag != null
+        ? tierPrepayFlag
+        : isAnnualPrepayEligibleServiceMix(recurringSvcList, oneTimeList);
+      if (!prepayMixEligible) {
+        return res.status(400).json({ error: 'annual prepay is not available for this estimate' });
+      }
     }
     // Per-service cadence: in a bundle the customer may pick each selectable
     // service's cadence independently. `serviceCadences` maps a service key to
@@ -8080,6 +8252,13 @@ router.put('/:token/accept', async (req, res, next) => {
       }) || null;
       if (!selectedCombo) {
         return res.status(400).json({ error: 'selected service cadence combination is not available for this estimate' });
+      }
+      // A matched combo's server-stamped prepay flag is authoritative
+      // (codex r21 P0): combos span multiple recurring services and
+      // multi-service prepay is hard-blocked downstream, so an accept that
+      // selected one must not carry prepay past this point.
+      if (annualPrepaySelected && selectedCombo.annualPrepayEligible !== true) {
+        return res.status(400).json({ error: 'annual prepay is not available for this estimate' });
       }
     }
     // Re-base the visit-pricing frequency on the selected combo so BOTH the
@@ -8184,7 +8363,22 @@ router.put('/:token/accept', async (req, res, next) => {
         const svcRow = recurringSvcList.find((s) => recurringServiceKey(s) === svcKey);
         const ladder = bundleSectionLadderForService(svcKey, acceptedEstDataForPricing, svcRow || { service: svcKey }, rDisc);
         const tierEntry = ladder && ladder.find((e) => e.key === tierKey);
-        if (!tierEntry) continue;
+        if (!tierEntry) {
+          // A NULL ladder is the legitimate single-tier section (the stored
+          // row already IS the only offered tier — nothing to restamp). A
+          // PRESENT ladder that lacks the requested tier means the combo
+          // axes and the restamp ladder disagree (retired/crafted tier):
+          // accepting would commit the combo's totals while the rows keep
+          // their stored cadence — billed ≠ scheduled. Refuse instead of
+          // silently skipping (estimator audit 2026-07-24 P2).
+          if (ladder) {
+            return res.status(409).json({
+              error: 'One of this estimate’s plan options is no longer offered — pick a current option, or call Waves and we’ll refresh your quote.',
+              reason: 'service_cadence_tier_unavailable',
+            });
+          }
+          continue;
+        }
         if (svcKey === 'lawn_care') {
           acceptedEstDataForPricing = applySelectedLawnTierToEstimateData(acceptedEstDataForPricing, tierEntry);
         } else if (svcKey === 'tree_shrub') {
@@ -8241,7 +8435,12 @@ router.put('/:token/accept', async (req, res, next) => {
     const acceptPestRecurring = detectPestRecurring(recurringSvcList);
     const { monthlyOff: storedCadencePrefMonthlyOff } = computePrefDiscount(acceptPrefs, acceptPestRecurring, false, 0);
     const acceptPrefMonthlyOff = selectedFrequencyPestVisits
-      ? preferenceMonthlyOffForPestVisits(acceptPrefs, selectedFrequencyPestVisits, selectedFrequencyPestMonthlyBase)
+      ? preferenceMonthlyOffForPestVisits(
+        acceptPrefs,
+        selectedFrequencyPestVisits,
+        selectedFrequencyPestMonthlyBase,
+        pestPricingVersionOf(selectedFrequency, acceptPestRecurring),
+      )
       : storedCadencePrefMonthlyOff;
     const acceptTier = estimate.waveguard_tier || pricingBundle?.waveGuardTier || 'Bronze';
     const acceptEstResult = acceptedEstDataForPricing?.result || acceptedEstDataForPricing || {};
@@ -9909,6 +10108,20 @@ router.put('/:token/accept', async (req, res, next) => {
       }
     } catch (e) { logger.error(`[notifications] Estimate accepted notification failed: ${e.message}`); }
 
+    // Termite bait accepts prep the signable program agreement (draft +
+    // admin bell; customer send only behind
+    // GATE_TERMITE_PROGRAM_AGREEMENT_AUTOSEND). The service never throws
+    // and skips silently for non-termite estimates. Re-read the row so the
+    // agreement prefills from the ACCEPTED figures written above, not the
+    // pre-accept snapshot in memory.
+    if (customerId) {
+      try {
+        const { maybeCreateTermiteProgramAgreement } = require('../services/termite-program-agreement');
+        const acceptedRow = await db('estimates').where({ id: estimate.id }).first();
+        await maybeCreateTermiteProgramAgreement({ estimate: acceptedRow || estimate, customerId, req, billingTerm });
+      } catch (e) { logger.error(`[termite-agreement] accept hook failed: ${e.message}`); }
+    }
+
     // Customer-facing accepts should get the same admin phone workflow as a
     // quote request: call Adam from a Waves number during business hours, then
     // auto-bridge to the customer when the leadAutoBridge gate is enabled.
@@ -9970,7 +10183,7 @@ router.put('/:token/accept', async (req, res, next) => {
 });
 
 // PUT /api/estimates/:token/select-tier — customer selects a WaveGuard tier
-router.put('/:token/select-tier', async (req, res, next) => {
+router.put('/:token/select-tier', estimateToggleLimiter, async (req, res, next) => {
   try {
     const estimate = await db('estimates').where({ token: req.params.token }).first();
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
@@ -10059,15 +10272,20 @@ router.put('/:token/select-tier', async (req, res, next) => {
       return res.status(409).json({ error: 'Estimate is no longer active' });
     }
 
-    // Notify admin of tier selection
-    try {
-      const NotificationService = require('../services/notification-service');
-      await NotificationService.notifyAdmin('estimate',
-        `Tier upgrade: ${estimate.customer_name}`,
-        `Selected ${selectedTier} (was ${previousTier}) \u2014 $${monthlyTotal}/mo`,
-        { icon: '\u2B06\uFE0F', link: '/admin/estimates', metadata: { estimateId: estimate.id } }
-      );
-    } catch (e) { logger.error(`[estimate] Tier selection notification failed: ${e.message}`); }
+    // Notify admin of tier selection \u2014 only on an actual CHANGE. Re-clicking
+    // the already-selected tier is a no-op write and used to ring a fresh
+    // bell every time (estimator audit 2026-07-24); the toggle limiter
+    // bounds alternating spam.
+    if (selectedTier !== previousTier) {
+      try {
+        const NotificationService = require('../services/notification-service');
+        await NotificationService.notifyAdmin('estimate',
+          `Tier upgrade: ${estimate.customer_name}`,
+          `Selected ${selectedTier} (was ${previousTier}) \u2014 $${monthlyTotal}/mo`,
+          { icon: '\u2B06\uFE0F', link: '/admin/estimates', metadata: { estimateId: estimate.id } }
+        );
+      } catch (e) { logger.error(`[estimate] Tier selection notification failed: ${e.message}`); }
+    }
 
     logger.info(`[estimate] ${estimate.id}: selected ${selectedTier} tier (was ${previousTier}) — $${monthlyTotal}/mo`);
     res.json({ success: true, tier: selectedTier, monthlyTotal, annualTotal });
@@ -10350,7 +10568,7 @@ router.put('/:token/bond', bondTermSwitchLimiter, async (req, res, next) => {
   }
 });
 
-router.put('/:token/preferences', async (req, res, next) => {
+router.put('/:token/preferences', estimateToggleLimiter, async (req, res, next) => {
   try {
     const estimate = await db('estimates').where({ token: req.params.token }).first();
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
@@ -10770,10 +10988,13 @@ router.put('/:token/decline', async (req, res, next) => {
 const ADMIN_IP_ALLOWLIST = (process.env.WAVES_ADMIN_IPS || '')
   .split(',').map((s) => s.trim()).filter(Boolean);
 
+// Cadence pills carry their visit count in parens (owner 2026-07-23,
+// matching the mosquito "Seasonal (9 visits)" style — recurring services
+// only, never one-time labels).
 const FREQUENCY_LADDER = [
-  { key: 'quarterly',  label: 'Quarterly',   engineFrequency: 'quarterly' },
-  { key: 'bi_monthly', label: 'Bi-monthly',  engineFrequency: 'bimonthly' },
-  { key: 'monthly',    label: 'Monthly',     engineFrequency: 'monthly' },
+  { key: 'quarterly',  label: 'Quarterly (4 visits)',   engineFrequency: 'quarterly' },
+  { key: 'bi_monthly', label: 'Bi-monthly (6 visits)',  engineFrequency: 'bimonthly' },
+  { key: 'monthly',    label: 'Monthly (12 visits)',    engineFrequency: 'monthly' },
 ];
 
 function extractRequestIp(req) {
@@ -10841,6 +11062,24 @@ function extractEngineInputs(estData) {
       eligibilityConfirmed: true,
       floorBreachAcknowledged: opAdj.floorBreachAcknowledged === true,
     };
+  }
+  // Curve provenance for unstamped pest inputs (audit 2026-07-28): agent
+  // drafts persisted engineInputs WITHOUT services.pest.version, and the
+  // ladder replay below defaults unstamped → v1 — rendering (and accepting)
+  // a v2-priced draft at retired v1 bi-monthly/monthly prices. Resolve the
+  // sold curve from the stored result exactly like the save path
+  // (admin-estimate-persistence) does; only a truly evidence-less input is
+  // left unstamped for the legacy-replay default. Clone before stamping —
+  // `out.services` still references the stored estimate_data object.
+  if (out.services?.pest && typeof out.services.pest === 'object'
+    && !out.services.pest.version) {
+    const resolvedVersion = resolveStoredPestPricingVersion(estData);
+    if (resolvedVersion) {
+      out.services = {
+        ...out.services,
+        pest: { ...out.services.pest, version: resolvedVersion },
+      };
+    }
   }
   return out;
 }
@@ -11019,6 +11258,9 @@ function shapeFrequencyEntry(ladder, engineResult, engineInputs) {
         visitsPerYear: Number.isFinite(visits) && visits > 0 ? visits : null,
         monthlyBase: baseMonthly ? Math.round(baseMonthly * 100) / 100 : null,
         monthly: netMonthly,
+        // Curve stamp for the version-aware pest floors — the selected-
+        // frequency preference caps read it off these rows (codex #2966 r3).
+        ...(li.pricingVersion ? { pricingVersion: li.pricingVersion } : {}),
         estimatedDurationMinutes: firstPositiveNumber(li.estimatedDurationMinutes, li.estimated_duration_minutes) || null,
         // Carry the per-service cadence (foam has its own, e.g. bimonthly) so a
         // mixed plan whose top-level frequency is the generic quarterly ladder
@@ -11734,7 +11976,9 @@ function retiredTreeShrubRequoteNeeded(estData = null) {
     .map((row) => treeShrubTierKey(row))
     .filter((key) => ['light', 'standard', 'enhanced', 'premium'].includes(key));
   if (tierKeys.length) {
-    if (tierKeys.some((key) => key === 'light' || key === 'standard')) return false;
+    // enhanced (9x) is a live tier again as of 2026-07-23 (owner upsell
+    // directive); only a premium-only ladder still forces a requote.
+    if (tierKeys.some((key) => key === 'light' || key === 'standard' || key === 'enhanced')) return false;
     const { recurringSvcList } = acceptanceServiceLists(estData);
     return (recurringSvcList || []).map(recurringServiceKey).includes('tree_shrub');
   }
@@ -11805,36 +12049,37 @@ function recurringLawnRowAtRetiredCadence(estDataLike = null) {
   });
 }
 
-// Retired T&S tiers = anything that isn't the 6x Standard mandate or the 4x
-// Light downsell (v4.5). Detection mirrors the accept restamp: a selected
-// Enhanced card restamps the row to the tree_shrub_6week key, older stored
-// rows carry a 9/12 visit count or 6-week wording.
+// Retired T&S tiers = the 12x Premium only. The 9x Enhanced (every 6 weeks,
+// tree_shrub_6week) was un-retired 2026-07-23 (owner upsell directive) and
+// is a live cadence again — the seeder/plan-sync path (every_6_weeks,
+// 42-day interval) has been live since the multiservice booking lane.
+// Detection mirrors the accept restamp: a Premium-era stored row carries a
+// 12 visit count, a monthly cadence field, or 12-visit wording.
 function recurringTreeShrubRowAtRetiredCadence(estDataLike = null) {
   if (!estDataLike || typeof estDataLike !== 'object') return false;
   const { recurringSvcList } = acceptanceServiceLists(estDataLike);
   const { normalizeRecurringPattern } = require('../services/recurring-appointment-seeder');
   return (recurringSvcList || []).some((svc) => {
     if (recurringServiceKey(svc) !== 'tree_shrub') return false;
-    const key = String(svc?.serviceKey || svc?.service_key || '').trim();
-    if (key === 'tree_shrub_6week') return true;
     // Explicit cadence FIELDS first — the converter reads these before any
     // visit count or display text (explicitServiceCadence), so a crafted
     // row like { frequency: 'monthly' } with no visit count would schedule
     // the retired 12x Premium cadence while passing the checks below
-    // (codex P2 r1). Only the two live tiers' patterns are acceptable;
-    // field-less legacy rows fall through to the visit/text checks.
+    // (codex P2 r1). every_6_weeks is now a first-class seeder pattern
+    // (9x Enhanced un-retired 2026-07-24) and passes alongside the
+    // bimonthly/quarterly cadences.
     const fieldPattern = [svc?.frequency, svc?.frequencyKey, svc?.frequency_key, svc?.recurringPattern, svc?.recurring_pattern]
       .map((value) => normalizeRecurringPattern(value))
       .find(Boolean) || null;
-    if (fieldPattern && !['bimonthly', 'quarterly'].includes(fieldPattern)) return true;
+    if (fieldPattern && !['bimonthly', 'quarterly', 'every_6_weeks'].includes(fieldPattern)) return true;
     // Same alias set the converter's visitsPerYearForRecurringService reads
     // (codex P2 r2: a stale row shaped { appsPerYear: 9 } slipped through).
     const visits = Number(
       svc?.visitsPerYear ?? svc?.appsPerYear ?? svc?.visits ?? svc?.apps ?? svc?.treatmentsPerYear ?? svc?.v,
     );
-    if (Number.isFinite(visits) && visits > 0) return visits !== 4 && visits !== 6;
+    if (Number.isFinite(visits) && visits > 0) return visits !== 4 && visits !== 6 && visits !== 9;
     const text = String(svc?.name || svc?.label || svc?.displayName || '').toLowerCase();
-    return /\b(every\s*)?6\s*weeks?\b|\b(9|12)\s*(visits?|apps?|applications?)\b/.test(text);
+    return /\b12\s*(visits?|apps?|applications?)\b/.test(text);
   });
 }
 
@@ -11917,6 +12162,52 @@ function annualPrepayEligibleForEstimateData(estData) {
   if (estData.membershipSnapshot && estData.membershipSnapshot.isExistingCustomer) return false;
   const { recurringSvcList, oneTimeList } = acceptanceServiceLists(estData);
   return isAnnualPrepayEligibleServiceMix(recurringSvcList, oneTimeList);
+}
+
+// A mosquito ladder entry (seasonal9 / monthly12). The customer switches
+// tiers live, so prepay eligibility must follow the SELECTED tier, not the
+// stored default row (codex r10 P1): seasonal can't prepay, monthly can —
+// in BOTH directions of the default.
+function frequencyIsMosquitoTier(frequency = {}) {
+  return String(frequency?.serviceCategory || '') === 'mosquito';
+}
+
+function frequencyIsSeasonalMosquitoTier(frequency = {}) {
+  if (!frequencyIsMosquitoTier(frequency)) return false;
+  return String(frequency.key || frequency.tierKey || '') === 'seasonal9'
+    || Number(frequency.visitsPerYear) === 9;
+}
+
+// Bundle combo-axis token → mosquito tier stub for
+// annualPrepayEligibleForMosquitoTier; null when the token isn't a mosquito
+// ladder key. Lets accept and /deposit-intent honor a monthly12 axis on a
+// seasonal-default estimate (eligible) and refuse a seasonal9 axis on a
+// monthly-default one — the top-level frequency stays the pest cadence in a
+// bundle and carries no per-tier flag (codex r16 P2).
+function mosquitoTierForAxisToken(token) {
+  const t = String(token || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_');
+  if (t === 'seasonal9' || t === 'seasonal' || t === 'seasonal_feb_oct') {
+    return { serviceCategory: 'mosquito', key: 'seasonal9', visitsPerYear: 9 };
+  }
+  if (t === 'monthly12') return { serviceCategory: 'mosquito', key: 'monthly12', visitsPerYear: 12 };
+  return null;
+}
+
+// Prepay eligibility with the mix's mosquito row replaced by the given tier —
+// the same substitution acceptance performs when it restamps the selected
+// tier onto the row before conversion. All non-mosquito rules (existing
+// customer, termite bond, one-time-only) keep their normal effect.
+function annualPrepayEligibleForMosquitoTier(estData, frequency) {
+  if (!estData || typeof estData !== 'object') return false;
+  if (estData.membershipSnapshot && estData.membershipSnapshot.isExistingCustomer) return false;
+  if (frequencyIsSeasonalMosquitoTier(frequency)) return false;
+  const { recurringSvcList, oneTimeList } = acceptanceServiceLists(estData);
+  const RecurringAppointmentSeeder = require('../services/recurring-appointment-seeder');
+  const swapped = (recurringSvcList || []).map((svc) => (
+    RecurringAppointmentSeeder.serviceKeyFor(svc) === 'mosquito'
+      ? { service: 'mosquito', name: svc.name, visitsPerYear: Number(frequency?.visitsPerYear) || 12 }
+      : svc));
+  return isAnnualPrepayEligibleServiceMix(swapped, oneTimeList);
 }
 
 // Does annual prepay carry a SELLABLE incentive for this estimate? Mirrors
@@ -13420,13 +13711,15 @@ function treeShrubFrequenciesFromResultStats(estData = {}) {
         ? Math.max(0, roundMonthly(perTreatmentBase - (visits ? manualDiscountAmount / visits : 0)))
         : null;
       // House convention: T&S tiers display as cadences (4=Quarterly,
-      // 6=Bi-monthly, 9=Every 6 weeks). Light is the 4-visit Quarterly option.
+      // 6=Bi-monthly, 9=Every 6 weeks), with the visit count in parens on
+      // the pill (owner 2026-07-23). labelBase stays clean for the
+      // "<cadence> tree & shrub program" included line.
       const labelBase = tierKey === 'light' ? 'Quarterly'
         : tierKey === 'enhanced' ? 'Every 6 weeks'
         : 'Bi-monthly';
       return {
         key: tierKey,
-        label: labelBase,
+        label: visits ? `${labelBase} (${Math.round(visits)} visits)` : labelBase,
         serviceCategory: 'tree_shrub',
         serviceTierKey: tierKey,
         monthlyBase,
@@ -13435,6 +13728,10 @@ function treeShrubFrequenciesFromResultStats(estData = {}) {
         perTreatment,
         visitsPerYear: visits,
         billingFrequencyKey: 'monthly',
+        // Tier plans bill per application on accept (plan annual ÷ visits,
+        // estimate-converter) — suppress the "Billed $X/mo" note (owner
+        // 2026-07-23: billing is always per application).
+        ...(perTreatment != null && visits ? { billedPerApplication: true } : {}),
         manualDiscount: manualDiscount || null,
         recommended: row.recommended === true || row.isRecommended === true,
         selected: row.selected === true || row.isSelected === true,
@@ -13488,7 +13785,8 @@ function lawnTierKey(row = {}) {
   return raw.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || null;
 }
 
-const LAWN_CADENCE_LABEL = { basic: 'Quarterly', standard: 'Bi-monthly', enhanced: '9 visits / yr', premium: 'Monthly' };
+// Visit counts in parens + "Every 6 weeks" for the 9x tier (owner 2026-07-23).
+const LAWN_CADENCE_LABEL = { basic: 'Quarterly (4 visits)', standard: 'Bi-monthly (6 visits)', enhanced: 'Every 6 weeks (9 visits)', premium: 'Monthly (12 visits)' };
 
 // ── Lawn program minimum + retired cadences (owner directive 2026-07-09) ─────
 // The engine floors NEW quotes (priceLawnCare), but stored estimates carry
@@ -13832,7 +14130,8 @@ function hideFlooredLawnCadencesFromBundle(payload = {}, estData = {}) {
 // Mirrors treeShrubFrequenciesFromResultStats: only fires for lawn-only
 // estimates (when lawn is the sole recurring service); mixed bundles price
 // lawn inside the pest cadence. Pricing is unchanged — the 4/6/9/12 cost-floor
-// numbers, relabeled as Quarterly / Bi-monthly / 9 visits / yr / Monthly.
+// numbers, relabeled as Quarterly / Bi-monthly / Every 6 weeks / Monthly
+// (visit counts render on the pills — owner 2026-07-23).
 function lawnFrequenciesFromResultStats(estData = {}) {
   const resultStats = recurringResultStats(estData);
   const rows = Array.isArray(resultStats.lawn) ? resultStats.lawn : [];
@@ -13951,6 +14250,10 @@ function lawnFrequenciesFromRows(rows = [], estData = {}, manualDiscountOverride
         perTreatment,
         visitsPerYear: visits,
         billingFrequencyKey: 'monthly',
+        // Tier plans bill per application on accept (plan annual ÷ visits,
+        // estimate-converter) — suppress the "Billed $X/mo" note (owner
+        // 2026-07-23: billing is always per application).
+        ...(perTreatment != null && visits ? { billedPerApplication: true } : {}),
         manualDiscount: manualDiscount || null,
         ...(manualDiscountSuppressed ? { manualDiscountSuppressed: true } : {}),
         // Armed margin floor rides the entry so downstream repricers (the
@@ -14179,6 +14482,10 @@ function mosquitoFrequenciesFromResultStats(estData = {}) {
         perTreatment,
         visitsPerYear: visits,
         billingFrequencyKey: 'monthly',
+        // Tier plans bill per application on accept (plan annual ÷ visits,
+        // estimate-converter) — suppress the "Billed $X/mo" note (owner
+        // 2026-07-23: billing is always per application).
+        ...(perTreatment != null && visits ? { billedPerApplication: true } : {}),
         manualDiscount: manualDiscount || null,
         recommended: row.recommended === true || row.isRecommended === true,
         selected: row.selected === true || row.isSelected === true,
@@ -14273,6 +14580,10 @@ function foamFrequenciesFromV1Services(services = []) {
     perTreatment,
     visitsPerYear: visits,
     billingFrequencyKey: 'monthly',
+    // Tier plans bill per application on accept (plan annual ÷ visits,
+    // estimate-converter) — suppress the "Billed $X/mo" note (owner
+    // 2026-07-23: billing is always per application).
+    ...(perTreatment != null && visits ? { billedPerApplication: true } : {}),
     estimatedDurationMinutes,
     // foam_recurring is non-discountable (cadence multiplier is its only
     // discount), so no manual-discount shaping here.
@@ -14327,7 +14638,7 @@ function treeShrubTierRuntimeMeta(tierKey) {
         serviceKey: 'tree_shrub_quarterly',
         name: 'Quarterly Tree & Shrub Care Service',
         frequencyKey: 'quarterly',
-        label: 'Quarterly',
+        label: 'Quarterly (4 visits)',
         visitsPerYear: 4,
       };
     case 'standard':
@@ -14336,7 +14647,7 @@ function treeShrubTierRuntimeMeta(tierKey) {
         serviceKey: 'tree_shrub_program',
         name: 'Bi-Monthly Tree & Shrub Care Service',
         frequencyKey: 'bi_monthly',
-        label: 'Bi-monthly',
+        label: 'Bi-monthly (6 visits)',
         visitsPerYear: 6,
       };
     case 'enhanced':
@@ -14345,7 +14656,7 @@ function treeShrubTierRuntimeMeta(tierKey) {
         serviceKey: 'tree_shrub_6week',
         name: 'Every 6 Weeks Tree & Shrub Care Service',
         frequencyKey: 'every_6_weeks',
-        label: 'Every 6 weeks',
+        label: 'Every 6 weeks (9 visits)',
         visitsPerYear: 9,
       };
     default:
@@ -14543,10 +14854,10 @@ function applySelectedTreeShrubTierToEstimateData(estData = {}, frequency = {}) 
 // established (bi_monthly / every_6_weeks / monthly) so the accepted recurring
 // line rides the proven downstream scheduling + billing plumbing.
 const LAWN_CADENCE_RUNTIME = {
-  basic: { tierKey: 'basic', serviceKey: 'lawn_care_quarterly', name: 'Quarterly Lawn Care Service', frequencyKey: 'quarterly', label: 'Quarterly', visitsPerYear: 4 },
-  standard: { tierKey: 'standard', serviceKey: 'lawn_care_bimonthly', name: 'Bi-Monthly Lawn Care Service', frequencyKey: 'bi_monthly', label: 'Bi-monthly', visitsPerYear: 6 },
-  enhanced: { tierKey: 'enhanced', serviceKey: 'lawn_care_6week', name: 'Every 6 Weeks Lawn Care Service', frequencyKey: 'every_6_weeks', label: '9 visits / yr', visitsPerYear: 9 },
-  premium: { tierKey: 'premium', serviceKey: 'lawn_care_monthly', name: 'Monthly Lawn Care Service', frequencyKey: 'monthly', label: 'Monthly', visitsPerYear: 12 },
+  basic: { tierKey: 'basic', serviceKey: 'lawn_care_quarterly', name: 'Quarterly Lawn Care Service', frequencyKey: 'quarterly', label: 'Quarterly (4 visits)', visitsPerYear: 4 },
+  standard: { tierKey: 'standard', serviceKey: 'lawn_care_bimonthly', name: 'Bi-Monthly Lawn Care Service', frequencyKey: 'bi_monthly', label: 'Bi-monthly (6 visits)', visitsPerYear: 6 },
+  enhanced: { tierKey: 'enhanced', serviceKey: 'lawn_care_6week', name: 'Every 6 Weeks Lawn Care Service', frequencyKey: 'every_6_weeks', label: 'Every 6 weeks (9 visits)', visitsPerYear: 9 },
+  premium: { tierKey: 'premium', serviceKey: 'lawn_care_monthly', name: 'Monthly Lawn Care Service', frequencyKey: 'monthly', label: 'Monthly (12 visits)', visitsPerYear: 12 },
 };
 function lawnTierRuntimeMeta(tierKey) {
   return LAWN_CADENCE_RUNTIME[String(tierKey || '').trim().toLowerCase()] || null;
@@ -14988,24 +15299,27 @@ function frequencyFromTreatmentRow(baseFrequency = {}, key, row = {}, recurringS
     ? roundMonthly((anchorPrice * visitsPerYear) / 12)
     : firstPositiveNumber(row.monthlyBase) || monthly;
   if (monthly == null && monthlyBase == null) return null;
-  // Termite bait: stations are checked quarterly (owner directive
-  // 2026-07-10) and NEW estimates persist explicit perTreatment/visitsPerYear
-  // and are BILLED per application (owner 2026-07-20) — flag those so the
-  // card drops the "Billed $X/mo" note, which would misstate the charge.
-  // OLD payloads (perTreatment/visitsPerYear null) keep the display-only
-  // derivation ($29.75/mo → $89.25/check) AND the monthly note: their
-  // accept path still bills the flat monthly, so the note stays truthful
-  // for exactly the estimates it still applies to.
+  // Rows carrying explicit per-application data (per-visit price + visit
+  // count) are BILLED per application on accept for every estimate-flow
+  // customer, not just termite bait: estimate-converter stamps
+  // billing_mode='per_application' and charges plan annual ÷ visits per
+  // completion (owner rulings 2026-07-09 / 2026-07-23: billing is always
+  // per application). Flag them so the card drops the "Billed $X/mo" note,
+  // which would misstate the charge. The lone monthly-billed acceptor is a
+  // CURRENT monthly member adding on (converter preservesExistingMembership)
+  // — their card leads with the same per-application headline either way.
+  // OLD flat-monthly payloads (perTreatment/visitsPerYear null, e.g.
+  // pre-flag termite monitoring) keep the display-only derivation
+  // ($29.75/mo → $89.25/check) AND the monthly note: without a visit count
+  // the converter's per-application division can't run, so their accept
+  // path still bills the flat monthly and the note stays truthful for
+  // exactly the estimates it still applies to.
   let effectiveVisits = visitsPerYear;
-  let billedPerApplication = false;
-  if (key === 'termite_bait') {
-    if (displayPrice && visitsPerYear) {
-      billedPerApplication = true;
-    } else if (monthly != null) {
-      const TERMITE_CHECKS_PER_YEAR = 4;
-      effectiveVisits = TERMITE_CHECKS_PER_YEAR;
-      displayPrice = roundMonthly((monthly * 12) / TERMITE_CHECKS_PER_YEAR);
-    }
+  const billedPerApplication = !!(displayPrice && visitsPerYear);
+  if (key === 'termite_bait' && !billedPerApplication && monthly != null) {
+    const TERMITE_CHECKS_PER_YEAR = 4;
+    effectiveVisits = TERMITE_CHECKS_PER_YEAR;
+    displayPrice = roundMonthly((monthly * 12) / TERMITE_CHECKS_PER_YEAR);
   }
 
   const useSelectableCadence = key === 'pest_control' || useBaseFrequencyKey;
@@ -15014,10 +15328,19 @@ function frequencyFromTreatmentRow(baseFrequency = {}, key, row = {}, recurringS
     || row.label
     || recurringServiceDisplayName(key)
     || 'Recurring service';
+  // Mirrored non-pest sections track the pest cadence KEY (the bundle has
+  // one selector) but must not wear the pest ladder's visit counts over
+  // their own card — "Bi-monthly (6 visits)" on a 9-application lawn
+  // program misstates the program (audit 2026-07-28). Keep the cadence
+  // word, drop the parenthetical; the card's own sub-label renders this
+  // service's real visit count from its row's visitsPerYear.
+  const selectableLabel = key === 'pest_control'
+    ? (baseFrequency.label || fallbackLabel)
+    : (String(baseFrequency.label || '').replace(/\s*\(\d+\s+visits?\)\s*$/i, '') || fallbackLabel);
   return {
     key: useSelectableCadence ? baseFrequency.key : 'recurring',
     label: useSelectableCadence
-      ? (baseFrequency.label || fallbackLabel)
+      ? selectableLabel
       : fallbackLabel,
     monthlyBase,
     monthly,
@@ -15055,6 +15378,10 @@ function frequencyFromRecurringService(recurringService = {}, key, recurringDisc
     perTreatment: perTreatment || null,
     perVisit: key === 'pest_control' ? (perTreatment || null) : null,
     visitsPerYear: visitsPerYear || null,
+    // Same rule as frequencyFromTreatmentRow: a known visit count means the
+    // converter bills per application (plan annual ÷ visits) — no visit
+    // count means the flat-monthly cadence fallback, where the note stays.
+    ...(perTreatment > 0 && visitsPerYear > 0 ? { billedPerApplication: true } : {}),
     included: includedRowsForServiceFrequency({}, key, recurringService),
     addOns: [],
     quoteRequired: false,
@@ -15170,6 +15497,13 @@ function nonPestTierBaseMap(resultStats = {}, programMinMonthly, { lawnCostFloor
       // Retired lawn cadences (basic/Quarterly) must not be a selectable
       // combo axis on old stored estimates either.
       if (serviceKey === 'lawn_care' && isRetiredLawnTierKey(tierKey)) continue;
+      // Retired T&S Premium (12x) likewise (estimator audit 2026-07-24 P2):
+      // pre-v4.5 stored rows still carry it, and the section ladder
+      // whitelists light/standard/enhanced — a premium combo would price
+      // totals whose tier restamp can never apply, committing an accept
+      // whose billed total diverges from the scheduled program. Enhanced
+      // (9x) stays: un-retired as the every-6-weeks upsell (#2968).
+      if (serviceKey === 'tree_shrub' && tierKey === 'premium') continue;
       const v = finiteNumberOrNull(row.v ?? row.visits ?? row.visitsPerYear ?? row.frequency);
       let mo = finiteNumberOrNull(row.mo ?? row.monthly);
       let ann = finiteNumberOrNull(row.ann ?? row.annual) ?? (mo != null ? roundMonthly(mo * 12) : null);
@@ -15707,10 +16041,85 @@ function sectionTierEligibleFromKeys(isRecurring, memberKeys = []) {
   return !!isRecurring && (Array.isArray(memberKeys) ? memberKeys : []).some((k) => TIER_BADGE_ELIGIBLE_KEYS.has(k));
 }
 
-function buildRenderFlags(payload = {}, services = [], combinedRecurring = null) {
+// Engine inputs for the buy-vs-rent comparison replays. Admin-builder saves
+// store the replayable payload as engineRequest = { profile,
+// selectedServices, options } (estimate_data.inputs there is the FLATTENED
+// form — svcTermiteBait etc. — which has no `services` and would fail the
+// builder's guard; codex P1 on #3001). Translate it exactly like
+// serverRecomputeFromEstimateData does, then feed the result back through
+// extractEngineInputs so the saved-floor replay overrides,
+// priorQualifyingServices, and operator price adjustment all apply the same
+// way they do for engine-shaped saves.
+function comparisonEngineInputs(estData) {
+  if (!estData || typeof estData !== 'object') return null;
+  const req = estData.engineRequest;
+  if (req && typeof req === 'object' && req.profile) {
+    try {
+      const { translateV2CallToV1Input } = require('./property-lookup-v2');
+      const base = translateV2CallToV1Input(
+        req.profile,
+        Array.isArray(req.selectedServices) ? req.selectedServices : [],
+        req.options || {},
+      );
+      if (base && typeof base === 'object') {
+        return extractEngineInputs({ ...estData, engineInputs: base });
+      }
+    } catch (_err) { /* fall through to the stored input shapes */ }
+  }
+  return extractEngineInputs(estData);
+}
+
+// Per-ESTIMATE availability for the comparison-sheet link (codex P1 on
+// #3001): the gate alone is not enough — the rental gate being off, a
+// commercial property, or an unpriceable uplift all make the builder
+// fail-closed and the PDF 404, so the link must not render. Runs the same
+// fail-closed builder the PDF route runs; cheap pre-filters keep the two
+// engine replays off every non-termite /data call, and a per-request memo
+// (keyed on the parsed estData object) keeps repeat buildRenderFlags calls
+// on the same payload — attach + finalize, cached bundles included — from
+// replaying the engine again (codex P2, round 3).
+const termiteComparisonAvailabilityMemo = new WeakMap();
+function termiteComparisonAvailableForEstimate(estData, services = [], estimate = null) {
+  const { termiteComparisonGateOn, buildTermiteComparisonData } = require('../services/termite-warranty-comparison');
+  if (!termiteComparisonGateOn()) return false;
+  if (!estData || typeof estData !== 'object') return false;
+  // Unsplit multi-service estimates render ONE 'bundle' section carrying
+  // the real services in memberKeys (codex P2, round 3) — a bundled
+  // termite program must still offer the sheet.
+  const hasTermiteSection = services.some((section) => section?.key === 'termite_bait'
+    || (Array.isArray(section?.memberKeys) && section.memberKeys.includes('termite_bait')));
+  if (!hasTermiteSection) return false;
+  if (termiteComparisonAvailabilityMemo.has(estData)) {
+    return termiteComparisonAvailabilityMemo.get(estData);
+  }
+  let available = false;
+  try {
+    // Same guards as the PDF route — selectedTier, quote-time discount, AND
+    // the stored-quote reproduction check: a quote the replay can't
+    // reproduce must hide the link, not 404 it.
+    const { persistedTermiteQuoteFromEstimateData } = require('../services/termite-warranty-comparison');
+    const persistedQuote = persistedTermiteQuoteFromEstimateData(estData);
+    available = persistedQuote != null && buildTermiteComparisonData(comparisonEngineInputs(estData), {
+      selectedTier: estimate?.waveguard_tier || null,
+      expectedTierDiscount: estimate?.waveguard_tier
+        ? tierDiscountForEstimate(estData, estimate.waveguard_tier)
+        : null,
+      persistedQuote,
+    }) != null;
+  } catch (_err) {
+    available = false;
+  }
+  termiteComparisonAvailabilityMemo.set(estData, available);
+  return available;
+}
+
+function buildRenderFlags(payload = {}, services = [], combinedRecurring = null, estData = null, estimate = null) {
   const hasRecurringPest = services.some((section) => section?.isPest && section?.isRecurring);
   const hasPestOneTime = services.some((section) => section?.isPest && !section?.isRecurring);
-  const hasWaivableSetupFee = services.some((section) => section?.isRecurring && section?.setupFee?.waivedWithPrepay);
+  // Waivability no longer matters for showing the card: seasonal mosquito
+  // carries a NON-waivable setup fee (prepay isn't offered for it) that the
+  // converter still charges — the card must render either way.
+  const hasSetupFeeCard = services.some((section) => section?.isRecurring && section?.setupFee);
   // Tier UI shows when any recurring section is badge-eligible. Derived from the
   // same per-section flag the client reads, so the global gate and the per-section
   // badge can never disagree. Pest-only setup fee/perks/add-ons stay on
@@ -15723,13 +16132,17 @@ function buildRenderFlags(payload = {}, services = [], combinedRecurring = null)
     showRecurringSummary: combinedRecurring != null,
     showWaveGuardTierUi: hasRecurringPest || hasTierBadgeRecurringService || hasDiscountContext || qualifyingCount > 1,
     showWaveGuardPerks: hasRecurringPest || qualifyingCount > 1 || hasDiscountContext,
-    showWaveGuardSetupFee: hasRecurringPest || hasWaivableSetupFee,
+    showWaveGuardSetupFee: hasRecurringPest || hasSetupFeeCard,
     showPestRecurringAddOns: hasRecurringPest && !payload.quoteRequired,
     showOneTimePestAddOns: false && hasPestOneTime,
     // Per-service "email/text me the full details PDF" buttons (live by
     // default — owner approved the packet copy 2026-07-11;
     // GATE_SERVICE_DETAILS_PDF=false is the kill switch).
     showServiceDetailsRequest: process.env.GATE_SERVICE_DETAILS_PDF !== 'false',
+    // Buy-vs-rent options sheet link on the termite section (dark, explicit
+    // opt-in). Computed per estimate with the SAME fail-closed builder the
+    // PDF route runs (codex P1) — the link never renders toward a 404.
+    showTermiteComparison: termiteComparisonAvailableForEstimate(estData, services, estimate),
   };
 }
 
@@ -15865,7 +16278,7 @@ function attachPublicPricingContract(payload = {}, estimate = {}, estData = {}) 
     ...contractPayload,
     services,
     combinedRecurring,
-    renderFlags: buildRenderFlags(contractPayload, services, combinedRecurring),
+    renderFlags: buildRenderFlags(contractPayload, services, combinedRecurring, estData, estimate),
     askChips,
     oneTimeBreakdown: contractPayload.oneTimeBreakdown,
     quoteRequired: contractPayload.quoteRequired === true || sectionQuoteRequired,
@@ -16083,6 +16496,47 @@ function finalizePricingBundle(payload = {}, estimate = {}, estData = {}) {
     && !annualPrepayHasSellableIncentive(estimate, estData, withQuoteState)) {
     withQuoteState.annualPrepayEligible = false;
   }
+  // Per-tier prepay eligibility for the mosquito ladder (codex r10 P1): the
+  // estimate-level flag reflects the STORED default row, but seasonal9 can't
+  // prepay while monthly12 can — stamp each mosquito frequency so the client
+  // resolves the option from the SELECTED tier. Accept and /deposit-intent
+  // enforce the same per-tier rule server-side. The sellable-incentive gate
+  // applies to tiers too (codex r12 P1): an operator-waived setup fee leaves
+  // monthly-mosquito prepay with NO benefit, and the tier flag must not
+  // resurrect an option the global gate correctly disabled.
+  const hasMosquitoTierFrequencies = Array.isArray(withQuoteState.frequencies)
+    && withQuoteState.frequencies.some(frequencyIsMosquitoTier);
+  const hasMosquitoAxisCombos = Array.isArray(withQuoteState.serviceCadenceCombos)
+    && withQuoteState.serviceCadenceCombos.some((combo) => !!mosquitoTierForAxisToken(combo?.selection?.mosquito));
+  if (hasMosquitoTierFrequencies || hasMosquitoAxisCombos) {
+    const tierIncentive = annualPrepayHasSellableIncentive(estimate, estData, withQuoteState);
+    if (hasMosquitoTierFrequencies) {
+      withQuoteState.frequencies = withQuoteState.frequencies.map((frequency) => (
+        frequencyIsMosquitoTier(frequency)
+          ? {
+            ...frequency,
+            annualPrepayEligible: tierIncentive
+              && annualPrepayEligibleForMosquitoTier(estData, frequency),
+          }
+          : frequency));
+    }
+    // Bundle combos carry the mosquito tier on their selection axis — stamp
+    // authoritative eligibility on each so the client renders from the
+    // matched combo (codex r18 P1). A combo by definition spans MULTIPLE
+    // recurring services, and multi-service annual prepay is hard-blocked
+    // everywhere downstream (/deposit-intent rejects unit counts above one;
+    // the converter throws ANNUAL_PREPAY_MULTI_SERVICE_UNSUPPORTED), so the
+    // stamp is always FALSE (codex r19 P1) — offering it would lead every
+    // checkout into a deterministic failure. The monthly12-axis restore case
+    // only exists for SOLO mosquito, which has no combos and resolves via
+    // the per-frequency stamp above.
+    if (hasMosquitoAxisCombos) {
+      withQuoteState.serviceCadenceCombos = withQuoteState.serviceCadenceCombos.map((combo) => (
+        mosquitoTierForAxisToken(combo?.selection?.mosquito)
+          ? { ...combo, annualPrepayEligible: false }
+          : combo));
+    }
+  }
   // After the contract attaches sections, hide floor-clamped lawn cadences on
   // every path (fresh build, send-snapshot fast path, pricing cache) — dropped
   // top-level entries move to hiddenLawnFrequencies for accept resolution.
@@ -16099,7 +16553,7 @@ function finalizePricingBundle(payload = {}, estimate = {}, estData = {}) {
     quoteRequired: quoteState.quoteRequired,
     quoteRequiredReason: quoteState.reason,
     quoteRequiredItems: quoteState.items,
-    renderFlags: buildRenderFlags({ ...withContract, quoteRequired: quoteState.quoteRequired }, withContract.services, withContract.combinedRecurring),
+    renderFlags: buildRenderFlags({ ...withContract, quoteRequired: quoteState.quoteRequired }, withContract.services, withContract.combinedRecurring, estData, estimate),
   };
 }
 
@@ -16222,7 +16676,13 @@ function shapeFromV1(v1, ladder, pestTier, prefs, options = {}) {
     : null;
   const nonPestServices = v1.services.filter((svc) => !isPestServiceName(svc?.name));
   const pestRecurring = pestTier
-    ? { monthlyBase: pestMoBefore, visitsPerYear: Number(pestTier.apps || pestTier.v || 4) || 4 }
+    ? {
+      monthlyBase: pestMoBefore,
+      visitsPerYear: Number(pestTier.apps || pestTier.v || 4) || 4,
+      // Version-aware preference cap: the mapped tier row carries the curve
+      // stamp; unstamped legacy tiers read as v1 (codex #2966 r3 P2).
+      pricingVersion: pestPricingVersionOf(pestTier),
+    }
     : null;
   const { monthlyOff } = computePrefDiscount(prefs, pestRecurring, false, 0);
   const discountMonthly = (monthly, svc) => {
@@ -16539,7 +16999,16 @@ function pricingBundleMissingRequiredSetupFee(bundle = {}, estData = {}) {
   if (Array.isArray(bundle.oneTimeBreakdown?.items)
     && bundle.oneTimeBreakdown.items.some(isSetupRow)) return false;
   if (bundle.setupFee && bundle.setupFee.service === 'waveguard_setup') return false;
-  if (!annualPrepayEligibleForEstimateData(estData)) return false;
+  // Seasonal mosquito is prepay-INELIGIBLE yet still owes the setup fee
+  // (codex r14 P1): the eligibility early-return alone would let pre-rule
+  // fee-less sendSnapshots fast-path forever, hiding a fee acceptance
+  // invoices. Recognize the fee-due seasonal mix the same way the fee-card
+  // sites do; existing customers keep the outright waiver (no recompute).
+  const stalePrepayEligible = annualPrepayEligibleForEstimateData(estData);
+  const staleSeasonalFeeDue = !stalePrepayEligible
+    && !estData?.membershipSnapshot?.isExistingCustomer
+    && recurringMixHasSeasonalMosquito(estimateDataRecurringServices(estData));
+  if (!stalePrepayEligible && !staleSeasonalFeeDue) return false;
   return require('../services/estimate-converter').shouldIncludeWaveGuardSetupFeeForRecurring({
     recurringServices: estimateDataRecurringServices(estData),
     estimateData: estData,
@@ -16574,6 +17043,27 @@ function resolveAnnualPrepayInvoiceAmount(annualTotal, monthlyTotal) {
 // basis, so it is stripped from every customer-bound bundle shape (margin
 // data is surfaced to the OWNER, never to customers). Depth-bounded clone:
 // never mutates the cached bundle.
+// Internal review-lane fields ride one-time breakdown items for admin
+// surfaces and the quote-required reason note. On PRICED (non-quote-required)
+// items nothing customer-facing consumes them — dropping them at the public
+// boundary keeps the review lane server-side. Quote-required items keep the
+// full set: quoteRequiredReasonCandidates humanizes them into the customer's
+// reason note (client lib quoteDisplay.js).
+const ONE_TIME_ITEM_REVIEW_FIELDS = ['warning', 'warningText', 'warnings', 'manualReviewReasons', 'measurementWarnings'];
+function sanitizePublicOneTimeBreakdown(breakdown) {
+  if (!breakdown || typeof breakdown !== 'object' || !Array.isArray(breakdown.items)) return breakdown;
+  return {
+    ...breakdown,
+    items: breakdown.items.map((item) => {
+      if (!item || typeof item !== 'object') return item;
+      if (item.quoteRequired === true || item.kind === 'quote_required') return item;
+      const out = { ...item };
+      for (const key of ONE_TIME_ITEM_REVIEW_FIELDS) delete out[key];
+      return out;
+    }),
+  };
+}
+
 function stripInternalMarginFieldsDeep(value, depth = 0) {
   if (depth > 6 || !value || typeof value !== 'object') return value;
   if (Array.isArray(value)) return value.map((entry) => stripInternalMarginFieldsDeep(entry, depth + 1));
@@ -16585,7 +17075,141 @@ function stripInternalMarginFieldsDeep(value, depth = 0) {
   return out;
 }
 
+// Codex P1s (#2978 r1-r2): a CURRENT monthly member adding on keeps monthly
+// membership billing at accept (estimate-converter preservesExistingMembership),
+// so for exactly that audience the "Billed $X/mo" note IS the truthful
+// disclosure — the per-application flag must not suppress it. The lane is
+// resolved LIVE from the linked customer row via the SAME shared predicate
+// the converter uses (customerPreservesMonthlyMembership, billing-cadence.js):
+// a save-time snapshot would go stale when the customer changes lanes, and a
+// membership snapshot doesn't even exist for monthly members without
+// qualifying recurring rows. Enforcement is symmetric — preserved members
+// get every flag stripped, everyone else gets missing flags ADDED on the
+// tier-plan surfaces, so pre-flag send snapshots (sent before this change)
+// serve the same disclosure as fresh builds.
+async function estimateCustomerPreservesMonthlyBilling(estimate) {
+  if (!estimate?.customer_id && !estimate?.customer_phone) return false;
+  try {
+    let customer = null;
+    if (estimate.customer_id) {
+      customer = await db('customers').where({ id: estimate.customer_id }).first();
+    } else {
+      // UNLINKED estimates link at accept through this same matcher
+      // (matchAcceptCustomerByPhone → convertEstimate, the #2680 r3
+      // shared-resolution contract) — resolve the prospective customer
+      // identically so the disclosure matches the billing accept will
+      // actually apply (codex #2978 r4). Ambiguous matches return null,
+      // exactly like accept (no link → converts per-application).
+      ({ match: customer } = await matchAcceptCustomerByPhone(estimate));
+    }
+    if (!customer) return false;
+    return BillingCadence.customerPreservesMonthlyMembership(customer);
+  } catch (e) {
+    // Unknown lane with a customer signal present: keep the monthly
+    // disclosure. Wrongly suppressing it hides a description of a real
+    // charge; wrongly showing it merely over-discloses for one transient
+    // failure window.
+    logger.warn(`[estimate-public] billing-lane lookup failed for estimate ${estimate?.id}: ${e.message}`);
+    return true;
+  }
+}
+
+// Pre-migration compatibility (codex #2978 r3, mirrors estimate-converter):
+// on a database without migration 20260709000010's billing_mode /
+// per_application_fee columns (an explicitly supported preview /
+// deploy-window state) the converter keeps the LEGACY update shape — every
+// accept bills through the monthly cron — so per-application billing does
+// not exist and the monthly note is the truthful disclosure for everyone.
+// A migrated database never un-migrates, so a true probe is cached forever;
+// while false we re-probe per build — the window is short. Fail directions
+// differ from the probe SUCCEEDING false: a probe ERROR means the database
+// is unreachable (the page is failing anyway), not pre-migration — assume
+// migrated so the display logic keeps working; the converter's error→legacy
+// choice is about WRITE safety (never write columns that may not exist),
+// which doesn't apply to a display flag.
+let perApplicationColumnsKnownPresent = false;
+async function perApplicationBillingColumnsExist() {
+  if (perApplicationColumnsKnownPresent) return true;
+  try {
+    perApplicationColumnsKnownPresent = await db.schema.hasColumn('customers', 'billing_mode');
+    return perApplicationColumnsKnownPresent;
+  } catch {
+    return true;
+  }
+}
+// Test-only: lets suites exercise the pre-migration branch after a true
+// probe has been cached.
+function resetPerApplicationColumnsProbeForTests() {
+  perApplicationColumnsKnownPresent = false;
+}
+
+// Copying transforms, mirroring stripInternalMarginFieldsDeep — the pricing
+// cache must keep the raw bundle (the enforcement is lane-conditional).
+function stripBilledPerApplicationDeep(value, depth = 0) {
+  if (depth > 6 || !value || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return value.map((entry) => stripBilledPerApplicationDeep(entry, depth + 1));
+  const out = {};
+  for (const [key, nested] of Object.entries(value)) {
+    if (key === 'billedPerApplication') continue;
+    out[key] = stripBilledPerApplicationDeep(nested, depth + 1);
+  }
+  return out;
+}
+
+// Tier-plan surfaces whose accept path bills per application (plan annual ÷
+// visits). Deliberately EXCLUDES termite_bait/pest sections: legacy
+// flat-monthly termite rows carry a derived per-visit price + visit count
+// yet genuinely bill the flat monthly — their entries must keep the note
+// (the #2965 carve-out), and only the builders can tell those payloads
+// apart, so snapshot back-fill never touches them.
+const TIER_BILLED_PER_APP_SECTION_KEYS = new Set(['lawn_care', 'tree_shrub', 'mosquito', 'foam_recurring']);
+
+function frequencyEntryLooksPerApplication(entry) {
+  return !!entry && typeof entry === 'object'
+    && entry.quoteRequired !== true
+    && Number(entry.perTreatment) > 0
+    && Number(entry.visitsPerYear) > 0;
+}
+
+function withBilledPerApplicationFlag(entry) {
+  return frequencyEntryLooksPerApplication(entry) && entry.billedPerApplication !== true
+    ? { ...entry, billedPerApplication: true }
+    : entry;
+}
+
+function addMissingBilledPerApplicationFlags(bundle) {
+  const out = { ...bundle };
+  const mapTopLevel = (freqs) => (Array.isArray(freqs)
+    ? freqs.map((entry) => (
+      TIER_BILLED_PER_APP_SECTION_KEYS.has(entry?.serviceCategory)
+        ? withBilledPerApplicationFlag(entry)
+        : entry
+    ))
+    : freqs);
+  out.frequencies = mapTopLevel(out.frequencies);
+  out.hiddenLawnFrequencies = mapTopLevel(out.hiddenLawnFrequencies);
+  if (Array.isArray(out.services)) {
+    out.services = out.services.map((section) => (
+      section && TIER_BILLED_PER_APP_SECTION_KEYS.has(section.key) && Array.isArray(section.frequencies)
+        ? { ...section, frequencies: section.frequencies.map(withBilledPerApplicationFlag) }
+        : section
+    ));
+  }
+  return out;
+}
+
 async function buildPricingBundle(estimate) {
+  const bundle = await buildPricingBundleInner(estimate);
+  if (!bundle || typeof bundle !== 'object') return bundle;
+  if (!(await perApplicationBillingColumnsExist())) {
+    return stripBilledPerApplicationDeep(bundle);
+  }
+  return (await estimateCustomerPreservesMonthlyBilling(estimate))
+    ? stripBilledPerApplicationDeep(bundle)
+    : addMissingBilledPerApplicationFlags(bundle);
+}
+
+async function buildPricingBundleInner(estimate) {
   cleanupEstimatePricingCache();
   const estData = typeof estimate.estimate_data === 'string'
     ? JSON.parse(estimate.estimate_data)
@@ -16752,12 +17376,21 @@ async function buildPricingBundle(estimate) {
     // prepay-eligible too but carry no setup fee.
     const membershipFeeMixApplies = require('../services/estimate-converter')
       .recurringMixHasMembershipFeeService(v1.services);
-    if (annualPrepayEligible && membershipFeeMixApplies) {
+    // Seasonal mosquito is prepay-INELIGIBLE but still owes the setup fee at
+    // accept (codex r8: hiding the prepay CTA must not also hide a fee the
+    // converter charges). Existing customers stay excluded — their fee is
+    // waived outright.
+    const seasonalSetupFeeDue = membershipFeeMixApplies
+      && !annualPrepayEligible
+      && !estData?.membershipSnapshot?.isExistingCustomer
+      && recurringMixHasSeasonalMosquito(v1.services);
+    if ((annualPrepayEligible || seasonalSetupFeeDue) && membershipFeeMixApplies) {
       firstVisitFees.push({
         service: 'waveguard_setup',
         amount: Number(v1.membershipFee || PEST.initialFee || 99) || 99,
         label: 'WaveGuard setup',
-        waivedWithPrepay: true,
+        // No waiver note when prepay isn't offered (seasonal mosquito).
+        waivedWithPrepay: annualPrepayEligible,
       });
     }
     const initialRoachItem = findInitialRoachItem(v1.pestTiers, estData);
@@ -16786,7 +17419,7 @@ async function buildPricingBundle(estimate) {
       if (!membershipFeeMixApplies && rawV1OneTimeTotal && v1.membershipFee > 0) {
         return Math.max(0, Math.round((rawV1OneTimeTotal - v1.membershipFee) * 100) / 100);
       }
-      if (membershipFeeMixApplies && annualPrepayEligible && !(v1.membershipFee > 0)) {
+      if (membershipFeeMixApplies && (annualPrepayEligible || seasonalSetupFeeDue) && !(v1.membershipFee > 0)) {
         const fee = Number(PEST.initialFee || 99) || 99;
         return Math.round(((Number(rawV1OneTimeTotal) || 0) + fee) * 100) / 100;
       }
@@ -16809,7 +17442,7 @@ async function buildPricingBundle(estimate) {
       anchorOneTimePrice,
       // Back-compat: keep `setupFee` populated with the first waivable entry
       // for any older client build still reading the singular field.
-      setupFee: firstVisitFees.find((f) => f.waivedWithPrepay) || null,
+      setupFee: firstVisitFees.find((f) => f.service === 'waveguard_setup' || f.waivedWithPrepay) || null,
       firstVisitFees,
       oneTimeBreakdown: storedOneTimeBreakdown,
       ...(serviceCadenceCombos && serviceCadenceCombos.length ? { serviceCadenceCombos } : {}),
@@ -16853,7 +17486,14 @@ async function buildPricingBundle(estimate) {
     let fallbackAnchorLift = 0;
     const fallbackMixApplies = require('../services/estimate-converter')
       .recurringMixHasMembershipFeeService(estimateDataRecurringServices(estData));
-    if (fallbackMixApplies && annualPrepayEligibleForEstimateData(estData)) {
+    const fallbackPrepayEligible = annualPrepayEligibleForEstimateData(estData);
+    // Same seasonal-mosquito carve-out as the v1 branch: prepay-ineligible
+    // but the setup fee is still charged at accept, so the card must show.
+    const fallbackSeasonalFeeDue = fallbackMixApplies
+      && !fallbackPrepayEligible
+      && !estData?.membershipSnapshot?.isExistingCustomer
+      && recurringMixHasSeasonalMosquito(estimateDataRecurringServices(estData));
+    if (fallbackMixApplies && (fallbackPrepayEligible || fallbackSeasonalFeeDue)) {
       const storedSetupRow = (Array.isArray(storedOneTimeBreakdown?.items) ? storedOneTimeBreakdown.items : [])
         .find((row) => row?.service === 'waveguard_setup' || isWaveGuardSetupOneTimeItem(row || {}));
       const storedSetupAmount = Number(storedSetupRow?.amount ?? storedSetupRow?.price);
@@ -16862,7 +17502,7 @@ async function buildPricingBundle(estimate) {
         service: 'waveguard_setup',
         amount: feeAmount,
         label: 'WaveGuard setup',
-        waivedWithPrepay: true,
+        waivedWithPrepay: fallbackPrepayEligible,
       });
       if (!storedSetupRow) fallbackAnchorLift = feeAmount;
     }
@@ -16884,7 +17524,7 @@ async function buildPricingBundle(estimate) {
       waveGuardTier: estimate.waveguard_tier || 'Bronze',
       anchorOneTimePrice: storedChoiceOneTimePrice
         ?? (((Number(estimate.onetime_total || 0) || 0) + fallbackAnchorLift) || null),
-      setupFee: fallbackFirstVisitFees.find((f) => f.waivedWithPrepay) || null,
+      setupFee: fallbackFirstVisitFees.find((f) => f.service === 'waveguard_setup' || f.waivedWithPrepay) || null,
       firstVisitFees: fallbackFirstVisitFees,
       oneTimeBreakdown: storedOneTimeBreakdown,
       fallback: 'no_engine_inputs',
@@ -16916,6 +17556,14 @@ async function buildPricingBundle(estimate) {
       inputsForFrequency.services.pest = {
         ...(inputsForFrequency.services.pest || {}),
         frequency: ladder.engineFrequency,
+        // STORED-inputs replay: extractEngineInputs resolves unstamped
+        // inputs from the stored pest line's curve (v2-priced agent drafts
+        // replay v2; unstamped stored lines replay v1). An input still
+        // unstamped here has NO stored pest evidence — it predates the v2
+        // default, so reprice on the v1 curve it was quoted with; never
+        // silently render/accept a sent bi-monthly/monthly quote at the
+        // higher v2 price (codex #2966 r2 P1).
+        version: (inputsForFrequency.services.pest || {}).version || 'v1',
       };
       // The operator's below-floor acknowledgement covered ONE computed
       // price at the SAVED pest cadence — alternate customer-selectable
@@ -17006,12 +17654,18 @@ async function buildPricingBundle(estimate) {
     : [];
   const engineMembershipFeeMixApplies = require('../services/estimate-converter')
     .recurringMixHasMembershipFeeService(engineRecurringServices);
-  if (!oneTimeOnly && engineMembershipFeeMixApplies && annualPrepayEligibleForEstimateData(estData)) {
+  const enginePrepayEligible = annualPrepayEligibleForEstimateData(estData);
+  // Same seasonal-mosquito carve-out as the v1/fallback branches.
+  const engineSeasonalFeeDue = engineMembershipFeeMixApplies
+    && !enginePrepayEligible
+    && !estData?.membershipSnapshot?.isExistingCustomer
+    && recurringMixHasSeasonalMosquito(engineRecurringServices);
+  if (!oneTimeOnly && engineMembershipFeeMixApplies && (enginePrepayEligible || engineSeasonalFeeDue)) {
     engineFirstVisitFees.push({
       service: 'waveguard_setup',
       amount: Number(PEST.initialFee || 99) || 99,
       label: 'WaveGuard setup',
-      waivedWithPrepay: true,
+      waivedWithPrepay: enginePrepayEligible,
     });
   }
 
@@ -17021,7 +17675,7 @@ async function buildPricingBundle(estimate) {
     anchorOneTimePrice,
     defaultServiceMode: oneTimeOnly ? 'one_time' : 'recurring',
     oneTimeBreakdown,
-    setupFee: engineFirstVisitFees.find((f) => f.waivedWithPrepay) || null,
+    setupFee: engineFirstVisitFees.find((f) => f.service === 'waveguard_setup' || f.waivedWithPrepay) || null,
     firstVisitFees: engineFirstVisitFees,
     source: 'engine_invocation',
   }), estimate, estData);
@@ -17321,6 +17975,77 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
       .del()
       .catch(() => {});
     return res.json({ ok: true, channel: 'sms', ...(smsResult.deduped ? { deduped: true } : {}) });
+  } catch (err) { next(err); }
+});
+
+// ── Termite options comparison sheet (dark; GATE_TERMITE_COMPARISON_SHEET) ──
+//
+// Buy-vs-rent the bait stations, priced for THIS estimate's property by two
+// deterministic engine replays, plus the bond term menu. Same bearer-token
+// contract as the service-details PDF above: token-shaped 404s, viewable
+// estimates only, no draft leak. Availability is computed fail-closed in the
+// content builder (gate, residential termite line, rental actually priced) —
+// a comparison that can only show one column 404s instead of rendering.
+router.get('/:token/warranty-comparison/pdf', dataLimiter, async (req, res, next) => {
+  try {
+    res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.set('Referrer-Policy', 'no-referrer');
+    // ONE 404 body for every branch (codex P2): gate-off, malformed token,
+    // unknown token, non-viewable row, and viewable-but-unbuildable must be
+    // indistinguishable, or the response becomes an existence oracle for
+    // bearer-token links.
+    const notFound = () => res.status(404).json({ error: 'Estimate not found' });
+    const { termiteComparisonGateOn, buildTermiteComparisonData } = require('../services/termite-warranty-comparison');
+    if (!termiteComparisonGateOn()) return notFound();
+    if (!SERVICE_DETAILS_TOKEN_RE.test(String(req.params.token || ''))) {
+      return notFound();
+    }
+    const estimate = await db('estimates').where({ token: req.params.token }).first();
+    if (!estimate || !isEstimateCustomerViewable(estimate)) {
+      return notFound();
+    }
+    // Same membership reconciliation /data performs before pricing (codex
+    // P2, round 3): a linked customer whose plan lapsed leaves stale
+    // existing-member artifacts in estimate_data, and replaying them would
+    // print lower totals than the estimate page shows.
+    await reconcileFrozenMembershipSnapshot(estimate);
+    let estData = {};
+    try {
+      estData = typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : (estimate.estimate_data || {});
+    } catch { /* unparseable → no comparison */ }
+    // engineRequest-aware replay inputs + the QUOTE-TIME bond snapshot (the
+    // same shapes attachTermiteBondSelector reads, incl. the legacy
+    // root-mapped blob — codex P2), passed ONLY while the live bond gate is
+    // on: with the kill switch off the selector hides and PUT /:token/bond
+    // 403s, so the sheet must not advertise terms the customer can't pick.
+    // The row's persisted waveguard_tier + quote-time tier discount ride
+    // along so a quote the replay can't reproduce (customer-selected tier,
+    // or a tier-discount config change after send) fails the sheet closed
+    // instead of misprinting discounted figures.
+    const storedBondSnapshot = termiteBondOptionsFromEstimateData(estData)
+      || (Array.isArray(estData?.results?.tmBait?.bondOptions) ? estData.results.tmBait.bondOptions : null);
+    const { persistedTermiteQuoteFromEstimateData } = require('../services/termite-warranty-comparison');
+    const persistedQuote = persistedTermiteQuoteFromEstimateData(estData);
+    if (!persistedQuote) return notFound();
+    const data = buildTermiteComparisonData(comparisonEngineInputs(estData), {
+      bondOptions: termiteBondOptionGateOn() ? storedBondSnapshot : null,
+      selectedTier: estimate.waveguard_tier || null,
+      expectedTierDiscount: estimate.waveguard_tier
+        ? tierDiscountForEstimate(estData, estimate.waveguard_tier)
+        : null,
+      persistedQuote,
+    });
+    if (!data) return notFound();
+    const { renderTermiteComparisonPdf } = require('../services/pdf/termite-comparison-pdf');
+    const buffer = await renderTermiteComparisonPdf({
+      ...data,
+      address: estimate.address || null,
+      // Same canonical host every other estimate link uses.
+      estimateUrl: `https://portal.wavespestcontrol.com/estimate/${estimate.token}`,
+    });
+    res.set('Content-Type', 'application/pdf');
+    res.set('Content-Disposition', 'inline; filename="Waves_Termite_Options.pdf"');
+    res.send(buffer);
   } catch (err) { next(err); }
 });
 
@@ -17760,6 +18485,13 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       },
       pricing: {
         ...stripInternalMarginFieldsDeep(pricingBundle),
+        // Review-lane enums on PRICED one-time items are pure exposure to
+        // the token holder — the client reads them only on quote-required
+        // items (quoteRequiredReasonCandidates), so keep them exactly there
+        // and drop them everywhere else (estimator audit 2026-07-24).
+        ...(pricingBundle.oneTimeBreakdown
+          ? { oneTimeBreakdown: sanitizePublicOneTimeBreakdown(stripInternalMarginFieldsDeep(pricingBundle.oneTimeBreakdown)) }
+          : {}),
         defaultServiceMode: pricingBundle.defaultServiceMode || defaultServiceMode,
       },
       cta: {
@@ -17861,6 +18593,9 @@ module.exports.handleEstimateAsk = handleEstimateAsk;
 module.exports.handleEstimateView = handleEstimateView;
 module.exports.verifyEstimateAskToken = verifyEstimateAskToken;
 module.exports.buildPricingBundle = buildPricingBundle;
+module.exports.addMissingBilledPerApplicationFlags = addMissingBilledPerApplicationFlags;
+module.exports.stripBilledPerApplicationDeep = stripBilledPerApplicationDeep;
+module.exports._resetPerApplicationColumnsProbeForTests = resetPerApplicationColumnsProbeForTests;
 module.exports.buildWaveGuardIntelligencePayload = buildWaveGuardIntelligencePayload;
 module.exports.buildShowYourWork = buildShowYourWork;
 module.exports.deriveServiceCategory = deriveServiceCategory;
@@ -17891,6 +18626,7 @@ module.exports.isRodentGuaranteeOnlyEstimate = isRodentGuaranteeOnlyEstimate;
 module.exports.resolveEstimateInvoiceMode = resolveEstimateInvoiceMode;
 module.exports.reconcileFrozenMembershipSnapshot = reconcileFrozenMembershipSnapshot;
 module.exports.stripInternalMarginFieldsDeep = stripInternalMarginFieldsDeep;
+module.exports.sanitizePublicOneTimeBreakdown = sanitizePublicOneTimeBreakdown;
 module.exports.defaultServiceModeForEstimate = defaultServiceModeForEstimate;
 module.exports.shouldPersistPestOnlyRecurringChoice = shouldPersistPestOnlyRecurringChoice;
 module.exports.isPestServiceName = isPestServiceName;
@@ -17899,6 +18635,9 @@ module.exports.oneTimeChoiceAmountForEstimate = oneTimeChoiceAmountForEstimate;
 module.exports.acceptedOneTimeChoiceListForEstimate = acceptedOneTimeChoiceListForEstimate;
 module.exports.isAnnualPrepayEligibleServiceMix = isAnnualPrepayEligibleServiceMix;
 module.exports.annualPrepayEligibleForEstimateData = annualPrepayEligibleForEstimateData;
+module.exports.annualPrepayEligibleForMosquitoTier = annualPrepayEligibleForMosquitoTier;
+module.exports.mosquitoTierForAxisToken = mosquitoTierForAxisToken;
+module.exports.annualPrepayHasSellableIncentive = annualPrepayHasSellableIncentive;
 module.exports.normalizeAcceptPaymentMethodPreference = normalizeAcceptPaymentMethodPreference;
 module.exports.validateRecurringSlotPaymentPreference = validateRecurringSlotPaymentPreference;
 module.exports.isReservationHeldAppointment = isReservationHeldAppointment;
@@ -17978,3 +18717,7 @@ module.exports.matchAcceptCustomerByPhone = matchAcceptCustomerByPhone;
 module.exports.resolveEstimateContactFields = resolveEstimateContactFields;
 module.exports.applySelectedTermiteBondToEstimateData = applySelectedTermiteBondToEstimateData;
 module.exports.attachTermiteBondSelector = attachTermiteBondSelector;
+// Test hooks (audit 2026-07-28): curve resolution for unstamped pest replays
+// and the mirrored-section label rule.
+module.exports.extractEngineInputs = extractEngineInputs;
+module.exports.frequencyFromTreatmentRow = frequencyFromTreatmentRow;

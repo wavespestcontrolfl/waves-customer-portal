@@ -269,9 +269,26 @@ function resolveBillingCadence({
   };
 }
 
+/**
+ * The single source of truth for "this customer stays a monthly member
+ * through an estimate accept" — shared by the converter's accept path and
+ * the estimate display surfaces so the billing disclosure can never drift
+ * from the billing behavior. Only NULL (legacy) or an explicit
+ * monthly_membership lane preserves — any explicit non-monthly lane
+ * (per_application/annual_prepay/per_visit/one_time) converts per the owner
+ * ruling; lingering tier/rate fields on an explicit per-visit customer must
+ * not resurrect membership billing (Codex #2836 r3).
+ */
+function customerPreservesMonthlyMembership(customer = {}) {
+  return ['active_customer', 'won', 'at_risk'].includes(customer.pipeline_stage)
+    && Number(customer.monthly_rate) > 0
+    && (customer.billing_mode == null || customer.billing_mode === 'monthly_membership');
+}
+
 module.exports = {
   billingIntervalMonthsForFrequencyKey,
   collectRecurringServices,
+  customerPreservesMonthlyMembership,
   displayForFrequencyKey,
   frequencyKeyFromVisitsPerYear,
   inferFrequencyKeyFromEstimateData,

@@ -50,6 +50,39 @@ import {
 
 /* ── helpers ────────────────────────────────────────────────── */
 
+// One-time mosquito base price for a treatable area, mirroring the
+// server-authoritative band (server/services/pricing-engine/constants.js
+// ONE_TIME.mosquito, repriced 2026-07 to ~25% under the one-time pest band)
+// and the server's 500-sf-step interpolation between bucket anchors
+// (service-pricing.js ONE_TIME_MOSQUITO_ANCHOR_SQFT + interpolateMosquitoPrice).
+// Anchors and the over-acre increment ($40 / 10k sf over an acre) must stay
+// in sync with the server so previewed prices match what the server actually
+// charges. Also used by the schedule modal to show the auto (lot-based)
+// charge before submission.
+export function oneTimeMosquitoLadderPrice(treatableSqFt) {
+  let p;
+  if (treatableSqFt > 43560) {
+    p = 269 + Math.ceil((treatableSqFt - 43560) / 10000) * 40;
+  } else {
+    const otAnchors = [[7500, 149], [11000, 169], [16000, 189], [24000, 209], [32000, 239], [43560, 269]];
+    const stepped = Math.ceil(Math.max(0, treatableSqFt) / 500) * 500;
+    p = otAnchors[otAnchors.length - 1][1];
+    if (stepped <= otAnchors[0][0]) {
+      p = otAnchors[0][1];
+    } else {
+      for (let i = 1; i < otAnchors.length; i++) {
+        if (stepped <= otAnchors[i][0]) {
+          const [as, ap] = otAnchors[i - 1];
+          const [bs, bp2] = otAnchors[i];
+          p = Math.round(ap + ((stepped - as) / (bs - as)) * (bp2 - ap));
+          break;
+        }
+      }
+    }
+  }
+  return p;
+}
+
 export function interpolate(v, b) {
   if (v <= b[0].at) return b[0].adj;
   if (v >= b[b.length - 1].at) return b[b.length - 1].adj;
@@ -355,7 +388,9 @@ const LAWN_PRICING_V2 = {
   // _SPOT_RESERVE (2026-07-17): material budgets now fund the protocol
   // spot-treatment reserves (owner-approved) — estimates stamped with the
   // prior _DENSE_35_FLOOR were priced on scheduled-only budgets.
-  pricingVersion: 'LAWN_PRICING_V2_SPOT_RESERVE',
+  // _LADDER_CAP (2026-07-29): Premium 12x column retuned + cap so 12x
+  // per-app never exceeds 9x per-app (server mirror).
+  pricingVersion: 'LAWN_PRICING_V2_LADDER_CAP',
   laborRateLoaded: 35,
   equipmentReservePerVisit: 0,
   adminAnnualDefault: 51,
@@ -435,6 +470,71 @@ export function applyServerTermiteBondPricingConfig(config) {
   TERMITE_BOND_RATES['5yr'] = rate(config?.term_5yr) ?? TERMITE_BOND_DEFAULT_RATES['5yr'];
   TERMITE_BOND_RATES['10yr'] = rate(config?.term_10yr) ?? TERMITE_BOND_DEFAULT_RATES['10yr'];
   return { ...TERMITE_BOND_RATES };
+}
+
+// Station rental amortization horizon — DB-tunable via
+// pricing_config.termite_rental (db-bridge synced server-side). Same
+// live-rates posture as the bond table above: the fallback engine must
+// preview what the server will price, or an admin horizon change silently
+// diverges the fallback quote from the saved one. Absent/invalid resets the
+// in-code default (kill-value pattern). Whole quarters only, matching the
+// bridge — a fractional horizon has no business meaning.
+const TERMITE_RENTAL_DEFAULT_QUARTERS = 20;
+let TERMITE_RENTAL_QUARTERS = TERMITE_RENTAL_DEFAULT_QUARTERS;
+
+export function applyServerTermiteRentalPricingConfig(config) {
+  const n = Number(config?.recovery_quarters ?? config?.recoveryQuarters);
+  TERMITE_RENTAL_QUARTERS = Number.isFinite(n) && n > 0
+    ? Math.round(n)
+    : TERMITE_RENTAL_DEFAULT_QUARTERS;
+  return TERMITE_RENTAL_QUARTERS;
+}
+
+// Station-check brackets (owner 2026-07-28) — DB-tunable via
+// pricing_config.termite_monitoring, same live-rates posture as the bond and
+// rental appliers above. monthly = base + step × max(0, ceil(sta/bracket)−2):
+// ≤10 stations $19 · 11-15 $24 · 16-20 $29 · 21-25 $34 · … The flat
+// Basic/Premier tiers are retired (Premier was never defined or sold).
+const TERMITE_MONITORING_DEFAULTS = { baseMonthly: 19, stepMonthly: 5, bracketStations: 5 };
+let TERMITE_MONITORING = { ...TERMITE_MONITORING_DEFAULTS };
+
+export function applyServerTermiteMonitoringPricingConfig(config) {
+  const pos = (v) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : null);
+  const nonNeg = (v) => (Number.isFinite(Number(v)) && Number(v) >= 0 ? Number(v) : null);
+  // Whole dollars, matching the server validator + bridge — cents cannot
+  // survive the engine's whole-dollar annualization.
+  TERMITE_MONITORING = {
+    baseMonthly: Math.round(pos(config?.base_monthly) ?? TERMITE_MONITORING_DEFAULTS.baseMonthly),
+    stepMonthly: Math.round(nonNeg(config?.step_monthly) ?? TERMITE_MONITORING_DEFAULTS.stepMonthly),
+    bracketStations: pos(config?.bracket_stations)
+      ? Math.round(Number(config.bracket_stations))
+      : TERMITE_MONITORING_DEFAULTS.bracketStations,
+  };
+  return { ...TERMITE_MONITORING };
+}
+
+// Mirrors server termiteMonitoringMonthlyForStations exactly.
+function termiteMonitoringMonthly(stations) {
+  const m = TERMITE_MONITORING;
+  const steps = Math.max(0, Math.ceil(Math.max(1, Number(stations) || 0) / m.bracketStations) - 2);
+  return Math.round((m.baseMonthly + steps * m.stepMonthly) * 100) / 100;
+}
+
+// Mirrors server priceTermiteStationRental: whole-dollar per-application
+// uplift, annual = x4. Returns null when there is nothing worth billing.
+function termiteStationRentalLine(installPrice) {
+  const price = Number(installPrice);
+  if (!Number.isFinite(price) || price <= 0) return null;
+  const perApp = Math.round(price / TERMITE_RENTAL_QUARTERS);
+  if (perApp <= 0) return null;
+  const annual = Math.round(perApp * 4 * 100) / 100;
+  return {
+    perApp,
+    annual,
+    monthly: Math.round((annual / 12) * 100) / 100,
+    retailValue: Math.round(price),
+    recoveryQuarters: TERMITE_RENTAL_QUARTERS,
+  };
 }
 
 function termiteBondOptionsTable() {
@@ -572,10 +672,10 @@ export function collectMarginReviewNotes(E) {
 // Material budgets now live in @waves/lawn-cost-floor (lawnMaterialBudget),
 // shared with the server so the table can't drift between preview and bill.
 const LAWN_PRICES = {
-  st_augustine: { name: 'St. Augustine', code: 'A', pts: [[0,30,38,47,55],[3000,30,38,47,55],[3500,30,38,47,58],[4000,30,38,47,62],[5000,30,38,50,71],[6000,30,39,56,81],[7000,32,42,62,91],[8000,35,47,68,100],[10000,40,54,80,118],[12000,46,62,92,137],[15000,53,73,110,165],[20000,68,91,140,212]] },
-  bermuda:      { name: 'Bermuda',       code: 'C1', pts: [[0,34,42,51,63],[4000,34,42,51,63],[5000,34,42,51,73],[6000,34,42,57,82],[7000,34,43,63,91],[8000,36,47,69,102],[10000,41,55,81,120],[12000,47,63,94,140],[15000,55,74,112,168],[20000,69,94,143,217]] },
-  zoysia:       { name: 'Zoysia',        code: 'C2', pts: [[0,34,42,51,63],[4000,34,42,51,63],[5000,34,42,52,74],[6000,34,42,58,83],[7000,34,44,63,93],[8000,36,47,70,102],[10000,41,56,82,122],[12000,47,63,95,141],[15000,56,75,113,171],[20000,70,95,145,219]] },
-  bahia:        { name: 'Bahia',         code: 'D', pts: [[0,25,34,42,51],[3000,25,34,42,51],[3500,25,34,42,53],[4000,25,34,42,58],[5000,25,34,47,66],[6000,27,36,52,74],[7000,30,39,57,82],[8000,31,42,62,91],[10000,36,49,73,107],[12000,41,56,83,123],[15000,48,65,99,147],[20000,60,82,125,189]] },
+  st_augustine: { name: 'St. Augustine', code: 'A', pts: [[0,30,38,47,55],[3000,30,38,47,55],[3500,30,38,47,58],[4000,30,38,47,62],[5000,30,38,50,66],[6000,30,39,56,74],[7000,32,42,62,82],[8000,35,47,68,90],[10000,40,54,80,106],[12000,46,62,92,122],[15000,53,73,110,146],[20000,68,91,140,186]] },
+  bermuda:      { name: 'Bermuda',       code: 'C1', pts: [[0,34,42,51,63],[4000,34,42,51,63],[5000,34,42,51,68],[6000,34,42,57,76],[7000,34,43,63,84],[8000,36,47,69,92],[10000,41,55,81,108],[12000,47,63,94,125],[15000,55,74,112,149],[20000,69,94,143,190]] },
+  zoysia:       { name: 'Zoysia',        code: 'C2', pts: [[0,34,42,51,63],[4000,34,42,51,63],[5000,34,42,52,69],[6000,34,42,58,77],[7000,34,44,63,84],[8000,36,47,70,93],[10000,41,56,82,109],[12000,47,63,95,126],[15000,56,75,113,150],[20000,70,95,145,193]] },
+  bahia:        { name: 'Bahia',         code: 'D', pts: [[0,25,34,42,51],[3000,25,34,42,51],[3500,25,34,42,53],[4000,25,34,42,56],[5000,25,34,47,62],[6000,27,36,52,69],[7000,30,39,57,76],[8000,31,42,62,82],[10000,36,49,73,97],[12000,41,56,83,110],[15000,48,65,99,132],[20000,60,82,125,166]] },
 };
 
 function toPositiveNumber(value) {
@@ -1227,7 +1327,22 @@ function resolveLawnFreq(freq) {
   return LAWN_FREQS.includes(parsed) ? parsed : 9;
 }
 
+// Premium (12x) ladder cap — server mirror (2026-07-29): 12x per-app never
+// exceeds 9x per-app. Table endpoints are capped, but each column rounds its
+// interpolation independently, so the cap must also apply to the looked-up
+// result (matches lookupLawnBracket in server service-pricing).
 function lawnLookup(lp, sf, freqIdx) {
+  const result = lawnLookupUncapped(lp, sf, freqIdx);
+  if (freqIdx === 3 && result.monthly > 0) {
+    const enhanced = lawnLookupUncapped(lp, sf, 2);
+    if (enhanced.monthly > 0) {
+      result.monthly = Math.min(result.monthly, Math.floor(enhanced.monthly * 12 / 9));
+    }
+  }
+  return result;
+}
+
+function lawnLookupUncapped(lp, sf, freqIdx) {
   const pts = lp.pts;
   if (sf <= pts[0][0]) return { monthly: pts[0][freqIdx + 1], pricingBasis: 'TABLE_INTERPOLATION', pricingSource: 'MARKET_TABLE' };
   if (sf > LAWN_TABLE_MAX_SQFT) {
@@ -1308,6 +1423,7 @@ export function calculateEstimate(inputs) {
     poolCageSize,
     hasLargeDriveway,
     indoor,
+    attachedGarage,
     shrubDensity,
     treeDensity,
     landscapeComplexity,
@@ -1351,6 +1467,7 @@ export function calculateEstimate(inputs) {
     termiteBaitSystem,
     termiteMonitoringTier,
     termiteBondTerm,
+    termiteOwnership,
     trenchingPerimeterLF: _trenchingPerimeterLF,
     trenchingConcreteLF: _trenchingConcreteLF,
     trenchingDirtLF: _trenchingDirtLF,
@@ -1705,11 +1822,12 @@ export function calculateEstimate(inputs) {
     : 'MEDIUM';
   const cageAdjBySize = { SMALL: 5, MEDIUM: 8, LARGE: 12, OVERSIZED: 18 };
   // Deprecated client mirror of server/services/pricing-engine/constants.PEST.
-  // Keep these literals synced until this file is retired.
+  // Keep these literals synced until this file is retired. Synced to the v2
+  // cadence curve (live default since 2026-07-23).
   const pestFrequencyTiers = [
     { f: 4, label: 'Quarterly', disc: 1.00, rec: pestFreq === 4 },
-    { f: 6, label: 'Bi-Monthly', disc: 0.85, rec: pestFreq === 6 },
-    { f: 12, label: 'Monthly', disc: 0.70, rec: pestFreq === 12 },
+    { f: 6, label: 'Bi-Monthly', disc: 0.88, rec: pestFreq === 6 },
+    { f: 12, label: 'Monthly', disc: 0.78, rec: pestFreq === 12 },
   ];
 
   // Track active pest price modifiers and non-pricing property context.
@@ -1748,6 +1866,9 @@ export function calculateEstimate(inputs) {
   if (indoor) addMod('pest', 'Indoor treatment: +$15/visit', 15, 'up');
   else addMod('pest', 'Exterior only: $0/visit', 0, 'info');
 
+  // Attached garage (server mirror: PEST.additionalAdjustments.attachedGarage)
+  if (attachedGarage) addMod('pest', 'Attached garage: +$5/visit', 5, 'up');
+
   // Urgency
   if (urgency === 'SOON') addMod('one-time', `Urgency (Soon): +25%`, 25, 'up');
   else if (urgency === 'URGENT') addMod('one-time', `Urgency (Emergency): +50%`, 50, 'up');
@@ -1776,6 +1897,7 @@ export function calculateEstimate(inputs) {
     else if (landscapeComplexity === 'SIMPLE') adj -= 5;
     if (nearWater && nearWater !== 'NONE' && nearWater !== 'NO' && nearWater !== false) adj += 3;
     if (indoor) adj += 15;
+    if (attachedGarage) adj += 5;
     return adj + propTypeAdj;
   };
   const initialRoachPrice = (type, fpEff, standalone = false) => {
@@ -1963,14 +2085,14 @@ export function calculateEstimate(inputs) {
             return { floorPa, floorAnn, floorMo };
           })()
         : {};
-      R.pestTiers.push({ pa: perApp, apps: ft.f, ann, mo, init: 99, rOG: roachAddOn, roachAddOn, label: ft.label, recommended: ft.rec, dimmed: !ft.rec, ...pestFloorMeta });
+      R.pestTiers.push({ pa: perApp, apps: ft.f, ann, mo, init: 99, rOG: roachAddOn, roachAddOn, label: ft.label, recommended: ft.rec, dimmed: !ft.rec, pricingVersion: 'v2', ...pestFloorMeta });
       if (ft.f === pestFreq) {
-        R.pest = { pa: perApp, apps: ft.f, ann, mo, init: 99, rOG: roachAddOn, roachAddOn, label: ft.label, ...pestFloorMeta };
+        R.pest = { pa: perApp, apps: ft.f, ann, mo, init: 99, rOG: roachAddOn, roachAddOn, label: ft.label, pricingVersion: 'v2', ...pestFloorMeta };
       }
     });
     R.pestRoachMod = roachMod;
     R.pestInitialRoachPrice = initialRoachPrice(roachMod, fpEff, false);
-    wgServices.push({ name: 'Pest (' + R.pest.label + ')', service: 'pest_control', mo: R.pest.mo, perTreatment: R.pest.pa, visitsPerYear: R.pest.apps });
+    wgServices.push({ name: 'Pest (' + R.pest.label + ')', service: 'pest_control', mo: R.pest.mo, perTreatment: R.pest.pa, visitsPerYear: R.pest.apps, pricingVersion: 'v2' });
   }
 
   /* ── TREE & SHRUB ────────────────────────────────────────── */
@@ -2006,18 +2128,21 @@ export function calculateEstimate(inputs) {
     const lpv = LABOR * ((osm + 10) / 60);
     // Tiers mirror the server engine (constants.js TREE_SHRUB): 6-visit
     // Standard is the mandated default (protocol six_x); 4-visit Light
-    // (protocol four_x) is the downsell for clean / low-pest-history beds.
-    // 9x Enhanced and 12x Premium are retired.
+    // (protocol four_x) is the downsell for clean / low-pest-history beds;
+    // 9-visit Enhanced is the every-6-weeks UPSELL (un-retired 2026-07-23,
+    // owner directive — never auto-recommended). 12x Premium stays retired.
     // v4.6 material model is ANNUAL and protocol-derived:
-    //   (fixed $15 + $4/tree + $0.055/bed sqft) * tierFactor (Light 0.75)
+    //   (fixed $15 + $4/tree + $0.055/bed sqft) * tierFactor
+    //   (Light 0.75, Enhanced 1.25)
     // and price targets a 45% admin-INCLUSIVE margin:
     //   annual = (materials + labor + $51 admin) / (1 - 0.45)
-    // Floors are backstops only (Light $22/mo, Standard $35/mo) and Light's
-    // floor must stay <= 2/3 of Standard's.
+    // Floors are backstops only (Light $22/mo, Standard $35/mo, Enhanced
+    // $48/mo) and Light's floor must stay <= 2/3 of Standard's.
     const TS_ADMIN_ANNUAL = 51;
     const tst = [
       { n: 'Light', v: 4, f: 22, mf: 0.75 },
       { n: 'Standard', v: 6, f: 35, mf: 1 },
+      { n: 'Enhanced', v: 9, f: 48, mf: 1.25 },
     ];
     R.ts = [];
     R.tsMeta = { eb, et, bedAreaIsEstimated };
@@ -2093,6 +2218,8 @@ export function calculateEstimate(inputs) {
       categoryOrder.indexOf(treatableCategory),
       categoryOrder.indexOf(grossLotCategory) - 1
     )];
+    const mqCategoryFloor = { SMALL: 0, QUARTER: 8000, THIRD: 12000, HALF: 18000, ACRE: 35000 };
+    const mqPricingSqFt = Math.max(treatableSqFt, mqCategoryFloor[sz] || 0);
     let pr = 1.0;
     if (treeDensity === 'HEAVY') pr += 0.15;
     else if (treeDensity === 'MODERATE') pr += 0.05;
@@ -2102,24 +2229,48 @@ export function calculateEstimate(inputs) {
     if (nearWater) pr += 0.10;
     // v1.5: irrigation creates standing water in valve boxes, low spots, overflow areas
     if (hasIrrigation) pr += 0.08;
-    if (sz === 'ACRE') pr += 0.15;
-    else if (sz === 'HALF') pr += 0.05;
-    pr = Math.min(2.0, Math.round(pr * 100) / 100);
-    const bp = {
-      SMALL: [105, 90],
-      QUARTER: [115, 100],
-      THIRD: [130, 115],
-      HALF: [155, 135],
-      ACRE: [195, 175],
+    // Continuous lot-size pressure — mirrors mosquitoLotSizePressure in
+    // server/services/pricing-engine/service-pricing.js (ramps to +0.05 by
+    // 18k and +0.15 by 35k, no boundary jumps).
+    if (mqPricingSqFt >= 35000) pr += 0.15;
+    else if (mqPricingSqFt >= 18000) pr += 0.05 + ((mqPricingSqFt - 18000) / 17000) * 0.10;
+    else if (mqPricingSqFt >= 12000) pr += ((mqPricingSqFt - 12000) / 6000) * 0.05;
+    // Full precision through the per-visit math (server parity — priceMosquito
+    // never rounds the multiplier); round only the display copy in mqMeta.
+    pr = Math.min(2.0, pr);
+    const prDisplay = Math.round(pr * 100) / 100;
+    // Mirrors server/services/pricing-engine/constants.js MOSQUITO.basePrices
+    // (repriced 2026-07 to the 60%-margin band) and the server's 500-sf-step
+    // interpolation between bucket anchors (interpolateMosquitoPrice in
+    // service-pricing.js). Must stay in sync with the server so the previewed
+    // price matches what the server actually charges.
+    // Terminal (ACRE) anchors extend past one acre at the previous segment's
+    // slope so the per-500-sf increment keeps declining into the widest lots
+    // (mirrors mosquitoRecurringAnchors: 35000 + ceil((97-86)/((86-79)/17000)/500)*500
+    // = 62000 seasonal; 35000 + ceil((86-77)/((77-73)/17000)/500)*500 = 73500 monthly).
+    const mqAnchors = {
+      seasonal9: [[8000, 73], [12000, 76], [18000, 79], [35000, 86], [62000, 97]],
+      monthly12: [[8000, 66], [12000, 69], [18000, 73], [35000, 77], [73500, 86]],
     };
-    const b = bp[sz] || bp.SMALL;
+    const mqInterp = (anchors, sqft) => {
+      const stepped = Math.ceil(Math.max(0, sqft) / 500) * 500;
+      if (stepped <= anchors[0][0]) return anchors[0][1];
+      for (let i = 1; i < anchors.length; i++) {
+        if (stepped <= anchors[i][0]) {
+          const [as, ap] = anchors[i - 1];
+          const [bs, bpr] = anchors[i];
+          return Math.round(ap + ((stepped - as) / (bs - as)) * (bpr - ap));
+        }
+      }
+      return anchors[anchors.length - 1][1];
+    };
     const ri = (pr >= 1.30 || nearWater || treeDensity === 'HEAVY') ? 1 : 0;
     const mt = [
-      { n: 'Seasonal Mosquito Program (9 visits)', pv: Math.round(b[0] * pr), v: 9, tier: 'seasonal9' },
-      { n: 'Monthly Mosquito Program (12 visits)', pv: Math.round(b[1] * pr), v: 12, tier: 'monthly12' },
+      { n: 'Seasonal Mosquito Program (9 visits)', pv: Math.round(mqInterp(mqAnchors.seasonal9, mqPricingSqFt) * pr), v: 9, tier: 'seasonal9' },
+      { n: 'Monthly Mosquito Program (12 visits)', pv: Math.round(mqInterp(mqAnchors.monthly12, mqPricingSqFt) * pr), v: 12, tier: 'monthly12' },
     ];
     R.mq = [];
-    R.mqMeta = { pr, sz, ri, treatableSqFt, grossLotCategory };
+    R.mqMeta = { pr: prDisplay, sz, ri, treatableSqFt, grossLotCategory };
     mt.forEach((t, i) => {
       const ann = t.pv * t.v;
       const mo = Math.round(ann / 12 * 100) / 100;
@@ -2137,16 +2288,28 @@ export function calculateEstimate(inputs) {
     const perim = termitePerimeterLF || (fpEff > 0 ? Math.round(4 * Math.sqrt(fpEff) * pm) : 0);
     if (perim > 0) {
       hasRec = true;
-      const sta = Math.max(8, Math.ceil(perim / 10));
-      const ai = Math.round((sta * (13.16 + 5.25 + 0.75)) * 1.45);
-      const ti = Math.round((sta * (22.05 + 5.25 + 0.75)) * 1.45);
-      const bmo = termiteMonitoringTier === 'premier' ? 35 : 35;
-      const pmo = 65;
+      // Label-driven spacing per system (owner 2026-07-28): Advance-class
+      // 10 ft, Trelona 15 ft — so each system's install prices off ITS OWN
+      // station count. Menu is Trelona-only; Advance stays computable for
+      // replaying old estimates.
+      const tmSystem = termiteBaitSystem || 'trelona';
+      const staAdv = Math.max(8, Math.ceil(perim / 10));
+      const staTre = Math.max(8, Math.ceil(perim / 15));
+      const sta = tmSystem === 'advance' ? staAdv : staTre;
+      const ai = Math.round((staAdv * (13.16 + 5.25 + 0.75)) * 1.45);
+      const ti = Math.round((staTre * (22.05 + 5.25 + 0.75)) * 1.45);
+      // Bracketed by the selected system's station count; the retired
+      // Basic/Premier tier input no longer changes price (bmo/pmo kept for
+      // legacy readers, both stamped with the bracket monthly).
+      const monMonthly = termiteMonitoringMonthly(sta);
+      const bmo = monMonthly;
+      const pmo = monMonthly;
       R.tmBait = {
-        selectedSystem: termiteBaitSystem,
-        system: termiteBaitSystem,
-        selectedMonitoringTier: termiteMonitoringTier,
-        monitoringTier: termiteMonitoringTier,
+        selectedSystem: tmSystem,
+        system: tmSystem,
+        selectedMonitoringTier: 'basic',
+        monitoringTier: 'basic',
+        monMonthly,
         ai,
         ti,
         bmo,
@@ -2159,13 +2322,17 @@ export function calculateEstimate(inputs) {
         },
       };
       wgServices.push({
-        name: termiteMonitoringTier === 'premier' ? 'Termite Bait (Premier)' : 'Termite Bait (Basic)',
+        // Tiers are retired (owner 2026-07-28) — no tier suffix, and the
+        // row bills the SAME bracket monthly the aggregates use (a flat
+        // 35/65 here would persist a row that disagrees with monthlyTotal,
+        // and acceptance/conversion bill from these rows).
+        name: 'Termite Bait',
         service: 'termite_bait',
-        mo: termiteMonitoringTier === 'premier' ? 65 : 35,
+        mo: monMonthly,
         // Quarterly station checks, billed per application (owner
         // 2026-07-20) — mirrors server priceTermiteBait visitsPerYear/perApp
-        // (perApp = monthly x 3, exact: $105 basic / $195 premier).
-        perTreatment: (termiteMonitoringTier === 'premier' ? 65 : 35) * 3,
+        // (perApp = monthly × 3, exact by construction).
+        perTreatment: Math.round(monMonthly * 3 * 100) / 100,
         visitsPerYear: 4,
       });
       // Bond rider (owner 2026-07-20) — mirrors server priceTermiteBond +
@@ -2193,6 +2360,34 @@ export function calculateEstimate(inputs) {
           waveGuardDiscountEligible: false,
           countsTowardWaveGuardTier: false,
         });
+      }
+      // Station rental (owner 2026-07-26) — mirrors the server: renting
+      // zeroes the one-time install (see tmInstall below, which reads
+      // R.tmBait.rented) and recovers it as its own per-application line.
+      // NOT tier-counted and NOT bundle-discountable: this is hardware cost
+      // recovery on stations Waves still owns.
+      const rentsStations = String(termiteOwnership || '').toLowerCase() === 'rent';
+      R.tmBait.ownership = rentsStations ? 'rent' : 'own';
+      R.tmBait.stationsOwnedBy = rentsStations ? 'waves' : 'customer';
+      if (rentsStations) {
+        const rental = termiteStationRentalLine(tmSystem === 'advance' ? ai : ti);
+        if (rental) {
+          R.tmBait.rented = true;
+          R.tmBait.stationRental = rental;
+          wgServices.push({
+            name: 'Termite Station Rental',
+            service: 'termite_station_rental',
+            mo: rental.monthly,
+            perTreatment: rental.perApp,
+            visitsPerYear: 4,
+            annual: rental.annual,
+            retailValue: rental.retailValue,
+            discountable: false,
+            discountEligible: false,
+            waveGuardDiscountEligible: false,
+            countsTowardWaveGuardTier: false,
+          });
+        }
       }
     } else {
       R.tmBait = {
@@ -2270,18 +2465,7 @@ export function calculateEstimate(inputs) {
   if (svcOnetimeMosquito && !isCommercial && lotSqFt > 0) {
     hasOT = true;
     const treatableSqFt = Math.max(0, Math.round(lotSqFt - footprint - estimateHardscape()));
-    // Mirrors the server-authoritative one-time mosquito band
-    // (server/services/pricing-engine/constants.js ONE_TIME.mosquito, repriced
-    // 2026-06 to the SW-FL single-visit market). Buckets and the over-acre
-    // increment ($40 / 10k sf over an acre) must stay in sync with the server so
-    // the previewed price matches what the server actually charges.
-    let p = 99;
-    if (treatableSqFt > 43560) p = 269 + Math.ceil((treatableSqFt - 43560) / 10000) * 40;
-    else if (treatableSqFt > 32000) p = 269;
-    else if (treatableSqFt > 24000) p = 239;
-    else if (treatableSqFt > 16000) p = 199;
-    else if (treatableSqFt > 11000) p = 159;
-    else if (treatableSqFt > 7500) p = 129;
+    const p = oneTimeMosquitoLadderPrice(treatableSqFt);
     const addOns = mosquitoStationCount * 75 + mosquitoDunkCount * 15;
     const fp = Math.round((p + addOns) * rD);
     const detailParts = [];
@@ -2918,7 +3102,9 @@ export function calculateEstimate(inputs) {
     if (R.mq[ri]) { ac++; ra += R.mq[ri].ann; lineItems.push({ name: 'Mosquito', service: 'mosquito', ann: R.mq[ri].ann, discountable: true }); }
   }
   if (R.tmBait && !R.tmBait.quoteRequired && !R.tmBait.requiresMeasurement) {
-    const termiteMonthly = termiteMonitoringTier === 'premier' ? 65 : 35;
+    // Bracketed station-check monthly off the priced system's station count
+    // (owner 2026-07-28) — the flat tier literals are retired.
+    const termiteMonthly = R.tmBait.monMonthly ?? termiteMonitoringMonthly(R.tmBait.sta);
     ac++;
     ra += termiteMonthly * 12;
     lineItems.push({ name: 'Termite Bait', service: 'termite_bait', ann: termiteMonthly * 12, discountable: true });
@@ -2927,6 +3113,16 @@ export function calculateEstimate(inputs) {
     if (R.tmBond) {
       ra += R.tmBond.annual;
       lineItems.push({ name: R.tmBond.name, service: 'termite_bond', ann: R.tmBond.annual, discountable: false });
+    }
+    // Station rental rider (codex P2, #2998 round 4): same posture as the
+    // bond — in the recurring annual (EXACT line annual, so a $100/yr
+    // rider doesn't decay to $99.96 via its rounded monthly), no tier
+    // count, no bundle % discount. Without this the fallback's totals
+    // omitted the rental entirely, so a client-priced save persisted and
+    // displayed less than the rows promise.
+    if (R.tmBait.stationRental) {
+      ra += R.tmBait.stationRental.annual;
+      lineItems.push({ name: 'Termite Station Rental', service: 'termite_station_rental', ann: R.tmBait.stationRental.annual, discountable: false });
     }
   }
   // Recurring Foam: standalone — flows into the recurring annual/monthly total
@@ -3117,7 +3313,12 @@ export function calculateEstimate(inputs) {
   let ot = 0;
   otItems.forEach(i => ot += i.price);
   specItems.forEach(s => { if (!s.onProg) ot += s.price; });
-  let tmInstall = R.tmBait ? ((termiteBaitSystem === 'trelona' ? R.tmBait.ti : R.tmBait.ai) || 0) : 0;
+  // Rented stations are never billed as an install — the cost rides the
+  // recurring termite_station_rental line instead (mirrors the server, where
+  // installation.price is zeroed while retailValue keeps the hardware value).
+  let tmInstall = R.tmBait && !R.tmBait.rented
+    ? (((R.tmBait.system || 'trelona') === 'advance' ? R.tmBait.ai : R.tmBait.ti) || 0)
+    : 0;
   ot = Math.round(ot * 100) / 100;
 
   const rba = R.rodBaitMo ? R.rodBaitMo * 12 : 0;
@@ -3156,6 +3357,11 @@ export function calculateEstimate(inputs) {
       monthlyTotal: mm,
       annualBeforeDiscount: ra,
       annualAfterDiscount: ad,
+      // EXACT full recurring annual, mirroring the server mapper (codex P2,
+      // #2998 round 4): deriveTotalsFromEstimateData prefers this ahead of
+      // reconstructing round(monthly) * 12, which drifts whenever a line's
+      // annual isn't divisible by 12 (the station-rental rider).
+      annualTotal: y2,
       waveGuardTier: wt,
       discount: wd,
       savings: da,

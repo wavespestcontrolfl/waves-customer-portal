@@ -92,13 +92,39 @@ intentionally minimal. The retired V2 keys (`dashboard-v2`, `dispatch-v2`,
 `customers-v2`, `estimates-v2`, `comms-v2`, `mobile-shell-v2`,
 `admin-shell-v2`) are no longer read by the client; stale rows are inert.
 
+## Customer surfaces are GLASS
+
+Customer-facing pages (portal PWA, newsletter email chrome + every landing
+page reached from it, and ALL secondary customer pages, React or
+server-rendered) use the glass token system — frosted cards, gold action
+bars — via `GLASS_THEME` (email-template.js) / `useGlassSurface`
+(glass-engine). Canonical ink navy is `#04395E` (never remap it), and the
+font stack under `html[data-glass-theme]` is the clean system stack — no
+Anton / Luckiest Guy / Baloo there. Full decisions:
+`docs/design/DECISIONS.md` (2026-07-17 entries) + the customer design brief.
+
 ## Hard lines (both systems)
 
-- 14px minimum for readable text (Virginia uses this 8 hours a day). The
-  brand gate (`npm run check:portal-brand`) enforces this on customer
-  surfaces.
+- 14px minimum for readable text (Virginia uses this 8 hours a day).
+  POLICY on customer surfaces: 16px body / 14px label floors, and no raw
+  emoji in JSX source (including comments — use icon components). The
+  mechanical gate (`npm run check:portal-brand`, runs in Railway prebuild
+  — one violation kills EVERY build) enforces only a SUBSET: selected
+  customer directories (`components/estimate` excluded) and inline
+  `fontSize: 11`/`13` literals — so a passing gate is NOT proof of
+  compliance; the policy applies repo-wide regardless of gate coverage.
 - Never apply customer-facing brand styling (Luckiest Guy / Baloo 2 / gold
   pill / mascot) inside `/admin/*` — admin stays monochrome.
+- **iOS PWA safe areas:** `viewport-fit=cover` is global in the standalone
+  PWA, so ANY new `top:0` fixed/sticky header or full-screen overlay (admin,
+  customer, or tech) must pad with
+  `calc(<base> + env(safe-area-inset-top, 0px))` — fixed bottom bars use
+  `safe-area-inset-bottom` — or it sits under the status bar. Panels use
+  `h-full`, never `h-screen`/`100vh`. None of this reproduces in desktop
+  Chrome emulation.
+- Company name in written copy is "Waves Pest Control" — never
+  "Waves Lawn & Pest". The mascot LOGO artwork carrying the old name is
+  CURRENT and intentional; never flag or swap the asset.
 - Before requesting review on any UI-touching PR, run the **ui-verify
   skill** (render, screenshot, compare against the spec).
 

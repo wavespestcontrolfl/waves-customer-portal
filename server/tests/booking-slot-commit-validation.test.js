@@ -140,6 +140,22 @@ describe('resolveBookingDuration — server-derived, never trusted raw', () => {
     expect(normalizeBookingServiceKey(null)).toBe('');
   });
 
+  test('composite service keys (multi-service gate ON in tests): canonical sort, summed duration, joined label round-trip (#multi)', () => {
+    // Canonical form: sorted, deduped, '+'-joined.
+    expect(normalizeBookingServiceKey('pest_control+mosquito')).toBe('mosquito+pest_control');
+    expect(normalizeBookingServiceKey('mosquito+pest_control')).toBe('mosquito+pest_control');
+    expect(normalizeBookingServiceKey('Pest Control + Mosquito Control')).toBe('mosquito+pest_control');
+    expect(normalizeBookingServiceKey('pest_control+pest_control')).toBe('pest_control');
+    // One unknown part invalidates the whole value; >3 services invalid.
+    expect(normalizeBookingServiceKey('pest_control+german_roach')).toBe('');
+    expect(normalizeBookingServiceKey('pest_control+mosquito+lawn_care+termite')).toBe('');
+    // Duration = catalog sum, client minutes still ignored.
+    for (const requested of [45, 600, 'abc', null]) {
+      expect(resolveBookingDuration(requested, {}, 'mosquito+pest_control')).toBe(105);
+      expect(resolveBookingDuration(requested, {}, 'lawn_care+mosquito+pest_control')).toBe(165);
+    }
+  });
+
   test('bookingOfferLocationKey — public rounding grid, idempotent for exact vs rounded echoes', () => {
     expect(bookingOfferLocationKey(27.336789, -82.530612)).toBe('27.34,-82.53');
     expect(bookingOfferLocationKey(27.34, -82.53)).toBe('27.34,-82.53'); // re-rounding a rounded echo

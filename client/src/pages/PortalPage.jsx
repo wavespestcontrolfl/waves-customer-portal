@@ -174,7 +174,7 @@ const WAVES_AI_TABS = {
   },
   learn: {
     placeholder: 'Ask about lawn or pest care…',
-    pills: ['Why is my lawn yellowing?', 'When is mosquito season?', 'Are treatments pet-safe?'],
+    pills: ['Why is my lawn yellowing?', 'When is mosquito season?', 'What about pets after a treatment?'],
   },
 };
 
@@ -569,17 +569,29 @@ function BeforeAfterSlider({ beforeAfter }) {
   const [position, setPosition] = useState(50);
   const containerRef = useRef(null);
   const dragging = useRef(false);
+  // rAF-throttled writes — a state set per pointermove re-rendered the card
+  // every few ms and read as lag on phones (owner 2026-07-28; same fix as the
+  // report's LawnProgressionSlider).
+  const pendingPos = useRef(50);
+  const rafId = useRef(0);
+  useEffect(() => () => cancelAnimationFrame(rafId.current), []);
 
   const updatePosition = useCallback((clientX) => {
     const rect = containerRef.current?.getBoundingClientRect();
     if (!rect) return;
     const x = Math.max(0, Math.min(clientX - rect.left, rect.width));
-    setPosition((x / rect.width) * 100);
+    pendingPos.current = (x / rect.width) * 100;
+    if (!rafId.current) {
+      rafId.current = requestAnimationFrame(() => {
+        rafId.current = 0;
+        setPosition(pendingPos.current);
+      });
+    }
   }, []);
 
   const onPointerDown = useCallback((e) => {
     dragging.current = true;
-    e.currentTarget.setPointerCapture(e.pointerId);
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch (err) { /* noop */ }
     updatePosition(e.clientX);
   }, [updatePosition]);
 
@@ -610,9 +622,15 @@ function BeforeAfterSlider({ beforeAfter }) {
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
+      onPointerCancel={onPointerUp}
+      /* pan-y, not none: 'none' hijacked vertical swipes over the photo and
+         froze page scrolling — the slider read as broken on phones (owner
+         2026-07-28). pan-y keeps page scroll; horizontal drags still drive
+         the divider, and pointercancel resets the drag when the browser
+         claims a vertical gesture. */
       style={{
         position: 'relative', width: '100%', height: 220, borderRadius: 14,
-        overflow: 'hidden', cursor: 'ew-resize', userSelect: 'none', touchAction: 'none',
+        overflow: 'hidden', cursor: 'ew-resize', userSelect: 'none', touchAction: 'pan-y',
       }}
     >
       {/* BEFORE layer */}
@@ -2220,7 +2238,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
       />
       <HomeContentRow
         compact={compact}
-        title="The Waves Newsletter"
+        title="Waves Newsletter"
         ctaLabel="Read Issue"
         iconTile={<WavesLogoTile compact={compact} />}
         posts={newsletterPosts.map((p) => ({
@@ -7580,9 +7598,20 @@ const SERVICE_CATALOG = [
   },
   {
     id: 'mosquito', name: 'Mosquito Barrier Treatment', icon: 'bug',
-    frequencies: ['Monthly (Apr–Oct)', 'Year-Round (12x)'],
-    basePrice: 45, description: 'Perimeter barrier spray, standing water treatment, foliage and shrub line application',
-    products: ['Cyzmic CS', 'Tekko Pro IGR'],
+    // My Plan renders frequencies[0] as the cadence line for whichever mosquito
+    // service it matched, and SERVICE_CATALOG carries no link to the customer's
+    // enrolled program — so naming either cadence here states the wrong one for
+    // the other program's customers. Variant-neutral until the panel can read
+    // the matched service's real cadence. Was 'Monthly (Apr–Oct)', 7 visits,
+    // which matches neither program.
+    frequencies: ['Seasonal or monthly program'],
+    // basePrice has NO renderer on main — the per-service dollar figures were
+    // removed 2026-07-11 (owner: they were fabricated static-catalog math, see
+    // the comments at :4742 and :9026). Kept in sync with the rate card floor
+    // (SMALL lot, 12-visit = $60/visit) so a future re-wire can't resurrect the
+    // old $45, which the engine can never produce.
+    basePrice: 60, description: 'Perimeter barrier spray, standing water treatment, foliage and shrub line application',
+    products: ['Bifen I/T', 'Tekko Pro IGR'],
   },
   {
     id: 'tree_shrub', name: 'Tree & Shrub Program', icon: 'palm',

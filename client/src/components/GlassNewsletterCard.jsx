@@ -32,7 +32,7 @@ export default function GlassNewsletterCard({ source }) {
         textTransform: 'uppercase', color: CUSTOMER_SURFACE.muted,
         marginBottom: 8,
       }}>
-        The Waves Newsletter
+        Waves Newsletter
       </div>
       <NewsletterSignup
         variant="light"

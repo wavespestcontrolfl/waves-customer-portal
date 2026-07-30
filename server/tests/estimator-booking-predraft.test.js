@@ -254,7 +254,16 @@ describe('maybePreDraftForBooking — shell path', () => {
       BOOKING({ service_address_line1: '456 Palm Ave', service_address_city: 'Sarasota' }), // in-lock re-read
       null, // idempotency probe
     ];
-    const result = await maybePreDraftForBooking('svc-1');
+    // Pinned BEFORE the fixture's visit date so the ET-derived expiry branch
+    // is the one under test (see the expiry assertion below).
+    const realNow = Date.now;
+    Date.now = () => new Date('2026-07-20T12:00:00Z').getTime();
+    let result;
+    try {
+      result = await maybePreDraftForBooking('svc-1');
+    } finally {
+      Date.now = realNow;
+    }
     expect(result.drafted).toBe(true);
     // The in-lock re-read holds the booking row FOR UPDATE through the
     // insert — booking mutations don't share the advisory lock.
@@ -285,9 +294,33 @@ describe('maybePreDraftForBooking — shell path', () => {
     expect(data.bookingPreDraft.serviceType).toBe('Waves Assessment');
     // Expiry outlives the visit: ET-derived from the ET business date —
     // never the naive UTC-midnight parse that lands the prior ET evening.
+    //
+    // The clock is PINNED for this assertion. booking-predraft.js computes
+    // `Math.max(expiryBase, Date.now()) + 14d`, so once the fixture's
+    // scheduled_date (2026-07-25) aged into the past, Date.now() won the max
+    // and the ET-derived branch stopped being exercised at all — the test
+    // began failing on 2026-07-26 purely because the calendar moved. Pinning
+    // keeps this asserting what it claims to assert, forever.
     const expiresMs = row.expires_at.getTime();
     const etNoon = new Date('2026-07-25T16:00:00Z').getTime(); // noon ET (EDT) on the visit date
     expect(expiresMs).toBe(etNoon + 14 * 86400000);
+  });
+
+  test('expiry falls back to now+14d when the visit date is already past', async () => {
+    // The other half of `Math.max(expiryBase, Date.now())` — the branch the
+    // rotted assertion above silently drifted onto. A stale booking must still
+    // get an expiry in the future, never one derived from a past visit date.
+    mockState.firstQueue = [BOOKING(), CUSTOMER, BOOKING(), null];
+    const realNow = Date.now;
+    const pinned = new Date('2026-09-01T15:00:00Z').getTime(); // well after the visit
+    Date.now = () => pinned;
+    try {
+      await maybePreDraftForBooking('svc-1');
+    } finally {
+      Date.now = realNow;
+    }
+    const row = mockState.inserts[0].payload;
+    expect(row.expires_at.getTime()).toBe(pinned + 14 * 86400000);
   });
 
   test('falls back to the customer address when the booking has none', async () => {

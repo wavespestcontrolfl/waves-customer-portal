@@ -14,6 +14,12 @@ const path = require('path');
 // a source-level assertion in the same style as
 // booking-slot-commit-validation.test.js — it fails if the findAvailableSlots
 // call ever loses the includeWeekends:true that keeps Sundays bookable.
+//
+// Layering note (2026-07-23): includeWeekends:true keeps weekends ENUMERABLE;
+// whether they are actually OFFERED is now governed by the owner-editable
+// weekly days-off setting enforced in scheduling/blackout-dates.js (seeded
+// Sat+Sun off). Enumeration staying weekend-inclusive is what makes that
+// setting the single source of truth — don't "fix" this back to false.
 describe('booking availability offers weekends (Sat + Sun)', () => {
   const src = fs.readFileSync(path.join(__dirname, '../routes/booking.js'), 'utf8');
 

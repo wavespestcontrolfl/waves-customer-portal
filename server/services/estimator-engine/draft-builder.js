@@ -110,6 +110,35 @@ function lookupFeatureModifiers(enriched) {
   };
 }
 
+// Story provenance → the pricing engine's storiesSource vocabulary.
+// 'estimated' fires the stories_estimated manual-review reason in the
+// story-sensitive pricers (pest per-story, termite bait linear feet).
+function storiesSourceForPricing(propertyFacts) {
+  if (!positive(propertyFacts?.stories)) return 'default';
+  const evidence = propertyFacts?.storiesEvidence;
+  if (evidence) {
+    // AI stories-fallback provenance FAILS CLOSED: only an explicitly
+    // direct, attributable, non-low-confidence answer prices as a lookup.
+    // Attributable means a VALID http(s) URL that classifies to a known
+    // source family — prose ("the county site"), "unknown", or malformed
+    // model output must ride the stories_estimated review rail, not
+    // auto-price termite/pest. Missing/unknown basis (legacy-format
+    // responses) likewise fails closed.
+    let urlOk = false;
+    try {
+      const parsed = new URL(evidence.sourceUrl);
+      urlOk = parsed.protocol === 'http:' || parsed.protocol === 'https:';
+    } catch { /* not a URL — fail closed */ }
+    const KNOWN_STORY_SOURCE_TYPES = new Set(['verified', 'county', 'cadastral', 'permit', 'builder', 'listing', 'aggregator']);
+    const direct = evidence.basis === 'direct'
+      && evidence.confidence !== 'low'
+      && urlOk
+      && KNOWN_STORY_SOURCE_TYPES.has(evidence.sourceType);
+    return direct ? 'lookup' : 'estimated';
+  }
+  return 'lookup';
+}
+
 function buildEngineInput({ intent, propertyFacts, context, priorQualifyingServices = [], profileDescribesQuotedProperty = false, lookupEnriched = null }) {
   // profileDescribesQuotedProperty is POSITIVELY established by the caller
   // (the trusted profile's saved address street-matches the final quoted
@@ -194,10 +223,35 @@ function buildEngineInput({ intent, propertyFacts, context, priorQualifyingServi
     // Provenance the story-sensitive pricers key their review reasons off —
     // a defaulted count on a 2-story home must carry storiesSource so
     // termite bait (linear-feet math) flags itself instead of silently
-    // underquoting.
-    storiesSource: positive(propertyFacts?.stories) ? 'lookup' : 'default',
+    // underquoting. A low-confidence AI inference is 'estimated' (fires the
+    // same stories_estimated review reason), NOT 'lookup' — the bare
+    // positive-integer check dressed every fallback guess as a real lookup.
+    storiesSource: storiesSourceForPricing(propertyFacts),
     address: intent.address || null,
     leadSource: 'call_pipeline',
+  };
+}
+
+// Stamp the pest curve at the source (audit 2026-07-28): the intent schema
+// can't carry services.pest.version, so drafts persisted unstamped inputs
+// and every later replay had to re-derive the sold curve from the stored
+// result — the PUBLIC replay boundary defaulted unstamped inputs to v1,
+// rendering (and accepting) a v2-priced draft at retired v1 bi-monthly/
+// monthly prices. Persist the version the engine actually priced with so
+// replays (public ladder, accept, admin revision) are stamped without
+// inference. Pure: returns a new object when it stamps, never mutates.
+function stampPestCurveVersion(engineInputs = {}, engineResult = null) {
+  const pest = engineInputs?.services?.pest;
+  if (!pest || typeof pest !== 'object' || pest.version) return engineInputs;
+  const pricedPestLine = (engineResult?.lineItems || [])
+    .find((li) => li?.service === 'pest_control');
+  if (!pricedPestLine) return engineInputs;
+  return {
+    ...engineInputs,
+    services: {
+      ...engineInputs.services,
+      pest: { ...pest, version: pricedPestLine.pricingVersion === 'v2' ? 'v2' : 'v1' },
+    },
   };
 }
 
@@ -568,7 +622,7 @@ function conflictingOpenEstimate(openEstimates, intentAddress) {
 }
 
 // ── Draft row ─────────────────────────────────────────────────
-async function createDraftEstimate({ intent, engineInput, engineResult, totals, lane, laneReasons, propertyFacts, comps, calibration, model, call, context, membershipSnapshot = null, priorQualifyingServices = [], origin = null }) {
+async function createDraftEstimate({ intent, engineInput, engineResult, totals, lane, laneReasons, propertyFacts, propertyFactsV2 = null, comps, calibration, model, call, context, membershipSnapshot = null, priorQualifyingServices = [], origin = null }) {
   const token = crypto.randomBytes(16).toString('hex');
   const expiresAt = new Date();
   expiresAt.setDate(expiresAt.getDate() + 7);
@@ -583,7 +637,8 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
   // the public reconcile path clears only the TOP-LEVEL key on stale
   // membership snapshots, and a nested copy would keep replaying the
   // combined-tier discount after the membership lapsed.
-  const { priorQualifyingServices: _nestedPrior, ...storedEngineInputs } = engineInput || {};
+  const { priorQualifyingServices: _nestedPrior, ...unstampedEngineInputs } = engineInput || {};
+  const storedEngineInputs = stampPestCurveVersion(unstampedEngineInputs, engineResult);
 
   // Serialization: the phone advisory lock covers callers with a usable
   // number. WITHOUT one, withAutomatedEstimatePhoneLock degrades to a bare
@@ -674,6 +729,10 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
           evidence: intent.evidence || [],
           constraintFlags: intent.constraint_flags || [],
           propertyFacts,
+          // Scoped V2 selection + diff vs the V1 facts the draft priced from
+          // (shadow evaluation data; pricing follows V1 until
+          // GATE_PROPERTY_FACTS_V2 flips).
+          ...(propertyFactsV2 ? { propertyFactsV2 } : {}),
           comps,
           calibration,
           composer: { model: model || null, confidence: intent.confidence },
@@ -750,6 +809,7 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
 module.exports = {
   LANES,
   buildEngineInput,
+  stampPestCurveVersion,
   deriveTotals,
   compsBand,
   calibrationWarnings,

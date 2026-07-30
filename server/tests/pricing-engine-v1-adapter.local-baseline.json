@@ -35,13 +35,13 @@
           "label": "Quarterly"
         },
         {
-          "mo": 49.73,
+          "mo": 51.48,
           "apps": 6,
           "recommended": false,
           "label": "Bi-Monthly"
         },
         {
-          "mo": 81.9,
+          "mo": 91.26,
           "apps": 12,
           "recommended": false,
           "label": "Monthly"
@@ -66,10 +66,10 @@
     "recurring": {
       "tier": "Platinum",
       "discount": 0.2,
-      "annualBeforeDiscount": 2797,
-      "annualAfterDiscount": 2237.6,
-      "monthlyTotal": 186.47,
-      "savings": 559.4,
+      "annualBeforeDiscount": 2881,
+      "annualAfterDiscount": 2304.8,
+      "monthlyTotal": 192.07,
+      "savings": 576.2,
       "serviceCount": 4
     },
     "results": {
@@ -98,13 +98,13 @@
           "label": "Quarterly"
         },
         {
-          "mo": 53.55,
+          "mo": 55.44,
           "apps": 6,
           "recommended": false,
           "label": "Bi-Monthly"
         },
         {
-          "mo": 88.2,
+          "mo": 98.28,
           "apps": 12,
           "recommended": false,
           "label": "Monthly"
@@ -120,15 +120,20 @@
           "mo": 41.08,
           "recommended": true,
           "name": "Standard"
+        },
+        {
+          "mo": 54,
+          "recommended": false,
+          "name": "Enhanced"
         }
       ],
       "mq": [
         {
-          "mo": 64.5,
+          "mo": 71.25,
           "recommended": false
         },
         {
-          "mo": 79,
+          "mo": 86,
           "recommended": true
         }
       ],
@@ -141,8 +146,8 @@
       "specItems": []
     },
     "totals": {
-      "year1": 2336.6,
-      "year2": 2237.6
+      "year1": 2403.8,
+      "year2": 2304.8
     }
   },
   "v1adapter_boracare_attic_2000sf": {
@@ -380,9 +385,9 @@
     "recurring": {
       "tier": "Bronze",
       "discount": 0,
-      "annualBeforeDiscount": 1764,
-      "annualAfterDiscount": 1764,
-      "monthlyTotal": 147,
+      "annualBeforeDiscount": 1788,
+      "annualAfterDiscount": 1788,
+      "monthlyTotal": 149,
       "savings": 0,
       "serviceCount": 1
     },
@@ -392,11 +397,11 @@
       "ts": [],
       "mq": [
         {
-          "mo": 124.5,
+          "mo": 127.5,
           "recommended": false
         },
         {
-          "mo": 147,
+          "mo": 149,
           "recommended": true
         }
       ],
@@ -409,17 +414,17 @@
       "specItems": []
     },
     "totals": {
-      "year1": 1764,
-      "year2": 1764
+      "year1": 1788,
+      "year2": 1788
     }
   },
   "v1adapter_termite_bait_three_systems": {
     "recurring": {
       "tier": "Bronze",
       "discount": 0,
-      "annualBeforeDiscount": 420,
-      "annualAfterDiscount": 420,
-      "monthlyTotal": 35,
+      "annualBeforeDiscount": 348,
+      "annualAfterDiscount": 348,
+      "monthlyTotal": 29,
       "savings": 0,
       "serviceCount": 1
     },
@@ -429,26 +434,26 @@
       "ts": [],
       "mq": [],
       "tmBait": {
-        "ai": 695,
-        "ti": null,
-        "bmo": 35,
-        "pmo": 65
+        "ai": null,
+        "ti": 691,
+        "bmo": 29,
+        "pmo": 29
       }
     },
     "oneTime": {
-      "total": 695,
-      "tmInstall": 695,
+      "total": 691,
+      "tmInstall": 691,
       "items": [
         {
-          "name": "Advance Installation",
-          "price": 695
+          "name": "Trelona Installation",
+          "price": 691
         }
       ],
       "specItems": []
     },
     "totals": {
-      "year1": 1115,
-      "year2": 420
+      "year1": 1039,
+      "year2": 348
     }
   },
   "v1adapter_rodent_bait_large_footprint": {
@@ -484,10 +489,10 @@
     "recurring": {
       "tier": "Gold",
       "discount": 0.15,
-      "annualBeforeDiscount": 1713.7,
-      "annualAfterDiscount": 1456.65,
-      "monthlyTotal": 121.39,
-      "savings": 257.05,
+      "annualBeforeDiscount": 1734.76,
+      "annualAfterDiscount": 1474.55,
+      "monthlyTotal": 122.88,
+      "savings": 260.21,
       "serviceCount": 3
     },
     "results": {
@@ -516,13 +521,13 @@
           "label": "Quarterly"
         },
         {
-          "mo": 49.73,
+          "mo": 51.48,
           "apps": 6,
           "recommended": true,
           "label": "Bi-Monthly"
         },
         {
-          "mo": 81.9,
+          "mo": 91.26,
           "apps": 12,
           "recommended": false,
           "label": "Monthly"
@@ -538,6 +543,11 @@
           "mo": 41.08,
           "recommended": true,
           "name": "Standard"
+        },
+        {
+          "mo": 54,
+          "recommended": false,
+          "name": "Enhanced"
         }
       ],
       "mq": [],
@@ -550,8 +560,8 @@
       "specItems": []
     },
     "totals": {
-      "year1": 1555.65,
-      "year2": 1456.65
+      "year1": 1573.55,
+      "year2": 1474.55
     }
   },
   "v1adapter_zone_d_quarterly_pest_bahia": {
@@ -590,13 +600,13 @@
           "label": "Quarterly"
         },
         {
-          "mo": 49.73,
+          "mo": 51.48,
           "apps": 6,
           "recommended": false,
           "label": "Bi-Monthly"
         },
         {
-          "mo": 81.9,
+          "mo": 91.26,
           "apps": 12,
           "recommended": false,
           "label": "Monthly"

@@ -44,6 +44,7 @@ try {
   Anthropic = null;
 }
 const MODELS = require('../config/models');
+const { stripThinkingBlocks } = require('./llm/deep');
 
 const MAX_BATCH = 50;
 
@@ -87,7 +88,10 @@ ${description || '(none)'}`;
     system: systemPrompt,
     messages: [{ role: 'user', content: userPrompt }],
   });
-  const text = response.content?.[0]?.text || '';
+  // Thinking-block guard: WORKHORSE/FAST resolve to a model that can lead
+  // with a thinking block (no .text) on larger inputs, which made a blind
+  // content[0] read return '' — see event-ingestion.js for the incident.
+  const text = stripThinkingBlocks(response).content?.[0]?.text || '';
   const jsonMatch = text.match(/\{[\s\S]*\}/);
   if (!jsonMatch) throw new Error('Claude returned no JSON');
   const parsed = JSON.parse(jsonMatch[0]);

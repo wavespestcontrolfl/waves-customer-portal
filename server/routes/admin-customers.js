@@ -259,6 +259,17 @@ function cadenceFromEstimateLine(line, fallback = 'one_time') {
   const frequency = String(line?.frequency || line?.freq || line?.cadence || '').toLowerCase();
   const frequencyKey = frequency.replace(/[-_\s]+/g, '');
   const visits = Number(line?.visitsPerYear ?? line?.visits_per_year ?? line?.visits ?? line?.apps);
+  // Seasonal mosquito (9 visits): its quote rows carry frequency
+  // 'every_6_weeks' (the estimate-public tier map), but nine mosquito visits
+  // have exactly ONE valid cadence — the Feb–Oct walk. Without this the modal
+  // pre-fill books a custom 42-day series (including winter visits), and the
+  // converter's forced resolver never runs because the booking route creates
+  // the series itself (skipAutoSchedule). Same rule as
+  // converterFollowUpSeedingPattern / annualPrepayCoverageCadence.
+  const RecurringAppointmentSeeder = require('../services/recurring-appointment-seeder');
+  if (RecurringAppointmentSeeder.serviceKeyFor(line || {}) === 'mosquito' && visits === 9) {
+    return RecurringAppointmentSeeder.SEASONAL_FEB_OCT;
+  }
   // Before the month-based buckets: an every-6-weeks plan (9 visits/year) has
   // no month-based cadence — without this it fell to the quarterly fallback,
   // so a 6-week quote pre-filled the modal as quarterly and the prepay
@@ -293,11 +304,19 @@ function indexServicesForSchedule(rows = []) {
 }
 
 function serviceCatalogMatch(line, serviceIndex) {
-  const rawKey = normalizeServiceKey(line?.service || line?.serviceKey || line?.key || '');
+  // The explicit serviceKey is its own candidate, tried FIRST (codex r17
+  // P2): an accepted seasonal selection is restamped as { service:
+  // 'mosquito', serviceKey: 'mosquito_seasonal' }, and folding serviceKey
+  // into a service-wins fallback made the exact seasonal row unreachable —
+  // the fuzzy matcher then returned mosquito_monthly.
+  const explicitKey = normalizeServiceKey(line?.serviceKey || line?.key || '');
+  const rawKey = normalizeServiceKey(line?.service || '');
   const labelKey = normalizeServiceKey(line?.name || line?.label || line?.displayName || '');
   const candidates = [
+    explicitKey,
     rawKey,
     labelKey,
+    ...(SERVICE_KEY_ALIASES[explicitKey] || []),
     ...(SERVICE_KEY_ALIASES[rawKey] || []),
     ...(SERVICE_KEY_ALIASES[labelKey] || []),
   ].filter(Boolean);
@@ -378,8 +397,16 @@ function formatEstimateLine(line, { kind, estimate, serviceIndex }) {
     : moneyOrNull(line?.priceAfterDiscount, line?.amountAfterDiscount, line?.totalAfterDiscount, line?.price, line?.amount, line?.total);
   if (kind !== 'recurring' && price == null) return null;
 
-  const matched = serviceCatalogMatch({ ...line, name }, serviceIndex);
+  const rawMatched = serviceCatalogMatch({ ...line, name }, serviceIndex);
   const cadence = kind === 'recurring' ? cadenceFromEstimateLine(line, 'quarterly') : 'one_time';
+  // Never stamp the monthly catalog identity on a seasonal mosquito line
+  // (codex r16 P2): the seasonal row is normally in the index (queried
+  // explicitly despite is_active=false), but a fuzzy hit on mosquito_monthly
+  // would make catalog-first consumers classify the plan as 12-visit
+  // monthly. Fail to NO identity rather than the wrong one.
+  const matched = cadence === 'seasonal_feb_oct' && rawMatched?.service_key === 'mosquito_monthly'
+    ? null
+    : rawMatched;
   // The scheduler (and Schedule modal) have no native every_6_weeks cadence —
   // they represent it as a custom 42-day interval. Translate here so the
   // modal pre-fill books the series the quote actually sold; intervalDays is
@@ -1880,7 +1907,14 @@ router.get('/:id/schedule-estimates', requireAdmin, async (req, res, next) => {
           'bill_by_invoice', 'show_one_time_option', 'created_at', 'accepted_at',
         ),
       db('services')
-        .where({ is_active: true })
+        // mosquito_seasonal is is_active=false until the owner activates the
+        // program, but a seasonal QUOTE still needs its catalog identity —
+        // without it the fuzzy match stamps mosquito_monthly's service_id on
+        // a seasonal booking and catalog-first consumers classify the plan
+        // as 12-visit monthly (codex r16 P2). Inactive here only widens the
+        // schedule-modal pre-fill's identity resolution; it does not make
+        // the service bookable anywhere else.
+        .where((q) => q.where({ is_active: true }).orWhere({ service_key: 'mosquito_seasonal' }))
         .select(
           'id', 'service_key', 'name', 'short_name', 'category', 'billing_type',
           'frequency', 'visits_per_year', 'default_duration_minutes',
@@ -2467,6 +2501,9 @@ router.post('/', requireAdmin, async (req, res, next) => {
         first_name: normalized.firstName, last_name: normalized.lastName || null, phone: normalized.phone, email: normalized.email,
         address_line1: normalized.addressLine1 || null, address_line2: normalized.addressLine2 || null, city: normalized.city || null, state: normalized.state, zip: normalized.zip || null,
         waveguard_tier: normalized.tier, monthly_rate: normalized.monthlyRate,
+        // Human-chosen tier at create: 'manual' provenance keeps the
+        // auto-tier machinery off it (migration 20260728000001).
+        waveguard_tier_source: normalized.tier ? 'manual' : null,
         member_since: etDateString(),
         referral_code: code, lead_source: normalized.leadSource,
         pipeline_stage: normalized.pipelineStage,
@@ -2648,7 +2685,16 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
     for (const [k, v] of Object.entries(fields)) {
       if (req.body[k] !== undefined) {
         // Handle empty strings for numeric/date fields
-        if (v === 'monthly_rate') { updates[v] = req.body[k] === '' ? 0 : parseFloat(req.body[k]) || 0; }
+        if (v === 'waveguard_tier') {
+          updates[v] = req.body[k];
+          // A human set (or cleared) the tier: record 'manual' provenance so
+          // the auto-tier machinery (GATE_AUTO_WAVEGUARD_TIER realignment +
+          // label-only messaging suppression) never treats an admin-chosen
+          // tier as a derived label it may move. Clearing the tier clears
+          // provenance with it. Ships with migration 20260728000001.
+          updates.waveguard_tier_source = req.body[k] ? 'manual' : null;
+        }
+        else if (v === 'monthly_rate') { updates[v] = req.body[k] === '' ? 0 : parseFloat(req.body[k]) || 0; }
         else if (v === 'next_follow_up_date') { updates[v] = req.body[k] || null; }
         else if (v === 'has_left_google_review') { updates[v] = !!req.body[k]; }
         else if (v === 'payer_id') { updates[v] = (req.body[k] === '' || req.body[k] == null) ? null : (parseInt(req.body[k], 10) || null); }
@@ -2758,6 +2804,20 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
               { before: lockedBefore, after: lockedAfter, source: 'Customer 360 edit' }, trx
             );
           }
+          // Name and phone have the same snapshot problem (leads, estimates,
+          // contracts, promoter, booking recovery, automation greetings) —
+          // both diff-gated inside the service, so an unchanged full-form
+          // resave is a no-op.
+          if (updates.first_name !== undefined || updates.last_name !== undefined) {
+            await require('../services/customer-contact-fanout').propagateCustomerNameChange(
+              { before: lockedBefore, after: lockedAfter }, trx
+            );
+          }
+          if (updates.phone !== undefined) {
+            await require('../services/customer-contact-fanout').propagateCustomerPhoneChange(
+              { before: lockedBefore, after: lockedAfter }, trx
+            );
+          }
         });
       } catch (e) {
         if (e && e.code === '23505') {
@@ -2781,11 +2841,20 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           sensitiveFieldsChanged: changed.filter(field => sensitiveFields.includes(field)),
         }, true);
       }
-      const beforeHasMembership = hasMembership(before);
-      const afterHasMembership = hasMembership(after);
+      // EFFECTIVE membership for lifecycle emails: an auto-derived tier
+      // LABEL (waveguard_tier_source = 'auto', no positive rate, label-only
+      // lane) is not a membership the customer knows about — deactivating,
+      // reactivating, or clearing it must not send membership.canceled /
+      // reactivated / started emails (Codex #3011 r8 P1: the tier stamp is
+      // contractually comms-silent). A label that transitions to a REAL
+      // membership in this same save (rate/lane set) correctly counts as a
+      // membership start, because the label side evaluates to non-member.
+      const { isAutoDerivedTierLabelRow } = require('../services/self-booking-plan-sync');
+      const beforeHasMembership = hasMembership(before) && !isAutoDerivedTierLabelRow(before);
+      const afterHasMembership = hasMembership(after) && !isAutoDerivedTierLabelRow(after);
       const membershipFieldChanged = membershipDetailsChanged(before, after);
       const membershipEventAt = new Date();
-      if (updates.active === false && before.active !== false && hasMembership(before)) {
+      if (updates.active === false && before.active !== false && beforeHasMembership) {
         void AccountMembershipEmail.sendMembershipCanceled({
           customerId: req.params.id,
           effectiveDate: membershipEventAt,
@@ -2794,13 +2863,18 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           monthlyRate: before.monthly_rate,
           idempotencyKey: adminMembershipDailyIdempotencyKey('membership.canceled', req.params.id, 'admin', membershipEventAt),
         }).catch(err => logger.warn(`[customers] membership.canceled email failed for ${req.params.id}: ${err.message}`));
-      } else if (updates.active === true && before.active === false && hasMembership(after)) {
+      } else if (updates.active === true && before.active === false && afterHasMembership) {
         void AccountMembershipEmail.sendMembershipReactivated({
           customerId: req.params.id,
           effectiveDate: membershipEventAt,
           idempotencyKey: adminMembershipDailyIdempotencyKey('membership.reactivated', req.params.id, 'admin', membershipEventAt),
         }).catch(err => logger.warn(`[customers] membership.reactivated email failed for ${req.params.id}: ${err.message}`));
-      } else if (membershipFieldChanged && !beforeHasMembership && afterHasMembership) {
+      } else if (!beforeHasMembership && afterHasMembership) {
+        // Effective-membership transition alone is the trigger (Codex #3011
+        // r9): a label becoming a REAL membership can happen WITHOUT the
+        // tier/rate fields changing — re-saving the same tier flips
+        // provenance to 'manual', or an established billing lane is selected
+        // — and membershipDetailsChanged compares only tier and rate.
         void AccountMembershipEmail.sendMembershipStarted({
           customerId: req.params.id,
           effectiveDate: membershipEventAt,
@@ -2809,7 +2883,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           sourceId: `admin_membership_start:${req.params.id}:${etDateString(membershipEventAt)}`,
           idempotencyKey: adminMembershipStartIdempotencyKey(req.params.id, before, after, membershipEventAt),
         }).catch(err => logger.warn(`[customers] membership.started email failed for ${req.params.id}: ${err.message}`));
-      } else if (membershipFieldChanged && beforeHasMembership && !afterHasMembership) {
+      } else if (beforeHasMembership && !afterHasMembership) {
         void AccountMembershipEmail.sendMembershipCanceled({
           customerId: req.params.id,
           effectiveDate: membershipEventAt,

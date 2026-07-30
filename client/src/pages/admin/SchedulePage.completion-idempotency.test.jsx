@@ -5,7 +5,6 @@ import {
   completionReviewSuppressionReason,
   completionTimeOnSiteBody,
   completionWillReview,
-  normalizeCompletionDetourPhotos,
   restoredBackfillChoices,
   shouldResetCompletionIdempotencyKey,
 } from "./SchedulePage.jsx";
@@ -16,11 +15,11 @@ describe("completion idempotency retry keys", () => {
     expect(shouldResetCompletionIdempotencyKey({ status: 422 })).toBe(true);
   });
 
-  it("preserves the key for billing-required conflicts", () => {
+  it("preserves the key for ordinary conflicts", () => {
     expect(
       shouldResetCompletionIdempotencyKey({
         status: 409,
-        code: "completion_billing_required",
+        code: "completion_side_effects_running",
       }),
     ).toBe(false);
   });
@@ -71,19 +70,13 @@ describe("backfill timeOnSite submission (Codex P1, PR #2897)", () => {
   });
 });
 
-describe("completion detour draft state", () => {
+describe("completion draft state", () => {
   it("treats outbound-message and pest-rating changes as draft content", () => {
     expect(completionPreferencesNeedDraft()).toBe(false);
     expect(completionPreferencesNeedDraft({ sendSms: false })).toBe(true);
     expect(completionPreferencesNeedDraft({ includePayLink: false })).toBe(true);
     expect(completionPreferencesNeedDraft({ requestReview: false })).toBe(true);
     expect(completionPreferencesNeedDraft({ clientPestRating: 0 })).toBe(true);
-  });
-
-  it("keeps prepared photos available for the in-memory billing detour", () => {
-    const photos = [{ name: "after.jpg", data: "data:image/jpeg;base64,abc" }];
-    expect(normalizeCompletionDetourPhotos(photos)).toBe(photos);
-    expect(normalizeCompletionDetourPhotos(null)).toEqual([]);
   });
 });
 

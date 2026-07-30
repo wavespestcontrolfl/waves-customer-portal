@@ -28,14 +28,14 @@ function lawnEstData({ recommendedVisits = 9 } = {}) {
 }
 
 describe('lawnFrequenciesFromResultStats — customer-facing lawn cadences', () => {
-  test('maps the sold tiers to Bi-monthly / 9 visits / yr / Monthly and drops the retired Quarterly cadence', () => {
+  test('maps the sold tiers to Bi-monthly / Every 6 weeks / Monthly and drops the retired Quarterly cadence', () => {
     // basic/Quarterly is retired for new sales (owner directive 2026-07-09) —
     // stored rows still carry it, but it must never be re-offered.
     const freqs = lawnFrequenciesFromResultStats(lawnEstData());
     expect(freqs.map((f) => [f.key, f.label, f.visitsPerYear])).toEqual([
-      ['standard', 'Bi-monthly', 6],
-      ['enhanced', '9 visits / yr', 9],
-      ['premium', 'Monthly', 12],
+      ['standard', 'Bi-monthly (6 visits)', 6],
+      ['enhanced', 'Every 6 weeks (9 visits)', 9],
+      ['premium', 'Monthly (12 visits)', 12],
     ]);
   });
 
@@ -64,6 +64,18 @@ describe('lawnFrequenciesFromResultStats — customer-facing lawn cadences', () 
     });
     // No manual discount in the fixture → prices equal the base.
     expect(enhanced.monthly).toBe(enhanced.monthlyBase);
+  });
+
+  test('stamps billedPerApplication on every tier — accept bills plan annual ÷ visits, so the card must never claim a monthly charge (owner 2026-07-23; estimator audit 2026-07-24)', () => {
+    // The 6- and 9-visit tiers are the regression trap: monthly ≠ per-app
+    // there, so a missing flag resurrects the "Billed $X/mo" note. The
+    // 12-visit tier hides the note arithmetically (monthly == per-app) —
+    // asserting the flag on ALL tiers keeps the suite honest anyway.
+    const freqs = lawnFrequenciesFromResultStats(lawnEstData());
+    expect(freqs.length).toBeGreaterThan(0);
+    for (const f of freqs) {
+      expect(f.billedPerApplication).toBe(true);
+    }
   });
 
   test('the recommended cadence follows the engine row (default = enhanced / 9 visits)', () => {
@@ -96,7 +108,7 @@ describe('lawnFrequenciesFromResultStats — customer-facing lawn cadences', () 
     });
     expect(freqs.map((f) => f.key)).toEqual(['standard', 'enhanced', 'premium']);
     const std = freqs.find((f) => f.key === 'standard');
-    expect(std.label).toBe('Bi-monthly');
+    expect(std.label).toBe('Bi-monthly (6 visits)');
     expect(std.visitsPerYear).toBe(6);
     expect(std.monthly).toBe(55.5); // the real 6-visit price, not Basic's $35
   });
@@ -512,9 +524,9 @@ describe('lawnFrequenciesFromEngineResult — engine-invocation lawn-only ladder
   test('expands the lawn line item tiers into the sold cadences, in order (Quarterly retired)', () => {
     const freqs = lawnFrequenciesFromEngineResult({ lineItems: [lawnLineItem()] });
     expect(freqs.map((f) => [f.key, f.label, f.visitsPerYear, f.monthly])).toEqual([
-      ['standard', 'Bi-monthly', 6, 55],
-      ['enhanced', '9 visits / yr', 9, 62.25],
-      ['premium', 'Monthly', 12, 84],
+      ['standard', 'Bi-monthly (6 visits)', 6, 55],
+      ['enhanced', 'Every 6 weeks (9 visits)', 9, 62.25],
+      ['premium', 'Monthly (12 visits)', 12, 84],
     ]);
     expect(freqs.find((f) => f.key === 'enhanced').selected).toBe(true);
   });

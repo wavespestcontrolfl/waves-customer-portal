@@ -84,6 +84,29 @@ function navigateTo(rawUrl) {
   navigateToCustomerUrl(rawUrl);
 }
 
+// App.getLaunchUrl() returns the SAME URL for the entire native app session,
+// and in remote-server mode every location.assign is a full document load that
+// re-runs this module. The dest === current guard above cannot catch a launch
+// URL that REDIRECTS — an /l/:code short link 302s to /estimate/:token, so the
+// webview is never "at" /l/:code and the replay loops the app forever
+// (2026-07-23 prod incident: a customer's estimate short link looped ~3
+// navigations/sec until they force-quit). Consume the launch URL ONCE per app
+// session: mark it in sessionStorage — which WebKit scopes to the browsing
+// session, so it survives in-session document reloads but resets on the next
+// cold start — BEFORE navigating, and skip the replay on later boots.
+export const LAUNCH_URL_CONSUMED_KEY = 'waves-native-launch-url-consumed';
+
+function consumeLaunchUrl(url) {
+  try {
+    if (sessionStorage.getItem(LAUNCH_URL_CONSUMED_KEY) === url) return false;
+    sessionStorage.setItem(LAUNCH_URL_CONSUMED_KEY, url);
+  } catch {
+    // Storage unavailable: still honor the launch URL — a true cold start must
+    // navigate. The loop needs storage broken AND a redirecting link at once.
+  }
+  return true;
+}
+
 export async function initNativeLinks() {
   if (!isNativeApp()) return;
 
@@ -99,7 +122,7 @@ export async function initNativeLinks() {
   try {
     App.addListener('appUrlOpen', ({ url }) => navigateTo(url));
     const launch = await App.getLaunchUrl();
-    if (launch?.url) navigateTo(launch.url);
+    if (launch?.url && consumeLaunchUrl(launch.url)) navigateTo(launch.url);
   } catch {
     // Never let link plumbing break app boot.
   }

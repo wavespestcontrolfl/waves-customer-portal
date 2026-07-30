@@ -1,0 +1,243 @@
+/**
+ * billedPerApplication vs the live billing lane (codex P1s on #2978).
+ *
+ * The "Billed $X/mo" note suppressor must track how the accept path will
+ * actually bill: everyone converts to per-application billing EXCEPT a
+ * CURRENT monthly member (estimate-converter preservesExistingMembership).
+ * buildPricingBundle resolves the lane LIVE from the linked customer row via
+ * the shared predicate (billing-cadence customerPreservesMonthlyMembership)
+ * and enforces the flag symmetrically — strip for preserved members, add
+ * missing flags on tier-plan surfaces for everyone else (pre-flag send
+ * snapshots included).
+ */
+
+const mockDbState = {
+  customer: null,
+  calls: [],
+  billingModeColumnExists: true,
+  // Candidate rows for the awaited-as-list customers query
+  // (matchAcceptCustomerByPhone's phone sweep).
+  phoneCandidates: [],
+};
+
+jest.mock('../models/db', () => {
+  const handler = (table) => {
+    const builder = {
+      where: () => builder,
+      whereIn: () => builder,
+      whereNull: () => builder,
+      whereNotNull: () => builder,
+      andWhere: () => builder,
+      orderBy: () => builder,
+      orderByRaw: () => builder,
+      limit: () => builder,
+      select: async () => [],
+      first: async () => {
+        mockDbState.calls.push(table);
+        if (table === 'customers') {
+          if (mockDbState.customer instanceof Error) throw mockDbState.customer;
+          return mockDbState.customer;
+        }
+        return null;
+      },
+      // Awaiting the builder without .first() (the phone-candidate sweep)
+      // resolves the canned candidate list.
+      then: (resolve, reject) => {
+        mockDbState.calls.push(`${table}:list`);
+        if (table === 'customers' && mockDbState.phoneCandidates instanceof Error) {
+          return reject(mockDbState.phoneCandidates);
+        }
+        return resolve(table === 'customers' ? (mockDbState.phoneCandidates || []) : []);
+      },
+    };
+    return builder;
+  };
+  handler.fn = { now: () => new Date() };
+  handler.raw = async () => ({ rows: [] });
+  handler.schema = {
+    hasColumn: async (table, column) => {
+      if (table === 'customers' && column === 'billing_mode') {
+        if (mockDbState.billingModeColumnExists instanceof Error) throw mockDbState.billingModeColumnExists;
+        return mockDbState.billingModeColumnExists;
+      }
+      return true;
+    },
+  };
+  return handler;
+});
+
+const {
+  buildPricingBundle,
+  addMissingBilledPerApplicationFlags,
+  _resetPerApplicationColumnsProbeForTests,
+} = require('../routes/estimate-public');
+
+function lawnEstimateRow({ customerId = null, customerPhone = null } = {}) {
+  return {
+    id: `estimate-lane-${customerId || 'lead'}`,
+    status: 'sent',
+    customer_id: customerId,
+    customer_phone: customerPhone,
+    monthly_total: 55.5,
+    annual_total: 666,
+    onetime_total: 0,
+    estimate_data: {
+      result: {
+        hasRecurring: true,
+        recurring: {
+          monthlyTotal: 55.5,
+          services: [{ name: 'Lawn Care', service: 'lawn_care', mo: 55.5, ann: 666, v: 6, visitsPerYear: 6, perTreatment: 111 }],
+        },
+        results: {
+          lawn: [
+            { name: 'Standard', v: 6, mo: 55.5, ann: 666, pa: 111 },
+            { name: 'Enhanced', v: 9, mo: 66.75, ann: 801, pa: 89, recommended: true },
+          ],
+        },
+        oneTime: { items: [] },
+      },
+    },
+  };
+}
+
+function collectFlags(bundle) {
+  const flags = [];
+  const walk = (node) => {
+    if (!node || typeof node !== 'object') return;
+    if (Array.isArray(node)) { node.forEach(walk); return; }
+    if ('billedPerApplication' in node) flags.push(node.billedPerApplication);
+    Object.values(node).forEach(walk);
+  };
+  walk(bundle);
+  return flags;
+}
+
+beforeEach(() => {
+  mockDbState.customer = null;
+  mockDbState.calls = [];
+  mockDbState.billingModeColumnExists = true;
+  mockDbState.phoneCandidates = [];
+  _resetPerApplicationColumnsProbeForTests();
+});
+
+describe('buildPricingBundle lane enforcement', () => {
+  test('lead estimate (no customer link, no phone): flags present, no customer lookup', async () => {
+    const bundle = await buildPricingBundle(lawnEstimateRow());
+    expect(collectFlags(bundle).length).toBeGreaterThan(0);
+    expect(mockDbState.calls).not.toContain('customers');
+  });
+
+  test('UNLINKED estimate whose phone matches a monthly member strips — accept links that member and bills monthly (codex r4)', async () => {
+    mockDbState.phoneCandidates = [{
+      id: 'cust-m', phone: '+19415551234', pipeline_stage: 'active_customer', monthly_rate: 95, billing_mode: null,
+    }];
+    const bundle = await buildPricingBundle(lawnEstimateRow({ customerPhone: '+19415551234' }));
+    expect(collectFlags(bundle)).toEqual([]);
+  });
+
+  test('unlinked phone matching a per_application customer keeps the flags', async () => {
+    mockDbState.phoneCandidates = [{
+      id: 'cust-p', phone: '+19415551234', pipeline_stage: 'active_customer', monthly_rate: 95, billing_mode: 'per_application',
+    }];
+    const bundle = await buildPricingBundle(lawnEstimateRow({ customerPhone: '+19415551234' }));
+    expect(collectFlags(bundle).length).toBeGreaterThan(0);
+  });
+
+  test('unlinked phone with no candidate rows keeps the flags (new signup, per-application)', async () => {
+    mockDbState.phoneCandidates = [];
+    const bundle = await buildPricingBundle(lawnEstimateRow({ customerPhone: '+19415550000' }));
+    expect(collectFlags(bundle).length).toBeGreaterThan(0);
+  });
+
+  test('linked CURRENT monthly member (legacy NULL lane): every flag stripped, note preserved', async () => {
+    mockDbState.customer = { id: 'cust-1', pipeline_stage: 'active_customer', monthly_rate: 95, billing_mode: null };
+    const bundle = await buildPricingBundle(lawnEstimateRow({ customerId: 'cust-1' }));
+    expect(collectFlags(bundle)).toEqual([]);
+  });
+
+  test('linked monthly_membership member: stripped too', async () => {
+    mockDbState.customer = { id: 'cust-1', pipeline_stage: 'won', monthly_rate: 60, billing_mode: 'monthly_membership' };
+    const bundle = await buildPricingBundle(lawnEstimateRow({ customerId: 'cust-1' }));
+    expect(collectFlags(bundle)).toEqual([]);
+  });
+
+  test('linked per_application-lane customer: flags present (their accept bills per application)', async () => {
+    mockDbState.customer = { id: 'cust-1', pipeline_stage: 'active_customer', monthly_rate: 95, billing_mode: 'per_application' };
+    const bundle = await buildPricingBundle(lawnEstimateRow({ customerId: 'cust-1' }));
+    expect(collectFlags(bundle).length).toBeGreaterThan(0);
+  });
+
+  test('linked but customer row missing: flags present (converts like a new signup)', async () => {
+    mockDbState.customer = null;
+    const bundle = await buildPricingBundle(lawnEstimateRow({ customerId: 'cust-gone' }));
+    expect(collectFlags(bundle).length).toBeGreaterThan(0);
+  });
+
+  test('lane lookup failure on a linked estimate fails to the monthly disclosure (strip)', async () => {
+    mockDbState.customer = new Error('connection refused');
+    const bundle = await buildPricingBundle(lawnEstimateRow({ customerId: 'cust-1' }));
+    expect(collectFlags(bundle)).toEqual([]);
+  });
+
+  test('pre-migration database (no billing_mode column): every flag stripped even for leads — accepts bill the legacy monthly cron (codex r3)', async () => {
+    mockDbState.billingModeColumnExists = false;
+    const bundle = await buildPricingBundle(lawnEstimateRow());
+    expect(collectFlags(bundle)).toEqual([]);
+  });
+
+  test('column probe ERROR assumes migrated — unreachable db is not pre-migration', async () => {
+    mockDbState.billingModeColumnExists = new Error('information_schema unavailable');
+    const bundle = await buildPricingBundle(lawnEstimateRow());
+    expect(collectFlags(bundle).length).toBeGreaterThan(0);
+  });
+
+  test('a migrated probe is cached — the flag path stays hot after the first true answer', async () => {
+    const first = await buildPricingBundle(lawnEstimateRow());
+    expect(collectFlags(first).length).toBeGreaterThan(0);
+    // Flip the mock to "column missing": the cached true probe must win
+    // (a migrated database never un-migrates).
+    mockDbState.billingModeColumnExists = false;
+    const second = await buildPricingBundle(lawnEstimateRow());
+    expect(collectFlags(second).length).toBeGreaterThan(0);
+  });
+});
+
+describe('addMissingBilledPerApplicationFlags — pre-flag send-snapshot back-fill', () => {
+  test('adds the flag on tier-plan section entries and serviceCategory ladders, never on termite/pest rows', () => {
+    const preFlagBundle = {
+      frequencies: [
+        // Single-service lawn ladder entry from an old snapshot (no flag).
+        { key: 'standard', serviceCategory: 'lawn_care', monthly: 55.5, perTreatment: 111, visitsPerYear: 6 },
+        // Pest cadence entry — no serviceCategory, must stay untouched.
+        { key: 'quarterly', monthly: 95, perTreatment: 285, visitsPerYear: 4 },
+      ],
+      services: [
+        {
+          key: 'tree_shrub',
+          frequencies: [
+            { key: 'enhanced', monthly: 68.6, perTreatment: 91.47, visitsPerYear: 9 },
+            { key: 'quote', quoteRequired: true, monthly: null, perTreatment: null, visitsPerYear: 9 },
+          ],
+        },
+        {
+          // Legacy flat-monthly termite monitoring: derived per-visit price +
+          // visit count but genuinely billed monthly — the #2965 carve-out.
+          key: 'termite_bait',
+          frequencies: [
+            { key: 'recurring', monthly: 29.75, perTreatment: 89.25, visitsPerYear: 4 },
+          ],
+        },
+      ],
+    };
+    const out = addMissingBilledPerApplicationFlags(preFlagBundle);
+    expect(out.frequencies[0].billedPerApplication).toBe(true);
+    expect(out.frequencies[1].billedPerApplication).toBeUndefined();
+    const ts = out.services.find((s) => s.key === 'tree_shrub');
+    expect(ts.frequencies[0].billedPerApplication).toBe(true);
+    expect(ts.frequencies[1].billedPerApplication).toBeUndefined(); // quote-required
+    const termite = out.services.find((s) => s.key === 'termite_bait');
+    expect(termite.frequencies[0].billedPerApplication).toBeUndefined();
+    // Copying transform — the input (cache-resident) bundle is untouched.
+    expect(preFlagBundle.frequencies[0].billedPerApplication).toBeUndefined();
+  });
+});

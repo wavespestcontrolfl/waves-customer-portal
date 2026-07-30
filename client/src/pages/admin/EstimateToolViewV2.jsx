@@ -1725,9 +1725,10 @@ function CustomerEstimatePreviewV2({ E, R, form, satelliteUrl, onSelectPestFreq,
                 )}
               </div>
             ))}
-            <div className="text-13 text-[#04395E] mt-3">
-              Try us risk-free — 90-day money-back guarantee.
-            </div>
+            {/* Standalone risk-free / 90-day line removed to match the
+                customer page — #2969 deduped it there (the CTA micro is the
+                one sanctioned spot), so the "matches the customer page"
+                promise above holds again. */}
           </div>
         ) : oneTimeStandaloneTotal > 0 ? (
           <div className="pt-5 pb-3">
@@ -2060,8 +2061,6 @@ export default function EstimateToolViewV2({
     manualDiscountValue: "",
     manualDiscountLabel: "",
     manualDiscountInternalReason: "",
-    manualDiscountEligibilityConfirmed: false,
-    manualDiscountEligibilityOverrideReason: "",
     serviceSpecificDiscountKeys: [],
     grassType: "st_augustine",
     mosquitoProgram: "monthly12",
@@ -2107,9 +2106,12 @@ export default function EstimateToolViewV2({
     termiteFootprintSqFt: "",
     termitePerimeterLF: "",
     termiteBaitComplexity: "",
-    termiteBaitSystem: "advance",
+    // Trelona-only menu (owner 2026-07-28); tier is a retired concept the
+    // API still accepts.
+    termiteBaitSystem: "trelona",
     termiteMonitoringTier: "basic",
     termiteBondTerm: "none",
+    termiteOwnership: "own",
     termiteScope: "bait_monitoring_no_warranty",
     trenchingPerimeterLF: "",
     trenchingConcreteLF: "",
@@ -2355,12 +2357,29 @@ export default function EstimateToolViewV2({
       }
     }
     if (form.svcMosquito && !commercialDetected) {
-      const programBase =
-        form.mosquitoProgram === "seasonal9" ? 105 : 90;
-      approx.mosquito = Math.max(
-        programBase,
-        Math.round(lotSqft * 0.005 + programBase),
-      );
+      // Rough preview; engine is authoritative. Mirrors the server's 500-sf
+      // step interpolation between per-visit bucket anchors (no pressure
+      // factors), then visits/yr -> levelized monthly.
+      const mqSeasonal = form.mosquitoProgram === "seasonal9";
+      const mqAnchors = mqSeasonal
+        ? [[8000, 73], [12000, 76], [18000, 79], [35000, 86], [62000, 97]]
+        : [[8000, 66], [12000, 69], [18000, 73], [35000, 77], [73500, 86]];
+      const mqTreatable = Math.max(0, lotSqft - (sqft || 0));
+      const mqStepped = Math.ceil(mqTreatable / 500) * 500;
+      let mqPerVisit = mqAnchors[mqAnchors.length - 1][1];
+      if (mqStepped <= mqAnchors[0][0]) {
+        mqPerVisit = mqAnchors[0][1];
+      } else {
+        for (let i = 1; i < mqAnchors.length; i++) {
+          if (mqStepped <= mqAnchors[i][0]) {
+            const [aSq, aPr] = mqAnchors[i - 1];
+            const [bSq, bPr] = mqAnchors[i];
+            mqPerVisit = Math.round(aPr + ((mqStepped - aSq) / (bSq - aSq)) * (bPr - aPr));
+            break;
+          }
+        }
+      }
+      approx.mosquito = Math.round((mqPerVisit * (mqSeasonal ? 9 : 12)) / 12);
     }
     if (form.svcTermiteBait && !commercialDetected) approx.termiteBait = 50;
     if (form.svcRodentBait && !commercialDetected) approx.rodentBait = sqft > 2500 ? 69 : 49;
@@ -2911,6 +2930,14 @@ export default function EstimateToolViewV2({
   const [discountPresets, setDiscountPresets] = useState([]);
   const [serviceCreditPresets, setServiceCreditPresets] = useState([]);
   const [fleaPricingConfig, setFleaPricingConfig] = useState(null);
+  // Whether the SERVER will actually honor a rented-stations selection.
+  // GATE_TERMITE_STATION_RENTAL defaults off and the engine silently reprices
+  // a dark 'rent' to outright purchase — so offering the control while the
+  // gate is down lets an operator pick "Rented" and send a purchase quote
+  // carrying the install charge. The first server calculation already ignored
+  // the choice, so the save-time recompute check sees no drift to warn about
+  // (codex P1). Fail closed: null/false hides the control entirely.
+  const [termiteRentalAvailable, setTermiteRentalAvailable] = useState(false);
   useEffect(() => {
     (async () => {
       try {
@@ -2948,6 +2975,27 @@ export default function EstimateToolViewV2({
     };
   }, []);
 
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        const r = await adminFetch("/admin/pricing-config/termite_rental");
+        if (!r.ok) return;
+        const row = await r.json();
+        // Explicit true only — a 404 (row not seeded), a transport failure,
+        // or an older server that does not send the field all keep the
+        // rental choice hidden rather than offering an option the engine
+        // would silently discard.
+        if (active) setTermiteRentalAvailable(row?.featureAvailable === true);
+      } catch {
+        /* ignore — stays unavailable */
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
+
   function applyDiscountPreset(key) {
     setEstimate(null);
     setSavedId(null);
@@ -2960,8 +3008,6 @@ export default function EstimateToolViewV2({
         manualDiscountValue: "",
         manualDiscountLabel: "",
         manualDiscountInternalReason: "",
-        manualDiscountEligibilityConfirmed: false,
-        manualDiscountEligibilityOverrideReason: "",
       }));
       return;
     }
@@ -2969,8 +3015,6 @@ export default function EstimateToolViewV2({
       setForm((f) => ({
         ...f,
         manualDiscountPreset: key,
-        manualDiscountEligibilityConfirmed: false,
-        manualDiscountEligibilityOverrideReason: "",
       }));
       return;
     }
@@ -2983,8 +3027,6 @@ export default function EstimateToolViewV2({
       manualDiscountType: manualType,
       manualDiscountValue: isCustomDiscountTemplate(d) ? "" : String(d.amount || 0),
       manualDiscountLabel: d.name,
-      manualDiscountEligibilityConfirmed: false,
-      manualDiscountEligibilityOverrideReason: "",
     }));
   }
 
@@ -3442,15 +3484,6 @@ export default function EstimateToolViewV2({
         alert("Enter an internal reason for custom discounts.");
         return null;
       }
-      if (
-        manualDiscountType !== "NONE" &&
-        manualDiscountValue > 0 &&
-        selectedManualPreset?.warnings?.some((warning) => String(warning).startsWith("manual_discount_requires_")) &&
-        form.manualDiscountEligibilityConfirmed !== true
-      ) {
-        alert("Confirm eligibility or enter an approved override before applying this discount.");
-        return null;
-      }
       const manualDiscount = buildManualDiscountPayload({
         form: { ...form, manualDiscountType },
         selectedPreset: selectedManualPreset,
@@ -3517,9 +3550,15 @@ export default function EstimateToolViewV2({
         thatchProbe3Inches: form.thatchProbe3Inches,
         thatchDepthInches: form.thatchDepthInches,
         thatchMeasurementSource: form.thatchMeasurementSource || "manual",
-        termiteBaitSystem: form.termiteBaitSystem || "advance",
+        termiteBaitSystem: form.termiteBaitSystem || "trelona",
         termiteMonitoringTier: form.termiteMonitoringTier || "basic",
         termiteBondTerm: form.termiteBondTerm || "none",
+        // Hard floor to purchase when the server has not advertised the
+        // rental feature: a prefilled/edited draft or a gate flipped OFF
+        // mid-session can still carry termiteOwnership='rent' in form state
+        // after the control stops rendering, and sending that would quote a
+        // rental the engine will reprice as a purchase.
+        termiteOwnership: (termiteRentalAvailable && form.termiteOwnership === "rent") ? "rent" : "own",
         termiteBaitComplexity: form.termiteBaitComplexity || "",
         termiteScope: form.termiteScope || "bait_monitoring_no_warranty",
         termiteFootprintSqFt,
@@ -3889,6 +3928,27 @@ export default function EstimateToolViewV2({
         result.modifiers = mods;
       }
 
+      // Stale rental gate (codex P1, round 2): the availability probe runs
+      // once at mount, so GATE_TERMITE_STATION_RENTAL flipped OFF mid-session
+      // (a deploy under an open tab) still sends termiteOwnership='rent' —
+      // and the server silently prices a purchase while the form shows
+      // "Rented". The calculation RESPONSE is the live truth: a rent request
+      // on a selected termite program that comes back with no rental line
+      // means the server no longer honors the feature. Reset to purchase,
+      // hide the control, and drop this result so the operator regenerates
+      // and SEES the purchase quote they would actually send.
+      if (
+        options.termiteOwnership === "rent"
+        && selectedServices.includes("TERMITE_BAIT")
+        && !(result?.recurring?.services || []).some((svc) => svc.service === "termite_station_rental")
+      ) {
+        setTermiteRentalAvailable(false);
+        setForm((f) => ({ ...f, termiteOwnership: "own" }));
+        setEstimate(null);
+        alert("The server did not price this quote as a station rental (the rental option is off or not priceable for this configuration). The form has been reset to purchased stations — generate again to see the purchase quote.");
+        return null;
+      }
+
       // Stash the exact engine request so the server can replay it on save and
       // be the authority on the persisted price (Decision #2). This is the same
       // payload sent to /calculate-estimate above.
@@ -4196,9 +4256,10 @@ export default function EstimateToolViewV2({
       termiteFootprintSqFt: "",
       termitePerimeterLF: "",
       termiteBaitComplexity: "",
-      termiteBaitSystem: "advance",
+      termiteBaitSystem: "trelona",
       termiteMonitoringTier: "basic",
       termiteBondTerm: "none",
+      termiteOwnership: "own",
       termiteScope: "bait_monitoring_no_warranty",
       trenchingPerimeterLF: "",
       trenchingConcreteLF: "",
@@ -5996,24 +6057,13 @@ export default function EstimateToolViewV2({
                             ]}
                           />
                         </FieldV2>
-                        <FieldV2 label="System">
-                          <SelectV2
-                            k="termiteBaitSystem"
-                            options={[
-                              { value: "advance", label: "Advance" },
-                              { value: "trelona", label: "Trelona" },
-                            ]}
-                          />
-                        </FieldV2>
-                        <FieldV2 label="Monitoring">
-                          <SelectV2
-                            k="termiteMonitoringTier"
-                            options={[
-                              { value: "basic", label: "Basic" },
-                              { value: "premier", label: "Premier" },
-                            ]}
-                          />
-                        </FieldV2>
+                        {/* System + Monitoring selects removed (owner
+                            2026-07-28): the menu is Trelona-only at its
+                            label 15-ft spacing, and the station check is
+                            bracket-priced by station count — no tiers.
+                            Advance stays priceable in the engine for
+                            replaying old estimates; the form always sends
+                            trelona/basic for new quotes. */}
                         {/* Residential bond rider (owner 2026-07-20): fixed
                             quarterly warranty rate per term, priced by the
                             engine — labels stay term-only so a DB rate change
@@ -6028,6 +6078,24 @@ export default function EstimateToolViewV2({
                                 { value: "1yr", label: "1-Year term" },
                                 { value: "5yr", label: "5-Year term" },
                                 { value: "10yr", label: "10-Year term" },
+                              ]}
+                            />
+                          </FieldV2>
+                        )}
+                        {/* Station ownership (owner 2026-07-26): rental drops
+                            the one-time install and recovers it as a per-
+                            application uplift on the quarterly check. Amount
+                            comes from the engine (pricing_config.termite_rental),
+                            so no rate is spelled out here. Residential only —
+                            commercial routes hardware through the manual-quote
+                            scope split below. */}
+                        {!isCommercialEstimateInput(form) && termiteRentalAvailable && (
+                          <FieldV2 label="Stations">
+                            <SelectV2
+                              k="termiteOwnership"
+                              options={[
+                                { value: "own", label: "Purchased" },
+                                { value: "rent", label: "Rented" },
                               ]}
                             />
                           </FieldV2>
@@ -6859,35 +6927,11 @@ export default function EstimateToolViewV2({
                     {" "}
                     <InputV2
                       k="manualDiscountInternalReason"
-                      placeholder="Required for custom or eligibility override"
+                      placeholder="Required for custom discounts"
                     />{" "}
                   </FieldV2>{" "}
                 </div>{" "}
               </div>{" "}
-              <label className="flex items-center gap-2 text-12 text-zinc-900 mt-1">
-                <input
-                  type="checkbox"
-                  checked={form.manualDiscountEligibilityConfirmed === true}
-                  onChange={(e) =>
-                    setForm((f) => ({
-                      ...f,
-                      manualDiscountEligibilityConfirmed: e.target.checked,
-                    }))
-                  }
-                  className="h-3.5 w-3.5 accent-zinc-900"
-                />
-                Eligibility confirmed or approved override
-              </label>
-              {form.manualDiscountEligibilityConfirmed && (
-                <div className="mt-2">
-                  <FieldV2 label="Override reason">
-                    <InputV2
-                      k="manualDiscountEligibilityOverrideReason"
-                      placeholder="e.g. verified ID, referral noted, annual prepay confirmed"
-                    />
-                  </FieldV2>
-                </div>
-              )}
               <div className="text-11 text-ink-tertiary mt-2">
                 Applies after bundle/WaveGuard discounts to both recurring and
                 one-time services. Re-click Generate Estimate to recalculate.
@@ -7830,24 +7874,40 @@ export default function EstimateToolViewV2({
                               <>
                                 <TierGridV2>
                                   {" "}
-                                  {R.tmBait.ai != null && (
-                                    <TierRowV2
-                                      name="Advance"
-                                      detail={`${fmtInt(R.tmBait.ai)} install | Basic $35 | Premier $65/mo`}
-                                      price="$35-65"
-                                      recommended={R.tmBait.selectedSystem === "advance"}
-                                      dimmed={R.tmBait.selectedSystem && R.tmBait.selectedSystem !== "advance"}
-                                    />
-                                  )}{" "}
-                                  {R.tmBait.ti != null && (
-                                    <TierRowV2
-                                      name="Trelona"
-                                      detail={`${fmtInt(R.tmBait.ti)} install | Basic $35 | Premier $65/mo`}
-                                      price="$35-65"
-                                      recommended={R.tmBait.selectedSystem === "trelona"}
-                                      dimmed={R.tmBait.selectedSystem && R.tmBait.selectedSystem !== "trelona"}
-                                    />
-                                  )}{" "}
+                                  {/* Trelona-only menu + station-count
+                                      bracket pricing (owner 2026-07-28) —
+                                      the retired flat Basic/Premier figures
+                                      must never render beside a bracketed
+                                      quote total. Renders whichever system
+                                      the result actually priced: new quotes
+                                      are Trelona, but a replayed pre-change
+                                      Advance draft still shows ITS row
+                                      (server adapter exposes monMonthly;
+                                      bmo is the legacy fallback name). */}
+                                  {(() => {
+                                    const tmSys =
+                                      R.tmBait.selectedSystem === "advance"
+                                        ? "advance"
+                                        : "trelona";
+                                    const tmInstallPrice =
+                                      tmSys === "advance"
+                                        ? R.tmBait.ai
+                                        : R.tmBait.ti;
+                                    const tmMon =
+                                      R.tmBait.monMonthly ?? R.tmBait.bmo;
+                                    return tmInstallPrice != null ? (
+                                      <TierRowV2
+                                        name={
+                                          tmSys === "advance"
+                                            ? "Advance (legacy)"
+                                            : "Trelona"
+                                        }
+                                        detail={`${fmtInt(tmInstallPrice)} install | ${R.tmBait.sta} stations | $${tmMon}/mo station check`}
+                                        price={`$${Math.round((tmMon ?? 0) * 3)}/app`}
+                                        recommended
+                                      />
+                                    ) : null;
+                                  })()}{" "}
                                 </TierGridV2>{" "}
                                 <div className="text-11 text-ink-secondary mt-1">
                                   Install cost is a one-time setup fee, not a

@@ -243,7 +243,9 @@ async function bookingUrlFor(intent) {
   // mosquito / tree-shrub abandoner into the wrong service flow + recurrence.
   let url = BOOKING_URL;
   const sid = String(intent.service_id || '').trim();
-  if (/^[a-z_]{1,40}$/.test(sid)) url += `&service=${encodeURIComponent(sid)}`;
+  // '+' admits composite multi-service ids (a+b+c) so a bundle abandoner
+  // recovers into the same bundle, not the default pest flow (#2957).
+  if (/^[a-z_+]{1,60}$/.test(sid)) url += `&service=${encodeURIComponent(sid)}`;
   // Quote→book handoff: re-carry the pricing estimate reference captured with
   // the intent (HMAC-verified at capture), so a booking made from the recovery
   // link still prices from that exact quote (pay-at-visit) instead of landing

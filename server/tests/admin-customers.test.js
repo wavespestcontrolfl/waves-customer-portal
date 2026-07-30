@@ -406,6 +406,33 @@ describe('admin customers route helpers', () => {
     expect(cadenceFromEstimateLine({ frequency: 'Monthly' }, 'quarterly')).toBe('monthly');
   });
 
+  test('seasonal mosquito (9 visits) maps to the seasonal cadence, not custom/42 (codex r5 P1)', () => {
+    // The seasonal9 tier's rows carry frequency 'every_6_weeks'; the modal
+    // pre-fill was booking a 42-day series (incl. winter visits) because the
+    // booking route creates the series itself and never reaches the
+    // converter's forced resolver.
+    expect(cadenceFromEstimateLine({
+      service: 'mosquito_seasonal',
+      name: 'Seasonal Mosquito Control',
+      frequency: 'every_6_weeks',
+      visitsPerYear: 9,
+    }, 'quarterly')).toBe('seasonal_feb_oct');
+    // Scoped to mosquito: T&S 9x keeps the every-6-weeks → custom/42 mapping.
+    expect(cadenceFromEstimateLine({
+      service: 'tree_shrub',
+      name: 'Enhanced Tree & Shrub Care Service',
+      frequency: 'every_6_weeks',
+      visitsPerYear: 9,
+    }, 'quarterly')).toBe('every_6_weeks');
+    // Monthly mosquito is unaffected.
+    expect(cadenceFromEstimateLine({
+      service: 'mosquito_monthly',
+      name: 'Monthly Mosquito Control',
+      frequency: 'monthly',
+      visitsPerYear: 12,
+    }, 'quarterly')).toBe('monthly');
+  });
+
   test('does not treat one-time or none tiers as memberships', () => {
     expect(hasMembership({ tier: 'One-Time', monthlyRate: 0 })).toBe(false);
     expect(hasMembership({ waveguard_tier: 'one_time', monthly_rate: 0 })).toBe(false);
@@ -513,6 +540,55 @@ describe('admin customers route helpers', () => {
       { id: 1, service_key: 'flea_tick', name: 'Flea Control Service', short_name: 'Flea' },
     ]);
     expect(serviceCatalogMatch({ name: 'Tick Treatment' }, legacyIndex)?.service_key).toBe('flea_tick');
+  });
+
+  test('seasonal mosquito lines keep the seasonal catalog identity, never monthly (codex r16 P2)', () => {
+    const index = indexServicesForSchedule([
+      { id: 10, service_key: 'mosquito_monthly', name: 'Monthly Mosquito Control', category: 'mosquito', billing_type: 'recurring', frequency: 'monthly', visits_per_year: 12 },
+      { id: 11, service_key: 'mosquito_seasonal', name: 'Seasonal Mosquito Control', category: 'mosquito', billing_type: 'recurring', frequency: 'seasonal_feb_oct', visits_per_year: 9 },
+    ]);
+    const estimate = {
+      id: 'estimate-mq-seasonal',
+      monthly_total: 82.5,
+      estimate_data: {
+        result: {
+          recurring: {
+            services: [{ service: 'mosquito_seasonal', name: 'Seasonal Mosquito Control', frequency: 'every_6_weeks', visitsPerYear: 9, mo: 82.5 }],
+          },
+        },
+      },
+    };
+    const [line] = scheduleLinesFromEstimate(estimate, index);
+    expect(line.cadence).toBe('seasonal_feb_oct');
+    expect(line.serviceKey).toBe('mosquito_seasonal');
+    expect(line.serviceId).toBe(11);
+    // Without the seasonal catalog row (env not yet migrated), fail to NO
+    // identity rather than stamping the monthly row on a seasonal series.
+    const monthlyOnlyIndex = indexServicesForSchedule([
+      { id: 10, service_key: 'mosquito_monthly', name: 'Monthly Mosquito Control', category: 'mosquito', billing_type: 'recurring', frequency: 'monthly', visits_per_year: 12 },
+    ]);
+    const [fallbackLine] = scheduleLinesFromEstimate(estimate, monthlyOnlyIndex);
+    expect(fallbackLine.cadence).toBe('seasonal_feb_oct');
+    expect(fallbackLine.serviceId).toBe(null);
+    expect(fallbackLine.serviceKey).not.toBe('mosquito_monthly');
+    // Accepted seasonal selections are restamped as { service: 'mosquito',
+    // serviceKey: 'mosquito_seasonal' } with a shortened name — the explicit
+    // serviceKey must be its own FIRST match candidate or the fuzzy matcher
+    // lands on mosquito_monthly (codex r17 P2).
+    const restamped = {
+      id: 'estimate-mq-restamped',
+      monthly_total: 82.5,
+      estimate_data: {
+        result: {
+          recurring: {
+            services: [{ service: 'mosquito', serviceKey: 'mosquito_seasonal', name: 'Seasonal Mosquito Control', frequency: 'every_6_weeks', visitsPerYear: 9, mo: 82.5 }],
+          },
+        },
+      },
+    };
+    const [restampedLine] = scheduleLinesFromEstimate(restamped, index);
+    expect(restampedLine.serviceKey).toBe('mosquito_seasonal');
+    expect(restampedLine.serviceId).toBe(11);
   });
 
   test('does not create fallback schedule lines from billing-only estimate rows', () => {

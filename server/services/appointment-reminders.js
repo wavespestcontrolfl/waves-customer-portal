@@ -15,7 +15,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { readCachedLineType, cacheLineType } = require('./messaging/validators/line-type');
-const { getAppointmentContacts, isServiceContactRole, firstNameFrom } = require('./customer-contact');
+const { getAppointmentContacts, isServiceContactRole, firstNameFrom, PREFS_UNAVAILABLE } = require('./customer-contact');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const { TZ, parseETDateTime, formatETDay, formatETDate, formatETTime, etDateString, addETDays } = require('../utils/datetime-et');
 const AppointmentEmail = require('./appointment-email');
@@ -87,12 +87,19 @@ function looksLikeEmail(value) {
 // owner's phone being reachable doesn't reach the person the appointment
 // notifies. Best-effort — DB misses fail open per leg but never throw.
 async function hasTextReachableApptRecipient(customer) {
-  const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => null);
+  const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => PREFS_UNAVAILABLE);
   // sms_enabled=false blocks every SMS to this customer at send time, so a
   // past delivery can't make them text-reachable today.
   if (prefs?.sms_enabled === false) return false;
 
-  for (const contact of getAppointmentContacts(customer, prefs || {})) {
+  // Same opt-in hold as the send path: a held (unconfirmed) recipient can't
+  // count as text-reachable, or the no-reachable-channel human alert gets
+  // suppressed by a phone we deliberately are not texting (#2956 r4).
+  const { filterRecipientsByOptin } = require('./recipient-optin');
+  const reachableContacts = await filterRecipientsByOptin(
+    getAppointmentContacts(customer, prefs || {}), customer.id
+  ).catch(() => getAppointmentContacts(customer, prefs || {}));
+  for (const contact of reachableContacts) {
     const digits = lastTenDigits(contact.phone);
     if (!digits) continue;
     const delivered = await db('sms_log')
@@ -693,7 +700,31 @@ async function safeSendAppointment(customer, prefs, renderBody, messageType = 'a
   }
 
   let sentAny = false;
-  for (const contact of contacts) {
+  // Recipient double opt-in hold (gated): third-party contacts the portal
+  // flow has asked to confirm (pending/declined row) don't get texts until
+  // they reply YES. No row = grandfathered. Shared with the twilio.js
+  // en-route/arrived loops; fail-open on lookup errors.
+  const { filterRecipientsByOptin } = require('./recipient-optin');
+  let allowedContacts = await filterRecipientsByOptin(contacts, customer.id);
+  // Hold emptied a NON-empty list: fall back to the primary account holder
+  // (always a legitimate recipient of their own appointment changes; their
+  // own consent is validated at send time) so reschedule/cancel/no-show
+  // notices from DIRECT callers never silently vanish (#2956 codex r7).
+  // …but NEVER over an explicit opt-out (codex #2992 P1): the resolver now
+  // honors a stored `false`, so re-adding the holder here would reinstate
+  // exactly the messages the toggle promises to stop. An unreadable preference
+  // is treated the same way — fail closed rather than guess.
+  const { prefsUnavailable: primaryPrefsUnavailable } = require('./customer-contact');
+  const primaryOptedOut = primaryPrefsUnavailable(prefs) || prefs?.appointment_notify_primary === false;
+  if (!allowedContacts.length && contacts.length && !primaryOptedOut) {
+    const { getPrimaryContact } = require('./customer-contact');
+    const primary = getPrimaryContact(customer);
+    if (primary.phone) {
+      logger.info(`[appt-remind] All recipients held by opt-in for customer ${customer.id} — falling back to primary for ${messageType}`);
+      allowedContacts = [{ ...primary, role: 'primary' }];
+    }
+  }
+  for (const contact of allowedContacts) {
     const body = typeof renderBody === 'function' ? await renderBody(contact) : renderBody;
     const identityTrustLevel = isServiceContactRole(contact.role)
       ? 'service_contact_authorized'
@@ -753,7 +784,7 @@ async function resolveChannelPrefsRow(customerId, prefs = null, customerRow = nu
 }
 
 async function getReminderPrefs(customerId) {
-  const prefs = await db('notification_prefs').where({ customer_id: customerId }).first().catch(() => null);
+  const prefs = await db('notification_prefs').where({ customer_id: customerId }).first().catch(() => PREFS_UNAVAILABLE);
   const channelPrefs = await resolveChannelPrefsRow(customerId, prefs);
 
   return {
@@ -1900,7 +1931,7 @@ const AppointmentReminders = {
       try {
         const { customer } = await getCustomerAndTech(record.customer_id, scheduledServiceId);
         if (customer) {
-          const prefs = await db('notification_prefs').where({ customer_id: record.customer_id }).first().catch(() => null);
+          const prefs = await db('notification_prefs').where({ customer_id: record.customer_id }).first().catch(() => PREFS_UNAVAILABLE);
           const day = formatDay(newApptTime);
           const date = formatDate(newApptTime);
           const time = formatTime(newApptTime);
@@ -2025,7 +2056,7 @@ const AppointmentReminders = {
       // Send cancellation notice
       const { customer } = await getCustomerAndTech(record.customer_id, scheduledServiceId);
       if (customer) {
-        const prefs = await db('notification_prefs').where({ customer_id: record.customer_id }).first().catch(() => null);
+        const prefs = await db('notification_prefs').where({ customer_id: record.customer_id }).first().catch(() => PREFS_UNAVAILABLE);
         const apptTime = new Date(record.appointment_time);
         const day = formatDay(apptTime);
         const date = formatDate(apptTime);
@@ -2103,7 +2134,7 @@ const AppointmentReminders = {
       const { customer } = await getCustomerAndTech(svc.customer_id, scheduledServiceId);
       if (!customer) return null;
 
-      const prefs = await db('notification_prefs').where({ customer_id: svc.customer_id }).first().catch(() => null);
+      const prefs = await db('notification_prefs').where({ customer_id: svc.customer_id }).first().catch(() => PREFS_UNAVAILABLE);
 
       // scheduled_date is a DATE, window_start a TIME — compose into the
       // naive 'YYYY-MM-DDTHH:MM:SS' shape parseETDateTime expects so the
@@ -2212,7 +2243,7 @@ const AppointmentReminders = {
 
       const { customer } = await getCustomerAndTech(record.customer_id, representativeScheduledServiceId || record.scheduled_service_id);
       if (customer) {
-        const prefs = await db('notification_prefs').where({ customer_id: record.customer_id }).first().catch(() => null);
+        const prefs = await db('notification_prefs').where({ customer_id: record.customer_id }).first().catch(() => PREFS_UNAVAILABLE);
         const scopeText = options.scope === 'series' ? 'recurring series' : 'future recurring appointments';
         const serviceLabel = smsServiceLabelStored(options.serviceType || record.service_type);
         await safeSendAppointment(customer, prefs || {}, async (contact) => {

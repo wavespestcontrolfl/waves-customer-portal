@@ -82,6 +82,30 @@ function revivalResetFields() {
     // admin_status='pending', so clearing the marker can't re-judge them.
     curated_at: db.raw(`CASE WHEN ${REVIVAL_COND} THEN NULL ELSE events_raw.curated_at END`, { etMidnight }),
     curation_note: db.raw(`CASE WHEN ${REVIVAL_COND} THEN NULL ELSE events_raw.curation_note END`, { etMidnight }),
+    // The structured editorial assessment (2026-07-28 rubric) belongs to
+    // the occurrence that was examined — a revived occurrence must start
+    // clean, or a later missing/malformed reassessment would leave the
+    // prior occurrence's score, codes, and evidence permanently attached.
+    editorial_score: db.raw(`CASE WHEN ${REVIVAL_COND} THEN NULL ELSE events_raw.editorial_score END`, { etMidnight }),
+    score_breakdown: db.raw(`CASE WHEN ${REVIVAL_COND} THEN NULL ELSE events_raw.score_breakdown END`, { etMidnight }),
+    rejection_codes: db.raw(`CASE WHEN ${REVIVAL_COND} THEN NULL ELSE events_raw.rejection_codes END`, { etMidnight }),
+    audience_tags: db.raw(`CASE WHEN ${REVIVAL_COND} THEN NULL ELSE events_raw.audience_tags END`, { etMidnight }),
+    novelty_type: db.raw(`CASE WHEN ${REVIVAL_COND} THEN NULL ELSE events_raw.novelty_type END`, { etMidnight }),
+    editorial_evidence: db.raw(`CASE WHEN ${REVIVAL_COND} THEN NULL ELSE events_raw.editorial_evidence END`, { etMidnight }),
+    // Image handling (og:image backfill contract, event-image-backfill.js):
+    // a feed that HAS an image always wins, but a feed null must not
+    // clobber a backfilled value — EXCEPT on revival, where the old
+    // occurrence's poster would be stale art for the new occurrence, so
+    // the feed value (even null) is taken verbatim and the row re-probes.
+    // The url-change condition mirrors the attempt-stamp reset below: an
+    // image sourced from the OLD page is presumed stale once the url
+    // moves, so the feed value is taken verbatim (null clears it) and
+    // the re-opened backoff lets the new page be probed.
+    image_url: db.raw(`CASE WHEN (${REVIVAL_COND}) OR (events_raw.event_url IS DISTINCT FROM EXCLUDED.event_url) THEN EXCLUDED.image_url ELSE COALESCE(EXCLUDED.image_url, events_raw.image_url) END`, { etMidnight }),
+    // Re-open the probe backoff when the occurrence revives OR the event
+    // url itself changed (the old page's failed probe says nothing about
+    // the new page).
+    image_backfill_attempted_at: db.raw(`CASE WHEN (${REVIVAL_COND}) OR (events_raw.event_url IS DISTINCT FROM EXCLUDED.event_url) THEN NULL ELSE events_raw.image_backfill_attempted_at END`, { etMidnight }),
   };
 }
 
@@ -118,6 +142,7 @@ try {
 }
 
 const MODELS = require('../config/models');
+const { stripThinkingBlocks } = require('./llm/deep');
 
 const HTTP_TIMEOUT_MS = 15000;
 const MAX_ITEMS_PER_FEED = 200;
@@ -262,8 +287,9 @@ async function pullRssSource(source) {
   //     to do" columns, municipal announcements). item.pubDate is the
   //     publication date, NOT an event date — writing it to start_at
   //     dates every event "yesterday at pull time", so nothing ever
-  //     lands in the forward digest window and tier-1 auto-approval
-  //     seeds junk (council agendas) into the approved pool. Articles
+  //     lands in the forward digest window (and, historically, tier-1
+  //     auto-approval — retired by the 2026-07-28 rubric — seeded junk
+  //     council agendas straight into the approved pool). Articles
   //     are bundled and run through the same Claude extraction as
   //     scrape sources to pull real event dates out of the text;
   //     articles with no dated event yield nothing.
@@ -307,7 +333,10 @@ async function pullRssSource(source) {
     // Best-effort city from title + description; falls back to source
     // coverage_geo[0] so the tile always has *something*.
     const city = extractCity(title) || extractCity(description) || (source.coverage_geo?.[0] || null);
-    const autoApprove = source.priority_tier === 1;
+    // No tier-based auto-approval: since the 2026-07-28 editorial rubric,
+    // EVERY automatic approval must carry a score above the absolute floor,
+    // and only auto-curation computes scores. Tier-1 rows insert pending
+    // like everything else and are examined at the next 6:15 curation run.
 
     await db('events_raw')
       .insert({
@@ -322,7 +351,6 @@ async function pullRssSource(source) {
         event_url: eventUrl,
         image_url: imageUrl,
         categories,
-        ...(autoApprove && { admin_status: 'approved' }),
       })
       .onConflict(['source_id', 'external_id'])
       .merge({
@@ -331,7 +359,6 @@ async function pullRssSource(source) {
         start_at: start,
         city,
         event_url: eventUrl,
-        image_url: imageUrl,
         categories,
         pulled_at: db.fn.now(),
         updated_at: db.fn.now(),
@@ -497,7 +524,13 @@ async function extractEventsWithClaude(source, content, { mode, maxEvents }) {
     system: systemPrompt,
     messages: [{ role: 'user', content: wrapped }],
   });
-  const text = response.content?.[0]?.text || '';
+  // WORKHORSE resolves to a model that can lead with a thinking block on
+  // real feed-sized inputs (#2814 moved it opus-4-8 → sonnet-5 on 2026-07-18).
+  // A thinking block has no .text, so reading content[0] blind yielded '' and
+  // threw "did not return parseable JSON" while a perfectly good extraction
+  // sat in content[1] — that silently killed every Claude-backed event source
+  // for 7 straight days. Strip first, then index.
+  const text = stripThinkingBlocks(response).content?.[0]?.text || '';
   // Happy path: a complete {...} object. The regex needs a closing brace,
   // so a response truncated before ANY object closed won't match here —
   // that case falls through to recovery below rather than throwing blind.
@@ -527,7 +560,7 @@ async function extractEventsWithClaude(source, content, { mode, maxEvents }) {
 /**
  * Validate one Claude-extracted event and shape it for upsert.
  * Pure — returns null when the event should be dropped, else
- * { row, autoApprove } where row holds the events_raw columns.
+ * { row } where row holds the events_raw columns.
  *
  * opts.requireStart — drop events without a parseable start date.
  * News-mode RSS sets this: the articles contract says "no stated event
@@ -576,14 +609,13 @@ function normalizeExtractedEvent(source, ev, nowMs, opts = {}) {
     ? ev.city.trim().toLowerCase().slice(0, 128)
     : (source.coverage_geo?.[0] || null);
 
-  // Tier-1 auto-approve additionally requires a real extracted start
-  // date. An undated event can never enter the digest (eligibility
-  // requires start_at), so pre-approving it only seeds unreviewed
-  // rows into the approved pool.
-  const autoApprove = source.priority_tier === 1 && Boolean(start);
-
+  // No tier-based auto-approval (2026-07-28 rubric): every automatic
+  // approval must carry an editorial score above the absolute floor, and
+  // only auto-curation computes scores — a tier-1 row that skipped the
+  // rubric would ship with editorial_score/rejection_codes NULL and no
+  // floor applied. All rows insert pending; curation examines them at
+  // the next 6:15 run.
   return {
-    autoApprove,
     row: {
       source_id: source.id,
       external_id: externalId,
@@ -606,13 +638,10 @@ async function upsertExtractedEvents(source, claudeEvents, opts = {}) {
   for (const ev of claudeEvents) {
     const normalized = normalizeExtractedEvent(source, ev, nowMs, opts);
     if (!normalized) { dropped += 1; continue; }
-    const { row, autoApprove } = normalized;
+    const { row } = normalized;
 
     await db('events_raw')
-      .insert({
-        ...row,
-        ...(autoApprove && { admin_status: 'approved' }),
-      })
+      .insert(row)
       .onConflict(['source_id', 'external_id'])
       .merge({
         title: row.title,
@@ -621,7 +650,6 @@ async function upsertExtractedEvents(source, claudeEvents, opts = {}) {
         venue_name: row.venue_name,
         city: row.city,
         event_url: row.event_url,
-        image_url: row.image_url,
         pulled_at: db.fn.now(),
         updated_at: db.fn.now(),
         ...revivalResetFields(),
@@ -768,7 +796,7 @@ async function pullIcalSource(source) {
       || extractCity(description)
       || extractCity(venueName)
       || (source.coverage_geo?.[0] || null);
-    const autoApprove = source.priority_tier === 1 && !recurrence?.routine;
+    // No tier-based auto-approval — see the rubric note in the RSS handler.
 
     await db('events_raw')
       .insert({
@@ -790,7 +818,6 @@ async function pullIcalSource(source) {
           freshness_status: recurrence.freshness_status,
           freshness_score: recurrence.freshness_score,
         }),
-        ...(autoApprove && { admin_status: 'approved' }),
       })
       .onConflict(['source_id', 'external_id'])
       .merge({
@@ -1020,6 +1047,7 @@ module.exports = {
   // Exported for unit tests — pure pieces of the shared extraction path.
   buildArticleBundle,
   buildExtractionSystemPrompt,
+  extractEventsWithClaude, // exported for the thinking-block regression test
   normalizeExtractedEvent,
   recurrenceMetadataFromIcalEvent,
   recoverEventObjectsFromTruncatedJson,

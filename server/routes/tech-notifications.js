@@ -18,9 +18,25 @@ router.get('/', async (req, res, next) => {
     const unreadOnly = req.query.unreadOnly !== 'false';
     let q = db('tech_notifications')
       .where({ technician_id: req.technicianId })
-      .whereNull('dismissed_at');
+      .whereNull('dismissed_at')
+      // Storm-watch nudges are only actionable for a couple of hours
+      // (sweep lookahead + service window). Without an age cutoff, unread
+      // alerts from earlier days pile up into a wall of cards that buries
+      // the tech home screen on the next load.
+      .where(function stormFreshness() {
+        this.whereNot({ type: 'storm_watch_alert' })
+          .orWhereRaw("created_at >= now() - interval '6 hours'");
+      });
     if (unreadOnly) q = q.where({ read: false });
-    const rows = await q.orderBy('created_at', 'desc').limit(20);
+    // FRESH non-storm rows outrank everything inside the 20-row window: a
+    // storm burst must never crowd an actionable geofence/timer prompt out
+    // of the poll result. The priority is freshness-scoped, though — a stale
+    // backlog of ≥20 unread non-storm rows must not displace a live storm
+    // warning either, so aged rows compete with storms purely on recency.
+    const rows = await q
+      .orderByRaw("CASE WHEN type != 'storm_watch_alert' AND created_at >= now() - interval '6 hours' THEN 0 ELSE 1 END")
+      .orderBy('created_at', 'desc')
+      .limit(20);
     res.json({ notifications: rows.map(parseRow) });
   } catch (err) { next(err); }
 });

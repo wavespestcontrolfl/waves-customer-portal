@@ -719,3 +719,101 @@ describe('lawn floor display-hide machinery (buildPricingBundle e2e) — disarme
     });
   });
 });
+
+describe('section ladders stamp billedPerApplication (owner 2026-07-23: billing is always per application; estimator audit 2026-07-24)', () => {
+  // Regression trap from PR #2965: the PriceCard "Billed $X/mo" note renders
+  // for any per-app-headline frequency WITHOUT this flag, and the server only
+  // stamped termite_bait — so every 4/6/9-visit lawn/T&S/mosquito tier
+  // (monthly ≠ per-app) shipped a monthly-billing claim the converter
+  // contradicts (billing_mode='per_application', plan annual ÷ visits).
+  const TS_RESULT_STATS = {
+    ts: [
+      { name: 'Light', v: 4, mo: 30, ann: 360, pa: 90 },
+      { name: 'Standard', v: 6, mo: 40, ann: 480, pa: 80 },
+      { name: 'Enhanced', v: 9, mo: 68.6, ann: 823.2, pa: 91.47 },
+    ],
+  };
+
+  test('tree & shrub ladder (incl. the 9x Enhanced upsell) flags every tier', () => {
+    const ladder = bundleSectionLadderForService(
+      'tree_shrub',
+      { results: TS_RESULT_STATS },
+      { name: 'Tree & Shrub', service: 'tree_shrub' },
+      0,
+    );
+    expect(ladder.map((e) => e.key)).toEqual(['light', 'standard', 'enhanced']);
+    for (const entry of ladder) {
+      expect(entry.billedPerApplication).toBe(true);
+    }
+  });
+
+  test('lawn ladder flags every tier — the 6/9-visit tiers are where a missing flag resurrects the note', () => {
+    const ladder = bundleSectionLadderForService(
+      'lawn_care',
+      { results: LAWN_RESULT_STATS },
+      { name: 'Lawn Care', service: 'lawn_care' },
+      0,
+    );
+    expect(ladder.length).toBeGreaterThan(0);
+    for (const entry of ladder) {
+      expect(entry.billedPerApplication).toBe(true);
+    }
+  });
+
+  test('mosquito ladder flags both tiers (seasonal9 is the monthly ≠ per-app case)', () => {
+    const ladder = bundleSectionLadderForService(
+      'mosquito',
+      { results: { mq: LAWN_MQ_RESULT_STATS.mq } },
+      { name: 'Mosquito Control', service: 'mosquito' },
+      0,
+    );
+    expect(ladder.map((e) => e.key).sort()).toEqual(['monthly12', 'seasonal9']);
+    for (const entry of ladder) {
+      expect(entry.billedPerApplication).toBe(true);
+    }
+  });
+});
+
+describe('retired T&S Premium is not a combo axis (estimator audit 2026-07-24)', () => {
+  // Pre-v4.5 estimates still store the 12x Premium row. The section ladder
+  // whitelists light/standard/enhanced, so a premium combo priced totals the
+  // accept-time tier restamp could never apply — the accept committed the
+  // premium combo's dollars while the recurring rows kept their stored
+  // cadence (billed ≠ scheduled). Premium must vanish from the tier map so
+  // no such combo exists; Enhanced (9x) stays — un-retired by #2968.
+  const TS_ROWS_WITH_PREMIUM = [
+    { name: 'Light', v: 4, mo: 30, ann: 360, pa: 90 },
+    { name: 'Standard', v: 6, mo: 40, ann: 480, pa: 80 },
+    { name: 'Enhanced', v: 9, mo: 68.6, ann: 823.2, pa: 91.47 },
+    { name: 'Premium', v: 12, mo: 80, ann: 960, pa: 80 },
+  ];
+
+  test('nonPestTierBaseMap drops premium, keeps light/standard/enhanced', () => {
+    const map = nonPestTierBaseMap({ ts: TS_ROWS_WITH_PREMIUM });
+    expect(Object.keys(map.tree_shrub).sort()).toEqual(['enhanced', 'light', 'standard']);
+  });
+
+  test('no combo carries a tree_shrub:premium selection', () => {
+    const v1 = {
+      pestTiers: [
+        { label: 'Quarterly', mo: 95, pa: 285, apps: 4 },
+        { label: 'Monthly', mo: 120, pa: 120, apps: 12 },
+      ],
+      services: [
+        { name: 'Pest Control', service: 'pest_control', mo: 95 },
+        { name: 'Tree & Shrub', service: 'tree_shrub', mo: 40, visitsPerYear: 6 },
+      ],
+      discount: 0.10,
+    };
+    const combos = buildServiceCadenceCombos(v1, {}, { ts: TS_ROWS_WITH_PREMIUM });
+    expect(Array.isArray(combos)).toBe(true);
+    expect(combos.length).toBeGreaterThan(0);
+    for (const combo of combos) {
+      expect(combo.selection.tree_shrub).not.toBe('premium');
+      expect(combo.key).not.toContain('tree_shrub:premium');
+    }
+    // The three live tiers all fan out.
+    const tsKeys = new Set(combos.map((c) => c.selection.tree_shrub));
+    expect([...tsKeys].sort()).toEqual(['enhanced', 'light', 'standard']);
+  });
+});

@@ -133,4 +133,4 @@ async function classifyEmail(email) {
   }
 }
 
-module.exports = { classifyEmail, classifyEmailContent, parseClaudeJson };
+module.exports = { classifyEmail, classifyEmailContent, parseClaudeJson, EMAIL_CATEGORIES };

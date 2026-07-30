@@ -91,8 +91,10 @@ class AvailabilityEngine {
       // between 8 PM and midnight ET) and getDay() reads the UTC weekday, so
       // the offered day and the ET labels below would diverge in that window.
       const date = addETDays(today, i); // anchored at noon UTC on the ET calendar day
-      if (etParts(date).dayOfWeek === 0) continue; // skip Sunday (ET)
 
+      // Closed days (one-off blackouts + weekly days off) come from the shared
+      // helper — no hardcoded Sunday skip, so reopening a day in Settings
+      // reopens this surface too.
       const dateStr = etDateString(date);
       if (blackout.has(dateStr)) continue;
 
@@ -250,11 +252,11 @@ class AvailabilityEngine {
     if (dateStr < todayStr) {
       throw bookingError('That date has already passed — please pick another day', 'INVALID_DATE', 400);
     }
-    if (etParts(parseETDateTime(`${dateStr}T12:00`)).dayOfWeek === 0) {
-      throw bookingError('We are closed on Sundays — please pick another day', 'INVALID_DATE', 400);
-    }
-    // Owner blackout re-check at COMMIT — the quoted option may predate the
-    // blackout (AI book_appointment confirms options quoted earlier).
+    // Owner closed-day re-check at COMMIT — covers one-off blackouts AND
+    // weekly days off (the old hardcoded Sunday reject lived here; the shared
+    // helper now decides, so reopening a day in Settings reopens this path).
+    // The quoted option may predate the closure (AI book_appointment confirms
+    // options quoted earlier).
     {
       const { isBlackoutDate } = require('./scheduling/blackout-dates');
       if (await isBlackoutDate(dateStr)) {

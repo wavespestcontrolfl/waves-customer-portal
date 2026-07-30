@@ -20,8 +20,17 @@ jest.mock("../services/short-url", () => ({
 }));
 jest.mock("../services/customer-contact", () => ({
   getAppointmentContacts: jest.fn(),
+  getPrimaryContact: jest.requireActual("../services/customer-contact").getPrimaryContact,
   isServiceContactRole: jest.requireActual("../services/customer-contact").isServiceContactRole,
   firstNameFrom: jest.requireActual("../services/customer-contact").firstNameFrom,
+  // Real implementation: the en-route fallback consults it to avoid re-adding
+  // a holder who explicitly opted out (codex #2992 P1).
+  prefsUnavailable: jest.requireActual("../services/customer-contact").prefsUnavailable,
+}));
+// Opt-in hold is exercised by its own suite — pass-through here so these
+// en-route cases test the send legs, not the hold.
+jest.mock("../services/recipient-optin", () => ({
+  filterRecipientsByOptin: jest.fn(async (contacts) => contacts),
 }));
 jest.mock("../services/messaging/send-customer-message", () => ({
   sendCustomerMessage: jest.fn(),

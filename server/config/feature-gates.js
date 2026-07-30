@@ -32,6 +32,7 @@
  *   GATE_CALL_REPLAY_EVAL=true  (weekly reviewed-call extraction replay eval)
  *   GATE_ADS_BUDGET_LIVE_PUSH=true (capacity cron pushes budget changes to Google Ads)
  *   GATE_BOOKING_FUNNEL_CANARY=true (alert when /book funnel entries see zero conversions)
+ *   GATE_AUTO_WAVEGUARD_TIER=true (auto-stamp/lapse WaveGuard tier from upcoming recurring coverage)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -58,6 +59,13 @@ const gates = {
   // switch: unset or any non-'true' value. Booking/estimate flows stay
   // card-only regardless (owner ruling 2026-07-13).
   portalAchAutopay: process.env.GATE_PORTAL_ACH_AUTOPAY === 'true',
+
+  // /secure/:token plan-choice step (pay per application vs. annual prepay)
+  // on the appointment card-request page. Customer-facing money surface —
+  // fail-closed ==='true' in EVERY environment. Gate off: the page payload
+  // carries no planContext and /secure renders exactly the card-only
+  // experience; the select-plan endpoint 404s (unobservable while dark).
+  securePlanChoice: process.env.GATE_SECURE_PLAN_CHOICE === 'true',
 
   // Customer duplicate auto-merge (customer-dedupe.js green tier). An
   // auto-WRITER — merges shell duplicate rows into their real customer on the
@@ -408,6 +416,16 @@ const gates = {
   // claims or sends.
   estimateDepositAbandonmentSms: process.env.GATE_ESTIMATE_DEPOSIT_ABANDONMENT_SMS === 'true',
 
+  // Pre-connect caller screen — inbound callers with NO customer match AND
+  // STIR/SHAKEN attestation B (spoofed-number robocall profile; 67% dead-air
+  // in 60d of prod signal, ~2% of lead calls) must press a key before staff
+  // phones ring. Failures land in the Waves voicemail recorder, never a
+  // hangup. Caller-facing friction: explicit opt-in in EVERY environment.
+  // Off → qualifying calls are only stamped
+  // call_log.metadata.preconnect_screen='would_gate' (shadow daily counters,
+  // zero caller impact).
+  callPreconnectScreen: process.env.GATE_CALL_PRECONNECT_SCREEN === 'true',
+
   // Payment-step-abandonment follow-up EMAIL — emails customers who reached
   // the save-a-card step of accepting an estimate (Auto Pay card on a
   // recurring accept, or the one-time card hold; estimate_checkout_events
@@ -749,6 +767,24 @@ const gates = {
   // Kill switch: unset GATE_BOOK_AI_SEARCH.
   bookAiSearch: isProd ? process.env.GATE_BOOK_AI_SEARCH === 'true' : true,
 
+  // Recipient double opt-in (#2948 follow-up): newly added on-location
+  // contacts get a "Reply YES" confirmation text, and appointment texts to
+  // them hold until confirmed. Double-dark: this gate AND the
+  // recipient_optin_request sms_templates row (seeded inactive) must both
+  // be on before anything sends. Pre-existing contacts are grandfathered
+  // (no recipient_optin row = allowed). Kill switch: unset
+  // GATE_RECIPIENT_DOUBLE_OPTIN.
+  recipientDoubleOptin: isProd ? process.env.GATE_RECIPIENT_DOUBLE_OPTIN === 'true' : true,
+
+  // Multi-service public booking (owner-authorized 2026-07-23): /book can
+  // select 2-3 services in one visit — composite service key through the
+  // same signed-offer path, summed duration, joined label. Exposed to the
+  // client via GET /api/booking/config as `multi_service` (fail-closed:
+  // the selector only renders when the portal affirms; the server also
+  // refuses composite keys while the gate is off). Kill switch: unset
+  // GATE_MULTI_SERVICE_BOOKING.
+  multiServiceBooking: isProd ? process.env.GATE_MULTI_SERVICE_BOOKING === 'true' : true,
+
   // Auto-Dispatch — autonomous daily optimizer for FUTURE recurring visits.
   // Master gate for the cron job (double-gated behind cronJobs). Off by default
   // in prod until the owner validates dry-run output; even when ON it stays in
@@ -873,6 +909,23 @@ const gates = {
   // switch: unset (or any non-'true' value) — the field is omitted from
   // every payload and the chips disappear.
   bookingRainChips: process.env.GATE_BOOKING_RAIN_CHIPS === 'true',
+
+  // WaveGuard auto-tier from recurring coverage (owner directive 2026-07-28),
+  // BOTH directions: a customer with upcoming recurring qualifying services
+  // on the schedule is stamped a tier automatically (1 family = Bronze,
+  // 2 = Silver, 3 = Gold, 4+ = Platinum) at series-seeding time and via a
+  // nightly reconcile — and a label-only tiered customer is realigned to
+  // their upcoming recurring coverage by the same nightly job: raised,
+  // lowered, or cleared back to No Plan when it lapses (paying members and
+  // paid billing lanes are never auto-realigned; the cancellation/
+  // offboarding flow owns their tier). An auto-WRITER on
+  // customer records that also changes future membership pricing
+  // eligibility, so opt-in in EVERY environment. It writes waveguard_tier
+  // ONLY (never monthly_rate / member_since / billing fields) and sends no
+  // customer communications. Kill switch: unset or any non-'true' value —
+  // booking flows and the nightly job revert to the old members-only
+  // re-alignment.
+  autoWaveguardTierEnroll: process.env.GATE_AUTO_WAVEGUARD_TIER === 'true',
 };
 
 function isEnabled(gate) {

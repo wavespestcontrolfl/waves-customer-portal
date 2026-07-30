@@ -54,6 +54,12 @@ async function buildRecapPayload(scheduledServiceId, { knex = db } = {}) {
 
   const token = await ensureReportToken(rec.id, knex);
   const data = await buildReportV1Data(service, token, knex);
+  // Cockroach-family typed reports dropped the V2 perimeter dashboard on
+  // the live report (owner 2026-07-27) — the recap must not keep telling
+  // the "Where we protected / no perimeter application" story the report
+  // no longer shows (codex P2 #3007 r10).
+  const { isCockroachTypedReportType } = require('./pest-report-v2');
+  if (isCockroachTypedReportType(data?.typedReport?.type)) return null;
   const dynamicContext = await buildServiceReportDynamicContext({ recordId: rec.id, mode: 'static', knex });
   if (!dynamicContext?.premiumExperience) return null;
 

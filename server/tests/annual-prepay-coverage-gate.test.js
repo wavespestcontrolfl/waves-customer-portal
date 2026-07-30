@@ -159,3 +159,32 @@ describe('annualPrepayCoversVisit — fail-closed completion coverage gate', () 
     await expect(annualPrepayCoversVisit(null)).resolves.toBe(false);
   });
 });
+
+describe('seasonal mosquito is deliberately UNSUPPORTED for prepay coverage', () => {
+  // The mosquito 9x cadence gaps 1 month in season and 4 across the winter, but
+  // the coverage seeder fills remaining prepaid visits with same-day-of-month
+  // math from one stored cadence — it would place them in Nov-Jan, the months
+  // the program excludes, and those mis-dated visits could complete-bill again.
+  // Fail closed: the sale downgrades to a standard accept. Supporting prepay
+  // here means teaching the coverage seeder the season first.
+  const { prepayCoverageCadenceForPattern, visitsPerYearForCadence } = require('../services/prepay-cadence');
+  const { normalizeCoverageCadence } = _private;
+
+  test('the coverage layer refuses to normalize it', () => {
+    expect(normalizeCoverageCadence('seasonal_feb_oct')).toBeNull();
+  });
+
+  test('the prepay preflight returns no coverage cadence (downgrades the sale)', () => {
+    expect(prepayCoverageCadenceForPattern('seasonal_feb_oct')).toBeNull();
+  });
+
+  test('but its visit count is still known, so nothing infers a wrong one', () => {
+    expect(visitsPerYearForCadence('seasonal_feb_oct')).toBe(9);
+  });
+
+  test('monthly mosquito is unaffected — it prepays on the existing monthly cadence', () => {
+    expect(prepayCoverageCadenceForPattern('monthly')).toBe('monthly');
+    expect(normalizeCoverageCadence('monthly')).toBe('monthly');
+    expect(visitsPerYearForCadence('monthly')).toBe(12);
+  });
+});

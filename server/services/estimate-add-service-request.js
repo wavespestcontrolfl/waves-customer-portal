@@ -162,7 +162,10 @@ function addRequestedServiceToInputs(engineInputs, estData, serviceKey, requeste
 
   if (serviceKey === 'pest_control') {
     if (updatedInputs.services.pest) return { added: false, updatedInputs, reason: 'already_included' };
-    updatedInputs.services.pest = { frequency: 'quarterly', version: 'v1', roachType: 'none' };
+    // No version: a brand-new pest addition prices on the LIVE default curve
+    // (v2) — explicit 'v1' is reserved for replays of quotes sold under the
+    // old curve (codex #2966 r3 P2).
+    updatedInputs.services.pest = { frequency: 'quarterly', roachType: 'none' };
     return { added: true, updatedInputs };
   }
 
@@ -183,7 +186,9 @@ function addRequestedServiceToInputs(engineInputs, estData, serviceKey, requeste
     // Engine defaults (system/monitoring) match estimate-engine's own
     // fallbacks; footprint/perimeter come from the saved property inputs,
     // and missing measurements surface as quoteRequired on the draft.
-    updatedInputs.services.termite_bait = { system: 'advance', monitoringTier: 'basic' };
+    // Trelona-only menu (owner 2026-07-28): new quotes sell Trelona at its
+    // label 15-ft spacing; 'advance' is replay-only.
+    updatedInputs.services.termite_bait = { system: 'trelona', monitoringTier: 'basic' };
     return { added: true, updatedInputs };
   }
 

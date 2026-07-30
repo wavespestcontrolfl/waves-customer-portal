@@ -160,12 +160,13 @@ const PEST = {
   },
   frequencyDiscounts: {
     // Per-visit rate multiplier by cadence. Quarterly is the reference baseline.
-    // Session 11a byte-parity: v1 lowered from 0.92/0.85 to 0.85/0.70 to match
-    // v2's currently-live hardcoded curve (pricing-engine-v2.js:751-755) so
-    // customers see the same bimonthly/monthly prices after the engine swap.
-    // Session 6 may intentionally restore a milder curve via pricing_changelog.
+    // v2 is the LIVE DEFAULT (owner directive 2026-07-23): the old monthly
+    // 0.70 was a flat marketing multiplier that underpriced the visit — the
+    // cost model only saves ~5 on-site minutes at monthly cadence. v1 stays
+    // for explicit-version replays of estimates priced under the old curve;
+    // do not retune v1 (it's historical), retune v2.
     v1: { quarterly: 1.00, bimonthly: 0.85, monthly: 0.70 },
-    v2: { quarterly: 1.00, bimonthly: 0.88, monthly: 0.78 },  // Was 0.85/0.70. Test for one quarter.
+    v2: { quarterly: 1.00, bimonthly: 0.88, monthly: 0.78 },
   },
   frequencies: { quarterly: 4, bimonthly: 6, monthly: 12 },
   initialFee: r(99), // WaveGuard membership (waived with annual prepay)
@@ -248,7 +249,10 @@ const LAWN_PRICING_V2 = {
   // _SPOT_RESERVE (2026-07-17): material budgets now fund the protocol
   // spot-treatment reserves (owner-approved) — estimates stamped with the
   // prior _DENSE_35_FLOOR were priced on scheduled-only budgets.
-  pricingVersion: 'LAWN_PRICING_V2_SPOT_RESERVE',
+  // _LADDER_CAP (2026-07-29): Premium 12x bracket column retuned + runtime
+  // cap so 12x per-app never exceeds 9x per-app — estimates stamped
+  // _SPOT_RESERVE priced 12x on the pre-cap (higher, inverting) column.
+  pricingVersion: 'LAWN_PRICING_V2_LADDER_CAP',
   laborRateLoaded: 35,
   equipmentIncludedInLabor: true,
   equipmentReservePerVisit: 0,
@@ -284,54 +288,61 @@ const GRASS_TYPE_ALIASES = {
 // Base prices — credit card surcharge (up to 2.9%) applied at checkout, not baked in here.
 // Revised 2026-06-17: 35% fully loaded gross margin floor (prior 45% curve scaled
 // by 0.55/0.65 ≈ 0.846 — a floor-binding cell moves from exactly 45% to exactly 35%).
+// Premium (12x) column retuned 2026-07-29 (owner directive, pricing audit
+// 2026-07-28): the 12x per-application price must never exceed the 9x
+// per-application price at the same size — the previous column inverted the
+// ladder above ~4,100 sqft (monthly read as the most expensive cadence per
+// application on estimate cards). Rule: premium_monthly =
+// min(previous, floor(enhanced_monthly × 4/3)); small-lawn cells that
+// already sat under the cap are unchanged.
 const LAWN_BRACKETS = {
   st_augustine: [
     [3000,  r(30),  r(38),  r(47),  r(55)],
     [3500,  r(30),  r(38),  r(47),  r(58)],
     [4000,  r(30),  r(38),  r(47),  r(62)],
-    [5000,  r(30),  r(38),  r(50),  r(71)],
-    [6000,  r(30),  r(39),  r(56),  r(81)],
-    [7000,  r(32),  r(42),  r(62),  r(91)],
-    [8000,  r(35),  r(47),  r(68),  r(100)],
-    [10000, r(40),  r(54),  r(80),  r(118)],
-    [12000, r(46),  r(62),  r(92),  r(137)],
-    [15000, r(53),  r(73),  r(110), r(165)],
-    [20000, r(68),  r(91),  r(140), r(212)],
+    [5000,  r(30),  r(38),  r(50),  r(66)],
+    [6000,  r(30),  r(39),  r(56),  r(74)],
+    [7000,  r(32),  r(42),  r(62),  r(82)],
+    [8000,  r(35),  r(47),  r(68),  r(90)],
+    [10000, r(40),  r(54),  r(80),  r(106)],
+    [12000, r(46),  r(62),  r(92),  r(122)],
+    [15000, r(53),  r(73),  r(110), r(146)],
+    [20000, r(68),  r(91),  r(140), r(186)],
   ],
   bermuda: [
     [4000,  r(34), r(42),  r(51),  r(63)],
-    [5000,  r(34), r(42),  r(51),  r(73)],
-    [6000,  r(34), r(42),  r(57),  r(82)],
-    [7000,  r(34), r(43),  r(63),  r(91)],
-    [8000,  r(36), r(47),  r(69),  r(102)],
-    [10000, r(41), r(55),  r(81),  r(120)],
-    [12000, r(47), r(63),  r(94),  r(140)],
-    [15000, r(55), r(74),  r(112), r(168)],
-    [20000, r(69), r(94),  r(143), r(217)],
+    [5000,  r(34), r(42),  r(51),  r(68)],
+    [6000,  r(34), r(42),  r(57),  r(76)],
+    [7000,  r(34), r(43),  r(63),  r(84)],
+    [8000,  r(36), r(47),  r(69),  r(92)],
+    [10000, r(41), r(55),  r(81),  r(108)],
+    [12000, r(47), r(63),  r(94),  r(125)],
+    [15000, r(55), r(74),  r(112), r(149)],
+    [20000, r(69), r(94),  r(143), r(190)],
   ],
   zoysia: [
     [4000,  r(34), r(42),  r(51),  r(63)],
-    [5000,  r(34), r(42),  r(52),  r(74)],
-    [6000,  r(34), r(42),  r(58),  r(83)],
-    [7000,  r(34), r(44),  r(63),  r(93)],
-    [8000,  r(36), r(47),  r(70),  r(102)],
-    [10000, r(41), r(56),  r(82),  r(122)],
-    [12000, r(47), r(63),  r(95),  r(141)],
-    [15000, r(56), r(75),  r(113), r(171)],
-    [20000, r(70), r(95),  r(145), r(219)],
+    [5000,  r(34), r(42),  r(52),  r(69)],
+    [6000,  r(34), r(42),  r(58),  r(77)],
+    [7000,  r(34), r(44),  r(63),  r(84)],
+    [8000,  r(36), r(47),  r(70),  r(93)],
+    [10000, r(41), r(56),  r(82),  r(109)],
+    [12000, r(47), r(63),  r(95),  r(126)],
+    [15000, r(56), r(75),  r(113), r(150)],
+    [20000, r(70), r(95),  r(145), r(193)],
   ],
   bahia: [
     [3000,  r(25), r(34),  r(42),  r(51)],
     [3500,  r(25), r(34),  r(42),  r(53)],
-    [4000,  r(25), r(34),  r(42),  r(58)],
-    [5000,  r(25), r(34),  r(47),  r(66)],
-    [6000,  r(27), r(36),  r(52),  r(74)],
-    [7000,  r(30), r(39),  r(57),  r(82)],
-    [8000,  r(31), r(42),  r(62),  r(91)],
-    [10000, r(36), r(49),  r(73),  r(107)],
-    [12000, r(41), r(56),  r(83),  r(123)],
-    [15000, r(48), r(65),  r(99),  r(147)],
-    [20000, r(60), r(82),  r(125), r(189)],
+    [4000,  r(25), r(34),  r(42),  r(56)],
+    [5000,  r(25), r(34),  r(47),  r(62)],
+    [6000,  r(27), r(36),  r(52),  r(69)],
+    [7000,  r(30), r(39),  r(57),  r(76)],
+    [8000,  r(31), r(42),  r(62),  r(82)],
+    [10000, r(36), r(49),  r(73),  r(97)],
+    [12000, r(41), r(56),  r(83),  r(110)],
+    [15000, r(48), r(65),  r(99),  r(132)],
+    [20000, r(60), r(82),  r(125), r(166)],
   ],
 };
 
@@ -404,16 +415,22 @@ const SHADE_RULES = {
 //     "10/10 SWFL Tree & Shrub Protocol" six_x cadence in
 //     server/config/protocols.json). Light (4x) maps to the protocol four_x
 //     cadence and is an available downsell for clean, low-pest-history
-//     landscapes — it is never auto-recommended. The 9x Enhanced and 12x
-//     Premium tiers are RETIRED (v4.5): the documented protocol tops out at
-//     6 visits, so pricing 9/12 visits charged for visits we don't run.
-//     Legacy `enhanced` / `premium` requests map to `standard` with a
-//     warning. See service-pricing.js#normalizeTreeShrubTier.
+//     landscapes — it is never auto-recommended. The 9x Enhanced tier was
+//     retired in v4.5 and UN-RETIRED as an UPSELL (owner directive
+//     2026-07-23): every-6-weeks coverage for heavy-pressure/high-value
+//     landscapes, never auto-recommended — Standard stays the default and
+//     recommendation. Visits 7-9 are lighter foliar insect/disease apps, so
+//     Enhanced material runs 1.25x the Standard annual budget
+//     (enhancedFactor), not 1.5x — fert and Snapshot stay on their own
+//     calendar. The 12x Premium tier REMAINS retired; legacy `premium`
+//     requests map to `standard` with a warning. See
+//     service-pricing.js#normalizeTreeShrubTier.
 // ============================================================
 const TREE_SHRUB = {
   tiers: {
     light:     { label: 'Light', frequency: 4, monthlyFloor: r(22) },
     standard:  { label: 'Standard', frequency: 6, monthlyFloor: r(35) },
+    enhanced:  { label: 'Enhanced', frequency: 9, monthlyFloor: r(48) },
   },
   defaultTier: 'standard',
   recommendedTier: 'standard',
@@ -423,6 +440,7 @@ const TREE_SHRUB = {
     perTreeAnnual: 4,
     perSqFtAnnual: 0.055,
     lightFactor: 0.75,
+    enhancedFactor: 1.25,
   },
   treeDensityCounts: { none: 0, light: 3, moderate: 6, heavy: 10 },
   marginTarget: 0.45,
@@ -707,16 +725,22 @@ const MOSQUITO = {
   },
   basePrices: {
     //           seasonal9, monthly12
-    // Repriced 2026-06 to match SW-FL market ($45-58/mo recurring); prior
-    // pricing ran ~2x market and the service never sold. Bifen-only barrier
-    // @ ~11min on-site holds ~62-71% real margin at these rates.
-    SMALL:   [r(66), r(60)],
-    QUARTER: [r(69), r(63)],
-    THIRD:   [r(72), r(66)],
-    HALF:    [r(78), r(70)],
-    ACRE:    [r(88), r(78)],
+    // Repriced 2026-07 to a 60% target contribution margin on the real cost
+    // basis (Bifen-only barrier, ~11min on-site via mist blower, 20min drive,
+    // $51/yr admin) — a uniform +10% over the 2026-06 market floor. Still well
+    // under Terminix ($131.11/mo mosquito+tick) and TruGreen ($85.56/app).
+    SMALL:   [r(73), r(66)],
+    QUARTER: [r(76), r(69)],
+    THIRD:   [r(79), r(73)],
+    HALF:    [r(86), r(77)],
+    ACRE:    [r(97), r(86)],
   },
   tierVisits: { seasonal9: 9, monthly12: 12 },
+  // Prices climb between bucket anchors in 500-sf steps (see
+  // interpolateMosquitoPrice) instead of jumping flat-bucket to flat-bucket —
+  // drive + setup dominate visit cost, so the per-step increment shrinks as
+  // lots grow rather than pricing big jobs out.
+  priceStepSqFt: 500,
   productCosts: {
     bifenthrinOz: 41.08 / 128,      // Bifen I/T 1 gal @ $41.08; Talak equivalent @ $41.57.
     tekkoProOz: 52.97 / 16,         // Tekko Pro IGR 16 oz @ $52.97.
@@ -749,13 +773,25 @@ const MOSQUITO = {
 // ============================================================
 const TERMITE = {
   perimeterMultiplier: { standard: 1.25, complex: 1.35 },
+  // Legacy fallback for callers without a system in hand; per-system
+  // spacing below wins wherever the system is known (owner 2026-07-28).
   stationSpacing: 10,  // feet between stations
   minStations: 8,
+  // Menu is Trelona-only (owner 2026-07-28): Advance stays fully priceable
+  // for replaying existing estimates, but new quotes default to Trelona and
+  // the estimator no longer offers the choice. Sentricon is NOT addable —
+  // Corteva dealer program, we're not enrolled.
+  defaultSystem: 'trelona',
   systems: {
     // Wholesale verified Apr 2026: Advance TBS RFID = $131.60 / 10-cs = $13.16/sta;
     // Trelona ATBS RFID (pre-baited annual) = $352.80 / 16-cs = $22.05/sta.
-    advance: { stationCost: 13.16, laborMaterial: 5.25, misc: 0.75, label: 'Advance (Active)' },
-    trelona: { stationCost: 22.05, laborMaterial: 5.25, misc: 0.75, label: 'Trelona (Termite)' },
+    // Spacing per LABEL: Advance/Sentricon-class ~10 ft; Trelona ATBS is the
+    // wide-spacing annual system (label 10-15 ft, 20 max) — 15 ft is what
+    // keeps a ~224 LF home at 15 stations / ~$610 install instead of
+    // 23 / ~$935 (owner 2026-07-28, competitive review vs $375 Sentricon
+    // installs).
+    advance: { stationCost: 13.16, laborMaterial: 5.25, misc: 0.75, label: 'Advance (Active)', spacingFt: 10 },
+    trelona: { stationCost: 22.05, laborMaterial: 5.25, misc: 0.75, label: 'Trelona (Termite)', spacingFt: 15 },
   },
   // 1.45x set Apr 2026 after competitive review (All U Need: 21 Sentricon stations
   // for $375). Prior 1.75x put doorstep ~3x market on Trelona default. Note:
@@ -763,11 +799,19 @@ const TERMITE = {
   // actual install labor in service-pricing.js is margin-only, not billed. Don't
   // remove the $6 buildup without restructuring the formula.
   installMultiplier: 1.45,
-  // TODO(v4.4): document monitoring subscription pricing policy
-  // (basic=$35, premier=$65 MRR — what each tier includes, why these values).
+  // Station-check pricing scales with STATION COUNT in 5-station brackets
+  // (owner 2026-07-28; anchor = a ~23-station/10-ft home at $34/mo gross,
+  // which a Gold member sees as the market-standard ~$29/mo):
+  //   monthly = baseMonthly + stepMonthly × max(0, ceil(stations/bracketStations) − 2)
+  //   ≤10 → $19 · 11-15 → $24 · 16-20 → $29 · 21-25 → $34 · 26-30 → $39 …
+  // Displayed AND billed per application (monthly × 12 ÷ 4 visits). The
+  // former flat Basic($35)/Premier($65) tiers are RETIRED — Premier was
+  // never defined or sold; the tier input is accepted for replay
+  // compatibility but no longer changes price.
   monitoring: {
-    basic:   { monthly: r(35), label: 'Basic' },
-    premier: { monthly: r(65), label: 'Premier' },
+    bracketStations: 5,
+    baseMonthly: r(19),
+    stepMonthly: r(5),
   },
   // Stations are checked quarterly (owner directive 2026-07-10) and the
   // program is displayed AND billed per application (owner 2026-07-20) —
@@ -785,6 +829,27 @@ const TERMITE = {
     '1yr':  { quarterly: r(60), label: '1-Year',  years: 1 },
     '5yr':  { quarterly: r(54), label: '5-Year',  years: 5 },
     '10yr': { quarterly: r(45), label: '10-Year', years: 10 },
+  },
+  // Station rental (owner 2026-07-26): the Massey/Sentricon-style option —
+  // $0 install, Waves RETAINS ownership of the in-ground stations, and the
+  // install price it would have cost to buy them is recovered as a fixed
+  // per-application uplift on the same quarterly station check.
+  //
+  // recoveryQuarters is the amortization horizon, NOT an end date: the
+  // uplift is permanent for the life of the agreement (owner ruling — it is
+  // a rental fee, not a payment plan). At the seeded 20 quarters a rental
+  // customer reaches parity with outright purchase at the 5-year mark and
+  // pays more after that, which is the honest trade for $0 up front and is
+  // exactly the shape of the builder programs these takeovers come from.
+  //
+  // The uplift rides its OWN line item (termite_station_rental), mirroring
+  // the bond rider: hardware cost recovery must never be eroded by a
+  // WaveGuard tier or bundle percentage, so it is registered in
+  // excludedFromPercentDiscount. DB-tunable via pricing_config.termite_rental
+  // (recovery_quarters — see db-bridge).
+  rental: {
+    recoveryQuarters: 20,
+    label: 'Station Rental',
   },
 };
 
@@ -1070,12 +1135,14 @@ const ONE_TIME = {
     oneTimeMultiplier: 1.50,
   },
   mosquito: {
-    // Repriced 2026-06 to the SW-FL single-visit band ($80-150 low end,
-    // scaling for big lots); prior pricing ran ~2x market.
-    SMALL:   r(99),
-    STANDARD: r(129),
-    LARGE:   r(159),
-    XL:      r(199),
+    // Repriced 2026-07 to sit ~25% under the one-time pest band (quarterly
+    // × 2.2, floor $199 → ~$199-290 for typical homes), scaled by lot bucket
+    // instead of footprint. ESTATE/ACRE_CLASS held at the 2026-06 values —
+    // they already sit inside that band and mosquito rates never get cut.
+    SMALL:   r(149),
+    STANDARD: r(169),
+    LARGE:   r(189),
+    XL:      r(209),
     ESTATE:  r(239),
     ACRE_CLASS: r(269),
     OVER_ACRE: r(269),
@@ -1865,6 +1932,10 @@ const WAVEGUARD = {
     pre_slab_termidor: true,    // Excluded — no discount
     foam_recurring: true,       // Recurring spot-foam: standalone, no WaveGuard tier or bundle % discount (cadence multiplier is its only discount)
     termite_bond: true,         // Warranty rider (owner 2026-07-20): fixed quarterly rate by term, no tier count, no bundle % discount
+    // Station rental uplift (owner 2026-07-26): straight hardware cost
+    // recovery on stations Waves still owns — discounting it would give away
+    // the stations, not a margin. No tier count, no bundle % discount.
+    termite_station_rental: true,
     // priceGermanRoachInitial bakes urgency × rc in a single Math.round to
     // match v2's applyOT exactly (pricing-engine-v2.js:183, 482). Excluding
     // it here stops the orchestrator discount loop from applying the 15% rc

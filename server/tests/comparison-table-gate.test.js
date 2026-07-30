@@ -140,12 +140,133 @@ describe('comparison-table-gate', () => {
     // Unambiguous brand tokens only. English-word brands ("Lawn Doctor",
     // "Bug Out") are deliberately NOT signals in any casing — see the
     // competitor-facts comment; they false-block title-cased headings.
-    for (const brand of ['TruGreen', 'Mosquito Joe', 'Greenix']) {
+    // (TruGreen was promoted from signal-only to a full curated COMPETITORS
+    // record 2026-07-28 — covered by the next test instead.)
+    for (const brand of ['Mosquito Joe', 'Greenix']) {
       const t = CATEGORY_TABLE.replace('National chain', brand);
       const r = gate.evaluate(wrap(t), { namedCompetitorEnabled: true });
       expect(r.pass).toBe(false);
       expect(r.findings.some((f) => f.code === 'COMPARISON_UNKNOWN_COMPETITOR')).toBe(true);
     }
+  });
+
+  test('TruGreen is a KNOWN competitor after the 2026-07-28 promotion — never UNKNOWN, still human-reviewed', () => {
+    const cf = require('../services/content/competitor-facts');
+    const rec = cf.findCompetitor('TruGreen');
+    expect(rec?.id).toBe('trugreen');
+    expect(Object.keys(rec.attributes)).toEqual(expect.arrayContaining(['reach', 'residential_recurring', 'guarantee']));
+    for (const attr of Object.values(rec.attributes)) {
+      expect(attr.source).toMatch(/^https:\/\/www\.trugreen\.com\//);
+      expect(attr.asOf).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    }
+    // Named in a table without sourced captions: routes to review with
+    // known-competitor findings, never the UNKNOWN_COMPETITOR P0 block.
+    const t = CATEGORY_TABLE.replace('National chain', 'TruGreen');
+    const r = gate.evaluate(wrap(t), { namedCompetitorEnabled: true });
+    expect(r.findings.some((f) => f.code === 'COMPARISON_UNKNOWN_COMPETITOR')).toBe(false);
+  });
+
+  test('a citation URL containing a brand token is NOT a prose mention — anchor text still is (Codex r2 P1)', () => {
+    // Required citation link whose DESTINATION contains "trugreen": with a
+    // table present, must not produce COMPETITOR_IN_PROSE or poison the
+    // unsourced-known set; with no table, must not produce IN_PROSE either.
+    const citation = 'Per [the company\'s published plan page](https://www.trugreen.com/why-choose-trugreen/professional-lawn-care), plans are annual.';
+    const withTable = { body: `# Guide\n\n${citation}\n\n${CATEGORY_TABLE}\n\nClosing prose.` };
+    const r1 = gate.evaluate(withTable, { namedCompetitorEnabled: true });
+    expect(r1.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_IN_PROSE')).toBe(false);
+    expect(r1.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_UNSOURCED')).toBe(false);
+    const r2 = gate.evaluate({ body: `# Guide\n\n${citation}\n\nNo table here.` }, { namedCompetitorEnabled: true });
+    expect(r2.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_IN_PROSE')).toBe(false);
+    // Anchor TEXT naming the competitor is still a prose mention.
+    const named = 'See [TruGreen\'s plan page](https://www.trugreen.com/plans) for details.';
+    const r3 = gate.evaluate({ body: `# Guide\n\n${named}\n\n${CATEGORY_TABLE}\n\nClosing prose.` }, { namedCompetitorEnabled: true });
+    expect(r3.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_IN_PROSE')).toBe(true);
+    // URL masking is bounded: punctuation glued to the URL must not extend
+    // the mask over adjacent prose (Codex r3 P1 — this failed OPEN before).
+    for (const glued of [
+      'Per https://www.trugreen.com/plans,TruGreen offers annual plans.',
+      'Per https://www.trugreen.com/plans;TruGreen offers annual plans.',
+    ]) {
+      const r4 = gate.evaluate({ body: `# Guide\n\n${glued}\n\n${CATEGORY_TABLE}\n\nClosing prose.` }, { namedCompetitorEnabled: true });
+      expect(r4.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_IN_PROSE')).toBe(true);
+    }
+  });
+
+  test('a link DESTINATION still associates its competitor for tone + review (Codex r4 P1)', () => {
+    // Disparaging anchor aimed at a competitor via the URL: P0, both paths.
+    const dis = 'Avoid [this dishonest company](https://www.trugreen.com/plans) at all costs.';
+    for (const body of [
+      `# Guide\n\n${dis}\n\n${CATEGORY_TABLE}\n\nClosing prose.`,
+      `# Guide\n\n${dis}\n\nNo table here.`,
+    ]) {
+      const r = gate.evaluate({ body }, { namedCompetitorEnabled: true });
+      expect(r.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(true);
+      expect(r.pass).toBe(false);
+    }
+    // Negative-reliability anchor: P1, routed to review.
+    const neg = 'They are [unreliable and hard to reach](https://www.trugreen.com/contact).';
+    const rNeg = gate.evaluate({ body: `# Guide\n\n${neg}\n\n${CATEGORY_TABLE}\n\nClosing prose.` }, { namedCompetitorEnabled: true });
+    expect(rNeg.findings.some((f) => f.code === 'COMPARISON_NEGATIVE_RELIABILITY')).toBe(true);
+    // A clean citation link stays finding-free but still routes to
+    // named-competitor review — linking a competitor is never invisible.
+    const clean = 'Per [the published plan page](https://www.trugreen.com/plans), plans are annual.';
+    const rClean = gate.evaluate({ body: `# Guide\n\n${clean}\n\n${CATEGORY_TABLE}\n\nClosing prose.` }, { namedCompetitorEnabled: true });
+    expect(rClean.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
+    expect(rClean.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_IN_PROSE')).toBe(false);
+    expect(rClean.findings.some((f) => f.code === 'COMPARISON_COMPETITOR_UNSOURCED')).toBe(false);
+    expect(rClean.pass).toBe(true);
+    expect(rClean.requiresHumanReview).toBe(true);
+  });
+
+  test('non-inline URL forms, trailing clauses, full vocabulary, unknown links, and the feature gate all hold (Codex r5)', () => {
+    // r5.1: bare URL — no markdown link — still associates for tone.
+    const bare = 'This dishonest company: https://www.trugreen.com/plans is one to avoid.';
+    const rBare = gate.evaluate({ body: `# Guide\n\n${bare}\n\n${CATEGORY_TABLE}\n\nClosing prose.` }, { namedCompetitorEnabled: true });
+    expect(rBare.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(true);
+    // r5.3: accusation AFTER the link.
+    const trailing = '[This company](https://www.trugreen.com/plans) is dishonest.';
+    const rTrail = gate.evaluate({ body: `# Guide\n\n${trailing}\n\n${CATEGORY_TABLE}\n\nClosing prose.` }, { namedCompetitorEnabled: true });
+    expect(rTrail.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(true);
+    // r5.4: NEG_ADJ evaluatives count for link-anchored disparagement.
+    const evalNeg = 'They are [the worst company](https://www.trugreen.com/plans) around.';
+    const rEval = gate.evaluate({ body: `# Guide\n\n${evalNeg}\n\n${CATEGORY_TABLE}\n\nClosing prose.` }, { namedCompetitorEnabled: true });
+    expect(rEval.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(true);
+    // r5.2: a link to a recognized-but-uncurated competitor fails closed.
+    const unknown = 'Compare [their plans](https://www.mosquito-joe.com/plans) yourself.';
+    const rUnk = gate.evaluate({ body: `# Guide\n\n${unknown}\n\n${CATEGORY_TABLE}\n\nClosing prose.` }, { namedCompetitorEnabled: true });
+    expect(rUnk.findings.some((f) => f.code === 'COMPARISON_UNKNOWN_COMPETITOR')).toBe(true);
+    const rUnkNoTable = gate.evaluate({ body: `# Guide\n\n${unknown}\n\nNo table.` }, { namedCompetitorEnabled: true });
+    expect(rUnkNoTable.findings.some((f) => f.code === 'COMPARISON_UNKNOWN_COMPETITOR')).toBe(true);
+    // r5.5: with the feature gate OFF, a link-only known competitor is
+    // named-competitor usage — flagged, never silently auto-published.
+    const clean = 'Per [the published plan page](https://www.trugreen.com/plans), plans are annual.';
+    const rGate = gate.evaluate({ body: `# Guide\n\n${clean}\n\n${CATEGORY_TABLE}\n\nClosing prose.` }, { namedCompetitorEnabled: false });
+    expect(rGate.findings.some((f) => f.code === 'COMPARISON_NAMED_COMPETITOR_DISABLED')).toBe(true);
+    expect(rGate.pass).toBe(false);
+  });
+
+  test('host index, multi-hit URLs, sentence-bounded tone, and table-less gate parity (Codex r6)', () => {
+    // r6.4: concatenated official domains resolve via the curated host index.
+    const massey = 'They are [the worst company](https://www.masseyservices.com) around.';
+    const rMassey = gate.evaluate({ body: `# Guide\n\n${massey}\n\n${CATEGORY_TABLE}\n\nClosing prose.` }, { namedCompetitorEnabled: true });
+    expect(rMassey.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(true);
+    // r6.3: every competitor in a URL is kept — uncurated Hawx can't hide
+    // behind allowlisted Orkin in the same path.
+    const multi = 'See [this comparison](https://example.gov/orkin-vs-hawx) for details.';
+    const rMulti = gate.evaluate({ body: `# Guide\n\n${multi}\n\n${CATEGORY_TABLE}\n\nClosing prose.` }, { namedCompetitorEnabled: true });
+    expect(rMulti.findings.some((f) => f.code === 'COMPARISON_UNKNOWN_COMPETITOR' && /Hawx/i.test(f.message))).toBe(true);
+    // r6.2: negativity in a PRIOR sentence about something else must not
+    // attach to a citation link — D1's failure-mechanism prose is legal.
+    const legit = 'DIY fertilizer can be unreliable. Consult [the published plan](https://www.trugreen.com/plans).';
+    const rLegit = gate.evaluate({ body: `# Guide\n\n${legit}\n\n${CATEGORY_TABLE}\n\nClosing prose.` }, { namedCompetitorEnabled: true });
+    expect(rLegit.findings.some((f) => f.code === 'COMPARISON_DISPARAGEMENT')).toBe(false);
+    expect(rLegit.findings.some((f) => f.code === 'COMPARISON_NEGATIVE_RELIABILITY')).toBe(false);
+    expect(rLegit.pass).toBe(true);
+    expect(rLegit.requiresHumanReview).toBe(true);
+    // r6.1: gate parity on the table-less path.
+    const rNoTableGate = gate.evaluate({ body: '# Guide\n\nSee [the plan](https://www.trugreen.com/plans).\n\nNo table.' }, { namedCompetitorEnabled: false });
+    expect(rNoTableGate.findings.some((f) => f.code === 'COMPARISON_NAMED_COMPETITOR_DISABLED')).toBe(true);
+    expect(rNoTableGate.pass).toBe(false);
   });
 
   test('title-cased English phrases containing brand-like words stay clean (Codex round-5 P2)', () => {

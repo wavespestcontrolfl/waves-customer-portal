@@ -111,6 +111,10 @@ describe('GET /admin/schedule/:id/card-request', () => {
           status: 'completed',
           sentAt: '2026-07-20T10:00:05Z',
           completedAt: '2026-07-20T10:31:00Z',
+          // Plan-choice lane (GATE_SECURE_PLAN_CHOICE): NULL until the
+          // customer picks a plan on the /secure page.
+          selectedPlan: null,
+          prepayInvoiceId: null,
         },
       });
     });

@@ -433,6 +433,39 @@ export function startSprayEngine({
 // Build the fully-settled band offscreen in one pass. The modal composes and
 // saves the snapshot from this the moment Play starts — the animation is
 // presentation only, so closing the sheet mid-spray can never lose a trace.
+// Lawn variant (owner 2026-07-28): a lawn is treated as an AREA, not a
+// perimeter barrier — the spray-mist band read wrong on lawn reports. Bake a
+// clean outline of the treated lawn instead: soft outer glow + crisp line.
+// Deliberately NO interior fill: the traced loop commonly wraps the whole
+// yard with the house inside it, and a filled polygon would permanently
+// shade the roof as "treated turf" in the snapshot (codex P1 #3038 r3).
+// The customer report animates the pulse; this is the settled frame.
+export function buildOutlineAccum({ width, height, points, closed, color }) {
+  const rgb = hexToRgb(color);
+  const accum = document.createElement('canvas');
+  accum.width = width;
+  accum.height = height;
+  const ctx = accum.getContext('2d');
+  if (!Array.isArray(points) || points.length < 2) return accum;
+  const trace = () => {
+    ctx.beginPath();
+    ctx.moveTo(points[0].x, points[0].y);
+    for (let i = 1; i < points.length; i += 1) ctx.lineTo(points[i].x, points[i].y);
+    if (closed && points.length > 2) ctx.closePath();
+  };
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  trace();
+  ctx.strokeStyle = rgba(rgb, 0.3);
+  ctx.lineWidth = 14;
+  ctx.stroke();
+  trace();
+  ctx.strokeStyle = rgba(rgb, 0.9);
+  ctx.lineWidth = 4.5;
+  ctx.stroke();
+  return accum;
+}
+
 export function buildSettledAccum({ width, height, points, closed, mistColor }) {
   const pts = closed && points.length > 2 ? [...points, points[0]] : [...points];
   const mist = hexToRgb(mistColor);

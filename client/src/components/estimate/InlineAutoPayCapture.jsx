@@ -52,14 +52,25 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
     onStateChange?.({ ready, agreed, loadFailed });
   }, [ready, agreed, loadFailed, onStateChange]);
 
+  // Keyed on the intent's VALUES, never the object's identity: a parent that
+  // passes an inline `{clientSecret, publishableKey}` literal re-creates the
+  // prop every render, and SecureAppointmentPage re-renders between typing
+  // and confirm (capture-state emits, the busy flip inside handleSave). An
+  // identity-keyed effect re-ran on each of those renders and mounted a
+  // fresh EMPTY Payment Element over the one the customer had filled in, so
+  // confirmSetup validated the empty element and every save failed with
+  // "Your card number is incomplete" (customer report 2026-07-29 — zero
+  // secure-card links had ever completed).
+  const clientSecret = intent?.clientSecret || null;
+  const publishableKey = intent?.publishableKey || null;
   useEffect(() => {
     let cancelled = false;
-    if (!intent?.clientSecret || !intent?.publishableKey) return undefined;
+    if (!clientSecret || !publishableKey) return undefined;
     loadStripeSdk().then((StripeCtor) => {
       if (cancelled || !mountRef.current) return;
-      const stripe = StripeCtor(intent.publishableKey);
+      const stripe = StripeCtor(publishableKey);
       const elements = stripe.elements({
-        clientSecret: intent.clientSecret,
+        clientSecret,
         appearance: glassActive
           ? { theme: 'stripe', variables: { borderRadius: '12px', colorPrimary: '#0A7EC2', colorText: NAVY, fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif' } }
           : { theme: 'stripe', variables: { borderRadius: '8px' } },
@@ -76,7 +87,7 @@ const InlineAutoPayCapture = forwardRef(function InlineAutoPayCapture(
       }
     });
     return () => { cancelled = true; };
-  }, [intent, loadStripeSdk, glassActive]);
+  }, [clientSecret, publishableKey, loadStripeSdk, glassActive]);
 
   useImperativeHandle(ref, () => ({
     isReady: () => ready && agreed,

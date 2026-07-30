@@ -36,7 +36,6 @@ import { createPortal } from "react-dom";
 
 import { addETDays, etDateString } from "../../lib/timezone";
 import { useFeatureFlagReady } from "../../hooks/useFeatureFlag";
-import AnnualPrepayLauncher from "../../components/schedule/AnnualPrepayLauncher";
 import useSpeechDictation from "../../hooks/useSpeechDictation";
 import { Mic, MicOff } from "lucide-react";
 import ProjectFindingFieldInput from "../../components/tech/ProjectFindingFieldInput";
@@ -291,42 +290,26 @@ const VISIT_OUTCOME_OPTIONS = [
   { value: "customer_concern", label: "Customer concern" },
   { value: "incomplete", label: "Incomplete" },
 ];
-const OFFICE_APPROVAL_REASONS = [
-  {
-    value: "office_approved_blackout_exception",
-    label: "Office approved exception",
-  },
-  {
-    value: "soil_test_supported_phosphorus",
-    label: "Soil test supports phosphorus",
-  },
-  {
-    value: "non_fertilizer_application_only",
-    label: "No N/P fertilizer applied",
-  },
-];
-const N_LIMIT_APPROVAL_REASONS = [
-  {
-    value: "admin_approved_n_budget_exception",
-    label: "Admin approved exception",
-  },
-  { value: "ledger_adjustment_pending", label: "Ledger adjustment pending" },
-  {
-    value: "site_specific_agronomic_need",
-    label: "Site-specific agronomic need",
-  },
-];
-const MANAGER_APPROVAL_REASONS = [
-  {
-    value: "manager_approved_protocol_exception",
-    label: "Manager approved protocol exception",
-  },
-  {
-    value: "field_conditions_documented",
-    label: "Field conditions documented",
-  },
-  { value: "label_review_completed", label: "Label / rotation reviewed" },
-];
+// Plan/approval-engine block messages predate the advisory policy and can
+// still phrase conditions as approval mandates. Soften them for display —
+// the closeout never blocks, so the copy must not claim review is required.
+function softenApprovalWording(text) {
+  return String(text || "")
+    .replace(
+      /;\s*manager (?:review|approval) is required before applying it\.?/gi,
+      " — double-check before applying.",
+    )
+    .replace(/\brequires manager approval\b/gi, "flagged for review")
+    .trim();
+}
+// Rig-calibration states worth a closeout advisory line. Deliberately
+// excludes 'equipment_selection_required' — with no equipment step left in
+// the closeout, "select equipment" would be permanent noise.
+const CALIBRATION_ADVISORY_CODES = new Set([
+  "missing_calibration",
+  "expired_calibration",
+  "calibration_not_field_verified",
+]);
 const MANAGER_APPROVAL_CODES = new Set([
   "off_protocol_product",
   "high_rate_application",
@@ -359,12 +342,6 @@ function rateUnitsMatch(a, b) {
   const right = normalizeRateUnit(b);
   return !!left && !!right && left === right;
 }
-const TANK_CLEANOUT_METHODS = [
-  "Triple rinse",
-  "Clean water flush",
-  "Tank cleaner flush",
-  "Dedicated tank, no residue risk",
-];
 const AREAS_BY_SERVICE = {
   pest: [
     "Perimeter",
@@ -386,6 +363,37 @@ const AREAS_BY_SERVICE = {
     "Follow-up recommended",
   ],
 };
+// Per-product treatment areas are multi-select but stored as ONE
+// comma-joined string in the existing applicationArea field
+// ("Kitchen, Bathrooms") so drafts, the submit payload, and the
+// service_products.application_area column keep their shape — only the
+// picker UI changed. Area labels are a controlled chip vocabulary and
+// never contain commas.
+function parseApplicationAreas(value) {
+  return String(value || "")
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+// Chip choices = this visit's treated-area chips, plus any already-selected
+// area that is no longer chipped at the visit level. Keeping stale
+// selections visible (instead of hiding them like the old <select> did)
+// lets the tech see and clear a value that would otherwise submit
+// invisibly from p.applicationArea (same trap as codex P3 r2 on #2950).
+function productAreaChoices(areasServiced, currentValue) {
+  const choices = [...areasServiced];
+  for (const area of parseApplicationAreas(currentValue)) {
+    if (!choices.includes(area)) choices.push(area);
+  }
+  return choices;
+}
+function toggleProductAreaValue(currentValue, area, orderedChoices) {
+  const selected = parseApplicationAreas(currentValue);
+  const next = selected.includes(area)
+    ? selected.filter((a) => a !== area)
+    : orderedChoices.filter((a) => selected.includes(a) || a === area);
+  return next.join(", ");
+}
 const CUSTOMER_INTERACTION_OPTIONS = [
   { value: "tech_home_spoke_with_them", label: "Customer home — spoke with them" },
   { value: "not_home_full_access", label: "Customer not home — full access" },
@@ -509,8 +517,8 @@ function adminFetch(path, options = {}) {
   }).then(async (r) => {
     if (!r.ok) {
       // Surface the server's error body — completion handlers branch on
-      // err.code (completion_billing_required and friends), so a bare
-      // "HTTP 409" string breaks the billing-detour routing.
+      // err.code (lawn_assessment_stale and friends), so a bare
+      // "HTTP 409" string breaks that routing.
       let body = null;
       try { body = await r.json(); } catch { /* non-JSON error */ }
       const err = new Error(body?.error || `HTTP ${r.status}`);
@@ -551,24 +559,77 @@ function googleMapsUrl(address) {
   return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`;
 }
 
+// Token per category that /admin/protocols/photos/relevant classifies to the
+// same line the panel renders (its filter matches literal tokens only).
+const PHOTO_LOOKUP_TYPE_BY_CATEGORY = {
+  lawn: "lawn",
+  tree_shrub: "tree shrub",
+  pest: "pest",
+  mosquito: "mosquito",
+  termite: "termite",
+};
+
 function detectServiceCategory(serviceType) {
   const s = (serviceType || "").toLowerCase();
+  // "Palmetto" is a roach, not a palm — the word-bounded exception must run
+  // before the palm check or "Palmetto Roach Knockdown" classifies as
+  // tree_shrub (mirrors the server classifier).
+  if (/\bpalmetto\b/.test(s)) return "pest";
+  // Pest-primary combined names ("Quarterly Pest + Termite Bait Station")
+  // stay pest — the companion token names a section, not the line (mirrors
+  // the server classifier's rule exactly).
   if (
+    /\bpest\b.*\b(rodent|termite)\b/.test(s) &&
+    !/\b(lawn|turf|grass|weed|fertil|mosquito)\b/.test(s)
+  )
+    return "pest";
+  // Precedence mirrors the server's detectServiceLine: explicit lawn-SURFACE
+  // tokens win (the combined "Lawn + Tree & Shrub" service stays lawn), while
+  // tree/shrub outranks only lawn's ambiguous treatment tokens — "Tree &
+  // Shrub Fertilization" is a tree & shrub service, not lawn.
+  const hasLawnSurface =
     s.includes("lawn") ||
     s.includes("turf") ||
     s.includes("grass") ||
+    s.includes("sod");
+  if (
+    !hasLawnSurface &&
+    // Mosquito/termite/WDO tokens outrank tree tokens ("Tree Line Mosquito
+    // Treatment" is mosquito work) — mirrors the server normalizer's
+    // tree/shrub exclusions exactly. Ornamental/Arborjet are the server's
+    // tree/shrub aliases (service-line-configs.js).
+    !s.includes("mosquito") &&
+    !s.includes("termite") &&
+    !s.includes("wdo") &&
+    (s.includes("tree") ||
+      s.includes("shrub") ||
+      s.includes("ornamental") ||
+      s.includes("arborjet") ||
+      /\bpalm(s)?\b/.test(s))
+  )
+    return "tree_shrub";
+  if (
+    hasLawnSurface ||
     s.includes("fertil") ||
     s.includes("weed") ||
     s.includes("dethatch") ||
     s.includes("top dress") ||
-    s.includes("aerat") ||
-    s.includes("sod")
+    s.includes("aerat")
   )
     return "lawn";
-  if (s.includes("tree") || s.includes("shrub") || s.includes("palm"))
-    return "tree_shrub";
   if (s.includes("mosquito")) return "mosquito";
-  if (s.includes("termite")) return "termite";
+  // Termite-product aliases mirror the server normalizer, which maps EVERY
+  // /advance/ label to a termite type. Word-bounded \badvance\b never
+  // matches "Advanced Pest Control" (trailing d), so the bare alias is safe.
+  if (
+    s.includes("termite") ||
+    s.includes("wdo") ||
+    s.includes("bora") ||
+    s.includes("trelona") ||
+    s.includes("termidor") ||
+    /\badvance\b/.test(s)
+  )
+    return "termite";
   if (
     s.includes("rodent") ||
     /\brat(s)?\b/.test(s) ||
@@ -668,10 +729,6 @@ export function completionPreferencesNeedDraft({
     || String(backfillTimeOnSite || "").trim() !== "";
 }
 
-export function normalizeCompletionDetourPhotos(photos) {
-  return Array.isArray(photos) ? photos : [];
-}
-
 // timeOnSite fragment of the completion POST body. The panel's running
 // `elapsed` derives from the visit's ORIGINAL check-in — for a stale on_site
 // row that's days or weeks — and the server books any submitted timeOnSite
@@ -742,6 +799,27 @@ export function completionWillReview({
 
 function completionDraftKey(serviceId) {
   return `waves_completion_draft_${serviceId}`;
+}
+
+// A completed visit whose REQUIRED completion-invoice mint failed (503
+// backfill_invoice_mint_failed) still owes its resume: the server released
+// the completion attempt to the immediately-resumable state and the visit
+// row is already 'completed', so without a marker no dispatch surface would
+// reopen completion after a reload/dismiss and the mint could strand until
+// Billing Recovery sweeps it. CompletionPanel sets the marker when the 503
+// lands and clears it on success; DispatchPageV2's completion-open gates
+// honor it for completed visits. Exported for DispatchPageV2 — one key
+// derivation, no drift.
+export function completionResumeOwedKey(serviceId) {
+  return `waves_completion_resume_owed_${serviceId}`;
+}
+
+export function completionResumeOwed(serviceId) {
+  try {
+    return localStorage.getItem(completionResumeOwedKey(serviceId)) === "1";
+  } catch {
+    return false;
+  }
 }
 
 // Accepts "HH:MM" or "HH:MM:SS" (DB rows carry seconds; time inputs don't).
@@ -832,6 +910,7 @@ const EDIT_FREQUENCIES = [
   { value: "semiannual", label: "Semiannual" },
   { value: "annual", label: "Annual" },
   { value: "monthly_nth_weekday", label: "Every month on the Nth weekday" },
+  { value: "seasonal_feb_oct", label: "Seasonal (Feb–Oct, monthly)" },
   { value: "custom", label: "Custom (every N days)" },
 ];
 const EDIT_NTH_OPTIONS = [
@@ -887,6 +966,36 @@ function editNextRecurringDate(baseDateStr, pattern, i, opts = {}) {
     );
     return isNaN(d.getTime()) ? base : d;
   }
+  // Seasonal (Feb–Oct): walk the 9-month season ordinally, then convert back
+  // to a plain month delta so day semantics match the other month cadences.
+  // Mirrors the server's seasonalFebOctDate INCLUDING seasonOrdinalForBase's
+  // off-season normalization — Nov/Dec/Jan anchors all sit one slot before
+  // the coming February, so occurrence 1 lands on that February. Without this
+  // the editor previewed the 91-day fallback for a seasonal mosquito series.
+  if (pattern === "seasonal_feb_oct") {
+    // The preview's first chip is the anchor itself — display it as booked,
+    // never renormalized (an off-season office booking is the operator's).
+    if (i === 0) return base;
+    const SEASON_MONTHS = 9; // Feb..Oct
+    const m1 = base.getMonth() + 1;
+    const y = base.getFullYear();
+    const baseOrdinal = m1 < 2 ? y * SEASON_MONTHS - 1
+      : m1 > 10 ? (y + 1) * SEASON_MONTHS - 1
+        : y * SEASON_MONTHS + (m1 - 2);
+    const ordinal = baseOrdinal + i;
+    const targetYear = Math.floor(ordinal / SEASON_MONTHS);
+    const targetMonth1 = ((ordinal % SEASON_MONTHS) + SEASON_MONTHS) % SEASON_MONTHS + 2;
+    const monthDelta = (targetYear - y) * 12 + (targetMonth1 - m1);
+    const d = new Date(base);
+    const nthOfBase = Math.ceil(d.getDate() / 7);
+    const target = editNthWeekdayOfMonth(
+      d.getFullYear(),
+      d.getMonth() + monthDelta,
+      nthOfBase,
+      d.getDay(),
+    );
+    return isNaN(target.getTime()) ? base : target;
+  }
   const monthIntervals = {
     monthly: 1,
     bimonthly: 2,
@@ -928,6 +1037,26 @@ function editShiftPastWeekend(date, skip, direction) {
     shifted.setDate(shifted.getDate() + (day === 6 ? 2 : 1));
   }
   return shifted;
+}
+
+// Mirror of the server's clampDateToSeason: a weekend-shifted seasonal date
+// that crossed the season edge (Oct 31 Sat → Nov 2) walks back into Feb–Oct
+// so the edit preview matches the dates the server will save.
+function editClampToSeason(date, pattern, skip) {
+  if (pattern !== "seasonal_feb_oct" || !date || isNaN(date.getTime())) return date;
+  const m = date.getMonth(); // 0-indexed: Feb=1 … Oct=9
+  if (m >= 1 && m <= 9) return date;
+  const step = m === 0 ? 1 : -1; // Jan undershoot → forward; Nov/Dec → back
+  const out = new Date(date);
+  for (let n = 0; n < 75; n++) {
+    out.setDate(out.getDate() + step);
+    const mm = out.getMonth();
+    if (mm < 1 || mm > 9) continue;
+    const day = out.getDay();
+    if (skip && (day === 0 || day === 6)) continue;
+    return out;
+  }
+  return date;
 }
 const EDIT_FALLBACK_SERVICES = [
   {
@@ -1432,7 +1561,11 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       const displayDate =
         i === 0
           ? d
-          : editShiftPastWeekend(d, !!skipWeekends, weekendShift);
+          : editClampToSeason(
+              editShiftPastWeekend(d, !!skipWeekends, weekendShift),
+              recurringFreq,
+              !!skipWeekends,
+            );
       dates.push(
         displayDate.toLocaleDateString("en-US", {
           month: "short",
@@ -3274,7 +3407,12 @@ export function ProtocolPanel({ service, onClose }) {
   const [protocolMatchReason, setProtocolMatchReason] = useState(null);
   const [productLabels, setProductLabels] = useState([]);
   const [loading, setLoading] = useState(true);
-  const serviceCategory = detectServiceCategory(service.serviceType);
+  // Classify from the RAW service type when the payload carries it: the
+  // schedule day view sends a normalized display name ("Lawn + Tree & Shrub"
+  // becomes "Tree & Shrub Care") while the server's line-scoped fields are
+  // classified from the raw value — the panel must agree with them.
+  const panelServiceType = service.serviceTypeRaw || service.serviceType;
+  const serviceCategory = detectServiceCategory(panelServiceType);
   const isLawn = serviceCategory === "lawn";
   const [activeSection, setActiveSection] = useState(
     isLawn ? "lawn_protocol" : "overview",
@@ -3331,7 +3469,20 @@ export function ProtocolPanel({ service, onClose }) {
 
       const [p, s, sc, eq, lp, lm, sp] = await Promise.all([
         adminFetch(
-          `/admin/protocols/photos/relevant?serviceType=${encodeURIComponent(service.serviceType)}&month=${month}`,
+          // The photos endpoint derives its line from literal tokens
+          // (lawn/turf, tree/shrub, pest, mosquito, termite) — send the
+          // panel's CLASSIFIED category as that token so the lookup always
+          // matches the panel's line, even for raw aliases ("Bora-Care",
+          // "Aeration") carrying none of the tokens. "pest" is also the
+          // classifier's rodent/unknown fallback though, so that token is
+          // only sent when the label genuinely says pest — rodent and
+          // unknown labels keep their token-less (unfiltered) lookup.
+          `/admin/protocols/photos/relevant?serviceType=${encodeURIComponent(
+            (serviceCategory !== "pest" ||
+            /\bpest\b/.test(panelServiceType.toLowerCase())
+              ? PHOTO_LOOKUP_TYPE_BY_CATEGORY[serviceCategory]
+              : null) || service.serviceType,
+          )}&month=${month}`,
         ),
         adminFetch(
           `/admin/protocols/seasonal-index?month=${month}&service_line=${line}`,
@@ -3348,7 +3499,7 @@ export function ProtocolPanel({ service, onClose }) {
           : Promise.resolve(null),
         !isLawn && protocolProgram
           ? adminFetch(
-              `/admin/protocols/match?serviceType=${encodeURIComponent(service.serviceType)}`,
+              `/admin/protocols/match?serviceType=${encodeURIComponent(panelServiceType)}`,
             )
           : Promise.resolve(null),
       ]);
@@ -4342,9 +4493,12 @@ export function ProtocolPanel({ service, onClose }) {
                     ))}
                   </div>
                 )}
-                {/* Last service notes */}
-                {service.lastServiceNotes &&
-                  stripLegacyBoilerplate(service.lastServiceNotes) && (
+                {/* Last service notes — line-scoped (lastLineServiceNotes) so a
+                    pest dashboard never shows the customer's lawn visit notes.
+                    No fallback to the any-line field: cross-line notes here
+                    were the bug, not a degraded mode. */}
+                {service.lastLineServiceNotes &&
+                  stripLegacyBoilerplate(service.lastLineServiceNotes) && (
                     <div
                       style={{
                         background: D.bg,
@@ -4369,7 +4523,7 @@ export function ProtocolPanel({ service, onClose }) {
                       <div
                         style={{ fontSize: 12, color: D.text, lineHeight: 1.5 }}
                       >
-                        {stripLegacyBoilerplate(service.lastServiceNotes)}
+                        {stripLegacyBoilerplate(service.lastLineServiceNotes)}
                       </div>{" "}
                     </div>
                   )}
@@ -5853,6 +6007,10 @@ function LawnAssessmentCompletionBlock({
   service,
   disabled,
   onConfirmed,
+  // Fires false while the existing-assessment lookup is in flight and true
+  // once it settles — the parent must not treat the pre-load null confirmed
+  // id as "retake pending".
+  onReady,
   // Optional on-site lawn-length (gauge) photo — captured inline next to the turf
   // photos here, but stored on the shared turf-height state (CompletionPanel owns
   // it). Only rendered when the gauge-reading capture applies (turf-height flag).
@@ -5902,7 +6060,11 @@ function LawnAssessmentCompletionBlock({
     setConfirmedId(null);
     setError("");
     onConfirmed?.(null);
-    if (!service?.id) return () => { cancelled = true; };
+    onReady?.(false);
+    if (!service?.id) {
+      onReady?.(true);
+      return () => { cancelled = true; };
+    }
 
     setLoading(true);
     adminFetch(`/admin/lawn-assessment/service/${service.id}`)
@@ -5927,7 +6089,15 @@ function LawnAssessmentCompletionBlock({
           onConfirmed?.(assessment.id);
         }
       })
-      .catch(() => {})
+      .then(() => {
+        if (!cancelled) onReady?.(true);
+      })
+      .catch(() => {
+        // The lookup learned NOTHING — report failed, never ready: the parent
+        // omits lawnAssessmentId so the server's visit-linked fallback (DB
+        // truth) still grounds any existing confirmed scores.
+        if (!cancelled) onReady?.("failed");
+      })
       .finally(() => {
         if (!cancelled) setLoading(false);
       });
@@ -5969,6 +6139,10 @@ function LawnAssessmentCompletionBlock({
   async function analyze() {
     if (!service?.customerId || photos.length === 0) return;
     setAnalyzing(true);
+    // Same suspension as the confirmation POST: the vision analysis can run
+    // long, and a report generated mid-analysis would carry an explicit-null
+    // assessment state for scores that are about to be reviewed.
+    onReady?.(false);
     setError("");
     try {
       const response = await adminFetch("/admin/lawn-assessment/assess", {
@@ -5998,12 +6172,20 @@ function LawnAssessmentCompletionBlock({
       setError(err.message || "Assessment failed");
     } finally {
       setAnalyzing(false);
+      // Settled either way: post-analysis the row is unconfirmed (or the
+      // analysis failed with photos pending) — explicit null IS the true
+      // "review outstanding" state.
+      onReady?.(true);
     }
   }
 
   async function confirm() {
     if (!result?.assessment?.id) return;
     setConfirming(true);
+    // Readiness is suspended while the confirmation POST is in flight — the
+    // parent's id is stale until it lands, and generating meanwhile would
+    // send an explicit null that suppresses the assessment being confirmed.
+    onReady?.(false);
     setError("");
     try {
       const response = await adminFetch("/admin/lawn-assessment/confirm", {
@@ -6027,8 +6209,17 @@ function LawnAssessmentCompletionBlock({
       const assessmentId = response?.assessment?.id || result.assessment.id;
       setConfirmedId(assessmentId);
       onConfirmed?.(assessmentId);
+      onReady?.(true);
     } catch (err) {
       setError(err.message || "Confirm failed");
+      // A definitive 4xx rejection means the write did NOT commit — null is
+      // the true state (retake still pending), so readiness returns true and
+      // the explicit-null payload keeps any superseded row suppressed.
+      // Ambiguous failures (network, 5xx, lost response) report failed: the
+      // write may have committed, so the server grounds from DB truth.
+      const definitiveRejection =
+        Number(err?.status) >= 400 && Number(err?.status) < 500;
+      onReady?.(definitiveRejection ? true : "failed");
     } finally {
       setConfirming(false);
     }
@@ -7872,14 +8063,9 @@ export function CompletionPanel({
   onClose,
   onSubmit,
   onViewDetails,
-  // Typed specialty completion (PR 3): parent-owned routes for the
-  // billing-required 409 (opens the checkout flow) and the success-screen
-  // follow-up CTA (wired by PR 4 — the button only renders when provided).
-  onBillingRequired,
+  // Typed specialty completion (PR 4): parent-owned success-screen
+  // follow-up CTA (the button only renders when provided).
   onScheduleFollowup,
-  billingDetourPhotos = [],
-  onDiscardBillingDetour,
-  onBillingDetourPhotosChange,
 }) {
   const [notes, setNotes] = useState("");
   // Voice-to-text for the notes box. Appends final transcript chunks; the tech
@@ -8067,24 +8253,14 @@ export function CompletionPanel({
   const [aiReportIncludeComms, setAiReportIncludeComms] = useState(true);
   const [success, setSuccess] = useState(false);
   const [completionResult, setCompletionResult] = useState(null);
-  // Completion-screen annual-prepay offer (flag-gated, default off): a post-
-  // completion CTA that mints the prepay invoice and either sends it alongside
-  // the report or charges the year via Tap to Pay. Off = no change to completion.
-  const [showPrepay, setShowPrepay] = useState(false);
-  const { enabled: prepayAtCompletionFlag } = useFeatureFlagReady("prepay-at-completion");
-  // Minting an annual-prepay invoice is admin-only (requireAdmin). The admin app +
-  // flags endpoint also serve technician users, so gate the CTA on the admin role
-  // exactly like the Customer 360 prepay buttons — otherwise a tech hits a 403
-  // after filling the modal.
-  const showPrepayCta = prepayAtCompletionFlag && panelIsAdmin;
+  // The annual-prepay offer was REMOVED from the completion success screen
+  // (owner 2026-07-29: success stays minimal — service complete + delivery
+  // status only). Prepay lives in Customer 360; don't re-add a CTA here.
   const [elapsed, setElapsed] = useState("0:00");
   const [quickComplete, setQuickComplete] = useState(false);
   // Completion photos are intentionally kept out of localStorage (a handful
-  // of base64 images can exceed its quota). Dispatch keeps them in memory
-  // across the billing checkout detour and passes them back on remount.
-  const [servicePhotos, setServicePhotos] = useState(() =>
-    normalizeCompletionDetourPhotos(billingDetourPhotos),
-  );
+  // of base64 images can exceed its quota).
+  const [servicePhotos, setServicePhotos] = useState([]);
   // Turf height-of-cut capture (lawn completion, behind the flag). `ready` gates
   // submit so a lawn visit can't be completed before the flag state is known —
   // otherwise a pre-load submit hides the field the server still requires (422).
@@ -8309,7 +8485,13 @@ export function CompletionPanel({
     const counts = stationProgram === "trapping"
       ? { traps_checked: String(activeKeys.length - inaccessible) }
       : {
-        total_stations: String(activeKeys.length),
+        // total_stations is termite-only since 2026-07-23: the rodent
+        // schema retired it (the map's pins ARE the roster), and writing it
+        // there would trip the unknown-field rejection at submit
+        // (codex P1 on #2963).
+        ...(stationProgram === "termite"
+          ? { total_stations: String(activeKeys.length) }
+          : {}),
         stations_checked: String(activeKeys.length - inaccessible),
         stations_inaccessible: String(inaccessible),
         // Only the termite schema carries a per-station activity COUNT; the
@@ -8408,9 +8590,6 @@ export function CompletionPanel({
   useEffect(() => {
     servicePhotosRef.current = servicePhotos;
   }, [servicePhotos]);
-  useEffect(() => {
-    onBillingDetourPhotosChange?.(service.id, servicePhotos);
-  }, [onBillingDetourPhotosChange, service.id, servicePhotos]);
   // Tech-speed telemetry (contract §10) — rides inside the completion POST
   // as `completionTelemetry`; never a separate request.
   const completionTelemetryRef = useRef({
@@ -8457,12 +8636,18 @@ export function CompletionPanel({
   const [nextVisit, setNextVisit] = useState(null);
   const [nextVisitNote, setNextVisitNote] = useState("");
   const [showNextVisitNote, setShowNextVisitNote] = useState(false);
-  const [equipmentSystemId, setEquipmentSystemId] = useState("");
-  const [calibrationId, setCalibrationId] = useState("");
-  const [equipmentCalibrations, setEquipmentCalibrations] = useState([]);
-  const [equipmentCalibrationError, setEquipmentCalibrationError] =
-    useState("");
   const [treatmentPlanBlocks, setTreatmentPlanBlocks] = useState([]);
+  // Calibration state of the plan's auto-selected rig — advisory-only since
+  // the closeout no longer has an equipment step (missing/expired/unverified
+  // must still be VISIBLE, or the server would record an advisory the tech
+  // never saw).
+  const [treatmentPlanCalibrationBlocks, setTreatmentPlanCalibrationBlocks] =
+    useState([]);
+  // Ordinance restriction windows active on THIS service date (evaluated
+  // server-side against the property's real municipality rules) — drives the
+  // off-plan N/P advisory below.
+  const [treatmentPlanOrdinanceWindows, setTreatmentPlanOrdinanceWindows] =
+    useState([]);
   const [treatmentPlanAnnualN, setTreatmentPlanAnnualN] = useState(null);
   const [treatmentPlanStructuredProtocol, setTreatmentPlanStructuredProtocol] =
     useState(null);
@@ -8475,10 +8660,17 @@ export function CompletionPanel({
   const [treatmentPlanSubstitutions, setTreatmentPlanSubstitutions] =
     useState([]);
   const [treatmentPlanError, setTreatmentPlanError] = useState("");
+  // Pending until the plan request settles — WaveGuard lawn completion waits
+  // on it so a fast/restored closeout can never POST before the compliance
+  // advisories had a chance to render.
+  const [treatmentPlanLoading, setTreatmentPlanLoading] = useState(false);
   const [protocolActions, setProtocolActions] = useState([]);
   const [protocolActionMeta, setProtocolActionMeta] = useState(null);
   const [protocolActionError, setProtocolActionError] = useState("");
   const [protocolActionsLoading, setProtocolActionsLoading] = useState(false);
+  // True only after a SUCCESSFUL load — an empty filtered result is a real
+  // "no product-backed actions" answer, distinct from unloaded/failed.
+  const [protocolActionsLoaded, setProtocolActionsLoaded] = useState(false);
   const [selectedProtocolActionLabels, setSelectedProtocolActionLabels] =
     useState([]);
   // label -> { scope, treatmentApplied } for completed actions, so the
@@ -8498,22 +8690,14 @@ export function CompletionPanel({
   const [protocolCarrierGalPer1000, setProtocolCarrierGalPer1000] =
     useState("");
   const [treatmentPlanMixItems, setTreatmentPlanMixItems] = useState([]);
-  const [officeApprovalReasonCode, setOfficeApprovalReasonCode] = useState("");
-  const [officeApprovalNote, setOfficeApprovalNote] = useState("");
-  const [nLimitApprovalReasonCode, setNLimitApprovalReasonCode] = useState("");
-  const [nLimitApprovalNote, setNLimitApprovalNote] = useState("");
-  const [managerApprovalReasonCode, setManagerApprovalReasonCode] =
-    useState("");
-  const [managerApprovalNote, setManagerApprovalNote] = useState("");
   const [treatmentPlanProductIds, setTreatmentPlanProductIds] = useState([]);
   const [treatmentPlanPlannedProductIds, setTreatmentPlanPlannedProductIds] =
     useState([]);
-  const [tankLastProduct, setTankLastProduct] = useState("");
-  const [tankLastProductCategory, setTankLastProductCategory] = useState("");
-  const [tankCleanoutCompleted, setTankCleanoutCompleted] = useState("");
-  const [tankCleanoutMethod, setTankCleanoutMethod] = useState("");
-  const [tankCleanoutNote, setTankCleanoutNote] = useState("");
   const [lawnAssessmentId, setLawnAssessmentId] = useState(null);
+  // False while the assessment block is still looking up the visit's existing
+  // assessment — the AI-report payload omits lawnAssessmentId until then so a
+  // pre-load null is never misread as "retake pending".
+  const [lawnAssessmentReady, setLawnAssessmentReady] = useState(false);
   const [lawnAssessmentRevision, setLawnAssessmentRevision] = useState(0);
   const [savedDraft, setSavedDraft] = useState(null);
   const [showDraftPrompt, setShowDraftPrompt] = useState(false);
@@ -8575,6 +8759,26 @@ export function CompletionPanel({
     serviceLineForCloseout === "pest" &&
     !backfillQuietCloseout;
   const treeShrubCloseoutOn = serviceLineForCloseout === "tree_shrub";
+  // Areas-treated chips are structural-pest rooms/zones. They describe
+  // neither plant work (T&S — the Treatment Zone trace records where the
+  // visit treated; owner 2026-07-23), nor rodent visits (the typed forms
+  // carry their own location semantics — trap activity locations, entry
+  // points, sanitation areas, the station map; owner 2026-07-23), nor bed
+  // bug treatments (an interior service whose typed form records the rooms
+  // treated directly — the chip list doesn't even offer a bedroom; owner
+  // 2026-07-23). Keyed on the completion profile's TYPED FINDINGS TYPE,
+  // not the name-derived service line: a pest-primary bundle like
+  // "Pest & Rodent Control" classifies as the rodent LINE by name while
+  // its completion is a generic pest form (rodent work is a companion),
+  // and hiding areas there would lose where the pest treatment went
+  // (codex P2 r2 on #2963). The stale-draft clearing effect below keys
+  // off the same flag so hidden state can't ride a restored draft into
+  // the submit.
+  const areasTreatedHidden = treeShrubCloseoutOn
+    || [
+      "rodent_trapping", "rodent_exclusion", "rodent_sanitation",
+      "rodent_inspection", "rodent_bait_station", "bed_bug",
+    ].includes(service.completionProfile?.findingsType);
 
   // Auto-run the AI photo review once enough closeout photos are captured. The
   // dual-vision scoring lives server-side (no persistence); the result rides the
@@ -8609,24 +8813,25 @@ export function CompletionPanel({
       .catch(() => {});
     return () => { cancelled = true; };
   }, [treeShrubCloseoutOn, servicePhotos, service.id]);
-  // T&S completions dropped the Areas-treated picker (owner 2026-07-23) —
-  // but a draft saved BEFORE the change can still restore stale room/zone
-  // chips into hidden state, where the tech can't see or clear them and the
-  // submit/recap/report paths would still consume them (codex P3 on #2950).
-  // Clear the state whenever it appears so every consumer sees empty. The
-  // same applies to each restored product's applicationArea: with the chips
-  // gone the per-product area selector never renders (it requires
-  // areasServiced.length), so a stale 'Kitchen'-style value would submit
-  // invisibly from p.applicationArea (codex P3 r2 on #2950).
+  // Lines that dropped the Areas-treated picker (T&S 2026-07-23, rodent
+  // 2026-07-23) — a draft saved BEFORE the change can still restore stale
+  // room/zone chips into hidden state, where the tech can't see or clear
+  // them and the submit/recap/report paths would still consume them (codex
+  // P3 on #2950). Clear the state whenever it appears so every consumer
+  // sees empty. The same applies to each restored product's
+  // applicationArea: with the chips gone the per-product area selector
+  // never renders (it requires areasServiced.length), so a stale
+  // 'Kitchen'-style value would submit invisibly from p.applicationArea
+  // (codex P3 r2 on #2950).
   useEffect(() => {
-    if (!treeShrubCloseoutOn) return;
+    if (!areasTreatedHidden) return;
     if (areasServiced.length) setAreasServiced([]);
     setSelectedProducts((prev) => (
       prev.some((p) => p && p.applicationArea)
         ? prev.map((p) => (p && p.applicationArea ? { ...p, applicationArea: "" } : p))
         : prev
     ));
-  }, [treeShrubCloseoutOn, areasServiced, selectedProducts]);
+  }, [areasTreatedHidden, areasServiced, selectedProducts]);
   const treeShrubCloseoutRequired =
     !isTypedFindings &&
     ["tree_shrub", "palm"].includes(serviceLineForCloseout);
@@ -8682,10 +8887,27 @@ export function CompletionPanel({
     invoiceAlreadyPaid ||
     autopayCoversVisit ||
     !!service.completionInvoiceAlreadySent;
+  // Typed one-time completions bill by PROFILE: since the billing pre-gate
+  // removal (2026-07-27) the server mints the completion invoice at the row
+  // price for a billingType 'one_time' profile even without the scheduler
+  // flag or a tier. Mirror that conjunction here (row-priced, performed,
+  // non-callback, not an included follow-up) so the SMS preview, pay-link
+  // toggle, and review controls show the completion the server actually
+  // performs.
+  const typedOneTimeBilling =
+    String(service.completionProfile?.billingType || "").toLowerCase() ===
+      "one_time" &&
+    service.followupIncluded !== true &&
+    hasVisitPrice &&
+    !isCallback &&
+    visitOutcome !== "inspection_only" &&
+    visitOutcome !== "customer_declined";
   const willInvoice =
     !oneTimeRecapOnly &&
     !reportOnlyCompletion &&
-    (!!service.createInvoiceOnComplete || !!service.waveguardTier) &&
+    (!!service.createInvoiceOnComplete ||
+      !!service.waveguardTier ||
+      typedOneTimeBilling) &&
     invoiceAmount > 0;
   // A pay link is only inserted when an invoice will be created AND the
   // operator hasn't opted to send the report on its own (e.g. paid in person).
@@ -8772,9 +8994,6 @@ export function CompletionPanel({
   );
   const blackoutApprovalRequired =
     calibrationRequired && !isIncompleteVisit && blackoutBlocks.length > 0;
-  const blackoutCompletionBlocked =
-    blackoutApprovalRequired &&
-    (!canApproveOfficeExceptions || !officeApprovalReasonCode);
   const blackoutHelpText =
     treatmentPlanError ||
     blackoutBlocks
@@ -8787,9 +9006,6 @@ export function CompletionPanel({
   );
   const nLimitApprovalRequired =
     calibrationRequired && !isIncompleteVisit && annualNBlocks.length > 0;
-  const nLimitCompletionBlocked =
-    nLimitApprovalRequired &&
-    (!canApproveOfficeExceptions || !nLimitApprovalReasonCode);
   const nLimitHelpText =
     treatmentPlanError ||
     annualNBlocks
@@ -8877,7 +9093,7 @@ export function CompletionPanel({
     })),
     ...conditionalProtocolSelectedProducts.map((product) => ({
       code: "conditional_protocol_product_review",
-      message: `${product.name || "Selected product"} is conditional on the WaveGuard protocol card and was not in the generated mix; manager review is required before applying it.`,
+      message: `${product.name || "Selected product"} is conditional on the WaveGuard protocol card and was not in the generated mix — double-check the fit before applying.`,
     })),
     ...highRateSelectedProducts.map((product) => ({
       code: "high_rate_application",
@@ -8885,29 +9101,105 @@ export function CompletionPanel({
     })),
     ...labelUnitReviewProducts.map((product) => ({
       code: "label_rate_unit_review",
-      message: `${product.name || "Selected product"} rate unit ${product.rateUnit || "unknown"} does not match label unit ${product.catalogRateUnit || "unknown"}; manager review is required before applying it.`,
+      message: `${product.name || "Selected product"} rate unit ${product.rateUnit || "unknown"} does not match label unit ${product.catalogRateUnit || "unknown"} — double-check the rate math before applying.`,
     })),
   ];
   const managerApprovalRequired =
     calibrationRequired &&
     !isIncompleteVisit &&
     managerApprovalBlocks.length > 0;
-  const managerApprovalCompletionBlocked =
-    managerApprovalRequired &&
-    (!canApproveOfficeExceptions || !managerApprovalReasonCode);
   const managerApprovalHelpText = managerApprovalBlocks
     .map((block) => block.message)
     .filter(Boolean)
     .join(" ");
-  const tankCleanoutRequired =
-    calibrationRequired && !isIncompleteVisit && !!equipmentSystemId;
-  const tankCleanoutCompletionBlocked =
-    tankCleanoutRequired &&
-    (!tankLastProduct.trim() ||
-      tankCleanoutCompleted !== "yes" ||
-      !tankCleanoutMethod.trim());
-  const tankCleanoutHelpText =
-    "Record the prior tank product and confirm cleanout before completing this WaveGuard lawn visit.";
+  // Off-plan N/P check the plan can't see: the property-gate blocks cover
+  // PLANNED products only, so a tech-added fertilizer would otherwise reach
+  // completion without any blackout warning. The restriction windows come
+  // from the plan payload — evaluated server-side against the property's
+  // real municipality ordinances for this service date (no client month
+  // math, no timezone handling). Advisory only; the server still records
+  // the authoritative condition on the completion.
+  // Per-nutrient suppression, not all-or-nothing: a plan already blocked for
+  // nitrogen must still warn about an off-plan PHOSPHORUS product the tech
+  // swapped in (the plan block only speaks for the nutrient it names).
+  const planBlackoutNutrients = new Set(
+    blackoutBlocks
+      .map((block) =>
+        block?.code === "nitrogen_blackout"
+          ? "n"
+          : block?.code === "phosphorus_blackout"
+            ? "p"
+            : null,
+      )
+      .filter(Boolean),
+  );
+  const offPlanNpAdvisories =
+    calibrationRequired && !isIncompleteVisit
+      ? treatmentPlanOrdinanceWindows.flatMap((window) => {
+          // One line per NUTRIENT so a both-restricted window never claims a
+          // nitrogen-only product also contains phosphorus.
+          const lines = [];
+          for (const [flagKey, short, nutrient, analysisField] of [
+            ["restrictedNitrogen", "n", "nitrogen", "analysis_n"],
+            ["restrictedPhosphorus", "p", "phosphorus", "analysis_p"],
+          ]) {
+            if (!window?.[flagKey] || planBlackoutNutrients.has(short))
+              continue;
+            const names = [
+              ...new Set(
+                selectedProducts
+                  .map((sp) =>
+                    (products || []).find(
+                      (p) => String(p.id) === String(sp.productId),
+                    ),
+                  )
+                  .filter((row) => Number(row?.[analysisField] || 0) > 0)
+                  .map((row) => row.name)
+                  .filter(Boolean),
+              ),
+            ];
+            if (names.length) {
+              lines.push(
+                `${window.jurisdictionName || "The local ordinance"} restricts ${nutrient} during this visit window — ${names.join(", ")} contains ${nutrient}; completion records this.`,
+              );
+            }
+          }
+          return lines;
+        })
+      : [];
+  // Non-blocking closeout advisories (owner directive 2026-07-29): the old
+  // office/N-budget/manager approval ceremonies are gone — each condition is
+  // one quiet line the tech can read and move past. The server records the
+  // same conditions on the completion for the audit trail.
+  const closeoutAdvisories = [
+    ...(blackoutApprovalRequired ? [blackoutHelpText] : []),
+    ...offPlanNpAdvisories,
+    ...(nLimitApprovalRequired
+      ? [[nLimitHelpText, nLimitSummaryText].filter(Boolean).join(" ")]
+      : []),
+    ...(managerApprovalRequired && managerApprovalHelpText
+      ? [softenApprovalWording(managerApprovalHelpText)]
+      : []),
+    ...(calibrationRequired && !isIncompleteVisit
+      ? treatmentPlanCalibrationBlocks
+          .map((block) => block?.message)
+          .filter(Boolean)
+      : []),
+    // A failed plan fetch means the compliance advisories above CANNOT be
+    // computed — say so instead of rendering an empty (falsely clean) list.
+    ...(calibrationRequired && !isIncompleteVisit && treatmentPlanError
+      ? [
+          `WaveGuard plan unavailable (${treatmentPlanError}) — blackout/N-budget/protocol advisories can't be shown for this visit.`,
+        ]
+      : []),
+  ];
+  // WaveGuard lawn completion waits for the plan request to settle so a fast
+  // or restored closeout can never POST before the advisories had a chance to
+  // render (the server records conditions now instead of rejecting them).
+  const closeoutAdvisoriesPending =
+    calibrationRequired &&
+    !isIncompleteVisit &&
+    (treatmentPlanLoading || (isLawn && protocolActionsLoading));
   const treeShrubProductFlags = treeShrubProductFlagsClient(selectedProducts);
   const treeShrubCloseoutBlocks = treeShrubCloseoutRequired
     ? treeShrubCloseoutBlocksClient({
@@ -8926,35 +9218,23 @@ export function CompletionPanel({
     (calibrationRequired || treeShrubCloseoutRequired) && !isIncompleteVisit;
   const completionCtaLabel = submitting
     ? "Completing..."
-    : tankCleanoutCompletionBlocked
-      ? "Tank Cleanout Required"
-      : protocolActualsCompletionBlocked
-        ? !selectedProducts.length
-          ? "Products Applied Required"
-          : selectedProductsMissingActualAmount.length
-            ? "Product Actuals Required"
-            : "Inventory Blocked"
-        : blackoutCompletionBlocked
-          ? canApproveOfficeExceptions
-            ? "Office Approval Required"
-            : "Admin Approval Required"
-          : nLimitCompletionBlocked
-            ? canApproveOfficeExceptions
-              ? "N Approval Required"
-              : "Admin Approval Required"
-            : managerApprovalCompletionBlocked
-              ? canApproveOfficeExceptions
-                ? "Manager Approval Required"
-                : "Admin Approval Required"
-              : treeShrubCompletionBlocked
-                ? "Tree/Shrub Closeout Required"
-              : isIncompleteVisit
-                ? "Mark Visit Incomplete"
-                : !effectiveSendSms
-                  ? "Complete Service"
-                  : willInvoice
-                    ? "Complete & Send Invoice"
-                    : "Complete & Send Recap";
+    : closeoutAdvisoriesPending
+      ? "Loading plan…"
+    : protocolActualsCompletionBlocked
+      ? !selectedProducts.length
+        ? "Products Applied Required"
+        : selectedProductsMissingActualAmount.length
+          ? "Product Actuals Required"
+          : "Inventory Blocked"
+      : treeShrubCompletionBlocked
+        ? "Tree/Shrub Closeout Required"
+        : isIncompleteVisit
+          ? "Mark Visit Incomplete"
+          : !effectiveSendSms
+            ? "Complete Service"
+            : willInvoice
+              ? "Complete & Send Invoice"
+              : "Complete & Send Recap";
 
   useEffect(() => {
     const iv = setInterval(() => setElapsed(elapsedSince(onSiteTime)), 1000);
@@ -9035,11 +9315,19 @@ export function CompletionPanel({
       }
     }
     setProtocolActionsLoading(true);
+    setProtocolActionsLoaded(false);
     adminFetch(`/admin/protocols/completion-actions?${params.toString()}`)
       .then((data) => {
         if (cancelled) return;
-        setProtocolActions(Array.isArray(data.actions) ? data.actions : []);
+        const rows = Array.isArray(data.actions) ? data.actions : [];
+        // Lawn closeouts list only product-backed applications — the
+        // scout/task/expectation rows (chinch re-check, irrigation audit,
+        // soil sample) are protocol-reference material, not 30-second
+        // closeout material (owner directive 2026-07-29). The Protocols
+        // tab keeps the full row set.
+        setProtocolActions(isLawn ? rows.filter((a) => a?.product?.id) : rows);
         setProtocolActionMeta(data || null);
+        setProtocolActionsLoaded(true);
       })
       .catch((err) => {
         if (!cancelled)
@@ -9066,40 +9354,12 @@ export function CompletionPanel({
   useEffect(() => {
     if (!calibrationRequired) return;
     let cancelled = false;
-    setEquipmentCalibrationError("");
-    adminFetch("/admin/equipment-systems/calibrations")
-      .then((data) => {
-        if (cancelled) return;
-        const rows = Array.isArray(data.calibrations) ? data.calibrations : [];
-        const usableRows = rows.filter(
-          (row) => row.calibration_status === "field_verified",
-        );
-        setEquipmentCalibrations(usableRows);
-        if (!equipmentSystemId && usableRows.length === 1) {
-          setEquipmentSystemId(usableRows[0].equipment_system_id || "");
-          setCalibrationId(usableRows[0].id || "");
-        }
-      })
-      .catch((err) => {
-        if (!cancelled)
-          setEquipmentCalibrationError(
-            err.message || "Could not load equipment calibrations",
-          );
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [calibrationRequired]);
-
-  useEffect(() => {
-    if (!calibrationRequired) return;
-    let cancelled = false;
     setTreatmentPlanError("");
-    const params = new URLSearchParams();
-    if (equipmentSystemId) params.set("equipmentSystemId", equipmentSystemId);
-    if (calibrationId) params.set("calibrationId", calibrationId);
-    const suffix = params.toString() ? `?${params.toString()}` : "";
-    adminFetch(`/admin/treatment-plans/${service.id}${suffix}`)
+    setTreatmentPlanLoading(true);
+    // No equipment/calibration selection in the closeout any more (owner
+    // directive 2026-07-29) — the plan endpoint auto-selects the assigned
+    // rig server-side when one exists.
+    adminFetch(`/admin/treatment-plans/${service.id}`)
       .then((data) => {
         if (cancelled) return;
         const blocks =
@@ -9107,6 +9367,17 @@ export function CompletionPanel({
           data?.plan?.protocol?.blocked ||
           [];
         setTreatmentPlanBlocks(Array.isArray(blocks) ? blocks : []);
+        setTreatmentPlanCalibrationBlocks(
+          (Array.isArray(data?.plan?.equipmentCalibration?.blocks)
+            ? data.plan.equipmentCalibration.blocks
+            : []
+          ).filter((block) => CALIBRATION_ADVISORY_CODES.has(block?.code)),
+        );
+        setTreatmentPlanOrdinanceWindows(
+          Array.isArray(data?.plan?.propertyGate?.activeOrdinanceWindows)
+            ? data.plan.propertyGate.activeOrdinanceWindows
+            : [],
+        );
         setTreatmentPlanAnnualN(data?.plan?.propertyGate?.annualN || null);
         setTreatmentPlanStructuredProtocol(data?.plan?.protocol?.structured || null);
         setTreatmentPlanAppointmentAssignment(data?.plan?.appointmentAssignment || null);
@@ -9120,26 +9391,8 @@ export function CompletionPanel({
             ? data.plan.inventory.warnings
             : [],
         );
-        const selectedCalibration = data?.plan?.equipmentCalibration?.selected;
-        // Only auto-adopt the plan's selected calibration when it's field
-        // verified — i.e. one of the rows that actually appears in the dropdown.
-        // The plan can surface a stale, unverified calibration as `selected`
-        // (it's filtered out of the dropdown); auto-filling that would make the
-        // visit look like the tech chose equipment they can't see, defeating the
-        // calibration advisory bypass and recording an unverified system as used.
-        if (
-          !equipmentSystemId &&
-          selectedCalibration?.equipment_system_id &&
-          selectedCalibration.calibration_status === "field_verified"
-        ) {
-          setEquipmentSystemId(selectedCalibration.equipment_system_id);
-          setCalibrationId(selectedCalibration.id || "");
-        }
-        // The carrier feeds the read-only mix box, so it must track every plan
-        // fetch — equipment/calibration changes refetch with a new carrier. The
-        // old set-once-when-empty latch predates removing the carrier input;
-        // with no input left to preserve, latching would show mix amounts for
-        // the previous equipment after a calibration switch.
+        // The carrier feeds the read-only mix box; it tracks every plan
+        // fetch (the plan endpoint picks the rig server-side).
         setProtocolCarrierGalPer1000(
           data?.plan?.mixCalculator?.carrierGalPer1000
             ? String(data.plan.mixCalculator.carrierGalPer1000)
@@ -9169,17 +9422,14 @@ export function CompletionPanel({
       .catch((err) => {
         if (!cancelled)
           setTreatmentPlanError(err.message || "Could not load WaveGuard plan");
+      })
+      .finally(() => {
+        if (!cancelled) setTreatmentPlanLoading(false);
       });
     return () => {
       cancelled = true;
     };
-  }, [
-    calibrationRequired,
-    service.id,
-    equipmentSystemId,
-    calibrationId,
-    lawnAssessmentRevision,
-  ]);
+  }, [calibrationRequired, service.id, lawnAssessmentRevision]);
 
   useEffect(() => {
     setTreeShrubCloseout(defaultTreeShrubCloseout(service));
@@ -9221,10 +9471,6 @@ export function CompletionPanel({
       oneTimeRecapOnly ||
       reviewTiming !== "120" ||
       reviewCustomAt.trim() ||
-      tankLastProduct.trim() ||
-      tankCleanoutCompleted ||
-      tankCleanoutMethod.trim() ||
-      tankCleanoutNote.trim() ||
       JSON.stringify(treeShrubCloseout) !== JSON.stringify(defaultTreeShrubCloseout(service)) ||
       Object.keys(findingsValues).length ||
       typedActivityScore != null ||
@@ -9318,19 +9564,6 @@ export function CompletionPanel({
         chipLinesDetached,
         nextVisitNote,
         showNextVisitNote,
-        equipmentSystemId,
-        calibrationId,
-        officeApprovalReasonCode,
-        officeApprovalNote,
-        nLimitApprovalReasonCode,
-        nLimitApprovalNote,
-        managerApprovalReasonCode,
-        managerApprovalNote,
-        tankLastProduct,
-        tankLastProductCategory,
-        tankCleanoutCompleted,
-        tankCleanoutMethod,
-        tankCleanoutNote,
         treeShrubCloseout,
         // Typed specialty findings — must survive the billing-409 checkout
         // detour (the panel closes while the tech collects payment).
@@ -9388,19 +9621,6 @@ export function CompletionPanel({
     chipLinesDetached,
     nextVisitNote,
     showNextVisitNote,
-    equipmentSystemId,
-    calibrationId,
-    officeApprovalReasonCode,
-    officeApprovalNote,
-    nLimitApprovalReasonCode,
-    nLimitApprovalNote,
-    managerApprovalReasonCode,
-    managerApprovalNote,
-    tankLastProduct,
-    tankLastProductCategory,
-    tankCleanoutCompleted,
-    tankCleanoutMethod,
-    tankCleanoutNote,
     treeShrubCloseout,
     findingsValues,
     typedActivityScore,
@@ -9456,10 +9676,10 @@ export function CompletionPanel({
       // Map the legacy singular "Side yard" to the renamed "Side yards" so a draft
       // saved before the rename restores as the currently-rendered option (and
       // dedupe, so re-selecting can't submit both strings). Other values pass through.
-      // T&S never restores areas — the picker is gone there (owner 2026-07-23) and a
-      // pre-change draft's chips would sit invisible in state (codex P3 on #2950);
-      // the treeShrubCloseoutOn clearing effect backstops any other entry path.
-      !treeShrubCloseoutOn && Array.isArray(savedDraft.areasServiced)
+      // Lines without the picker (T&S + rodent, owner 2026-07-23) never restore
+      // areas — a pre-change draft's chips would sit invisible in state (codex P3
+      // on #2950); the areasTreatedHidden clearing effect backstops any other path.
+      !areasTreatedHidden && Array.isArray(savedDraft.areasServiced)
         ? [...new Set(savedDraft.areasServiced.map((a) => (a === "Side yard" ? "Side yards" : a)))]
         : [],
     );
@@ -9534,19 +9754,6 @@ export function CompletionPanel({
     setChipLinesDetached(savedDraft.chipLinesDetached === true);
     setNextVisitNote(savedDraft.nextVisitNote || "");
     setShowNextVisitNote(!!savedDraft.showNextVisitNote);
-    setEquipmentSystemId(savedDraft.equipmentSystemId || "");
-    setCalibrationId(savedDraft.calibrationId || "");
-    setOfficeApprovalReasonCode(savedDraft.officeApprovalReasonCode || "");
-    setOfficeApprovalNote(savedDraft.officeApprovalNote || "");
-    setNLimitApprovalReasonCode(savedDraft.nLimitApprovalReasonCode || "");
-    setNLimitApprovalNote(savedDraft.nLimitApprovalNote || "");
-    setManagerApprovalReasonCode(savedDraft.managerApprovalReasonCode || "");
-    setManagerApprovalNote(savedDraft.managerApprovalNote || "");
-    setTankLastProduct(savedDraft.tankLastProduct || "");
-    setTankLastProductCategory(savedDraft.tankLastProductCategory || "");
-    setTankCleanoutCompleted(savedDraft.tankCleanoutCompleted || "");
-    setTankCleanoutMethod(savedDraft.tankCleanoutMethod || "");
-    setTankCleanoutNote(savedDraft.tankCleanoutNote || "");
     setTreeShrubCloseout(
       normalizeTreeShrubCloseoutDraft(savedDraft.treeShrubCloseout, service),
     );
@@ -9620,11 +9827,10 @@ export function CompletionPanel({
 
   function discardDraft() {
     localStorage.removeItem(completionDraftKey(service.id));
-    // Photos survive checkout in parent memory rather than localStorage. A
-    // deliberate Discard must clear both stores or old evidence remains
-    // attached to the otherwise-reset completion.
+    // Photos live in memory rather than localStorage. A deliberate Discard
+    // must clear them too or old evidence remains attached to the
+    // otherwise-reset completion.
     setServicePhotos([]);
-    onDiscardBillingDetour?.();
     setSavedDraft(null);
     setShowDraftPrompt(false);
   }
@@ -9929,6 +10135,16 @@ export function CompletionPanel({
     }
     const payload = {
       scheduledServiceId: service.id || null,
+      // The CURRENTLY confirmed assessment: an id grounds exactly that row,
+      // null means a retake is pending, and the field is OMITTED while the
+      // block's existing-assessment lookup is still in flight (the server
+      // then falls back to the visit-linked row) or for non-lawn visits.
+      // Tri-state: true = lookup succeeded (send id or explicit null);
+      // "failed"/false = omit the field so the server grounds from its own
+      // visit-linked lookup (DB truth) instead of trusting a blind client.
+      ...(isLawn && lawnAssessmentReady === true
+        ? { lawnAssessmentId: lawnAssessmentId || null }
+        : {}),
       customerName: service.customerName,
       serviceType: service.serviceType,
       serviceLine: service.serviceLine || service.service_line || undefined,
@@ -9967,7 +10183,14 @@ export function CompletionPanel({
       observations.length > 0 ||
       recommendations.length > 0 ||
       Boolean(concern) ||
-      payload.pestActivityRating !== null;
+      payload.pestActivityRating !== null ||
+      // A confirmed photo-scored assessment is substantive visit detail on
+      // its own — a scores-only lawn visit can still generate.
+      Boolean(payload.lawnAssessmentId) ||
+      // The omitted-field fallback state must REACH the server — after a
+      // failed lookup the client can't know whether a visit-linked confirmed
+      // row exists; the server's validated gate decides.
+      (isLawn && lawnAssessmentReady === "failed");
     return { payload, hasReportInput };
   }
   function recordActionScope(label, scope, treatmentApplied) {
@@ -10246,13 +10469,6 @@ export function CompletionPanel({
       prev.includes(area) ? prev.filter((a) => a !== area) : [...prev, area],
     );
   }
-  function handleEquipmentSelect(value) {
-    setEquipmentSystemId(value);
-    const selected = equipmentCalibrations.find(
-      (c) => c.equipment_system_id === value,
-    );
-    setCalibrationId(selected?.id || "");
-  }
   async function handlePhotoSelect(e) {
     const files = Array.from(e.target.files || []);
     if (servicePhotos.length + files.length > 5) {
@@ -10297,46 +10513,17 @@ export function CompletionPanel({
       alert("Hang on — finishing the AI draft. Try again in a moment.");
       return;
     }
+    // WaveGuard lawn: the compliance advisories come from the plan request —
+    // completing before it settles would record conditions the tech never saw.
+    if (closeoutAdvisoriesPending) {
+      alert("Hang on — loading the WaveGuard plan. Try again in a moment.");
+      return;
+    }
     // The turf-height flag drives the (optional) gauge-reading section on lawn
     // visits; don't submit until its state is loaded so a pre-load submit can't
     // silently drop a reading/photo. The flag is session-cached so this rarely waits.
     if (isLawn && !turfHeightFlagReady) {
       alert("Completion options are still loading — please try again in a moment.");
-      return;
-    }
-    if (calibrationAdvisory) {
-      const proceed = window.confirm(
-        `${
-          calibrationHelpText ||
-          "No field-verified calibrated equipment is selected for this WaveGuard lawn visit."
-        }\n\nComplete this visit without field-verified calibrated equipment?`,
-      );
-      if (!proceed) return;
-    }
-    if (tankCleanoutCompletionBlocked) {
-      alert(tankCleanoutHelpText);
-      return;
-    }
-    if (blackoutCompletionBlocked) {
-      alert(
-        canApproveOfficeExceptions
-          ? "Office approval is required before completing this WaveGuard lawn visit during an N/P blackout."
-          : "Admin approval is required before completing this WaveGuard lawn visit during an N/P blackout.",
-      );
-      return;
-    }
-    if (nLimitCompletionBlocked) {
-      alert(
-        "Admin approval is required before completing this WaveGuard lawn visit over the annual N budget.",
-      );
-      return;
-    }
-    if (managerApprovalCompletionBlocked) {
-      alert(
-        canApproveOfficeExceptions
-          ? "Manager approval is required before completing this WaveGuard protocol exception."
-          : "An admin must approve this WaveGuard protocol exception before completion.",
-      );
       return;
     }
     if (treeShrubCompletionBlocked) {
@@ -10591,8 +10778,21 @@ export function CompletionPanel({
           service.id,
         );
       }
+      // Lawn closeouts enforce the product-backed rule at submit too: a
+      // draft saved before the scout/task rows were filtered out can restore
+      // labels the selector no longer offers — they must not persist as
+      // completed protocol actions. Only applied once the (filtered) action
+      // set has loaded; pest keeps its fallback-chip labels untouched.
       const reportProtocolActions = activeSelectedLabels(
         selectedProtocolActionLabels,
+      ).filter(
+        (label) =>
+          !isLawn ||
+          (protocolActionsLoaded &&
+            protocolActions.some(
+              (action) =>
+                (action.label || action.note || action.raw || "") === label,
+            )),
       );
       const reportProtocolActionScopes = reportProtocolActions
         .map((label) => {
@@ -10621,38 +10821,10 @@ export function CompletionPanel({
         // unreviewed customer-facing copy (Codex P1).
         visitOutcome,
         reviewSuppression: reviewSuppressionReason,
-        equipmentSystemId: equipmentSystemId || null,
-        calibrationId: calibrationId || null,
-        officeApproval:
-          blackoutApprovalRequired && canApproveOfficeExceptions
-            ? {
-                reasonCode: officeApprovalReasonCode,
-                note: officeApprovalNote,
-              }
-            : null,
-        nLimitApproval:
-          nLimitApprovalRequired && canApproveOfficeExceptions
-            ? {
-                reasonCode: nLimitApprovalReasonCode,
-                note: nLimitApprovalNote,
-              }
-            : null,
-        managerApproval:
-          managerApprovalRequired && canApproveOfficeExceptions
-            ? {
-                reasonCode: managerApprovalReasonCode,
-                note: managerApprovalNote,
-              }
-            : null,
-        tankCleanout: tankCleanoutRequired
-          ? {
-              lastProductInTank: tankLastProduct,
-              lastProductCategory: tankLastProductCategory,
-              cleanoutCompleted: tankCleanoutCompleted === "yes",
-              cleanoutMethod: tankCleanoutMethod,
-              note: tankCleanoutNote,
-            }
-          : null,
+        // Equipment/calibration, tank cleanout, and the office/N/manager
+        // approval ceremonies are gone from the closeout (owner directive
+        // 2026-07-29). The server records blackout/N-budget/protocol
+        // conditions as advisories on the completion by itself.
         products: selectedProducts.map((p) => ({
           productId: p.productId,
           rate: p.rate,
@@ -10867,6 +11039,9 @@ export function CompletionPanel({
         );
       }
       localStorage.removeItem(completionDraftKey(service.id));
+      try {
+        localStorage.removeItem(completionResumeOwedKey(service.id));
+      } catch { /* storage unavailable — marker never existed either */ }
       setCompletionResult(result || null);
       setSuccess(true);
       const smsNeedsAttention = ["blocked", "failed"].includes(
@@ -10877,43 +11052,37 @@ export function CompletionPanel({
       // Keep the panel open when a pest recap is pending — it renders async and the
       // tech approves/sends it from the success overlay (the approve UI is otherwise
       // unreachable once the panel auto-closes).
-      // Keep the success overlay open when the annual-prepay CTA is available so
-      // the operator can act on it — otherwise the ~1.2s auto-close unmounts the
-      // button (and the prepay modal) mid-flow on the common no-recap path.
-      if (!result?.followupSuggestion?.required && !recapEligible && !showPrepayCta) {
+      if (!result?.followupSuggestion?.required && !recapEligible) {
         setTimeout(() => onClose(true), smsNeedsAttention ? 3200 : 1200);
       }
     } catch (e) {
       if (shouldResetCompletionIdempotencyKey(e)) {
         completionIdempotencyKeyRef.current = null;
       }
-      const billingRequired =
-        e?.status === 409 &&
-        (e?.code === "completion_billing_required" ||
-          /invoice or payment is required/i.test(e?.message || ""));
-      if (billingRequired) {
-        // Typed one-time billing gate — route to the existing checkout
-        // flow. Flush the draft synchronously first: the panel unmounts on
-        // detour, which cancels the debounced write and would lose edits
-        // made in the last 700ms.
-        if (draftSnapshotRef.current) {
-          try {
-            localStorage.setItem(
-              completionDraftKey(service.id),
-              JSON.stringify(draftSnapshotRef.current),
-            );
-          } catch { /* storage full — draft prompt simply won't restore */ }
-        }
+      if (e?.code === "backfill_invoice_mint_failed") {
+        // The closeout committed but its REQUIRED invoice didn't mint. Mark
+        // the visit as owing a resume so the dispatch page can reopen this
+        // panel for the (now completed) visit even after a reload — the
+        // re-submitted completion replays through the server's resume claim
+        // and retries the mint.
+        try {
+          localStorage.setItem(completionResumeOwedKey(service.id), "1");
+        } catch { /* storage full — the mounted panel's retry still works */ }
+      } else if (e?.code === "completion_resume_payload_mismatch") {
+        // A marker-resume rebuilt from the draft can differ from the
+        // committed body (photos live only in memory). The closeout itself
+        // is saved; the office bills the visit from Billing Recovery — stop
+        // re-offering a resume that can never match.
+        try {
+          localStorage.removeItem(completionResumeOwedKey(service.id));
+        } catch { /* ignore */ }
         alert(
-          "An invoice or payment is required before completing this one-time service." +
-            (onBillingRequired ? " Opening checkout." : ""),
+          "This closeout is already saved — the retry didn't match the original submission (photos don't survive a reload). The office can bill the visit from Billing Recovery.",
         );
-        if (onBillingRequired) {
-          onBillingRequired(service, { servicePhotos });
-        }
-      } else {
-        alert("Failed to complete service: " + e.message);
+        setSubmitting(false);
+        return;
       }
+      alert("Failed to complete service: " + e.message);
     }
     setSubmitting(false);
   }
@@ -10923,37 +11092,6 @@ export function CompletionPanel({
       .toLowerCase()
       .includes(productSearch.toLowerCase()),
   );
-  const selectedCalibration =
-    equipmentCalibrations.find(
-      (c) => c.equipment_system_id === equipmentSystemId,
-    ) || null;
-  const selectedCalibrationExpired =
-    !!selectedCalibration?.expires_at &&
-    new Date(selectedCalibration.expires_at).getTime() < Date.now();
-  const selectedCalibrationUnverified =
-    !!selectedCalibration &&
-    selectedCalibration.calibration_status !== "field_verified";
-  // WaveGuard calibration is advisory at completion, not a hard gate: when no
-  // field-verified calibrated equipment is on record (or the selected one is
-  // expired/unverified) the tech can still close out — calibrationId is sent as
-  // null — after acknowledging a warning, rather than being trapped on this screen.
-  const calibrationAdvisory =
-    calibrationRequired &&
-    !isIncompleteVisit &&
-    (!equipmentSystemId ||
-      selectedCalibrationExpired ||
-      selectedCalibrationUnverified);
-  const calibrationHelpText =
-    equipmentCalibrationError ||
-    (selectedCalibrationUnverified
-      ? "Selected calibration is not field verified — verify it when you can. You can still complete this visit."
-      : selectedCalibrationExpired
-      ? "Selected calibration is expired — record a new one when you can. You can still complete this visit."
-      : !equipmentSystemId && calibrationRequired
-        ? "No field-verified calibrated equipment on record. You can complete without it; calibration is recorded as none."
-        : calibrationRequired
-          ? "WaveGuard lawn visits should use field-verified calibrated spray equipment when available."
-          : "");
   function isProtocolActionSelected(action) {
     const noteText = action?.note || action?.label || action?.raw || "";
     // After an AI draft the notes are clean prose (no tagged lines), so check
@@ -10971,6 +11109,15 @@ export function CompletionPanel({
         selectedProducts.some((p) => p.productId === action.product.id))
     );
   }
+  // Lawn closeouts are product-backed-only: no generic pest fallback chips
+  // (a scout-only or unmatched-catalog visit must not surface "Cobweb sweep"),
+  // and an empty list hides the field instead of exposing the fallback.
+  const protocolActionFallbackChips = isLawn ? [] : CHIP_ACTIONS;
+  const hideProtocolActionsField =
+    isLawn &&
+    !protocolActionsLoading &&
+    !protocolActionError &&
+    protocolActions.length === 0;
   const protocolActionSelectOptions = protocolActions.map((action, index) => ({
     value: action.id ? String(action.id) : `action-${index}`,
     label: action.label || action.note || action.raw || "Protocol action",
@@ -11346,17 +11493,33 @@ export function CompletionPanel({
           {success && (
             <div
               style={{
-                position: "absolute",
+                // Fixed, not absolute: the panel scrolls, and completion is
+                // triggered from its bottom — an absolute overlay renders at
+                // the top of the scrolled content, off-screen (owner 07-29).
+                position: "fixed",
                 inset: 0,
                 background: "rgba(250,250,250,0.96)",
                 display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                zIndex: 10,
                 flexDirection: "column",
+                // Scrollable, with margin-auto centering on the inner wrapper
+                // (not justifyContent center — centered flex overflow clips
+                // the top unreachably on short/landscape viewports when the
+                // recap card or follow-up CTAs make the content tall).
+                overflowY: "auto",
+                WebkitOverflowScrolling: "touch",
+                zIndex: 10,
                 padding: 24,
               }}
             >
+              <div
+                style={{
+                  margin: "auto",
+                  display: "flex",
+                  flexDirection: "column",
+                  alignItems: "center",
+                  width: "100%",
+                }}
+              >
               {" "}
               <div
                 style={{
@@ -11403,6 +11566,9 @@ export function CompletionPanel({
                         : "Report saved"}{" "}
                 for {service.customerName}
               </div>{" "}
+              {/* completionAdvisories are deliberately NOT rendered here —
+                  the success screen stays minimal (owner 2026-07-29); they
+                  are recorded server-side and surface in Customer 360. */}
               {completionResult?.typedDeliveryMode === "internal_only" && (
                 <div
                   style={{
@@ -11422,16 +11588,7 @@ export function CompletionPanel({
                   <PestRecapCard serviceId={service.id} />
                 </div>
               )}
-              {showPrepayCta && (
-                <button
-                  type="button"
-                  onClick={() => setShowPrepay(true)}
-                  style={{ ...secondaryPill, marginTop: 16 }}
-                >
-                  Offer annual prepay
-                </button>
-              )}
-              {(recapEligible || showPrepayCta) && !completionResult?.followupSuggestion?.required && (
+              {recapEligible && !completionResult?.followupSuggestion?.required && (
                 <button
                   type="button"
                   onClick={() => onClose(true)}
@@ -11474,14 +11631,8 @@ export function CompletionPanel({
                   </button>
                 </div>
               )}
+              </div>
             </div>
-          )}
-          {showPrepay && (
-            <AnnualPrepayLauncher
-              customerId={service.customerId || service.customer_id}
-              onClose={() => setShowPrepay(false)}
-              onSaved={() => setShowPrepay(false)}
-            />
           )}
           {/* Sticky top bar — Square pattern: ← · centered title · ⋯ */}
           <div
@@ -11755,8 +11906,9 @@ export function CompletionPanel({
               <Field label="Lawn assessment">
                 <LawnAssessmentCompletionBlock
                   service={service}
-                  disabled={isIncompleteVisit || submitting}
+                  disabled={isIncompleteVisit || submitting || generating}
                   onConfirmed={handleLawnAssessmentConfirmed}
+                  onReady={setLawnAssessmentReady}
                   showGaugePhoto={turfHeightFlag}
                   gaugePhoto={turfHeight.gaugePhoto}
                   onGaugePhoto={(p) => setTurfHeight((v) => ({ ...v, gaugePhoto: p }))}
@@ -11812,245 +11964,31 @@ export function CompletionPanel({
                 />
               </Field>
             )}
-            {calibrationRequired && (
-              <Field label="Equipment calibration">
-                {" "}
-                <select
-                  value={equipmentSystemId}
-                  onChange={(e) => handleEquipmentSelect(e.target.value)}
-                  disabled={isIncompleteVisit}
-                  style={mInput}
-                >
-                  {" "}
-                  <option value="">Select calibrated equipment</option>
-                  {equipmentCalibrations.map((c) => (
-                    <option key={c.id} value={c.equipment_system_id}>
-                      {c.system_name || "Equipment"} ·{" "}
-                      {c.carrier_gal_per_1000 || "—"} gal/1K
-                    </option>
-                  ))}
-                </select>{" "}
-                <div
-                  style={{
-                    marginTop: 8,
-                    fontFamily: font,
-                    fontSize: 12,
-                    color:
-                      selectedCalibrationExpired || equipmentCalibrationError
-                        ? M.err
-                        : M.ink3,
-                    lineHeight: 1.35,
-                  }}
-                >
-                  {isIncompleteVisit
-                    ? "Calibration is not required when marking a visit incomplete."
-                    : calibrationHelpText}
-                </div>{" "}
-              </Field>
-            )}
-            {tankCleanoutRequired && (
-              <Field label="Tank cleanout">
-                {" "}
-                <div
-                  style={{
-                    marginBottom: 10,
-                    fontFamily: font,
-                    fontSize: 12,
-                    color: tankCleanoutCompletionBlocked ? M.err : M.ink3,
-                    lineHeight: 1.35,
-                  }}
-                >
-                  {tankCleanoutHelpText}
-                </div>{" "}
-                <input
-                  value={tankLastProduct}
-                  onChange={(e) => setTankLastProduct(e.target.value)}
-                  placeholder="Last product in tank"
-                  style={mInput}
-                />{" "}
-                <select
-                  value={tankLastProductCategory}
-                  onChange={(e) => setTankLastProductCategory(e.target.value)}
-                  style={{ ...mInput, marginTop: 8 }}
-                >
-                  {" "}
-                  <option value="">Prior product type</option>{" "}
-                  <option value="herbicide">Herbicide / weed control</option>{" "}
-                  <option value="insecticide">Insecticide</option>{" "}
-                  <option value="fungicide">Fungicide</option>{" "}
-                  <option value="fertilizer">Fertilizer / nutrient</option>{" "}
-                  <option value="water_only">Water only</option>{" "}
-                  <option value="unknown">Unknown</option>{" "}
-                </select>{" "}
-                <select
-                  value={tankCleanoutCompleted}
-                  onChange={(e) => setTankCleanoutCompleted(e.target.value)}
-                  style={{ ...mInput, marginTop: 8 }}
-                >
-                  {" "}
-                  <option value="">Cleanout completed?</option>{" "}
-                  <option value="yes">Yes</option>{" "}
-                  <option value="no">No</option>{" "}
-                </select>{" "}
-                <select
-                  value={tankCleanoutMethod}
-                  onChange={(e) => setTankCleanoutMethod(e.target.value)}
-                  style={{ ...mInput, marginTop: 8 }}
-                >
-                  {" "}
-                  <option value="">Cleanout method</option>
-                  {TANK_CLEANOUT_METHODS.map((method) => (
-                    <option key={method} value={method}>
-                      {method}
-                    </option>
-                  ))}
-                </select>{" "}
-                <textarea
-                  value={tankCleanoutNote}
-                  onChange={(e) => setTankCleanoutNote(e.target.value)}
-                  rows={2}
-                  placeholder="Cleanout note"
-                  style={{ ...mTextarea, minHeight: 72, marginTop: 8 }}
-                />{" "}
-              </Field>
-            )}
-            {blackoutApprovalRequired && (
-              <Field label="Office approval">
-                {" "}
-                <div
-                  style={{
-                    marginBottom: 10,
-                    fontFamily: font,
-                    fontSize: 12,
-                    color: M.err,
-                    lineHeight: 1.35,
-                  }}
-                >
-                  {blackoutHelpText}{" "}
-                  {!canApproveOfficeExceptions
-                    ? "An admin must approve this exception before completion."
-                    : ""}
-                </div>
-                {canApproveOfficeExceptions && (
-                  <>
-                    {" "}
-                    <select
-                      value={officeApprovalReasonCode}
-                      onChange={(e) =>
-                        setOfficeApprovalReasonCode(e.target.value)
-                      }
-                      style={mInput}
-                    >
-                      {" "}
-                      <option value="">Select approval reason</option>
-                      {OFFICE_APPROVAL_REASONS.map((reason) => (
-                        <option key={reason.value} value={reason.value}>
-                          {reason.label}
-                        </option>
-                      ))}
-                    </select>{" "}
-                    <textarea
-                      value={officeApprovalNote}
-                      onChange={(e) => setOfficeApprovalNote(e.target.value)}
-                      rows={2}
-                      placeholder="Approval note"
-                      style={{ ...mTextarea, minHeight: 72, marginTop: 8 }}
-                    />{" "}
-                  </>
-                )}
-              </Field>
-            )}
-            {nLimitApprovalRequired && (
-              <Field label="Annual N budget">
-                {" "}
-                <div
-                  style={{
-                    marginBottom: 10,
-                    fontFamily: font,
-                    fontSize: 12,
-                    color: M.err,
-                    lineHeight: 1.35,
-                  }}
-                >
-                  {nLimitHelpText} {nLimitSummaryText}{" "}
-                  {!canApproveOfficeExceptions
-                    ? "An admin must approve this exception before completion."
-                    : ""}
-                </div>
-                {canApproveOfficeExceptions && (
-                  <>
-                    {" "}
-                    <select
-                      value={nLimitApprovalReasonCode}
-                      onChange={(e) =>
-                        setNLimitApprovalReasonCode(e.target.value)
-                      }
-                      style={mInput}
-                    >
-                      {" "}
-                      <option value="">Select approval reason</option>
-                      {N_LIMIT_APPROVAL_REASONS.map((reason) => (
-                        <option key={reason.value} value={reason.value}>
-                          {reason.label}
-                        </option>
-                      ))}
-                    </select>{" "}
-                    <textarea
-                      value={nLimitApprovalNote}
-                      onChange={(e) => setNLimitApprovalNote(e.target.value)}
-                      rows={2}
-                      placeholder="Approval note"
-                      style={{ ...mTextarea, minHeight: 72, marginTop: 8 }}
-                    />{" "}
-                  </>
-                )}
-              </Field>
-            )}
-            {managerApprovalRequired && (
-              <Field label="Manager approval">
-                {" "}
-                <div
-                  style={{
-                    marginBottom: 10,
-                    fontFamily: font,
-                    fontSize: 12,
-                    color: M.err,
-                    lineHeight: 1.35,
-                  }}
-                >
-                  {managerApprovalHelpText}{" "}
-                  {!canApproveOfficeExceptions
-                    ? "An admin must approve this exception before completion."
-                    : ""}
-                </div>
-                {canApproveOfficeExceptions && (
-                  <>
-                    {" "}
-                    <select
-                      value={managerApprovalReasonCode}
-                      onChange={(e) =>
-                        setManagerApprovalReasonCode(e.target.value)
-                      }
-                      style={mInput}
-                    >
-                      {" "}
-                      <option value="">Select approval reason</option>
-                      {MANAGER_APPROVAL_REASONS.map((reason) => (
-                        <option key={reason.value} value={reason.value}>
-                          {reason.label}
-                        </option>
-                      ))}
-                    </select>{" "}
-                    <textarea
-                      value={managerApprovalNote}
-                      onChange={(e) => setManagerApprovalNote(e.target.value)}
-                      rows={2}
-                      placeholder="Approval note"
-                      style={{ ...mTextarea, minHeight: 72, marginTop: 8 }}
-                    />{" "}
-                  </>
-                )}
-              </Field>
+            {closeoutAdvisories.length > 0 && (
+              <div
+                style={{
+                  marginBottom: 12,
+                  padding: "10px 12px",
+                  borderRadius: 10,
+                  border: `1px solid ${M.hairline}`,
+                  background: M.card,
+                }}
+              >
+                {closeoutAdvisories.map((text, i) => (
+                  <div
+                    key={i}
+                    style={{
+                      fontFamily: font,
+                      fontSize: 12,
+                      color: M.ink3,
+                      lineHeight: 1.35,
+                      marginTop: i === 0 ? 0 : 6,
+                    }}
+                  >
+                    ⚠️ {text}
+                  </div>
+                ))}
+              </div>
             )}
             {/* Technician notes */}
             <Field label="Visit outcome">
@@ -12179,7 +12117,7 @@ export function CompletionPanel({
                 ))}
               </div>
             )}
-            {!isTypedFindings && (
+            {!isTypedFindings && !hideProtocolActionsField && (
               <Field label="Protocol actions">
                 {protocolActionsLoading ? (
                   <div style={{ fontFamily: font, fontSize: 13, color: M.ink4 }}>
@@ -12213,7 +12151,7 @@ export function CompletionPanel({
                               {opt.label}
                             </option>
                           ))
-                        : CHIP_ACTIONS.map((chip) => (
+                        : protocolActionFallbackChips.map((chip) => (
                             <option key={chip.label} value={chip.label}>
                               {chip.label}
                             </option>
@@ -12315,7 +12253,7 @@ export function CompletionPanel({
                   }
                   setGenerating(false);
                 }}
-                disabled={generating}
+                disabled={generating || (isLawn && lawnAssessmentReady === false)}
                 style={{
                   ...secondaryPill,
                   marginTop: 4,
@@ -12337,7 +12275,7 @@ export function CompletionPanel({
                   onClick={() => setZoneMapOpen(true)}
                   style={secondaryPill}
                 >
-                  Trace where we sprayed
+                  {isLawn ? "Outline the treated lawn" : "Trace where we sprayed"}
                 </button>
                 {zoneMapOpen && (
                   <TechTreatmentZoneModal
@@ -12349,10 +12287,13 @@ export function CompletionPanel({
                     onClose={() => setZoneMapOpen(false)}
                     onSaved={applyTracedTreatmentZone}
                     appearance="light"
+                    lawnMode={isLawn}
                   />
                 )}
                 <span style={{ fontSize: 13, color: "var(--muted, #667085)", marginLeft: 10 }}>
-                  Auto-trace the perimeter on the satellite photo — it renders as the spray map on the customer report.
+                  {isLawn
+                    ? "Auto-trace the lawn on the satellite photo — it renders as a highlighted treated-area outline on the customer report."
+                    : "Auto-trace the perimeter on the satellite photo — it renders as the spray map on the customer report."}
                 </span>
               </Field>
             )}
@@ -12759,36 +12700,55 @@ export function CompletionPanel({
                         <option value="lb">lb</option>{" "}
                         <option value="gal">gal</option>{" "}
                       </select>{" "}
-                      {areasServiced.length > 0 && (
-                        <select
-                          value={sp.applicationArea || ""}
-                          onChange={(e) =>
-                            updateProduct(
-                              sp.productId,
-                              "applicationArea",
-                              e.target.value,
-                            )
-                          }
-                          style={{
-                            ...mInput,
-                            minWidth: 150,
-                            flex: "1 1 150px",
-                            height: 40,
-                            padding: "0 12px",
-                          }}
-                        >
-                          <option value="">
-                            {areasServiced.length === 1
-                              ? `Area: ${areasServiced[0]}`
-                              : "Treatment area"}
-                          </option>
-                          {areasServiced.map((area) => (
-                            <option key={area} value={area}>
-                              {area}
-                            </option>
-                          ))}
-                        </select>
-                      )}
+                      {areasServiced.length > 0 && (() => {
+                        const selectedAreas = parseApplicationAreas(
+                          sp.applicationArea,
+                        );
+                        const areaChoices = productAreaChoices(
+                          areasServiced,
+                          sp.applicationArea,
+                        );
+                        return (
+                          <div
+                            style={{
+                              flexBasis: "100%",
+                              display: "flex",
+                              flexWrap: "wrap",
+                              gap: 6,
+                            }}
+                          >
+                            <span
+                              style={{
+                                width: "100%",
+                                fontSize: 12,
+                                fontWeight: 500,
+                                color: M.ink3,
+                              }}
+                            >
+                              Treatment areas
+                            </span>
+                            {areaChoices.map((area) => (
+                              <Chip
+                                key={area}
+                                selected={selectedAreas.includes(area)}
+                                onClick={() =>
+                                  updateProduct(
+                                    sp.productId,
+                                    "applicationArea",
+                                    toggleProductAreaValue(
+                                      sp.applicationArea,
+                                      area,
+                                      areaChoices,
+                                    ),
+                                  )
+                                }
+                              >
+                                {area}
+                              </Chip>
+                            ))}
+                          </div>
+                        );
+                      })()}
                       <select
                         value={productApplicationMethod(sp, serviceTypeForArea)}
                         onChange={(e) =>
@@ -12909,11 +12869,11 @@ export function CompletionPanel({
                 </div>
               )}
             </Field>
-            {/* Areas serviced — hidden for Tree & Shrub (owner 2026-07-23):
-                the area chips are structural-pest rooms/zones that don't
-                describe plant work, and the Treatment Zone trace already
-                records where the visit treated. */}
-            {!quickComplete && !treeShrubCloseoutOn && (
+            {/* Areas serviced — hidden for Tree & Shrub and rodent lines
+                (owner 2026-07-23): the chips are structural-pest rooms/zones;
+                those visits carry their own location semantics (zone trace,
+                trap locations, entry points, station map). */}
+            {!quickComplete && !areasTreatedHidden && (
               <Field label="Areas treated">
                 {" "}
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
@@ -13400,10 +13360,7 @@ export function CompletionPanel({
               disabled={
                 submitting ||
                 generating ||
-                tankCleanoutCompletionBlocked ||
-                blackoutCompletionBlocked ||
-                nLimitCompletionBlocked ||
-                managerApprovalCompletionBlocked ||
+                closeoutAdvisoriesPending ||
                 treeShrubCompletionBlocked ||
                 protocolActualsCompletionBlocked
               }
@@ -13411,10 +13368,7 @@ export function CompletionPanel({
                 ...primaryPill,
                 opacity:
                   submitting ||
-                  tankCleanoutCompletionBlocked ||
-                  blackoutCompletionBlocked ||
-                  nLimitCompletionBlocked ||
-                  managerApprovalCompletionBlocked ||
+                  closeoutAdvisoriesPending ||
                   treeShrubCompletionBlocked ||
                   protocolActualsCompletionBlocked
                     ? 0.5
@@ -13508,34 +13462,14 @@ export function CompletionPanel({
                 Report stored — customer delivery is off for this service type.
               </div>
             )}
-            {showPrepayCta && !completionResult?.followupSuggestion?.required && (
-              <div
-                style={{
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: 8,
-                  marginTop: 20,
-                  width: "100%",
-                  maxWidth: 360,
-                  padding: "0 24px",
-                  boxSizing: "border-box",
-                }}
+            {recapEligible && !completionResult?.followupSuggestion?.required && (
+              <button
+                type="button"
+                onClick={() => onClose(true)}
+                style={{ ...btnBase, width: "100%", maxWidth: 312, marginTop: 20, background: "transparent", color: D.text, border: `1px solid ${D.border}`, fontSize: 14 }}
               >
-                <button
-                  type="button"
-                  onClick={() => setShowPrepay(true)}
-                  style={{ ...btnBase, width: "100%", background: D.teal, color: "#fff", fontSize: 14 }}
-                >
-                  Offer annual prepay
-                </button>
-                <button
-                  type="button"
-                  onClick={() => onClose(true)}
-                  style={{ ...btnBase, width: "100%", background: "transparent", color: D.text, border: `1px solid ${D.border}`, fontSize: 14 }}
-                >
-                  Done
-                </button>
-              </div>
+                Done
+              </button>
             )}
             {completionResult?.followupSuggestion?.required && (
               <div
@@ -13587,13 +13521,6 @@ export function CompletionPanel({
               </div>
             )}
           </div>
-        )}
-        {showPrepay && (
-          <AnnualPrepayLauncher
-            customerId={service.customerId || service.customer_id}
-            onClose={() => setShowPrepay(false)}
-            onSaved={() => setShowPrepay(false)}
-          />
         )}
         {/* Header */}
         <div
@@ -13774,8 +13701,9 @@ export function CompletionPanel({
               <label style={labelStyle}>Lawn Assessment</label>{" "}
               <LawnAssessmentCompletionBlock
                 service={service}
-                disabled={isIncompleteVisit || submitting}
+                disabled={isIncompleteVisit || submitting || generating}
                 onConfirmed={handleLawnAssessmentConfirmed}
+                onReady={setLawnAssessmentReady}
                 showGaugePhoto={turfHeightFlag}
                 gaugePhoto={turfHeight.gaugePhoto}
                 onGaugePhoto={(p) => setTurfHeight((v) => ({ ...v, gaugePhoto: p }))}
@@ -13884,291 +13812,29 @@ export function CompletionPanel({
               )}
             </div>
           )}
-          {calibrationRequired && (
-            <div style={{ marginBottom: 20 }}>
-              {" "}
-              <label style={labelStyle}>Equipment Calibration</label>{" "}
-              <select
-                value={equipmentSystemId}
-                onChange={(e) => handleEquipmentSelect(e.target.value)}
-                disabled={isIncompleteVisit}
-                style={inputStyle}
-              >
-                {" "}
-                <option value="">Select calibrated equipment</option>
-                {equipmentCalibrations.map((c) => (
-                  <option key={c.id} value={c.equipment_system_id}>
-                    {c.system_name || "Equipment"} ·{" "}
-                    {c.carrier_gal_per_1000 || "—"} gal/1K
-                  </option>
-                ))}
-              </select>{" "}
-              <div
-                style={{
-                  fontSize: 12,
-                  color:
-                    selectedCalibrationExpired || equipmentCalibrationError
-                      ? D.red
-                      : D.muted,
-                  lineHeight: 1.4,
-                }}
-              >
-                {isIncompleteVisit
-                  ? "Calibration is not required when marking a visit incomplete."
-                  : calibrationHelpText}
-              </div>{" "}
-            </div>
-          )}
-          {tankCleanoutRequired && (
-            <div style={{ marginBottom: 20 }}>
-              {" "}
-              <label style={labelStyle}>Tank Cleanout</label>{" "}
-              <div
-                style={{
-                  fontSize: 12,
-                  color: tankCleanoutCompletionBlocked ? D.red : D.muted,
-                  lineHeight: 1.4,
-                  marginBottom: 8,
-                }}
-              >
-                {tankCleanoutHelpText}
-              </div>{" "}
-              <input
-                value={tankLastProduct}
-                onChange={(e) => setTankLastProduct(e.target.value)}
-                placeholder="Last product in tank"
-                style={inputStyle}
-              />{" "}
-              <select
-                value={tankLastProductCategory}
-                onChange={(e) => setTankLastProductCategory(e.target.value)}
-                style={{ ...inputStyle, marginTop: 8 }}
-              >
-                {" "}
-                <option value="">Prior product type</option>{" "}
-                <option value="herbicide">Herbicide / weed control</option>{" "}
-                <option value="insecticide">Insecticide</option>{" "}
-                <option value="fungicide">Fungicide</option>{" "}
-                <option value="fertilizer">Fertilizer / nutrient</option>{" "}
-                <option value="water_only">Water only</option>{" "}
-                <option value="unknown">Unknown</option>{" "}
-              </select>{" "}
-              <select
-                value={tankCleanoutCompleted}
-                onChange={(e) => setTankCleanoutCompleted(e.target.value)}
-                style={{ ...inputStyle, marginTop: 8 }}
-              >
-                {" "}
-                <option value="">Cleanout completed?</option>{" "}
-                <option value="yes">Yes</option>{" "}
-                <option value="no">No</option>{" "}
-              </select>{" "}
-              <select
-                value={tankCleanoutMethod}
-                onChange={(e) => setTankCleanoutMethod(e.target.value)}
-                style={{ ...inputStyle, marginTop: 8 }}
-              >
-                {" "}
-                <option value="">Cleanout method</option>
-                {TANK_CLEANOUT_METHODS.map((method) => (
-                  <option key={method} value={method}>
-                    {method}
-                  </option>
-                ))}
-              </select>{" "}
-              <textarea
-                value={tankCleanoutNote}
-                onChange={(e) => setTankCleanoutNote(e.target.value)}
-                rows={2}
-                placeholder="Cleanout note"
-                style={{
-                  width: "100%",
-                  background: D.input,
-                  color: D.text,
-                  border: `1px solid ${D.border}`,
-                  borderRadius: 10,
-                  padding: 12,
-                  fontSize: 14,
-                  resize: "vertical",
-                  fontFamily: "'Nunito Sans', sans-serif",
-                  boxSizing: "border-box",
-                  marginTop: 8,
-                }}
-              />{" "}
-            </div>
-          )}
-          {blackoutApprovalRequired && (
-            <div style={{ marginBottom: 20 }}>
-              {" "}
-              <label style={labelStyle}>Office Approval</label>{" "}
-              <div
-                style={{
-                  fontSize: 12,
-                  color: D.red,
-                  lineHeight: 1.4,
-                  marginBottom: 8,
-                }}
-              >
-                {blackoutHelpText}{" "}
-                {!canApproveOfficeExceptions
-                  ? "An admin must approve this exception before completion."
-                  : ""}
-              </div>
-              {canApproveOfficeExceptions && (
-                <>
-                  {" "}
-                  <select
-                    value={officeApprovalReasonCode}
-                    onChange={(e) =>
-                      setOfficeApprovalReasonCode(e.target.value)
-                    }
-                    style={inputStyle}
-                  >
-                    {" "}
-                    <option value="">Select approval reason</option>
-                    {OFFICE_APPROVAL_REASONS.map((reason) => (
-                      <option key={reason.value} value={reason.value}>
-                        {reason.label}
-                      </option>
-                    ))}
-                  </select>{" "}
-                  <textarea
-                    value={officeApprovalNote}
-                    onChange={(e) => setOfficeApprovalNote(e.target.value)}
-                    rows={2}
-                    placeholder="Approval note"
-                    style={{
-                      width: "100%",
-                      background: D.input,
-                      color: D.text,
-                      border: `1px solid ${D.border}`,
-                      borderRadius: 10,
-                      padding: 12,
-                      fontSize: 14,
-                      resize: "vertical",
-                      fontFamily: "'Nunito Sans', sans-serif",
-                      boxSizing: "border-box",
-                      marginTop: 8,
-                    }}
-                  />{" "}
-                </>
-              )}
-            </div>
-          )}
-          {nLimitApprovalRequired && (
-            <div style={{ marginBottom: 20 }}>
-              {" "}
-              <label style={labelStyle}>Annual N Budget</label>{" "}
-              <div
-                style={{
-                  fontSize: 12,
-                  color: D.red,
-                  lineHeight: 1.4,
-                  marginBottom: 8,
-                }}
-              >
-                {nLimitHelpText} {nLimitSummaryText}{" "}
-                {!canApproveOfficeExceptions
-                  ? "An admin must approve this exception before completion."
-                  : ""}
-              </div>
-              {canApproveOfficeExceptions && (
-                <>
-                  {" "}
-                  <select
-                    value={nLimitApprovalReasonCode}
-                    onChange={(e) =>
-                      setNLimitApprovalReasonCode(e.target.value)
-                    }
-                    style={inputStyle}
-                  >
-                    {" "}
-                    <option value="">Select approval reason</option>
-                    {N_LIMIT_APPROVAL_REASONS.map((reason) => (
-                      <option key={reason.value} value={reason.value}>
-                        {reason.label}
-                      </option>
-                    ))}
-                  </select>{" "}
-                  <textarea
-                    value={nLimitApprovalNote}
-                    onChange={(e) => setNLimitApprovalNote(e.target.value)}
-                    rows={2}
-                    placeholder="Approval note"
-                    style={{
-                      width: "100%",
-                      background: D.input,
-                      color: D.text,
-                      border: `1px solid ${D.border}`,
-                      borderRadius: 10,
-                      padding: 12,
-                      fontSize: 14,
-                      resize: "vertical",
-                      fontFamily: "'Nunito Sans', sans-serif",
-                      boxSizing: "border-box",
-                      marginTop: 8,
-                    }}
-                  />{" "}
-                </>
-              )}
-            </div>
-          )}
-          {managerApprovalRequired && (
-            <div style={{ marginBottom: 20 }}>
-              {" "}
-              <label style={labelStyle}>Manager Approval</label>{" "}
-              <div
-                style={{
-                  fontSize: 12,
-                  color: D.red,
-                  lineHeight: 1.4,
-                  marginBottom: 8,
-                }}
-              >
-                {managerApprovalHelpText}{" "}
-                {!canApproveOfficeExceptions
-                  ? "An admin must approve this exception before completion."
-                  : ""}
-              </div>
-              {canApproveOfficeExceptions && (
-                <>
-                  {" "}
-                  <select
-                    value={managerApprovalReasonCode}
-                    onChange={(e) =>
-                      setManagerApprovalReasonCode(e.target.value)
-                    }
-                    style={inputStyle}
-                  >
-                    {" "}
-                    <option value="">Select approval reason</option>
-                    {MANAGER_APPROVAL_REASONS.map((reason) => (
-                      <option key={reason.value} value={reason.value}>
-                        {reason.label}
-                      </option>
-                    ))}
-                  </select>{" "}
-                  <textarea
-                    value={managerApprovalNote}
-                    onChange={(e) => setManagerApprovalNote(e.target.value)}
-                    rows={2}
-                    placeholder="Approval note"
-                    style={{
-                      width: "100%",
-                      background: D.input,
-                      color: D.text,
-                      border: `1px solid ${D.border}`,
-                      borderRadius: 10,
-                      padding: 12,
-                      fontSize: 14,
-                      resize: "vertical",
-                      fontFamily: "'Nunito Sans', sans-serif",
-                      boxSizing: "border-box",
-                      marginTop: 8,
-                    }}
-                  />{" "}
-                </>
-              )}
+          {closeoutAdvisories.length > 0 && (
+            <div
+              style={{
+                marginBottom: 20,
+                padding: "10px 12px",
+                borderRadius: 8,
+                border: `1px solid ${D.border}`,
+                background: D.bg,
+              }}
+            >
+              {closeoutAdvisories.map((text, i) => (
+                <div
+                  key={i}
+                  style={{
+                    fontSize: 12,
+                    color: D.muted,
+                    lineHeight: 1.4,
+                    marginTop: i === 0 ? 0 : 6,
+                  }}
+                >
+                  ⚠️ {text}
+                </div>
+              ))}
             </div>
           )}
           {/* Visit Outcome */}
@@ -14299,7 +13965,7 @@ export function CompletionPanel({
           )}
           {/* Compact completion quick-picks */}
           <div style={{ marginTop: 10, marginBottom: 16 }}>
-            {!isTypedFindings && (
+            {!isTypedFindings && !hideProtocolActionsField && (
             <div style={{ marginBottom: 12 }}>
               <label style={{ ...labelStyle, color: D.blue }}>
                 Protocol Actions
@@ -14339,7 +14005,7 @@ export function CompletionPanel({
                             {opt.label}
                           </option>
                         ))
-                      : CHIP_ACTIONS.map((chip) => (
+                      : protocolActionFallbackChips.map((chip) => (
                           <option key={chip.label} value={chip.label}>
                             {chip.label}
                           </option>
@@ -14439,7 +14105,7 @@ export function CompletionPanel({
                 }
                 setGenerating(false);
               }}
-              disabled={generating}
+              disabled={generating || (isLawn && lawnAssessmentReady === false)}
               style={{
                 width: "100%",
                 padding: "10px 16px",
@@ -14859,35 +14525,70 @@ export function CompletionPanel({
                     <option value="lb">lb</option>{" "}
                     <option value="gal">gal</option>{" "}
                   </select>{" "}
-                  {areasServiced.length > 0 && (
-                    <select
-                      value={sp.applicationArea || ""}
-                      onChange={(e) =>
-                        updateProduct(
-                          sp.productId,
-                          "applicationArea",
-                          e.target.value,
-                        )
-                      }
-                      style={{
-                        ...inputStyle,
-                        minWidth: 150,
-                        flex: "1 1 150px",
-                        marginBottom: 0,
-                      }}
-                    >
-                      <option value="">
-                        {areasServiced.length === 1
-                          ? `Area: ${areasServiced[0]}`
-                          : "Treatment area"}
-                      </option>
-                      {areasServiced.map((area) => (
-                        <option key={area} value={area}>
-                          {area}
-                        </option>
-                      ))}
-                    </select>
-                  )}
+                  {areasServiced.length > 0 && (() => {
+                    const selectedAreas = parseApplicationAreas(
+                      sp.applicationArea,
+                    );
+                    const areaChoices = productAreaChoices(
+                      areasServiced,
+                      sp.applicationArea,
+                    );
+                    return (
+                      <div
+                        style={{
+                          flexBasis: "100%",
+                          display: "flex",
+                          flexWrap: "wrap",
+                          alignItems: "center",
+                          gap: 6,
+                        }}
+                      >
+                        <span
+                          style={{
+                            fontSize: 12,
+                            fontWeight: 500,
+                            color: D.muted,
+                          }}
+                        >
+                          Treatment areas
+                        </span>
+                        {areaChoices.map((area) => {
+                          const selected = selectedAreas.includes(area);
+                          return (
+                            <button
+                              key={area}
+                              type="button"
+                              onClick={() =>
+                                updateProduct(
+                                  sp.productId,
+                                  "applicationArea",
+                                  toggleProductAreaValue(
+                                    sp.applicationArea,
+                                    area,
+                                    areaChoices,
+                                  ),
+                                )
+                              }
+                              style={{
+                                padding: "6px 14px",
+                                borderRadius: 20,
+                                fontSize: 12,
+                                fontWeight: 500,
+                                cursor: "pointer",
+                                background: selected ? D.teal + "22" : D.card,
+                                color: selected ? D.teal : D.muted,
+                                border: `1px solid ${selected ? D.teal : D.border}`,
+                                transition: "all 0.15s",
+                              }}
+                            >
+                              {selected ? "✓ " : ""}
+                              {area}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    );
+                  })()}
                   <select
                     value={productApplicationMethod(sp, serviceTypeForArea)}
                     onChange={(e) =>
@@ -14992,10 +14693,10 @@ export function CompletionPanel({
               ))}
             </div>
           )}
-          {/* Areas Serviced — hidden for Tree & Shrub (owner 2026-07-23): the
-              area chips don't describe plant work and the Treatment Zone trace
-              records where the visit treated. */}
-          {!quickComplete && !treeShrubCloseoutOn && (
+          {/* Areas Serviced — hidden for Tree & Shrub and rodent lines (owner
+              2026-07-23): the chips are structural-pest rooms/zones; those
+              visits carry their own location semantics. */}
+          {!quickComplete && !areasTreatedHidden && (
             <div style={{ marginBottom: 20 }}>
               {" "}
               <label style={labelStyle}>Areas Treated</label>{" "}
@@ -15381,10 +15082,7 @@ export function CompletionPanel({
             disabled={
               submitting ||
               generating ||
-              tankCleanoutCompletionBlocked ||
-              blackoutCompletionBlocked ||
-              nLimitCompletionBlocked ||
-              managerApprovalCompletionBlocked ||
+              closeoutAdvisoriesPending ||
               treeShrubCompletionBlocked ||
               protocolActualsCompletionBlocked
             }
@@ -15397,10 +15095,7 @@ export function CompletionPanel({
               height: 52,
               opacity:
                 submitting ||
-                tankCleanoutCompletionBlocked ||
-                blackoutCompletionBlocked ||
-                nLimitCompletionBlocked ||
-                managerApprovalCompletionBlocked ||
+                closeoutAdvisoriesPending ||
                 treeShrubCompletionBlocked ||
                 protocolActualsCompletionBlocked
                   ? 0.6

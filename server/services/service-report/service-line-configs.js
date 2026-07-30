@@ -209,9 +209,26 @@ function getServiceLineConfig(serviceLineOrType) {
   return SERVICE_LINE_CONFIGS[key] || SERVICE_LINE_CONFIGS.pest;
 }
 
+// Rodent-program companion services whose names carry no rodent token, so
+// detectServiceLine alone can't claim them ("Exclusion Service",
+// "Sanitation & Cleanup"). Used by the rodent report's next-visit pick —
+// a rodent report may disclose these as the customer's next rodent-related
+// visit. \w* covers the variants (trapping/traps, proofing). The negative
+// guard keeps non-rodent trapping work out ("Wildlife Trapping", "Fly Trap
+// Service" also fall to the pest default line) — owner rule is if and only
+// if rodent-related.
+const RODENT_ADJACENT_SERVICE_RE = /\b(exclusion|sanitation|proof|trap)\w*/i;
+const NON_RODENT_TRAP_RE = /\b(wildlife|raccoon|squirrel|opossum|possum|armadillo|iguana|snake|bird|bat|hog|coyote|fly|flies|insect|pantry|moth|glue\s*board)\b/i;
+
+function isRodentAdjacentServiceType(serviceType) {
+  const text = String(serviceType || '');
+  return RODENT_ADJACENT_SERVICE_RE.test(text) && !NON_RODENT_TRAP_RE.test(text);
+}
+
 module.exports = {
   SERVICE_LINE_IDS,
   SERVICE_LINE_CONFIGS,
+  isRodentAdjacentServiceType,
   detectServiceLine,
   getServiceLineConfig,
 };

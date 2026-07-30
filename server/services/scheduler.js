@@ -451,6 +451,20 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // HOURLY :20 — geocode backstop. Several customer-create paths never call
+  // ensureCustomerGeocoded (and the ones that do swallow transient Google
+  // failures), leaving latitude/longitude NULL — which silently drops those
+  // stops from route optimization. Sweep fills any gap within the hour.
+  cron.schedule('20 * * * *', async () => {
+    try {
+      const { runExclusive } = require('../utils/cron-lock');
+      const { sweepUngeocodedCustomers } = require('./geocoder');
+      await runExclusive('geocoder-backstop', () => sweepUngeocodedCustomers());
+    } catch (err) {
+      logger.error(`[geocoder] backstop sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // =========================================================================
   // DAILY 2:40AM — Knowledge-index sync (hybrid knowledge search, lane A2):
   // re-reads every corpus connector, upserts changed chunks, embeds pending
@@ -1371,6 +1385,24 @@ function initScheduledJobs() {
       await EventNormalizer.normalizeBatch();
     } catch (err) {
       logger.error(`Event normalization failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 5:30AM — Newsletter event og:image backfill. Half an hour after
+  // normalization so today's newly-normalized rows get probed same-day.
+  // 25 rows/run, weekly retry backoff, SSRF-hardened transport shared with
+  // event-reverify. Kill switch: NEWSLETTER_IMAGE_BACKFILL=false.
+  // =========================================================================
+  cron.schedule('30 5 * * *', async () => {
+    logger.info('Running: Newsletter event image backfill');
+    try {
+      // runExclusive: deploy-overlap instances would each select the same
+      // unstamped batch and double the outbound fetches.
+      const EventImageBackfill = require('./event-image-backfill');
+      await runExclusive('event-image-backfill', () => EventImageBackfill.backfillBatch());
+    } catch (err) {
+      logger.error(`Event image backfill failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -2428,6 +2460,45 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 6:50 AM — Inbox hygiene: quarantine sweep + spam-folder rescue.
+  // Runs before the 7:30 digest so the digest reports what actually happened.
+  // =========================================================================
+  cron.schedule('50 6 * * *', async () => {
+    try {
+      // runExclusive: overlapping Railway instances scanning the same Spam
+      // ids would double-insert rescue/review notifications.
+      await runExclusive('inbox-hygiene', async () => {
+        // Independent jobs run isolated — a transient quarantine failure
+        // must not cost the once-daily spam rescue or draft reconciliation.
+        const hygiene = require('./email/inbox-hygiene');
+        let swept = { trashed: 0, restored: 0 };
+        let rescued = { rescued: 0, scanned: 0, customers: 0, unauthenticated: 0 };
+        let drafts = { settled: 0, released: 0, redrafted: 0 };
+        let staleBlocks = { reconciled: 0, failed: 0 };
+        const failures = [];
+        try { swept = await hygiene.sweepQuarantine(); }
+        catch (e) { failures.push(`sweep: ${e.message}`); logger.error(`[inbox-hygiene] quarantine sweep failed: ${e.message}`); }
+        try { rescued = await hygiene.rescueSpamFolder(); }
+        catch (e) { failures.push(`rescue: ${e.message}`); logger.error(`[inbox-hygiene] spam rescue failed: ${e.message}`); }
+        try { drafts = await hygiene.reconcilePendingDrafts(); }
+        catch (e) { failures.push(`reconcile: ${e.message}`); logger.error(`[inbox-hygiene] draft reconcile failed: ${e.message}`); }
+        // Auto-blocked senders who have since become customers/open leads:
+        // unwind the block (and recover buried mail) without waiting for
+        // their next inbound message to trip the isBlocked retry path.
+        try { staleBlocks = await require('./email/spam-blocker').reconcileStaleAutoBlocks(); }
+        catch (e) { failures.push(`stale-blocks: ${e.message}`); logger.error(`[inbox-hygiene] stale-block reconcile failed: ${e.message}`); }
+        if (staleBlocks.failed) failures.push(`stale-blocks: ${staleBlocks.failed} row(s) still pending recovery`);
+        logger.info(`[inbox-hygiene] daily sweep: ${swept.trashed} quarantined trashed (${swept.restored} restored), ${rescued.rescued}/${rescued.scanned} rescued from spam (${rescued.customers} customer, ${rescued.unauthenticated} unverified), draft claims: ${drafts.settled} settled/${drafts.released} released/${drafts.redrafted} redrafted, stale blocks: ${staleBlocks.reconciled} unwound/${staleBlocks.failed} pending`);
+        // Isolation must not mask failure from job_health — all jobs ran,
+        // but a failed step still marks this tick failed for ops visibility.
+        if (failures.length) throw new Error(`inbox-hygiene partial failure: ${failures.join('; ')}`);
+      });
+    } catch (err) {
+      logger.error(`[inbox-hygiene] Cron failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 7:30 AM — Morning email digest notification
   // =========================================================================
   cron.schedule('30 7 * * *', async () => {
@@ -2445,7 +2516,10 @@ function initScheduledJobs() {
 
       const leads = emails.filter(e => e.auto_action && e.auto_action.includes('lead_created')).length;
       const invoices = emails.filter(e => e.classification === 'vendor_invoice').length;
-      const spam = emails.filter(e => e.classification === 'spam').length;
+      // Actual quarantine-lane outcomes only — a known-sender skip or a
+      // failed quarantine left the message available and must not be
+      // digested as handled.
+      const spam = emails.filter(e => /^spam_(quarantined|trashing|trashed|blocked)/.test(e.auto_action || '')).length;
       const invoiceAmounts = emails
         .filter(e => e.classification === 'vendor_invoice' && e.extracted_data)
         .reduce((sum, e) => {
@@ -2462,16 +2536,44 @@ function initScheduledJobs() {
           ? `${invoices} invoice${invoices > 1 ? 's' : ''} ($${invoiceAmounts.toFixed(2)} logged)`
           : `${invoices} invoice${invoices > 1 ? 's' : ''} (amounts not extracted)`);
       }
-      if (spam > 0) parts.push(`${spam} spam blocked`);
+      if (spam > 0) parts.push(`${spam} spam quarantined`);
+      // Exception surface: quarantine attempts that FAILED left classified
+      // spam sitting in the inbox — that's exactly what the digest exists
+      // to flag.
+      const quarantineIssues = emails.filter(e => ['spam_quarantine_failed', 'spam_quarantine_ambiguous'].includes(e.auto_action)).length;
+      if (quarantineIssues > 0) parts.push(`⚠️ ${quarantineIssues} quarantine failure${quarantineIssues > 1 ? 's' : ''} (spam still in inbox)`);
+      const unsubscribed = emails.filter(e => e.auto_action && e.auto_action.startsWith('newsletter_unsubscribed')).length;
+      if (unsubscribed > 0) parts.push(`${unsubscribed} unsubscribed`);
+      // Real Gmail draft ids only — 'pending' claims and reconciliation
+      // sentinels (reconciled_replied / reconciled_existing_draft) are not
+      // drafts this agent created.
+      const drafted = emails.filter(e => e.draft_gmail_id
+        && !['pending', 'reconciled_existing_draft', 'reconciled_replied'].includes(e.draft_gmail_id)).length;
+      if (drafted > 0) parts.push(`${drafted} repl${drafted > 1 ? 'ies' : 'y'} drafted`);
+
+      // Follow-up nudges: inbound conversation mail nobody has answered.
+      // Failure here must not kill the digest \u2014 nudges degrade to absent.
+      let nudgeLines = '';
+      try {
+        const { collectUnansweredNudges } = require('./email/inbox-hygiene');
+        const nudges = await collectUnansweredNudges();
+        if (nudges.length) {
+          nudgeLines = ` Awaiting your reply: ${nudges
+            .map((n) => `${n.from_name || n.from_address} ("${(n.subject || '(no subject)').slice(0, 40)}")`)
+            .join('; ')}.`;
+        }
+      } catch (e) {
+        logger.warn(`[email-digest] nudge collection failed: ${e.message}`);
+      }
 
       await db('notifications').insert({
         recipient_type: 'admin',
         category: 'email_digest',
         title: 'Morning Email Digest',
-        body: `${emails.length} emails overnight. ${parts.join(', ')}. Check /admin/email for details.`,
+        body: `${emails.length} emails overnight. ${parts.join(', ')}.${nudgeLines} Check /admin/email for details.`,
         icon: '\uD83D\uDCE7',
         link: '/admin/email',
-        metadata: JSON.stringify({ severity: parseInt(unread?.c || 0) > 10 ? 'high' : 'low' }),
+        metadata: JSON.stringify({ severity: (parseInt(unread?.c || 0) > 10 || nudgeLines || quarantineIssues > 0) ? 'high' : 'low' }),
         created_at: new Date(),
       }).catch(() => {});
 
@@ -3428,6 +3530,19 @@ function initScheduledJobs() {
       logger.info(`Document workflow done: ${result.expired || 0} expired, ${result.reminders?.sent || 0} reminder(s) sent, ${result.reminders?.failed || 0} failed`);
     } catch (err) {
       logger.error(`Document request lifecycle failed: ${err.message}`);
+    }
+    // Termite program agreement reconciliation: re-prep any recently accepted
+    // termite estimate whose agreement draft failed transiently at accept
+    // time (idempotent per-property dedupe; no repeat bells for unresolved
+    // figures). Acceptance already committed — prep must be retryable.
+    try {
+      const { reconcileTermiteProgramAgreements } = require('./termite-program-agreement');
+      const recon = await reconcileTermiteProgramAgreements();
+      if (recon.created || recon.failed) {
+        logger.info(`Termite agreement reconciliation: ${recon.checked} checked, ${recon.created} created, ${recon.failed} failed`);
+      }
+    } catch (err) {
+      logger.error(`Termite agreement reconciliation failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

@@ -495,6 +495,9 @@ router.get('/config', async (req, res, next) => {
       // Marketing-site (astro /book) AI search bar — fail-closed dark-ship
       // flag; the portal's own booking surfaces don't read this.
       ai_search: isEnabled('bookAiSearch'),
+      // Multi-service selector on /book — fail-closed dark-ship flag; the
+      // server independently refuses composite service keys while off.
+      multi_service: isEnabled('multiServiceBooking'),
       advance_days_min: config.advance_days_min ?? 1,
       advance_days_max: config.advance_days_max ?? 14,
       slot_duration_minutes: config.slot_duration_minutes ?? 60,
@@ -703,17 +706,44 @@ const BOOKING_FUNNEL_SERVICE_LABELS = {
 // "constructor" pass normalization and hand back inherited objects instead
 // of catalog values.
 const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
-function normalizeBookingServiceKey(value) {
+
+// Multi-service bookings (GATE_MULTI_SERVICE_BOOKING, owner-authorized
+// 2026-07-23): a composite key is 2-3 funnel keys joined by '+', sorted
+// (canonical form) — it flows through the SAME signed-offer path as a
+// single key, so slot_sig covers the combined scope and summed duration.
+// Gate off ⇒ composites normalize to '' (the existing unknown-service
+// path: clamped duration, server-owned fallback label, and /confirm's
+// empty-serviceKey slot_sig rejection) — fail closed with zero new code
+// paths for crafted posts.
+const MAX_MULTI_BOOKING_SERVICES = 3;
+function normalizeBookingServiceKeys(value) {
   const text = String(value || '').trim().toLowerCase();
-  if (!text) return '';
-  if (hasOwn(BOOKING_FUNNEL_SERVICE_DURATIONS, text)) return text;
-  return hasOwn(BOOKING_FUNNEL_SERVICE_ALIASES, text) ? BOOKING_FUNNEL_SERVICE_ALIASES[text] : '';
+  if (!text) return [];
+  const parts = text.split('+').map((p) => p.trim()).filter(Boolean);
+  if (parts.length > 1) {
+    const { isEnabled } = require('../config/feature-gates');
+    if (!isEnabled('multiServiceBooking')) return [];
+    if (parts.length > MAX_MULTI_BOOKING_SERVICES) return [];
+  }
+  const keys = [];
+  for (const part of parts) {
+    let key = '';
+    if (hasOwn(BOOKING_FUNNEL_SERVICE_DURATIONS, part)) key = part;
+    else if (hasOwn(BOOKING_FUNNEL_SERVICE_ALIASES, part)) key = BOOKING_FUNNEL_SERVICE_ALIASES[part];
+    if (!key) return []; // one unknown part invalidates the whole value
+    if (!keys.includes(key)) keys.push(key);
+  }
+  return keys.sort();
+}
+function normalizeBookingServiceKey(value) {
+  return normalizeBookingServiceKeys(value).join('+');
 }
 // Allowlisted display label for a client-supplied service value ('' when the
-// value names no funnel service).
+// value names no funnel service). Composites join per-service labels.
 function canonicalBookingServiceLabel(value) {
-  const key = normalizeBookingServiceKey(value);
-  return key && hasOwn(BOOKING_FUNNEL_SERVICE_LABELS, key) ? BOOKING_FUNNEL_SERVICE_LABELS[key] : '';
+  const keys = normalizeBookingServiceKeys(value);
+  if (!keys.length) return '';
+  return keys.map((key) => BOOKING_FUNNEL_SERVICE_LABELS[key]).join(' + ');
 }
 
 // Stable location scope for signed offers: the server-resolved coordinates
@@ -737,7 +767,10 @@ function bookingOfferLocationKey(lat, lng) {
 const MIN_BOOKING_DURATION_MINUTES = 45;
 const MAX_BOOKING_DURATION_MINUTES = 90;
 function resolveBookingDuration(requested, config = {}, serviceKey = '') {
-  const catalog = BOOKING_FUNNEL_SERVICE_DURATIONS[serviceKey];
+  const keys = String(serviceKey || '').split('+').filter(Boolean);
+  const catalog = keys.length && keys.every((k) => hasOwn(BOOKING_FUNNEL_SERVICE_DURATIONS, k))
+    ? keys.reduce((sum, k) => sum + BOOKING_FUNNEL_SERVICE_DURATIONS[k], 0)
+    : 0;
   if (catalog) return catalog;
   const n = parseInt(requested, 10);
   if (Number.isInteger(n) && n >= MIN_BOOKING_DURATION_MINUTES && n <= MAX_BOOKING_DURATION_MINUTES) return n;
@@ -1492,7 +1525,21 @@ async function createSelfBooking(payload = {}) {
       };
       let gatePass = { valid: false };
       if (pricing_estimate_id && verifyEstimateHandoffToken(pricing_estimate_id, estimate_token)) {
-        gatePass = await bindGateEstimate(pricing_estimate_id);
+        // A valid HMAC proves the token was minted for THIS estimate id — but
+        // the wizard refreshes drafts in place, so the estimate's CURRENT
+        // shape may no longer be self-bookable (recalculated into commercial /
+        // manual / mixed-billing / bed-bug, or promoted by staff). Re-check
+        // the live row before honoring the token as a gate pass (Codex #2964
+        // r2) — a stale link falls to the standing refusal, whose quote CTA
+        // re-runs the wizard and mints a fresh, current link. The accept-token
+        // arm below is deliberately NOT shape-checked: accepted estimates are
+        // past 'draft' by definition and their booking link is the sanctioned
+        // post-accept path.
+        const { wizardDraftSelfServeBookable } = require('../services/booking-pay-at-visit');
+        const handoffRow = await db('estimates').where('id', pricing_estimate_id).first().catch(() => null);
+        if (wizardDraftSelfServeBookable(handoffRow)) {
+          gatePass = await bindGateEstimate(pricing_estimate_id);
+        }
       }
       if (!gatePass.valid && source_estimate_id && accept_token
           && verifyEstimateHandoffToken(`estimate-accept:${source_estimate_id}`, accept_token)) {
@@ -1853,7 +1900,7 @@ async function createSelfBooking(payload = {}) {
     // posted values, then from the server-side estimate row. A crafted
     // ?service_label= string ("FREE Termite Treatment call 941-…") must never
     // land on the confirmation page, owner SMS, or dispatch surfaces.
-    const resolvedServiceType = BOOKING_FUNNEL_SERVICE_LABELS[serviceKey]
+    const resolvedServiceType = canonicalBookingServiceLabel(serviceKey)
       || canonicalBookingServiceLabel(quoted_service_label)
       || canonicalBookingServiceLabel(service_type)
       || cleanBookingServiceLabel(estimate?.services?.[0])
@@ -1920,12 +1967,17 @@ async function createSelfBooking(payload = {}) {
         // wizard drafts, so once staff promote the same estimate (sent/accepted/
         // declined) a not-yet-expired token must not stamp pricing from a quote
         // that is no longer the live self-serve draft.
-        const pricingEstData = pricingEstimate?.estimate_data || {};
-        const pricingEstimateEligible = !!pricingEstimate
-          && pricingEstimate.source === 'quote_wizard'
-          && pricingEstimate.status === 'draft'
-          && !pricingEstData.commercialEstimatedPricing
-          && !pricingEstData.quoteRequired;
+        // Shape eligibility of the CURRENT stored draft — shared predicate
+        // with the customers-only gate pass above (wizardDraftSelfServeBookable:
+        // wizard source, still 'draft', not commercial/manual, not mixed
+        // recurring+one-time, no bed-bug line). The wizard refreshes drafts in
+        // place, so a token minted while the quote was residential/recurring
+        // must not price a snapshot that has since changed shape — mixed
+        // billing in particular would stamp the recurring per-visit price
+        // while every one-time add-on silently vanishes from the series'
+        // billing (an undercharge).
+        const { wizardDraftSelfServeBookable: pricingShapeEligible } = require('../services/booking-pay-at-visit');
+        const pricingEstimateEligible = pricingShapeEligible(pricingEstimate);
         const pricingTrusted = handoffTokenValid
           && pricingEstimateEligible
           && String(pricingEstimate.customer_id) === String(custId);
@@ -2293,13 +2345,24 @@ async function createSelfBooking(payload = {}) {
     // signed MOSQUITO slot must not conjure a 4-visit quarterly pest series.
     // Both must independently map to pest_control (a legit quarterly pest
     // booking signs pest and labels pest, so this only tightens the gate).
-    const signedServiceKeyIsPest =
-      RecurringAppointmentSeeder.serviceKeyFor({ service_type: serviceKey }) === 'pest_control';
+    // Composite-aware: a multi-service booking whose SIGNED key includes
+    // pest_control is a pest booking for series purposes — serviceKeyFor's
+    // regex order would otherwise classify "mosquito+pest_control" (or the
+    // joined label) as mosquito and silently drop the quarterly series the
+    // customer just bought (#2957 codex P1). Component check runs on the
+    // signed key ONLY — the label side stays serviceKeyFor so a crafted
+    // label still can't conjure a pest series from a non-pest signature.
+    const signedKeyComponents = String(serviceKey || '').split('+').filter(Boolean);
+    const signedServiceKeyIsPest = signedKeyComponents.includes('pest_control')
+      || RecurringAppointmentSeeder.serviceKeyFor({ service_type: serviceKey }) === 'pest_control';
+    const resolvedLabelIsPest = signedKeyComponents.length > 1
+      ? String(resolvedServiceType || '').toLowerCase().includes('pest control')
+      : RecurringAppointmentSeeder.serviceKeyFor({ service_type: resolvedServiceType }) === 'pest_control';
     const shouldSeedQuarterlyPestFollowUps =
       !isOneTimeEstimateBooking
       && requestedRecurringPattern === 'quarterly'
       && signedServiceKeyIsPest
-      && RecurringAppointmentSeeder.serviceKeyFor({ service_type: resolvedServiceType }) === 'pest_control';
+      && resolvedLabelIsPest;
     // Duplicate-series guard: don't seed a SECOND active series of the same
     // service family — the booked visit itself stays (the customer chose it),
     // but the 3 seeded follow-ups are what mint a duplicate quarterly series
@@ -2318,20 +2381,34 @@ async function createSelfBooking(payload = {}) {
     if (shouldSeedQuarterlyPestFollowUps) {
       try {
         const outcome = await db.transaction(async (trx) => {
+          // Composite parents (Pest + add-ons) guard and seed as the PEST
+          // family: serviceKeyFor on the joined label would classify the
+          // series as mosquito/lawn and (a) miss an existing pest series
+          // (duplicate seeding) and (b) mint children that look like full
+          // combined visits at the pest cadence (#2957 codex r2).
+          const compositePest = signedKeyComponents.length > 1 && signedKeyComponents.includes('pest_control');
           const { matches, guardError } = await RecurringAppointmentSeeder.checkActiveSeriesLocked(trx, {
             customerId: custId,
             serviceId: serviceRow.service_id || null,
-            serviceType: serviceRow.service_type || resolvedServiceType,
+            serviceType: compositePest ? 'Pest Control' : (serviceRow.service_type || resolvedServiceType),
             excludeParentId: serviceRow.id,
           });
           if (guardError) logger.warn(`[booking:confirm] duplicate-series guard failed (seeding proceeds): ${guardError.message}`);
           if (matches.length > 0) return { kept: matches[0] };
+          const pestDuration = BOOKING_FUNNEL_SERVICE_DURATIONS.pest_control;
+          const pestEndMin = timeToMin(slot_start) + pestDuration;
+          const pestWindowEnd = `${String(Math.floor(pestEndMin / 60)).padStart(2, '0')}:${String(pestEndMin % 60).padStart(2, '0')}`;
           const seedResult = await RecurringAppointmentSeeder.seedFollowUpsForParent(trx, serviceRow, {
             pattern: 'quarterly',
             plannedCount: 4,
             skipWeekends: true,
             weekendShift: 'forward',
-            durationMinutes: duration,
+            // Children of a composite parent are PEST-ONLY visits: pest
+            // label, pest duration, pest window — the add-on services were
+            // a first-visit bundle; their cadences are set up by the office
+            // from the owner alert (v1 constraint, PR body).
+            durationMinutes: compositePest ? pestDuration : duration,
+            ...(compositePest ? { serviceType: 'Pest Control', windowEnd: pestWindowEnd } : {}),
             source: source || 'self_booked',
             // Follow-ups bill the even quotient — the parent already absorbed
             // the remainder cents — instead of inheriting the parent's price
@@ -2433,7 +2510,29 @@ async function createSelfBooking(payload = {}) {
     // keyed off the VERIFIED customer, so the forgeable lead_id can never
     // convert a lead the booker doesn't own.
     let leadConversion = null;
-    if (followUpRows.length > 0 || lead_id) {
+    // Handoff-derived trigger (Codex #2964 r3): recovery-rebuilt /book links
+    // and older quote links carry the estimate handoff but no ?lead= param,
+    // so a non-pest/one-time booking (which seeds no series) would strand the
+    // quote's lead in new_lead. A VERIFIED handoff names its wizard estimate,
+    // and the wizard stamps estimate_data.lead_id — derive the trigger from
+    // that when the client sent none. Trigger only, like lead_id itself: the
+    // conversion below stays keyed off the VERIFIED customer with
+    // enforceOriginating, so neither a forged lead_id nor a derived one can
+    // convert a lead the booker doesn't own. Best-effort — the booking is
+    // already committed.
+    let leadTrigger = !!lead_id;
+    if (!leadTrigger && followUpRows.length === 0 && pricing_estimate_id) {
+      try {
+        const { verifyEstimateHandoffToken } = require('../utils/estimate-handoff-token');
+        if (verifyEstimateHandoffToken(pricing_estimate_id, estimate_token)) {
+          const handoffEstimate = await db('estimates').where('id', pricing_estimate_id).first();
+          leadTrigger = !!(handoffEstimate?.source === 'quote_wizard' && handoffEstimate?.estimate_data?.lead_id);
+        }
+      } catch (err) {
+        logger.warn(`[lead-trigger] handoff lead derivation failed for customer=${custId}: ${err.message}`);
+      }
+    }
+    if (followUpRows.length > 0 || leadTrigger) {
       try {
         const { convertLeadFromEvent } = require('../services/lead-estimate-link');
         leadConversion = await convertLeadFromEvent({

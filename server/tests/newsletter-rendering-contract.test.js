@@ -48,18 +48,24 @@ function renderedThemeNames(html, idPattern) {
 }
 
 describe('newsletter rendering contract', () => {
-  test('flagship masthead is "Fresh This Week" under the 2026 Waves logo, with the universal footer', () => {
+  test('flagship masthead is "Waves Newsletter" (no "The", no subtitle, 20px) under the 2026 Waves logo, with the universal footer', () => {
     const html = wrapNewsletter({
       body: '<p>Issue body</p>',
       newsletterType: 'local-weekly-fresh-events',
       unsubscribeUrl: 'https://portal.wavespestcontrol.com/unsubscribe/test-token',
     });
-    const masthead = /<img src="([^"]+)" alt="Fresh This Week" width="(\d+)"/.exec(html);
+    const masthead = /<img src="([^"]+)" alt="Waves Newsletter" width="(\d+)"/.exec(html);
+
+    // Owner directive 2026-07-28: the retired identities must never
+    // resurrect, and dropping the tagline must not leave an empty <p>.
+    expect(html).not.toContain('Fresh This Week');
+    expect(html).not.toContain('A local weekend guide from the Waves crew');
+    expect(html).not.toMatch(/<h1[^>]*>Waves Newsletter<\/h1>\s*<p[^>]*>\s*<\/p>/);
 
     expect({
       documentTitle: /<title>([^<]+)<\/title>/.exec(html)?.[1],
       visibleHeading: /<h1[^>]*>([^<]+)<\/h1>/.exec(html)?.[1],
-      taglineCount: occurrenceCount(html, 'A local weekend guide from the Waves crew'),
+      retiredTaglineCount: occurrenceCount(html, 'A local weekend guide from the Waves crew'),
       mastheadUrl: masthead?.[1],
       mastheadWidth: Number(masthead?.[2]),
       // The beehiiv-era masthead ASSET stays retired: header art must never
@@ -73,17 +79,17 @@ describe('newsletter rendering contract', () => {
       unsubscribeCount: occurrenceCount(html, '>Unsubscribe</a>'),
     }).toMatchInlineSnapshot(`
       {
-        "appBadgeCount": 2,
-        "documentTitle": "Fresh This Week",
+        "appBadgeCount": 0,
+        "documentTitle": "Waves Newsletter",
         "footerAddressCount": 1,
         "footerPhoneLinkCount": 1,
         "hasBeehiivHostedAsset": false,
         "mastheadUrl": "https://portal.wavespestcontrol.com/waves-logo-2026.png",
         "mastheadWidth": 72,
+        "retiredTaglineCount": 0,
         "socialIconCount": 5,
-        "taglineCount": 1,
         "unsubscribeCount": 1,
-        "visibleHeading": "Fresh This Week",
+        "visibleHeading": "Waves Newsletter",
         "wavesLogoCount": 2,
       }
     `);
@@ -186,7 +192,6 @@ describe('newsletter rendering contract', () => {
           "waves-blue",
           "deep-water",
           "sunshine",
-          "waves-red",
         ],
         "pestInsider": [
           "waves-blue",

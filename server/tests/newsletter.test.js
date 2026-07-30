@@ -495,12 +495,26 @@ describe('event ingestion revivalResetFields — past→future re-date clears fr
     // in the upsert (the normalizer recomputes it instead). It signals revival
     // via normalized_at (re-queue) + freshness_revival_pending (explicit marker
     // the normalizer consumes), plus the curation re-open pair (curated_at /
-    // curation_note) — all safe to set in the ON CONFLICT update.
-    expect(Object.keys(f).sort()).toEqual(['curated_at', 'curation_note', 'freshness_revival_pending', 'normalized_at']);
+    // curation_note) AND the six structured-assessment columns (2026-07-28
+    // rubric) — a revived occurrence starts clean, so a later missing or
+    // malformed reassessment can never leave a prior occurrence's score
+    // attached. The image pair (og:image backfill contract, 2026-07-28:
+    // feed wins / null preserves backfill / revival or url change takes
+    // the feed value verbatim and re-opens the probe backoff) rides the
+    // same merge. All nullable, all safe to set in the ON CONFLICT update.
+    expect(Object.keys(f).sort()).toEqual([
+      'audience_tags', 'curated_at', 'curation_note', 'editorial_evidence',
+      'editorial_score', 'freshness_revival_pending', 'image_backfill_attempted_at',
+      'image_url', 'normalized_at', 'novelty_type', 'rejection_codes',
+      'score_breakdown',
+    ]);
   });
 
-  test('revival re-opens auto-curation: curated_at/curation_note clear on the SAME past→future gate', () => {
-    for (const col of ['curated_at', 'curation_note']) {
+  test('revival re-opens auto-curation: assessment columns clear on the SAME past→future gate', () => {
+    for (const col of [
+      'curated_at', 'curation_note', 'editorial_score', 'score_breakdown',
+      'rejection_codes', 'audience_tags', 'novelty_type', 'editorial_evidence',
+    ]) {
       const { sql } = revivalResetFields()[col].toSQL();
       const lower = sql.toLowerCase();
       expect(lower).toMatch(/case when/);
@@ -648,7 +662,7 @@ describe('event ingestion buildExtractionSystemPrompt — shared extraction prom
   });
 });
 
-describe('event ingestion normalizeExtractedEvent — validation + auto-approve gate', () => {
+describe('event ingestion normalizeExtractedEvent — validation (no auto-approval since the 2026-07-28 rubric)', () => {
   const { normalizeExtractedEvent, recurrenceMetadataFromIcalEvent } = require('../services/event-ingestion');
   const NOW = Date.parse('2026-06-11T12:00:00Z');
   const tier1 = { id: 'src-1', priority_tier: 1, coverage_geo: ['tampa'] };
@@ -669,14 +683,16 @@ describe('event ingestion normalizeExtractedEvent — validation + auto-approve 
     expect(normalizeExtractedEvent(tier2, undated, NOW)).not.toBeNull();
   });
 
-  test('tier-1 auto-approves ONLY when a real start date was extracted', () => {
+  test('NO source tier auto-approves — every automatic approval must come from the scored curation path', () => {
+    // Owner rubric 2026-07-28: an approval without an editorial score above
+    // the absolute floor must be impossible. Tier-1 rows insert pending and
+    // are examined by the 6:15 curation run like everything else.
     const dated = normalizeExtractedEvent(tier1, { title: 'Festival', startAt: '2026-06-14T10:00:00-04:00' }, NOW);
-    expect(dated.autoApprove).toBe(true);
-    const undated = normalizeExtractedEvent(tier1, { title: 'Festival', startAt: null }, NOW);
-    expect(undated).not.toBeNull();
-    expect(undated.autoApprove).toBe(false);
+    expect(dated.autoApprove).toBeUndefined();
+    expect(dated.row.admin_status).toBeUndefined();
     const tier2Dated = normalizeExtractedEvent(tier2, { title: 'Festival', startAt: '2026-06-14T10:00:00-04:00' }, NOW);
-    expect(tier2Dated.autoApprove).toBe(false);
+    expect(tier2Dated.autoApprove).toBeUndefined();
+    expect(Object.keys(dated).sort()).toEqual(['row']);
   });
 
   test('canonicalizes the dedup key and validates URLs', () => {
@@ -1561,8 +1577,11 @@ describe('newsletter assembly — Beehiiv-parity event rendering', () => {
     // rotating anchor text, not "Tickets & Info"
     expect(html).toContain('>Grab your spot</a>');
     expect(html).not.toContain('Tickets &amp; Info');
-    // event name inline-linked in the description
-    expect(html).toContain('<a href="https://example.com/fin"');
+    // event name inline-linked in the description — via the evclick
+    // tracking token (the live sender substitutes a per-recipient
+    // redirect; proof/preview/archive resolve it back to the direct url)
+    expect(html).toContain('<a href="{{evclick:a0000000-0000-4000-8000-000000000002}}"');
+    expect(html).not.toContain('<a href="https://example.com/fin"');
     // rotating scoop label; plain "•" bullets with model emojis stripped
     // (baseEvent highlights deliberately carry leading emojis to prove the
     // strip — and old persisted drafts still have them)
@@ -1581,6 +1600,40 @@ describe('newsletter assembly — Beehiiv-parity event rendering', () => {
     });
     expect(html).toContain('https://cdn.example.com/fin.jpg');
     expect(html).not.toContain('🎟️ <strong>FREE</strong>');
+  });
+
+  test('no eventId → ticket links fall back to the direct url (no tracking token)', async () => {
+    const html = await assembleBeehiivNewsletter({
+      selectedSubject: 'Test',
+      events: [{ ...baseEvent, eventId: null }],
+    });
+    expect(html).toContain('<a href="https://example.com/fin"');
+    expect(html).not.toContain('{{evclick:');
+  });
+
+  test('image-first visual rule: GIF-shaped urls reject → GIF fallback; still art replaces the GIF and carries the caption', async () => {
+    for (const bad of [
+      'https://cdn.example.com/loop.gif',
+      'https://cdn.example.com/image?file=promo.gif',
+      'https://cdn.example.com/image?format=gif&id=9',
+      'https://media2.giphy.com/media/abc/200.webp',
+    ]) {
+      const html = await assembleBeehiivNewsletter({
+        selectedSubject: 'Test',
+        events: [{ ...baseEvent, imageUrl: bad }],
+      });
+      expect(html).not.toContain(bad.slice(24));
+    }
+    const jpg = await assembleBeehiivNewsletter({ selectedSubject: 'Test', events: [{ ...baseEvent, gifCaption: 'Mood: fiddle chaos.' }] });
+    expect(jpg).toMatch(/<img src="https:\/\/cdn\.example\.com\/fin\.jpg"[^>]*max-height:280px/);
+    // Real art REPLACES the reaction GIF (owner direction 2026-07-29) and
+    // the caption-genre punchline rides under it.
+    expect(jpg).not.toContain('giphy');
+    expect(jpg).toContain('Mood: fiddle chaos.');
+    // Standards-clients-only: Outlook's Word engine cannot aspect-fit a
+    // bounded box, so no MSO-visible variant.
+    expect(jpg).toMatch(/<!--\[if !mso\]><!--><div[^>]*>\s*<img src="https:\/\/cdn\.example\.com\/fin\.jpg"/);
+    expect(jpg).not.toMatch(/\[if mso\]><img src="https:\/\/cdn\.example\.com\/fin\.jpg"/);
   });
 
   test('closing checklist renders ✔️ items and the sign-off defaults to the Team form', async () => {
@@ -1612,6 +1665,241 @@ describe('newsletter assembly — Beehiiv-parity event rendering', () => {
       ps: 'P.S.',
     });
     expect(labelOnly).not.toContain('<strong>P.S.</strong>');
+  });
+});
+
+describe('DB-locked prices vs the hallucinated-claim scan', () => {
+  const { findHallucinatedClaims } = require('../services/newsletter-validator');
+
+  test('HTML exemption is STRUCTURAL and PAIR-verified: only an event id wearing ITS OWN locked price passes', () => {
+    const A = 'a0000001-0000-4000-8000-000000000001';
+    const B = 'b0000002-0000-4000-8000-000000000002';
+    const pairs = [{ eventId: A, price: 'From $25' }, { eventId: B, price: '$50' }];
+    // Assembler-emitted shape — model prose can never produce this tag
+    // (markdownToHtml escapes HTML before markdown) — verified as an
+    // event/price PAIR against the send's own lineup.
+    expect(findHallucinatedClaims(`<p>🎟️ <span data-db-price="${A}">From $25</span></p>`, pairs, 'html')).toEqual([]);
+    // A hand-edited VALUE (sentinel intact) blocks.
+    expect(findHallucinatedClaims(`<p>🎟️ <span data-db-price="${A}">$250</span></p>`, pairs, 'html')).toEqual(
+      expect.arrayContaining([expect.stringContaining('dollar amount in body')]),
+    );
+    // Event A wearing Event B's REAL price blocks — pair, not set.
+    expect(findHallucinatedClaims(`<p>🎟️ <span data-db-price="${A}">$50</span></p>`, pairs, 'html')).toEqual(
+      expect.arrayContaining([expect.stringContaining('dollar amount in body')]),
+    );
+    // An id-less span never exempts.
+    expect(findHallucinatedClaims('<p>🎟️ <span data-db-price>From $25</span></p>', pairs, 'html')).toEqual(
+      expect.arrayContaining([expect.stringContaining('dollar amount in body')]),
+    );
+    // Marker-prefixed prose WITHOUT the span blocks even with a lock —
+    // this is the subject-laundering case ("🎟️ From $25 in prizes").
+    expect(findHallucinatedClaims('<p>🎟️ From $25 in prizes</p>', ['From $25'])).toEqual(
+      expect.arrayContaining([expect.stringContaining('dollar amount in body')]),
+    );
+    expect(findHallucinatedClaims('<p>Win $25 cash at the raffle!</p>', ['$25'])).toEqual(
+      expect.arrayContaining([expect.stringContaining('dollar amount in body')]),
+    );
+  });
+
+  test('text-segment excision binds the event/price pair via the adjacent evclick token', () => {
+    const A = 'a0000001-0000-4000-8000-000000000001';
+    const B = 'b0000002-0000-4000-8000-000000000002';
+    const pairs = [{ eventId: A, price: '$25' }, { eventId: B, price: '$50' }];
+    const line = (price, id) => `Friday | Venue | Tickets: ${price}\nDetails & tickets: {{evclick:${id}}}`;
+    expect(findHallucinatedClaims(line('$25', A), pairs, 'text')).toEqual([]);
+    // Event A's facts line wearing Event B's REAL price blocks — the
+    // adjacent token pins the pair.
+    expect(findHallucinatedClaims(line('$50', A), pairs, 'text')).toEqual(
+      expect.arrayContaining([expect.stringContaining('dollar amount in body')]),
+    );
+    // No adjacent token at all → no exemption.
+    expect(findHallucinatedClaims('Tickets: $25 somewhere in prose', pairs, 'text')).toEqual(
+      expect.arrayContaining([expect.stringContaining('dollar amount in body')]),
+    );
+  });
+
+  test('text-segment excision (unbound string entries — unit convenience): renderer shape passes; boundary-bound', () => {
+    expect(findHallucinatedClaims('Tickets: From $25', ['From $25'])).toEqual([]);
+    expect(findHallucinatedClaims('Tickets: From&nbsp;&#36;25', ['From $25'])).toEqual([]);
+    // Locked $25 cannot hollow an invented $250.
+    expect(findHallucinatedClaims('Tickets: $250 tonight.', ['$25'])).toEqual(
+      expect.arrayContaining([expect.stringContaining('dollar amount in body')]),
+    );
+    expect(findHallucinatedClaims('Enjoy free admission all day.', ['Free'])).toEqual(
+      expect.arrayContaining([expect.stringContaining('admission claim')]),
+    );
+    const sneaky = 'Tickets: From $25 but VIP is $99.';
+    expect(findHallucinatedClaims(sneaky, ['From $25'])).toEqual(
+      expect.arrayContaining([expect.stringContaining('dollar amount in body')]),
+    );
+  });
+
+  test('validateNewsletterDraft scans segments separately — a priced subject blocks even when the body price is locked', () => {
+    const { validateNewsletterDraft } = require('../services/newsletter-validator');
+    const pairs = [{ eventId: 'a0000001-0000-4000-8000-000000000001', price: 'From $25' }];
+    const send = {
+      subject: '🎟️ From $25 in prizes this weekend',
+      preview_text: 'ok',
+      html_body: '<p>🎟️ <span data-db-price="a0000001-0000-4000-8000-000000000001">From $25</span></p><p>Great show.</p>',
+      text_body: 'Tickets: From $25\nDetails & tickets: {{evclick:a0000001-0000-4000-8000-000000000001}}',
+      newsletter_type: 'local-weekly-fresh-events',
+    };
+    const { errors } = validateNewsletterDraft(send, { recipientCount: 5, lockedPrices: pairs });
+    expect(errors).toEqual(expect.arrayContaining([expect.stringContaining('dollar amount in body')]));
+    const clean = validateNewsletterDraft({ ...send, subject: 'Weekend chaos incoming' }, { recipientCount: 5, lockedPrices: pairs });
+    expect(clean.errors).toEqual([]);
+  });
+
+  test('assembled meta-box price validates cleanly via the structural span — no lock list needed for HTML', async () => {
+    const { assembleBeehiivNewsletter } = require('../services/newsletter-draft');
+    const html = await assembleBeehiivNewsletter({
+      selectedSubject: 'T',
+      events: [{
+        eventId: 'a0000001-0000-4000-8000-000000000001',
+        emoji: '🎭', title: 'A Show', sourceTitle: 'The Show', description: 'The Show is on.',
+        dateStr: 'Friday, June 12', eventUrl: 'https://example.com/x',
+        isFree: false, priceText: 'From $25',
+      }],
+    });
+    expect(html).toContain('<span data-db-price="a0000001-0000-4000-8000-000000000001">From $25</span>');
+    expect(findHallucinatedClaims(html, [{ eventId: 'a0000001-0000-4000-8000-000000000001', price: 'From $25' }], 'html')).toEqual([]);
+  });
+});
+
+describe('tiered event treatment (owner direction 2026-07-29)', () => {
+  const { assembleBeehiivNewsletter, buildFlagshipTextBody } = require('../services/newsletter-draft');
+  const mk = (n, over = {}) => ({
+    eventId: `a000000${n}-0000-4000-8000-00000000000${n}`,
+    emoji: ['🎸', '🎭', '🏈', '🎡', '🍫'][n],
+    title: `Curiosity Title ${n}`,
+    sourceTitle: `Official Event ${n}`,
+    description: `Official Event ${n} is the move this weekend.`,
+    dateStr: 'Friday, June 12',
+    timeStr: '8:00 PM',
+    location: `Venue ${n}, Sarasota`,
+    eventUrl: `https://example.com/ev${n}`,
+    imageUrl: null,
+    isFree: false,
+    priceText: n === 1 ? 'From $25' : null,
+    labels: n === 2 ? ['Family', 'Worth the drive'] : [],
+    highlights: ['Big stage', 'Bigger snacks'],
+    scoopLabel: "Here's the scoop:",
+    proTip: 'Get there before 8 for a table.',
+    closingLine: 'A **kicker** line.',
+    linkText: 'Grab your spot',
+    ...over,
+  });
+  const draft = () => ({ selectedSubject: 'Test', events: [0, 1, 2, 3, 4].map((n) => mk(n)) });
+
+  test('headliner keeps the full anatomy; featured cards drop bullets/pro-tip/kicker; shortlist groups compact entries', async () => {
+    const html = await assembleBeehiivNewsletter(draft());
+    // Hero (event 0) renders scoop bullets + pro tip + kicker.
+    expect(html).toContain("Here&#39;s the scoop:");
+    expect(html).toContain('<strong>Pro tip:</strong>');
+    expect(html).toContain('kicker');
+    // Only ONE of each — featured/shortlist events never render them.
+    expect(html.match(/Pro tip:/g)).toHaveLength(1);
+    expect(html.match(/Here&#39;s the scoop:/g)).toHaveLength(1);
+    // Featured events still get full h2 headings; shortlist gets one
+    // group heading and compact entries led by the REAL event name.
+    expect(html).toContain('The Weekend Shortlist');
+    expect(html.match(/The Weekend Shortlist/g)).toHaveLength(1);
+    expect(html).toContain('<strong>Official Event 3</strong>');
+    expect(html).toContain('<strong>Official Event 4</strong>');
+  });
+
+  test('pinned ev.tier wins over position: a missing headliner leaves a gap, nothing promotes', async () => {
+    const html = await assembleBeehiivNewsletter({
+      selectedSubject: 'Test',
+      // Headliner dropped upstream — survivors keep their pinned tiers.
+      events: [mk(1, { tier: 'featured' }), mk(2, { tier: 'featured' }), mk(3, { tier: 'quick' }), mk(4, { tier: 'quick' })],
+    });
+    // No hero furniture renders at all (scoop/pro-tip/kicker are hero-only).
+    expect(html).not.toContain('Pro tip:');
+    expect(html).not.toContain("Here&#39;s the scoop:");
+    expect(html).toContain('The Weekend Shortlist');
+    expect(html).toContain('<strong>Official Event 3</strong>');
+  });
+
+  test('DB-locked price renders (FREE wins over priceText); labels chip line renders', async () => {
+    const html = await assembleBeehiivNewsletter(draft());
+    expect(html).toMatch(/🎟️ <span data-db-price="a0000001-[^"]+">From \$25<\/span>/);
+    expect(html).toContain('🏷️ <em>Family · Worth the drive</em>');
+    const free = await assembleBeehiivNewsletter({ selectedSubject: 'T', events: [mk(1, { isFree: true })] });
+    expect(free).toContain('🎟️ <strong>FREE</strong>');
+    expect(free).not.toContain('From $25');
+  });
+
+  test('TOC is a collapsible details block: count summary + real names first, witty second', async () => {
+    const html = await assembleBeehiivNewsletter(draft());
+    expect(html).toContain('<details>');
+    expect(html).toContain('5 weekend picks · North Port to Tampa');
+    expect(html).toMatch(/<strong>Official Event 0<\/strong><\/a> <em[^>]*>— Curiosity Title 0<\/em>/);
+  });
+
+  test('share banner is forward-only (no social profile links); dividers are not links', async () => {
+    const html = await assembleBeehiivNewsletter(draft());
+    expect(html).toContain('Forward them this email');
+    expect(html).not.toContain('facebook.com/wavespestcontrol');
+    expect(html).not.toMatch(/<a href="https:\/\/www\.wavespestcontrol\.com\/"[^>]*>\s*<img src="[^"]*divider/);
+  });
+
+  test('buildFlagshipTextBody: content-equivalent sections — hero furniture serialized, no unreviewed CTA', () => {
+    const text = buildFlagshipTextBody({
+      greeting: 'Hey there!',
+      introText: 'Big weekend **ahead**.',
+      transitionLine: "Let's get into it",
+      events: [mk(1), mk(3, { isFree: true })],
+      homeownerMinute: 'Check your _screens_.',
+      closingHeading: 'That is the scoop, crew',
+      closingText: 'Go outside.',
+      closingChecklist: ['Hydrate like it\'s your job'],
+      ps: 'Forward this to a friend.',
+      signoff: '— The Waves Team',
+    });
+    expect(text).toContain('== Curiosity Title 1 ==');
+    expect(text).toContain("Here's the scoop:");
+    expect(text).toContain('Friday, June 12 at 8:00 PM | Venue 1, Sarasota | Tickets: From $25');
+    const withAddr = buildFlagshipTextBody({ events: [mk(1, { address: '123 Main St' })] });
+    expect(withAddr).toContain('Venue 1, Sarasota (123 Main St)');
+    // evclick token — sendCampaign substitutes both MIME parts.
+    expect(text).toContain('Details & tickets: {{evclick:a0000001-0000-4000-8000-000000000001}}');
+    // Text validates clean under the PAIR-BOUND text scan (facts line
+    // adjacent to its own event token).
+    expect(findHallucinatedClaims(text, [{ eventId: 'a0000001-0000-4000-8000-000000000001', price: 'From $25' }], 'text')).toEqual([]);
+    expect(text).toContain("Let's get into it");
+    expect(text).toContain('== That is the scoop, crew ==');
+    expect(text).toContain('FREE');
+    // Hero furniture serializes (first event only).
+    expect(text).toContain('- Big stage');
+    expect(text).toContain('Pro tip: Get there before 8');
+    expect(text).toContain('A kicker line.');
+    expect(text.match(/Pro tip:/g)).toHaveLength(1);
+    // Checklist + P.S. serialize; no unreviewed sales CTA.
+    expect(text).toContain("[ ] Hydrate like it's your job");
+    expect(text).toContain('P.S. Forward this to a friend.');
+    expect(text).not.toContain('Schedule a visit');
+    expect(text).toContain('== Homeowner Minute ==');
+    expect(text).not.toContain('**');
+    expect(text).toContain('{{feedback-text}}');
+  });
+
+  test('text builder keys hero furniture off the pinned tier — a gapped lineup stays MIME-equivalent', () => {
+    const gapped = buildFlagshipTextBody({
+      events: [mk(1, { tier: 'featured' }), mk(2, { tier: 'featured' })],
+      signoff: '— The Waves Team',
+    });
+    // No hero furniture anywhere: both survivors are featured-tier.
+    expect(gapped).not.toContain('Pro tip:');
+    expect(gapped).not.toContain('- Big stage');
+  });
+
+  test('sortByCallerRank re-asserts portfolio order over a reordered model echo', () => {
+    const { sortByCallerRank } = require('../services/newsletter-draft');
+    const ids = [1, 2, 3].map((n) => `a000000${n}-0000-4000-8000-00000000000${n}`);
+    const shuffled = [mk(3), mk(1), mk(2)];
+    const sorted = sortByCallerRank(shuffled, ids);
+    expect(sorted.map((e) => e.sourceTitle)).toEqual(['Official Event 1', 'Official Event 2', 'Official Event 3']);
   });
 });
 

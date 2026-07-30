@@ -102,7 +102,9 @@ describe('pollLivePost live-flip auto-share', () => {
       title: 'Test Post',
       description: 'Meta',
       link: expect.stringContaining('/pest-control/test-post/'),
-      source: 'blog',
+      // 'blog_auto' distinguishes the AUTOMATIC live-flip from the admin
+      // Share button's 'blog' — the daily auto-share cap counts by source_type.
+      source: 'blog_auto',
       noAiImage: true,
     }));
     expect(updates.find((u) => u.updates.shared_to_social === true)).toBeDefined();

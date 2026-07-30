@@ -36,6 +36,10 @@ const NEWSLETTER_TYPES = {
         'tampa',
       ],
     },
+    // Beehiiv comedic format (owner reversal 2026-07-28, late evening —
+    // supersedes the same-day compact spec): conceptual coverage boxes the
+    // generator fills; audience/road-trip coverage is ALSO enforced upstream
+    // as portfolio constraints (newsletter-portfolio.js), which is retained.
     requiredSections: [
       'local_intro',
       'fresh_this_week',

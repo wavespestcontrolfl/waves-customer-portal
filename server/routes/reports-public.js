@@ -341,13 +341,23 @@ async function buildServiceReportV1ResponseData(service, token, { mode = 'live',
   // plus a seasonal "what to expect" forecast resolved from the property zip.
   // Pest service line only; best-effort so a forecast/network hiccup never blocks
   // the report. Flows to the client via the `...data` spread below.
+  // Cockroach-FAMILY typed reports (generic cockroach + the roach
+  // knockdown cleanouts) opt OUT of the V2 dashboard entirely (owner
+  // 2026-07-27): its perimeter-protection story — "Where we protected",
+  // entry/lanai/pool-pad rows, "no perimeter application was logged" — is
+  // wrong for an interior cleanout and read as filler. Without the V2
+  // shell the report composes from the typed record instead: Visit
+  // Summary (narrative slot), the What-we-found tiles, and the activity
+  // gauge, all of which the dashboard would otherwise suppress. The same
+  // classifier drives the PDF cache suffix (pest-report-v2.js).
+  const { buildPestReportV2, buildCustomerConcernCard, isCockroachTypedReportType } = require('../services/service-report/pest-report-v2');
   if (
     process.env.PEST_REPORT_V2 === 'true'
     && data.serviceLine === 'pest'
+    && !isCockroachTypedReportType(data.typedReport?.type)
     && dynamicContext.premiumExperience
   ) {
     try {
-      const { buildPestReportV2 } = require('../services/service-report/pest-report-v2');
       const forecast = await fetchSeasonalForecastSafe(service.zip);
       const pestReportV2 = buildPestReportV2({
         premiumExperience: dynamicContext.premiumExperience,
@@ -367,9 +377,29 @@ async function buildServiceReportV1ResponseData(service, token, { mode = 'live',
         technicianReport: !data.typedReport && data.summarySource === 'technician_report'
           ? data.summary
           : null,
+        // Homeowner-reported concern → the "We looked into what you flagged"
+        // card, so what the customer told the tech never disappears into a
+        // summary clause (John Kelleher audit 2026-07-29).
+        customerConcern: data.customerConcern || null,
       });
       if (pestReportV2) data.pestReportV2 = pestReportV2;
     } catch { /* best-effort — never block the report */ }
+  }
+
+  // Cockroach-family typed reports skip the V2 dashboard entirely, but the
+  // homeowner's reported concern deserves the same acknowledgment card there —
+  // the client renders data.customerConcernCard standalone without re-enabling
+  // the perimeter dashboard (codex P2 #3043).
+  if (
+    process.env.PEST_REPORT_V2 === 'true'
+    && data.serviceLine === 'pest'
+    && !data.pestReportV2
+    && data.customerConcern
+  ) {
+    try {
+      const card = buildCustomerConcernCard(data.customerConcern);
+      if (card) data.customerConcernCard = card;
+    } catch { /* best-effort */ }
   }
 
   // Mosquito Report V2 — yard-usability dashboard for RECURRING mosquito visits
@@ -843,13 +873,27 @@ router.post('/:token/events', reportEventLimiter, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// Cockroach-family typed reports retired the V2 perimeter story — an
+// approved recap video telling it must not serve from ANY public endpoint,
+// including permanent-token URLs hit by old clients (codex P2 #3007 r12).
+function cockroachRecapRetired(service) {
+  try {
+    const data = typeof service.service_data === 'string'
+      ? JSON.parse(service.service_data)
+      : service.service_data;
+    const { isCockroachTypedReportType } = require('../services/service-report/pest-report-v2');
+    return isCockroachTypedReportType(data?.typedReportSnapshot?.type);
+  } catch { return false; }
+}
+
 // GET /api/reports/:token/recap — customer-facing recap status. Only exposes a
 // recap the tech has APPROVED (ready-but-unapproved stays private).
 router.get('/:token/recap', async (req, res, next) => {
   if (!FULL_TOKEN_RE.test(req.params.token || '')) return res.status(404).json({ error: 'Not found' });
   try {
-    const service = await db('service_records').where({ report_view_token: req.params.token }).select('id', 'scheduled_service_id').first();
+    const service = await db('service_records').where({ report_view_token: req.params.token }).select('id', 'scheduled_service_id', 'service_data').first();
     if (!service || !service.scheduled_service_id) return res.status(404).json({ error: 'Not found' });
+    if (cockroachRecapRetired(service)) return res.json({ ready: false, durationMs: null });
     const { getRecap } = require('../services/service-report/recap-pipeline');
     const recap = await getRecap(service.scheduled_service_id);
     const ready = Boolean(recap && recap.status === 'approved' && recap.s3_key);
@@ -861,8 +905,9 @@ router.get('/:token/recap', async (req, res, next) => {
 router.get('/:token/recap/video', async (req, res, next) => {
   if (!FULL_TOKEN_RE.test(req.params.token || '')) return res.status(404).end();
   try {
-    const service = await db('service_records').where({ report_view_token: req.params.token }).select('id', 'scheduled_service_id').first();
+    const service = await db('service_records').where({ report_view_token: req.params.token }).select('id', 'scheduled_service_id', 'service_data').first();
     if (!service || !service.scheduled_service_id) return res.status(404).end();
+    if (cockroachRecapRetired(service)) return res.status(404).end();
     const { getRecap } = require('../services/service-report/recap-pipeline');
     const recap = await getRecap(service.scheduled_service_id);
     if (!recap || recap.status !== 'approved' || !recap.s3_key) return res.status(404).end();
@@ -1419,7 +1464,15 @@ router.get('/:token/data', async (req, res, next) => {
       // 2026-07-09). Live views only: the player streams
       // /reports/:token/recap/video, meaningless in pdf/static renders.
       // Best-effort — never blocks.
-      if (mode === 'live' && service.scheduled_service_id && !v1Data.internalOnly && v1Data.serviceLine === 'pest') {
+      if (
+        mode === 'live' && service.scheduled_service_id && !v1Data.internalOnly
+        && v1Data.serviceLine === 'pest'
+        // Cockroach-family typed reports dropped the V2 perimeter story —
+        // an ALREADY-approved recap video telling it must not keep serving
+        // on permanent links either (codex P1 #3007 r11; the recap builder
+        // stopped producing new ones in r10).
+        && !require('../services/service-report/pest-report-v2').isCockroachTypedReportType(v1Data.typedReport?.type)
+      ) {
         try {
           const { getRecap } = require('../services/service-report/recap-pipeline');
           const recap = await getRecap(service.scheduled_service_id);

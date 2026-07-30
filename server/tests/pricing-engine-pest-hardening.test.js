@@ -122,7 +122,7 @@ describe('pest-control pricing hardening', () => {
       frequencyWasDefaulted: false,
     }));
     expect(normalizePestFrequency('nonsense').frequencyWarnings).toContain('invalid_pest_frequency_defaulted_to_quarterly');
-    expect(normalizePestPricingVersion('bad').pricingVersionWarnings).toContain('invalid_pest_pricing_version_defaulted_to_v1');
+    expect(normalizePestPricingVersion('bad').pricingVersionWarnings).toContain('invalid_pest_pricing_version_defaulted_to_v2');
     expect(normalizeRoachType('palmetto').roachType).toBe('regular');
     expect(normalizeRoachType('kitchen').roachType).toBe('german');
     expect(normalizeRoachType('mystery').roachWarnings).toContain('invalid_roach_type_defaulted_to_none');

@@ -23,6 +23,8 @@ describe('pricing engine DB bridge', () => {
   const originalRecurringCustomerPerk = constants.WAVEGUARD.recurringCustomerOneTimePerk;
   const originalMosquitoBasePrices = JSON.parse(JSON.stringify(constants.MOSQUITO.basePrices));
   const originalMosquitoTierVisits = { ...constants.MOSQUITO.tierVisits };
+  // Shallow-clone, not JSON — the ACRE bucket's maxSqFt is Infinity.
+  const originalMosquitoLotCategories = constants.MOSQUITO.lotCategories.map((c) => ({ ...c }));
   const originalPalmTreatments = JSON.parse(JSON.stringify(constants.PALM.treatments));
   const originalBedBug = JSON.parse(JSON.stringify(constants.BED_BUG));
   const originalFlea = JSON.parse(JSON.stringify(constants.SPECIALTY.flea));
@@ -56,6 +58,7 @@ describe('pricing engine DB bridge', () => {
     constants.WAVEGUARD.recurringCustomerOneTimePerk = originalRecurringCustomerPerk;
     constants.MOSQUITO.basePrices = JSON.parse(JSON.stringify(originalMosquitoBasePrices));
     constants.MOSQUITO.tierVisits = { ...originalMosquitoTierVisits };
+    constants.MOSQUITO.lotCategories = originalMosquitoLotCategories.map((c) => ({ ...c }));
     constants.PALM.treatments = JSON.parse(JSON.stringify(originalPalmTreatments));
     constants.PALM.treatmentTypes = constants.PALM.treatments;
     for (const key of Object.keys(constants.BED_BUG)) delete constants.BED_BUG[key];
@@ -247,21 +250,101 @@ describe('pricing engine DB bridge', () => {
     expect(constants.MOSQUITO.tierVisits).toEqual({ seasonal9: 9, monthly12: 12 });
   });
 
+  test('applies treatable-sf mosquito lot brackets from pricing_config', async () => {
+    const db = pricingConfigDb([
+      {
+        config_key: 'mosquito_lot_sizes',
+        data: {
+          SMALL: { max_sqft: 7999, label: '< 8k treatable sf' },
+          QUARTER: { max_sqft: 11999, label: '8k-12k treatable sf' },
+          THIRD: { max_sqft: 17999, label: '12k-18k treatable sf' },
+          HALF: { max_sqft: 34999, label: '18k-35k treatable sf' },
+          ACRE: { max_sqft: 999999, label: '35k+ treatable sf' },
+        },
+      },
+    ]);
+
+    await expect(syncConstantsFromDB(db)).resolves.toBe(true);
+
+    // Migration 20260724130000 restated the row in treatable sf, so applying it
+    // must be a no-op against the in-code brackets — no silent bracket movement.
+    expect(constants.MOSQUITO.lotCategories.map((c) => [c.key, c.maxSqFt])).toEqual([
+      ['SMALL', 7999],
+      ['QUARTER', 11999],
+      ['THIRD', 17999],
+      ['HALF', 34999],
+      ['ACRE', Infinity],
+    ]);
+  });
+
+  test('legacy gross-lot seed reasserts the in-code brackets, not the last synced ones', async () => {
+    // constants.MOSQUITO.lotCategories is a mutable singleton and the admin PUT
+    // re-runs this sync, so rejecting the seed has to ASSIGN the in-code values
+    // back. Skipping the assignment would keep a previous sync's custom
+    // thresholds live while the DB and admin UI show the rejected seed.
+    await expect(syncConstantsFromDB(pricingConfigDb([{
+      config_key: 'mosquito_lot_sizes',
+      data: { SMALL: { max_sqft: 5000 }, QUARTER: { max_sqft: 9000 }, THIRD: { max_sqft: 14000 }, HALF: { max_sqft: 30000 }, ACRE: { max_sqft: 999999 } },
+    }]))).resolves.toBe(true);
+    expect(constants.MOSQUITO.lotCategories.map((c) => c.maxSqFt)).toEqual([5000, 9000, 14000, 30000, Infinity]);
+
+    // Now an admin saves the legacy acreage seed: the custom 5000 must NOT survive.
+    await expect(syncConstantsFromDB(pricingConfigDb([{
+      config_key: 'mosquito_lot_sizes',
+      data: { SMALL: { max_sqft: 10889 }, QUARTER: { max_sqft: 14519 }, THIRD: { max_sqft: 21779 }, HALF: { max_sqft: 43559 }, ACRE: {} },
+    }]))).resolves.toBe(true);
+    expect(constants.MOSQUITO.lotCategories.map((c) => [c.key, c.maxSqFt])).toEqual([
+      ['SMALL', 7999],
+      ['QUARTER', 11999],
+      ['THIRD', 17999],
+      ['HALF', 34999],
+      ['ACRE', Infinity],
+    ]);
+  });
+
+  test('ignores the legacy gross-lot-acreage mosquito lot-size seed', async () => {
+    const db = pricingConfigDb([
+      {
+        config_key: 'mosquito_lot_sizes',
+        data: {
+          SMALL: { max_sqft: 10889, label: '< 1/4 acre' },
+          QUARTER: { max_sqft: 14519, label: '1/4 acre' },
+          THIRD: { max_sqft: 21779, label: '1/3 acre' },
+          HALF: { max_sqft: 43559, label: '1/2 acre' },
+          ACRE: { label: '1+ acre' },
+        },
+      },
+    ]);
+
+    await expect(syncConstantsFromDB(db)).resolves.toBe(true);
+
+    // Gross lot acreage widens every bracket ~36% and drops most homes a
+    // bracket. The values are ascending and finite, so validation passes them —
+    // db-bridge has to reject the seed by value.
+    expect(constants.MOSQUITO.lotCategories.map((c) => [c.key, c.maxSqFt])).toEqual([
+      ['SMALL', 7999],
+      ['QUARTER', 11999],
+      ['THIRD', 17999],
+      ['HALF', 34999],
+      ['ACRE', Infinity],
+    ]);
+  });
+
   test('validates active mosquito recurring and one-time config defaults', () => {
     expect(validatePestPricingConfig(constants)).toEqual(expect.objectContaining({ valid: true }));
     expect(constants.MOSQUITO.basePrices).toEqual(expect.objectContaining({
-      SMALL: [66, 60],
-      QUARTER: [69, 63],
-      THIRD: [72, 66],
-      HALF: [78, 70],
-      ACRE: [88, 78],
+      SMALL: [73, 66],
+      QUARTER: [76, 69],
+      THIRD: [79, 73],
+      HALF: [86, 77],
+      ACRE: [97, 86],
     }));
     expect(constants.MOSQUITO.tierVisits).toEqual({ seasonal9: 9, monthly12: 12 });
     expect(constants.ONE_TIME.mosquito).toEqual(expect.objectContaining({
-      SMALL: 99,
-      STANDARD: 129,
-      LARGE: 159,
-      XL: 199,
+      SMALL: 149,
+      STANDARD: 169,
+      LARGE: 189,
+      XL: 209,
       ESTATE: 239,
       ACRE_CLASS: 269,
       OVER_ACRE: 269,
@@ -793,7 +876,7 @@ describe('pricing engine DB bridge', () => {
 
     snapshot.TERMITE.stationSpacing = 0;
     snapshot.TERMITE.systems.advance.stationCost = -1;
-    snapshot.TERMITE.monitoring.basic.monthly = 0;
+    snapshot.TERMITE.monitoring.baseMonthly = 0;
     snapshot.SPECIALTY.trenching.concretePctCap = 1.2;
     snapshot.SPECIALTY.trenching.products.termidor_sc.containerCost = 0;
     snapshot.SPECIALTY.trenching.products.taurus_sc.productOzPerFinishedGallonAtHighRate = 0.4;
@@ -820,7 +903,7 @@ describe('pricing engine DB bridge', () => {
     expect(result.errors).toEqual(expect.arrayContaining([
       'TERMITE.stationSpacing must be positive',
       'TERMITE.systems.advance.stationCost must be non-negative',
-      'TERMITE.monitoring.basic.monthly must be positive',
+      'TERMITE.monitoring.baseMonthly must be positive',
       'SPECIALTY.trenching.concretePctCap must be between 0 and 1',
       'SPECIALTY.trenching.productPremiumMultiplier must be at least 1',
       'SPECIALTY.trenching.products.termidor_sc.containerCost must be positive',
@@ -837,14 +920,35 @@ describe('pricing engine DB bridge', () => {
     ]));
   });
 
+  test('termite monitoring brackets sync whole-dollar and ignore the retired flat keys', async () => {
+    const db = pricingConfigDb([{
+      config_key: 'termite_monitoring',
+      // Whole dollars end-to-end (codex P2 rounds 0+1 on #3017): the
+      // engine's annual is whole-dollar by design, so cents cannot stay
+      // coherent across monthly x 12 / monthly x 3 — the admin validator
+      // rejects cents, and a legacy/hand-edited cent row ROUNDS here
+      // rather than desyncing server vs client fallback. Legacy
+      // basic/premier keys are ignored — honoring `basic` as a bracket
+      // base would double the small-home rate.
+      data: { pricing_model: 'station_brackets', base_monthly: 19.5, step_monthly: 4.25, bracket_stations: 5, basic: 35, premier: 65 },
+    }]);
+    await expect(syncConstantsFromDB(db)).resolves.toBe(true);
+    expect(constants.TERMITE.monitoring.baseMonthly).toBe(20);
+    expect(constants.TERMITE.monitoring.stepMonthly).toBe(4);
+    expect(constants.TERMITE.monitoring.bracketStations).toBe(5);
+  });
+
   test('rejects invalid termite DB overlay and restores previous constants', async () => {
+    // station_spacing_ft is retired and no longer synced (owner
+    // 2026-07-28), so the invalid trigger is a negative station cost —
+    // still a synced field.
     const db = pricingConfigDb([{
       config_key: 'termite_install',
-      data: { station_spacing_ft: 0, multiplier: 1.45 },
+      data: { advance_bait: -1, multiplier: 1.45 },
     }]);
 
     await expect(syncConstantsFromDB(db)).resolves.toBe(false);
-    expect(constants.TERMITE.stationSpacing).toBe(originalTermite.stationSpacing);
+    expect(constants.TERMITE.systems.advance.stationCost).toBe(originalTermite.systems.advance.stationCost);
     expect(constants.TERMITE.installMultiplier).toBe(originalTermite.installMultiplier);
   });
 });

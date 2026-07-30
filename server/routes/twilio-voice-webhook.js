@@ -62,9 +62,15 @@ function maskPhone(value) {
   return digits ? `***${digits.slice(-4)}` : 'unknown';
 }
 
-async function findSingleCustomerByPhone(dbLike, phone) {
+// Raw phone-match fetch (up to 2 rows). Callers that need to LINK a customer
+// use findSingleCustomerByPhone below (1 match or nothing); callers that only
+// need to know whether ANY customer exists on this number — like the
+// pre-connect screen's known-customer bypass — check length > 0, because a
+// number shared by 2+ records is still unmistakably a known caller even
+// though it is not safe to auto-link.
+async function findCustomerPhoneMatches(dbLike, phone) {
   const key = customerPhoneLookupKey(phone);
-  if (!key) return null;
+  if (!key) return [];
 
   const query = dbLike('customers').whereNull('deleted_at');
   if (key.length === 10) {
@@ -76,12 +82,41 @@ async function findSingleCustomerByPhone(dbLike, phone) {
     query.whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') = ?", [key]);
   }
 
-  const matches = await query.orderBy('updated_at', 'desc').limit(2);
+  return query.orderBy('updated_at', 'desc').limit(2);
+}
+
+async function findSingleCustomerByPhone(dbLike, phone) {
+  const matches = await findCustomerPhoneMatches(dbLike, phone);
   if (matches.length === 1) return matches[0];
   if (matches.length > 1) {
     logger.warn(`[voice] ${matches.length} customers share caller phone ${maskPhone(phone)}; not auto-linking call_log`);
   }
   return null;
+}
+
+// Screen-bypass identity check: does ANY customer record know this number —
+// the customer's own phone OR one of the three service-contact slot phones?
+// Mirrors CONTACT_MATCH_PHONE_COLS in call-recording-processor.js (the
+// canonical inbound identity set: the pipeline itself records spouses and
+// tenants into those slots). Used ONLY for the pre-connect screen exemption:
+// call_log linking stays primary-phone-only via findSingleCustomerByPhone,
+// and slot roles that must never auto-link (lender/agent) still bypass here
+// — whoever they are, they are a known caller, not a spoofed robocall.
+const KNOWN_CALLER_PHONE_COLS = ['phone', 'service_contact_phone', 'service_contact2_phone', 'service_contact3_phone'];
+
+async function knownCallerPhoneExists(dbLike, phone) {
+  const key = customerPhoneLookupKey(phone);
+  if (!key) return false;
+  const keys = key.length === 10 ? [key, `1${key}`] : [key];
+  const placeholder = keys.map(() => '?').join(', ');
+  const frag = KNOWN_CALLER_PHONE_COLS
+    .map((col) => `regexp_replace(COALESCE(${col}, ''), '[^0-9]', '', 'g') IN (${placeholder})`)
+    .join(' OR ');
+  const rows = await dbLike('customers')
+    .whereNull('deleted_at')
+    .whereRaw(`(${frag})`, KNOWN_CALLER_PHONE_COLS.flatMap(() => keys))
+    .limit(1);
+  return rows.length > 0;
 }
 
 // Builds the spoken caller name stamped into call_log at /voice time and read
@@ -311,6 +346,70 @@ function resolveCsrName(staffNumber) {
 
 const VOICEMAIL_COMPLETE_ACTION = '/api/webhooks/twilio/voicemail-complete';
 
+// ── Pre-connect caller screen ────────────────────────────────────────────
+// Unknown-caller calls arriving with STIR/SHAKEN attestation B (the carrier
+// can't vouch the caller owns the displayed number) are the spoofed-number
+// robocall population. 60 days of the ground truth captured on this webhook:
+// 25% of inbound calls are unknown+B, 67% of those end as dead-air
+// voicemails, and only ~2% of lead-producing calls arrive on B. Attestation
+// A, C, and MISSING all bypass — most real leads arrive with no attestation
+// at all, so absence is NOT suspicion.
+//
+// With GATE_CALL_PRECONNECT_SCREEN on, qualifying callers must press a key
+// before staff phones ring; no key → the Waves voicemail recorder, never a
+// bare hangup (a confused human still reaches voicemail; a silent robocall
+// voicemail is auto-hidden by the dead-air suppression in the admin call
+// log). Gate off = shadow: qualifying calls are stamped
+// metadata.preconnect_screen='would_gate' so daily volume is judgeable
+// before any caller ever hears the prompt. Lifecycle stamps: 'gated' at the
+// challenge, then 'passed' (key pressed) or 'failed' (fell to voicemail).
+function preconnectScreenDecision({ knownCaller, stirVerstat, gateOn }) {
+  if (knownCaller || !/-B$/.test(String(stirVerstat || ''))) return 'none';
+  return gateOn ? 'gate' : 'would_gate';
+}
+
+// Pass/fail re-enter THIS route via query params (?screened=1 / ?screenfail=1)
+// so the normal routing, idempotency claim, and voicemail flows are reused
+// verbatim — no new public webhook route exists.
+function buildPreconnectChallengeTwiML() {
+  const twiml = new VoiceResponse();
+  const gatherOpts = {
+    input: 'dtmf',
+    numDigits: 1,
+    timeout: 6,
+    action: '/api/webhooks/twilio/voice?screened=1',
+    method: 'POST',
+  };
+  twiml
+    .gather(gatherOpts)
+    .say({ voice: SAY_VOICE }, 'Thank you for calling Waves Pest Control. To be connected, please press one.');
+  twiml
+    .gather(gatherOpts)
+    .say({ voice: SAY_VOICE }, 'Please press one to be connected.');
+  twiml.redirect({ method: 'POST' }, '/api/webhooks/twilio/voice?screenfail=1');
+  return twiml.toString();
+}
+
+async function stampPreconnectScreen(callSid, value) {
+  try {
+    const row = await db('call_log')
+      .where('twilio_call_sid', callSid)
+      .orderBy('created_at', 'desc')
+      .first();
+    if (!row) return;
+    let meta = {};
+    try {
+      meta = typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
+    } catch { meta = {}; }
+    meta.preconnect_screen = value;
+    await db('call_log')
+      .where({ id: row.id })
+      .update({ metadata: JSON.stringify(meta), updated_at: new Date() });
+  } catch (err) {
+    logger.warn(`[preconnect-screen] stamp '${value}' failed for ${maskSid(callSid)}: ${err.message}`);
+  }
+}
+
 function appendVoicemailRecording(twiml) {
   const voicemailAudio = process.env.WAVES_VOICEMAIL_URL || 'https://jet-wolverine-3713.twil.io/assets/waves-voicemail.mp3';
   twiml.play(voicemailAudio);
@@ -478,8 +577,41 @@ router.post('/voice', async (req, res) => {
 
     const numberConfig = TWILIO_NUMBERS.findByNumber(To);
 
-    // Match caller to customer
-    let customer = await findSingleCustomerByPhone(db, From);
+    // Match caller to customer. The raw matches are fetched once: a single
+    // match links the call; 2+ matches deliberately do NOT auto-link (shared
+    // number) but still count as a known caller for the screen bypass below.
+    const customerPhoneMatches = await findCustomerPhoneMatches(db, From);
+    let customer = customerPhoneMatches.length === 1 ? customerPhoneMatches[0] : null;
+    if (customerPhoneMatches.length > 1) {
+      logger.warn(`[voice] ${customerPhoneMatches.length} customers share caller phone ${maskPhone(From)}; not auto-linking call_log`);
+    }
+
+    // Pre-connect screen decision (see helpers above). Re-entries from the
+    // challenge TwiML arrive on this same route with ?screened=1 (a key was
+    // pressed) or ?screenfail=1 (both Gathers timed out) — they are never a
+    // first delivery, so the insert/stamp below doesn't double-fire.
+    const screenReentry = req.query.screened === '1'
+      ? 'passed'
+      : (req.query.screenfail === '1' ? 'failed' : null);
+    let knownCaller = customerPhoneMatches.length > 0;
+    // Service-contact slot phones (spouse/tenant — the canonical inbound
+    // identity set) also bypass the screen. Checked only when it could
+    // change the outcome (no primary match, B attestation, not a re-entry)
+    // so the extra query never runs on ordinary calls; a check failure
+    // fails OPEN — never challenge a caller because Postgres hiccupped.
+    if (!knownCaller && !screenReentry && /-B$/.test(String(req.body.StirVerstat || ''))) {
+      try {
+        knownCaller = await knownCallerPhoneExists(db, From);
+      } catch (err) {
+        logger.warn(`[preconnect-screen] known-caller check failed (failing open, no challenge): ${err.message}`);
+        knownCaller = true;
+      }
+    }
+    const screenDecision = screenReentry ? 'none' : preconnectScreenDecision({
+      knownCaller,
+      stirVerstat: req.body.StirVerstat,
+      gateOn: isEnabled('callPreconnectScreen'),
+    });
 
     // #4: Caller ID Enrichment via Twilio Lookup API
     if (firstDelivery && !customer && From) {
@@ -525,6 +657,12 @@ router.post('/voice', async (req, res) => {
         // that absence is itself a finding (Marchex was silent for months).
         stir_verstat: req.body.StirVerstat || null,
         addons: parseAddOnsForAudit(req.body.AddOns),
+        // Pre-connect screen lifecycle: 'would_gate' (shadow, gate off) or
+        // 'gated' (challenge issued) → later 'passed'/'failed'. Absent for
+        // known customers and non-B attestation.
+        ...(screenDecision !== 'none'
+          ? { preconnect_screen: screenDecision === 'gate' ? 'gated' : 'would_gate' }
+          : {}),
       }),
     });
     // call_log now committed — don't release the claim on a later error.
@@ -569,6 +707,38 @@ router.post('/voice', async (req, res) => {
     // intentional.
     const greetingUrl = process.env.WAVES_GREETING_URL
       || 'https://jet-wolverine-3713.twil.io/assets/ElevenLabs_2025-09-20T05_54_14_Veda%20Sky%20-%20Customer%20Care%20Agent_pvc_sp114_s58_sb72_se89_b_m2.mp3';
+
+    // ── Pre-connect caller screen (before any staff ring / agent leg) ──
+    if (screenReentry === 'failed') {
+      // Both Gathers timed out — dead air or a caller who can't press keys.
+      // Never a bare hangup: route to the Waves voicemail recorder so a real
+      // human still gets through. Greeting MP3 first — it carries the
+      // FL §934.03 recording disclosure and MUST precede the recorder.
+      // Both audit writes are best-effort: a transient DB failure must never
+      // bubble to the outer catch and replace the promised voicemail
+      // fallback with the generic error TwiML.
+      await stampPreconnectScreen(CallSid, 'failed');
+      await db('call_log').where('twilio_call_sid', CallSid).update({
+        answered_by: 'voicemail',
+        call_outcome: 'voicemail',
+        updated_at: new Date(),
+      }).catch((err) => {
+        logger.warn(`[preconnect-screen] failed-outcome update skipped for ${maskSid(CallSid)}: ${err.message}`);
+      });
+      logger.info(`[preconnect-screen] no key from ${maskPhone(From)} (${maskSid(CallSid)}) — routing to Waves voicemail`);
+      const failTwiml = new VoiceResponse();
+      failTwiml.play(greetingUrl);
+      appendVoicemailRecording(failTwiml);
+      return res.type('text/xml').send(failTwiml.toString());
+    }
+    if (screenReentry === 'passed') {
+      // Any keypress proves a human; continue into the normal flow below.
+      await stampPreconnectScreen(CallSid, 'passed');
+      logger.info(`[preconnect-screen] caller ${maskPhone(From)} passed (${maskSid(CallSid)}) — continuing normal routing`);
+    } else if (screenDecision === 'gate') {
+      logger.info(`[preconnect-screen] challenging unknown B-attestation caller ${maskPhone(From)} (${maskSid(CallSid)})`);
+      return res.type('text/xml').send(buildPreconnectChallengeTwiML());
+    }
 
     // ── AI voice agent routing (opt-in; default path untouched) ──
     // The agent NEVER fronts a call unless GATE_VOICE_AI_AGENT is on AND the
@@ -1154,23 +1324,49 @@ router.post('/recording-status', async (req, res) => {
       // Twilio sent on this webhook. Skip auto-processing entirely if
       // we couldn't attach the recording to any row above.
       //
-      // 10-minute delay (PR #467): Twilio's recording-status:completed
-      // fires before the MP3 is reliably fetchable from their CDN, so the
-      // auth'd download in the processor can 404 or return a partial
-      // buffer and Gemini gets garbage. Empirically ~10 min is the
-      // propagation window where the download stabilizes. The 5-min
-      // processAllPending cron in scheduler.js is the restart-safe
-      // backstop if this in-memory timer is lost — it applies the same
-      // age gate, so it will not fire ahead of the window.
+      // Two timers (PR #467 + verified-download follow-up): Twilio's
+      // recording-status:completed fires before the MP3 is reliably
+      // fetchable from their CDN — an early download can 404 or return a
+      // partial buffer. The EARLY timer (default 2 min) is safe because the
+      // processor now verifies the downloaded bytes against the recording's
+      // known duration and defers (releases its claim untouched) when the
+      // audio isn't fully propagated; most recordings are ready well before
+      // 10 minutes, so this cuts typical transcript latency by ~8 min. The
+      // 10-minute timer stays as the second attempt for recordings the
+      // early pass deferred, and the 5-min processAllPending cron in
+      // scheduler.js remains the restart-safe backstop if these in-memory
+      // timers are lost (deploys wipe them — it happened to the first
+      // post-cutover call on 2026-07-28).
       if (matchedSid) {
         queueVoiceMessageSync(matchedSid);
         try {
           const processor = require('../services/call-recording-processor');
-          setTimeout(async () => {
+          const earlyDelayMs = Number(process.env.CALL_PROC_EARLY_PROCESS_DELAY_MS) || 2 * 60 * 1000;
+          const fallbackDelayMs = 10 * 60 * 1000;
+          const attempt = async (label) => {
             try {
-              await processor.processRecording(matchedSid);
-            } catch (e) { logger.error(`Auto-process recording failed: ${e.message}`); }
-          }, 10 * 60 * 1000);
+              return await processor.processRecording(matchedSid);
+            } catch (e) {
+              logger.error(`Auto-process recording failed (${label}): ${e.message}`);
+              return null;
+            }
+          };
+          // The fallback timer is chained on the EARLY attempt's outcome, not
+          // scheduled unconditionally: once the early pass reaches ANY result
+          // other than a not-ready deferral, re-invoking processRecording at
+          // 10 min would re-claim non-'processed' terminal rows (voicemail,
+          // spam) and repeat transcription/extraction (Codex #3037 round-2
+          // P2). Deferral or error → schedule the second attempt for the
+          // remainder of the original 10-minute window. If the process
+          // restarts and both in-memory timers are lost, the 5-min cron is
+          // still the backstop, unchanged.
+          setTimeout(async () => {
+            const result = await attempt('early');
+            const needsFallback = !result || result.reason === 'recording_not_ready';
+            if (needsFallback) {
+              setTimeout(() => attempt('fallback'), Math.max(fallbackDelayMs - earlyDelayMs, 60 * 1000));
+            }
+          }, earlyDelayMs);
         } catch (e) { logger.error(`Recording auto-process setup failed: ${e.message}`); }
       }
     }
@@ -1544,6 +1740,10 @@ router.post('/call-status', async (req, res) => {
 router._test = {
   agentHandoffKind,
   appendAgentHandoff,
+  buildPreconnectChallengeTwiML,
+  findCustomerPhoneMatches,
+  knownCallerPhoneExists,
+  preconnectScreenDecision,
   connectingAnnouncement,
   customerPhoneLookupKey,
   findSingleCustomerByPhone,

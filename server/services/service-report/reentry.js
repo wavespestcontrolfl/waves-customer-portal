@@ -1,6 +1,6 @@
 const db = require('../../models/db');
 const { DEFAULT_TIME_ZONE, formatReadyTime, normalizeDate } = require('./time-format');
-const { normalizeAdvisoryForTreatmentScope, parseJsonObject } = require('./report-data');
+const { normalizeAdvisoryForTreatmentScope, parseJsonObject, resolveTracedExteriorZone } = require('./report-data');
 
 function addMinutes(date, minutes) {
   return new Date(date.getTime() + (minutes * 60 * 1000));
@@ -58,7 +58,15 @@ function buildReentryContextFromRecord(record, now = new Date()) {
 
   const advisory = normalizeAdvisoryForTreatmentScope(
     parseJsonObject(record?.advisory),
-    { service: record, applications },
+    {
+      service: record,
+      applications,
+      // Read-time mirror of the completion-path trace evidence: a
+      // technician-traced treatment zone is explicit exterior scope, so a
+      // legacy record with a stored exterior timer and a trace keeps it
+      // under the explicit-exterior rule (codex P1 #3007 r5).
+      zones: record?.tracedExteriorZone ? [{ label: 'Traced exterior treatment zone' }] : [],
+    },
   );
   const exteriorMin = numericMinutes(advisory.exterior_reentry_min);
   const interiorMin = numericMinutes(advisory.interior_reentry_min);
@@ -89,11 +97,15 @@ async function buildReentryContext({ record, now = new Date(), knex = db } = {})
       .select('id', 'applied_at', 'created_at', 'application_area', 'application_method', 'targets')
       .catch(() => []);
   }
-  return buildReentryContextFromRecord({ ...record, applications }, now);
+  const tracedExteriorZone = record.tracedExteriorZone !== undefined
+    ? record.tracedExteriorZone
+    : await resolveTracedExteriorZone(record, knex);
+  return buildReentryContextFromRecord({ ...record, applications, tracedExteriorZone }, now);
 }
 
 module.exports = {
   buildReentryContext,
   buildReentryContextFromRecord,
   buildReentrySummary,
+  resolveTracedExteriorZone,
 };

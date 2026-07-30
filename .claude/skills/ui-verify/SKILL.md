@@ -35,6 +35,24 @@ Codex on a UI-touching PR:
 5. Put the screenshots/findings in the PR description so the reviewer sees
    the rendered result.
 
+## Additional checks
+
+- New `top:0` fixed/sticky headers, bottom bars, or full-screen overlays:
+  verify safe-area padding on an iPhone-sized viewport — `viewport-fit=cover`
+  is global in the standalone PWA and desktop Chrome emulation does NOT
+  reproduce notch/status-bar overlap (see waves-design hard lines).
+- When jsdom-only checks aren't enough, a full local stack is workable:
+  scratch `createdb` + `migrate:latest` (~10 min), seed an admin
+  `technicians` row + a customer, run server with `DATABASE_URL`/`JWT_SECRET`
+  + `npm run dev` in `client/`, login via `/api/admin/auth/login` and stash
+  `waves_admin_token` in localStorage. Routing trap: admin Customer 360 is a
+  PANEL at `/admin/customers?customerId=<id>` — `/admin/customers/<id>`
+  falls through to the customer login.
+- NEVER verify against a real customer's live record — use the staff
+  `adminDraftPreview` path or owner-created test records. On a real
+  estimate page, frequency-tab clicks POST selection events even in
+  adminPreview: inspect the payload JSON, never click.
+
 ## Estimate UIs specifically
 
 The canonical spec for estimate-facing UI is the **server-rendered**

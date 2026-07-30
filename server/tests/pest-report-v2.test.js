@@ -129,8 +129,28 @@ describe('pestReportV2PdfSignature — PDF cache-key component', () => {
 
   it('marks pest-line records only when the gate is on', () => {
     process.env.PEST_REPORT_V2 = 'true';
-    expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('-pestv2b');
-    expect(pestReportV2PdfSignature({ service_type: 'Quarterly Pest Control' })).toBe('-pestv2b');
+    expect(pestReportV2PdfSignature({ service_line: 'pest' })).toBe('-pestv2c');
+    expect(pestReportV2PdfSignature({ service_type: 'Quarterly Pest Control' })).toBe('-pestv2c');
+    // Cockroach typed records dropped the dashboard (owner 2026-07-27) —
+    // their PDFs carry a distinct suffix so cached dashboard renders
+    // re-render once on next view.
+    expect(pestReportV2PdfSignature({
+      service_line: 'pest',
+      service_data: JSON.stringify({ typedReportSnapshot: { type: 'cockroach' } }),
+    })).toBe('-roachtyped2');
+    // the whole roach FAMILY shares the opt-out (codex P1 #3007)
+    expect(pestReportV2PdfSignature({
+      service_line: 'pest',
+      service_data: JSON.stringify({ typedReportSnapshot: { type: 'german_roach_knockdown' } }),
+    })).toBe('-roachtyped2');
+    expect(pestReportV2PdfSignature({
+      service_line: 'pest',
+      service_data: JSON.stringify({ typedReportSnapshot: { type: 'palmetto_roach_knockdown' } }),
+    })).toBe('-roachtyped2');
+    expect(pestReportV2PdfSignature({
+      service_line: 'pest',
+      service_data: JSON.stringify({ typedReportSnapshot: { type: 'bed_bug' } }),
+    })).toBe('-pestv2c');
     // Other lines keep their keys — the pest gate must not invalidate
     // cached lawn/mosquito/termite report PDFs.
     expect(pestReportV2PdfSignature({ service_line: 'mosquito' })).toBe('');

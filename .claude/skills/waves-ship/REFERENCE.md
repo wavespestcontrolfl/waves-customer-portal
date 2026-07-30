@@ -20,6 +20,7 @@ Timing: inline P1/P2 comments land ~1–2 minutes AFTER the top-level wrapper. P
 
 ## Codex quirks
 - Bare `@codex` only works on the first tag of a PR. Re-reviews need the literal text `@codex review`.
+- Un-drafting a PR auto-triggers a second, DEEPER review of the same head — a tag-verdict clean issued just before un-drafting is superseded. Never merge until the un-draft review completes.
 - Quote-replying (`> @codex …`) spawns a cloud TASK that edits code — never use it to request a review.
 - During usage limits, bounced/swallowed re-tags are NOT queued. Post a fresh `@codex review` after the limit resets. Silence >15–20 min on a heavy usage day = assume limited, not clean.
 - If Codex infra is flaky (tag ignored, no bounce): push an empty commit (`git commit --allow-empty -m "nudge codex"`) and re-tag fresh — this has revived stuck reviews.
@@ -46,6 +47,12 @@ Always push by explicit `sha:ref` when recovering. The tracked hook at `scripts/
 - Runs `codex exec --sandbox read-only` against the diff vs `origin/main` (override base with `CODEX_REVIEW_BASE`).
 - Blocks on P0, warns on P1, output schema at `.github/codex-review-schema.json`.
 - Bypass: `SKIP_CODEX_REVIEW=1` — use only for hijack recovery or docs-only emergencies; the GitHub bot still reviews the PR.
+
+## Railway PR-environment facts
+
+- The PR-env fork base MUST stay **staging** — `baseEnvironmentId: null` forks PRODUCTION, and with `GATE_CRON_JOBS=true` + live keys every PR env would boot the cron fleet with prod credentials. Never repoint the base.
+- Staging inherits a LIVE `sk_live_` Stripe key — never exercise payment flows in a PR environment.
+- The PR-env database is empty by design; a failing PR env from missing data is not a code failure.
 
 ## Worktree & workspace traps
 - `@waves/*` packages are ABSOLUTE symlinks; removing the worktree they point into breaks other builds — if a worktree owns a symlink target, copy the package into the bare repo `packages/` and relink relatively before removing.

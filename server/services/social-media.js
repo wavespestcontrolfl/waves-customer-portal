@@ -26,6 +26,7 @@ const { WAVES_LOCATIONS } = require('../config/locations');
 const config = require('../config');
 const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('./llm/call');
+const { etParts } = require('../utils/datetime-et');
 
 const FACEBOOK_PAGE_ID = process.env.FACEBOOK_PAGE_ID;
 const INSTAGRAM_ACCOUNT_ID = process.env.INSTAGRAM_ACCOUNT_ID;
@@ -91,6 +92,90 @@ async function isPausedByAdmin() {
     const row = await db('system_settings').where('key', 'social_automation_paused').first();
     return row?.value === 'true' || row?.value === true;
   } catch { return false; }
+}
+
+// ── Blog auto-share throttle (2026-07-24 social audit) ──
+// The blog→social lane publishes off blog cadence, not off the curated social
+// calendar, and knows nothing about it. In the 30 days to 2026-07-24 it put out
+// 44 feed posts + 88 GBP posts (every blog fanned to all 4 city profiles), and
+// on 07-23 alone it fired 5 posts including two near-duplicate LinkedIn posts
+// hours apart. These two guards bound it. They apply ONLY to the automated
+// blog lanes — manual admin posts, the content studio, and newsletter shares
+// are untouched.
+// 'blog_auto' is the AUTOMATIC live-flip share (content-astro/pages-poll.js).
+// It is deliberately a DIFFERENT source_type from the admin Share button's
+// 'blog': both are throttled lanes only if they are distinguishable in the
+// row we persist, and the cap counts by source_type. An admin-triggered
+// 'blog' share stays unthrottled and uncounted.
+const AUTOSHARE_SOURCES = new Set(['rss', 'blog_scheduled', 'autonomous_blog', 'blog_auto']);
+
+// Kill switch: SOCIAL_AUTOSHARE_DAILY_CAP=0 disables the cap entirely.
+// Deliberately defaults ON (1/day) rather than the usual dark-ship default-OFF:
+// a default-OFF throttle would leave the spam live on deploy, which is the bug.
+function autoshareDailyCap() {
+  const raw = process.env.SOCIAL_AUTOSHARE_DAILY_CAP;
+  if (raw === undefined || raw === '') return 1;
+  // Validate the WHOLE value. parseInt('0.5') and parseInt('0oops') both yield
+  // 0, which would silently disable the throttle on a typo — and 0 is the
+  // explicit kill switch, so it must never be reached by accident.
+  const trimmed = String(raw).trim();
+  if (!/^\d+$/.test(trimmed)) return 1;
+  const parsed = Number.parseInt(trimmed, 10);
+  return Number.isFinite(parsed) ? parsed : 1;
+}
+
+// Kill switch: SOCIAL_AUTOSHARE_GBP_SINGLE_LOCATION=false restores the 4× fanout.
+function autoshareGbpSingleLocation() {
+  const raw = process.env.SOCIAL_AUTOSHARE_GBP_SINGLE_LOCATION;
+  return String(raw === undefined || raw === '' ? 'true' : raw).toLowerCase() !== 'false';
+}
+
+// Count today's already-published auto-share posts, in ET (the business day the
+// cadence is reasoned about). Compared as a date IN the ET zone rather than
+// against a UTC window so posts near midnight aren't attributed to the wrong day.
+// Only 'published' counts: dry runs post nothing and must not consume the cap.
+//
+// Counts on COALESCE(published_at, created_at), not created_at alone: the
+// auto-source dedupe path REUSES an existing row when a failed share is retried
+// later, preserving the original created_at. Counting by created_at would
+// attribute that success to the original attempt's day, leaving it out of the
+// real publication day's count and letting a second post exceed the cap.
+// published_at is now stamped on every successful publish (insert and update),
+// so it is the accurate publication timestamp; created_at is the fallback for
+// rows written before that.
+async function autoshareCountToday() {
+  try {
+    const row = await db('social_media_posts')
+      .whereIn('source_type', [...AUTOSHARE_SOURCES])
+      .where('status', 'published')
+      .whereRaw(
+        "(COALESCE(published_at, created_at) AT TIME ZONE 'America/New_York')::date"
+        + " = (now() AT TIME ZONE 'America/New_York')::date",
+      )
+      .count({ n: '*' })
+      .first();
+    return Number(row?.n || 0);
+  } catch (err) {
+    // Fail OPEN: a counting failure must not silently stop all blog sharing.
+    logger.warn(`[social] auto-share cap check failed, allowing post: ${err.message}`);
+    return 0;
+  }
+}
+
+// Pick ONE city profile per auto-shared post instead of fanning to all four.
+// Deterministic day-based rotation: no extra state, and the 4 profiles cycle
+// evenly instead of each receiving every blog post.
+//
+// The index MUST come from the EASTERN calendar day, not a UTC epoch day.
+// Railway runs TZ=UTC, so after 8pm EDT the UTC day has already rolled over
+// while the daily cap is still on the prior ET business day — the two would
+// disagree, and consecutive ET-day posts straddling that cutoff would skip a
+// profile or repeat one instead of cycling evenly.
+function rotateGbpLocation(locations, now = new Date()) {
+  if (locations.length <= 1) return locations;
+  const { year, month, day } = etParts(now);
+  const etDayIndex = Math.floor(Date.UTC(year, month - 1, day) / 86400000);
+  return [locations[etDayIndex % locations.length]];
 }
 
 // ── Per-platform consecutive-failure alerting ──
@@ -847,7 +932,7 @@ async function uploadVideoToS3(buffer, filename) {
 // agent's distribute_to_social tool — live blog_posts only, gated by
 // blogPostShareability). Gates the og:image hero fetch, the Facebook /feed
 // link-post format, and the IG caption URL append.
-const BLOG_HERO_SOURCES = new Set(['autonomous_blog', 'rss', 'blog_scheduled', 'blog', 'content_agent']);
+const BLOG_HERO_SOURCES = new Set(['autonomous_blog', 'rss', 'blog_scheduled', 'blog', 'blog_auto', 'content_agent']);
 async function blogHeroSocialImageUrl(link) {
   try {
     const pageUrl = new URL(String(link || ''));
@@ -1236,6 +1321,18 @@ const SocialMediaService = {
     const cardsEligible = !SOCIAL_FLAGS.dryRun && SOCIAL_FLAGS.automationEnabled
       && hasImageHosting && (metaReady || gbpReady) && !(await isPausedByAdmin());
 
+    // Remaining auto-share slots for today, resolved ONCE before the loop.
+    // publishToAll re-checks the cap authoritatively; this exists so capped
+    // items do no fetch/render/upload work first — otherwise every unshared
+    // feed item past the first would upload a hero JPEG or brand card to S3 on
+    // each 4-hour tick and then be immediately skipped, orphaning the object.
+    // A manual admin run overrides the cap entirely (see publishToAll).
+    const rssDailyCap = autoshareDailyCap();
+    let autosharesLeft = Infinity;
+    if (!manual && rssDailyCap > 0) {
+      autosharesLeft = Math.max(0, rssDailyCap - await autoshareCountToday());
+    }
+
     // Advisory lock prevents overlapping cron runs / deploys from double-posting.
     // Uses transaction-scoped lock so acquire+release use the same connection.
     const results = [];
@@ -1254,26 +1351,83 @@ const SocialMediaService = {
         return;
       }
 
-      for (const item of items.slice(0, 5)) {
+      // Resolve which feed entries are already shared across the WHOLE feed
+      // BEFORE applying the five-item work limit. Filtering inside a
+      // slice(0, 5) loop means five already-shared entries can occupy the
+      // prefix and starve newer unshared ones indefinitely — and the daily cap
+      // makes that reachable, since capped items are deferred to a later day
+      // while new entries keep arriving ahead of them. One batched query keeps
+      // this to a single round trip regardless of feed length.
+      //
+      // Blocks on a row that went out or is queued ('scheduled'), but NOT on a
+      // prior 'failed' row — a transient outage (here or in the merge-time
+      // shareUrlOnce path) should stay retryable on the next 4h tick, not be
+      // permanently suppressed. 'rejected' is excluded for the same reason:
+      // an approval-queue draft whose suggestedLink pointed at this blog URL
+      // must not permanently suppress the RSS share of the post itself when
+      // an admin rejects that draft.
+      // Collapse duplicate entries WITHIN one feed response first. The taken
+      // sets below are a snapshot taken before the loop, so unlike the old
+      // per-item lookup they cannot observe a row this run just inserted — a
+      // feed listing the same URL/GUID twice would otherwise post it twice,
+      // since the row is written only after the external posts complete.
+      const seenUrls = new Set();
+      const seenGuids = new Set();
+      const feedEntries = [];
+      for (const item of items) {
         const normalizedUrl = normalizeUrl(item.link) || null;
         const normalizedGuid = item.guid || normalizedUrl;
-
-        // Block on a row that went out or is queued ('scheduled'), but NOT on a
-        // prior 'failed' row — a transient outage (here or in the merge-time
-        // shareUrlOnce path) should stay retryable on the next 4h tick, not be
-        // permanently suppressed. 'rejected' is excluded for the same reason:
-        // an approval-queue draft whose suggestedLink pointed at this blog URL
-        // must not permanently suppress the RSS share of the post itself when
-        // an admin rejects that draft.
-        const existing = await trx('social_media_posts')
+        if ((normalizedUrl && seenUrls.has(normalizedUrl))
+          || (normalizedGuid && seenGuids.has(normalizedGuid))) continue;
+        if (normalizedUrl) seenUrls.add(normalizedUrl);
+        if (normalizedGuid) seenGuids.add(normalizedGuid);
+        feedEntries.push({ item, normalizedUrl, normalizedGuid });
+      }
+      const feedUrls = [...new Set(feedEntries.map((e) => e.normalizedUrl).filter(Boolean))];
+      const feedGuids = [...new Set(feedEntries.map((e) => e.normalizedGuid).filter(Boolean))];
+      let takenUrls = new Set();
+      let takenGuids = new Set();
+      if (feedUrls.length || feedGuids.length) {
+        const takenRows = await trx('social_media_posts')
           .where(function() {
-            this.where({ source_url: normalizedUrl })
-              .orWhere({ source_guid: normalizedGuid });
+            if (feedUrls.length) this.whereIn('source_url', feedUrls);
+            if (feedGuids.length) this.orWhereIn('source_guid', feedGuids);
           })
           .whereNotIn('status', ['dry_run', 'failed', 'rejected'])
-          .first();
+          .select('source_url', 'source_guid');
+        takenUrls = new Set(takenRows.map((r) => r.source_url).filter(Boolean));
+        takenGuids = new Set(takenRows.map((r) => r.source_guid).filter(Boolean));
+      }
+      // OLDEST-FIRST drain, for the AUTOMATIC lane only. fetchRSSFeed preserves
+      // feed order, which is newest-first, and every tick rebuilds this list
+      // from scratch. Draining newest-first means that once the feed produces
+      // more entries per day than the cap allows, each day's newest arrival
+      // takes the only slot while older deferred entries slide further back
+      // and eventually fall out of the feed unshared. FIFO guarantees a
+      // deferred post its turn.
+      //
+      // A manual admin run bypasses the cap, so it has no starvation to fix —
+      // and reversing it would change "Check & Auto-Publish New" from
+      // publishing the newest five entries to releasing the five oldest
+      // still in the feed, i.e. stale backlog instead of current posts.
+      const unsharedFeedOrder = feedEntries.filter((e) => !(
+        (e.normalizedUrl && takenUrls.has(e.normalizedUrl))
+        || (e.normalizedGuid && takenGuids.has(e.normalizedGuid))
+      ));
+      const unshared = manual ? unsharedFeedOrder : [...unsharedFeedOrder].reverse();
 
-        if (existing) continue;
+      for (const { item, normalizedUrl, normalizedGuid } of unshared.slice(0, 5)) {
+
+        // Cap exhausted: stop BEFORE any media work. No later item can publish
+        // either, so break rather than continue — the remaining items stay
+        // unshared and are picked up on a following day's tick.
+        if (autosharesLeft <= 0) {
+          logger.info(
+            `[social] RSS run stopped — daily auto-share cap (${rssDailyCap}) reached; `
+            + `"${item.title}" and any remaining items deferred`,
+          );
+          break;
+        }
 
         try {
           // Share the blog post with the on-brand card (title + excerpt + read-
@@ -1319,7 +1473,11 @@ const SocialMediaService = {
             // the AI image generator (irrelevant literal images). A manual admin
             // /check-rss keeps the existing AI fallback (admin is supervising).
             noAiImage: !manual,
+            // An admin-triggered run already bypasses the automatic RSS gates;
+            // it must bypass the auto-share cap and GBP narrowing too.
+            bypassAutoshareThrottle: manual,
           });
+          if (result?.success) autosharesLeft -= 1;
           results.push({ item: item.title, ...result });
         } catch (err) {
           logger.error(`[social] Failed to process RSS item "${item.title}": ${err.message}`);
@@ -1391,12 +1549,33 @@ const SocialMediaService = {
   // videoUrl: a hosted MP4 (creative-engine Reel). FB posts it as a page video
   // and IG as a Reel; GBP has no video ingestion, so it keeps the image params
   // (imageUrl/gbpImageUrl are the still fallback alongside a video).
-  async publishToAll({ title, description, link, guid, source, imageUrl, gbpImageUrl, videoUrl, customContent, channels, gbpLocationIds, noAiImage = false, postId = null }) {
+  async publishToAll({ title, description, link, guid, source, imageUrl, gbpImageUrl, videoUrl, customContent, channels, gbpLocationIds, noAiImage = false, postId = null, bypassAutoshareThrottle = false }) {
     if (!SOCIAL_FLAGS.automationEnabled) {
       return { success: false, platforms: [{ platform: 'all', skipped: 'Automation is disabled' }] };
     }
     if (await isPausedByAdmin()) {
       return { success: false, platforms: [{ platform: 'all', skipped: 'Automation is paused' }] };
+    }
+
+    // Blog auto-share lanes are capped per ET day (see AUTOSHARE_SOURCES above).
+    // bypassAutoshareThrottle is set by an admin-triggered run (POST /check-rss
+    // with manual:true), which deliberately overrides the automatic RSS gates —
+    // an explicitly requested share must not be silently swallowed by the cap.
+    const dailyCap = autoshareDailyCap();
+    const throttledLane = AUTOSHARE_SOURCES.has(source);
+    if (dailyCap > 0 && throttledLane && !bypassAutoshareThrottle) {
+      const postedToday = await autoshareCountToday();
+      if (postedToday >= dailyCap) {
+        logger.info(
+          `[social] auto-share skipped — daily cap ${dailyCap} reached `
+          + `(${postedToday} today, source=${source}, link=${link})`,
+        );
+        return {
+          success: false,
+          skippedByDailyCap: true,
+          platforms: [{ platform: 'all', skipped: `Daily auto-share cap (${dailyCap}) reached` }],
+        };
+      }
     }
 
     const platformResults = [];
@@ -1697,9 +1876,38 @@ const SocialMediaService = {
       platformResults.push({ platform: 'gbp', skipped: 'Disabled' });
     }
     // customContent.gbp may be a string (same copy for all locations) or an object keyed by location id
-    const gbpLocations = requestedPlatforms.has('gbp') && SOCIAL_FLAGS.gbpEnabled
+    let gbpLocations = requestedPlatforms.has('gbp') && SOCIAL_FLAGS.gbpEnabled
       ? WAVES_LOCATIONS.filter((loc) => !requestedGbpLocations || requestedGbpLocations.has(loc.id))
       : [];
+    // Auto-shared blog posts go to ONE rotating city profile, not all four.
+    // Only when the caller didn't pin locations — an explicit admin selection
+    // (or the studio's per-city targeting) is always honored as-is.
+    if (
+      gbpLocations.length > 1
+      && !requestedGbpLocations
+      && throttledLane
+      && autoshareGbpSingleLocation()
+      && !bypassAutoshareThrottle
+    ) {
+      // Rotate only among profiles that can actually publish. Narrowing to one
+      // profile removes the old fanout's accidental redundancy: if the day's
+      // slot landed on a profile missing its OAuth credentials, postToGBP would
+      // return "No GBP credentials" and that day would get NO GBP post at all,
+      // even with three working profiles available.
+      let candidates = gbpLocations;
+      try {
+        const configured = await gbpService.getConfiguredLocations();
+        const ready = new Set(configured.map((loc) => loc.id));
+        const publishable = gbpLocations.filter((loc) => ready.has(loc.id));
+        if (publishable.length) candidates = publishable;
+      } catch (err) {
+        // Fail OPEN to the unfiltered list — a credential-lookup failure should
+        // not stop the GBP post; postToGBP still reports a real failure.
+        logger.warn(`[social] GBP configured-location lookup failed, rotating over all: ${err.message}`);
+      }
+      gbpLocations = rotateGbpLocation(candidates);
+      logger.info(`[social] auto-share GBP narrowed to ${gbpLocations[0].name} (rotation)`);
+    }
     for (const loc of gbpLocations) {
       try {
         const gbpCustom = customContent?.gbp;
@@ -1768,8 +1976,20 @@ const SocialMediaService = {
       ai_model: MODELS.VOICE,
       published_content: Object.keys(publishedContent).length > 0
         ? JSON.stringify(publishedContent) : null,
+      // Stamp the real publication moment. The auto-source dedupe path below
+      // reuses an existing row on a later retry and keeps its original
+      // created_at, so created_at is NOT a reliable "when did this go out".
+      // The daily auto-share cap counts on this column.
+      ...(postStatus === 'published' ? { published_at: new Date() } : {}),
     };
-    const updateCols = { platforms_posted: postRow.platforms_posted, status: postRow.status, published_content: postRow.published_content };
+    const updateCols = {
+      platforms_posted: postRow.platforms_posted,
+      status: postRow.status,
+      published_content: postRow.published_content,
+      // Same reason: a retry that finally succeeds must record TODAY as its
+      // publication day, otherwise it never counts against today's cap.
+      ...(postStatus === 'published' ? { published_at: new Date() } : {}),
+    };
 
     const autoSources = ['rss', 'blog_scheduled', 'newsletter'];
     const isAutoSource = autoSources.includes(postRow.source_type);
@@ -1785,7 +2005,6 @@ const SocialMediaService = {
           .update({
             ...updateCols,
             image_url: postRow.image_url,
-            ...(postStatus === 'published' ? { published_at: new Date() } : {}),
           });
         if (!updated) await db('social_media_posts').insert(postRow);
       } else if (isAutoSource) {
@@ -1935,3 +2154,8 @@ module.exports.BLOG_HERO_SOURCES = BLOG_HERO_SOURCES;
 module.exports.PUBLISH_PLATFORMS = PUBLISH_PLATFORMS;
 module.exports.DEFAULT_PUBLISH_PLATFORMS = DEFAULT_PUBLISH_PLATFORMS;
 module.exports.linkedinWantsBlogHero = linkedinWantsBlogHero;
+// Blog auto-share throttle (2026-07-24 audit) — exported for tests.
+module.exports.AUTOSHARE_SOURCES = AUTOSHARE_SOURCES;
+module.exports.autoshareDailyCap = autoshareDailyCap;
+module.exports.autoshareGbpSingleLocation = autoshareGbpSingleLocation;
+module.exports.rotateGbpLocation = rotateGbpLocation;

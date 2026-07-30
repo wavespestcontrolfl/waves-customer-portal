@@ -37,7 +37,7 @@ const {
   weekLockKey,
 } = require('../services/event-freshness');
 const { parseETDateTime, addETDays, etDateString, etParts } = require('../utils/datetime-et');
-const { validateNewsletterDraft } = require('../services/newsletter-validator');
+const { validateNewsletterDraft, lockedPricesForSend } = require('../services/newsletter-validator');
 const { createNewsletterDraft, persistNewsletterDraft } = require('../services/newsletter-draft');
 const {
   validateFlagshipEventSelection,
@@ -499,6 +499,37 @@ router.get('/sends/:id', async (req, res, next) => {
       }
     }
 
+    // Event-level click rollup (owner spec 2026-07-28 PR 5): unique
+    // clickers per locked event, in lineup position order. Guarded —
+    // pre-migration environments just omit the field.
+    let eventClicks = null;
+    try {
+      // Build from the LOCKED LINEUP and left-join click counts, so a
+      // genuinely zero-click event (or a fully unclicked tracked send)
+      // shows its zeros instead of vanishing — only untracked sends
+      // (no evclick tokens in the stored body) omit the rollup.
+      const { parseLockedEventIds } = require('../services/newsletter-event-selection');
+      const lockedIds = [...new Set(parseLockedEventIds(send.event_ids).map(String))];
+      const tracked = String(send.html_body || '').includes('{{evclick:');
+      if (lockedIds.length && tracked) {
+        const clickRows = await db('newsletter_event_clicks')
+          // Human clicks only — scanner prefetches record as 'prefetch'.
+          .where({ send_id: req.params.id, kind: 'details' })
+          .select('event_id')
+          .count('* as clicks')
+          .groupBy('event_id');
+        const clicksById = new Map(clickRows.map((r) => [String(r.event_id).toLowerCase(), Number(r.clicks)]));
+        const titleRows = await db('events_raw').whereIn('id', lockedIds).select('id', 'title');
+        const titleById = new Map(titleRows.map((r) => [String(r.id).toLowerCase(), r.title]));
+        eventClicks = lockedIds.map((id, position) => ({
+          eventId: id,
+          title: titleById.get(id.toLowerCase()) || null,
+          position,
+          clicks: clicksById.get(id.toLowerCase()) || 0,
+        }));
+      }
+    } catch { /* table not migrated yet — omit */ }
+
     // Reaction-footer rollup — 👍/😐/👎 counts plus the 👎 "what was
     // missing?" tallies. One delivery row per recipient, so these count
     // people (a changed mind overwrites, never double-counts).
@@ -531,7 +562,7 @@ router.get('/sends/:id', async (req, res, next) => {
     // an unlinked null draft stays untyped (forcing it to flagship would
     // wrongly apply the event-id/Tuesday gates on its next save).
     const flagship = await isFlagshipSend(send);
-    res.json({ send: { ...send, flagship }, deliveries, variantStats, feedback });
+    res.json({ send: { ...send, flagship }, deliveries, variantStats, feedback, eventClicks });
   } catch (err) { next(err); }
 });
 
@@ -865,7 +896,8 @@ router.post('/sends/:id/send', async (req, res) => {
       const recipientCount = force ? 1 : Number(
         (await NewsletterSender.buildSubscriberQuery(send.segment_filter, await NewsletterSender.resolveSegmentCustomerIds(send.segment_filter)).count('* as c').first())?.c || 0
       );
-      const { errors } = validateNewsletterDraft(typedSend, { recipientCount });
+      const lockedPrices = await lockedPricesForSend(typedSend, db);
+      const { errors } = validateNewsletterDraft(typedSend, { recipientCount, lockedPrices });
       if (errors.length > 0) {
         return res.status(400).json({ error: 'Validation failed', errors });
       }
@@ -880,6 +912,30 @@ router.post('/sends/:id/send', async (req, res) => {
       // in-flight campaign — let the winner finish and stamp 'sent'.
       if (err.code === 'ALREADY_CLAIMED') {
         logger.info(`[newsletter] background send ${req.params.id} already claimed by another worker — no-op`);
+        return;
+      }
+      if (err.code === 'EVENT_REVERIFY_FAILED' || err.code === 'EVENT_SELECTION_INVALID') {
+        // A dead/ineligible locked event is an EDITORIAL problem, not a
+        // delivery failure: 'failed' rows can't be patched and Resume just
+        // re-runs the same pre-claim check, stranding the issue. Keep a
+        // draft editable; revert a scheduled row to draft with its stale
+        // approval state cleared (same exit as the scheduler tick).
+        logger.error(`[newsletter] background send ${req.params.id} blocked pre-claim: ${err.message}`);
+        try {
+          const reverted = await db('newsletter_sends')
+            .where({ id: req.params.id, status: 'scheduled' })
+            .update({
+              status: 'draft',
+              scheduled_for: null,
+              proof_token: null,
+              proof_sent_at: null,
+              proof_approved_at: null,
+              updated_at: new Date(),
+            });
+          if (reverted) {
+            await db('newsletter_calendar').where({ send_id: req.params.id }).update({ status: 'drafted', updated_at: new Date() });
+          }
+        } catch { /* swallow */ }
         return;
       }
       logger.error(`[newsletter] background send ${req.params.id} failed: ${err.message}`, { stack: err.stack });
@@ -1042,8 +1098,13 @@ router.post('/preview', async (req, res) => {
     // shows the block the broadcast will carry even on hand-composed bodies.
     const { stripPersonalizationTokens } = require('../services/newsletter-draft');
     const { ensureFeedbackToken } = require('../services/newsletter-feedback');
+    // Event click tokens resolve to the DIRECT event URLs before the
+    // neutralizer's homepage fallback — the Compose preview is the
+    // surface operators review, so its links must open the real pages.
+    const { resolveEvclickFromBody } = require('../services/newsletter-event-clicks');
+    const resolvedBody = await resolveEvclickFromBody(ensureFeedbackToken({ html: htmlBody || '' }).html);
     const html = wrapNewsletter({
-      body: stripPersonalizationTokens(ensureFeedbackToken({ html: htmlBody || '' }).html),
+      body: stripPersonalizationTokens(resolvedBody),
       unsubscribeUrl: demoUrl,
       preheader: previewText ? stripPersonalizationTokens(previewText) : undefined,
       newsletterType: newsletterType || undefined,
@@ -1169,9 +1230,23 @@ router.post('/draft-ai', aiDraftLimiter, async (req, res) => {
         // flagship draft stays DB-locked instead of inviting the model to
         // invent events.
         const plan = await buildDigestPlan({ reference: editorialReference || new Date() });
-        const { scored } = plan;
         editorialReference = editorialReference || plan.startDate;
-        resolvedEventIds = scored.slice(0, 12).map((ev) => ev.id);
+        // Portfolio-select the auto-sourced pool (floor, caps, coverage,
+        // hero-first ordering) — the raw plan is freshness-ordered, and the
+        // compact prompt treats the FIRST id as the hero, so passing it
+        // unranked would promote an arbitrary fresh event.
+        const { selectPortfolio } = require('../services/newsletter-portfolio');
+        const portfolio = selectPortfolio(plan.scored);
+        if (!portfolio.selected.length) {
+          // No candidate clears the editorial floor — falling back to the
+          // raw freshness order would draft exactly the sub-floor lineup
+          // the rubric exists to prevent. Fail actionably instead.
+          return res.status(400).json({
+            error: 'No approved events clear the editorial floor for this issue week',
+            detail: 'Approve or star floor-passing events in the Event Inbox, or pick events explicitly, then draft again.',
+          });
+        }
+        resolvedEventIds = portfolio.selected.map((ev) => ev.id);
       }
 
       if (resolvedEventIds.length === 0) {
@@ -1927,7 +2002,8 @@ router.post('/sends/:id/validate', async (req, res, next) => {
       logger.error(`[newsletter] validate subscriber count failed: ${queryErr.message}`);
       return res.status(500).json({ error: 'Could not verify subscriber count — try again' });
     }
-    const { errors, warnings } = validateNewsletterDraft(send, { recipientCount });
+    const lockedPrices = await lockedPricesForSend(send, db);
+    const { errors, warnings } = validateNewsletterDraft(send, { recipientCount, lockedPrices });
     res.json({ valid: errors.length === 0, errors, warnings });
   } catch (err) { next(err); }
 });

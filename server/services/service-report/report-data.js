@@ -1,6 +1,6 @@
 const db = require('../../models/db');
 const { METHOD_LABELS, renderTreatmentMap } = require('./treatment-map');
-const { detectServiceLine, getServiceLineConfig } = require('./service-line-configs');
+const { detectServiceLine, getServiceLineConfig, isRodentAdjacentServiceType } = require('./service-line-configs');
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
 const { loadActiveConfig, loadScoreForServiceRecord, loadHistoryForCustomer } = require('../pest-pressure/store');
 const { buildPestPressureCustomerView } = require('../pest-pressure/customer-view');
@@ -12,6 +12,7 @@ const { buildLawnReportV2, grassLabelFor } = require('./lawn-report-v2');
 const { buildTreeShrubReportV2 } = require('./tree-shrub-report-v2');
 const { applyLawnReportNarrative } = require('./lawn-report-narrative');
 const { applyVisitSummaryNarrative } = require('./visit-summary-narrative');
+const { applyRodentReportNarrative, applyTypedReportNarrative } = require('./rodent-report-narrative');
 const { technicianReportCustomerCopy } = require('./technician-report-copy');
 const { getTurfHeightForVisit, getTurfHeightTrend } = require('../turf-height-service');
 const { resolveZoneRowsImageDrift } = require('./zone-drift');
@@ -416,7 +417,11 @@ function treatmentScope({ service = {}, applications = [], zones = [] } = {}) {
     .replace(/[^a-z0-9]+/g, ' ');
   // Area chips are a controlled vocabulary and remain a valid scope signal.
   const textInterior = /\b(interior|inside|indoor|kitchen|bath|bathroom|baseboard|baseboards|bedroom|living room|laundry|utility room|pantry|closet)\b/.test(text);
-  const textExterior = /\b(exterior|outside|outdoor|perimeter|foundation|eaves|soffit|yard|front|back|rear|side|lanai|patio|pool|driveway|landscape|mulch|entry|threshold|lawn)\b/.test(text);
+  // fence/trash cover the controlled pest-area chips "Fence line" and
+  // "Trash area" — clearly exterior choices that previously fell through
+  // and (under the explicit-exterior rule) would wrongly zero the
+  // customer's dry-down timer (codex P1 #3007).
+  const textExterior = /\b(exterior|outside|outdoor|perimeter|foundation|eaves|soffit|yard|front|back|rear|side|lanai|patio|pool|driveway|landscape|mulch|entry|threshold|lawn|fence|trash)\b/.test(text);
   // Structured action scope is additive: an interior treatment fires interior
   // even when only exterior areas were chipped (and vice-versa).
   const action = structuredActionScope(service);
@@ -424,18 +429,43 @@ function treatmentScope({ service = {}, applications = [], zones = [] } = {}) {
     hasInterior: textInterior || action.hasInterior,
     hasExterior: textExterior || action.hasExterior,
     hasExplicitScope: text.trim().length > 0 || action.hasTreatment,
+    // TRUE only when a recognized interior/exterior LOCATION signal exists.
+    // Target-only text (product target names) makes hasExplicitScope true
+    // without classifying anything — the write-path defer must key on this
+    // instead, or a trace saved later can't restore the timer (codex P1
+    // #3007 r13).
+    hasLocationSignal: textInterior || textExterior || action.hasInterior || action.hasExterior,
   };
 }
 
-function normalizeAdvisoryForTreatmentScope(advisory = {}, { service = {}, applications = [], zones = [] } = {}) {
+function normalizeAdvisoryForTreatmentScope(advisory = {}, { service = {}, applications = [], zones = [], deferUnknownExteriorZeroing = false } = {}) {
   const normalized = { ...parseJsonObject(advisory) };
   const scope = treatmentScope({ service, applications, zones });
 
   if (normalized.interior_reentry_min != null && scope.hasExplicitScope && scope.hasExterior && !scope.hasInterior) {
     normalized.interior_reentry_min = 0;
   }
-  if (normalized.exterior_reentry_min != null && scope.hasExplicitScope && scope.hasInterior && !scope.hasExterior) {
-    normalized.exterior_reentry_min = 0;
+  // Owner rule 2026-07-27: the Exterior re-entry target exists ONLY when
+  // the visit explicitly classified exterior treatment — never as a
+  // default timer. A visit with no recorded scope at all therefore shows
+  // no exterior row (previously both service-line default timers rendered).
+  // This subsumes the old interior-only branch: explicitly-interior visits
+  // have hasExterior false and zero out here the same way.
+  // WRITE-path callers set deferUnknownExteriorZeroing: an UNKNOWN scope
+  // keeps the stored duration so a treatment-zone trace saved AFTER
+  // completion can still surface the timer — the read-time normalizer
+  // (trace-aware) makes the final display call, and stored zero would be
+  // unrecoverable (codex P1 #3007 r11). Explicitly non-exterior scope
+  // still zeroes at write.
+  if (normalized.exterior_reentry_min != null && !(scope.hasExplicitScope && scope.hasExterior)) {
+    // WRITE path never zeroes exterior (codex P1 r17): a Treatment Zone
+    // Mapper trace can be saved AFTER completion even when the visit
+    // recorded interior locations, and a stored zero is unrecoverable.
+    // Every DISPLAY surface (report payload, re-entry card, SMS, email)
+    // normalizes at read time with trace evidence and zeroes there.
+    if (!deferUnknownExteriorZeroing) {
+      normalized.exterior_reentry_min = 0;
+    }
   }
 
   return normalized;
@@ -446,7 +476,26 @@ function normalizeAdvisoryForTreatmentScope(advisory = {}, { service = {}, appli
 // resolved here is what the customer sees — the report build can only zero it
 // further, never restore it. Kept as a pure helper so the scope wiring is
 // directly testable without the full /complete route harness.
-function buildCompletionAdvisory({ advisoryDefaults = {}, completionAreas = [], protocolActionScopes = [], applications = [] } = {}) {
+// Shared trace-evidence resolver (read paths + SMS/email delivery): a
+// technician-traced treatment zone is explicit exterior scope. Only the
+// expected missing-table error means "no trace" — a transient failure
+// preserves the exterior timer rather than suppressing customer safety
+// guidance (codex P1 #3007 r9/r17). Lives here (not reentry.js) so the
+// report payload's own advisory normalization can use it without a
+// require cycle.
+async function resolveTracedExteriorZone(record, knex = db) {
+  if (!record?.scheduled_service_id) return false;
+  try {
+    return !!(await knex('treatment_zone_maps')
+      .where({ scheduled_service_id: record.scheduled_service_id })
+      .first());
+  } catch (traceErr) {
+    return !(traceErr?.code === '42P01'
+      || /no such table|does not exist/i.test(String(traceErr?.message || '')));
+  }
+}
+
+function buildCompletionAdvisory({ advisoryDefaults = {}, completionAreas = [], protocolActionScopes = [], applications = [], tracedExteriorZone = false } = {}) {
   return normalizeAdvisoryForTreatmentScope(advisoryDefaults, {
     service: {
       areas_serviced: completionAreas,
@@ -456,6 +505,16 @@ function buildCompletionAdvisory({ advisoryDefaults = {}, completionAreas = [], 
       },
     },
     applications,
+    // A technician-traced treatment zone is explicit exterior evidence: the
+    // trace is drawn over the property's satellite exterior. Typed T&S
+    // closeouts hide areasServiced and clear applicationArea, so without
+    // this the explicit-exterior rule would zero the dry-down timer on a
+    // visit whose treatment location WAS captured (codex P1 #3007 r5).
+    zones: tracedExteriorZone ? [{ label: 'Traced exterior treatment zone' }] : [],
+    // Unknown scope keeps the stored duration at write time — a trace saved
+    // after completion must still be able to surface the timer, and the
+    // read-time normalizer makes the final display decision.
+    deferUnknownExteriorZeroing: true,
   });
 }
 
@@ -562,11 +621,20 @@ function defaultZones(labels, serviceLine) {
 function matchZoneIds(product, zones, areaLabels = []) {
   const explicit = parseJsonArray(product.zone_ids);
   if (explicit.length) return explicit.map(String);
-  const area = String(product.application_area || product.area || '').toLowerCase();
-  if (area) {
+  // application_area may be a comma-joined multi-area list ("Kitchen,
+  // Bathrooms") since the per-product picker went multi-select — match each
+  // listed area independently so multi-word zone labels ("Kitchen west")
+  // still resolve. A single-area value splits to itself, so the legacy
+  // shape behaves exactly as before.
+  const areas = String(product.application_area || product.area || '')
+    .toLowerCase()
+    .split(',')
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (areas.length) {
     const matched = zones.filter((zone) => {
-      return String(zone.label || '').toLowerCase().includes(area)
-        || area.includes(String(zone.label || '').toLowerCase());
+      const label = String(zone.label || '').toLowerCase();
+      return areas.some((area) => label.includes(area) || area.includes(label));
     });
     if (matched.length) return matched.map((zone) => String(zone.id));
   }
@@ -1290,10 +1358,15 @@ function stripLiveOnlyScheduleFields(data) {
 function shouldAddNoActivityFinding({ service = {}, structured = {}, protocol = {} } = {}) {
   const visitOutcome = String(protocol.visitOutcome || service.visit_outcome || service.status || 'completed').toLowerCase();
   const concernText = structuredCustomerConcern(structured);
+  // A positive activity rating recorded at completion means SOMETHING was
+  // seen — synthesizing "all zones clear" beside it re-creates the exact
+  // contradiction the insert guard now prevents (codex P1 #3043 r2).
+  const rating = Number(service.client_pest_rating);
   return visitOutcome === 'completed'
     && !(protocol.observations || []).length
     && !(protocol.recommendations || []).length
-    && !concernText;
+    && !concernText
+    && !(Number.isFinite(rating) && rating > 0);
 }
 
 function findingSeverityForObservation(text) {
@@ -1698,17 +1771,6 @@ async function lawnPhotoUrl(photo) {
   }
 }
 
-async function firstLawnAssessmentPhoto(knex, assessmentId) {
-  if (!assessmentId) return null;
-  return knex('lawn_assessment_photos')
-    .where({ assessment_id: assessmentId, customer_visible: true })
-    .orderBy('is_best_photo', 'desc')
-    .orderBy('quality_score', 'desc')
-    .orderBy('photo_order', 'asc')
-    .first()
-    .catch(() => null);
-}
-
 async function loadLinkedLawnAssessment(service, knex = db) {
   if (!service?.customer_id) return null;
 
@@ -1785,10 +1847,52 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db) {
 
   let beforeAfter = null;
   if (historyRows.length >= 2) {
-    const [beforePhoto, afterPhoto] = await Promise.all([
-      firstLawnAssessmentPhoto(knex, initialRow.id),
-      firstLawnAssessmentPhoto(knex, assessment.id),
+    // The before/after slider claims "the same lawn, then vs now" — pairing the
+    // best photo of each visit regardless of WHERE it was taken produced a bed
+    // photo next to a curb-strip photo (audit 2026-07-28). Pair by ZONE: pull
+    // both visits' visible photos (already rank-ordered), find the first shared
+    // zone, and take each side's best photo from it — anchoring on only the
+    // single best "before" photo missed valid pairs when a lower-ranked zone
+    // matched (pre-push audit P1). Photos without recorded zones (older rows)
+    // fall back to best-vs-best; when both sides record zones but none match,
+    // drop the photo pair (the score delta still reports) rather than show a
+    // false comparison.
+    const photosFor = (assessmentId) => knex('lawn_assessment_photos')
+      .where({ assessment_id: assessmentId, customer_visible: true })
+      .orderBy('is_best_photo', 'desc')
+      .orderBy('quality_score', 'desc')
+      .orderBy('photo_order', 'asc')
+      .catch(() => []);
+    const [beforeCandidates, afterCandidates] = await Promise.all([
+      photosFor(initialRow.id),
+      photosFor(assessment.id),
     ]);
+    // Only an explicitly recorded zone is a location claim. photo_type looks
+    // locational ('front_yard') but the primary save path synthesizes it from
+    // UPLOAD ORDER (admin-lawn-assessment.js — i===0 → 'front_yard'), so
+    // keying on it would falsely pair two arbitrary first-selected photos as
+    // the same area (codex P1 #3038 r3). Photos without real zones fall back
+    // to best-vs-best, same as before this change.
+    const zoneKey = (p) => String(p?.zone || '').trim().toLowerCase();
+    let beforePhoto = null;
+    let afterPhoto = null;
+    for (const candidate of beforeCandidates) {
+      const zone = zoneKey(candidate);
+      if (!zone) continue;
+      const match = afterCandidates.find((p) => zoneKey(p) === zone);
+      if (match) {
+        beforePhoto = candidate;
+        afterPhoto = match;
+        break;
+      }
+    }
+    if (!beforePhoto) {
+      const bothSidesZoned = beforeCandidates.some((p) => zoneKey(p))
+        && afterCandidates.some((p) => zoneKey(p));
+      beforePhoto = beforeCandidates[0] || null;
+      // Zones recorded on both sides but disjoint → no honest pair exists.
+      afterPhoto = bothSidesZoned ? null : (afterCandidates[0] || null);
+    }
     beforeAfter = {
       before: {
         date: initialRow.service_date,
@@ -2036,6 +2140,30 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     detail: finding.detail || '',
     recommendation: finding.recommendation || '',
   }));
+
+  // Render-time honesty pass for PERSISTED no-activity rows: older completions
+  // could stamp "All inspected zones were clear…" even when the homeowner
+  // reported something during the visit (the insert guard now suppresses these
+  // going forward, but stored rows are permanent). When a customer concern is
+  // on record, soften the absolute claim so the report never tells a customer
+  // "all clear" right after they flagged something (John Kelleher audit
+  // 2026-07-29). PEST ONLY — other lines have their own no-activity copy, and
+  // the softened sentence must not claim treatment or a scheduled follow-up
+  // the record doesn't evidence (codex P2 #3043 ×2).
+  if (serviceLine === 'pest') {
+    const renderConcern = structuredCustomerConcern(structured);
+    if (renderConcern) {
+      for (const finding of findings) {
+        if (finding.category === 'no_activity') {
+          // Title AND detail (r2), in NEUTRAL wording (r3): the concern may
+          // be about service or access ("please avoid the herb garden"), so
+          // the copy must not characterize it as a pest sighting.
+          finding.title = 'No pest activity confirmed this visit';
+          finding.detail = 'Inspected areas showed no confirmed pest activity. The note you shared with us is recorded on this visit’s report.';
+        }
+      }
+    }
+  }
 
   for (const observation of protocol.observations) {
     if (findings.some((finding) => finding.title.toLowerCase() === observation.toLowerCase())) continue;
@@ -2332,6 +2460,10 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
             linearFt: numberOrNull(tracedRow.linear_ft),
             closedLoop: Boolean(tracedRow.closed_loop),
             capturedAt: tracedRow.updated_at || tracedRow.created_at || null,
+            // 'lawn' | 'perimeter' | null (legacy rows predate the column) —
+            // the client only claims "treated lawn area" for rows actually
+            // captured by the lawn outline workflow (codex P1 #3038).
+            captureMode: tracedRow.capture_mode || null,
             label: 'Treated perimeter traced on-site by your technician.',
             // Traced path in snapshot pixel space (1280x960) so the report
             // can REPLAY the spray application the tech saw (owner
@@ -2454,11 +2586,16 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   const photoChain = photos.some((photo) => photo.hash_sha256)
     ? validatePhotoChainRows(photos)
     : { valid: null, photo_count: photos.length, broken_at: null };
+  const payloadTracedExteriorZone = await resolveTracedExteriorZone(service, knex);
   const advisory = normalizeAdvisoryForTreatmentScope({
     ...config.advisoryDefaults,
     ...parseJsonObject(service.advisory),
     ...(service.irrigation_recommendation ? { irrigation: service.irrigation_recommendation } : {}),
-  }, { service, applications });
+  }, {
+    service,
+    applications,
+    zones: payloadTracedExteriorZone ? [{ label: 'Traced exterior treatment zone' }] : [],
+  });
   const metrics = buildMetrics(config, {
     onSiteMin,
     treatedZoneIds,
@@ -2803,6 +2940,14 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // itself uses. The visit this report covers is excluded by id so a same-day
   // report never shows its own just-completed slot. Best-effort: never blocks
   // the report.
+  // Rodent report refresh gate (owner ask 2026-07-27) — declared before the
+  // next-appointment pick because the widened rodent-program match below is
+  // part of the gated behavior: with the gate dark, reports keep the strict
+  // same-line pick exactly as before (codex round-3 P2), so unsetting the
+  // var restores pre-refresh output everywhere.
+  const rodentReportRefresh = serviceLine === 'rodent'
+    && process.env.GATE_RODENT_REPORT_REFRESH === 'true';
+
   let nextAppointment = null;
   try {
     const reportTodayIso = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
@@ -2827,8 +2972,59 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       .orderBy('window_start', 'asc')
       .limit(200)
       .catch(() => []);
+    // A rodent report's "next visit" spans the whole rodent program —
+    // trapping, exclusion, sanitation, proofing — including service names
+    // that carry no rodent token ("Exclusion Service" alone falls to the
+    // pest default). Owner 2026-07-27: the rodent report shows the next
+    // service date if and only if it is rodent-related. The widened match
+    // only claims names NO other line detects (the 'pest' fallback) — a
+    // "Mosquito Trap Service" still detects as mosquito and stays out —
+    // and isRodentAdjacentServiceType's negative guard keeps non-rodent
+    // trapping ("Wildlife Trapping") out too. Other report lines keep the
+    // strict same-line match.
+    // Name shape alone is NOT rodent evidence (codex round-4/5 P2): a
+    // generic "Sanitation & Cleanup" booking that has nothing to do with
+    // the rodent program would satisfy the regex. The catalog is the
+    // authority: a candidate whose scheduled_services.service_id points at
+    // a services row with category 'rodent' is rodent-related regardless
+    // of its (possibly customized/renamed) service_type label; unlinked
+    // legacy rows fall back to exact catalog-NAME matching plus the
+    // adjacent-shape regex. Best-effort: an unavailable catalog just keeps
+    // the strict same-line match.
+    let serviceCategoryById = null;
+    let rodentCatalogNames = null;
+    if (rodentReportRefresh) {
+      try {
+        const catalogRows = await knex('services').select('id', 'name', 'category');
+        serviceCategoryById = new Map((Array.isArray(catalogRows) ? catalogRows : [])
+          .filter((row) => row && row.id)
+          .map((row) => [String(row.id), String(row.category || '')]));
+        rodentCatalogNames = new Set((Array.isArray(catalogRows) ? catalogRows : [])
+          .filter((row) => String(row?.category || '') === 'rodent')
+          .map((row) => String(row.name || '').trim().toLowerCase())
+          .filter(Boolean));
+      } catch { serviceCategoryById = null; rodentCatalogNames = null; }
+    }
     const nextApptRow = (Array.isArray(upcomingRows) ? upcomingRows : [])
-      .find((row) => detectServiceLine(row.service_type) === serviceLine) || null;
+      .find((row) => {
+        // A resolvable catalog link is authoritative in BOTH directions
+        // (codex round-8 P2): it admits a rodent-category visit under any
+        // label AND vetoes a rodent-sounding label linked to a non-rodent
+        // service. Label matching only ever judges unlinked/unresolvable
+        // rows.
+        const linkedCategory = rodentReportRefresh && serviceCategoryById && row.service_id
+          ? serviceCategoryById.get(String(row.service_id)) || null
+          : null;
+        if (linkedCategory) return linkedCategory === 'rodent';
+        const rowLine = detectServiceLine(row.service_type);
+        if (rowLine === serviceLine) return true;
+        if (!rodentReportRefresh) return false;
+        // unlinked legacy rows: exact rodent-catalog name + adjacent shape
+        return rowLine === 'pest'
+          && isRodentAdjacentServiceType(row.service_type)
+          && !!rodentCatalogNames
+          && rodentCatalogNames.has(String(row.service_type || '').trim().toLowerCase());
+      }) || null;
     if (nextApptRow && nextApptRow.scheduled_date) {
       const rawDate = nextApptRow.scheduled_date;
       nextAppointment = {
@@ -2897,6 +3093,100 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     }).catch(() => structured.customerRecap || '');
   }
 
+  // Rodent report refresh (owner ask 2026-07-27, env-gated): the typed
+  // rodent report's Visit Summary is the frozen SMS recap — it never sees
+  // the findings, activity reading, trap counts, devices, or photo evidence
+  // the rest of the report is built from. The gate reweaves all of it into
+  // a detailed grounded narrative (rodent-report-narrative.js), and the
+  // client uses the same flag to lift photos into the summary, show the
+  // next rodent-related visit, drop the Rodent Service Coverage card (the
+  // trap map owns the spatial story), and render the trap-styled map pins.
+  // Tech-reviewed "Generate AI report" copy still wins the summary slot;
+  // narrative generation is LIVE VIEWS ONLY (same posture as the pest
+  // block). The rodentReportRefresh gate itself is computed above, before
+  // the next-appointment pick it also widens. Kill switch: unset the var.
+  if (
+    rodentReportRefresh
+    && typedSnapshot
+    && visitSummarySource !== 'technician_report'
+    && opts.mode === 'live'
+  ) {
+    const narrated = await applyRodentReportNarrative({
+      recap: visitSummary,
+      serviceTypeDisplay: linkedServiceName,
+      typedReport: typedSnapshot,
+      activity,
+      stationSummary: stationMap?.summary || null,
+      // summary.activity semantics differ by program (traps with a capture
+      // vs stations with bait consumption) — the narrative names the fact
+      // accordingly and must know which map this is.
+      stationProgram: stationMap?.program || null,
+      applications,
+      photos: photoPayload,
+      nextAppointment,
+    }).catch(() => null);
+    if (narrated && narrated !== visitSummary) {
+      visitSummary = narrated;
+      visitSummarySource = 'rodent_narrative';
+    }
+  }
+
+  // Typed-report narrative for EVERY OTHER typed specialty report on the
+  // V1 surface (owner ask 2026-07-27, second lane): cockroach, bed bug,
+  // termite bait, … keep the frozen recap/template as their summary — the
+  // gate reweaves the typed data. NOTE: WDO inspections are OUT OF SCOPE
+  // here — completion profiles exclude wdo_inspection from V1 and public
+  // WDOs render on the project-report surface (codex P2 #3007 r7); a WDO
+  // narrative would be its own lane on that surface. COMPANION typed
+  // snapshots keep their ratified template bodies BY DESIGN (codex P2
+  // r14): the narrative upgrades the report's ONE summary surface; the
+  // companion cards are compliance record sections, and per-companion
+  // generation would multiply view-time LLM calls without a summary slot
+  // to fill.
+  // The gate reweaves the
+  // typed findings, activity reading, station counts, products, photo
+  // evidence, and next same-line visit into the grounded narrative (same
+  // engine + guard stack as the rodent refresh). Precedence unchanged: the
+  // tech's reviewed "Generate AI report" copy still wins — both the summary
+  // slot and a snapshot whose Today's Result body came from it. LIVE VIEWS
+  // ONLY, so pdf/static/sms_preview output never varies with the gate (no
+  // PDF cache-key impact). The client shows the narrative in whichever
+  // summary surface the report renders: the legacy Visit Summary section,
+  // or the Today's Result body when Pest/Mosquito V2 suppresses that
+  // section (summarySource === 'typed_narrative' drives the override).
+  // Kill switch: unset GATE_TYPED_REPORT_NARRATIVE.
+  if (
+    serviceLine !== 'rodent'
+    // Lawn and tree & shrub have their own specialized narrative layers
+    // (applyLawnReportNarrative / the T&S V2 composition) — a second
+    // generic summary would duplicate or conflict with them, and this
+    // engine's guards don't ground agronomic claims (codex P2 #3007 r6).
+    && serviceLine !== 'lawn'
+    && serviceLine !== 'tree_shrub'
+    && typedSnapshot
+    && visitSummarySource !== 'technician_report'
+    && typedSnapshot.todaysResult?.bodySource !== 'technician_report'
+    && opts.mode === 'live'
+    && process.env.GATE_TYPED_REPORT_NARRATIVE === 'true'
+  ) {
+    const narrated = await applyTypedReportNarrative({
+      recap: visitSummary,
+      serviceTypeDisplay: linkedServiceName,
+      reportTypeLabel: typedSnapshot.reportTypeLabel || typedSnapshot.typeLabel || null,
+      typedReport: typedSnapshot,
+      activity,
+      stationSummary: stationMap?.summary || null,
+      stationProgram: stationMap?.program || null,
+      applications,
+      photos: photoPayload,
+      nextAppointment,
+    }).catch(() => null);
+    if (narrated && narrated !== visitSummary) {
+      visitSummary = narrated;
+      visitSummarySource = 'typed_narrative';
+    }
+  }
+
   return {
     reportVersion: 'service_report_v1',
     reportV2,
@@ -2960,9 +3250,16 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     },
     summary: visitSummary,
     // 'technician_report' when summary is the tech-reviewed AI report copy,
+    // 'rodent_narrative' / 'typed_narrative' when a gated narrative
+    // composed it (typed_narrative also drives the client's Today's Result
+    // body override on V2-suppressed summaries),
     // 'recap' for the completion recap — lets response wrappers (Pest V2
     // hero) surface the reviewed copy without re-parsing the notes.
     summarySource: visitSummarySource,
+    // Customer concern captured at completion — feeds the pest V2 "what you
+    // flagged" card (reports-public passes it to buildPestReportV2). Lawn and
+    // tree & shrub already consume it inside their own V2 builders.
+    customerConcern: structuredCustomerConcern(structured),
     customerInteraction: service.customer_interaction || structured.customerInteraction || null,
     serviceAreas: areaLabels,
     measurements: {
@@ -3007,7 +3304,24 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       footer: 'Treatment areas are technician-reported service zones, not survey boundaries.',
     },
     stationMap,
-    serviceCoverage,
+    // Rodent refresh drops the coverage card ONLY when the trap/station map
+    // actually renders in its place — the zone list duplicated it (owner
+    // 2026-07-27). That means stationMap.available AND a live view: the
+    // client only mounts StationMapCard on mode === 'live' (no satellite
+    // basemap in pdf/static per provider ToS), so PDF renders and rodent
+    // reports with no station map (exclusion/sanitation visits) keep
+    // coverage as their only spatial section. MUST be an explicit
+    // `enabled: false` — a null/absent key makes the client REBUILD the
+    // card from serviceLocations/serviceAreas (its legacy fallback path).
+    serviceCoverage: rodentReportRefresh && stationMap?.available && opts.mode === 'live'
+      ? { enabled: false }
+      : serviceCoverage,
+    // Client-side switch for the refreshed rodent layout (photos in the
+    // summary, trap-styled animated map pins). LIVE VIEWS ONLY: stored PDF
+    // keys don't carry this gate, so a flag that changed pdf/static markup
+    // would keep serving stale cached PDFs across a gate flip (codex P2
+    // #3004) — non-live renders keep the legacy layout unconditionally.
+    rodentReportRefresh: (rodentReportRefresh && opts.mode === 'live') || undefined,
     nextAppointment,
     visitTimeline,
     serviceLocations,
@@ -3052,11 +3366,13 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
 
 module.exports = {
   buildReportV1Data,
+  resolveTracedExteriorZone,
   structuredCustomerConcern,
   stripLiveOnlyScheduleFields,
   calculateLawnOverallScore,
   lawnScoreDelta,
   lawnScoreValue,
+  resolveStressDamage,
   singleVoiceObservation,
   parseJsonObject,
   parseJsonArray,

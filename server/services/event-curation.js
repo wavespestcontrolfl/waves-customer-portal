@@ -9,13 +9,22 @@
  * Monday autopilot starved at 0 eligible events and the flagship
  * lane silently died.
  *
- * This cron (6:15am ET, before the 7am Monday autopilot) classifies
- * never-examined pending events with Claude and approves the ones a
- * local reader would actually go to. Hard gates (future-dated, has a
- * URL, normalized, fresh) run in SQL; the model only judges "is this a
- * real consumer event worth a things-to-do guide". Rejected events
- * STAY pending with a curation_note — the operator can still approve
- * manually; nothing is auto-rejected.
+ * This cron (6:15am ET, before the 7am Monday autopilot) runs the
+ * owner's 2026-07-28 editorial rubric over never-examined pending
+ * events. Hard gates (future-dated, has a URL, normalized, fresh) run
+ * in SQL; the model CLASSIFIES each event — per-factor scores, penalty
+ * flags, hard-policy rejection codes, audience tags, evidence — and
+ * deterministic code (event-scoring.js) computes the final 0–100 score
+ * and the decision. The editorial questions are no longer "would a
+ * local reader go?" but "would readers be disappointed we failed to
+ * tell them?" and "is it special enough to justify the drive and the
+ * plan?".
+ *
+ * Auto-approval requires ZERO rejection codes AND score ≥ the feature
+ * floor (75, env-tunable). Everything else STAYS pending with its
+ * score, codes, and reasoning persisted — the operator can still
+ * approve manually; nothing is auto-rejected. An event can never
+ * become publishable merely because the issue needs another card.
  *
  * Idempotent per event: examined rows get curated_at and the candidate
  * query excludes them, so each event costs one classification, not one
@@ -28,7 +37,9 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { etDateString, parseETDateTime } = require('../utils/datetime-et');
+const {
+  etDateString, parseETDateTime, formatETDay, formatETDate, formatETTime,
+} = require('../utils/datetime-et');
 const {
   excludeRoutineRecurringFromQuery,
   isEligibleForFreshDigest,
@@ -37,6 +48,13 @@ const {
   filterPreviouslyFeaturedIdentities,
   filterRepeatedDateIdentities,
 } = require('./newsletter-event-selection');
+const {
+  FACTOR_MAXES,
+  REJECTION_CODES,
+  assessEvent,
+  featureScoreFloor,
+  malformedAssessmentReason,
+} = require('./event-scoring');
 
 let Anthropic;
 try {
@@ -46,11 +64,15 @@ try {
 }
 
 const MODELS = require('../config/models');
+const { stripThinkingBlocks } = require('./llm/deep');
 
-// Examined per run. One Claude call per CLASSIFY_BATCH; a fully fresh
-// backlog (e.g. first deploy) drains within a couple of runs.
+// Examined per run. One Claude call per CLASSIFY_BATCH; the structured
+// assessment is ~10× the old approve/note payload, so the batch is
+// smaller and the token ceiling higher. A fully fresh backlog drains
+// within a few runs.
 const CURATION_RUN_LIMIT = 120;
-const CLASSIFY_BATCH = 40;
+const CLASSIFY_BATCH = 12;
+const CLASSIFY_MAX_TOKENS = 6000;
 const FORWARD_WINDOW_DAYS = 90;
 const NOTE_MAX = 200;
 
@@ -74,6 +96,7 @@ function buildCurationCandidateQuery(limit = CURATION_RUN_LIMIT) {
       'e.venue_name', 'e.city', 'e.event_type', 'e.recurrence_type',
       'e.freshness_status', 'e.times_featured', 'e.last_featured_at',
       'e.pulled_at', 'e.is_free', 'e.family_friendly', 'e.event_url',
+      'e.price_text', 'e.region_zone',
       'e.admin_status', 'e.merged_into', 's.name as source_name',
     )
     .where('e.admin_status', 'pending')
@@ -105,34 +128,91 @@ async function fetchCurationCandidates(limit = CURATION_RUN_LIMIT) {
   // accept. A plain isRoutineRecurringEvent check here silently discarded
   // fresh_series_launch debuts (the single-use series-debut carve-out),
   // leaving them pending forever.
-  return historicallyNewRows.filter((row) => isEligibleForFreshDigest(row));
+  const candidates = historicallyNewRows.filter((row) => isEligibleForFreshDigest(row));
+
+  // Rows dropped by the PERMANENT identity filters must be marked
+  // examined — the candidate query is start_at-ASC LIMIT-ed, so
+  // un-stamped drops (e.g. a debut series' later siblings) would hold the
+  // same earliest slots on every run and eventually starve later events
+  // out of classification. They stay pending — the note says why, and
+  // the operator can still approve manually.
+  //
+  // Eligibility drops are deliberately NOT stamped: isEligibleForFreshDigest
+  // is time-dependent — a limited_run is only admissible in its opening or
+  // closing week, an annual can clear its 300-day cooldown — so a row
+  // dropped today can be genuinely scoreable next week. Those rows stay
+  // curated_at NULL and retry as the reference advances; they are bounded
+  // (real limited-run/annual listings, not fan-out spam, which the identity
+  // filters above catch and stamp).
+  const nonRepeatedIds = new Set(nonRepeatedRows.map((row) => String(row.id)));
+  const historicallyNewIds = new Set(historicallyNewRows.map((row) => String(row.id)));
+  const isAnnual = (row) => row.event_type === 'annual' || row.recurrence_type === 'annual';
+  const policyDrops = rows
+    .filter((row) => !historicallyNewIds.has(String(row.id)))
+    // An ANNUAL row dropped by the previously-featured filter is a
+    // time-dependent decision — isEditoriallyNewEvent re-admits it after
+    // the 300-day cooldown — so it stays unstamped and retries, like the
+    // eligibility drops below. Non-annual featured-history drops and all
+    // repeated-identity drops are permanent and stamp.
+    .filter((row) => !(nonRepeatedIds.has(String(row.id)) && isAnnual(row)))
+    .map((row) => ({
+      id: String(row.id),
+      note: !nonRepeatedIds.has(String(row.id))
+        ? 'Excluded by policy: repeated-date identity (routine series occurrence)'
+        : 'Excluded by policy: identity already featured in a prior issue',
+    }));
+
+  return { candidates, policyDrops };
 }
 
 function buildCurationPrompt(events, todayIso) {
   const lines = events.map((e) => {
-    const date = e.start_at ? new Date(e.start_at).toISOString() : 'unknown';
+    // Eastern wall-clock with the weekday spelled out — the rubric awards
+    // planning points for Friday–Sunday timing, and a raw UTC ISO string
+    // shifts every EDT evening event onto the wrong weekday (Thu 8 PM ET
+    // renders as Friday midnight UTC).
+    const startDate = e.start_at ? new Date(e.start_at) : null;
+    const date = startDate && !Number.isNaN(startDate.getTime())
+      ? `${formatETDay(startDate)}, ${formatETDate(startDate)}, ${formatETTime(startDate)} ET`
+      : 'unknown';
     const desc = (e.description || '').replace(/\s+/g, ' ').slice(0, 300);
-    return `- id: ${e.id}\n  title: ${e.title}\n  date: ${date}\n  venue: ${e.venue_name || 'unknown'} (${e.city || 'unknown city'})\n  source: ${e.source_name || 'unknown'}\n  description: ${desc || '(none)'}`;
+    const free = e.is_free === true ? 'yes' : (e.is_free === false ? 'no' : 'unknown');
+    const family = e.family_friendly === true ? 'yes' : (e.family_friendly === false ? 'no' : 'unknown');
+    return `- id: ${e.id}\n  title: ${e.title}\n  date: ${date}\n  venue: ${e.venue_name || 'unknown'} (${e.city || 'unknown city'})\n  source: ${e.source_name || 'unknown'}\n  free: ${free} | price: ${e.price_text || 'unknown'} | family-friendly: ${family}\n  description: ${desc || '(none)'}`;
   });
 
-  return `You curate the Waves Newsletter's weekly local events issue — a punchy, FOMO-driven guide for Southwest Florida (North Port to Tampa). Today's date: ${todayIso}.
+  const factorLines = Object.entries(FACTOR_MAXES)
+    .map(([name, max]) => `  ${name}: 0-${max}`).join('\n');
 
-APPROVE genuinely new, date-specific events a local reader would actually go to for fun: live music, festivals, one-time markets, food and drink, family activities, arts, outdoors, museum and aquarium programs, and seasonal happenings.
+  return `You are the editor of the Waves Newsletter's weekly local events issue — a curated guide for Southwest Florida readers from North Port to Tampa. Today's date: ${todayIso}.
 
-REJECT (leave for human review):
-- Routine or repeating programming: weekly/daily/monthly yoga, fitness classes, trivia, karaoke, markets, meetups, or any "every Tuesday"-style listing
-- Government/civic process: council or committee meetings, agendas, hearings, workshops, procurement notices
-- Business networking, ribbon cuttings, chamber luncheons aimed at members
-- Webinars, virtual-only events, multi-week classes that require enrollment
-- Sales promotions and store openings dressed up as events
-- Anything whose title/description doesn't describe a real attendable happening
+Judge every event by TWO questions — not "might someone go?" but:
+1. Would a meaningful number of local readers be DISAPPOINTED that we failed to tell them about this?
+2. Is it SPECIAL enough to justify the reader's time, drive, planning, and possibly money this week?
+
+Plenty of people "might go" to a library workshop, a boutique promotion, or an ordinary film screening. That does not earn a slot in a regional newsletter. Inaugural events, one-night-only shows, opening weekends, touring acts, annual signature events, and limited engagements do.
+
+Score each event on these factors (integers, each capped at its maximum):
+${factorLines}
+
+High marks: specialness = inaugural / one-night-only / opening weekend / touring act / special themed edition / annual signature / limited engagement. reader_pull = a clear "send this to your spouse" hook with regional draw. audience_fit = strong family activity or credible parents' night out with known age suitability. planning_value = Friday-Sunday timing, enough notice, usable date/time/ticket info. local_relevance = locally distinctive, reasonable drive for its significance. source_confidence = official organizer/venue page with current, verifiable details. accessibility = clear pricing, all-ages access where applicable, a free or reasonably priced option.
+
+Penalty flags — set when true (fixed point values are applied in code, you only flag):
+  generic_class — ordinary workshop/class with no exceptional element
+  retail_promo — store promotion or lead generation dressed up as an event
+  ordinary_screening — regular film showing (no restoration, Q&A, anniversary, or reopening hook)
+
+Hard-policy rejection codes — set when ANY apply (the event can then never be auto-approved):
+${REJECTION_CODES.map((c) => `  ${c}`).join('\n')}
+A class, screening, market, or store event may still qualify WITHOUT a rejection code when it has a genuinely exceptional, verifiable element — the exceptional element must appear in the listing, never invented.
 
 Output STRICT JSON only:
-{"decisions": [{"id": "<uuid exactly as given>", "approve": true, "note": "<one short reason, max 80 chars>"}]}
+{"assessments": [{"id": "<uuid exactly as given>", "event_type": "<short slug>", "novelty_type": "one_time|inaugural|opening_weekend|closing_weekend|touring|annual_signature|special_edition|limited_engagement|series_debut|ordinary", "family_status": "confirmed|adults_lean|unknown", "audience_tags": ["family"|"parents_night"|"teens"|"free"|"worth_the_drive"], "scores": {"specialness": 0, "reader_pull": 0, "audience_fit": 0, "planning_value": 0, "local_relevance": 0, "source_confidence": 0, "accessibility": 0}, "penalty_flags": [], "rejection_codes": [], "editorial_reason": "<one sentence, max 200 chars>", "evidence": ["<short verifiable statement from the listing>"]}]}
 
 Rules:
-- One decision per input event, using its exact id.
-- When unsure, approve: false — a human reviews everything you don't approve.
+- One assessment per input event, using its exact id.
+- Score from the LISTING's evidence only — never invent prices, ticket status, or special elements.
+- When unsure whether something is special, score it LOW — a human reviews everything that isn't auto-approved.
 - Return JSON only — no code fence, no commentary.
 
 Events:
@@ -140,28 +220,25 @@ ${lines.join('\n')}`;
 }
 
 /**
- * Parse + validate the model's decisions. Unknown ids are dropped;
- * a missing decision means the event stays pending (fail-closed).
+ * Parse + validate the model's assessments. Unknown ids are dropped;
+ * a missing assessment means the event stays pending (fail-closed).
+ * Factor clamping / code allow-listing happens in event-scoring.
  */
 function parseCurationResponse(text, candidateIds) {
   const jsonMatch = String(text || '').match(/\{[\s\S]*\}/);
   if (!jsonMatch) throw new Error('Claude did not return JSON for event curation');
   const parsed = JSON.parse(jsonMatch[0]);
-  const raw = Array.isArray(parsed.decisions) ? parsed.decisions : [];
+  const raw = Array.isArray(parsed.assessments) ? parsed.assessments : [];
   const known = new Set(candidateIds.map(String));
   const seen = new Set();
-  const decisions = [];
-  for (const d of raw) {
-    const id = d && d.id != null ? String(d.id) : null;
+  const assessments = [];
+  for (const a of raw) {
+    const id = a && a.id != null ? String(a.id) : null;
     if (!id || !known.has(id) || seen.has(id)) continue;
     seen.add(id);
-    decisions.push({
-      id,
-      approve: d.approve === true,
-      note: d.note ? String(d.note).slice(0, NOTE_MAX) : null,
-    });
+    assessments.push({ ...a, id });
   }
-  return decisions;
+  return assessments;
 }
 
 async function classifyBatch(events, todayIso) {
@@ -171,57 +248,99 @@ async function classifyBatch(events, todayIso) {
   const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
   const response = await anthropic.messages.create({
     model: MODELS.WORKHORSE,
-    max_tokens: 3000,
-    system: 'You are a precise event curator. You output strict JSON and nothing else.',
+    max_tokens: CLASSIFY_MAX_TOKENS,
+    system: 'You are a precise, demanding events editor. You output strict JSON and nothing else.',
     messages: [{ role: 'user', content: buildCurationPrompt(events, todayIso) }],
   });
-  const text = response.content?.[0]?.text || '';
+  // Thinking-block guard: WORKHORSE/FAST resolve to a model that can lead
+  // with a thinking block (no .text) on larger inputs, which made a blind
+  // content[0] read return '' — see event-ingestion.js for the incident.
+  const text = stripThinkingBlocks(response).content?.[0]?.text || '';
   return parseCurationResponse(text, events.map((e) => e.id));
 }
 
 /**
- * Fallback decisions for batch members the model's response omitted
- * (or the parser dropped as unknown/duplicate ids). Without these the
- * omitted rows keep curated_at NULL, re-enter the candidate pool, and
- * get sent to the model — and billed — again on every run; a
- * consistently partial response could pin the run limit forever.
- * Fail-closed: omitted = left pending for human review, marked
- * examined.
+ * Fallback for batch members the model's response omitted (or the
+ * parser dropped as unknown/duplicate ids). Without these the omitted
+ * rows keep curated_at NULL, re-enter the candidate pool, and get sent
+ * to the model — and billed — again on every run. Fail-closed:
+ * omitted = left pending for human review, marked examined, no score.
  */
-function missingDecisionFallbacks(batch, decisions) {
-  const decided = new Set(decisions.map((d) => String(d.id)));
+function missingAssessmentFallbacks(batch, assessments) {
+  const decided = new Set(assessments.map((a) => String(a.id)));
   return batch
     .filter((e) => !decided.has(String(e.id)))
-    .map((e) => ({ id: String(e.id), approve: false, note: 'No decision returned by model' }));
+    .map((e) => ({ id: String(e.id), __missing: true }));
 }
 
 /**
- * Apply one decision. Approval is guarded on admin_status='pending'
- * (a concurrent operator decision wins); the examined-marker update is
- * unguarded so the row never re-enters the candidate pool either way.
+ * Apply one assessed decision. Approval is guarded on
+ * admin_status='pending' (a concurrent operator decision wins); the
+ * examined-marker update is unguarded so the row never re-enters the
+ * candidate pool either way. The structured assessment persists on the
+ * row in both branches — the proof diagnostics panel and the Event
+ * Inbox read it.
  */
-async function applyDecision(decision) {
+async function applyDecision(event, rawAssessment, reference = new Date()) {
+  // Missing AND structurally malformed assessments take the same
+  // fail-closed path: examined, pending, and — critically — the
+  // structured assessment columns cleared, so a revived occurrence can
+  // never keep a prior occurrence's score/codes/evidence attached to a
+  // fresh examination (Codex P1/P2 on this PR).
+  const malformedReason = rawAssessment.__missing ? null : malformedAssessmentReason(rawAssessment);
+  if (rawAssessment.__missing || malformedReason) {
+    await db('events_raw')
+      .where({ id: event.id })
+      .whereNull('curated_at')
+      .update({
+        editorial_score: null,
+        score_breakdown: null,
+        rejection_codes: null,
+        audience_tags: null,
+        novelty_type: null,
+        editorial_evidence: null,
+        curated_at: db.fn.now(),
+        curation_note: rawAssessment.__missing
+          ? 'No assessment returned by model'
+          : `Malformed assessment: ${malformedReason}`.slice(0, NOTE_MAX),
+        updated_at: db.fn.now(),
+      });
+    return 'left_pending';
+  }
+
+  const decision = assessEvent(event, rawAssessment, reference);
+  const note = (decision.editorialReason
+    || (decision.rejectionCodes.length
+      ? `Policy: ${decision.rejectionCodes.join(', ')}`
+      : `Scored ${decision.score}/100`)
+  ).slice(0, NOTE_MAX);
+  const assessmentFields = {
+    editorial_score: decision.score,
+    score_breakdown: JSON.stringify(decision.breakdown),
+    rejection_codes: JSON.stringify(decision.rejectionCodes),
+    audience_tags: JSON.stringify(decision.audienceTags),
+    novelty_type: decision.noveltyType,
+    editorial_evidence: JSON.stringify(decision.evidence),
+    curation_note: note,
+    updated_at: db.fn.now(),
+  };
+
   if (decision.approve) {
     const updated = await db('events_raw')
-      .where({ id: decision.id, admin_status: 'pending' })
+      .where({ id: event.id, admin_status: 'pending' })
       .whereNull('merged_into')
       .update({
+        ...assessmentFields,
         admin_status: 'approved',
         approved_via: 'auto_curation',
         curated_at: db.fn.now(),
-        curation_note: decision.note,
-        updated_at: db.fn.now(),
       });
     if (updated) return 'approved';
   }
   await db('events_raw')
-    .where({ id: decision.id })
+    .where({ id: event.id })
     .whereNull('curated_at')
-    .update({
-      curated_at: db.fn.now(),
-      curation_note: decision.note,
-      updated_at: db.fn.now(),
-    });
+    .update({ ...assessmentFields, curated_at: db.fn.now() });
   return decision.approve ? 'raced' : 'left_pending';
 }
 
@@ -234,35 +353,60 @@ async function runAutoCuration({ limit = CURATION_RUN_LIMIT } = {}) {
     return { disabled: true, examined: 0, approved: 0 };
   }
 
-  const candidates = await fetchCurationCandidates(limit);
-  if (!candidates.length) {
-    return { examined: 0, approved: 0 };
+  const { candidates, policyDrops } = await fetchCurationCandidates(limit);
+
+  // Stamp policy-dropped rows first so they leave the candidate window
+  // even when the model batches below fail. Same guarded write as the
+  // missing-assessment fallback: examined, pending, assessment cleared.
+  for (const drop of policyDrops) {
+    await db('events_raw')
+      .where({ id: drop.id })
+      .whereNull('curated_at')
+      .update({
+        editorial_score: null,
+        score_breakdown: null,
+        rejection_codes: null,
+        audience_tags: null,
+        novelty_type: null,
+        editorial_evidence: null,
+        curated_at: db.fn.now(),
+        curation_note: drop.note,
+        updated_at: db.fn.now(),
+      });
   }
 
+  if (!candidates.length) {
+    return { examined: 0, approved: 0, policyDropped: policyDrops.length };
+  }
+
+  const byId = new Map(candidates.map((e) => [String(e.id), e]));
   const todayIso = etDateString(new Date());
+  const reference = new Date();
   let approved = 0;
   let examined = 0;
 
   for (let i = 0; i < candidates.length; i += CLASSIFY_BATCH) {
     const batch = candidates.slice(i, i + CLASSIFY_BATCH);
-    let decisions;
+    let assessments;
     try {
-      decisions = await classifyBatch(batch, todayIso);
+      assessments = await classifyBatch(batch, todayIso);
     } catch (err) {
       // A failed batch leaves its rows un-examined — they'll be
       // retried next run. Don't fail the whole sweep.
       logger.error(`[event-curation] batch classify failed: ${err.message}`);
       continue;
     }
-    for (const decision of [...decisions, ...missingDecisionFallbacks(batch, decisions)]) {
-      const outcome = await applyDecision(decision);
+    for (const assessment of [...assessments, ...missingAssessmentFallbacks(batch, assessments)]) {
+      const event = byId.get(String(assessment.id));
+      if (!event) continue;
+      const outcome = await applyDecision(event, assessment, reference);
       examined += 1;
       if (outcome === 'approved') approved += 1;
     }
   }
 
-  logger.info(`[event-curation] examined ${examined}/${candidates.length}, approved ${approved}`);
-  return { examined, approved, candidates: candidates.length };
+  logger.info(`[event-curation] examined ${examined}/${candidates.length}, approved ${approved}, policy-dropped ${policyDrops.length} (feature floor ${featureScoreFloor()})`);
+  return { examined, approved, candidates: candidates.length, policyDropped: policyDrops.length };
 }
 
 module.exports = {
@@ -270,7 +414,8 @@ module.exports = {
   // Exported for unit tests — pure pieces.
   buildCurationPrompt,
   parseCurationResponse,
-  missingDecisionFallbacks,
+  missingAssessmentFallbacks,
   curationEnabled,
   buildCurationCandidateQuery,
+  applyDecision,
 };

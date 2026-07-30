@@ -97,7 +97,7 @@ function getAftercareTips(serviceType) {
     return 'Avoid mowing for 48 hours. Water as usual unless otherwise noted. Greening expected in 7-10 days. Weed yellowing begins in 5-7 days.';
   }
   // Default to pest
-  return 'Treated areas dry in 30-45 min. Safe for pets and children once dry. Minor pest activity may continue 7-14 days as product takes full effect.';
+  return 'Keep people and pets off treated areas until completely dry — your technician confirms timing for the products used. Minor pest activity may continue 7-14 days as product takes full effect.';
 }
 
 // Calculate visit duration from available data
