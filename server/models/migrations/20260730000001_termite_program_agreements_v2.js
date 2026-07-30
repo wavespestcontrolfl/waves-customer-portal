@@ -554,22 +554,26 @@ exports.down = async function down(knex) {
       .whereRaw("metadata->>'reason' = 'superseded_by_v2_migration'")
       .select('contract_id', 'customer_id', 'metadata');
     const templateKeysForRestore = TEMPLATE_V2.map((t) => t.template_key);
+    // Same canonicalization as the service's normalizeAddress — '123 Main
+    // Street' and '123 Main St' are the SAME property for restore
+    // decisions (migrations stay self-contained, so the map is inlined).
+    const ADDR_TOKENS = {
+      street: 'st', avenue: 'ave', drive: 'dr', road: 'rd', boulevard: 'blvd',
+      lane: 'ln', court: 'ct', circle: 'cir', place: 'pl', terrace: 'ter',
+      parkway: 'pkwy', highway: 'hwy', trail: 'trl', way: 'way', loop: 'loop',
+      north: 'n', south: 's', east: 'e', west: 'w',
+      apartment: 'apt', suite: 'ste', unit: 'unit',
+    };
+    const normAddr = (v) => String(v || '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, ' ')
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((t) => ADDR_TOKENS[t] || t)
+      .join(' ');
     for (const evt of cancelEvents) {
-      let meta = evt.metadata;
-      if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
-      let priorStatus = ['draft', 'sent', 'viewed'].includes(meta?.prior_status) ? meta.prior_status : 'draft';
-      // A share token that expired while the row sat cancelled must not
-      // come back as a live-looking request whose link 410s — restore it
-      // as 'expired' so the delivery lifecycle owns the renewal.
-      if (source.share_token_expires_at && new Date(source.share_token_expires_at) < new Date()) {
-        priorStatus = 'expired';
-      }
-      // Never reopen a source whose customer already has a replacement for
-      // the SAME property (open OR signed) — restoring it would put two
-      // public signing flows (or a signed contract plus a live request) in
-      // front of the customer. A valid agreement at ANOTHER property never
-      // suppresses this one's restoration. Unprovable addresses stay
-      // conservative (suppress).
+      // Source FIRST — everything below reads it.
       const source = await knex('customer_contracts')
         .where({ id: evt.contract_id })
         .first('customer_id', 'document_variables_snapshot', 'document_template_key', 'document_template_version_id', 'share_token_expires_at');
@@ -583,7 +587,21 @@ exports.down = async function down(knex) {
         .where({ template_key: source.document_template_key })
         .first('active_version_id');
       if (!sourceTemplate || sourceTemplate.active_version_id !== source.document_template_version_id) continue;
-      const normAddr = (v) => String(v || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+      let meta = evt.metadata;
+      if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
+      let priorStatus = ['draft', 'sent', 'viewed'].includes(meta?.prior_status) ? meta.prior_status : 'draft';
+      // A share token that expired while the row sat cancelled must not
+      // come back as a live-looking request whose link 410s — restore it
+      // as 'expired' so the delivery lifecycle owns the renewal.
+      if (source.share_token_expires_at && new Date(source.share_token_expires_at) < new Date()) {
+        priorStatus = 'expired';
+      }
+      // Never reopen a source whose customer already has a replacement for
+      // the SAME property (open unexpired OR signed) — restoring it would
+      // put two public signing flows (or a signed contract plus a live
+      // request) in front of the customer. A valid agreement at ANOTHER
+      // property never suppresses this one's restoration. Unprovable
+      // addresses stay conservative (suppress).
       const snapOf = (raw) => {
         let sn = raw;
         if (typeof sn === 'string') { try { sn = JSON.parse(sn); } catch { sn = null; } }
@@ -597,8 +615,12 @@ exports.down = async function down(knex) {
         .whereIn('document_template_key', templateKeysForRestore)
         .whereNot('id', evt.contract_id)
         .whereIn('status', ['draft', 'sent', 'viewed', 'signed'])
-        .select('document_variables_snapshot');
+        .select('status', 'share_token_expires_at', 'document_variables_snapshot');
       const replacementSameProperty = candidates.some((c) => {
+        // An open candidate whose token has expired is no coverage — its
+        // link 410s; only signed rows count regardless of token state.
+        if (c.status !== 'signed'
+          && c.share_token_expires_at && new Date(c.share_token_expires_at) < new Date()) return false;
         const cs = snapOf(c.document_variables_snapshot);
         if (cs?.estimate?.id && sourceEstimateId && String(cs.estimate.id) === String(sourceEstimateId)) return true;
         const cAddr = normAddr(cs?.estimate?.address || cs?.customer?.address);

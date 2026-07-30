@@ -717,10 +717,15 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       // publish/reactivation between the pre-transaction reads and here
       // must not let us insert (and autosend) an agreement rendered from a
       // no-longer-active version.
-      const liveTemplate = await trx('document_templates')
-        .where({ template_key: prepared.templateKey })
+      // Lock BOTH program templates and rebuild the active-id set from the
+      // locked truth: the pre-transaction snapshot could brand a freshly
+      // published-and-issued v3 request 'stale' and cancel a delivered link.
+      const lockedTemplates = await trx('document_templates')
+        .whereIn('template_key', PROGRAM_TEMPLATE_KEYS)
         .forUpdate()
-        .first('active_version_id');
+        .select('template_key', 'active_version_id');
+      const lockedActiveIds = new Set(lockedTemplates.map((t) => t.active_version_id).filter(Boolean));
+      const liveTemplate = lockedTemplates.find((t) => t.template_key === prepared.templateKey);
       if (!liveTemplate || liveTemplate.active_version_id !== version.id) return 'version_changed';
       // FOR UPDATE: the status re-read must be current when we cancel — a
       // customer signing the older agreement concurrently would otherwise
@@ -728,7 +733,7 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       // update, and the completed signature would be clobbered 'cancelled'.
       const openRows = await openProgramAgreements(customerId, trx, { forUpdate: true });
       const nowTs = new Date();
-      if (openRows.some((r) => classifyExistingAgreement(r, estimate, nowTs, { activeVersionIds }) === 'blocks')) return null;
+      if (openRows.some((r) => classifyExistingAgreement(r, estimate, nowTs, { activeVersionIds: lockedActiveIds }) === 'blocks')) return null;
       // Signed re-check INSIDE the lock: a customer signing a (stale) request
       // for THIS estimate between an unlocked pre-check and this transaction
       // commits 'signed' — the row drops out of the open set above, and
@@ -763,7 +768,7 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       // older open draft — cancel it so exactly one live agreement exists
       // and it carries the ACCEPTED figures. The cancel stays conditional
       // on the row still being open (belt + braces with the row lock).
-      const stale = openRows.filter((r) => classifyExistingAgreement(r, estimate, nowTs, { activeVersionIds }) === 'supersede');
+      const stale = openRows.filter((r) => classifyExistingAgreement(r, estimate, nowTs, { activeVersionIds: lockedActiveIds }) === 'supersede');
       for (const staleRow of stale) {
         const cancelled = await trx('customer_contracts')
           .where({ id: staleRow.id })
