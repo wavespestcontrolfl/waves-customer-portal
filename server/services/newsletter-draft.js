@@ -132,8 +132,8 @@ EVENT RULES:
 - title: a CURIOSITY-GAP headline that never uses the raw event name (it renders elsewhere). Proven formulas: question + affirmation ("...? Yes, Please" / "...? Say Less" / "...? Count Us In"), PSA framing ("PSA: You Might Meet Your New Best Friend This Weekend"), direct address ("This One's for You"), equation ("High Hair + Hot Dice = Ultimate Weekend").
 - Each event gets a unique thematic emoji (no repeats between events).
 - gifSearchTerm: 2-4 word Giphy search for a pop-culture REACTION meme (the joke), not a literal event photo. Every gifSearchTerm in the issue (including introGifTerm) must be clearly DISTINCT from the others — different verbs, moods, and meme genres, never near-synonyms of another section's term — so no two sections pull similar GIFs.
-- TIERS (the events arrive in rank order — KEEP that order): the FIRST event is the HEADLINER (description 70-100 words + highlights + optional proTip + closingLine). Events 2-3 are FEATURED (description 40-60 words; highlights, proTip, closingLine all null). Events 4+ are SHORTLIST picks (description = ONE punchy sentence, 15-25 words; highlights, proTip, closingLine all null).
-- description: conversational, says WHY someone would actually go (length per tier above). Work the event's official name (exactly as given in the record) into the prose once — the renderer turns it into the ticket link. Do NOT restate the date, venue, or URL — those render automatically.
+- CONSISTENT TREATMENT (owner rule): every event gets the SAME volume — description 40-70 words, highlights 3-4 bullets, closingLine; proTip optional. Keep the events in the order provided. No event should read noticeably longer or shorter than its neighbors.
+- description: conversational, says WHY someone would actually go (40-70 words, EVERY event). Work the event's official name (exactly as given in the record) into the prose once — the renderer turns it into the ticket link. Do NOT restate the date, venue, or URL — those render automatically.
 - scoopLabel: the lead-in for the highlights list. Rotate across events, never repeat in one issue: "Here's the scoop:", "Here's the deal:", "Here's what's going down:", "What to expect:", "Here's the rundown:", "Why it's a vibe:", "Why it's a weekend winner:", "Here's what you're walking into:".
 - highlights: 3-5 short bullets, PLAIN TEXT — no emojis, no leading bullet characters (the renderer adds the "•" marker). Vibe-only; no logistics, no prices.
 - proTip (HEADLINER only, optional): a genuinely useful planning tip GROUNDED in the event record provided — arrive-early for a stated start time, what to bring for a stated venue type, weather planning for an outdoor venue. NEVER invent logistics the record doesn't support (parking rules, bag policies, sellout predictions, registration requirements). If nothing useful is grounded, return null — a joke is not a tip (jokes live in the description). Do NOT include the words "Pro tip" — the renderer adds the label. NOT pricing.
@@ -431,7 +431,7 @@ async function assemblePestInsiderNewsletter(draft) {
   if (draft.crawlHeading || draft.crawlText) {
     parts.push(dividerHtml());
     if (draft.crawlHeading) {
-      parts.push(`<h2 id="pi-crawl" style="${sectionHeadingStyle(0, 8)}"><strong><em>${markdownToHtml(draft.crawlHeading)}</em></strong></h2>`);
+      parts.push(`<h2 id="pi-crawl" class="dm-chip" style="${sectionHeadingStyle(0, 8)}"><strong><em>${markdownToHtml(draft.crawlHeading)}</em></strong></h2>`);
     }
     if (crawlGif) parts.push(gifBlock(crawlGif, draft.crawlGifCaption));
     if (draft.crawlText) {
@@ -443,7 +443,7 @@ async function assemblePestInsiderNewsletter(draft) {
   if (draft.pestOfMonth?.name) {
     const card = draft.pestOfMonth;
     parts.push(dividerHtml());
-    parts.push(`<h2 id="pi-pest" style="${sectionHeadingStyle(1, 8)}">${escapeHtml(card.emoji || '🪲')} <strong><em>Pest of the Month: ${markdownToHtml(card.name)}</em></strong></h2>`);
+    parts.push(`<h2 id="pi-pest" class="dm-chip" style="${sectionHeadingStyle(1, 8)}">${escapeHtml(card.emoji || '🪲')} <strong><em>Pest of the Month: ${markdownToHtml(card.name)}</em></strong></h2>`);
     const rows = [
       card.whereYoullSeeIt && `📍 <strong>Where you'll see it:</strong> ${markdownToHtml(card.whereYoullSeeIt)}`,
       card.threatLevel && `⚠️ <strong>How worried to be:</strong> ${markdownToHtml(card.threatLevel)}`,
@@ -457,7 +457,7 @@ async function assemblePestInsiderNewsletter(draft) {
   if (draft.lawnHeading || draft.lawnText) {
     parts.push(dividerHtml());
     if (draft.lawnHeading) {
-      parts.push(`<h2 id="pi-lawn" style="${sectionHeadingStyle(2, 8)}"><strong><em>${markdownToHtml(draft.lawnHeading)}</em></strong></h2>`);
+      parts.push(`<h2 id="pi-lawn" class="dm-chip" style="${sectionHeadingStyle(2, 8)}"><strong><em>${markdownToHtml(draft.lawnHeading)}</em></strong></h2>`);
     }
     if (draft.lawnText) {
       parts.push(`<div style="margin:0 0 14px 0;padding:14px 18px;background:#F2F8F0;border-radius:10px;border-left:4px solid #5BA862;">
@@ -469,14 +469,14 @@ async function assemblePestInsiderNewsletter(draft) {
   // 4. Myth-Buster
   if (draft.mythQuestion && draft.mythVerdict) {
     parts.push(dividerHtml());
-    parts.push(`<h2 id="pi-myth" style="${sectionHeadingStyle(3, 8)}">🔍 <strong><em>Myth-Buster: ${markdownToHtml(draft.mythQuestion)}</em></strong></h2>`);
+    parts.push(`<h2 id="pi-myth" class="dm-chip" style="${sectionHeadingStyle(3, 8)}">🔍 <strong><em>Myth-Buster: ${markdownToHtml(draft.mythQuestion)}</em></strong></h2>`);
     parts.push(`<p style="margin:0 0 14px 0;font-size:15px;line-height:1.6;">${markdownToHtml(draft.mythVerdict)}</p>`);
   }
 
   // 5. The pitch (sincere middle of the sandwich)
   if (draft.pitchHeading) {
     parts.push(dividerHtml());
-    parts.push(`<h2 id="pi-pitch" style="${sectionHeadingStyle(4, 8)}"><strong><em>${markdownToHtml(draft.pitchHeading)}</em></strong></h2>`);
+    parts.push(`<h2 id="pi-pitch" class="dm-chip" style="${sectionHeadingStyle(4, 8)}"><strong><em>${markdownToHtml(draft.pitchHeading)}</em></strong></h2>`);
     if (pitchGif) parts.push(gifBlock(pitchGif, draft.pitchGifCaption));
     if (draft.pitchIntro) {
       parts.push(`<p style="margin:0 0 14px 0;font-size:15px;line-height:1.6;">${markdownToHtml(draft.pitchIntro)}</p>`);
@@ -491,7 +491,7 @@ async function assemblePestInsiderNewsletter(draft) {
   if (draft.closingHeading || draft.closingText || draft.ctaLine) {
     parts.push(dividerHtml());
     if (draft.closingHeading) {
-      parts.push(`<h2 id="pi-close" style="${sectionHeadingStyle(5)}"><strong><em>${markdownToHtml(draft.closingHeading)}</em></strong></h2>`);
+      parts.push(`<h2 id="pi-close" class="dm-chip" style="${sectionHeadingStyle(5)}"><strong><em>${markdownToHtml(draft.closingHeading)}</em></strong></h2>`);
     }
     if (draft.closingText) {
       parts.push(`<p style="margin:0 0 14px 0;font-size:15px;line-height:1.6;">${markdownToHtml(draft.closingText).replace(/\n+/g, '<br/><br/>')}</p>`);
@@ -1268,20 +1268,12 @@ async function assembleBeehiivNewsletter(draft) {
   // Image-first visual rule (owner direction 2026-07-29): an event with
   // real still art shows THAT (the useful information), and the reaction
   // GIF is the fallback comedy device for events without art. Giphy is
-  // only queried for events that will actually render a GIF — which also
-  // excludes SHORTLIST entries (index > FEATURED_MAX): their compact
-  // format renders no visual at all, so a lookup would burn requests and
-  // the shared retry budget on a discarded pick.
-  const FEATURED_MAX = 2; // [0] hero, [1..2] featured, [3..] shortlist
-  // ev.tier (pinned to the REQUESTED portfolio rank at lock time) wins;
-  // position is only the fallback for direct-assembler callers/tests.
-  const tierOf = (i) => events[i]?.tier
-    || (i === 0 ? 'hero' : (i <= FEATURED_MAX ? 'featured' : 'quick'));
+  // only queried for events that will actually render a GIF.
   const eventShowsImage = events.map((ev) => {
     const u = safeUrl(ev.imageUrl);
     return Boolean(u && !isLikelyGifUrl(u));
   });
-  const eventRendersGif = (i) => tierOf(i) !== 'quick' && !eventShowsImage[i];
+  const eventRendersGif = (i) => !eventShowsImage[i];
   const [introCandidates, ...eventCandidates] = await Promise.all([
     searchGiphyCandidates(draft.introGifTerm),
     ...events.map((ev, i) => (eventRendersGif(i) ? searchGiphyCandidates(ev.gifSearchTerm) : Promise.resolve([]))),
@@ -1308,18 +1300,21 @@ async function assembleBeehiivNewsletter(draft) {
   // line is the compact at-a-glance version (owner-accepted critique
   // 2026-07-29), and entries lead with the REAL event name so the list
   // is scannable — the curiosity headline rides second.
+  // Real event names ONLY (owner 2026-07-29: no trailing curiosity-title
+  // text in the list).
   const tocItems = events.map(ev => {
     const real = ev.sourceTitle ? `<strong>${escapeHtml(ev.sourceTitle)}</strong>` : markdownToHtml(ev.title);
-    const witty = ev.sourceTitle ? ` <em style="color:${COLORS.muted};">— ${markdownToHtml(ev.title)}</em>` : '';
-    return `<li style="margin:0 0 6px 0;"><a href="#evt-${slugify(ev.title)}" style="color:${COLORS.blue};text-decoration:none;">${escapeHtml(ev.emoji || '🎯')} ${real}</a>${witty}</li>`;
+    return `<li style="margin:0 0 6px 0;"><a href="#evt-${slugify(ev.title)}" class="dm-link" style="color:${COLORS.blue};text-decoration:none;">${escapeHtml(ev.emoji || '🎯')} ${real}</a></li>`;
   });
   if (draft.homeownerMinute) {
     tocItems.push(`<li style="margin:0 0 6px 0;"><a href="#homeowner-minute" style="color:${COLORS.blue};text-decoration:none;font-weight:500;">🏠 Homeowner Minute</a></li>`);
   }
-  const tocSummary = `${events.length} weekend pick${events.length === 1 ? '' : 's'} · North Port to Tampa · ~5-minute read`;
-  parts.push(`<div style="margin:0 0 24px 0;padding:14px 20px;background:${COLORS.cardBg};border-radius:10px;">
+  // Owner 2026-07-29: the summary line is JUST the read time — no count,
+  // no geography, no "(tap for the list)".
+  const tocSummary = '~5-minute read';
+  parts.push(`<div class="dm-box" style="margin:0 0 24px 0;padding:14px 20px;background:${COLORS.cardBg};border-radius:10px;">
 <details>
-<summary style="cursor:pointer;font-size:14px;color:${COLORS.muted};font-weight:600;">${escapeHtml(tocSummary)} <span style="font-weight:400;">(tap for the list)</span></summary>
+<summary class="dm-muted" style="cursor:pointer;font-size:14px;color:${COLORS.muted};font-weight:600;">${escapeHtml(tocSummary)}</summary>
 <ul style="list-style:none;padding:0;margin:10px 0 0 0;font-size:14px;line-height:1.9;">${tocItems.join('\n')}</ul>
 </details>
 </div>`);
@@ -1340,19 +1335,16 @@ async function assembleBeehiivNewsletter(draft) {
     parts.push(`<p style="margin:0 0 8px 0;font-size:15px;line-height:1.6;"><strong>${markdownToHtml(draft.transitionLine)}</strong></p>`);
   }
 
-  // ── Event Sections ── tiered treatment (owner direction 2026-07-29,
-  // from the external editorial critique): the events arrive in the
-  // portfolio's rank order (caller-order sort upstream), so position
-  // assigns the tier —
-  //   [0]        HEADLINER: full Beehiiv anatomy
-  //   [1..2]     FEATURED:  visual + trimmed description + meta
-  //   [3..]      SHORTLIST: compact entries under a single heading
-  // "When everything is highlighted, nothing feels important."
+  // ── Event Sections ── UNIFORM treatment (owner directive 2026-07-29:
+  // "move back to the list of events like we had before … make these
+  // consistent" — the tiered hero/featured/shortlist experiment is
+  // retired). Every event renders the same full anatomy; the prompt
+  // enforces consistent per-event content volume.
 
-  // Shared per-event pieces, computed once per iteration. Ticket links
-  // render as {{evclick:<eventId>}} tokens: the live sender substitutes a
-  // per-recipient tracking redirect; proof, preview, and archive resolve
-  // them back to the DIRECT event URL (newsletter-event-clicks.js).
+  // Shared per-event pieces. Ticket links render as {{evclick:<eventId>}}
+  // tokens: the live sender substitutes a per-recipient tracking
+  // redirect; proof, preview, and archive resolve them back to the
+  // DIRECT event URL (newsletter-event-clicks.js).
   const eventPieces = (ev) => {
     const ticketUrl = safeUrl(ev.eventUrl);
     const ticketHref = (ticketUrl && ev.eventId)
@@ -1365,9 +1357,9 @@ async function assembleBeehiivNewsletter(draft) {
     return { ticketUrl, ticketHref, anchorText, labels };
   };
 
-  // Meta lines shared by hero + featured cards. Price policy: the FREE
-  // badge (DB flag) wins; otherwise the DB-locked priceText renders
-  // verbatim-escaped. Model-written pricing stays hard-blocked upstream.
+  // Meta box. Price policy: the FREE badge (DB flag) wins; otherwise the
+  // DB-locked priceText renders inside its PAIR-verified data-db-price
+  // sentinel. Model-written pricing stays hard-blocked upstream.
   const metaBoxHtml = (ev, pieces) => {
     const meta = [];
     if (ev.dateStr) {
@@ -1391,10 +1383,10 @@ async function assembleBeehiivNewsletter(draft) {
       meta.push(`🏷️ <em>${pieces.labels.map((l) => escapeHtml(l)).join(' · ')}</em>`);
     }
     if (pieces.ticketUrl) {
-      meta.push(`🔗 <a href="${pieces.ticketHref}" style="color:${COLORS.blue};text-decoration:underline;font-weight:500;">${escapeHtml(pieces.anchorText)}</a>`);
+      meta.push(`🔗 <a href="${pieces.ticketHref}" class="dm-link" style="color:${COLORS.blue};text-decoration:underline;font-weight:500;">${escapeHtml(pieces.anchorText)}</a>`);
     }
     if (!meta.length) return null;
-    return `<div style="margin:0 0 14px 0;padding:12px 16px;background:${COLORS.cardBg};border-radius:8px;font-size:14px;line-height:2;">\n${meta.join('<br/>\n')}\n</div>`;
+    return `<div class="dm-box" style="margin:0 0 14px 0;padding:12px 16px;background:${COLORS.cardBg};border-radius:8px;font-size:14px;line-height:2;">\n${meta.join('<br/>\n')}\n</div>`;
   };
 
   // One visual per event: real still art when the event has it (the
@@ -1410,7 +1402,7 @@ async function assembleBeehiivNewsletter(draft) {
 <img src="${thumbUrl}" alt="${thumbAlt}" style="max-width:100%;max-height:280px;width:auto;height:auto;border-radius:10px;display:block;margin:0 auto;" />
 </div><!--<![endif]-->`;
       if (ev.gifCaption) {
-        html += `\n<p style="text-align:center;margin:0 0 14px 0;font-size:14px;color:${COLORS.muted};"><em>${markdownToHtml(ev.gifCaption)}</em></p>`;
+        html += `\n<p class="dm-muted" style="text-align:center;margin:0 0 14px 0;font-size:14px;color:${COLORS.muted};"><em>${markdownToHtml(ev.gifCaption)}</em></p>`;
       }
       return html;
     }
@@ -1418,47 +1410,17 @@ async function assembleBeehiivNewsletter(draft) {
     return eventGif ? gifBlock(eventGif, ev.gifCaption) : '';
   };
 
-  let quickHeadingRendered = false;
   for (let i = 0; i < events.length; i++) {
     const ev = events[i];
-    const tier = tierOf(i);
     const pieces = eventPieces(ev);
     const anchorId = `evt-${slugify(ev.title)}`;
 
-    if (tier === 'quick') {
-      // Shortlist: one heading for the group, then compact entries —
-      // real name, one sentence, one inline meta line.
-      if (!quickHeadingRendered) {
-        parts.push(dividerHtml());
-        parts.push(`<h2 style="${sectionHeadingStyle(i, 8)}">⚡ <strong><em>The Weekend Shortlist</em></strong></h2>`);
-        quickHeadingRendered = true;
-      }
-      const lines = [];
-      const nameHtml = ev.sourceTitle ? escapeHtml(ev.sourceTitle) : markdownToHtml(ev.title);
-      lines.push(`<p id="${anchorId}" style="margin:0 0 4px 0;font-size:15px;line-height:1.5;">${escapeHtml(ev.emoji || '🎯')} <strong>${nameHtml}</strong>${pieces.labels.length ? ` <em style="color:${COLORS.muted};font-size:13px;">· ${pieces.labels.map((l) => escapeHtml(l)).join(' · ')}</em>` : ''}</p>`);
-      if (ev.description) {
-        let descHtml = markdownToHtml(ev.description);
-        if (pieces.ticketHref && ev.sourceTitle) {
-          descHtml = linkifyFirst(descHtml, ev.sourceTitle, pieces.ticketHref);
-        }
-        lines.push(`<p style="margin:0 0 4px 0;font-size:14px;line-height:1.6;">${descHtml}</p>`);
-      }
-      const metaBits = [];
-      if (ev.dateStr) metaBits.push(`📅 <strong>${escapeHtml(ev.dateStr)}</strong>${ev.timeStr ? ` · ${escapeHtml(ev.timeStr)}` : ''}`);
-      if (ev.location) metaBits.push(`📍 ${ev.address ? `${escapeHtml(ev.location)} (${escapeHtml(ev.address)})` : escapeHtml(ev.location)}`);
-      if (ev.isFree) metaBits.push(`🎟️ <strong>FREE</strong>`);
-      else if (ev.priceText) metaBits.push(`🎟️ <span data-db-price="${escapeHtml(String(ev.eventId || '').toLowerCase())}">${escapeHtml(ev.priceText)}</span>`);
-      if (pieces.ticketUrl) metaBits.push(`🔗 <a href="${pieces.ticketHref}" style="color:${COLORS.blue};text-decoration:underline;font-weight:500;">${escapeHtml(pieces.anchorText)}</a>`);
-      if (metaBits.length) {
-        lines.push(`<p style="margin:0;font-size:13px;line-height:1.7;color:${COLORS.muted};">${metaBits.join(' &nbsp;·&nbsp; ')}</p>`);
-      }
-      parts.push(`<div style="margin:0 0 18px 0;padding:12px 16px;background:${COLORS.cardBg};border-radius:8px;">\n${lines.join('\n')}\n</div>`);
-      continue;
-    }
-
-    // Hero + featured cards.
     parts.push(dividerHtml());
-    parts.push(`<h2 id="${anchorId}" style="${sectionHeadingStyle(i, 8)}">${escapeHtml(ev.emoji || '🎯')} <strong><em>${markdownToHtml(ev.title)}</em></strong></h2>`);
+    // Both id and a legacy <a name> anchor: TOC jumps work in clients
+    // that honor either form (Apple Mail, desktop clients; Gmail's
+    // mobile apps ignore in-email anchors — platform limitation).
+    parts.push(`<a name="${anchorId}"></a>`);
+    parts.push(`<h2 id="${anchorId}" class="dm-chip" style="${sectionHeadingStyle(i, 8)}">${escapeHtml(ev.emoji || '🎯')} <strong><em>${markdownToHtml(ev.title)}</em></strong></h2>`);
 
     const visual = visualHtml(ev, i);
     if (visual) parts.push(visual);
@@ -1474,43 +1436,40 @@ async function assembleBeehiivNewsletter(draft) {
     const metaBox = metaBoxHtml(ev, pieces);
     if (metaBox) parts.push(metaBox);
 
-    // Scoop bullets, pro tip, and kicker are HEADLINER furniture only —
-    // featured cards stay trimmed (40-60 word description + meta).
-    if (tier === 'hero') {
-      const hl = Array.isArray(ev.highlights) ? ev.highlights : (typeof ev.highlights === 'string' ? [ev.highlights] : []);
-      if (hl.length) {
-        const label = (typeof ev.scoopLabel === 'string' && ev.scoopLabel.trim())
-          ? ev.scoopLabel.trim().slice(0, 60)
-          : 'What to expect:';
-        parts.push(`<p style="margin:0 0 6px 0;font-size:14px;font-weight:600;">${markdownToHtml(label)}</p>`);
-        const bullets = hl
-          .map((h) => plainBulletText(h))
-          .filter(Boolean)
-          .map((h) =>
-            `<li style="margin:0 0 6px 0;padding-left:4px;font-size:14px;line-height:1.6;">• ${markdownToHtml(h)}</li>`
-          ).join('\n');
-        parts.push(`<ul style="list-style:none;padding:0;margin:0 0 14px 0;">${bullets}</ul>`);
-      }
+    const hl = Array.isArray(ev.highlights) ? ev.highlights : (typeof ev.highlights === 'string' ? [ev.highlights] : []);
+    if (hl.length) {
+      const label = (typeof ev.scoopLabel === 'string' && ev.scoopLabel.trim())
+        ? ev.scoopLabel.trim().slice(0, 60)
+        : 'What to expect:';
+      parts.push(`<p style="margin:0 0 6px 0;font-size:14px;font-weight:600;">${markdownToHtml(label)}</p>`);
+      const bullets = hl
+        .map((h) => plainBulletText(h))
+        .filter(Boolean)
+        .map((h) =>
+          `<li style="margin:0 0 6px 0;padding-left:4px;font-size:14px;line-height:1.6;">• ${markdownToHtml(h)}</li>`
+        ).join('\n');
+      parts.push(`<ul style="list-style:none;padding:0;margin:0 0 14px 0;">${bullets}</ul>`);
+    }
 
-      // Pro tip — strip any model-provided "Pro tip:" prefix so the rendered
-      // label never doubles ("Pro tip: Pro tip: ..." shipped once).
-      if (ev.proTip) {
-        const tipText = String(ev.proTip).replace(/^\s*(?:🚨\s*)?pro[\s-]*tip[:\s-]*/i, '');
-        if (tipText.trim()) {
-          parts.push(`<p style="margin:0 0 14px 0;font-size:14px;line-height:1.5;">🚨 <strong>Pro tip:</strong> <em>${markdownToHtml(tipText)}</em></p>`);
-        }
+    // Pro tip — strip any model-provided "Pro tip:" prefix so the rendered
+    // label never doubles ("Pro tip: Pro tip: ..." shipped once).
+    if (ev.proTip) {
+      const tipText = String(ev.proTip).replace(/^\s*(?:🚨\s*)?pro[\s-]*tip[:\s-]*/i, '');
+      if (tipText.trim()) {
+        parts.push(`<p style="margin:0 0 14px 0;font-size:14px;line-height:1.5;">🚨 <strong>Pro tip:</strong> <em>${markdownToHtml(tipText)}</em></p>`);
       }
+    }
 
-      if (ev.closingLine) {
-        parts.push(`<p style="margin:0 0 0 0;font-size:15px;line-height:1.6;">${markdownToHtml(ev.closingLine)}</p>`);
-      }
+    if (ev.closingLine) {
+      parts.push(`<p style="margin:0 0 0 0;font-size:15px;line-height:1.6;">${markdownToHtml(ev.closingLine)}</p>`);
     }
   }
 
   // ── Homeowner Minute ──
   if (draft.homeownerMinute) {
     parts.push(dividerHtml());
-    parts.push(`<h2 id="homeowner-minute" style="${sectionHeadingStyle(events.length)}">🏠 <strong><em>Homeowner Minute</em></strong></h2>`);
+    parts.push(`<a name="homeowner-minute"></a>`);
+    parts.push(`<h2 id="homeowner-minute" class="dm-chip" style="${sectionHeadingStyle(events.length)}">🏠 <strong><em>Homeowner Minute</em></strong></h2>`);
     parts.push(`<div style="margin:0 0 20px 0;padding:18px 20px;background:${COLORS.homeownerBg};border-radius:12px;border-left:4px solid ${COLORS.blue};">
 <p style="margin:0;font-size:15px;line-height:1.6;">${markdownToHtml(draft.homeownerMinute)}</p>
 </div>`);
@@ -1520,7 +1479,7 @@ async function assembleBeehiivNewsletter(draft) {
   if (draft.closingHeading || draft.closingText) {
     parts.push(dividerHtml());
     if (draft.closingHeading) {
-      parts.push(`<h2 style="${sectionHeadingStyle(events.length + 1)}">${escapeHtml(draft.closingEmoji || '📝')} <strong><em>${markdownToHtml(draft.closingHeading)}</em></strong></h2>`);
+      parts.push(`<h2 class="dm-chip" style="${sectionHeadingStyle(events.length + 1)}">${escapeHtml(draft.closingEmoji || '📝')} <strong><em>${markdownToHtml(draft.closingHeading)}</em></strong></h2>`);
     }
     if (draft.closingText) {
       parts.push(`<p style="margin:0 0 14px 0;font-size:15px;line-height:1.6;">${markdownToHtml(draft.closingText)}</p>`);
@@ -1551,8 +1510,8 @@ async function assembleBeehiivNewsletter(draft) {
   // Waves social PROFILES while claiming to share the issue (owner-
   // accepted critique 2026-07-29); profiles stay in the footer, and the
   // wrapper adds a real web-version permalink when the send has a slug.
-  parts.push(`<div style="margin:28px 0 0 0;padding:16px 20px;background:${COLORS.cardBg};border-radius:10px;text-align:center;">
-<p style="margin:0;font-size:14px;color:${COLORS.muted};">Know someone who always asks what's happening this weekend? <strong>Forward them this email.</strong></p>
+  parts.push(`<div class="dm-box" style="margin:28px 0 0 0;padding:16px 20px;background:${COLORS.cardBg};border-radius:10px;text-align:center;">
+<p class="dm-muted" style="margin:0;font-size:14px;color:${COLORS.muted};">Know someone who always asks what's happening this weekend? <strong>Forward them this email.</strong></p>
 </div>`);
 
   // ── Reaction footer ── every edition ends with the feedback ask (owner
@@ -1600,19 +1559,12 @@ function buildFlagshipTextBody(draft) {
     // Curiosity headline as the heading (matches the HTML h2); the
     // official name rides in the description prose per the prompt.
     lines.push(`== ${stripMd(ev.title) || ev.sourceTitle || ''} ==`);
-    // Captions render only on tiers whose HTML shows a visual — the
-    // shortlist's compact HTML never renders gifCaption, so the text
-    // alternative must not either (MIME parity).
-    const tier = ev.tier || (i === 0 ? 'hero' : (i <= 2 ? 'featured' : 'quick'));
-    if (ev.gifCaption && tier !== 'quick') lines.push(stripMd(ev.gifCaption));
+    if (ev.gifCaption) lines.push(stripMd(ev.gifCaption));
     if (ev.description) lines.push(stripMd(ev.description));
-    // Headliner furniture serializes too — the MIME alternatives must
-    // stay content-equivalent (same fields, nothing extra, nothing
-    // less). Keys off the PINNED tier when present (position fallback
-    // for direct callers) so a gapped lineup renders identically in
-    // both MIME parts.
-    const isHero = ev.tier ? ev.tier === 'hero' : i === 0;
-    if (isHero) {
+    // Uniform treatment: every event's furniture serializes — the MIME
+    // alternatives stay content-equivalent (same fields, nothing extra,
+    // nothing less).
+    {
       const hl = Array.isArray(ev.highlights) ? ev.highlights : [];
       if (hl.length && ev.scoopLabel) lines.push(stripMd(ev.scoopLabel));
       for (const h of hl) {
@@ -1848,29 +1800,12 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
         `but none matched the approved eventIds. Refusing to render an empty newsletter.`
       );
     }
-    // Rank against the APPROVED PROMPT LINEUP (approvedEvents, already
-    // caller-sorted) — the events the model actually saw — not the raw
-    // requested ids. An event the eligibility filter dropped BEFORE the
-    // prompt means the model legitimately wrote headliner copy for the
-    // next one (it was first in the prompt), so it IS the hero. Only a
-    // MODEL omission after the prompt leaves a GAP — nothing promotes
-    // into copy written under a smaller tier's word contract (featured
-    // 40-60w as headliner, shortlist one-liner as featured).
-    const promptIds = approvedEvents.map((r) => r.id);
-    draft.events = sortByCallerRank(locked, promptIds);
-    const promptRank = new Map(promptIds.map((id, i) => [String(id).toLowerCase(), i]));
-    for (const ev of draft.events) {
-      const rank = promptRank.get(String(ev.eventId).toLowerCase());
-      if (rank !== undefined) {
-        ev.tier = rank === 0 ? 'hero' : (rank <= 2 ? 'featured' : 'quick');
-      }
-    }
-    if (promptRank.size && draft.events.length && draft.events[0].tier !== 'hero') {
-      draft.factualLockingWarnings = [
-        ...(draft.factualLockingWarnings || []),
-        'Prompt headliner missing from the draft — first card renders with featured treatment (no promotion).',
-      ];
-    }
+    // Re-assert the APPROVED PROMPT LINEUP's order (approvedEvents,
+    // already caller-sorted — the events the model actually saw) over
+    // whatever sequence the model echoed back. Uniform treatment
+    // (owner 2026-07-29) means no tier assignment: every surviving
+    // event renders the same full anatomy.
+    draft.events = sortByCallerRank(locked, approvedEvents.map((r) => r.id));
   }
 
   // 4a.5 Strip stray URLs from the free-prose fields (intro / homeowner minute /

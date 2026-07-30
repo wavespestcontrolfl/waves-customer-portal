@@ -1841,3 +1841,18 @@ Proof emails gain an INTERNAL diagnostics panel above the recipient preview (lin
 **Price-lock contract.** The claim validator's dollar-amount hard-block stays; callers now fetch the lineup's own `events_raw.price_text` strings (`lockedPricesForSend`) and the scanner excises exactly those normalized strings before matching — the model can only "repeat" the DB truth, and any other priced claim still blocks. Fail-open to an empty list keeps the scan maximally strict.
 
 **Verification.** 384 tests green across newsletter, compact-format, rendering-contract, event-clicks, and proof suites; new coverage for tiering, price/labels, collapsible TOC, forward-only share, unlinked dividers, and the structured text body. Rendering-contract snapshots updated deliberately (appBadgeCount 2→0; flagship theme rotation loses the 4th entry — shortlist entries don't render themed h2s).
+
+## 2026-07-29 — Owner style directives on the final preview: uniform cards, dark mode, blue/gold headers, universal footer (feat/newsletter-uniform-darkmode)
+
+**Owner decisions (2026-07-29, on reviewing the final #3052 preview).** Six directives, several superseding the same-day critique-driven choices:
+
+1. **Dark-mode support for ALL emails.** The shared glassPage shell declares `color-scheme: light dark` and ships a designed dark theme (deep-navy page, dark cards, light ink, gold accents kept) via `@media (prefers-color-scheme: dark)` + Outlook's `[data-ogsc]/[data-ogsb]` attributes, targeting `dm-*` class hooks on the page, cards, chips, boxes, and muted text. Honoring clients get a deliberate night render instead of auto-inversion; Gmail's app still applies its own transform (no hook exists), but explicit colors keep it sane.
+2. **The Waves logo always sits ABOVE the masthead title** — its own block row, never beside it.
+3. **TOC entries jump to their event** — `<a name>` anchors + h2 ids per event (works in Apple Mail/desktop clients; Gmail mobile ignores in-email anchors — platform limitation, documented).
+4. **Section headers render in Waves blue and gold/yellow ONLY** — the deep-water and waves-red bands are retired from the rotation.
+5. **The newsletter keeps the full universal footer** (app badges included) — supersedes the critique-driven appPromo removal.
+6. **Uniform event treatment** — the tiered hero/featured/shortlist experiment is retired ("move back to the list of events like we had before … make these consistent"). Every event renders the same full anatomy; the prompt enforces consistent volume (description 40–70 words, 3–4 highlights, kicker on every event). The tier-pinning machinery is removed with it. TOC summary is just "~5-minute read" (fold-out kept), entries are real event names only.
+
+Everything else from the day's hardening stands: image-first visuals, pair-verified price sentinels, evclick-bound text exemptions, structured plain text, geo labels, unlinked dividers, forward-only share, web-version permalink.
+
+**Verification.** Rendering-contract suite updated deliberately (2-theme palette snapshot, blue/gold rotation, appBadgeCount back to 2, dark-mode layer test, logo-block assertion); newsletter suite's tiered describe replaced with uniform expectations. All suites green.

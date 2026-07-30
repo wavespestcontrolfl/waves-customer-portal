@@ -1766,7 +1766,7 @@ describe('DB-locked prices vs the hallucinated-claim scan', () => {
   });
 });
 
-describe('tiered event treatment (owner direction 2026-07-29)', () => {
+describe('uniform event treatment (owner direction 2026-07-29 v2: consistent full cards, no tiers)', () => {
   const { assembleBeehiivNewsletter, buildFlagshipTextBody } = require('../services/newsletter-draft');
   const mk = (n, over = {}) => ({
     eventId: `a000000${n}-0000-4000-8000-00000000000${n}`,
@@ -1791,34 +1791,32 @@ describe('tiered event treatment (owner direction 2026-07-29)', () => {
   });
   const draft = () => ({ selectedSubject: 'Test', events: [0, 1, 2, 3, 4].map((n) => mk(n)) });
 
-  test('headliner keeps the full anatomy; featured cards drop bullets/pro-tip/kicker; shortlist groups compact entries', async () => {
+  test('every event renders the SAME full anatomy — no shortlist, no tier furniture gating', async () => {
     const html = await assembleBeehiivNewsletter(draft());
-    // Hero (event 0) renders scoop bullets + pro tip + kicker.
-    expect(html).toContain("Here&#39;s the scoop:");
-    expect(html).toContain('<strong>Pro tip:</strong>');
-    expect(html).toContain('kicker');
-    // Only ONE of each — featured/shortlist events never render them.
-    expect(html.match(/Pro tip:/g)).toHaveLength(1);
-    expect(html.match(/Here&#39;s the scoop:/g)).toHaveLength(1);
-    // Featured events still get full h2 headings; shortlist gets one
-    // group heading and compact entries led by the REAL event name.
-    expect(html).toContain('The Weekend Shortlist');
-    expect(html.match(/The Weekend Shortlist/g)).toHaveLength(1);
-    expect(html).toContain('<strong>Official Event 3</strong>');
-    expect(html).toContain('<strong>Official Event 4</strong>');
+    expect(html).not.toContain('The Weekend Shortlist');
+    // Furniture renders once PER EVENT (5 events).
+    expect(html.match(/Pro tip:/g)).toHaveLength(5);
+    expect(html.match(/Here&#39;s the scoop:/g)).toHaveLength(5);
+    expect(html.match(/kicker/g)).toHaveLength(5);
   });
 
-  test('pinned ev.tier wins over position: a missing headliner leaves a gap, nothing promotes', async () => {
-    const html = await assembleBeehiivNewsletter({
-      selectedSubject: 'Test',
-      // Headliner dropped upstream — survivors keep their pinned tiers.
-      events: [mk(1, { tier: 'featured' }), mk(2, { tier: 'featured' }), mk(3, { tier: 'quick' }), mk(4, { tier: 'quick' })],
-    });
-    // No hero furniture renders at all (scoop/pro-tip/kicker are hero-only).
-    expect(html).not.toContain('Pro tip:');
-    expect(html).not.toContain("Here&#39;s the scoop:");
-    expect(html).toContain('The Weekend Shortlist');
-    expect(html).toContain('<strong>Official Event 3</strong>');
+  test('TOC: fold-out with a bare read-time summary; entries are REAL event names only', async () => {
+    const html = await assembleBeehiivNewsletter(draft());
+    expect(html).toContain('<details>');
+    expect(html).toContain('~5-minute read');
+    expect(html).not.toContain('weekend pick');
+    expect(html).not.toContain('North Port to Tampa');
+    expect(html).not.toContain('tap for the list');
+    expect(html).toContain('<strong>Official Event 0</strong>');
+    // No trailing curiosity-title text after the name.
+    expect(html).not.toMatch(/Official Event 0<\/strong><\/a> <em/);
+  });
+
+  test('TOC links target real anchors: <a name> + matching h2 id per event', async () => {
+    const html = await assembleBeehiivNewsletter(draft());
+    expect(html).toContain('href="#evt-curiosity-title-0"');
+    expect(html).toContain('<a name="evt-curiosity-title-0"></a>');
+    expect(html).toMatch(/<h2 id="evt-curiosity-title-0" class="dm-chip"/);
   });
 
   test('DB-locked price renders (FREE wins over priceText); labels chip line renders', async () => {
@@ -1830,13 +1828,6 @@ describe('tiered event treatment (owner direction 2026-07-29)', () => {
     expect(free).not.toContain('From $25');
   });
 
-  test('TOC is a collapsible details block: count summary + real names first, witty second', async () => {
-    const html = await assembleBeehiivNewsletter(draft());
-    expect(html).toContain('<details>');
-    expect(html).toContain('5 weekend picks · North Port to Tampa');
-    expect(html).toMatch(/<strong>Official Event 0<\/strong><\/a> <em[^>]*>— Curiosity Title 0<\/em>/);
-  });
-
   test('share banner is forward-only (no social profile links); dividers are not links', async () => {
     const html = await assembleBeehiivNewsletter(draft());
     expect(html).toContain('Forward them this email');
@@ -1844,7 +1835,7 @@ describe('tiered event treatment (owner direction 2026-07-29)', () => {
     expect(html).not.toMatch(/<a href="https:\/\/www\.wavespestcontrol\.com\/"[^>]*>\s*<img src="[^"]*divider/);
   });
 
-  test('buildFlagshipTextBody: content-equivalent sections — hero furniture serialized, no unreviewed CTA', () => {
+  test('buildFlagshipTextBody: content-equivalent — EVERY event serializes its furniture; no unreviewed CTA', () => {
     const text = buildFlagshipTextBody({
       greeting: 'Hey there!',
       introText: 'Big weekend **ahead**.',
@@ -1860,38 +1851,23 @@ describe('tiered event treatment (owner direction 2026-07-29)', () => {
     expect(text).toContain('== Curiosity Title 1 ==');
     expect(text).toContain("Here's the scoop:");
     expect(text).toContain('Friday, June 12 at 8:00 PM | Venue 1, Sarasota | Tickets: From $25');
-    const withAddr = buildFlagshipTextBody({ events: [mk(1, { address: '123 Main St' })] });
-    expect(withAddr).toContain('Venue 1, Sarasota (123 Main St)');
     // evclick token — sendCampaign substitutes both MIME parts.
     expect(text).toContain('Details & tickets: {{evclick:a0000001-0000-4000-8000-000000000001}}');
-    // Text validates clean under the PAIR-BOUND text scan (facts line
-    // adjacent to its own event token).
     expect(findHallucinatedClaims(text, [{ eventId: 'a0000001-0000-4000-8000-000000000001', price: 'From $25' }], 'text')).toEqual([]);
+    expect(text).toContain('FREE');
+    // Furniture for BOTH events (uniform).
+    expect(text.match(/Pro tip:/g)).toHaveLength(2);
+    expect(text.match(/- Big stage/g)).toHaveLength(2);
     expect(text).toContain("Let's get into it");
     expect(text).toContain('== That is the scoop, crew ==');
-    expect(text).toContain('FREE');
-    // Hero furniture serializes (first event only).
-    expect(text).toContain('- Big stage');
-    expect(text).toContain('Pro tip: Get there before 8');
-    expect(text).toContain('A kicker line.');
-    expect(text.match(/Pro tip:/g)).toHaveLength(1);
-    // Checklist + P.S. serialize; no unreviewed sales CTA.
     expect(text).toContain("[ ] Hydrate like it's your job");
     expect(text).toContain('P.S. Forward this to a friend.');
     expect(text).not.toContain('Schedule a visit');
     expect(text).toContain('== Homeowner Minute ==');
+    const withAddr = buildFlagshipTextBody({ events: [mk(1, { address: '123 Main St' })] });
+    expect(withAddr).toContain('Venue 1, Sarasota (123 Main St)');
     expect(text).not.toContain('**');
     expect(text).toContain('{{feedback-text}}');
-  });
-
-  test('text builder keys hero furniture off the pinned tier — a gapped lineup stays MIME-equivalent', () => {
-    const gapped = buildFlagshipTextBody({
-      events: [mk(1, { tier: 'featured' }), mk(2, { tier: 'featured' })],
-      signoff: '— The Waves Team',
-    });
-    // No hero furniture anywhere: both survivors are featured-tier.
-    expect(gapped).not.toContain('Pro tip:');
-    expect(gapped).not.toContain('- Big stage');
   });
 
   test('sortByCallerRank re-asserts portfolio order over a reordered model echo', () => {

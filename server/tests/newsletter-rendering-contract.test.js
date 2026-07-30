@@ -39,7 +39,7 @@ function renderedThemeNames(html, idPattern) {
     theme.name,
   ]));
 
-  return [...html.matchAll(new RegExp(`<h2 id="${idPattern}" style="([^"]+)"`, 'g'))]
+  return [...html.matchAll(new RegExp(`<h2 id="${idPattern}"(?: class="[^"]*")? style="([^"]+)"`, 'g'))]
     .map((match) => {
       const style = match[1];
       const colors = /color:(#[0-9A-F]{6});background:(#[0-9A-F]{6});border-left:4px solid (#[0-9A-F]{6});/i.exec(style);
@@ -79,7 +79,7 @@ describe('newsletter rendering contract', () => {
       unsubscribeCount: occurrenceCount(html, '>Unsubscribe</a>'),
     }).toMatchInlineSnapshot(`
       {
-        "appBadgeCount": 0,
+        "appBadgeCount": 2,
         "documentTitle": "Waves Newsletter",
         "footerAddressCount": 1,
         "footerPhoneLinkCount": 1,
@@ -125,9 +125,22 @@ describe('newsletter rendering contract', () => {
     expect(html).toContain('width="20" height="20"');
   });
 
+  test('dark-mode layer: designed dark overrides + hooks ship on every glass page', () => {
+    const html = wrapNewsletter({ body: '<p>x</p>', newsletterType: 'local-weekly-fresh-events' });
+    expect(html).toContain('name="color-scheme" content="light dark"');
+    expect(html).toContain('@media (prefers-color-scheme: dark)');
+    expect(html).toContain('[data-ogsc]');
+    expect(html).toContain('class="dm-body"');
+    expect(html).toContain('class="dm-page"');
+    expect(html).toContain('class="dm-card"');
+    // Logo sits in its own block row ABOVE the masthead title.
+    expect(html).toMatch(/<div style="display:block;text-align:center;"><a [^>]+><img [^>]*waves[^>]*><\/a><\/div>\s*<h1 class="dm-ink"/i);
+  });
+
   test('keeps every canonical Waves section theme at WCAG AA contrast', () => {
     const themes = newsletterPalette().sectionHeaders;
 
+    // Owner directive 2026-07-29: Waves blue + gold/yellow ONLY.
     expect(themes).toMatchInlineSnapshot(`
       [
         {
@@ -137,22 +150,10 @@ describe('newsletter rendering contract', () => {
           "text": "#04395E",
         },
         {
-          "accent": "#1B2C5B",
-          "background": "#F0F7FC",
-          "name": "deep-water",
-          "text": "#1B2C5B",
-        },
-        {
           "accent": "#F4B014",
           "background": "#FFF9D6",
           "name": "sunshine",
           "text": "#664500",
-        },
-        {
-          "accent": "#C8102E",
-          "background": "#FDECEF",
-          "name": "waves-red",
-          "text": "#C8102E",
         },
       ]
     `);
@@ -190,16 +191,17 @@ describe('newsletter rendering contract', () => {
       {
         "flagship": [
           "waves-blue",
-          "deep-water",
+          "sunshine",
+          "waves-blue",
           "sunshine",
         ],
         "pestInsider": [
           "waves-blue",
-          "deep-water",
           "sunshine",
-          "waves-red",
           "waves-blue",
-          "deep-water",
+          "sunshine",
+          "waves-blue",
+          "sunshine",
         ],
       }
     `);
