@@ -149,6 +149,31 @@ const TRIGGER_REGISTRY = {
       link: p.threadId ? `/admin/communications?thread=${p.threadId}` : '/admin/communications',
     }),
   },
+  // Fired by call-recording-processor (GATE_VOICEMAIL_CALLBACK_ALERT) for a
+  // voicemail with concrete service intent that did NOT take the workable
+  // lead path — usually an existing customer asking for service. Without
+  // this, such voicemails end terminal and are only visible by scrolling
+  // the comms inbox.
+  customer_voicemail_callback: {
+    label: 'Voicemail needs callback',
+    category: 'voicemail_callback',
+    priority: 'high',
+    group: 'Communication',
+    build: (p) => {
+      const who = p.name || (p.phone ? maskPhone(p.phone) : 'Unknown caller');
+      const bodyParts = [who];
+      if (p.service) bodyParts.push(`Asked about ${p.service}`);
+      if (p.phone) bodyParts.push(`Callback: ${maskPhone(p.phone)}`);
+      return {
+        title: 'Voicemail callback needed',
+        body: bodyParts.join(' - '),
+        // Voicemail recordings render under the Calls tab (hash-routed);
+        // ?thread= would open the SMS view instead. CallLogTabV2 has no
+        // per-call URL param today, so the tab is the deepest stable link.
+        link: '/admin/communications#tab=calls',
+      };
+    },
+  },
   // Fired by estimate-converter when a paid acceptance deposit could not be
   // credited to the first invoice — the money sits on the deposit ledger
   // until someone reconciles it manually.
@@ -533,6 +558,13 @@ function pushTagFor(triggerKey, payload = {}) {
   if (triggerKey === 'sms_reply') {
     const thread = payload.threadId || 'unknown-thread';
     return `waves-sms_reply-${thread}-${crypto.randomUUID()}`;
+  }
+  if (triggerKey === 'customer_voicemail_callback') {
+    // Per-call tag: the service worker replaces same-tag pushes with
+    // renotify:false, so a static tag would let a second caller's alert
+    // silently swallow the first. Stable per call — a reprocess re-push for
+    // the SAME call may replace itself.
+    return `waves-customer_voicemail_callback-${payload.callLogId || 'unknown-call'}`;
   }
   return `waves-${triggerKey}`;
 }

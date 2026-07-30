@@ -1621,6 +1621,34 @@ function hasWorkableLeadSignal({ extracted = {}, phone = null, voicemail = false
   return hasServiceIntent && (hasReachback || voicemail === true);
 }
 
+// A voicemail landing on the TERMINAL skip path despite concrete service
+// intent — the workable-lead gate declined it (existing customer matched, or
+// a non-lead call_type veto), so no lead, no bell, nothing but a comms-inbox
+// row. That silence lost a WDO-closing lead in May 2026 (recovered only by a
+// manual re-key that minted a duplicate account). Returns the notification
+// payload for the customer_voicemail_callback bell, or null when the
+// voicemail carries no workable service signal (plain "call me back" messages
+// stay bell-free). Pure decision core — the caller owns the gate check, the
+// customer lookup, and the dedupe.
+function voicemailCallbackAlertPlan({ extracted = {}, voicemailChannel = false, voicemailLeadPath = false, vmPhone = null, outbound = false } = {}) {
+  if (!voicemailChannel || voicemailLeadPath) return null;
+  // An OUTBOUND call reaching the customer's voicemail records OUR message —
+  // a staff recording that names the service would otherwise satisfy the
+  // service-signal test and ring a bogus callback bell.
+  if (outbound) return null;
+  if (extracted.is_spam) return null;
+  if (!vmPhone) return null;
+  if (!hasWorkableLeadSignal({ extracted, phone: vmPhone, voicemail: true })) return null;
+  const name = [capitalizeName(extracted.first_name), capitalizeName(extracted.last_name || '')]
+    .filter(Boolean)
+    .join(' ');
+  return {
+    name: name || null,
+    service: extracted.matched_service || extracted.requested_service || null,
+    phone: vmPhone,
+  };
+}
+
 // Phone columns consulted for inbound identity: the customer's own number
 // PLUS the three service-contact slot phones — the pipeline itself records
 // spouses/tenants into those slots, and matching that ignored them forked a
@@ -5000,6 +5028,51 @@ const CallRecordingProcessor = {
       // accrual exists to measure. Customer resolution hasn't run on this
       // path; enrichment keys on the webhook's pre-linked customer if any.
       await applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v2Result, customerId: call.customer_id || null, transcript: transcription });
+
+      // Service-request voicemail that the workable-lead gate declined
+      // (existing customer, or non-lead call_type veto): surface a callback
+      // bell instead of ending silent. Bell only — never customer comms.
+      // Best-effort: an alert failure must never break call processing.
+      if (isEnabled('voicemailCallbackAlert')) {
+        try {
+          const vmAlertPhone = resolveCallContactPhone(call, extracted.phone);
+          const alertPlan = voicemailCallbackAlertPlan({
+            extracted,
+            voicemailChannel,
+            voicemailLeadPath,
+            vmPhone: vmAlertPhone,
+            outbound: isOutboundCall(call),
+          });
+          if (alertPlan) {
+            // One alert per call even across reprocessing (retranscription
+            // backfill re-runs terminal voicemails through this path). The
+            // claim is a single atomic UPDATE on the call row — deliberately
+            // NOT a notifications-row check, because bell rows are
+            // preference-gated and pushes are delivered independently, so a
+            // delivery-dependent dedupe re-alerts whenever the bell row is
+            // missing. Claim-then-deliver: a delivery failure after the
+            // claim stays best-effort (triggerNotification never throws).
+            const claimed = await db('call_log')
+              .where({ id: call.id })
+              .whereNull('voicemail_callback_alerted_at')
+              .update({ voicemail_callback_alerted_at: new Date() });
+            if (claimed) {
+              const vmAlertCustomer = call.customer_id
+                ? { id: call.customer_id }
+                : await findCustomerForCallContact(vmAlertPhone, extracted).catch(() => null);
+              const { triggerNotification } = require('./notification-triggers');
+              await triggerNotification('customer_voicemail_callback', {
+                ...alertPlan,
+                customerId: vmAlertCustomer?.id || null,
+                callLogId: call.id,
+              });
+            }
+          }
+        } catch (alertErr) {
+          logger.warn(`[call-proc] voicemail callback alert failed for ${callSid}: ${alertErr.message}`);
+        }
+      }
+
       logger.info(`[call-proc] Skipping ${callSid}: ${extracted.is_spam ? 'spam' : 'voicemail'}`);
       return { success: true, skipped: true, reason: extracted.is_spam ? 'spam' : 'voicemail' };
     }
@@ -9211,6 +9284,7 @@ CallRecordingProcessor._test = {
   isNonLeadCallContent,
   leadContactCompleteness,
   hasWorkableLeadSignal,
+  voicemailCallbackAlertPlan,
   transcribeRecording,
   extractCallDataV2,
   CALL_EXTRACTION_ROUTE,
