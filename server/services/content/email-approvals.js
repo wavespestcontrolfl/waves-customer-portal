@@ -395,11 +395,19 @@ function renderApprovalEmail({ run, row, opportunity = null, preview = null }) {
     `<strong>Target:</strong> ${escapeHtml(opportunity?.query || run.action_type || '')}<br/>`,
     `<strong>Parked as:</strong> ${escapeHtml(row.kind)}</p>`,
     run.reviewer_notes ? `<p><strong>Reviewer notes:</strong> ${escapeHtml(String(run.reviewer_notes).slice(0, 600))}</p>` : '',
-    // The COMPLETE draft. For named-competitor runs approval PUBLISHES this
-    // content; a trust-build approval only grants ramp credit — the label
-    // must never promise a publication that doesn't happen (Codex r5).
-    draftBody ? `<p><strong>${isCompetitor ? 'Full draft (this exact content publishes on approval):' : 'Full draft (approval grants trust-build credit — this draft does NOT publish now):'}</strong></p><blockquote style="border-left:3px solid #ccc;padding-left:10px;color:#444;white-space:pre-wrap;">${escapeHtml(draftBody)}</blockquote>` : '',
-    metadata ? `<p><strong>Metadata (${isCompetitor ? 'also publishes — ' : ''}frontmatter, alt text, schema):</strong></p><blockquote style="border-left:3px solid #ccc;padding-left:10px;color:#666;white-space:pre-wrap;font-size:12px;">${escapeHtml(metadata)}</blockquote>` : '',
+    // The COMPLETE draft — but only when the whole thing FITS: the
+    // truncated presentation is a go-to-the-portal notification, so it
+    // carries a small excerpt only. Shipping the full oversized payload
+    // with a warning appended would clip in Gmail and hide the warning
+    // itself (Codex r13).
+    // For named-competitor runs approval PUBLISHES this content; a
+    // trust-build approval only grants ramp credit — the label must never
+    // promise a publication that doesn't happen (Codex r5).
+     
+    truncatedFlag
+      ? (draftBody ? `<p><strong>Draft opening (excerpt only — full review in /admin/seo):</strong></p><blockquote style="border-left:3px solid #ccc;padding-left:10px;color:#444;white-space:pre-wrap;">${escapeHtml(draftBody.slice(0, 1500))}…</blockquote>` : '')
+      : (draftBody ? `<p><strong>${isCompetitor ? 'Full draft (this exact content publishes on approval):' : 'Full draft (approval grants trust-build credit — this draft does NOT publish now):'}</strong></p><blockquote style="border-left:3px solid #ccc;padding-left:10px;color:#444;white-space:pre-wrap;">${escapeHtml(draftBody)}</blockquote>` : ''),
+    !truncatedFlag && metadata ? `<p><strong>Metadata (${isCompetitor ? 'also publishes — ' : ''}frontmatter, alt text, schema):</strong></p><blockquote style="border-left:3px solid #ccc;padding-left:10px;color:#666;white-space:pre-wrap;font-size:12px;">${escapeHtml(metadata)}</blockquote>` : '',
     truncatedFlag
       ? '<p style="color:#b00;"><strong>This draft exceeds email size limits, so it cannot be fully shown here. Replying "approved" will NOT execute — review and decide in /admin/seo instead. ("not approved" still works.)</strong></p>'
       : '<p><strong>Reply to this email</strong> (keep the subject) with exactly one of:</p>\n<p style="font-size:18px;"><strong>approved</strong> &nbsp;—or—&nbsp; <strong>not approved</strong></p>',
@@ -446,17 +454,24 @@ async function sendApprovalRequest(run, opportunity = null) {
   }
   if (!row || row.email_sent_at) return { row, skipped: row ? 'already_sent' : 'insert_failed' };
 
-  // Revalidate before (re)sending: a failed first send can be retried
-  // AFTER the item was decided in the portal — trust-build approvals stamp
-  // the run and complete the opportunity without changing skip_reason, so
-  // the kind check alone can't see it (Codex r12). A decided item's row is
-  // superseded, never re-emailed.
+  // Revalidate before (re)sending — against FRESH rows, not the caller's
+  // copies: a failed first send can be retried AFTER the item was decided
+  // in the portal. Trust-build approvals stamp the run and complete the
+  // opportunity without changing skip_reason; a named-competitor portal
+  // approval re-parks the run as astro_pr_pending_merge while the
+  // OPPORTUNITY stays pending_review — a stale run object would miss it
+  // (Codex r12 + r13). A decided item's row is superseded, never
+  // re-emailed.
   {
+    const freshRun = await db('autonomous_runs').where({ id: run.id }).first() || run;
     const opp = row.opportunity_id ? await db('opportunity_queue').where({ id: row.opportunity_id }).first() : null;
-    const decidedElsewhere = (opp && opp.status !== 'pending_review') || !!run.trust_build_approved_at;
+    const decidedElsewhere = (opp && opp.status !== 'pending_review')
+      || !!freshRun.trust_build_approved_at
+      || freshRun.outcome !== 'completed_pending_review'
+      || freshRun.skip_reason !== row.kind;
     if (decidedElsewhere) {
       await db('content_email_approvals').where({ id: row.id, status: 'awaiting_reply' })
-        .update({ status: 'superseded', last_error: `decided before email could send (opp ${opp?.status || '?'}${run.trust_build_approved_at ? ', trust-build approved' : ''})`, updated_at: new Date() });
+        .update({ status: 'superseded', last_error: `decided before email could send (opp ${opp?.status || '?'}, run ${freshRun.skip_reason || freshRun.outcome || '?'}${freshRun.trust_build_approved_at ? ', trust-build approved' : ''})`, updated_at: new Date() });
       return { row, skipped: 'decided_before_send' };
     }
   }
@@ -545,6 +560,16 @@ async function sweepUnnotifiedRuns() {
     .where('r.shadow_mode', false)
     .where('o.status', 'pending_review')
     .where('r.created_at', '>', cutoff)
+    // Only the LATEST parked run per opportunity: a requeue leaves the old
+    // run parked too, and emailing both would offer the owner a decision
+    // on a superseded draft (Codex r13).
+    .whereNotExists(function newerParkedRun() {
+      this.select(db.raw('1')).from('autonomous_runs as r2')
+        .whereRaw('r2.opportunity_id = r.opportunity_id')
+        .where('r2.outcome', 'completed_pending_review')
+        .where('r2.shadow_mode', false)
+        .whereRaw('r2.created_at > r.created_at');
+    })
     .select('r.id', 'r.skip_reason');
   let sent = 0;
   for (const run of orphans) {

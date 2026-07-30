@@ -470,7 +470,11 @@ describe('round-5 hardening (Codex r5)', () => {
     const row = { id: 'x', token: 'EA-oldtoken1', run_id: 'r', opportunity_id: 'o', kind: 'named_competitor_review', email_sent_at: null, email_sending_at: null, draft_sha: 'sha-of-DELIVERED-draft-A' };
     db.mockImplementation((table) => ({
       where: jest.fn().mockReturnValue({
-        first: jest.fn().mockResolvedValue(table === 'content_email_approvals' ? row : null),
+        first: jest.fn().mockResolvedValue(
+          table === 'content_email_approvals' ? row
+            : table === 'autonomous_runs' ? { id: 'r', outcome: 'completed_pending_review', skip_reason: 'named_competitor_review', trust_build_approved_at: null }
+            : table === 'opportunity_queue' ? { status: 'pending_review' } : null
+        ),
         whereNull: jest.fn().mockReturnValue({
           where: jest.fn().mockReturnValue({ update: jest.fn().mockImplementation((p) => { updates.push(p); return Promise.resolve(1); }) }),
         }),
@@ -479,7 +483,7 @@ describe('round-5 hardening (Codex r5)', () => {
       insert: jest.fn().mockReturnValue({ onConflict: jest.fn().mockReturnValue({ ignore: jest.fn().mockReturnValue({ returning: jest.fn().mockResolvedValue([row]) }) }) }),
     }));
     try {
-      await approvals.sendApprovalRequest({ id: 'r', skip_reason: 'named_competitor_review', opportunity_id: 'o', draft_payload: JSON.stringify({ title: 'T', body: 'EDITED draft B' }) });
+      await approvals.sendApprovalRequest({ id: 'r', outcome: 'completed_pending_review', skip_reason: 'named_competitor_review', opportunity_id: 'o', trust_build_approved_at: null, draft_payload: JSON.stringify({ title: 'T', body: 'EDITED draft B' }) });
       const rebind = updates.find((u) => u.draft_sha && u.token);
       expect(rebind).toBeTruthy();
       expect(rebind.token).not.toBe('EA-oldtoken1');
@@ -569,6 +573,43 @@ describe('round-12 hardening (Codex r12)', () => {
     const rendered = approvals._internals.renderApprovalEmail({ run, row });
     expect(rendered.truncated).toBe(true);
     expect(rendered.bodyHtml).toContain('will NOT execute');
+    // The portal-routing email is a NOTIFICATION: excerpt only, and the
+    // rendered result itself stays far under the clip line (Codex r13).
+    expect(Buffer.byteLength(rendered.bodyHtml, 'utf8')).toBeLessThan(20000);
+    expect(rendered.bodyHtml).toContain('excerpt only');
+  });
+
+  test('resend revalidation uses a FRESH run — a portal PR-approval mid-retry supersedes (Codex r13)', async () => {
+    const db = require('../models/db');
+    const email = require('../services/email');
+    email.send = jest.fn().mockResolvedValue({ ok: true });
+    const gates = require('../config/feature-gates');
+    const gateSpy = jest.spyOn(gates, 'isEnabled').mockReturnValue(true);
+    const updates = [];
+    const row = { id: 'x', token: 'EA-deadbeef', run_id: 'r', opportunity_id: 'o', kind: 'named_competitor_review', email_sent_at: null, email_sending_at: null, draft_sha: null };
+    db.mockImplementation((table) => ({
+      where: jest.fn().mockReturnValue({
+        first: jest.fn().mockResolvedValue(
+          table === 'content_email_approvals' ? row
+            // FRESH run: portal approval re-parked it as astro_pr_pending_merge
+            : table === 'autonomous_runs' ? { id: 'r', outcome: 'completed_pending_review', skip_reason: 'astro_pr_pending_merge' }
+            // opportunity deliberately still pending_review in the PR flow
+            : table === 'opportunity_queue' ? { status: 'pending_review' } : null
+        ),
+        update: jest.fn().mockImplementation((p) => { updates.push(p); return Promise.resolve(1); }),
+        whereNull: jest.fn().mockReturnValue({ where: jest.fn().mockReturnValue({ update: jest.fn().mockResolvedValue(1) }) }),
+      }),
+      insert: jest.fn().mockReturnValue({ onConflict: jest.fn().mockReturnValue({ ignore: jest.fn().mockReturnValue({ returning: jest.fn().mockResolvedValue([row]) }) }) }),
+    }));
+    try {
+      // Caller passes the STALE pre-approval run object.
+      const result = await approvals.sendApprovalRequest({ id: 'r', skip_reason: 'named_competitor_review', outcome: 'completed_pending_review', opportunity_id: 'o', trust_build_approved_at: null, draft_payload: '{}' });
+      expect(result.skipped).toBe('decided_before_send');
+      expect(email.send).not.toHaveBeenCalled();
+      expect(updates.find((u) => u.status === 'superseded')).toBeTruthy();
+    } finally {
+      gateSpy.mockRestore();
+    }
   });
 
   test('a retry send after a portal trust-build approval supersedes instead of re-emailing', async () => {
