@@ -2032,12 +2032,12 @@ describe('newsletter greeting personalization + render polish', () => {
     expect(html).not.toContain('width="100"');
   });
 
-  test('wrapNewsletter local-guide chrome uses the Waves Pest Control logo (glass footer, 44px)', () => {
+  test('wrapNewsletter local-guide chrome uses the site shield Waves logo (glass footer, 44px)', () => {
     // The 88px header logo was retired with the pre-glass theme (#2428);
     // the glass wrapper carries the 2026 logo in the footer at 44px.
     const { wrapNewsletter } = require('../services/email-template');
     const html = wrapNewsletter({ body: '<p>x</p>', newsletterType: 'local-weekly-fresh-events' });
-    expect(html).toContain('waves-logo-pest-control.png');
+    expect(html).toContain('waves-logo-site.png');
     expect(html).not.toContain('/waves-logo.png');
     expect(html).toContain('width="44"');
   });

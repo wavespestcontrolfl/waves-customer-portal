@@ -49,7 +49,7 @@ function renderedThemeNames(html, idPattern) {
 }
 
 describe('newsletter rendering contract', () => {
-  test('flagship masthead is "Waves Newsletter" (no "The", no subtitle, 20px) under the Waves Pest Control logo, with the universal footer', () => {
+  test('flagship masthead is "Waves Newsletter" (no "The", no subtitle, 20px) under the site shield Waves logo, with the universal footer', () => {
     const html = wrapNewsletter({
       body: '<p>Issue body</p>',
       newsletterType: 'local-weekly-fresh-events',
@@ -74,7 +74,7 @@ describe('newsletter rendering contract', () => {
       hasBeehiivHostedAsset: /media\.beehiiv\.com/.test(html),
       footerAddressCount: occurrenceCount(html, WAVES_ADDRESS_LINE),
       footerPhoneLinkCount: occurrenceCount(html, `href="tel:${WAVES_SUPPORT_PHONE_E164}"`),
-      wavesLogoCount: occurrenceCount(html, 'waves-logo-pest-control.png'),
+      wavesLogoCount: occurrenceCount(html, 'waves-logo-site.png'),
       appBadgeCount: (html.match(/app-email\/(?:apple-app-store|google-play)-badge\.png/g) || []).length,
       socialIconCount: occurrenceCount(html, 'app-email/social/'),
       unsubscribeCount: occurrenceCount(html, '>Unsubscribe</a>'),
@@ -85,7 +85,7 @@ describe('newsletter rendering contract', () => {
         "footerAddressCount": 1,
         "footerPhoneLinkCount": 1,
         "hasBeehiivHostedAsset": false,
-        "mastheadUrl": "https://portal.wavespestcontrol.com/waves-logo-pest-control.png",
+        "mastheadUrl": "https://portal.wavespestcontrol.com/waves-logo-site.png",
         "mastheadWidth": 72,
         "retiredTaglineCount": 0,
         "socialIconCount": 5,
