@@ -447,8 +447,18 @@ function applyV2ToPropertyFacts(propertyFacts, v2) {
         confidence: 'high',
         rejected: propertyFacts.lot?.rejected || [],
       };
+    } else if (facts.lot.applicability === 'private_parcel'
+      && positive(propertyFacts.lot?.value)) {
+      // V2 REQUIRED a private-lot measurement here and could not resolve
+      // one — the retained V1 value (which can be a medium-confidence
+      // profile lot) survives as data, not as confidence: mark it low so
+      // classifyLane parks lot-driven drafts for review instead of
+      // green-laning on a measurement V2 explicitly failed to confirm.
+      propertyFacts.lot = { ...propertyFacts.lot, confidence: 'low' };
     }
-    // keepsRealParcel: the V1 lot stays untouched.
+    // leased_land entire-structure keep: the V1 lot (and its own
+    // confidence — county high stays green, caller-stated low parks) is
+    // untouched; V2 never required a private-lot measurement there.
   }
   if (legacy.stories) propertyFacts.stories = legacy.stories;
   return propertyFacts;

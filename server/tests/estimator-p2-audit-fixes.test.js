@@ -20,6 +20,7 @@
  */
 
 let mockLeadRows = [];
+let mockCallLogRows = [];
 
 jest.mock('../models/db', () => {
   const toTime = (v) => new Date(v).getTime();
@@ -28,6 +29,7 @@ jest.mock('../models/db', () => {
     const builder = {
       select() { return this; },
       whereRaw() { return this; },
+      whereNot(col, val) { filtered = filtered.filter((r) => r[col] !== val); return this; },
       whereNull(col) { filtered = filtered.filter((r) => r[col] == null); return this; },
       where(a, b, c) {
         if (typeof a === 'function') {
@@ -37,6 +39,10 @@ jest.mock('../models/db', () => {
           const alts = [];
           const qb = {
             whereNull(col) { alts.push((r) => r[col] == null); return qb; },
+            // Raw phone-digit matches are treated as always-true — the
+            // fixtures only carry rows for the number under test.
+            whereRaw() { alts.push(() => true); return qb; },
+            orWhereRaw() { alts.push(() => true); return qb; },
             orWhere(col, opOrVal, val) {
               if (val === undefined) { alts.push((r) => r[col] === opOrVal); return qb; }
               if (opOrVal === '<') { alts.push((r) => toTime(r[col]) < toTime(val)); return qb; }
@@ -69,7 +75,7 @@ jest.mock('../models/db', () => {
     };
     return builder;
   };
-  return (table) => makeBuilder(table, table === 'leads' ? mockLeadRows : []);
+  return (table) => makeBuilder(table, table === 'leads' ? mockLeadRows : (table === 'call_log' ? mockCallLogRows : []));
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
@@ -193,7 +199,7 @@ describe('audit P2: reused-lead window vs foreign-sid leads', () => {
     created_at: '2026-07-01T17:00:00.000Z',
   };
 
-  beforeEach(() => { mockLeadRows = []; });
+  beforeEach(() => { mockLeadRows = []; mockCallLogRows = []; });
 
   test("another call's sid-stamped lead inside the window is not returned at all", async () => {
     mockLeadRows = [{
@@ -241,6 +247,30 @@ describe('audit P2: reused-lead window vs foreign-sid leads', () => {
     const { lead, forThisCall } = await ctxPriv.loadLeadForCall(CALL, '+19415550123');
     expect(forThisCall).toBe(true);
     expect(lead.id).toBe('lead-reused-old-sid');
+  });
+
+  test('an older sid-stamped lead updated in-window is only PRIOR HISTORY when a concurrent call overlaps the window', async () => {
+    // updated_at cannot say WHICH call touched the lead — with another call
+    // from the same line inside the window, attribution is ambiguous and
+    // must fall to the conservative byPhone path.
+    mockLeadRows = [{
+      id: 'lead-ambiguous',
+      phone: '+19415550123',
+      twilio_call_sid: 'CA-two-weeks-ago',
+      deleted_at: null,
+      created_at: '2026-06-17T09:00:00.000Z',
+      updated_at: '2026-07-01T17:06:00.000Z',
+    }];
+    mockCallLogRows = [{
+      id: 'call-b',
+      twilio_call_sid: 'CA-call-b',
+      from_phone: '+19415550123',
+      to_phone: '+19415551111',
+      created_at: '2026-07-01T17:04:00.000Z',
+    }];
+    const { lead, forThisCall } = await ctxPriv.loadLeadForCall(CALL, '+19415550123');
+    expect(forThisCall).toBe(false);
+    expect(lead?.id).toBe('lead-ambiguous');
   });
 
   test('an unstamped reused lead touched inside the window keeps current-call priority', async () => {
@@ -328,10 +358,14 @@ describe('audit P2: V2 apply keeps real lots for tenants and unresolved parcels'
     expect(facts.lot.value).toBeNull();
   });
 
-  test('unresolved private_parcel keeps the V1 lot instead of a false "no lot"', () => {
+  test('unresolved private_parcel keeps the V1 lot as DATA but downgrades it to low confidence', () => {
     const facts = v1Facts();
     shadow.applyV2ToPropertyFacts(facts, v2('private_parcel'));
+    // V2 required a private-lot measurement and failed to resolve one — the
+    // value survives (not a false "no lot") but must route to review, so a
+    // medium-confidence profile lot cannot green-lane lot-driven pricing.
     expect(facts.lot.value).toBe(9500);
+    expect(facts.lot.confidence).toBe('low');
   });
 
   test('common_master_parcel condo still clears a leaked development lot', () => {
