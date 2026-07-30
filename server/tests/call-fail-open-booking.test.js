@@ -401,6 +401,42 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(r.allowed).toBe(false);
   });
 
+  test('out-of-vocabulary commitment language fails closed — "subject to homeowner approval" (P0 contract)', () => {
+    const subj = "We will see you Sunday at noon, subject to homeowner approval.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, subj);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: subj }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('any unexpected wording fails the vocabulary contract — "we will swing by Sunday at noon" (P0 contract)', () => {
+    const swing = "We will swing by Sunday at noon with all the equipment loaded.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, swing);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: swing }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+  });
+
+  test('a numeric date must match the slot — "Sunday 8/9 at noon" never books an August 2 slot (P1)', () => {
+    const numeric = "So we will see you Sunday 8/9 at noon, and just let us know if anything changes.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, numeric);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: numeric }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+  });
+
+  test('a MATCHING numeric date binds — "Sunday 8/2 at noon" books the August 2 slot (P1 counter-case)', () => {
+    const numeric = "So we will see you Sunday 8/2 at noon, and just let us know if anything changes.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, numeric);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: numeric }), opts({ transcript }));
+    expect(r.allowed).toBe(true);
+  });
+
+  test('a wrong year fails closed (P1)', () => {
+    const yearQuote = "So we will see you Sunday at noon August 2 2027, and just let us know if anything changes.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, yearQuote);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: yearQuote }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+  });
+
   test('nonzero SECONDS in confirmed_start_at fail the on-the-hour guard (round-4 P1)', () => {
     const ex = agentCommitted();
     ex.scheduling.confirmed_start_at = '2026-08-02T12:00:30-04:00';

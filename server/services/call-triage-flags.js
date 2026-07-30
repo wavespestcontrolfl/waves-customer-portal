@@ -425,6 +425,42 @@ function turnHasUnresolvedConditional(normalizedTurn) {
   return false;
 }
 
+// Affirmative commitment contract (codex P0, final form): blacklists cannot
+// enumerate every conditional/tentative phrasing ("subject to homeowner
+// approval", "pencil you in", …), so the decision is inverted into a CLOSED
+// VOCABULARY: every word of the grounding turn must come from the small set
+// a plain affirmative commitment sentence is built from — discourse openers,
+// first-person commitment heads and verbs, slot glue, day/date/time words,
+// and the benign closers agents actually say. Conditional, tentative,
+// approval-seeking, or otherwise unexpected language is OUT of vocabulary by
+// construction and fails closed to triage. Numbers are permitted as tokens;
+// what they may MEAN is validated separately by quoteBindsConfirmedSlot.
+// The negation/conditional screens above stay as defense in depth.
+const COMMITMENT_TURN_VOCAB = new Set([
+  'so', 'ok', 'okay', 'alright', 'awesome', 'perfect', 'great', 'sounds',
+  'good', 'yep', 'yes', 'and', 'then', 'all', 'set', 'right',
+  'we', 'i', 'll', 'will', 're', 'are', 'you', 'your', 'it', 'that', 's',
+  'see', 'confirm', 'confirmed', 'confirming', 'book', 'booked', 'booking',
+  'schedule', 'scheduled', 'have', 'put', 'get', 'got', 'be', 'come',
+  'coming', 'out', 'there', 'down', 'visit', 'appointment', 'inspection',
+  'for', 'at', 'on', 'the', 'this', 'of', 'to', 'in',
+  'noon', 'midnight', 'am', 'pm', 'a', 'm', 'p', 'o', 'clock', 'morning', 'afternoon',
+  'sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday',
+  'january', 'february', 'march', 'april', 'may', 'june', 'july', 'august',
+  'september', 'october', 'november', 'december',
+  'just', 'let', 'us', 'know', 'anything', 'changes', 'if', 'comes', 'up',
+  'need', 'needs', 'questions', 'thanks', 'thank', 'much', 'bye', 'talk',
+  'soon', 'welcome', 'care', 'no', 'problem',
+]);
+function commitmentTurnVocabularyOk(normalizedTurn) {
+  return normalizedTurn.split(' ').every((tok) => (
+    !tok
+    || COMMITMENT_TURN_VOCAB.has(tok)
+    || /^\d{1,4}$/.test(tok)
+    || /^\d{1,2}(st|nd|rd|th)$/.test(tok)
+  ));
+}
+
 function agentQuoteGroundedInTranscript(quote, transcript) {
   const q = normalizeForGrounding(quote);
   if (!q || q.length < 12) return false;
@@ -444,7 +480,9 @@ function agentQuoteGroundedInTranscript(quote, transcript) {
   // unresolved conditional language — if a fragment appears in both a
   // rejecting turn and a committing turn, we cannot deterministically tell
   // which one the model meant: fail closed.
-  return matching.every((t) => !turnHasNegationOrHedge(t) && !turnHasUnresolvedConditional(t));
+  return matching.every((t) => !turnHasNegationOrHedge(t)
+    && !turnHasUnresolvedConditional(t)
+    && commitmentTurnVocabularyOk(t));
 }
 
 // Slot binding (codex round-2 P1): the grounded commitment quote must refer
@@ -512,6 +550,20 @@ function quoteBindsConfirmedSlot(quote, confirmedStartAt, callStartedAt) {
   }
   for (const om of q.matchAll(/ (\d{1,2})(?:st|nd|rd|th)(?= )/g)) {
     if (Number(om[1]) !== slotDay) return false;
+  }
+  // Numeric dates and years (codex P1): "Sunday 8/9 at noon" normalizes to
+  // the adjacent digit pair "8 9" — every adjacent pair whose second token
+  // is not the ":00" minutes must equal the slot's ET month/day. Any 3–4
+  // digit number must be the slot's ET year; anything else is an
+  // unvalidated explicit date token and fails closed.
+  const slotMonthNum = start.toLocaleString('en-US', { timeZone: 'America/New_York', month: 'numeric' });
+  const slotYear = start.toLocaleString('en-US', { timeZone: 'America/New_York', year: 'numeric' });
+  for (const pair of q.matchAll(/(?<= )(\d{1,2}) (\d{1,2})(?= )/g)) {
+    if (pair[2] === '00') continue;
+    if (Number(pair[1]) !== Number(slotMonthNum) || Number(pair[2]) !== slotDay) return false;
+  }
+  for (const yr of q.matchAll(/(?<= )(\d{3,4})(?= )/g)) {
+    if (yr[1] !== slotYear) return false;
   }
   // Exact binding, not presence (codex round-5 P1): a multi-slot turn
   // ("Sunday at 10 AM won't work, but we'll see you at 11 AM") scatters
