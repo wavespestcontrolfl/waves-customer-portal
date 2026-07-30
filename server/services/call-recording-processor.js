@@ -8896,7 +8896,14 @@ const CallRecordingProcessor = {
     // THIS CALL (created after the call row), reading the CURRENT stored
     // email so a correction made during the failed window wins. Matched
     // pre-existing customers keep the old behavior: no auto-subscribe.
-    if (!newsletterCandidate && customerId && !createdCustomerFromCall) {
+    // Gated on the pre-claim processing_status (Codex #3084 r21):
+    // `call.processing_status` was read BEFORE the claim, so it still says
+    // whether THIS run is the extraction_failed retry. An admin force
+    // reprocess of an already-processed call must not rebuild — its
+    // subscribe path re-sends the pending DOI (confirmation_resent) on
+    // every force.
+    if (!newsletterCandidate && customerId && !createdCustomerFromCall
+        && call.processing_status === 'extraction_failed') {
       try {
         const custRow = await db('customers').where({ id: customerId }).first('email', 'first_name', 'last_name', 'created_at');
         if (custRow?.created_at && call.created_at
@@ -8926,7 +8933,13 @@ const CallRecordingProcessor = {
       // newsletter hold against that settled address — never the stale
       // in-memory candidate captured before the correction.
       const { recordFirstTouchHold } = require('./lead-first-touch-resume');
-      newsletterHoldRecorded = await recordFirstTouchHold({ callLogId: call.id, customerId, heldEmail: newsletterCandidate.email || extracted.email, heldNewsletter: true, runStartedAt: processingStartedAt });
+      // The hold's address is the CURRENTLY REVIEWED extraction — never the
+      // candidate's stored email (Codex #3084 r21): on a retry run the
+      // rebuilt candidate carries the customer's OLDER stored address, and
+      // recording it here would let the new card's resolution release both
+      // sends to an address the operator never read back. No extracted
+      // email (demoted) → empty inert address, correction-only release.
+      newsletterHoldRecorded = await recordFirstTouchHold({ callLogId: call.id, customerId, heldEmail: extracted.email || '', heldNewsletter: true, runStartedAt: processingStartedAt });
     } else if (newsletterCandidate) {
       const stillOwned = await db('call_log')
         .where({ id: call.id })
@@ -8964,7 +8977,10 @@ const CallRecordingProcessor = {
           const retried = await recordFirstTouchHold({
             callLogId: call.id,
             customerId,
-            heldEmail: newsletterCandidate?.email || extracted.email,
+            // Currently reviewed extraction only (Codex #3084 r21) — a
+            // rebuilt candidate's stored email must never become the held
+            // target of a card the operator hasn't read back.
+            heldEmail: extracted.email || '',
             heldDrip: dripHeld && dripHoldRecorded === null,
             heldNewsletter: newsHeld && newsletterHoldRecorded === null,
             runStartedAt: processingStartedAt,

@@ -292,10 +292,14 @@ router.post('/:id/verdict', async (req, res) => {
     // unretryable — the terminal cards 409 the retry — so the write failing
     // rolls the resolve back, the route 500s with the cards still open, and
     // a retry works.
+    // spam_status is non-releasing too (Codex #3084 r21): the operator just
+    // identified a lead-classified call as spam — the first-touch sends
+    // must never fire at an address a spammer supplied.
     const denyClearsEmailEarly = verdict === 'deny'
       && wrongFields.length > 0
       && !wrongFields.includes('name')
-      && !wrongFields.includes('consent');
+      && !wrongFields.includes('consent')
+      && !wrongFields.includes('spam_status');
     const holdsTable = await db.schema.hasTable('first_touch_holds');
     const stampCall = verdict === 'deny' && !denyClearsEmailEarly && holdsTable
       ? await db('call_log').where({ id: item.call_log_id }).first('customer_id')

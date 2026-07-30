@@ -524,6 +524,18 @@ describe('mid-send races (r19)', () => {
     expect(mockHoldUpdates.at(-1)).toMatchObject({ status: 'released', released_drip: true });
   });
 
+  test('a deny stamp landing mid-send blocks the terminal settle and survives the re-pend', async () => {
+    // The claim-safe merge preserves held_email, so the target CAS alone
+    // would pass — the settle's deny guard refuses instead (Codex #3084
+    // r21), and the deny-preserving re-pend leaves the stamp untouched.
+    mockReleasedSettleZeroOnce = true; // terminal CAS refuses (deny landed)
+    mockRepenGuardZeroOnce = true; // guarded re-pend refuses too (stamp present)
+    await resumeHeldFirstTouch({ callLogId: 'call-1' });
+    const last = mockHoldUpdates.at(-1);
+    expect(last).toMatchObject({ status: 'pending' });
+    expect(last.last_error).toBeUndefined();
+  });
+
   test('a failed pre-send re-read never buries a freshly-landed deny stamp', async () => {
     // The re-read failed, so deny state is unknown — the guarded re-pend
     // matches 0 rows (a deny stamp landed since the claim) and the recovery

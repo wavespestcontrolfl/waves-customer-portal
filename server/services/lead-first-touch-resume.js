@@ -149,10 +149,18 @@ async function settleIfTargetUnchanged(holdId, observedEmailLc, patch, dbh) {
   const settled = await dbh('first_touch_holds')
     .where({ id: holdId })
     .whereRaw("LOWER(COALESCE(held_email, '')) = ?", [observedEmailLc])
+    // A deny stamping AFTER the pre-send read must survive the settle
+    // (Codex #3084 r21): the claim-safe merge preserves held_email, so the
+    // target CAS alone would pass and the released patch's last_error:null
+    // would clear the fresh stamp. The sends already went to the
+    // previously-approved target; the NEW cycle's deny keeps every future
+    // release gated until a correction.
+    .where(function notDenied() {
+      this.whereNull('last_error').orWhereNot('last_error', 'email_denied_await_correction');
+    })
     .update({ ...patch, updated_at: new Date() });
   if (!settled) {
-    await dbh('first_touch_holds').where({ id: holdId })
-      .update({ status: 'pending', last_error: 'superseded_during_send', updated_at: new Date() });
+    await repenHoldPreservingDeny(holdId, 'superseded_during_send', dbh);
   }
   return settled > 0;
 }
@@ -370,9 +378,21 @@ async function resumeHeldFirstTouch({
             // superseded (possibly hard-bounced) address is the exact
             // incident this lane exists to prevent. A thrown update lands
             // in the enroll catch below: re-pend, retryable.
+            // CAS'd against the hold's CURRENT target (Codex #3084 r21):
+            // correction B can land between enrollCustomer and this write,
+            // retargeting both the enrollment and the hold to B — writing
+            // A back would let a due step send to A before the superseded
+            // settle's retry restores B. The scalar-subquery predicate only
+            // writes while the hold still targets A; once B commits, B's
+            // own fanout enrollment sync is the writer, so both orders
+            // converge on B.
             await dbh('automation_enrollments')
               .where({ id: enroll.enrollmentId, status: 'active' })
               .whereRaw('LOWER(email) != ?', [sendEmail])
+              .whereRaw(
+                "(SELECT LOWER(COALESCE(held_email, '')) FROM first_touch_holds WHERE id = ?) = ?",
+                [hold.id, sendEmail],
+              )
               .update({ email: sendEmail, updated_at: new Date() });
           }
           result.enrolled = result.enrolled || !!enroll?.enrolled;

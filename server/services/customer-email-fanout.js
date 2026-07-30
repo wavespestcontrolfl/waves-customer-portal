@@ -617,6 +617,12 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
       const settled = await conn('first_touch_holds')
         .where({ id: holdId })
         .whereRaw("LOWER(COALESCE(held_email, '')) = ?", [sentEmailLc])
+        // A deny stamping mid-callback must survive the settle — same
+        // guard as the resume module's settleIfTargetUnchanged (Codex
+        // #3084 r21).
+        .where(function notDenied() {
+          this.whereNull('last_error').orWhereNot('last_error', 'email_denied_await_correction');
+        })
         .update({
           released_newsletter: true,
           status: dripSettled ? 'released' : 'pending',
@@ -624,8 +630,18 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
           updated_at: new Date(),
         });
       if (!settled) {
-        await conn('first_touch_holds').where({ id: holdId })
+        // Two-step deny-preserving re-pend (mirrors repenHoldPreservingDeny):
+        // the fallback marker only lands on un-stamped rows.
+        const repenned = await conn('first_touch_holds')
+          .where({ id: holdId })
+          .where(function notDenied() {
+            this.whereNull('last_error').orWhereNot('last_error', 'email_denied_await_correction');
+          })
           .update({ status: 'pending', last_error: 'superseded_during_send', updated_at: new Date() });
+        if (!repenned) {
+          await conn('first_touch_holds').where({ id: holdId })
+            .update({ status: 'pending', updated_at: new Date() });
+        }
         continue;
       }
       if (dripSettled) await repenIfWorkMergedDuringClaim(holdId, conn);
