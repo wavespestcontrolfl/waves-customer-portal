@@ -786,7 +786,7 @@ function conditionRows(conditions = {}, { weeklyRainIn = null } = {}) {
   // Lawn reports show the week's rain (the number the water card and 7-day
   // chart are built from) so every rain figure on the page agrees; other
   // lines keep the trailing-24h capture (owner 2026-07-30).
-  const rainRow = Number.isFinite(Number(weeklyRainIn))
+  const rainRow = weeklyRainIn != null && weeklyRainIn !== '' && Number.isFinite(Number(weeklyRainIn))
     ? ['Rain this week', weeklyRainIn, ' in']
     : ['Rain last 24 hr', conditions.rain_24h_in, ' in'];
   const rows = [

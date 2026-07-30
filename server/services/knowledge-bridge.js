@@ -520,21 +520,17 @@ const KnowledgeBridge = {
       };
 
       // Today's treatment context — what was ACTUALLY applied on the linked
-      // visit, plus the technician's own notes. The recommendations must never
-      // advise against or defer a product class the technician already applied
-      // today (owner audit 2026-07-30: "field observations do not currently
-      // support active disease treatment" rendered on the same report as that
-      // day's fungicide application). Fail-soft: missing link/tables just mean
-      // no treatment block in the prompt.
+      // visit. The recommendations must never advise against or defer a
+      // product class the technician already applied today (owner audit
+      // 2026-07-30: "field observations do not currently support active
+      // disease treatment" rendered on the same report as that day's
+      // fungicide application). Product rows only — raw technician notes are
+      // NOT parser-approved copy and must not feed customer-facing prompts
+      // (report egress rule). Fail-soft: missing link/tables just mean no
+      // treatment block in the prompt.
       let appliedProducts = [];
-      let technicianNotes = '';
       if (assessment.service_record_id) {
         try {
-          const serviceRecord = await db('service_records')
-            .where({ id: assessment.service_record_id })
-            .select('technician_notes')
-            .first();
-          technicianNotes = String(serviceRecord?.technician_notes || '').slice(0, 800);
           appliedProducts = await db('service_products')
             .where({ service_record_id: assessment.service_record_id })
             .select('product_name', 'product_category');
@@ -566,9 +562,7 @@ Current Scores (all 0-100, higher = healthier):
 ${appliedProducts.length ? `
 Applied TODAY on this visit (already done — authoritative):
 ${appliedProducts.map((p) => `- ${p.product_name}${p.product_category ? ` (${p.product_category})` : ''}`).join('\n')}
-HARD RULE: these applications have already been made. Never recommend against, question, or defer a product class applied today (no "before making a fungicide application" when a fungicide was applied) — frame follow-up as monitoring the lawn's response to today's treatment.` : ''}${technicianNotes ? `
-Technician visit notes (authoritative over photo-derived reads where they conflict):
-${technicianNotes}` : ''}
+HARD RULE: these applications have already been made. Never recommend against, question, or defer a product class applied today (no "before making a fungicide application" when a fungicide was applied) — frame follow-up as monitoring the lawn's response to today's treatment.` : ''}
 
 Protocol References (from Claudeopedia):
 ${protocolEntries.map(e => `[${e.category}] ${e.title}: ${(e.content || '').substring(0, 300)}`).join('\n')}
