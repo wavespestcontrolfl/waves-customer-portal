@@ -1968,22 +1968,24 @@ function initScheduledJobs() {
           const claimMeta = typeof msg.metadata === 'string'
             ? (() => { try { return JSON.parse(msg.metadata); } catch { return {}; } })()
             : (msg.metadata || {});
-          // A decision-linked scheduled reply must clear TWO fire-time
-          // re-checks (the send-time checks ran at enqueue, potentially hours
-          // ago, and pre-rollout cards never saw the price rule at all):
-          //   (a) its anchoring inbound is still the newest on the thread;
-          //   (b) non-human-authored agent text carries no price quote.
-          // Either failure → block this queued row, retire the claimed
-          // decision, reopen parked siblings — in ONE thread-locked
-          // transaction over FRESHLY read metadata: the cancel route can
-          // transfer parked ids onto this row after our claim, and those must
-          // reopen here, not sit invisible until orphan recovery.
+          // A decision-linked scheduled reply must clear a fire-time
+          // re-check: its anchoring inbound is still the newest on the
+          // thread. (The former price-quote fire-time block is RETIRED —
+          // owner ruling 2026-07-30, house_voice_v10: real account amounts
+          // may be texted; the operator reviewed this exact body at
+          // schedule time, the drafter's deterministic amount-source guard
+          // ran at draft time, and Codex r7 flagged that keeping the old
+          // blocker silently retired every reviewed amount-bearing send.)
+          // Failure → block this queued row, retire the claimed decision,
+          // reopen parked siblings — in ONE thread-locked transaction over
+          // FRESHLY read metadata: the cancel route can transfer parked ids
+          // onto this row after our claim, and those must reopen here, not
+          // sit invisible until orphan recovery.
           if (claimMeta.agent_decision_id) {
             const suggest = require('./sms-suggest-mode');
             const anchorStale = await suggest.suggestionAnchorIsStale({ decisionId: claimMeta.agent_decision_id, excludeSmsLogId: msg.id });
-            const pricedAgentText = claimMeta.human_authored !== true && suggest.hasPriceQuote(msg.message_body);
-            if (anchorStale || pricedAgentText) {
-              const blockedReason = anchorStale ? 'stale_agent_decision' : 'price_quote_agent_decision';
+            if (anchorStale) {
+              const blockedReason = 'stale_agent_decision';
               const threadKey = String(msg.to_phone || '').replace(/\D/g, '').slice(-10) || msg.customer_id || msg.id;
               // Everything under the lock, metadata read THROUGH the trx
               // AFTER acquiring it — the cancel route can transfer parked

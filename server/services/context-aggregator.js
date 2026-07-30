@@ -39,7 +39,13 @@ const ACCESS_CODE_REVERSE_RE = new RegExp(`\\b(\\d{3,8})\\b([^\\n]{0,40}?)\\b(${
 const ACCESS_CODE_NOUN_RE = /\b(?:code|pin|combo|combination|passcode)\b/i;
 const ACCESS_CODE_CONTEXT_RE = new RegExp(`\\b(?:${ACCESS_CODE_KEYWORDS})\\b`, 'i');
 const ACCESS_CODE_VALUE_RE = /\b(?:\d{3,8}|[A-Z]{2,10}|[A-Za-z]*\d[A-Za-z0-9#*]*)\b/g;
-const ACCESS_CODE_STOPWORDS = new Set(['gate', 'garage', 'door', 'lockbox', 'lock', 'box', 'keypad', 'entry', 'access', 'alarm', 'pin', 'code', 'combo', 'combination', 'passcode', 'is', 'the', 'a', 'an', 'use', 'tech', 'only', 'for', 'to', 'and', 'or']);
+// Lowercase credentials (Codex r7: "gate code blue", "the gate code is
+// waves") can't be shape-detected — they're masked POSITIONALLY: the 1-2
+// tokens directly following the code noun (with optional is/: connector),
+// and the token directly before "is/= the … code" phrasing.
+const ACCESS_CODE_AFTER_NOUN_RE = /\b(code|pin|combo|combination|passcode)\b(\s*(?:is|:|=|-)?\s*)([A-Za-z0-9#*]{2,12})(\s+[A-Za-z0-9#*]{2,12})?/gi;
+const ACCESS_CODE_BEFORE_NOUN_RE = /\b([A-Za-z0-9#*]{2,12})(\s+(?:is|=)\s+(?:the\s+)?[^.\n]{0,20}?\b(?:code|pin|combo|combination|passcode)\b)/gi;
+const ACCESS_CODE_STOPWORDS = new Set(['gate', 'garage', 'door', 'lockbox', 'lock', 'box', 'keypad', 'entry', 'access', 'alarm', 'pin', 'code', 'combo', 'combination', 'passcode', 'is', 'the', 'a', 'an', 'use', 'tech', 'only', 'for', 'to', 'and', 'or', 'needed', 'required', 'broken', 'works', 'not', 'no', 'none', 'unknown', 'same', 'new', 'old']);
 function redactAccessCodes(text) {
   let out = String(text || '');
   // repeat until stable: "gate code 1234 and garage 5678" needs both masked
@@ -53,9 +59,19 @@ function redactAccessCodes(text) {
   // Alphanumeric credential pass, per sentence-ish segment.
   out = out.split(/([.;\n])/).map((seg) => {
     if (!ACCESS_CODE_CONTEXT_RE.test(seg) || !ACCESS_CODE_NOUN_RE.test(seg)) return seg;
-    return seg.replace(ACCESS_CODE_VALUE_RE, (tok) => (
+    let masked = seg.replace(ACCESS_CODE_VALUE_RE, (tok) => (
       ACCESS_CODE_STOPWORDS.has(tok.toLowerCase()) ? tok : '[redacted]'
     ));
+    // Positional lowercase pass (Codex r7): the tokens adjacent to the code
+    // noun are the credential regardless of casing.
+    masked = masked.replace(ACCESS_CODE_AFTER_NOUN_RE, (m, noun, mid, t1, t2) => {
+      const mask = (tok) => (tok && !ACCESS_CODE_STOPWORDS.has(tok.trim().toLowerCase()) ? tok.replace(/[A-Za-z0-9#*]+/, '[redacted]') : (tok || ''));
+      return `${noun}${mid}${mask(t1)}${mask(t2)}`;
+    });
+    masked = masked.replace(ACCESS_CODE_BEFORE_NOUN_RE, (m, tok, rest) => (
+      ACCESS_CODE_STOPWORDS.has(tok.toLowerCase()) ? m : `[redacted]${rest}`
+    ));
+    return masked;
   }).join('');
   return out;
 }
@@ -139,7 +155,10 @@ class ContextAggregator {
         // "your invoice"). LIST, not first (Codex r5): the newest row can be
         // payer-billed while the customer still owes an older own invoice —
         // and the canonical balance sums collectible own invoices.
-        .whereNotIn('status', [...INVOICE_UNCOLLECTIBLE_STATUSES, 'draft'])
+        // ALLOW-list (Codex r7 — the deny-list leaked 'scheduled'/'sending'
+        // rows the customer has never seen): the canonical customer-visible
+        // set billing-v2's balance uses.
+        .whereIn('status', ['sent', 'viewed', 'overdue'])
         .orderBy('created_at', 'desc')
         // aggregate over the FULL collectible set (Codex r6 — a display-sized
         // limit truncated the balance and could hide the customer's own
@@ -160,6 +179,11 @@ class ContextAggregator {
       // v10: the card on file (designated autopay card first). Brand + last4
       // only — never a full number anywhere in this system.
       db('payment_methods').where({ customer_id: customer.id })
+        // Stripe-backed methods only (Codex r7): legacy-processor rows are
+        // preserved by migration but nothing can charge them — a legacy
+        // default must not read as the current card on file.
+        .where({ processor: 'stripe' })
+        .whereNotNull('stripe_payment_method_id')
         // The DEFAULT method is the canonical card-on-file (Codex r5):
         // savePaymentMethod clears only is_default on old rows, so a stale
         // row can keep autopay_enabled=true — ordering by autopay first

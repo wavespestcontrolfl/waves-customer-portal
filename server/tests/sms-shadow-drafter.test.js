@@ -561,6 +561,19 @@ describe('v10 — full-account grounding', () => {
     expect(none).not.toContain('Payment method on file');
   });
 
+  test('EPA-registered is REQUIRED wording and survives; EPA-approved drops (codex r7)', () => {
+    const ok = buildFactsBlock({
+      summary: 'X',
+      recentCalls: [{ summary: 'Explained the product is EPA-registered for residential use.', direction: 'inbound', date: '2026-07-28T15:00:00Z' }],
+    });
+    expect(ok).toContain('EPA-registered');
+    const bad = buildFactsBlock({
+      summary: 'X',
+      recentCalls: [{ summary: 'Told them it is EPA-approved.', direction: 'inbound', date: '2026-07-28T15:00:00Z' }],
+    });
+    expect(bad).not.toContain('EPA-approved');
+  });
+
   test('unqualified safety claims drop from grounded text (codex r6)', () => {
     const block = buildFactsBlock({
       summary: 'X',

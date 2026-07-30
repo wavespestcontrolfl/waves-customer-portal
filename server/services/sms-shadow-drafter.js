@@ -491,7 +491,7 @@ function sanitizeExemplarText(text) {
 // untrusted grounding text (property notes, call summaries, transcripts)
 // drops that line/entry — the drafter must never be handed repeatable
 // prohibited language.
-const SMS_COMPLIANCE_CLAIM_RE = /\b(?:pet|child|kid|family|people|human)s?[\s-]?safe\b|\bnon[\s-]?toxic\b|\bharmless\b|\bEPA[\s-]?(?:approved|registered|certified)\b|\bsafe\s+(?:for|around|to)\b|\b(?:is|are|was|were|be|being|been|it'?s|they'?re|stays?|remains?|totally|completely|perfectly|very|100%)\s+safe\b|\b(?:treatment|product|chemical|spray|application)s?\b[^.\n]{0,25}\bsafe\b|\bre-?entry\b[^.\n]{0,30}\d+\s*(?:min|minute|hour)|\bdry(?:ing)?\s*time\b[^.\n]{0,20}\d+/i;
+const SMS_COMPLIANCE_CLAIM_RE = /\b(?:pet|child|kid|family|people|human)s?[\s-]?safe\b|\bnon[\s-]?toxic\b|\bharmless\b|\bEPA[\s-]?(?:approved|certified)\b|\bsafe\s+(?:for|around|to)\b|\b(?:is|are|was|were|be|being|been|it'?s|they'?re|stays?|remains?|totally|completely|perfectly|very|100%)\s+safe\b|\b(?:treatment|product|chemical|spray|application)s?\b[^.\n]{0,25}\bsafe\b|\bre-?entry\b[^.\n]{0,30}\d+\s*(?:min|minute|hour)|\bdry(?:ing)?\s*time\b[^.\n]{0,20}\d+/i;
 
 const EXEMPLAR_INJECTION_RE = /\b(ignore|disregard|forget|override)\b[^.]{0,40}\b(previous|prior|above|earlier|instruction|instructions|prompt|context|rule|rules)\b|system\s*prompt|you are now|\bact as\b|new instructions|```|<\/?[a-z][\w-]*>|\b(assistant|system|user)\s*:/i;
 function exemplarLooksClean(inbound, reply) {
@@ -917,7 +917,13 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
       context.billing?.openInvoice?.amountDue != null ? centsOf(context.billing.openInvoice.amountDue) : null,
       ...((context.billing?.recentPayments || []).map((p) => (p?.amount != null ? centsOf(p.amount) : null))),
     ].filter((v) => Number.isFinite(v)));
-    const replyAmounts = (parsed.reply.match(/\$\s?\d[\d,]*(?:\.\d{1,2})?/g) || [])
+    // Every amount syntax hasPriceQuote recognizes (Codex r7): $-prefixed,
+    // USD-prefixed, and number-with-unit ("50 dollars"/"50 bucks"). Bare
+    // unit-less numerals stay out of the deterministic guard (dates, house
+    // numbers, zone counts would false-positive) — those remain the
+    // verifier's + reviewer's territory.
+    const AMOUNT_FORMS_RE = /(?:\$|\bUSD\s?)\s?\d[\d,]*(?:\.\d{1,2})?|\b\d[\d,]*(?:\.\d{1,2})?\s?(?:dollars|bucks|usd)\b/gi;
+    const replyAmounts = (parsed.reply.match(AMOUNT_FORMS_RE) || [])
       .map((a) => centsOf(a.replace(/[^\d.]/g, '')));
     const replyHasUngroundedAmount = replyAmounts.some((a) => !authorizedCents.has(a));
     if (replyHasUngroundedAmount) {
