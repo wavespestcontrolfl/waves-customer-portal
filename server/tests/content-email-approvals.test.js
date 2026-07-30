@@ -364,6 +364,8 @@ describe('round-5 hardening (Codex r5)', () => {
     }));
     const prev = process.env.APPROVAL_ALLOWED_SENDERS;
     process.env.APPROVAL_ALLOWED_SENDERS = 'owner@example.com';
+    const gates = require('../config/feature-gates');
+    const gateSpy = jest.spyOn(gates, 'isEnabled').mockReturnValue(true);
     try {
       mkDb({ id: 'x', status: 'approved' }); // already-decided token still OUR traffic…
       await expect(approvals.isApprovalControlMessage({ subject: 'Re: [EA-1a2b3c4d] Approve? Post', from_address: 'owner@example.com' })).resolves.toBe(true);
@@ -376,7 +378,13 @@ describe('round-5 hardening (Codex r5)', () => {
       mkDb(null); // token-shaped but unknown
       await expect(approvals.isApprovalControlMessage({ subject: 'Re: [EA-deadbeef] spam', from_address: 'owner@example.com' })).resolves.toBe(false);
       await expect(approvals.isApprovalControlMessage({ subject: 'Quarterly service question', from_address: 'owner@example.com' })).resolves.toBe(false);
+      // Gate off → no bypass at all, even for a live token + approver
+      // (a rollback must restore normal inbox handling, Codex r18).
+      gateSpy.mockReturnValue(false);
+      mkDb({ id: 'x', status: 'awaiting_reply' });
+      await expect(approvals.isApprovalControlMessage({ subject: 'Re: [EA-1a2b3c4d] Approve? Post', from_address: 'owner@example.com' })).resolves.toBe(false);
     } finally {
+      gateSpy.mockRestore();
       if (prev === undefined) delete process.env.APPROVAL_ALLOWED_SENDERS; else process.env.APPROVAL_ALLOWED_SENDERS = prev;
     }
   });

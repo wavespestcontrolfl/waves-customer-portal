@@ -38,6 +38,10 @@ exports.up = async function up(knex) {
     // a payload edited after the email went out re-emails with a fresh
     // token instead of publishing unseen content.
     t.string('draft_sha', 64);
+    // The truncation verdict of the email AS DELIVERED — decision-time
+    // recomputation can diverge (opportunity.query mutates under reseeds),
+    // so the verdict that gates emailed approval is the persisted one.
+    t.boolean('email_truncated');
     // Send-claim timestamp (distinct from confirmed delivery): a crash
     // between claiming and SMTP completing leaves email_sending_at set with
     // email_sent_at null — reclaimable after a staleness window.

@@ -314,6 +314,10 @@ function verifySenderAuthentication(rawSource, senderAddress) {
  * off the regex alone (Codex r8).
  */
 async function isApprovalControlMessage(email = {}) {
+  // Gate off = the email-approval flow is dark: no inbox bypasses either,
+  // or historical tokens would exempt mail from blocklist/classification
+  // forever after a rollback (Codex r18).
+  if (!emailApprovalsEnabled()) return false;
   const m = String(email.subject || '').match(TOKEN_RE);
   if (!m) return false;
   // The bypass is bound to WHO sent it, not just the token: only the
@@ -559,7 +563,11 @@ async function sendApprovalRequest(run, opportunity = null) {
   // (Codex r17).
   const confirmed = await db('content_email_approvals')
     .where({ id: row.id, token: row.token, email_sending_at: myClaimStamp })
-    .update({ email_sent_at: new Date(), last_error: null, updated_at: new Date() });
+    // Persist the truncation verdict of the email AS DELIVERED — inputs
+    // are mutable (reseeds update opportunity.query), so decision-time
+    // recomputation could diverge from what the owner actually saw
+    // (Codex r18).
+    .update({ email_sent_at: new Date(), email_truncated: rendered.truncated, last_error: null, updated_at: new Date() });
   if (!confirmed) {
     logger.warn(`[email-approvals] ${row.token}: send completed after the claim was reclaimed — delivery NOT confirmed for the newer token`);
     return { row, sent: false, skipped: 'claim_reclaimed_during_send' };
@@ -665,6 +673,7 @@ async function executeDecision(row, decision, sender) {
         draft_sha: null,
         email_sent_at: null,
         email_sending_at: null,
+        email_truncated: null,
         last_error: 'draft changed after email — re-requested',
         updated_at: new Date(),
       });
@@ -679,14 +688,19 @@ async function executeDecision(row, decision, sender) {
     // including the rendered-bytes ceiling (raw caps alone under-measure
     // escaped/UTF-8 expansion, Codex r12).
     if (decision === 'approved') {
-      // Rendered with the SAME inputs as send time (opportunity included —
-      // its query string feeds the Target line), so the truncation verdict
-      // here can never diverge from what was actually measured when the
-      // email went out (Codex r17).
-      const oppForRender = row.opportunity_id ? await db('opportunity_queue').where({ id: row.opportunity_id }).first() : null;
-      const effectiveTruncated = current
-        ? (current.truncated || renderApprovalEmail({ run, row, opportunity: oppForRender, preview: current }).truncated)
-        : false;
+      // The PERSISTED verdict of the email as delivered wins — inputs are
+      // mutable (reseeds update opportunity.query), so recomputation is
+      // only the fallback for legacy rows sent before the column existed
+      // (Codex r17 + r18).
+      let effectiveTruncated;
+      if (row.email_truncated !== null && row.email_truncated !== undefined) {
+        effectiveTruncated = !!row.email_truncated;
+      } else {
+        const oppForRender = row.opportunity_id ? await db('opportunity_queue').where({ id: row.opportunity_id }).first() : null;
+        effectiveTruncated = current
+          ? (current.truncated || renderApprovalEmail({ run, row, opportunity: oppForRender, preview: current }).truncated)
+          : false;
+      }
       if (effectiveTruncated) {
         const marker = 'oversized_approve_ignored';
         if (row.last_error !== marker) {
@@ -803,6 +817,7 @@ async function finishExecution(row, decision, sender, { recovery = false } = {})
           decided_at: null,
           email_sent_at: null,
           email_sending_at: null,
+          email_truncated: null,
           last_error: 'draft changed under lock — re-requested',
           updated_at: new Date(),
         });
