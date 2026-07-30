@@ -89,7 +89,7 @@ function emailKey(value) {
  *   and campaigns (status='active' only) never reach them.
  */
 async function propagateCustomerEmailChange({ before, after, source = 'customer edit' }, conn = db) {
-  const counts = { leads: 0, estimates: 0, newsletter: 0, automations: 0, templateRuns: 0, promoters: 0, billingPrefs: 0, contracts: 0, bookingIntents: 0, reviewCards: 0 };
+  const counts = { leads: 0, estimates: 0, newsletter: 0, newsletterDeliveries: 0, automations: 0, templateRuns: 0, promoters: 0, billingPrefs: 0, contracts: 0, bookingIntents: 0, reviewCards: 0 };
   let pendingConfirmation = null;
   const customerId = (after && after.id) || (before && before.id);
   // OLD is a loose match key (the stored copy may itself be malformed — that
@@ -252,6 +252,18 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
       .whereRaw('LOWER(email) = ?', [oldEmail])
       .first();
     if (oldSub) {
+      // The old inbox's already-DELIVERED quiz/feedback/event links must stop
+      // resolving once the address moves — each delivery row's engagement_token
+      // is a bearer credential mailed to the OLD mailbox (which, on a typo fix,
+      // can be a real third party's inbox). Rotate them per-row BEFORE the
+      // merge branch's del() below sets subscriber_id NULL and strands them.
+      // gen_random_uuid() is volatile (fresh value per row), so the unique
+      // index on engagement_token holds. Answered quizzes/feedback are keyed
+      // by delivery id, not token — nothing recorded is lost — and future
+      // sends read the token at send time, so they pick up the new values.
+      counts.newsletterDeliveries += await conn('newsletter_send_deliveries')
+        .where({ subscriber_id: oldSub.id })
+        .update({ engagement_token: conn.raw('gen_random_uuid()'), updated_at: now });
       const targetSub = await conn('newsletter_subscribers')
         .whereRaw('LOWER(email) = ?', [newEmail])
         .first();
@@ -335,7 +347,7 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
 
   if (Object.values(counts).some(Boolean)) {
     // Counts only — never the email values (PII stays out of logs).
-    logger.info(`[email-fanout] customer ${customerId}: synced ${counts.leads} lead(s), ${counts.estimates} estimate(s), ${counts.newsletter} newsletter, ${counts.automations} enrollment(s), ${counts.templateRuns} template run(s), ${counts.promoters} promoter(s), ${counts.billingPrefs} billing pref(s), ${counts.contracts} contract(s), ${counts.bookingIntents} booking intent(s); resolved ${counts.reviewCards} email review card(s)`);
+    logger.info(`[email-fanout] customer ${customerId}: synced ${counts.leads} lead(s), ${counts.estimates} estimate(s), ${counts.newsletter} newsletter (${counts.newsletterDeliveries} delivery token(s) rotated), ${counts.automations} enrollment(s), ${counts.templateRuns} template run(s), ${counts.promoters} promoter(s), ${counts.billingPrefs} billing pref(s), ${counts.contracts} contract(s), ${counts.bookingIntents} booking intent(s); resolved ${counts.reviewCards} email review card(s)`);
   }
   return pendingConfirmation ? { ...counts, pendingConfirmation } : counts;
 }
