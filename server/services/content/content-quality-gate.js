@@ -33,7 +33,7 @@
  */
 
 const { THRESHOLDS } = require('./scoring-config');
-const { evaluateTitleMetaSpam, renderMetaTokens, SALESY_META_RE, SOFT_CTA_RE } = require('./title-meta-spam-gate');
+const { evaluateTitleMetaSpam, renderMetaTokens, SALESY_META_RE, endsWithSoftCta } = require('./title-meta-spam-gate');
 const { isFaqBlockedService } = require('./content-guardrails');
 
 // Compute the achievable maximum score PER PAGE TYPE so the pass
@@ -1033,14 +1033,32 @@ function blogMetaContractResult(m) {
     return { ok: false, reason: 'blog_meta_must_not_carry_phone' };
   }
   if (SALESY_META_RE.test(m)) return { ok: false, reason: 'blog_meta_salesy' };
-  if (!SOFT_CTA_RE.test(m)) return { ok: false, reason: 'blog_meta_missing_soft_cta' };
+  // The CTA must END the meta (last sentence), not merely appear somewhere —
+  // "Learn more about X. Professional treatment available…" is not the shape.
+  if (!endsWithSoftCta(m)) return { ok: false, reason: 'blog_meta_missing_soft_cta' };
+  return { ok: true };
+}
+
+// A typed-out phone in the publishable TITLE ships the wrong tracking number
+// on every other domain, same as in the meta. Checked wherever the title
+// will actually publish (a protected metaTitle proposal is discarded by the
+// publisher, so it's exempt via context.protectedTitle).
+function titleLiteralPhoneResult(draft) {
+  const t = (draft.title || draft.frontmatter?.title || '').trim();
+  if (t && LITERAL_PHONE_IN_META_RE.test(t)) return { ok: false, reason: 'literal_phone_in_title' };
   return { ok: true };
 }
 
 // Metadata-rewrite lane: target-aware (brief.target_page_type is derived from
 // the RESOLVED target file by the runner; unresolved targets now PARK before
 // this gate runs — see metadata_target_unresolved).
-function checkMetaPhoneTokenPresent(draft, brief) {
+function checkMetaPhoneTokenPresent(draft, brief, context) {
+  // Publishable titles never carry a typed-out number either — skip only
+  // when the proposal is discarded (protected metaTitle target).
+  if (!context?.protectedTitle) {
+    const titleResult = titleLiteralPhoneResult(draft);
+    if (!titleResult.ok) return titleResult;
+  }
   const m = (draft.meta_description || draft.frontmatter?.meta_description || draft.frontmatter?.metaDescription || '').trim();
   if (!m) return { ok: false, reason: 'no_meta_description' };
   return brief?.target_page_type === 'page' ? pageMetaPhoneResult(m) : blogMetaContractResult(m);
@@ -1049,6 +1067,8 @@ function checkMetaPhoneTokenPresent(draft, brief) {
 // city-service bundle: newly authored city/service pages must carry the
 // {{cityPhone}} token. Meta PRESENCE is other gates' job — empty defers.
 function checkCityServiceMetaPhone(draft) {
+  const titleResult = titleLiteralPhoneResult(draft);
+  if (!titleResult.ok) return titleResult;
   const m = (draft.meta_description || draft.frontmatter?.meta_description || draft.frontmatter?.metaDescription || '').trim();
   if (!m) return { ok: true, reason: 'no_meta_to_check' };
   return pageMetaPhoneResult(m);
@@ -1059,6 +1079,8 @@ function checkCityServiceMetaPhone(draft) {
 // draft bypassed the metadata-lane check entirely and could auto-publish a
 // promotional meta.
 function checkBlogMetaContract(draft) {
+  const titleResult = titleLiteralPhoneResult(draft);
+  if (!titleResult.ok) return titleResult;
   const m = (draft.meta_description || draft.frontmatter?.meta_description || '').trim();
   if (!m) return { ok: true, reason: 'no_meta_to_check' };
   return blogMetaContractResult(m);

@@ -182,11 +182,24 @@ function renderMetaTokens(text) {
 const SALESY_META_RE = /free\s+(estimate|quote|inspection)|call\s+(now|today|us)\b|book\s+(now|today|online)\b|schedule\s+(service|now|today|your)\b|(request|get)\s+a\s+(free\s+)?quote\b|contact\s+us\b|save\s+(on|up\s+to|\$|\d+\s*%)|\d+\s*%\s*off|discount|special\s+offer|act\s+now|limited\s+time/i;
 const SOFT_CTA_RE = /\b(learn\s+(more|how|why|what)|read\s+(more|on|the\s+full)|find\s+out\s+(more|how|why|what)|see\s+(how|what|why))\b/i;
 
+// The soft CTA must be where the owner rule puts it — at the END of the
+// meta. Presence alone let "Learn more about chinch bugs. Professional
+// treatment is available…" pass while ending on promotional copy, so the
+// check runs against the meta's LAST sentence.
+function endsWithSoftCta(text) {
+  const t = String(text || '').trim();
+  if (!t) return false;
+  const sentences = t.split(/[.!?]+/).map((s) => s.trim()).filter(Boolean);
+  const last = sentences[sentences.length - 1] || '';
+  return SOFT_CTA_RE.test(last);
+}
+
 module.exports = {
   evaluateTitleMetaSpam,
   renderMetaTokens,
   SALESY_META_RE,
   SOFT_CTA_RE,
+  endsWithSoftCta,
   HYPE_TERMS,
   COMMERCIAL_TERMS,
   _internals: {

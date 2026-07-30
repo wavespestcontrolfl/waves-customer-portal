@@ -2098,3 +2098,13 @@ describe('blog meta soft-CTA requirement on refresh (owner rule 2026-07-29)', ()
     expect(r.findings.some((f) => f.code === 'BLOG_META_MISSING_SOFT_CTA')).toBe(true);
   });
 });
+
+describe('literal phone in draft titles (round-3 hardening)', () => {
+  test('any lane: typed-out phone in a draft title P1s', () => {
+    const r = guardrails.evaluate(
+      { body: 'Body copy.', frontmatter: { title: 'Pest Control Sarasota — 941-297-2606' } },
+      {},
+    );
+    expect(r.findings.some((f) => f.code === 'LITERAL_PHONE_IN_TITLE')).toBe(true);
+  });
+});

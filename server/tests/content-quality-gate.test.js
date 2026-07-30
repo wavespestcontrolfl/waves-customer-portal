@@ -990,3 +990,26 @@ describe('meta contract bundle checks + refinements (owner rule 2026-07-29)', ()
     expect(checkBlogMetaContract({ frontmatter: {} }).ok).toBe(true);
   });
 });
+
+describe('meta contract round-3 hardening (Codex findings)', () => {
+  const { checkMetaPhoneTokenPresent, checkBlogMetaContract, checkCityServiceMetaPhone } = require('../services/content/content-quality-gate')._internals;
+  const BLOG = { target_page_type: 'supporting-blog' };
+  const PAGE = { target_page_type: 'page' };
+
+  test('soft CTA must END the meta — a mid-meta mention with a promotional tail fails', () => {
+    const r = checkBlogMetaContract({ meta_description: 'Learn more about chinch bugs. Professional lawn treatment is available from Waves whenever you need a local turf expert in Southwest Florida.' });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('blog_meta_missing_soft_cta');
+  });
+
+  test('literal phone in a publishable title fails on every lane', () => {
+    const meta = 'Pest control in Sarasota built for coastal pressure. Call ☎️ {{cityPhone}} for a FREE estimate from techs on daily local routes here.';
+    const withPhoneTitle = { title: 'Pest Control Sarasota — 941-297-2606', meta_description: meta };
+    expect(checkMetaPhoneTokenPresent(withPhoneTitle, PAGE, {}).reason).toBe('literal_phone_in_title');
+    expect(checkMetaPhoneTokenPresent(withPhoneTitle, BLOG, {}).reason).toBe('literal_phone_in_title');
+    expect(checkCityServiceMetaPhone(withPhoneTitle).reason).toBe('literal_phone_in_title');
+    expect(checkBlogMetaContract(withPhoneTitle).reason).toBe('literal_phone_in_title');
+    // Protected metaTitle target: the proposal is discarded — title exempt.
+    expect(checkMetaPhoneTokenPresent(withPhoneTitle, PAGE, { protectedTitle: true }).ok).toBe(true);
+  });
+});

@@ -1760,7 +1760,7 @@ const LITERAL_PHONE_IN_META_RE = /\(\d{3}\)\s*\d{3}[-.\s]?\d{4}|\b\d{3}[-.]\d{3}
 function metaDescriptionContractFinding(frontmatter, { isRefresh = false, liveMetaDescription = null, targetIsBlog = false } = {}) {
   // SALESY/SOFT-CTA definitions shared with the quality gate (single source
   // in title-meta-spam-gate) so the two enforcement points can't drift.
-  const { SALESY_META_RE, SOFT_CTA_RE } = require('./title-meta-spam-gate');
+  const { SALESY_META_RE, endsWithSoftCta } = require('./title-meta-spam-gate');
   if (!isRefresh) return null;
   const draftMeta = frontmatter?.metaDescription ?? frontmatter?.meta_description;
   if (draftMeta === undefined || !String(draftMeta).trim()) return null; // absent → publisher keeps the live value
@@ -1773,8 +1773,8 @@ function metaDescriptionContractFinding(frontmatter, { isRefresh = false, liveMe
     if (SALESY_META_RE.test(draftTrim)) {
       return finding('P1', 'BLOG_META_SALESY', 'Blog meta descriptions stay informational — no sales CTAs (owner rule 2026-07-29); end with a soft CTA like "Learn more on the Waves blog."');
     }
-    if (!SOFT_CTA_RE.test(draftTrim)) {
-      return finding('P1', 'BLOG_META_MISSING_SOFT_CTA', 'Blog meta descriptions end with a soft CTA like "Learn more on the Waves blog." (owner rule 2026-07-29).');
+    if (!endsWithSoftCta(draftTrim)) {
+      return finding('P1', 'BLOG_META_MISSING_SOFT_CTA', 'Blog meta descriptions must END with a soft CTA like "Learn more on the Waves blog." — the last sentence, not merely a mention (owner rule 2026-07-29).');
     }
   } else {
     if (!draftTrim.includes('{{cityPhone}}')) {
@@ -1788,6 +1788,20 @@ function metaDescriptionContractFinding(frontmatter, { isRefresh = false, liveMe
   const rendered = renderMetaTokens(draftTrim).trim();
   if (rendered.length > 160) {
     return finding('P1', 'META_OVER_160_RENDERED', `Rewritten meta description renders at ${rendered.length} characters — the cap is 160 (owner rule 2026-07-29).`);
+  }
+  return null;
+}
+
+// A typed-out phone in a draft TITLE ships the wrong tracking number on every
+// other domain (titles are multi-domain like metas). Applies to every
+// body-content lane — no grandfathering: no live title legitimately carries a
+// literal number.
+function literalPhoneInTitleFinding(frontmatter) {
+  for (const field of ['title', 'metaTitle']) {
+    const v = frontmatter?.[field];
+    if (v !== undefined && LITERAL_PHONE_IN_META_RE.test(String(v))) {
+      return finding('P1', 'LITERAL_PHONE_IN_TITLE', `Draft ${field} contains a typed-out phone number — titles never carry literal numbers (pages render on many domains with different tracking numbers).`);
+    }
   }
   return null;
 }
@@ -1925,6 +1939,8 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     // Owner rule 2026-07-29: a refresh that CHANGES the meta description must
     // carry {{cityPhone}}, never a literal number, and stay ≤160 rendered.
     metaDescriptionContractFinding(frontmatter, { isRefresh, liveMetaDescription, targetIsBlog }),
+    // Typed-out phone in a draft title — wrong number on every other domain.
+    literalPhoneInTitleFinding(frontmatter),
   ].filter(Boolean);
 
   const pass = !findings.some((f) => f.severity === 'P0' || f.severity === 'P1');
