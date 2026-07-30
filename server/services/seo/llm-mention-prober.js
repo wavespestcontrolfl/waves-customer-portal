@@ -10,7 +10,7 @@
  *   - Gemini   → Google google_search grounding tool (live web) [GEMINI_API_KEY]
  *   - Claude   → Anthropic web_search tool (live web)           [ANTHROPIC_API_KEY]
  *   - Google AI Overview → DataForSEO SERP AI overview          [DATAFORSEO_*]
- *   - Perplexity → DEFERRED until PERPLEXITY_API_KEY is provisioned.
+ *   - Perplexity → Sonar search-grounded model (live web)       [PERPLEXITY_API_KEY]
  *
  * A platform whose key/gate is missing is skipped silently — the run degrades
  * to whatever providers are configured rather than failing.
@@ -208,6 +208,39 @@ class LLMMentionProber {
     }
   }
 
+  async probePerplexity(query) {
+    if (!process.env.PERPLEXITY_API_KEY) return null;
+    // Sonar models are search-grounded by default — every answer is a live-web
+    // answer, which is exactly what a Perplexity user sees.
+    const model = process.env.PERPLEXITY_MENTIONS_MODEL || 'sonar';
+    try {
+      const res = await fetch('https://api.perplexity.ai/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${process.env.PERPLEXITY_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model,
+          messages: [{ role: 'user', content: query }],
+        }),
+      });
+      if (!res.ok) { logger.warn(`[llm-mentions] Perplexity ${res.status} for "${query}"`); return null; }
+      const data = await res.json();
+      const text = data?.choices?.[0]?.message?.content || '';
+      // Citations: legacy top-level `citations` (URL strings) and the newer
+      // `search_results` ({title,url,date}) — harvest both, parse() dedupes.
+      const citedUrls = [
+        ...(Array.isArray(data?.citations) ? data.citations : []),
+        ...(Array.isArray(data?.search_results) ? data.search_results.map(r => r?.url) : []),
+      ].filter(u => typeof u === 'string' && u);
+      return { text, citedUrls, model, grounded: true };
+    } catch (err) {
+      logger.warn(`[llm-mentions] Perplexity probe failed: ${err.message}`);
+      return null;
+    }
+  }
+
   /** Map platform key → probe fn. */
   get providers() {
     return {
@@ -215,6 +248,7 @@ class LLMMentionProber {
       gemini: q => this.probeGemini(q),
       claude: q => this.probeClaude(q),
       google_ai_overview: q => this.probeGoogleAIOverview(q),
+      perplexity: q => this.probePerplexity(q),
     };
   }
 
