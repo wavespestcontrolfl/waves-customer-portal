@@ -89,7 +89,7 @@ const TWO_TREATMENT_PACKAGE_KEYS = new Set(['cockroach_control', 'bed_bug_treatm
 // 2468" — codex r3). Ordinary copy ("entry points treated", "gate was
 // open") never trips; a street address near the word "gate" may — that
 // false positive fails closed and the tech rephrases.
-const COMPLETION_ACCESS_CODE_RE = /(?:\b(?:gate|garage|door|lock\s?box|keypad|alarm|entry|access)\b[^\n.!?]{0,40}\b(?:code|pin|combo|combination)\b|\b(?:code|pin|combo|combination)\b[^\n.!?]{0,15}\d{3,}|\b(?:gate|lock\s?box|keypad|alarm)\b[^\n.!?]{0,12}\b\d{3,8}\b)/i;
+const COMPLETION_ACCESS_CODE_RE = /(?:\b(?:gate|garage|door|lock\s?box|keypad|alarm|entry|access)\b[^\n.!?]{0,40}\b(?:code|pin|combo|combination)\b|\b(?:code|pin|combo|combination)\b[^\n.!?]{0,15}\d{3,}|\b(?:gate|garage|door|lock\s?box|keypad|alarm|entry|access)\b[^\n.!?]{0,12}\b\d{3,8}\b)/i;
 const { buildPrepaidSeriesContext } = require('../services/prepaid-series');
 const {
   findFirstApplicationInvoiceForEstimateService,
@@ -3303,6 +3303,19 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               error: `This completion contains wording we can't put on a customer report (${copyViolations.join(', ')}). Describe what was observed and done today instead of absolute claims.`,
               code: 'typed_recommendations_banned_copy',
               violations: copyViolations,
+            },
+          };
+        }
+        // Same access-code egress gate the untyped branch enforces (codex
+        // r4): typed completions carry the identical customer-visible
+        // free-text surfaces, and an entry code in any of them would
+        // persist into the report the same way.
+        if (customerCopySources.some((entry) => COMPLETION_ACCESS_CODE_RE.test(String(entry || '')))) {
+          return {
+            status: 422,
+            body: {
+              error: 'This completion looks like it contains an access, gate, or lockbox code. Keep entry codes out of customer-visible fields — use the internal property notes instead.',
+              code: 'completion_access_code',
             },
           };
         }
