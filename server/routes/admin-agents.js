@@ -1475,12 +1475,31 @@ router.get('/intent-modes', async (req, res, next) => {
     const suggestMode = require('../services/sms-suggest-mode');
     const graduation = require('../services/sms-graduation');
     const judgeCohort = graduation.resolveCohortVersions();
+    // Voice-profile pin for the readiness slice (Codex r2): resolution
+    // failure pins to a never-matching sentinel so readiness evidence
+    // empties (fail closed) while the endpoint — and its all-time display
+    // telemetry — survives.
+    let voiceProfilePin;
+    try {
+      voiceProfilePin = await graduation.resolveVoiceProfilePin();
+    } catch (err) {
+      voiceProfilePin = '__unresolved__';
+      logger.warn(`[admin-agents] voice-profile pin resolution failed: ${err.message}; readiness evidence blocked until it recovers`);
+    }
     const [rows, seenIntents, outcomes] = await Promise.all([
       suggestMode.listIntentModes(),
       db('message_drafts').whereNotNull('intent').distinct('intent').pluck('intent'),
-      db('agent_decisions').where('workflow', suggestMode.SUGGEST_WORKFLOW)
-        .select('detected_intent as intent', 'status', 'prompt_version').count('* as count')
-        .groupBy('detected_intent', 'status', 'prompt_version'),
+      // LEFT join: display telemetry must keep counting decisions even if a
+      // draft row is ever missing; the readiness slice treats an unmatched
+      // row's NULL profile as '__none__', which only matches the no-profile
+      // state — fail-closed enough, and the executor gate re-checks live.
+      db({ a: 'agent_decisions' })
+        .leftJoin({ md: 'message_drafts' }, 'md.id', 'a.entity_id')
+        .where('a.workflow', suggestMode.SUGGEST_WORKFLOW)
+        .select('a.detected_intent as intent', 'a.status', 'a.prompt_version')
+        .select(db.raw("md.intended_actions::jsonb->>'voice_profile_version' as voice_profile_version"))
+        .count('* as count')
+        .groupBy('a.detected_intent', 'a.status', 'a.prompt_version', db.raw("md.intended_actions::jsonb->>'voice_profile_version'")),
     ]);
 
     const byIntent = new Map();
@@ -1512,7 +1531,7 @@ router.get('/intent-modes', async (req, res, next) => {
     // readiness evidence (a human accepting a superseded version's drafts
     // says nothing about the drafter that would be auto-sending). Shapes and
     // fail-closed rules live in rollupSuggestOutcomes.
-    const outcomeRollup = graduation.rollupSuggestOutcomes(outcomes, judgeCohort);
+    const outcomeRollup = graduation.rollupSuggestOutcomes(outcomes, judgeCohort, voiceProfilePin);
     for (const [intent, e] of outcomeRollup) bucket(intent).suggest = e.display;
 
     // Phase E readiness: per-intent eligibility for the next ladder rung,

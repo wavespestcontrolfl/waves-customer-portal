@@ -8,6 +8,8 @@ jest.mock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({ mocke
 jest.mock('../services/sms-shadow-drafter', () => ({
   PROMPT_VERSION: 'house_voice_v9_test',
   generateGroundedDraft: jest.fn(),
+  // effective profile = none unless a test overrides — keeps the pin inert
+  resolveEffectiveVoiceProfile: jest.fn(async () => null),
 }));
 jest.mock('../services/sms-shadow-judge', () => ({ judgeOne: jest.fn() }));
 jest.mock('../utils/cron-lock', () => ({
@@ -40,6 +42,11 @@ function makeDbi({
       return b;
     });
     b.orderBy = jest.fn(() => b);
+    // profile pin (Codex r2): the sweep's mock resolver returns no profile
+    // and these fixture runs carry no voice_profile_version, so the
+    // COALESCE(-1) = -1 predicate is a semantic no-op here — record-free
+    // pass-through keeps the fixture routing on _kv.
+    b.whereRaw = jest.fn(() => b);
     b.count = jest.fn(() => {
       if (table === 'sms_sealed_eval_items') return Promise.resolve([{ count: activeCount }]);
       return b;
@@ -149,6 +156,34 @@ describe('runAutoExamSweep', () => {
     expect(examRunner).toHaveBeenCalledWith(expect.objectContaining({ runId: 'stranded-1' }));
     expect(result.legs.anthropic.outcome).toBe('resumed_stranded');
     expect(result.ran).toBe(1);
+  });
+
+  test('stranded STALE-PROFILE row is resumed but never claims the leg — fresh current-profile run in the SAME sweep (codex r3)', async () => {
+    // Effective profile is none (mock resolver → null) but the stranded run
+    // was pinned to profile v7: finishing it keeps the paid cohort and frees
+    // the one-running index, yet the leg still needs a current-profile run.
+    const examRunner = jest.fn(async () => ({ status: 'complete' }));
+    const dbi = makeDbi({
+      runningRow: { id: 'stale-profile-1', provider_leg: 'anthropic', prompt_version: CURRENT, voice_profile_version: 7 },
+      completeByLeg: { openai: { id: 'r2' } },
+    });
+    const result = await runAutoExamSweep({ dbi, examRunner, summaryFn: summaryBothClean });
+    expect(examRunner).toHaveBeenCalledWith(expect.objectContaining({ runId: 'stale-profile-1' }));
+    expect(examRunner).toHaveBeenCalledWith(expect.objectContaining({ providerLeg: 'anthropic' }));
+    expect(result.legs.anthropic.outcome).not.toBe('resumed_stranded');
+  });
+
+  test('a profile approved mid-sweep aborts the leg (PROFILE_CHANGED) — never spends on an untracked pair (codex r4)', async () => {
+    const moved = new Error('effective voice profile is now 5, expected none — profile changed since the sweep snapshot');
+    moved.code = 'PROFILE_CHANGED';
+    const examRunner = jest.fn().mockRejectedValue(moved);
+    const dbi = makeDbi({});
+    const result = await runAutoExamSweep({ dbi, examRunner, summaryFn: summaryBothClean });
+    expect(result.legs.anthropic.outcome).toBe('profile_changed');
+    expect(result.legs.openai.outcome).toBe('profile_changed');
+    expect(result.ran).toBe(0);
+    // fresh creates carried the sweep's frozen pin for createExamRun to check
+    expect(examRunner).toHaveBeenCalledWith(expect.objectContaining({ expectedVoiceProfileVersion: null }));
   });
 
   test('stranded STALE-version row is recovered without shadowing the current-version leg', async () => {
