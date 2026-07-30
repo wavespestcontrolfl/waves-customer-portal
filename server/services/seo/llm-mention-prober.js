@@ -183,22 +183,39 @@ class LLMMentionProber {
 
   async probeGoogleAIOverview(query) {
     try {
-      const data = await dataforseo.request('/serp/google/ai_overview/live/advanced', [{
+      // AI Overviews arrive as an `ai_overview` item inside the ORGANIC SERP
+      // response — there is no /serp/google/ai_overview/ endpoint. The old
+      // path 404'd at the task level ("Invalid Path", status 40402) on every
+      // probe since 2026-05-30, and those errors were recorded as legitimate
+      // "no overview" observations (the 0/1092 finding, purged by migration
+      // 20260729020000). load_async_ai_overview makes DataForSEO wait for the
+      // async-loaded overview content instead of returning a stub.
+      const data = await dataforseo.request('/serp/google/organic/live/advanced', [{
         keyword: query,
         location_name: 'Bradenton,Florida,United States',
         language_name: 'English',
+        load_async_ai_overview: true,
       }]);
       // null = not attempted (unconfigured / gate off / request error) → caller
-      // skips, no cost, retries next run. A returned response means the paid
-      // lookup happened, so even "no AI overview present" must be recorded as a
-      // real no-mention observation — otherwise idempotency never fires and the
-      // same paid miss is re-run every day, blowing past MAX_PROBES_PER_RUN.
+      // skips, no cost, retries next run.
       if (data == null) return null;
-      const items = data?.tasks?.[0]?.result?.[0]?.items || [];
+      const task = data?.tasks?.[0];
+      // Task-level error (bad path/params/quota) is NOT an observation — the
+      // lookup didn't measure the SERP, so recording it would poison the
+      // share-of-voice series exactly like the Invalid Path incident did.
+      if (task?.status_code !== 20000) {
+        logger.warn(`[llm-mentions] AI Overview task error ${task?.status_code} (${task?.status_message}) for "${query}"`);
+        return null;
+      }
+      // A successful SERP with no ai_overview item is a real paid observation:
+      // Google showed no overview for this query. It must be recorded so
+      // idempotency fires — otherwise the same paid miss re-runs every day,
+      // blowing past MAX_PROBES_PER_RUN.
+      const items = task?.result?.[0]?.items || [];
       const aio = items.find(i => i.type === 'ai_overview');
       if (!aio) return { text: '', citedUrls: [], model: 'dataforseo:ai_overview', grounded: true };
-      const text = JSON.stringify(aio);
-      const citedUrls = (aio.references || aio.items || [])
+      const text = aio.markdown || JSON.stringify(aio);
+      const citedUrls = [...(aio.references || []), ...(aio.items || [])]
         .map(r => r?.url)
         .filter(Boolean);
       return { text, citedUrls, model: 'dataforseo:ai_overview', grounded: true };
