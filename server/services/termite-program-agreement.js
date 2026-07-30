@@ -909,38 +909,30 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 // cancelled, e.g. by the compliance migration): the superseded wording's
 // public signing link must die whenever the row is deemed handled.
 async function cancelStaleSource(row, conn = db) {
-  // Reactivation-safe AND atomic: the staleness condition rides the UPDATE
-  // itself (NOT EXISTS an active pointer at this row's version), so an
-  // admin reactivating the version between any pre-read and the write
-  // cannot get a current request cancelled. The pre-read only provides the
-  // fast-path 'reactivated' signal for callers.
-  if (row.document_template_version_id && row.document_template_key) {
-    const template = await conn('document_templates')
-      .where({ template_key: row.document_template_key })
-      .first('active_version_id');
-    if (template?.active_version_id === row.document_template_version_id) return 'reactivated';
-  }
-  const cancelled = await conn('customer_contracts')
-    .where({ id: row.id })
-    .whereIn('status', OPEN_STATUSES)
-    .modify((q) => {
-      if (row.document_template_version_id && row.document_template_key) {
-        q.whereNotExists(function stillStale() {
-          this.select(conn.raw('1'))
-            .from('document_templates as dt')
-            .where('dt.template_key', row.document_template_key)
-            .where('dt.active_version_id', row.document_template_version_id);
-        });
-      }
-    })
-    .update({
-      status: 'cancelled',
-      cancelled_at: new Date(),
-      cancelled_reason: 'Superseded by updated compliance wording (v2 templates)',
-      updated_at: new Date(),
-    });
-  if (cancelled) {
-    await conn('customer_contract_events').insert({
+  // Serialized against admin publication: the template row is locked
+  // FOR UPDATE in the same transaction as the cancel, so a reactivation
+  // either commits BEFORE the lock (we observe it and skip) or waits until
+  // our transaction commits (the cancel already applied to a genuinely
+  // stale request). No MVCC-snapshot window remains.
+  return conn.transaction(async (trx) => {
+    if (row.document_template_version_id && row.document_template_key) {
+      const template = await trx('document_templates')
+        .where({ template_key: row.document_template_key })
+        .forUpdate()
+        .first('active_version_id');
+      if (template?.active_version_id === row.document_template_version_id) return 'reactivated';
+    }
+    const cancelled = await trx('customer_contracts')
+      .where({ id: row.id })
+      .whereIn('status', OPEN_STATUSES)
+      .update({
+        status: 'cancelled',
+        cancelled_at: new Date(),
+        cancelled_reason: 'Superseded by updated compliance wording (v2 templates)',
+        updated_at: new Date(),
+      });
+    if (!cancelled) return false;
+    await trx('customer_contract_events').insert({
       contract_id: row.id,
       customer_id: row.customer_id,
       event_type: 'cancelled',
@@ -949,16 +941,7 @@ async function cancelStaleSource(row, conn = db) {
       metadata: JSON.stringify({ reason: 'superseded_stale_version' }),
     });
     return true;
-  }
-  // Zero rows: either not open anymore (fine) or the atomic condition hit a
-  // mid-flight reactivation — distinguish so the caller skips the marker.
-  if (row.document_template_version_id && row.document_template_key) {
-    const template = await conn('document_templates')
-      .where({ template_key: row.document_template_key })
-      .first('active_version_id');
-    if (template?.active_version_id === row.document_template_version_id) return 'reactivated';
-  }
-  return false;
+  });
 }
 
 async function markSupersededHandled(row, outcome, conn = db) {
@@ -1027,8 +1010,68 @@ async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
     expiredStale.push(...rows);
   }
 
+  // Rolling-deploy window: an OLD application instance (without the
+  // commercial/multi-unit park) can keep accepting for a short time AFTER
+  // the migration commits the v2 pointer, minting CURRENT-version
+  // residential agreements for estimates that must park. Those rows pass
+  // every stale filter and block the ordinary sweep, so a bounded
+  // window after each rollout is re-validated against today's predicates.
+  const ROLLOUT_MISISSUE_WINDOW_MS = 48 * 60 * 60 * 1000;
+  const rolloutWindowRows = [];
+  for (const [templateKey, cutoff] of rolloutStarts) {
+    const rows = await notReprocessed(db('customer_contracts')
+      .where('document_template_key', templateKey)
+      .whereIn('status', OPEN_STATUSES)
+      .whereIn('document_template_version_id', [...activeVersionIds])
+      .where('created_at', '>=', cutoff)
+      .where('created_at', '<=', new Date(cutoff.getTime() + ROLLOUT_MISISSUE_WINDOW_MS)))
+      .select('id', 'customer_id', 'status', 'recipient_name', 'document_variables_snapshot', 'document_template_key', 'document_template_version_id', 'created_at')
+      .limit(limit);
+    rolloutWindowRows.push(...rows);
+  }
+
   const NotificationService = require('./notification-service');
   const seenEstimates = new Set();
+  for (const row of rolloutWindowRows) {
+    if (results.checked >= limit) break;
+    let snap = row.document_variables_snapshot;
+    if (typeof snap === 'string') { try { snap = JSON.parse(snap); } catch { snap = null; } }
+    const rawId = snap?.estimate?.id;
+    const linkedEstimateId = UUID_RE.test(String(rawId || '')) ? String(rawId) : null;
+    if (!linkedEstimateId) { await markSupersededHandled(row, 'rollout_window_manual'); continue; }
+    results.checked += 1;
+    const linkedEstimate = await db('estimates').where({ id: linkedEstimateId }).first();
+    if (!linkedEstimate || !linkedEstimate.customer_id
+      || String(linkedEstimate.customer_id) !== String(row.customer_id)) {
+      await markSupersededHandled(row, 'rollout_window_ownership');
+      continue;
+    }
+    if (!isCommercialEstimate(linkedEstimate, parseEstimateData(linkedEstimate.estimate_data))) {
+      // Correctly issued under today's rules — nothing to do, never rescan.
+      await markSupersededHandled(row, 'rollout_window_ok');
+      continue;
+    }
+    // A commercial estimate holding a residential agreement: run it through
+    // today's flow — the commercial branch retires the same-property open
+    // rows (including this one) and rings the reissue-scoped bell.
+    const misissueResult = await maybeCreateTermiteProgramAgreement({
+      estimate: linkedEstimate,
+      customerId: row.customer_id,
+      notifyOnUnresolved: true,
+      signedBlockScope: 'property',
+      signedAfter: row.created_at || null,
+      reissueSourceContractId: row.id,
+    });
+    if (misissueResult.skipped === 'commercial' && misissueResult.belled !== false) {
+      await markSupersededHandled(row, 'rollout_window_commercial_reissued');
+      results.skipped += 1;
+    } else if (misissueResult.belled === false) {
+      results.failed += 1; // bell missing — retry tomorrow
+    } else {
+      await markSupersededHandled(row, misissueResult.skipped || 'rollout_window_processed');
+      results.skipped += 1;
+    }
+  }
   for (const row of [...staleOpen, ...migrationCancelled, ...expiredStale]) {
     if (results.checked >= limit) break;
     results.checked += 1;
@@ -1153,7 +1196,7 @@ async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
     // The snapshot's estimate must belong to THIS contract's customer — an
     // untrusted id pointing at another customer's estimate must never feed
     // figures into (or autosend) an agreement. Park it with the operator.
-    if (estimate.customer_id && String(estimate.customer_id) !== String(row.customer_id)) {
+    if (!estimate.customer_id || String(estimate.customer_id) !== String(row.customer_id)) {
       const mismatchBellState = await adminBellExists('Re-issue termite agreement%', 'contractId', row.id);
       const mismatchBelled = mismatchBellState === true
         || (mismatchBellState === false && await ringAdminBell(NotificationService, [
