@@ -334,7 +334,10 @@ async function renderSendPreview(send, toEmail) {
       ? `https://www.wavespestcontrol.com/newsletter/archive/${send.slug}`
       : undefined,
     // Legacy bodies (persisted before the dark-mode layer) stay light.
-    darkAwareBody: bodyIsDarkAware(ensured.html),
+    // Inspect ONLY the persisted body: the composed preview prepends the
+    // proof banner/diagnostics, which carry their own dm-box hooks and
+    // would make every legacy draft look dark-capable.
+    darkAwareBody: bodyIsDarkAware(send.html_body),
   });
 
   const testSub = await db('newsletter_subscribers')
