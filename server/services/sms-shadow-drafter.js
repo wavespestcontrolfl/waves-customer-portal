@@ -114,7 +114,7 @@ async function fetchVoiceProfileForDrafter({ dbi = db } = {}) {
   }
 }
 
-function buildSystemPrompt(voiceProfileText = '') {
+function buildSystemPromptWithProfile(voiceProfileText = '') {
   const base = `You are the Waves Pest Control AI assistant drafting an SMS reply to a customer in Southwest Florida. This reply may be shown to a Waves team member to review and send, or — once an intent has earned it through review — sent to the customer automatically. Treat it as customer-facing: write exactly what should go to the customer, and make it safe and correct to send AS-IS with no human edit.
 
 ${CUSTOMER_SMS_HOUSE_VOICE}
@@ -148,16 +148,27 @@ Respond with ONLY a JSON object, no prose, no code fences:
   // is distilled from customer-influenced corpus, so it is treated as style
   // DATA, never instructions, and stripped lines fail toward the base rules.
   // Any composition error fails to the base prompt: a style block must never
-  // block drafting.
+  // block drafting. `applied` reports whether the profile actually reached
+  // the prompt (Codex r4): a fully-stripped or compose-failed profile falls
+  // back to the base prompt, and stamping its version anyway would let
+  // base-prompt drafts accumulate cohort evidence — or an exam report —
+  // under a profile that never shaped them.
   if (voiceProfileText) {
     try {
       const { composeSystemPrompt } = require('./voice-agent/relay-conversation');
-      return composeSystemPrompt(base, voiceProfileText);
+      const composed = composeSystemPrompt(base, voiceProfileText);
+      // composeSystemPrompt returns the base untouched when sanitization
+      // strips every profile line — identity IS the applied signal.
+      if (composed !== base) return { system: composed, applied: true };
     } catch (err) {
       logger.warn(`[sms-shadow] voice profile compose failed (${err.message}); drafting on base prompt`);
     }
   }
-  return base;
+  return { system: base, applied: false };
+}
+
+function buildSystemPrompt(voiceProfileText = '') {
+  return buildSystemPromptWithProfile(voiceProfileText).system;
 }
 
 function formatEtDate(value) {
@@ -461,7 +472,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   const voiceProfile = presetVoiceProfile !== undefined
     ? presetVoiceProfile
     : await fetchVoiceProfileForDrafter();
-  const system = buildSystemPrompt(voiceProfile?.profile_text || '');
+  const { system, applied: profileApplied } = buildSystemPromptWithProfile(voiceProfile?.profile_text || '');
   // presetFactsBlock (sealed-eval exam) replays the FROZEN facts the drafter
   // saw the day of the original message — building from a live context here
   // would grade the draft against today's schedule/balance (the exact drift
@@ -485,7 +496,11 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // one provider for every generation in the loop, fallback disabled.
   const pinned = Boolean(routeOverride);
   const route = routeOverride || draftRouteFor({ intentName: intent?.intent, inboundMessage });
-  const voiceProfileVersion = voiceProfile?.version ?? null;
+  // Stamp only what actually shaped the prompt (Codex r4): a fetched profile
+  // that failed to compose (or sanitized to nothing) drafted on the BASE
+  // prompt, and every cohort/exam consumer of this stamp must see that as
+  // profile-free.
+  const voiceProfileVersion = profileApplied ? (voiceProfile?.version ?? null) : null;
   const first = await generateDraftOnce(client, system, userContent, route, { pinned });
   if (!first) return { parsed: null, passes: 1, converged: false, model: null, voiceProfileVersion };
   let { parsed, model } = first;
@@ -716,6 +731,11 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
           confidence: intent?.confidence ?? null,
           model: draftModel,
           promptVersion: PROMPT_VERSION,
+          // The profile that ACTUALLY shaped this draft (null = base prompt).
+          // The executor refuses when it differs from the currently effective
+          // profile — readiness evidence belongs to the effective profile,
+          // and a stale/base-prompt draft must not ride it (Codex r4 P1).
+          voiceProfileVersion,
           schedulingIntent,
         });
         if (result?.sent) {
@@ -798,6 +818,7 @@ module.exports = {
   SAVE_SALE_TEXT_RE,
   parseShadowResponse,
   buildSystemPrompt,
+  buildSystemPromptWithProfile,
   buildUserPrompt,
   buildUserPromptFromFacts,
   buildFactsBlock,

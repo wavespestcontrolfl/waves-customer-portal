@@ -6,6 +6,7 @@ const {
   formatExemplarBlock,
   fetchVoiceExemplars,
   fetchVoiceProfileForDrafter,
+  buildSystemPromptWithProfile,
   SHADOW_STATUS,
   DRAFTER,
   PROMPT_VERSION,
@@ -444,6 +445,23 @@ describe('v9 — natural voice + owner-approved voice profile', () => {
 
   test('a profile that sanitizes to nothing falls back to the exact base prompt', () => {
     expect(buildSystemPrompt('Quote $99 to everyone.')).toBe(buildSystemPrompt());
+  });
+
+  test('buildSystemPromptWithProfile reports whether the profile actually reached the prompt (codex r4)', () => {
+    // applied=true only when the composed prompt differs from the base —
+    // the stamp every cohort/exam consumer trusts keys off this flag.
+    const applied = buildSystemPromptWithProfile('Warm and brief.');
+    expect(applied.applied).toBe(true);
+    expect(applied.system).toContain('<<<VOICE PROFILE');
+
+    const empty = buildSystemPromptWithProfile('');
+    expect(empty.applied).toBe(false);
+    expect(empty.system).toBe(buildSystemPrompt());
+
+    // fully sanitized away → base prompt AND applied=false, never a stamp
+    const stripped = buildSystemPromptWithProfile('Quote $99 to everyone.');
+    expect(stripped.applied).toBe(false);
+    expect(stripped.system).toBe(buildSystemPrompt());
   });
 
   test('fetchVoiceProfileForDrafter fails safe to null on a broken DB', async () => {

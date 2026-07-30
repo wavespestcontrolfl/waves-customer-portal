@@ -173,6 +173,19 @@ describe('runAutoExamSweep', () => {
     expect(result.legs.anthropic.outcome).not.toBe('resumed_stranded');
   });
 
+  test('a profile approved mid-sweep aborts the leg (PROFILE_CHANGED) — never spends on an untracked pair (codex r4)', async () => {
+    const moved = new Error('effective voice profile is now 5, expected none — profile changed since the sweep snapshot');
+    moved.code = 'PROFILE_CHANGED';
+    const examRunner = jest.fn().mockRejectedValue(moved);
+    const dbi = makeDbi({});
+    const result = await runAutoExamSweep({ dbi, examRunner, summaryFn: summaryBothClean });
+    expect(result.legs.anthropic.outcome).toBe('profile_changed');
+    expect(result.legs.openai.outcome).toBe('profile_changed');
+    expect(result.ran).toBe(0);
+    // fresh creates carried the sweep's frozen pin for createExamRun to check
+    expect(examRunner).toHaveBeenCalledWith(expect.objectContaining({ expectedVoiceProfileVersion: null }));
+  });
+
   test('stranded STALE-version row is recovered without shadowing the current-version leg', async () => {
     // Resume path retires stale-version rows then throws by contract.
     const retire = new Error('examined house_voice_v8 but the drafter is now house_voice_v9_test — start a new run');

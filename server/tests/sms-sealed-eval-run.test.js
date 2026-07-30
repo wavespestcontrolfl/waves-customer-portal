@@ -214,7 +214,7 @@ describe('runSealedExam — voice-profile pin (Codex r2)', () => {
       items: [item('i1')],
       voiceProfiles: [{ version: 4, profile_text: 'Warm and brief.' }],
     });
-    drafter.generateGroundedDraft.mockResolvedValue(goodDraft());
+    drafter.generateGroundedDraft.mockResolvedValue({ ...goodDraft(), voiceProfileVersion: 4 });
     judge.judgeOne.mockResolvedValue(judgment());
     const out = await sealedEval.runSealedExam({ runId: 'r1', dbi });
     expect(out.status).toBe('complete');
@@ -236,6 +236,32 @@ describe('runSealedExam — voice-profile pin (Codex r2)', () => {
     expect(drafter.generateGroundedDraft).toHaveBeenCalledWith(
       expect.objectContaining({ voiceProfile: null })
     );
+  });
+
+  test('a pinned run whose drafts fell back to the BASE prompt fails instead of reporting a phantom-profile exam (codex r4)', async () => {
+    const dbi = makeRunnerDb({
+      runs: [{ id: 'r1', status: 'running', provider_leg: 'openai', prompt_version: 'house_voice_v9_test', voice_profile_version: 4 }],
+      items: [item('i1')],
+      voiceProfiles: [{ version: 4, profile_text: 'Warm and brief.' }],
+    });
+    // the drafter reports the profile never reached the prompt (stamp null)
+    drafter.generateGroundedDraft.mockResolvedValue({ ...goodDraft(), voiceProfileVersion: null });
+    judge.judgeOne.mockResolvedValue(judgment());
+    const out = await sealedEval.runSealedExam({ runId: 'r1', dbi });
+    expect(out.status).toBe('failed');
+    // no result row was recorded under the phantom profile
+    expect(dbi.state.results.filter((r) => r.run_id === 'r1')).toHaveLength(0);
+  });
+
+  test('createExamRun refuses when the effective profile moved past the caller\'s expected pin (codex r4 sweep freeze)', async () => {
+    drafter.resolveEffectiveVoiceProfile.mockResolvedValueOnce({ version: 5, profile_text: 'x' });
+    const dbi = makeRunnerDb({ runs: [], items: [item('i1')] });
+    await expect(sealedEval.createExamRun({ providerLeg: 'anthropic', expectedVoiceProfileVersion: 4, dbi }))
+      .rejects.toMatchObject({ code: 'PROFILE_CHANGED' });
+    // matching pin creates normally
+    drafter.resolveEffectiveVoiceProfile.mockResolvedValueOnce({ version: 4, profile_text: 'x' });
+    const run = await sealedEval.createExamRun({ providerLeg: 'anthropic', expectedVoiceProfileVersion: 4, dbi });
+    expect(run.voice_profile_version).toBe(4);
   });
 
   test('a pinned run whose profile row vanished is FINALIZED failed — never drafts unpinned, never wedges the one-running index (codex r3)', async () => {

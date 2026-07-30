@@ -491,7 +491,7 @@ async function fetchSuggestOutcomes({ intent, dbi = db, cohortVersions, voicePro
  * regression after the flip STOPS auto-send. Fail closed: escalation intents,
  * and any signal-fetch error, return not-eligible.
  */
-async function evaluateAutoSendEligibility({ intent, dbi = db } = {}) {
+async function evaluateAutoSendEligibility({ intent, dbi = db, voiceProfileVersion } = {}) {
   const { isEscalationIntent } = require('./sms-suggest-mode');
   if (isEscalationIntent(intent)) {
     return { eligible: false, blockers: ['Escalation intent — never auto-sends.'] };
@@ -499,9 +499,17 @@ async function evaluateAutoSendEligibility({ intent, dbi = db } = {}) {
   let judge;
   let suggest;
   try {
-    const signals = await fetchLiveJudgeSignals(dbi);
+    // One pin for both evidence queries (Codex r4): the executor resolves
+    // the effective profile once and passes it here, so the gate's
+    // draft-vs-profile check and the evidence cohort can never disagree.
+    // Standalone callers omit it and the fetchers resolve (errors → the
+    // fail-closed catch below).
+    const pin = voiceProfileVersion !== undefined
+      ? voiceProfileVersion
+      : await resolveVoiceProfilePin({ dbi });
+    const signals = await fetchLiveJudgeSignals(dbi, { voiceProfileVersion: pin });
     judge = signals.get(intent) || { judged: 0, unsafe: 0, avgSafety: null, recentUnsafe: 0, backfillJudged: 0, priorVersionJudged: 0 };
-    suggest = await fetchSuggestOutcomes({ intent, dbi });
+    suggest = await fetchSuggestOutcomes({ intent, dbi, voiceProfileVersion: pin });
   } catch (err) {
     logger.warn(`[sms-graduation] auto-send eligibility fetch failed (${intent}): ${err.message}; blocking`);
     return { eligible: false, blockers: ['Live readiness signal unavailable — auto-send blocked.'] };

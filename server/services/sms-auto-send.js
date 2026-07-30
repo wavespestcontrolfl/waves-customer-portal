@@ -291,6 +291,7 @@ async function maybeAutoSend(params = {}) {
     draftId, customer, smsLogId, inboundMessage, reply, intent,
     intendedActions = null, actionsVerifiedSafe = false,
     confidence = null, model = null, promptVersion = null, schedulingIntent = false,
+    voiceProfileVersion = null,
   } = params;
   const customerId = customer?.id || null;
 
@@ -326,6 +327,26 @@ async function maybeAutoSend(params = {}) {
       return { sent: false, reason: 'redaction_placeholder' };
     }
 
+    // (3.65) Voice-profile pin at the autonomy boundary (Codex r4): the
+    //       readiness evidence the eligibility check consults belongs to the
+    //       CURRENTLY effective profile, but THIS draft may have been shaped
+    //       by a different one — the drafting-path fetch fails safe to the
+    //       base prompt, and an approval can land mid-generation. Resolve
+    //       the effective profile ONCE (fail closed on error), require the
+    //       draft's stamp to match it, and hand the SAME pin to the
+    //       eligibility queries so gate and evidence can never disagree.
+    let effectiveVoiceProfileVersion;
+    try {
+      effectiveVoiceProfileVersion = (await require('./sms-shadow-drafter').resolveEffectiveVoiceProfile())?.version ?? null;
+    } catch (err) {
+      logger.warn(`[sms-auto-send] voice-profile resolution failed (${err.message}) — refusing auto-send (intent=${intent})`);
+      return { sent: false, reason: 'voice_profile_unresolved' };
+    }
+    if ((voiceProfileVersion ?? null) !== effectiveVoiceProfileVersion) {
+      logger.warn(`[sms-auto-send] draft profile (${voiceProfileVersion ?? 'none'}) != effective profile (${effectiveVoiceProfileVersion ?? 'none'}) — refusing auto-send (intent=${intent})`);
+      return { sent: false, reason: 'voice_profile_mismatch' };
+    }
+
     // (3.7) House rule: no prices in customer SMS — a reply quoting a dollar
     //       amount never auto-sends; a human quotes prices deliberately.
     //       Deterministic, independent of the LLM verifier.
@@ -336,7 +357,7 @@ async function maybeAutoSend(params = {}) {
 
     // (4) Server-enforced graduation eligibility — re-checked live every send.
     const graduation = require('./sms-graduation');
-    const elig = await graduation.evaluateAutoSendEligibility({ intent });
+    const elig = await graduation.evaluateAutoSendEligibility({ intent, voiceProfileVersion: effectiveVoiceProfileVersion });
     if (!elig.eligible) {
       logger.info(`[sms-auto-send] intent=${intent} not eligible; blockers: ${(elig.blockers || []).join(' | ')}`);
       return { sent: false, reason: 'not_eligible' };

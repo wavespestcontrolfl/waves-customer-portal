@@ -260,7 +260,7 @@ async function examOneItem({ run, item, route, client, dbi = db, voiceProfile = 
   const judge = require('./sms-shadow-judge');
 
   const intent = { intent: item.intent || 'GENERAL' };
-  const { parsed, passes, converged, model } = await drafter.generateGroundedDraft({
+  const { parsed, passes, converged, model, voiceProfileVersion } = await drafter.generateGroundedDraft({
     client,
     inboundMessage: item.inbound_message,
     intent,
@@ -271,6 +271,15 @@ async function examOneItem({ run, item, route, client, dbi = db, voiceProfile = 
   });
   if (!parsed) {
     logger.warn(`[sealed-eval] draft failed for item ${String(item.id).slice(0, 8)} (leg ${run.provider_leg}); left pending`);
+    return false;
+  }
+  // The stamp reports what ACTUALLY shaped the prompt (Codex r4): if the
+  // pinned profile failed to compose (sanitized empty / compose error), the
+  // draft ran on the base prompt and recording it under this run would report
+  // an exam for a profile that never shaped it. Refuse the item — the profile
+  // text is static per run, so this fails the sitting fast rather than mixing.
+  if ((voiceProfileVersion ?? null) !== (run.voice_profile_version ?? null)) {
+    logger.error(`[sealed-eval] item ${String(item.id).slice(0, 8)} drafted under profile ${voiceProfileVersion ?? 'none'} but run ${String(run.id).slice(0, 8)} is pinned to ${run.voice_profile_version ?? 'none'} — refusing result`);
     return false;
   }
 
@@ -387,7 +396,7 @@ async function finalizeRun({ runId, dbi = db } = {}) {
  * would sit unprocessed and read as a wedged run. A run stranded 'running'
  * by a crash is resumed (POST with resumeRunId), not recreated.
  */
-async function createExamRun({ providerLeg, baselineRunId, triggeredBy = 'manual', dbi = db } = {}) {
+async function createExamRun({ providerLeg, baselineRunId, triggeredBy = 'manual', expectedVoiceProfileVersion, dbi = db } = {}) {
   if (!EXAM_LEG_ROUTES[providerLeg]) throw new Error(`unknown sealed-eval provider leg: ${providerLeg}`);
   const drafter = require('./sms-shadow-drafter');
 
@@ -436,6 +445,18 @@ async function createExamRun({ providerLeg, baselineRunId, triggeredBy = 'manual
   // sitting. Resolution errors propagate: an exam must not silently record
   // itself under an unknown profile state.
   const effectiveProfile = await drafter.resolveEffectiveVoiceProfile({ dbi });
+  // Sweep freeze (Codex r4): the auto-sweep resolves its pin once and tracks
+  // coverage for that (version, profile) pair — if the effective profile
+  // moved between the sweep's snapshot and this create, stamping the NEW
+  // profile would spend a whole leg on a pair the sweep isn't tracking and
+  // still leave the gate uncovered. Callers that pass their expected pin get
+  // a coded refusal instead; the next sweep re-resolves and covers cleanly.
+  if (expectedVoiceProfileVersion !== undefined
+      && (effectiveProfile?.version ?? null) !== (expectedVoiceProfileVersion ?? null)) {
+    const moved = new Error(`effective voice profile is now ${effectiveProfile?.version ?? 'none'}, expected ${expectedVoiceProfileVersion ?? 'none'} — profile changed since the sweep snapshot`);
+    moved.code = 'PROFILE_CHANGED';
+    throw moved;
+  }
   try {
     const [run] = await dbi('sms_sealed_eval_runs')
       .insert({
@@ -471,7 +492,7 @@ async function createExamRun({ providerLeg, baselineRunId, triggeredBy = 'manual
  * caller — so a mismatched resume can't grade one leg's run with the other
  * leg's drafts.
  */
-async function runSealedExam({ providerLeg, baselineRunId, runId, triggeredBy = 'manual', dbi = db } = {}) {
+async function runSealedExam({ providerLeg, baselineRunId, runId, triggeredBy = 'manual', expectedVoiceProfileVersion, dbi = db } = {}) {
   let run;
   if (runId) {
     run = await dbi('sms_sealed_eval_runs').where({ id: runId }).first();
@@ -519,7 +540,7 @@ async function runSealedExam({ providerLeg, baselineRunId, runId, triggeredBy = 
       run = { ...run, status: 'running', error: null, finished_at: null };
     }
   } else {
-    run = await createExamRun({ providerLeg, baselineRunId, triggeredBy, dbi });
+    run = await createExamRun({ providerLeg, baselineRunId, triggeredBy, expectedVoiceProfileVersion, dbi });
   }
   const route = EXAM_LEG_ROUTES[run.provider_leg];
   if (!route) throw new Error(`run ${String(run.id).slice(0, 8)} has unknown provider leg ${run.provider_leg}`);
@@ -846,7 +867,7 @@ async function runAutoExamSweep({ dbi = db, examRunner = runSealedExam, summaryF
       const result = await runExclusive('sms-sealed-eval', () => (
         failed
           ? examRunner({ runId: failed.id, dbi })
-          : examRunner({ providerLeg: leg, triggeredBy: 'auto:prompt-watch', dbi })
+          : examRunner({ providerLeg: leg, triggeredBy: 'auto:prompt-watch', expectedVoiceProfileVersion: sweepProfilePin, dbi })
       ), { recordHealth: false });
       if (result && result.skipped) {
         legs[leg] = { outcome: 'lock_busy' };
@@ -865,6 +886,13 @@ async function runAutoExamSweep({ dbi = db, examRunner = runSealedExam, summaryF
     } catch (err) {
       if (err && err.code === 'RUN_IN_PROGRESS') {
         legs[leg] = { outcome: 'run_in_progress' };
+      } else if (err && err.code === 'PROFILE_CHANGED') {
+        // The effective profile moved mid-sweep (Codex r4): spending this
+        // leg would stamp a pair the sweep isn't tracking. Not counted as
+        // ran; tomorrow's sweep re-resolves the pin and covers both legs
+        // under the new profile.
+        legs[leg] = { outcome: 'profile_changed' };
+        logger.warn(`[sealed-eval] auto exam (${leg} leg) skipped: ${err.message}`);
       } else {
         legs[leg] = { outcome: 'error', error: err.message };
         logger.error(`[sealed-eval] auto exam (${leg} leg) failed: ${err.message}`);
