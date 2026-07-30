@@ -391,11 +391,22 @@ async function transitionJobStatus({ jobId, fromStatus, toStatus, transitionedBy
     // one direct-update cancellation writer (Intelligence Bar
     // cancel_appointment) now routes through this writer too. Lazy
     // require: the module's dependency chain reaches back into job-status.
-    if (!['cancelled', 'skipped', 'no_show'].includes(String(toStatus || ''))) return;
-    const { handleFollowupChildCancellation } = require('./typed-followup-obligation');
-    void handleFollowupChildCancellation({ jobId, toStatus }).catch((e) => {
-      logger.warn(`[job-status] follow-up re-park hook failed for ${jobId}: ${e.message}`);
-    });
+    const { handleFollowupChildCancellation, handleFollowupChildRevival } = require('./typed-followup-obligation');
+    if (['cancelled', 'skipped', 'no_show'].includes(String(toStatus || ''))) {
+      void handleFollowupChildCancellation({ jobId, toStatus }).catch((e) => {
+        logger.warn(`[job-status] follow-up re-park hook failed for ${jobId}: ${e.message}`);
+      });
+    } else {
+      // Reverse direction: a compensated cancellation (offboarding /
+      // cancellation-processor revert a cancel when tracker state raced) or
+      // any other transition back to a covering status re-covers the source
+      // obligation — resolve the typed cards the re-park minted, or they
+      // linger as false exceptions the reverse transition never cleans
+      // (local Codex audit P1).
+      void handleFollowupChildRevival({ jobId, toStatus }).catch((e) => {
+        logger.warn(`[job-status] follow-up revival hook failed for ${jobId}: ${e.message}`);
+      });
+    }
   }
 
   if (trx) {

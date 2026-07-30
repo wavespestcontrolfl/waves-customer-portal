@@ -8527,17 +8527,24 @@ router.post('/:serviceId/schedule-followup', async (req, res, next) => {
         code: 'followup_no_typed_completion',
       });
     }
-    // The SAME override chain the completion ran (shared module) — the
-    // stored snapshot's values drive it, so a stale or crafted POST can't
-    // mint an included $0 follow-up the completion's verdict withheld
-    // (species rule incl. the cockroach_control exemption, two-treatment
-    // visit-2 stop, German "No"/window selection, palmetto "Yes" upgrade).
-    const suggestion = typedFollowupVerdict({
-      scheduledService: svc,
-      profile,
-      findingsType: profile.findingsType,
-      values: snapshot?.values || {},
-    });
+    // The completion FROZE its final verdict into structured_notes — the
+    // CTA must book exactly the promise that was made, so a later profile
+    // change (interval, policy, deactivation) can neither reject the
+    // original CTA nor authorize a follow-up the completion withheld.
+    // Legacy records without a frozen verdict re-derive through the SAME
+    // shared override chain the completion ran (species rule incl. the
+    // cockroach_control exemption, two-treatment visit-2 stop, German
+    // "No"/window selection, palmetto "Yes" upgrade) — a stale or crafted
+    // POST still can't mint an included $0 follow-up the verdict withheld.
+    const frozenCtaVerdict = parseJsonObject(sourceRecord?.structured_notes)?.typedFollowupVerdict;
+    const suggestion = (frozenCtaVerdict && typeof frozenCtaVerdict.required === 'boolean')
+      ? frozenCtaVerdict
+      : typedFollowupVerdict({
+        scheduledService: svc,
+        profile,
+        findingsType: profile.findingsType,
+        values: snapshot?.values || {},
+      });
     if (!suggestion?.required) {
       return res.status(409).json({
         error: 'This completed visit does not call for a follow-up appointment.',

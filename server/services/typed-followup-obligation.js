@@ -328,11 +328,48 @@ async function handleFollowupChildCancellation({ jobId, toStatus, trx = null } =
   }
 }
 
+/**
+ * The reverse reconciliation: a linked follow-up child transitioning BACK
+ * to a covering status (compensated cancellation — customer-offboarding /
+ * cancellation-processor can revert a cancel when tracker state raced
+ * ahead — or an ordinary un-missed rebook, or the child completing) means
+ * the source obligation is covered again; any typed follow_up_needed card
+ * the cancellation re-park minted is now a false exception and must
+ * resolve. Only the typed sources are touched — project_completion and
+ * visit-outcome cards have their own lifecycles. Best-effort, same
+ * rationale as the cancellation hook.
+ */
+async function handleFollowupChildRevival({ jobId, toStatus, trx = null } = {}) {
+  if (FOLLOWUP_CHILD_INACTIVE_STATUSES.includes(String(toStatus || ''))) return { skipped: 'not_revival' };
+  const q = trx || db;
+  try {
+    const child = await q('scheduled_services')
+      .where({ id: jobId })
+      .first('id', 'followup_source_service_id');
+    if (!child?.followup_source_service_id) return { skipped: 'not_followup_child' };
+    const open = await q('dispatch_alerts')
+      .where({ type: 'follow_up_needed', job_id: child.followup_source_service_id })
+      .whereNull('resolved_at')
+      .whereRaw("payload->>'source' IN ('typed_completion', 'followup_cancelled')")
+      .select('id');
+    if (!open.length) return { skipped: 'no_open_alert' };
+    const { resolveAlert } = require('./dispatch-alerts');
+    for (const alert of open) {
+      await resolveAlert({ id: alert.id, resolvedBy: null });
+    }
+    return { resolved: open.length };
+  } catch (e) {
+    logger.warn(`[typed-followup] revival reconcile failed for ${jobId}: ${e.message}`);
+    return { skipped: 'error' };
+  }
+}
+
 module.exports = {
   typedFollowupVerdict,
   typedFollowupObligationForCompletedSource,
   parkFollowupAlert,
   handleFollowupChildCancellation,
+  handleFollowupChildRevival,
   KNOCKDOWN_FOLLOWUP_WINDOW_DAYS,
   TWO_TREATMENT_PACKAGE_KEYS,
   FOLLOWUP_CHILD_INACTIVE_STATUSES,

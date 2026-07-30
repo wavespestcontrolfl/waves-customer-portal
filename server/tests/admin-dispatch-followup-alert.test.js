@@ -146,16 +146,18 @@ describe('/complete parks the alert atomically (source contracts)', () => {
 });
 
 describe('/schedule-followup (source contracts)', () => {
-  test('the CTA gate uses the SAME shared verdict chain as the completion', () => {
+  test('the CTA books the FROZEN completion verdict; legacy records fall back to the shared chain', () => {
     const routeIdx = dispatchSource.indexOf("router.post('/:serviceId/schedule-followup'");
     const routeTail = dispatchSource.slice(routeIdx);
-    const verdictIdx = routeTail.indexOf('const suggestion = typedFollowupVerdict({');
-    expect(verdictIdx).toBeGreaterThan(-1);
-    // Snapshot-driven, and still fails closed on missing/mismatched snapshots.
-    expect(routeTail.slice(0, verdictIdx)).toContain('followup_no_typed_completion');
-    const afterVerdict = routeTail.slice(verdictIdx, verdictIdx + 700);
-    expect(afterVerdict).toContain('values: snapshot?.values || {}');
-    expect(afterVerdict).toContain('followup_not_required');
+    const frozenIdx = routeTail.indexOf('const frozenCtaVerdict = parseJsonObject(sourceRecord?.structured_notes)?.typedFollowupVerdict;');
+    expect(frozenIdx).toBeGreaterThan(-1);
+    // Snapshot gate still fails closed on missing/mismatched snapshots.
+    expect(routeTail.slice(0, frozenIdx)).toContain('followup_no_typed_completion');
+    const verdictBlock = routeTail.slice(frozenIdx, frozenIdx + 900);
+    expect(verdictBlock).toContain("typeof frozenCtaVerdict.required === 'boolean'");
+    expect(verdictBlock).toContain(': typedFollowupVerdict({');
+    expect(verdictBlock).toContain('values: snapshot?.values || {}');
+    expect(verdictBlock).toContain('followup_not_required');
   });
 
   test('EVERY booked-follow-up answer resolves the parked alert: fresh insert, idempotent retry, 23505 race winner', () => {
@@ -348,5 +350,20 @@ describe('codex r5 — IB idempotent retry re-park + atomic reason (source contr
     expect(trxBlock.indexOf("await trx('scheduled_services')")).toBeGreaterThan(trxBlock.indexOf('transitionJobStatus({'));
     // No stray post-commit notes write remains.
     expect(fn).not.toContain("await db('scheduled_services').where('id', appointment_id).update({");
+  });
+});
+
+describe('local audit P1s — frozen CTA verdict + compensated-cancellation revival', () => {
+  test('a child transitioning back to a covering status resolves the typed cards (both hook directions wired)', () => {
+    const moduleSource = fs.readFileSync(path.join(__dirname, '../services/typed-followup-obligation.js'), 'utf8');
+    const revival = moduleSource.slice(moduleSource.indexOf('async function handleFollowupChildRevival'));
+    // Only typed sources — project_completion / visit-outcome cards have
+    // their own lifecycles.
+    expect(revival).toContain("payload->>'source' IN ('typed_completion', 'followup_cancelled')");
+    expect(revival).toContain("skipped: 'not_revival'");
+    // job-status dispatches BOTH directions post-commit.
+    expect(jobStatusSource).toContain('handleFollowupChildRevival({ jobId, toStatus })');
+    const hook = jobStatusSource.slice(jobStatusSource.indexOf('function maybeReparkFollowupObligation()'));
+    expect(hook.indexOf('handleFollowupChildCancellation')).toBeLessThan(hook.indexOf('handleFollowupChildRevival'));
   });
 });
