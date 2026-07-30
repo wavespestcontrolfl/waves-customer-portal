@@ -23,7 +23,7 @@ const db = require('../models/db');
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
 const crypto = require('crypto');
-const { wrapNewsletter, ensureLegalTextFooter } = require('./email-template');
+const { wrapNewsletter, ensureLegalTextFooter, bodyIsDarkAware } = require('./email-template');
 const { recordTouchpoint } = require('./conversations');
 const { GREETING_NAME_TOKEN, greetingNameValueFor, stripPersonalizationTokens, CITY_TOKEN, GRASS_TYPE_TOKEN, DEFAULT_CITY_LABEL, DEFAULT_GRASS_LABEL, decodeEscapedEntities } = require('./newsletter-draft');
 const { selectAudience, SELLABLE_LINES } = require('./newsletter-audience-profiles');
@@ -562,6 +562,9 @@ async function sendCampaign(sendId, opts = {}) {
     preferredSourcesCta: true,
     // Web-version permalink — the Astro archive page for this issue.
     webVersionUrl: send.slug ? `https://www.wavespestcontrol.com/newsletter/archive/${send.slug}` : undefined,
+    // Legacy bodies (persisted before the dark-mode layer) carry no dm-*
+    // hooks and must stay on the light card.
+    darkAwareBody: bodyIsDarkAware(bodyHtml),
   });
 
   let accepted = 0, failed = 0;
