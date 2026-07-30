@@ -571,6 +571,11 @@ exports.down = async function down(knex) {
       await knex.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`termite-agreement:${customerId}`]);
     }
   }
+  // Template keys whose active pointer THIS rollback actually moved —
+  // NULL-version sources (deleted rendering version) can't equality-match
+  // a restored pointer, so membership here is their "my rollback ran"
+  // signal in the restore pass below.
+  const repointedTemplateKeys = new Set();
   for (const seed of TEMPLATE_V2) {
     const template = await knex('document_templates').where({ template_key: seed.template_key }).first();
     if (!template) continue;
@@ -597,12 +602,14 @@ exports.down = async function down(knex) {
           active_version_id: priorId,
           updated_at: knex.fn.now(),
         });
+        repointedTemplateKeys.add(seed.template_key);
       }
     } else {
       await knex('document_templates').where({ id: template.id }).update({
         active_version_id: null,
         updated_at: knex.fn.now(),
       });
+      repointedTemplateKeys.add(seed.template_key);
     }
     await knex('migration_rollback_state')
       .where({ migration_name: MIGRATION_NAME, state_key: `prior_active:${seed.template_key}` })
@@ -650,7 +657,7 @@ exports.down = async function down(knex) {
       // Source FIRST — everything below reads it.
       const source = await knex('customer_contracts')
         .where({ id: evt.contract_id })
-        .first('customer_id', 'document_variables_snapshot', 'document_template_key', 'document_template_version_id', 'share_token_expires_at', 'created_at');
+        .first('customer_id', 'recipient_name', 'document_variables_snapshot', 'document_template_key', 'document_template_version_id', 'share_token_expires_at', 'created_at');
       if (!source) continue;
       // Only restore when this source's version actually became active
       // again in this rollback: on the content-reuse path (approved body
@@ -660,7 +667,19 @@ exports.down = async function down(knex) {
       const sourceTemplate = await knex('document_templates')
         .where({ template_key: source.document_template_key })
         .first('active_version_id');
-      if (!sourceTemplate || sourceTemplate.active_version_id !== source.document_template_version_id) continue;
+      if (!sourceTemplate) continue;
+      // A source whose rendering version was deleted (FK SET NULL) can
+      // never equality-match the restored pointer, but it was still OUR
+      // cancellation: when this rollback actually repointed its template,
+      // it must be processed too — deactivated replacements retired and
+      // the re-issue handed to the operator below (its wording can't be
+      // verified against the restored version, so it is never
+      // auto-restored). Sources whose version did not become active again
+      // (content-reuse path: v2 stays active) are skipped as before.
+      const nullVersionSource = !source.document_template_version_id;
+      const versionRestored = !nullVersionSource
+        && sourceTemplate.active_version_id === source.document_template_version_id;
+      if (!versionRestored && !(nullVersionSource && repointedTemplateKeys.has(source.document_template_key))) continue;
       let meta = evt.metadata;
       if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
       let priorStatus = ['draft', 'sent', 'viewed'].includes(meta?.prior_status) ? meta.prior_status : 'draft';
@@ -758,6 +777,34 @@ exports.down = async function down(knex) {
         }
       }
       if (replacementSameProperty) continue;
+      if (nullVersionSource) {
+        // Deactivated replacements were retired above; the source itself
+        // is NOT auto-restored (unverifiable wording) — hand the re-issue
+        // to the operator. Title + contractId metadata match the sweep's
+        // 'Re-issue termite agreement%' dedupe, so neither surface can
+        // double-ring for the same contract.
+        const hasNotifications = await knex.schema.hasTable('notifications');
+        if (hasNotifications) {
+          const existingBell = await knex('notifications')
+            .where('recipient_type', 'admin')
+            .where('title', 'like', 'Re-issue termite agreement%')
+            .whereRaw("metadata->>'contractId' = ?", [String(evt.contract_id)])
+            .first('id');
+          if (!existingBell) {
+            await knex('notifications').insert({
+              recipient_type: 'admin',
+              recipient_id: null,
+              category: 'estimate',
+              title: 'Re-issue termite agreement (rolled back)',
+              body: `The termite program agreement for ${source.recipient_name || 'a customer'} was cancelled for the v2 compliance wording, and its original template version no longer exists, so the rollback could not restore it automatically. Re-issue it from the document library on the active template.`,
+              icon: '\u{1F4DD}',
+              link: `/admin/customers/${source.customer_id}`,
+              metadata: JSON.stringify({ contractId: evt.contract_id, customerId: source.customer_id, reason: 'v2_rollback_null_version' }),
+            });
+          }
+        }
+        continue;
+      }
       const restored = await knex('customer_contracts')
         .where({ id: evt.contract_id, status: 'cancelled' })
         .where('cancelled_reason', 'like', 'Superseded by updated compliance wording%')

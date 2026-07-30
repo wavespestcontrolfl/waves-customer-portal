@@ -407,6 +407,20 @@ router.post('/:key/contracts', async (req, res, next) => {
       const { PROGRAM_TEMPLATE_KEYS } = require('../services/termite-program-agreement');
       if (PROGRAM_TEMPLATE_KEYS.includes(loaded.template.template_key)) {
         await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`termite-agreement:${customer.id}`]);
+        // Revalidate AFTER the lock: this request may have waited behind
+        // the v2 migration rollback (or a publish) — the render above was
+        // captured before the wait, and inserting it unchecked would put a
+        // just-deactivated version's wording back in front of the
+        // customer. Pointer or status moved → abort; the admin reloads and
+        // reissues from the now-active version.
+        const live = await trx('document_templates')
+          .where({ id: loaded.template.id })
+          .first('active_version_id', 'status');
+        if (!live || live.status !== 'active' || live.active_version_id !== loaded.activeVersion.id) {
+          const staleErr = new Error('Document template changed while issuing — reload and try again.');
+          staleErr.status = 409;
+          throw staleErr;
+        }
       }
       const [row] = await trx('customer_contracts').insert({
         customer_id: customer.id,
@@ -455,7 +469,10 @@ router.post('/:key/contracts', async (req, res, next) => {
       signingUrl,
       rendered,
     });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    next(err);
+  }
 });
 
 function cleanRecipientName(value) {
