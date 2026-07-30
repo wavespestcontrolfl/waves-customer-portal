@@ -1,6 +1,6 @@
 /**
  * SMS reply-drafting model split (owner directive 2026-07-05):
- *   default auto-reply draft              → ROUTES.smsDraftDefault (GPT-5.6 Luna)
+ *   default auto-reply draft              → ROUTES.smsDraftDefault (Claude Sonnet; owner ruling 07-30)
  *   save-the-sale (cancel/complaint/issue) → ROUTES.smsDraftSaveSale (Claude Sonnet 5)
  *   tone rewrite (/rewrite-sms)            → ROUTES.smsToneRewrite (Claude Sonnet 5)
  * Every routed lane falls back to the opposite provider on a miss.
@@ -45,7 +45,9 @@ describe('route selection', () => {
   // route WIRING — which registry const each lane reads and which provider
   // serves it.
   test('routes are wired to the registry consts per the owner directive', () => {
-    expect(MODELS.ROUTES.smsDraftDefault).toEqual({ provider: 'openai', model: MODELS.OPENAI_SMS_DRAFT });
+    // owner ruling 07-30: Claude Sonnet primary on every SMS draft lane
+    // (v9 exam ranking), GPT is the cross-provider fallback.
+    expect(MODELS.ROUTES.smsDraftDefault).toEqual({ provider: 'anthropic', model: MODELS.SMS_SONNET });
     expect(MODELS.ROUTES.smsDraftSaveSale).toEqual({ provider: 'anthropic', model: MODELS.SMS_SONNET });
     expect(MODELS.ROUTES.smsToneRewrite).toEqual({ provider: 'anthropic', model: MODELS.SMS_SONNET });
   });
@@ -113,7 +115,8 @@ describe('generateDraftOnce', () => {
     expect(dispatchWithFallback).toHaveBeenCalledWith(
       {
         primary: MODELS.ROUTES.smsDraftDefault,
-        fallback: MODELS.TEXT_POLICIES.fastStructured.fallback,
+        // Claude-primary route → the cross-provider (OpenAI Sol) backup
+        fallback: MODELS.TEXT_POLICIES.highStakes.fallback,
       },
       expect.objectContaining({ system: 'system', text: 'user content', jsonMode: false }),
       expect.objectContaining({ validate: expect.any(Function) }),

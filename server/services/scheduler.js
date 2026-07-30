@@ -1968,22 +1968,68 @@ function initScheduledJobs() {
           const claimMeta = typeof msg.metadata === 'string'
             ? (() => { try { return JSON.parse(msg.metadata); } catch { return {}; } })()
             : (msg.metadata || {});
-          // A decision-linked scheduled reply must clear TWO fire-time
-          // re-checks (the send-time checks ran at enqueue, potentially hours
-          // ago, and pre-rollout cards never saw the price rule at all):
-          //   (a) its anchoring inbound is still the newest on the thread;
-          //   (b) non-human-authored agent text carries no price quote.
-          // Either failure → block this queued row, retire the claimed
-          // decision, reopen parked siblings — in ONE thread-locked
-          // transaction over FRESHLY read metadata: the cancel route can
-          // transfer parked ids onto this row after our claim, and those must
-          // reopen here, not sit invisible until orphan recovery.
+          // A decision-linked scheduled reply must clear a fire-time
+          // re-check: its anchoring inbound is still the newest on the
+          // thread. (The former price-quote fire-time block is RETIRED —
+          // owner ruling 2026-07-30, house_voice_v10: real account amounts
+          // may be texted; the operator reviewed this exact body at
+          // schedule time, the drafter's deterministic amount-source guard
+          // ran at draft time, and Codex r7 flagged that keeping the old
+          // blocker silently retired every reviewed amount-bearing send.)
+          // Failure → block this queued row, retire the claimed decision,
+          // reopen parked siblings — in ONE thread-locked transaction over
+          // FRESHLY read metadata: the cancel route can transfer parked ids
+          // onto this row after our claim, and those must reopen here, not
+          // sit invisible until orphan recovery.
           if (claimMeta.agent_decision_id) {
             const suggest = require('./sms-suggest-mode');
             const anchorStale = await suggest.suggestionAnchorIsStale({ decisionId: claimMeta.agent_decision_id, excludeSmsLogId: msg.id });
-            const pricedAgentText = claimMeta.human_authored !== true && suggest.hasPriceQuote(msg.message_body);
-            if (anchorStale || pricedAgentText) {
-              const blockedReason = anchorStale ? 'stale_agent_decision' : 'price_quote_agent_decision';
+            // Amount revalidation (Codex r9): the account can change between
+            // review and fire (a portal payment sends no inbound SMS, so the
+            // anchor check can't see it). Non-human-authored agent text
+            // carrying numeric amounts must still match the CURRENT
+            // authoritative billing values; unverifiable or mismatched →
+            // block + retire, same path as a stale anchor. Fail CLOSED on
+            // any error — an unknowable account state must not send figures.
+            let amountsStale = false;
+            if (!anchorStale && claimMeta.human_authored !== true && msg.customer_id) {
+              const AMOUNT_FORMS_RE = /(?:\$|\bUSD\s?)\s?\d[\d,]*(?:\.\d{1,2})?|\b\d[\d,]*(?:\.\d{1,2})?\s?(?:dollars|bucks|usd)\b/gi;
+              const bodyAmounts = (String(msg.message_body || '').match(AMOUNT_FORMS_RE) || [])
+                .map((a) => Math.round(Number(a.replace(/[^\d.]/g, '')) * 100));
+              if (bodyAmounts.length) {
+                try {
+                  const ContextAggregator = require('./context-aggregator');
+                  const customerRow = await db('customers').where({ id: msg.customer_id }).first();
+                  const ctx = customerRow ? await ContextAggregator.getContextForCustomer(customerRow) : null;
+                  const cents = (v) => Math.round(Number(v) * 100);
+                  // CURRENT OBLIGATIONS ONLY (Codex r10): a paid balance
+                  // moves the same figure into recent payments, so a union
+                  // set would keep authorizing the stale "your balance is
+                  // $X" claim. At fire time only what the customer still
+                  // owes may validate an amount; a just-paid figure blocks.
+                  // Payment ACKNOWLEDGEMENTS may cite payment-history
+                  // amounts (Codex r11: "we received your $95 payment") —
+                  // but only when the body actually reads as an ack, so a
+                  // stale "your balance is $X" can never re-authorize via
+                  // the payment row (r10).
+                  // "payment" must appear NEAR the ack verb (Codex r12) — a
+                  // generic "Thanks for reaching out — your balance is $X"
+                  // must not unlock payment-history amounts.
+                  const ackBody = /\b(?:received|processed|went through)\b[^.\n]{0,30}\bpayment\b|\bpayment\b[^.\n]{0,30}\b(?:received|processed|went through)\b|\bthank(?:s| you)\b[^.\n]{0,25}\bpayment\b/i.test(String(msg.message_body || ''));
+                  const authorized = new Set([
+                    ctx?.billing?.outstandingBalance > 0 ? cents(ctx.billing.outstandingBalance) : null,
+                    ctx?.billing?.openInvoice?.amountDue != null ? cents(ctx.billing.openInvoice.amountDue) : null,
+                    ...(ackBody ? (ctx?.billing?.recentPayments || []).map((p) => (p?.amount != null ? cents(p.amount) : null)) : []),
+                  ].filter((v) => Number.isFinite(v)));
+                  amountsStale = bodyAmounts.some((a) => !authorized.has(a));
+                } catch (err) {
+                  logger.warn(`[scheduler] amount revalidation failed for scheduled sms ${msg.id}: ${err.message}; blocking send`);
+                  amountsStale = true;
+                }
+              }
+            }
+            if (anchorStale || amountsStale) {
+              const blockedReason = anchorStale ? 'stale_agent_decision' : 'stale_amount_agent_decision';
               const threadKey = String(msg.to_phone || '').replace(/\D/g, '').slice(-10) || msg.customer_id || msg.id;
               // Everything under the lock, metadata read THROUGH the trx
               // AFTER acquiring it — the cancel route can transfer parked

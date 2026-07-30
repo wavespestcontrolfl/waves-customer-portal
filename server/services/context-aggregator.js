@@ -1,5 +1,8 @@
 const db = require('../models/db');
 const logger = require('./logger');
+const { INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue } = require('./invoice-helpers');
+const { customerOnAutopay, isPaused } = require('./autopay-eligibility');
+const { technicianReportCustomerCopy } = require('./service-report/technician-report-copy');
 const { etDateString } = require('../utils/datetime-et');
 const { arrivalWindowRange } = require('../utils/sms-time-format');
 
@@ -16,6 +19,126 @@ const UPCOMING_SERVICE_STATUSES = ['pending', 'confirmed', 'en_route', 'on_site'
 // Calls the extractor affirmatively classified as not-a-real-conversation
 // with this customer — their summaries must never ground an SMS reply.
 const EXCLUDED_CALL_TYPES = new Set(['spam', 'wrong_number']);
+// V2-enriched natures that are affirmatively NOT a conversation with this
+// customer (Codex r8): a shadow-mode V2 can classify a call spam while the
+// legacy signals stay silent — a valid V2 verdict wins.
+const EXCLUDED_V2_NATURES = new Set(['spam_solicitation', 'robocall', 'wrong_number', 'vendor_or_partner']);
+
+// Deterministic access-code redaction (Codex r1, PR #3076): free-text fields
+// REALLY carry code values — call-profile-enrichment persists strings like
+// "front gate code is 4545" into access_notes — so presence-booleans on the
+// dedicated code columns are not enough. Any 3-8 digit run within a short
+// window after a code-ish keyword is masked before the text can reach a
+// prompt (and therefore facts_block rows and sealed-eval items).
+const ACCESS_CODE_KEYWORDS = 'gate|garage|door|lock\\s*box|keypad|entry|access|alarm|pin|code|combo|combination|passcode|password|passphrase';
+const ACCESS_CODE_RE = new RegExp(`\\b(${ACCESS_CODE_KEYWORDS})\\b([^\\n]{0,40}?)\\b(\\d{3,8})\\b`, 'gi');
+// Reverse order too (Codex r5): "4545 is the gate code" — digits first,
+// keyword within the following window.
+const ACCESS_CODE_REVERSE_RE = new RegExp(`\\b(\\d{3,8})\\b([^\\n]{0,40}?)\\b(${ACCESS_CODE_KEYWORDS})\\b`, 'gi');
+// Non-numeric credentials (Codex r6: "gate code BLUE", "door pin BLUE 1234"):
+// inside any segment that carries BOTH an access keyword and a code noun,
+// every value-shaped token (digit run, ALLCAPS word, letter+digit mix) is
+// masked. Over-redaction is the safe direction for access text; the keyword
+// words themselves stay legible.
+const ACCESS_CODE_NOUN_RE = /\b(?:code|pin|combo|combination|passcode|password|passphrase)\b/i;
+const ACCESS_CODE_CONTEXT_RE = new RegExp(`\\b(?:${ACCESS_CODE_KEYWORDS})\\b`, 'i');
+const ACCESS_CODE_VALUE_RE = /\b(?:\d{3,8}|[A-Z]{2,10}|[A-Za-z]*\d[A-Za-z0-9#*]*)\b/g;
+// Lowercase credentials (Codex r7: "gate code blue", "the gate code is
+// waves") can't be shape-detected — they're masked POSITIONALLY: the 1-2
+// tokens directly following the code noun (with optional is/: connector),
+// and the token directly before "is/= the … code" phrasing.
+// Up to FOUR value tokens (Codex r10): spoken credentials arrive as number
+// words — "four five four five" — and a two-token cap leaked the tail.
+const ACCESS_CODE_AFTER_NOUN_RE = /\b(code|pin|combo|combination|passcode|password|passphrase)\b(\s*(?:is|:|=|-)?\s*)((?:["'\u201c\u2018]?[A-Za-z0-9#*]{1,12}["'\u201d\u2019]?\s*){1,4})/gi;
+// Up to FOUR reverse-order tokens + password nouns (Codex r11): "four five
+// four five is the gate code" / "waves is the gate password".
+const ACCESS_CODE_BEFORE_NOUN_RE = /((?:["'“‘]?[A-Za-z0-9#*]{1,12}["'”’]?\s+){1,4})((?:is|=)\s+(?:the\s+)?[^.\n]{0,20}?\b(?:code|pin|combo|combination|passcode|password|passphrase)\b)/gi;
+const ACCESS_CODE_STOPWORDS = new Set(['gate', 'garage', 'door', 'lockbox', 'lock', 'box', 'keypad', 'entry', 'access', 'alarm', 'pin', 'code', 'combo', 'combination', 'passcode', 'password', 'passphrase', 'is', 'the', 'a', 'an', 'use', 'tech', 'only', 'for', 'to', 'and', 'or', 'needed', 'required', 'broken', 'works', 'not', 'no', 'none', 'unknown', 'same', 'new', 'old']);
+// Structured sensitive identifiers (Codex r11): SSNs and card-number runs
+// spoken on calls or typed into notes must never reach a prompt or a
+// persisted facts_block. Deterministic shapes: dashed SSN, keyword-adjacent
+// digit runs, and 12-19 digit runs with optional separators.
+const SSN_DASHED_RE = /\b\d{3}[- ]\d{2}[- ]\d{4}\b/g;
+const SSN_KEYWORD_RE = /\b(ssn|social(?:\s+security)?(?:\s+number)?)\b([^.\n]{0,20}?)\b(\d[\d- ]{7,13}\d)\b/gi;
+const CARD_NUMBER_RE = /\b(?:\d[ -]?){12,19}\b/g;
+const CVV_RE = /\b(cvv2?|cvc|security\s+code|card\s+code)\b([^.\n]{0,15}?)\b(\d{3,4})\b/gi;
+function redactSensitiveIdentifiers(text) {
+  return String(text || '')
+    .replace(SSN_DASHED_RE, '[redacted]')
+    .replace(SSN_KEYWORD_RE, (m, kw, mid) => `${kw}${mid}[redacted]`)
+    .replace(CARD_NUMBER_RE, (m) => (m.replace(/[^\d]/g, '').length >= 12 ? '[redacted]' : m))
+    .replace(CVV_RE, (m, kw, mid) => `${kw}${mid}[redacted]`);
+}
+
+function redactAccessCodes(text) {
+  let out = String(text || '');
+  // repeat until stable: "gate code 1234 and garage 5678" needs both masked
+  for (let i = 0; i < 5; i += 1) {
+    const next = out
+      .replace(ACCESS_CODE_RE, (m, kw, mid) => `${kw}${mid}[redacted]`)
+      .replace(ACCESS_CODE_REVERSE_RE, (m, digits, mid, kw) => `[redacted]${mid}${kw}`);
+    if (next === out) break;
+    out = next;
+  }
+  // Alphanumeric credential pass, per sentence-ish segment.
+  out = out.split(/([.;\n])/).map((seg) => {
+    if (!ACCESS_CODE_CONTEXT_RE.test(seg) || !ACCESS_CODE_NOUN_RE.test(seg)) return seg;
+    let masked = seg.replace(ACCESS_CODE_VALUE_RE, (tok) => (
+      ACCESS_CODE_STOPWORDS.has(tok.toLowerCase()) ? tok : '[redacted]'
+    ));
+    // Positional lowercase pass (Codex r7): the tokens adjacent to the code
+    // noun are the credential regardless of casing.
+    masked = masked.replace(ACCESS_CODE_AFTER_NOUN_RE, (m, noun, mid, tokens) => {
+      const maskedTokens = String(tokens || '').replace(/["'\u201c\u2018]?[A-Za-z0-9#*]{1,12}["'\u201d\u2019]?/g, (tok) => {
+        const bare = tok.replace(/["'\u201c\u201d\u2018\u2019]/g, '').toLowerCase();
+        return ACCESS_CODE_STOPWORDS.has(bare) ? tok : tok.replace(/[A-Za-z0-9#*]+/, '[redacted]');
+      });
+      return `${noun}${mid}${maskedTokens}`;
+    });
+    masked = masked.replace(ACCESS_CODE_BEFORE_NOUN_RE, (m, tokens, rest) => {
+      const maskedTokens = String(tokens || '').replace(/["'“‘]?[A-Za-z0-9#*]{1,12}["'”’]?/g, (tok) => {
+        const bare = tok.replace(/["'“”‘’]/g, '').toLowerCase();
+        return ACCESS_CODE_STOPWORDS.has(bare) ? tok : tok.replace(/[A-Za-z0-9#*]+/, '[redacted]');
+      });
+      return `${maskedTokens}${rest}`;
+    });
+    return masked;
+  }).join('');
+  return redactSensitiveIdentifiers(out);
+}
+
+// Canonical lawn scoring, mirrored from routes/lawn-health.js:39-59 (the
+// route exports only its router). Modern rows trust the stored overall_score;
+// legacy rows recompute under the four-category weighting so this fact can
+// never disagree with the portal/report score.
+function lawnStressDamage(row = {}) {
+  if (row.stress_damage != null) return row.stress_damage;
+  return Math.min(row.fungus_control ?? 100, row.thatch_level ?? 100);
+}
+function lawnOverall(row = {}) {
+  if (row.overall_score != null && row.stress_damage != null) return row.overall_score;
+  return Math.round(
+    (row.turf_density || 0) * 0.30 +
+    (row.weed_suppression || 0) * 0.25 +
+    (row.color_health || 0) * 0.25 +
+    lawnStressDamage(row) * 0.20
+  );
+}
+
+// The ONLY sanctioned customer copy inside technician_notes is the reviewed
+// WHAT WE DID / WHAT WE FOUND parse (owner ruling 2026-07-16; the raw field
+// carries access codes, billing notes, and candid remarks). Anything that
+// doesn't parse renders as NO notes — never the raw text.
+function customerSafeVisitNotes(notes) {
+  try {
+    const parsed = technicianReportCustomerCopy(notes);
+    // Contract (Codex r5 — the earlier did/found read silently discarded
+    // EVERY approved note): the parser returns { whatWeDid, whatWeFound,
+    // body, violations } and body is already the vetted joined copy — null
+    // when the banned-copy guard flagged it, which stays null here.
+    return parsed?.body || null;
+  } catch { return null; }
+}
 
 class ContextAggregator {
   async getFullCustomerContext(phone) {
@@ -37,12 +160,16 @@ class ContextAggregator {
   // pick a different (or deleted) account that shares the number.
   async getContextForCustomer(customer) {
     // Parallel data fetch
-    const [smsHistory, serviceHistory, upcomingServices, propertyPrefs, payments, interactions, complaints, reschedules, pendingEstimate, activeCancelSave, compliance, recentCalls] = await Promise.all([
+    const [smsHistory, serviceHistory, upcomingServices, propertyPrefs, payments, interactions, complaints, reschedules, pendingEstimate, activeCancelSave, compliance, recentCalls, allInvoices, lawnAssessments, cardOnFile] = await Promise.all([
       db('sms_log').where({ customer_id: customer.id }).orderBy('created_at', 'desc').limit(20),
-      db('service_records').where({ customer_id: customer.id }).orderBy('service_date', 'desc').limit(5),
+      // completed visits only (Codex r8): an 'incomplete' closeout must not
+      // answer "what did you do last time" as though the work happened.
+      db('service_records').where({ customer_id: customer.id, status: 'completed' }).orderBy('service_date', 'desc').limit(5),
       db('scheduled_services as ss').leftJoin('technicians as tech', 'ss.technician_id', 'tech.id').where('ss.customer_id', customer.id).where('ss.scheduled_date', '>=', etDateString()).whereIn('ss.status', UPCOMING_SERVICE_STATUSES).orderBy('ss.scheduled_date').limit(3).select('ss.service_type', 'ss.scheduled_date', 'ss.window_display', 'ss.window_start', 'ss.window_end', 'ss.time_window', 'ss.status', 'tech.name as technician_name'),
       db('property_preferences').where({ customer_id: customer.id }).first(),
-      db('payments').where({ 'payments.customer_id': customer.id }).orderBy('payment_date', 'desc').limit(5),
+      // 'upcoming' filtered IN SQL (Codex r8) — post-limit JS filtering let
+      // five future autopay rows empty the history.
+      db('payments').where({ 'payments.customer_id': customer.id }).whereNot('status', 'upcoming').orderBy('payment_date', 'desc').limit(5),
       db('customer_interactions').where({ customer_id: customer.id }).orderBy('created_at', 'desc').limit(10),
       db('customer_interactions').where({ customer_id: customer.id, interaction_type: 'complaint' }).where('created_at', '>', new Date(Date.now() - 90 * 86400000)),
       db('reschedule_log').where({ customer_id: customer.id }).where('created_at', '>', new Date(Date.now() - 30 * 86400000)).count('* as count').first(),
@@ -52,13 +179,135 @@ class ContextAggregator {
       db('sms_sequences').where({ customer_id: customer.id, sequence_type: 'cancellation_save', status: 'active' }).first(),
       this.getCompliance(customer.id),
       this.getRecentCalls(customer.id),
+      // Newest invoice a customer could actually be asked about: unpaid and
+      // not voided. payer_id kept in the row — a third-party-billed invoice
+      // is a FACT the drafter needs (the customer cannot pay it), never a
+      // reason to hide it. Fail-soft like every other leg.
+      db('invoices').where({ customer_id: customer.id })
+        // Canonical uncollectible set (invoice-helpers — processing/refunded/
+        // canceled included, Codex r2) + draft (not yet sent; the customer
+        // has never seen it, so it must not ground a reply about
+        // "your invoice"). LIST, not first (Codex r5): the newest row can be
+        // payer-billed while the customer still owes an older own invoice —
+        // and the canonical balance sums collectible own invoices.
+        // ALL statuses fetched (Codex r10 — the r9 consolidation edit missed;
+        // a visible-only fetch left draftOwnInvoiceIds permanently empty and
+        // payer classification blind to settled payer rows). The visible
+        // sent/viewed/overdue slice is derived in JS below; 300-row sanity
+        // ceiling, far above any real account.
+        .orderBy('created_at', 'desc')
+        .limit(300)
+        .select('id', 'title', 'status', 'total', 'credit_applied', 'due_date', 'payer_id', 'created_at')
+        // FAIL CLOSED (Codex r11): a lone invoice-query failure must not
+        // read as "no invoices" — null marks billing UNAVAILABLE and the
+        // facts render a visible unknown instead of "Balance: Current".
+        .catch(() => null),
+      // v10: lawn health scores — "how's my lawn doing" is a routine text.
+      db('lawn_assessments').where({ customer_id: customer.id })
+        // Tech-confirmed only (Codex r2): the customer lawn-health routes all
+        // filter on confirmed_by_tech — provisional AI scores must not ground
+        // a customer-facing text.
+        .where({ confirmed_by_tech: true })
+        .orderBy('service_date', 'asc')
+        .select('service_date', 'turf_density', 'weed_suppression', 'fungus_control', 'thatch_level', 'color_health', 'overall_score', 'stress_damage')
+        // FAIL CLOSED (Codex r12): a query failure must not read as "no
+        // assessments on file" — null renders a visible unavailable.
+        .catch(() => null),
+      // v10: the card on file (designated autopay card first). Brand + last4
+      // only — never a full number anywhere in this system.
+      db('payment_methods').where({ customer_id: customer.id })
+        // Stripe-backed methods only (Codex r7): legacy-processor rows are
+        // preserved by migration but nothing can charge them — a legacy
+        // default must not read as the current card on file.
+        .where({ processor: 'stripe' })
+        .whereNotNull('stripe_payment_method_id')
+        // The DEFAULT method is the canonical card-on-file (Codex r5):
+        // savePaymentMethod clears only is_default on old rows, so a stale
+        // row can keep autopay_enabled=true — ordering by autopay first
+        // would resurrect it.
+        .orderBy([{ column: 'is_default', order: 'desc' }, { column: 'created_at', order: 'desc' }])
+        .first('card_brand', 'last_four', 'exp_month', 'exp_year', 'autopay_enabled', 'is_default', 'method_type')
+        // FAIL CLOSED (Codex r12): customerOnAutopay swallows DB errors into
+        // "no chargeable method" → false — a transient payment_methods
+        // failure would render "Autopay: not active" as fact. Our own query
+        // hits the same table; an error sentinel here forces the UNKNOWN
+        // autopay rendering below.
+        .catch(() => 'unavailable'),
     ]);
 
     const lastService = serviceHistory[0] || null;
-    // Superseded failed attempts were collected by their retry's own row —
-    // counting them would describe already-taken money as owed in
-    // customer-facing replies.
-    const balance = payments.filter(p => ['failed', 'pending', 'overdue'].includes(p.status) && !p.superseded_by_payment_id).reduce((s, p) => s + parseFloat(p.amount || 0), 0);
+    // Third-party Bill-To (Codex r2, mirrors billing-v2 /balance): a payment
+    // against a payer-billed invoice is the PAYER's even though the row sits
+    // under the homeowner's customer_id — exclude those from both the
+    // balance and the recent-payments facts.
+    const billingUnavailable = allInvoices === null;
+    const invoiceRows = allInvoices || [];
+    const VISIBLE_INVOICE_STATUSES = new Set(['sent', 'viewed', 'overdue']);
+    const payerInvoiceIds = new Set(invoiceRows.filter((r) => r.payer_id).map((r) => String(r.id)));
+    const draftOwnInvoiceIds = new Set(invoiceRows.filter((r) => !r.payer_id && String(r.status) === 'draft').map((r) => String(r.id)));
+    const paymentInvoiceId = (p) => {
+      try {
+        const m = typeof p.metadata === 'string' ? JSON.parse(p.metadata) : p.metadata;
+        return m && m.invoice_id != null ? String(m.invoice_id) : null;
+      } catch { return null; }
+    };
+    const ownPayments = payments.filter((p) => {
+      const invId = paymentInvoiceId(p);
+      return !(invId && payerInvoiceIds.has(invId));
+    });
+    // Canonical balance (Codex r5, mirrors billing-v2 /balance): the sum of
+    // collectible OWN invoices (net of credit) plus failed standalone
+    // attempts — a customer with a sent-but-unpaid invoice and no failed
+    // attempt is NOT "Current". Invoice-linked failed attempts are excluded
+    // (the invoice itself already counts — double-count guard). Superseded
+    // failed attempts were collected by their retry's own row.
+    const ownInvoices = invoiceRows.filter((inv) => !inv.payer_id && VISIBLE_INVOICE_STATUSES.has(String(inv.status)));
+    const ownInvoiceIds = new Set(ownInvoices.map((inv) => String(inv.id)));
+    const invoiceBalance = ownInvoices.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0);
+    const failedStandalone = ownPayments
+      .filter(p => ['failed', 'pending', 'overdue'].includes(p.status) && !p.superseded_by_payment_id)
+      // Invoice-linked failures are excluded (Codex r8, billing-v2 canon) —
+      // the invoice lifecycle owns that money — EXCEPT when the linked
+      // invoice is still a DRAFT (Codex r9, billing-v2:605-608): the visible
+      // allow-list never sums drafts, so dropping the failed
+      // completion-autopay row too would show $0 owed on a still-collectible
+      // debt.
+      .filter(p => { const invId = paymentInvoiceId(p); return !invId || draftOwnInvoiceIds.has(invId); })
+      .reduce((sum, p) => sum + parseFloat(p.amount || 0), 0);
+    const balance = invoiceBalance + failedStandalone;
+    // Newest own invoice with a POSITIVE due (Codex r8): a fully-credited
+    // newest row must not present "$0.00 due" while an older invoice carries
+    // the balance.
+    const openInvoice = ownInvoices.find((inv) => invoiceAmountDue(inv) > 0) || null;
+    const hasPayerBilledOpen = invoiceRows.some((inv) => inv.payer_id && VISIBLE_INVOICE_STATUSES.has(String(inv.status)));
+    // Canonical autopay state (Codex r1): the raw autopay_enabled flag lies
+    // when the default method is missing/expired/unhealthy, and a stale
+    // autopay_paused_until must not read as paused — customerOnAutopay +
+    // isPaused are the same predicates the customer autopay endpoint serves.
+    // Fail-closed: an eligibility error renders the state UNKNOWN, never on.
+    let autopayState = null;
+    const paymentMethodsUnavailable = cardOnFile === 'unavailable';
+    try {
+      if (paymentMethodsUnavailable) throw new Error('payment_methods unreadable — autopay state unknowable');
+      const paused = isPaused(customer);
+      // next_charge_date is only real for the monthly-membership lane
+      // (Codex r9, customer-autopay canon): per-application / prepay /
+      // one-time accounts can carry a stale date the cron will never act on
+      // — advertising it would promise a charge that isn't coming.
+      let monthlyLane = false;
+      try {
+        const { resolveBillingLane } = require('./billing-lane');
+        monthlyLane = resolveBillingLane(customer).mode === 'monthly_membership';
+      } catch { monthlyLane = false; }
+      autopayState = {
+        on: paused ? false : await customerOnAutopay(customer),
+        paused,
+        pausedUntil: paused ? customer.autopay_paused_until : null,
+        nextChargeDate: monthlyLane ? (customer.next_charge_date || null) : null,
+      };
+    } catch (err) {
+      logger.warn(`[context] autopay eligibility failed for customer ${customer.id}: ${err.message}`);
+    }
 
     // Build flags
     const flags = [];
@@ -69,7 +318,9 @@ class ContextAggregator {
     if (parseInt(reschedules?.count || 0) > 1) flags.push({ type: 'reschedule_history', severity: 'medium', detail: `${reschedules.count} reschedules in 30 days` });
     if (['at_risk', 'churned'].includes(customer.pipeline_stage)) flags.push({ type: 'churn_risk', severity: 'high', detail: `Stage: ${customer.pipeline_stage}` });
     if (activeCancelSave) flags.push({ type: 'cancel_save_active', severity: 'high', detail: `Cancel save step ${activeCancelSave.step}` });
-    if (pendingEstimate) flags.push({ type: 'pending_estimate', severity: 'info', detail: `$${pendingEstimate.monthly_total}/mo ${pendingEstimate.waveguard_tier}` });
+    // No amount in the flag (Codex r5 + per-application rule): this detail
+    // renders into ACCOUNT FLAGS, which is verifier-approved grounding.
+    if (pendingEstimate) flags.push({ type: 'pending_estimate', severity: 'info', detail: `${pendingEstimate.waveguard_tier || 'estimate'} pending (priced per application)` });
 
     const summary = this.buildSummary(customer, flags, lastService, upcomingServices, balance);
 
@@ -84,13 +335,113 @@ class ContextAggregator {
         customerSince: customer.customer_since,
       },
       smsHistory: smsHistory.map(m => ({ direction: m.direction, body: m.message_body, date: m.created_at, type: m.message_type })),
-      lastService: lastService ? { type: lastService.service_type, date: lastService.service_date, notes: lastService.technician_notes } : null,
+      // technician_notes is INTERNAL (owner ruling 2026-07-16: access codes,
+      // billing notes, candid remarks live there) — only the reviewed
+      // WHAT WE DID / WHAT WE FOUND parse may reach customer-facing prompts
+      // (Codex r1); unparseable notes render as none, never raw.
+      lastService: lastService ? { type: lastService.service_type, date: lastService.service_date, notes: customerSafeVisitNotes(lastService.technician_notes) } : null,
+      // v10 grounding: the last few visits with reviewed notes + areas —
+      // "what did you do last time" is a routine customer text.
+      serviceHistory: serviceHistory.slice(0, 3).map(s => ({
+        type: s.service_type,
+        date: s.service_date,
+        notes: customerSafeVisitNotes(s.technician_notes),
+        areasServiced: Array.isArray(s.areas_serviced) ? s.areas_serviced : null,
+      })),
       upcomingServices: upcomingServices.map(s => ({ type: s.service_type, date: s.scheduled_date, window: this.deriveWindow(s), status: s.status, tech: s.technician_name || null, isToday: this.calendarDay(s.scheduled_date) === etDateString() })),
-      billing: { outstandingBalance: balance, recentPayments: payments.slice(0, 3) },
+      billing: {
+        // invoice grounding failed → the whole money picture is unknowable
+        unavailable: billingUnavailable,
+        outstandingBalance: balance,
+        // completed/attempted history only (Codex r5): 'upcoming' autopay
+        // rows are FUTURE charges, not payments the customer made.
+        recentPayments: ownPayments.filter((p) => String(p.status || '').toLowerCase() !== 'upcoming').slice(0, 3),
+        // v10: real autopay state (canonical eligibility, null = unknown).
+        autopay: autopayState,
+        // v10: the newest sent-and-unpaid invoice. payerBilled=true means a
+        // third party pays it — the customer cannot, and a draft must never
+        // ask them to.
+        // The customer's OWN newest collectible invoice (payer-billed rows
+        // can never shadow it — Codex r5); the payer-billed note rides
+        // separately so both facts surface.
+        openInvoice: openInvoice ? {
+          title: openInvoice.title || null,
+          status: openInvoice.status,
+          // Net of applied credit (invoice-helpers.invoiceAmountDue) — the
+          // gross total over-states what Stripe will collect (Codex r2).
+          amountDue: invoiceAmountDue(openInvoice),
+          dueDate: openInvoice.due_date || null,
+        } : null,
+        payerBilledInvoice: hasPayerBilledOpen,
+        // v10: payment method on file — brand/bank + last4 only, never a
+        // full number. ACH methods store bank last4 with a null card_brand
+        // (Codex r2) — label them a bank account, never "card".
+        cardOnFile: cardOnFile && cardOnFile !== 'unavailable' && cardOnFile.last_four ? {
+          type: String(cardOnFile.method_type || '').toLowerCase().includes('bank') || String(cardOnFile.method_type || '').toLowerCase().includes('ach') || (!cardOnFile.card_brand && cardOnFile.method_type) ? 'bank' : 'card',
+          brand: cardOnFile.card_brand || null,
+          last4: cardOnFile.last_four,
+          expMonth: cardOnFile.exp_month || null,
+          expYear: cardOnFile.exp_year || null,
+          // the autopay label requires the CANONICAL on-state (Codex r11) —
+          // stale row flags on an expired/paused/blocked method must not
+          // present as the active charge method.
+          isAutopayCard: Boolean(cardOnFile.is_default && cardOnFile.autopay_enabled && autopayState?.on),
+        } : null,
+      },
+      // v10: lawn health — latest vs baseline, same scoring the AI-number
+      // assistant's get_lawn_health tool reports.
+      lawnHealth: (() => {
+        if (lawnAssessments === null) return { unavailable: true };
+        const rows = (lawnAssessments || []).filter((r) => r && r.service_date);
+        if (!rows.length) return null;
+        // Only the four technician-confirmed categories (Codex r5): fungus/
+        // thatch are retained AI sub-reads the tech does NOT correct — a low
+        // raw sub-read must not become a texted diagnosis. Stress is the
+        // consolidated confirmed metric.
+        const shape = (row) => ({
+          date: row.service_date,
+          overall: lawnOverall(row),
+          turfDensity: row.turf_density ?? null,
+          weedSuppression: row.weed_suppression ?? null,
+          colorHealth: row.color_health ?? null,
+          stressDamage: lawnStressDamage(row),
+        });
+        return { baseline: shape(rows[0]), latest: shape(rows[rows.length - 1]), assessments: rows.length };
+      })(),
+      // v10: pending estimate as a first-class fact (was only a flag detail).
+      pendingEstimate: pendingEstimate ? {
+        status: pendingEstimate.status,
+        monthlyTotal: pendingEstimate.monthly_total != null ? parseFloat(pendingEstimate.monthly_total) : null,
+        tier: pendingEstimate.waveguard_tier || null,
+        // authoritative send stamp ONLY (Codex r5) — a draft-then-sent
+        // estimate must never report its creation date as the send date.
+        sentAt: pendingEstimate.sent_at || null,
+      } : null,
       propertyPrefs: propertyPrefs || {},
+      // v10: property facts the drafter may draw on. Access CODES are
+      // presence-booleans ONLY — the values never enter a prompt (they would
+      // persist into facts_block rows and sealed-eval items; "it's on file"
+      // is the only customer-facing answer anyway).
+      // Free-text preference fields run through the deterministic access-
+      // code redactor (Codex r1) — call-profile enrichment writes literal
+      // code values into access_notes.
+      propertyProfile: propertyPrefs ? {
+        pets: redactAccessCodes(propertyPrefs.pet_details) || null,
+        petsSecuredPlan: redactAccessCodes(propertyPrefs.pets_secured_plan) || null,
+        irrigation: Boolean(propertyPrefs.irrigation_system),
+        irrigationNotes: redactAccessCodes(propertyPrefs.irrigation_schedule_notes) || null,
+        hoaName: propertyPrefs.hoa_name || null,
+        hoaRestrictions: redactAccessCodes(propertyPrefs.hoa_restrictions) || null,
+        accessNotes: redactAccessCodes(propertyPrefs.access_notes) || null,
+        parkingNotes: redactAccessCodes(propertyPrefs.parking_notes) || null,
+        specialInstructions: redactAccessCodes(propertyPrefs.special_instructions) || null,
+        gateCodeOnFile: Boolean(propertyPrefs.property_gate_code || propertyPrefs.neighborhood_gate_code),
+        garageCodeOnFile: Boolean(propertyPrefs.garage_code),
+        lockboxOnFile: Boolean(propertyPrefs.lockbox_code),
+      } : null,
       flags, compliance,
       recentInteractions: interactions.slice(0, 5).map(i => ({ type: i.interaction_type, subject: i.subject, date: i.created_at })),
-      recentCalls: recentCalls.map(c => ({ summary: c.call_summary, direction: c.direction, outcome: c.call_outcome, date: c.created_at })),
+      recentCalls: recentCalls.map(c => ({ summary: c.call_summary, direction: c.direction, outcome: c.call_outcome, date: c.created_at, transcript: c.transcript || null, nature: c.enriched_nature || null })),
       summary,
     };
   }
@@ -105,7 +456,9 @@ class ContextAggregator {
     try {
       const rows = await db('call_log')
         .where({ customer_id: customerId })
-        .where('created_at', '>', new Date(Date.now() - 30 * 86400000))
+        // v10: 60-day window, 4 calls — customers reference calls older than
+        // a month ("when we talked last month about the ants…").
+        .where('created_at', '>', new Date(Date.now() - 60 * 86400000))
         .whereNotNull('call_summary')
         .whereRaw("length(trim(call_summary)) > 0")
         // The voice webhook links customer_id by caller ID BEFORE the call is
@@ -119,10 +472,40 @@ class ContextAggregator {
         // over-fetch: the extraction-classified misdials below are filtered
         // in JS (ai_extraction is a TEXT column in prod — casting to jsonb in
         // SQL throws on any malformed row), and a filtered row must not
-        // silently shrink the pick below 2 real calls.
-        .limit(6)
-        .select('direction', 'call_outcome', 'call_summary', 'created_at', 'ai_extraction', 'processing_status');
-      return rows.filter((r) => !this.isExcludedCall(r)).slice(0, 2);
+        // silently shrink the pick below 4 real calls.
+        .limit(10)
+        .select('direction', 'call_outcome', 'call_summary', 'created_at', 'ai_extraction', 'processing_status', 'transcription', 'ai_extraction_enriched', 'v2_extraction_status');
+      const eligible = rows.filter((r) => !this.isExcludedCall(r)).slice(0, 4);
+      // v10: the NEWEST call also carries its transcript (owner directive:
+      // the drafter should see what was actually said, not only the
+      // summary). One call only — transcripts are long — and capped here to
+      // bound the context object; the drafter caps and sanitizes again at
+      // render. Older calls stay summary-only.
+      // Spoken code values ("my gate code is 4545") get the same
+      // deterministic redaction as property notes before either the summary
+      // or the transcript can reach a prompt.
+      // Validated v2 extraction (Codex r2): when the enriched extraction is
+      // 'valid', surface its customer-relevant classification alongside the
+      // raw transcript — a truncated/ambiguous transcript shouldn't be the
+      // only structured read of the call. Whitelisted scalar only; the rest
+      // of the enriched payload (dispositions, internal codes) stays out of
+      // customer-facing grounding.
+      const enrichedNature = (r) => {
+        if (String(r.v2_extraction_status || '') !== 'valid') return null;
+        try {
+          const obj = typeof r.ai_extraction_enriched === 'string' ? JSON.parse(r.ai_extraction_enriched) : r.ai_extraction_enriched;
+          const nature = String(obj?.call_nature || '').trim();
+          return nature ? nature.slice(0, 60) : null;
+        } catch { return null; }
+      };
+      return eligible.map((r, i) => ({
+        ...r,
+        enriched_nature: enrichedNature(r),
+        call_summary: redactAccessCodes(r.call_summary),
+        transcript: i === 0 && typeof r.transcription === 'string' && r.transcription.trim()
+          ? redactAccessCodes(r.transcription.slice(0, 4000))
+          : null,
+      }));
     } catch (err) {
       logger.warn(`[context] recent-call lookup failed for customer ${customerId}: ${err.message}`);
       return [];
@@ -150,6 +533,13 @@ class ContextAggregator {
   isExcludedCall(row) {
     if (String(row?.processing_status || '').trim().toLowerCase() === 'spam') return true;
     if (EXCLUDED_CALL_TYPES.has(this.extractedCallType(row?.ai_extraction))) return true;
+    // Valid V2 verdicts count (Codex r8) — legacy signals may be silent.
+    if (String(row?.v2_extraction_status || '') === 'valid') {
+      try {
+        const enriched = typeof row.ai_extraction_enriched === 'string' ? JSON.parse(row.ai_extraction_enriched) : row.ai_extraction_enriched;
+        if (EXCLUDED_V2_NATURES.has(String(enriched?.call_nature || '').trim().toLowerCase())) return true;
+      } catch { /* malformed enriched → fall through to legacy signals */ }
+    }
     try {
       const obj = typeof row?.ai_extraction === 'string' ? JSON.parse(row.ai_extraction) : row?.ai_extraction;
       return obj?.is_spam === true;
@@ -211,7 +601,11 @@ class ContextAggregator {
   }
 
   buildSummary(c, flags, lastSvc, upcoming, balance) {
-    let s = `${c.first_name} ${c.last_name} | ${c.waveguard_tier || 'No tier'} ($${c.monthly_rate || 0}/mo) | ${c.pipeline_stage}`;
+    // No rate amount here (Codex r3 + the per-application display rule):
+    // monthly_rate is an internal figure, not customer billing copy — with
+    // amount-bearing drafts now sendable, "($X/mo)" in the summary would let
+    // a per-application customer be quoted a monthly price.
+    let s = `${c.first_name} ${c.last_name} | ${c.waveguard_tier || 'No tier'} | ${c.pipeline_stage}`;
     if (lastSvc) s += ` | Last: ${lastSvc.service_type} ${new Date(lastSvc.service_date).toLocaleDateString('en-US', { timeZone: 'America/New_York' })}`;
     if (upcoming.length) s += ` | Next: ${upcoming[0].service_type} ${new Date(upcoming[0].scheduled_date).toLocaleDateString('en-US', { timeZone: 'America/New_York' })}`;
     if (balance > 0) s += ` | ⚠️ $${balance.toFixed(2)} overdue`;
@@ -230,3 +624,6 @@ class ContextAggregator {
 
 module.exports = new ContextAggregator();
 module.exports.UPCOMING_SERVICE_STATUSES = UPCOMING_SERVICE_STATUSES;
+module.exports.redactAccessCodes = redactAccessCodes;
+module.exports.lawnOverall = lawnOverall;
+module.exports.customerSafeVisitNotes = customerSafeVisitNotes;

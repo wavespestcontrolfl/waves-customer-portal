@@ -230,7 +230,12 @@ async function judgeOne(draft, humanReply) {
   const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
   const resp = await createDeepMessage(client, {
     model: MODELS.DEEP,
-    max_tokens: 4096, // DEEP: thinking spends from max_tokens — keep headroom for the verdict JSON
+    // DEEP: thinking spends from max_tokens. 4096 proved too tight on items
+    // with large facts blocks — thinking exhausted the budget before the
+    // verdict JSON was written, so judgeOne returned unparseable and sealed
+    // exam runs aborted on 'consecutive item failures' (07-30, runs a9e23d74
+    // + fb7aef4a). 8192 keeps verdict headroom under the longest real items.
+    max_tokens: 8192,
     messages: [{
       role: 'user',
       content: buildJudgePrompt({

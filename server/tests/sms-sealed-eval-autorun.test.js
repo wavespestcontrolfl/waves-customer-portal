@@ -23,7 +23,8 @@ jest.mock('../services/notification-service', () => ({
 const { runExclusive, isLocked } = require('../utils/cron-lock');
 const NotificationService = require('../services/notification-service');
 const logger = require('../services/logger');
-const { runAutoExamSweep, EXAM_LEGS } = require('../services/sms-sealed-eval');
+const sealedEval = require('../services/sms-sealed-eval');
+const { runAutoExamSweep } = sealedEval;
 
 const CURRENT = 'house_voice_v9_test';
 
@@ -292,7 +293,8 @@ describe('runAutoExamSweep', () => {
     expect(body).toContain('REGRESSION vs baseline (p=0.01)');
   });
 
-  test('sanity: EXAM_LEGS is the two-leg contract this sweep iterates', () => {
-    expect(EXAM_LEGS).toEqual(['anthropic', 'openai']);
+  test('sanity: the sweep iterates the two LIVE legs; gemini stays measurement-only', () => {
+    expect(sealedEval.LIVE_EXAM_LEGS).toEqual(['anthropic', 'openai']);
+    expect(sealedEval.EXAM_LEGS).toContain('gemini'); // manual/measurement leg
   });
 });

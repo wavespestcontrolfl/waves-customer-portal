@@ -118,17 +118,11 @@ async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomer
 
     // House rule at the send boundary: check the OUTGOING body — the text
     // that will actually reach the customer — not the stored suggestion.
-    // The composer keeps the draft linkage across textarea edits, so an
-    // operator who REMOVED a hallucinated price must be allowed through
-    // (price-free correction), while a body still carrying one (pre-rollout
-    // card sent verbatim, or a price typed back in under the agent link) is
-    // refused. The card is NOT retired — the operator can edit and resend,
-    // or send a deliberate quote as a plain manual message (no draft link).
-    const suggestMode = require('../services/sms-suggest-mode');
-    if (outgoingBody && suggestMode.hasPriceQuote(outgoingBody)) {
-      logger.info(`[agent-review] outgoing agent-linked body quotes a price (decision ${decision.id}) — refusing send`);
-      return null;
-    }
+    // (The former price-quote refusal here is retired — owner ruling
+    // 2026-07-30, house_voice_v10: real dollar amounts from the customer's
+    // BILLING facts may be texted. The operator reviewing the card is the
+    // gate; the drafter's verifier checks every figure against the facts
+    // block; auto-send still refuses amount-bearing drafts.)
 
     // STALENESS: a card is only sendable while its anchoring inbound is
     // still the newest customer message on the thread. Drafting lanes that

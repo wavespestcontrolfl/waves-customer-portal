@@ -45,7 +45,7 @@ const ESCALATION_INTENTS = new Set(['customer_issue_needs_review']);
 // draft must NEVER reach a customer with one — the few-shot exemplars contain
 // them, and prompt instructions alone aren't a guarantee. This is the
 // deterministic, verifier-independent guard the delivery paths fail closed on.
-const REDACTION_PLACEHOLDER_RE = /\[(name|phone|email|ssn|card|address|url|zip)\]/i;
+const REDACTION_PLACEHOLDER_RE = /\[(name|phone|email|ssn|card|address|url|zip|redacted)\]/i;
 function hasRedactionPlaceholder(text) {
   return REDACTION_PLACEHOLDER_RE.test(String(text || ''));
 }
