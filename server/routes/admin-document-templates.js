@@ -291,6 +291,16 @@ router.post('/versions/:id/publish', async (req, res, next) => {
     const version = await db('document_template_versions').where({ id: req.params.id }).first();
     if (!version) return res.status(404).json({ error: 'Document template version not found' });
     await db.transaction(async (trx) => {
+      const template = await trx('document_templates')
+        .where({ id: version.template_id })
+        .forUpdate()
+        .first('id', 'active_version_id', 'status');
+      // Idempotent re-publish of the already-active version is a no-op:
+      // published_at is the ROLLOUT moment (the termite reconciliation
+      // reads it as its lower bound), so advancing it without an actual
+      // activation would shift those windows forward and orphan stale
+      // requests / misissues from the real rollout interval.
+      if (template && template.active_version_id === version.id && template.status === 'active') return;
       await trx('document_template_versions').where({ id: version.id }).update({
         // Activation IS the rollout moment: downstream consumers (e.g. the
         // termite-agreement expired-recovery cutoff) read the ACTIVE

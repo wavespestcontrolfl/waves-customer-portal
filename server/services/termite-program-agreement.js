@@ -484,8 +484,24 @@ function isCommercialEstimate(estimate = {}, estData = null) {
   // uses so an explicitly commercial accept always parks.
   const commercialFlag = (value) => value === true
     || ['true', 'yes', 'y', '1', 'commercial'].includes(String(value ?? '').trim().toLowerCase());
-  if (commercialFlag(data?.inputs?.isCommercial) || commercialFlag(data?.engineInputs?.isCommercial)) return true;
-  const propertyType = String(data?.inputs?.propertyType || data?.propertyType || '').toLowerCase();
+  // Estimates persist their inputs under several generations of shapes:
+  // estimator-form `inputs`, v1/engine-draft `engineInputs`, the admin
+  // save's `engineRequest.profile`, and the quote-wizard's `enriched`
+  // profile. Detection must read ALL of them — an engineInputs-only
+  // Duplex/Condo/Townhome must park exactly like a form-entered one.
+  const profile = (data?.engineRequest && typeof data.engineRequest === 'object'
+    && data.engineRequest.profile && typeof data.engineRequest.profile === 'object')
+    ? data.engineRequest.profile : null;
+  const enriched = (data?.enriched && typeof data.enriched === 'object') ? data.enriched : null;
+  if (commercialFlag(data?.inputs?.isCommercial) || commercialFlag(data?.engineInputs?.isCommercial)
+    || commercialFlag(profile?.isCommercial) || commercialFlag(enriched?.isCommercial)) return true;
+  const propertyType = [
+    data?.inputs?.propertyType,
+    data?.propertyType,
+    data?.engineInputs?.propertyType,
+    profile?.propertyType,
+    enriched?.propertyType,
+  ].map((v) => String(v || '').toLowerCase()).join('|');
   // Persisted estimator values include the concrete multi-unit types, not
   // just the 'Multifamily' label — every multi-unit structure parks.
   if (/commercial|multi[- ]?family|multifamily|duplex|triplex|quadplex|condo|town\s?home|townhouse|apartment/.test(propertyType)) return true;
@@ -796,10 +812,14 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       const lockedTemplates = await trx('document_templates')
         .whereIn('template_key', PROGRAM_TEMPLATE_KEYS)
         .forUpdate()
-        .select('template_key', 'active_version_id');
+        .select('template_key', 'active_version_id', 'status');
       const lockedActiveIds = new Set(lockedTemplates.map((t) => t.active_version_id).filter(Boolean));
       const liveTemplate = lockedTemplates.find((t) => t.template_key === prepared.templateKey);
-      if (!liveTemplate || liveTemplate.active_version_id !== version.id) return 'version_changed';
+      // Status re-check alongside the version re-check: an admin pausing or
+      // archiving the template between the unlocked read and this lock must
+      // not have us insert (and autosend) from a just-disabled template —
+      // the version pointer alone doesn't move on pause/archive.
+      if (!liveTemplate || liveTemplate.status !== 'active' || liveTemplate.active_version_id !== version.id) return 'version_changed';
       // FOR UPDATE: the status re-read must be current when we cancel — a
       // customer signing the older agreement concurrently would otherwise
       // commit 'signed' between our unlocked read and an unconditional
@@ -1169,7 +1189,13 @@ async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
       // re-issue to the operator — never assume the migration covered it.
       // A version reactivated mid-sweep makes this row current again —
       // skip entirely with no marker (and no misleading cancelled bell).
-      if ((await cancelStaleSource(row)) === 'reactivated') continue;
+      const manualCancelOutcome = await cancelStaleSource(row);
+      if (manualCancelOutcome === 'reactivated') continue;
+      // Selected OPEN but the conditional cancel didn't land: another actor
+      // changed the row in between (admin cancel/void, a signature, an
+      // expiry). Their action is authoritative — no re-issue bell over it.
+      // No marker: a future pass re-evaluates the row's new state.
+      if (manualCancelOutcome === false && OPEN_STATUSES.includes(String(row.status || '').toLowerCase())) continue;
       // The bell IS the handoff — the row is only marked handled when it
       // actually landed; a double notify failure leaves the row eligible
       // for tomorrow's retry (the cancel above is conditional, so the
@@ -1211,7 +1237,16 @@ async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
     // path stays bell-only. A version REACTIVATED mid-sweep makes the row
     // current again: skip it entirely with NO marker, so a later rollout
     // can reconsider it.
-    if ((await cancelStaleSource(row)) === 'reactivated') continue;
+    const cancelOutcome = await cancelStaleSource(row);
+    if (cancelOutcome === 'reactivated') continue;
+    // A stale-OPEN row whose conditional cancel didn't land was changed by
+    // another actor between selection and here (admin cancel/void, a
+    // signature, an expiry). That intentional change is authoritative — do
+    // not create (and potentially autosend) a replacement over it. No
+    // marker: the row re-evaluates under its new state on a future pass.
+    // (false is EXPECTED for migration-cancelled and expired selections —
+    // those proceed as before.)
+    if (cancelOutcome === false && OPEN_STATUSES.includes(String(row.status || '').toLowerCase())) continue;
 
     // Executed agreements stay executed — but only within THIS superseded
     // cycle: a signature belonging to the same estimate, or any same-

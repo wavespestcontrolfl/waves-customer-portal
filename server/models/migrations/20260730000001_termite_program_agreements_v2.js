@@ -621,7 +621,7 @@ exports.down = async function down(knex) {
       // Source FIRST — everything below reads it.
       const source = await knex('customer_contracts')
         .where({ id: evt.contract_id })
-        .first('customer_id', 'document_variables_snapshot', 'document_template_key', 'document_template_version_id', 'share_token_expires_at');
+        .first('customer_id', 'document_variables_snapshot', 'document_template_key', 'document_template_version_id', 'share_token_expires_at', 'created_at');
       if (!source) continue;
       // Only restore when this source's version actually became active
       // again in this rollback: on the content-reuse path (approved body
@@ -660,7 +660,7 @@ exports.down = async function down(knex) {
         .whereIn('document_template_key', templateKeysForRestore)
         .whereNot('id', evt.contract_id)
         .whereIn('status', ['draft', 'sent', 'viewed', 'signed'])
-        .select('id', 'status', 'share_token_expires_at', 'document_variables_snapshot', 'document_template_version_id');
+        .select('id', 'status', 'share_token_expires_at', 'document_variables_snapshot', 'document_template_version_id', 'signed_at', 'created_at');
       const sameProperty = (c) => {
         const cs = snapOf(c.document_variables_snapshot);
         if (cs?.estimate?.id && sourceEstimateId && String(cs.estimate.id) === String(sourceEstimateId)) return true;
@@ -671,8 +671,25 @@ exports.down = async function down(knex) {
       let replacementSameProperty = false;
       for (const c of candidates) {
         if (!sameProperty(c)) continue;
-        // Signed rows are executed contracts — coverage regardless of token.
-        if (c.status === 'signed') { replacementSameProperty = true; continue; }
+        // Signed rows are executed contracts — coverage regardless of
+        // token, but only within THIS cycle: the same estimate, or a
+        // same-property signature made at/after the source request was
+        // created (its executed replacement). A historical signature from
+        // before the source existed belongs to an earlier cycle and must
+        // not keep the newer cancelled request dead through the rollback.
+        // Unprovable timestamps stay conservative (suppress).
+        if (c.status === 'signed') {
+          const cs = snapOf(c.document_variables_snapshot);
+          const cSameEstimate = !!(cs?.estimate?.id && sourceEstimateId
+            && String(cs.estimate.id) === String(sourceEstimateId));
+          const signedTs = c.signed_at ? new Date(c.signed_at)
+            : (c.created_at ? new Date(c.created_at) : null);
+          const sourceCreatedAt = source.created_at ? new Date(source.created_at) : null;
+          if (cSameEstimate || !signedTs || !sourceCreatedAt || signedTs >= sourceCreatedAt) {
+            replacementSameProperty = true;
+          }
+          continue;
+        }
         // An open candidate whose token has expired is no coverage — its
         // link 410s and the lifecycle pass will stamp it 'expired'.
         if (c.share_token_expires_at && new Date(c.share_token_expires_at) < new Date()) continue;

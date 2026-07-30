@@ -375,6 +375,16 @@ describe('isCommercialEstimate', () => {
     expect(isCommercialEstimate({}, { inputs: { propertyType: 'Single Family' } })).toBe(false);
   });
 
+  test('every persisted input generation parks (engineInputs / engineRequest.profile / enriched)', () => {
+    expect(isCommercialEstimate({}, { engineInputs: { propertyType: 'Duplex' } })).toBe(true);
+    expect(isCommercialEstimate({}, { engineInputs: { isCommercial: true } })).toBe(true);
+    expect(isCommercialEstimate({}, { engineRequest: { profile: { propertyType: 'Townhome' } } })).toBe(true);
+    expect(isCommercialEstimate({}, { engineRequest: { profile: { isCommercial: 'YES' } } })).toBe(true);
+    expect(isCommercialEstimate({}, { enriched: { propertyType: 'Condo' } })).toBe(true);
+    expect(isCommercialEstimate({}, { engineInputs: { propertyType: 'Single Family' } })).toBe(false);
+    expect(isCommercialEstimate({}, { engineRequest: { profile: { propertyType: 'Single Family' } } })).toBe(false);
+  });
+
   test('commercial termite key marks the program present so the park runs (not no_termite_program)', () => {
     const facts = collectTermiteFacts({
       result: { lineItems: [{ service: 'commercial_termite_bait', monthly: 120 }] },
