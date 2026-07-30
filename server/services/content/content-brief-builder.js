@@ -321,16 +321,20 @@ function stripFaqRequirements({ requiredSections, schemaTypes }) {
 // Canonical URL slug component per service for city-service pages.
 // pest → "pest-control" (so URL is /pest-control-bradenton-fl/)
 // lawn → "lawn-care" (NOT lawn-control — that's not a real page)
-// tree-shrub doesn't ship as a city-service slug today; surface no
-// link instead of fabricating one.
 const SERVICE_CITY_SLUG = {
   pest: 'pest-control',
   lawn: 'lawn-care',
   mosquito: 'mosquito-control',
   termite: 'termite-control',
   rodent: 'rodent-control',
-  // tree-shrub / specialty: no canonical city-service slug pattern;
-  // fall back to the service hub link only.
+  // tree-shrub DOES ship city pages — as `tree-and-shrub-care-{city}-fl`, not
+  // the `tree-shrub-care` spelling this map keys on, which is why it read as
+  // "no city-service slug" for so long. All eight PAGE_CITY_SLUGS cities
+  // return 200 (verified 2026-07-29), and the slug is already in
+  // CITY_SERVICE_LINK_RE, so these links pass the route gate. This is the real
+  // tree-shrub target now that the dead /tree-shrub-care/ hub route is gone.
+  'tree-shrub': 'tree-and-shrub-care',
+  // specialty: no canonical city-service slug pattern; hub link only.
 };
 
 // Every route here must be a REAL page. A brief's internal_links_to_add is a
@@ -350,11 +354,17 @@ const SERVICE_HUB_LINKS = {
   mosquito: ['/pest-control-services/'],
   termite: ['/termite-inspection/'],
   rodent: ['/pest-control-services/', '/pest-library/'],
-  // No hub-level tree & shrub page exists (only /{city}-tree-shrub-care/,
-  // which is not a CITY_SERVICE_LINK_RE shape). /contact/ is this vertical's
-  // conversion link and a real page; checkHubLinkPresent accepts any route in
-  // the union of this map, so the gate is satisfied without a dead link.
-  'tree-shrub': ['/contact/'],
+  // No hub-level tree & shrub page exists — and this must stay EMPTY rather
+  // than borrow a conversion route. checkHubLinkPresent builds ONE accepted set
+  // from every value in this map, so putting /contact/ here would let a
+  // supporting blog for ANY service satisfy the relevant-hub hard check with a
+  // generic contact CTA (caught by the pre-push Codex audit on this change).
+  // Conversion routes belong in SERVICE_CONVERSION_LINK only. Tree & shrub gets
+  // its real local page via SERVICE_CITY_SLUG above; a city-less tree-shrub
+  // supporting blog therefore has no hub link and will park on
+  // hub_link_present — fail-closed and visible, which is the right outcome
+  // until there's a real hub page to point at (owner call, not this change's).
+  'tree-shrub': [],
   specialty: ['/pest-control-services/'],
 };
 

@@ -279,9 +279,16 @@ describe('WORD_COUNT_TARGET map', () => {
 });
 
 describe('SERVICE_HUB_LINKS', () => {
-  test('every service maps to ≥1 hub link', () => {
+  // tree-shrub is deliberately EMPTY: there is no hub-level tree & shrub page
+  // (the bare /tree-shrub-care/ route this map used to carry 404s), and the
+  // alternatives are both worse — a dead link, or a conversion route that would
+  // weaken checkHubLinkPresent for every service. An empty list parks a
+  // city-less tree-shrub blog on hub_link_present instead, which is visible.
+  const NO_HUB_PAGE = new Set(['tree-shrub']);
+
+  test('every service with a hub page maps to ≥1 real hub link', () => {
     for (const svc of Object.keys(SERVICE_HUB_LINKS)) {
-      expect(SERVICE_HUB_LINKS[svc].length).toBeGreaterThan(0);
+      if (!NO_HUB_PAGE.has(svc)) expect(SERVICE_HUB_LINKS[svc].length).toBeGreaterThan(0);
       expect(SERVICE_HUB_LINKS[svc].every((l) => l.startsWith('/'))).toBe(true);
     }
   });
@@ -462,8 +469,25 @@ describe('_internalLinksFor conversion link', () => {
     expect(lawn).toContain('/lawn-care-venice-fl/');
 
     const trees = builder._internalLinksFor({ city: null, service: 'tree-shrub-care' }, 'supporting-blog');
-    expect(trees).toContain('/contact/');
+    expect(trees).toContain('/contact/'); // conversion link, from SERVICE_CONVERSION_LINK
     expect(trees).not.toContain('/tree-shrub-care/');
+
+    // Tree & shrub city pages use the `tree-and-shrub-care` spelling (all eight
+    // cities verified 200 on 2026-07-29) — the real replacement for the dead
+    // bare hub route.
+    const treesCity = builder._internalLinksFor({ city: 'Venice', service: 'tree-shrub' }, 'supporting-blog');
+    expect(treesCity).toContain('/tree-and-shrub-care-venice-fl/');
+  });
+
+  // /contact/ must never sit in SERVICE_HUB_LINKS: checkHubLinkPresent accepts
+  // the union of that map for EVERY service, so a conversion route there would
+  // let any supporting blog pass the relevant-hub hard check with a generic CTA.
+  test('SERVICE_HUB_LINKS contains no conversion routes', () => {
+    const { SERVICE_HUB_LINKS } = require('../services/content/content-brief-builder')._internals;
+    const hubs = new Set(Object.values(SERVICE_HUB_LINKS).flat());
+    for (const conversion of ['/contact/', '/book/', '/quote/', '/pest-control-quote/']) {
+      expect(hubs.has(conversion)).toBe(false);
+    }
   });
 
   test('non-blog page types keep their existing link shape', () => {
