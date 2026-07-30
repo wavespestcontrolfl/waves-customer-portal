@@ -43,6 +43,15 @@ function extractTemplatePlaceholders(body) {
 }
 
 function validateTemplateBody(body, variables) {
+  // Double-brace tokens are the email/newsletter syntax — in an SMS body the
+  // renderer substitutes the INNER {token} and the leftover braces then read
+  // as an unresolved placeholder, silently suppressing every send of this
+  // template. Reject at write time instead of failing at send time.
+  if (/\{\{|\}\}/.test(String(body || ''))) {
+    return {
+      error: 'SMS templates use single-brace {variable} tokens — {{double braces}} would silently block every send of this template',
+    };
+  }
   const allowed = new Set(parseTemplateVariables(variables));
   const unknown = extractTemplatePlaceholders(body).filter((key) => !allowed.has(key));
   if (!unknown.length) return null;

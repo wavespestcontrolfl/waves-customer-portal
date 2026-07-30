@@ -595,7 +595,9 @@ describe("TwilioService legacy customer SMS helpers", () => {
 
     expect(smsTemplates.getTemplate).toHaveBeenCalledWith(
       "service_complete",
-      { first_name: "Sam" },
+      // service_type + portal_url joined 2026-07-30: the seeded body needs
+      // {portal_url}, and rendering without it suppressed this path entirely.
+      { first_name: "Sam", service_type: "Pest Control", portal_url: expect.stringContaining("http") },
       { workflow: "service_complete", entity_type: "service_record", entity_id: "record-1" },
     );
     expect(sendCustomerMessage).toHaveBeenCalledWith(
