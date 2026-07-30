@@ -560,6 +560,8 @@ async function sendCampaign(sendId, opts = {}) {
     preheader: send.preview_text || undefined,
     newsletterType: send.newsletter_type || undefined,
     preferredSourcesCta: true,
+    // Web-version permalink — the Astro archive page for this issue.
+    webVersionUrl: send.slug ? `https://www.wavespestcontrol.com/newsletter/archive/${send.slug}` : undefined,
   });
 
   let accepted = 0, failed = 0;

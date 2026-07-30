@@ -338,8 +338,12 @@ function glassFinePrint(T, extra = '') {
 
 // The complete universal Waves footer. Wrappers call this helper instead of
 // independently composing app links, company details, social links, and logo.
-function universalWavesFooterHtml(T) {
-  return glassFinePrint(T, appFooterHtml(T));
+function universalWavesFooterHtml(T, { appPromo = true } = {}) {
+  // appPromo:false → the newsletter lane. The customer-app pitch has no
+  // relevance to a general local-newsletter subscriber (owner-accepted
+  // critique 2026-07-29); it stays in the transactional/service wrappers,
+  // where every recipient is a customer.
+  return glassFinePrint(T, appPromo ? appFooterHtml(T) : '');
 }
 
 // Web-page variant for server-rendered customer pages (newsletter confirm /
@@ -447,11 +451,16 @@ function glassServiceEmail({ preheader, body, footerNote } = {}) {
   return glassPage(T, { preheader, contentHtml, msoWidth: 620 });
 }
 
-function glassNewsletter({ body, unsubscribeUrl, preheader, footerNote, preferredSourcesCta, newsletterType } = {}) {
+function glassNewsletter({ body, unsubscribeUrl, preheader, footerNote, preferredSourcesCta, newsletterType, webVersionUrl } = {}) {
   const T = GLASS_THEME;
   const identity = newsletterIdentity(newsletterType);
   const unsubscribeLine = unsubscribeUrl
     ? `<div style="font-family:${T.font};font-size:14px;line-height:1.6;color:${T.muted};text-align:center;"><a href="${unsubscribeUrl}" style="color:${T.muted};text-decoration:underline;">Unsubscribe</a></div>`
+    : '';
+  // Real web-version permalink (the Astro archive page) — the honest
+  // "share the link" affordance the old social-icon share block implied.
+  const webVersionLine = webVersionUrl
+    ? `<div style="margin-bottom:10px;font-family:${T.font};font-size:14px;line-height:1.6;color:${T.muted};text-align:center;"><a href="${webVersionUrl}" style="color:${T.link};text-decoration:underline;">Read this issue on the web</a></div>`
     : '';
   const preferredSourcesLine = preferredSourcesCta
     ? `<div style="margin-bottom:10px;font-family:${T.font};font-size:14px;line-height:1.6;color:${T.body};text-align:center;">
@@ -466,7 +475,7 @@ function glassNewsletter({ body, unsubscribeUrl, preheader, footerNote, preferre
           <h1 style="margin:8px 0 0 0;font-family:${T.headingFont};font-size:20px;line-height:1.2;letter-spacing:-0.02em;color:${T.ink};font-weight:700;">${identity.title}</h1>${identity.tagline ? `
           <p style="margin:6px 0 0 0;font-family:${T.font};font-size:15px;line-height:1.5;color:${T.muted};">${identity.tagline}</p>` : ''}`;
 
-  const footerExtras = `${preferredSourcesLine}${unsubscribeLine}${footerNote
+  const footerExtras = `${webVersionLine}${preferredSourcesLine}${unsubscribeLine}${footerNote
     ? `<div style="margin-top:8px;font-family:${T.font};font-size:14px;color:${T.muted};text-align:center;">${footerNote}</div>`
     : ''}`;
 
@@ -479,7 +488,7 @@ function glassNewsletter({ body, unsubscribeUrl, preheader, footerNote, preferre
         </td></tr>
         ${footerExtras ? `<tr><td align="center" style="padding:24px 4px 0 4px;">${footerExtras}</td></tr>` : ''}
         <tr><td align="center" style="padding:16px 4px 0 4px;">
-          ${universalWavesFooterHtml(T)}
+          ${universalWavesFooterHtml(T, { appPromo: false })}
         </td></tr>
       </table>`;
 
@@ -557,8 +566,8 @@ function wrapServiceEmail({ preheader, body, footerNote } = {}) {
  *                                  // generic publication identity.
  * }} opts
  */
-function wrapNewsletter({ body, unsubscribeUrl, preheader, footerNote, preferredSourcesCta, newsletterType } = {}) {
-  return glassNewsletter({ body, unsubscribeUrl, preheader, footerNote, preferredSourcesCta, newsletterType });
+function wrapNewsletter({ body, unsubscribeUrl, preheader, footerNote, preferredSourcesCta, newsletterType, webVersionUrl } = {}) {
+  return glassNewsletter({ body, unsubscribeUrl, preheader, footerNote, preferredSourcesCta, newsletterType, webVersionUrl });
 }
 
 /**

@@ -1611,7 +1611,7 @@ describe('newsletter assembly — Beehiiv-parity event rendering', () => {
     expect(html).not.toContain('{{evclick:');
   });
 
-  test('thumbnail hardening: GIF-shaped urls reject (suffix/param/host); still images get the two-axis cap + MSO branch', async () => {
+  test('image-first visual rule: GIF-shaped urls reject → GIF fallback; still art replaces the GIF and carries the caption', async () => {
     for (const bad of [
       'https://cdn.example.com/loop.gif',
       'https://cdn.example.com/image?file=promo.gif',
@@ -1624,10 +1624,14 @@ describe('newsletter assembly — Beehiiv-parity event rendering', () => {
       });
       expect(html).not.toContain(bad.slice(24));
     }
-    const jpg = await assembleBeehiivNewsletter({ selectedSubject: 'Test', events: [{ ...baseEvent }] });
-    expect(jpg).toMatch(/<img src="https:\/\/cdn\.example\.com\/fin\.jpg"[^>]*max-height:220px/);
-    // The whole thumbnail block is standards-clients-only: Outlook's Word
-    // engine cannot aspect-fit a bounded box, so no MSO-visible variant.
+    const jpg = await assembleBeehiivNewsletter({ selectedSubject: 'Test', events: [{ ...baseEvent, gifCaption: 'Mood: fiddle chaos.' }] });
+    expect(jpg).toMatch(/<img src="https:\/\/cdn\.example\.com\/fin\.jpg"[^>]*max-height:280px/);
+    // Real art REPLACES the reaction GIF (owner direction 2026-07-29) and
+    // the caption-genre punchline rides under it.
+    expect(jpg).not.toContain('giphy');
+    expect(jpg).toContain('Mood: fiddle chaos.');
+    // Standards-clients-only: Outlook's Word engine cannot aspect-fit a
+    // bounded box, so no MSO-visible variant.
     expect(jpg).toMatch(/<!--\[if !mso\]><!--><div[^>]*>\s*<img src="https:\/\/cdn\.example\.com\/fin\.jpg"/);
     expect(jpg).not.toMatch(/\[if mso\]><img src="https:\/\/cdn\.example\.com\/fin\.jpg"/);
   });
@@ -1661,6 +1665,91 @@ describe('newsletter assembly — Beehiiv-parity event rendering', () => {
       ps: 'P.S.',
     });
     expect(labelOnly).not.toContain('<strong>P.S.</strong>');
+  });
+});
+
+describe('tiered event treatment (owner direction 2026-07-29)', () => {
+  const { assembleBeehiivNewsletter, buildFlagshipTextBody } = require('../services/newsletter-draft');
+  const mk = (n, over = {}) => ({
+    eventId: `a000000${n}-0000-4000-8000-00000000000${n}`,
+    emoji: ['🎸', '🎭', '🏈', '🎡', '🍫'][n],
+    title: `Curiosity Title ${n}`,
+    sourceTitle: `Official Event ${n}`,
+    description: `Official Event ${n} is the move this weekend.`,
+    dateStr: 'Friday, June 12',
+    timeStr: '8:00 PM',
+    location: `Venue ${n}, Sarasota`,
+    eventUrl: `https://example.com/ev${n}`,
+    imageUrl: null,
+    isFree: false,
+    priceText: n === 1 ? 'From $25' : null,
+    labels: n === 2 ? ['Family', 'Worth the drive'] : [],
+    highlights: ['Big stage', 'Bigger snacks'],
+    scoopLabel: "Here's the scoop:",
+    proTip: 'Get there before 8 for a table.',
+    closingLine: 'A **kicker** line.',
+    linkText: 'Grab your spot',
+    ...over,
+  });
+  const draft = () => ({ selectedSubject: 'Test', events: [0, 1, 2, 3, 4].map((n) => mk(n)) });
+
+  test('headliner keeps the full anatomy; featured cards drop bullets/pro-tip/kicker; shortlist groups compact entries', async () => {
+    const html = await assembleBeehiivNewsletter(draft());
+    // Hero (event 0) renders scoop bullets + pro tip + kicker.
+    expect(html).toContain("Here&#39;s the scoop:");
+    expect(html).toContain('<strong>Pro tip:</strong>');
+    expect(html).toContain('kicker');
+    // Only ONE of each — featured/shortlist events never render them.
+    expect(html.match(/Pro tip:/g)).toHaveLength(1);
+    expect(html.match(/Here&#39;s the scoop:/g)).toHaveLength(1);
+    // Featured events still get full h2 headings; shortlist gets one
+    // group heading and compact entries led by the REAL event name.
+    expect(html).toContain('The Weekend Shortlist');
+    expect(html.match(/The Weekend Shortlist/g)).toHaveLength(1);
+    expect(html).toContain('<strong>Official Event 3</strong>');
+    expect(html).toContain('<strong>Official Event 4</strong>');
+  });
+
+  test('DB-locked price renders (FREE wins over priceText); labels chip line renders', async () => {
+    const html = await assembleBeehiivNewsletter(draft());
+    expect(html).toContain('🎟️ From $25');
+    expect(html).toContain('🏷️ <em>Family · Worth the drive</em>');
+    const free = await assembleBeehiivNewsletter({ selectedSubject: 'T', events: [mk(1, { isFree: true })] });
+    expect(free).toContain('🎟️ <strong>FREE</strong>');
+    expect(free).not.toContain('From $25');
+  });
+
+  test('TOC is a collapsible details block: count summary + real names first, witty second', async () => {
+    const html = await assembleBeehiivNewsletter(draft());
+    expect(html).toContain('<details>');
+    expect(html).toContain('5 weekend picks · North Port to Tampa');
+    expect(html).toMatch(/<strong>Official Event 0<\/strong><\/a> <em[^>]*>— Curiosity Title 0<\/em>/);
+  });
+
+  test('share banner is forward-only (no social profile links); dividers are not links', async () => {
+    const html = await assembleBeehiivNewsletter(draft());
+    expect(html).toContain('Forward them this email');
+    expect(html).not.toContain('facebook.com/wavespestcontrol');
+    expect(html).not.toMatch(/<a href="https:\/\/www\.wavespestcontrol\.com\/"[^>]*>\s*<img src="[^"]*divider/);
+  });
+
+  test('buildFlagshipTextBody: structured sections with names, facts, full urls, and the feedback text token', () => {
+    const text = buildFlagshipTextBody({
+      greeting: 'Hey there!',
+      introText: 'Big weekend **ahead**.',
+      events: [mk(1), mk(3, { isFree: true })],
+      homeownerMinute: 'Check your _screens_.',
+      closingText: 'Go outside.',
+      signoff: '— The Waves Team',
+    });
+    expect(text).toContain('== Official Event 1 ==');
+    expect(text).toContain('Friday, June 12 at 8:00 PM | Venue 1, Sarasota | From $25');
+    expect(text).toContain('Tickets & info: https://example.com/ev1');
+    expect(text).toContain('FREE');
+    expect(text).toContain('== Homeowner Minute ==');
+    expect(text).toContain('Big weekend ahead.');
+    expect(text).not.toContain('**');
+    expect(text).toContain('{{feedback-text}}');
   });
 });
 
