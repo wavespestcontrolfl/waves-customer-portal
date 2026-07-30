@@ -11500,13 +11500,26 @@ export function CompletionPanel({
                 inset: 0,
                 background: "rgba(250,250,250,0.96)",
                 display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                zIndex: 10,
                 flexDirection: "column",
+                // Scrollable, with margin-auto centering on the inner wrapper
+                // (not justifyContent center — centered flex overflow clips
+                // the top unreachably on short/landscape viewports when the
+                // recap card or follow-up CTAs make the content tall).
+                overflowY: "auto",
+                WebkitOverflowScrolling: "touch",
+                zIndex: 10,
                 padding: 24,
               }}
             >
+              <div
+                style={{
+                  margin: "auto",
+                  display: "flex",
+                  flexDirection: "column",
+                  alignItems: "center",
+                  width: "100%",
+                }}
+              >
               {" "}
               <div
                 style={{
@@ -11618,6 +11631,7 @@ export function CompletionPanel({
                   </button>
                 </div>
               )}
+              </div>
             </div>
           )}
           {/* Sticky top bar — Square pattern: ← · centered title · ⋯ */}
