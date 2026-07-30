@@ -416,9 +416,13 @@ const WORKER_SAFETY_RE = /\b(?:technicians?|applicators?|staff|crew|team)\b[^.!?
 function complianceOverclaims(text) {
   const issues = [];
   const sentences = String(text || '').split(/[.!?\n]+/);
+  // The technician-confirms framing may legitimately sit in an ADJACENT
+  // sentence ("… safe once dry. Your technician confirms timing.") — test
+  // the whole copy once; the idiom strip itself stays per-sentence.
+  const idiomAllowed = TECH_CONFIRM_CONTEXT_RE.test(String(text || ''));
   for (const sentence of sentences) {
     if (!sentence.trim()) continue;
-    const safetyScope = (TECH_CONFIRM_CONTEXT_RE.test(sentence)
+    const safetyScope = (idiomAllowed
       ? sentence.replace(SAFE_DRY_IDIOM_RE, '')
       : sentence)
       .replace(SAFE_FROM_PEST_RE, '')
@@ -1798,7 +1802,15 @@ const SocialMediaService = {
     let metaWantsImage = false;
     let gbpWantsImage = false;
     let linkedinWantsHero = false;
-    if (!generatedImageUrl && !SOCIAL_FLAGS.dryRun && hasImageHosting) {
+    // Pre-image semantic gate: every platform's copy derives from
+    // title+description, so a definitive violation in the seed dooms the
+    // whole run — never spend paid image generation/card renders on it
+    // (scheduler/RSS retries would otherwise repeat the spend each cycle).
+    // The per-platform judges below still do the actual rejecting, with
+    // properly-skipped result entries; this only suppresses image work.
+    const seedVerdict = await judgeCopyOnce([title, description].filter(Boolean).join('\n'));
+    const seedRejected = seedVerdict.ok && !seedVerdict.compliant;
+    if (!generatedImageUrl && !SOCIAL_FLAGS.dryRun && hasImageHosting && !seedRejected) {
       // A requested platform must actually be able to consume the image.
       // Instagram is a sync env check. GBP is checked lazily (only when
       // Instagram can't already consume) and must have at least one location

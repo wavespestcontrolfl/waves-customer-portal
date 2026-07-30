@@ -107,6 +107,8 @@ const CLEAN = [
   // #3066 r1+r2: punctuated idiom stays exempt WITH technician framing.
   'Our treatments are safe—once dry; your technician confirms timing',
   'Our treatments are safe, once dry — tech confirms when',
+  // r4: the confirmation may live in the adjacent sentence.
+  'Our treatments are safe once dry. Your technician confirms timing.',
   'Enter within 24 hours for a chance to win',
   'Technicians wear protective equipment to stay safe while applying pesticides',
 ];
