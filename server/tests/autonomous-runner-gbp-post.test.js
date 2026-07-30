@@ -5,6 +5,9 @@
 
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/social-compliance-judge', () => ({
+  judgeSocialCopy: jest.fn(async () => ({ ok: true, compliant: true, violations: [] })),
+}));
 jest.mock('../services/social-media', () => ({
   generateContent: jest.fn(),
   validateContent: jest.fn(),
@@ -19,6 +22,7 @@ jest.mock('../services/social-media', () => ({
 
 const db = require('../models/db');
 const social = require('../services/social-media');
+const complianceJudge = require('../services/social-compliance-judge');
 const runner = require('../services/content/autonomous-runner');
 const { gbpLocationIdForCity } = runner._internals;
 
@@ -323,6 +327,24 @@ describe('_handleGbpPostAction', () => {
     expect(result.claim).toBe('complete');
     expect(result.patch.outcome).toBe('completed_published');
     expect(social.postToGBP).toHaveBeenCalledWith('sarasota', expect.any(String), expect.any(String), null, { alreadyBranded: true });
+  });
+
+  test('compliance-judge violation parks for review; judge outage fails open', async () => {
+    process.env.AUTO_PUBLISH_GBP_POST = 'true';
+    mockDb();
+    complianceJudge.judgeSocialCopy.mockResolvedValueOnce({ ok: true, compliant: false, violations: ['blanket safety claim'] });
+    const parked = await runner._handleGbpPostAction(baseBrief(), { shadow_mode: false });
+    expect(parked.claim).toBe('pending');
+    expect(parked.patch.skip_reason).toBe('gbp_post_compliance_judge_failed');
+    expect(parked.patch.reviewer_notes).toContain('blanket safety claim');
+    expect(social.postToGBP).not.toHaveBeenCalled();
+
+    // Unavailable judge (ok:false) must NOT block the lane.
+    mockDb();
+    complianceJudge.judgeSocialCopy.mockResolvedValueOnce({ ok: false, reason: 'providers down' });
+    const posted = await runner._handleGbpPostAction(baseBrief(), { shadow_mode: false });
+    expect(posted.claim).toBe('complete');
+    expect(social.postToGBP).toHaveBeenCalled();
   });
 
   test('validation failure parks with the rejected copy in notes', async () => {

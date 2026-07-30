@@ -380,7 +380,73 @@ async function assertSocialPublishingReady(platform, locationId) {
 
 // ── Content Validation ──
 const PRICING_PATTERNS = /\$\d+(?:\.\d{2})?(?:\s*\/\s*(?:mo(?:nth)?|yr|year|visit|quarter))?/i;
-const SAFETY_OVERCLAIMS = /\b(?:guarante(?:e[ds]?|ing)|100\s*%\s*(?:effective|safe|eliminat)|completely\s+safe|risk[\s-]*free|no\s+side\s+effects)\b/i;
+// Includes the compliance-language class (AGENTS.md): no pesticide is ever
+// blanket-"safe" (pet-safe / family-safe / safe for kids), and it's
+// "EPA-registered", never "EPA-approved".
+const SAFETY_OVERCLAIMS = /\b(?:guarante(?:e[ds]?|ing)|100\s*%\s*(?:effective|safe|eliminat)|completely\s+safe|risk[\s-]*free|no\s+side\s+effects|(?:pet|kid|child|family)[\s-]*(?:and[\s-]*(?:pet|kid|child|family)[\s-]*)?safe|safe\s+(?:for|around)\s+(?:your\s+|the\s+|our\s+)?(?:pets?|kids?|children|famil(?:y|ies))|EPA[\s-]*approved|approved\s+by\s+(?:the\s+)?EPA)\b/i;
+// Word-order enumeration of banned claims proved unbounded across review
+// rounds (#3059 r2-r9), so the timing and product-safety classes are caught
+// by CLAUSE-LEVEL CO-OCCURRENCE instead. These constants are the vocabulary.
+const TIMING_DURATION_RE = /\b(?:\d+\s*(?:[-–]\s*(?:\d+\s*)?)?(?:minutes?|mins?|hours?|hrs?)|(?:an?|one|two)[\s-]+hours?|half[\s-]+(?:an[\s-]+)?hour)\b/i;
+const REENTRY_CONTEXT_RE = /\bre-?ent\w*|\b(?:dry(?:ing|s)?|dries)\b|\bsafe(?:ly|ty)?\b|\benter(?:ing)?\b[^.!?\n]{0,30}\b(?:treated|areas?|lawn|yard|home|house)\b|\b(?:treated|areas?|lawn|yard|home|house)\b[^.!?\n]{0,30}\benter(?:ing)?\b|\b(?:off|inside|indoors|away|out\s+of)\b[^.!?\n]*\b(?:treated|lawn|grass|yard|areas?|surfaces?)\b|\b(?:treated|lawn|grass|yard)\b[^.!?\n]*\b(?:off|inside|indoors|away|avoid\w*|back)\b|\b(?:pets?|kids?|children|famil\w+)\b[^.!?\n]*\b(?:off|inside|indoors|away|back|out(?:side)?)\b|\b(?:avoid\w*|no\s+entry)\b[^.!?\n]*\b(?:treated|areas?|lawn|yard)\b|\bwalk\w*\b[^.!?\n]{0,30}\b(?:treated|lawn|grass|yard)\b|\b(?:you|your\s+family|residents?|occupants?|everyone)\b[^.!?\n]{0,20}\breturn\w*\b|^\s*return(?:ing)?\b/i;
+// Agronomic aftercare timing (mowing/watering windows) is legitimate copy,
+// and cadence copy uses days — only minute/hour figures are the banned class.
+const AGRONOMIC_EXEMPT_RE = /\b(?:mow\w*|water\w*|irrigat\w*|fertiliz\w*|seed\w*|overseed\w*|aerat\w*|rain)\b/i;
+// Product-safety co-occurrence: "safe(ly/ty)" said about products/
+// applications in ANY word order (predicate forms included). Two carve-outs
+// are stripped BEFORE testing: the approved idiom ("safe once/until/when
+// dry") and protective framing ("safe from termites …" — safety from the
+// PEST, not the pesticide), so "keep your home safe from termites with
+// professional pest control" stays legal.
+const SAFETY_WORD_RE = /\bsafe(?:ly|ty)?\b/i;
+const PRODUCT_CONTEXT_RE = /\b(?:pesticides?|products?|treatments?|sprays?(?:ing)?|chemicals?|applications?|pest\s+control|exterminat\w*)\b/i;
+// "once/when dry" only — "safe UNTIL dry" literally claims the treatment is
+// safe while WET (the opposite meaning) and is never exempt.
+const SAFE_DRY_IDIOM_RE = /\bsafe\s*[—–,-]?\s*(?:once|when)\s+(?:completely\s+|fully\s+)?dry\b/gi;
+// The idiom is only approved WITH its technician-CONFIRMS-timing framing —
+// bare "our treatments are safe once dry" is still a product-safety claim,
+// and a mere technician MENTION ("our technician applied…") doesn't count:
+// the sentence needs an actual confirmation ("technician confirms/will let
+// you know", "confirms timing").
+const TECH_CONFIRM_CONTEXT_RE = /\btech(?:nician)?s?\b[^.!?\n]{0,40}\b(?:confirm\w*|advise\w*|tells?|will\s+(?:tell|let\s+you\s+know))|\bconfirm\w*[^.!?\n]{0,25}\btiming\b|\btiming\b[^.!?\n]{0,30}\bconfirm/i;
+const SAFE_FROM_PEST_RE = /\bsafe(?:ly|ty)?\s+from\s+[\w'-]+(?:\s+(?:and|or)\s+[\w'-]+)?/gi;
+// Worker-safety mentions ("technicians ... stay safe while applying") are
+// about the crew's PPE, not a product claim — stripped before testing.
+const WORKER_SAFETY_RE = /\b(?:technicians?|applicators?|staff|crew|team)\b[^.!?\n]*\b(?:stay(?:ing)?|keep(?:ing)?|remain(?:ing)?|be)\s+safe(?:ly)?\b/gi;
+
+// Clause-level compliance check — returns the violated-rule messages.
+function complianceOverclaims(text) {
+  const issues = [];
+  const sentences = String(text || '').split(/[.!?\n]+/);
+  // The technician-confirms framing may legitimately sit in an ADJACENT
+  // sentence ("… safe once dry. Your technician confirms timing.") — test
+  // the whole copy once; the idiom strip itself stays per-sentence.
+  const idiomAllowed = TECH_CONFIRM_CONTEXT_RE.test(String(text || ''));
+  for (const sentence of sentences) {
+    if (!sentence.trim()) continue;
+    const safetyScope = (idiomAllowed
+      ? sentence.replace(SAFE_DRY_IDIOM_RE, '')
+      : sentence)
+      .replace(SAFE_FROM_PEST_RE, '')
+      .replace(WORKER_SAFETY_RE, '');
+    if (SAFETY_WORD_RE.test(safetyScope) && PRODUCT_CONTEXT_RE.test(safetyScope)) {
+      issues.push('Contains a product-safety claim — never call a pesticide/treatment "safe" (idiom: "safe once dry")');
+    }
+    // The agronomic exemption applies per CLAUSE, not per sentence — "keep
+    // pets off treated areas for 30 minutes, and avoid watering for 24
+    // hours" must still flag on its first clause.
+    // Coordinating conjunctions split clauses too — "… for 30 minutes and
+    // avoid watering …" must not let the aftercare half exempt the first.
+    for (const clause of sentence.split(/[,;]+|\s+(?:and|but|while|then)\s+/i)) {
+      if (TIMING_DURATION_RE.test(clause) && REENTRY_CONTEXT_RE.test(clause)
+        && !AGRONOMIC_EXEMPT_RE.test(clause)) {
+        issues.push('Contains fixed drying/re-entry time — timing is technician-confirmed ("safe once dry")');
+        break;
+      }
+    }
+  }
+  return issues;
+}
 const PHONE_PATTERN = /(?:\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}|\+1\d{10})/g;
 
 const KNOWN_PHONES = new Set();
@@ -405,6 +471,9 @@ function validateContent(text, platform) {
   }
   if (SAFETY_OVERCLAIMS.test(text)) {
     issues.push('Contains safety overclaim (guaranteed, 100% effective, etc.)');
+  }
+  for (const issue of new Set(complianceOverclaims(text))) {
+    issues.push(issue);
   }
 
   const phones = text.match(PHONE_PATTERN) || [];
@@ -1705,6 +1774,14 @@ const SocialMediaService = {
     // branded; heroes/photos/unknown caller images get watermarked in
     // postToGBP unless the caller vouches via gbpImageBranded.
     let resolvedGbpBranded = resolvedGbpImageUrl ? !!gbpImageBranded : false;
+    // Compliance-judge memo for THIS publish call: identical copy (e.g. one
+    // GBP body fanned out to 4 locations) is judged once.
+    const _judgeMemo = new Map();
+    const judgeCopyOnce = (copy) => {
+      const key = String(copy || '');
+      if (!_judgeMemo.has(key)) _judgeMemo.set(key, require('./social-compliance-judge').judgeSocialCopy(key));
+      return _judgeMemo.get(key);
+    };
     // SOCIAL_MEDIA_CDN_DOMAIN is required too: uploadImageToS3 returns null
     // without it (private S3 URLs aren't publicly fetchable), so generating
     // an image without a CDN just burns credits and discards the result.
@@ -1727,7 +1804,21 @@ const SocialMediaService = {
     let metaWantsImage = false;
     let gbpWantsImage = false;
     let linkedinWantsHero = false;
-    if (!generatedImageUrl && !SOCIAL_FLAGS.dryRun && hasImageHosting) {
+    // Pre-image semantic gate: every platform's copy derives from
+    // title+description, so a definitive violation in the seed dooms the
+    // whole run — never spend paid image generation/card renders on it
+    // (scheduler/RSS retries would otherwise repeat the spend each cycle).
+    // The per-platform judges below still do the actual rejecting, with
+    // properly-skipped result entries; this only suppresses image work.
+    // Only when copy will be GENERATED from the seed — caller-supplied
+    // customContent captions are judged on their own text and may be clean
+    // even when the internal title/description isn't.
+    let seedRejected = false;
+    if (!customContent) {
+      const seedVerdict = await judgeCopyOnce([title, description].filter(Boolean).join('\n'));
+      seedRejected = seedVerdict.ok && !seedVerdict.compliant;
+    }
+    if (!generatedImageUrl && !SOCIAL_FLAGS.dryRun && hasImageHosting && !seedRejected) {
       // A requested platform must actually be able to consume the image.
       // Instagram is a sync env check. GBP is checked lazily (only when
       // Instagram can't already consume) and must have at least one location
@@ -1883,6 +1974,32 @@ const SocialMediaService = {
           platformResults.push({ platform: p.key, success: false, error: `Validation: ${validation.issues[0]}`, validationIssues: validation.issues });
           continue;
         }
+        // Semantic second pass (owner ruling 2026-07-30): the deterministic
+        // checks above are the fast first-pass; the cross-provider judge
+        // catches phrasings no regex enumerates. FAIL-OPEN — an unavailable
+        // judge (ok:false) never blocks the lane; a definitive non-compliant
+        // verdict skips this platform exactly like a validation failure.
+        const verdict = await judgeCopyOnce(content);
+        // LinkedIn additionally forwards title/description as the article
+        // card metadata — judge that surface too (memoized; identical to the
+        // seed string, so generated-copy runs reuse the seed verdict).
+        const linkedinMetaVerdict = p.key === 'linkedin'
+          ? await judgeCopyOnce([title, description].filter(Boolean).join('\n'))
+          : null;
+        if (linkedinMetaVerdict && linkedinMetaVerdict.ok && !linkedinMetaVerdict.compliant) {
+          logger.warn(`[social] Compliance judge rejected linkedin article metadata: ${linkedinMetaVerdict.violations.join('; ')}`);
+          platformResults.push({ platform: 'linkedin', success: false, skipped: true, error: `Compliance judge: ${linkedinMetaVerdict.violations[0] || 'violation'}` });
+          continue;
+        }
+        if (verdict.ok && !verdict.compliant) {
+          const why = verdict.violations.join('; ') || 'compliance violation';
+          logger.warn(`[social] Compliance judge rejected ${p.key} copy: ${why}`);
+          // skipped: a judge rejection is a content decision, not a platform
+          // attempt — it must not feed the consecutive-failure credential
+          // alerts (platformOutcomeForPost ignores skipped entries).
+          platformResults.push({ platform: p.key, success: false, skipped: true, error: `Compliance judge: ${verdict.violations[0] || 'violation'}`, validationIssues: verdict.violations });
+          continue;
+        }
 
         if (SOCIAL_FLAGS.dryRun) {
           logger.info(`[social] DRY RUN — ${p.key}: ${content.substring(0, 120)}...`);
@@ -1955,6 +2072,16 @@ const SocialMediaService = {
                 // here would keep the caption AND the URL — over-limit).
               } else if (content.length + suffix.length > igLimit) {
                 igCaption = `${content.slice(0, igLimit - suffix.length - 1).trimEnd()}…${suffix}`;
+                // The trim can amputate load-bearing framing (e.g. the
+                // technician-confirms-timing tail that legalizes the dry
+                // idiom) — re-judge the FINAL caption; a definitive
+                // violation posts nothing to Instagram.
+                const trimmedVerdict = await judgeCopyOnce(igCaption);
+                if (trimmedVerdict.ok && !trimmedVerdict.compliant) {
+                  logger.warn(`[social] Compliance judge rejected trimmed Instagram caption: ${trimmedVerdict.violations.join('; ')}`);
+                  platformResults.push({ platform: 'instagram', success: false, skipped: true, error: `Compliance judge: ${trimmedVerdict.violations[0] || 'violation'}` });
+                  continue;
+                }
               } else {
                 igCaption = `${content}${suffix}`;
               }
@@ -2039,6 +2166,15 @@ const SocialMediaService = {
         if (!gbpValidation.valid) {
           logger.warn(`[social] GBP content validation failed for ${loc.name}: ${gbpValidation.issues.join('; ')}`);
           platformResults.push({ platform: 'gbp', location: loc.id, success: false, error: `Validation: ${gbpValidation.issues[0]}` });
+          continue;
+        }
+        // Semantic second pass — same contract as the platforms loop above.
+        // judgeCopyOnce memoizes per content string, so a 4-location fan-out
+        // with shared copy judges once.
+        const gbpVerdict = await judgeCopyOnce(gbpContent);
+        if (gbpVerdict.ok && !gbpVerdict.compliant) {
+          logger.warn(`[social] Compliance judge rejected GBP copy for ${loc.name}: ${gbpVerdict.violations.join('; ')}`);
+          platformResults.push({ platform: 'gbp', location: loc.id, success: false, skipped: true, error: `Compliance judge: ${gbpVerdict.violations[0] || 'violation'}` });
           continue;
         }
 
@@ -2160,7 +2296,7 @@ const SocialMediaService = {
   /**
    * Post to a single platform (from admin UI).
    */
-  async postToSingle(platform, { title, description, link, content, imageUrl, locationId, mediaFallback = true }) {
+  async postToSingle(platform, { title, description, link, content, imageUrl, locationId, mediaFallback = true, complianceJudged = false }) {
     if (!SOCIAL_FLAGS.automationEnabled) {
       return { platform, success: false, error: 'Automation is disabled' };
     }
@@ -2178,6 +2314,20 @@ const SocialMediaService = {
     const validation = validateContent(text, platform);
     if (!validation.valid) {
       return { platform, success: false, error: `Validation: ${validation.issues[0]}`, validationIssues: validation.issues };
+    }
+    // Semantic second pass (owner ruling 2026-07-30) — postToSingle serves
+    // the tech no-admin-queue flow, which must not bypass the judge. A
+    // rejection is skipped (content decision, not a platform failure).
+    // Callers that already judged this exact copy PRE-claim (tech-social
+    // /publish) pass complianceJudged:true — a second nondeterministic
+    // verdict after the claim/photo-upload would recreate the dead-end this
+    // preflight exists to prevent.
+    const singleVerdict = complianceJudged
+      ? { ok: true, compliant: true, violations: [] }
+      : await require('./social-compliance-judge').judgeSocialCopy(text);
+    if (singleVerdict.ok && !singleVerdict.compliant) {
+      logger.warn(`[social] Compliance judge rejected ${platform} copy: ${singleVerdict.violations.join('; ')}`);
+      return { platform, success: false, skipped: true, error: `Compliance judge: ${singleVerdict.violations[0] || 'violation'}` };
     }
 
     if (SOCIAL_FLAGS.dryRun) {

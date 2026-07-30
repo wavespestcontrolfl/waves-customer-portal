@@ -695,9 +695,35 @@ const ContentScheduler = {
           customContent,
         });
 
+        const complianceRejected = !result?.dryRun && !result?.success
+          && Array.isArray(result?.platforms)
+          && result.platforms.some((e) => String(e?.error || '').startsWith('Compliance judge'));
         if (result?.dryRun) {
           await db('social_media_posts').where('id', social.id).update({ publish_status: 'dry_run', status: 'dry_run' });
           logger.info(`[content-scheduler] Dry-run social: "${social.title}" — marked dry_run`);
+        } else if (complianceRejected) {
+          // Exception-based handling: a judge-rejected scheduled post PARKS
+          // for review instead of being silently consumed as "published"
+          // (nothing actually posted). The status change stops the retry
+          // loop; the notification surfaces it.
+          const reasons = result.platforms
+            .map((e) => e?.error).filter((e) => String(e || '').startsWith('Compliance judge'));
+          await db('social_media_posts').where('id', social.id).update({
+            publish_status: 'compliance_rejected',
+            status: 'compliance_rejected',
+          });
+          try {
+            await db('notifications').insert({
+              recipient_type: 'admin',
+              category: 'social_compliance_rejected',
+              title: 'Scheduled social post rejected by compliance judge',
+              body: `"${String(social.title || '').slice(0, 120)}" was not published: ${[...new Set(reasons)].join('; ').slice(0, 400)}. Edit the copy and reschedule from Social Studio.`,
+              created_at: new Date(),
+            });
+          } catch (err) {
+            logger.error(`[content-scheduler] compliance-rejection notification failed: ${err.message}`);
+          }
+          logger.warn(`[content-scheduler] Compliance judge rejected scheduled social: "${social.title}" — parked for review`);
         } else {
           await db('social_media_posts').where('id', social.id).update({
             publish_status: 'published',
