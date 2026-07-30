@@ -334,27 +334,6 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
         resolved_at: now,
         updated_at: now,
       });
-    // Resume the HELD first-touch sends (2026-07-30): the call pipeline
-    // holds the new_lead drip AND the newsletter DOI while an email
-    // read-back card is open; the operator's correction is a release point.
-    // The shared helper re-checks consent (do-not-contact, suppressions)
-    // and dedupes via enrollCustomer — a no-op for normally-enrolled
-    // customers. (Triage-inbox resolves without an email edit release via
-    // the same helper from admin-triage.)
-    if (counts.reviewCards > 0) {
-      try {
-        const { resumeHeldFirstTouch } = require('./lead-first-touch-resume');
-        // deferNewsletter: this runs inside the caller's edit transaction —
-        // the DOI (an unrollbackable send) executes post-commit via
-        // resumeHeldNewsletterPostCommit, same contract as
-        // pendingConfirmation below.
-        const resume = await resumeHeldFirstTouch({ customerId, email: newEmail, dbh: conn, source: 'email_corrected', deferNewsletter: true });
-        if (resume?.enrolled) counts.heldDripResumed = 1;
-        if (resume?.newsletterResume) heldNewsletterResume = resume.newsletterResume;
-      } catch (resumeErr) {
-        logger.warn(`[email-fanout] held-drip resume failed for customer ${customerId}: ${resumeErr.message}`);
-      }
-    }
     for (const callId of [...new Set(openItems.map((i) => i.call_log_id).filter(Boolean))]) {
       const stillOpen = await conn('triage_items')
         .where({ call_log_id: callId })
@@ -367,20 +346,54 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
     }
   }
 
+  // Resume the HELD first-touch sends (2026-07-30): the call pipeline holds
+  // the new_lead drip AND the newsletter DOI while an email read-back card
+  // is live; the operator's correction is a release point. NOT gated on a
+  // card still being open — a deny verdict (wrong name) resolves the email
+  // card before the correction happens, and the ledger row, not the card,
+  // carries the pending state (Codex #3084 r8). The shared helper re-checks
+  // consent (do-not-contact, suppressions), dedupes via enrollCustomer, and
+  // no-ops for customers with no pending hold.
+  try {
+    const { resumeHeldFirstTouch } = require('./lead-first-touch-resume');
+    // deferNewsletter: this runs inside the caller's edit transaction — the
+    // DOI (an unrollbackable send) executes post-commit via
+    // resumeHeldNewsletterPostCommit, same contract as pendingConfirmation.
+    const resume = await resumeHeldFirstTouch({ customerId, email: newEmail, dbh: conn, source: 'email_corrected', deferNewsletter: true });
+    if (resume?.enrolled) counts.heldDripResumed = 1;
+    if (resume?.newsletterResume) heldNewsletterResume = resume.newsletterResume;
+  } catch (resumeErr) {
+    logger.warn(`[email-fanout] held-drip resume failed for customer ${customerId}: ${resumeErr.message}`);
+  }
+
   if (Object.values(counts).some(Boolean)) {
     // Counts only — never the email values (PII stays out of logs).
     logger.info(`[email-fanout] customer ${customerId}: synced ${counts.leads} lead(s), ${counts.estimates} estimate(s), ${counts.newsletter} newsletter (${counts.newsletterDeliveries} delivery token(s) rotated), ${counts.automations} enrollment(s), ${counts.templateRuns} template run(s), ${counts.promoters} promoter(s), ${counts.billingPrefs} billing pref(s), ${counts.contracts} contract(s), ${counts.bookingIntents} booking intent(s); resolved ${counts.reviewCards} email review card(s)`);
   }
   // One DOI, never two (Codex #3084 r5): if the customer publicly
   // subscribed while the call's newsletter was held, the moved pending row's
-  // re-sent confirmation IS the resume — drop the held payload and consume
-  // its markers so a later cycle cannot re-fire it.
+  // re-sent confirmation IS the resume — drop the held payloads and consume
+  // EVERY associated hold (newsletterResume is an array — one payload per
+  // pending hold; consuming only one would leave the rest 'releasing' and
+  // resendable after the stale-claim window, Codex #3084 r8). Each hold
+  // settles fully here: 'released' once its drip side is also done, so the
+  // claim never lingers for the reclaim sweep.
   if (pendingConfirmation && heldNewsletterResume) {
     try {
-      if (heldNewsletterResume.holdId) {
+      for (const payload of heldNewsletterResume) {
+        if (!payload?.holdId) continue;
+        const hold = await conn('first_touch_holds')
+          .where({ id: payload.holdId })
+          .first('held_drip', 'released_drip');
+        const dripSettled = !hold || !hold.held_drip || hold.released_drip;
         await conn('first_touch_holds')
-          .where({ id: heldNewsletterResume.holdId })
-          .update({ released_newsletter: true, updated_at: now });
+          .where({ id: payload.holdId })
+          .update({
+            released_newsletter: true,
+            status: dripSettled ? 'released' : 'pending',
+            ...(dripSettled ? { released_at: now, last_error: null } : {}),
+            updated_at: now,
+          });
       }
     } catch (dedupeErr) {
       logger.warn(`[email-fanout] held-newsletter dedupe failed for customer ${customerId}: ${dedupeErr.message}`);

@@ -13,6 +13,9 @@ let mockDncRow = null;
 let mockSuppressionRow = null;
 let mockCustomerRow = { id: 'cust-1', first_name: 'Pat', last_name: 'Sample' };
 let mockHoldUpdates = [];
+let mockTriageCardRow = null;
+let mockMergeFailures = 0;
+let mockMergeArgs = [];
 jest.mock('../models/db', () => {
   const handler = (table) => {
     const chain = {
@@ -23,7 +26,16 @@ jest.mock('../models/db', () => {
       select: jest.fn(() => chain),
       insert: jest.fn(() => chain),
       onConflict: jest.fn(() => chain),
-      merge: jest.fn(async () => 1),
+      merge: jest.fn(async (patch) => {
+        if (table === 'first_touch_holds') {
+          if (mockMergeFailures > 0) {
+            mockMergeFailures--;
+            throw new Error('transient db error');
+          }
+          mockMergeArgs.push(patch);
+        }
+        return 1;
+      }),
       update: jest.fn(async (patch) => {
         if (table === 'first_touch_holds') {
           if (patch.status === 'releasing' && mockClaimFails) return 0;
@@ -35,6 +47,7 @@ jest.mock('../models/db', () => {
         if (table === 'first_touch_holds') return mockHold;
         if (table === 'customers') return mockCustomerRow;
         if (table === 'call_log') return mockDncRow;
+        if (table === 'triage_items') return mockTriageCardRow;
         if (table === 'automation_templates') return { key: 'new_lead' };
         return null;
       }),
@@ -64,7 +77,7 @@ jest.mock('../services/call-recording-processor', () => ({
   resumeNewsletterForCallCustomer: (...a) => mockNewsletter(...a),
 }));
 
-const { resumeHeldFirstTouch } = require('../services/lead-first-touch-resume');
+const { resumeHeldFirstTouch, recordFirstTouchHold } = require('../services/lead-first-touch-resume');
 
 function baseHold(overrides = {}) {
   return {
@@ -84,6 +97,9 @@ beforeEach(() => {
   mockSuppressionRow = null;
   mockHoldUpdates = [];
   mockCustomerRow = { id: 'cust-1', first_name: 'Pat', last_name: 'Sample' };
+  mockTriageCardRow = null;
+  mockMergeFailures = 0;
+  mockMergeArgs = [];
 });
 
 describe('resumeHeldFirstTouch (ledger release engine)', () => {
@@ -189,5 +205,74 @@ describe('resumeHeldFirstTouch (ledger release engine)', () => {
     expect(mockEnroll).not.toHaveBeenCalled();
     expect(res.resumed).toBe(true);
     expect(mockHoldUpdates.at(-1)).toMatchObject({ status: 'released', released_newsletter: true });
+  });
+});
+
+describe('recordFirstTouchHold (durable hold ledger writes)', () => {
+  test('records the held address as given when no prior row complicates it', async () => {
+    mockHold = null;
+    const ok = await recordFirstTouchHold({
+      callLogId: 'call-1', customerId: 'cust-1',
+      heldEmail: 'Guess@Example.com', heldDrip: true, runStartedAt: new Date(),
+    });
+    expect(ok).toBe(true);
+    expect(mockMergeArgs.at(-1).held_email).toBe('guess@example.com');
+  });
+
+  test('a live card from an EARLIER run keeps the address the operator is reviewing', async () => {
+    // Force-reprocess: triage inserts retain the old card via
+    // onConflict-ignore, so resolving it must release the address it shows —
+    // never a newer unreviewed extraction.
+    mockHold = baseHold({ held_email: 'reviewed@example.com', status: 'pending' });
+    mockTriageCardRow = { id: 'card-old' };
+    await recordFirstTouchHold({
+      callLogId: 'call-1', customerId: 'cust-1',
+      heldEmail: 'newguess@example.com', heldDrip: true, runStartedAt: new Date(),
+    });
+    expect(mockMergeArgs.at(-1).held_email).toBe('reviewed@example.com');
+  });
+
+  test('a hold RELEASED during this run re-pends against the settled (corrected) address', async () => {
+    // Operator corrected the email mid-run: the fanout released the drip and
+    // wrote the corrected address to the customer row. The later newsletter
+    // hold must target that, never the stale pre-correction candidate.
+    const runStartedAt = new Date(Date.now() - 60_000);
+    mockHold = baseHold({ status: 'released', released_at: new Date(), held_email: 'original@example.com' });
+    mockCustomerRow = { id: 'cust-1', email: 'corrected@example.com' };
+    await recordFirstTouchHold({
+      callLogId: 'call-1', customerId: 'cust-1',
+      heldEmail: 'original@example.com', heldNewsletter: true, runStartedAt,
+    });
+    expect(mockMergeArgs.at(-1).held_email).toBe('corrected@example.com');
+  });
+
+  test('a hold released in an EARLIER cycle re-pends normally with the fresh address', async () => {
+    const runStartedAt = new Date();
+    mockHold = baseHold({ status: 'released', released_at: new Date(Date.now() - 3_600_000), held_email: 'old@example.com' });
+    await recordFirstTouchHold({
+      callLogId: 'call-1', customerId: 'cust-1',
+      heldEmail: 'fresh@example.com', heldDrip: true, runStartedAt,
+    });
+    expect(mockMergeArgs.at(-1).held_email).toBe('fresh@example.com');
+  });
+
+  test('retries a transient write failure and succeeds', async () => {
+    mockHold = null;
+    mockMergeFailures = 1;
+    const ok = await recordFirstTouchHold({
+      callLogId: 'call-1', customerId: 'cust-1', heldEmail: 'a@example.com', heldDrip: true,
+    });
+    expect(ok).toBe(true);
+    expect(mockMergeArgs).toHaveLength(1);
+  });
+
+  test('returns null only after exhausting every attempt', async () => {
+    mockHold = null;
+    mockMergeFailures = 99;
+    const ok = await recordFirstTouchHold({
+      callLogId: 'call-1', customerId: 'cust-1', heldEmail: 'a@example.com', heldDrip: true,
+    });
+    expect(ok).toBeNull();
+    expect(mockMergeArgs).toHaveLength(0);
   });
 });

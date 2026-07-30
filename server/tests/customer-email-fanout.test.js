@@ -9,6 +9,14 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/newsletter-confirm', () => ({ sendConfirmationEmail: jest.fn().mockResolvedValue(true) }));
 
+const mockResume = jest.fn();
+jest.mock('../services/lead-first-touch-resume', () => ({
+  resumeHeldFirstTouch: (...a) => mockResume(...a),
+}));
+beforeEach(() => {
+  mockResume.mockReset().mockResolvedValue({ resumed: false, enrolled: false, newsletterResume: null });
+});
+
 const { propagateCustomerEmailChange, resendPendingConfirmation, emailKey } = require('../services/customer-email-fanout');
 
 /**
@@ -308,6 +316,70 @@ describe('propagateCustomerEmailChange', () => {
     await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
     const reasonFilter = conn.__calls.find((c) => c.table === 'triage_items' && c.op === 'whereIn' && c.arg.col === 'reason_code');
     expect(reasonFilter.arg.vals).toEqual(['email_unverified', 'email_invalid']);
+  });
+
+  test('the held-first-touch release runs even when NO review card is still open', async () => {
+    // A name-deny verdict resolves the email card BEFORE the correction
+    // happens; the ledger row — not the card — carries the pending state, so
+    // the correction must attempt the release unconditionally.
+    const conn = makeConn(); // no triage rows → reviewCards stays 0
+    const counts = await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
+    expect(counts.reviewCards).toBe(0);
+    expect(mockResume).toHaveBeenCalledWith(expect.objectContaining({
+      customerId: 'cust-1',
+      email: 'charleswrobb@gmail.com',
+      deferNewsletter: true,
+    }));
+  });
+
+  test('DOI dedupe consumes EVERY deferred newsletter hold, not just one', async () => {
+    // pendingConfirmation (moved pending subscriber) + deferred holds from
+    // TWO calls: the re-sent confirmation is the one DOI; both ledger rows
+    // must settle released_newsletter so neither can resend after the
+    // stale-claim window.
+    mockResume.mockResolvedValueOnce({
+      resumed: true,
+      enrolled: true,
+      newsletterResume: [
+        { holdId: 'hold-1', customerId: 'cust-1', email: 'charleswrobb@gmail.com' },
+        { holdId: 'hold-2', customerId: 'cust-1', email: 'charleswrobb@gmail.com' },
+      ],
+    });
+    const conn = makeConn({
+      newsletter_subscribers: {
+        firstQueue: [
+          { id: 739, email: 'charlesw.robb@gmail.com', customer_id: 'cust-1', status: 'pending', confirmation_token: 'tok-1', first_name: 'Charles' },
+          null,
+        ],
+      },
+      first_touch_holds: {
+        firstQueue: [
+          { held_drip: true, released_drip: true },
+          { held_drip: false, released_drip: false },
+        ],
+      },
+    });
+    const result = await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
+    expect(result.pendingConfirmation).toBeDefined();
+    expect(result.heldNewsletterResume).toBeUndefined();
+    const holdUpdates = conn.__updates('first_touch_holds');
+    expect(holdUpdates).toHaveLength(2);
+    for (const u of holdUpdates) {
+      expect(u.arg.released_newsletter).toBe(true);
+      expect(u.arg.status).toBe('released');
+    }
+  });
+
+  test('deferred newsletter holds pass through when no pending subscriber was moved', async () => {
+    mockResume.mockResolvedValueOnce({
+      resumed: true,
+      enrolled: false,
+      newsletterResume: [{ holdId: 'hold-1', customerId: 'cust-1', email: 'charleswrobb@gmail.com' }],
+    });
+    const conn = makeConn();
+    const result = await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
+    expect(result.heldNewsletterResume).toEqual([expect.objectContaining({ holdId: 'hold-1' })]);
+    expect(conn.__updates('first_touch_holds')).toHaveLength(0);
   });
 });
 

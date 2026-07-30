@@ -303,36 +303,82 @@ async function resumeHeldNewsletterPostCommit(payloadOrList, dbh = db) {
  * Idempotent per call; a force-reprocess refreshes the row to pending with
  * the fresh address, and held flags accumulate (drip and newsletter holds
  * are recorded at different steps of the same run).
+ *
+ * Two force-reprocess/race guards when `runStartedAt` is passed:
+ *   - A LIVE card minted by an earlier run means the operator is still
+ *     reviewing the PREVIOUS address (triage inserts keep the old card via
+ *     onConflict-ignore) — resolving that card must release the address it
+ *     shows, so the existing held_email is preserved over the fresh guess.
+ *   - A row RELEASED during this run means an operator settled the question
+ *     mid-run (email correction / accept verdict) — that action's address is
+ *     authoritative, so the new hold re-pends against the customer's stored
+ *     address (which the correction fanout just wrote), never the stale
+ *     in-memory candidate captured before it.
+ *
+ * The write retries transient failures — this row is the ONLY durable record
+ * the release paths read, so processing must not finish without it.
  */
-async function recordFirstTouchHold({ callLogId, customerId = null, heldEmail, heldDrip = false, heldNewsletter = false, dbh = db }) {
-  try {
-    if (!(await dbh.schema.hasTable('first_touch_holds'))) return null;
-    const now = new Date();
-    await dbh('first_touch_holds')
-      .insert({
-        call_log_id: callLogId,
-        customer_id: customerId,
-        held_email: String(heldEmail || '').trim().toLowerCase(),
-        held_drip: heldDrip,
-        held_newsletter: heldNewsletter,
-        status: 'pending',
-        created_at: now,
-        updated_at: now,
-      })
-      .onConflict('call_log_id')
-      .merge({
-        customer_id: customerId,
-        held_email: String(heldEmail || '').trim().toLowerCase(),
-        held_drip: dbh.raw('first_touch_holds.held_drip OR excluded.held_drip'),
-        held_newsletter: dbh.raw('first_touch_holds.held_newsletter OR excluded.held_newsletter'),
-        status: 'pending',
-        updated_at: now,
-      });
-    return true;
-  } catch (err) {
-    logger.warn(`[first-touch-resume] hold record failed for call ${callLogId}: ${err.message}`);
-    return null;
+const HOLD_RECORD_ATTEMPTS = 3;
+
+async function recordFirstTouchHold({ callLogId, customerId = null, heldEmail, heldDrip = false, heldNewsletter = false, runStartedAt = null, dbh = db }) {
+  for (let attempt = 1; attempt <= HOLD_RECORD_ATTEMPTS; attempt++) {
+    try {
+      if (!(await dbh.schema.hasTable('first_touch_holds'))) return null;
+      const now = new Date();
+      let emailToRecord = String(heldEmail || '').trim().toLowerCase();
+      if (runStartedAt) {
+        const existing = await dbh('first_touch_holds')
+          .where({ call_log_id: callLogId })
+          .first('held_email', 'status', 'released_at');
+        if (existing && existing.status === 'released'
+            && existing.released_at && new Date(existing.released_at) >= runStartedAt) {
+          const cust = customerId
+            ? await dbh('customers').where({ id: customerId }).first('email')
+            : null;
+          const settledEmail = String(cust?.email || existing.held_email || '').trim().toLowerCase();
+          if (settledEmail) emailToRecord = settledEmail;
+        } else if (existing && existing.held_email) {
+          const cardFromEarlierRun = await dbh('triage_items')
+            .where({ call_log_id: callLogId })
+            .whereIn('reason_code', EMAIL_REVIEW_REASON_CODES)
+            .whereIn('status', ['open', 'in_progress'])
+            .where('created_at', '<', runStartedAt)
+            .first('id');
+          if (cardFromEarlierRun) {
+            emailToRecord = String(existing.held_email).trim().toLowerCase();
+          }
+        }
+      }
+      await dbh('first_touch_holds')
+        .insert({
+          call_log_id: callLogId,
+          customer_id: customerId,
+          held_email: emailToRecord,
+          held_drip: heldDrip,
+          held_newsletter: heldNewsletter,
+          status: 'pending',
+          created_at: now,
+          updated_at: now,
+        })
+        .onConflict('call_log_id')
+        .merge({
+          customer_id: customerId,
+          held_email: emailToRecord,
+          held_drip: dbh.raw('first_touch_holds.held_drip OR excluded.held_drip'),
+          held_newsletter: dbh.raw('first_touch_holds.held_newsletter OR excluded.held_newsletter'),
+          status: 'pending',
+          updated_at: now,
+        });
+      return true;
+    } catch (err) {
+      if (attempt === HOLD_RECORD_ATTEMPTS) {
+        logger.error(`[first-touch-resume] hold record failed for call ${callLogId} after ${HOLD_RECORD_ATTEMPTS} attempts: ${err.message}`);
+        return null;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 200 * attempt));
+    }
   }
+  return null;
 }
 
 module.exports = {

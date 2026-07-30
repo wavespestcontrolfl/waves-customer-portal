@@ -8743,6 +8743,12 @@ const CallRecordingProcessor = {
     // Variable name kept as `beehiivResult` for schema/log continuity;
     // carries the local enrollment result now.
     let beehiivResult = null;
+    // Ledger-write outcomes for the two hold sites — null means the durable
+    // record FAILED (after internal retries) and the end-of-run
+    // reconciliation must re-attempt it (Codex #3084 r8): the ledger row is
+    // the only thing the release paths read.
+    let dripHoldRecorded = null;
+    let newsletterHoldRecorded = null;
     if (customerId && extracted.email && v2EmailBlocked) {
       logger.info(`[call-proc] Skipping new_lead automation enroll for ${callSid}: v2 TCPA gate blocked all outbound (do_not_contact)`);
       beehiivResult = { skipped: 'v2_tcpa_gate' };
@@ -8761,9 +8767,11 @@ const CallRecordingProcessor = {
       beehiivResult = { skipped: 'email_under_review' };
       // Ledger row carries the address ACTUALLY held (post dictation/
       // arbiter/domain correction) — the release engine sends to this, never
-      // to a matched customer's stale stored email.
+      // to a matched customer's stale stored email. runStartedAt lets the
+      // helper keep a live earlier-run card's address (the one the operator
+      // is reviewing) instead of overwriting it with a fresh unreviewed guess.
       const { recordFirstTouchHold } = require('./lead-first-touch-resume');
-      await recordFirstTouchHold({ callLogId: call.id, customerId, heldEmail: extracted.email, heldDrip: true });
+      dripHoldRecorded = await recordFirstTouchHold({ callLogId: call.id, customerId, heldEmail: extracted.email, heldDrip: true, runStartedAt: processingStartedAt });
     } else if (customerId && extracted.email) {
       try {
         const AutomationRunner = require('./automation-runner');
@@ -8853,8 +8861,12 @@ const CallRecordingProcessor = {
       // confirmation is ALSO a first-touch email to the unconfirmed address.
       logger.info(`[call-proc] Skipping newsletter subscribe for ${callSid}: extracted email is under read-back review`);
       newsletterResult = { skipped: 'email_under_review' };
+      // runStartedAt: if an operator already SETTLED this call's hold during
+      // the run (email correction / accept verdict), the helper re-pends the
+      // newsletter hold against that settled address — never the stale
+      // in-memory candidate captured before the correction.
       const { recordFirstTouchHold } = require('./lead-first-touch-resume');
-      await recordFirstTouchHold({ callLogId: call.id, customerId, heldEmail: newsletterCandidate.email || extracted.email, heldNewsletter: true });
+      newsletterHoldRecorded = await recordFirstTouchHold({ callLogId: call.id, customerId, heldEmail: newsletterCandidate.email || extracted.email, heldNewsletter: true, runStartedAt: processingStartedAt });
     } else if (newsletterCandidate) {
       const stillOwned = await db('call_log')
         .where({ id: call.id })
@@ -8881,6 +8893,26 @@ const CallRecordingProcessor = {
     if (customerId
         && (beehiivResult?.skipped === 'email_under_review' || newsletterResult?.skipped === 'email_under_review')) {
       try {
+        // A hold without its ledger row is unreleasable — the release paths
+        // read only first_touch_holds. If either write failed (after the
+        // helper's own retries), re-attempt once more before the run can
+        // finish (Codex #3084 r8).
+        const dripHeld = beehiivResult?.skipped === 'email_under_review';
+        const newsHeld = newsletterResult?.skipped === 'email_under_review';
+        if ((dripHeld && dripHoldRecorded === null) || (newsHeld && newsletterHoldRecorded === null)) {
+          const { recordFirstTouchHold } = require('./lead-first-touch-resume');
+          const retried = await recordFirstTouchHold({
+            callLogId: call.id,
+            customerId,
+            heldEmail: newsletterCandidate?.email || extracted.email,
+            heldDrip: dripHeld && dripHoldRecorded === null,
+            heldNewsletter: newsHeld && newsletterHoldRecorded === null,
+            runStartedAt: processingStartedAt,
+          });
+          if (retried === null) {
+            logger.error(`[call-proc] first-touch hold ledger write STILL failing for ${maskSid(callSid)} — held send(s) have no durable release record`);
+          }
+        }
         if (!(await shouldHoldLeadEmailEnrollment(call.id))) {
           // No LIVE card. Two very different reasons (Codex #3084 r4):
           //   - an admin resolved the card mid-run → release now;
@@ -8897,8 +8929,11 @@ const CallRecordingProcessor = {
             .where('resolved_at', '>=', processingStartedAt)
             .first('id');
           if (resolvedCard) {
+            // Scoped to THIS call (Codex #3084 r8): releasing by customerId
+            // alone would claim every pending hold for the customer,
+            // including other calls whose read-back cards are still open.
             const { resumeHeldFirstTouch } = require('./lead-first-touch-resume');
-            await resumeHeldFirstTouch({ customerId, source: 'mid_run_card_release' });
+            await resumeHeldFirstTouch({ callLogId: call.id, customerId, source: 'mid_run_card_release' });
           } else {
             const { buildTriageItem } = require('./call-routing-gates');
             await db('triage_items')
