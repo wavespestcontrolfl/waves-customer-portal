@@ -13,6 +13,7 @@ function installDb({ listRows, customersById }) {
       whereNull: jest.fn(() => chain),
       orWhereNull: jest.fn(() => chain),
       whereNotNull: jest.fn(() => chain),
+      whereRaw: jest.fn(() => chain),
       where: jest.fn((arg) => {
         if (typeof arg === 'function') {
           arg.call(chain);

@@ -143,6 +143,10 @@ async function sweepUngeocodedCustomers({ limit = 25 } = {}) {
       this.whereNull('latitude').orWhereNull('longitude');
     })
     .whereNotNull('address_line1')
+    // Blank/whitespace streets (e.g. twilio-webhook creates '' addresses)
+    // must be skipped — geocoding "Bradenton, FL" alone would pin the
+    // customer at a city centroid, a false coordinate worse than none.
+    .whereRaw("btrim(address_line1) <> ''")
     .modify((q) => {
       if (excluded.length) q.whereNotIn('id', excluded);
     })
