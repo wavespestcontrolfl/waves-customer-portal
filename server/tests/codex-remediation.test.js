@@ -2809,9 +2809,14 @@ describe('syncPendingHold error and recovery behavior (codex P1 x2)', () => {
     expect(h.reason).toMatch(/could not read the remediation sync state/);
   });
 
-  test('a stale in-flight sentinel is RELEASED when the branch never moved', async () => {
+  // Aged well past STALE_IN_FLIGHT_MS: no live round can still be pre-push.
+  const OLD = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+
+  test('an ABANDONED in-flight sentinel is released when the branch never moved', async () => {
     const db = makeDb({
-      codex_remediation_state: [{ pr_number: 5, status: 'remediating', sync_pending_sha: `push_in_flight:${HEAD}` }],
+      codex_remediation_state: [{
+        pr_number: 5, status: 'remediating', sync_pending_sha: `push_in_flight:${HEAD}`, updated_at: OLD,
+      }],
     });
     // Ref still at the pre-push head → the round died before gh.putFile.
     const gh = { getBranchSha: async () => HEAD };
@@ -2821,9 +2826,41 @@ describe('syncPendingHold error and recovery behavior (codex P1 x2)', () => {
     expect(db._tables.codex_remediation_state.find((x) => x.pr_number === 5).sync_pending_sha).toBeNull();
   });
 
-  test('an in-flight sentinel HOLDS when the branch moved (a push did land)', async () => {
+  // The merge gate is not serialized against remediation, so a RECENT sentinel
+  // may be a healthy round sitting in its legitimate stamp→putFile window.
+  // Clearing it there could release the hold on a push that then lands.
+  test('a FRESH in-flight sentinel holds and is never cleared', async () => {
+    const db = makeDb({
+      codex_remediation_state: [{
+        pr_number: 5, status: 'remediating', sync_pending_sha: `push_in_flight:${HEAD}`,
+        updated_at: new Date().toISOString(),
+      }],
+    });
+    let refReads = 0;
+    const gh = { getBranchSha: async () => { refReads += 1; return HEAD; } };
+    const h = await rem.syncPendingHold(5, { db, headSha: HEAD, gh, branch: 'content/blog-x' });
+    expect(h.pending).toBe(true);
+    expect(h.reason).toMatch(/in flight/);
+    expect(refReads).toBe(0); // decided on age alone, before any ref read
+    expect(db._tables.codex_remediation_state.find((x) => x.pr_number === 5).sync_pending_sha)
+      .toBe(`push_in_flight:${HEAD}`);
+  });
+
+  test('a MISSING updated_at holds — "0" must not parse as the year 2000', async () => {
     const db = makeDb({
       codex_remediation_state: [{ pr_number: 5, status: 'remediating', sync_pending_sha: `push_in_flight:${HEAD}` }],
+    });
+    const gh = { getBranchSha: async () => HEAD };
+    const h = await rem.syncPendingHold(5, { db, headSha: HEAD, gh, branch: 'content/blog-x' });
+    expect(h.pending).toBe(true);
+    expect(h.reason).toMatch(/age unknown/);
+  });
+
+  test('an in-flight sentinel HOLDS when the branch moved (a push did land)', async () => {
+    const db = makeDb({
+      codex_remediation_state: [{
+        pr_number: 5, status: 'remediating', sync_pending_sha: `push_in_flight:${HEAD}`, updated_at: OLD,
+      }],
     });
     const gh = { getBranchSha: async () => 'landedcommit123' };
     const h = await rem.syncPendingHold(5, { db, headSha: 'landedcommit123', gh, branch: 'content/blog-x' });
@@ -2834,7 +2871,9 @@ describe('syncPendingHold error and recovery behavior (codex P1 x2)', () => {
 
   test('an unreadable ref HOLDS (fail closed)', async () => {
     const db = makeDb({
-      codex_remediation_state: [{ pr_number: 5, status: 'remediating', sync_pending_sha: `push_in_flight:${HEAD}` }],
+      codex_remediation_state: [{
+        pr_number: 5, status: 'remediating', sync_pending_sha: `push_in_flight:${HEAD}`, updated_at: OLD,
+      }],
     });
     const gh = { getBranchSha: async () => { throw new Error('ref lookup down'); } };
     const h = await rem.syncPendingHold(5, { db, headSha: HEAD, gh, branch: 'content/blog-x' });

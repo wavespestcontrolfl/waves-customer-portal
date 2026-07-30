@@ -215,6 +215,15 @@ const PARK_POST_PUSH = 'post_push';
 // released instead of holding every merge forever. Deliberately not SHA-shaped so
 // it can never be mistaken for a commit; ~56 chars, inside varchar(64).
 const SYNC_PENDING_PUSH_IN_FLIGHT = 'push_in_flight';
+// How long an in-flight sentinel must sit untouched before the merge gate may
+// treat it as abandoned. Generously above the real stamp→putFile window (one
+// GitHub write, seconds) so a healthy round is never reconciled out from under
+// itself, and well under a human's response time so a genuinely dead round
+// doesn't wedge the PR for long. Override for tests, not for prod tuning.
+const STALE_IN_FLIGHT_MS = Math.max(
+  60_000,
+  parseInt(process.env.CODEX_REMEDIATION_STALE_PUSH_MS || '', 10) || 900_000,
+);
 const inFlightSentinel = (preHeadSha) => (preHeadSha
   ? `${SYNC_PENDING_PUSH_IN_FLIGHT}:${String(preHeadSha).trim().toLowerCase()}`
   : SYNC_PENDING_PUSH_IN_FLIGHT);
@@ -300,14 +309,38 @@ async function syncPendingHold(prNumber, {
   const { inFlight, preHead } = parseInFlightSentinel(sha);
 
   if (inFlight && preHead && branch) {
+    // "Branch still at the pre-push head" is NOT proof the writer died — there is
+    // a legitimate interval between the stamp and gh.putFile where exactly that is
+    // true of a healthy round. This gate runs from the merge path, which is not
+    // serialized against remediation (a manual mergeAstro isn't under the
+    // scheduler's advisory lock), so clearing on the ref alone could release the
+    // hold mid-round; if the push then landed and the process died before
+    // recording the SHA, an unsynced fix would sit on the branch with no hold at
+    // all. Require the sentinel to be OLDER than any round could still be in that
+    // window before treating it as abandoned. Nothing else writes the row while a
+    // round is stuck there, so updated_at is the stamp time.
+    // NOT `Date.parse(x || 0)`: that coerces a missing value to the STRING "0",
+    // which parses as the year 2000 — so an absent updated_at would read as
+    // ancient and auto-release every sentinel, defeating this gate entirely.
+    // Absent or unparseable means "cannot prove staleness", which must hold.
+    const stampedAt = state.updated_at ? (Date.parse(state.updated_at) || 0) : 0;
+    const age = stampedAt ? Date.now() - stampedAt : 0;
+    if (!stampedAt || age < STALE_IN_FLIGHT_MS) {
+      return {
+        pending: true,
+        sha,
+        reason: `a fix push is in flight (pre-push head ${shortSha(preHead)}${stampedAt ? `, ${Math.round(age / 1000)}s old` : ', age unknown'}) — holding until it completes or goes stale`,
+      };
+    }
     const gh = injectedGh || ghDefault;
     let refHead = null;
     try { refHead = String((await gh.getBranchSha(branch)) || '').trim().toLowerCase(); } catch (_) { refHead = null; }
     if (refHead && refHead === preHead) {
-      // The branch never moved: the round died before its push. Nothing is
-      // unsynced, so release the hold rather than wedging the PR.
+      // Old enough that no live round could still be pre-push, AND the branch
+      // never moved: the round died before its push. Nothing is unsynced, so
+      // release the hold rather than wedging the PR forever.
       await saveState(db, prNumber, { sync_pending_sha: null });
-      logger.info(`[codex-remediation] released a stale in-flight sync hold on PR #${prNumber}: branch still at the pre-push head ${shortSha(preHead)}, no commit landed`);
+      logger.info(`[codex-remediation] released a stale in-flight sync hold on PR #${prNumber}: branch still at the pre-push head ${shortSha(preHead)} after ${Math.round(age / 60000)}m, no commit landed`);
       return { pending: false };
     }
     // Ref moved (a push DID land) or is unreadable → keep holding.
