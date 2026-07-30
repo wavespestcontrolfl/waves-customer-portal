@@ -20,7 +20,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const sendgrid = require('./sendgrid-mail');
 const NewsletterSender = require('./newsletter-sender');
-const { wrapNewsletter } = require('./email-template');
+const { wrapNewsletter, bodyIsDarkAware } = require('./email-template');
 const { validateNewsletterDraft, lockedPricesForSend } = require('./newsletter-validator');
 const { requiresClaimValidation, isFlagshipType } = require('../config/newsletter-types');
 const { isFlagshipTargetForWeek } = require('./event-freshness');
@@ -333,6 +333,8 @@ async function renderSendPreview(send, toEmail) {
     webVersionUrl: (send.slug && ['sending', 'sent', 'failed'].includes(send.status))
       ? `https://www.wavespestcontrol.com/newsletter/archive/${send.slug}`
       : undefined,
+    // Legacy bodies (persisted before the dark-mode layer) stay light.
+    darkAwareBody: bodyIsDarkAware(ensured.html),
   });
 
   const testSub = await db('newsletter_subscribers')

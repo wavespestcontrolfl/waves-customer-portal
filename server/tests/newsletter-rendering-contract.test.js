@@ -147,6 +147,13 @@ describe('newsletter rendering contract', () => {
     expect(transactional).toContain('class="dm-page-text"');
     // Every anchor inside the dark-aware newsletter card recolors.
     expect(html).toContain('.dm-card a { color: #6CC1F0 !important; }');
+    // Legacy bodies without dm-* hooks stay on the light card.
+    const { bodyIsDarkAware } = require('../services/email-template');
+    expect(bodyIsDarkAware('<div class="dm-box">x</div>')).toBe(true);
+    expect(bodyIsDarkAware('<p style="background:#F2F8F0">legacy</p>')).toBe(false);
+    const legacy = wrapNewsletter({ body: '<p>legacy</p>', newsletterType: 'local-weekly-fresh-events', darkAwareBody: false });
+    expect(legacy).toContain('class="dm-lightcard"');
+    expect(legacy).not.toContain('class="dm-card"');
     // Logo sits in its own block row ABOVE the masthead title.
     expect(html).toMatch(/<div style="display:block;text-align:center;"><a [^>]+><img [^>]*waves[^>]*><\/a><\/div>\s*<h1 class="dm-ink"/i);
   });

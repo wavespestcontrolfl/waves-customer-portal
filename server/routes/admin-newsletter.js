@@ -1103,12 +1103,15 @@ router.post('/preview', async (req, res) => {
     // surface operators review, so its links must open the real pages.
     const { resolveEvclickFromBody } = require('../services/newsletter-event-clicks');
     const resolvedBody = await resolveEvclickFromBody(ensureFeedbackToken({ html: htmlBody || '' }).html);
+    const { bodyIsDarkAware } = require('../services/email-template');
     const html = wrapNewsletter({
       body: stripPersonalizationTokens(resolvedBody),
       unsubscribeUrl: demoUrl,
       preheader: previewText ? stripPersonalizationTokens(previewText) : undefined,
       newsletterType: newsletterType || undefined,
       preferredSourcesCta: true,
+      // Legacy/operator-authored bodies without dm-* hooks stay light.
+      darkAwareBody: bodyIsDarkAware(resolvedBody),
     });
     res.json({ html });
   } catch (err) {

@@ -621,6 +621,16 @@ function wrapServiceEmail({ preheader, body, footerNote } = {}) {
  *                                  // generic publication identity.
  * }} opts
  */
+/**
+ * A persisted body is dark-capable only if the assembler that generated
+ * it emitted the dm-* hooks — bodies saved before the dark-mode layer
+ * (or authored elsewhere) must stay on the opaque light card, or their
+ * un-hooked tinted panels re-create the unreadable contrast.
+ */
+function bodyIsDarkAware(body) {
+  return /class="dm-/.test(String(body || ''));
+}
+
 function wrapNewsletter({ body, unsubscribeUrl, preheader, footerNote, preferredSourcesCta, newsletterType, webVersionUrl, darkAwareBody } = {}) {
   return glassNewsletter({ body, unsubscribeUrl, preheader, footerNote, preferredSourcesCta, newsletterType, webVersionUrl, darkAwareBody });
 }
@@ -681,6 +691,7 @@ function ensureLegalTextFooter(text, opts = {}) {
 }
 
 module.exports = {
+  bodyIsDarkAware,
   wrapEmail,
   wrapServiceEmail,
   wrapNewsletter,
