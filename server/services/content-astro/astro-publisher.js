@@ -1863,7 +1863,11 @@ function canPublishMetadataRewrite(draft, brief = {}) {
 async function getLiveFrontmatter(targetUrlOrPath) {
   const resolved = await resolveExistingAstroFileForTarget(targetUrlOrPath);
   if (!resolved) return null;
-  return fm.parse(resolved.file.content).data || {};
+  // _astro_source_path: the resolved repo path, under a reserved key no
+  // frontmatter schema uses — callers need it to tell blog targets (titles
+  // legitimately editable) from service/location targets (metaTitle
+  // protected, owner rule 2026-07-16) without a second fetch.
+  return { ...(fm.parse(resolved.file.content).data || {}), _astro_source_path: resolved.path };
 }
 
 /**
@@ -2765,6 +2769,7 @@ module.exports = {
   publishMetadataRewrite,
   publishRefresh,
   getLiveFrontmatter,
+  isBlogTarget,
   loadExistingPageBody,
   resolveExistingAstroFileForTarget,
   canPublishDraftBrief,

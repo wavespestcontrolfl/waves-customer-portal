@@ -1754,8 +1754,33 @@ class AutonomousRunner {
       };
     }
 
+    // Resolve the target ONCE, up front: page type drives the meta
+    // completeness contract below, and a non-blog target whose live page
+    // carries a metaTitle is PROTECTED (owner rule 2026-07-16) — the
+    // publisher will keep the live title no matter what the draft proposes,
+    // so every title-scoped gate must evaluate the description-only change
+    // that will actually ship instead of parking on a discarded proposal.
+    // Resolution failure fails CLOSED to the stricter blog contract and to
+    // protectedTitle=false (full title gating) — such a target cannot
+    // publish anyway.
+    let targetPageType = 'supporting-blog';
+    let protectedTitle = false;
+    try {
+      const publisher = getAstroPublisher();
+      const liveFm = publisher?.getLiveFrontmatter
+        ? await publisher.getLiveFrontmatter(brief.target_url || brief.page_url || draft.page_url)
+        : null;
+      const srcPath = typeof liveFm?._astro_source_path === 'string' ? liveFm._astro_source_path : null;
+      if (srcPath && !srcPath.startsWith('src/content/blog/')) {
+        targetPageType = 'page';
+        protectedTitle = liveFm.metaTitle !== undefined;
+      }
+    } catch (_) { /* keep the stricter blog contract + full title gating */ }
+
     const gateResult = spamGate.evaluateTitleMetaSpam({
-      title: draft.title,
+      // Protected target: blank title makes inspectTitle skip (the proposal
+      // is discarded by the publisher); the meta half still runs in full.
+      title: protectedTitle ? '' : draft.title,
       meta_description: draft.meta_description,
       city: brief.city,
       service: brief.service,
@@ -1804,24 +1829,16 @@ class AutonomousRunner {
         meta_description: draft.meta_description,
       },
     };
-    // target_page_type is derived from the RESOLVED target file — for
-    // rewrite_title_meta briefs page_type is already 'metadata' (decision
-    // router), so it says nothing about the target. Blog targets keep the
-    // full meta completeness contract; resolution failure fails CLOSED to
-    // the blog contract (stricter) — such a target cannot publish anyway.
-    let targetPageType = 'supporting-blog';
-    try {
-      const publisher = getAstroPublisher();
-      const resolved = publisher?.resolveExistingAstroFileForTarget
-        ? await publisher.resolveExistingAstroFileForTarget(brief.target_url || brief.page_url || draft.page_url)
-        : null;
-      if (resolved?.path && !String(resolved.path).startsWith('src/content/blog/')) targetPageType = 'page';
-    } catch (_) { /* keep the stricter blog contract */ }
+    // target_page_type + protectedTitle were derived from the resolved
+    // target file above, before the spam gate — for rewrite_title_meta
+    // briefs page_type is already 'metadata' (decision router), so it says
+    // nothing about the target.
     const metadataBrief = { ...brief, page_type: 'metadata', target_page_type: targetPageType };
     const qualityContext = {
       siblingTitles: await this._loadSiblingTitlesForMetadata(brief, draft),
       previewBuildSuccess: true,
       sitemapHasUrl: true,
+      protectedTitle,
     };
     let qualityResult;
     try {
@@ -2798,7 +2815,15 @@ class AutonomousRunner {
         // edited — hand the live value to the guardrails so a rewriting draft
         // parks (PROTECTED_META_TITLE_REWRITE) instead of publishing. Rides
         // the same fail-closed liveFm load as the brand-token guard above.
-        liveMetaTitle = liveFm.metaTitle != null && String(liveFm.metaTitle).trim()
+        // Blog targets are exempt (legacy v1 posts may carry a legitimately
+        // editable metaTitle, and publishRefresh only freezes non-blog
+        // targets); an unresolvable source path falls back to PROTECTED —
+        // wrongly parking a rare legacy-blog title edit is recoverable in
+        // review, silently shipping a service metaTitle rewrite is not.
+        const liveIsBlog = typeof publisher.isBlogTarget === 'function'
+          && typeof liveFm._astro_source_path === 'string'
+          && publisher.isBlogTarget(liveFm._astro_source_path);
+        liveMetaTitle = !liveIsBlog && liveFm.metaTitle != null && String(liveFm.metaTitle).trim()
           ? String(liveFm.metaTitle)
           : null;
       }
