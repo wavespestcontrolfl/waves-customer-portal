@@ -1039,6 +1039,11 @@ router.post('/blog/:id/share-social', async (req, res, next) => {
         guid: `blog_${post.id}`,
         source: 'blog',
         imageUrl: publicBlogImageUrl(post),
+        // GBP posts only from the explicit GBP image channel (no shared-image
+        // fallback — AI provenance is unknowable there). The blog hero IS the
+        // sanctioned GBP image, so pass it explicitly or the re-share posts
+        // GBP text-only.
+        gbpImageUrl: publicBlogImageUrl(post),
       });
     } else {
       // Default path dedupes via shareUrlOnce — with the live-flip auto-share

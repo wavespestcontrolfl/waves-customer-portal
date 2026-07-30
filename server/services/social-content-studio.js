@@ -1413,10 +1413,25 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
     // scenes, so the engine is asked for no GBP (4:3) scene at all — GBP takes
     // the deterministic card render below, same as the non-creative branches.
     // A GBP-ONLY run skips the engine entirely: nothing would consume the
-    // square scenes, so generating them just burns paid image credits.
+    // square scenes, so generating them just burns paid image credits. For
+    // an immediate publish, additionally require at least one non-GBP
+    // channel to be actually publish-ready (creds/flags present) — otherwise
+    // publishToAll skips Meta and every generated asset is discarded. Draft
+    // runs keep generating regardless of readiness: their variants are the
+    // approval queue's content and publish later, when readiness may differ.
     const hasNonGbpChannel = Array.isArray(plan.channels)
       && plan.channels.some((c) => c !== 'gbp');
-    const creativeVariants = hasNonGbpChannel
+    let creativeEligible = hasNonGbpChannel;
+    if (creativeEligible && effectiveMode !== 'draft') {
+      creativeEligible = false;
+      for (const ch of plan.channels) {
+        if (ch === 'gbp') continue;
+         
+        const readiness = await SocialMediaService.assertSocialPublishingReady(ch);
+        if (readiness.ready) { creativeEligible = true; break; }
+      }
+    }
+    const creativeVariants = creativeEligible
       ? await creativeVariantsForRun(plan, preview, {
         isReviewRun, wantsGbp: false, effectiveMode, now: startedAt,
       })

@@ -37,6 +37,11 @@ const FLAGGED_TIMING = [
   'about an hour to dry',
   'safe within an hour',
   'dry within 20 minutes',
+  // Wait-before word orders (codex round-5).
+  'wait 30 minutes before re-entering',
+  'allow 30 minutes before re-entry',
+  'wait an hour before letting pets back outside',
+  'give it 45 minutes before walking on treated areas',
 ];
 
 const CLEAN = [
@@ -50,6 +55,10 @@ const CLEAN = [
   'visits typically take about 45 minutes',
   'we respond within 24 hours',
   'mosquito barrier lasts 21-30 days',
+  // Agronomic aftercare timing is not a safety re-entry claim.
+  'avoid mowing for 48 hours',
+  'wait 24 hours before mowing',
+  'wait 48 hours before watering the treated zone',
 ];
 
 describe('SAFETY_OVERCLAIMS compliance class', () => {

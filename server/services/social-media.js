@@ -378,7 +378,7 @@ const SAFETY_OVERCLAIMS = /\b(?:guarante(?:e[ds]?|ing)|100\s*%\s*(?:effective|sa
 // Three shapes: "30 minutes to dry"/"30-45 min drying", "dries/safe/re-enter
 // in|within|after 30 ...", "30-minute drying/re-entry (time)", plus the
 // wordy "about an hour to dry".
-const FIXED_TIMING_CLAIMS = /\b\d+\s*(?:[-–]\s*\d+\s*)?(?:minutes?|mins?|hours?|hrs?)\s+(?:to\s+dry|dry(?:ing)?(?:\s+time)?|re-?entry)|\b(?:dry|dries|drying|safe|re-?enter(?:ing)?|re-?entry)\s+(?:in|within|after)\s+(?:about\s+|around\s+|~\s*)?(?:\d+|an?\s+hour|half\s+an\s+hour)|\b\d+\s*[-–]?\s*(?:minute|min|hour|hr)s?\s+(?:dry(?:ing)?|re-?entry)\b|\babout\s+an\s+hour\s+to\s+dry\b/i;
+const FIXED_TIMING_CLAIMS = /\b\d+\s*(?:[-–]\s*\d+\s*)?(?:minutes?|mins?|hours?|hrs?)\s+(?:to\s+dry|dry(?:ing)?(?:\s+time)?|re-?entry)|\b(?:dry|dries|drying|safe|re-?enter(?:ing)?|re-?entry)\s+(?:in|within|after)\s+(?:about\s+|around\s+|~\s*)?(?:\d+|an?\s+hour|half\s+an\s+hour)|\b\d+\s*[-–]?\s*(?:minute|min|hour|hr)s?\s+(?:dry(?:ing)?|re-?entry)\b|\babout\s+an\s+hour\s+to\s+dry\b|\b(?:wait|allow|give\s+it)\s+(?:about\s+|around\s+|~\s*)?(?:\d+\s*(?:[-–]\s*\d+\s*)?(?:minutes?|mins?|hours?|hrs?)|an?\s+hour|half\s+an\s+hour)\s+before\s+(?:re-?ent(?:er(?:ing)?|ry)|entering|going\s+back|letting|walking|using|use|kids|pets|children)/i;
 const PHONE_PATTERN = /(?:\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}|\+1\d{10})/g;
 
 const KNOWN_PHONES = new Set();
