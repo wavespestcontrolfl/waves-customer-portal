@@ -142,7 +142,7 @@ EVENT RULES:
 
 INTRO: greeting "Hey there!" energy — NEVER include a name or name placeholder; the renderer appends the subscriber's first name automatically. introText 2-4 sentences with a "Whether you're into X, Y, or Z" triad and a FOMO close. introGifCaption: cold-open punchline for the intro GIF (same caption genre).
 
-HOMEOWNER MINUTE: One useful seasonal tip (pest, lawn, plants, home prep). Max ~90 words. Technical precision is the brand: distinguish OUTDOOR pests pushed toward shelter (rain drives palmetto bugs/outdoor roaches indoors) from INDOOR breeders (German roaches are carried in and thrive wherever there's food, warmth, and moisture — weather doesn't cause them). Never imply weather causes an indoor infestation. Genuinely useful, not salesy — the brand sell in this newsletter is ZERO; this tip is the only Waves-adjacent content and it must stand on its own. Voice it like the themed issues: **bold the facts**, _italicize the jokes_, anthropomorphize the pest/plant when it lands ("that mosquito keeping you up at night? Probably a mom-to-be"), urgency biological/seasonal, never commercial. May end with a "Hot tip:" one-liner.
+HOMEOWNER MINUTE: One useful seasonal tip (pest, lawn, plants, home prep) — VARY the topic week to week; don't default to rain-and-roaches. Max ~90 words. One factual guard: never imply weather causes an indoor infestation. Genuinely useful, not salesy — the brand sell in this newsletter is ZERO; this tip is the only Waves-adjacent content and it must stand on its own. Voice it like the themed issues: **bold the facts**, _italicize the jokes_, anthropomorphize the pest/plant when it lands ("that mosquito keeping you up at night? Probably a mom-to-be"), urgency biological/seasonal, never commercial. May end with a "Hot tip:" one-liner.
 
 CLOSING: closingText = 1-2 short paragraphs that CALL BACK to this issue's actual events in an absurd triad ("Whether you end up juggling pineapples, dancing to swamp funk, or sobbing quietly to Schubert — we fully support your weekend choices."). closingChecklist: 3-4 short ✔️-style reminders mixing practical + absurd ("Hydrate like it's your job", "Don't underestimate the power of a funnel cake"). Do NOT include the ✔️ itself in the items — the renderer adds it.
 
@@ -1096,12 +1096,22 @@ function linkifyFirst(html, text, url) {
   return `${html.slice(0, idx)}<a href="${url}" style="color:${COLORS.blue};text-decoration:underline;font-weight:600;">${matched}</a>${html.slice(idx + needle.length)}`;
 }
 
-function gifBlock(url, caption) {
+function gifBlock(url, caption, { capHeight = false } = {}) {
   const safeGifUrl = safeUrl(url);
   if (!safeGifUrl) return '';
-  let html = `<div style="text-align:center;margin:12px 0 8px 0;">
-<img src="${safeGifUrl}" alt="" style="max-width:100%;height:auto;border-radius:10px;display:block;margin:0 auto;" />
+  // capHeight: EVENT visuals only (owner 2026-07-30 — GIFs and photos
+  // share one 280px aspect-fit box). Intro and Pest Insider GIFs keep
+  // their natural sizing. Capped visuals are mso-hidden like the still
+  // photos (#3033 contract): Outlook's Word engine ignores max-height
+  // and would render a tall GIF at natural size — Outlook readers keep
+  // the caption and full card content.
+  const sizing = capHeight
+    ? 'max-width:100%;max-height:280px;width:auto;height:auto;'
+    : 'max-width:100%;height:auto;';
+  const imgHtml = `<div style="text-align:center;margin:12px 0 8px 0;">
+<img src="${safeGifUrl}" alt="" style="${sizing}border-radius:10px;display:block;margin:0 auto;" />
 </div>`;
+  let html = capHeight ? `<!--[if !mso]><!-->${imgHtml}<!--<![endif]-->` : imgHtml;
   if (caption) {
     html += `\n<p style="text-align:center;margin:0 0 16px 0;font-size:14px;font-style:italic;color:${COLORS.muted};line-height:1.4;">${escapeHtml(caption)}</p>`;
   }
@@ -1300,11 +1310,20 @@ async function assembleBeehiivNewsletter(draft) {
   // line is the compact at-a-glance version (owner-accepted critique
   // 2026-07-29), and entries lead with the REAL event name so the list
   // is scannable — the curiosity headline rides second.
-  // Real event names ONLY (owner 2026-07-29: no trailing curiosity-title
-  // text in the list).
-  const tocItems = events.map(ev => {
-    const real = ev.sourceTitle ? `<strong>${escapeHtml(ev.sourceTitle)}</strong>` : markdownToHtml(ev.title);
-    return `<li style="margin:0 0 6px 0;"><a href="#evt-${slugify(ev.title)}" class="dm-link" style="color:${COLORS.blue};text-decoration:none;">${escapeHtml(ev.emoji || '🎯')} ${real}</a></li>`;
+  // Owner 2026-07-30 (supersedes the real-names directive): the list is
+  // a TEASE — witty curiosity titles only, never the official event
+  // names, so the fold-out doesn't give the issue away. ENFORCED: a
+  // model title that just echoes the DB-locked official name falls back
+  // to a generic no-spoilers entry.
+  const normTitle = (t) => String(t || '').normalize('NFKC').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const tocItems = events.map((ev, i) => {
+    // Containment, not just equality: "Downtown Night Market After Dark"
+    // still reveals "Downtown Night Market". Names under 4 normalized
+    // chars are too generic to treat as leaks.
+    const src = normTitle(ev.sourceTitle);
+    const leaks = src.length >= 4 && normTitle(ev.title).includes(src);
+    const tease = leaks ? `Weekend pick #${i + 1}` : markdownToHtml(ev.title);
+    return `<li style="margin:0 0 6px 0;"><a href="#evt-${slugify(ev.title)}" class="dm-link" style="color:${COLORS.blue};text-decoration:none;">${escapeHtml(ev.emoji || '🎯')} <strong>${tease}</strong></a></li>`;
   });
   if (draft.homeownerMinute) {
     tocItems.push(`<li style="margin:0 0 6px 0;"><a href="#homeowner-minute" style="color:${COLORS.blue};text-decoration:none;font-weight:500;">🏠 Homeowner Minute</a></li>`);
@@ -1312,10 +1331,11 @@ async function assembleBeehiivNewsletter(draft) {
   // Owner 2026-07-29: the summary line is JUST the read time — no count,
   // no geography, no "(tap for the list)".
   const tocSummary = '~5-minute read';
-  parts.push(`<div class="dm-box" style="margin:0 0 24px 0;padding:14px 20px;background:${COLORS.cardBg};border-radius:10px;">
+  // Centered below the hero image (owner 2026-07-30).
+  parts.push(`<div class="dm-box" style="margin:0 0 24px 0;padding:14px 20px;background:${COLORS.cardBg};border-radius:10px;text-align:center;">
 <details>
-<summary class="dm-muted" style="cursor:pointer;font-size:14px;color:${COLORS.muted};font-weight:600;">${escapeHtml(tocSummary)}</summary>
-<ul style="list-style:none;padding:0;margin:10px 0 0 0;font-size:14px;line-height:1.9;">${tocItems.join('\n')}</ul>
+<summary class="dm-muted" style="cursor:pointer;font-size:14px;color:${COLORS.muted};font-weight:600;text-align:center;">${escapeHtml(tocSummary)}</summary>
+<ul style="list-style:none;padding:0;margin:10px 0 0 0;font-size:14px;line-height:1.9;text-align:center;">${tocItems.join('\n')}</ul>
 </details>
 </div>`);
 
@@ -1407,15 +1427,18 @@ async function assembleBeehiivNewsletter(draft) {
       return html;
     }
     const eventGif = eventGifs[i];
-    return eventGif ? gifBlock(eventGif, ev.gifCaption) : '';
+    return eventGif ? gifBlock(eventGif, ev.gifCaption, { capHeight: true }) : '';
   };
 
+  // No wave-divider squiggle between sections (owner 2026-07-30) —
+  // plain vertical spacing separates the cards.
+  const sectionSpacer = '<div style="height:26px;line-height:26px;font-size:0;">&nbsp;</div>';
   for (let i = 0; i < events.length; i++) {
     const ev = events[i];
     const pieces = eventPieces(ev);
     const anchorId = `evt-${slugify(ev.title)}`;
 
-    parts.push(dividerHtml());
+    parts.push(sectionSpacer);
     // Both id and a legacy <a name> anchor: TOC jumps work in clients
     // that honor either form (Apple Mail, desktop clients; Gmail's
     // mobile apps ignore in-email anchors — platform limitation).
@@ -1467,17 +1490,17 @@ async function assembleBeehiivNewsletter(draft) {
 
   // ── Homeowner Minute ──
   if (draft.homeownerMinute) {
-    parts.push(dividerHtml());
+    parts.push(sectionSpacer);
     parts.push(`<a name="homeowner-minute"></a>`);
     parts.push(`<h2 id="homeowner-minute" class="dm-chip" style="${sectionHeadingStyle(events.length)}">🏠 <strong><em>Homeowner Minute</em></strong></h2>`);
     parts.push(`<div class="dm-box" style="margin:0 0 20px 0;padding:18px 20px;background:${COLORS.homeownerBg};border-radius:12px;border-left:4px solid ${COLORS.blue};">
-<p style="margin:0;font-size:15px;line-height:1.6;">${markdownToHtml(draft.homeownerMinute)}</p>
+<p style="margin:0;font-family:${COLORS.font};font-size:15px;line-height:1.6;">${markdownToHtml(draft.homeownerMinute)}</p>
 </div>`);
   }
 
   // ── Closing ──
   if (draft.closingHeading || draft.closingText) {
-    parts.push(dividerHtml());
+    parts.push(sectionSpacer);
     if (draft.closingHeading) {
       parts.push(`<h2 class="dm-chip" style="${sectionHeadingStyle(events.length + 1)}">${escapeHtml(draft.closingEmoji || '📝')} <strong><em>${markdownToHtml(draft.closingHeading)}</em></strong></h2>`);
     }
@@ -1733,10 +1756,31 @@ async function createNewsletterDraft({
     ? buildPestInsiderSystemPrompt(voice, month)
     : buildFlagshipSystemPrompt(voice, month);
 
-  // Enrich the user prompt with homeowner minute topic if provided
+  // Enrich the user prompt with homeowner minute topic if provided;
+  // otherwise supply RECENT topics so "vary week to week" is enforceable
+  // (the model can't avoid repeats it has never seen).
   let enrichedPrompt = prompt;
   if (homeownerMinuteTopic) {
     enrichedPrompt += `\nHomeowner Minute topic: ${homeownerMinuteTopic}`;
+  } else if (typeConfig?.flagship) {
+    try {
+      // STRICTLY earlier weeks only: operators pre-plan future topics
+      // (four planned rows would displace history), and the current
+      // issue's OWN planned topic must never land in the do-not-repeat
+      // list — /draft-ai calls without homeownerMinuteTopic even when
+      // the week's calendar row has one. week_of is an ET DATE, so
+      // compare against the issue's ET date string, not the timestamp
+      // (a date < timestamp comparison would re-include same-day rows).
+      const recent = await knex('newsletter_calendar')
+        .whereNotNull('homeowner_minute_topic')
+        .where('week_of', '<', etDateString(editorialReference))
+        .orderBy('week_of', 'desc')
+        .limit(4)
+        .pluck('homeowner_minute_topic');
+      if (recent.length) {
+        enrichedPrompt += `\nRecent Homeowner Minute topics (do NOT repeat these): ${recent.join('; ')}`;
+      }
+    } catch { /* best-effort — the section still generates without history */ }
   }
 
   const userPrompt = `Topic / prompt: ${enrichedPrompt}
@@ -1970,6 +2014,7 @@ module.exports = {
   // Exported for unit testing the Beehiiv-parity render devices
   clockEmojiFor,
   // GIF dedupe (one issue never repeats a GIF)
+  gifBlock,
   searchGiphyCandidates,
   pickUniqueGif,
   pickUniqueGifWithRetry,

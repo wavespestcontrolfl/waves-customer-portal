@@ -184,15 +184,14 @@ describe('assembleBeehiivNewsletter — no GIF repeats in one issue', () => {
     expect(new Set(gifUrls).size).toBe(4); // ALL distinct — the actual owner rule
   });
 
-  test('divider uses the self-hosted 2026 mascot badge at 48px, not the Beehiiv CDN', async () => {
+  test('flagship has NO divider squiggle (owner 2026-07-30); nothing references the Beehiiv CDN', async () => {
     const html = await assembleBeehiivNewsletter({
       selectedSubject: 'Weekend Lineup',
       greeting: 'Hey there',
       introText: 'Big week ahead.',
       events: [eventFixture(1)],
     });
-    expect(html).toContain('https://d2riygw2ap9mi.cloudfront.net/social-media/waves-divider-2026-v2.gif');
-    expect(html).toContain('width="48"');
+    expect(html).not.toContain('waves-divider-2026-v2.gif');
     expect(html).not.toContain('media.beehiiv.com');
   });
 });
