@@ -8898,12 +8898,14 @@ const CallRecordingProcessor = {
     // pre-existing customers keep the old behavior: no auto-subscribe.
     // Gated on the pre-claim processing_status (Codex #3084 r21):
     // `call.processing_status` was read BEFORE the claim, so it still says
-    // whether THIS run is the extraction_failed retry. An admin force
-    // reprocess of an already-processed call must not rebuild — its
+    // whether THIS run is a recovery pass — the extraction_failed retry, or
+    // a stale-claim reclaim ('processing': a worker died after persisting
+    // customer_id but before the newsletter step, Codex #3084 r22). An
+    // admin force reprocess of a PROCESSED call must not rebuild — its
     // subscribe path re-sends the pending DOI (confirmation_resent) on
     // every force.
     if (!newsletterCandidate && customerId && !createdCustomerFromCall
-        && call.processing_status === 'extraction_failed') {
+        && ['extraction_failed', 'processing'].includes(call.processing_status)) {
       try {
         const custRow = await db('customers').where({ id: customerId }).first('email', 'first_name', 'last_name', 'created_at');
         if (custRow?.created_at && call.created_at

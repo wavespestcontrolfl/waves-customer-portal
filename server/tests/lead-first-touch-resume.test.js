@@ -18,6 +18,7 @@ let mockMergeFailures = 0;
 let mockMergeArgs = [];
 let mockCustomerFirstQueue = null; // shift per customers.first(); an Error value throws
 let mockSubscriberRow = null; // newsletter_subscribers.first() (DOI dedupe guard)
+let mockSubscriberFirstError = null; // thrown by newsletter_subscribers.first()
 let mockSubscriberUpdates = [];
 let mockSubscriberUpdateError = null;
 let mockOnFirstTouchClaim = null; // fires when a claim update lands (race simulation)
@@ -99,7 +100,10 @@ jest.mock('../models/db', () => {
           if (mockTriageFirstQueue && mockTriageFirstQueue.length) return mockTriageFirstQueue.shift();
           return mockTriageCardRow;
         }
-        if (table === 'newsletter_subscribers') return mockSubscriberRow;
+        if (table === 'newsletter_subscribers') {
+          if (mockSubscriberFirstError) throw mockSubscriberFirstError;
+          return mockSubscriberRow;
+        }
         if (table === 'automation_templates') return { key: 'new_lead' };
         return null;
       }),
@@ -162,6 +166,7 @@ beforeEach(() => {
   mockSubscriberRow = null;
   mockSubscriberUpdates = [];
   mockSubscriberUpdateError = null;
+  mockSubscriberFirstError = null;
   mockOnFirstTouchClaim = null;
   mockHoldFirstQueue = null;
   mockTriageFirstQueue = null;
@@ -534,6 +539,50 @@ describe('mid-send races (r19)', () => {
     const last = mockHoldUpdates.at(-1);
     expect(last).toMatchObject({ status: 'pending' });
     expect(last.last_error).toBeUndefined();
+  });
+
+  test('a live review card minted after the pre-claim check blocks the release', async () => {
+    // A force-reprocess can insert a NEW email card and re-pend the row
+    // between a caller's pre-claim check and the claim (Codex #3084 r22) —
+    // the in-claim re-check refuses to send the back-under-review address.
+    mockTriageCardRow = { id: 'card-live' };
+    const res = await resumeHeldFirstTouch({ callLogId: 'call-1' });
+    expect(res.skipped).toBe('email_review_live');
+    expect(mockEnroll).not.toHaveBeenCalled();
+    expect(mockNewsletter).not.toHaveBeenCalled();
+    expect(mockHoldUpdates.at(-1)).toMatchObject({ status: 'pending' });
+    expect(mockHoldUpdates.at(-1).last_error).toBeUndefined();
+  });
+
+  test('an explicit correction proceeds past a live review card', async () => {
+    // The operator's asserted address supersedes the open question (r8
+    // decision: the fanout release is ungated on card state).
+    mockTriageCardRow = { id: 'card-live' };
+    const res = await resumeHeldFirstTouch({ customerId: 'cust-1', email: 'corrected@example.com' });
+    expect(res.resumed).toBe(true);
+    expect(mockEnroll).toHaveBeenCalled();
+  });
+
+  test('a DOI-failure re-pend never buries a mid-send deny stamp', async () => {
+    // Retryable settles are deny-preserving too (Codex #3084 r22): the
+    // guarded write refuses (a deny landed), and the fallback re-pends
+    // without touching last_error.
+    mockNewsletter.mockResolvedValueOnce({ subscribed: true, confirmationEmailSent: false });
+    mockRepenGuardZeroOnce = true;
+    await resumeHeldFirstTouch({ callLogId: 'call-1' });
+    const last = mockHoldUpdates.at(-1);
+    expect(last).toMatchObject({ status: 'pending' });
+    expect(last.last_error).toBeUndefined();
+  });
+
+  test('an unverifiable DOI-dedupe lookup fails closed instead of sending', async () => {
+    // A delivered DOI whose hold settle failed must not double-mail when
+    // the guard read errors (Codex #3084 r22): no send, retryable re-pend,
+    // and NOT the send-failed marker (skipDedupe stays false).
+    mockSubscriberFirstError = new Error('pool exhausted');
+    await resumeHeldFirstTouch({ callLogId: 'call-1' });
+    expect(mockNewsletter).not.toHaveBeenCalled();
+    expect(mockHoldUpdates.at(-1)).toMatchObject({ status: 'pending', last_error: 'doi_state_unverified' });
   });
 
   test('a failed pre-send re-read never buries a freshly-landed deny stamp', async () => {

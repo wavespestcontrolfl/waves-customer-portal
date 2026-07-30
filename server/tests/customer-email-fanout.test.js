@@ -401,6 +401,11 @@ describe('propagateCustomerEmailChange', () => {
     expect(conn.__calls.some((c) => c.table === 'first_touch_holds' && c.op === 'where'
       && c.arg && c.arg.status === 'releasing' && c.arg.customer_id === 'cust-1')).toBe(true);
     expect(retarget.arg.updated_at).toBeUndefined();
+    // The correction lifts a deny stamp on active claims too (Codex #3084
+    // r22) — the in-flight worker's deny-safe settle would otherwise
+    // preserve the stamp and strand the corrected hold from the sweep.
+    expect(String(retarget.arg.last_error.__raw)).toContain('email_denied_await_correction');
+    expect(String(retarget.arg.last_error.__raw)).toContain('THEN NULL');
   });
 
   test('a correction retargets PENDING holds — and lifts a deny stamp — before releasing', async () => {

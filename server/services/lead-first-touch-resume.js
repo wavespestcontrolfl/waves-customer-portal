@@ -97,6 +97,26 @@ async function claimHold(hold, dbh) {
 }
 
 async function settleHold(holdId, patch, dbh) {
+  // EVERY retryable settle (pending + a fallback marker) is deny-preserving
+  // (Codex #3084 r22): a deny stamping after the pre-send read must not be
+  // buried under ANY retry marker — the card is resolved by then, and the
+  // sweep excludes only the exact deny marker. Terminal released settles
+  // carry their own deny guard (settleIfTargetUnchanged); 'blocked' is a
+  // stronger consent terminal and may overwrite.
+  if (patch.status === 'pending' && patch.last_error) {
+    const updated = await dbh('first_touch_holds')
+      .where({ id: holdId })
+      .where(function notDenied() {
+        this.whereNull('last_error').orWhereNot('last_error', 'email_denied_await_correction');
+      })
+      .update({ ...patch, updated_at: new Date() });
+    if (!updated) {
+      const { last_error, ...rest } = patch;
+      await dbh('first_touch_holds').where({ id: holdId })
+        .update({ ...rest, status: 'pending', updated_at: new Date() });
+    }
+    return;
+  }
   await dbh('first_touch_holds').where({ id: holdId }).update({ ...patch, updated_at: new Date() });
 }
 
@@ -221,7 +241,14 @@ async function runNewsletterResume(payload, dbh = db, { skipDedupe = false } = {
         return { skipped: 'confirmation_recently_sent' };
       }
     } catch (guardErr) {
-      logger.warn(`[first-touch-resume] DOI-dedupe guard lookup failed: ${guardErr.code || guardErr.name || 'db_error'} — proceeding with resume`);
+      // Fail CLOSED (Codex #3084 r22): if delivery state can't be verified,
+      // proceeding falls through to subscribeOrResubscribe's
+      // confirmation_resent path and can double-mail a DOI that already
+      // delivered (only its hold settle failed). Undelivered + retryReason
+      // keeps the hold retryable and skipDedupe false — the guard re-runs
+      // on the next trigger.
+      logger.warn(`[first-touch-resume] DOI-dedupe guard lookup failed: ${guardErr.code || guardErr.name || 'db_error'} — not sending`);
+      return { confirmationEmailSent: false, retryReason: 'doi_state_unverified' };
     }
   }
   const CRP = require('./call-recording-processor');
@@ -267,6 +294,33 @@ async function resumeHeldFirstTouch({
         await settleHold(hold.id, { status: 'pending' }, dbh);
         result.skipped = result.skipped || 'email_denied';
         continue;
+      }
+
+      // Live-card re-check INSIDE the claim (Codex #3084 r22): a
+      // force-reprocess can mint a NEW email-review card and re-pend the
+      // row with its fresh extraction between a caller's pre-claim check
+      // (the sweep's query, a resolve's sibling check) and this claim —
+      // the address is back under review and must not send. Only an
+      // explicit operator correction (the email override) proceeds past a
+      // live card. Fail-closed: an unverifiable card state never sends.
+      // The plain re-pend touches no last_error (a deny stays intact).
+      if (!email && hold.call_log_id) {
+        let liveCard = null;
+        try {
+          liveCard = await dbh('triage_items')
+            .where({ call_log_id: hold.call_log_id })
+            .whereIn('reason_code', EMAIL_REVIEW_REASON_CODES)
+            .whereIn('status', ['open', 'in_progress'])
+            .first('id');
+        } catch (cardErr) {
+          logger.warn(`[first-touch-resume] in-claim live-card re-check failed: ${cardErr.code || cardErr.name || 'db_error'} — hold stays pending`);
+          liveCard = { unverified: true };
+        }
+        if (liveCard) {
+          await settleHold(hold.id, { status: 'pending' }, dbh);
+          result.skipped = result.skipped || 'email_review_live';
+          continue;
+        }
       }
 
       const holdCustomerId = hold.customer_id || customerId;
@@ -597,8 +651,7 @@ async function runOnePostCommitResume(payload, holdIds, dbh) {
     }
     if (await emailSuppressedForNewLead(sendPayload.email, dbh)) {
       for (const holdId of holdIds) {
-        await dbh('first_touch_holds').where({ id: holdId })
-          .update({ status: 'pending', last_error: 'email_suppressed', updated_at: new Date() });
+        await repenHoldPreservingDeny(holdId, 'email_suppressed', dbh);
       }
       logger.info('[first-touch-resume] post-commit target suppressed — hold(s) stay pending');
       return { skipped: 'email_suppressed' };
@@ -623,8 +676,8 @@ async function runOnePostCommitResume(payload, holdIds, dbh) {
         // Back to pending — the DOI never confirmed; the next release
         // trigger (or the ledger sweep) retries it. retryReason outcomes
         // (e.g. dedupe_linkage_failed) keep skipDedupe FALSE on retry.
-        await dbh('first_touch_holds').where({ id: holdId })
-          .update({ status: 'pending', last_error: outcome?.retryReason || 'newsletter_doi_not_confirmed', updated_at: new Date() });
+        // Deny-preserving (r22): a stamp landing mid-callback survives.
+        await repenHoldPreservingDeny(holdId, outcome?.retryReason || 'newsletter_doi_not_confirmed', dbh);
       }
     }
     return outcome;
@@ -639,8 +692,8 @@ async function runOnePostCommitResume(payload, holdIds, dbh) {
     // confirmation_sent_at dedupe guard skips the resend and just settles.
     for (const holdId of holdIds) {
       try {
-        await dbh('first_touch_holds').where({ id: holdId })
-          .update({ status: 'pending', last_error: `newsletter_resume_failed: ${code}`, updated_at: new Date() });
+        // Deny-preserving (r22): a stamp landing mid-callback survives.
+        await repenHoldPreservingDeny(holdId, `newsletter_resume_failed: ${code}`, dbh);
       } catch (repenErr) {
         logger.warn(`[first-touch-resume] hold ${holdId} re-pend failed: ${repenErr.code || repenErr.name || 'db_error'} (stale-claim window will reclaim)`);
       }

@@ -373,9 +373,18 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
     // the NEWEST corrected address, not the value captured at claim time
     // (Codex #3084 r12). updated_at is deliberately untouched: bumping it
     // would extend a possibly-dead claimant's stale-claim window.
+    // The deny stamp lifts here too (Codex #3084 r22): the correction's own
+    // resume cannot claim a releasing row, and the in-flight worker's
+    // deny-safe settle would re-pend it with the stamp preserved — leaving
+    // the sweep to exclude the corrected hold forever. The correction is an
+    // explicit operator approval of the new address, on active claims
+    // exactly as on pending rows.
     await conn('first_touch_holds')
       .where({ customer_id: customerId, status: 'releasing' })
-      .update({ held_email: newEmail });
+      .update({
+        held_email: newEmail,
+        last_error: conn.raw("CASE WHEN last_error = 'email_denied_await_correction' THEN NULL ELSE last_error END"),
+      });
     // PENDING rows durably adopt the corrected address too, BEFORE the
     // release attempt below (Codex #3084 r18): resumeHeldFirstTouch never
     // throws — a transient failure re-pends the row and returns — and this
@@ -492,11 +501,21 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
   // correction's own callback, with the holds re-pended so the sweep
   // covers a lost callback. 'target_verify_failed', NOT the send-failed
   // marker: nothing was sent, so the retry must keep its dedupe guard.
+  // Deny-preserving two-step (Codex #3084 r22): the fallback marker only
+  // lands on un-stamped rows; a deny that stamped mid-callback re-pends
+  // with its stamp intact.
   const repenHolds = async (marker) => {
     for (const holdId of holdIds) {
       try {
-        await conn('first_touch_holds').where({ id: holdId })
+        const repenned = await conn('first_touch_holds').where({ id: holdId })
+          .where(function notDenied() {
+            this.whereNull('last_error').orWhereNot('last_error', 'email_denied_await_correction');
+          })
           .update({ status: 'pending', last_error: marker, updated_at: new Date() });
+        if (!repenned) {
+          await conn('first_touch_holds').where({ id: holdId })
+            .update({ status: 'pending', updated_at: new Date() });
+        }
       } catch (repenErr) {
         logger.warn(`[email-fanout] hold ${holdId} re-pend failed: ${repenErr.code || repenErr.name || 'db_error'} (stale-claim window will reclaim)`);
       }
