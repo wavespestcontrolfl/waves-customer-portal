@@ -405,11 +405,14 @@ const TRIGGER_REGISTRY = {
         };
       }
       // Postgres decimals arrive as strings ("0.00" is truthy) — coerce, and
-      // label by which total actually carries the price (one-time-only
-      // estimates keep monthly_total at 0).
+      // label by which total actually carries the price: monthly, else the
+      // annual-only recurring shape, else one-time.
       const monthly = Number(p.monthlyTotal || 0);
+      const annual = Number(p.annualTotal || 0);
       const onetime = Number(p.onetimeTotal || 0);
-      const price = monthly > 0 ? `$${monthly.toFixed(2)}/mo` : (onetime > 0 ? `$${onetime.toFixed(2)} one-time` : null);
+      const price = monthly > 0 ? `$${monthly.toFixed(2)}/mo`
+        : annual > 0 ? `$${annual.toFixed(2)}/yr`
+          : onetime > 0 ? `$${onetime.toFixed(2)} one-time` : null;
       return {
         title: p.customerName ? `${p.customerName} — estimate expired` : 'Estimate expired',
         body: `${p.customerName ? `${p.customerName}'s` : 'An'} estimate${price ? ` (${price})` : ''} expired without a decision. Worth a follow-up call.`,

@@ -63,7 +63,7 @@ async function runEstimateExpiration() {
     // RETURNING the flipped rows so the admin bell can name who walked away
     // (owner ruling 2026-07-30: a bell that says "Customer expired without a
     // decision" is not actionable).
-    .update({ status: 'expired', updated_at: now }, ['id', 'customer_name', 'monthly_total', 'onetime_total']);
+    .update({ status: 'expired', updated_at: now }, ['id', 'customer_name', 'monthly_total', 'annual_total', 'onetime_total']);
 
   // Rule 2: explicit expires_at — any non-terminal row whose expires_at has
   // passed. Accepted/declined estimates are left alone.
@@ -76,7 +76,7 @@ async function runEstimateExpiration() {
     // before the customer booked doesn't make expiring their live courtship
     // any less wrong.
     .modify(excludePendingFirstBookings)
-    .update({ status: 'expired', updated_at: now }, ['id', 'customer_name', 'monthly_total', 'onetime_total']);
+    .update({ status: 'expired', updated_at: now }, ['id', 'customer_name', 'monthly_total', 'annual_total', 'onetime_total']);
 
   const agedRows = Array.isArray(agedResult) ? agedResult : [];
   const dateRows = Array.isArray(dateResult) ? dateResult : [];
@@ -107,6 +107,7 @@ async function runEstimateExpiration() {
         count: total,
         customerName: single?.customer_name || null,
         monthlyTotal: single?.monthly_total || null,
+        annualTotal: single?.annual_total || null,
         onetimeTotal: single?.onetime_total || null,
         estimateId: single?.id || null,
         names: expiredRows.map((r) => r.customer_name).filter(Boolean).slice(0, 5),
