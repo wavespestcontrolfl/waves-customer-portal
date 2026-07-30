@@ -474,11 +474,6 @@ describe('ReschedulePage weather-move banner', () => {
     // Arrival windows quote the 2-hour promise from each start.
     expect(screen.getByText('Arrival 12:00 PM–2:00 PM')).toBeInTheDocument();
     expect(screen.getByText('Arrival 9:00 AM–11:00 AM')).toBeInTheDocument();
-    // Waves-app download block with both store badges.
-    expect(screen.getByText('Download the Waves app')).toBeInTheDocument();
-    // Anchor + its role="img" SVG both carry the store label.
-    expect(screen.getAllByLabelText('Download on the App Store').length).toBeGreaterThan(0);
-    expect(screen.getAllByLabelText('Get it on Google Play').length).toBeGreaterThan(0);
     // Rain gets the bonding explainer, collapsed by default.
     expect(screen.getByText('Why the move?')).toBeInTheDocument();
     expect(screen.getByText(/microencapsulated/)).toBeInTheDocument();

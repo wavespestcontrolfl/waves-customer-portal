@@ -21,9 +21,7 @@ import { COLORS, FONTS } from '../theme-brand';
 import { FS, FW, LH, SP } from '../theme-doc';
 import { CUSTOMER_SURFACE } from '../theme-customer';
 import { WavesShell } from '../components/brand';
-import BrandFooter, {
-  APP_STORE_URL, PLAY_STORE_URL, AppStoreBadgeSvg, GooglePlayBadgeSvg,
-} from '../components/BrandFooter';
+import BrandFooter from '../components/BrandFooter';
 import Icon from '../components/Icon';
 import { useGlassSurface } from '../glass/glass-engine';
 import WavesAIScheduleSearch from '../components/booking/WavesAIScheduleSearch';
@@ -261,25 +259,6 @@ function WeatherMoveBanner({ move, firstName, serviceType, hero = false }) {
 
       <WeatherMoveRow label="Was" date={move.from?.date} windowStart={move.from?.windowStart} chance={move.fromChance} isNow={false} />
       <WeatherMoveRow label="Now" date={move.to?.date} windowStart={move.to?.windowStart} chance={move.toChance} isNow />
-
-      {/* Same centered label-over-badges shape as BrandFooter's StoreBadges. */}
-      <div data-glass="soft" style={{
-        display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10, marginTop: 14,
-        background: S.soft, border: `1px solid ${S.softBorder}`, borderRadius: 8, padding: '14px 16px',
-        textAlign: 'center',
-      }}>
-        <div style={{ fontSize: 15, fontWeight: 600, color: S.text, lineHeight: 1.4 }}>
-          Download the Waves app
-        </div>
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'center', justifyContent: 'center' }}>
-          <a href={APP_STORE_URL} target="_blank" rel="noopener noreferrer" aria-label="Download on the App Store" style={{ display: 'inline-block' }}>
-            <AppStoreBadgeSvg fill={COLORS.glassNavy} />
-          </a>
-          <a href={PLAY_STORE_URL} target="_blank" rel="noopener noreferrer" aria-label="Get it on Google Play" style={{ display: 'inline-block' }}>
-            <GooglePlayBadgeSvg fill={COLORS.glassNavy} />
-          </a>
-        </div>
-      </div>
 
       {WHY_MOVE_REASONS.has(move.reasonCode) ? (
         <details data-glass="soft" style={{
