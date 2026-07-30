@@ -105,25 +105,33 @@ function buildUserMessage(facts) {
   return `STRUCTURED FACTS for this visit (rewrite the copy from these — do not copy these words):\n\n${JSON.stringify(facts, null, 2)}\n\nReturn the JSON now.`;
 }
 
-// Replace a deterministic string with the model's version only if it's a non-empty,
-// non-banned string. Otherwise keep the safe deterministic copy.
-function safeText(modelValue, fallback) {
-  const t = typeof modelValue === 'string' ? modelValue.trim() : '';
-  if (!t) return fallback;
-  if (findBannedCustomerCopy(t).length) return fallback;
-  return t;
-}
-
 // The rain figure is a past-7-days total — model output that reframes the
 // window as the visit interval ("since the last visit", "this cycle") or as
 // a single day's rain is factually wrong whenever visits aren't weekly, and
 // the prompt rule alone doesn't guarantee compliance (codex P1 #3093 r3:
-// exactly this framing shipped on a live report). Enforce at merge time:
-// window-violating water copy falls back to the deterministic sentence.
-const RAIN_WINDOW_VIOLATIONS = /\bsince\s+(?:your|the)\s+last\s+(?:visit|service)\b|\bthis\s+(?:service\s+)?cycle\b|\bbetween\s+(?:visits|services)\b|\brain(?:fall)?\s+(?:today|yesterday)\b/i;
+// exactly this framing shipped on a live report).
+const RAIN_WINDOW_PHRASES = /\bsince\s+(?:your|the)\s+last\s+(?:visit|service)\b|\bthis\s+(?:service\s+)?cycle\b|\bbetween\s+(?:visits|services)\b|\brain(?:fall)?\s+(?:today|yesterday)\b/i;
+const RAIN_TERMS = /\brain|\binch|\bprecipitation|\bwater/i;
+
+// Replace a deterministic string with the model's version only if it's a
+// non-empty, non-banned string that doesn't tie a rain/water amount to the
+// wrong window. The window check applies to EVERY merged field (mainWatch,
+// diagnosis explanations, insights — codex P1 r4), but only when the text
+// also talks about rain/water: a trend claim like "weeds are down since the
+// last visit" is legitimate (the prior visit IS the trend anchor).
+function safeText(modelValue, fallback) {
+  const t = typeof modelValue === 'string' ? modelValue.trim() : '';
+  if (!t) return fallback;
+  if (findBannedCustomerCopy(t).length) return fallback;
+  if (RAIN_WINDOW_PHRASES.test(t) && RAIN_TERMS.test(t)) return fallback;
+  return t;
+}
+
+// The water explanation is ALWAYS about the rain window — reject window
+// phrases unconditionally there, no rain-term co-occurrence needed.
 function safeWaterText(modelValue, fallback) {
   const t = safeText(modelValue, fallback);
-  if (t !== fallback && RAIN_WINDOW_VIOLATIONS.test(t)) return fallback;
+  if (t !== fallback && RAIN_WINDOW_PHRASES.test(t)) return fallback;
   return t;
 }
 

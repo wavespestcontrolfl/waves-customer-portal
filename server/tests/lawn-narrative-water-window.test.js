@@ -34,4 +34,18 @@ describe('safeWaterText — rain window enforcement', () => {
     const merged = _test.mergeNarrative(v2, { water: 'About 3 inches of rain since the last visit.' });
     expect(merged.water.explanation).toBe(FALLBACK);
   });
+
+  test('other narrative fields reject rain claims tied to the wrong window', () => {
+    const det = 'A few faint blotchy spots after the recent rain.';
+    const v2 = { water: null, snapshot: { mainWatch: det }, diagnosis: [], insights: [] };
+    const merged = _test.mergeNarrative(v2, { mainWatch: 'We saw 4 inches of rain since the last visit, so watch the damp spots.' });
+    expect(merged.snapshot.mainWatch).toBe(det);
+  });
+
+  test('non-rain trend claims about the last visit still pass in other fields', () => {
+    const det = 'Weed pressure is being watched.';
+    const v2 = { water: null, snapshot: { mainWatch: det }, diagnosis: [], insights: [] };
+    const merged = _test.mergeNarrative(v2, { mainWatch: 'Weed pressure has eased since the last visit.' });
+    expect(merged.snapshot.mainWatch).toBe('Weed pressure has eased since the last visit.');
+  });
 });

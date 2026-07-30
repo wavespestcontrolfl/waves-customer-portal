@@ -79,15 +79,19 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
   } else if (waterCat && (waterCat.status === 'watch' || waterCat.status === 'needs_attention')) {
     // The water score is degraded without dry evidence (overwatering/fungus
     // signals also lower it) — a dry-area/sprinkler claim here would be
-    // invented (codex P1 #3093 r2). Neutral moisture-watch card grounded in
-    // the diagnosis's own explanation.
+    // invented (codex P1 #3093 r2). Grounded in the diagnosis's own
+    // explanation, and the action must match the signal: a damp/fungal read
+    // gets ease-back advice, never "keep the current schedule" (codex P1 r4).
+    const damp = !!(water && water.overwatering);
     cards.push({
-      category: 'water', status: 'watch', confidence: 'area_estimated',
-      headline: 'Moisture balance is the thing to watch',
+      category: 'water', status: 'watch', confidence: damp ? 'tech_confirmed' : 'area_estimated',
+      headline: damp ? 'Damp areas are the thing to watch' : 'Moisture balance is the thing to watch',
       whatWeSaw: waterCat.customerExplanation || 'Today’s photos showed a mixed moisture read across the lawn.',
       whyItMatters: 'Keeping moisture balanced protects the lawn from both fungus pressure and dry stress.',
       wavesAction: 'Flagged it for a recheck at the next visit.',
-      customerAction: 'Keep your current watering schedule unless we flag a change.',
+      customerAction: damp
+        ? 'Let the damp areas dry out between waterings, and ease back an irrigation cycle if they stay soggy.'
+        : 'Keep your current watering schedule unless we flag a change.',
       nextVisitPlan: 'Recheck the moisture balance next visit.',
     });
   }
