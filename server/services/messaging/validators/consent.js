@@ -14,6 +14,7 @@
 
 const db = require('../../../models/db');
 const logger = require('../../logger');
+const { toE164 } = require('../../../utils/phone');
 
 /**
  * @param {import('../policy').SendCustomerMessageInput} input
@@ -268,7 +269,16 @@ async function loadContactState(input) {
     && input.purpose === 'conversational'
     && !['lead', 'internal', 'tech', 'admin'].includes(input.audience);
   if (needsReplyEvidence) {
-    const phones = [...new Set([input.to, state.customer?.phone].filter(Boolean))];
+    // Twilio records sms_log.from_phone in canonical E.164, but input.to /
+    // customer.phone can carry stored formatting (e.g. '+44 20 7946 0958',
+    // '(941) 555-1234') that an exact match would miss — blocking the very
+    // reply this evidence exists to allow (Codex P2 on 5fbf59c8b). Query
+    // both the raw and toE164 forms of each candidate.
+    const phones = [...new Set(
+      [input.to, state.customer?.phone]
+        .flatMap((p) => [p, toE164(p)])
+        .filter(Boolean),
+    )];
     if (phones.length) {
       try {
         const inbound = await db('sms_log')

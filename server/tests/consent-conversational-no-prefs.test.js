@@ -122,9 +122,11 @@ describe('loadContactState — inbound-history evidence', () => {
   const { loadContactState } = require('../services/messaging/validators/consent');
 
   let smsLogQueried;
+  let smsLogPhones;
 
   const mockDb = ({ prefs = null, customer = null, inboundRow = null, inboundThrows = false }) => {
     smsLogQueried = false;
+    smsLogPhones = null;
     db.mockImplementation((table) => {
       if (table === 'notification_prefs') {
         return { where: () => ({ first: async () => prefs }) };
@@ -136,12 +138,15 @@ describe('loadContactState — inbound-history evidence', () => {
         smsLogQueried = true;
         return {
           where: () => ({
-            whereIn: () => ({
-              first: async () => {
-                if (inboundThrows) throw new Error('boom');
-                return inboundRow;
-              },
-            }),
+            whereIn: (_col, phones) => {
+              smsLogPhones = phones;
+              return {
+                first: async () => {
+                  if (inboundThrows) throw new Error('boom');
+                  return inboundRow;
+                },
+              };
+            },
           }),
         };
       }
@@ -194,6 +199,15 @@ describe('loadContactState — inbound-history evidence', () => {
     expect(state.hasInboundHistory).toBe(false);
     expect(state.lookupFailed).toBe(true);
   });
+
+  test('formatted phones are queried in BOTH raw and canonical E.164 forms', async () => {
+    mockDb({ customer: { id: 'c1', phone: '+44 20 7946 0958' }, inboundRow: { id: 's1' } });
+    await loadContactState({ ...baseInput, to: '(941) 555-0100' });
+    expect(smsLogPhones).toEqual(expect.arrayContaining([
+      '(941) 555-0100', '+19415550100',
+      '+44 20 7946 0958', '+442079460958',
+    ]));
+  });
 });
 
 describe('loadSuppressionState — transient failure is UNKNOWN state, not empty', () => {
@@ -215,6 +229,24 @@ describe('loadSuppressionState — transient failure is UNKNOWN state, not empty
     }));
     const state = await loadSuppressionState({ to: '+19415550100' }, { prefs: null });
     expect(state.suppressionLookupFailed).toBeUndefined();
+  });
+
+  test('42P01 error code fails open without the flag even with a nonstandard message', async () => {
+    const err = new Error('some driver wording');
+    err.code = '42P01';
+    db.mockImplementation(() => ({
+      where: () => ({ first: async () => { throw err; } }),
+    }));
+    const state = await loadSuppressionState({ to: '+19415550100' }, { prefs: null });
+    expect(state.suppressionLookupFailed).toBeUndefined();
+  });
+
+  test('an error merely MENTIONING the table (permission denied) still stamps the flag', async () => {
+    db.mockImplementation(() => ({
+      where: () => ({ first: async () => { throw new Error('permission denied for table messaging_suppression'); } }),
+    }));
+    const state = await loadSuppressionState({ to: '+19415550100' }, { prefs: null });
+    expect(state.suppressionLookupFailed).toBe(true);
   });
 
   test('successful lookup with an active row still lands on contactState.suppression', async () => {

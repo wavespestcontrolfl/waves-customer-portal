@@ -89,7 +89,13 @@ async function loadSuppressionState(input, contactState) {
       contactState.suppression = row;
     }
   } catch (err) {
-    if (err && /relation .* does not exist|messaging_suppression/i.test(err.message)) {
+    // ONLY the undefined-relation error (Postgres 42P01) means "migration
+    // not yet applied" and may fail open. Matching any error that merely
+    // mentions the table name (e.g. "permission denied for table
+    // messaging_suppression") would skip the failure flag below and let
+    // the consent validator's no-prefs exception send to a possibly
+    // suppressed number (Codex P1 on 5fbf59c8b).
+    if (err && (err.code === '42P01' || /relation .* does not exist/i.test(err.message || ''))) {
       // Migration not yet applied. Fail open — the consent validator's
       // sms_enabled=false path still catches the most common opt-out case
       // (which the existing twilio-webhook STOP handler already writes).
