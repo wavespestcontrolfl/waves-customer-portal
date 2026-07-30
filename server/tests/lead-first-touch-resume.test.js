@@ -7,6 +7,8 @@
  */
 
 let mockHold = null;
+let mockHolds = null; // overrides single-hold mode when set
+let mockClaimFails = false;
 let mockDncRow = null;
 let mockSuppressionRow = null;
 let mockCustomerRow = { id: 'cust-1', first_name: 'Pat', last_name: 'Sample' };
@@ -22,7 +24,13 @@ jest.mock('../models/db', () => {
       insert: jest.fn(() => chain),
       onConflict: jest.fn(() => chain),
       merge: jest.fn(async () => 1),
-      update: jest.fn(async (patch) => { if (table === 'first_touch_holds') mockHoldUpdates.push(patch); return 1; }),
+      update: jest.fn(async (patch) => {
+        if (table === 'first_touch_holds') {
+          if (patch.status === 'releasing' && mockClaimFails) return 0;
+          mockHoldUpdates.push(patch);
+        }
+        return 1;
+      }),
       first: jest.fn(async () => {
         if (table === 'first_touch_holds') return mockHold;
         if (table === 'customers') return mockCustomerRow;
@@ -31,7 +39,9 @@ jest.mock('../models/db', () => {
         return null;
       }),
       then: (resolve, reject) => Promise.resolve(
-        table === 'email_suppressions' ? (mockSuppressionRow ? [mockSuppressionRow] : []) : []
+        table === 'email_suppressions' ? (mockSuppressionRow ? [mockSuppressionRow] : [])
+          : table === 'first_touch_holds' ? (mockHolds || (mockHold ? [mockHold] : []))
+            : []
       ).then(resolve, reject),
     };
     return chain;
@@ -68,6 +78,8 @@ function baseHold(overrides = {}) {
 beforeEach(() => {
   jest.clearAllMocks();
   mockHold = baseHold();
+  mockHolds = null;
+  mockClaimFails = false;
   mockDncRow = null;
   mockSuppressionRow = null;
   mockHoldUpdates = [];
@@ -111,8 +123,8 @@ describe('resumeHeldFirstTouch (ledger release engine)', () => {
     mockSuppressionRow = { id: 'sup-1', suppression_type: 'bounce', group_key: null };
     const res = await resumeHeldFirstTouch({ callLogId: 'call-1' });
     expect(res).toMatchObject({ resumed: false, skipped: 'email_suppressed' });
-    expect(mockHoldUpdates.at(-1)).toMatchObject({ last_error: 'email_suppressed' });
-    expect(mockHoldUpdates.at(-1).status).toBeUndefined();
+    // The claim reverts to pending explicitly — retryable, never released.
+    expect(mockHoldUpdates.at(-1)).toMatchObject({ status: 'pending', last_error: 'email_suppressed' });
   });
 
   test('an unrelated group-scoped suppression does NOT block (canonical group semantics)', async () => {
@@ -142,14 +154,33 @@ describe('resumeHeldFirstTouch (ledger release engine)', () => {
     const last = mockHoldUpdates.at(-1);
     expect(last.released_drip).toBe(true);
     expect(last.released_newsletter).toBeUndefined();
-    expect(last.status).toBeUndefined();
+    // Claim reverts to pending — the DOI retry stays live.
+    expect(last.status).toBe('pending');
     expect(last.last_error).toBe('newsletter_doi_not_confirmed');
   });
 
   test('deferNewsletter returns the payload instead of sending mid-transaction', async () => {
     const res = await resumeHeldFirstTouch({ customerId: 'cust-1', email: 'corrected@example.com', deferNewsletter: true });
     expect(mockNewsletter).not.toHaveBeenCalled();
-    expect(res.newsletterResume).toMatchObject({ holdId: 'hold-1', email: 'corrected@example.com' });
+    expect(res.newsletterResume).toEqual([expect.objectContaining({ holdId: 'hold-1', email: 'corrected@example.com' })]);
+  });
+
+  test('a lost atomic claim skips the hold — no duplicate DOI from racing release paths', async () => {
+    mockClaimFails = true;
+    const res = await resumeHeldFirstTouch({ callLogId: 'call-1' });
+    expect(res.resumed).toBe(false);
+    expect(mockEnroll).not.toHaveBeenCalled();
+    expect(mockNewsletter).not.toHaveBeenCalled();
+  });
+
+  test('an email correction releases EVERY pending hold for the customer', async () => {
+    mockHolds = [
+      baseHold({ id: 'hold-1', call_log_id: 'call-1', held_newsletter: true }),
+      baseHold({ id: 'hold-2', call_log_id: 'call-2', held_newsletter: false }),
+    ];
+    const res = await resumeHeldFirstTouch({ customerId: 'cust-1', email: 'corrected@example.com' });
+    expect(res.resumed).toBe(true);
+    expect(mockEnroll).toHaveBeenCalledTimes(2);
   });
 
   test('newsletter-only hold with drip already released settles cleanly', async () => {

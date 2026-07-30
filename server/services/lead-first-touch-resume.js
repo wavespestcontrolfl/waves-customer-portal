@@ -56,13 +56,44 @@ async function emailSuppressedForNewLead(email, dbh) {
   return rows.some((row) => automationSuppressionMatches(template || {}, row));
 }
 
-async function findPendingHold({ callLogId = null, customerId = null, dbh }) {
-  if (!(await dbh.schema.hasTable('first_touch_holds'))) return null;
-  let q = dbh('first_touch_holds').where({ status: 'pending' });
+// Every pending hold in scope (a customer can hold from multiple calls —
+// an email edit must release ALL of them, Codex #3084 r7). A 'releasing'
+// claim older than the stale window belongs to a dead worker and is
+// reclaimable.
+const STALE_CLAIM_MS = 10 * 60 * 1000;
+
+async function findPendingHolds({ callLogId = null, customerId = null, dbh }) {
+  if (!(await dbh.schema.hasTable('first_touch_holds'))) return [];
+  let q = dbh('first_touch_holds').where(function scope() {
+    this.where({ status: 'pending' })
+      .orWhere(function stale() {
+        this.where({ status: 'releasing' })
+          .where('updated_at', '<', new Date(Date.now() - STALE_CLAIM_MS));
+      });
+  });
   if (callLogId) q = q.where({ call_log_id: callLogId });
   else if (customerId) q = q.where({ customer_id: customerId });
-  else return null;
-  return q.orderBy('created_at', 'desc').first('*');
+  else return [];
+  return q.orderBy('created_at', 'asc').select('*');
+}
+
+// Atomic claim (Codex #3084 r7): two release paths racing the same hold —
+// a triage verdict against the end-of-run reconciliation — must not both
+// run the DOI side effect. The winner flips pending→releasing; the loser's
+// conditional update affects 0 rows and skips. Failure paths revert to
+// pending (retryable); terminal paths settle released/blocked.
+async function claimHold(hold, dbh) {
+  const claimed = await dbh('first_touch_holds')
+    .where({ id: hold.id })
+    .where(function claimable() {
+      this.where({ status: 'pending' })
+        .orWhere(function stale() {
+          this.where({ status: 'releasing' })
+            .where('updated_at', '<', new Date(Date.now() - STALE_CLAIM_MS));
+        });
+    })
+    .update({ status: 'releasing', updated_at: new Date() });
+  return claimed > 0;
 }
 
 async function settleHold(holdId, patch, dbh) {
@@ -86,11 +117,12 @@ async function runNewsletterResume(payload) {
 }
 
 /**
- * Release the pending first-touch hold for a call (triage paths) or a
- * customer (email-correction paths). `email` (a corrected address) overrides
- * the ledger's held_email; the customer's STORED email is deliberately never
- * used — for a matched existing customer it can be a different, stale
- * address than the one confirmed on the call.
+ * Release EVERY pending first-touch hold in scope — a call (triage paths)
+ * or a customer (email-correction paths; one customer can hold from several
+ * calls). `email` (a corrected address) overrides each ledger row's
+ * held_email; the customer's STORED email is deliberately never used — for
+ * a matched existing customer it can be a different, stale address than the
+ * one confirmed on the call.
  */
 async function resumeHeldFirstTouch({
   customerId = null,
@@ -100,119 +132,144 @@ async function resumeHeldFirstTouch({
   source = 'email_review_resolved',
   deferNewsletter = false,
 } = {}) {
-  const result = { resumed: false, enrolled: false, newsletter: null, newsletterResume: null, skipped: null };
+  const result = { resumed: false, enrolled: false, newsletter: null, newsletterResume: [], skipped: null };
   try {
-    const hold = await findPendingHold({ callLogId, customerId, dbh });
-    if (!hold) return { ...result, skipped: 'no_pending_hold' };
+    const holds = await findPendingHolds({ callLogId, customerId, dbh });
+    if (!holds.length) return { ...result, newsletterResume: null, skipped: 'no_pending_hold' };
 
-    const holdCustomerId = hold.customer_id || customerId;
-    if (!holdCustomerId) {
-      await settleHold(hold.id, { last_error: 'no_customer_linked' }, dbh);
-      return { ...result, skipped: 'no_customer' };
-    }
-    const customer = await dbh('customers')
-      .where({ id: holdCustomerId })
-      .first('id', 'first_name', 'last_name');
-    if (!customer) {
-      await settleHold(hold.id, { last_error: 'customer_not_found' }, dbh);
-      return { ...result, skipped: 'customer_not_found' };
-    }
+    for (const hold of holds) {
+      if (!(await claimHold(hold, dbh))) continue; // another release path owns it
 
-    const resumeEmail = String(email || hold.held_email || '').trim().toLowerCase();
-    if (!resumeEmail || !RESUME_EMAIL_RE.test(resumeEmail)) {
-      // Stays pending: a later correction releases it.
-      await settleHold(hold.id, { last_error: 'invalid_email' }, dbh);
-      return { ...result, skipped: 'invalid_email' };
-    }
-
-    if (await customerCallDoNotContact(holdCustomerId, dbh)) {
-      await settleHold(hold.id, { status: 'blocked', last_error: 'do_not_contact' }, dbh);
-      logger.info(`[first-touch-resume] customer ${holdCustomerId}: do-not-contact veto — hold blocked (${source})`);
-      return { ...result, skipped: 'do_not_contact' };
-    }
-    if (await emailSuppressedForNewLead(resumeEmail, dbh)) {
-      // Pending, not blocked: a corrected address after a bounce releases it.
-      await settleHold(hold.id, { last_error: 'email_suppressed' }, dbh);
-      logger.info(`[first-touch-resume] customer ${holdCustomerId}: address suppressed — hold stays pending (${source})`);
-      return { ...result, skipped: 'email_suppressed' };
-    }
-
-    const patch = {};
-    if (hold.held_drip && !hold.released_drip) {
-      try {
-        const AutomationRunner = require('./automation-runner');
-        const enroll = await AutomationRunner.enrollCustomer({
-          templateKey: 'new_lead',
-          customer: {
-            email: resumeEmail,
-            first_name: customer.first_name || null,
-            last_name: customer.last_name || null,
-            id: holdCustomerId,
-          },
-          dbh,
-        });
-        result.enrolled = !!enroll?.enrolled;
-        patch.released_drip = true;
-      } catch (enrollErr) {
-        // Stays pending — the ledger row IS the retryable release.
-        await settleHold(hold.id, { last_error: `enroll_failed: ${String(enrollErr.message).slice(0, 200)}` }, dbh);
-        logger.warn(`[first-touch-resume] enroll failed for customer ${holdCustomerId} — hold stays pending: ${enrollErr.message}`);
-        return { ...result, skipped: 'enroll_failed' };
+      const holdCustomerId = hold.customer_id || customerId;
+      if (!holdCustomerId) {
+        await settleHold(hold.id, { status: 'pending', last_error: 'no_customer_linked' }, dbh);
+        continue;
       }
-    }
+      const customer = await dbh('customers')
+        .where({ id: holdCustomerId })
+        .first('id', 'first_name', 'last_name');
+      if (!customer) {
+        await settleHold(hold.id, { status: 'pending', last_error: 'customer_not_found' }, dbh);
+        continue;
+      }
 
-    let newsletterSettled = !hold.held_newsletter || hold.released_newsletter;
-    if (hold.held_newsletter && !hold.released_newsletter) {
-      if (deferNewsletter) {
-        // Transactional caller: DOI executes post-commit via
-        // resumeHeldNewsletterPostCommit, which settles the flag itself.
-        result.newsletterResume = {
-          holdId: hold.id,
-          customerId: holdCustomerId,
-          email: resumeEmail,
-          firstName: customer.first_name || null,
-          lastName: customer.last_name || null,
-        };
-      } else {
-        result.newsletter = await runNewsletterResume({
-          customerId: holdCustomerId,
-          email: resumeEmail,
-          firstName: customer.first_name || null,
-          lastName: customer.last_name || null,
-        });
-        if (newsletterDelivered(result.newsletter)) {
-          patch.released_newsletter = true;
-          newsletterSettled = true;
-        } else {
-          patch.last_error = 'newsletter_doi_not_confirmed';
+      const resumeEmail = String(email || hold.held_email || '').trim().toLowerCase();
+      if (!resumeEmail || !RESUME_EMAIL_RE.test(resumeEmail)) {
+        // Back to pending: a later correction releases it.
+        await settleHold(hold.id, { status: 'pending', last_error: 'invalid_email' }, dbh);
+        result.skipped = result.skipped || 'invalid_email';
+        continue;
+      }
+
+      if (await customerCallDoNotContact(holdCustomerId, dbh)) {
+        await settleHold(hold.id, { status: 'blocked', last_error: 'do_not_contact' }, dbh);
+        logger.info(`[first-touch-resume] customer ${holdCustomerId}: do-not-contact veto — hold blocked (${source})`);
+        result.skipped = result.skipped || 'do_not_contact';
+        continue;
+      }
+      if (await emailSuppressedForNewLead(resumeEmail, dbh)) {
+        // Back to pending: a corrected address after a bounce releases it.
+        await settleHold(hold.id, { status: 'pending', last_error: 'email_suppressed' }, dbh);
+        logger.info(`[first-touch-resume] customer ${holdCustomerId}: address suppressed — hold stays pending (${source})`);
+        result.skipped = result.skipped || 'email_suppressed';
+        continue;
+      }
+
+      const patch = {};
+      if (hold.held_drip && !hold.released_drip) {
+        try {
+          const AutomationRunner = require('./automation-runner');
+          const enroll = await AutomationRunner.enrollCustomer({
+            templateKey: 'new_lead',
+            customer: {
+              email: resumeEmail,
+              first_name: customer.first_name || null,
+              last_name: customer.last_name || null,
+              id: holdCustomerId,
+            },
+            dbh,
+          });
+          result.enrolled = result.enrolled || !!enroll?.enrolled;
+          patch.released_drip = true;
+        } catch (enrollErr) {
+          // Back to pending — the ledger row IS the retryable release.
+          await settleHold(hold.id, { status: 'pending', last_error: `enroll_failed: ${String(enrollErr.message).slice(0, 200)}` }, dbh);
+          logger.warn(`[first-touch-resume] enroll failed for customer ${holdCustomerId} — hold stays pending: ${enrollErr.message}`);
+          result.skipped = result.skipped || 'enroll_failed';
+          continue;
         }
       }
+
+      let newsletterSettled = !hold.held_newsletter || hold.released_newsletter;
+      let deferredThisHold = false;
+      if (hold.held_newsletter && !hold.released_newsletter) {
+        if (deferNewsletter) {
+          // Transactional caller: DOI executes post-commit via
+          // resumeHeldNewsletterPostCommit, which settles the row itself.
+          // The claim stays 'releasing' until then (stale-claim window
+          // reclaims it if the process dies before commit).
+          result.newsletterResume.push({
+            holdId: hold.id,
+            customerId: holdCustomerId,
+            email: resumeEmail,
+            firstName: customer.first_name || null,
+            lastName: customer.last_name || null,
+          });
+          deferredThisHold = true;
+        } else {
+          const outcome = await runNewsletterResume({
+            customerId: holdCustomerId,
+            email: resumeEmail,
+            firstName: customer.first_name || null,
+            lastName: customer.last_name || null,
+          });
+          result.newsletter = outcome;
+          if (newsletterDelivered(outcome)) {
+            patch.released_newsletter = true;
+            newsletterSettled = true;
+          } else {
+            patch.status = 'pending';
+            patch.last_error = 'newsletter_doi_not_confirmed';
+          }
+        }
+      }
+
+      const dripSettled = !hold.held_drip || hold.released_drip || patch.released_drip;
+      if (dripSettled && newsletterSettled && !deferredThisHold) {
+        patch.status = 'released';
+        patch.released_at = new Date();
+        patch.last_error = null;
+      } else if (!deferredThisHold && !patch.status) {
+        patch.status = 'pending';
+      }
+      if (Object.keys(patch).length) await settleHold(hold.id, patch, dbh);
+
+      result.resumed = result.resumed || result.enrolled
+        || newsletterDelivered(result.newsletter) || deferredThisHold;
     }
 
-    const dripSettled = !hold.held_drip || hold.released_drip || patch.released_drip;
-    if (dripSettled && newsletterSettled) {
-      patch.status = 'released';
-      patch.released_at = new Date();
-      patch.last_error = null;
-    }
-    if (Object.keys(patch).length) await settleHold(hold.id, patch, dbh);
-
-    result.resumed = result.enrolled || newsletterDelivered(result.newsletter) || !!result.newsletterResume;
+    if (!result.newsletterResume.length) result.newsletterResume = null;
     if (result.resumed) {
-      logger.info(`[first-touch-resume] customer ${holdCustomerId}: first-touch released (${source}; enrolled=${result.enrolled})`);
+      logger.info(`[first-touch-resume] released first-touch hold(s) (${source}; enrolled=${result.enrolled})`);
     }
     return result;
   } catch (err) {
     logger.warn(`[first-touch-resume] failed (${source}): ${err.message}`);
-    return { ...result, skipped: 'error' };
+    return { ...result, newsletterResume: null, skipped: 'error' };
   }
 }
 
 // Post-commit companion for transactional callers (same contract as the
 // fanout's resendPendingConfirmation): execute the deferred newsletter DOI
 // after the edit commits, then settle the ledger. Never throws.
-async function resumeHeldNewsletterPostCommit(payload, dbh = db) {
-  if (!payload) return null;
+async function resumeHeldNewsletterPostCommit(payloadOrList, dbh = db) {
+  if (!payloadOrList) return null;
+  if (Array.isArray(payloadOrList)) {
+    const outcomes = [];
+    for (const p of payloadOrList) outcomes.push(await resumeHeldNewsletterPostCommit(p, dbh));
+    return outcomes;
+  }
+  const payload = payloadOrList;
   try {
     const outcome = await runNewsletterResume(payload);
     if (payload.holdId) {
@@ -221,12 +278,15 @@ async function resumeHeldNewsletterPostCommit(payload, dbh = db) {
         const dripSettled = !hold || !hold.held_drip || hold.released_drip;
         await dbh('first_touch_holds').where({ id: payload.holdId }).update({
           released_newsletter: true,
-          ...(dripSettled ? { status: 'released', released_at: new Date(), last_error: null } : {}),
+          status: dripSettled ? 'released' : 'pending',
+          ...(dripSettled ? { released_at: new Date(), last_error: null } : {}),
           updated_at: new Date(),
         });
       } else {
+        // Back to pending — the DOI never confirmed; the next release
+        // trigger retries it.
         await dbh('first_touch_holds').where({ id: payload.holdId })
-          .update({ last_error: 'newsletter_doi_not_confirmed', updated_at: new Date() });
+          .update({ status: 'pending', last_error: 'newsletter_doi_not_confirmed', updated_at: new Date() });
       }
     }
     return outcome;
