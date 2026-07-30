@@ -1768,6 +1768,61 @@ async function maybeRemediateBlogPost(post, deps = {}) {
   }, deps);
 }
 
+/**
+ * Mirror whitelisted frontmatter fixes into an autonomous run's draft_payload.
+ *
+ * The poller's finalize path reads draft_payload.frontmatter.meta_description as
+ * the social-share excerpt, so an unmirrored fix posts the exact snippet Codex
+ * flagged. This lane is fail-SOFT (unlike the scheduler lane's row sync, where a
+ * throw parks): a caption is not worth parking a pushed fix over.
+ *
+ * The documented degradation is a title-only card — but that only fires on an
+ * ABSENT excerpt. So when the mirror write fails, the STALE description is
+ * removed rather than left in place, which is what makes the claimed fallback
+ * real instead of publishing pre-fix copy. Never throws.
+ */
+async function mirrorFrontmatterToDraftPayload(db, runId, prNumber, frontmatterChanges) {
+  if (!frontmatterChanges
+    || (frontmatterChanges.meta_description === undefined && frontmatterChanges.hero_alt === undefined)) return;
+  try {
+    const fresh = await db('autonomous_runs').where({ id: runId }).first();
+    if (!fresh || !fresh.draft_payload) return;
+    const payload = typeof fresh.draft_payload === 'string' ? JSON.parse(fresh.draft_payload) : fresh.draft_payload;
+    if (!payload || typeof payload !== 'object') return;
+    payload.frontmatter = payload.frontmatter && typeof payload.frontmatter === 'object' ? payload.frontmatter : {};
+    if (frontmatterChanges.meta_description !== undefined) {
+      payload.frontmatter.meta_description = frontmatterChanges.meta_description;
+    }
+    if (frontmatterChanges.hero_alt !== undefined) {
+      payload.frontmatter.hero_image = {
+        ...(payload.frontmatter.hero_image && typeof payload.frontmatter.hero_image === 'object' ? payload.frontmatter.hero_image : {}),
+        alt: frontmatterChanges.hero_alt,
+      };
+    }
+    await db('autonomous_runs').where({ id: runId }).update({
+      draft_payload: JSON.stringify(payload),
+      updated_at: new Date(),
+    });
+  } catch (e) {
+    logger.warn(`[codex-remediation] draft_payload mirror failed for PR #${prNumber}: ${e.message} — clearing the stale excerpt so the share degrades to title-only`);
+    if (frontmatterChanges.meta_description === undefined) return;
+    try {
+      const again = await db('autonomous_runs').where({ id: runId }).first();
+      const payload = typeof again?.draft_payload === 'string' ? JSON.parse(again.draft_payload) : again?.draft_payload;
+      if (!payload || typeof payload !== 'object' || !payload.frontmatter
+        || typeof payload.frontmatter !== 'object'
+        || payload.frontmatter.meta_description === undefined) return;
+      delete payload.frontmatter.meta_description;
+      await db('autonomous_runs').where({ id: runId }).update({
+        draft_payload: JSON.stringify(payload),
+        updated_at: new Date(),
+      });
+    } catch (inner) {
+      logger.warn(`[codex-remediation] could not clear the stale excerpt for PR #${prNumber}: ${inner.message} — the social share may use the pre-fix description`);
+    }
+  }
+}
+
 /** Autonomous lane (autonomous-pr-poller): a run with a live PR, no blog_posts row. */
 async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
   if (!remediationEnabled()) return { skipped: true, reason: 'disabled' };
@@ -1845,32 +1900,9 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
     // lane's row sync (runRemediationForPr parks when onRemediated throws):
     // a stale caption degrades to the title-only fallback, never a wrong
     // route — not worth parking a pushed fix over, so failures only warn.
-    onRemediated: run && run.id ? async ({ frontmatterChanges }) => {
-      if (!frontmatterChanges
-        || (frontmatterChanges.meta_description === undefined && frontmatterChanges.hero_alt === undefined)) return;
-      try {
-        const fresh = await db('autonomous_runs').where({ id: run.id }).first();
-        if (!fresh || !fresh.draft_payload) return;
-        const payload = typeof fresh.draft_payload === 'string' ? JSON.parse(fresh.draft_payload) : fresh.draft_payload;
-        if (!payload || typeof payload !== 'object') return;
-        payload.frontmatter = payload.frontmatter && typeof payload.frontmatter === 'object' ? payload.frontmatter : {};
-        if (frontmatterChanges.meta_description !== undefined) {
-          payload.frontmatter.meta_description = frontmatterChanges.meta_description;
-        }
-        if (frontmatterChanges.hero_alt !== undefined) {
-          payload.frontmatter.hero_image = {
-            ...(payload.frontmatter.hero_image && typeof payload.frontmatter.hero_image === 'object' ? payload.frontmatter.hero_image : {}),
-            alt: frontmatterChanges.hero_alt,
-          };
-        }
-        await db('autonomous_runs').where({ id: run.id }).update({
-          draft_payload: JSON.stringify(payload),
-          updated_at: new Date(),
-        });
-      } catch (e) {
-        logger.warn(`[codex-remediation] draft_payload mirror failed for PR #${pr && pr.number}: ${e.message} — social caption may use the pre-fix value`);
-      }
-    } : null,
+    onRemediated: run && run.id
+      ? ({ frontmatterChanges }) => mirrorFrontmatterToDraftPayload(db, run.id, pr && pr.number, frontmatterChanges)
+      : null,
     // Re-run the runner's publish gates on the rewritten body before it can
     // commit — the run's uniqueness/quality/SEO/visibility verdicts covered
     // the ORIGINAL body only. Missing run row fails closed inside (parks).
@@ -1905,6 +1937,7 @@ module.exports = {
   p2MergeEnabled,
   p2OnlyMergeEligible,
   syncPendingHold,
+  mirrorFrontmatterToDraftPayload,
   findingSeverity,
   isPostPushPark,
   MAX_ROUNDS,

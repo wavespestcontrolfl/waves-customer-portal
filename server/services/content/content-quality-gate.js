@@ -914,19 +914,35 @@ function checkHubLinkPresent(draft, brief) {
       : { ok: false, reason: 'no_curated_hub_link_found' };
   }
   const { SERVICE_HUB_LINKS, SERVICE_CITY_SLUG, SERVICE_ID_ALIASES } = require('./content-brief-builder')._internals;
-  const hubs = [...new Set(Object.values(SERVICE_HUB_LINKS).flat())];
-  if (hubs.some((h) => body.includes(h))) return { ok: true };
+  // Resolve the brief's service FIRST and check only ITS hubs. Testing the union
+  // of every service's hubs let any vertical satisfy a check named
+  // "relevant hub" with an unrelated one — and it made the hubless carve-out
+  // below dead code, since a tree/shrub draft linking /pest-control-services/
+  // passed before the carve-out was ever reached.
+  const service = SERVICE_ID_ALIASES[brief?.service] || brief?.service;
+  const serviceHubs = service ? SERVICE_HUB_LINKS[service] : null;
+
+  // Unknown or absent service: fall back to the union. The service is what makes
+  // "relevant" meaningful, so without it there is nothing stricter to assert, and
+  // failing here would park briefs that simply carry no service.
+  if (!Array.isArray(serviceHubs)) {
+    const anyHub = [...new Set(Object.values(SERVICE_HUB_LINKS).flat())];
+    return anyHub.some((h) => body.includes(h))
+      ? { ok: true }
+      : { ok: false, reason: 'no_hub_link_found' };
+  }
+
+  if (serviceHubs.some((h) => body.includes(h))) return { ok: true };
+
   // A vertical with NO hub-level page (tree & shrub: /tree-shrub-care/ does not
   // exist, only /tree-and-shrub-care-{city}-fl/) has an empty SERVICE_HUB_LINKS
-  // entry, so the union above can never satisfy it and EVERY such draft parked —
+  // entry, so no hub link can ever satisfy it and EVERY such draft parked —
   // including city-scoped ones that followed their brief exactly. For those
   // services the city-service page IS the most relevant local page the brief
-  // mandates, so accept it. Scoped to services with no hub link: a vertical that
-  // HAS one must still link it rather than substituting a city page.
-  const service = SERVICE_ID_ALIASES[brief?.service] || brief?.service;
-  const citySlug = service ? SERVICE_CITY_SLUG[service] : null;
-  const hubless = service ? !(SERVICE_HUB_LINKS[service] || []).length : false;
-  if (hubless && citySlug) {
+  // mandates, so accept it. Scoped to hubless services only: a vertical that HAS
+  // a hub must link it rather than substituting a city page.
+  const citySlug = SERVICE_CITY_SLUG[service];
+  if (!serviceHubs.length && citySlug) {
     const cityRoute = new RegExp(`/${citySlug}-[a-z][a-z0-9-]*-fl/`);
     if (cityRoute.test(body)) return { ok: true };
   }

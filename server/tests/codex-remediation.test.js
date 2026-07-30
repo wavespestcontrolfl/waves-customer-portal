@@ -2860,3 +2860,79 @@ describe('syncPendingHold error and recovery behavior (codex P1 x2)', () => {
     expect(db._tables.codex_remediation_state.find((x) => x.pr_number === 5).sync_pending_sha).toBe(HEAD);
   });
 });
+
+// The autonomous mirror is fail-soft by design (a caption isn't worth parking a
+// pushed fix over) and its documented degradation is a title-only card. But the
+// poller reads draft_payload.frontmatter.meta_description directly, so a FAILED
+// mirror left the pre-fix description in place and published exactly the copy
+// Codex flagged. These drive the real mirror function, not a copy of it.
+describe('mirrorFrontmatterToDraftPayload', () => {
+  const { mirrorFrontmatterToDraftPayload: mirror } = rem;
+
+  // Minimal autonomous_runs stub; failUpdates makes the first N updates throw.
+  const makeRunDb = (payload, { failUpdates = 0 } = {}) => {
+    const rows = [{ id: 'run-1', draft_payload: payload === null ? null : JSON.stringify(payload) }];
+    let updates = 0;
+    const db = () => {
+      let crit = {};
+      return {
+        where(c) { crit = c; return this; },
+        async first() { return rows.find((r) => r.id === crit.id) || null; },
+        async update(patch) {
+          updates += 1;
+          if (updates <= failUpdates) throw new Error('update boom');
+          const r = rows.find((x) => x.id === crit.id);
+          if (r) Object.assign(r, patch);
+          return 1;
+        },
+      };
+    };
+    db._payload = () => (rows[0].draft_payload ? JSON.parse(rows[0].draft_payload) : rows[0].draft_payload);
+    db._updates = () => updates;
+    return db;
+  };
+
+  test('a successful mirror writes the fixed values', async () => {
+    const db = makeRunDb({ frontmatter: { meta_description: 'PRE-FIX', title: 'T' } });
+    await mirror(db, 'run-1', 9, { meta_description: 'FIXED copy' });
+    expect(db._payload().frontmatter.meta_description).toBe('FIXED copy');
+    expect(db._payload().frontmatter.title).toBe('T');
+  });
+
+  test('hero_alt merges into hero_image without dropping siblings', async () => {
+    const db = makeRunDb({ frontmatter: { hero_image: { src: '/a.webp', alt: 'old' } } });
+    await mirror(db, 'run-1', 9, { hero_alt: 'new alt' });
+    expect(db._payload().frontmatter.hero_image).toEqual({ src: '/a.webp', alt: 'new alt' });
+  });
+
+  test('a FAILED mirror removes the stale excerpt so the share degrades to title-only', async () => {
+    const db = makeRunDb({ frontmatter: { meta_description: 'PRE-FIX copy Codex flagged', title: 'T' } }, { failUpdates: 1 });
+    await mirror(db, 'run-1', 9, { meta_description: 'FIXED copy' });
+    const stored = db._payload();
+    expect(stored.frontmatter.meta_description).toBeUndefined(); // no pre-fix copy left to publish
+    expect(stored.frontmatter.title).toBe('T');                 // rest of the payload survives
+    expect(db._updates()).toBe(2);                              // failed write, then the clear
+  });
+
+  test('it never throws even when BOTH writes fail', async () => {
+    const db = makeRunDb({ frontmatter: { meta_description: 'PRE-FIX' } }, { failUpdates: 2 });
+    await expect(mirror(db, 'run-1', 9, { meta_description: 'FIXED' })).resolves.toBeUndefined();
+  });
+
+  test('a hero_alt-only failure does not touch meta_description', async () => {
+    const db = makeRunDb({ frontmatter: { meta_description: 'KEEP ME', hero_image: { alt: 'old' } } }, { failUpdates: 1 });
+    await mirror(db, 'run-1', 9, { hero_alt: 'new' });
+    expect(db._payload().frontmatter.meta_description).toBe('KEEP ME');
+    expect(db._updates()).toBe(1); // no clear attempted — nothing stale to clear
+  });
+
+  test('no changes, no row, and a null payload are all no-ops', async () => {
+    const db = makeRunDb({ frontmatter: { meta_description: 'X' } });
+    await mirror(db, 'run-1', 9, null);
+    await mirror(db, 'run-1', 9, {});
+    expect(db._updates()).toBe(0);
+    const empty = makeRunDb(null);
+    await mirror(empty, 'run-1', 9, { meta_description: 'Y' });
+    expect(empty._updates()).toBe(0);
+  });
+});
