@@ -47,7 +47,18 @@ const DRAFTER = 'house_voice';
 // start+2h (owner directive) via ContextAggregator, never the internal job
 // block. The facts block is also persisted on each draft row (facts_block)
 // so the judge grades grounding against what the drafter actually saw.
-const PROMPT_VERSION = 'house_voice_v8';
+// v9 (07-30): NATURALNESS, owner-driven ("should read like a Waves staff
+// member or Adam texting"). Two changes, one version: (a) the shared house
+// voice (managed-agent-config) drops the mandatory closer boilerplate and
+// the every-message greeting — conversational replies now end when the
+// answer ends and only greet at the start of a conversation; (b) the
+// owner-approved VOICE PROFILE (voice_profiles, distilled weekly from real
+// Waves calls + SMS replies) is appended to the drafter's system prompt via
+// the same sanitize/compose path the phone agent uses — the wiring that was
+// deliberately deferred at distiller ship time until the v8 cohort matured.
+// Fail-safe: no approved profile / fetch error / kill switch → base prompt,
+// byte-identical behavior minus the voice-rule edits.
+const PROMPT_VERSION = 'house_voice_v9';
 const SHADOW_STATUS = 'shadow';
 
 // Few-shot tunables. SHADOW_FEWSHOT=false disables corpus injection (v7 then
@@ -67,8 +78,32 @@ const INTENDED_ACTION_TYPES = [
   'send_estimate_link',
 ];
 
-function buildSystemPrompt() {
-  return `You are the Waves Pest Control AI assistant drafting an SMS reply to a customer in Southwest Florida. This reply may be shown to a Waves team member to review and send, or — once an intent has earned it through review — sent to the customer automatically. Treat it as customer-facing: write exactly what should go to the customer, and make it safe and correct to send AS-IS with no human edit.
+// v9 voice-profile tunables. SHADOW_VOICE_PROFILE=false is the kill switch:
+// drafting reverts to the base prompt with no profile block, no deploy.
+const VOICE_PROFILE_ENABLED = process.env.SHADOW_VOICE_PROFILE !== 'false';
+
+/**
+ * Latest owner-approved voice profile for the drafter, or null. Blocking on
+ * purpose (unlike the phone agent's non-blocking cache): the drafter is
+ * fire-and-forget off the webhook, so one indexed SELECT costs nothing — and
+ * a deterministic fetch keeps the v9 cohort homogeneous (every v9 draft
+ * either has THE current approved profile or none, never a stale cached
+ * one). Fail-safe: kill switch, no approved row, or any error → null, and
+ * the system prompt is the base prompt.
+ */
+async function fetchVoiceProfileForDrafter({ dbi = db } = {}) {
+  if (!VOICE_PROFILE_ENABLED) return null;
+  try {
+    const { getApprovedVoiceProfile } = require('./voice-profile-distiller');
+    return await getApprovedVoiceProfile({ dbi });
+  } catch (err) {
+    logger.warn(`[sms-shadow] voice profile fetch failed (${err.message}); drafting on base prompt`);
+    return null;
+  }
+}
+
+function buildSystemPrompt(voiceProfileText = '') {
+  const base = `You are the Waves Pest Control AI assistant drafting an SMS reply to a customer in Southwest Florida. This reply may be shown to a Waves team member to review and send, or — once an intent has earned it through review — sent to the customer automatically. Treat it as customer-facing: write exactly what should go to the customer, and make it safe and correct to send AS-IS with no human edit.
 
 ${CUSTOMER_SMS_HOUSE_VOICE}
 
@@ -95,6 +130,22 @@ Respond with ONLY a JSON object, no prose, no code fences:
   "intended_actions": [{"type": "escalate", "note": "optional short reason"}],
   "missing_info": "facts you needed but the context lacked, or null"
 }`;
+
+  // Owner-approved voice profile rides in via the SAME sanitize/compose path
+  // the phone agent uses (one defense, one framing, cap parity) — the profile
+  // is distilled from customer-influenced corpus, so it is treated as style
+  // DATA, never instructions, and stripped lines fail toward the base rules.
+  // Any composition error fails to the base prompt: a style block must never
+  // block drafting.
+  if (voiceProfileText) {
+    try {
+      const { composeSystemPrompt } = require('./voice-agent/relay-conversation');
+      return composeSystemPrompt(base, voiceProfileText);
+    } catch (err) {
+      logger.warn(`[sms-shadow] voice profile compose failed (${err.message}); drafting on base prompt`);
+    }
+  }
+  return base;
 }
 
 function formatEtDate(value) {
@@ -387,7 +438,13 @@ async function generateDraftOnce(client, system, userContent, route = MODELS.ROU
  * client so live + backfill share one implementation.
  */
 async function generateGroundedDraft({ client, context, inboundMessage, intent, schedulingIntent, factsBlock: presetFactsBlock, routeOverride }) {
-  const system = buildSystemPrompt();
+  // v9: the owner-approved voice profile joins the system prompt for every
+  // generation in the loop (revisions included), live and sealed-exam alike —
+  // the exam must draft under the exact prompt live traffic drafts under.
+  // voiceProfileVersion rides back in telemetry so cohort readouts can see
+  // which profile (if any) shaped each draft.
+  const voiceProfile = await fetchVoiceProfileForDrafter();
+  const system = buildSystemPrompt(voiceProfile?.profile_text || '');
   // presetFactsBlock (sealed-eval exam) replays the FROZEN facts the drafter
   // saw the day of the original message — building from a live context here
   // would grade the draft against today's schedule/balance (the exact drift
@@ -411,11 +468,12 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // one provider for every generation in the loop, fallback disabled.
   const pinned = Boolean(routeOverride);
   const route = routeOverride || draftRouteFor({ intentName: intent?.intent, inboundMessage });
+  const voiceProfileVersion = voiceProfile?.version ?? null;
   const first = await generateDraftOnce(client, system, userContent, route, { pinned });
-  if (!first) return { parsed: null, passes: 1, converged: false, model: null };
+  if (!first) return { parsed: null, passes: 1, converged: false, model: null, voiceProfileVersion };
   let { parsed, model } = first;
   // Kill switch / single-pass mode: no verification claim, behave as pre-v3.
-  if (!VERIFY_ENABLED) return { parsed, passes: 1, converged: true, model };
+  if (!VERIFY_ENABLED) return { parsed, passes: 1, converged: true, model, voiceProfileVersion };
 
   const verifier = require('./sms-draft-verifier');
   let passes = 1;
@@ -469,7 +527,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     passes += 1;
   }
 
-  return { parsed, passes, converged, model };
+  return { parsed, passes, converged, model, voiceProfileVersion };
 }
 
 /**
@@ -545,7 +603,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
     // v3: draft → adversarial fact-check → revise loop (generateGroundedDraft).
-    const { parsed, passes, converged, model: draftModel } = await generateGroundedDraft({
+    const { parsed, passes, converged, model: draftModel, voiceProfileVersion } = await generateGroundedDraft({
       client, context, inboundMessage, intent, schedulingIntent,
     });
     if (!parsed) {
@@ -595,6 +653,10 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
           actions: parsed.intended_actions,
           missing_info: parsed.missing_info,
           verify: { passes, converged },
+          // Which owner-approved voice profile (voice_profiles.version)
+          // shaped this draft — null = base prompt. Lets cohort readouts
+          // split v9 drafts by the profile that was live at draft time.
+          voice_profile_version: voiceProfileVersion ?? null,
         }),
         scheduling_intent: Boolean(schedulingIntent),
         draft_ms: Date.now() - startedAt,
@@ -724,6 +786,7 @@ module.exports = {
   buildFactsBlock,
   formatExemplarBlock,
   fetchVoiceExemplars,
+  fetchVoiceProfileForDrafter,
   DRAFTER,
   PROMPT_VERSION,
   SHADOW_STATUS,
