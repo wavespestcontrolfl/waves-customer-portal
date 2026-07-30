@@ -509,11 +509,12 @@ async function sendApprovalRequest(run, opportunity = null) {
   // mid-send leaves a stale sending claim that becomes reclaimable after
   // the staleness window instead of stranding the row forever.
   const claimStaleBefore = new Date(Date.now() - SEND_CLAIM_STALE_MINUTES * 60_000);
+  const myClaimStamp = new Date();
   const sendClaimed = await db('content_email_approvals')
     .where({ id: row.id })
     .whereNull('email_sent_at')
     .where((q) => q.whereNull('email_sending_at').orWhere('email_sending_at', '<', claimStaleBefore))
-    .update({ email_sending_at: new Date(), updated_at: new Date() });
+    .update({ email_sending_at: myClaimStamp, updated_at: new Date() });
   if (!sendClaimed) return { row, skipped: 'send_claimed_elsewhere' };
 
   const email = require('../email');
@@ -546,10 +547,23 @@ async function sendApprovalRequest(run, opportunity = null) {
     replyTo: imapMailbox().user,
   });
   if (result?.ok === false) {
-    await db('content_email_approvals').where({ id: row.id }).update({ email_sending_at: null, last_error: String(result.error || 'send failed').slice(0, 500), updated_at: new Date() });
+    // Release ONLY our own claim — a reclaimer may already hold the row.
+    await db('content_email_approvals').where({ id: row.id, email_sending_at: myClaimStamp })
+      .update({ email_sending_at: null, last_error: String(result.error || 'send failed').slice(0, 500), updated_at: new Date() });
     return { row, sent: false, error: result.error };
   }
-  await db('content_email_approvals').where({ id: row.id }).update({ email_sent_at: new Date(), last_error: null, updated_at: new Date() });
+  // Confirm delivery ONLY while this is still OUR claim and OUR token: an
+  // SMTP call that outlived the staleness window may have been reclaimed
+  // (token rotated for an edited draft) — the stale sender must not stamp
+  // the NEW token as delivered when it actually sent the OLD content
+  // (Codex r17).
+  const confirmed = await db('content_email_approvals')
+    .where({ id: row.id, token: row.token, email_sending_at: myClaimStamp })
+    .update({ email_sent_at: new Date(), last_error: null, updated_at: new Date() });
+  if (!confirmed) {
+    logger.warn(`[email-approvals] ${row.token}: send completed after the claim was reclaimed — delivery NOT confirmed for the newer token`);
+    return { row, sent: false, skipped: 'claim_reclaimed_during_send' };
+  }
   logger.info(`[email-approvals] sent ${row.token} (${row.kind}) for run ${run.id}`);
   return { row, sent: true };
 }
@@ -665,8 +679,13 @@ async function executeDecision(row, decision, sender) {
     // including the rendered-bytes ceiling (raw caps alone under-measure
     // escaped/UTF-8 expansion, Codex r12).
     if (decision === 'approved') {
+      // Rendered with the SAME inputs as send time (opportunity included —
+      // its query string feeds the Target line), so the truncation verdict
+      // here can never diverge from what was actually measured when the
+      // email went out (Codex r17).
+      const oppForRender = row.opportunity_id ? await db('opportunity_queue').where({ id: row.opportunity_id }).first() : null;
       const effectiveTruncated = current
-        ? (current.truncated || renderApprovalEmail({ run, row, preview: current }).truncated)
+        ? (current.truncated || renderApprovalEmail({ run, row, opportunity: oppForRender, preview: current }).truncated)
         : false;
       if (effectiveTruncated) {
         const marker = 'oversized_approve_ignored';
@@ -932,8 +951,15 @@ async function pollReplies() {
     if (!row.email_sent_at) continue; // unsent rows are the resend path's job
     const run = row.run_id ? await db('autonomous_runs').where({ id: row.run_id }).first() : null;
     const opp = row.opportunity_id ? await db('opportunity_queue').where({ id: row.opportunity_id }).first() : null;
+    // A requeue leaves run A's shape untouched while replacement run B
+    // re-parks the SAME opportunity as pending_review — a newer parked run
+    // supersedes the sent email just like a decided item (Codex r17).
+    const newerParked = run?.opportunity_id ? await db('autonomous_runs')
+      .where({ opportunity_id: run.opportunity_id, outcome: 'completed_pending_review', shadow_mode: false })
+      .where('created_at', '>', run.created_at || new Date(0))
+      .first() : null;
     const stillParked = run && run.outcome === 'completed_pending_review' && run.skip_reason === row.kind
-      && !run.trust_build_approved_at && opp && opp.status === 'pending_review';
+      && !run.trust_build_approved_at && opp && opp.status === 'pending_review' && !newerParked;
     if (!stillParked) {
       await db('content_email_approvals').where({ id: row.id, status: 'awaiting_reply' })
         .update({ status: 'superseded', last_error: `decided elsewhere before any reply (run ${run?.skip_reason || run?.outcome || 'gone'}, opp ${opp?.status || 'gone'})`, updated_at: new Date() });
