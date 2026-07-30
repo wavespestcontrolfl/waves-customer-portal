@@ -248,6 +248,11 @@ export default function TechTreatmentZoneModal({
   };
 
   const handleTracePointer = (e) => {
+    // Locked while a zoom reload or auto-trace is in flight — their async
+    // completions commit points/frames computed from the pre-await state,
+    // and interleaved taps would be overwritten or land on the wrong frame
+    // (pre-push audit P1 2026-07-29).
+    if (zoomBusy || suggesting) return;
     if (step !== 'trace' || mapState.status !== 'ready') return;
     const { x, y, threshold } = pointerToMapPx(e);
     if (x < 0 || y < 0 || x > MAP_WIDTH || y > MAP_HEIGHT) return;
@@ -282,7 +287,7 @@ export default function TechTreatmentZoneModal({
   };
 
   const handleAutoTrace = async () => {
-    if (suggesting || mapState.status !== 'ready') return;
+    if (suggesting || zoomBusy || mapState.status !== 'ready') return;
     setSuggesting(true);
     setSuggestNote('');
     try {
@@ -343,7 +348,7 @@ export default function TechTreatmentZoneModal({
   // lat/lng, so dropped points re-project exactly (pure 2× scale per step) —
   // linear-ft and lat/lng math follow mapState.zoom automatically.
   const changeZoom = async (delta) => {
-    if (zoomBusy || step !== 'trace' || mapState.status !== 'ready') return;
+    if (zoomBusy || suggesting || step !== 'trace' || mapState.status !== 'ready') return;
     const target = mapState.zoom + delta;
     if (target < MIN_TRACE_ZOOM || target > mapState.maxZoom) return;
     const scaled = rescalePointsForZoom(points, delta);
@@ -364,7 +369,10 @@ export default function TechTreatmentZoneModal({
         next = { url, image: await loadMapImage(url) };
       }
       setMapState((prev) => ({ ...prev, zoom: target, url: next.url, image: next.image }));
-      setPoints(scaled);
+      // Functional update — trace input is locked while zoomBusy, and this
+      // re-derives from the latest state rather than the pre-await snapshot
+      // (pre-push audit P1 2026-07-29).
+      setPoints((prev) => rescalePointsForZoom(prev, delta));
     } catch {
       setSuggestNote('That zoom level failed to load — try again.');
     } finally {
@@ -706,15 +714,15 @@ export default function TechTreatmentZoneModal({
             </p>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
               <button
-                style={btnStyle('ghost', suggesting || points.length > 0)}
-                disabled={suggesting || points.length > 0}
+                style={btnStyle('ghost', suggesting || zoomBusy || points.length > 0)}
+                disabled={suggesting || zoomBusy || points.length > 0}
                 onClick={handleAutoTrace}
               >
                 {suggesting ? 'Detecting…' : 'Auto-trace'}
               </button>
               <button
-                style={btnStyle('ghost', points.length === 0)}
-                disabled={points.length === 0}
+                style={btnStyle('ghost', points.length === 0 || zoomBusy || suggesting)}
+                disabled={points.length === 0 || zoomBusy || suggesting}
                 onClick={() => {
                   if (closed) { setClosed(false); return; }
                   setPoints((prev) => prev.slice(0, -1));
@@ -724,8 +732,8 @@ export default function TechTreatmentZoneModal({
                 {closed ? 'Reopen loop' : 'Undo point'}
               </button>
               <button
-                style={btnStyle('ghost', points.length < 3 || closed)}
-                disabled={points.length < 3 || closed}
+                style={btnStyle('ghost', points.length < 3 || closed || zoomBusy || suggesting)}
+                disabled={points.length < 3 || closed || zoomBusy || suggesting}
                 onClick={() => setClosed(true)}
               >
                 Close loop
@@ -737,8 +745,8 @@ export default function TechTreatmentZoneModal({
                   claim too, so it carries the same closed-loop gate.
                   Plain perimeter keeps its open-path spray behavior. */}
               <button
-                style={btnStyle('primary', (lawnMode || interior) ? (points.length < 3 || !closed) : points.length < 2)}
-                disabled={(lawnMode || interior) ? (points.length < 3 || !closed) : points.length < 2}
+                style={btnStyle('primary', zoomBusy || suggesting || ((lawnMode || interior) ? (points.length < 3 || !closed) : points.length < 2))}
+                disabled={zoomBusy || suggesting || ((lawnMode || interior) ? (points.length < 3 || !closed) : points.length < 2)}
                 onClick={() => setStep('play')}
               >
                 {lawnMode ? 'Set outline' : 'Play spray'}
