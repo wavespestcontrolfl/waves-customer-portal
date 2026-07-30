@@ -166,7 +166,12 @@ function slugReason(value) {
 // Token grammar mirrors the Astro publisher's remark substitution
 // (whitespace-tolerant, and phone/tel are aliases that also render a phone
 // number) — exact-string checks let "{{ cityPhone }}" or "{{tel}}" through.
+// PHONE_TOKEN_RE is the BAN matcher (any token that renders a phone);
+// CITY_PHONE_TOKEN_RE is the REQUIREMENT matcher — only {{cityPhone}}
+// resolves the tracking number that belongs to the page (owner: "the phone
+// has to align with the page"); {{phone}}/{{tel}} render the generic line.
 const PHONE_TOKEN_RE = /\{\{\s*(cityPhone|phone|tel)\s*\}\}/i;
+const CITY_PHONE_TOKEN_RE = /\{\{\s*cityPhone\s*\}\}/i;
 const META_TOKEN_RENDERINGS = [
   [/\{\{\s*(cityPhone|phone|tel)\s*\}\}/gi, '(941) 297-2606'],
   [/\{\{\s*brandShort\s*\}\}/gi, 'Waves'],
@@ -182,7 +187,7 @@ function renderMetaTokens(text) {
 // no sales copy, and they END with a soft CTA like "Learn more on the Waves
 // blog." Shared here (like renderMetaTokens) so the quality gate and the
 // guardrails enforce the SAME sales-copy/CTA definitions and can't drift.
-const SALESY_META_RE = /free\s+(estimate|quote|inspection)|call\s+(now|today|us)\b|book\s+(now|today|online)\b|schedule\s+(service|now|today|your)\b|(request|get)\s+a\s+(free\s+)?quote\b|contact\s+us\b|save\s+(on|up\s+to|with|big|money|\$|\d+\s*%)|you\s+can\s+save\b|\d+\s*%\s*off|discount|special\s+offer|act\s+now|limited\s+time/i;
+const SALESY_META_RE = /free\s+(estimate|quote|inspection)|call\s+(now|today|us)\b|book\s+(now|today|online)\b|schedule\s+(service|now|today|your)\b|(request|get)\s+a\s+(free\s+)?quote\b|contact\s+us\b|save\s+(on|up\s+to|with|big|money|\$|\d+\s*%)|you\s+can\s+save\b|\d+\s*%\s*off|discount|special\s+offer|act\s+now|limited\s+time|\b(choose|hire|trust|pick)\s+(waves|us\b|our\s)|\bwaves\s+(can|will)\s+(help|handle|protect|treat)\b|\bget\s+started\b|\bsign\s+up\b|\blet\s+us\s+(handle|help|take)\b|\bwe(?:'|’)ll\s+(handle|take\s+care)\b/i;
 const SOFT_CTA_RE = /\b(learn\s+(more|how|why|what)|read\s+(more|on|the\s+full)|find\s+out\s+(more|how|why|what)|see\s+(how|what|why))\b/i;
 
 // The meta's LAST sentence must BE a sanctioned soft CTA — not merely
@@ -213,6 +218,7 @@ module.exports = {
   evaluateTitleMetaSpam,
   renderMetaTokens,
   PHONE_TOKEN_RE,
+  CITY_PHONE_TOKEN_RE,
   SALESY_META_RE,
   SOFT_CTA_RE,
   endsWithSoftCta,

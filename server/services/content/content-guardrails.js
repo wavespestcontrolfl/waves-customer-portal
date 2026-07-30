@@ -1762,7 +1762,7 @@ function metaDescriptionContractFinding(frontmatter, { isRefresh = false, liveMe
   // source in title-meta-spam-gate) so the enforcement points can't drift.
   // PHONE_TOKEN_RE covers the publisher's full substitution grammar —
   // whitespace-tolerant, and the phone/tel aliases render a phone too.
-  const { SALESY_META_RE, endsWithSoftCta, PHONE_TOKEN_RE } = require('./title-meta-spam-gate');
+  const { SALESY_META_RE, endsWithSoftCta, PHONE_TOKEN_RE, CITY_PHONE_TOKEN_RE } = require('./title-meta-spam-gate');
   // Runs on refresh drafts (both contracts, changed metas only) AND on any
   // caller that declares a blog target — the legacy BlogWriter/admin/
   // calendar publishAstro path runs ONLY guardrails (no supporting-blog
@@ -1789,8 +1789,9 @@ function metaDescriptionContractFinding(frontmatter, { isRefresh = false, liveMe
       return finding('P1', 'BLOG_META_MISSING_SOFT_CTA', 'Blog meta descriptions must END with a soft CTA like "Learn more on the Waves blog." — the last sentence, not merely a mention (owner rule 2026-07-29).');
     }
   } else {
-    if (!PHONE_TOKEN_RE.test(draftTrim)) {
-      return finding('P1', 'META_MISSING_PHONE_TOKEN', 'Rewritten meta description must contain the {{cityPhone}} token (owner rule 2026-07-29: every non-blog meta carries the page\'s own phone number).');
+    // {{cityPhone}} SPECIFICALLY — phone/tel aliases render the generic line.
+    if (!CITY_PHONE_TOKEN_RE.test(draftTrim)) {
+      return finding('P1', 'META_MISSING_PHONE_TOKEN', 'Rewritten meta description must contain the {{cityPhone}} token (owner rule 2026-07-29: every non-blog meta carries the page\'s own phone number — phone/tel aliases render the generic line).');
     }
     if (LITERAL_PHONE_IN_META_RE.test(draftTrim)) {
       return finding('P1', 'LITERAL_PHONE_IN_META', 'Meta description contains a typed-out phone number — use the {{cityPhone}} token so each domain renders its own tracking number.');

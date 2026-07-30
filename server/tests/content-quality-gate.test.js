@@ -1061,11 +1061,21 @@ describe('phone-token grammar (round-7 hardening)', () => {
   const PAGE = { target_page_type: 'page' };
   const LEAD = 'What summer heat does to Southwest Florida turf and how a full recovery works. ';
 
-  test('whitespace-tolerant and alias tokens satisfy the non-blog requirement', () => {
-    for (const tok of ['{{ cityPhone }}', '{{tel}}', '{{ phone }}']) {
-      const m = `Pest control in Sarasota built for the coastal pressure this season. Call ${tok} for an estimate from techs on daily local routes.`;
-      expect(checkMetaPhoneTokenPresent({ meta_description: m }, PAGE, {}).ok).toBe(true);
+  test('only {{cityPhone}} (whitespace-tolerant) satisfies the non-blog requirement — phone/tel aliases render the generic line', () => {
+    const meta = (tok) => `Pest control in Sarasota built for the coastal pressure this season. Call ${tok} for an estimate from techs on daily local routes.`;
+    expect(checkMetaPhoneTokenPresent({ meta_description: meta('{{ cityPhone }}') }, PAGE, {}).ok).toBe(true);
+    for (const tok of ['{{tel}}', '{{ phone }}']) {
+      const r = checkMetaPhoneTokenPresent({ meta_description: meta(tok) }, PAGE, {});
+      expect(r.ok).toBe(false);
+      expect(r.reason).toBe('meta_missing_cityPhone_token');
     }
+  });
+
+  test('choose/hire-brand solicitation is salesy on blog metas', () => {
+    const { checkBlogMetaContract: blogCheck } = require('../services/content/content-quality-gate')._internals;
+    const r = blogCheck({ meta_description: 'Choose Waves for professional pest control across Southwest Florida homes, with local experience for the bugs residents see most. Learn more.' });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('blog_meta_salesy');
   });
 
   test('whitespace-tolerant and alias tokens are banned from blog metas', () => {
