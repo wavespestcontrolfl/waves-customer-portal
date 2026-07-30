@@ -1061,17 +1061,28 @@ function reviewRequestedForHead(issueComments = [], headSha = null) {
   });
 }
 
-async function park(db, prNumber, reason, onPark, headSha = null, phase = PARK_PRE_PUSH) {
+// `phase` is REQUIRED and has no default. Every call site names it, and
+// anything this function doesn't recognize — a typo, or a future post-push exit
+// that forgets the argument — is persisted as POST_PUSH, i.e. fail closed with
+// the merge bar shut. Defaulting to PARK_PRE_PUSH (as this did originally) made
+// the permissive value the fallback, so a new branch-mutating park that omitted
+// the phase would have opened the bar against unsynchronized state — the exact
+// thing isPostPushPark's unknown-value handling exists to prevent.
+async function park(db, prNumber, reason, onPark, headSha, phase) {
   // Persist the reason, the head the verdict applied to, and the round PHASE —
   // the reason used to live only in logs (short retention: three parked
   // autonomous PRs were undiagnosable after the fact), the head is what lets a
   // later push re-arm the loop (a park is a verdict on a specific head, not on
   // the PR), and the phase is what the merge bar reads.
+  const resolvedPhase = phase === PARK_PRE_PUSH ? PARK_PRE_PUSH : PARK_POST_PUSH;
+  if (phase !== PARK_PRE_PUSH && phase !== PARK_POST_PUSH) {
+    logger.warn(`[codex-remediation] park for PR #${prNumber} passed an unrecognized phase (${JSON.stringify(phase)}) — persisting '${PARK_POST_PUSH}' (fail closed, merge bar stays shut): ${reason}`);
+  }
   const wrote = await saveState(db, prNumber, {
     status: 'parked',
     park_reason: String(reason || '').slice(0, 1000),
     parked_head_sha: headSha ? String(headSha).trim().toLowerCase() : null,
-    park_phase: phase === PARK_POST_PUSH ? PARK_POST_PUSH : PARK_PRE_PUSH,
+    park_phase: resolvedPhase,
   });
   if (!wrote) {
     // The PR merged/closed while this round ran — the row is terminal and a
@@ -1248,14 +1259,14 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
 
   // Fresh findings on the current head.
   if (atRoundLimit(state.rounds)) {
-    return park(db, prNumber, `exhausted ${MAX_ROUNDS} remediation rounds`, onPark, headSha);
+    return park(db, prNumber, `exhausted ${MAX_ROUNDS} remediation rounds`, onPark, headSha, PARK_PRE_PUSH);
   }
 
   const targetPath = pickTargetPath(findings, slug);
-  if (!targetPath) return park(db, prNumber, 'could not resolve target markdown file', onPark, headSha);
+  if (!targetPath) return park(db, prNumber, 'could not resolve target markdown file', onPark, headSha, PARK_PRE_PUSH);
 
   const file = await gh.getFile(targetPath, branch);
-  if (!file || !file.content) return park(db, prNumber, `file not found on branch: ${targetPath}`, onPark, headSha);
+  if (!file || !file.content) return park(db, prNumber, `file not found on branch: ${targetPath}`, onPark, headSha, PARK_PRE_PUSH);
 
   // Deterministic date-restamp carve-out: resolve date-stamp findings in code
   // (today ET), and only send the REMAINING findings to the body-only LLM fix.
@@ -1286,11 +1297,11 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
     // round limit so the PR reaches human review instead of looping.
     const attempt = (state.rounds || 0) + 1;
     await saveState(db, prNumber, { branch, rounds: attempt });
-    if (atRoundLimit(attempt)) return park(db, prNumber, 'LLM produced no valid fix after max attempts', onPark, headSha);
+    if (atRoundLimit(attempt)) return park(db, prNumber, 'LLM produced no valid fix after max attempts', onPark, headSha, PARK_PRE_PUSH);
     return { skipped: true, reason: 'no valid LLM fix (will retry)' };
   }
   if (fixed.trim() === String(file.content).trim()) {
-    return park(db, prNumber, 'remediation produced no change (likely false-positive findings)', onPark, headSha);
+    return park(db, prNumber, 'remediation produced no change (likely false-positive findings)', onPark, headSha, PARK_PRE_PUSH);
   }
   // Frontmatter is immutable during remediation outside the validated
   // meta_description / hero_image.alt whitelist — any other added/removed/
@@ -1301,7 +1312,7 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   // whitelist are the ONLY frontmatter deltas that can ever pass.
   const fmDelta = frontmatterFixViolation(baseline, fixed, findings);
   if (fmDelta.violation) {
-    return park(db, prNumber, `fix changed frontmatter beyond the whitelist: ${fmDelta.violation}`, onPark, headSha);
+    return park(db, prNumber, `fix changed frontmatter beyond the whitelist: ${fmDelta.violation}`, onPark, headSha, PARK_PRE_PUSH);
   }
   // Scheduler-lane metadata quality re-check (the autonomous lane covers
   // this inside revalidateFix — validateAutonomousRunGates swaps the
@@ -1309,7 +1320,7 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   if (typeof revalidateFix !== 'function' && fmDelta.changed.meta_description !== undefined) {
     const metaVerdict = validateRewrittenMeta(fmDelta.changed.meta_description, factContext, deps);
     if (!metaVerdict.ok) {
-      return park(db, prNumber, `rewritten meta_description failed metadata quality checks: ${metaVerdict.reason}`, onPark, headSha);
+      return park(db, prNumber, `rewritten meta_description failed metadata quality checks: ${metaVerdict.reason}`, onPark, headSha, PARK_PRE_PUSH);
     }
   }
   // The frozen frontmatter must still DESCRIBE the fixed body: schema_types is
@@ -1318,7 +1329,7 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   // content that isn't there. Park — restamping schema is a human call.
   const schemaChanged = deps.schemaShapeChanged || schemaShapeChanged;
   if (schemaChanged(file.content, fixed, deps)) {
-    return park(db, prNumber, 'fix changes the body-derived schema types (frontmatter schema is frozen)', onPark, headSha);
+    return park(db, prNumber, 'fix changes the body-derived schema types (frontmatter schema is frozen)', onPark, headSha, PARK_PRE_PUSH);
   }
   // An un-interpolated {{token}} in an .mdx body crashes the MDX compile —
   // publishOrUpdatePage blocks these before opening a PR (astro-publisher
@@ -1329,22 +1340,22 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
     if (!tokenOf) {
       try { tokenOf = require('../content-astro/astro-publisher')._internals.mdxBreakingToken; } catch (_) { tokenOf = null; }
     }
-    if (typeof tokenOf !== 'function') return park(db, prNumber, 'mdx token guard unavailable (fail closed)', onPark, headSha);
+    if (typeof tokenOf !== 'function') return park(db, prNumber, 'mdx token guard unavailable (fail closed)', onPark, headSha, PARK_PRE_PUSH);
     let token = null;
-    try { token = tokenOf(String((fm.parse(fixed) || {}).content || '')); } catch (e) { return park(db, prNumber, `mdx token guard failed: ${e.message}`, onPark, headSha); }
-    if (token) return park(db, prNumber, `fix introduces an MDX-breaking token (${token})`, onPark, headSha);
+    try { token = tokenOf(String((fm.parse(fixed) || {}).content || '')); } catch (e) { return park(db, prNumber, `mdx token guard failed: ${e.message}`, onPark, headSha, PARK_PRE_PUSH); }
+    if (token) return park(db, prNumber, `fix introduces an MDX-breaking token (${token})`, onPark, headSha, PARK_PRE_PUSH);
   }
 
   // Re-run the publisher's content-safety gates on the fix before committing —
   // a fix that fails them is worse than the original finding, so park it.
   const validate = deps.validateFixedBlogFile || validateFixedBlogFile;
   const gate = await validate(fixed, { service, factContext, operatorFaqException, guardContext }, deps);
-  if (!gate || !gate.ok) return park(db, prNumber, `fix failed content gates: ${gate && gate.reason}`, onPark, headSha);
+  if (!gate || !gate.ok) return park(db, prNumber, `fix failed content gates: ${gate && gate.reason}`, onPark, headSha, PARK_PRE_PUSH);
   // A passing fix that INTRODUCES a named-competitor comparison still needs a
   // human: the merge stamps enforcing that sign-off (astro_requires_human_merge
   // / named_competitor_review) predate the fix and are never restamped here.
   if (gate.requiresHumanReview === true) {
-    return park(db, prNumber, 'fix introduces named-competitor content (requires human sign-off)', onPark, headSha);
+    return park(db, prNumber, 'fix introduces named-competitor content (requires human sign-off)', onPark, headSha, PARK_PRE_PUSH);
   }
 
   // Lane-specific gate re-run (autonomous lane: uniqueness / quality /
@@ -1353,7 +1364,7 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
     let recheck;
     try { recheck = await revalidateFix(fixed); } catch (e) { recheck = { ok: false, reason: e.message }; }
     if (!recheck || recheck.ok !== true) {
-      return park(db, prNumber, `fix failed lane gates: ${(recheck && recheck.reason) || 'no result'}`, onPark, headSha);
+      return park(db, prNumber, `fix failed lane gates: ${(recheck && recheck.reason) || 'no result'}`, onPark, headSha, PARK_PRE_PUSH);
     }
   }
 
@@ -1405,7 +1416,19 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   // head — which is true as soon as the commit exists, not once the sync
   // finishes. Divergence from a post-push park is held by isPostPushPark at
   // the bar, not by withholding the bookkeeping.
-  await saveState(db, prNumber, { rounds: round, last_push_sha: newHead || null, last_findings: JSON.stringify(findings) });
+  //
+  // The return value is load-bearing, exactly as it is for the pre-push save: a
+  // false means markPrTerminal won the race and the row is already merged/closed.
+  // Continuing would let a stale GitHub read pass the revalidation below and
+  // hand onRemediated a fix commit that never entered main, mirroring it into
+  // portal state that nothing re-checks. Stop here instead.
+  const recorded = await saveState(db, prNumber, {
+    rounds: round, last_push_sha: newHead || null, last_findings: JSON.stringify(findings),
+  });
+  if (!recorded) {
+    logger.warn(`[codex-remediation] PR #${prNumber} left the open state during the fix push — skipping post-commit sync (fix commit ${shortSha(newHead)} may not be in main)`);
+    return { skipped: true, reason: 'pr left the open state during remediation (terminal row at push-time bookkeeping)' };
+  }
 
   // Post-push revalidation: the PR can merge/close in the window between the
   // pre-push saveState and gh.putFile. The push itself is then inert (the
@@ -1731,7 +1754,7 @@ module.exports = {
   schemaShapeChanged,
   isDateStampFinding,
   restampFrontmatterDates,
-  _internals: { saveState, getState },
+  _internals: { saveState, getState, park, PARK_PRE_PUSH, PARK_POST_PUSH },
   stripCodeFence,
   atRoundLimit,
   remediationEnabled,

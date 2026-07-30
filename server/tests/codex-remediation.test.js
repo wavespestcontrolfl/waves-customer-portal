@@ -2535,3 +2535,68 @@ describe('park() stamps the correct phase at each call site', () => {
     expect(r.status).toBe('remediating');
   });
 });
+
+// The WRITE side must fail closed too. isPostPushPark treats an unknown phase as
+// branch-mutating, but that is useless if park() normalizes unknown/omitted
+// values to the permissive 'pre_push' before they are ever persisted — a future
+// post-push exit that forgets the argument would open the merge bar.
+describe('park() fails closed on an omitted or unrecognized phase', () => {
+  const parkFn = rem._internals.park;
+
+  test.each([
+    ['omitted', undefined],
+    ['null', null],
+    ['misspelled', 'post-push'],
+    ['nonsense', 'later'],
+  ])('phase %s is persisted as post_push', async (_label, phase) => {
+    const db = makeDb();
+    await parkFn(db, 5, 'some new failure path', null, HEAD, phase);
+    const row = db._tables.codex_remediation_state.find((x) => x.pr_number === 5);
+    expect(row.park_phase).toBe('post_push');
+    // And the bar must actually stay shut on it.
+    const gh = makeGh({
+      reviewComments: [finding({ body: `**<sub><sub>![P2 Badge](x)</sub></sub>  a**\n\nd` })],
+      reviews: [codexReview()],
+    });
+    const r = await rem.p2OnlyMergeEligible(5, HEAD, { db, gh });
+    expect(r.eligible).toBe(false);
+  });
+
+  test('only the exact pre_push constant yields pre_push', async () => {
+    const db = makeDb();
+    await parkFn(db, 7, 'pre-push verdict', null, HEAD, 'pre_push');
+    expect(db._tables.codex_remediation_state.find((x) => x.pr_number === 7).park_phase).toBe('pre_push');
+  });
+});
+
+// A concurrent merge/close tombstone must stop the round at the push-time
+// bookkeeping write, before onRemediated can mirror a commit that never entered
+// main into portal state.
+describe('push-time bookkeeping respects a terminal row', () => {
+  test('a merged tombstone stops the round before the post-commit sync', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const db = makeDb();
+    const gh = makeGh();
+    const onRemediated = jest.fn();
+    // The PR merges during the fix push: the row goes terminal right after the
+    // pre-push 'remediating' save, so the push-time save loses the race.
+    let pushed = false;
+    const origPut = gh.putFile;
+    gh.putFile = async (args) => {
+      const res = await origPut(args);
+      pushed = true;
+      await rem.markPrTerminal(5, 'merged', db);
+      return res;
+    };
+    const r = await runRemediationForPr({ ...CTX, onRemediated }, {
+      db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS,
+    });
+    expect(pushed).toBe(true);
+    expect(r.skipped).toBe(true);
+    expect(r.reason).toMatch(/terminal row at push-time bookkeeping/);
+    expect(onRemediated).not.toHaveBeenCalled();
+    expect(gh._calls.comments).toHaveLength(0);
+    // The terminal stamp stands; the round did not resurrect the row.
+    expect(db._tables.codex_remediation_state.find((x) => x.pr_number === 5).status).toBe('merged');
+  });
+});
