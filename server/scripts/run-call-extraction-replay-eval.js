@@ -31,7 +31,12 @@ const ARGS = Object.fromEntries(
     if (ARGS.json) logger.transports.forEach((t) => { t.silent = true; });
 
     const opts = {};
-    if (!ARGS.notify) opts.notify = async () => {};
+    // --notify gates BOTH channels: without it a manual run must neither
+    // insert an admin notification nor email the company inbox.
+    if (!ARGS.notify) {
+      opts.notify = async () => {};
+      opts.sendEmail = async () => ({ ok: true });
+    }
     if (ARGS.fixture) opts.fixturePath = ARGS.fixture;
 
     const result = await runCallExtractionReplayEval(opts);

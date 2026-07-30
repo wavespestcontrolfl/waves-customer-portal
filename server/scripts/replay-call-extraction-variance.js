@@ -68,6 +68,8 @@ const EXPECTATION_KEYS = new Set([
   'prior_v2_route_changed',
   'current_flags_include',
   'current_flags_exclude',
+  'current_call_nature_in',
+  'current_recommended_disposition_in',
   'legacy_schedule_variance_fields',
 ]);
 
@@ -445,6 +447,31 @@ function evaluateFixtureExpectation(result, fixtureCase, context = {}) {
       }
     } else {
       fixtureError('invalid_current_flags_exclude', expect.current_flags_exclude, 'array');
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(expect, 'current_call_nature_in')) {
+    if (isStringArray(expect.current_call_nature_in)) {
+      check(
+        'current_call_nature_in',
+        normalizeExpectedArray(expect.current_call_nature_in).includes(result.current.callNature),
+        result.current.callNature,
+        expect.current_call_nature_in
+      );
+    } else {
+      fixtureError('invalid_current_call_nature_in', expect.current_call_nature_in, 'array');
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(expect, 'current_recommended_disposition_in')) {
+    if (isStringArray(expect.current_recommended_disposition_in)) {
+      check(
+        'current_recommended_disposition_in',
+        normalizeExpectedArray(expect.current_recommended_disposition_in).includes(result.current.recommendedDisposition),
+        result.current.recommendedDisposition,
+        expect.current_recommended_disposition_in
+      );
+    } else {
+      fixtureError('invalid_current_recommended_disposition_in', expect.current_recommended_disposition_in, 'array');
     }
   }
 
@@ -941,6 +968,8 @@ async function replayCall(call, context) {
       confidence: currentExtraction?.confidence?.overall ?? null,
       schedulingStatus: currentExtraction?.scheduling?.status || null,
       serviceCategory: currentExtraction?.service_request?.primary_service_category || null,
+      callNature: currentExtraction?.call_nature || null,
+      recommendedDisposition: currentExtraction?.recommended_disposition || null,
     },
     variance: {
       routeChangedVsLegacySchedule: !!scheduled !== !!currentRoute.allowed,
@@ -1007,6 +1036,8 @@ function buildReplayErrorResult(call, err, context = {}) {
       confidence: null,
       schedulingStatus: null,
       serviceCategory: null,
+      callNature: null,
+      recommendedDisposition: null,
     },
     variance: {
       routeChangedVsLegacySchedule: false,
