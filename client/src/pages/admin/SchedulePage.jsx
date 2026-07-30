@@ -10416,6 +10416,29 @@ export function CompletionPanel({
       );
       return;
     }
+    // The server normalizer silently trims each observation/recommendation
+    // line to 240 chars and keeps at most 20 entries — reject oversized
+    // input here instead of letting the saved report lose text without
+    // warning (codex P2).
+    {
+      const freeTextProblems = [];
+      for (const [label, text] of [
+        ["Observations", observationsText],
+        ["Recommendations", recommendationsText],
+      ]) {
+        const lines = freeTextLines(text);
+        if (lines.length > 20) {
+          freeTextProblems.push(`${label}: at most 20 entries (one per line)`);
+        }
+        if (lines.some((line) => line.length > 240)) {
+          freeTextProblems.push(`${label}: keep each line under 240 characters`);
+        }
+      }
+      if (freeTextProblems.length) {
+        alert(`Shorten these before submitting — ${freeTextProblems.join("; ")}.`);
+        return;
+      }
+    }
     if (isTypedFindings && !isIncompleteVisit) {
       const missingTypedRequired = (typedFindingsSchema.fields || [])
         .filter(

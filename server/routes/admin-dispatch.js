@@ -4860,7 +4860,17 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // history. The activity score above is their indicator instead.
         // Internal-only consultations are excluded for the same reason: an
         // advisory walkthrough must not write Pest Pressure history.
-        if (useServiceReportV1 && serviceFindingsAvailable && serviceRecordCols.pressure_index && !typedFindingsType && !isInternalOnlyCompletion) {
+        // One-time treatments are excluded FORM-INDEPENDENTLY (codex r5):
+        // the untyped pest family (tick control, fire ant, nest removals…)
+        // slips both the typed guard and review-window's one-time-label
+        // heuristic, and an isolated treatment must not seed recurring
+        // pressure history. Re-service/callback visits are the deliberate
+        // exception — extra visits on an active plan still score (see
+        // review-window.js isOneTimeServiceLabel).
+        const oneTimePressureExcluded = String(completionProfile?.billingType || '').toLowerCase() === 'one_time'
+          && completionProfile?.serviceKey !== 'pest_re_service'
+          && !svc.is_callback;
+        if (useServiceReportV1 && serviceFindingsAvailable && serviceRecordCols.pressure_index && !typedFindingsType && !isInternalOnlyCompletion && !oneTimePressureExcluded) {
           const pestPressure = await runPestPressureForServiceRecord(record.id, trx);
           if (pestPressure && pestPressure.result.displayedScore != null) {
             record.pressure_index = pestPressure.result.displayedScore;
