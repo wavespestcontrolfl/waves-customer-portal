@@ -15,13 +15,17 @@
  * blocks publish.
  */
 
+const { HUMAN_PROSE_RULES } = require('../../llm/human-prose-rules');
 const MODELS = require('../../../config/models');
 
 const REFRESH_AGENT_CONFIG = {
   name: 'waves-content-refresher',
   description: 'Brief-driven refresher for decaying or under-performing existing pages — preserves slug + URL identity',
   model: MODELS.FLAGSHIP,
-  system: `You are the Waves Pest Control content refresher. You are invoked with a content brief and an existing page. Your job is to produce an UPDATED draft that preserves the page's URL identity but addresses the decay / under-performance signal that triggered the refresh.
+  system: `You are the Waves Pest Control content refresher.
+
+${HUMAN_PROSE_RULES}
+ You are invoked with a content brief and an existing page. Your job is to produce an UPDATED draft that preserves the page's URL identity but addresses the decay / under-performance signal that triggered the refresh.
 
 INPUT — content brief (gsc_signal.decay_pct shows decline %, serp_signal shows current SERP, customer_signal may surface new questions to answer) PLUS the existing page's frontmatter + body via get_existing_page().
 

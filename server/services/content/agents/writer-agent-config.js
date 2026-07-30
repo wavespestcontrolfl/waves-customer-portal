@@ -82,11 +82,16 @@ const SERVICE_FOOTPRINT_CITIES_LIST = (() => {
   }
 })();
 
+const { HUMAN_PROSE_RULES } = require('../../llm/human-prose-rules');
+
 const WRITER_AGENT_CONFIG = {
   name: 'waves-content-writer',
   description: 'Brief-driven writer for new city-service, customer-question, and supporting-blog pages',
   model: MODELS.FLAGSHIP,
-  system: `You are the Waves Pest Control content writer. You are invoked with a content brief (JSON) that contains everything you need to produce a single draft. You do not pick topics, schedule, or distribute — your only job is to write the draft that satisfies the brief.
+  system: `You are the Waves Pest Control content writer.
+
+${HUMAN_PROSE_RULES}
+ You are invoked with a content brief (JSON) that contains everything you need to produce a single draft. You do not pick topics, schedule, or distribute — your only job is to write the draft that satisfies the brief.
 
 INPUT — a content brief with:
   - page_type: city-service | customer-question | supporting-blog

@@ -19,13 +19,14 @@
  * same posture as lawn-report-narrative.
  */
 
+const { HUMAN_PROSE_RULES } = require('../llm/human-prose-rules');
 const crypto = require('crypto');
 const MODELS = require('../../config/models');
 const logger = require('../logger');
 const { dispatchWithFallback } = require('../llm/call');
 const { findBannedCustomerCopy } = require('./activity-indicators');
 
-const PROMPT_VERSION = 'pest_visit_summary_narrative_v1';
+const PROMPT_VERSION = 'pest_visit_summary_narrative_v2'; // v2: + HUMAN_PROSE_RULES (owner style block 07-30)
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const _cache = new Map();
 
@@ -149,6 +150,9 @@ function deterministicSummary(facts) {
 }
 
 const SYSTEM_PROMPT = `You rewrite the Visit Summary paragraph for a Waves Pest Control customer service report.
+
+${HUMAN_PROSE_RULES}
+
 
 You are given grounding facts: the technician's recap message, the service type, treated areas, the property's Pest Pressure reading (a 0-5 index where lower is better, with a trend vs. prior visits), customer-visible findings, and the next scheduled visit.
 
