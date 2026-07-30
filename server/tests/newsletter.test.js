@@ -2034,11 +2034,12 @@ describe('newsletter greeting personalization + render polish', () => {
 
   test('wrapNewsletter local-guide chrome uses the canonical portal Waves logo (glass footer, 44px)', () => {
     // The 88px header logo was retired with the pre-glass theme (#2428);
-    // the glass wrapper carries the 2026 logo in the footer at 44px.
+    // the glass wrapper carries the CANONICAL portal logo in the footer
+    // at 44px — the 2026 AI re-render is retired (owner 2026-07-30).
     const { wrapNewsletter } = require('../services/email-template');
     const html = wrapNewsletter({ body: '<p>x</p>', newsletterType: 'local-weekly-fresh-events' });
-    expect(html).toContain('waves-logo.png');
-    expect(html).not.toContain('/waves-logo.png');
+    expect(html).toContain('/waves-logo.png');
+    expect(html).not.toContain('waves-logo-2026.png');
     expect(html).toContain('width="44"');
   });
 });
