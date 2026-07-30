@@ -283,7 +283,12 @@ router.post('/:id/verdict', async (req, res) => {
     // if the later feedback/review-status bookkeeping fails, the handler
     // 500s with the cards already closed and a retried verdict 409s — this
     // block must already have run by then or the hold loses its trigger.
+    // A deny with NO fields selected says "something is wrong" without
+    // saying what — it must not read as confirming the email (Codex #3084
+    // r10). The hold stays pending; the correction fanout (ungated on card
+    // state since r8) releases it once the operator fixes the record.
     const denyClearsEmail = verdict === 'deny'
+      && wrongFields.length > 0
       && !wrongFields.includes('name')
       && !wrongFields.includes('consent');
     if ((verdict === 'accept' || denyClearsEmail) && liveEmailCard) {

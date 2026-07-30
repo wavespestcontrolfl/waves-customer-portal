@@ -100,6 +100,24 @@ async function settleHold(holdId, patch, dbh) {
   await dbh('first_touch_holds').where({ id: holdId }).update({ ...patch, updated_at: new Date() });
 }
 
+// A claimant settles from its claim-time snapshot — work merged into the row
+// DURING the claim window (Step 8 adding held_newsletter while a drip-only
+// release is in flight; the r9 merge preserves the 'releasing' claim) would
+// otherwise be buried under the terminal 'released'. Re-read after every
+// released-settle and flip back to pending if unreleased work remains, so
+// the end-of-run reconciliation (or the next trigger) picks it up
+// (Codex #3084 r10).
+async function repenIfWorkMergedDuringClaim(holdId, dbh) {
+  const fresh = await dbh('first_touch_holds')
+    .where({ id: holdId })
+    .first('held_drip', 'released_drip', 'held_newsletter', 'released_newsletter', 'status');
+  if (fresh && fresh.status === 'released'
+      && ((fresh.held_drip && !fresh.released_drip) || (fresh.held_newsletter && !fresh.released_newsletter))) {
+    await dbh('first_touch_holds').where({ id: holdId })
+      .update({ status: 'pending', last_error: 'work_merged_during_release', updated_at: new Date() });
+  }
+}
+
 // Delivered = the DOI confirmation actually went out, or the helper
 // deliberately skipped (unsubscribed/invalid — nothing left to retry). A
 // created subscriber whose confirmation SEND failed keeps the hold
@@ -133,12 +151,17 @@ async function resumeHeldFirstTouch({
   deferNewsletter = false,
 } = {}) {
   const result = { resumed: false, enrolled: false, newsletter: null, newsletterResume: [], skipped: null };
+  // The hold currently claimed by this loop iteration — the outer catch
+  // re-pends it if an error escapes mid-release, so a claimed row never
+  // strands 'releasing' with its card already resolved (Codex #3084 r10).
+  let inFlightHoldId = null;
   try {
     const holds = await findPendingHolds({ callLogId, customerId, dbh });
     if (!holds.length) return { ...result, newsletterResume: null, skipped: 'no_pending_hold' };
 
     for (const hold of holds) {
       if (!(await claimHold(hold, dbh))) continue; // another release path owns it
+      inFlightHoldId = hold.id;
 
       const holdCustomerId = hold.customer_id || customerId;
       if (!holdCustomerId) {
@@ -176,6 +199,13 @@ async function resumeHeldFirstTouch({
       }
 
       const patch = {};
+      // The ledger's held_email becomes the address this release actually
+      // targets (Codex #3084 r10) — after a correction that's the corrected
+      // value, after an as-is accept it's unchanged. A later hold-record for
+      // the same call (Step 8 newsletter after a mid-run release) reads it
+      // back, so the confirmed address wins over a matched customer's stale
+      // stored email in BOTH release kinds.
+      patch.held_email = resumeEmail;
       if (hold.held_drip && !hold.released_drip) {
         try {
           const AutomationRunner = require('./automation-runner');
@@ -193,8 +223,11 @@ async function resumeHeldFirstTouch({
           patch.released_drip = true;
         } catch (enrollErr) {
           // Back to pending — the ledger row IS the retryable release.
-          await settleHold(hold.id, { status: 'pending', last_error: `enroll_failed: ${String(enrollErr.message).slice(0, 200)}` }, dbh);
-          logger.warn(`[first-touch-resume] enroll failed for customer ${holdCustomerId} — hold stays pending: ${enrollErr.message}`);
+          // Sanitized code only, in the log AND the ledger: an enrollment
+          // unique-violation can echo the denormalized email.
+          const enrollCode = enrollErr.code || enrollErr.name || 'enroll_failed';
+          await settleHold(hold.id, { status: 'pending', last_error: `enroll_failed: ${enrollCode}` }, dbh);
+          logger.warn(`[first-touch-resume] enroll failed for customer ${holdCustomerId} — hold stays pending: ${enrollCode}`);
           result.skipped = result.skipped || 'enroll_failed';
           continue;
         }
@@ -217,12 +250,22 @@ async function resumeHeldFirstTouch({
           });
           deferredThisHold = true;
         } else {
-          const outcome = await runNewsletterResume({
-            customerId: holdCustomerId,
-            email: resumeEmail,
-            firstName: customer.first_name || null,
-            lastName: customer.last_name || null,
-          });
+          // Direct (non-deferred) path: a thrown resume must not escape to
+          // the outer catch with the hold still claimed — treat it as
+          // undelivered (re-pends below) and log only a sanitized code (a
+          // unique-violation message can echo the subscriber email),
+          // Codex #3084 r10.
+          let outcome = null;
+          try {
+            outcome = await runNewsletterResume({
+              customerId: holdCustomerId,
+              email: resumeEmail,
+              firstName: customer.first_name || null,
+              lastName: customer.last_name || null,
+            });
+          } catch (newsletterErr) {
+            logger.warn(`[first-touch-resume] newsletter resume failed for customer ${holdCustomerId}: ${newsletterErr.code || newsletterErr.name || 'resume_failed'}`);
+          }
           result.newsletter = outcome;
           if (newsletterDelivered(outcome)) {
             patch.released_newsletter = true;
@@ -243,6 +286,7 @@ async function resumeHeldFirstTouch({
         patch.status = 'pending';
       }
       if (Object.keys(patch).length) await settleHold(hold.id, patch, dbh);
+      if (patch.status === 'released') await repenIfWorkMergedDuringClaim(hold.id, dbh);
 
       result.resumed = result.resumed || result.enrolled
         || newsletterDelivered(result.newsletter) || deferredThisHold;
@@ -254,7 +298,22 @@ async function resumeHeldFirstTouch({
     }
     return result;
   } catch (err) {
-    logger.warn(`[first-touch-resume] failed (${source}): ${err.message}`);
+    // Sanitized code only — subscriber/enrollment errors can echo the email.
+    const code = err.code || err.name || 'error';
+    logger.warn(`[first-touch-resume] failed (${source}): ${code}`);
+    // Restore the claimed hold to a retryable state. Guarded on
+    // status='releasing' so a hold this loop already settled (pending /
+    // blocked / released) is never flipped — 'blocked' is a consent
+    // terminal and must stay that way.
+    if (inFlightHoldId) {
+      try {
+        await dbh('first_touch_holds')
+          .where({ id: inFlightHoldId, status: 'releasing' })
+          .update({ status: 'pending', last_error: `resume_failed: ${code}`, updated_at: new Date() });
+      } catch (repenErr) {
+        logger.warn(`[first-touch-resume] hold ${inFlightHoldId} re-pend failed: ${repenErr.code || repenErr.name || 'db_error'} (stale-claim window will reclaim)`);
+      }
+    }
     return { ...result, newsletterResume: null, skipped: 'error' };
   }
 }
@@ -282,6 +341,7 @@ async function resumeHeldNewsletterPostCommit(payloadOrList, dbh = db) {
           ...(dripSettled ? { released_at: new Date(), last_error: null } : {}),
           updated_at: new Date(),
         });
+        if (dripSettled) await repenIfWorkMergedDuringClaim(payload.holdId, dbh);
       } else {
         // Back to pending — the DOI never confirmed; the next release
         // trigger retries it.
@@ -348,11 +408,20 @@ async function recordFirstTouchHold({ callLogId, customerId = null, heldEmail, h
           .first('held_email', 'status', 'released_at');
         if (existing && existing.status === 'released'
             && existing.released_at && new Date(existing.released_at) >= runStartedAt) {
-          const cust = customerId
-            ? await dbh('customers').where({ id: customerId }).first('email')
-            : null;
-          const settledEmail = String(cust?.email || existing.held_email || '').trim().toLowerCase();
-          if (settledEmail) emailToRecord = settledEmail;
+          // The row's held_email IS the address the mid-run release actually
+          // confirmed and sent to (the release stamps it — corrected value
+          // after a correction, unchanged after an as-is accept; fanout
+          // markers carry the corrected value). NEVER the customer's stored
+          // email: for a matched existing customer that can be a stale
+          // address the operator did not confirm (Codex #3084 r10).
+          const settledEmail = String(existing.held_email || '').trim().toLowerCase();
+          if (settledEmail) {
+            emailToRecord = settledEmail;
+          } else if (customerId) {
+            const cust = await dbh('customers').where({ id: customerId }).first('email');
+            const storedEmail = String(cust?.email || '').trim().toLowerCase();
+            if (storedEmail) emailToRecord = storedEmail;
+          }
         } else if (existing && existing.held_email) {
           const cardFromEarlierRun = await dbh('triage_items')
             .where({ call_log_id: callLogId })

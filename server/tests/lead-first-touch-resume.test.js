@@ -182,6 +182,40 @@ describe('resumeHeldFirstTouch (ledger release engine)', () => {
     expect(res.newsletterResume).toEqual([expect.objectContaining({ holdId: 'hold-1', email: 'corrected@example.com' })]);
   });
 
+  test('a release stamps held_email with the address it actually targeted', async () => {
+    await resumeHeldFirstTouch({ customerId: 'cust-1', email: 'corrected@example.com' });
+    expect(mockHoldUpdates.at(-1)).toMatchObject({ held_email: 'corrected@example.com', status: 'released' });
+  });
+
+  test('a released settle re-pends when newsletter work merged during the claim', async () => {
+    // Step 8 merges held_newsletter=true while a drip-only release is in
+    // flight (the merge preserves the 'releasing' claim). The claimant's
+    // stale snapshot would settle 'released' and bury the newsletter — the
+    // post-settle re-read flips the row back to pending.
+    mockHold = baseHold({ held_newsletter: false });
+    mockEnroll.mockImplementationOnce(async () => {
+      mockHold = { ...mockHold, held_newsletter: true, released_drip: true, status: 'released' };
+      return { enrolled: true };
+    });
+    const res = await resumeHeldFirstTouch({ callLogId: 'call-1' });
+    expect(res.enrolled).toBe(true);
+    expect(mockHoldUpdates.at(-1)).toMatchObject({ status: 'pending', last_error: 'work_merged_during_release' });
+  });
+
+  test('a thrown direct newsletter resume re-pends the claim and logs only sanitized codes', async () => {
+    const dbErr = new Error('duplicate key value violates unique constraint — (email)=(secret@example.com)');
+    dbErr.code = '23505';
+    mockNewsletter.mockRejectedValueOnce(dbErr);
+    const res = await resumeHeldFirstTouch({ callLogId: 'call-1' });
+    // Drip released, newsletter undelivered → retryable, never stranded
+    // 'releasing' with the card already resolved.
+    expect(res.enrolled).toBe(true);
+    expect(mockHoldUpdates.at(-1)).toMatchObject({ status: 'pending', last_error: 'newsletter_doi_not_confirmed' });
+    for (const call of logger.warn.mock.calls) {
+      expect(String(call[0])).not.toContain('secret@example.com');
+    }
+  });
+
   test('a lost atomic claim skips the hold — no duplicate DOI from racing release paths', async () => {
     mockClaimFails = true;
     const res = await resumeHeldFirstTouch({ callLogId: 'call-1' });
@@ -233,18 +267,20 @@ describe('recordFirstTouchHold (durable hold ledger writes)', () => {
     expect(mockMergeArgs.at(-1).held_email).toBe('reviewed@example.com');
   });
 
-  test('a hold RELEASED during this run re-pends against the settled (corrected) address', async () => {
-    // Operator corrected the email mid-run: the fanout released the drip and
-    // wrote the corrected address to the customer row. The later newsletter
-    // hold must target that, never the stale pre-correction candidate.
+  test('a hold RELEASED during this run re-pends against the address that release confirmed', async () => {
+    // The release stamps held_email with the address it actually targeted —
+    // corrected value after a correction, unchanged after an as-is accept.
+    // The stored customer email is NEVER used when the row carries one: for
+    // a matched existing customer it can be a stale address the operator
+    // did not confirm.
     const runStartedAt = new Date(Date.now() - 60_000);
-    mockHold = baseHold({ status: 'released', released_at: new Date(), held_email: 'original@example.com' });
-    mockCustomerRow = { id: 'cust-1', email: 'corrected@example.com' };
+    mockHold = baseHold({ status: 'released', released_at: new Date(), held_email: 'confirmed@example.com' });
+    mockCustomerRow = { id: 'cust-1', email: 'stale@stored.com' };
     await recordFirstTouchHold({
       callLogId: 'call-1', customerId: 'cust-1',
       heldEmail: 'original@example.com', heldNewsletter: true, runStartedAt,
     });
-    expect(mockMergeArgs.at(-1).held_email).toBe('corrected@example.com');
+    expect(mockMergeArgs.at(-1).held_email).toBe('confirmed@example.com');
   });
 
   test('a hold released in an EARLIER cycle re-pends normally with the fresh address', async () => {
