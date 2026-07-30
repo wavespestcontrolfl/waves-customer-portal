@@ -338,6 +338,11 @@ export default function SecureAppointmentPage() {
             Your annual prepay invoice is ready. Pay it once and every visit
             this year is covered — no charges after your visits.
           </p>
+          {data?.cancelFeeNote ? (
+            <p style={{ fontSize: 14, color: S.muted, lineHeight: 1.5, marginTop: 6 }}>
+              {data.cancelFeeNote}
+            </p>
+          ) : null}
           {data ? <VisitSummary data={data} /> : null}
           <a href={data?.payUrl} data-glass-accent="" style={{ ...PRIMARY_CTA, marginTop: 16 }}>
             Pay your annual invoice

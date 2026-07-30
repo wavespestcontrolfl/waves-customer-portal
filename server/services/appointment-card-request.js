@@ -136,7 +136,11 @@ function cancelFeeText() {
 // (Codex #3077), so this form trades the fuller sentence for ~27 chars.
 function cancelFeeLine() {
   const feeText = cancelFeeText();
-  return feeText ? `\n${feeText} fee only for last-minute cancels or no-shows. Rescheduling is free.` : '';
+  // No rescheduling-reassurance clause in the SMS form: with real service
+  // labels (e.g. "Quarterly Pest Control") the longer clause pushed rendered
+  // plan-choice invites to a 4th segment (Codex #3077 r2). The /secure page
+  // and email keep the fuller sentence.
+  return feeText ? `\n${feeText} fee only for last-minute cancels or no-shows.` : '';
 }
 
 // Fuller sentence for the /secure page (no SMS segment budget there).
