@@ -1671,15 +1671,24 @@ describe('newsletter assembly — Beehiiv-parity event rendering', () => {
 describe('DB-locked prices vs the hallucinated-claim scan', () => {
   const { findHallucinatedClaims } = require('../services/newsletter-validator');
 
-  test('HTML exemption is STRUCTURAL and VERIFIED: only spans whose content matches a locked price pass', () => {
+  test('HTML exemption is STRUCTURAL and PAIR-verified: only an event id wearing ITS OWN locked price passes', () => {
+    const A = 'a0000001-0000-4000-8000-000000000001';
+    const B = 'b0000002-0000-4000-8000-000000000002';
+    const pairs = [{ eventId: A, price: 'From $25' }, { eventId: B, price: '$50' }];
     // Assembler-emitted shape — model prose can never produce this tag
-    // (markdownToHtml escapes HTML before markdown) — verified against
-    // the send's own locked values.
-    expect(findHallucinatedClaims('<p>🎟️ <span data-db-price>From $25</span></p>', ['From $25'], 'html')).toEqual([]);
-    expect(findHallucinatedClaims('<p>🎟️ <span data-db-price>Free admission · paid parking</span></p>', ['Free admission · paid parking'], 'html')).toEqual([]);
-    // A hand-edited span (sentinel intact, value changed) falls through
-    // to the scan and blocks.
-    expect(findHallucinatedClaims('<p>🎟️ <span data-db-price>$250</span></p>', ['$25'], 'html')).toEqual(
+    // (markdownToHtml escapes HTML before markdown) — verified as an
+    // event/price PAIR against the send's own lineup.
+    expect(findHallucinatedClaims(`<p>🎟️ <span data-db-price="${A}">From $25</span></p>`, pairs, 'html')).toEqual([]);
+    // A hand-edited VALUE (sentinel intact) blocks.
+    expect(findHallucinatedClaims(`<p>🎟️ <span data-db-price="${A}">$250</span></p>`, pairs, 'html')).toEqual(
+      expect.arrayContaining([expect.stringContaining('dollar amount in body')]),
+    );
+    // Event A wearing Event B's REAL price blocks — pair, not set.
+    expect(findHallucinatedClaims(`<p>🎟️ <span data-db-price="${A}">$50</span></p>`, pairs, 'html')).toEqual(
+      expect.arrayContaining([expect.stringContaining('dollar amount in body')]),
+    );
+    // An id-less span never exempts.
+    expect(findHallucinatedClaims('<p>🎟️ <span data-db-price>From $25</span></p>', pairs, 'html')).toEqual(
       expect.arrayContaining([expect.stringContaining('dollar amount in body')]),
     );
     // Marker-prefixed prose WITHOUT the span blocks even with a lock —
@@ -1710,16 +1719,17 @@ describe('DB-locked prices vs the hallucinated-claim scan', () => {
 
   test('validateNewsletterDraft scans segments separately — a priced subject blocks even when the body price is locked', () => {
     const { validateNewsletterDraft } = require('../services/newsletter-validator');
+    const pairs = [{ eventId: 'a0000001-0000-4000-8000-000000000001', price: 'From $25' }];
     const send = {
       subject: '🎟️ From $25 in prizes this weekend',
       preview_text: 'ok',
-      html_body: '<p>🎟️ <span data-db-price>From $25</span></p><p>Great show.</p>',
+      html_body: '<p>🎟️ <span data-db-price="a0000001-0000-4000-8000-000000000001">From $25</span></p><p>Great show.</p>',
       text_body: 'Tickets: From $25',
       newsletter_type: 'local-weekly-fresh-events',
     };
-    const { errors } = validateNewsletterDraft(send, { recipientCount: 5, lockedPrices: ['From $25'] });
+    const { errors } = validateNewsletterDraft(send, { recipientCount: 5, lockedPrices: pairs });
     expect(errors).toEqual(expect.arrayContaining([expect.stringContaining('dollar amount in body')]));
-    const clean = validateNewsletterDraft({ ...send, subject: 'Weekend chaos incoming' }, { recipientCount: 5, lockedPrices: ['From $25'] });
+    const clean = validateNewsletterDraft({ ...send, subject: 'Weekend chaos incoming' }, { recipientCount: 5, lockedPrices: pairs });
     expect(clean.errors).toEqual([]);
   });
 
@@ -1734,8 +1744,8 @@ describe('DB-locked prices vs the hallucinated-claim scan', () => {
         isFree: false, priceText: 'From $25',
       }],
     });
-    expect(html).toContain('<span data-db-price>From $25</span>');
-    expect(findHallucinatedClaims(html, ['From $25'], 'html')).toEqual([]);
+    expect(html).toContain('<span data-db-price="a0000001-0000-4000-8000-000000000001">From $25</span>');
+    expect(findHallucinatedClaims(html, [{ eventId: 'a0000001-0000-4000-8000-000000000001', price: 'From $25' }], 'html')).toEqual([]);
   });
 });
 
@@ -1781,9 +1791,22 @@ describe('tiered event treatment (owner direction 2026-07-29)', () => {
     expect(html).toContain('<strong>Official Event 4</strong>');
   });
 
+  test('pinned ev.tier wins over position: a missing headliner leaves a gap, nothing promotes', async () => {
+    const html = await assembleBeehiivNewsletter({
+      selectedSubject: 'Test',
+      // Headliner dropped upstream — survivors keep their pinned tiers.
+      events: [mk(1, { tier: 'featured' }), mk(2, { tier: 'featured' }), mk(3, { tier: 'quick' }), mk(4, { tier: 'quick' })],
+    });
+    // No hero furniture renders at all (scoop/pro-tip/kicker are hero-only).
+    expect(html).not.toContain('Pro tip:');
+    expect(html).not.toContain("Here&#39;s the scoop:");
+    expect(html).toContain('The Weekend Shortlist');
+    expect(html).toContain('<strong>Official Event 3</strong>');
+  });
+
   test('DB-locked price renders (FREE wins over priceText); labels chip line renders', async () => {
     const html = await assembleBeehiivNewsletter(draft());
-    expect(html).toContain('🎟️ <span data-db-price>From $25</span>');
+    expect(html).toMatch(/🎟️ <span data-db-price="a0000001-[^"]+">From \$25<\/span>/);
     expect(html).toContain('🏷️ <em>Family · Worth the drive</em>');
     const free = await assembleBeehiivNewsletter({ selectedSubject: 'T', events: [mk(1, { isFree: true })] });
     expect(free).toContain('🎟️ <strong>FREE</strong>');
@@ -1817,7 +1840,8 @@ describe('tiered event treatment (owner direction 2026-07-29)', () => {
       ps: 'Forward this to a friend.',
       signoff: '— The Waves Team',
     });
-    expect(text).toContain('== Official Event 1 ==');
+    expect(text).toContain('== Curiosity Title 1 ==');
+    expect(text).toContain("Here's the scoop:");
     expect(text).toContain('Friday, June 12 at 8:00 PM | Venue 1, Sarasota | Tickets: From $25');
     const withAddr = buildFlagshipTextBody({ events: [mk(1, { address: '123 Main St' })] });
     expect(withAddr).toContain('Venue 1, Sarasota (123 Main St)');

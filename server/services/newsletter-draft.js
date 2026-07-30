@@ -1273,11 +1273,15 @@ async function assembleBeehiivNewsletter(draft) {
   // format renders no visual at all, so a lookup would burn requests and
   // the shared retry budget on a discarded pick.
   const FEATURED_MAX = 2; // [0] hero, [1..2] featured, [3..] shortlist
+  // ev.tier (pinned to the REQUESTED portfolio rank at lock time) wins;
+  // position is only the fallback for direct-assembler callers/tests.
+  const tierOf = (i) => events[i]?.tier
+    || (i === 0 ? 'hero' : (i <= FEATURED_MAX ? 'featured' : 'quick'));
   const eventShowsImage = events.map((ev) => {
     const u = safeUrl(ev.imageUrl);
     return Boolean(u && !isLikelyGifUrl(u));
   });
-  const eventRendersGif = (i) => i <= FEATURED_MAX && !eventShowsImage[i];
+  const eventRendersGif = (i) => tierOf(i) !== 'quick' && !eventShowsImage[i];
   const [introCandidates, ...eventCandidates] = await Promise.all([
     searchGiphyCandidates(draft.introGifTerm),
     ...events.map((ev, i) => (eventRendersGif(i) ? searchGiphyCandidates(ev.gifSearchTerm) : Promise.resolve([]))),
@@ -1344,7 +1348,6 @@ async function assembleBeehiivNewsletter(draft) {
   //   [1..2]     FEATURED:  visual + trimmed description + meta
   //   [3..]      SHORTLIST: compact entries under a single heading
   // "When everything is highlighted, nothing feels important."
-  const tierOf = (i) => (i === 0 ? 'hero' : (i <= FEATURED_MAX ? 'featured' : 'quick'));
 
   // Shared per-event pieces, computed once per iteration. Ticket links
   // render as {{evclick:<eventId>}} tokens: the live sender substitutes a
@@ -1379,9 +1382,10 @@ async function assembleBeehiivNewsletter(draft) {
     }
     if (ev.isFree) meta.push(`🎟️ <strong>FREE</strong>`);
     // data-db-price sentinel: the ONLY structurally exempt price shape in
-    // the claim scan. Model prose can never produce this tag —
-    // markdownToHtml escapes HTML before applying markdown.
-    else if (ev.priceText) meta.push(`🎟️ <span data-db-price>${escapeHtml(ev.priceText)}</span>`);
+    // the claim scan — PAIR-verified against this event's own locked
+    // price. Model prose can never produce this tag (markdownToHtml
+    // escapes HTML before applying markdown).
+    else if (ev.priceText) meta.push(`🎟️ <span data-db-price="${escapeHtml(String(ev.eventId || '').toLowerCase())}">${escapeHtml(ev.priceText)}</span>`);
     if (ev.admission) meta.push(`🎟️ ${markdownToHtml(ev.admission)}`);
     if (pieces.labels.length) {
       meta.push(`🏷️ <em>${pieces.labels.map((l) => escapeHtml(l)).join(' · ')}</em>`);
@@ -1441,9 +1445,9 @@ async function assembleBeehiivNewsletter(draft) {
       }
       const metaBits = [];
       if (ev.dateStr) metaBits.push(`📅 <strong>${escapeHtml(ev.dateStr)}</strong>${ev.timeStr ? ` · ${escapeHtml(ev.timeStr)}` : ''}`);
-      if (ev.location) metaBits.push(`📍 ${escapeHtml(ev.location)}`);
+      if (ev.location) metaBits.push(`📍 ${ev.address ? `${escapeHtml(ev.location)} (${escapeHtml(ev.address)})` : escapeHtml(ev.location)}`);
       if (ev.isFree) metaBits.push(`🎟️ <strong>FREE</strong>`);
-      else if (ev.priceText) metaBits.push(`🎟️ <span data-db-price>${escapeHtml(ev.priceText)}</span>`);
+      else if (ev.priceText) metaBits.push(`🎟️ <span data-db-price="${escapeHtml(String(ev.eventId || '').toLowerCase())}">${escapeHtml(ev.priceText)}</span>`);
       if (pieces.ticketUrl) metaBits.push(`🔗 <a href="${pieces.ticketHref}" style="color:${COLORS.blue};text-decoration:underline;font-weight:500;">${escapeHtml(pieces.anchorText)}</a>`);
       if (metaBits.length) {
         lines.push(`<p style="margin:0;font-size:13px;line-height:1.7;color:${COLORS.muted};">${metaBits.join(' &nbsp;·&nbsp; ')}</p>`);
@@ -1593,12 +1597,16 @@ function buildFlagshipTextBody(draft) {
   for (let i = 0; i < evs.length; i++) {
     const ev = evs[i];
     const lines = [];
-    lines.push(`== ${ev.sourceTitle || stripMd(ev.title)} ==`);
+    // Curiosity headline as the heading (matches the HTML h2); the
+    // official name rides in the description prose per the prompt.
+    lines.push(`== ${stripMd(ev.title) || ev.sourceTitle || ''} ==`);
+    if (ev.gifCaption) lines.push(stripMd(ev.gifCaption));
     if (ev.description) lines.push(stripMd(ev.description));
     // Headliner furniture serializes too — the MIME alternatives must
     // stay content-equivalent (same fields, nothing extra, nothing less).
     if (i === 0) {
       const hl = Array.isArray(ev.highlights) ? ev.highlights : [];
+      if (hl.length && ev.scoopLabel) lines.push(stripMd(ev.scoopLabel));
       for (const h of hl) {
         const t = plainBulletText(h);
         if (t) lines.push(`- ${stripMd(t)}`);
@@ -1829,11 +1837,27 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
         `but none matched the approved eventIds. Refusing to render an empty newsletter.`
       );
     }
-    // Tier assignment is positional, so re-assert the CALLER's rank
-    // (portfolio order) over whatever sequence the model echoed back —
-    // a reordered-but-valid JSON must not promote an arbitrary event to
-    // headliner. Unknown ids sort last (lock already dropped them).
+    // Re-assert the CALLER's rank (portfolio order) over whatever
+    // sequence the model echoed back, then pin each event's editorial
+    // TIER to its REQUESTED rank — not its position in the surviving
+    // array. A dropped/omitted event leaves a GAP instead of promoting
+    // copy written under a smaller tier's word contract (featured 40-60w
+    // as headliner, shortlist one-liner as featured).
     draft.events = sortByCallerRank(locked, eventIds);
+    const requestRank = new Map((Array.isArray(eventIds) ? eventIds : [])
+      .map((id, i) => [String(id).toLowerCase(), i]));
+    for (const ev of draft.events) {
+      const rank = requestRank.get(String(ev.eventId).toLowerCase());
+      if (rank !== undefined) {
+        ev.tier = rank === 0 ? 'hero' : (rank <= 2 ? 'featured' : 'quick');
+      }
+    }
+    if (requestRank.size && draft.events.length && draft.events[0].tier !== 'hero') {
+      draft.factualLockingWarnings = [
+        ...(draft.factualLockingWarnings || []),
+        'Requested headliner missing from the draft — first card renders with featured treatment (no promotion).',
+      ];
+    }
   }
 
   // 4a.5 Strip stray URLs from the free-prose fields (intro / homeowner minute /
@@ -1918,8 +1942,8 @@ ${tone ? `Tone: ${tone}` : ''}${eventBlock}`;
     // structural data-db-price span; only the text segment excises its
     // renderer shape via the lineup's locked prices.
     const draftLockedPrices = (draft.events || [])
-      .map((ev) => (typeof ev.priceText === 'string' ? ev.priceText : ''))
-      .filter(Boolean);
+      .filter((ev) => typeof ev.priceText === 'string' && ev.priceText)
+      .map((ev) => ({ eventId: String(ev.eventId || '').toLowerCase(), price: ev.priceText }));
     const claimErrors = [...new Set([
       ...findHallucinatedClaims(draft.htmlBody || '', draftLockedPrices, 'html'),
       ...findHallucinatedClaims(draft.textBody || '', draftLockedPrices, 'text'),

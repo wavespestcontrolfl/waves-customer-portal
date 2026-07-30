@@ -330,7 +330,7 @@ async function renderSendPreview(send, toEmail) {
     // the archive can actually serve it (getPostBySlug requires
     // sending/sent). A pre-send draft proof omits the link rather than
     // handing the owner a guaranteed 404.
-    webVersionUrl: (send.slug && ['sending', 'sent'].includes(send.status))
+    webVersionUrl: (send.slug && ['sending', 'sent', 'failed'].includes(send.status))
       ? `https://www.wavespestcontrol.com/newsletter/archive/${send.slug}`
       : undefined,
   });

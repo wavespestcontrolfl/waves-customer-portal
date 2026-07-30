@@ -60,19 +60,30 @@ function decodeEntities(text) {
 function findHallucinatedClaims(body, lockedPrices = [], mode = 'text') {
   if (!body) return [];
   const normPrice = (v) => decodeEntities(String(v || '')).normalize('NFKC').replace(/\s+/g, ' ').trim();
-  const lockedSet = new Set(lockedPrices.map(normPrice).filter(Boolean));
+  // Entries are {eventId, price} pairs (lockedPricesForSend) or bare
+  // strings (legacy/tests). Text excision uses the VALUES; the HTML span
+  // exemption requires the event/price PAIR to match.
+  const priceEntries = (Array.isArray(lockedPrices) ? lockedPrices : [])
+    .map((e) => (typeof e === 'string' ? { eventId: null, price: e } : (e || {})))
+    .filter((e) => typeof e.price === 'string' && e.price.trim());
+  const lockedSet = new Set(priceEntries.map((e) => normPrice(e.price)).filter(Boolean));
+  const priceByEvent = new Map(priceEntries
+    .filter((e) => e.eventId)
+    .map((e) => [String(e.eventId).toLowerCase(), normPrice(e.price)]));
   // NFKC folds Unicode look-alikes (fullwidth '＄', fullwidth digits, etc.)
   // down to their ASCII forms so a homoglyph "＄15" / "ｆｒｅｅ" can't render as
   // the claim to subscribers while slipping past the ASCII regexes.
   let bodyText = decodeEntities(String(body)
-    // Structural exemption FIRST — and VERIFIED: an assembler-emitted
-    // price span vanishes only when its decoded content matches one of
-    // the send's locked prices. An operator hand-editing the persisted
-    // HTML from $25 to $250 keeps the sentinel but loses the match, so
-    // the edited value falls through to the scan and blocks.
-    .replace(/<span data-db-price>([\s\S]*?)<\/span>/gi, (m, inner) => (
-      lockedSet.has(normPrice(inner)) ? ' ' : ` ${inner} `
+    // Structural exemption FIRST — and PAIR-verified: an assembler-
+    // emitted price span carries its event id, and it vanishes only when
+    // its decoded content matches THAT event's own locked price. A
+    // hand-edited value ($25 → $250, or Event A wearing Event B's real
+    // price) keeps the sentinel but loses the pair match, falls through
+    // to the scan, and blocks. Spans without an id never exempt.
+    .replace(/<span data-db-price="([^"]*)">([\s\S]*?)<\/span>/gi, (m, id, inner) => (
+      priceByEvent.get(String(id).toLowerCase()) === normPrice(inner) ? ' ' : ` ${inner} `
     ))
+    .replace(/<span data-db-price>([\s\S]*?)<\/span>/gi, (m, inner) => ` ${inner} `)
     .replace(/<[^>]+>/g, ' '))
     .normalize('NFKC')
     .replace(/\s+/g, ' ');
@@ -117,8 +128,10 @@ async function lockedPricesForSend(send, knex) {
   try {
     const ids = Array.isArray(send?.event_ids) ? send.event_ids : JSON.parse(send?.event_ids || '[]');
     if (!Array.isArray(ids) || !ids.length || !knex) return [];
-    const rows = await knex('events_raw').whereIn('id', ids).select('price_text');
-    return rows.map((r) => (typeof r.price_text === 'string' ? r.price_text.trim() : '')).filter(Boolean);
+    const rows = await knex('events_raw').whereIn('id', ids).select('id', 'price_text');
+    return rows
+      .filter((r) => typeof r.price_text === 'string' && r.price_text.trim())
+      .map((r) => ({ eventId: String(r.id).toLowerCase(), price: r.price_text.trim() }));
   } catch {
     return [];
   }
