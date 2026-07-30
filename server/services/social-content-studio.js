@@ -740,7 +740,7 @@ async function renderReviewGraphicImageUrl(candidate, platform) {
   );
 }
 
-function previewWithVisual(preview, { imageUrl, variant, templateKey, creative, variants, videoUrl }) {
+function previewWithVisual(preview, { imageUrl, gbpImageUrl, variant, templateKey, creative, variants, videoUrl }) {
   if (!imageUrl) return preview;
   return {
     ...preview,
@@ -751,7 +751,11 @@ function previewWithVisual(preview, { imageUrl, variant, templateKey, creative, 
       // Creative-engine metadata: which scene concept made this image (feeds the
       // no-repeat rotation) and, on draft runs, the alternate variants the admin
       // can pick from in the approval queue. videoUrl records an approved Reel
-      // (the primary imageUrl stays a still for thumbnails/GBP).
+      // (the primary imageUrl stays a still for thumbnails).
+      // gbpImageUrl is the DETERMINISTIC GBP card for this run — persisted so
+      // an approved draft's GBP post keeps its compliant image (publishToAll
+      // never falls back to the shared image for GBP; no AI imagery on GBP).
+      ...(gbpImageUrl ? { gbpImageUrl } : {}),
       ...(creative ? { creative } : {}),
       ...(Array.isArray(variants) && variants.length ? { variants } : {}),
       ...(videoUrl ? { videoUrl } : {}),
@@ -1405,14 +1409,43 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
     // gated by SOCIAL_CREATIVE_ENGINE_ENABLED). An empty result — engine off,
     // provider outage, upload failure — falls through to the legacy SVG brand
     // card below, so the engine can only ever upgrade a post, never block one.
-    const creativeVariants = await creativeVariantsForRun(plan, preview, {
-      isReviewRun, wantsGbp, effectiveMode, now: startedAt,
-    });
+    // GBP never posts AI imagery (owner rule): creative variants are AI photo
+    // scenes, so the engine is asked for no GBP (4:3) scene at all — GBP takes
+    // the deterministic card render below, same as the non-creative branches.
+    // A GBP-ONLY run skips the engine entirely: nothing would consume the
+    // square scenes, so generating them just burns paid image credits. For
+    // an immediate publish, additionally require at least one non-GBP
+    // channel to be actually publish-ready (creds/flags present) — otherwise
+    // publishToAll skips Meta and every generated asset is discarded. Draft
+    // runs keep generating regardless of readiness: their variants are the
+    // approval queue's content and publish later, when readiness may differ.
+    const hasNonGbpChannel = Array.isArray(plan.channels)
+      && plan.channels.some((c) => c !== 'gbp');
+    let creativeEligible = hasNonGbpChannel;
+    if (creativeEligible && effectiveMode !== 'draft') {
+      creativeEligible = false;
+      for (const ch of plan.channels) {
+        if (ch === 'gbp') continue;
+         
+        const readiness = await SocialMediaService.assertSocialPublishingReady(ch);
+        if (readiness.ready) { creativeEligible = true; break; }
+      }
+    }
+    const creativeVariants = creativeEligible
+      ? await creativeVariantsForRun(plan, preview, {
+        isReviewRun, wantsGbp: false, effectiveMode, now: startedAt,
+      })
+      : [];
     if (creativeVariants.length) {
       imageUrl = creativeVariants[0].imageUrl;
-      gbpImageUrl = creativeVariants[0].gbpImageUrl || null;
+      if (wantsGbp) {
+        gbpImageUrl = isReviewRun
+          ? await renderReviewGraphicImageUrl(plan.reviewGraphic, 'gbp')
+          : await renderCampaignImageUrl(plan, preview, 'gbp');
+      }
       finalPreview = previewWithVisual(preview, {
         imageUrl,
+        gbpImageUrl,
         variant: isReviewRun ? 'review' : 'campaign',
         templateKey: isReviewRun ? 'waves_photo_review_v1' : 'waves_photo_square_v1',
         creative: {
@@ -1432,6 +1465,7 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
       if (wantsGbp) gbpImageUrl = await renderReviewGraphicImageUrl(plan.reviewGraphic, 'gbp');
       finalPreview = previewWithVisual(preview, {
         imageUrl,
+        gbpImageUrl,
         variant: 'review',
         templateKey: 'waves_clean_square',
       });
@@ -1440,6 +1474,7 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
       if (wantsGbp) gbpImageUrl = await renderCampaignImageUrl(plan, preview, 'gbp');
       finalPreview = previewWithVisual(preview, {
         imageUrl,
+        gbpImageUrl,
         variant: 'campaign',
         templateKey: 'waves_campaign_square',
       });
@@ -1683,7 +1718,13 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
         customContent: preview.drafts,
         channels: remainingChannels,
         imageUrl: chosenImageUrl,
-        gbpImageUrl: httpUrlOrNull(imageVariant?.gbpImageUrl),
+        // ONLY the run-level deterministic GBP card — never the per-variant
+        // gbpImageUrl. Post-deploy, creative variants carry no GBP URL at all
+        // (wantsGbp:false), so a variant-level value can only be a LEGACY
+        // pre-deploy AI 4:3 scene queued in an old draft — reading it would
+        // publish AI imagery to GBP on approval. publishToAll posts GBP
+        // text-only when the card is absent.
+        gbpImageUrl: httpUrlOrNull(preview.visual?.gbpImageUrl),
         videoUrl: chosenVideoUrl,
         noAiImage: true, // stored visual only — never a fresh literal AI image
         gbpLocationIds: [gbpLocationId],
@@ -1756,6 +1797,11 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
     // stays the still (thumbnails/GBP) and videoUrl records the published Reel.
     const approvedPreview = previewWithVisual(preview, {
       imageUrl: chosenImageUrl || preview.visual?.imageUrl,
+      // Carry the deterministic GBP card forward — a failed attempt stays
+      // draft_created and a RETRY re-reads preview.visual.gbpImageUrl; losing
+      // it here would demote the retry's GBP post to text-only. Run-level
+      // ONLY: a per-variant gbpImageUrl is a legacy pre-deploy AI scene.
+      gbpImageUrl: preview.visual?.gbpImageUrl || null,
       variant: preview.visual?.variant || 'campaign',
       templateKey: preview.visual?.templateKey,
       creative: chosen.conceptKey ? { conceptKey: chosen.conceptKey, sceneModel: chosen.sceneModel || null } : preview.visual?.creative,

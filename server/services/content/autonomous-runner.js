@@ -2214,25 +2214,45 @@ class AutonomousRunner {
       };
     }
 
-    // Best-effort image so the GBP post isn't a flat text card. The image
-    // pipeline (generate -> S3 -> CDN) is the same one publishToAll uses for
-    // Instagram; on any failure we fall through to a text-only post (the
-    // prior behavior) rather than blocking the publish. Gate on image hosting
-    // first — uploadImageToS3 returns null without S3 + a CDN domain, so
-    // generating without it would just burn credits.
+    // Best-effort image so the GBP post isn't a flat text card. GBP never
+    // posts AI-generated imagery (owner rule) — use the same deterministic
+    // on-brand card the blog shares use, 4:3 so Google doesn't center-crop
+    // the logo/CTA. renderBrandCardUrl returns null on any failure (no
+    // S3/CDN, render error), falling through to a text-only post rather
+    // than blocking the publish.
     const imageHostingReady =
       !!process.env.S3_BUCKET && !!process.env.AWS_ACCESS_KEY_ID
       && !!process.env.AWS_SECRET_ACCESS_KEY && !!process.env.SOCIAL_MEDIA_CDN_DOMAIN;
     let gbpImageUrl = null;
     try {
-      if (imageHostingReady && social.generateImage && social.uploadImageToS3) {
-        const img = await social.generateImage(title);
-        if (img?.base64) {
-          gbpImageUrl = await social.uploadImageToS3(img.base64, `gbp-${location.id}-${Date.now()}.jpg`);
+      if (imageHostingReady && social.renderBrandCardUrl) {
+        // The card headline is customer-derived (target_keyword can carry the
+        // opportunity query verbatim) — gate it through the same deterministic
+        // validator as the post copy before rendering it onto a public image.
+        // On top of that, a CATEGORICAL headline rule: a card headline never
+        // legitimately needs the word "safe(ty)" or a time-figure at all, and
+        // regex-enumerating English phrasings of banned claims is unbounded —
+        // so any such headline posts text-only, full stop.
+        // An invalid headline just means a text-only post. Explicit eyebrow:
+        // these are location posts, not blog shares — never let the card
+        // default to "From the Waves blog".
+        const HEADLINE_RISK_RE = /\bsafe(?:ty|ly)?\b|\d\s*(?:minutes?|mins?|hours?|hrs?)\b/i;
+        const titleCheck = social.validateContent
+          ? social.validateContent(title, 'gbp')
+          : { valid: true };
+        if (HEADLINE_RISK_RE.test(title)) {
+          logger.warn('[autonomous-runner] GBP card headline contains safety/timing language (posting text-only)');
+        } else if (titleCheck.valid) {
+          gbpImageUrl = await social.renderBrandCardUrl(
+            { variant: 'blog', title, excerpt: content, cta: 'Learn more', eyebrow: 'Waves Pest Control' },
+            'gbp',
+          );
+        } else {
+          logger.warn(`[autonomous-runner] GBP card headline failed validation (posting text-only): ${titleCheck.issues?.join('; ')}`);
         }
       }
     } catch (err) {
-      logger.warn(`[autonomous-runner] GBP image generation failed (posting text-only): ${err.message}`);
+      logger.warn(`[autonomous-runner] GBP brand-card render failed (posting text-only): ${err.message}`);
     }
 
     const t2 = Date.now();
