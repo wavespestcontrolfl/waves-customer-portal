@@ -3510,12 +3510,19 @@ function initScheduledJobs() {
   // =========================================================================
   cron.schedule('10 6 * * *', async () => {
     logger.info('Running: document request lifecycle');
+    // ORDER IS LOAD-BEARING: expiration FIRST (the termite sweeps key off
+    // 'expired' stamps), then the termite superseded reconciliation (which
+    // cancels stale-version and misissued requests), and REMINDERS LAST —
+    // a reminder processed before the superseded pass would email/text the
+    // customer a signing nudge for the very request that pass is about to
+    // cancel, pointing them at obsolete or residential-only wording.
+    const { expireDocumentRequests, processDueDocumentReminders } = require('./document-contract-delivery');
+    let expiredCount = 0;
     try {
-      const { processDocumentWorkflow } = require('./document-contract-delivery');
-      const result = await processDocumentWorkflow();
-      logger.info(`Document workflow done: ${result.expired || 0} expired, ${result.reminders?.sent || 0} reminder(s) sent, ${result.reminders?.failed || 0} failed`);
+      const expired = await expireDocumentRequests();
+      expiredCount = expired?.expired || 0;
     } catch (err) {
-      logger.error(`Document request lifecycle failed: ${err.message}`);
+      logger.error(`Document request expiration failed: ${err.message}`);
     }
     // Termite program agreement reconciliation: re-prep any recently accepted
     // termite estimate whose agreement draft failed transiently at accept
@@ -3541,6 +3548,12 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`Termite agreement reconciliation failed: ${err.message}`);
+    }
+    try {
+      const reminders = await processDueDocumentReminders();
+      logger.info(`Document workflow done: ${expiredCount} expired, ${reminders?.sent || 0} reminder(s) sent, ${reminders?.failed || 0} failed`);
+    } catch (err) {
+      logger.error(`Document request reminders failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

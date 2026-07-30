@@ -324,7 +324,12 @@ router.post('/versions/:id/publish', async (req, res, next) => {
     });
     const template = await db('document_templates').where({ id: version.template_id }).first();
     const loaded = await loadTemplateByKey(template.template_key);
-    res.json({ template: serializeTemplate(loaded.template, loaded.activeVersion), version: serializeVersion(version) });
+    // Re-read the version: activation advances published_at (the rollout
+    // moment), and the response must not report the stale pre-activation
+    // timestamp under `version` while `template.activeVersion` shows the
+    // new one.
+    const freshVersion = await db('document_template_versions').where({ id: version.id }).first();
+    res.json({ template: serializeTemplate(loaded.template, loaded.activeVersion), version: serializeVersion(freshVersion || version) });
   } catch (err) { next(err); }
 });
 

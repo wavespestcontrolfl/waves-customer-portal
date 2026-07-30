@@ -495,16 +495,40 @@ function isCommercialEstimate(estimate = {}, estData = null) {
   const enriched = (data?.enriched && typeof data.enriched === 'object') ? data.enriched : null;
   if (commercialFlag(data?.inputs?.isCommercial) || commercialFlag(data?.engineInputs?.isCommercial)
     || commercialFlag(profile?.isCommercial) || commercialFlag(enriched?.isCommercial)) return true;
-  const propertyType = [
+  // Engine-shaped inputs carry explicit commercial markers beyond the
+  // flag: category COMMERCIAL and the commercial subtype/risk fields are
+  // only ever set for commercial intents (estimator-engine draft-builder).
+  const commercialMarkers = (src) => !!src && (
+    String(src.category || '').trim().toUpperCase() === 'COMMERCIAL'
+    || !!src.commercialSubtype || !!src.commercialRiskType
+  );
+  if ([data?.inputs, data?.engineInputs, profile, enriched].some(commercialMarkers)) return true;
+  // Canonical commercial property-type classification, mirroring the
+  // estimate engine's alias/token rules (client/src/lib/estimateEngine.js
+  // classifyPropertyType): a persisted 'Office' / 'Restaurant' / 'School'
+  // / 'HOA Common Area' / 'Government Municipal' must park here exactly
+  // as the engine prices it commercial. Multi-unit residential structures
+  // (duplex/condo/townhome) park too.
+  const COMMERCIAL_TYPE_TOKENS = new Set([
+    'commercial', 'business', 'office', 'retail', 'shop', 'storefront', 'plaza',
+    'warehouse', 'apartment', 'apartments', 'multifamily', 'hoa', 'restaurant',
+    'medical', 'clinic', 'industrial', 'school', 'daycare', 'government', 'municipal',
+  ]);
+  const isCommercialPropertyType = (value) => {
+    const normalized = String(value || '').trim().toLowerCase()
+      .replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+    if (!normalized) return false;
+    if (normalized.includes('multi_family') || normalized.includes('common_area') || normalized.includes('food_service')) return true;
+    if (/duplex|triplex|quadplex|condo|town_?home|townhouse/.test(normalized)) return true;
+    return normalized.split('_').some((token) => COMMERCIAL_TYPE_TOKENS.has(token));
+  };
+  if ([
     data?.inputs?.propertyType,
     data?.propertyType,
     data?.engineInputs?.propertyType,
     profile?.propertyType,
     enriched?.propertyType,
-  ].map((v) => String(v || '').toLowerCase()).join('|');
-  // Persisted estimator values include the concrete multi-unit types, not
-  // just the 'Multifamily' label — every multi-unit structure parks.
-  if (/commercial|multi[- ]?family|multifamily|duplex|triplex|quadplex|condo|town\s?home|townhouse|apartment/.test(propertyType)) return true;
+  ].some(isCommercialPropertyType)) return true;
   if (String(estimate.waveguard_tier || '').toLowerCase() === 'commercial') return true;
   try {
     const txt = typeof estimate.estimate_data === 'string' ? estimate.estimate_data : JSON.stringify(data);

@@ -598,16 +598,25 @@ exports.down = async function down(knex) {
   // over a later 'sent' would restore a row the public signing route 409s
   // on). Newest-first plus first-seen-wins keeps one event per contract.
   const loadCancelEvents = async () => {
-    const all = await knex('customer_contract_events')
-      .where({ event_type: 'cancelled', actor_type: 'system' })
-      .whereRaw("metadata->>'reason' in (?, ?)", ['superseded_by_v2_migration', 'superseded_stale_version'])
-      .orderBy('created_at', 'desc')
-      .select('contract_id', 'customer_id', 'metadata');
+    const all = await knex('customer_contract_events as cce')
+      .join('customer_contracts as cc', 'cc.id', 'cce.contract_id')
+      .where({ 'cce.event_type': 'cancelled', 'cce.actor_type': 'system' })
+      .whereRaw("cce.metadata->>'reason' in (?, ?)", ['superseded_by_v2_migration', 'superseded_stale_version'])
+      .orderBy('cce.created_at', 'desc')
+      .select('cce.contract_id', 'cce.customer_id', 'cce.metadata', 'cc.created_at as source_created_at');
     const latestByContract = new Map();
     for (const evt of all) {
       if (!latestByContract.has(String(evt.contract_id))) latestByContract.set(String(evt.contract_id), evt);
     }
-    return [...latestByContract.values()];
+    // NEWEST SOURCE FIRST — the restore order is load-bearing: restoring
+    // the newest cycle first lets the cycle-bound coverage check suppress
+    // every older same-property source (candidate created at/after source
+    // = coverage). Event timestamps can TIE within one migration batch, so
+    // ordering by event time alone would let an older source restore
+    // first, decline as coverage for the newer one, and leave BOTH links
+    // live with the obsolete figures signable.
+    return [...latestByContract.values()]
+      .sort((a, b) => new Date(b.source_created_at || 0) - new Date(a.source_created_at || 0));
   };
   if (hasContracts && hasEvents) {
     // Pre-repoint snapshot ONLY drives advisory-lock acquisition; the

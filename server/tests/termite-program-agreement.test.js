@@ -375,6 +375,18 @@ describe('isCommercialEstimate', () => {
     expect(isCommercialEstimate({}, { inputs: { propertyType: 'Single Family' } })).toBe(false);
   });
 
+  test('canonical commercial property types and engine markers park (Office/Restaurant/School/HOA/Government)', () => {
+    for (const pt of ['Office', 'Restaurant', 'School', 'HOA Common Area', 'Government Municipal', 'Warehouse', 'Medical Office', 'Business Park', 'Daycare']) {
+      expect(isCommercialEstimate({}, { engineInputs: { propertyType: pt } })).toBe(true);
+      expect(isCommercialEstimate({}, { inputs: { propertyType: pt } })).toBe(true);
+    }
+    expect(isCommercialEstimate({}, { engineInputs: { category: 'COMMERCIAL' } })).toBe(true);
+    expect(isCommercialEstimate({}, { engineInputs: { commercialSubtype: 'restaurant_food_service' } })).toBe(true);
+    expect(isCommercialEstimate({}, { engineRequest: { profile: { commercialRiskType: 'food' } } })).toBe(true);
+    expect(isCommercialEstimate({}, { engineInputs: { propertyType: 'Single Family', category: 'RESIDENTIAL' } })).toBe(false);
+    expect(isCommercialEstimate({}, { engineInputs: { propertyType: 'Mobile Home' } })).toBe(false);
+  });
+
   test('every persisted input generation parks (engineInputs / engineRequest.profile / enriched)', () => {
     expect(isCommercialEstimate({}, { engineInputs: { propertyType: 'Duplex' } })).toBe(true);
     expect(isCommercialEstimate({}, { engineInputs: { isCommercial: true } })).toBe(true);
