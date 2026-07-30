@@ -163,6 +163,13 @@ async function transitionCore({ id, nextStatus, note, assignedTo }) {
         if (!siblingLive) {
           const call = await db('call_log').where({ id: item.call_log_id }).first('customer_id');
           if (call?.customer_id) {
+            // A resolve-as-is is an explicit approval — it supersedes a
+            // deny stamp left by an EARLIER review cycle (force-reprocess),
+            // which would otherwise gate every automated release forever
+            // (Codex #3084 r17).
+            await db('first_touch_holds')
+              .where({ call_log_id: item.call_log_id, last_error: 'email_denied_await_correction' })
+              .update({ last_error: null, updated_at: new Date() });
             await resumeHeldFirstTouch({ customerId: call.customer_id, callLogId: item.call_log_id, source: 'triage_resolve' });
           }
         }
@@ -350,6 +357,13 @@ router.post('/:id/verdict', async (req, res) => {
         {
           const call = await db('call_log').where({ id: item.call_log_id }).first('customer_id');
           if (call?.customer_id) {
+            // This verdict explicitly approves the extraction — clear a
+            // deny stamp left by an EARLIER review cycle (force-reprocess),
+            // which would otherwise gate every automated release forever
+            // (Codex #3084 r17).
+            await db('first_touch_holds')
+              .where({ call_log_id: item.call_log_id, last_error: 'email_denied_await_correction' })
+              .update({ last_error: null, updated_at: new Date() });
             await resumeHeldFirstTouch({ customerId: call.customer_id, callLogId: item.call_log_id, source: 'triage_verdict_accept' });
           }
         }

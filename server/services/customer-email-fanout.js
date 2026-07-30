@@ -373,6 +373,13 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
       .whereIn('reason_code', EMAIL_REVIEW_REASON_CODES)
       .whereIn('call_log_id', conn('call_log').select('id').where({ customer_id: customerId }))
       .distinct('call_log_id');
+    // Zero-work released markers RETARGET on conflict (Codex #3084 r17):
+    // two corrections before the processor's Step-6 write means marker A
+    // already exists when correction B arrives — B's address must win, or
+    // the processor's released-during-run guard adopts A's superseded
+    // value. Real rows (any held flag, or pending/releasing/blocked) are
+    // never touched by the CASE.
+    const zeroWorkMarker = "first_touch_holds.status = 'released' AND NOT first_touch_holds.held_drip AND NOT first_touch_holds.held_newsletter";
     for (const callId of [...new Set(reviewedCalls.map((r) => r.call_log_id).filter(Boolean))]) {
       await conn('first_touch_holds')
         .insert({
@@ -387,7 +394,10 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
           updated_at: now,
         })
         .onConflict('call_log_id')
-        .ignore();
+        .merge({
+          held_email: conn.raw(`CASE WHEN ${zeroWorkMarker} THEN excluded.held_email ELSE first_touch_holds.held_email END`),
+          released_at: conn.raw(`CASE WHEN ${zeroWorkMarker} THEN excluded.released_at ELSE first_touch_holds.released_at END`),
+        });
     }
   }
 

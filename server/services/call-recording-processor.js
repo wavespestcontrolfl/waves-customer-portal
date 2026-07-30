@@ -8964,6 +8964,7 @@ const CallRecordingProcessor = {
             const { resumeHeldFirstTouch } = require('./lead-first-touch-resume');
             await resumeHeldFirstTouch({ callLogId: call.id, customerId, source: 'mid_run_card_release' });
           } else {
+            try {
             const { buildTriageItem } = require('./call-routing-gates');
             await db('triage_items')
               .insert(buildTriageItem({
@@ -8975,6 +8976,18 @@ const CallRecordingProcessor = {
               }))
               .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
               .ignore();
+            } catch (markerErr) {
+              // Without this card the pending hold is invisible to
+              // operators AND ineligible for the sweep (no resolved card
+              // ever exists) — neither send would have a release trigger
+              // left (Codex #3084 r17). Fail the run like the other
+              // durable-state failures: the outer catch stamps
+              // extraction_failed and the retry re-attempts the insert.
+              logger.error(`[call-proc] end-of-run recovery card insert failed for ${maskSid(callSid)}: ${markerErr.message}`);
+              const stateErr = new Error('email_review_state_unavailable');
+              stateErr.emailReviewStateUnavailable = true;
+              throw stateErr;
+            }
           }
         }
       } catch (reconcileErr) {

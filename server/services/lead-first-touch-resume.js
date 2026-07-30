@@ -163,6 +163,12 @@ async function runNewsletterResume(payload, dbh = db, { skipDedupe = false } = {
               .update({ customer_id: payload.customerId, updated_at: new Date() });
           } catch (linkErr) {
             logger.warn(`[first-touch-resume] dedupe linkage failed for customer ${payload.customerId}: ${linkErr.code || linkErr.name || 'db_error'}`);
+            // Retryable, never terminal (Codex #3084 r17): releasing the
+            // hold now would leave the subscriber invisible to the email
+            // fanout's customer-scoped token rotation. retryReason (not the
+            // send-failed marker) keeps skipDedupe FALSE on retry, so the
+            // guard re-runs — re-linking without a second confirmation.
+            return { confirmationEmailSent: false, retryReason: 'dedupe_linkage_failed' };
           }
         }
         return { skipped: 'confirmation_recently_sent' };
@@ -364,7 +370,9 @@ async function resumeHeldFirstTouch({
             newsletterSettled = true;
           } else {
             patch.status = 'pending';
-            patch.last_error = 'newsletter_doi_not_confirmed';
+            // retryReason (e.g. dedupe_linkage_failed) is deliberately NOT
+            // the send-failed marker — it must not trigger skipDedupe.
+            patch.last_error = outcome?.retryReason || 'newsletter_doi_not_confirmed';
           }
         }
       }
@@ -503,9 +511,10 @@ async function runOnePostCommitResume(payload, holdIds, dbh) {
         if (dripSettled) await repenIfWorkMergedDuringClaim(holdId, dbh);
       } else {
         // Back to pending — the DOI never confirmed; the next release
-        // trigger (or the ledger sweep) retries it.
+        // trigger (or the ledger sweep) retries it. retryReason outcomes
+        // (e.g. dedupe_linkage_failed) keep skipDedupe FALSE on retry.
         await dbh('first_touch_holds').where({ id: holdId })
-          .update({ status: 'pending', last_error: 'newsletter_doi_not_confirmed', updated_at: new Date() });
+          .update({ status: 'pending', last_error: outcome?.retryReason || 'newsletter_doi_not_confirmed', updated_at: new Date() });
       }
     }
     return outcome;
@@ -666,12 +675,17 @@ async function sweepAbandonedFirstTouchHolds({ dbh = db, limit = 10 } = {}) {
       // release via a correction — sweeping them would just churn through
       // the invalid-address guard every pass.
       .whereNot('held_email', '')
-      .whereExists(function answered() {
-        this.select(1).from('triage_items')
-          .whereRaw('triage_items.call_log_id = first_touch_holds.call_log_id')
-          .whereIn('reason_code', EMAIL_REVIEW_REASON_CODES)
-          .where('status', 'resolved');
-      })
+      // The LATEST review cycle must be the one that resolved — evaluated
+      // IN the query (Codex #3084 r17), because a post-limit filter would
+      // let ten old dismissed-cycle rows permanently shadow eligible holds
+      // behind them. Also implies at least one resolved card exists.
+      .whereRaw(`(
+        SELECT t.status FROM triage_items t
+        WHERE t.call_log_id = first_touch_holds.call_log_id
+          AND t.reason_code IN ('email_unverified', 'email_invalid')
+        ORDER BY t.created_at DESC
+        LIMIT 1
+      ) = 'resolved'`)
       .whereNotExists(function stillLive() {
         this.select(1).from('triage_items')
           .whereRaw('triage_items.call_log_id = first_touch_holds.call_log_id')

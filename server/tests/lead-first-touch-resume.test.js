@@ -19,6 +19,7 @@ let mockMergeArgs = [];
 let mockCustomerFirstQueue = null; // shift per customers.first(); an Error value throws
 let mockSubscriberRow = null; // newsletter_subscribers.first() (DOI dedupe guard)
 let mockSubscriberUpdates = [];
+let mockSubscriberUpdateError = null;
 let mockOnFirstTouchClaim = null; // fires when a claim update lands (race simulation)
 let mockHoldFirstQueue = null; // shift per first_touch_holds.first(); an Error value throws
 let mockTriageFirstQueue = null; // shift per triage_items.first()
@@ -56,7 +57,10 @@ jest.mock('../models/db', () => {
           mockHoldUpdates.push(patch);
           if (patch.status === 'releasing' && mockOnFirstTouchClaim) mockOnFirstTouchClaim();
         }
-        if (table === 'newsletter_subscribers') mockSubscriberUpdates.push(patch);
+        if (table === 'newsletter_subscribers') {
+          if (mockSubscriberUpdateError) throw mockSubscriberUpdateError;
+          mockSubscriberUpdates.push(patch);
+        }
         return 1;
       }),
       first: jest.fn(async () => {
@@ -143,6 +147,7 @@ beforeEach(() => {
   mockCustomerFirstQueue = null;
   mockSubscriberRow = null;
   mockSubscriberUpdates = [];
+  mockSubscriberUpdateError = null;
   mockOnFirstTouchClaim = null;
   mockHoldFirstQueue = null;
   mockTriageFirstQueue = null;
@@ -471,6 +476,21 @@ describe('deny-stamped holds and dedupe hardening (r14)', () => {
     await resumeHeldFirstTouch({ callLogId: 'call-1' });
     expect(mockNewsletter).not.toHaveBeenCalled();
     expect(mockSubscriberUpdates.at(-1)).toMatchObject({ customer_id: 'cust-1' });
+  });
+
+  test('a failed dedupe linkage keeps the hold retryable — without a resend marker', async () => {
+    // The deduped release must not go terminal while the subscriber is
+    // unlinked, and the re-pend marker must NOT be the send-failed one
+    // (that would skipDedupe into a duplicate confirmation on retry).
+    mockHold = baseHold({ held_drip: false });
+    mockSubscriberRow = { status: 'pending', confirmation_sent_at: new Date() };
+    const dbErr = new Error('link write failed');
+    dbErr.code = 'ECONNRESET';
+    mockSubscriberUpdateError = dbErr;
+    const res = await resumeHeldFirstTouch({ callLogId: 'call-1' });
+    expect(mockNewsletter).not.toHaveBeenCalled();
+    expect(res.resumed).toBe(false);
+    expect(mockHoldUpdates.at(-1)).toMatchObject({ status: 'pending', last_error: 'dedupe_linkage_failed' });
   });
 
   test('post-commit re-pends when a superseded target is suppressed', async () => {

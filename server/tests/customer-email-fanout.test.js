@@ -54,6 +54,7 @@ function makeConn(cfg = {}) {
       insert: (arg) => { calls.push({ table, op: 'insert', arg }); return qb; },
       onConflict: () => qb,
       ignore: () => Promise.resolve(1),
+      merge: (arg) => { calls.push({ table, op: 'merge', arg }); return Promise.resolve(1); },
       distinct: () => qb,
       then: (resolve, reject) => Promise.resolve(
         (t.rowsQueue && t.rowsQueue.length) ? t.rowsQueue.shift() : (t.rows || [])
@@ -410,6 +411,13 @@ describe('propagateCustomerEmailChange', () => {
       held_email: HOLD_AFTER.email,
       status: 'released',
     });
+    // A SECOND correction must retarget a zero-work released marker — the
+    // conflict merge carries a CASE that adopts the newer address only for
+    // marker rows (never real holds).
+    const markerMerge = conn.__calls.find((c) => c.table === 'first_touch_holds' && c.op === 'merge');
+    expect(markerMerge).toBeDefined();
+    expect(String(markerMerge.arg.held_email.__raw)).toContain('excluded.held_email');
+    expect(String(markerMerge.arg.held_email.__raw)).toContain("NOT first_touch_holds.held_newsletter");
   });
 
   test('a correction leaves a SETTLED ledger marker for reviewed calls with no hold row', async () => {
