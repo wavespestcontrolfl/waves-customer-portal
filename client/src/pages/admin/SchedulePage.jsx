@@ -12083,6 +12083,11 @@ export function CompletionPanel({
                 )}
               </Field>
             )}
+            {/* Frozen while an AI draft is in flight (codex P2) — the
+                generate payload snapshots these fields, and an edit landing
+                mid-request would ship a summary that contradicts what the
+                completion then persists (same rule the old chip handlers
+                enforced with their `generating` guard). */}
             <Field label="Observations">
               {" "}
               <textarea
@@ -12091,7 +12096,8 @@ export function CompletionPanel({
                 onChange={(e) => setObservationsText(e.target.value)}
                 rows={2}
                 placeholder="Optional — anything you noticed (one per line)"
-                style={mTextarea}
+                disabled={generating}
+                style={{ ...mTextarea, opacity: generating ? 0.55 : 1 }}
               />{" "}
             </Field>
             <Field label="Recommendations">
@@ -12102,7 +12108,8 @@ export function CompletionPanel({
                 onChange={(e) => setRecommendationsText(e.target.value)}
                 rows={2}
                 placeholder="Optional — next steps if needed (one per line)"
-                style={mTextarea}
+                disabled={generating}
+                style={{ ...mTextarea, opacity: generating ? 0.55 : 1 }}
               />{" "}
             </Field>
             {/* AI report — drafts customer-facing visit copy into the notes box
@@ -13951,6 +13958,8 @@ export function CompletionPanel({
               )}
             </div>
             )}
+            {/* Frozen while an AI draft is in flight (codex P2) — mirrors
+                the mobile variant. */}
             <div style={{ marginBottom: 12 }}>
               <label style={{ ...labelStyle, color: D.amber }}>
                 Observations
@@ -13961,7 +13970,8 @@ export function CompletionPanel({
                 onChange={(e) => setObservationsText(e.target.value)}
                 rows={2}
                 placeholder="Optional — anything you noticed (one per line)"
-                style={{ ...inputStyle, height: "auto", resize: "vertical" }}
+                disabled={generating}
+                style={{ ...inputStyle, height: "auto", resize: "vertical", opacity: generating ? 0.55 : 1 }}
               />{" "}
             </div>
             <div style={{ marginBottom: 12 }}>
@@ -13974,7 +13984,8 @@ export function CompletionPanel({
                 onChange={(e) => setRecommendationsText(e.target.value)}
                 rows={2}
                 placeholder="Optional — next steps if needed (one per line)"
-                style={{ ...inputStyle, height: "auto", resize: "vertical" }}
+                disabled={generating}
+                style={{ ...inputStyle, height: "auto", resize: "vertical", opacity: generating ? 0.55 : 1 }}
               />{" "}
             </div>{" "}
           </div>
