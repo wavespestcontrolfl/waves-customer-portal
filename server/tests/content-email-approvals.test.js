@@ -357,18 +357,26 @@ describe('round-5 hardening (Codex r5)', () => {
     expect(updates.some((u) => u.status === 'failed')).toBe(false);
   });
 
-  test('approval-token subjects are control messages ONLY when the token is live (Codex r8)', async () => {
+  test('approval-token subjects are control messages when the token EXISTS in any status (Codex r8+r10)', async () => {
     const db = require('../models/db');
     const mkDb = (row) => db.mockImplementation(() => ({
-      whereRaw: jest.fn().mockReturnValue({
-        whereIn: jest.fn().mockReturnValue({ first: jest.fn().mockResolvedValue(row) }),
-      }),
+      whereRaw: jest.fn().mockReturnValue({ first: jest.fn().mockResolvedValue(row) }),
     }));
-    mkDb({ id: 'x' }); // live token
+    mkDb({ id: 'x', status: 'approved' }); // already-decided token still OUR traffic
     await expect(approvals.isApprovalControlMessage({ subject: 'Re: [EA-1a2b3c4d] Approve? Post' })).resolves.toBe(true);
     mkDb(null); // token-shaped but unknown — a blocked sender earns no bypass
     await expect(approvals.isApprovalControlMessage({ subject: 'Re: [EA-deadbeef] spam' })).resolves.toBe(false);
     await expect(approvals.isApprovalControlMessage({ subject: 'Quarterly service question' })).resolves.toBe(false);
+  });
+
+  test('reversed/deferred rejections fail closed; reasoned rejections still reject (Codex r10)', () => {
+    expect(parseDecision('not approved yet')).toBe(null);
+    expect(parseDecision('not approved unless the source is updated')).toBe(null);
+    expect(parseDecision('not approved? actually approved')).toBe(null);
+    expect(parseDecision('not approved, but close')).toBe(null);
+    // Reasons remain rejections.
+    expect(parseDecision('Not Approved - competitor angle too aggressive')).toBe('rejected');
+    expect(parseDecision('not approved, tone it down and resend')).toBe('rejected');
   });
 
   test('an HTML-only multipart/alternative reply resolves its direct text/html leaf (Codex r8)', () => {

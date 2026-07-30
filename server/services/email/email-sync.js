@@ -281,14 +281,11 @@ async function upsertEmail(parsed) {
 
   // Content-approval replies ([EA-xxxxxxxx] subjects) are control messages
   // too: the IMAP poller owns the decision — they must never burn a
-  // classifier call or risk an auto-action archiving/answering them.
-  let approvalControl = false;
-  try {
-    const { isApprovalControlMessage } = require('../content/email-approvals');
-    approvalControl = await isApprovalControlMessage(email);
-  } catch (err) {
-    logger.error(`[email-sync] Approval-control check failed for ${email.id}: ${err?.message || err}`);
-  }
+  // classifier call or risk an auto-action archiving/answering them. The
+  // EARLY verdict (computed before the blocklist branch) is reused so a
+  // decision the poller executed between the two points can't flip this
+  // to false (Codex r10).
+  const approvalControl = approvalControlEarly;
 
   // Classify in background (don't block sync)
   if (!proofHandled && !approvalControl && (!email.classification || email.classification === 'vendor')) {

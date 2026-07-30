@@ -115,6 +115,13 @@ function escapeHtml(s) {
 // executes (Codex #3024 r5). Curly apostrophes/dashes included.
 const APPROVAL_TRAILER_RE = /^[\s,.!:;()✓👍—–-]*(?:(?:thanks?|thank you|ty|looks good(?: to me)?|lgtm|ship it|go ahead|yes|please|proceed|sounds good|perfect|great|good)[\s,.!]*)*$/i;
 
+// A rejection trailer that REVERSES or DEFERS the rejection makes the line
+// ambiguous ("not approved yet", "not approved unless…", "not approved?
+// actually approved") — dismissing on those would close the topic against
+// the owner's intent. Free-text REASONS ("not approved - angle too
+// aggressive") remain valid rejections (Codex r10).
+const REJECTION_REVERSAL_RE = /^[\s,.!:;—–-]*(?:yet|unless|until|if|actually|but)\b|[?]/i;
+
 function parseDecision(text) {
   const lines = String(text || '').split(/\r?\n/);
   for (const raw of lines) {
@@ -122,7 +129,10 @@ function parseDecision(text) {
     if (!line) continue;
     if (line.startsWith('>')) continue; // quoted reply trail
     if (/^On .{0,120}wrote:$/.test(line)) break; // start of quoted original
-    if (/^not[\s-]+approved\b/i.test(line)) return 'rejected';
+    if (/^not[\s-]+approved\b/i.test(line)) {
+      const rest = line.replace(/^not[\s-]+approved\b/i, '');
+      return REJECTION_REVERSAL_RE.test(rest) ? null : 'rejected';
+    }
     if (/^approved\b/i.test(line)) {
       const rest = line.replace(/^approved\b/i, '');
       return APPROVAL_TRAILER_RE.test(rest) ? 'approved' : null;
@@ -302,9 +312,13 @@ async function isApprovalControlMessage(email = {}) {
   const m = String(email.subject || '').match(TOKEN_RE);
   if (!m) return false;
   try {
+    // ANY status counts: a reply whose decision the poller already executed
+    // (or that arrived before sync ingested it) is still OUR control
+    // traffic — it must never be classified or auto-actioned after the
+    // fact (Codex r10). Forged token-shaped subjects still fail here
+    // because the token doesn't exist in the table at all.
     const row = await db('content_email_approvals')
       .whereRaw('LOWER(token) = ?', [m[0].toLowerCase()])
-      .whereIn('status', ['awaiting_reply', 'executing'])
       .first();
     return !!row;
   } catch {
@@ -345,7 +359,7 @@ function draftPreview(run) {
     truncated: truncated || metadataTruncated,
     // Content fingerprint of the FULL payload (not the capped preview):
     // approval binds to this snapshot, not merely the run id.
-    sha: crypto.createHash('sha256').update(`${title} ${full} ${metadata || ''}`).digest('hex'),
+    sha: crypto.createHash('sha256').update(`${title}\u0000${full}\u0000${metadata || ''}`).digest('hex'),
   };
 }
 
