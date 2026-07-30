@@ -80,10 +80,26 @@ async function checkConsentForPurpose(input, policy, contactState) {
     if (
       policy.requireConsent === 'transactional' &&
       input.purpose === 'conversational' &&
-      contactState &&
-      contactState.hasInboundHistory === true
+      contactState
     ) {
-      return { ok: true };
+      // The exception only fires on POSITIVELY loaded state. Suppression
+      // fails open for recipients with a prefs row (sms_enabled still
+      // catches the common STOP case), but here the prefs row is absent —
+      // a pre-customer STOP lives ONLY in messaging_suppression, and the
+      // very inbound that recorded it also supplies hasInboundHistory. If
+      // that lookup failed we cannot rule out an active suppression, so
+      // return the retryable code instead of granting the exception
+      // (Codex P1 on 92cb96ae4).
+      if (contactState.suppressionLookupFailed) {
+        return {
+          ok: false,
+          code: 'CONSENT_LOOKUP_FAILED',
+          reason: 'Could not load messaging_suppression state (DB error during lookup) — required before the no-prefs conversational exception; retry advised',
+        };
+      }
+      if (contactState.hasInboundHistory === true) {
+        return { ok: true };
+      }
     }
     return {
       ok: false,
@@ -237,12 +253,21 @@ async function loadContactState(input) {
   }
 
   // Reply evidence for the no-prefs-row conversational exception: has this
-  // phone ever texted US? Only queried when the prefs row is missing (the
-  // normal path never pays for it). On query error we leave it false — the
-  // exception simply doesn't apply and the send fails closed as
-  // NO_CONSENT_RECORD rather than converting a legit denial into a retry.
+  // phone ever texted US? Only queried when the consent decision actually
+  // depends on it — prefs row missing, purpose conversational, and an
+  // audience that requires the evidence (leads are exempted by the branch
+  // above without it, and internal/tech/admin bypass consent entirely), so
+  // the normal path and lead sends never pay for the un-indexed from_phone
+  // scan (Codex P2 on 92cb96ae4). On query error we set lookupFailed so the
+  // validator returns the retryable CONSENT_LOOKUP_FAILED instead of the
+  // definitive NO_CONSENT_RECORD — a legit reply suppressed by a DB blip
+  // must be retried, not dropped (Codex P1 on 92cb96ae4).
   state.hasInboundHistory = false;
-  if (!state.prefs) {
+  const needsReplyEvidence = !state.prefs
+    && !state.lookupFailed
+    && input.purpose === 'conversational'
+    && !['lead', 'internal', 'tech', 'admin'].includes(input.audience);
+  if (needsReplyEvidence) {
     const phones = [...new Set([input.to, state.customer?.phone].filter(Boolean))];
     if (phones.length) {
       try {
@@ -253,6 +278,7 @@ async function loadContactState(input) {
         state.hasInboundHistory = Boolean(inbound);
       } catch (err) {
         logger.warn(`[messaging:consent] inbound-history lookup failed: ${err.message}`);
+        state.lookupFailed = true;
       }
     }
   }

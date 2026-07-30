@@ -9,10 +9,13 @@
  * manual replies from Communications / tech Messages.
  *
  * Reply evidence (contactState.hasInboundHistory — a prior inbound sms_log
- * row from this phone) is required for non-lead audiences: purpose
- * 'conversational' is reused by flows that can START a thread, and a cold
- * outbound to a no-row recipient must not bypass consent (Codex P1 on
- * PR #3057).
+ * row from this phone, loaded only when the decision depends on it) is
+ * required for non-lead audiences: purpose 'conversational' is reused by
+ * flows that can START a thread, and a cold outbound to a no-row recipient
+ * must not bypass consent. The exception also requires positively loaded
+ * suppression state — a pre-customer STOP lives only in
+ * messaging_suppression, so an unknown suppression lookup must return the
+ * retryable code, never grant the send (Codex P1s on PR #3057).
  */
 
 jest.mock('../models/db', () => jest.fn());
@@ -51,6 +54,23 @@ describe('conversational sends with NO notification_prefs row', () => {
     );
     expect(res.ok).toBe(false);
     expect(res.code).toBe('NO_CONSENT_RECORD');
+  });
+
+  test('suppression lookup failed: exception refuses to fire — retryable CONSENT_LOOKUP_FAILED, never a send', async () => {
+    const policy = resolvePolicy('customer', 'conversational');
+    const res = await checkConsentForPurpose(
+      smsInput(),
+      policy,
+      {
+        prefs: null,
+        customer: { id: 'c1' },
+        lookupFailed: false,
+        hasInboundHistory: true,
+        suppressionLookupFailed: true,
+      },
+    );
+    expect(res.ok).toBe(false);
+    expect(res.code).toBe('CONSENT_LOOKUP_FAILED');
   });
 
   test('lead audience: allowed without inbound evidence (pre-existing behavior preserved)', async () => {
@@ -101,7 +121,10 @@ describe('loadContactState — inbound-history evidence', () => {
   const db = require('../models/db');
   const { loadContactState } = require('../services/messaging/validators/consent');
 
+  let smsLogQueried;
+
   const mockDb = ({ prefs = null, customer = null, inboundRow = null, inboundThrows = false }) => {
+    smsLogQueried = false;
     db.mockImplementation((table) => {
       if (table === 'notification_prefs') {
         return { where: () => ({ first: async () => prefs }) };
@@ -110,6 +133,7 @@ describe('loadContactState — inbound-history evidence', () => {
         return { where: () => ({ first: async () => customer }) };
       }
       if (table === 'sms_log') {
+        smsLogQueried = true;
         return {
           where: () => ({
             whereIn: () => ({
@@ -125,29 +149,81 @@ describe('loadContactState — inbound-history evidence', () => {
     });
   };
 
+  const baseInput = { customerId: 'c1', to: '+19415550100', audience: 'customer', purpose: 'conversational' };
+
   test('prefs row missing + prior inbound sms_log row → hasInboundHistory true', async () => {
     mockDb({ customer: { id: 'c1', phone: '+19415550100' }, inboundRow: { id: 's1' } });
-    const state = await loadContactState({ customerId: 'c1', to: '+19415550100' });
+    const state = await loadContactState(baseInput);
     expect(state.hasInboundHistory).toBe(true);
+    expect(state.lookupFailed).toBe(false);
   });
 
   test('prefs row missing + no inbound row → hasInboundHistory false', async () => {
     mockDb({ customer: { id: 'c1', phone: '+19415550100' }, inboundRow: null });
-    const state = await loadContactState({ customerId: 'c1', to: '+19415550100' });
+    const state = await loadContactState(baseInput);
     expect(state.hasInboundHistory).toBe(false);
+    expect(state.lookupFailed).toBe(false);
   });
 
   test('prefs row present → the inbound-history query never runs', async () => {
     mockDb({ prefs: { sms_enabled: true }, customer: { id: 'c1', phone: '+19415550100' }, inboundThrows: true });
-    const state = await loadContactState({ customerId: 'c1', to: '+19415550100' });
+    const state = await loadContactState(baseInput);
+    expect(smsLogQueried).toBe(false);
     expect(state.hasInboundHistory).toBe(false);
     expect(state.prefs).toEqual({ sms_enabled: true });
   });
 
-  test('inbound-history query error stays false (fails closed, not lookupFailed)', async () => {
-    mockDb({ customer: { id: 'c1', phone: '+19415550100' }, inboundThrows: true });
-    const state = await loadContactState({ customerId: 'c1', to: '+19415550100' });
+  test('lead audience → the inbound-history query never runs (evidence not required)', async () => {
+    mockDb({ customer: null, inboundThrows: true });
+    const state = await loadContactState({ ...baseInput, customerId: undefined, audience: 'lead' });
+    expect(smsLogQueried).toBe(false);
     expect(state.hasInboundHistory).toBe(false);
     expect(state.lookupFailed).toBe(false);
+  });
+
+  test('non-conversational purpose → the inbound-history query never runs', async () => {
+    mockDb({ customer: { id: 'c1', phone: '+19415550100' }, inboundThrows: true });
+    const state = await loadContactState({ ...baseInput, purpose: 'billing' });
+    expect(smsLogQueried).toBe(false);
+    expect(state.hasInboundHistory).toBe(false);
+  });
+
+  test('inbound-history query error → lookupFailed true (retryable, not a definitive denial)', async () => {
+    mockDb({ customer: { id: 'c1', phone: '+19415550100' }, inboundThrows: true });
+    const state = await loadContactState(baseInput);
+    expect(state.hasInboundHistory).toBe(false);
+    expect(state.lookupFailed).toBe(true);
+  });
+});
+
+describe('loadSuppressionState — transient failure is UNKNOWN state, not empty', () => {
+  const db = require('../models/db');
+  const { loadSuppressionState } = require('../services/messaging/validators/suppression');
+
+  test('transient lookup error stamps suppressionLookupFailed on contactState', async () => {
+    db.mockImplementation(() => ({
+      where: () => ({ first: async () => { throw new Error('connection terminated'); } }),
+    }));
+    const state = await loadSuppressionState({ to: '+19415550100' }, { prefs: null });
+    expect(state.suppressionLookupFailed).toBe(true);
+    expect(state.suppression).toBeUndefined();
+  });
+
+  test('missing-table error keeps failing open without the flag (migration-not-applied path)', async () => {
+    db.mockImplementation(() => ({
+      where: () => ({ first: async () => { throw new Error('relation "messaging_suppression" does not exist'); } }),
+    }));
+    const state = await loadSuppressionState({ to: '+19415550100' }, { prefs: null });
+    expect(state.suppressionLookupFailed).toBeUndefined();
+  });
+
+  test('successful lookup with an active row still lands on contactState.suppression', async () => {
+    const row = { phone: '+19415550100', reason: 'opt_out_keyword', active: true };
+    db.mockImplementation(() => ({
+      where: () => ({ first: async () => row }),
+    }));
+    const state = await loadSuppressionState({ to: '+19415550100' }, { prefs: null });
+    expect(state.suppression).toEqual(row);
+    expect(state.suppressionLookupFailed).toBeUndefined();
   });
 });

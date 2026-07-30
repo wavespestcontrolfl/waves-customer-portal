@@ -96,6 +96,13 @@ async function loadSuppressionState(input, contactState) {
       return contactState;
     }
     logger.warn(`[messaging:suppression] lookup failed: ${err.message}`);
+    // Transient failure: suppression state is UNKNOWN, not empty.
+    // checkSuppression keeps failing open here (recipients with a prefs
+    // row still have the sms_enabled gate), but the consent validator's
+    // no-prefs conversational exception requires positively loaded
+    // suppression state and turns this flag into the retryable
+    // CONSENT_LOOKUP_FAILED (Codex P1 on PR #3057, 92cb96ae4).
+    contactState.suppressionLookupFailed = true;
   }
   return contactState;
 }
