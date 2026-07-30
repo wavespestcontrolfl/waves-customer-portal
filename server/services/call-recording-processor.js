@@ -1630,8 +1630,12 @@ function hasWorkableLeadSignal({ extracted = {}, phone = null, voicemail = false
 // voicemail carries no workable service signal (plain "call me back" messages
 // stay bell-free). Pure decision core — the caller owns the gate check, the
 // customer lookup, and the dedupe.
-function voicemailCallbackAlertPlan({ extracted = {}, voicemailChannel = false, voicemailLeadPath = false, vmPhone = null } = {}) {
+function voicemailCallbackAlertPlan({ extracted = {}, voicemailChannel = false, voicemailLeadPath = false, vmPhone = null, outbound = false } = {}) {
   if (!voicemailChannel || voicemailLeadPath) return null;
+  // An OUTBOUND call reaching the customer's voicemail records OUR message —
+  // a staff recording that names the service would otherwise satisfy the
+  // service-signal test and ring a bogus callback bell.
+  if (outbound) return null;
   if (extracted.is_spam) return null;
   if (!vmPhone) return null;
   if (!hasWorkableLeadSignal({ extracted, phone: vmPhone, voicemail: true })) return null;
@@ -5037,26 +5041,33 @@ const CallRecordingProcessor = {
             voicemailChannel,
             voicemailLeadPath,
             vmPhone: vmAlertPhone,
+            outbound: isOutboundCall(call),
           });
           if (alertPlan) {
+            const vmAlertCustomer = call.customer_id
+              ? { id: call.customer_id }
+              : await findCustomerForCallContact(vmAlertPhone, extracted).catch(() => null);
             // One bell per call even across reprocessing (retranscription
             // backfill re-runs terminal voicemails through this path).
-            const alreadyAlerted = await db('notifications')
-              .where({ category: 'voicemail_callback' })
-              .whereRaw('metadata::text LIKE ?', [`%${call.id}%`])
-              .first()
-              .catch(() => null);
-            if (!alreadyAlerted) {
-              const vmAlertCustomer = call.customer_id
-                ? { id: call.customer_id }
-                : await findCustomerForCallContact(vmAlertPhone, extracted).catch(() => null);
+            // Competing reprocesses serialize on an advisory xact lock keyed
+            // to the call id: the holder's bell insert (auto-committed inside
+            // triggerNotification) lands before the lock releases, so the
+            // next holder's re-check sees it — check + insert stay atomic
+            // without a schema change.
+            await db.transaction(async (trx) => {
+              await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [call.id]);
+              const alreadyAlerted = await trx('notifications')
+                .where({ category: 'voicemail_callback' })
+                .whereRaw('metadata::text LIKE ?', [`%${call.id}%`])
+                .first();
+              if (alreadyAlerted) return;
               const { triggerNotification } = require('./notification-triggers');
               await triggerNotification('customer_voicemail_callback', {
                 ...alertPlan,
                 customerId: vmAlertCustomer?.id || null,
                 callLogId: call.id,
               });
-            }
+            });
           }
         } catch (alertErr) {
           logger.warn(`[call-proc] voicemail callback alert failed for ${callSid}: ${alertErr.message}`);

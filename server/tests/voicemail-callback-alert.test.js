@@ -11,14 +11,17 @@ const { TRIGGER_REGISTRY } = require('../services/notification-triggers');
 
 const { voicemailCallbackAlertPlan } = _test;
 
+// Synthetic caller only — no real customer data in fixtures (AGENTS.md).
+const TEST_PHONE = '+15005550006';
+
 function wdoVoicemail(overrides = {}) {
   return {
     is_voicemail: true,
     is_spam: false,
     is_lead: false,
     call_type: 'voicemail',
-    first_name: 'melody',
-    last_name: 'woodfield',
+    first_name: 'sam',
+    last_name: 'example',
     matched_service: 'WDO Inspection',
     requested_service: 'wdo',
     ...overrides,
@@ -31,12 +34,12 @@ describe('voicemailCallbackAlertPlan', () => {
       extracted: wdoVoicemail(),
       voicemailChannel: true,
       voicemailLeadPath: false,
-      vmPhone: '+16788186060',
+      vmPhone: TEST_PHONE,
     });
     expect(plan).toEqual({
-      name: 'Melody Woodfield',
+      name: 'Sam Example',
       service: 'WDO Inspection',
-      phone: '+16788186060',
+      phone: TEST_PHONE,
     });
   });
 
@@ -45,7 +48,7 @@ describe('voicemailCallbackAlertPlan', () => {
       extracted: wdoVoicemail({ first_name: null, last_name: null }),
       voicemailChannel: true,
       voicemailLeadPath: false,
-      vmPhone: '+16788186060',
+      vmPhone: TEST_PHONE,
     });
     expect(plan).toMatchObject({ name: null, service: 'WDO Inspection' });
   });
@@ -55,7 +58,7 @@ describe('voicemailCallbackAlertPlan', () => {
       extracted: wdoVoicemail(),
       voicemailChannel: true,
       voicemailLeadPath: true,
-      vmPhone: '+16788186060',
+      vmPhone: TEST_PHONE,
     })).toBeNull();
   });
 
@@ -64,7 +67,19 @@ describe('voicemailCallbackAlertPlan', () => {
       extracted: wdoVoicemail({ matched_service: null, requested_service: null }),
       voicemailChannel: true,
       voicemailLeadPath: false,
-      vmPhone: '+16788186060',
+      vmPhone: TEST_PHONE,
+    })).toBeNull();
+  });
+
+  test('no alert for an outbound call that reached the customer voicemail', () => {
+    // Our own recorded message can name the service — that must not ring a
+    // "callback needed" bell.
+    expect(voicemailCallbackAlertPlan({
+      extracted: wdoVoicemail(),
+      voicemailChannel: true,
+      voicemailLeadPath: false,
+      vmPhone: TEST_PHONE,
+      outbound: true,
     })).toBeNull();
   });
 
@@ -73,13 +88,13 @@ describe('voicemailCallbackAlertPlan', () => {
       extracted: wdoVoicemail({ is_spam: true }),
       voicemailChannel: true,
       voicemailLeadPath: false,
-      vmPhone: '+16788186060',
+      vmPhone: TEST_PHONE,
     })).toBeNull();
     expect(voicemailCallbackAlertPlan({
       extracted: wdoVoicemail(),
       voicemailChannel: false,
       voicemailLeadPath: false,
-      vmPhone: '+16788186060',
+      vmPhone: TEST_PHONE,
     })).toBeNull();
     expect(voicemailCallbackAlertPlan({
       extracted: wdoVoicemail(),
@@ -102,19 +117,19 @@ describe('customer_voicemail_callback trigger registry entry', () => {
 
   test('build links to the customer thread when known and masks the phone', () => {
     const built = entry.build({
-      name: 'Melody Woodfield',
+      name: 'Sam Example',
       service: 'WDO Inspection',
-      phone: '+16788186060',
+      phone: TEST_PHONE,
       customerId: 'cust-1',
     });
     expect(built.title).toBe('Voicemail callback needed');
-    expect(built.body).toContain('Melody Woodfield');
+    expect(built.body).toContain('Sam Example');
     expect(built.body).toContain('WDO Inspection');
-    expect(built.body).not.toContain('6788186060');
+    expect(built.body).not.toContain('5550006');
     expect(built.link).toBe('/admin/communications?thread=cust-1');
 
-    const anon = entry.build({ phone: '+16788186060' });
+    const anon = entry.build({ phone: TEST_PHONE });
     expect(anon.link).toBe('/admin/communications');
-    expect(anon.body).not.toContain('6788186060');
+    expect(anon.body).not.toContain('5550006');
   });
 });
