@@ -296,6 +296,22 @@ describe('_handleGbpPostAction', () => {
     expect(social.postToGBP).toHaveBeenCalledWith('sarasota', expect.any(String), expect.any(String), null);
   });
 
+  test('headline with safety/timing language posts text-only even when the validator passes it', async () => {
+    process.env.AUTO_PUBLISH_GBP_POST = 'true';
+    mockDb();
+    social.renderBrandCardUrl.mockResolvedValue('https://cdn.example.com/social-media/gbp.jpg');
+    // validateContent passes everything here — the CATEGORICAL headline rule
+    // (no "safe(ty)"/time-figures on a public card, ever) must catch it alone.
+    const result = await runner._handleGbpPostAction(
+      baseBrief({ target_keyword: 'pest safety tips sarasota' }),
+      { shadow_mode: false },
+    );
+
+    expect(social.renderBrandCardUrl).not.toHaveBeenCalled();
+    expect(result.claim).toBe('complete');
+    expect(social.postToGBP).toHaveBeenCalledWith('sarasota', expect.any(String), expect.any(String), null);
+  });
+
   test('card render failure still posts (text-only), does not block publish', async () => {
     process.env.AUTO_PUBLISH_GBP_POST = 'true';
     mockDb();

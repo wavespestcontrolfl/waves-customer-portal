@@ -26,6 +26,8 @@ const FLAGGED = [
   'safe products for your lawn',
   'a safe treatment plan for summer',
   'targeted, safe application practices',
+  'safe pest control',
+  'safe pest control services in Sarasota',
 ];
 
 const FLAGGED_TIMING = [
@@ -42,6 +44,11 @@ const FLAGGED_TIMING = [
   'allow 30 minutes before re-entry',
   'wait an hour before letting pets back outside',
   'give it 45 minutes before walking on treated areas',
+  // Duration-after-exclusion word orders (codex round-7).
+  'keep pets off treated areas for 30 minutes',
+  'stay off the lawn for 30 minutes',
+  'you can return after 30 minutes',
+  'kids should stay off the grass for an hour',
 ];
 
 const CLEAN = [

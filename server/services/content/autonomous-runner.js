@@ -2212,13 +2212,20 @@ class AutonomousRunner {
         // The card headline is customer-derived (target_keyword can carry the
         // opportunity query verbatim) — gate it through the same deterministic
         // validator as the post copy before rendering it onto a public image.
+        // On top of that, a CATEGORICAL headline rule: a card headline never
+        // legitimately needs the word "safe(ty)" or a time-figure at all, and
+        // regex-enumerating English phrasings of banned claims is unbounded —
+        // so any such headline posts text-only, full stop.
         // An invalid headline just means a text-only post. Explicit eyebrow:
         // these are location posts, not blog shares — never let the card
         // default to "From the Waves blog".
+        const HEADLINE_RISK_RE = /\bsafe(?:ty|ly)?\b|\d\s*(?:minutes?|mins?|hours?|hrs?)\b/i;
         const titleCheck = social.validateContent
           ? social.validateContent(title, 'gbp')
           : { valid: true };
-        if (titleCheck.valid) {
+        if (HEADLINE_RISK_RE.test(title)) {
+          logger.warn('[autonomous-runner] GBP card headline contains safety/timing language (posting text-only)');
+        } else if (titleCheck.valid) {
           gbpImageUrl = await social.renderBrandCardUrl(
             { variant: 'blog', title, excerpt: content, cta: 'Learn more', eyebrow: 'Waves Pest Control' },
             'gbp',
