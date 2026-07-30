@@ -2626,7 +2626,7 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null) {
   if (parkParcel) {
     flags.push({
       field: 'parkParcel',
-      reason: parkParcel.situsCount >= 5
+      reason: (parkParcel.parkConfirmed || parkParcel.situsCount >= 5)
         ? `Address is one of ${parkParcel.situsCount} homes on a single county master parcel — a land-lease community (mobile-home park or similar), so per-home sq ft, lot size, and stories are not on the roll. Get home dimensions from the customer or on site and save them as field-verified.`
         : `Address shares one county parcel with ${parkParcel.situsCount - 1} other unit(s) — a duplex or small multi-unit parcel, so the roll's dimensions describe the whole building and lot, not this unit. Get the unit's sq ft and stories from the customer or on site and save them as field-verified.`,
       priority: 'HIGH',

@@ -1075,6 +1075,10 @@ function mobileHomeParkSignalFromParcel(parcel) {
     situsCount: Math.max(2, Number(parcel.residentialUnits) || 0),
     parcelId: parcel.paoParcelId || parcel.parcelId || null,
     situsAddress: null,
+    // Positive park evidence (DOR 28 / park land use) — the flag copy must
+    // say "park" even when residentialUnits was unavailable and situsCount
+    // fell back to 2, which would otherwise read as duplex scale.
+    parkConfirmed: true,
   };
 }
 

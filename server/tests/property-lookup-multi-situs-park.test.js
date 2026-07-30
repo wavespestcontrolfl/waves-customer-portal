@@ -184,9 +184,10 @@ describe('GIS by-point lane: mobile-home-park master parcels', () => {
       residentialUnits: 226,
       lotSqft: 2043352,
     });
-    expect(signal).toEqual({ situsCount: 226, parcelId: '900000100', situsAddress: null });
-    // Missing unit count still marks it as multi-home.
-    expect(_private.mobileHomeParkSignalFromParcel({ dorUseCode: '28' })).toMatchObject({ situsCount: 2 });
+    expect(signal).toEqual({ situsCount: 226, parcelId: '900000100', situsAddress: null, parkConfirmed: true });
+    // Missing unit count still marks it as multi-home — and keeps the
+    // positive park evidence so the flag copy never reads duplex.
+    expect(_private.mobileHomeParkSignalFromParcel({ dorUseCode: '28' })).toMatchObject({ situsCount: 2, parkConfirmed: true });
     expect(_private.mobileHomeParkSignalFromParcel({ dorUseCode: '0100' })).toBeNull();
   });
 
@@ -224,6 +225,17 @@ describe('park parcel verify flag', () => {
     expect(parkFlag.priority).toBe('HIGH');
     expect(parkFlag.reason).toContain('duplex or small multi-unit');
     expect(parkFlag.reason).not.toContain('land-lease');
+  });
+
+  test('GIS-confirmed park keeps park copy even at the situsCount fallback floor', () => {
+    const rc = {
+      squareFootage: 0,
+      lotSize: 0,
+      _raw: { multiSitusParcel: { situsCount: 2, parcelId: '900000300', situsAddress: null, parkConfirmed: true } },
+    };
+    const parkFlag = routePrivate.buildFieldVerifyFlags(rc, {}).find((f) => f.field === 'parkParcel');
+    expect(parkFlag.reason).toContain('land-lease');
+    expect(parkFlag.reason).not.toContain('duplex');
   });
 
   test('no parkParcel flag on ordinary records', () => {
