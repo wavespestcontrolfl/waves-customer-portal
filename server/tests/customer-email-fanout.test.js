@@ -236,6 +236,11 @@ describe('propagateCustomerEmailChange', () => {
     const moved = conn.__updates('newsletter_subscribers')[0].arg;
     expect(moved.confirmation_token).toBe(result.pendingConfirmation.confirmation_token);
     expect(moved.unsubscribe_token).toMatch(/^[0-9a-f-]{36}$/);
+    // The delivered-stamp attested a DOI sent to the OLD address — a
+    // pending move clears it via a status-guarded CASE so the resume
+    // dedupe guard can never read it as delivery to the corrected address
+    // (Codex #3084 r18). Confirmed rows keep theirs (audit only).
+    expect(String(moved.confirmation_sent_at.__raw)).toContain("WHEN status = 'pending' THEN NULL");
   });
 
   test('bearer tokens rotate on ACTIVE subscriber moves too', async () => {
@@ -389,6 +394,24 @@ describe('propagateCustomerEmailChange', () => {
     expect(retarget.arg.updated_at).toBeUndefined();
   });
 
+  test('a correction retargets PENDING holds — and lifts a deny stamp — before releasing', async () => {
+    // Durable in the SAME transaction as the correction (Codex #3084 r18):
+    // resumeHeldFirstTouch never throws — a transient failure re-pends and
+    // returns — so without the retarget the sweep would later release the
+    // ledger's OLD (rejected) address with no email override in sight.
+    const conn = makeConn();
+    await propagateCustomerEmailChange({ before: HOLD_BEFORE, after: HOLD_AFTER }, conn);
+    expect(conn.__calls.some((c) => c.table === 'first_touch_holds' && c.op === 'where'
+      && c.arg && c.arg.status === 'pending' && c.arg.customer_id === 'cust-1')).toBe(true);
+    const pendingRetarget = conn.__updates('first_touch_holds')
+      .find((u) => u.arg.held_email === HOLD_AFTER.email && u.arg.last_error && u.arg.last_error.__raw);
+    expect(pendingRetarget).toBeDefined();
+    // The correction is an explicit operator approval of the new address —
+    // it lifts a deny stamp so the sweep can release the retargeted row.
+    expect(String(pendingRetarget.arg.last_error.__raw)).toContain('email_denied_await_correction');
+    expect(String(pendingRetarget.arg.last_error.__raw)).toContain('THEN NULL');
+  });
+
   test('the marker persists even when the email card was ALREADY resolved (deny-then-correct)', async () => {
     // A non-releasing deny resolves the card before the correction arrives:
     // openItems is empty, but the call still needs its marker — otherwise
@@ -457,19 +480,28 @@ describe('propagateCustomerEmailChange', () => {
 describe('resendPendingConfirmation', () => {
   const { sendConfirmationEmail } = require('../services/newsletter-confirm');
 
+  // Every send-path test seeds the subscriber verify-read (Codex #3084
+  // r18): the payload email/token must still match the row or the send is
+  // skipped as superseded.
+  const matchRow = (payload) => ({
+    newsletter_subscribers: { firstQueue: [{ email: payload.email, confirmation_token: payload.confirmation_token }] },
+  });
+
   test('sends to the corrected address and stamps confirmation_sent_at', async () => {
     sendConfirmationEmail.mockResolvedValueOnce(true);
-    const conn = makeConn();
-    const ok = await resendPendingConfirmation(
-      { id: 739, email: 'charleswrobb@gmail.com', first_name: 'Charles', confirmation_token: 'tok-1' }, conn);
+    const payload = { id: 739, email: 'charleswrobb@gmail.com', first_name: 'Charles', confirmation_token: 'tok-1' };
+    const conn = makeConn(matchRow(payload));
+    const ok = await resendPendingConfirmation(payload, conn);
     expect(ok).toBe(true);
-    expect(sendConfirmationEmail).toHaveBeenCalledWith(expect.objectContaining({ email: 'charleswrobb@gmail.com', confirmation_token: 'tok-1' }));
+    expect(sendConfirmationEmail).toHaveBeenCalledWith(expect.objectContaining({ email: payload.email, confirmation_token: 'tok-1' }));
     expect(conn.__updates('newsletter_subscribers')[0].arg.confirmation_sent_at).toBeInstanceOf(Date);
   });
 
   test('settles deduped newsletter holds only AFTER the re-send succeeds', async () => {
     sendConfirmationEmail.mockResolvedValueOnce(true);
+    const payload = { id: 811, email: 'samtypo@example.com', confirmation_token: 'tok-1', heldNewsletterHoldIds: ['hold-1', 'hold-2'] };
     const conn = makeConn({
+      ...matchRow(payload),
       first_touch_holds: {
         firstQueue: [
           { held_drip: true, released_drip: true },
@@ -477,8 +509,7 @@ describe('resendPendingConfirmation', () => {
         ],
       },
     });
-    const ok = await resendPendingConfirmation(
-      { id: 811, email: 'samtypo@example.com', confirmation_token: 'tok-1', heldNewsletterHoldIds: ['hold-1', 'hold-2'] }, conn);
+    const ok = await resendPendingConfirmation(payload, conn);
     expect(ok).toBe(true);
     const holdUpdates = conn.__updates('first_touch_holds');
     expect(holdUpdates).toHaveLength(2);
@@ -495,9 +526,9 @@ describe('resendPendingConfirmation', () => {
     // claim stays for the stale-claim reclaim + dedupe guard instead.
     sendConfirmationEmail.mockResolvedValueOnce(true);
     const dbErr = new Error('settle write failed');
-    const conn = makeConn({ first_touch_holds: { updateError: dbErr } });
-    const ok = await resendPendingConfirmation(
-      { id: 811, email: 'samtypo@example.com', confirmation_token: 'tok-1', heldNewsletterHoldIds: ['hold-1'] }, conn);
+    const payload = { id: 811, email: 'samtypo@example.com', confirmation_token: 'tok-1', heldNewsletterHoldIds: ['hold-1'] };
+    const conn = makeConn({ ...matchRow(payload), first_touch_holds: { updateError: dbErr } });
+    const ok = await resendPendingConfirmation(payload, conn);
     expect(ok).toBe(true);
     const repens = conn.__updates('first_touch_holds')
       .filter((u) => u.arg.last_error === 'newsletter_doi_not_confirmed');
@@ -506,9 +537,9 @@ describe('resendPendingConfirmation', () => {
 
   test('re-pends deduped holds when the re-send fails — the DOI stays retryable', async () => {
     sendConfirmationEmail.mockRejectedValueOnce(new Error('sendgrid down'));
-    const conn = makeConn();
-    const ok = await resendPendingConfirmation(
-      { id: 811, email: 'samtypo@example.com', confirmation_token: 'tok-1', heldNewsletterHoldIds: ['hold-1'] }, conn);
+    const payload = { id: 811, email: 'samtypo@example.com', confirmation_token: 'tok-1', heldNewsletterHoldIds: ['hold-1'] };
+    const conn = makeConn(matchRow(payload));
+    const ok = await resendPendingConfirmation(payload, conn);
     expect(ok).toBe(false);
     const holdUpdates = conn.__updates('first_touch_holds');
     expect(holdUpdates).toHaveLength(1);
@@ -517,11 +548,30 @@ describe('resendPendingConfirmation', () => {
 
   test('a failed send never throws and leaves the stamp alone', async () => {
     sendConfirmationEmail.mockRejectedValueOnce(new Error('sendgrid down'));
-    const conn = makeConn();
-    const ok = await resendPendingConfirmation(
-      { id: 739, email: 'charleswrobb@gmail.com', confirmation_token: 'tok-1' }, conn);
+    const payload = { id: 739, email: 'charleswrobb@gmail.com', confirmation_token: 'tok-1' };
+    const conn = makeConn(matchRow(payload));
+    const ok = await resendPendingConfirmation(payload, conn);
     expect(ok).toBe(false);
     expect(conn.__updates('newsletter_subscribers')).toHaveLength(0);
+  });
+
+  test('a superseded subscriber row skips the stale send and re-pends retryably', async () => {
+    // A SECOND correction rotated the subscriber's email + token before
+    // this callback ran (Codex #3084 r18): the captured link is a dead
+    // token aimed at the outdated mailbox. Skip the send, hand the work to
+    // the newer correction's callback, and re-pend WITHOUT the send-failed
+    // marker (nothing was sent — the retry keeps its dedupe guard).
+    const sendsBefore = sendConfirmationEmail.mock.calls.length;
+    const conn = makeConn({
+      newsletter_subscribers: { firstQueue: [{ email: 'newer@example.com', confirmation_token: 'tok-2' }] },
+    });
+    const ok = await resendPendingConfirmation(
+      { id: 811, email: 'samtypo@example.com', confirmation_token: 'tok-1', heldNewsletterHoldIds: ['hold-1'] }, conn);
+    expect(ok).toBe(false);
+    expect(sendConfirmationEmail.mock.calls.length).toBe(sendsBefore);
+    const holdUpdates = conn.__updates('first_touch_holds');
+    expect(holdUpdates).toHaveLength(1);
+    expect(holdUpdates[0].arg).toMatchObject({ status: 'pending', last_error: 'target_verify_failed' });
   });
 
   test('null input is a no-op', async () => {

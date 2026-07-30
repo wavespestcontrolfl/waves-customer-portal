@@ -8792,6 +8792,20 @@ const CallRecordingProcessor = {
       // is reviewing) instead of overwriting it with a fresh unreviewed guess.
       const { recordFirstTouchHold } = require('./lead-first-touch-resume');
       dripHoldRecorded = await recordFirstTouchHold({ callLogId: call.id, customerId, heldEmail: extracted.email, heldDrip: true, runStartedAt: processingStartedAt });
+    } else if (customerId && !extracted.email && extracted.email_raw && !v2EmailBlocked
+        && (emailReviewHeldThisRun || await shouldHoldLeadEmailEnrollment(call.id))) {
+      // A DEMOTED address (dictation policy moved the unconfirmed guess to
+      // email_raw) still owes this customer the first-touch drip once the
+      // office confirms the real spelling (Codex #3084 r18): without a
+      // held_drip row the email-correction fanout would resume only the
+      // newsletter hold Step 8 records. The EMPTY held address is inert to
+      // every automated release — the invalid-address guard blocks sends
+      // and the sweep skips empty-address rows — so only the correction's
+      // explicit address releases it.
+      logger.info(`[call-proc] Skipping new_lead automation enroll for ${maskSid(callSid)}: extracted email was demoted to read-back review`);
+      beehiivResult = { skipped: 'email_under_review' };
+      const { recordFirstTouchHold } = require('./lead-first-touch-resume');
+      dripHoldRecorded = await recordFirstTouchHold({ callLogId: call.id, customerId, heldEmail: '', heldDrip: true, runStartedAt: processingStartedAt });
     } else if (customerId && extracted.email) {
       try {
         const AutomationRunner = require('./automation-runner');

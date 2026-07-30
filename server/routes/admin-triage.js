@@ -124,16 +124,52 @@ async function transitionCore({ id, nextStatus, note, assignedTo }) {
   // actioning the same item concurrently can both pass the read above; the
   // conditional update + affected-row count makes the loser a no-op so only the
   // winner mutates the row (and, for verdicts, only the winner writes feedback).
-  const updated = await db('triage_items')
-    .where({ id })
-    .whereIn('status', OPEN_STATES)
-    .update({
-      status: nextStatus,
-      resolution_note: note,
-      assigned_to: assignedTo,
-      resolved_at: new Date(),
-      updated_at: new Date(),
-    });
+  // Resolving an email card AS-IS is an approval, and an approval must clear a
+  // stale deny stamp ATOMICALLY with the resolve (Codex #3084 r18): a
+  // post-resolve clear can fail with the card already terminal — the retried
+  // transition 409s, and the sweep excludes the still-stamped hold forever. One
+  // transaction: the clear failing rolls the resolve back, the route 500s with
+  // the card still open, and a retry works.
+  const { resumeHeldFirstTouch, EMAIL_REVIEW_REASON_CODES } = require('../services/lead-first-touch-resume');
+  const emailReviewCard = !!item.call_log_id && EMAIL_REVIEW_REASON_CODES.includes(item.reason_code);
+  let updated = 0;
+  // null = not checked (not resolving an email card); the release below runs
+  // only when the check ran inside the transaction and found none live.
+  let siblingLive = null;
+  await db.transaction(async (trx) => {
+    updated = await trx('triage_items')
+      .where({ id })
+      .whereIn('status', OPEN_STATES)
+      .update({
+        status: nextStatus,
+        resolution_note: note,
+        assigned_to: assignedTo,
+        resolved_at: new Date(),
+        updated_at: new Date(),
+      });
+    if (updated > 0 && nextStatus === 'resolved' && emailReviewCard) {
+      // A force-reprocess can leave BOTH an email_invalid and an
+      // email_unverified card on the call (the partial unique index is
+      // per reason_code) — resolving one while the sibling is still live
+      // means the replacement extraction is still awaiting read-back, so
+      // the hold must not release yet (Codex #3084 r11). The sibling's
+      // own resolve (or the correction fanout) releases it.
+      siblingLive = !!(await trx('triage_items')
+        .where({ call_log_id: item.call_log_id })
+        .whereIn('reason_code', EMAIL_REVIEW_REASON_CODES)
+        .whereIn('status', OPEN_STATES)
+        .first('id'));
+      if (!siblingLive && await trx.schema.hasTable('first_touch_holds')) {
+        // A resolve-as-is is an explicit approval — it supersedes a deny
+        // stamp left by an EARLIER review cycle (force-reprocess), which
+        // would otherwise gate every automated release forever (Codex
+        // #3084 r17; atomic with the resolve since r18).
+        await trx('first_touch_holds')
+          .where({ call_log_id: item.call_log_id, last_error: 'email_denied_await_correction' })
+          .update({ last_error: null, updated_at: new Date() });
+      }
+    }
+  });
   if (updated === 0) return { outcome: 'conflict' };
 
   // Resolving an email read-back card AS-IS ("the spelling was right") is a
@@ -145,34 +181,11 @@ async function transitionCore({ id, nextStatus, note, assignedTo }) {
   // compare-and-swap (Codex #3084 r9): if it ran after the review-status
   // bookkeeping and that write failed, the card would already be closed, a
   // retry would 409, and the hold would have no release trigger left.
-  if (nextStatus === 'resolved' && item.call_log_id) {
+  if (nextStatus === 'resolved' && emailReviewCard && siblingLive === false) {
     try {
-      const { resumeHeldFirstTouch, EMAIL_REVIEW_REASON_CODES } = require('../services/lead-first-touch-resume');
-      if (EMAIL_REVIEW_REASON_CODES.includes(item.reason_code)) {
-        // A force-reprocess can leave BOTH an email_invalid and an
-        // email_unverified card on the call (the partial unique index is
-        // per reason_code) — resolving one while the sibling is still live
-        // means the replacement extraction is still awaiting read-back, so
-        // the hold must not release yet (Codex #3084 r11). The sibling's
-        // own resolve (or the correction fanout) releases it.
-        const siblingLive = await db('triage_items')
-          .where({ call_log_id: item.call_log_id })
-          .whereIn('reason_code', EMAIL_REVIEW_REASON_CODES)
-          .whereIn('status', OPEN_STATES)
-          .first('id');
-        if (!siblingLive) {
-          const call = await db('call_log').where({ id: item.call_log_id }).first('customer_id');
-          if (call?.customer_id) {
-            // A resolve-as-is is an explicit approval — it supersedes a
-            // deny stamp left by an EARLIER review cycle (force-reprocess),
-            // which would otherwise gate every automated release forever
-            // (Codex #3084 r17).
-            await db('first_touch_holds')
-              .where({ call_log_id: item.call_log_id, last_error: 'email_denied_await_correction' })
-              .update({ last_error: null, updated_at: new Date() });
-            await resumeHeldFirstTouch({ customerId: call.customer_id, callLogId: item.call_log_id, source: 'triage_resolve' });
-          }
-        }
+      const call = await db('call_log').where({ id: item.call_log_id }).first('customer_id');
+      if (call?.customer_id) {
+        await resumeHeldFirstTouch({ customerId: call.customer_id, callLogId: item.call_log_id, source: 'triage_resolve' });
       }
     } catch (resumeErr) {
       logger.warn(`[admin-triage] first-touch resume failed for item ${id}: ${resumeErr.message}`);
@@ -267,33 +280,30 @@ router.post('/:id/verdict', async (req, res) => {
     // reviewer sees 0 open rows, gets a 409, and writes no feedback.
     // email_bounce_reverify rows are excluded: the reviewer is judging the
     // CALL, and a pending bounce follow-up must survive that judgment.
-    // Captured BEFORE the bulk resolve (Codex #3084 r4): the release below
-    // must key on a LIVE email card this verdict is closing — a historical
-    // resolved card from an earlier review cycle must not re-trigger sends.
-    const liveEmailCard = await db('triage_items')
-      .where({ call_log_id: item.call_log_id })
-      .whereIn('reason_code', ['email_unverified', 'email_invalid'])
-      .whereIn('status', OPEN_STATES)
-      .first('id');
-
-    // A deny that must keep the email held stamps the ledger ATOMICALLY
-    // with the card resolution (Codex #3084 r16): a committed resolve with
-    // a failed stamp would let the sweep read the resolved card as
-    // confirmation, and the terminal card makes the verdict unretryable
-    // (409). One transaction — the stamp failing rolls the resolve back,
-    // the route 500s with the cards still open, and a retry works.
+    //
+    // The ledger stamp decisions key on what the transaction ACTUALLY
+    // resolves (Codex #3084 r18): a force-reprocess can insert a fresh email
+    // card between any pre-read and the bulk update, so the update RETURNS
+    // the reason_codes it closed — a pre-read snapshot would let a deny
+    // commit unstamped (sweep reads the resolved card as approval) or an
+    // accept skip the stamp-clear. Stamp (non-releasing deny) and
+    // stamp-clear (approval) both ride in the SAME transaction as the
+    // resolve (r16/r18): a committed resolve with a failed stamp write is
+    // unretryable — the terminal cards 409 the retry — so the write failing
+    // rolls the resolve back, the route 500s with the cards still open, and
+    // a retry works.
     const denyClearsEmailEarly = verdict === 'deny'
       && wrongFields.length > 0
       && !wrongFields.includes('name')
       && !wrongFields.includes('consent');
-    const needsDenyStamp = verdict === 'deny' && !denyClearsEmailEarly && !!liveEmailCard
-      && await db.schema.hasTable('first_touch_holds');
-    const stampCall = needsDenyStamp
+    const holdsTable = await db.schema.hasTable('first_touch_holds');
+    const stampCall = verdict === 'deny' && !denyClearsEmailEarly && holdsTable
       ? await db('call_log').where({ id: item.call_log_id }).first('customer_id')
       : null;
     let resolved = 0;
+    let emailCardResolved = false;
     await db.transaction(async (trx) => {
-      resolved = await trx('triage_items')
+      const resolvedRows = await trx('triage_items')
         .where({ call_log_id: item.call_log_id })
         .whereNot('reason_code', 'email_bounce_reverify')
         .whereIn('status', OPEN_STATES)
@@ -303,29 +313,42 @@ router.post('/:id/verdict', async (req, res) => {
           assigned_to: req.technicianId,
           resolved_at: new Date(),
           updated_at: new Date(),
-        });
-      if (resolved > 0 && needsDenyStamp) {
-        // UPSERT, not update (r14): a deny can land BEFORE the processor's
-        // Step 6/8 ledger write, and an update-only stamp would leave the
-        // later-inserted hold unstamped. The insert's empty held_email is
-        // inert (the invalid-address guard blocks sends); the processor's
-        // merge fills flags/address but never touches last_error. Only the
-        // correction fanout releases a stamped hold; success clears it.
+        }, ['reason_code']);
+      resolved = resolvedRows.length;
+      emailCardResolved = resolvedRows
+        .some((r) => ['email_unverified', 'email_invalid'].includes(r?.reason_code));
+      if (resolved > 0 && emailCardResolved && holdsTable) {
         const now = new Date();
-        await trx('first_touch_holds')
-          .insert({
-            call_log_id: item.call_log_id,
-            customer_id: stampCall?.customer_id || null,
-            held_email: '',
-            held_drip: false,
-            held_newsletter: false,
-            status: 'pending',
-            last_error: 'email_denied_await_correction',
-            created_at: now,
-            updated_at: now,
-          })
-          .onConflict('call_log_id')
-          .merge({ last_error: 'email_denied_await_correction', updated_at: now });
+        if (verdict === 'deny' && !denyClearsEmailEarly) {
+          // UPSERT, not update (r14): a deny can land BEFORE the processor's
+          // Step 6/8 ledger write, and an update-only stamp would leave the
+          // later-inserted hold unstamped. The insert's empty held_email is
+          // inert (the invalid-address guard blocks sends); the processor's
+          // merge fills flags/address but never touches last_error. Only the
+          // correction fanout releases a stamped hold; success clears it.
+          await trx('first_touch_holds')
+            .insert({
+              call_log_id: item.call_log_id,
+              customer_id: stampCall?.customer_id || null,
+              held_email: '',
+              held_drip: false,
+              held_newsletter: false,
+              status: 'pending',
+              last_error: 'email_denied_await_correction',
+              created_at: now,
+              updated_at: now,
+            })
+            .onConflict('call_log_id')
+            .merge({ last_error: 'email_denied_await_correction', updated_at: now });
+        } else {
+          // This verdict explicitly approves the extraction — clear a deny
+          // stamp left by an EARLIER review cycle (force-reprocess), which
+          // would otherwise gate every automated release forever (Codex
+          // #3084 r17; atomic with the resolve since r18).
+          await trx('first_touch_holds')
+            .where({ call_log_id: item.call_log_id, last_error: 'email_denied_await_correction' })
+            .update({ last_error: null, updated_at: now });
+        }
       }
     });
     if (resolved === 0) {
@@ -348,24 +371,15 @@ router.post('/:id/verdict', async (req, res) => {
     // saying what — it must not read as confirming the email (Codex #3084
     // r10). The hold stays pending; the correction fanout (ungated on card
     // state since r8) releases it once the operator fixes the record.
-    // (The non-releasing deny's ledger stamp already happened atomically
-    // with the resolve above.)
+    // (The non-releasing deny's stamp AND the approval's stamp-clear both
+    // already happened atomically with the resolve above.)
     const denyClearsEmail = denyClearsEmailEarly;
-    if ((verdict === 'accept' || denyClearsEmail) && liveEmailCard) {
+    if ((verdict === 'accept' || denyClearsEmail) && emailCardResolved) {
       try {
         const { resumeHeldFirstTouch } = require('../services/lead-first-touch-resume');
-        {
-          const call = await db('call_log').where({ id: item.call_log_id }).first('customer_id');
-          if (call?.customer_id) {
-            // This verdict explicitly approves the extraction — clear a
-            // deny stamp left by an EARLIER review cycle (force-reprocess),
-            // which would otherwise gate every automated release forever
-            // (Codex #3084 r17).
-            await db('first_touch_holds')
-              .where({ call_log_id: item.call_log_id, last_error: 'email_denied_await_correction' })
-              .update({ last_error: null, updated_at: new Date() });
-            await resumeHeldFirstTouch({ customerId: call.customer_id, callLogId: item.call_log_id, source: 'triage_verdict_accept' });
-          }
+        const call = await db('call_log').where({ id: item.call_log_id }).first('customer_id');
+        if (call?.customer_id) {
+          await resumeHeldFirstTouch({ customerId: call.customer_id, callLogId: item.call_log_id, source: 'triage_verdict_accept' });
         }
       } catch (resumeErr) {
         logger.warn(`[admin-triage] first-touch resume failed for call ${item.call_log_id}: ${resumeErr.message}`);

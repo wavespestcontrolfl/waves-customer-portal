@@ -426,6 +426,26 @@ describe('resumeHeldNewsletterPostCommit failure paths', () => {
     const settles = mockHoldUpdates.filter((u) => u.released_newsletter === true);
     expect(settles).toHaveLength(2);
   });
+
+  // BOTH outbound vetoes re-run at send time (Codex #3084 r18): the
+  // callback fires after the correction transaction committed, and a
+  // do-not-contact request or bounce suppression landing in that gap is
+  // invisible to the in-transaction check.
+  test('a do-not-contact landing after commit blocks instead of sending', async () => {
+    mockDncRow = { id: 'call-1' };
+    const outcome = await resumeHeldNewsletterPostCommit({ holdId: 'hold-1', customerId: 'cust-1', email: 'ok@example.com' });
+    expect(outcome).toMatchObject({ skipped: 'do_not_contact' });
+    expect(mockNewsletter).not.toHaveBeenCalled();
+    expect(mockHoldUpdates.at(-1)).toMatchObject({ status: 'blocked', last_error: 'do_not_contact' });
+  });
+
+  test('a suppression landing after commit re-pends instead of sending', async () => {
+    mockSuppressionRow = { suppression_type: 'bounce' };
+    const outcome = await resumeHeldNewsletterPostCommit({ holdId: 'hold-1', customerId: 'cust-1', email: 'ok@example.com' });
+    expect(outcome).toMatchObject({ skipped: 'email_suppressed' });
+    expect(mockNewsletter).not.toHaveBeenCalled();
+    expect(mockHoldUpdates.at(-1)).toMatchObject({ status: 'pending', last_error: 'email_suppressed' });
+  });
 });
 
 describe('deny-stamped holds and dedupe hardening (r14)', () => {

@@ -297,6 +297,13 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
             email: newEmail,
             confirmation_token: freshConfirmationToken,
             unsubscribe_token: randomUUID(),
+            // A pending row's delivered-stamp attests a DOI sent to the OLD
+            // address — carried onto the corrected row it would make the
+            // resume path's dedupe guard treat this subscriber as recently
+            // delivered and settle holds without ever sending a usable link
+            // (Codex #3084 r18). Confirmed rows keep theirs (audit only —
+            // the guard reads pending rows exclusively).
+            confirmation_sent_at: conn.raw("CASE WHEN status = 'pending' THEN NULL ELSE confirmation_sent_at END"),
             updated_at: now,
           });
         // A PENDING row's DOI confirmation went to the old typo — hand the
@@ -369,6 +376,21 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
     await conn('first_touch_holds')
       .where({ customer_id: customerId, status: 'releasing' })
       .update({ held_email: newEmail });
+    // PENDING rows durably adopt the corrected address too, BEFORE the
+    // release attempt below (Codex #3084 r18): resumeHeldFirstTouch never
+    // throws — a transient failure re-pends the row and returns — and this
+    // edit transaction still commits, so without the retarget the sweep
+    // would later release the ledger's OLD (rejected) address with no email
+    // override in sight. The correction is an explicit operator approval of
+    // the new address, so it also lifts a deny stamp: a sweep release of
+    // the retargeted row sends exactly what this fanout release would have.
+    await conn('first_touch_holds')
+      .where({ customer_id: customerId, status: 'pending' })
+      .update({
+        held_email: newEmail,
+        last_error: conn.raw("CASE WHEN last_error = 'email_denied_await_correction' THEN NULL ELSE last_error END"),
+        updated_at: now,
+      });
     const reviewedCalls = await conn('triage_items')
       .whereIn('reason_code', EMAIL_REVIEW_REASON_CODES)
       .whereIn('call_log_id', conn('call_log').select('id').where({ customer_id: customerId }))
@@ -461,6 +483,48 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
   const holdIds = Array.isArray(pendingConfirmation.heldNewsletterHoldIds)
     ? pendingConfirmation.heldNewsletterHoldIds
     : [];
+  // The captured payload can be SUPERSEDED before this callback runs
+  // (Codex #3084 r18): a second correction committed in the gap rotates the
+  // subscriber's email and confirmation token in its own transaction, and
+  // sending the captured link would mail a dead token to the outdated
+  // mailbox — then settle holds whose DOI never usably delivered. Verify
+  // the row still matches; a mismatch hands the work to the newer
+  // correction's own callback, with the holds re-pended so the sweep
+  // covers a lost callback. 'target_verify_failed', NOT the send-failed
+  // marker: nothing was sent, so the retry must keep its dedupe guard.
+  try {
+    const current = await conn('newsletter_subscribers')
+      .where({ id: pendingConfirmation.id })
+      .first('email', 'confirmation_token');
+    const emailMatches = String(current?.email || '').trim().toLowerCase()
+      === String(pendingConfirmation.email || '').trim().toLowerCase();
+    const tokenMatches = String(current?.confirmation_token || '')
+      === String(pendingConfirmation.confirmation_token || '');
+    if (!current || !emailMatches || !tokenMatches) {
+      logger.info(`[email-fanout] DOI re-send superseded for subscriber ${pendingConfirmation.id} — stale payload skipped`);
+      for (const holdId of holdIds) {
+        try {
+          await conn('first_touch_holds').where({ id: holdId })
+            .update({ status: 'pending', last_error: 'target_verify_failed', updated_at: new Date() });
+        } catch (repenErr) {
+          logger.warn(`[email-fanout] hold ${holdId} re-pend failed: ${repenErr.code || repenErr.name || 'db_error'} (stale-claim window will reclaim)`);
+        }
+      }
+      return false;
+    }
+  } catch (verifyErr) {
+    // Can't verify the authoritative target — never send on a stale guess.
+    logger.warn(`[email-fanout] DOI re-send target verify failed for subscriber ${pendingConfirmation.id}: ${verifyErr.code || verifyErr.name || 'db_error'}`);
+    for (const holdId of holdIds) {
+      try {
+        await conn('first_touch_holds').where({ id: holdId })
+          .update({ status: 'pending', last_error: 'target_verify_failed', updated_at: new Date() });
+      } catch (repenErr) {
+        logger.warn(`[email-fanout] hold ${holdId} re-pend failed: ${repenErr.code || repenErr.name || 'db_error'} (stale-claim window will reclaim)`);
+      }
+    }
+    return false;
+  }
   // The 'newsletter_doi_not_confirmed' re-pend is scoped to SEND failures
   // only (Codex #3084 r16): retries treat that marker as "must actually
   // re-send" (skipDedupe), so a post-send bookkeeping failure marked the

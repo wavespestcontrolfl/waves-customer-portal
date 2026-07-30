@@ -457,7 +457,6 @@ async function runOnePostCommitResume(payload, holdIds, dbh) {
     // second correction may have superseded held_email after this payload
     // was built inside the first correction's transaction.
     let sendPayload = payload;
-    let adoptedSuperseded = false;
     let holdWasDoiUnconfirmed = false;
     if (payload.holdId) {
       try {
@@ -467,7 +466,6 @@ async function runOnePostCommitResume(payload, holdIds, dbh) {
         if (freshEmail && freshEmail !== String(payload.email || '').trim().toLowerCase()
             && RESUME_EMAIL_RE.test(freshEmail)) {
           sendPayload = { ...payload, email: freshEmail };
-          adoptedSuperseded = true;
         }
       } catch (rereadErr) {
         // Can't verify the authoritative target — never send on a stale
@@ -485,16 +483,28 @@ async function runOnePostCommitResume(payload, holdIds, dbh) {
         return { skipped: 'target_verify_failed' };
       }
     }
-    // An adopted superseded target was never suppression-checked by THIS
-    // claim (Codex #3084 r14) — mirror the direct path's gate before the
-    // unrollbackable send; suppressed → back to pending for a later
-    // correction.
-    if (adoptedSuperseded && await emailSuppressedForNewLead(sendPayload.email, dbh)) {
+    // BOTH outbound vetoes re-run at send time, unconditionally (Codex
+    // #3084 r18; supersede-only suppression check since r14): this callback
+    // fires after the correction transaction committed, and a do-not-contact
+    // request or a bounce suppression landing in that gap is invisible to
+    // the in-transaction check. Do-not-contact is the consent terminal
+    // (blocked, matching the direct path); a suppressed address goes back
+    // to pending for a later correction. A veto lookup that THROWS falls
+    // through to the outer catch, which re-pends every hold (retryable).
+    if (payload.customerId && await customerCallDoNotContact(payload.customerId, dbh)) {
+      for (const holdId of holdIds) {
+        await dbh('first_touch_holds').where({ id: holdId })
+          .update({ status: 'blocked', last_error: 'do_not_contact', updated_at: new Date() });
+      }
+      logger.info(`[first-touch-resume] customer ${payload.customerId}: post-commit do-not-contact veto — hold(s) blocked`);
+      return { skipped: 'do_not_contact' };
+    }
+    if (await emailSuppressedForNewLead(sendPayload.email, dbh)) {
       for (const holdId of holdIds) {
         await dbh('first_touch_holds').where({ id: holdId })
           .update({ status: 'pending', last_error: 'email_suppressed', updated_at: new Date() });
       }
-      logger.info('[first-touch-resume] superseded post-commit target suppressed — hold(s) stay pending');
+      logger.info('[first-touch-resume] post-commit target suppressed — hold(s) stay pending');
       return { skipped: 'email_suppressed' };
     }
     const outcome = await runNewsletterResume(sendPayload, dbh, { skipDedupe: holdWasDoiUnconfirmed });
