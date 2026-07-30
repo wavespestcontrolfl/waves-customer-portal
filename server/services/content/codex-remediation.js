@@ -305,6 +305,21 @@ async function syncPendingHold(prNumber, {
   }
   const sha = String(state.sync_pending_sha || '').trim().toLowerCase();
   if (!sha) return { pending: false };
+
+  // Recover a hold whose sync is RECORDED complete and whose release write was
+  // simply lost. This has to happen HERE, not only in remediation's recovery
+  // branch: this gate returns pending before the Codex check, so a PR with a clean
+  // review never re-enters remediation at all — a stuck hold would block it
+  // forever. No replay and no inference, just the release that failed earlier.
+  const syncedSha = String(state.synced_sha || '').trim().toLowerCase();
+  if (syncedSha && syncedSha === sha) {
+    if (await retryWrite(db, prNumber, { sync_pending_sha: null }, 2, 'deferred sync-hold release')) {
+      logger.info(`[codex-remediation] released a stuck sync hold on PR #${prNumber} from the merge gate: the sync for ${shortSha(sha)} was already recorded complete`);
+      return { pending: false };
+    }
+    return { pending: true, sha, reason: `the sync for ${shortSha(sha)} completed but its hold could not be released — retrying next tick` };
+  }
+
   const head = String(headSha || '').trim().toLowerCase();
   const { inFlight, preHead } = parseInFlightSentinel(sha);
 
@@ -1265,16 +1280,30 @@ async function armPushHold(db, prNumber, branch, preHeadSha) {
  * logged loudly and recovered on a later tick by re-running the idempotent sync.
  */
 async function releaseSyncHold(db, prNumber, newHead, attempts = 3) {
+  // Record that the sync PROVABLY completed for this commit BEFORE clearing the
+  // hold, and in a separate write. That ordering is what makes a lost release
+  // recoverable: the window where synced_sha is set but the hold still stands is
+  // exactly the state a later tick can resolve — clear the hold, replay nothing,
+  // guess nothing. (One combined write would give no marker to recover from.)
+  const marked = await retryWrite(db, prNumber, { synced_sha: newHead || null }, attempts, 'sync-complete mark');
+  const released = await retryWrite(db, prNumber, { sync_pending_sha: null }, attempts, 'sync-hold release');
+  if (!released) {
+    logger.error(`[codex-remediation] could not release the sync hold for PR #${prNumber} after ${attempts} attempts — the fix commit ${shortSha(newHead)} IS synced${marked ? ', and that is recorded, so a later tick will clear the hold automatically' : ' but the marker write ALSO failed, so the hold needs clearing by hand after checking the portal row'}`);
+  }
+  return released;
+}
+
+async function retryWrite(db, prNumber, patch, attempts, label) {
   for (let i = 1; i <= attempts; i += 1) {
     try {
-      await saveState(db, prNumber, { sync_pending_sha: null });
+      await saveState(db, prNumber, patch);
       return true;
     } catch (e) {
       if (i === attempts) {
-        logger.error(`[codex-remediation] could not release the sync hold for PR #${prNumber} after ${attempts} attempts (${e.message}) — the fix commit ${shortSha(newHead)} IS synced, but the hold will block merges until a later tick re-runs the sync or it is cleared by hand`);
+        logger.warn(`[codex-remediation] ${label} failed for PR #${prNumber} after ${attempts} attempts: ${e.message}`);
         return false;
       }
-      logger.warn(`[codex-remediation] sync-hold release attempt ${i} failed for PR #${prNumber}: ${e.message} — retrying`);
+      logger.warn(`[codex-remediation] ${label} attempt ${i} failed for PR #${prNumber}: ${e.message} — retrying`);
     }
   }
   return false;
@@ -1462,7 +1491,15 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
       // than shipping unreconciled content. Logged at warn so it is visible rather
       // than mysterious.
       const pendingSha = String(state.sync_pending_sha || '').trim().toLowerCase();
-      if (pendingSha) {
+      const syncedSha = String(state.synced_sha || '').trim().toLowerCase();
+      if (pendingSha && syncedSha && syncedSha === pendingSha) {
+        // Not ambiguous: the sync for THIS commit is recorded as complete, so only
+        // the release write was lost. Clear the hold — nothing to replay, nothing
+        // to infer. This is the automatic recovery the marker exists for.
+        if (await retryWrite(db, prNumber, { sync_pending_sha: null }, 2, 'deferred sync-hold release')) {
+          logger.info(`[codex-remediation] released a stuck sync hold on PR #${prNumber}: the sync for ${shortSha(pendingSha)} was already recorded complete`);
+        }
+      } else if (pendingSha) {
         logger.warn(`[codex-remediation] PR #${prNumber} still holds an unfinished portal sync (${pendingSha === SYNC_PENDING_PUSH_IN_FLIGHT ? 'push in flight' : shortSha(pendingSha)}) while awaiting re-review — merges stay blocked until a round completes the sync, or clear it by hand after reconciling the portal row`);
       }
       const issueComments = await gh.listIssueComments(prNumber);

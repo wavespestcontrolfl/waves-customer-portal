@@ -57,11 +57,21 @@ exports.up = async function up(knex) {
       t.string('sync_pending_sha', 64);
     });
   }
+  if (!(await knex.schema.hasColumn('codex_remediation_state', 'synced_sha'))) {
+    await knex.schema.alterTable('codex_remediation_state', (t) => {
+      t.string('synced_sha', 64);
+    });
+  }
 };
 
 exports.down = async function down(knex) {
   const has = await knex.schema.hasTable('codex_remediation_state');
   if (!has) return;
+  if (await knex.schema.hasColumn('codex_remediation_state', 'synced_sha')) {
+    await knex.schema.alterTable('codex_remediation_state', (t) => {
+      t.dropColumn('synced_sha');
+    });
+  }
   if (await knex.schema.hasColumn('codex_remediation_state', 'sync_pending_sha')) {
     await knex.schema.alterTable('codex_remediation_state', (t) => {
       t.dropColumn('sync_pending_sha');

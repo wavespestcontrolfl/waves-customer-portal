@@ -3169,3 +3169,73 @@ describe('the awaiting-re-review branch never clears a sync hold', () => {
     expect(h.pending).toBe(true);
   });
 });
+
+// synced_sha makes a lost release recoverable WITHOUT a replay. Ordering is the
+// point: it is written before the hold is cleared, so "synced_sha === pending" is
+// exactly "the sync finished, only the release was lost".
+describe('synced_sha recovers a lost hold release', () => {
+  const p2Body = (t) => `**<sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub>  ${t}**\n\nd`;
+
+  test('the merge gate clears a hold whose sync is recorded complete', async () => {
+    const db = makeDb({
+      codex_remediation_state: [{
+        pr_number: 5, rounds: 1, status: 'remediating',
+        last_push_sha: HEAD, sync_pending_sha: HEAD, synced_sha: HEAD,
+      }],
+    });
+    const h = await rem.syncPendingHold(5, { db, headSha: HEAD, branch: 'content/blog-x' });
+    expect(h.pending).toBe(false);
+    expect(db._tables.codex_remediation_state.find((x) => x.pr_number === 5).sync_pending_sha).toBeNull();
+  });
+
+  // This is the case that would otherwise wedge forever: a clean review never
+  // re-enters remediation, so the gate itself has to do the recovery.
+  test('recovery works even though remediation would never run again', async () => {
+    const db = makeDb({
+      codex_remediation_state: [{
+        pr_number: 5, rounds: 1, status: 'remediating', sync_pending_sha: HEAD, synced_sha: HEAD,
+      }],
+    });
+    const first = await rem.syncPendingHold(5, { db, headSha: HEAD, branch: 'content/blog-x' });
+    expect(first.pending).toBe(false);
+    // Idempotent: a second pass sees no hold at all.
+    const second = await rem.syncPendingHold(5, { db, headSha: HEAD, branch: 'content/blog-x' });
+    expect(second.pending).toBe(false);
+  });
+
+  test('a synced_sha for a DIFFERENT commit does not release the hold', async () => {
+    const db = makeDb({
+      codex_remediation_state: [{
+        pr_number: 5, rounds: 1, status: 'remediating', sync_pending_sha: HEAD, synced_sha: 'someothercommit',
+      }],
+    });
+    const h = await rem.syncPendingHold(5, { db, headSha: HEAD, branch: 'content/blog-x' });
+    expect(h.pending).toBe(true);
+    expect(db._tables.codex_remediation_state.find((x) => x.pr_number === 5).sync_pending_sha).toBe(HEAD);
+  });
+
+  test('a successful round records synced_sha alongside clearing the hold', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const db = makeDb();
+    const onRemediated = jest.fn();
+    const r = await runRemediationForPr({ ...CTX, onRemediated }, {
+      db, gh: makeGh(), callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS,
+    });
+    expect(r.remediated).toBe(true);
+    const row = db._tables.codex_remediation_state.find((x) => x.pr_number === 5);
+    expect(row.synced_sha).toBe('newcommit999aaa');
+    expect(row.sync_pending_sha).toBeNull();
+  });
+
+  test('the bar is unblocked once the gate has recovered the hold', async () => {
+    const db = makeDb({
+      codex_remediation_state: [{
+        pr_number: 5, rounds: 1, status: 'remediating',
+        last_push_sha: HEAD, sync_pending_sha: HEAD, synced_sha: HEAD,
+      }],
+    });
+    const gh = makeGh({ reviewComments: [finding({ body: p2Body('a') })], reviews: [codexReview()] });
+    const r = await rem.p2OnlyMergeEligible(5, HEAD, { db, gh });
+    expect(r.eligible).toBe(true);
+  });
+});
