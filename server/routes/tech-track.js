@@ -645,7 +645,12 @@ const {
 const { invalidateServiceReportPdfCache } = require('../services/service-report/pdf-storage');
 const { geocodeAddress } = require('../services/geocoder');
 
-router.post('/:id/treatment-zone', upload.single('snapshot'), async (req, res, next) => {
+router.post('/:id/treatment-zone', upload.fields([
+  { name: 'snapshot', maxCount: 1 },
+  // Transparent grass-highlight layer (lawn_highlight saves) — the report
+  // animates it over the snapshot (owner 2026-07-30).
+  { name: 'mask', maxCount: 1 },
+]), async (req, res, next) => {
   try {
     if (!featureGates.isEnabled('treatmentZoneMap')) {
       return res.status(404).json({ error: 'Not enabled' });
@@ -664,8 +669,13 @@ router.post('/:id/treatment-zone', upload.single('snapshot'), async (req, res, n
     } catch {
       return res.status(400).json({ error: 'payload must be valid JSON' });
     }
-    if (req.file && req.file.mimetype !== 'image/png') {
+    const snapshotFile = req.files?.snapshot?.[0] || null;
+    const maskFile = req.files?.mask?.[0] || null;
+    if (snapshotFile && snapshotFile.mimetype !== 'image/png') {
       return res.status(400).json({ error: 'snapshot must be a PNG' });
+    }
+    if (maskFile && maskFile.mimetype !== 'image/png') {
+      return res.status(400).json({ error: 'mask must be a PNG' });
     }
 
     const row = await saveTreatmentZoneMap({
@@ -679,7 +689,8 @@ router.post('/:id/treatment-zone', upload.single('snapshot'), async (req, res, n
       centerLng: payload.lng,
       zoom: payload.zoom,
       address: payload.address,
-      snapshotPngBuffer: req.file?.buffer || null,
+      snapshotPngBuffer: snapshotFile?.buffer || null,
+      maskPngBuffer: maskFile?.buffer || null,
       captureMode: payload.captureMode,
     });
 

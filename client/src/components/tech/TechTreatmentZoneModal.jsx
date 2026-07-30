@@ -456,6 +456,18 @@ export default function TechTreatmentZoneModal({
       const blob = await composeSnapshot(base, accum, baseUrl);
       const fd = new FormData();
       fd.append('snapshot', blob, 'treatment-zone.png');
+      if (lawnMask) {
+        // The transparent highlight layer travels alongside the snapshot so
+        // the customer report can PULSE the green over the photo (owner
+        // 2026-07-30 "the goal is to show where we sprayed"). Fail-soft: a
+        // mask that won't export just means a static report highlight.
+        try {
+          const maskBlob = await new Promise((resolve, reject) => {
+            lawnMask.toBlob((b) => (b ? resolve(b) : reject(new Error('no mask blob'))), 'image/png');
+          });
+          fd.append('mask', maskBlob, 'treatment-zone-mask.png');
+        } catch { /* static highlight on the report */ }
+      }
       fd.append('payload', JSON.stringify({
         // px lives in the (possibly rotated) snapshot's space — the report
         // replay overlays it on that snapshot. lat/lng is true ground truth:
