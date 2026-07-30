@@ -11196,8 +11196,9 @@ export function CompletionPanel({
                   },
                 }
               : {
+                  // Observations only — raw technician notes never reach a
+                  // customer-facing LLM (AGENTS.md report/track egress).
                   context: {
-                    notes: stripChipTagLines(notes),
                     observations: freeTextLines(observationsText),
                   },
                 }),

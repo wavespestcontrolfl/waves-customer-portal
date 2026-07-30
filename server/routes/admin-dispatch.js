@@ -80,6 +80,12 @@ const KNOCKDOWN_FOLLOWUP_WINDOW_DAYS = { '10–14 days': 14, '2–3 weeks': 21 }
 // an included follow-up completing must not mint a third (Codex r3).
 // Trapping programs deliberately chain and are excluded.
 const TWO_TREATMENT_PACKAGE_KEYS = new Set(['cockroach_control', 'bed_bug_treatment']);
+
+// Report/track egress (AGENTS.md): entry-code shapes that must never persist
+// into customer-visible completion text. Conservative on purpose — it needs
+// BOTH a code word near a location word, or a code word followed by digits,
+// so ordinary copy ("entry points treated", "gate was open") never trips.
+const COMPLETION_ACCESS_CODE_RE = /(?:\b(?:gate|garage|door|lock\s?box|keypad|alarm|entry|access)\b[^\n.!?]{0,40}\b(?:code|pin|combo|combination)\b|\b(?:code|pin|combo|combination)\b[^\n.!?]{0,15}\d{3,})/i;
 const { buildPrepaidSeriesContext } = require('../services/prepaid-series');
 const {
   findFirstApplicationInvoiceForEstimateService,
@@ -3157,6 +3163,19 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               error: `This completion contains wording we can't put on a customer report (${untypedViolations.join(', ')}). Describe what was observed and done today instead of absolute claims.`,
               code: 'completion_banned_copy',
               violations: untypedViolations,
+            },
+          };
+        }
+        // Report/track egress (AGENTS.md): access/gate/lockbox codes never
+        // reach customer-facing reports. These free-text fields render
+        // verbatim (pressure driver line, photo captions), so a line that
+        // reads like an entry code fails closed instead of persisting.
+        if (untypedCopySources.some((entry) => COMPLETION_ACCESS_CODE_RE.test(String(entry || '')))) {
+          return {
+            status: 422,
+            body: {
+              error: 'This completion looks like it contains an access, gate, or lockbox code. Keep entry codes out of customer-visible fields — use the internal property notes instead.',
+              code: 'completion_access_code',
             },
           };
         }
@@ -8740,7 +8759,7 @@ router.post('/:serviceId/photo-analysis/draft', async (req, res) => {
       }
     } else {
       // Basic (untyped) completions analyze photos too (owner 2026-07-30) —
-      // grounded in the tech's notes/observations instead of a findings
+      // grounded in the tech's structured observations instead of a findings
       // form. A typed service must send its typed findings so the summary
       // stays grounded in the form the tech actually fills.
       if (photoProfile?.findingsType) {
@@ -8749,10 +8768,15 @@ router.post('/:serviceId/photo-analysis/draft', async (req, res) => {
           code: 'findings_type_mismatch',
         });
       }
-      const notes = String(context?.notes || '').trim().slice(0, 1500);
-      if (notes) contextLines.push(`Technician notes: ${notes}`);
+      // Report/track egress (AGENTS.md): raw technician notes never reach a
+      // customer-facing LLM — the prompt context is the structured
+      // observations field only, with entry-code-shaped lines dropped.
       const observations = Array.isArray(context?.observations)
-        ? context.observations.map((o) => String(o).trim()).filter(Boolean).slice(0, 10)
+        ? context.observations
+          .map((o) => String(o).trim())
+          .filter(Boolean)
+          .filter((o) => !COMPLETION_ACCESS_CODE_RE.test(o))
+          .slice(0, 10)
         : [];
       if (observations.length) {
         contextLines.push(`Observations: ${observations.join('; ').slice(0, 600)}`);
