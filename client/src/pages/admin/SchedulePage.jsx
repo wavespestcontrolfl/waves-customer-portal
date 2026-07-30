@@ -9493,12 +9493,18 @@ export function CompletionPanel({
     setAreasServiced(
       // Map the legacy singular "Side yard" to the renamed "Side yards" so a draft
       // saved before the rename restores as the currently-rendered option (and
-      // dedupe, so re-selecting can't submit both strings). Other values pass through.
+      // dedupe, so re-selecting can't submit both strings). Then prune to the
+      // CURRENT chip vocabulary: a draft saved before an option was removed
+      // ("No issues found" / "Follow-up recommended", dropped 2026-07-30)
+      // would otherwise restore an invisible value with no control to
+      // deselect it — and it could even leak into a product's
+      // applicationArea (codex P2).
       // Lines without the picker (T&S + rodent, owner 2026-07-23) never restore
       // areas — a pre-change draft's chips would sit invisible in state (codex P3
       // on #2950); the areasTreatedHidden clearing effect backstops any other path.
       !areasTreatedHidden && Array.isArray(savedDraft.areasServiced)
         ? [...new Set(savedDraft.areasServiced.map((a) => (a === "Side yard" ? "Side yards" : a)))]
+            .filter((a) => areaOptions.includes(a))
         : [],
     );
     setZoneMapImageFallback(
@@ -10222,14 +10228,16 @@ export function CompletionPanel({
         // Broad-label products (Bifen etc.) carry turf pests on the label —
         // on a non-lawn visit those prefills read wrong on the report (owner
         // 2026-07-30), so they're dropped here; the tech can still add any
-        // target by hand.
+        // target by hand. Keyed to the detected service CATEGORY, not the
+        // panel's `isLawn` (which is false for typed lawn visits — codex P2:
+        // a typed lawn treatment must keep its turf targets).
         targets: filterLabelTargetsForLine(
           normalizeLabelTargets(
             product.target_pests
               ?? product.targetPests
               ?? (products || []).find((p) => String(p.id) === String(product.id))?.target_pests,
           ),
-          { isLawn },
+          { isLawn: detectServiceCategory(service.serviceType) === "lawn" },
         ),
       },
     ]);

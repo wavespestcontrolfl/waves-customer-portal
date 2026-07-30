@@ -13,6 +13,7 @@
  *   tick_control           service_report / one_time_pest_treatment → service_report / null
  *   bee_wasp_removal       service_report / one_time_pest_treatment → service_report / null
  *   mud_dauber_removal     service_report / one_time_pest_treatment → service_report / null
+ *   pest_initial_cleanout  service_report / one_time_pest_treatment → service_report / null (seeded envs only)
  *
  * general_appointment stays project_required (untouched — separate owner
  * call), and the species-specific typed flows (cockroach, bed_bug,
@@ -48,6 +49,10 @@ const UNTYPE_KEYS = [
   'tick_control',
   'bee_wasp_removal',
   'mud_dauber_removal',
+  // Seeded-catalog twin of one_time_pest_control (dev/CI environments; no
+  // profile row in prod, where this loud-skips) — untyped with the family
+  // so the migrated catalog stays coherent with the lane registry.
+  'pest_initial_cleanout',
 ];
 
 const EXPECTED_TYPE = 'one_time_pest_treatment';

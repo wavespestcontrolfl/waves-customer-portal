@@ -82,10 +82,14 @@ const KNOCKDOWN_FOLLOWUP_WINDOW_DAYS = { '10–14 days': 14, '2–3 weeks': 21 }
 const TWO_TREATMENT_PACKAGE_KEYS = new Set(['cockroach_control', 'bed_bug_treatment']);
 
 // Report/track egress (AGENTS.md): entry-code shapes that must never persist
-// into customer-visible completion text. Conservative on purpose — it needs
-// BOTH a code word near a location word, or a code word followed by digits,
-// so ordinary copy ("entry points treated", "gate was open") never trips.
-const COMPLETION_ACCESS_CODE_RE = /(?:\b(?:gate|garage|door|lock\s?box|keypad|alarm|entry|access)\b[^\n.!?]{0,40}\b(?:code|pin|combo|combination)\b|\b(?:code|pin|combo|combination)\b[^\n.!?]{0,15}\d{3,})/i;
+// into customer-visible completion text. Three shapes: a code word near a
+// location word ("gate ... code"), a code word followed by digits
+// ("pin 9921"), and the bare shorthand of a code-carrying location word
+// followed directly by a code-shaped number ("Gate 1234", "lockbox is
+// 2468" — codex r3). Ordinary copy ("entry points treated", "gate was
+// open") never trips; a street address near the word "gate" may — that
+// false positive fails closed and the tech rephrases.
+const COMPLETION_ACCESS_CODE_RE = /(?:\b(?:gate|garage|door|lock\s?box|keypad|alarm|entry|access)\b[^\n.!?]{0,40}\b(?:code|pin|combo|combination)\b|\b(?:code|pin|combo|combination)\b[^\n.!?]{0,15}\d{3,}|\b(?:gate|lock\s?box|keypad|alarm)\b[^\n.!?]{0,12}\b\d{3,8}\b)/i;
 const { buildPrepaidSeriesContext } = require('../services/prepaid-series');
 const {
   findFirstApplicationInvoiceForEstimateService,
@@ -3179,6 +3183,20 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             },
           };
         }
+        // A pre-untype client (panel opened before the deploy, or a restored
+        // typed draft) still submits structuredFindings for a now-untyped
+        // profile. Accepting it would silently DISCARD the typed data the
+        // tech entered (target pest, activity level, treatment...) — make
+        // the transition loud instead (codex P2).
+        if (structuredFindings != null) {
+          return {
+            status: 409,
+            body: {
+              error: 'This service now completes with the standard form. Refresh the page and complete the visit again.',
+              code: 'untyped_refresh_required',
+            },
+          };
+        }
       }
       // Recap-only mode (the lightweight pest recap) has no findings, no
       // billing gate, and no snapshot — it must not be a side door around
@@ -3586,13 +3604,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       }
     }
 
-    // Typed one-time billing profile — the exact population the billing
-    // pre-gate below governs. Hoisted to a named flag because a backfill
-    // completion skips the gate and must reach the same billing outcome
-    // through the in-transaction invoice decision instead
-    // (shouldAutoInvoiceCompletion's typedOneTimeBilling input).
-    const typedOneTimeBillingProfile = !!typedFindingsType
-      && !isIncompleteVisit
+    // One-time billing profile — the population whose completion mints the
+    // visit invoice through the in-transaction invoice decision
+    // (shouldAutoInvoiceCompletion's typedOneTimeBilling input). Keyed to
+    // the PROFILE's billing_type, not to whether the completion form is
+    // typed: untyping a one-time service's form (the 2026-07-30 pest
+    // untype migration) must not silently turn off its billing (codex P1).
+    const typedOneTimeBillingProfile = !isIncompleteVisit
       && !recapReviewOnly
       && String(completionProfile?.billingType || '').toLowerCase() === 'one_time'
       && svc.followup_included !== true;
