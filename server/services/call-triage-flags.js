@@ -381,6 +381,27 @@ function normalizeForGrounding(s) {
 // good") from grounding a commitment claim. A quote the model stitched
 // across two turns fails per-turn containment — also closed, also correct:
 // the commitment sentence is a single agent utterance.
+// Negation/hedge screen (codex round-6 P1): the model can pin a VERBATIM
+// FRAGMENT that strips the negation around it — "Sunday at 10 AM" grounds
+// inside the agent turn "Sunday at 10 AM won't work, but I'll ask someone to
+// call you back", and the slot matcher would then see a clean single
+// mention. Deterministic containment can't parse negation, so the screen is
+// applied to the WHOLE turn the quote grounds in: any negation or hedge
+// token in that turn fails the grounding. Curated, conservative, fail-closed
+// — a benign turn containing "not" is sacrificed to triage rather than
+// risking a booking the agent rejected.
+const NEGATION_HEDGE_TOKENS = [
+  ' not ', ' won t ', ' wont ', ' can t ', ' cant ', ' cannot ', ' don t ',
+  ' dont ', ' doesn t ', ' doesnt ', ' isn t ', ' isnt ', ' unable ',
+  ' instead ', ' unless ', ' rather ', ' maybe ', ' might ',
+  ' unfortunately ', ' call you back ', ' have to check ', ' let me check ',
+  ' see if ', ' ask someone ',
+];
+function turnHasNegationOrHedge(normalizedTurn) {
+  const padded = ` ${normalizedTurn} `;
+  return NEGATION_HEDGE_TOKENS.some((t) => padded.includes(t));
+}
+
 function agentQuoteGroundedInTranscript(quote, transcript) {
   const q = normalizeForGrounding(quote);
   if (!q || q.length < 12) return false;
@@ -394,7 +415,12 @@ function agentQuoteGroundedInTranscript(quote, transcript) {
     else sawCaller = true;
   }
   if (!agentTurns.length || !sawCaller) return false;
-  return agentTurns.some((t) => normalizeForGrounding(t).includes(q));
+  const matching = agentTurns.map((t) => normalizeForGrounding(t)).filter((t) => t.includes(q));
+  if (!matching.length) return false;
+  // EVERY turn the quote grounds in must be free of negation/hedging — if a
+  // fragment appears in both a rejecting turn and a committing turn, we
+  // cannot deterministically tell which one the model meant: fail closed.
+  return matching.every((t) => !turnHasNegationOrHedge(t));
 }
 
 // Slot binding (codex round-2 P1): the grounded commitment quote must refer
@@ -410,7 +436,11 @@ function agentQuoteGroundedInTranscript(quote, transcript) {
 const WEEKDAY_NAMES = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
 
 function quoteBindsConfirmedSlot(quote, confirmedStartAt, callStartedAt) {
-  const q = ` ${normalizeForGrounding(quote)} `;
+  // Punctuated day periods (codex round-6 P2): "10 a.m." normalizes to the
+  // split tokens "10 a m" — collapse " a m " / " p m " back to " am " /
+  // " pm " so common transcript formats bind. Single-letter tokens only, so
+  // "plan a meeting" ("a meeting") is untouched.
+  const q = ` ${normalizeForGrounding(quote)} `.replace(/ ([ap]) m(?= )/g, ' $1m');
   const start = new Date(String(confirmedStartAt || ''));
   if (!q.trim() || Number.isNaN(start.getTime())) return false;
   // Calendar disambiguation (codex round-5 P1): a weekday name alone cannot

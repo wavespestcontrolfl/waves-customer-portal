@@ -72,7 +72,12 @@ function buildRouteDecision({
 
   return {
     call_log_id: callLogId,
-    decision_version: 'v2-1.0.0',
+    // v2-1.1.0: agent-commitment authorization (gated demotion of
+    // caller_not_authorized) changed what canAutoRoute can decide — the
+    // route_decisions migration contract requires a version bump so
+    // reprocessing a call writes a NEW decision row instead of being
+    // onConflict-ignored into the stale pre-rule one.
+    decision_version: 'v2-1.1.0',
     mode,
     validator_recommendation: routingResult?.allowed
       ? (scheduling.status === 'confirmed' ? 'auto_create_appointment' : 'upsert_customer_only')

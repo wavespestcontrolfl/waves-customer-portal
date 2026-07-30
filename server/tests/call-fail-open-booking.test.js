@@ -325,6 +325,26 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(r.allowed).toBe(false);
   });
 
+  test('a pinned FRAGMENT cannot strip negation — the whole grounding turn is screened (round-6 P1)', () => {
+    const rejectingTurn = "Sunday at 10 AM won't work, but I'll ask someone to call you back.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, rejectingTurn);
+    const ex = agentCommitted(['caller_not_authorized'], { quote: 'Sunday at 10 AM' });
+    ex.scheduling.confirmed_start_at = '2026-08-02T10:00:00-04:00';
+    const r = canAutoRoute(ex, opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('punctuated day periods bind — "Sunday at 10 a.m." matches a 10 AM slot (round-6 P2)', () => {
+    const punctuated = "So we'll see you Sunday at 10 a.m., and just let us know if anything changes.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, punctuated);
+    const ex = agentCommitted(['caller_not_authorized'], { quote: punctuated });
+    ex.scheduling.confirmed_start_at = '2026-08-02T10:00:00-04:00';
+    const r = canAutoRoute(ex, opts({ transcript }));
+    expect(r.allowed).toBe(true);
+    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+  });
+
   test('nonzero SECONDS in confirmed_start_at fail the on-the-hour guard (round-4 P1)', () => {
     const ex = agentCommitted();
     ex.scheduling.confirmed_start_at = '2026-08-02T12:00:30-04:00';
