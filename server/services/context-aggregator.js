@@ -50,8 +50,24 @@ const ACCESS_CODE_VALUE_RE = /\b(?:\d{3,8}|[A-Z]{2,10}|[A-Za-z]*\d[A-Za-z0-9#*]*
 // Up to FOUR value tokens (Codex r10): spoken credentials arrive as number
 // words — "four five four five" — and a two-token cap leaked the tail.
 const ACCESS_CODE_AFTER_NOUN_RE = /\b(code|pin|combo|combination|passcode|password|passphrase)\b(\s*(?:is|:|=|-)?\s*)((?:["'\u201c\u2018]?[A-Za-z0-9#*]{1,12}["'\u201d\u2019]?\s*){1,4})/gi;
-const ACCESS_CODE_BEFORE_NOUN_RE = /\b([A-Za-z0-9#*]{2,12})(\s+(?:is|=)\s+(?:the\s+)?[^.\n]{0,20}?\b(?:code|pin|combo|combination|passcode)\b)/gi;
+// Up to FOUR reverse-order tokens + password nouns (Codex r11): "four five
+// four five is the gate code" / "waves is the gate password".
+const ACCESS_CODE_BEFORE_NOUN_RE = /((?:["'“‘]?[A-Za-z0-9#*]{1,12}["'”’]?\s+){1,4})((?:is|=)\s+(?:the\s+)?[^.\n]{0,20}?\b(?:code|pin|combo|combination|passcode|password|passphrase)\b)/gi;
 const ACCESS_CODE_STOPWORDS = new Set(['gate', 'garage', 'door', 'lockbox', 'lock', 'box', 'keypad', 'entry', 'access', 'alarm', 'pin', 'code', 'combo', 'combination', 'passcode', 'password', 'passphrase', 'is', 'the', 'a', 'an', 'use', 'tech', 'only', 'for', 'to', 'and', 'or', 'needed', 'required', 'broken', 'works', 'not', 'no', 'none', 'unknown', 'same', 'new', 'old']);
+// Structured sensitive identifiers (Codex r11): SSNs and card-number runs
+// spoken on calls or typed into notes must never reach a prompt or a
+// persisted facts_block. Deterministic shapes: dashed SSN, keyword-adjacent
+// digit runs, and 12-19 digit runs with optional separators.
+const SSN_DASHED_RE = /\b\d{3}[- ]\d{2}[- ]\d{4}\b/g;
+const SSN_KEYWORD_RE = /\b(ssn|social(?:\s+security)?(?:\s+number)?)\b([^.\n]{0,20}?)\b(\d[\d- ]{7,13}\d)\b/gi;
+const CARD_NUMBER_RE = /\b(?:\d[ -]?){12,19}\b/g;
+function redactSensitiveIdentifiers(text) {
+  return String(text || '')
+    .replace(SSN_DASHED_RE, '[redacted]')
+    .replace(SSN_KEYWORD_RE, (m, kw, mid) => `${kw}${mid}[redacted]`)
+    .replace(CARD_NUMBER_RE, (m) => (m.replace(/[^\d]/g, '').length >= 12 ? '[redacted]' : m));
+}
+
 function redactAccessCodes(text) {
   let out = String(text || '');
   // repeat until stable: "gate code 1234 and garage 5678" needs both masked
@@ -77,12 +93,16 @@ function redactAccessCodes(text) {
       });
       return `${noun}${mid}${maskedTokens}`;
     });
-    masked = masked.replace(ACCESS_CODE_BEFORE_NOUN_RE, (m, tok, rest) => (
-      ACCESS_CODE_STOPWORDS.has(tok.toLowerCase()) ? m : `[redacted]${rest}`
-    ));
+    masked = masked.replace(ACCESS_CODE_BEFORE_NOUN_RE, (m, tokens, rest) => {
+      const maskedTokens = String(tokens || '').replace(/["'“‘]?[A-Za-z0-9#*]{1,12}["'”’]?/g, (tok) => {
+        const bare = tok.replace(/["'“”‘’]/g, '').toLowerCase();
+        return ACCESS_CODE_STOPWORDS.has(bare) ? tok : tok.replace(/[A-Za-z0-9#*]+/, '[redacted]');
+      });
+      return `${maskedTokens}${rest}`;
+    });
     return masked;
   }).join('');
-  return out;
+  return redactSensitiveIdentifiers(out);
 }
 
 // Canonical lawn scoring, mirrored from routes/lawn-health.js:39-59 (the
@@ -176,7 +196,10 @@ class ContextAggregator {
         .orderBy('created_at', 'desc')
         .limit(300)
         .select('id', 'title', 'status', 'total', 'credit_applied', 'due_date', 'payer_id', 'created_at')
-        .catch(() => []),
+        // FAIL CLOSED (Codex r11): a lone invoice-query failure must not
+        // read as "no invoices" — null marks billing UNAVAILABLE and the
+        // facts render a visible unknown instead of "Balance: Current".
+        .catch(() => null),
       // v10: lawn health scores — "how's my lawn doing" is a routine text.
       db('lawn_assessments').where({ customer_id: customer.id })
         // Tech-confirmed only (Codex r2): the customer lawn-health routes all
@@ -208,6 +231,7 @@ class ContextAggregator {
     // against a payer-billed invoice is the PAYER's even though the row sits
     // under the homeowner's customer_id — exclude those from both the
     // balance and the recent-payments facts.
+    const billingUnavailable = allInvoices === null;
     const invoiceRows = allInvoices || [];
     const VISIBLE_INVOICE_STATUSES = new Set(['sent', 'viewed', 'overdue']);
     const payerInvoiceIds = new Set(invoiceRows.filter((r) => r.payer_id).map((r) => String(r.id)));
@@ -315,6 +339,8 @@ class ContextAggregator {
       })),
       upcomingServices: upcomingServices.map(s => ({ type: s.service_type, date: s.scheduled_date, window: this.deriveWindow(s), status: s.status, tech: s.technician_name || null, isToday: this.calendarDay(s.scheduled_date) === etDateString() })),
       billing: {
+        // invoice grounding failed → the whole money picture is unknowable
+        unavailable: billingUnavailable,
         outstandingBalance: balance,
         // completed/attempted history only (Codex r5): 'upcoming' autopay
         // rows are FUTURE charges, not payments the customer made.
@@ -345,7 +371,10 @@ class ContextAggregator {
           last4: cardOnFile.last_four,
           expMonth: cardOnFile.exp_month || null,
           expYear: cardOnFile.exp_year || null,
-          isAutopayCard: Boolean(cardOnFile.is_default && cardOnFile.autopay_enabled),
+          // the autopay label requires the CANONICAL on-state (Codex r11) —
+          // stale row flags on an expired/paused/blocked method must not
+          // present as the active charge method.
+          isAutopayCard: Boolean(cardOnFile.is_default && cardOnFile.autopay_enabled && autopayState?.on),
         } : null,
       },
       // v10: lawn health — latest vs baseline, same scoring the AI-number

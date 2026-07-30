@@ -315,8 +315,14 @@ function buildFactsBlock(context) {
   // the prompt requires them verbatim-from-facts, the verifier checks every
   // figure against this block, and auto-send alone still refuses
   // amount-bearing drafts (autonomy boundary).
-  const billingLines = [`- Balance: ${balance}`];
-  const autopay = context.billing?.autopay;
+  // Invoice grounding unavailable (Codex r11): render a VISIBLE unknown —
+  // "Balance: Current" from a failed query is a fabrication vector, and the
+  // prompt's defer rules key off absence being explicit.
+  const billingLines = context.billing?.unavailable
+    ? ["- Billing records are unavailable right now — defer any balance, invoice, or amount question and say you'll confirm"]
+    : [`- Balance: ${balance}`];
+  const billingKnown = !context.billing?.unavailable;
+  const autopay = billingKnown ? context.billing?.autopay : null;
   if (autopay) {
     if (autopay.paused) billingLines.push(`- Autopay: PAUSED until ${formatEtDate(autopay.pausedUntil)}`);
     else if (autopay.on) billingLines.push(`- Autopay: on${autopay.nextChargeDate ? `, next charge ${formatEtDate(autopay.nextChargeDate)}` : ''}`);
@@ -326,20 +332,20 @@ function buildFactsBlock(context) {
     // defers instead of guessing (never claim a charge will or won't happen)
     billingLines.push('- Autopay: state unknown right now');
   }
-  const inv = context.billing?.openInvoice;
+  const inv = billingKnown ? context.billing?.openInvoice : null;
   if (inv) {
     const invParts = [`status ${inv.status}`];
     if (inv.title) invParts.push(`"${sanitizeSingleLine(inv.title, 120)}"`);
     if (inv.amountDue != null) invParts.push(`$${Number(inv.amountDue).toFixed(2)} due (net of any applied credit)`);
     if (inv.dueDate) invParts.push(`due ${formatEtDate(inv.dueDate)}`);
     billingLines.push(`- Open invoice: ${invParts.join(', ')}`);
-  } else {
+  } else if (billingKnown) {
     billingLines.push('- Open invoice: none');
   }
   if (context.billing?.payerBilledInvoice) {
     billingLines.push('- A separate invoice is BILLED TO A THIRD-PARTY PAYER — never ask the customer to pay that one');
   }
-  const pays = (context.billing?.recentPayments || []).filter((p) => p && p.amount != null);
+  const pays = billingKnown ? (context.billing?.recentPayments || []).filter((p) => p && p.amount != null) : [];
   if (pays.length) {
     billingLines.push(`- Recent payments: ${pays.map((p) => `$${Number(p.amount).toFixed(2)} ${p.status || ''} ${formatEtDate(p.payment_date || p.date)}`.replace(/\s+/g, ' ').trim()).join('; ')}`);
   }

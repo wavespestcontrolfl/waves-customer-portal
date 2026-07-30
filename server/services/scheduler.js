@@ -2007,9 +2007,16 @@ function initScheduledJobs() {
                   // set would keep authorizing the stale "your balance is
                   // $X" claim. At fire time only what the customer still
                   // owes may validate an amount; a just-paid figure blocks.
+                  // Payment ACKNOWLEDGEMENTS may cite payment-history
+                  // amounts (Codex r11: "we received your $95 payment") —
+                  // but only when the body actually reads as an ack, so a
+                  // stale "your balance is $X" can never re-authorize via
+                  // the payment row (r10).
+                  const ackBody = /\b(received|processed|went through|thank(?:s| you))\b/i.test(String(msg.message_body || ''));
                   const authorized = new Set([
                     ctx?.billing?.outstandingBalance > 0 ? cents(ctx.billing.outstandingBalance) : null,
                     ctx?.billing?.openInvoice?.amountDue != null ? cents(ctx.billing.openInvoice.amountDue) : null,
+                    ...(ackBody ? (ctx?.billing?.recentPayments || []).map((p) => (p?.amount != null ? cents(p.amount) : null)) : []),
                   ].filter((v) => Number.isFinite(v)));
                   amountsStale = bodyAmounts.some((a) => !authorized.has(a));
                 } catch (err) {

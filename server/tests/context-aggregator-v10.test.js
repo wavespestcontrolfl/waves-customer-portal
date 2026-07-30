@@ -26,6 +26,16 @@ describe('redactAccessCodes — deterministic code masking', () => {
     expect(redactAccessCodes('close the gate so the dog stays in')).toContain('dog stays in');
   });
 
+  test('reverse multiword + password nouns + structured identifiers (codex r11)', () => {
+    expect(redactAccessCodes('four five four five is the gate code')).not.toMatch(/four|five/);
+    expect(redactAccessCodes('waves is the gate password')).not.toContain('waves');
+    const ids = redactAccessCodes('my social is 123-45-6789 and card 4242 4242 4242 4242');
+    expect(ids).not.toContain('123-45-6789');
+    expect(ids).not.toContain('4242');
+    // phone numbers and dates survive
+    expect(redactAccessCodes('call me at 941-555-1234 about July 15')).toContain('941-555-1234');
+  });
+
   test('multiword spoken credentials mask fully (codex r10)', () => {
     const out = redactAccessCodes('the gate code is four five four five');
     expect(out).not.toMatch(/four|five/);
