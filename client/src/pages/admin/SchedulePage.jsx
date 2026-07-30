@@ -10419,18 +10419,36 @@ export function CompletionPanel({
     // The server normalizer silently trims each observation/recommendation
     // line to 240 chars and keeps at most 20 entries — reject oversized
     // input here instead of letting the saved report lose text without
-    // warning (codex P2).
+    // warning (codex P2). Counted on the MERGED payload the submit actually
+    // sends (restored chip labels + free text + the typed recommendation),
+    // not per-textarea — the cap applies to the whole array, and an
+    // overflow would silently drop the entries after the twentieth
+    // (codex r8: the typed recommendation is appended last and vanished
+    // first).
     {
       const freeTextProblems = [];
-      for (const [label, text] of [
-        ["Observations", observationsText],
-        ["Recommendations", recommendationsText],
-      ]) {
-        const lines = freeTextLines(text);
-        if (lines.length > 20) {
-          freeTextProblems.push(`${label}: at most 20 entries (one per line)`);
+      const mergedCounts = [
+        [
+          "Observations",
+          activeSelectedLabels(selectedObservationLabels).length +
+            freeTextLines(observationsText).length,
+          observationsText,
+        ],
+        [
+          "Recommendations",
+          activeSelectedLabels(selectedRecommendationLabels).length +
+            freeTextLines(recommendationsText).length +
+            (isTypedFindings && typedRecommendations.trim() ? 1 : 0),
+          recommendationsText,
+        ],
+      ];
+      for (const [label, mergedCount, text] of mergedCounts) {
+        if (mergedCount > 20) {
+          freeTextProblems.push(
+            `${label}: at most 20 entries total (${mergedCount} entered)`,
+          );
         }
-        if (lines.some((line) => line.length > 240)) {
+        if (freeTextLines(text).some((line) => line.length > 240)) {
           freeTextProblems.push(`${label}: keep each line under 240 characters`);
         }
       }
