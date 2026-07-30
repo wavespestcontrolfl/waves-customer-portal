@@ -36,7 +36,10 @@ async function geocodeAddressWithStatus(address) {
   }
   try {
     const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}&key=${GOOGLE_KEY}`;
-    const resp = await fetch(url);
+    // Timeout so a hung request can't stall sweep batches (or hold the
+    // backstop cron's advisory lock) indefinitely; aborts land in the
+    // catch below and count as transient.
+    const resp = await fetch(url, { signal: AbortSignal.timeout(10_000) });
     const data = await resp.json();
     if (data.status === 'OK' && data.results && data.results.length > 0) {
       const { lat, lng } = data.results[0].geometry.location;
@@ -183,8 +186,15 @@ async function sweepUngeocodedCustomers({ limit = 25 } = {}) {
           longitude: location.lng,
           updated_at: new Date(),
         });
-        if (written) results.geocoded += 1;
-        else results.unresolved += 1;
+        if (written) {
+          results.geocoded += 1;
+          // Repo convention for every re-geocode path: mirror fresh coords
+          // onto the primary customer_properties row so property-linked
+          // bookings can stamp them.
+          await require('./customer-properties').syncPrimaryCoordsFromCustomer(row.id);
+        } else {
+          results.unresolved += 1;
+        }
       } else {
         results.unresolved += 1;
         // Only permanent failures (ZERO_RESULTS for this exact address) are

@@ -36,12 +36,16 @@ function installDb({ listRows, customersById }) {
         chain._whereInIds = ids;
         return chain;
       }),
-      select: jest.fn(async () => {
+      // knex builders are chainable thenables: select() returns the builder,
+      // awaiting it yields rows, and .first() may follow select().
+      select: jest.fn(() => chain),
+      then: (resolve) => {
         if (chain._whereInIds) {
-          return chain._whereInIds.map((id) => customersById[id]).filter(Boolean);
+          resolve(chain._whereInIds.map((id) => customersById[id]).filter(Boolean));
+          return;
         }
-        return listRows.filter((r) => !(chain._excluded || []).includes(r.id));
-      }),
+        resolve(listRows.filter((r) => !(chain._excluded || []).includes(r.id)));
+      },
       first: jest.fn(async () => customersById[chain._id] || null),
       update: jest.fn(async (patch) => {
         updates.push({ id: chain._id, patch });
