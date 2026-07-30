@@ -959,3 +959,34 @@ describe('meta phone-token contract (owner rule 2026-07-29)', () => {
     expect(r.reason).toMatch(/^meta_rendered_length_164/);
   });
 });
+
+describe('meta contract bundle checks + refinements (owner rule 2026-07-29)', () => {
+  const { checkMetaPhoneTokenPresent, checkCityServiceMetaPhone, checkBlogMetaContract } = require('../services/content/content-quality-gate')._internals;
+  const BLOG = { target_page_type: 'supporting-blog' };
+
+  test('blog meta without a soft CTA fails', () => {
+    const r = checkMetaPhoneTokenPresent({ meta_description: 'How to tell chinch bug damage from drought stress in a Southwest Florida lawn, and what a full turf recovery actually takes this season.' }, BLOG);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('blog_meta_missing_soft_cta');
+  });
+
+  test('expanded salesy phrases are rejected on blog metas', () => {
+    for (const tail of ['Request a quote today.', 'Contact us for treatment.', 'Schedule service today.', 'Save on professional service.']) {
+      const r = checkMetaPhoneTokenPresent({ meta_description: `What SWFL chinch bug damage looks like and what a turf recovery takes. ${tail}` }, BLOG);
+      expect(r.ok).toBe(false);
+      expect(r.reason).toBe('blog_meta_salesy');
+    }
+  });
+
+  test('city-service bundle check requires the token; empty meta defers', () => {
+    expect(checkCityServiceMetaPhone({ frontmatter: { meta_description: 'Pest control in Sarasota built for the coastal pressure. Call ☎️ {{cityPhone}} for a FREE estimate from techs on daily local routes.' } }).ok).toBe(true);
+    expect(checkCityServiceMetaPhone({ frontmatter: { meta_description: 'Pest control in Sarasota built around coastal pest pressure, from drywood termites to German roaches, with plans quoted in about a minute.' } }).reason).toBe('meta_missing_cityPhone_token');
+    expect(checkCityServiceMetaPhone({ frontmatter: {} }).ok).toBe(true);
+  });
+
+  test('supporting-blog bundle check applies the full blog contract; empty meta defers', () => {
+    expect(checkBlogMetaContract({ frontmatter: { meta_description: 'How to tell chinch bug damage from drought stress in a SWFL lawn, and what recovery takes. Learn more on the Waves blog.' } }).ok).toBe(true);
+    expect(checkBlogMetaContract({ frontmatter: { meta_description: 'Chinch bug basics for SWFL lawns and what recovery takes. Call ☎️ {{cityPhone}} to learn more from the Waves lawn team today.' } }).reason).toBe('blog_meta_must_not_carry_phone');
+    expect(checkBlogMetaContract({ frontmatter: {} }).ok).toBe(true);
+  });
+});

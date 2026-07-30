@@ -1757,8 +1757,10 @@ function metaTitleRewriteFinding(frontmatter, { isRefresh = false, liveMetaTitle
 // whole refresh lane). The metadata-rewrite lane gets the same contract from
 // the quality gate's meta_phone_token_present + meta_length_in_bounds.
 const LITERAL_PHONE_IN_META_RE = /\(\d{3}\)\s*\d{3}[-.\s]?\d{4}|\b\d{3}[-.]\d{3}[-.]\d{4}\b/;
-const SALESY_META_RE = /free\s+(estimate|quote|inspection)|call\s+(now|today|us)\b|book\s+(now|today)\b/i;
 function metaDescriptionContractFinding(frontmatter, { isRefresh = false, liveMetaDescription = null, targetIsBlog = false } = {}) {
+  // SALESY/SOFT-CTA definitions shared with the quality gate (single source
+  // in title-meta-spam-gate) so the two enforcement points can't drift.
+  const { SALESY_META_RE, SOFT_CTA_RE } = require('./title-meta-spam-gate');
   if (!isRefresh) return null;
   const draftMeta = frontmatter?.metaDescription ?? frontmatter?.meta_description;
   if (draftMeta === undefined || !String(draftMeta).trim()) return null; // absent → publisher keeps the live value
@@ -1770,6 +1772,9 @@ function metaDescriptionContractFinding(frontmatter, { isRefresh = false, liveMe
     }
     if (SALESY_META_RE.test(draftTrim)) {
       return finding('P1', 'BLOG_META_SALESY', 'Blog meta descriptions stay informational — no sales CTAs (owner rule 2026-07-29); end with a soft CTA like "Learn more on the Waves blog."');
+    }
+    if (!SOFT_CTA_RE.test(draftTrim)) {
+      return finding('P1', 'BLOG_META_MISSING_SOFT_CTA', 'Blog meta descriptions end with a soft CTA like "Learn more on the Waves blog." (owner rule 2026-07-29).');
     }
   } else {
     if (!draftTrim.includes('{{cityPhone}}')) {

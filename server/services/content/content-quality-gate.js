@@ -33,7 +33,7 @@
  */
 
 const { THRESHOLDS } = require('./scoring-config');
-const { evaluateTitleMetaSpam, renderMetaTokens } = require('./title-meta-spam-gate');
+const { evaluateTitleMetaSpam, renderMetaTokens, SALESY_META_RE, SOFT_CTA_RE } = require('./title-meta-spam-gate');
 const { isFaqBlockedService } = require('./content-guardrails');
 
 // Compute the achievable maximum score PER PAGE TYPE so the pass
@@ -109,6 +109,9 @@ const PAGE_TYPE_CHECKS = {
     { name: 'service_menu_present', weight: 6, evaluate: checkServiceMenu },
     { name: 'faq_from_customer_calls', weight: 6, evaluate: checkFaqFromCustomer },
     { name: 'localbusiness_service_schema', weight: 6, isHard: true, evaluate: checkLocalBusinessServiceSchema },
+    // Owner rule 2026-07-29: non-blog metas carry {{cityPhone}} — weight 0
+    // like title_meta_spam_free (pure hard gate, thresholds unchanged).
+    { name: 'meta_phone_token_present', weight: 0, isHard: true, evaluate: checkCityServiceMetaPhone },
     // Hard: city-service bodies are built from customer-derived signals
     // (FAQ-from-calls, local proof) exactly like customer-question pages,
     // but this was the ONE body-writing lane with no publish-time PII
@@ -143,6 +146,11 @@ const PAGE_TYPE_CHECKS = {
     { name: 'two_plus_city_mentions', weight: 4, evaluate: checkTwoPlusCityMentions },
     { name: 'faq_section_present', weight: 4, evaluate: checkFaqSectionPresent },
     { name: 'voice_match', weight: 6, evaluate: checkVoiceMatch },
+    // Owner rule 2026-07-29: blog metas carry NO phone, nothing salesy, and
+    // end with a soft CTA ("Learn more on the Waves blog"). Weight 0 hard
+    // gate — without it a freshly authored blog meta bypassed the metadata-
+    // lane check entirely.
+    { name: 'blog_meta_contract', weight: 0, isHard: true, evaluate: checkBlogMetaContract },
   ],
   metadata: [
     { name: 'title_length_in_bounds', weight: 6, isHard: true, evaluate: checkTitleLengthBounds },
@@ -1012,28 +1020,48 @@ function checkPrimaryKeywordInTitle(draft, brief, context) {
 // Meta text must use the {{cityPhone}} token instead — see the bundle entry.
 const LITERAL_PHONE_IN_META_RE = /\(\d{3}\)\s*\d{3}[-.\s]?\d{4}|\b\d{3}[-.]\d{3}[-.]\d{4}\b/;
 
-// Salesy markers banned from BLOG metas (owner rule 2026-07-29: the blog is
-// the informational lane — its metas summarize and end with a soft CTA like
-// "Learn more on the Waves blog", never a phone or sales pitch).
-const SALESY_META_RE = /free\s+(estimate|quote|inspection)|call\s+(now|today|us)\b|book\s+(now|today)\b/i;
-
-function checkMetaPhoneTokenPresent(draft, brief) {
-  const m = (draft.meta_description || draft.frontmatter?.meta_description || draft.frontmatter?.metaDescription || '').trim();
-  if (!m) return { ok: false, reason: 'no_meta_description' };
-  // Blog targets (target_page_type !== 'page'): NO phone and nothing salesy —
-  // informational summary + soft CTA only. Non-blog pages: the phone is
-  // REQUIRED, always as the {{cityPhone}} token.
-  const isBlogTarget = brief?.target_page_type !== 'page';
-  if (isBlogTarget) {
-    if (m.includes('{{cityPhone}}') || m.includes('{{phone}}') || LITERAL_PHONE_IN_META_RE.test(m)) {
-      return { ok: false, reason: 'blog_meta_must_not_carry_phone' };
-    }
-    if (SALESY_META_RE.test(m)) return { ok: false, reason: 'blog_meta_salesy' };
-    return { ok: true };
-  }
+// The two meta contracts (owner rule 2026-07-29), applied per target type.
+// SALESY_META_RE / SOFT_CTA_RE are shared with content-guardrails via
+// title-meta-spam-gate so the definitions can't drift.
+function pageMetaPhoneResult(m) {
   if (!m.includes('{{cityPhone}}')) return { ok: false, reason: 'meta_missing_cityPhone_token' };
   if (LITERAL_PHONE_IN_META_RE.test(m)) return { ok: false, reason: 'literal_phone_in_meta_use_cityPhone_token' };
   return { ok: true };
+}
+function blogMetaContractResult(m) {
+  if (m.includes('{{cityPhone}}') || m.includes('{{phone}}') || LITERAL_PHONE_IN_META_RE.test(m)) {
+    return { ok: false, reason: 'blog_meta_must_not_carry_phone' };
+  }
+  if (SALESY_META_RE.test(m)) return { ok: false, reason: 'blog_meta_salesy' };
+  if (!SOFT_CTA_RE.test(m)) return { ok: false, reason: 'blog_meta_missing_soft_cta' };
+  return { ok: true };
+}
+
+// Metadata-rewrite lane: target-aware (brief.target_page_type is derived from
+// the RESOLVED target file by the runner; unresolved targets now PARK before
+// this gate runs — see metadata_target_unresolved).
+function checkMetaPhoneTokenPresent(draft, brief) {
+  const m = (draft.meta_description || draft.frontmatter?.meta_description || draft.frontmatter?.metaDescription || '').trim();
+  if (!m) return { ok: false, reason: 'no_meta_description' };
+  return brief?.target_page_type === 'page' ? pageMetaPhoneResult(m) : blogMetaContractResult(m);
+}
+
+// city-service bundle: newly authored city/service pages must carry the
+// {{cityPhone}} token. Meta PRESENCE is other gates' job — empty defers.
+function checkCityServiceMetaPhone(draft) {
+  const m = (draft.meta_description || draft.frontmatter?.meta_description || draft.frontmatter?.metaDescription || '').trim();
+  if (!m) return { ok: true, reason: 'no_meta_to_check' };
+  return pageMetaPhoneResult(m);
+}
+
+// supporting-blog bundle: newly authored blog posts get the full blog meta
+// contract (no phone, nothing salesy, soft CTA) — without this, a fresh blog
+// draft bypassed the metadata-lane check entirely and could auto-publish a
+// promotional meta.
+function checkBlogMetaContract(draft) {
+  const m = (draft.meta_description || draft.frontmatter?.meta_description || '').trim();
+  if (!m) return { ok: true, reason: 'no_meta_to_check' };
+  return blogMetaContractResult(m);
 }
 
 function checkNoDuplicateTitle(draft, _brief, context) {
@@ -1066,5 +1094,5 @@ module.exports._internals = {
   checkHubLinkPresent, checkTwoPlusCityMentions, checkFaqSectionPresent, checkVoiceMatch,
   checkTitleLengthBounds, checkMetaLengthBounds,
   checkPrimaryKeywordInTitle, checkNoDuplicateTitle,
-  checkMetaPhoneTokenPresent,
+  checkMetaPhoneTokenPresent, checkCityServiceMetaPhone, checkBlogMetaContract,
 };

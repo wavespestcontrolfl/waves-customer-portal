@@ -157,16 +157,23 @@ describe('rewrite_title_meta live adapter', () => {
           draft: {
             type: 'metadata',
             title: 'Pest Control in Lakewood Ranch, FL | Waves',
-            // Meets the 2026-07-29 meta contract. The mocked publisher has no
-            // getLiveFrontmatter, so target resolution fails closed to the
-            // BLOG contract: no phone, nothing salesy, soft CTA, 115-160.
-            meta_description: 'Need pest control in Lakewood Ranch? How to identify, treat, and prevent common Southwest Florida pest problems. Learn more on the Waves blog.',
+            // Meets the 2026-07-29 PAGE meta contract (resolved service
+            // target): {{cityPhone}} token, no literal number, 115-160
+            // rendered.
+            meta_description: 'Need pest control in Lakewood Ranch? Waves treats and prevents common Southwest Florida pest problems. Call ☎️ {{cityPhone}} for an estimate.',
           },
           agent_id: 'agent_meta',
           session_id: 'session_meta',
         }),
       };
       const publisher = {
+        // Target resolution is now mandatory (unresolved parks) — resolve to
+        // a service page with no metaTitle so the PAGE meta contract applies
+        // and the title gates run on the draft title.
+        getLiveFrontmatter: jest.fn().mockResolvedValue({
+          _astro_source_path: 'src/content/services/pest-control-lakewood-ranch-fl.md',
+          metaDescription: 'Old LWR meta description.',
+        }),
         publishMetadataRewrite: jest.fn().mockResolvedValue({
           status: 'pr_open',
           live: false,
@@ -187,6 +194,57 @@ describe('rewrite_title_meta live adapter', () => {
       expect(queue.pendingReview).toHaveBeenCalledWith('opp_meta_1', 'metadata_pr_pending_merge', { claimToken: claimedAt });
       expect(queue.release).not.toHaveBeenCalled();
       expect(queue.complete).not.toHaveBeenCalled();
+    } finally {
+      if (previousShadow === undefined) delete process.env.SHADOW_MODE_REWRITE_TITLE_META;
+      else process.env.SHADOW_MODE_REWRITE_TITLE_META = previousShadow;
+    }
+  });
+
+  test('parks a metadata rewrite whose target cannot be resolved (fail closed — blog vs page contracts diverge)', async () => {
+    const previousShadow = process.env.SHADOW_MODE_REWRITE_TITLE_META;
+    process.env.SHADOW_MODE_REWRITE_TITLE_META = 'false';
+    try {
+      const claimedAt = new Date('2026-05-27T13:00:00Z');
+      const queue = {
+        claimNext: jest.fn().mockResolvedValue({ id: 'opp_meta_unresolved', action_type: 'rewrite_title_meta', claimed_at: claimedAt }),
+        complete: jest.fn().mockResolvedValue(true),
+        pendingReview: jest.fn().mockResolvedValue(true),
+        release: jest.fn().mockResolvedValue(true),
+      };
+      const briefBuilder = {
+        compose: jest.fn().mockResolvedValue({
+          id: 'brief_meta_unresolved',
+          action_type: 'rewrite_title_meta',
+          page_type: 'metadata',
+          target_keyword: 'pest control lakewood ranch fl',
+          city: 'Lakewood Ranch',
+          service: 'pest',
+          human_review_required: false,
+        }),
+      };
+      const dispatcher = {
+        runWithBrief: jest.fn().mockResolvedValue({
+          ok: true,
+          draft: {
+            type: 'metadata',
+            title: 'Pest Control in Lakewood Ranch, FL | Waves',
+            meta_description: 'Need pest control in Lakewood Ranch? Waves treats and prevents common Southwest Florida pest problems. Call ☎️ {{cityPhone}} for an estimate.',
+          },
+        }),
+      };
+      // getLiveFrontmatter resolves to null → target unresolved → park.
+      const publisher = {
+        getLiveFrontmatter: jest.fn().mockResolvedValue(null),
+        publishMetadataRewrite: jest.fn(),
+      };
+      const runner = loadRunnerWith({ queue, briefBuilder, dispatcher, publisher });
+
+      const result = await runner.runNext();
+
+      expect(result.outcome).toBe('completed_pending_review');
+      expect(result.skip_reason).toBe('metadata_target_unresolved');
+      expect(publisher.publishMetadataRewrite).not.toHaveBeenCalled();
+      expect(queue.pendingReview).toHaveBeenCalledWith('opp_meta_unresolved', 'metadata_target_unresolved', { claimToken: claimedAt });
     } finally {
       if (previousShadow === undefined) delete process.env.SHADOW_MODE_REWRITE_TITLE_META;
       else process.env.SHADOW_MODE_REWRITE_TITLE_META = previousShadow;
@@ -229,7 +287,12 @@ describe('rewrite_title_meta live adapter', () => {
           },
         }),
       };
-      const publisher = { publishMetadataRewrite: jest.fn() };
+      const publisher = {
+        // Target resolution is mandatory (unresolved parks) — resolve to a
+        // service page so the gates under test actually run.
+        getLiveFrontmatter: jest.fn().mockResolvedValue({ _astro_source_path: 'src/content/services/pest-control-lakewood-ranch-fl.md' }),
+        publishMetadataRewrite: jest.fn(),
+      };
       const runner = loadRunnerWith({ queue, briefBuilder, dispatcher, publisher });
 
       const result = await runner.runNext();
@@ -283,7 +346,12 @@ describe('rewrite_title_meta live adapter', () => {
           },
         }),
       };
-      const publisher = { publishMetadataRewrite: jest.fn() };
+      const publisher = {
+        // Target resolution is mandatory (unresolved parks) — resolve to a
+        // service page so the gates under test actually run.
+        getLiveFrontmatter: jest.fn().mockResolvedValue({ _astro_source_path: 'src/content/services/pest-control-lakewood-ranch-fl.md' }),
+        publishMetadataRewrite: jest.fn(),
+      };
       const runner = loadRunnerWith({ queue, briefBuilder, dispatcher, publisher });
 
       const result = await runner.runNext();
@@ -340,7 +408,12 @@ describe('rewrite_title_meta live adapter', () => {
           },
         }),
       };
-      const publisher = { publishMetadataRewrite: jest.fn() };
+      const publisher = {
+        // Target resolution is mandatory (unresolved parks) — resolve to a
+        // service page so the gates under test actually run.
+        getLiveFrontmatter: jest.fn().mockResolvedValue({ _astro_source_path: 'src/content/services/pest-control-lakewood-ranch-fl.md' }),
+        publishMetadataRewrite: jest.fn(),
+      };
       const runner = loadRunnerWith({ queue, briefBuilder, dispatcher, publisher });
 
       const result = await runner.runNext();
@@ -395,7 +468,12 @@ describe('rewrite_title_meta live adapter', () => {
           draft: { type: 'metadata', title: 'X', meta_description: 'Y' },
         }),
       };
-      const publisher = { publishMetadataRewrite: jest.fn() };
+      const publisher = {
+        // Target resolution is mandatory (unresolved parks) — resolve to a
+        // service page so the gates under test actually run.
+        getLiveFrontmatter: jest.fn().mockResolvedValue({ _astro_source_path: 'src/content/services/pest-control-lakewood-ranch-fl.md' }),
+        publishMetadataRewrite: jest.fn(),
+      };
       const protectedPages = {
         isProtected: jest.fn().mockResolvedValue({ protected: true, reason: 'money_page', source: 'pattern' }),
       };

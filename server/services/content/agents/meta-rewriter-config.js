@@ -60,7 +60,9 @@ DO:
 
 DON'T:
   - Touch the body. The runner will only commit frontmatter changes.
-  - Type a phone number into title or meta — always the {{cityPhone}} token.
+  - Type a phone number into title or meta, ever. On non-blog pages the
+    phone appears ONLY as the {{cityPhone}} token; on blog posts there is
+    no phone at all (see OUTPUT REQUIREMENTS).
   - Promise prices in title/meta — link to estimator on the page itself.
   - Reuse an existing title from the site (no_duplicate_title hard fail).
   - Stuff keywords. The primary keyword once in title + ~once in meta
