@@ -8887,6 +8887,32 @@ const CallRecordingProcessor = {
       }
     }
 
+    // A RETRY run (extraction_failed → reprocess) re-enters with
+    // call_log.customer_id already persisted by the failed attempt, so the
+    // creation branch above never rebuilds newsletterCandidate — and the
+    // whole newsletter chain below would be skipped, leaving the
+    // call-created customer without a DOI or a held_newsletter flag forever
+    // (Codex #3084 r20). Reconstruct the candidate for customers CREATED BY
+    // THIS CALL (created after the call row), reading the CURRENT stored
+    // email so a correction made during the failed window wins. Matched
+    // pre-existing customers keep the old behavior: no auto-subscribe.
+    if (!newsletterCandidate && customerId && !createdCustomerFromCall) {
+      try {
+        const custRow = await db('customers').where({ id: customerId }).first('email', 'first_name', 'last_name', 'created_at');
+        if (custRow?.created_at && call.created_at
+            && new Date(custRow.created_at) >= new Date(call.created_at)) {
+          newsletterCandidate = {
+            customerId,
+            email: custRow.email || extracted.email || null,
+            firstName: custRow.first_name || (extracted.first_name ? capitalizeName(extracted.first_name) : null),
+            lastName: custRow.last_name || null,
+          };
+          logger.info(`[call-proc] Rebuilt newsletter candidate for call-created customer on retry (${maskSid(callSid)})`);
+        }
+      } catch (rebuildErr) {
+        logger.warn(`[call-proc] newsletter candidate rebuild failed for ${maskSid(callSid)}: ${rebuildErr.message}`);
+      }
+    }
     if (newsletterCandidate && v2EmailBlocked) {
       logger.info(`[call-proc] Skipping newsletter subscribe for ${callSid}: v2 TCPA gate blocked all outbound (do_not_contact)`);
     } else if (newsletterCandidate

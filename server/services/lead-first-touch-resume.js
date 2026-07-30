@@ -360,6 +360,21 @@ async function resumeHeldFirstTouch({
             },
             dbh,
           });
+          if (!enroll?.enrolled && enroll?.enrollmentId) {
+            // Already-enrolled leaves the ACTIVE enrollment's denormalized
+            // email untouched, and the scheduler sends each remaining step
+            // to the ROW's email (Codex #3084 r20): after a superseded
+            // settle re-pends this hold, the retry must retarget that
+            // active enrollment to the address THIS release confirmed —
+            // marking the drip released while its steps continue to the
+            // superseded (possibly hard-bounced) address is the exact
+            // incident this lane exists to prevent. A thrown update lands
+            // in the enroll catch below: re-pend, retryable.
+            await dbh('automation_enrollments')
+              .where({ id: enroll.enrollmentId, status: 'active' })
+              .whereRaw('LOWER(email) != ?', [sendEmail])
+              .update({ email: sendEmail, updated_at: new Date() });
+          }
           result.enrolled = result.enrolled || !!enroll?.enrolled;
           patch.released_drip = true;
         } catch (enrollErr) {
@@ -694,7 +709,15 @@ async function recordFirstTouchHold({ callLogId, customerId = null, heldEmail, h
         .onConflict('call_log_id')
         .merge({
           customer_id: customerId,
-          held_email: emailToRecord,
+          // An ACTIVE claim's target changes ONLY via operator retargets
+          // (the correction fanout) — a processor merge overwriting it
+          // would make the claimant's pre-send fresh read adopt a
+          // force-reprocess's unconfirmed guess as if it were a correction
+          // and send to it without read-back (Codex #3084 r20).
+          held_email: dbh.raw(
+            "CASE WHEN first_touch_holds.status = 'releasing' THEN first_touch_holds.held_email ELSE ? END",
+            [emailToRecord],
+          ),
           held_drip: dbh.raw('first_touch_holds.held_drip OR excluded.held_drip'),
           held_newsletter: dbh.raw('first_touch_holds.held_newsletter OR excluded.held_newsletter'),
           // Never demote an ACTIVE 'releasing' claim back to 'pending' — a

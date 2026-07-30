@@ -25,6 +25,7 @@ let mockHoldFirstQueue = null; // shift per first_touch_holds.first(); an Error 
 let mockTriageFirstQueue = null; // shift per triage_items.first()
 let mockReleasedSettleZeroOnce = false; // next released-settle matches 0 rows (mid-send retarget)
 let mockRepenGuardZeroOnce = false; // next guarded re-pend matches 0 rows (deny stamp landed)
+let mockEnrollmentUpdates = []; // automation_enrollments update() patches
 jest.mock('../models/db', () => {
   const handler = (table) => {
     const chain = {
@@ -71,6 +72,9 @@ jest.mock('../models/db', () => {
           if (mockSubscriberUpdateError) throw mockSubscriberUpdateError;
           mockSubscriberUpdates.push(patch);
         }
+        if (table === 'automation_enrollments') {
+          mockEnrollmentUpdates.push(patch);
+        }
         return 1;
       }),
       first: jest.fn(async () => {
@@ -109,7 +113,7 @@ jest.mock('../models/db', () => {
   };
   const db = jest.fn(handler);
   db.schema = { hasTable: jest.fn(async () => true) };
-  db.raw = jest.fn((x) => x);
+  db.raw = jest.fn((sql, bindings) => (bindings === undefined ? sql : { sql, bindings }));
   return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -163,7 +167,15 @@ beforeEach(() => {
   mockTriageFirstQueue = null;
   mockReleasedSettleZeroOnce = false;
   mockRepenGuardZeroOnce = false;
+  mockEnrollmentUpdates = [];
 });
+
+// The merge's held_email is a bound CASE since r20 (an ACTIVE claim's target
+// is preserved over a fresh extraction guess) — unwrap the recorded value.
+function mergedHeldEmail(mergeArg) {
+  const v = mergeArg.held_email;
+  return typeof v === 'string' ? v : v.bindings[0];
+}
 
 describe('resumeHeldFirstTouch (ledger release engine)', () => {
   test('releases drip + newsletter to the HELD address, then marks the row released', async () => {
@@ -332,7 +344,7 @@ describe('recordFirstTouchHold (durable hold ledger writes)', () => {
       heldEmail: 'Guess@Example.com', heldDrip: true, runStartedAt: new Date(),
     });
     expect(ok).toBe(true);
-    expect(mockMergeArgs.at(-1).held_email).toBe('guess@example.com');
+    expect(mergedHeldEmail(mockMergeArgs.at(-1))).toBe('guess@example.com');
   });
 
   test('a live card from an EARLIER run keeps the address the operator is reviewing', async () => {
@@ -345,7 +357,7 @@ describe('recordFirstTouchHold (durable hold ledger writes)', () => {
       callLogId: 'call-1', customerId: 'cust-1',
       heldEmail: 'newguess@example.com', heldDrip: true, runStartedAt: new Date(),
     });
-    expect(mockMergeArgs.at(-1).held_email).toBe('reviewed@example.com');
+    expect(mergedHeldEmail(mockMergeArgs.at(-1))).toBe('reviewed@example.com');
   });
 
   test('a hold RELEASED during this run re-pends against the address that release confirmed', async () => {
@@ -361,7 +373,7 @@ describe('recordFirstTouchHold (durable hold ledger writes)', () => {
       callLogId: 'call-1', customerId: 'cust-1',
       heldEmail: 'original@example.com', heldNewsletter: true, runStartedAt,
     });
-    expect(mockMergeArgs.at(-1).held_email).toBe('confirmed@example.com');
+    expect(mergedHeldEmail(mockMergeArgs.at(-1))).toBe('confirmed@example.com');
   });
 
   test('a hold released in an EARLIER cycle re-pends normally with the fresh address', async () => {
@@ -371,7 +383,7 @@ describe('recordFirstTouchHold (durable hold ledger writes)', () => {
       callLogId: 'call-1', customerId: 'cust-1',
       heldEmail: 'fresh@example.com', heldDrip: true, runStartedAt,
     });
-    expect(mockMergeArgs.at(-1).held_email).toBe('fresh@example.com');
+    expect(mergedHeldEmail(mockMergeArgs.at(-1))).toBe('fresh@example.com');
   });
 
   test('Step 8 keeps the during-run corrected address even after Step 6 re-pended the marker', async () => {
@@ -386,7 +398,7 @@ describe('recordFirstTouchHold (durable hold ledger writes)', () => {
       callLogId: 'call-1', customerId: 'cust-1',
       heldEmail: 'stale-guess@example.com', heldNewsletter: true, runStartedAt,
     });
-    expect(mockMergeArgs.at(-1).held_email).toBe('corrected@example.com');
+    expect(mergedHeldEmail(mockMergeArgs.at(-1))).toBe('corrected@example.com');
   });
 
   test('retries a transient write failure and succeeds', async () => {
@@ -416,6 +428,18 @@ describe('recordFirstTouchHold (durable hold ledger writes)', () => {
     mockHold = null;
     await recordFirstTouchHold({ callLogId: 'call-1', customerId: 'cust-1', heldEmail: 'a@example.com', heldDrip: true });
     expect(String(mockMergeArgs.at(-1).status)).toContain("WHEN first_touch_holds.status IN ('releasing', 'blocked') THEN first_touch_holds.status");
+  });
+
+  test("the merge never overwrites an ACTIVE claim's target with a fresh extraction guess", async () => {
+    // A force-reprocess merging mid-claim must not swap held_email under a
+    // claimant — its pre-send fresh read would adopt the unconfirmed guess
+    // as if it were an operator correction and send without read-back
+    // (Codex #3084 r20). Only the correction fanout retargets active claims.
+    mockHold = null;
+    await recordFirstTouchHold({ callLogId: 'call-1', customerId: 'cust-1', heldEmail: 'guess@example.com', heldDrip: true });
+    const merged = mockMergeArgs.at(-1).held_email;
+    expect(String(merged.sql)).toContain("WHEN first_touch_holds.status = 'releasing' THEN first_touch_holds.held_email");
+    expect(merged.bindings[0]).toBe('guess@example.com');
   });
 });
 
@@ -485,6 +509,19 @@ describe('mid-send races (r19)', () => {
     const res = await resumeHeldFirstTouch({ callLogId: 'call-1' });
     expect(res.resumed).toBe(true); // the sends to the observed target did go out
     expect(mockHoldUpdates.at(-1)).toMatchObject({ status: 'pending', last_error: 'superseded_during_send' });
+  });
+
+  test('an already-active enrollment is retargeted to the released address before the drip settles', async () => {
+    // enrollCustomer's already-enrolled outcome leaves the ACTIVE row's
+    // denormalized email untouched, and the scheduler sends to the ROW's
+    // email — a retry after a superseded settle must retarget it before
+    // marking the drip released (Codex #3084 r20).
+    mockEnroll.mockResolvedValueOnce({ enrolled: false, reason: 'already enrolled', enrollmentId: 'enr-1' });
+    mockHold = baseHold({ held_newsletter: false });
+    await resumeHeldFirstTouch({ callLogId: 'call-1' });
+    expect(mockEnrollmentUpdates).toHaveLength(1);
+    expect(mockEnrollmentUpdates[0]).toMatchObject({ email: 'confirmed@example.com' });
+    expect(mockHoldUpdates.at(-1)).toMatchObject({ status: 'released', released_drip: true });
   });
 
   test('a failed pre-send re-read never buries a freshly-landed deny stamp', async () => {
@@ -581,7 +618,7 @@ describe('deny-stamped holds and dedupe hardening (r14)', () => {
     mockHold = null;
     const ok = await recordFirstTouchHold({ callLogId: 'call-1', customerId: 'cust-1', heldEmail: null, heldNewsletter: true });
     expect(ok).toBe(true);
-    expect(mockMergeArgs.at(-1).held_email).toBe('');
+    expect(mergedHeldEmail(mockMergeArgs.at(-1))).toBe('');
   });
 });
 
