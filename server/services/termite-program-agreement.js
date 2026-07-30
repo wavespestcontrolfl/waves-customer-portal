@@ -187,6 +187,14 @@ function collectTermiteFacts(estData) {
       // legacy lines that never carried them), so it must not bypass the
       // fail-closed discount check.
       const visits = Number(node.visitsPerYear ?? node.visits) || 4;
+      // The seeded agreements promise a QUARTERLY cadence ("4 applications
+      // per year") verbatim. An EXPLICIT legacy/replayed count other than
+      // 4 must be remembered so the builder parks — otherwise a 3-visit
+      // accepted annual gets papered with a signable 4x promise that
+      // contradicts the accepted total.
+      if ((node.visitsPerYear != null || node.visits != null) && visits !== 4) {
+        facts.nonQuarterlyVisits = visits;
+      }
       const netAnnual = Number(node.manualFinalAnnual ?? node.annualAfterDiscount);
       if (Number.isFinite(netAnnual) && netAnnual > 0) {
         takePerApp(Math.round((netAnnual / visits) * 100) / 100, { net: true });
@@ -267,6 +275,12 @@ function buildTermiteProgramAgreementValues(estimate = {}, estData = null, { sta
   const data = estData || parseEstimateData(estimate.estimate_data);
   const facts = collectTermiteFacts(data);
   if (!facts.hasProgram) return null;
+
+  // Owner-approved wording states "4 applications per year" verbatim — an
+  // accepted line with an explicit non-quarterly visit count parks for a
+  // manually tailored agreement rather than signing a 4x promise that
+  // contradicts the accepted annual total.
+  if (facts.nonQuarterlyVisits) return null;
 
   // Pre-discount figure + a discount in play = the agreement could state a
   // higher price than the accepted invoice. Fail closed to manual prep.
@@ -493,7 +507,8 @@ function isCommercialEstimate(estimate = {}, estData = null) {
     && data.engineRequest.profile && typeof data.engineRequest.profile === 'object')
     ? data.engineRequest.profile : null;
   const enriched = (data?.enriched && typeof data.enriched === 'object') ? data.enriched : null;
-  if (commercialFlag(data?.inputs?.isCommercial) || commercialFlag(data?.engineInputs?.isCommercial)
+  if (commercialFlag(data?.isCommercial) || commercialFlag(data?.inputs?.isCommercial)
+    || commercialFlag(data?.engineInputs?.isCommercial)
     || commercialFlag(profile?.isCommercial) || commercialFlag(enriched?.isCommercial)) return true;
   // Engine-shaped inputs carry explicit commercial markers beyond the
   // flag: category COMMERCIAL and the commercial subtype/risk fields are
@@ -502,7 +517,11 @@ function isCommercialEstimate(estimate = {}, estData = null) {
     String(src.category || '').trim().toUpperCase() === 'COMMERCIAL'
     || !!src.commercialSubtype || !!src.commercialRiskType
   );
-  if ([data?.inputs, data?.engineInputs, profile, enriched].some(commercialMarkers)) return true;
+  // Top-level `data` included: legacy estimate_data shapes persist
+  // isCommercial / category / commercialSubtype at the root, not under an
+  // inputs container — the same shapes the property-type list below
+  // already honors at the top level.
+  if ([data, data?.inputs, data?.engineInputs, profile, enriched].some(commercialMarkers)) return true;
   // Canonical commercial property-type classification, mirroring the
   // estimate engine's alias/token rules (client/src/lib/estimateEngine.js
   // classifyPropertyType): a persisted 'Office' / 'Restaurant' / 'School'

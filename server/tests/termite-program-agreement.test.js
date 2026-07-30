@@ -150,6 +150,13 @@ describe('buildTermiteProgramAgreementValues', () => {
     expect(prepared.values.program.combined_per_application).toBe('$103');
   });
 
+  test('fail-closed: explicit non-quarterly visit count parks (template promises 4 applications/year)', () => {
+    const data = ownedEstData();
+    data.result.lineItems[0].visitsPerYear = 3;
+    data.result.lineItems[0].annual = 216;
+    expect(buildTermiteProgramAgreementValues({}, data)).toBeNull();
+  });
+
   test('fail-closed: owned program without an install price builds nothing', () => {
     const data = ownedEstData();
     delete data.result.lineItems[0].installation;
@@ -373,6 +380,14 @@ describe('isCommercialEstimate', () => {
       expect(isCommercialEstimate({}, { inputs: { propertyType: pt } })).toBe(true);
     }
     expect(isCommercialEstimate({}, { inputs: { propertyType: 'Single Family' } })).toBe(false);
+  });
+
+  test('top-level legacy commercial markers park (isCommercial/category/commercialSubtype at data root)', () => {
+    expect(isCommercialEstimate({}, { isCommercial: true })).toBe(true);
+    expect(isCommercialEstimate({}, { isCommercial: 'YES' })).toBe(true);
+    expect(isCommercialEstimate({}, { category: 'COMMERCIAL' })).toBe(true);
+    expect(isCommercialEstimate({}, { commercialSubtype: 'office_retail' })).toBe(true);
+    expect(isCommercialEstimate({}, { category: 'RESIDENTIAL' })).toBe(false);
   });
 
   test('canonical commercial property types and engine markers park (Office/Restaurant/School/HOA/Government)', () => {

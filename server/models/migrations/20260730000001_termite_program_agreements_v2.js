@@ -390,12 +390,16 @@ exports.up = async function up(knex) {
       .where({ template_id: template.id })
       .orderBy('version_number', 'asc');
     let seededVersion = versions.find((v) => v.body === seed.body) || null;
-    if (seededVersion) {
+    if (seededVersion && template.active_version_id !== seededVersion.id) {
       // Body-equal identifies OUR wording, but an admin-created draft can
       // carry the approved body with different signature metadata (title,
-      // disclosure, variables, required_fields). The activated compliance
-      // version must be canonical in full — repair the matched row to the
-      // seeded metadata (idempotent no-op when already canonical).
+      // disclosure, variables, required_fields). A version we are about to
+      // ACTIVATE must be canonical in full — repair it to the seeded
+      // metadata (idempotent no-op when already canonical). A version that
+      // is ALREADY active is an admin-authored live publication: its
+      // metadata stays untouched — nothing is being activated, no rollback
+      // state gets recorded for it, and down() would have no way to
+      // restore what a rewrite here destroyed.
       await knex('document_template_versions').where({ id: seededVersion.id }).update({
         title: seed.title,
         signer_disclosure: 'I agree to receive and sign this document electronically.',
