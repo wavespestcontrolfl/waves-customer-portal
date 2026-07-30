@@ -2002,10 +2002,14 @@ function initScheduledJobs() {
                   const customerRow = await db('customers').where({ id: msg.customer_id }).first();
                   const ctx = customerRow ? await ContextAggregator.getContextForCustomer(customerRow) : null;
                   const cents = (v) => Math.round(Number(v) * 100);
+                  // CURRENT OBLIGATIONS ONLY (Codex r10): a paid balance
+                  // moves the same figure into recent payments, so a union
+                  // set would keep authorizing the stale "your balance is
+                  // $X" claim. At fire time only what the customer still
+                  // owes may validate an amount; a just-paid figure blocks.
                   const authorized = new Set([
                     ctx?.billing?.outstandingBalance > 0 ? cents(ctx.billing.outstandingBalance) : null,
                     ctx?.billing?.openInvoice?.amountDue != null ? cents(ctx.billing.openInvoice.amountDue) : null,
-                    ...((ctx?.billing?.recentPayments || []).map((p) => (p?.amount != null ? cents(p.amount) : null))),
                   ].filter((v) => Number.isFinite(v)));
                   amountsStale = bodyAmounts.some((a) => !authorized.has(a));
                 } catch (err) {

@@ -26,6 +26,11 @@ describe('redactAccessCodes — deterministic code masking', () => {
     expect(redactAccessCodes('close the gate so the dog stays in')).toContain('dog stays in');
   });
 
+  test('multiword spoken credentials mask fully (codex r10)', () => {
+    const out = redactAccessCodes('the gate code is four five four five');
+    expect(out).not.toMatch(/four|five/);
+  });
+
   test('quoted credentials mask (codex r9)', () => {
     expect(redactAccessCodes('gate password is "waves"')).not.toContain('waves');
   });

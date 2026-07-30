@@ -47,7 +47,9 @@ const ACCESS_CODE_VALUE_RE = /\b(?:\d{3,8}|[A-Z]{2,10}|[A-Za-z]*\d[A-Za-z0-9#*]*
 // waves") can't be shape-detected — they're masked POSITIONALLY: the 1-2
 // tokens directly following the code noun (with optional is/: connector),
 // and the token directly before "is/= the … code" phrasing.
-const ACCESS_CODE_AFTER_NOUN_RE = /\b(code|pin|combo|combination|passcode|password|passphrase)\b(\s*(?:is|:|=|-)?\s*)(["'\u201c\u2018]?[A-Za-z0-9#*]{2,12}["'\u201d\u2019]?)(\s+["'\u201c\u2018]?[A-Za-z0-9#*]{2,12}["'\u201d\u2019]?)?/gi;
+// Up to FOUR value tokens (Codex r10): spoken credentials arrive as number
+// words — "four five four five" — and a two-token cap leaked the tail.
+const ACCESS_CODE_AFTER_NOUN_RE = /\b(code|pin|combo|combination|passcode|password|passphrase)\b(\s*(?:is|:|=|-)?\s*)((?:["'\u201c\u2018]?[A-Za-z0-9#*]{1,12}["'\u201d\u2019]?\s*){1,4})/gi;
 const ACCESS_CODE_BEFORE_NOUN_RE = /\b([A-Za-z0-9#*]{2,12})(\s+(?:is|=)\s+(?:the\s+)?[^.\n]{0,20}?\b(?:code|pin|combo|combination|passcode)\b)/gi;
 const ACCESS_CODE_STOPWORDS = new Set(['gate', 'garage', 'door', 'lockbox', 'lock', 'box', 'keypad', 'entry', 'access', 'alarm', 'pin', 'code', 'combo', 'combination', 'passcode', 'password', 'passphrase', 'is', 'the', 'a', 'an', 'use', 'tech', 'only', 'for', 'to', 'and', 'or', 'needed', 'required', 'broken', 'works', 'not', 'no', 'none', 'unknown', 'same', 'new', 'old']);
 function redactAccessCodes(text) {
@@ -68,13 +70,12 @@ function redactAccessCodes(text) {
     ));
     // Positional lowercase pass (Codex r7): the tokens adjacent to the code
     // noun are the credential regardless of casing.
-    masked = masked.replace(ACCESS_CODE_AFTER_NOUN_RE, (m, noun, mid, t1, t2) => {
-      const mask = (tok) => {
-        if (!tok) return '';
-        const bare = tok.trim().replace(/["'\u201c\u201d\u2018\u2019]/g, '').toLowerCase();
+    masked = masked.replace(ACCESS_CODE_AFTER_NOUN_RE, (m, noun, mid, tokens) => {
+      const maskedTokens = String(tokens || '').replace(/["'\u201c\u2018]?[A-Za-z0-9#*]{1,12}["'\u201d\u2019]?/g, (tok) => {
+        const bare = tok.replace(/["'\u201c\u201d\u2018\u2019]/g, '').toLowerCase();
         return ACCESS_CODE_STOPWORDS.has(bare) ? tok : tok.replace(/[A-Za-z0-9#*]+/, '[redacted]');
-      };
-      return `${noun}${mid}${mask(t1)}${mask(t2)}`;
+      });
+      return `${noun}${mid}${maskedTokens}`;
     });
     masked = masked.replace(ACCESS_CODE_BEFORE_NOUN_RE, (m, tok, rest) => (
       ACCESS_CODE_STOPWORDS.has(tok.toLowerCase()) ? m : `[redacted]${rest}`
@@ -167,16 +168,13 @@ class ContextAggregator {
         // "your invoice"). LIST, not first (Codex r5): the newest row can be
         // payer-billed while the customer still owes an older own invoice —
         // and the canonical balance sums collectible own invoices.
-        // ALLOW-list (Codex r7 — the deny-list leaked 'scheduled'/'sending'
-        // rows the customer has never seen): the canonical customer-visible
-        // set billing-v2's balance uses.
-        .whereIn('status', ['sent', 'viewed', 'overdue'])
+        // ALL statuses fetched (Codex r10 — the r9 consolidation edit missed;
+        // a visible-only fetch left draftOwnInvoiceIds permanently empty and
+        // payer classification blind to settled payer rows). The visible
+        // sent/viewed/overdue slice is derived in JS below; 300-row sanity
+        // ceiling, far above any real account.
         .orderBy('created_at', 'desc')
-        // aggregate over the FULL collectible set (Codex r6 — a display-sized
-        // limit truncated the balance and could hide the customer's own
-        // invoice behind newer payer-billed rows); 100 is a sanity ceiling,
-        // far above any real account.
-        .limit(100)
+        .limit(300)
         .select('id', 'title', 'status', 'total', 'credit_applied', 'due_date', 'payer_id', 'created_at')
         .catch(() => []),
       // v10: lawn health scores — "how's my lawn doing" is a routine text.

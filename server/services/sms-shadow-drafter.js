@@ -250,9 +250,20 @@ function buildFactsBlock(context) {
   try {
     ({ findBannedCustomerCopy: bannedCopyGuard } = require('./service-report/activity-indicators'));
   } catch { bannedCopyGuard = null; }
-  const hasBannedCopy = (text) => !bannedCopyGuard
-    || (bannedCopyGuard(text) || []).length > 0
-    || SMS_COMPLIANCE_CLAIM_RE.test(String(text || ''));
+  // The ONE sanctioned safety idiom (Codex r9+r10): "safe once dry" counts
+  // only when the SAME text also carries the technician-confirms-timing
+  // clause — the complete prescribed answer. The sanctioned sentence is
+  // stripped before screening so any OTHER claim in the text still drops it.
+  const SANCTIONED_SAFE_RE = /\bsafe\s+(?:once|when|after)\s+(?:it(?:'s| is| has)?\s+)?dr(?:y|ied|ying)\b/i;
+  const CONFIRM_TIMING_RE = /\b(?:tech(?:nician)?|office|we)\b[^.\n]{0,40}\bconfirm(?:s|ed|ing)?\b[^.\n]{0,25}\b(?:timing|time|when)\b/i;
+  const hasBannedCopy = (text) => {
+    if (!bannedCopyGuard) return true;
+    let t = String(text || '');
+    if (SANCTIONED_SAFE_RE.test(t) && CONFIRM_TIMING_RE.test(t)) {
+      t = t.replace(SANCTIONED_SAFE_RE, '');
+    }
+    return (bannedCopyGuard(t) || []).length > 0 || SMS_COMPLIANCE_CLAIM_RE.test(t);
+  };
 
   const conversation = (context.smsHistory || [])
     .slice(0, 10)
@@ -491,7 +502,7 @@ function sanitizeExemplarText(text) {
 // untrusted grounding text (property notes, call summaries, transcripts)
 // drops that line/entry — the drafter must never be handed repeatable
 // prohibited language.
-const SMS_COMPLIANCE_CLAIM_RE = /\b(?:pet|child|kid|family|people|human)s?[\s-]?safe\b|\bnon[\s-]?toxic\b|\bharmless\b|\bEPA[\s-]?(?:approved|certified)\b|\bsafe\s+(?:for|around|to)\b|\b(?:is|are|was|were|be|being|been|it'?s|they'?re|stays?|remains?|totally|completely|perfectly|very|100%)\s+safe\b(?!\s+(?:once|when|after)\s+(?:it(?:'s| is| has)?\s+)?dr(?:y|ied|ying))|\b(?:treatment|product|chemical|spray|application)s?\b[^.\n]{0,25}\bsafe\b(?!\s+(?:once|when|after)\s+(?:it(?:'s| is| has)?\s+)?dr(?:y|ied|ying))|\bre-?entry\b[^.\n]{0,30}\d+\s*(?:min|minute|hour)|\bdry(?:ing)?\s*time\b[^.\n]{0,20}\d+|\b(?:dry|dries|dried|drying)\b[^.\n]{0,25}\b(?:in|after|within)\b[^.\n]{0,15}\d+\s*(?:min|minute|hour)/i;
+const SMS_COMPLIANCE_CLAIM_RE = /\b(?:pet|child|kid|family|people|human)s?[\s-]?safe\b|\bnon[\s-]?toxic\b|\bharmless\b|\bEPA[\s-]?(?:approved|certified)\b|\bsafe\s+(?:for|around|to)\b|\b(?:is|are|was|were|be|being|been|it'?s|they'?re|stays?|remains?|totally|completely|perfectly|very|100%)\s+safe\b|\b(?:treatment|product|chemical|spray|application)s?\b[^.\n]{0,25}\bsafe\b|\bre-?entry\b[^.\n]{0,30}\d+\s*(?:min|minute|hour)|\bdry(?:ing)?\s*time\b[^.\n]{0,20}\d+|\b(?:dry|dries|dried|drying)\b[^.\n]{0,25}\b(?:in|after|within)\b[^.\n]{0,15}\d+\s*(?:min|minute|hour)/i;
 
 const EXEMPLAR_INJECTION_RE = /\b(ignore|disregard|forget|override)\b[^.]{0,40}\b(previous|prior|above|earlier|instruction|instructions|prompt|context|rule|rules)\b|system\s*prompt|you are now|\bact as\b|new instructions|```|<\/?[a-z][\w-]*>|\b(assistant|system|user)\s*:/i;
 function exemplarLooksClean(inbound, reply) {

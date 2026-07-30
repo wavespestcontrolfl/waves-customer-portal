@@ -580,6 +580,12 @@ describe('v10 — full-account grounding', () => {
       recentCalls: [{ summary: 'The treatment is safe once dry; the technician will confirm timing.', direction: 'inbound', date: '2026-07-28T15:00:00Z' }],
     });
     expect(ok).toContain('safe once dry');
+    // the idiom WITHOUT the confirm-timing clause is incomplete → drops (r10)
+    const partial = buildFactsBlock({
+      summary: 'X',
+      recentCalls: [{ summary: 'The treatment is safe once dry.', direction: 'inbound', date: '2026-07-28T15:00:00Z' }],
+    });
+    expect(partial).not.toContain('safe once dry');
   });
 
   test('unqualified safety claims drop from grounded text (codex r6)', () => {
