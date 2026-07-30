@@ -1790,8 +1790,7 @@ async function lookupPropertyFromAITrio(address, geoContext = null) {
           .catch(() => null);
       }
     }
-    parkParcelSignal = mobileHomeParkSignalFromParcel(parcel);
-    if (parkParcelSignal) {
+    if (parcel && isMobileHomeParkParcel(parcel)) {
       // Land-lease mobile-home park master parcel: the polygon genuinely
       // contains the rooftop, but every parcel-level dimension (and the
       // commercial-band DOR 28 code) describes the PARK, not the home.
@@ -1799,8 +1798,17 @@ async function lookupPropertyFromAITrio(address, geoContext = null) {
       // mismatch guard open, and a home at the park's own situs line would
       // pass it outright; both must still drop the parcel. Only the marker
       // survives, so the panel explains the missing dimensions instead of
-      // "not found on the roll".
-      logger.warn('[county-property] GIS parcel is a mobile-home-park master parcel — dropping parcel-level facts, keeping the park marker');
+      // "not found on the roll". An interpolated point is a guess along the
+      // street — it proves the neighborhood, not the parcel (same rule as
+      // the interpolated positive-situs guard), so it drops the parcel
+      // WITHOUT keeping the marker: a false HIGH park flag on a non-park
+      // neighbor is worse than a plain miss.
+      if (gisPrecision !== 'interpolated') {
+        parkParcelSignal = mobileHomeParkSignalFromParcel(parcel);
+      }
+      logger.warn('[county-property] GIS parcel is a mobile-home-park master parcel — dropping parcel-level facts', {
+        markerKept: Boolean(parkParcelSignal),
+      });
       parcel = null;
     } else if (parcel && parcel.aggregated === true) {
       if (aggregateSitusVerdict(parcel, searchAddress, gisPrecision, address) === 'drop') {
