@@ -59,7 +59,13 @@ const START_DATE_FALLBACK = 'To be confirmed at installation';
 // the next pass; a bell that landed while the durable marker write failed
 // is never duplicated; a genuinely new park months later (window elapsed)
 // re-rings.
-const BELL_DEDUPE_DAYS = 14;
+// 30 days: strictly longer than the 21-day standard-sweep window, so a
+// parked estimate cannot outlive its bell's dedupe record while still being
+// selected daily (a re-park after the window legitimately re-rings).
+const BELL_DEDUPE_DAYS = 30;
+// Tri-state: true (bell exists), false (proven absent), 'error' (lookup
+// failed — the caller must neither ring nor mark handled; the retry path
+// re-evaluates when the database recovers).
 async function adminBellExists(titleLike, metaKey, metaValue, conn = db) {
   if (!metaValue) return false;
   try {
@@ -71,8 +77,9 @@ async function adminBellExists(titleLike, metaKey, metaValue, conn = db) {
       .where('created_at', '>=', cutoff)
       .first('id');
     return !!row;
-  } catch {
-    return true; // fail-quiet: never double-bell on a lookup error
+  } catch (err) {
+    logger.warn(`[termite-agreement] bell-history lookup failed (${titleLike}): ${err.message}`);
+    return 'error';
   }
 }
 
@@ -548,7 +555,10 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
         logger.warn(`[termite-agreement] parked retirement failed for estimate ${estimate.id}: ${err.message}`);
       }
       let belled = null;
-      if (!(await manualPrepBellAlreadySent(estimate.id))) {
+      const commercialBellState = await manualPrepBellAlreadySent(estimate.id);
+      if (commercialBellState === true) belled = true;
+      else if (commercialBellState === 'error') belled = false;
+      else {
         belled = await ringAdminBell(NotificationService, [
           'estimate',
           'Termite agreement needs manual prep (commercial)',
@@ -571,7 +581,10 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
         logger.warn(`[termite-agreement] parked retirement failed for estimate ${estimate.id}: ${err.message}`);
       }
       let prepayBelled = null;
-      if (!(await manualPrepBellAlreadySent(estimate.id))) {
+      const prepayBellState = await manualPrepBellAlreadySent(estimate.id);
+      if (prepayBellState === true) prepayBelled = true;
+      else if (prepayBellState === 'error') prepayBelled = false;
+      else {
         prepayBelled = await ringAdminBell(NotificationService, [
           'estimate',
           'Termite agreement needs manual prep (annual prepay)',
@@ -601,7 +614,10 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
         logger.warn(`[termite-agreement] parked retirement failed for estimate ${estimate.id}: ${err.message}`);
       }
       let figuresBelled = null;
-      if (!(await manualPrepBellAlreadySent(estimate.id))) {
+      const figuresBellState = await manualPrepBellAlreadySent(estimate.id);
+      if (figuresBellState === true) figuresBelled = true;
+      else if (figuresBellState === 'error') figuresBelled = false;
+      else {
         figuresBelled = await ringAdminBell(NotificationService, [
           'estimate',
           'Termite agreement needs manual prep',
@@ -811,12 +827,14 @@ const REPROCESSED_EVENT = 'superseded_reprocessed';
 async function cancelStaleSource(row, conn = db) {
   // Revalidate staleness at cancel time: an admin may have REACTIVATED this
   // row's template version after the sweep's activeVersionIds snapshot was
-  // taken — a now-current request must not be cancelled.
+  // taken — a now-current request must not be cancelled, and the caller
+  // must NOT write a reprocessed marker (a later rollout must be able to
+  // reconsider the row).
   if (row.document_template_version_id && row.document_template_key) {
     const template = await conn('document_templates')
       .where({ template_key: row.document_template_key })
       .first('active_version_id');
-    if (template?.active_version_id === row.document_template_version_id) return false;
+    if (template?.active_version_id === row.document_template_version_id) return 'reactivated';
   }
   const cancelled = await conn('customer_contracts')
     .where({ id: row.id })
@@ -922,20 +940,23 @@ async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
       // past the migration): it is still openly signable on superseded
       // wording. Cancel it (conditional on still being open) and hand the
       // re-issue to the operator — never assume the migration covered it.
-      await cancelStaleSource(row);
+      // A version reactivated mid-sweep makes this row current again —
+      // skip entirely with no marker (and no misleading cancelled bell).
+      if ((await cancelStaleSource(row)) === 'reactivated') continue;
       // The bell IS the handoff — the row is only marked handled when it
       // actually landed; a double notify failure leaves the row eligible
       // for tomorrow's retry (the cancel above is conditional, so the
       // retry just re-rings the bell). A bell that already landed (e.g. the
       // durable marker write failed after a successful insert) counts as
       // landed — never duplicated.
-      const belled = (await adminBellExists('Re-issue termite agreement%', 'contractId', row.id))
-        || await ringAdminBell(NotificationService, [
+      const reissueBellState = await adminBellExists('Re-issue termite agreement%', 'contractId', row.id);
+      const belled = reissueBellState === true
+        || (reissueBellState === false && await ringAdminBell(NotificationService, [
           'estimate',
           'Re-issue termite agreement (wording updated)',
           `The open termite program agreement for ${row.recipient_name || 'a customer'} was cancelled because its wording was superseded by the v2 compliance templates. It was issued manually, so re-issue it from the document library on the updated template.`,
           { icon: '\u{1F4DD}', link: `/admin/customers/${row.customer_id}`, metadata: { contractId: row.id, customerId: row.customer_id } },
-        ], `manual stale-version re-issue for contract ${row.id}`);
+        ], `manual stale-version re-issue for contract ${row.id}`));
       if (belled) await markSupersededHandled(row, 'manual_reissue_belled');
       else results.failed += 1;
       if (belled) results.skipped += 1;
@@ -953,8 +974,10 @@ async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
     // a concurrent reissue racing maybeCreate's already_exists) must leave
     // the superseded public signing link dead. Conditional + idempotent:
     // migration-cancelled and expired rows are no-ops, and the bell-retry
-    // path stays bell-only.
-    await cancelStaleSource(row);
+    // path stays bell-only. A version REACTIVATED mid-sweep makes the row
+    // current again: skip it entirely with NO marker, so a later rollout
+    // can reconsider it.
+    if ((await cancelStaleSource(row)) === 'reactivated') continue;
 
     // Executed agreements stay executed — but only for THIS property/estimate:
     // a signed agreement at another of the customer's properties must not
