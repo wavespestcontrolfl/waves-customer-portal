@@ -83,10 +83,36 @@ export default function TracedTreatmentZoneMap({ traced, live = true, variant = 
               ? 'Satellite photo of the property with the treated home and perimeter highlighted'
               : 'Satellite photo of the property with the treated perimeter highlighted')}
         />
-        {/* Highlight-captured rows carry the grass HIGHLIGHT baked into the
-            snapshot (owner 2026-07-30: no box) — never draw the polygon
-            overlay on them. Legacy 'lawn' rows and highlight-fallback rows
-            carry the baked OUTLINE and keep the animated line. */}
+        {/* Highlight-captured rows: the snapshot carries the baked green
+            baseline (PDF/static-safe); live viewers get the transparent
+            highlight layer PULSING on top — the treated turf breathes
+            (owner 2026-07-30 "the goal is to show where we sprayed").
+            sprayLive already gates on scroll-into-view + motion tolerance,
+            so PDFs and reduced-motion visitors keep the still image. */}
+        {sprayLive && highlightCapture && traced.maskUrl && (
+          <>
+            <style>{`
+              @keyframes lawnHighlightPulse {
+                0%, 100% { opacity: 0; }
+                50% { opacity: 0.9; }
+              }
+              .lawn-highlight-pulse {
+                animation: lawnHighlightPulse 3.6s ease-in-out infinite;
+              }
+            `}</style>
+            <img
+              className="lawn-highlight-pulse"
+              src={traced.maskUrl}
+              alt=""
+              aria-hidden="true"
+              style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'none' }}
+            />
+          </>
+        )}
+        {/* Highlight-captured rows never draw the polygon overlay — the
+            highlight IS the render. Legacy 'lawn' rows and highlight-
+            fallback rows carry the baked OUTLINE and keep the animated
+            line. */}
         {sprayLive && pathD && outline && !highlightCapture && (
           <svg
             viewBox="0 0 1280 960"

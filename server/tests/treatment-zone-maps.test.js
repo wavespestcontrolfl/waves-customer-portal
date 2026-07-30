@@ -156,6 +156,63 @@ describe('saveTreatmentZoneMap', () => {
     expect(knex.state.inserted.capture_mode).toBe('perimeter');
   });
 
+  test('mask uploads alongside the snapshot and persists mask_s3_key (report pulse, owner 2026-07-30)', async () => {
+    const knex = makeKnex();
+    await saveTreatmentZoneMap({
+      scheduledServiceId: 'svc-1',
+      pathPoints: VALID_POINTS,
+      closedLoop: true,
+      captureMode: 'lawn_highlight',
+      snapshotPngBuffer: Buffer.from('png-bytes'),
+      maskPngBuffer: Buffer.from('mask-bytes'),
+      knex,
+    });
+    const putKeys = mockS3Send.mock.calls
+      .filter(([cmd]) => cmd.commandType === 'put')
+      .map(([cmd]) => cmd.input.Key);
+    expect(putKeys.some((k) => k.endsWith('-map.png'))).toBe(true);
+    expect(putKeys.some((k) => k.endsWith('-mask.png'))).toBe(true);
+    expect(knex.state.inserted.mask_s3_key).toMatch(/-mask\.png$/);
+  });
+
+  test('a new snapshot WITHOUT a mask clears the stale mask and deletes its object', async () => {
+    const knex = makeKnex({
+      existing: {
+        id: 'row-1',
+        snapshot_s3_key: 'service-photos/treatment-zones/svc-1/old.png',
+        mask_s3_key: 'service-photos/treatment-zones/svc-1/old-mask.png',
+      },
+    });
+    await saveTreatmentZoneMap({
+      scheduledServiceId: 'svc-1',
+      pathPoints: VALID_POINTS,
+      snapshotPngBuffer: Buffer.from('png-bytes'),
+      knex,
+    });
+    expect(knex.state.inserted.mask_s3_key).toBe(null);
+    const deleted = mockS3Send.mock.calls
+      .filter(([cmd]) => cmd.commandType === 'delete')
+      .map(([cmd]) => cmd.input.Key);
+    expect(deleted).toContain('service-photos/treatment-zones/svc-1/old-mask.png');
+  });
+
+  test('a metadata-only save keeps the existing mask', async () => {
+    const knex = makeKnex({
+      existing: {
+        id: 'row-1',
+        snapshot_s3_key: 'service-photos/treatment-zones/svc-1/old.png',
+        mask_s3_key: 'service-photos/treatment-zones/svc-1/old-mask.png',
+      },
+    });
+    await saveTreatmentZoneMap({
+      scheduledServiceId: 'svc-1',
+      pathPoints: VALID_POINTS,
+      knex,
+    });
+    expect(knex.state.inserted.mask_s3_key).toBe('service-photos/treatment-zones/svc-1/old-mask.png');
+    expect(mockS3Send).not.toHaveBeenCalled();
+  });
+
   test('without a new snapshot keeps the existing S3 key and skips upload', async () => {
     const knex = makeKnex({ existing: { id: 'row-1', snapshot_s3_key: 'service-photos/treatment-zones/svc-1/old.png' } });
     await saveTreatmentZoneMap({

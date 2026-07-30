@@ -2455,8 +2455,20 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
           PhotoService.CUSTOMER_DWELL_TTL_SECONDS
         ).catch(() => null);
         if (tracedSnapshotUrl) {
+          // lawn_highlight rows may carry the transparent highlight layer —
+          // the report pulses it over the snapshot (owner 2026-07-30).
+          // Fail-soft: no mask (legacy rows, spray/outline saves, presign
+          // hiccup) just means a static image.
+          let tracedMaskUrl = null;
+          if (tracedRow.capture_mode === 'lawn_highlight' && tracedRow.mask_s3_key) {
+            tracedMaskUrl = await PhotoService.getViewUrl(
+              tracedRow.mask_s3_key,
+              PhotoService.CUSTOMER_DWELL_TTL_SECONDS
+            ).catch(() => null);
+          }
           tracedTreatmentZone = {
             snapshotUrl: tracedSnapshotUrl,
+            maskUrl: tracedMaskUrl,
             linearFt: numberOrNull(tracedRow.linear_ft),
             closedLoop: Boolean(tracedRow.closed_loop),
             capturedAt: tracedRow.updated_at || tracedRow.created_at || null,
