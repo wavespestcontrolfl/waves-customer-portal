@@ -282,31 +282,48 @@ function applyRowGuard(q, row) {
   return q;
 }
 
+const STAMP_VETO = Symbol('stampVeto');
+
 /**
- * Guarded stamp in ONE transaction. The canonical account row is re-read
- * FOR SHARE: an UNCOMMITTED direct account correction holds its row lock,
- * so we BLOCK until it commits and then see its real updated_at — plain
- * timestamp comparison can't observe an uncommitted writer (MVCC reads the
- * old version), and its now() is transaction-start time, so it could
+ * Guarded stamp in ONE transaction. The account re-read runs FOR SHARE:
+ * an UNCOMMITTED direct account correction holds its row lock, so we
+ * BLOCK until it commits and then see its real updated_at — plain
+ * timestamp comparison can't observe an uncommitted writer (MVCC reads
+ * the old version), and its now() is transaction-start time, so it could
  * commit BEHIND our new watermark and never requeue.
+ *
+ * LOCK ORDER: the target row's exclusive lock (the UPDATE) comes FIRST
+ * and the account lock second — the admin identity path locks the
+ * customer row and then touches the account (admin-customers PUT +
+ * account-identity trigger), and taking the account lock first here
+ * would deadlock against it. A stale-account veto therefore has to ROLL
+ * BACK the already-applied stamp instead of skipping it.
  */
 async function guardedStamp(table, row, patch) {
-  return db.transaction(async (trx) => {
-    if (row.__canonicalIdentity?.id) {
-      const acc = await trx('customer_accounts')
-        .where({ id: row.__canonicalIdentity.id })
-        .select(trx.raw(US_TOKEN))
-        .forShare()
-        .first();
-      const expected = row.__canonicalIdentity.updated_at_us || null;
-      if (acc && expected && acc.updated_at_us !== expected) return 0; // account changed — veto
-      if (acc && !expected && row.__canonicalIdentity.updated_at
-        && new Date(acc.updated_at_us ? acc.updated_at_us.replace(' ', 'T') : 0).getTime()
-          > new Date(row.__canonicalIdentity.updated_at).getTime() + 1) return 0;
-    }
-    const q = applyRowGuard(trx(table).where({ id: row.id }), row);
-    return q.update(patch);
-  });
+  try {
+    return await db.transaction(async (trx) => {
+      const q = applyRowGuard(trx(table).where({ id: row.id }), row);
+      const n = await q.update(patch);
+      if (n && row.__canonicalIdentity?.id) {
+        const acc = await trx('customer_accounts')
+          .where({ id: row.__canonicalIdentity.id })
+          .select(trx.raw(US_TOKEN))
+          .forShare()
+          .first();
+        const expected = row.__canonicalIdentity.updated_at_us || null;
+        const veto = new Error('canonical account changed mid-stamp');
+        veto[STAMP_VETO] = true;
+        if (acc && expected && acc.updated_at_us !== expected) throw veto;
+        if (acc && !expected && row.__canonicalIdentity.updated_at
+          && new Date(acc.updated_at_us ? acc.updated_at_us.replace(' ', 'T') : 0).getTime()
+            > new Date(row.__canonicalIdentity.updated_at).getTime() + 1) throw veto;
+      }
+      return n;
+    });
+  } catch (err) {
+    if (err && err[STAMP_VETO]) return 0;
+    throw err;
+  }
 }
 
 async function stampIfUnchanged(table, row, patch) {
@@ -479,7 +496,10 @@ async function upsertContact(people, table, row, kind, gapMs, { markerSearchKey 
     // time in the watermark) so future passes demand a conclusive search
     // + grace before creating again.
     const status = createErr?.code || createErr?.response?.status;
-    const definitiveRejection = typeof status === 'number' && status >= 400 && status < 500;
+    // 408 is 4xx but AMBIGUOUS — the request may have reached Google
+    // before timing out, so it must enter pending-create recovery like a
+    // network error, not skip the marker like a validation rejection.
+    const definitiveRejection = typeof status === 'number' && status >= 400 && status < 500 && status !== 408;
     if (!definitiveRejection) {
       // The conditional may replace: NULL, the row's known (dead) resource
       // id, or an EXISTING marker — a repeated ambiguous recovery create
@@ -1167,16 +1187,25 @@ async function runContactsSync({ cap = RUN_CAP, gapMs = WRITE_GAP_MS, now = new 
             .whereNotNull('deleted_at')
             .update({ google_contact_id: retireMarkerFor(row.google_contact_id), google_contact_synced_at: null });
           if (!claimed) continue; // restored mid-batch — leave the contact alone
-          {
-            // Revalidate at the last instant before the destructive call —
-            // a restore in the claim→delete window keeps its contact (the
-            // retire marker hands recovery to the main lane).
-            const stillDeleted = await db(table).where({ id: row.id }).whereNotNull('deleted_at').first();
-            if (!stillDeleted) continue;
-          }
-          await deleteContact(people, row.google_contact_id);
+          // Revalidate under a row lock held THROUGH the destructive call —
+          // a SELECT-then-delete leaves a window where a restore commits
+          // deleted_at = NULL and we delete a live customer's contact.
+          // With FOR UPDATE, the restore's UPDATE blocks until this
+          // transaction commits; a restore that won the race instead makes
+          // the tombstone check fail and the contact is left alone (the
+          // retire marker hands recovery to the main lane).
+          let restoredMidBatch = false;
+          await db.transaction(async (trx) => {
+            const stillDeleted = await trx(table).where({ id: row.id })
+              .whereNotNull('deleted_at')
+              .forUpdate()
+              .first();
+            if (!stillDeleted) { restoredMidBatch = true; return; }
+            await deleteContact(people, row.google_contact_id);
+            await trx(table).where({ id: row.id }).update({ google_contact_id: null });
+          });
+          if (restoredMidBatch) continue;
           await sleep(gapMs);
-          await db(table).where({ id: row.id }).update({ google_contact_id: null });
         } else {
           // SHARED contact: released, not deleted — but it may still carry
           // THIS retired row's PII/tag if it was the last pushed source.

@@ -47,12 +47,23 @@ function setupDb({
   const firstQueues = Object.fromEntries(Object.entries(firstResults).map(([t, rows]) => [t, [...rows]]));
   const updateQueues = Object.fromEntries(Object.entries(updateResults).map(([t, rows]) => [t, [...rows]]));
   db.raw = jest.fn((sql) => ({ __raw: sql }));
-  // The guarded stamp wraps its canonical re-read + update in one
-  // transaction; the mock trx proxies straight back to the builder.
-  db.transaction = jest.fn(async (cb) => cb(Object.assign((table) => db(table), { raw: db.raw })));
+  // Transactions proxy back to the builder, but updates STAGE until the
+  // callback resolves — a throw (the guarded stamp's veto) rolls them
+  // back, mirroring the real rollback semantics the veto relies on.
+  db.transaction = jest.fn(async (cb) => {
+    const staged = [];
+    state.__staging = staged;
+    try {
+      const result = await cb(Object.assign((table) => db(table), { raw: db.raw }));
+      state.updates.push(...staged);
+      return result;
+    } finally {
+      state.__staging = null;
+    }
+  });
   db.mockImplementation((table) => {
     const builder = {};
-    for (const m of ['where', 'whereRaw', 'whereNull', 'whereNot', 'whereNotNull', 'orWhere', 'orWhereRaw', 'orderBy', 'limit', 'select', 'forShare']) {
+    for (const m of ['where', 'whereRaw', 'whereNull', 'whereNot', 'whereNotNull', 'orWhere', 'orWhereRaw', 'orderBy', 'limit', 'select', 'forShare', 'forUpdate']) {
       builder[m] = jest.fn((...args) => {
         if (typeof args[0] === 'function') args[0].call(builder, builder);
         return builder;
@@ -69,7 +80,7 @@ function setupDb({
       return q && q.length ? q.shift() : null;
     });
     builder.update = jest.fn(async (patch) => {
-      state.updates.push({ table, patch });
+      (state.__staging || state.updates).push({ table, patch });
       const q = updateQueues[table];
       if (q && q.length) {
         const v = q.shift();
@@ -273,6 +284,35 @@ describe('runContactsSync', () => {
     expect(mockPeopleApi.people.deleteContact).toHaveBeenCalledWith({ resourceName: 'people/old' });
     const patch = state.updates.find((u) => u.table === 'customers').patch;
     expect(patch.google_contact_id).toBeNull();
+  });
+
+  test('a 408 create timeout is AMBIGUOUS — the row gets a recovery marker, not a bare retry', async () => {
+    const state = setupDb({ customers: [{ ...CUSTOMER }] });
+    const timeout = new Error('Request timeout');
+    timeout.code = 408;
+    mockPeopleApi.people.createContact.mockRejectedValueOnce(timeout);
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(counts.failed).toBe(1);
+    // The request may have reached Google — without the marker, the next
+    // tick's non-conclusive search + immediate recreate mints a duplicate.
+    const marker = state.updates.find((u) => String(u.patch.google_contact_id || '').startsWith('pending_create_recovery'));
+    expect(marker).toBeDefined();
+  });
+
+  test('a restore committing inside the revalidate window vetoes the tombstone delete', async () => {
+    const state = setupDb({
+      customersSelects: [[], [{ id: 'c-dead', google_contact_id: 'people/keep' }], []],
+      leadsSelects: [[], [], []],
+      // in-use probes (null, null), then the LOCKED revalidation sees the
+      // restore already committed (deleted_at cleared → no row).
+      firstResults: { customers: [null, null], leads: [null] },
+    });
+    const counts = await runContactsSync({ gapMs: 0 });
+    expect(counts.retired).toBe(0);
+    expect(mockPeopleApi.people.deleteContact).not.toHaveBeenCalled();
+    // The pointer stays as the retire marker — the main lane recovers it.
+    const clear = state.updates.find((u) => u.table === 'customers' && u.patch.google_contact_id === null);
+    expect(clear).toBeUndefined();
   });
 
   test('tombstone lane retires soft-deleted rows — merged-away customers stop serving stale PII', async () => {
