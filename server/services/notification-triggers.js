@@ -259,7 +259,10 @@ const TRIGGER_REGISTRY = {
       const who = p.remoteName || (remote && remote !== 'unknown' ? remote : null);
       return {
         title: `${who ? `${who} — ` : ''}${channel} ${status}`,
-        body: `${direction}${channel}${phase}${code}: from ${from} to ${to}${p.errorMessage ? ` — ${p.errorMessage}` : ''}`,
+        // sidMasked stays in the body — with several events on one number it
+        // is the only handle correlating this alert to the masked provider
+        // SID in the logs.
+        body: `${direction}${channel}${phase}${code}: from ${from} to ${to}${p.errorMessage ? ` — ${p.errorMessage}` : ''}${p.sidMasked ? ` — ${p.sidMasked}` : ''}`,
         // CustomersPageV2 opens a record via the customerId query param — the
         // SPA has no /admin/customers/<id> route.
         link: p.customerId ? `/admin/customers?customerId=${p.customerId}` : (p.link || '/admin/communications'),
@@ -401,9 +404,15 @@ const TRIGGER_REGISTRY = {
           link: '/admin/estimates',
         };
       }
+      // Postgres decimals arrive as strings ("0.00" is truthy) — coerce, and
+      // label by which total actually carries the price (one-time-only
+      // estimates keep monthly_total at 0).
+      const monthly = Number(p.monthlyTotal || 0);
+      const onetime = Number(p.onetimeTotal || 0);
+      const price = monthly > 0 ? `$${monthly.toFixed(2)}/mo` : (onetime > 0 ? `$${onetime.toFixed(2)} one-time` : null);
       return {
         title: p.customerName ? `${p.customerName} — estimate expired` : 'Estimate expired',
-        body: `${p.customerName ? `${p.customerName}'s` : 'An'} estimate${p.monthlyTotal ? ` ($${p.monthlyTotal}/mo)` : ''} expired without a decision. Worth a follow-up call.`,
+        body: `${p.customerName ? `${p.customerName}'s` : 'An'} estimate${price ? ` (${price})` : ''} expired without a decision. Worth a follow-up call.`,
         link: p.estimateId ? `/admin/estimates?estimateId=${p.estimateId}` : '/admin/estimates',
       };
     },

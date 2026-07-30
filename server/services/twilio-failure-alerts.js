@@ -92,6 +92,12 @@ async function resolveRemoteParty(direction, from, to) {
   if (!e164 || !isLikelyE164(e164)) return null;
   const digits = String(e164).replace(/\D/g, '');
   const party = { name: null, customerId: null };
+  // Last-10 matching is a NANP convention — a non-NANP caller (+44 20 7946
+  // 0958) shares its last ten digits with an unrelated US number (+1 207 946
+  // 0958) and would falsely name that customer. toE164 preserves foreign
+  // country codes, so gate on them: international callers stay nameless (the
+  // real number still shows in the alert body).
+  if (String(e164).startsWith('+') && !String(e164).startsWith('+1')) return party;
   try {
     // Match every customer contact slot, not just the primary phone — the
     // pipeline records spouses/tenants into the service-contact slots (same
