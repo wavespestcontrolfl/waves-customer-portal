@@ -1421,7 +1421,6 @@ export function calculateEstimate(inputs) {
     hasPool,
     hasPoolCage,
     poolCageSize,
-    hasLargeDriveway,
     indoor,
     attachedGarage,
     shrubDensity,
@@ -1587,7 +1586,6 @@ export function calculateEstimate(inputs) {
     }
     if (hasPoolCage) hardscape += 600;
     else if (hasPool) hardscape += 450;
-    if (hasLargeDriveway) hardscape += 300;
     return hardscape;
   };
 
@@ -1721,13 +1719,11 @@ export function calculateEstimate(inputs) {
     }
     if (hasPoolCage) hardscapeEstimate += 600;
     else if (hasPool) hardscapeEstimate += 450;
-    if (hasLargeDriveway) hardscapeEstimate += 300;
 
     const openArea = Math.max(0, Math.round(lotSqFt - footprint - hardscapeEstimate));
     let score = 0;
     if (hasPool) score += 2;
     if (hasPoolCage) score += 2;
-    if (hasLargeDriveway) score += 2;
     if (shrubDensity === 'MODERATE') score += 1; else if (shrubDensity === 'HEAVY') score += 2;
     if (treeDensity === 'MODERATE') score += 1; else if (treeDensity === 'HEAVY') score += 2;
     if (landscapeComplexity === 'MODERATE') score += 1; else if (landscapeComplexity === 'COMPLEX') score += 2;
@@ -1941,7 +1937,6 @@ export function calculateEstimate(inputs) {
     let sc = 0;
     if (hasPool) sc += 2;
     if (hasPoolCage) sc += 2;
-    if (hasLargeDriveway) sc += 2;
     if (shrubDensity === 'MODERATE') sc += 1; else if (shrubDensity === 'HEAVY') sc += 2;
     if (treeDensity === 'MODERATE') sc += 1; else if (treeDensity === 'HEAVY') sc += 2;
     if (landscapeComplexity === 'MODERATE') sc += 1; else if (landscapeComplexity === 'COMPLEX') sc += 2;
@@ -1968,7 +1963,7 @@ export function calculateEstimate(inputs) {
     ];
     // Same complexity-minutes the server applies to the lawn cost floor, so the
     // preview matches the server-authoritative price (Decision #2).
-    const lawnComplexityMin = lawnComplexityMinutes({ landscapeComplexity, shrubDensity, hasLargeDriveway });
+    const lawnComplexityMin = lawnComplexityMinutes({ landscapeComplexity, shrubDensity });
     // Program minimum — same arithmetic as the server's priceLawnCare clamp.
     const lawnProgramMinMonthly = Number(LAWN_PRICING_V2.programMinimumMonthly);
     const lawnProgramMinAnnual = Number.isFinite(lawnProgramMinMonthly) && lawnProgramMinMonthly > 0
@@ -2568,7 +2563,6 @@ export function calculateEstimate(inputs) {
         if (!hasTrenchingConcretePct) {
           if (hasPoolCage) cp = 0.35;
           else if (hasPool) cp = 0.30;
-          if (hasLargeDriveway) cp += 0.05;
         }
         cp = Math.min(0.60, cp);
         cl = Math.round(perim * cp);
@@ -3346,7 +3340,6 @@ export function calculateEstimate(inputs) {
       turfBasis: turfArea.turfBasis,
       pool: hasPool,
       poolCage: hasPoolCage,
-      driveway: hasLargeDriveway,
       shrubs: shrubDensity,
       trees: treeDensity,
       complexity: landscapeComplexity,

@@ -603,3 +603,46 @@ Per-case attribution:
   entry in `results.ts` — additive, no price changes to existing entries. The
   platinum case therefore carries BOTH the mosquito reprice delta and this
   config delta.
+
+---
+
+## 2026-07-30 — Retire large-driveway from the estimator engine entirely
+
+Large driveway no longer affects anything the estimator computes (owner
+directive 2026-07-30). Removed: the 300-sqft hardscape addition (which fed
+the mosquito treatable area), the +2 turf-complexity score point (which fed
+the lawn sqft estimate), the termite-trench +0.05 concrete split, the lawn
+cost-floor +5 complexity minutes (margin reporting only since the 2026-07-17
+floor disarm), and the pest production-diagnostics +2 minutes. Driveway
+observations remain property context outside the estimator
+(satellite/property-lookup detection unchanged). See the `pricing_changelog`
+entry keyed by `claude-2026-07-30` / "Remove large driveway from estimator
+pricing and logic entirely." (migration `20260730120000`).
+
+LOCAL baselines were recaptured with `CAPTURE_BASELINE=1` under in-memory
+constants (no-DB sandbox — the same conditions as the CI golden-master step).
+Per-case attribution:
+
+- **This change**: `edge_large_footprint_5500sf_platinum_bundle` (the only
+  fixture with `largeDriveway: true`) — lawn_care 1128 → 1140/yr (94 → 95/mo):
+  dropping the 300-sqft hardscape addition enlarges the open/turf area, so the
+  interpolated lawn bracket moves up $1/mo. Pest is unchanged (driveway already
+  retired there 2026-07-16); mosquito did not cross a 500-sf price step.
+- **Inherited sync, NOT from this change** (premium 12x ladder cap, owner
+  directive 2026-07-29 — its PR retuned the columns but did not regenerate the
+  LOCAL fixtures, leaving the no-DB CI step red): 12x per-app values dropped in
+  `zone_b_monthly_pest_bermuda_premium` (936 → 864/yr lawn),
+  `v1adapter_baseline_zone_a_quarterly_pest_lawn` (12x mo 71 → 66),
+  `v1adapter_platinum_bundle_4_services_zone_a` (12x mo 71 → 66; recommended
+  tier, so bundle totals moved 2881 → 2821 before discount),
+  `v1adapter_zone_c_bimonthly_pest_lawn_treeshrub` (74 → 69), and
+  `v1adapter_zone_d_quarterly_pest_bahia` (66 → 62). All verified pre-existing
+  by running the suites on the unmodified tree before this change.
+
+DB (prod-parity) baselines were NOT touched — this sandbox has no production
+access. They still need an owner-run read-only recapture (railway run / HTTP
+mode per the 2026-07-28 access note) covering BOTH the 2026-07-29 ladder-cap
+drift and this retirement; the driveway-only delta there is expected to match
+the local one (`edge_large_footprint_5500sf_platinum_bundle` only — none of
+the removed values were DB-overridden: `pest_features` driveway keys were
+stripped 2026-07-16 and no seed ever wrote `concrete_pct_driveway`).

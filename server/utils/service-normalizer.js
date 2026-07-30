@@ -62,7 +62,11 @@ const SERVICE_TYPE_MAP = [
   { match: /fumigat|tent/i,                                 type: 'Tent Fumigation' },
 
   // Inspections/Estimates
-  { match: /estimat|assessment|consultation/i,              type: 'Property Assessment' },
+  // "Waves Assessment" is the real admin-catalog service (owner rule: call
+  // bookings use catalog services; unsure → Waves Assessment). The old
+  // normalized label "Property Assessment" was NOT a catalog service and
+  // confused the schedule views — normalize to the catalog name instead.
+  { match: /estimat|assessment|consultation/i,              type: 'Waves Assessment' },
   { match: /inspect/i,                                      type: 'Inspection' },
 
   // Callbacks

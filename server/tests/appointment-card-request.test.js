@@ -21,7 +21,16 @@ jest.mock('../models/db', () => {
     chain.onConflict = record('onConflict');
     chain.ignore = record('ignore');
     chain.select = (...args) => Promise.resolve(handlers.select ? handlers.select(chain, ...args) : []);
-    chain.first = (...args) => Promise.resolve(handlers.first ? handlers.first(chain, ...args) : null);
+    chain.first = (...args) => {
+      // The prior-completed-service probe (owner rule 2026-07-30) is the only
+      // scheduled_services .first() with a whereNot clause — default it to
+      // "no prior history" so every fixture stays a first-time customer;
+      // tests opt into history via handlers.priorCompletedFirst.
+      if (touch.table === 'scheduled_services' && chain.calls.some((c) => c[0] === 'whereNot')) {
+        return Promise.resolve(handlers.priorCompletedFirst ? handlers.priorCompletedFirst(chain) : null);
+      }
+      return Promise.resolve(handlers.first ? handlers.first(chain, ...args) : null);
+    };
     chain.update = (patch) => {
       chain.calls.push(['update', patch]);
       return Promise.resolve(handlers.update ? handlers.update(chain, patch) : 1);
@@ -105,6 +114,7 @@ const VISIT = {
   window_display: '9:00 AM',
   service_type: 'Pest Control',
   card_link_sent_at: null,
+  estimated_price: '135.00',
 };
 const CUSTOMER = { id: 'cust-1', first_name: 'Pat', phone: '+19415551234' };
 
@@ -148,6 +158,27 @@ describe('requestCardForAppointment — gate and visit eligibility', () => {
     mockTableHandlers.scheduled_services.first = () => ({ ...VISIT, scheduled_date: '2020-01-01' });
     const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1' });
     expect(res.reason).toBe('visit_in_past');
+  });
+
+  test('unpriced visit (NULL price = quote pending) never texts — owner directive 2026-07-30', async () => {
+    mockTableHandlers.scheduled_services.first = () => ({ ...VISIT, estimated_price: null });
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1' });
+    expect(res.reason).toBe('unpriced_visit');
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('zero-price visit ($0 = charge nothing) never texts', async () => {
+    mockTableHandlers.scheduled_services.first = () => ({ ...VISIT, estimated_price: '0.00' });
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1' });
+    expect(res.reason).toBe('zero_price_visit');
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('existing customer (completed service history) never gets the card ask — owner rule 2026-07-30', async () => {
+    mockTableHandlers.scheduled_services.priorCompletedFirst = () => ({ id: 'svc-older' });
+    const res = await requestCardForAppointment({ scheduledServiceId: 'svc-1' });
+    expect(res.reason).toBe('existing_customer');
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
   });
 
   test("a 'rescheduled' visit (pending-rebook placeholder, stale date on the row) never texts — closed until re-slotted", async () => {
@@ -297,6 +328,10 @@ describe('the send', () => {
       service_type: 'Pest Control',
       secure_link: expect.stringMatching(/\/secure\/[a-f0-9]{64}$/),
       date_line: expect.stringContaining(' on '),
+      // Cancellation-fee disclosure (owner ruling 2026-07-30): rides on every
+      // send that reaches the template — the $0/unpriced guard upstream is
+      // what keeps it off zero-amount visits. GSM-7-safe (no em-dash).
+      cancel_fee_line: expect.stringMatching(/^\n\$\d+(\.\d{2})? fee only for last-minute cancels or no-shows\.$/),
     }));
     expect(mockShorten).not.toHaveBeenCalled();
     expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
@@ -1000,8 +1035,25 @@ describe('plan-choice lane (GATE_SECURE_PLAN_CHOICE) — page payload', () => {
     const res = await loadSecureCardPageData(REQUEST.token);
     expect(res.state).toBe('ready');
     expect(Object.keys(res).sort()).toEqual([
-      'clientSecret', 'dateDisplay', 'firstName', 'serviceType', 'setupIntentId', 'state', 'windowDisplay',
+      // cancelFeeNote joined the base payload 2026-07-30 (owner fee-disclosure
+      // ruling) — present in ALL states, unrelated to the plan gate this test pins.
+      'cancelFeeNote', 'clientSecret', 'dateDisplay', 'firstName', 'serviceType', 'setupIntentId', 'state', 'windowDisplay',
     ]);
+  });
+
+  test('unpriced visit renders CLOSED and mints no SetupIntent — live price recheck on the token (Codex #3077 P1)', async () => {
+    // A request minted before the $0/unpriced send guard existed (or a visit
+    // repriced to $0 after the link went out) must not expose the capture
+    // form or the fee disclosure.
+    mockTableHandlers = baseHandlers({
+      appointment_card_requests: { first: () => ({ ...REQUEST }) },
+      scheduled_services: { first: () => ({ ...PLAN_VISIT, estimated_price: null }) },
+      customers: { first: () => ({ ...PLAN_CUSTOMER }) },
+    });
+    const res = await loadSecureCardPageData(REQUEST.token);
+    expect(res.state).toBe('closed');
+    expect(res.cancelFeeNote).toBeNull();
+    expect(mockCreateAppointmentCardSetupIntent).not.toHaveBeenCalled();
   });
 
   describe('gate ON (fresh module graph with the env set)', () => {

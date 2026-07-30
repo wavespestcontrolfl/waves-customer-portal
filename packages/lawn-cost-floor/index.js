@@ -73,17 +73,15 @@ function lawnMaterialCostPerVisit(annualMaterialBudget, lawnSqFt, visits) {
   return (annualMaterialBudget * (sf / MATERIAL_REFERENCE_SQFT)) / visits;
 }
 
-// Extra labor minutes/visit from landscape complexity. The privacy-fence term
-// falls back to the large-driveway flag when fence isn't known (matches how the
-// server defaults when property.fenceType is absent).
-function lawnComplexityMinutes({ landscapeComplexity, shrubDensity, hasLargeDriveway, hasPrivacyFence } = {}) {
+// Extra labor minutes/visit from landscape complexity.
+function lawnComplexityMinutes({ landscapeComplexity, shrubDensity, hasPrivacyFence } = {}) {
   const complexity = String(landscapeComplexity || '').toLowerCase();
   const shrubs = String(shrubDensity || '').toLowerCase();
   return (
     (complexity === 'moderate' ? 5 : 0) +
     (complexity === 'complex' ? 10 : 0) +
     (shrubs === 'heavy' ? 5 : 0) +
-    ((hasPrivacyFence || hasLargeDriveway) ? 5 : 0)
+    (hasPrivacyFence ? 5 : 0)
   );
 }
 

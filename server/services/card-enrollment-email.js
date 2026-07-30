@@ -274,6 +274,21 @@ async function sendAutopaySetupInvitation({ customerId, scheduledServiceId, serv
     // is only ever selected for lanes the plan page accepts, but the line
     // is still composed and passed either way — the template decides.)
     const timingLine = await chargeTimingLine(customerId);
+    // Cancellation-fee disclosure (owner ruling 2026-07-30) — same fee
+    // source as the estimate card-hold lane; '' when configured off, and
+    // composed locally to avoid a circular require back into
+    // appointment-card-request.
+    let cancelFeeSentence = '';
+    try {
+      const { cardHoldNoShowFee } = require('./estimate-card-holds');
+      const fee = Number(cardHoldNoShowFee());
+      if (fee > 0) {
+        const feeText = fee % 1 ? `$${fee.toFixed(2)}` : `$${fee}`;
+        cancelFeeSentence = `A ${feeText} fee applies only for last-minute cancels or no-shows. Rescheduling is always free.`;
+      }
+    } catch (feeErr) {
+      logger.warn(`[card-enrollment-email] cancel-fee line unavailable — omitting: ${feeErr.message}`);
+    }
     const result = await EmailTemplateLibrary.sendTemplate({
       templateKey,
       to: email,
@@ -283,6 +298,7 @@ async function sendAutopaySetupInvitation({ customerId, scheduledServiceId, serv
         date_line: dateLine || '',
         secure_link: secureUrl,
         charge_timing_line: timingLine,
+        cancel_fee_line: cancelFeeSentence,
         customer_portal_url: portalUrl('/login'),
         company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
         company_email: BILLING_EMAIL,

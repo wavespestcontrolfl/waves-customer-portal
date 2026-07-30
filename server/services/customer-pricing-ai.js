@@ -317,7 +317,6 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup })
     shrubs: customer.shrub_density || 'moderate',
     trees: customer.tree_density || 'moderate',
     complexity: customer.landscape_complexity || 'moderate',
-    largeDriveway: !!(customer.large_driveway || customer.has_large_driveway),
     irrigation: !!(customer.irrigation_system || customer.irrigation),
     treeCount: Number(customer.tree_count || 0) || 0,
   };
@@ -353,7 +352,6 @@ async function resolvePropertyContext({ customer, turfProfile, propertyLookup })
         shrubs: String(p.shrubDensity || features.shrubs || 'moderate').toLowerCase(),
         trees: String(p.treeDensity || features.trees || 'moderate').toLowerCase(),
         complexity: String(p.landscapeComplexity || features.complexity || 'moderate').toLowerCase(),
-        largeDriveway: !!p.largeDriveway || features.largeDriveway,
         irrigation: !!p.irrigationVisible || features.irrigation,
         treeCount: positiveNumber(p.estimatedTreeCount, features.treeCount),
       };

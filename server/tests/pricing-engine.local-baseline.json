@@ -23,9 +23,9 @@
   },
   "zone_b_monthly_pest_bermuda_premium": {
     "summary": {
-      "recurringAnnualAfterDiscount": 1929.1,
-      "recurringMonthlyAfterDiscount": 160.76,
-      "year1Total": 1929
+      "recurringAnnualAfterDiscount": 1864.3,
+      "recurringMonthlyAfterDiscount": 155.36,
+      "year1Total": 1864
     },
     "waveGuard": {
       "tier": "silver",
@@ -38,8 +38,8 @@
         "monthly": 100.62
       },
       "lawn_care": {
-        "annual": 936,
-        "monthly": 78
+        "annual": 864,
+        "monthly": 72
       }
     }
   },
@@ -111,9 +111,9 @@
   },
   "edge_large_footprint_5500sf_platinum_bundle": {
     "summary": {
-      "recurringAnnualAfterDiscount": 4147.81,
-      "recurringMonthlyAfterDiscount": 345.65,
-      "year1Total": 4148
+      "recurringAnnualAfterDiscount": 4157.41,
+      "recurringMonthlyAfterDiscount": 346.45,
+      "year1Total": 4157
     },
     "waveGuard": {
       "tier": "platinum",
@@ -126,8 +126,8 @@
         "monthly": 109.98
       },
       "lawn_care": {
-        "annual": 1128,
-        "monthly": 94
+        "annual": 1140,
+        "monthly": 95
       },
       "tree_shrub": {
         "annual": 1381,

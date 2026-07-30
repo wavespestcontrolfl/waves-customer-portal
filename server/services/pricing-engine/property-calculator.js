@@ -65,7 +65,9 @@ function normalizeFeatureInputs(input = {}) {
 
   features.poolCage = hasAffirmative(raw.poolCage, raw.hasPoolCage, input.poolCage, input.hasPoolCage);
   features.pool = hasAffirmative(raw.pool, raw.hasPool, input.pool, input.hasPool) || features.poolCage;
-  features.largeDriveway = hasAffirmative(raw.largeDriveway, raw.hasLargeDriveway, input.largeDriveway, input.hasLargeDriveway);
+  // largeDriveway is retired estimator-wide (owner directive 2026-07-30) —
+  // stripped here so replayed legacy inputs can't carry it into new profiles.
+  delete features.largeDriveway;
 
   const poolCageSize = raw.poolCageSize ?? input.poolCageSize;
   if (poolCageSize !== undefined && poolCageSize !== null && poolCageSize !== '') {
@@ -91,7 +93,6 @@ function estimateHardscape(lotSqFt, propertyType, features = {}) {
   let hs = fn(lotSqFt);
   if (features.poolCage) hs += HARDSCAPE_ADDITIONS.poolCage;
   else if (features.pool) hs += HARDSCAPE_ADDITIONS.poolNoCage;
-  if (features.largeDriveway) hs += HARDSCAPE_ADDITIONS.largeDriveway;
   return Math.round(hs);
 }
 
@@ -99,7 +100,6 @@ function calculateComplexityScore(features = {}) {
   let score = 0;
   if (features.pool || features.poolCage) score += 2;
   if (features.poolCage) score += 2;  // cage adds extra
-  if (features.largeDriveway) score += 2;
   if (features.shrubs === 'heavy') score += 2;
   else if (features.shrubs === 'moderate') score += 1;
   if (features.trees === 'heavy') score += 2;
