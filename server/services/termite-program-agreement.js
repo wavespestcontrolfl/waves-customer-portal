@@ -693,6 +693,32 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
 // historical records.
 const REPROCESSED_EVENT = 'superseded_reprocessed';
 
+// Conditionally retire a stale-open source row (no-op for rows already
+// cancelled, e.g. by the compliance migration): the superseded wording's
+// public signing link must die whenever the row is deemed handled.
+async function cancelStaleSource(row, conn = db) {
+  const cancelled = await conn('customer_contracts')
+    .where({ id: row.id })
+    .whereIn('status', OPEN_STATUSES)
+    .update({
+      status: 'cancelled',
+      cancelled_at: new Date(),
+      cancelled_reason: 'Superseded by updated compliance wording (v2 templates)',
+      updated_at: new Date(),
+    });
+  if (cancelled) {
+    await conn('customer_contract_events').insert({
+      contract_id: row.id,
+      customer_id: row.customer_id,
+      event_type: 'cancelled',
+      actor_type: 'system',
+      actor_id: null,
+      metadata: JSON.stringify({ reason: 'superseded_stale_version' }),
+    });
+  }
+  return !!cancelled;
+}
+
 async function markSupersededHandled(row, outcome, conn = db) {
   await conn('customer_contract_events').insert({
     contract_id: row.id,
@@ -751,27 +777,7 @@ async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
       // past the migration): it is still openly signable on superseded
       // wording. Cancel it (conditional on still being open) and hand the
       // re-issue to the operator — never assume the migration covered it.
-      if (OPEN_STATUSES.includes(String(row.status || '').toLowerCase())) {
-        const cancelled = await db('customer_contracts')
-          .where({ id: row.id })
-          .whereIn('status', OPEN_STATUSES)
-          .update({
-            status: 'cancelled',
-            cancelled_at: new Date(),
-            cancelled_reason: 'Superseded by updated compliance wording (v2 templates)',
-            updated_at: new Date(),
-          });
-        if (cancelled) {
-          await db('customer_contract_events').insert({
-            contract_id: row.id,
-            customer_id: row.customer_id,
-            event_type: 'cancelled',
-            actor_type: 'system',
-            actor_id: null,
-            metadata: JSON.stringify({ reason: 'superseded_stale_version' }),
-          });
-        }
-      }
+      await cancelStaleSource(row);
       // The bell IS the handoff — the row is only marked handled when it
       // actually landed; a double notify failure leaves the row eligible
       // for tomorrow's retry (the cancel above is conditional, so the
@@ -827,6 +833,10 @@ async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
       return openAddress === rowAddress;
     });
     if (replacementExists) {
+      // The staff-issued replacement covers the customer — but the stale
+      // source's public signing link must still die before the row is
+      // excluded from future sweeps.
+      await cancelStaleSource(row);
       await markSupersededHandled(row, 'replacement_exists');
       results.skipped += 1;
       continue;
@@ -850,25 +860,7 @@ async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
       // superseded wording: maybeCreate's parked branches return before its
       // supersede transaction, so cancel the source here (conditional on
       // still being open; migration rows are already cancelled).
-      const cancelled = await db('customer_contracts')
-        .where({ id: row.id })
-        .whereIn('status', OPEN_STATUSES)
-        .update({
-          status: 'cancelled',
-          cancelled_at: new Date(),
-          cancelled_reason: 'Superseded by updated compliance wording (v2 templates)',
-          updated_at: new Date(),
-        });
-      if (cancelled) {
-        await db('customer_contract_events').insert({
-          contract_id: row.id,
-          customer_id: row.customer_id,
-          event_type: 'cancelled',
-          actor_type: 'system',
-          actor_id: null,
-          metadata: JSON.stringify({ reason: 'superseded_stale_version' }),
-        });
-      }
+      await cancelStaleSource(row);
     }
     if (result.ok && result.contractId && !result.skipped) {
       await markSupersededHandled(row, 'replaced');
