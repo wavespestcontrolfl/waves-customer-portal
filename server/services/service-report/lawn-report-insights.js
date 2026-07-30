@@ -60,8 +60,9 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
       customerAction: `Add a little irrigation time to reach the seasonal target for your ${grassLabel}.`,
       nextVisitPlan: 'Recheck moisture and color next visit to confirm the added water is landing.',
     });
-  } else if (water.localizedDry || (waterCat && (waterCat.status === 'watch' || waterCat.status === 'needs_attention'))) {
-    // Balanced total but a localized dry/wet read — coverage, NOT "water more".
+  } else if (water.localizedDry) {
+    // Localized dry evidence (dry-signal observations or a coverage-issue
+    // snapshot) with a non-deficit total — coverage, NOT "water more".
     cards.push({
       category: 'water', status: 'watch', confidence: 'area_estimated',
       headline: 'Water coverage is the main thing to watch',
@@ -74,6 +75,20 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
       wavesAction: 'Flagged the area and will recheck it next visit.',
       customerAction: 'Check sprinkler coverage in that area rather than watering the whole yard more.',
       nextVisitPlan: 'Recheck the flagged area next visit to see whether coverage evened out.',
+    });
+  } else if (waterCat && (waterCat.status === 'watch' || waterCat.status === 'needs_attention')) {
+    // The water score is degraded without dry evidence (overwatering/fungus
+    // signals also lower it) — a dry-area/sprinkler claim here would be
+    // invented (codex P1 #3093 r2). Neutral moisture-watch card grounded in
+    // the diagnosis's own explanation.
+    cards.push({
+      category: 'water', status: 'watch', confidence: 'area_estimated',
+      headline: 'Moisture balance is the thing to watch',
+      whatWeSaw: waterCat.customerExplanation || 'Today’s photos showed a mixed moisture read across the lawn.',
+      whyItMatters: 'Keeping moisture balanced protects the lawn from both fungus pressure and dry stress.',
+      wavesAction: 'Flagged it for a recheck at the next visit.',
+      customerAction: 'Keep your current watering schedule unless we flag a change.',
+      nextVisitPlan: 'Recheck the moisture balance next visit.',
     });
   }
 

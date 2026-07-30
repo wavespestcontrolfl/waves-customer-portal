@@ -146,6 +146,10 @@ function wikiIlikeQuery(term, trustedOnly, limit) {
 // KNOWLEDGE BRIDGE SERVICE
 // ══════════════════════════════════════════════════════════════
 
+// Per-assessment chain of in-flight recommendation runs — see
+// generateAssessmentRecommendations for why runs must be serialized.
+const _recommendationRuns = new Map();
+
 const KnowledgeBridge = {
 
   // ────────────────────────────────────────────────────────────
@@ -451,9 +455,27 @@ const KnowledgeBridge = {
   // ────────────────────────────────────────────────────────────
   // generateAssessmentRecommendations — AI-powered recommendations
   // Uses both Claudeopedia protocols + wiki outcome data
-  // Called after lawn assessment is confirmed
+  // Called after lawn assessment is confirmed, and again after service
+  // completion persists the visit's products (grounded regen).
   // ────────────────────────────────────────────────────────────
   async generateAssessmentRecommendations(assessmentId) {
+    // Serialize runs per assessment: the confirm-time run can still be in
+    // flight when the post-completion grounded regen starts, and both write
+    // lawn_assessments.recommendations unconditionally — unserialized, the
+    // stale ungrounded result could land last (codex P1 #3093 r2). Chaining
+    // on the previous run's settled promise makes the later caller's result
+    // the final write. In-process is sufficient: the portal runs as a single
+    // Railway service instance.
+    const prev = _recommendationRuns.get(assessmentId) || Promise.resolve();
+    const run = prev.catch(() => {}).then(() => this._generateAssessmentRecommendationsInner(assessmentId));
+    _recommendationRuns.set(assessmentId, run);
+    run.finally(() => {
+      if (_recommendationRuns.get(assessmentId) === run) _recommendationRuns.delete(assessmentId);
+    }).catch(() => {});
+    return run;
+  },
+
+  async _generateAssessmentRecommendationsInner(assessmentId) {
     try {
       const assessment = await db('lawn_assessments').where({ id: assessmentId }).first();
       if (!assessment) return null;
