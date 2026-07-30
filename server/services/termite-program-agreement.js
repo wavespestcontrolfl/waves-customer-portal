@@ -305,6 +305,17 @@ function classifyExistingAgreement(row, estimate, now = new Date(), { activeVers
     try { snapshot = JSON.parse(snapshot); } catch { snapshot = null; }
   }
   const snapEstimateId = snapshot?.estimate?.id || null;
+  const sameEstimate = !!(snapEstimateId && estimate?.id && String(snapEstimateId) === String(estimate.id));
+  const snapAddress = normalizeAddress(snapshot?.estimate?.address || snapshot?.customer?.address);
+  const acceptedAddress = normalizeAddress(estimate?.address);
+  // Property scoping comes FIRST: another property's request is never this
+  // accept's business — even when its template version is stale, it is
+  // reconciled independently by the daily superseded pass, so it keeps its
+  // signing flow instead of being cancelled without a replacement here.
+  const provablyDifferentProperty = !sameEstimate
+    && snapAddress && acceptedAddress && snapAddress !== acceptedAddress;
+  if (provablyDifferentProperty) return 'ignore';
+
   // An open request rendered from a SUPERSEDED template version never
   // blocks — it must be cancelled and re-prepped from the active body,
   // even for the same estimate (this is what makes v1 retirement a durable
@@ -315,12 +326,10 @@ function classifyExistingAgreement(row, estimate, now = new Date(), { activeVers
     && row.document_template_version_id
     && !activeVersionIds.has(row.document_template_version_id);
   if (staleVersion) return 'supersede';
-  if (snapEstimateId && estimate?.id && String(snapEstimateId) === String(estimate.id)) return 'blocks';
-
-  const snapAddress = normalizeAddress(snapshot?.estimate?.address || snapshot?.customer?.address);
-  const acceptedAddress = normalizeAddress(estimate?.address);
-  if (!snapAddress || !acceptedAddress) return 'supersede'; // same customer, unprovable property — one open draft max
-  return snapAddress === acceptedAddress ? 'supersede' : 'ignore';
+  if (sameEstimate) return 'blocks';
+  // Same or unprovable property, different estimate, current version: the
+  // newer accept's figures supersede — one open draft max per property.
+  return 'supersede';
 }
 
 async function openProgramAgreements(customerId, conn = db, { forUpdate = false } = {}) {
@@ -656,57 +665,145 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
 // hand off to the operator instead of vanishing silently. A SIGNED program
 // row for the customer always blocks re-papering — executed contracts are
 // historical records.
+const REPROCESSED_EVENT = 'superseded_reprocessed';
+
+async function markSupersededHandled(row, outcome, conn = db) {
+  await conn('customer_contract_events').insert({
+    contract_id: row.id,
+    customer_id: row.customer_id,
+    event_type: REPROCESSED_EVENT,
+    actor_type: 'system',
+    actor_id: null,
+    metadata: JSON.stringify({ outcome }),
+  });
+}
+
 async function reconcileSupersededProgramAgreements({ limit = 50 } = {}) {
   const activeVersionIds = await activeProgramVersionIds();
   const results = { checked: 0, created: 0, skipped: 0, failed: 0 };
   if (!activeVersionIds.size) return results;
 
-  const staleOpen = await db('customer_contracts')
+  // Handled rows carry a durable REPROCESSED_EVENT marker so the daily pass
+  // ADVANCES: every terminal outcome (replaced, parked-with-bell, signed
+  // elsewhere, estimate gone) is marked and excluded next run — the same 50
+  // rows can't be re-selected forever and parked rows can't re-ring their
+  // manual-prep bells every day. Only transient errors stay unmarked for a
+  // retry.
+  const notReprocessed = (query) => query.whereNotExists(function handled() {
+    this.select(db.raw('1'))
+      .from('customer_contract_events as cce')
+      .whereRaw('cce.contract_id = customer_contracts.id')
+      .where('cce.event_type', REPROCESSED_EVENT);
+  });
+
+  const staleOpen = await notReprocessed(db('customer_contracts')
     .whereIn('document_template_key', PROGRAM_TEMPLATE_KEYS)
     .whereIn('status', OPEN_STATUSES)
-    .whereNotIn('document_template_version_id', [...activeVersionIds])
-    .select('id', 'customer_id', 'status', 'document_variables_snapshot')
+    .whereNotIn('document_template_version_id', [...activeVersionIds]))
+    .select('id', 'customer_id', 'status', 'recipient_name', 'document_variables_snapshot')
     .limit(limit);
-  const migrationCancelled = await db('customer_contracts')
+  const migrationCancelled = await notReprocessed(db('customer_contracts')
     .whereIn('document_template_key', PROGRAM_TEMPLATE_KEYS)
     .where('status', 'cancelled')
-    .where('cancelled_reason', 'like', 'Superseded by updated compliance wording%')
-    .select('id', 'customer_id', 'status', 'document_variables_snapshot')
+    .where('cancelled_reason', 'like', 'Superseded by updated compliance wording%'))
+    .select('id', 'customer_id', 'status', 'recipient_name', 'document_variables_snapshot')
     .limit(limit);
 
+  const NotificationService = require('./notification-service');
   const seenEstimates = new Set();
   for (const row of [...staleOpen, ...migrationCancelled]) {
     if (results.checked >= limit) break;
+    results.checked += 1;
     let snapshot = row.document_variables_snapshot;
     if (typeof snapshot === 'string') {
       try { snapshot = JSON.parse(snapshot); } catch { snapshot = null; }
     }
     const estimateId = snapshot?.estimate?.id || null;
-    if (!estimateId || seenEstimates.has(estimateId)) continue; // manual issues were belled by the migration
-    seenEstimates.add(estimateId);
-    results.checked += 1;
 
-    // Executed v1 agreements stay executed — never re-paper a customer who
-    // already signed.
-    const signed = await db('customer_contracts')
+    if (!estimateId) {
+      // MANUALLY issued stale row (no estimate linkage — e.g. one that raced
+      // past the migration): it is still openly signable on superseded
+      // wording. Cancel it (conditional on still being open) and hand the
+      // re-issue to the operator — never assume the migration covered it.
+      if (OPEN_STATUSES.includes(String(row.status || '').toLowerCase())) {
+        const cancelled = await db('customer_contracts')
+          .where({ id: row.id })
+          .whereIn('status', OPEN_STATUSES)
+          .update({
+            status: 'cancelled',
+            cancelled_at: new Date(),
+            cancelled_reason: 'Superseded by updated compliance wording (v2 templates)',
+            updated_at: new Date(),
+          });
+        if (cancelled) {
+          await db('customer_contract_events').insert({
+            contract_id: row.id,
+            customer_id: row.customer_id,
+            event_type: 'cancelled',
+            actor_type: 'system',
+            actor_id: null,
+            metadata: JSON.stringify({ reason: 'superseded_stale_version' }),
+          });
+          await ringAdminBell(NotificationService, [
+            'estimate',
+            'Re-issue termite agreement (wording updated)',
+            `The open termite program agreement for ${row.recipient_name || 'a customer'} was cancelled because its wording was superseded by the v2 compliance templates. It was issued manually, so re-issue it from the document library on the updated template.`,
+            { icon: '\u{1F4DD}', link: `/admin/customers/${row.customer_id}`, metadata: { contractId: row.id, customerId: row.customer_id } },
+          ], `manual stale-version re-issue for contract ${row.id}`);
+        }
+      }
+      await markSupersededHandled(row, 'manual_reissue_belled');
+      results.skipped += 1;
+      continue;
+    }
+
+    if (seenEstimates.has(estimateId)) { await markSupersededHandled(row, 'duplicate_estimate'); continue; }
+    seenEstimates.add(estimateId);
+
+    // Executed agreements stay executed — but only for THIS property/estimate:
+    // a signed agreement at another of the customer's properties must not
+    // block this one's replacement.
+    const rowAddress = normalizeAddress(snapshot?.estimate?.address || snapshot?.customer?.address);
+    const signedRows = await db('customer_contracts')
       .where({ customer_id: row.customer_id })
       .whereIn('document_template_key', PROGRAM_TEMPLATE_KEYS)
       .where('status', 'signed')
-      .first('id');
-    if (signed) { results.skipped += 1; continue; }
+      .select('document_variables_snapshot');
+    const signedSameProperty = signedRows.some((sr) => {
+      let ss = sr.document_variables_snapshot;
+      if (typeof ss === 'string') { try { ss = JSON.parse(ss); } catch { ss = null; } }
+      if (ss?.estimate?.id && String(ss.estimate.id) === String(estimateId)) return true;
+      const signedAddress = normalizeAddress(ss?.estimate?.address || ss?.customer?.address);
+      if (!signedAddress || !rowAddress) return true; // unprovable — don't re-paper
+      return signedAddress === rowAddress;
+    });
+    if (signedSameProperty) { await markSupersededHandled(row, 'signed_same_property'); results.skipped += 1; continue; }
 
     const estimate = await db('estimates').where({ id: estimateId }).first();
-    if (!estimate || estimate.status !== 'accepted') { results.skipped += 1; continue; }
+    if (!estimate || estimate.status !== 'accepted') {
+      await markSupersededHandled(row, 'estimate_unavailable');
+      results.skipped += 1;
+      continue;
+    }
 
     const result = await maybeCreateTermiteProgramAgreement({
       estimate,
       customerId: row.customer_id,
       notifyOnUnresolved: true,
     });
-    if (result.ok && result.contractId && !result.skipped) results.created += 1;
-    else if (result.ok) results.skipped += 1;
-    else if (['commercial', 'annual_prepay', 'figures_unresolved'].includes(result.skipped)) results.skipped += 1;
-    else results.failed += 1;
+    if (result.ok && result.contractId && !result.skipped) {
+      await markSupersededHandled(row, 'replaced');
+      results.created += 1;
+    } else if (result.ok) {
+      await markSupersededHandled(row, result.skipped || 'skipped');
+      results.skipped += 1;
+    } else if (['commercial', 'annual_prepay', 'figures_unresolved'].includes(result.skipped)) {
+      // Parked WITH a bell — terminal for this pass; the operator owns it now.
+      await markSupersededHandled(row, result.skipped);
+      results.skipped += 1;
+    } else {
+      results.failed += 1; // transient — stays unmarked for tomorrow's retry
+    }
   }
   return results;
 }

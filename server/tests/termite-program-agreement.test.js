@@ -296,6 +296,15 @@ describe('classifyExistingAgreement', () => {
     expect(classifyExistingAgreement(current, estimate, new Date(), { activeVersionIds: active })).toBe('blocks');
   });
 
+  test("a stale-version row for a DIFFERENT property is ignored — reconciled independently, never cancelled by another property's accept", () => {
+    const active = new Set(['v2-id']);
+    const otherProperty = openRow({
+      document_template_version_id: 'v1-id',
+      document_variables_snapshot: JSON.stringify({ estimate: { id: 'est-9', address: '400 Other St, Venice FL' } }),
+    });
+    expect(classifyExistingAgreement(otherProperty, estimate, new Date(), { activeVersionIds: active })).toBe('ignore');
+  });
+
   test('matching estimate id blocks regardless of address text', () => {
     const row = openRow({
       document_variables_snapshot: JSON.stringify({ estimate: { id: 'est-1', address: 'totally different text' } }),
