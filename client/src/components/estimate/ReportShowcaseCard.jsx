@@ -242,7 +242,7 @@ export default function ReportShowcaseCard({ variant = 'pest' }) {
           <p style={{ fontSize: 14, color: W.textBody, margin: '8px 0 0', lineHeight: 1.5 }}>
             {lawn
               ? <>Every treatment is documented while your tech is still in the driveway &mdash; turf density, weed pressure, color, and what was applied, tracked against your last visit so progress is never a guess.</>
-              : <>Every treatment is documented while your tech is still in the driveway &mdash; what was found, what was applied, and when it&rsquo;s safe for kids and pets to head back outside.</>}
+              : <>Every treatment is documented while your tech is still in the driveway &mdash; what was found, what was applied, and the re-entry guidance for kids and pets.</>}
           </p>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, margin: '16px 0 0' }}>
             {/* data-glass-accent renders these as the same gold pills as the
