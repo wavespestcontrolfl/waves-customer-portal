@@ -262,6 +262,23 @@ const HIGHLIGHT_RGB = [96, 214, 116];
 const HIGHLIGHT_ALPHA = 0.48;
 
 /**
+ * Turf pixel test, inverted on purpose: SWFL lawns run green through
+ * browning tan, so "must be green" misses half the actual lawn. Exclude
+ * what is clearly NOT turf — neutral gray (shingle roofs/drives/screens:
+ * tiny channel spread), blue-dominant (pools), near-white (lanai frames,
+ * bright concrete), and RED-DOMINANT (terracotta/barrel-tile roofs, mulch
+ * beds — codex P1 #3075: r≫g passed the old test). Browning turf is warm
+ * but never red-dominant (r-g ≲ 25); tile roofs and mulch run r-g ≈ 50-90.
+ * Trees passing is fine — vegetation on the lawn. Pinned by
+ * treatmentZoneSpray.turf.test.js.
+ */
+export function isTurfPixel(r, g, b) {
+  const spread = Math.max(r, g, b) - Math.min(r, g, b);
+  const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+  return spread >= 18 && b < Math.max(r, g) && lum < 215 && (r - g) < 28;
+}
+
+/**
  * Grass highlight mask: a width×height overlay canvas painting turf inside
  * the traced loop with the luminous green; everything else transparent.
  * Built at 320×240 and upscaled with a slight blur for soft organic edges.
@@ -292,28 +309,25 @@ export function buildLawnHighlightMask({ source, points, closed, width = MAP_WID
   const poly = pctx.getImageData(0, 0, SW, SH);
   const out = sctx.createImageData(SW, SH);
   const litA = Math.round(HIGHLIGHT_ALPHA * 255);
+  let litCount = 0;
+  let insideCount = 0;
   for (let i = 0; i < SW * SH; i += 1) {
     const o = i * 4;
-    const r = img.data[o];
-    const g = img.data[o + 1];
-    const b = img.data[o + 2];
-    // Turf test, inverted on purpose: SWFL lawns run green through browning
-    // tan, so "must be green" misses half the actual lawn. Exclude what is
-    // clearly NOT turf — neutral gray (shingle roofs/drives/screens: tiny
-    // channel spread), blue-dominant (pools), near-white (lanai frames,
-    // bright concrete), and RED-DOMINANT (terracotta/barrel-tile roofs,
-    // mulch beds — pre-push audit P1 2026-07-30: r≫g passed the old test).
-    // Browning turf is warm but never red-dominant (r-g ≲ 25); tile roofs
-    // and mulch run r-g ≈ 60-90. Trees highlighting is fine — vegetation.
-    const spread = Math.max(r, g, b) - Math.min(r, g, b);
-    const lum = 0.299 * r + 0.587 * g + 0.114 * b;
-    const turf = spread >= 18 && b < Math.max(r, g) && lum < 215 && (r - g) < 28;
-    const lit = poly.data[o + 3] > 127 && turf;
+    const inside = poly.data[o + 3] > 127;
+    if (inside) insideCount += 1;
+    const lit = inside && isTurfPixel(img.data[o], img.data[o + 1], img.data[o + 2]);
+    if (lit) litCount += 1;
     out.data[o] = HIGHLIGHT_RGB[0];
     out.data[o + 1] = HIGHLIGHT_RGB[1];
     out.data[o + 2] = HIGHLIGHT_RGB[2];
     out.data[o + 3] = lit ? litA : 0;
   }
+  // A mask that lights (almost) nothing — fully dormant brown lawn,
+  // washed-out imagery — must NOT count as a successful highlight: callers
+  // would skip the outline fallback and save an unmarked report while
+  // claiming the lawn was highlighted (codex P1 #3075). 1% of the loop is
+  // the floor for "we actually marked something".
+  if (!insideCount || litCount / insideCount < 0.01) return null;
   const oc = document.createElement('canvas');
   oc.width = SW;
   oc.height = SH;

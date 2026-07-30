@@ -416,14 +416,22 @@ export default function TechTreatmentZoneModal({
       if (lawnMode && closed) {
         // Grass highlight for the SAVED snapshot (no box — owner
         // 2026-07-30), built from the same (possibly aligned) base the
-        // snapshot composes over. Fail-soft to the classic outline on a
-        // tainted canvas.
+        // snapshot composes over. A tainted canvas throws — retry from a
+        // CORS-checked re-fetch of the same tile (the exact bitmap
+        // composeSnapshot's own taint fallback will compose over), so the
+        // report keeps the grass highlight instead of silently downgrading
+        // to the outline (codex P2 #3075). A null return means "no turf
+        // found" — re-fetching can't change that, so the outline fallback
+        // is correct there (codex P1 #3075).
+        const maskArgs = { points: finalPoints, closed, width: MAP_WIDTH, height: MAP_HEIGHT };
         try {
-          lawnMask = buildLawnHighlightMask({
-            source: base, points: finalPoints, closed,
-            width: MAP_WIDTH, height: MAP_HEIGHT,
-          });
-        } catch { lawnMask = null; }
+          lawnMask = buildLawnHighlightMask({ source: base, ...maskArgs });
+        } catch {
+          try {
+            const bitmap = await createImageBitmap(await (await fetch(baseUrl)).blob());
+            lawnMask = buildLawnHighlightMask({ source: bitmap, ...maskArgs });
+          } catch { lawnMask = null; }
+        }
       }
       const accum = lawnMode
         ? (lawnMask || buildOutlineAccum({
