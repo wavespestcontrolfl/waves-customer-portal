@@ -1315,9 +1315,13 @@ async function assembleBeehiivNewsletter(draft) {
   // names, so the fold-out doesn't give the issue away. ENFORCED: a
   // model title that just echoes the DB-locked official name falls back
   // to a generic no-spoilers entry.
-  const normTitle = (t) => String(t || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const normTitle = (t) => String(t || '').normalize('NFKC').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
   const tocItems = events.map((ev, i) => {
-    const leaks = ev.sourceTitle && normTitle(ev.title) === normTitle(ev.sourceTitle);
+    // Containment, not just equality: "Downtown Night Market After Dark"
+    // still reveals "Downtown Night Market". Names under 4 normalized
+    // chars are too generic to treat as leaks.
+    const src = normTitle(ev.sourceTitle);
+    const leaks = src.length >= 4 && normTitle(ev.title).includes(src);
     const tease = leaks ? `Weekend pick #${i + 1}` : markdownToHtml(ev.title);
     return `<li style="margin:0 0 6px 0;"><a href="#evt-${slugify(ev.title)}" class="dm-link" style="color:${COLORS.blue};text-decoration:none;">${escapeHtml(ev.emoji || '🎯')} <strong>${tease}</strong></a></li>`;
   });
@@ -1752,10 +1756,23 @@ async function createNewsletterDraft({
     ? buildPestInsiderSystemPrompt(voice, month)
     : buildFlagshipSystemPrompt(voice, month);
 
-  // Enrich the user prompt with homeowner minute topic if provided
+  // Enrich the user prompt with homeowner minute topic if provided;
+  // otherwise supply RECENT topics so "vary week to week" is enforceable
+  // (the model can't avoid repeats it has never seen).
   let enrichedPrompt = prompt;
   if (homeownerMinuteTopic) {
     enrichedPrompt += `\nHomeowner Minute topic: ${homeownerMinuteTopic}`;
+  } else if (typeConfig?.flagship) {
+    try {
+      const recent = await knex('newsletter_calendar')
+        .whereNotNull('homeowner_minute_topic')
+        .orderBy('week_of', 'desc')
+        .limit(4)
+        .pluck('homeowner_minute_topic');
+      if (recent.length) {
+        enrichedPrompt += `\nRecent Homeowner Minute topics (do NOT repeat these): ${recent.join('; ')}`;
+      }
+    } catch { /* best-effort — the section still generates without history */ }
   }
 
   const userPrompt = `Topic / prompt: ${enrichedPrompt}
