@@ -950,3 +950,30 @@ describe('checkHubLinkPresent — hubless verticals accept their city-service pa
     expect(run('see [here](/pest-control-sarasota-fl/)', brief).ok).toBe(true);
   });
 });
+
+// Lawn joined tree-shrub as hubless once the gate went service-specific: its only
+// entry was a Manatee-county fertilizer guide, which is the wrong required link for
+// a Sarasota or non-fertilizer lawn topic and nudges county-specific dates into the
+// wrong locale.
+describe('checkHubLinkPresent — lawn is hubless and uses its city page', () => {
+  const gate = require('../services/content/content-quality-gate');
+  const run = (body, brief) => gate._internals.checkHubLinkPresent({ body }, brief);
+
+  test('a lawn draft linking its city page passes', () => {
+    const body = 'Sarasota lawns differ — see [lawn care in Sarasota](/lawn-care-sarasota-fl/).';
+    expect(run(body, { service: 'lawn', page_type: 'supporting-blog' }).ok).toBe(true);
+    expect(run(body, { service: 'lawn-care', page_type: 'supporting-blog' }).ok).toBe(true);
+  });
+
+  test('the Manatee blackout guide alone no longer satisfies a lawn topic', () => {
+    const body = 'See the [fertilizer blackout guide](/lawn-care/fertilizer-blackout-manatee-county/).';
+    expect(run(body, { service: 'lawn', page_type: 'supporting-blog' }).ok).toBe(false);
+  });
+
+  test('it is still an allowed LINK, just not a mandated hub', () => {
+    const guardrails = require('../services/content/content-guardrails');
+    expect(guardrails.ALLOWED_INTERNAL_LINKS).toContain('/lawn-care/fertilizer-blackout-manatee-county/');
+    const r = guardrails.evaluate({ body: 'Manatee dates: [blackout guide](/lawn-care/fertilizer-blackout-manatee-county/).' }, {});
+    expect(r.findings.some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
+  });
+});

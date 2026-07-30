@@ -350,7 +350,17 @@ const SERVICE_CITY_SLUG = {
 // plus a unit test rather than by comment.
 const SERVICE_HUB_LINKS = {
   pest: ['/pest-control-services/', '/waveguard-memberships/', '/pest-library/'],
-  lawn: ['/lawn-care/fertilizer-blackout-manatee-county/'],
+  // Hubless, like tree-shrub: there is no lawn-wide hub page. The Manatee-county
+  // fertilizer-blackout guide used to stand in here, but once checkHubLinkPresent
+  // became service-specific that made a county-specific blog post the ONE accepted
+  // hub link for every lawn topic — irrelevant for most Sarasota/Venice and
+  // non-fertilizer subjects, and an active nudge toward putting Manatee blackout
+  // dates in the wrong locale (Sarasota county's differ). It stays on the
+  // guardrail allowlist, so a Manatee fertilizer post can still link it; it is
+  // just no longer mandated. Lawn city pages are real for all eight cities
+  // (/lawn-care-{city}-fl/, verified 200 on 2026-07-29) and satisfy the gate via
+  // the hubless carve-out.
+  lawn: [],
   mosquito: ['/pest-control-services/'],
   termite: ['/termite-inspection/'],
   rodent: ['/pest-control-services/', '/pest-library/'],

@@ -279,12 +279,14 @@ describe('WORD_COUNT_TARGET map', () => {
 });
 
 describe('SERVICE_HUB_LINKS', () => {
-  // tree-shrub is deliberately EMPTY: there is no hub-level tree & shrub page
-  // (the bare /tree-shrub-care/ route this map used to carry 404s), and the
-  // alternatives are both worse — a dead link, or a conversion route that would
-  // weaken checkHubLinkPresent for every service. An empty list parks a
-  // city-less tree-shrub blog on hub_link_present instead, which is visible.
-  const NO_HUB_PAGE = new Set(['tree-shrub']);
+  // Deliberately EMPTY where no hub-level page exists. tree-shrub: the bare
+  // /tree-shrub-care/ route this map used to carry 404s. lawn: the Manatee-county
+  // fertilizer guide that stood in here became the ONE accepted hub link for every
+  // lawn topic once the gate went service-specific — wrong for most Sarasota and
+  // non-fertilizer subjects. Both are satisfied instead by their real city-service
+  // pages via checkHubLinkPresent's hubless carve-out; a city-less draft parks on
+  // hub_link_present, which is visible.
+  const NO_HUB_PAGE = new Set(['tree-shrub', 'lawn']);
 
   test('every service with a hub page maps to ≥1 real hub link', () => {
     for (const svc of Object.keys(SERVICE_HUB_LINKS)) {
@@ -464,9 +466,10 @@ describe('_internalLinksFor conversion link', () => {
     // gone.
     const lawn = builder._internalLinksFor({ city: 'Venice', service: 'lawn-care' }, 'supporting-blog');
     expect(lawn).toContain('/contact/');
-    expect(lawn).toContain('/lawn-care/fertilizer-blackout-manatee-county/');
-    expect(lawn).not.toContain('/lawn-care/');
     expect(lawn).toContain('/lawn-care-venice-fl/');
+    expect(lawn).not.toContain('/lawn-care/');
+    // No county-specific guide mandated into a Venice topic.
+    expect(lawn).not.toContain('/lawn-care/fertilizer-blackout-manatee-county/');
 
     const trees = builder._internalLinksFor({ city: null, service: 'tree-shrub-care' }, 'supporting-blog');
     expect(trees).toContain('/contact/'); // conversion link, from SERVICE_CONVERSION_LINK

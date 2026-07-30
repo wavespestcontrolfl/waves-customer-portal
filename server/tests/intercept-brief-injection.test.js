@@ -73,10 +73,12 @@ describe('content-brief-builder operator-intercept injection', () => {
     // Operator internal links lead the list verbatim, with the standard
     // service-hub links merged after them (hub_link_present support).
     expect(brief.internal_links_to_add.slice(0, payload.internal_links.length)).toEqual(payload.internal_links);
-    // Lawn hub link merged in for hub_link_present. This asserted '/lawn-care/'
-    // until 2026-07-29, when a live fetch showed that route 404s (no bare hub
-    // page — only city-scoped ones); the real lawn hub target is the blackout
-    // guide.
+    // This asserted '/lawn-care/' until 2026-07-29, when a live fetch showed that
+    // route 404s (no bare lawn hub page exists — only city-scoped ones). The
+    // blackout guide below survives because THIS operator payload lists it
+    // verbatim, not because lawn mandates it: SERVICE_HUB_LINKS.lawn is now empty
+    // (a county-specific guide is the wrong required link for every lawn topic),
+    // so lawn satisfies hub_link_present via its city-service page instead.
     expect(brief.internal_links_to_add).toContain('/lawn-care/fertilizer-blackout-manatee-county/');
     expect(brief.internal_links_to_add).not.toContain('/lawn-care/');
 
