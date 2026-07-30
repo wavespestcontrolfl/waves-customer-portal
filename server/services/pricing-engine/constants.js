@@ -58,7 +58,7 @@ const HARDSCAPE = {
   townhome: (lotSqFt) => 400 + Math.max(0, lotSqFt - 7500) * 0.02,
   condo: (lotSqFt) => 200 + Math.max(0, lotSqFt - 7500) * 0.05,
 };
-const HARDSCAPE_ADDITIONS = { poolCage: 600, poolNoCage: 450, largeDriveway: 300 };
+const HARDSCAPE_ADDITIONS = { poolCage: 600, poolNoCage: 450 };
 
 // ── Bed Area Estimation ───────────────────────────────────────
 const BED_DENSITY = {
@@ -69,7 +69,7 @@ const BED_DENSITY = {
 const BED_AREA_CAP = 8000; // v2 cap
 
 // ── Turf Complexity Score → Factor ────────────────────────────
-// Score built from: pool(+2), cage(+2), driveway(+2), shrubs(+1/+2),
+// Score built from: pool(+2), cage(+2), shrubs(+1/+2),
 // trees(+1/+2), complexity(+1/+2), bedRatio≥0.20(+3) or ≥0.10(+1)
 const TURF_FACTORS = [0.78, 0.73, 0.68, 0.63, 0.58, 0.53, 0.48, 0.43, 0.38, 0.33];
 
@@ -199,7 +199,6 @@ const PEST = {
     shrubMinutes: { light: -2, moderate: 0, heavy: 3 },
     treeMinutes: { light: -2, moderate: 0, heavy: 3 },
     complexityMinutes: { simple: -3, moderate: 0, complex: 3 },
-    largeDrivewayMinutes: 2,
     nearWaterMinutes: 2,
     attachedGarageMinutes: 2,
     outbuildingMinutes: 3,
@@ -1108,8 +1107,8 @@ const ONE_TIME = {
   // Formula: max(floor, quarterlyPerApp × multiplier).
   //
   // Anchoring on the quarterly rate is the whole design: that rate already
-  // encodes every property metric (footprint, lot size, tree/shrub density,
-  // pool/cage, driveway, complexity, property type, age), so a one-time visit
+  // encodes every property metric (footprint, lot size, shrub density,
+  // pool/cage, complexity, property type, age), so a one-time visit
   // scales proportionally with real job difficulty — no separate sq-ft curve,
   // no flat add-on that would distort small vs. large properties.
   //
@@ -1239,7 +1238,6 @@ const SPECIALTY = {
     concretePctBase: 0.25,
     concretePctCage: 0.35,
     concretePctPool: 0.30,
-    concretePctDriveway: 0.05,
     concretePctCap: 0.60,
     defaultProductKey: 'taurus_sc',
     defaultIncludedProductKey: 'taurus_sc',

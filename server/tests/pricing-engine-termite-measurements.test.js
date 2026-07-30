@@ -88,24 +88,28 @@ describe('termite measurement overrides and safeguards', () => {
   });
 
   test('trenching keeps existing valid example and supports manual concrete LF', () => {
+    // largeDriveway is retired estimator-wide (2026-07-30): the flag stays in
+    // the fixture to pin that it no longer adds to the concrete split — the
+    // pool cage alone sets 0.35.
     const existing = priceTrenching({
       perimeter: 240,
       features: { poolCage: true, largeDriveway: true },
     });
 
-    expect(existing.concretePct).toBe(0.4);
-    expect(existing.dirtLF).toBe(144);
-    expect(existing.concreteLF).toBe(96);
-    expect(existing.price).toBe(2784);
+    expect(existing.concretePct).toBe(0.35);
+    expect(existing.dirtLF).toBe(156);
+    expect(existing.concreteLF).toBe(84);
+    expect(existing.price).toBe(2736);
     expect(existing.renewal).toBe(325);
     expect(existing.productKey).toBe('taurus_sc');
     expect(existing.productSurcharge).toBe(0);
-    expect(existing.baseInstallPrice).toBe(2784);
+    expect(existing.baseInstallPrice).toBe(2736);
     // Default trench depth is now the 0.5 ft baseline (×1.0 install premium), so
     // finished gallons halve vs. the retired 1.0 ft default; base price is unchanged.
     expect(existing.trenchDepthPriceMultiplier).toBe(1);
     expect(existing.highRatePriceMultiplier).toBe(1);
-    expect(existing.finishedGallons).toBe(51.84);
+    // (156 dirt + 84 concrete × 1.2 pad) × 4 gal/10LF × 0.5 ft depth
+    expect(existing.finishedGallons).toBe(51.36);
 
     const manual = priceTrenching({}, {
       measurements: { perimeterLF: 240, concreteLF: 120 },

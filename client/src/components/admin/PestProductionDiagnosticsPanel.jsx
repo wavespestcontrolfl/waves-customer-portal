@@ -20,7 +20,6 @@ const BREAKDOWN_LABELS = {
   shrubs: "Shrubs",
   trees: "Trees",
   complexity: "Landscape",
-  largeDriveway: "Large driveway",
   nearWater: "Near water",
   attachedGarage: "Attached garage",
   outbuildings: "Outbuildings",

@@ -81,9 +81,10 @@ function lineRequiresReview(line = {}) {
 // final quoted address), so its pool/cage, shrub density, landscape
 // complexity, and water adjacency feed real per-feature adjustments —
 // without this a caged-pool, heavy-landscaping home green-laned at the
-// bare-property price. Deliberately NOT mapped: tree density and large
-// driveway for pest (retired from pest pricing on main by #2794 — wiring
-// them here would add money that vanishes at merge). treeDensity still
+// bare-property price. Deliberately NOT mapped: tree density for pest
+// (retired from pest pricing on main by #2794) and large driveway anywhere
+// (retired estimator-wide 2026-07-30) — wiring either here would add money
+// that vanishes at merge. treeDensity still
 // flows top-level for the tree & shrub pricer's density-estimate fallback.
 // Enriched merge fields carry literal 'UNKNOWN' when neither records nor
 // vision resolved them — that must stay OFF the engine input.

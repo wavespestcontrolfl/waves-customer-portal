@@ -547,7 +547,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     const lot = Math.max(500, Math.min(LOT_CAP, realLotSqFt ?? (Number(lotSqFt) || sqft * 4)));
 
     // Greenlit 2026-04-18: enriched property features (pool/cage, shrub/tree
-    // density, landscape complexity, near-water, large-driveway) flow into the
+    // density, landscape complexity, near-water) flow into the
     // pricing engine so public quotes match what admin /estimate would price.
     // Same per-visit modifiers as admin (pool cage size defaults to medium:
     // small +$5, medium +$8, large +$12, oversized +$18; moderate shrubs/trees
@@ -608,7 +608,6 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         trees: (ep.treeDensity || ep.trees || '').toString().toLowerCase() || undefined,
         complexity: (ep.landscapeComplexity || ep.complexity || '').toString().toLowerCase() || undefined,
         nearWater: ep.nearWater === 'YES' || ep.nearWater === true,
-        largeDriveway: ep.hasLargeDriveway === true || ep.largeDriveway === true,
       },
       services: {},
     };

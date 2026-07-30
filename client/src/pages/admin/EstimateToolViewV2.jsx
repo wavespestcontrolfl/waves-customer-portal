@@ -2013,7 +2013,6 @@ export default function EstimateToolViewV2({
     hasPool: "NO",
     hasPoolCage: "NO",
     poolCageSize: "MEDIUM",
-    hasLargeDriveway: "NO",
     shrubDensity: "MODERATE",
     treeDensity: "MODERATE",
     landscapeComplexity: "MODERATE",
@@ -3116,7 +3115,6 @@ export default function EstimateToolViewV2({
       if (ep.poolCage === "YES") upd.hasPoolCage = "YES";
       if (ep.poolCageSize && ep.poolCageSize !== "NONE")
         upd.poolCageSize = ep.poolCageSize;
-      if (ep.largeDriveway) upd.hasLargeDriveway = "YES";
       if (ep.shrubDensity) upd.shrubDensity = ep.shrubDensity;
       if (ep.treeDensity) upd.treeDensity = ep.treeDensity;
       if (ep.landscapeComplexity)
@@ -3368,7 +3366,6 @@ export default function EstimateToolViewV2({
         upd.landscapeComplexity = data.landscape_complexity;
       if (data.has_pool) upd.hasPool = "YES";
       if (data.has_pool_cage) upd.hasPoolCage = "YES";
-      if (data.has_large_driveway) upd.hasLargeDriveway = "YES";
       if (data.near_water) upd.nearWater = "YES";
       if (data.property_type || data.category) {
         Object.assign(upd, resolveLookupPropertyTypeAutofill(data.property_type, data.category));
@@ -3770,7 +3767,6 @@ export default function EstimateToolViewV2({
       profile.storiesSource = form._storiesEdited
         ? "manual"
         : baseProfile.storiesSource;
-      profile.hasLargeDriveway = form.hasLargeDriveway === "YES";
       profile.shrubDensity = form.shrubDensity || profile.shrubDensity;
       profile.treeDensity = form.treeDensity || profile.treeDensity;
       profile.landscapeComplexity =
@@ -4208,7 +4204,6 @@ export default function EstimateToolViewV2({
       hasPool: "NO",
       hasPoolCage: "NO",
       poolCageSize: "MEDIUM",
-      hasLargeDriveway: "NO",
       nearWater: "NO",
       shrubDensity: "MODERATE",
       treeDensity: "MODERATE",
@@ -4866,7 +4861,6 @@ export default function EstimateToolViewV2({
                       hasPool: "NO",
                       hasPoolCage: "NO",
                       poolCageSize: "MEDIUM",
-                      hasLargeDriveway: "NO",
                       shrubDensity: "MODERATE",
                       treeDensity: "MODERATE",
                       landscapeComplexity: "MODERATE",
@@ -5338,15 +5332,6 @@ export default function EstimateToolViewV2({
                 <FieldV2 label="Pool Cage">
                   <SelectV2
                     k="hasPoolCage"
-                    options={[
-                      { value: "NO", label: "No" },
-                      { value: "YES", label: "Yes" },
-                    ]}
-                  />
-                </FieldV2>{" "}
-                <FieldV2 label="Large Driveway">
-                  <SelectV2
-                    k="hasLargeDriveway"
                     options={[
                       { value: "NO", label: "No" },
                       { value: "YES", label: "Yes" },
@@ -7587,12 +7572,7 @@ export default function EstimateToolViewV2({
                         {E.property?.poolCage === "YES" ||
                         E.property?.poolCage === true
                           ? ` (caged${E.property?.poolCageSize ? `: ${String(E.property.poolCageSize).toLowerCase()}` : ""})`
-                          : ""}{" "}
-                        | Driveway:{" "}
-                        {E.property?.largeDriveway === "YES" ||
-                        E.property?.largeDriveway === true
-                          ? "Large"
-                          : "Normal"}
+                          : ""}
                         <br />
                         Shrubs:{" "}
                         {E.property?.shrubDensity ||

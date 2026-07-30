@@ -395,7 +395,6 @@ function resolveFeatureConcretePct(property = {}) {
   let concretePct = SPECIALTY.trenching.concretePctBase;
   if (f.poolCage) concretePct = SPECIALTY.trenching.concretePctCage;
   else if (f.pool) concretePct = SPECIALTY.trenching.concretePctPool;
-  if (f.largeDriveway) concretePct += SPECIALTY.trenching.concretePctDriveway;
   return Math.min(concretePct, SPECIALTY.trenching.concretePctCap);
 }
 
@@ -1246,7 +1245,6 @@ function calculatePestProductionDiagnostics(property) {
     shrubs: cfg.shrubMinutes?.[f.shrubs] || 0,
     trees: cfg.treeMinutes?.[f.trees] || 0,
     complexity: cfg.complexityMinutes?.[f.complexity] || 0,
-    largeDriveway: f.largeDriveway ? (cfg.largeDrivewayMinutes || 0) : 0,
     nearWater: f.nearWater ? (cfg.nearWaterMinutes || 0) : 0,
     attachedGarage: hasAttachedGarageForPest(property) ? (cfg.attachedGarageMinutes || 0) : 0,
     outbuildings: outbuildingCount * (cfg.outbuildingMinutes || 0),
@@ -1863,7 +1861,6 @@ function calcLawnAnnualCostFloorDetails(lawnSqFt, track, visits, property = {}, 
   const complexityMinutes = lawnComplexityMinutes({
     landscapeComplexity: complexity,
     shrubDensity: shrubs,
-    hasLargeDriveway: features.largeDriveway,
     hasPrivacyFence: (property.fenceType || features.gate || features.accessDifficulty || '')
       .toString().toLowerCase().includes('privacy'),
   });

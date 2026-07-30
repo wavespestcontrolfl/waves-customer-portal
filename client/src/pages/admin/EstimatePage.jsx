@@ -813,7 +813,6 @@ function EstimateToolView() {
     hasPool: "NO",
     hasPoolCage: "NO",
     poolCageSize: "MEDIUM",
-    hasLargeDriveway: "NO",
     hasAttachedGarage: "NO",
     shrubDensity: "MODERATE",
     treeDensity: "MODERATE",
@@ -1495,7 +1494,6 @@ function EstimateToolView() {
       if (ep.poolCage === "YES") upd.hasPoolCage = "YES";
       if (ep.poolCageSize && ep.poolCageSize !== "NONE")
         upd.poolCageSize = ep.poolCageSize;
-      if (ep.largeDriveway) upd.hasLargeDriveway = "YES";
       // detectAttachedGarage always returns a boolean — assign BOTH outcomes
       // so a prior property's YES can never survive into the next lookup and
       // bill its $5/visit against the wrong home (hook P0 on #3040 r3).
@@ -1700,7 +1698,6 @@ function EstimateToolView() {
         upd.landscapeComplexity = data.landscape_complexity;
       if (data.has_pool) upd.hasPool = "YES";
       if (data.has_pool_cage) upd.hasPoolCage = "YES";
-      if (data.has_large_driveway) upd.hasLargeDriveway = "YES";
       if (data.near_water) upd.nearWater = "YES";
       const termiteFootprint =
         data.footprint_sqft ||
@@ -2053,7 +2050,6 @@ function EstimateToolView() {
         profile.storiesSource = form._storiesEdited
           ? "manual"
           : profile.storiesSource;
-        profile.hasLargeDriveway = form.hasLargeDriveway === "YES";
         // Server key: translateV2CallToV1Input forwards `attachedGarage`
         // (property-lookup-v2), not hasAttachedGarage — the wrong key would
         // silently drop the $5/visit adjustment on the authoritative path.
@@ -2168,8 +2164,6 @@ function EstimateToolView() {
           if (nw && nw !== "NONE" && nw !== "NO" && nw !== false)
             add("pest", "Near water: +$3/visit", 3, "up");
           else add("pest", "No water nearby: $0/visit", 0, "info");
-          if (p.hasLargeDriveway)
-            add("pest", "Large driveway: +$3/visit", 3, "up");
           if (p.yearBuilt)
             add(
               "property",
@@ -2243,7 +2237,6 @@ function EstimateToolView() {
       roachSeverity: form.germanRoachSeverity || "light",
       hasPool: yesNo(form.hasPool),
       hasPoolCage: yesNo(form.hasPoolCage),
-      hasLargeDriveway: yesNo(form.hasLargeDriveway),
       attachedGarage: yesNo(form.hasAttachedGarage),
       nearWater: yesNo(form.nearWater),
       isAfterHours: yesNo(form.isAfterHours),
@@ -2418,7 +2411,6 @@ function EstimateToolView() {
       hasPool: "NO",
       hasPoolCage: "NO",
       poolCageSize: "MEDIUM",
-      hasLargeDriveway: "NO",
       hasAttachedGarage: "NO",
       nearWater: "NO",
       shrubDensity: "MODERATE",
@@ -2670,7 +2662,6 @@ function EstimateToolView() {
                       hasPool: "NO",
                       hasPoolCage: "NO",
                       poolCageSize: "MEDIUM",
-                      hasLargeDriveway: "NO",
                       hasAttachedGarage: "NO",
                       shrubDensity: "MODERATE",
                       treeDensity: "MODERATE",
@@ -3181,15 +3172,6 @@ function EstimateToolView() {
                 <Field label="Pool Cage">
                   <Select
                     k="hasPoolCage"
-                    options={[
-                      { value: "NO", label: "No" },
-                      { value: "YES", label: "Yes" },
-                    ]}
-                  />
-                </Field>{" "}
-                <Field label="Large Driveway">
-                  <Select
-                    k="hasLargeDriveway"
                     options={[
                       { value: "NO", label: "No" },
                       { value: "YES", label: "Yes" },
@@ -4856,12 +4838,7 @@ function EstimateToolView() {
                         {E.property?.poolCage === "YES" ||
                         E.property?.poolCage === true
                           ? ` (caged${E.property?.poolCageSize ? `: ${String(E.property.poolCageSize).toLowerCase()}` : ""})`
-                          : ""}{" "}
-                        | Driveway:{" "}
-                        {E.property?.largeDriveway === "YES" ||
-                        E.property?.largeDriveway === true
-                          ? "Large"
-                          : "Normal"}
+                          : ""}
                         <br />
                         Shrubs:{" "}
                         {E.property?.shrubDensity ||

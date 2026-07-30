@@ -3243,7 +3243,6 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     complexity: (p.landscapeComplexity || 'SIMPLE').toLowerCase(),
     nearWater: p.nearWater === 'YES',
     irrigation: !!p.irrigation,
-    largeDriveway: !!p.hasLargeDriveway,
     treeCount: Number(p.treeCount || p.estimatedTreeCount) || 0,
   };
 
