@@ -864,6 +864,34 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
       // update, and the completed signature would be clobbered 'cancelled'.
       const openRows = await openProgramAgreements(customerId, trx, { forUpdate: true });
       const nowTs = new Date();
+      // Supersede-cancels run BEFORE the early returns: a same-estimate
+      // current-version blocker (or an executed signature) must not shield
+      // an OLDER same-property open agreement from retirement — rolling
+      // deploys and legacy/manual issuance can leave both, and the stale
+      // one would stay publicly signable at superseded figures. The
+      // cancel stays conditional on the row still being open (belt +
+      // braces with the row lock).
+      const stale = openRows.filter((r) => classifyExistingAgreement(r, estimate, nowTs, { activeVersionIds: lockedActiveIds }) === 'supersede');
+      for (const staleRow of stale) {
+        const cancelled = await trx('customer_contracts')
+          .where({ id: staleRow.id })
+          .whereIn('status', OPEN_STATUSES)
+          .update({
+            status: 'cancelled',
+            cancelled_at: nowTs,
+            cancelled_reason: 'Superseded by a newer accepted termite estimate',
+            updated_at: nowTs,
+          });
+        if (!cancelled) continue;
+        await trx('customer_contract_events').insert({
+          contract_id: staleRow.id,
+          customer_id: customerId,
+          event_type: 'cancelled',
+          actor_type: 'system',
+          actor_id: null,
+          metadata: JSON.stringify({ reason: 'superseded', supersededByEstimateId: estimate.id }),
+        });
+      }
       if (openRows.some((r) => classifyExistingAgreement(r, estimate, nowTs, { activeVersionIds: lockedActiveIds }) === 'blocks')) return null;
       // Signed re-check INSIDE the lock: a customer signing a (stale) request
       // for THIS estimate between an unlocked pre-check and this transaction
@@ -903,31 +931,6 @@ async function maybeCreateTermiteProgramAgreement({ estimate, customerId, req = 
           return !signedTs || signedTs >= signedAfterTs;
         });
         if (signedBlocks) return 'signed_exists';
-      }
-      // A revised estimate accepted for the same property supersedes the
-      // older open draft — cancel it so exactly one live agreement exists
-      // and it carries the ACCEPTED figures. The cancel stays conditional
-      // on the row still being open (belt + braces with the row lock).
-      const stale = openRows.filter((r) => classifyExistingAgreement(r, estimate, nowTs, { activeVersionIds: lockedActiveIds }) === 'supersede');
-      for (const staleRow of stale) {
-        const cancelled = await trx('customer_contracts')
-          .where({ id: staleRow.id })
-          .whereIn('status', OPEN_STATUSES)
-          .update({
-            status: 'cancelled',
-            cancelled_at: nowTs,
-            cancelled_reason: 'Superseded by a newer accepted termite estimate',
-            updated_at: nowTs,
-          });
-        if (!cancelled) continue;
-        await trx('customer_contract_events').insert({
-          contract_id: staleRow.id,
-          customer_id: customerId,
-          event_type: 'cancelled',
-          actor_type: 'system',
-          actor_id: null,
-          metadata: JSON.stringify({ reason: 'superseded', supersededByEstimateId: estimate.id }),
-        });
       }
       const [row] = await trx('customer_contracts').insert({
         customer_id: customer.id,
