@@ -89,7 +89,7 @@ function emailKey(value) {
  *   and campaigns (status='active' only) never reach them.
  */
 async function propagateCustomerEmailChange({ before, after, source = 'customer edit' }, conn = db) {
-  const counts = { leads: 0, estimates: 0, newsletter: 0, newsletterDeliveries: 0, automations: 0, templateRuns: 0, promoters: 0, billingPrefs: 0, contracts: 0, bookingIntents: 0, reviewCards: 0 };
+  const counts = { leads: 0, estimates: 0, newsletter: 0, newsletterDeliveries: 0, automations: 0, templateRuns: 0, promoters: 0, billingPrefs: 0, contracts: 0, bookingIntents: 0, reviewCards: 0, heldDripResumed: 0 };
   let pendingConfirmation = null;
   const customerId = (after && after.id) || (before && before.id);
   // OLD is a loose match key (the stored copy may itself be malformed — that
@@ -333,6 +333,32 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
         resolved_at: now,
         updated_at: now,
       });
+    // Resume the HELD first-touch drip (2026-07-30): the call pipeline holds
+    // new_lead enrollment while an email read-back card is open, and this
+    // operator confirmation is the release point — without it the held drip
+    // never starts. enrollCustomer carries its own dedupe (an enrollment
+    // that already exists in any status is never duplicated) and template/
+    // eligibility checks, so this is a no-op for customers who were
+    // enrolled normally.
+    if (counts.reviewCards > 0) {
+      try {
+        const AutomationRunner = require('./automation-runner');
+        const custRow = await conn('customers').where({ id: customerId }).first('id', 'first_name', 'last_name');
+        const resume = await AutomationRunner.enrollCustomer({
+          templateKey: 'new_lead',
+          customer: {
+            email: newEmail,
+            first_name: custRow?.first_name || null,
+            last_name: custRow?.last_name || null,
+            id: customerId,
+          },
+          dbh: conn,
+        });
+        if (resume?.enrolled) counts.heldDripResumed = 1;
+      } catch (resumeErr) {
+        logger.warn(`[email-fanout] held-drip resume failed for customer ${customerId}: ${resumeErr.message}`);
+      }
+    }
     for (const callId of [...new Set(openItems.map((i) => i.call_log_id).filter(Boolean))]) {
       const stillOpen = await conn('triage_items')
         .where({ call_log_id: callId })

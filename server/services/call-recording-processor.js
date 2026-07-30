@@ -1149,21 +1149,22 @@ function isNonLeadCallContent(extracted = {}) {
   return NON_LEAD_CALL_TYPES.has(callType);
 }
 
-// True when THIS run left an open email read-back card for the call — the
-// extracted address is a transcription guess and must not receive the
-// first-touch drip until the office confirms it. Fails toward HOLD on a
-// lookup error: a bounce to a wrong guess burns sender reputation and mints
-// a suppression on an address the customer may later confirm; a held drip
-// is recoverable from the review card.
+// True when the call has a live email read-back card — the extracted address
+// is a transcription guess and must not receive first-touch email until the
+// office confirms it. 'in_progress' counts as live (canonical open-review set,
+// admin-triage.js). Fails toward HOLD on a lookup error: a bounce to a wrong
+// guess burns sender reputation and mints a suppression on an address the
+// customer may later confirm; a held send is recoverable from the review card.
 async function shouldHoldLeadEmailEnrollment(callLogId) {
   try {
     const open = await db('triage_items')
-      .where({ call_log_id: callLogId, status: 'open' })
+      .where({ call_log_id: callLogId })
+      .whereIn('status', ['open', 'in_progress'])
       .whereIn('reason_code', ['email_unverified', 'email_invalid'])
       .first('id');
     return !!open;
   } catch (err) {
-    logger.warn(`[call-proc] email-review lookup failed — holding new_lead enroll: ${err.message}`);
+    logger.warn(`[call-proc] email-review lookup failed — holding first-touch email: ${err.message}`);
     return true;
   }
 }
@@ -5133,6 +5134,10 @@ const CallRecordingProcessor = {
     // Address/identity bridge (populated below in shadow mode): "confirm before
     // dispatch" reasons that flag the call for a human without blocking writes.
     const bridgeNeedsConfirmation = [];
+    // In-run email-review signal: set the moment either bridge branch decides
+    // the extracted email needs read-back, BEFORE any card insert — so a
+    // failed triage insert cannot release the first-touch email hold below.
+    let emailReviewHeldThisRun = false;
 
     // ── Contact-field dictation decoder (runs in EVERY mode, BEFORE the
     // routing gate so enforce mode benefits too) ──────────────────────────
@@ -5650,6 +5655,9 @@ const CallRecordingProcessor = {
             logger.info(`[call-proc-bridge] Skipped email domain correction — corrected address on file for another contact (${maskSid(callSid)})`);
           }
         }
+        if (needsConfirmation.includes('email_unverified') || needsConfirmation.includes('email_invalid')) {
+          emailReviewHeldThisRun = true;
+        }
         if (needsConfirmation.length) {
           bridgeNeedsConfirmation.push(...needsConfirmation);
           logger.info(`[call-proc-bridge] ${callSid} needs confirmation: ${needsConfirmation.join(', ')} (av=${v2AddressValidation?.status || 'n/a'})`);
@@ -5731,6 +5739,9 @@ const CallRecordingProcessor = {
           } else {
             logger.info(`[call-proc] Skipped email domain correction — corrected address on file for another contact (${maskSid(callSid)})`);
           }
+        }
+        if (emailReasons.includes('email_unverified') || emailReasons.includes('email_invalid')) {
+          emailReviewHeldThisRun = true;
         }
         if (emailReasons.length) {
           bridgeNeedsConfirmation.push(...emailReasons);
@@ -8714,13 +8725,17 @@ const CallRecordingProcessor = {
     if (customerId && extracted.email && v2EmailBlocked) {
       logger.info(`[call-proc] Skipping new_lead automation enroll for ${callSid}: v2 TCPA gate blocked all outbound (do_not_contact)`);
       beehiivResult = { skipped: 'v2_tcpa_gate' };
-    } else if (customerId && extracted.email && await shouldHoldLeadEmailEnrollment(call.id)) {
-      // Owner rule 2026-07-30 (Byrd bounce): a call-captured email this run
-      // flagged for read-back (email_unverified / email_invalid) is a
-      // transcription GUESS — the spelled-out address hard-bounced within a
-      // minute of the first drip send, burning sender reputation and landing
-      // a SendGrid suppression on a wrong address. Hold the first-touch drip
-      // until the office confirms the address via the open review card.
+    } else if (customerId && extracted.email
+        && (emailReviewHeldThisRun || await shouldHoldLeadEmailEnrollment(call.id))) {
+      // Owner rule 2026-07-30 (the spelled-email bounce incident): a
+      // call-captured email flagged for read-back (email_unverified /
+      // email_invalid) is a transcription GUESS — the live incident's
+      // spelled-out address hard-bounced within a minute of the first drip
+      // send, burning sender reputation and landing a SendGrid suppression
+      // on a wrong address. Hold the first-touch drip until the office
+      // confirms the address; the fanout resumes it on confirmation. The
+      // in-run flag covers a failed review-card insert; the DB check covers
+      // admin force-reprocess after the run.
       logger.info(`[call-proc] Skipping new_lead automation enroll for ${maskSid(callSid)}: extracted email is under read-back review`);
       beehiivResult = { skipped: 'email_under_review' };
     } else if (customerId && extracted.email) {
@@ -8806,6 +8821,12 @@ const CallRecordingProcessor = {
 
     if (newsletterCandidate && v2EmailBlocked) {
       logger.info(`[call-proc] Skipping newsletter subscribe for ${callSid}: v2 TCPA gate blocked all outbound (do_not_contact)`);
+    } else if (newsletterCandidate
+        && (emailReviewHeldThisRun || await shouldHoldLeadEmailEnrollment(call.id))) {
+      // Same hold as the new_lead drip: the newsletter double-opt-in
+      // confirmation is ALSO a first-touch email to the unconfirmed address.
+      logger.info(`[call-proc] Skipping newsletter subscribe for ${callSid}: extracted email is under read-back review`);
+      newsletterResult = { skipped: 'email_under_review' };
     } else if (newsletterCandidate) {
       const stillOwned = await db('call_log')
         .where({ id: call.id })

@@ -1,5 +1,5 @@
 /**
- * Owner rule 2026-07-30 (the Byrd bounce): a call whose extracted email this
+ * Owner rule 2026-07-30 (the spelled-email bounce incident): a call whose extracted email this
  * run flagged for read-back (open email_unverified / email_invalid review
  * card) must NOT be enrolled in the new_lead email drip — the address is a
  * transcription guess, and the first drip send hard-bounced within a minute,
@@ -36,7 +36,9 @@ describe('shouldHoldLeadEmailEnrollment', () => {
   test('open email read-back card holds enrollment', async () => {
     mockFirstResult = { id: 'triage-1' };
     await expect(shouldHoldLeadEmailEnrollment('call-1')).resolves.toBe(true);
-    expect(db._chain.where).toHaveBeenCalledWith({ call_log_id: 'call-1', status: 'open' });
+    expect(db._chain.where).toHaveBeenCalledWith({ call_log_id: 'call-1' });
+    // in_progress counts as live — the canonical open-review set.
+    expect(db._chain.whereIn).toHaveBeenCalledWith('status', ['open', 'in_progress']);
     expect(db._chain.whereIn).toHaveBeenCalledWith('reason_code', ['email_unverified', 'email_invalid']);
   });
 
