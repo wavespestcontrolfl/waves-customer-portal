@@ -21,7 +21,7 @@ const logger = require('./logger');
 const sendgrid = require('./sendgrid-mail');
 const NewsletterSender = require('./newsletter-sender');
 const { wrapNewsletter } = require('./email-template');
-const { validateNewsletterDraft } = require('./newsletter-validator');
+const { validateNewsletterDraft, lockedPricesForSend } = require('./newsletter-validator');
 const { requiresClaimValidation, isFlagshipType } = require('../config/newsletter-types');
 const { isFlagshipTargetForWeek } = require('./event-freshness');
 const { validateFlagshipEventSelection, parseLockedEventIds } = require('./newsletter-event-selection');
@@ -326,6 +326,13 @@ async function renderSendPreview(send, toEmail) {
     preheader: send.preview_text || undefined,
     newsletterType: send.newsletter_type || undefined,
     preferredSourcesCta: true,
+    // Same web-version permalink the live campaign gets — but only once
+    // the archive can actually serve it (getPostBySlug requires
+    // sending/sent). A pre-send draft proof omits the link rather than
+    // handing the owner a guaranteed 404.
+    webVersionUrl: (send.slug && ['sending', 'sent', 'failed'].includes(send.status))
+      ? `https://www.wavespestcontrol.com/newsletter/archive/${send.slug}`
+      : undefined,
   });
 
   const testSub = await db('newsletter_subscribers')
@@ -417,7 +424,8 @@ async function sendNewsletterProof(sendId) {
     return { skipped: true, reason: 'zero_recipients' };
   }
   if (requiresClaimValidation(send.newsletter_type)) {
-    const { errors } = validateNewsletterDraft(send, { recipientCount });
+    const lockedPrices = await lockedPricesForSend(send, db);
+    const { errors } = validateNewsletterDraft(send, { recipientCount, lockedPrices });
     if (errors.length > 0) {
       await notifyProof('newsletter_proof_blocked', { subject: send.subject, errors });
       return { skipped: true, reason: 'validation_failed', errors };
@@ -615,7 +623,8 @@ async function maybeHandleProofApproval(email) {
     return true;
   }
   if (requiresClaimValidation(send.newsletter_type)) {
-    const { errors } = validateNewsletterDraft(send, { recipientCount });
+    const lockedPrices = await lockedPricesForSend(send, db);
+    const { errors } = validateNewsletterDraft(send, { recipientCount, lockedPrices });
     if (errors.length > 0) {
       await notifyProof('newsletter_proof_blocked', {
         subject: send.subject,

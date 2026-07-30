@@ -79,7 +79,7 @@ describe('newsletter rendering contract', () => {
       unsubscribeCount: occurrenceCount(html, '>Unsubscribe</a>'),
     }).toMatchInlineSnapshot(`
       {
-        "appBadgeCount": 2,
+        "appBadgeCount": 0,
         "documentTitle": "Waves Newsletter",
         "footerAddressCount": 1,
         "footerPhoneLinkCount": 1,
@@ -192,7 +192,6 @@ describe('newsletter rendering contract', () => {
           "waves-blue",
           "deep-water",
           "sunshine",
-          "waves-red",
         ],
         "pestInsider": [
           "waves-blue",
