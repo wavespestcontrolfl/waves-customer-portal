@@ -2166,6 +2166,7 @@ export default function DispatchPageV2({
             setViewMode("day");
           }}
           onViewCustomer={openCustomerSidebar}
+          refreshKey={scheduleRefreshKey}
         />
       )}
       {viewMode === "list" && (
@@ -2700,6 +2701,10 @@ export default function DispatchPageV2({
           onRescheduled={() => {
             setRescheduleService(null);
             fetchSchedule(date);
+            // Week/5-Day and Month fetch their own payloads — bump the key
+            // so a sidebar-launched reschedule can't leave them showing the
+            // appointment at its old date.
+            setScheduleRefreshKey((k) => k + 1);
           }}
         />
       )}

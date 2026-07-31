@@ -4982,6 +4982,37 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
 
   const notifyCustomer = notificationType === "sms";
 
+  // window_end is the visit's SCHEDULING block — it must carry the visit's
+  // own duration, never a flat 2-hour span (that inflates occupancy and
+  // blocks real slots). The 2-hour arrival range is customer-facing copy
+  // only. Duration: the service's estimate, else the original window span,
+  // else 60 minutes.
+  const durationMinutes = (() => {
+    const d = parseInt(service.estimatedDuration, 10);
+    if (Number.isInteger(d) && d > 0) return d;
+    const [ws, we] = [service.windowStart, service.windowEnd];
+    if (ws && we) {
+      const [h1, m1] = String(ws).split(":").map(Number);
+      const [h2, m2] = String(we).split(":").map(Number);
+      const span = h2 * 60 + m2 - (h1 * 60 + m1);
+      if (span > 0) return span;
+    }
+    return 60;
+  })();
+
+  const windowFor = (startHHMM) => {
+    const [h, m] = String(startHHMM).split(":").map(Number);
+    if (Number.isNaN(h)) return null;
+    const endTotal = Math.min(h * 60 + (m || 0) + durationMinutes, 23 * 60 + 59);
+    const end = `${String(Math.floor(endTotal / 60)).padStart(2, "0")}:${String(endTotal % 60).padStart(2, "0")}`;
+    const start = `${String(h).padStart(2, "0")}:${String(m || 0).padStart(2, "0")}`;
+    return {
+      start,
+      end,
+      display: `${formatTimeDisplay(start)} - ${formatTimeDisplay(end)}`,
+    };
+  };
+
   const handleReschedule = async (opt) => {
     setSending(true);
     try {
@@ -4991,7 +5022,9 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
           method: "POST",
           body: JSON.stringify({
             newDate: opt.date,
-            newWindow: opt.suggestedWindow,
+            // Re-derive the block from the visit's own duration — the
+            // suggested window's 2-3h span is arrival copy, not occupancy.
+            newWindow: windowFor(opt.suggestedWindow?.start) || opt.suggestedWindow,
             reasonCode: reason,
             reasonText: notes,
             notifyCustomer,
@@ -5017,13 +5050,7 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
   const handleManualReschedule = async () => {
     if (!manualDate) return;
     setSending(true);
-    const [h, m] = manualTime.split(":");
-    const endH = String(Math.min(23, parseInt(h) + 2)).padStart(2, "0");
-    const window = {
-      start: manualTime,
-      end: `${endH}:${m}`,
-      display: `${formatTimeDisplay(manualTime)} - ${formatTimeDisplay(`${endH}:${m}`)}`,
-    };
+    const window = windowFor(manualTime);
     try {
       const result = await adminFetch(
         `/admin/dispatch/${service.id}/reschedule`,
