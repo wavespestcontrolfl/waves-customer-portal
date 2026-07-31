@@ -2321,6 +2321,12 @@ describe('validateRewrittenMeta enforces the blog meta contract (owner rule 2026
     const r = rem.validateRewrittenMeta('A no-panic Southwest Florida guide to spider identification covering the widow species, the recluse myth, and the harmless mosquito eaters.', CTX);
     expect(r.ok).toBe(true);
   });
+
+  test('sales terms in the final sentence still park (Codex P1: not demoted with the CTA)', () => {
+    const r = rem.validateRewrittenMeta('A no-panic Southwest Florida guide to spider identification covering the widow species and the recluse myth. Learn more about saving big with Waves.', CTX);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/blog_meta_final_sentence_sales_terms/);
+  });
 });
 
 // ── astro #409 (2026-07-27): the pre-push park classes the bar didn't know ──

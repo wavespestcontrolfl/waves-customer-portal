@@ -33,7 +33,7 @@
  */
 
 const { THRESHOLDS } = require('./scoring-config');
-const { evaluateTitleMetaSpam, renderMetaTokens, PHONE_TOKEN_RE, CITY_PHONE_TOKEN_RE, SALESY_META_RE, endsWithSoftCta } = require('./title-meta-spam-gate');
+const { evaluateTitleMetaSpam, renderMetaTokens, PHONE_TOKEN_RE, CITY_PHONE_TOKEN_RE, SALESY_META_RE, endsWithSoftCta, lastSentenceSalesTerms } = require('./title-meta-spam-gate');
 const { isFaqBlockedService } = require('./content-guardrails');
 
 // Compute the achievable maximum score PER PAGE TYPE so the pass
@@ -1077,6 +1077,11 @@ function blogMetaContractResult(m) {
     return { ok: false, reason: 'blog_meta_must_not_carry_phone' };
   }
   if (SALESY_META_RE.test(m)) return { ok: false, reason: 'blog_meta_salesy' };
+  // Sales terms in the FINAL sentence stay HARD — "Learn more about saving
+  // big with Waves." is sales copy that SALESY_META_RE alone misses (the
+  // gerund). This rejection used to live inside endsWithSoftCta; demoting
+  // the CTA requirement must not demote it (Codex P1, 2026-07-30).
+  if (lastSentenceSalesTerms(m)) return { ok: false, reason: 'blog_meta_final_sentence_sales_terms' };
   // Soft-CTA ending is NOT part of the hard contract (owner ruling
   // 2026-07-30: an otherwise-clean draft must never park on it) — it's the
   // weight-0 soft check blog_meta_soft_cta instead.

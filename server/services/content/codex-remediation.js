@@ -877,6 +877,11 @@ function validateRewrittenMeta(metaDescription, factContext = null, deps = {}) {
     if (spamGate.SALESY_META_RE.test(m)) {
       return { ok: false, reason: 'blog meta contract: blog_meta_salesy' };
     }
+    // Final-sentence money/deal terms stay HARD (Codex P1, 2026-07-30) —
+    // "Learn more about saving big" is sales copy SALESY_META_RE misses.
+    if (spamGate.lastSentenceSalesTerms(m)) {
+      return { ok: false, reason: 'blog meta contract: blog_meta_final_sentence_sales_terms' };
+    }
     return { ok: true };
   } catch (e) {
     return { ok: false, reason: `metadata quality re-check threw: ${e.message}` };

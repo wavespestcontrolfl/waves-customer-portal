@@ -204,12 +204,27 @@ const CTA_SALES_TERMS_RE = /\b(sav(?:e|ing|ings)|deal|offer|price|pricing|discou
 // St. Augustine grass." must keep its CTA sentence intact (St. Augustine is
 // the dominant SWFL turf, so this is the common case, not the edge).
 const ABBREV_DOT_RE = /\b(St|Dr|Mt|Ft|Mr|Mrs|Ms|vs|No)\./gi;
-function endsWithSoftCta(text) {
+function lastSentence(text) {
   const t = String(text || '').trim();
-  if (!t) return false;
+  if (!t) return '';
   const masked = t.replace(ABBREV_DOT_RE, (m) => m.replace('.', '\u0001'));
   const sentences = masked.split(/[.!?]+/).map((s) => s.replace(/\u0001/g, '.').trim()).filter(Boolean);
-  const last = sentences[sentences.length - 1] || '';
+  return sentences[sentences.length - 1] || '';
+}
+
+// Money/deal terms in the meta's FINAL sentence are sales copy regardless of
+// CTA shape ("Learn more about saving big with Waves."). This stays a HARD
+// contract term even though CTA presence itself became a soft nudge (owner
+// ruling 2026-07-30) — demoting endsWithSoftCta wholesale would have demoted
+// this rejection with it.
+function lastSentenceSalesTerms(text) {
+  const last = lastSentence(text);
+  return Boolean(last) && CTA_SALES_TERMS_RE.test(last);
+}
+
+function endsWithSoftCta(text) {
+  const last = lastSentence(text);
+  if (!last) return false;
   if (CTA_SALES_TERMS_RE.test(last)) return false;
   return SOFT_CTA_SENTENCE_RE.test(last);
 }
@@ -222,6 +237,7 @@ module.exports = {
   SALESY_META_RE,
   SOFT_CTA_RE,
   endsWithSoftCta,
+  lastSentenceSalesTerms,
   HYPE_TERMS,
   COMMERCIAL_TERMS,
   _internals: {

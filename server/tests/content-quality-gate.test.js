@@ -1043,11 +1043,10 @@ describe('soft CTA final sentence must BE a CTA (round-5 hardening)', () => {
     }
   });
 
-  test('sales terms riding the about-clause flag the SOFT check (contract itself passes — 2026-07-30 ruling)', () => {
-    const { checkBlogMetaSoftCta } = require('../services/content/content-quality-gate')._internals;
-    const draft = { meta_description: `${LEAD}Learn more about saving big with Waves.` };
-    expect(checkBlogMetaContract(draft).ok).toBe(true);
-    expect(checkBlogMetaSoftCta(draft, { target_page_type: 'supporting-blog' }).ok).toBe(false);
+  test('sales terms cannot ride in through the about-clause — still HARD (Codex P1: not demoted with the CTA)', () => {
+    const r = checkBlogMetaContract({ meta_description: `${LEAD}Learn more about saving big with Waves.` });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('blog_meta_final_sentence_sales_terms');
   });
 });
 

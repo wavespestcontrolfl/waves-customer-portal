@@ -1801,7 +1801,7 @@ function metaDescriptionContractFinding(frontmatter, { isRefresh = false, liveMe
   // source in title-meta-spam-gate) so the enforcement points can't drift.
   // PHONE_TOKEN_RE covers the publisher's full substitution grammar —
   // whitespace-tolerant, and the phone/tel aliases render a phone too.
-  const { SALESY_META_RE, PHONE_TOKEN_RE, CITY_PHONE_TOKEN_RE } = require('./title-meta-spam-gate');
+  const { SALESY_META_RE, PHONE_TOKEN_RE, CITY_PHONE_TOKEN_RE, endsWithSoftCta, lastSentenceSalesTerms } = require('./title-meta-spam-gate');
   // Runs on refresh drafts (both contracts, changed metas only) AND on any
   // caller that declares a blog target — the legacy BlogWriter/admin/
   // calendar publishAstro path runs ONLY guardrails (no supporting-blog
@@ -1821,12 +1821,16 @@ function metaDescriptionContractFinding(frontmatter, { isRefresh = false, liveMe
     if (PHONE_TOKEN_RE.test(draftTrim) || LITERAL_PHONE_IN_META_RE.test(draftTrim)) {
       return finding('P1', 'BLOG_META_CARRIES_PHONE', 'Blog meta descriptions never carry a phone number (owner rule 2026-07-29: informational summary + soft CTA only).');
     }
-    if (SALESY_META_RE.test(draftTrim)) {
-      return finding('P1', 'BLOG_META_SALESY', 'Blog meta descriptions stay informational — no sales CTAs (owner rule 2026-07-29); end with a soft CTA like "Learn more on the Waves blog."');
+    if (SALESY_META_RE.test(draftTrim) || lastSentenceSalesTerms(draftTrim)) {
+      return finding('P1', 'BLOG_META_SALESY', 'Blog meta descriptions stay informational — no sales CTAs or money/deal terms in the final sentence (owner rule 2026-07-29).');
     }
-    // No soft-CTA finding here: the ending is a nudge, never a blocker
-    // (owner ruling 2026-07-30) — the quality gate's weight-0 soft check
-    // blog_meta_soft_cta carries the signal.
+    // The soft-CTA ending itself is a nudge, never a blocker (owner ruling
+    // 2026-07-30) — P2 warns without parking, and the legacy BlogWriter/
+    // admin/calendar publishAstro lanes (which run ONLY guardrails, no
+    // supporting-blog quality bundle) keep the signal (Codex P2).
+    if (!endsWithSoftCta(draftTrim)) {
+      return finding('P2', 'BLOG_META_MISSING_SOFT_CTA', 'Blog meta descriptions should END with a soft CTA like "Learn more on the Waves blog." (nudge only — owner ruling 2026-07-30: never a publish blocker).');
+    }
   } else {
     // {{cityPhone}} SPECIFICALLY — phone/tel aliases render the generic line.
     if (!CITY_PHONE_TOKEN_RE.test(draftTrim)) {
