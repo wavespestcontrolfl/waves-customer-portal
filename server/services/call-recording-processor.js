@@ -1154,19 +1154,34 @@ function isNonLeadCallContent(extracted = {}) {
 // call mints the fresh review card and records extraction B — a late merge
 // from this worker would overwrite the pending ledger target with the stale
 // extraction A, and resolving the visible B card would then release
-// first-touch mail to the unreviewed A address. Verified immediately before
-// each ledger write; a lost (or unverifiable) claim skips the write — the
-// reclaiming peer's own Step 6/8 owns the ledger record.
-async function stillOwnsProcessingClaim(callId, procToken) {
+// first-touch mail to the unreviewed A address. The r44 read-only
+// pre-check was itself a TOCTOU (Codex #3084 r45): a worker could pass
+// it, stall past the reclaim threshold, and still merge late. The ledger
+// write now runs inside a transaction whose FIRST statement locks the
+// call_log row conditioned on the token — a reclaim's token rotation
+// queues behind that row lock until the merge commits, so ownership holds
+// THROUGH the write. Returns the record result when owned, 'claim_lost'
+// when the token no longer matches (the reclaiming peer's own Step 6/8
+// owns the ledger record), or null on a failed/unverifiable write (the
+// end-of-run retry re-attempts).
+async function recordFirstTouchHoldOwned(args, procToken) {
   try {
-    const owned = await db('call_log')
-      .where({ id: callId })
-      .where('processing_token', procToken)
-      .first('id');
-    return !!owned;
+    return await db.transaction(async (trx) => {
+      const owned = await trx('call_log')
+        .where({ id: args.callLogId })
+        .where('processing_token', procToken)
+        .forUpdate()
+        .first('id');
+      if (!owned) {
+        logger.info('[call-proc] processing claim lost — skipping the hold ledger write (the owner records it)');
+        return 'claim_lost';
+      }
+      const { recordFirstTouchHold } = require('./lead-first-touch-resume');
+      return await recordFirstTouchHold({ ...args, dbh: trx });
+    });
   } catch (claimErr) {
-    logger.warn(`[call-proc] processing-claim check failed: ${claimErr.message} — skipping the ledger write (the owner records it)`);
-    return false;
+    logger.warn(`[call-proc] token-fenced hold record failed: ${claimErr.message} — the end-of-run retry re-attempts`);
+    return null;
   }
 }
 
@@ -8884,13 +8899,14 @@ const CallRecordingProcessor = {
       // to a matched customer's stale stored email. runStartedAt lets the
       // helper keep a live earlier-run card's address (the one the operator
       // is reviewing) instead of overwriting it with a fresh unreviewed guess.
-      const { recordFirstTouchHold } = require('./lead-first-touch-resume');
-      // Token-fenced (Codex #3084 r44): a stale worker must not merge its
-      // extraction over the reclaiming peer's ledger record. null keeps
-      // the end-of-run retry eligible (which re-checks ownership).
-      dripHoldRecorded = (await stillOwnsProcessingClaim(call.id, procToken))
-        ? await recordFirstTouchHold({ callLogId: call.id, customerId, heldEmail: extracted.email, heldDrip: true, runStartedAt: processingStartedAt })
-        : null;
+      // Token-fenced with the claim held THROUGH the merge (Codex #3084
+      // r44/r45): a stale worker must not merge its extraction over the
+      // reclaiming peer's ledger record. null keeps the end-of-run retry
+      // eligible (which re-checks ownership itself).
+      dripHoldRecorded = await recordFirstTouchHoldOwned(
+        { callLogId: call.id, customerId, heldEmail: extracted.email, heldDrip: true, runStartedAt: processingStartedAt },
+        procToken,
+      );
     } else if (customerId && !extracted.email && extracted.email_raw && !v2EmailBlocked
         && (emailReviewHeldThisRun || await shouldHoldLeadEmailEnrollment(call.id))) {
       // A DEMOTED address (dictation policy moved the unconfirmed guess to
@@ -8903,11 +8919,12 @@ const CallRecordingProcessor = {
       // explicit address releases it.
       logger.info(`[call-proc] Skipping new_lead automation enroll for ${maskSid(callSid)}: extracted email was demoted to read-back review`);
       beehiivResult = { skipped: 'email_under_review' };
-      const { recordFirstTouchHold } = require('./lead-first-touch-resume');
-      // Token-fenced (r44) — see the primary drip-hold site above.
-      dripHoldRecorded = (await stillOwnsProcessingClaim(call.id, procToken))
-        ? await recordFirstTouchHold({ callLogId: call.id, customerId, heldEmail: '', heldDrip: true, runStartedAt: processingStartedAt })
-        : null;
+      // Token-fenced through the merge (r44/r45) — see the primary
+      // drip-hold site above.
+      dripHoldRecorded = await recordFirstTouchHoldOwned(
+        { callLogId: call.id, customerId, heldEmail: '', heldDrip: true, runStartedAt: processingStartedAt },
+        procToken,
+      );
     } else if (customerId && extracted.email) {
       try {
         const AutomationRunner = require('./automation-runner');
@@ -9062,17 +9079,17 @@ const CallRecordingProcessor = {
       // the run (email correction / accept verdict), the helper re-pends the
       // newsletter hold against that settled address — never the stale
       // in-memory candidate captured before the correction.
-      const { recordFirstTouchHold } = require('./lead-first-touch-resume');
       // The hold's address is the CURRENTLY REVIEWED extraction — never the
       // candidate's stored email (Codex #3084 r21): on a retry run the
       // rebuilt candidate carries the customer's OLDER stored address, and
       // recording it here would let the new card's resolution release both
       // sends to an address the operator never read back. No extracted
       // email (demoted) → empty inert address, correction-only release.
-      // Token-fenced (r44) — see the drip-hold sites.
-      newsletterHoldRecorded = (await stillOwnsProcessingClaim(call.id, procToken))
-        ? await recordFirstTouchHold({ callLogId: call.id, customerId, heldEmail: extracted.email || '', heldNewsletter: true, runStartedAt: processingStartedAt })
-        : null;
+      // Token-fenced through the merge (r44/r45) — see the drip-hold sites.
+      newsletterHoldRecorded = await recordFirstTouchHoldOwned(
+        { callLogId: call.id, customerId, heldEmail: extracted.email || '', heldNewsletter: true, runStartedAt: processingStartedAt },
+        procToken,
+      );
     } else if (newsletterCandidate) {
       const stillOwned = await db('call_log')
         .where({ id: call.id })
@@ -9106,15 +9123,11 @@ const CallRecordingProcessor = {
         const dripHeld = beehiivResult?.skipped === 'email_under_review';
         const newsHeld = newsletterResult?.skipped === 'email_under_review';
         if ((dripHeld && dripHoldRecorded === null) || (newsHeld && newsletterHoldRecorded === null)) {
-          // Token-fenced like the primary sites (Codex #3084 r44): a lost
+          // Token-fenced through the merge (Codex #3084 r44/r45): a lost
           // claim hands the ledger to the reclaiming peer's own run — the
           // retry (and its six-failures escalation) applies only while
           // this worker still owns the call.
-          if (!(await stillOwnsProcessingClaim(call.id, procToken))) {
-            logger.info(`[call-proc] processing claim lost for ${maskSid(callSid)} — the reclaiming peer records the hold ledger`);
-          } else {
-          const { recordFirstTouchHold } = require('./lead-first-touch-resume');
-          const retried = await recordFirstTouchHold({
+          const retried = await recordFirstTouchHoldOwned({
             callLogId: call.id,
             customerId,
             // Currently reviewed extraction only (Codex #3084 r21) — a
@@ -9124,8 +9137,10 @@ const CallRecordingProcessor = {
             heldDrip: dripHeld && dripHoldRecorded === null,
             heldNewsletter: newsHeld && newsletterHoldRecorded === null,
             runStartedAt: processingStartedAt,
-          });
-          if (retried === null) {
+          }, procToken);
+          if (retried === 'claim_lost') {
+            logger.info(`[call-proc] processing claim lost for ${maskSid(callSid)} — the reclaiming peer records the hold ledger`);
+          } else if (retried === null) {
             logger.error(`[call-proc] first-touch hold ledger write STILL failing for ${maskSid(callSid)} — held send(s) have no durable release record`);
             // Six straight write failures — without this row the held
             // send(s) can never be released, so the run must NOT complete
@@ -9136,7 +9151,6 @@ const CallRecordingProcessor = {
             const ledgerErr = new Error('first_touch_hold_ledger_unavailable');
             ledgerErr.holdLedgerUnavailable = true;
             throw ledgerErr;
-          }
           }
         }
         if (!(await shouldHoldLeadEmailEnrollment(call.id))) {
