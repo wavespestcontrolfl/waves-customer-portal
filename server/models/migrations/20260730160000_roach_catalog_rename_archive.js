@@ -117,6 +117,18 @@ function relabelReminderServiceType(value, fromName, toName) {
   return next === value ? null : next;
 }
 
+// Statement ids among these invoices' payer_statement_id links whose
+// statement is no longer 'open' — i.e. frozen issued billing documents.
+async function frozenPayerStatementIds(knex, invoices) {
+  const stmtIds = [...new Set(invoices.map((inv) => inv.payer_statement_id).filter(Boolean))];
+  if (!stmtIds.length || !(await knex.schema.hasTable('payer_statements'))) return new Set();
+  const rows = await knex('payer_statements')
+    .whereIn('id', stmtIds)
+    .whereNot('status', 'open')
+    .select('id');
+  return new Set(rows.map((r) => r.id));
+}
+
 async function loadState(knex) {
   if (!(await knex.schema.hasTable('system_settings'))) return null;
   const row = await knex('system_settings').where({ key: STATE_KEY }).first();
@@ -218,13 +230,22 @@ exports.up = async function up(knex) {
     if (ids.length) {
       // The status predicate rides ON the update, not just the select — a
       // visit that completes between the two must keep the label its
-      // completion artifacts recorded (codex #3108 r7 TOCTOU).
-      await knex('scheduled_services')
+      // completion artifacts recorded (codex #3108 r7 TOCTOU) — and the
+      // RECORDED ids come from the UPDATE's returning set, so a visit the
+      // predicate skipped is neither recorded nor has its self-booking /
+      // invoice / reminder snapshots queued (codex #3108 r8).
+      const updatedRows = await knex('scheduled_services')
         .whereIn('id', ids)
         .whereNotIn('status', TERMINAL_VISIT_STATUSES)
-        .update({ service_type: NEW_NAME });
-      state.backfilledVisitIds = ids;
-      visits.forEach((v) => { if (v.self_booking_id) selfBookingIdsByVisit.set(v.id, v.self_booking_id); });
+        .update({ service_type: NEW_NAME }, ['id']);
+      const updatedIds = (Array.isArray(updatedRows) ? updatedRows : [])
+        .map((r) => (r && typeof r === 'object' ? r.id : r))
+        .filter(Boolean);
+      state.backfilledVisitIds = updatedIds;
+      const updatedSet = new Set(updatedIds);
+      visits.forEach((v) => {
+        if (v.self_booking_id && updatedSet.has(v.id)) selfBookingIdsByVisit.set(v.id, v.self_booking_id);
+      });
     }
   }
 
@@ -263,23 +284,23 @@ exports.up = async function up(knex) {
       .where({ service_id: row.id, service_name: OLD_NAME })
       .select('id', 'scheduled_service_id');
     const parentIds = [...new Set(addons.map((a) => a.scheduled_service_id).filter(Boolean))];
+    // Row-lock the open parents for the migration transaction (knex wraps
+    // up() in one): a concurrent completion of a locked parent serializes
+    // behind our commit instead of racing the add-on relabel on an MVCC
+    // snapshot that still saw the parent as open (codex #3108 r8).
     const openParentIds = new Set(
       parentIds.length && (await knex.schema.hasTable('scheduled_services'))
         ? (await knex('scheduled_services')
           .whereIn('id', parentIds)
           .whereNotIn('status', TERMINAL_VISIT_STATUSES)
+          .forUpdate()
           .select('id')).map((v) => v.id)
         : []
     );
     const targets = addons.filter((a) => openParentIds.has(a.scheduled_service_id));
     if (targets.length) {
-      // Same TOCTOU guard as the visit update: the open-parent predicate
-      // rides on the update via a subquery, so a parent completing between
-      // classification and write keeps its add-on label.
       await knex('scheduled_service_addons')
         .whereIn('id', targets.map((a) => a.id))
-        .whereIn('scheduled_service_id',
-          knex('scheduled_services').whereNotIn('status', TERMINAL_VISIT_STATUSES).select('id'))
         .update({ service_name: NEW_NAME });
       state.relabeledAddonIds = targets.map((a) => a.id);
       state.addonParentVisitIds = [...new Set(targets.map((a) => a.scheduled_service_id))];
@@ -294,8 +315,14 @@ exports.up = async function up(knex) {
     const drafts = await knex('invoices')
       .whereIn('scheduled_service_id', snapshotVisitIds)
       .where({ status: 'draft' })
-      .select('id', 'title', 'line_items', 'service_type', 'scheduled_service_id');
+      .select('id', 'title', 'line_items', 'service_type', 'scheduled_service_id', 'payer_statement_id');
+    // A draft already accrued to a FROZEN payer statement (anything not
+    // 'open' is a finalized/issued billing document) stays untouched —
+    // statement lines load live from invoices.service_type, so relabeling
+    // would change a rendered issued document (codex #3108 r8).
+    const frozenStatementIds = await frozenPayerStatementIds(knex, drafts);
     for (const inv of drafts) {
+      if (inv.payer_statement_id && frozenStatementIds.has(inv.payer_statement_id)) continue;
       const result = relabelInvoiceSnapshot(inv, OLD_NAME, NEW_NAME);
       if (!result) continue;
       await knex('invoices').where({ id: inv.id }).update(result.patch);
@@ -430,11 +457,15 @@ exports.down = async function down(knex) {
     const drafts = await knex('invoices')
       .whereIn('id', invoiceIds)
       .where({ status: 'draft' })
-      .select('id', 'title', 'line_items', 'service_type', 'scheduled_service_id');
+      .select('id', 'title', 'line_items', 'service_type', 'scheduled_service_id', 'payer_statement_id');
+    // Same frozen-statement rule on the way back: a draft that accrued to a
+    // finalized statement since up() is part of an issued document now.
+    const frozenStatementIds = await frozenPayerStatementIds(knex, drafts);
     for (const inv of drafts) {
       const rec = relabeledInvoices[inv.id];
       if (!rec) continue;
       if (terminalVisitIds.has(rec.scheduled_service_id) || terminalVisitIds.has(inv.scheduled_service_id)) continue;
+      if (inv.payer_statement_id && frozenStatementIds.has(inv.payer_statement_id)) continue;
       const patch = rollbackInvoiceSnapshot(inv, rec, NEW_NAME, OLD_NAME);
       if (!patch) continue;
       await knex('invoices').where({ id: inv.id }).update(patch);

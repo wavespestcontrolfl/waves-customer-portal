@@ -35,6 +35,10 @@ function seedDb() {
     self_booked_appointments: [
       { id: 'sb-1', service_type: OLD_NAME, status: 'confirmed' },
     ],
+    payer_statements: [
+      { id: 'stmt-frozen', status: 'finalized' },
+      { id: 'stmt-open', status: 'open' },
+    ],
     scheduled_service_addons: [
       { id: 'add-open', scheduled_service_id: 'v-parent', service_id: 'svc-roach', service_name: OLD_NAME },
       // Add-on on a completed visit — history, never relabeled.
@@ -121,6 +125,8 @@ function fakeKnex(db, { missingTables = [] } = {}) {
       whereIn(col, vals) { inClauses.push({ col, vals }); return q; },
       whereNotIn(col, vals) { notInClauses.push({ col, vals }); return q; },
       whereNull(col) { filters.push({ [col]: null }); return q; },
+      whereNot(col, val) { notInClauses.push({ col, vals: [val] }); return q; },
+      forUpdate() { return q; },
       async select(...cols) {
         await resolveSubqueries();
         return rowsNow().filter(rowMatch).map((r) => {
@@ -135,10 +141,17 @@ function fakeKnex(db, { missingTables = [] } = {}) {
         const hit = rowsNow().find(rowMatch);
         return hit ? { ...hit } : undefined;
       },
-      update: async (patch) => {
+      update: async (patch, returning) => {
         await resolveSubqueries();
         const hits = rowsNow().filter(rowMatch);
         hits.forEach((r) => Object.assign(r, patch));
+        if (Array.isArray(returning)) {
+          return hits.map((r) => {
+            const out = {};
+            returning.forEach((c) => { out[c] = r[c]; });
+            return out;
+          });
+        }
         return hits.length;
       },
       del: async () => {
@@ -514,6 +527,36 @@ describe('20260730160000 roach catalog rename + archive', () => {
     expect(byKey(db, 'pest_initial_german_knockdown').is_archived).toBe(false);
     const state = JSON.parse(stateRow(db).value);
     expect(Object.keys(state.archived)).toEqual(['pest_initial_palmetto_knockdown']);
+  });
+
+  test('drafts accrued to a frozen payer statement stay untouched both ways (codex #3108 r8)', async () => {
+    const db = seedDb();
+    // Two drafts on the backfilled visit: one accrued to a FINALIZED
+    // statement (issued document — its lines render live from
+    // invoices.service_type), one accrued to a still-open statement.
+    invoiceById(db, 'inv-draft').payer_statement_id = 'stmt-frozen';
+    db.invoices.push({
+      id: 'inv-open-stmt',
+      scheduled_service_id: 'v-open-1',
+      status: 'draft',
+      title: OLD_NAME,
+      service_type: OLD_NAME,
+      payer_statement_id: 'stmt-open',
+      line_items: JSON.stringify([{ description: OLD_NAME, category: OLD_NAME, amount: 350 }]),
+    });
+    const knex = fakeKnex(db);
+    await migration.up(knex);
+
+    expect(invoiceById(db, 'inv-draft').title).toBe(OLD_NAME);
+    expect(invoiceById(db, 'inv-open-stmt').title).toBe(NEW_NAME);
+    const state = JSON.parse(stateRow(db).value);
+    expect(Object.keys(state.relabeledInvoices)).not.toContain('inv-draft');
+
+    // An invoice that accrues to a finalized statement AFTER up() is part
+    // of an issued document by rollback time — down() leaves it.
+    invoiceById(db, 'inv-open-stmt').payer_statement_id = 'stmt-frozen';
+    await migration.down(knex);
+    expect(invoiceById(db, 'inv-open-stmt').title).toBe(NEW_NAME);
   });
 
   test('addon rollback is skipped when the parent completed after up() (codex #3108 r5)', async () => {
