@@ -3174,7 +3174,9 @@ async function handlePayoutEvent(payout, eventType) {
         'payout',
         `Payout FAILED: $${(payout.amount / 100).toFixed(2)}`,
         `Payout failed: ${payout.failure_message || 'Unknown reason'}. Check your bank details.`,
-        { icon: '\u26A0\uFE0F', link: '/admin/banking' },
+        // bell: a failed payout is a money failure, not a payout FYI \u2014 it
+        // must ring even though the payout category is silenced by default.
+        { icon: '\u26A0\uFE0F', link: '/admin/banking', bell: true },
       );
     }
   } catch (err) {
