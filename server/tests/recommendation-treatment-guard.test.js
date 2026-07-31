@@ -85,6 +85,17 @@ describe('sanitizeRecommendationsAgainstTreatment', () => {
     expect(parsed.recommendations).toHaveLength(0);
   });
 
+  test('legitimate aftercare mentioning the class passes (defer must govern the treatment)', () => {
+    const { parsed, dropped } = _test.sanitizeRecommendationsAgainstTreatment({
+      recommendations: [
+        { priority: 1, action: 'Wait until today’s fungicide application has dried before mowing.', reason: 'Label re-entry guidance.', timeframe: 'Today' },
+        { priority: 2, action: 'Avoid watering for a few hours after the herbicide application.', reason: 'Foliar products need dry leaves to absorb.', timeframe: 'Today' },
+      ],
+    }, APPLIED);
+    expect(dropped).toBe(0);
+    expect(parsed.recommendations).toHaveLength(2);
+  });
+
   test('supportive mentions of the applied class pass through', () => {
     const { parsed, dropped } = _test.sanitizeRecommendationsAgainstTreatment({
       recommendations: [

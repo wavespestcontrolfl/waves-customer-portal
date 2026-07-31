@@ -509,8 +509,11 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   // the Water row must NOT read "Strong" — downgrade it to a coverage "watch" so it
   // never contradicts the photo caption (the report's biggest trust bug).
   const obsText = `${lawnAssessment.observations || ''} ${lawnAssessment.aiSummary || ''}`.toLowerCase();
-  // MOISTURE-specific signals only (not generic "stress", which can be heat/insect).
-  const drySignal = /\b(dry|drought|tan|uneven|irrigation|coverage|wilt|moisture)\b/.test(obsText);
+  // DRY-specific signals only — not generic "stress" (heat/insect), and not
+  // 'moisture'/'irrigation', which appear in WET observations ("algae
+  // indicates excess moisture", "ease irrigation") and would flip a
+  // confirmed-overwatering read into a dry-coverage story (codex P1 r8).
+  const drySignal = /\b(dry|drier|drought|tan|uneven|coverage|wilt)\b/.test(obsText);
   // The Water/Coverage score is derived from fungus/over-water signals and ignores
   // drought — so a dry/uneven photo read must downgrade it regardless of the weekly
   // amount (this is the "95 Strong vs photo says drought" contradiction).

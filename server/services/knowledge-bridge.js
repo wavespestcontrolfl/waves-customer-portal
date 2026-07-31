@@ -156,18 +156,43 @@ const _recommendationRuns = new Map();
 // that's the exact AI-vs-technician contradiction this lane exists to kill.
 // Each class matches its product name AND the customer-facing synonyms the
 // model actually writes — the shipped contradiction said "active disease
-// treatment", not "fungicide" (codex P1 r6).
+// treatment", not "fungicide" (codex P1 r6). Stored as pattern SOURCES so
+// the governed-contradiction builder below can compose them.
 const TREATMENT_CLASS_TERMS = {
-  fungicide: /\bfungicid|\bfung(?:us|al)\s+(?:treatment|application|control|spray)|\bdisease\s+(?:treatment|application|control|spray)/i,
-  herbicide: /\bherbicid|\bweed\s+(?:treatment|control|application|killer|spray)/i,
-  insecticide: /\binsecticid|\binsect\s+(?:treatment|control|application|spray)|\b(?:grub|chinch\s*bug|webworm)\s+(?:treatment|control|application)/i,
+  fungicide: 'fungicid\\w*|fung(?:us|al)\\s+(?:treatment|application|control|spray)|disease\\s+(?:treatment|application|control|spray)',
+  herbicide: 'herbicid\\w*|weed\\s+(?:treatment|control|application|killer|spray)',
+  insecticide: 'insecticid\\w*|insect\\s+(?:treatment|control|application|spray)|(?:grub|chinch\\s*bug|webworm)\\s+(?:treatment|control|application)',
 };
-const DEFER_LANGUAGE = /\b(?:defer|hold\s+off|wait|avoid|do\s+not\s+(?:apply|make|treat)|don['’]t\s+(?:apply|make|treat)|before\s+(?:making|applying)|not\s+(?:currently\s+)?(?:support|warrant|recommend)|until\s+.{0,50}\b(?:confirmed|verified|supports?)\b|without\s+(?:first|further)|(?:confirm|verify)\s+(?:that\s+)?no\b|\bno\s+[^.!?]{0,40}\b(?:is|are|was|were)?\s*(?:needed|necessary|required|warranted)|\bnot\s+(?:needed|necessary|required))\b/i;
+
+// Defer-language must GOVERN the treatment decision itself — bare
+// co-occurrence deleted legitimate aftercare like "avoid watering after the
+// herbicide application" and "wait until today's fungicide has dried"
+// (codex P2 r8). Each pattern binds the defer verb/negation directly to the
+// class term (or the class term to a not-needed clause).
+const _governedCache = new Map();
+function governedContradictionRegex(cls) {
+  if (_governedCache.has(cls)) return _governedCache.get(cls);
+  const CLASS = `(?:${TREATMENT_CLASS_TERMS[cls]})`;
+  const re = new RegExp([
+    // "hold off on any herbicide", "do not apply fungicide", "skip the fungicide", "no weed treatment"
+    `\\b(?:defer|hold\\s+off\\s+on|avoid|skip|withhold|do\\s+not\\s+(?:apply|make|use)|don['’]t\\s+(?:apply|make|use)|no|not)\\s+(?:[\\w'’-]+\\s+){0,2}${CLASS}`,
+    // "before making a fungicide application"
+    `\\bbefore\\s+(?:making|applying)\\s+(?:an?\\s+)?(?:[\\w'’-]+\\s+){0,2}${CLASS}`,
+    // "<class> ... is not needed/warranted/required"
+    `${CLASS}[^.!?]{0,50}\\bnot\\s+(?:currently\\s+)?(?:needed|necessary|required|warranted|supported|recommended)\\b`,
+    // "no <class> is needed", "confirm no fungicide is needed"
+    `\\b(?:confirm|verify)\\s+(?:that\\s+)?no\\s+(?:[\\w'’-]+\\s+){0,2}${CLASS}`,
+    // "do not currently support active disease treatment"
+    `\\bnot\\s+(?:currently\\s+)?(?:support|warrant|recommend)\\w*[^.!?]{0,40}${CLASS}`,
+  ].join('|'), 'i');
+  _governedCache.set(cls, re);
+  return re;
+}
 
 function contradictsAppliedTreatment(text, appliedClasses) {
   const t = String(text || '');
-  if (!t || !appliedClasses.length || !DEFER_LANGUAGE.test(t)) return false;
-  return appliedClasses.some((cls) => TREATMENT_CLASS_TERMS[cls] && TREATMENT_CLASS_TERMS[cls].test(t));
+  if (!t || !appliedClasses.length) return false;
+  return appliedClasses.some((cls) => TREATMENT_CLASS_TERMS[cls] && governedContradictionRegex(cls).test(t));
 }
 
 // Strip contradicting content from a parsed recommendations payload.
@@ -509,37 +534,47 @@ const KnowledgeBridge = {
   // Called after lawn assessment is confirmed, and again after service
   // completion persists the visit's products (grounded regen).
   // ────────────────────────────────────────────────────────────
-  async generateAssessmentRecommendations(assessmentId, { timeoutMs = null } = {}) {
+  async generateAssessmentRecommendations(assessmentId) {
     // Serialize runs per assessment: the confirm-time run can still be in
     // flight when the post-completion grounded regen starts, and both write
     // lawn_assessments.recommendations unconditionally — unserialized, the
-    // stale ungrounded result could land last (codex P1 #3093 r2). Chaining
-    // on the previous run's settled promise makes the later caller's result
-    // the final write. In-process is sufficient: the portal runs as a single
-    // Railway service instance.
-    //
-    // timeoutMs (codex P1 r6): callers on a customer-facing request path
-    // pass a deadline. The caller's await resolves null at the deadline, and
-    // the still-running generation SKIPS ITS WRITE once expired — a late
-    // stale write after the caller moved on would reintroduce the artifact
-    // race the deadline exists to bound.
-    const deadlineAt = timeoutMs ? Date.now() + timeoutMs : null;
+    // stale ungrounded result could land last (codex P1 #3093 r2). The
+    // in-process chain orders same-instance callers; the Postgres advisory
+    // lock inside the inner run orders callers ACROSS instances (rolling
+    // deploys briefly run two — codex P1 r8; in-process maps alone are
+    // documented as insufficient in this repo). Callers that need a bounded
+    // wait race this promise themselves — the run always completes and
+    // writes, so a late grounded correction still heals the stored copy.
     const prev = _recommendationRuns.get(assessmentId) || Promise.resolve();
-    const run = prev.catch(() => {}).then(() => this._generateAssessmentRecommendationsInner(assessmentId, deadlineAt));
+    const run = prev.catch(() => {}).then(() => this._generateAssessmentRecommendationsInner(assessmentId));
     _recommendationRuns.set(assessmentId, run);
     run.finally(() => {
       if (_recommendationRuns.get(assessmentId) === run) _recommendationRuns.delete(assessmentId);
     }).catch(() => {});
-    if (!deadlineAt) return run;
-    return Promise.race([
-      run,
-      new Promise((resolve) => { setTimeout(() => resolve(null), timeoutMs).unref?.(); }),
-    ]);
+    return run;
   },
 
-  async _generateAssessmentRecommendationsInner(assessmentId, deadlineAt = null) {
+  async _generateAssessmentRecommendationsInner(assessmentId) {
+    // Cross-process serialization (codex P1 r8): the xact-scoped advisory
+    // lock orders confirm-time and completion-time runs even when they land
+    // on different instances during a rolling deploy — lock-acquisition
+    // order is run order, so the later (grounded) caller always writes
+    // last. The lock spans the LLM call by design: holding one pool
+    // connection for a rare per-closeout run is the price of a globally
+    // ordered write.
+    return db.transaction(async (trx) => {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`lawn_rec_${assessmentId}`]);
+      return this._generateAssessmentRecommendationsLocked(assessmentId, trx);
+    }).catch((err) => {
+      logger.error(`[knowledge-bridge] generateAssessmentRecommendations transaction failed: ${err.message}`);
+      return null;
+    });
+  },
+
+  async _generateAssessmentRecommendationsLocked(assessmentId, trx) {
     try {
-      const assessment = await db('lawn_assessments').where({ id: assessmentId }).first();
+      // Re-read INSIDE the lock so a run queued behind another sees its write.
+      const assessment = await trx('lawn_assessments').where({ id: assessmentId }).first();
       if (!assessment) return null;
 
       const customer = await db('customers').where({ id: assessment.customer_id }).first();
@@ -686,17 +721,12 @@ Return a JSON object with:
           parsed.summary = 'Today’s applications are in place — we’ll track how the lawn responds and adjust at the next visit.';
         }
 
-        // Deadline expired while the model was generating: the caller has
-        // already moved on (artifacts may be building from the stored copy) —
-        // a late write here would swap data under them (codex P1 r6).
-        if (deadlineAt && Date.now() > deadlineAt) {
-          logger.warn(`[knowledge-bridge] recommendation run for assessment ${assessmentId} finished past its deadline — write skipped`);
-          return null;
-        }
-
         // Save to assessment (summary may have been stripped by the guard —
-        // keep the previously stored ai_summary in that case).
-        await db('lawn_assessments').where({ id: assessmentId }).update({
+        // keep the previously stored ai_summary in that case). Always write,
+        // even when a bounded caller has already moved on: the grounded
+        // correction must become durable (codex P1 r8) — the caller is
+        // responsible for refreshing any artifacts it built meanwhile.
+        await trx('lawn_assessments').where({ id: assessmentId }).update({
           ...(parsed.summary ? { ai_summary: parsed.summary } : {}),
           recommendations: JSON.stringify(parsed),
           updated_at: new Date(),

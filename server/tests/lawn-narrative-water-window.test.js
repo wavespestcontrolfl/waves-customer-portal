@@ -19,6 +19,8 @@ describe('safeWaterText — rain window enforcement', () => {
     'We measured 4.2 inches in the last 24 hours.',
     'Rainfall over the past day has been heavy.',
     'Since we last visited, about 2 inches of rain fell.',
+    'We measured 2 inches over the past three days.',
+    'Rain since our previous service has been steady.',
   ])('window-violating copy falls back: %s', (bad) => {
     expect(_test.safeWaterText(bad, FALLBACK)).toBe(FALLBACK);
   });
@@ -26,6 +28,10 @@ describe('safeWaterText — rain window enforcement', () => {
   test('weekly-window copy passes through', () => {
     const good = 'The past week brought about 4.23 inches of rain, well over what the lawn needs.';
     expect(_test.safeWaterText(good, FALLBACK)).toBe(good);
+  });
+
+  test('water copy without a named weekly window falls back (positive check)', () => {
+    expect(_test.safeWaterText('Rain totals look fine and the lawn is holding moisture well.', FALLBACK)).toBe(FALLBACK);
   });
 
   test('empty output keeps the deterministic fallback', () => {

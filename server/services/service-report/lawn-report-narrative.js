@@ -112,16 +112,20 @@ function buildUserMessage(facts) {
 // exactly this framing shipped on a live report).
 const RAIN_WINDOW_PHRASES = new RegExp([
   // visit-interval framings
-  '\\bsince\\s+(?:your|the)\\s+last\\s+(?:visit|service|appointment)\\b',
-  '\\bsince\\s+we\\s+last\\s+(?:visited|serviced|stopped\\s+by)\\b',
+  '\\bsince\\s+(?:your|the|our)\\s+(?:last|previous)\\s+(?:visit|service|appointment|application|stop)\\b',
+  '\\bsince\\s+we\\s+(?:last\\s+)?(?:visited|serviced|were|came|stopped)\\b',
   '\\bthis\\s+(?:service\\s+)?cycle\\b',
   '\\bbetween\\s+(?:visits|services|appointments)\\b',
   // single-day / sub-weekly framings
   '\\brain(?:fall)?\\s+(?:today|yesterday|overnight)\\b',
-  '\\b(?:last|past)\\s+24\\s*(?:hours|hrs|hour)\\b',
-  '\\b(?:last|past)\\s+48\\s*(?:hours|hrs|hour)\\b',
-  '\\b(?:over|in|during)\\s+the\\s+(?:last|past)\\s+(?:day|24\\s*hours)\\b',
+  '\\b(?:last|past)\\s+(?:\\d+|one|two|three|four|five|six|couple\\s+of|few)\\s+(?:day|days|hour|hours|hrs)\\b',
+  '\\b(?:over|in|during)\\s+the\\s+(?:last|past)\\s+(?:day|\\d+\\s*hours)\\b',
 ].join('|'), 'i');
+
+// Positive requirement for the water explanation (codex P1 r9: enumerating
+// every invalid phrasing is unwinnable): the copy must NAME the weekly
+// window, or it falls back to the deterministic sentence.
+const WEEKLY_WINDOW_PHRASES = /\b(?:this\s+(?:past\s+)?week|the\s+past\s+week|past\s+week|over\s+the\s+(?:past\s+)?week|(?:last|past)\s+(?:7|seven)\s+days|weekly|for\s+the\s+week|week[’']s\s+(?:rain|water))\b/i;
 const RAIN_TERMS = /\brain|\binch|\bprecipitation|\bwater/i;
 
 // Replace a deterministic string with the model's version only if it's a
@@ -139,10 +143,14 @@ function safeText(modelValue, fallback) {
 }
 
 // The water explanation is ALWAYS about the rain window — reject window
-// phrases unconditionally there, no rain-term co-occurrence needed.
+// phrases unconditionally there AND require the weekly window to be named
+// (deny + affirm: the denylist catches known-bad framings, the positive
+// check catches everything the list doesn't enumerate).
 function safeWaterText(modelValue, fallback) {
   const t = safeText(modelValue, fallback);
-  if (t !== fallback && RAIN_WINDOW_PHRASES.test(t)) return fallback;
+  if (t === fallback) return t;
+  if (RAIN_WINDOW_PHRASES.test(t)) return fallback;
+  if (!WEEKLY_WINDOW_PHRASES.test(t)) return fallback;
   return t;
 }
 

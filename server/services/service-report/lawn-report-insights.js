@@ -37,7 +37,9 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
   const waterCat = catByKey(categories, 'water_moisture_stress');
   if (water && water.status === 'surplus') {
     cards.push({
-      category: 'water', status: 'needs_attention', confidence: water.overwatering ? 'tech_confirmed' : 'area_estimated',
+      // Same provenance rule as the damp card below: overwatering is an
+      // automated (photo/area) signal, not technician confirmation.
+      category: 'water', status: 'needs_attention', confidence: water.overwatering ? 'ai_supported' : 'area_estimated',
       headline: 'The lawn is likely getting too much water',
       whatWeSaw: water.overwatering
         ? 'Damp areas and fungal/mushroom signs in today’s photos, with the weekly water total running above target.'
@@ -82,9 +84,12 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
     // invented (codex P1 #3093 r2). Grounded in the diagnosis's own
     // explanation, and the action must match the signal: a damp/fungal read
     // gets ease-back advice, never "keep the current schedule" (codex P1 r4).
+    // overwatering derives from the photo model / area snapshot — automated
+    // signals, never technician confirmation; 'tech_confirmed' here rendered
+    // "Confirmed by your technician" with false provenance (codex P1 r9).
     const damp = !!(water && water.overwatering);
     cards.push({
-      category: 'water', status: 'watch', confidence: damp ? 'tech_confirmed' : 'area_estimated',
+      category: 'water', status: 'watch', confidence: damp ? 'ai_supported' : 'area_estimated',
       headline: damp ? 'Damp areas are the thing to watch' : 'Moisture balance is the thing to watch',
       whatWeSaw: waterCat.customerExplanation || 'Today’s photos showed a mixed moisture read across the lawn.',
       whyItMatters: 'Keeping moisture balanced protects the lawn from both fungus pressure and dry stress.',

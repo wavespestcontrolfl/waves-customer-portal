@@ -5533,6 +5533,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       record.structured_notes = photoNotes;
     }
 
+    // Grounded-recommendation regen state — the PDF-queue block below uses
+    // these to re-render artifacts if the regen lands after its bounded wait.
+    let lawnRecRegenPromise = null;
+    let lawnRecRegenTimedOut = false;
     const completedLawnAssessmentId =
       linkedLawnAssessmentId || parseJsonObject(record.structured_notes).lawnAssessmentId || null;
     if (!isIncompleteVisit && completedLawnAssessmentId) {
@@ -5567,13 +5571,21 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // assessment is back-linked, regenerate and wait — the PDF job and
         // MMS preview later in this handler read ai_summary/recommendations
         // and must not bake the stale confirm-time output (r3/r5). The wait
-        // is DEADLINE-bounded so a stalled provider can't hang the tech's
-        // completion response (r6): at the deadline the caller resumes with
-        // the confirm-time copy AND the expired run skips its write, so no
-        // late stale swap either.
+        // is BOUNDED so a stalled provider can't hang the tech's completion
+        // response (r6), and the run always completes + writes: on a timeout
+        // the grounded correction still becomes durable and the PDF-queue
+        // block re-renders the artifact when it lands (r8) — no permanent
+        // stale copy on either path.
         const KnowledgeBridge = require('../services/knowledge-bridge');
-        await KnowledgeBridge.generateAssessmentRecommendations(completedAssessment.id, { timeoutMs: 60000 })
-          .catch((recErr) => logger.warn(`[dispatch] post-completion recommendation regen failed (non-blocking): ${recErr.message}`));
+        lawnRecRegenPromise = KnowledgeBridge.generateAssessmentRecommendations(completedAssessment.id)
+          .catch((recErr) => { logger.warn(`[dispatch] post-completion recommendation regen failed (non-blocking): ${recErr.message}`); return null; });
+        lawnRecRegenTimedOut = await Promise.race([
+          lawnRecRegenPromise.then(() => false),
+          new Promise((resolve) => { setTimeout(() => resolve(true), 60000).unref?.(); }),
+        ]);
+        if (lawnRecRegenTimedOut) {
+          logger.warn('[dispatch] lawn recommendation regen still running after 60s — completion continues; PDF re-queues when the grounded write lands');
+        }
       } catch (err) {
         logger.error(`[dispatch] Lawn assessment service_record link failed (non-blocking): ${err.message}`);
       }
@@ -6232,6 +6244,23 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       }).catch((err) => {
         logger.warn(`[dispatch] service report PDF render queue failed for ${record.id}: ${err.message}`);
       });
+      // A grounded-recommendation regen that outlived its bounded wait still
+      // writes when it lands — re-render the PDF then, so the queued artifact
+      // doesn't permanently carry the stale confirm-time copy (codex P1 r8).
+      if (lawnRecRegenTimedOut && lawnRecRegenPromise) {
+        lawnRecRegenPromise.then(async (lateResult) => {
+          if (!lateResult) return;
+          try {
+            await enqueuePdfRenderJob({
+              serviceRecordId: record.id,
+              payload: { source: 'grounded_regen_late', token: reportToken },
+            });
+            logger.info(`[dispatch] PDF re-queued for ${record.id} after late grounded recommendation write`);
+          } catch (requeueErr) {
+            logger.warn(`[dispatch] late PDF re-queue failed for ${record.id}: ${requeueErr.message}`);
+          }
+        }).catch(() => {});
+      }
     }
     // Best-effort: queue the "Your Visit, in Motion" recap render for pest visits
     // (flag-gated via PEST_RECAP). The pipeline self-skips non-eligible visits and a
