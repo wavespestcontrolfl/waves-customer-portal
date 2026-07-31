@@ -555,6 +555,14 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
+  test("a TAG QUESTION poisons the turn — \"You're booked Sunday at noon. Right?\" (round-7o P1 regression)", () => {
+    const tag = "You're booked Sunday at noon. Right?";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, tag);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "You're booked Sunday at noon" }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
   test('nonzero SECONDS in confirmed_start_at fail the on-the-hour guard (round-4 P1)', () => {
     const ex = agentCommitted();
     ex.scheduling.confirmed_start_at = '2026-08-02T12:00:30-04:00';

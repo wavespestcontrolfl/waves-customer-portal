@@ -588,16 +588,21 @@ function agentCommitmentSentenceVerified(quote, transcript, confirmedStartAt, ca
     // noon on Sunday?" a QUESTION — an interrogative sentence can never be
     // the commitment sentence.
     const chunks = (String(turn).replace(/\b([ap])\.\s?m\.?/gi, '$1m').match(/[^.!?;]+[.!?;]*/g) || []);
+    // ANY question mark in the turn poisons it (codex P1, round 7o: a tag
+    // question — "You're booked Sunday at noon. Right?" — means the agent is
+    // ASKING, not committing, even when the pinned sentence is declarative).
+    const turnHasQuestion = String(turn).includes('?');
     const sentences = chunks
       .map((c) => ({ ns: normalizeCommitmentText(c), interrogative: c.includes('?') }))
       .filter((s) => s.ns);
     const turnFullyInVocabulary = sentences.every((s) => commitmentTurnVocabularyOk(s.ns));
     for (const s of sentences) {
-      if (s.ns.includes(q)) containing.push({ ...s, wholeTurn, turnFullyInVocabulary });
+      if (s.ns.includes(q)) containing.push({ ...s, wholeTurn, turnFullyInVocabulary, turnHasQuestion });
     }
   }
   if (!containing.length) return false;
-  return containing.every(({ ns, interrogative, wholeTurn, turnFullyInVocabulary }) => !interrogative
+  return containing.every(({ ns, interrogative, wholeTurn, turnFullyInVocabulary, turnHasQuestion }) => !interrogative
+    && !turnHasQuestion
     && turnFullyInVocabulary
     && !turnHasNegationOrHedge(wholeTurn)
     && !turnHasUnresolvedConditional(wholeTurn)
