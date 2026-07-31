@@ -516,13 +516,16 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
     // lock, and its retarget fixes only the HOLD. The freshly committed,
     // immediately-due enrollment still carries the rejected address, and
     // its prior target is unknowable here (the merge already rewrote the
-    // hold), so this sweep matches by OWNERSHIP alone: an ACTIVE,
-    // customer-LINKED new-lead-era enrollment at any address other than
-    // the corrected one is this customer's mail stream, and the
-    // correction is the operator's assertion of THE address for this
-    // customer. Unlinked rows stay untouched (the r26 ownership rule).
+    // hold), so this sweep matches by ownership — SCOPED to the new_lead
+    // template (Codex #3084 r38): only a hold release creates the late
+    // enrollment this race-repair exists for, and it always enrolls
+    // new_lead. A billing-recipient automation deliberately carries a
+    // SEPARATE address resolved from notification_prefs — an
+    // ownership-only rewrite would redirect dunning steps away from the
+    // intended billing contact. Unlinked rows stay untouched (the r26
+    // ownership rule).
     counts.automations += await conn('automation_enrollments')
-      .where({ customer_id: customerId, status: 'active' })
+      .where({ customer_id: customerId, status: 'active', template_key: 'new_lead' })
       .whereRaw('LOWER(email) != ?', [newEmail.toLowerCase()])
       .update({ email: newEmail, updated_at: now });
 
@@ -864,6 +867,11 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
   let gateFailed = false;
   let sentOk = false;
   let sendErr = null;
+  // Pre-gate fence snapshot (Codex #3084 r38): if the COMMIT fails after
+  // the provider already accepted the message, the rollback reinstates
+  // these stamps in the DB — the post-send settles must fence on them,
+  // not on the rolled-back gate stamps.
+  const preGateClaims = { ...holdClaims };
   if (holdIds.length) {
     try {
       await conn.transaction(async (trx) => {
@@ -893,8 +901,25 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
         }
       });
     } catch (gateErr) {
-      gateFailed = true;
-      logger.warn(`[email-fanout] pre-send gate ${gateErr.code === 'send_gate_lost' ? 'refused' : 'failed'} for subscriber ${pendingConfirmation.id}: ${gateErr.code || gateErr.name || 'db_error'}`);
+      if (sentOk) {
+        // The COMMIT failed after the provider accepted the message
+        // (Codex #3084 r38) — the DOI is out, the rollback restored the
+        // consumed markers and pre-gate stamps. Treating this as unsent
+        // would lift the durable pre-stamp and leave the force-resend
+        // markers armed: a duplicate confirmation on the next sweep.
+        // Instead fall through to the NORMAL post-send path on the
+        // pre-gate fences (which the DB now carries again): the released
+        // settles clear the restored markers, and the kept pre-stamp is
+        // the delivery evidence the dedupe guard honors.
+        logger.warn(`[email-fanout] gate commit failed AFTER the send for subscriber ${pendingConfirmation.id}: ${gateErr.code || gateErr.name || 'db_error'} — settling on the pre-gate fences`);
+        for (const holdId of holdIds) {
+          if (preGateClaims[holdId] === undefined) delete holdClaims[holdId];
+          else holdClaims[holdId] = preGateClaims[holdId];
+        }
+      } else {
+        gateFailed = true;
+        logger.warn(`[email-fanout] pre-send gate ${gateErr.code === 'send_gate_lost' ? 'refused' : 'failed'} for subscriber ${pendingConfirmation.id}: ${gateErr.code || gateErr.name || 'db_error'}`);
+      }
     }
   } else {
     // No deduped holds — nothing to lock; plain re-send.

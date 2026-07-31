@@ -35,6 +35,7 @@ let mockClaimLost = false; // fence reads report the claim as reclaimed (r27)
 let mockRenewLostIds = new Set(); // per-hold lease-renewal refusals (r28)
 let mockConsumeError = null; // thrown by the r31 marker-consume write (r32)
 let mockConsumeZeroOnce = false; // next marker-consume clear matches 0 rows (r33: deny/reclaim bumped the fence)
+let mockTrxCommitFailOnce = false; // next db.transaction runs its callback, then fails at COMMIT (r38)
 jest.mock('../models/db', () => {
   const handler = (table) => {
     let markerFilter = false; // this chain filters on the resend marker
@@ -200,8 +201,18 @@ jest.mock('../models/db', () => {
   db.schema = { hasTable: jest.fn(async () => true) };
   db.raw = jest.fn((sql, bindings) => (bindings === undefined ? sql : { sql, bindings }));
   // The r29 enroll validation wraps creation in a transaction (a savepoint
-  // on trx handles) — the stub hands back the same connection.
-  db.transaction = jest.fn(async (fn) => fn(db));
+  // on trx handles) — the stub hands back the same connection. The r38
+  // knob models a COMMIT that fails after the callback completed.
+  db.transaction = jest.fn(async (fn) => {
+    const result = await fn(db);
+    if (mockTrxCommitFailOnce) {
+      mockTrxCommitFailOnce = false;
+      const err = new Error('commit failed');
+      err.code = 'commit_failed';
+      throw err;
+    }
+    return result;
+  });
   return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -267,6 +278,7 @@ beforeEach(() => {
   mockRenewLostIds = new Set();
   mockConsumeError = null;
   mockConsumeZeroOnce = false;
+  mockTrxCommitFailOnce = false;
 });
 
 // The merge's held_email is a bound CASE since r20 (an ACTIVE claim's target
@@ -519,6 +531,21 @@ describe('resumeHeldFirstTouch (ledger release engine)', () => {
     mockHold = baseHold({ held_drip: false });
     await resumeHeldFirstTouch({ callLogId: 'call-1' });
     expect(mockSubscriberUpdates).toHaveLength(0);
+  });
+
+  test('a commit failure AFTER the send settles on the pre-gate fence instead of aborting', async () => {
+    // The resume already ran when the gate transaction's COMMIT failed
+    // (Codex #3084 r38): the rollback restored the pre-gate stamp and
+    // any consumed marker, so aborting would leave a force-resend ticket
+    // armed for a DELIVERED DOI. The worker instead settles normally on
+    // the pre-gate fence — the released settle clears the restored
+    // marker with it.
+    mockHold = baseHold({ held_drip: false });
+    mockTrxCommitFailOnce = true;
+    const res = await resumeHeldFirstTouch({ callLogId: 'call-1' });
+    expect(res.resumed).toBe(true);
+    expect(mockNewsletter).toHaveBeenCalledTimes(1);
+    expect(mockHoldUpdates.at(-1)).toMatchObject({ status: 'released', released_newsletter: true });
   });
 
   test('the pre-send gate refuses an UNMARKED hold too — a denial after the claim never sends', async () => {

@@ -744,6 +744,9 @@ async function resumeHeldFirstTouch({
           let skipDedupe = false;
           let gateRefused = false;
           let outcome = null;
+          // Pre-gate fence snapshot (r38): a commit failure after the
+          // provider call rolls the DB back to THIS stamp.
+          const preGateStamp = claimStamp;
           try {
             // The gate and the SEND share ONE transaction (Codex #3084
             // r37): the gate's CAS takes the hold's row lock, and the
@@ -794,17 +797,32 @@ async function resumeHeldFirstTouch({
               }
             });
           } catch (gateErr) {
-            // ABORT, never degrade to the dedupe guard (Codex #3084
-            // r32): an unverifiable gate may have left the marker armed,
-            // and a prior failed send's surviving confirmation_sent_at
-            // stamp would make the guard settle a hold whose DOI never
-            // delivered. The plain fenced re-pend keeps last_error
-            // untouched, so the marker survives for the retry.
-            logger.warn(`[first-touch-resume] pre-send gate failed: ${gateErr.code || gateErr.name || 'db_error'} — hold stays pending, marker intact`);
-            await fencedHoldWrite(dbh('first_touch_holds').where({ id: hold.id }), claimStamp)
-              .update({ status: 'pending', updated_at: new Date() });
-            result.skipped = result.skipped || 'doi_state_unverified';
-            continue;
+            if (outcome !== null) {
+              // The COMMIT failed after the resume already ran (Codex
+              // #3084 r38) — the DOI may be out, and the rollback
+              // restored the pre-gate stamp and any consumed marker.
+              // Aborting would leave the marker armed for a delivered
+              // send (a duplicate on retry); instead fall through to the
+              // normal settles on the pre-gate fence the DB now carries
+              // — a delivered outcome settles released and clears the
+              // restored marker with it.
+              logger.warn(`[first-touch-resume] gate commit failed AFTER the send: ${gateErr.code || gateErr.name || 'db_error'} — settling on the pre-gate fence`);
+              claimStamp = preGateStamp;
+              claimStamps.set(hold.id, preGateStamp);
+            } else {
+              // ABORT, never degrade to the dedupe guard (Codex #3084
+              // r32): an unverifiable gate may have left the marker
+              // armed, and a prior failed send's surviving
+              // confirmation_sent_at stamp would make the guard settle a
+              // hold whose DOI never delivered. The plain fenced re-pend
+              // keeps last_error untouched, so the marker survives for
+              // the retry.
+              logger.warn(`[first-touch-resume] pre-send gate failed: ${gateErr.code || gateErr.name || 'db_error'} — hold stays pending, marker intact`);
+              await fencedHoldWrite(dbh('first_touch_holds').where({ id: hold.id }), claimStamp)
+                .update({ status: 'pending', updated_at: new Date() });
+              result.skipped = result.skipped || 'doi_state_unverified';
+              continue;
+            }
           }
           if (gateRefused) {
             logger.info('[first-touch-resume] pre-send gate refused (deny/reclaim/retarget) — abandoning hold');
@@ -1093,6 +1111,9 @@ async function runOnePostCommitResume(payload, holdIds, dbh, claims = new Map())
     let outcome = null;
     let resumeThrow = null;
     const sentEmailLc = String(sendPayload.email || '').trim().toLowerCase();
+    // Pre-gate fence snapshot (r38): a commit failure after the provider
+    // call rolls the DB back to these stamps.
+    const preGateClaims = new Map(claims);
     if (holdIds.length) {
       try {
         await dbh.transaction(async (trx) => {
@@ -1128,17 +1149,32 @@ async function runOnePostCommitResume(payload, holdIds, dbh, claims = new Map())
           }
         });
       } catch (gateErr) {
-        const lostToOwner = gateErr.code === 'send_gate_lost';
-        logger.warn(`[first-touch-resume] post-commit pre-send gate ${lostToOwner ? 'refused' : 'failed'}: ${gateErr.code || gateErr.name || 'db_error'} — aborting the group send, markers intact`);
-        for (const holdId of holdIds) {
-          try {
-            await fencedHoldWrite(dbh('first_touch_holds').where({ id: holdId }), fenceOf(holdId))
-              .update({ status: 'pending', updated_at: new Date() });
-          } catch (repenErr) {
-            logger.warn(`[first-touch-resume] hold ${holdId} re-pend failed: ${repenErr.code || repenErr.name || 'db_error'} (stale-claim window will reclaim)`);
+        if (outcome !== null || resumeThrow) {
+          // The COMMIT failed after the resume already ran (Codex #3084
+          // r38) — the DOI may be out, and the rollback restored the
+          // consumed markers and pre-gate stamps. Aborting would leave
+          // markers armed for a possibly-delivered send (duplicates on
+          // retry); instead fall through to the normal settles on the
+          // pre-gate fences the DB now carries — a delivered outcome
+          // settles released and clears the restored markers with it.
+          logger.warn(`[first-touch-resume] post-commit gate commit failed AFTER the send: ${gateErr.code || gateErr.name || 'db_error'} — settling on the pre-gate fences`);
+          for (const holdId of holdIds) {
+            if (preGateClaims.has(holdId)) claims.set(holdId, preGateClaims.get(holdId));
+            else claims.delete(holdId);
           }
+        } else {
+          const lostToOwner = gateErr.code === 'send_gate_lost';
+          logger.warn(`[first-touch-resume] post-commit pre-send gate ${lostToOwner ? 'refused' : 'failed'}: ${gateErr.code || gateErr.name || 'db_error'} — aborting the group send, markers intact`);
+          for (const holdId of holdIds) {
+            try {
+              await fencedHoldWrite(dbh('first_touch_holds').where({ id: holdId }), fenceOf(holdId))
+                .update({ status: 'pending', updated_at: new Date() });
+            } catch (repenErr) {
+              logger.warn(`[first-touch-resume] hold ${holdId} re-pend failed: ${repenErr.code || repenErr.name || 'db_error'} (stale-claim window will reclaim)`);
+            }
+          }
+          return { skipped: lostToOwner ? 'claim_lost' : 'doi_state_unverified' };
         }
-        return { skipped: lostToOwner ? 'claim_lost' : 'doi_state_unverified' };
       }
     } else {
       outcome = await runNewsletterResume(sendPayload, dbh, { skipDedupe });

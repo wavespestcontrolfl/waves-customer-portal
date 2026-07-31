@@ -136,6 +136,15 @@ function makeConn(cfg = {}) {
     trxCount += 1;
     calls.push({ table: '__trx', op: 'begin' });
     const result = await fn(conn);
+    // __commitFailOnce (r38): the callback ran to completion but the
+    // COMMIT itself fails — models a DB blip during the held-lock send.
+    if (conn.__commitFailOnce) {
+      conn.__commitFailOnce = false;
+      calls.push({ table: '__trx', op: 'commit_fail' });
+      const err = new Error('commit failed');
+      err.code = 'commit_failed';
+      throw err;
+    }
     calls.push({ table: '__trx', op: 'end' });
     return result;
   };
@@ -666,6 +675,12 @@ describe('propagateCustomerEmailChange', () => {
       && c.op === 'whereRaw' && String(c.arg.sql).includes('!=')
       && Array.isArray(c.arg.bindings) && c.arg.bindings[0] === 'samtypo@example.com');
     expect(finalSweep).toBeDefined();
+    // Scoped to the new_lead template (r38): a billing-recipient
+    // automation's deliberately separate address must never be rewritten
+    // by this ownership-only repair.
+    const scoped = conn.__calls.find((c) => c.table === 'automation_enrollments'
+      && c.op === 'where' && c.arg && c.arg.template_key === 'new_lead');
+    expect(scoped).toBeDefined();
   });
 
   test('deferred newsletter holds pass through when no pending subscriber was moved', async () => {
@@ -989,6 +1004,29 @@ describe('resendPendingConfirmation', () => {
     expect(begin).toBeGreaterThanOrEqual(0);
     expect(send).toBeGreaterThan(begin);
     expect(end).toBeGreaterThan(send);
+  });
+
+  test('a commit failure AFTER the send settles on the pre-gate fences instead of aborting', async () => {
+    // The provider accepted the message but the transaction commit
+    // failed (Codex #3084 r38): the rollback restored consumed markers
+    // and pre-gate stamps, so the abort path would lift the durable
+    // pre-stamp and leave force-resend markers armed for a DELIVERED
+    // DOI — a duplicate on the next sweep. The callback instead falls
+    // through to the normal settles on the pre-gate fences.
+    sendConfirmationEmail.mockResolvedValueOnce(true);
+    const payload = { id: 811, email: 'samtypo@example.com', confirmation_token: 'tok-1', heldNewsletterHoldIds: ['hold-1'] };
+    const conn = makeConn({
+      ...matchRow(payload),
+      first_touch_holds: { firstQueue: [{ held_drip: false, released_drip: false }] },
+    });
+    conn.__commitFailOnce = true;
+    const ok = await resendPendingConfirmation(payload, conn);
+    expect(ok).toBe(true);
+    // The released settle landed; the pre-stamp was never lifted.
+    const settles = conn.__updates('first_touch_holds').filter((u) => u.arg.status === 'released');
+    expect(settles).toHaveLength(1);
+    const nsClears = conn.__updates('newsletter_subscribers').filter((u) => u.arg.confirmation_sent_at === null);
+    expect(nsClears).toHaveLength(0);
   });
 
   test('grouped pre-send gates run in ONE transaction — a mid-group miss aborts, nothing half-consumed', async () => {
