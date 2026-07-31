@@ -1061,9 +1061,14 @@ function attachParcelMeta(merged, parcel) {
 // different shape (stacked unit parcels) and keep their own lane.
 function isMobileHomeParkParcel(parcel) {
   if (!parcel || parcel.aggregated === true) return false;
+  if (/mobile\s*home\s*park/i.test(String(parcel.landUseDescription || ''))) return true;
+  // FL DOR code 28 covers BOTH mobile-home parks and commercial parking
+  // lots — the code alone must never reclassify a parking lot as a park
+  // (which would discard its valid commercial facts and stamp a false
+  // land-lease flag). Residential units on the roll are the corroboration:
+  // parking lots carry zero.
   const major = parseInt(dorMajorCategory(parcel.dorUseCode), 10);
-  if (major === 28) return true;
-  return /mobile\s*home\s*park/i.test(String(parcel.landUseDescription || ''));
+  return major === 28 && Number(parcel.residentialUnits) > 0;
 }
 
 // The multiSitusParcel signal a park GIS parcel contributes once its
@@ -1906,15 +1911,33 @@ async function lookupPropertyFromAITrio(address, geoContext = null) {
     ...aiRecords,
   ].filter(Boolean);
 
-  if (!records.length) return null;
+  if (!records.length) {
+    if (!parkParcelSignal) return null;
+    // Every fact provider failed or timed out, but the GIS point positively
+    // identified a park — returning null here would collapse to the generic
+    // "no property record" state and lose the one thing we do know. Ship a
+    // marker-only record (no facts, county-GIS provenance) so the panel
+    // still explains the missing dimensions.
+    const markerOnly = shapeAsPropertyRecord(
+      { confidence: 'low', county: geoContext?.county || '' },
+      searchAddress,
+      'county_gis',
+    );
+    markerOnly._source = 'cadastral';
+    markerOnly._raw._source = 'cadastral';
+    return stampMultiSitusParcelSignal(markerOnly, parkParcelSignal);
+  }
   const merged = preserveCountyGisLandUse(mergePropertyRecords(records, searchAddress), cadastralRecord);
   preserveCountyGisImpervious(merged, cadastralRecord);
   preserveMultiSitusParcelSignal(merged, countyRecord);
-  // The GIS-derived park signal only lands here, never on the county-core
-  // early return above: a FULL county record means the roll vouched for the
-  // typed address on its own parcel, and a park flag from a (possibly
-  // imprecise) rooftop point would be noise on a solved lookup.
-  stampMultiSitusParcelSignal(merged, parkParcelSignal);
+  // The GIS-derived park signal only lands when the roll did NOT resolve
+  // the typed address at all — an address-keyed county record of ANY
+  // completeness (including the county-core early return above) means the
+  // roll vouched for the address on a parcel of its own, and a park flag
+  // from a point that landed in a neighboring park polygon would be false
+  // on that record. A slim multi-situs county record already carries its
+  // own (address-confirmed) marker via the preserve above.
+  if (!countyRecord) stampMultiSitusParcelSignal(merged, parkParcelSignal);
   return attachParcelMeta(applyCountyGisTypeOverride(merged, cadastralRecord), parcel);
 }
 
@@ -3092,35 +3115,6 @@ function charlottePoolFeatures(detailHtml) {
 }
 
 function parseManateePaoRecord({ address, search, land, buildings, features }) {
-  // Multi-situs parcel (a land-lease mobile-home park at hundreds of
-  // addresses, a duplex at two): the typed address matched ONE situs line,
-  // but every land and building row describes the WHOLE parcel — a ~47-acre
-  // park lot or the other unit's half of a duplex must never price a single
-  // home. Keep the identity facts (matched situs, parcel link) and leave
-  // every per-unit dimension to AI/field sources; _multiSitusParcel drives
-  // the panel's verify-flag, whose copy scales with situsCount (park
-  // semantics only at association scale, ≥5). Before the situs-cell split
-  // these rows could never match at all, so no valid county dimensions are
-  // lost relative to the old behavior.
-  if ((search.situsCount || 1) > 1) {
-    return {
-      squareFootage: null,
-      lotSize: null,
-      yearBuilt: null,
-      bedrooms: null,
-      bathrooms: null,
-      stories: null,
-      propertyType: null,
-      constructionMaterial: null,
-      roofType: null,
-      source: `${MANATEE_PAO_BASE}/parcel/?parid=${encodeURIComponent(search.parcelId)}`,
-      confidence: 'high',
-      county: 'Manatee',
-      formattedAddress: [search.situsAddress, search.city, 'FL'].filter(Boolean).join(', ') || address,
-      _multiSitusParcel: { situsCount: search.situsCount },
-    };
-  }
-
   const buildingRows = parsePaoRows(buildings);
   const landRows = parsePaoRows(land);
   const primaryBuilding = pickPrimaryManateeBuilding(buildingRows);
@@ -3131,6 +3125,38 @@ function parseManateePaoRecord({ address, search, land, buildings, features }) {
   const commercialSized = isCommercialBuildingType(propertyType);
   const sqftDetailed = coerceBuildingSqftDetailed(primaryBuilding.LivBus, commercialSized);
   const source = `${MANATEE_PAO_BASE}/parcel/?parid=${encodeURIComponent(search.parcelId)}`;
+
+  // Multi-situs RESIDENTIAL parcel (a land-lease mobile-home park at
+  // hundreds of addresses, a duplex at two): the typed address matched ONE
+  // situs line, but every land and building row describes the WHOLE parcel
+  // — a ~47-acre park lot or the other unit's half of a duplex must never
+  // price a single home. Keep the identity facts (matched situs, parcel
+  // link) and leave every per-unit dimension to AI/field sources;
+  // _multiSitusParcel drives the panel's verify-flag, whose copy scales
+  // with situsCount (park semantics only at association scale, ≥5).
+  // COMMERCIAL multi-situs parcels (a shopping center's storefront
+  // addresses) keep the full parse: the commercial lane prices whole
+  // buildings, so the parcel-wide facts are the right ones there.
+  // Before the situs-cell split these rows could never match at all, so no
+  // valid county dimensions are lost relative to the old behavior.
+  if ((search.situsCount || 1) > 1 && !commercialSized) {
+    return {
+      squareFootage: null,
+      lotSize: null,
+      yearBuilt: null,
+      bedrooms: null,
+      bathrooms: null,
+      stories: null,
+      propertyType: null,
+      constructionMaterial: null,
+      roofType: null,
+      source,
+      confidence: 'high',
+      county: 'Manatee',
+      formattedAddress: [search.situsAddress, search.city, 'FL'].filter(Boolean).join(', ') || address,
+      _multiSitusParcel: { situsCount: search.situsCount },
+    };
+  }
 
   return {
     // LivBus = Living/BUSINESS area — Manatee's building rows already cover

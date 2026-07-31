@@ -31,7 +31,13 @@ jest.mock('../services/logger', () => ({
   error: jest.fn(),
 }));
 
-const { detectMultiSitusMasterParcel, _private } = require('../services/property-lookup/ai-property-lookup');
+jest.mock('../services/property-lookup/county-parcel-gis', () => {
+  const actual = jest.requireActual('../services/property-lookup/county-parcel-gis');
+  return { ...actual, lookupCountyParcelByPoint: jest.fn() };
+});
+
+const { lookupCountyParcelByPoint } = require('../services/property-lookup/county-parcel-gis');
+const { detectMultiSitusMasterParcel, lookupPropertyFromAITrio, _private } = require('../services/property-lookup/ai-property-lookup');
 const { _private: routePrivate } = require('../routes/property-lookup-v2');
 
 const PARK_SEARCH_RESULTS = {
@@ -143,6 +149,33 @@ describe('multi-situs master parcel record', () => {
     expect(parsed.lotSize).toBe(200000); // existing LOT_SQFT_MAX clamp path
   });
 
+  test('commercial multi-situs parcels keep the full parcel-wide parse', () => {
+    // A shopping center's storefront addresses share one parcel, but the
+    // commercial lane prices whole buildings — the parcel-wide facts are
+    // the right ones and must not be discarded as "residential units".
+    const parsed = _private.parseManateePaoRecord({
+      address: '210 Commerce Way, Bradenton, FL 34205',
+      search: { parcelId: '900000400', situsAddress: '210 COMMERCE WAY', city: 'BRADENTON', situsCount: 5 },
+      land: parkLand,
+      buildings: {
+        cols: [
+          { title: 'Type' }, { title: 'Bldg' }, { title: 'Classification' }, { title: 'Yrblt' },
+          { title: 'Effyr' }, { title: 'Stories' }, { title: 'UnRoof' }, { title: 'LivBus' },
+          { title: 'Rooms' }, { title: 'Const/ExtWall' }, { title: 'RoofMaterial' }, { title: 'RoofType' },
+        ],
+        rows: [
+          ['RETAIL STORE', '1', 'RETAIL', '1998', '2005', '1', '42,000', '38,500', '', 'CONCRETE BLOCK', 'BUILT-UP', 'FLAT'],
+        ],
+      },
+      features: null,
+    });
+
+    expect(parsed._multiSitusParcel).toBeUndefined();
+    expect(parsed.propertyType).toBe('Retail');
+    expect(parsed.squareFootage).toBe(38500);
+    expect(parsed.yearBuilt).toBe(1998);
+  });
+
   test('park signal survives an AI-trio merge the county record does not win', () => {
     const countyRecord = {
       _source: 'county',
@@ -163,16 +196,22 @@ describe('multi-situs master parcel record', () => {
 });
 
 describe('GIS by-point lane: mobile-home-park master parcels', () => {
-  test('detects DOR major 28 in every county code width and by description', () => {
-    // Manatee 2-digit, FDOR 3-digit, Sarasota/Charlotte 4-digit county form.
-    expect(_private.isMobileHomeParkParcel({ dorUseCode: '28' })).toBe(true);
-    expect(_private.isMobileHomeParkParcel({ dorUseCode: '028' })).toBe(true);
-    expect(_private.isMobileHomeParkParcel({ dorUseCode: '2800' })).toBe(true);
+  test('detects DOR major 28 in every county code width — with corroboration', () => {
+    // FL DOR 28 covers BOTH mobile-home parks and commercial parking lots,
+    // so the code alone is never enough: residential units on the roll (or
+    // explicit park wording) corroborate. Manatee 2-digit, FDOR 3-digit,
+    // Sarasota/Charlotte 4-digit county form.
+    expect(_private.isMobileHomeParkParcel({ dorUseCode: '28', residentialUnits: 226 })).toBe(true);
+    expect(_private.isMobileHomeParkParcel({ dorUseCode: '028', residentialUnits: 12 })).toBe(true);
+    expect(_private.isMobileHomeParkParcel({ dorUseCode: '2800', residentialUnits: 40 })).toBe(true);
     expect(_private.isMobileHomeParkParcel({ dorUseCode: null, landUseDescription: 'Mobile Home Parks (1555)' })).toBe(true);
+    // A commercial parking lot is DOR 28 with zero residential units — it
+    // must keep its commercial classification.
+    expect(_private.isMobileHomeParkParcel({ dorUseCode: '28' })).toBe(false);
+    expect(_private.isMobileHomeParkParcel({ dorUseCode: '2800', residentialUnits: 0 })).toBe(false);
     // Ordinary residential / commercial codes and aggregates stay out.
-    expect(_private.isMobileHomeParkParcel({ dorUseCode: '0100' })).toBe(false);
-    expect(_private.isMobileHomeParkParcel({ dorUseCode: '01' })).toBe(false);
-    expect(_private.isMobileHomeParkParcel({ dorUseCode: '2800', aggregated: true })).toBe(false);
+    expect(_private.isMobileHomeParkParcel({ dorUseCode: '0100', residentialUnits: 1 })).toBe(false);
+    expect(_private.isMobileHomeParkParcel({ dorUseCode: '2800', residentialUnits: 40, aggregated: true })).toBe(false);
     expect(_private.isMobileHomeParkParcel(null)).toBe(false);
   });
 
@@ -185,9 +224,9 @@ describe('GIS by-point lane: mobile-home-park master parcels', () => {
       lotSqft: 2043352,
     });
     expect(signal).toEqual({ situsCount: 226, parcelId: '900000100', situsAddress: null, parkConfirmed: true });
-    // Missing unit count still marks it as multi-home — and keeps the
-    // positive park evidence so the flag copy never reads duplex.
-    expect(_private.mobileHomeParkSignalFromParcel({ dorUseCode: '28' })).toMatchObject({ situsCount: 2, parkConfirmed: true });
+    // Park wording without a unit count still marks it as multi-home — and
+    // keeps the positive park evidence so the flag copy never reads duplex.
+    expect(_private.mobileHomeParkSignalFromParcel({ landUseDescription: 'Mobile Home Park' })).toMatchObject({ situsCount: 2, parkConfirmed: true });
     expect(_private.mobileHomeParkSignalFromParcel({ dorUseCode: '0100' })).toBeNull();
   });
 
@@ -195,6 +234,36 @@ describe('GIS by-point lane: mobile-home-park master parcels', () => {
     const merged = { _raw: {} };
     _private.stampMultiSitusParcelSignal(merged, { situsCount: 226, parcelId: '900000100', situsAddress: null });
     expect(detectMultiSitusMasterParcel(merged)).toMatchObject({ situsCount: 226 });
+  });
+
+  test('marker-only record ships when GIS finds a park but every fact provider fails', async () => {
+    lookupCountyParcelByPoint.mockResolvedValue({
+      county: 'Manatee',
+      gisProvider: 'manatee_gis',
+      parcelId: '900000100',
+      paoParcelId: '900000100',
+      situsAddress: '2901 PELICAN CT',
+      dorUseCode: '28',
+      landUseDescription: 'Mobile Home Parks (1555)',
+      residentialUnits: 226,
+      lotSqft: 2043352,
+    });
+    // Every downstream provider (PAO search, AI trio) fails hard.
+    const realFetch = global.fetch;
+    global.fetch = jest.fn().mockRejectedValue(new Error('provider down'));
+    try {
+      const record = await lookupPropertyFromAITrio('4512 Seagrape Cir, Palmetto, FL 34221', {
+        lat: 27.55, lng: -82.55, locationType: 'ROOFTOP', county: 'Manatee',
+      });
+      expect(record).not.toBeNull();
+      expect(detectMultiSitusMasterParcel(record)).toMatchObject({ situsCount: 226, parkConfirmed: true });
+      // Marker only — no park-wide facts leak.
+      expect(record.squareFootage || 0).toBe(0);
+      expect(record.lotSize || 0).toBe(0);
+      expect(record._source).toBe('cadastral');
+    } finally {
+      global.fetch = realFetch;
+    }
   });
 });
 
