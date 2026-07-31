@@ -658,6 +658,15 @@ function quoteBindsConfirmedSlot(normalizedSentence, confirmedStartAt, callStart
   for (const yr of q.matchAll(/(?<= )(\d{3,4})(?= )/g)) {
     if (Number(yr[1]) !== wallY) return false;
   }
+  // Full numeric consumption (codex P0, round 7j): every number token in the
+  // sentence must be a value the confirmed slot explains — its 12-hour hour,
+  // ":00" minutes, ET month, ET day, or the 4-/2-digit ET year. "Sunday
+  // 8/2/27 at noon" leaves a 27 the 2026 slot cannot explain and fails
+  // closed; so does any other unconsumed number (street numbers, prices).
+  const allowedNums = new Set([Number(hour12), 0, wallMo, slotDay, wallY, wallY % 100]);
+  for (const tok of q.split(' ')) {
+    if (/^\d+$/.test(tok) && !allowedNums.has(Number(tok))) return false;
+  }
   // Exact binding, not presence (codex round-5 P1): a multi-slot turn
   // ("Sunday at 10 AM won't work, but we'll see you at 11 AM") scatters
   // matching tokens without committing to them. The quote must contain

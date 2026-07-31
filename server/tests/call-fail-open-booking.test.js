@@ -495,6 +495,21 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
   });
 
+  test('a two-digit year must match — "Sunday 8/2/27 at noon" never books a 2026 slot (P0 regression)', () => {
+    const wrongYear = "So we'll see you Sunday 8/2/27 at noon, and just let us know if anything changes.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, wrongYear);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: wrongYear }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('a matching two-digit year binds — "Sunday 8/2/26 at noon" books the 2026-08-02 slot (counter-case)', () => {
+    const rightYear = "So we'll see you Sunday 8/2/26 at noon, and just let us know if anything changes.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, rightYear);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: rightYear }), opts({ transcript }));
+    expect(r.allowed).toBe(true);
+  });
+
   test('nonzero SECONDS in confirmed_start_at fail the on-the-hour guard (round-4 P1)', () => {
     const ex = agentCommitted();
     ex.scheduling.confirmed_start_at = '2026-08-02T12:00:30-04:00';
