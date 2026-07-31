@@ -201,7 +201,7 @@ const WEATHER_MOVE_LEADS = {
 // vacuuming, and point-source IGR (roach cleanout protocol) — exempted.
 // Widening the allowlist to another service family is an owner call.
 const WHY_MOVE_LIQUID_SPRAY_SERVICE = /\bpest\b|waveguard/i;
-const WHY_MOVE_EXEMPT_SERVICE = /interior|granular|termite|wdo|inspection|bait|cleanout|roach/i;
+const WHY_MOVE_EXEMPT_SERVICE = /interior|granular|termite|wdo|inspection|bait|cleanout|roach|setup/i;
 
 function showsWhyMove(move, serviceType) {
   const st = String(serviceType || '');
@@ -318,13 +318,14 @@ function WeatherMoveBanner({ move, firstName, serviceType, hero = false }) {
             <Icon name="chevronDown" size={16} style={{ marginLeft: 'auto', color: S.muted }} />
           </summary>
           <div style={{ padding: '0 14px 14px', fontSize: 14, color: S.body, lineHeight: 1.5 }}>
-            Our liquid treatments need a dry surface and a few hours to bond after application.
-            Rain during or right after a visit can wash product away before it binds — which
-            means weaker protection for your home. Once bonded, it's a different story: our
-            products use microencapsulated formulas — the active ingredient is sealed in
-            microscopic capsules that lock onto treated surfaces and release gradually — so
-            everyday Southwest Florida rain won't wash an established treatment away. Timing
-            the application to a dry window is what protects that bond, at no charge to you.
+            Our liquid treatments need a dry surface and a few hours to bond after
+            application. Rain during or right after a visit can wash product away before it
+            binds — which means weaker protection for your home. Once a treatment has dried
+            and bonded, rain matters much less: select formulations we use are
+            microencapsulated — the active ingredient rides in microscopic capsules that
+            lock onto treated surfaces and release gradually — adding residual staying power
+            against everyday Southwest Florida rain. No application is weatherproof, though,
+            which is exactly why we move your visit to a dry window — at no charge to you.
           </div>
         </details>
       ) : null}
