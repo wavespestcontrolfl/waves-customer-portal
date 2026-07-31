@@ -140,10 +140,17 @@ describe('deterministicOutOfScope', () => {
     expect(deterministicOutOfScope('how much for quarterly pest control')).toBe(false);
   });
 
-  test('bare nouns without service phrasing never trip it (surnames, street names)', () => {
+  test('bare nouns without service phrasing never trip it (surnames, street names, orgs)', () => {
     expect(deterministicOutOfScope("Hi, I'm Jane Painter. Can I get a quote?")).toBe(false);
     expect(deterministicOutOfScope('I live at 12 Roofers Rd, what do you charge?')).toBe(false);
     expect(deterministicOutOfScope('this is Sam Gutter, following up on a quote')).toBe(false);
+    expect(deterministicOutOfScope("Hi, I'm Joe Plumber. Can I get a quote?")).toBe(false);
+    expect(deterministicOutOfScope('this is Handyman Hardware confirming your service quote')).toBe(false);
+    expect(deterministicOutOfScope('quote for the Drywall Bros office please')).toBe(false);
+    // …while real trade requests still veto.
+    expect(deterministicOutOfScope('need a handyman for the fence')).toBe(true);
+    expect(deterministicOutOfScope('hvac repair quote please')).toBe(true);
+    expect(deterministicOutOfScope('drywall repair estimate?')).toBe(true);
   });
 
   test('does not fire on plain quote chatter', () => {
@@ -171,6 +178,13 @@ describe('extractAddressCandidates', () => {
     const [cand] = extractAddressCandidates('quote for 100 Palm Ave, Venice FL 34285 please');
     expect(cand.locality).toBe(', Venice 34285');
     expect(extractAddressCandidates('quote for 100 Palm Ave before Saturday')[0].locality).toBe('');
+  });
+
+  test('prefixVariants expands directional and suffix aliases both ways', () => {
+    const { _private } = require('../services/estimator-engine/scope-guards');
+    expect(_private.prefixVariants('100', 'N')).toEqual(expect.arrayContaining(['100 N%', '100 north%']));
+    expect(_private.prefixVariants('100', 'North')).toEqual(expect.arrayContaining(['100 North%', '100 n%']));
+    expect(_private.prefixVariants('100', 'Palm')).toEqual(['100 Palm%']);
   });
 
   test('caps at three candidates', () => {
@@ -279,6 +293,18 @@ describe('loadThreadTriageContext', () => {
     });
     expect(triage.matchedExistingCustomer).toBe(true);
     expect(triage.lines.join('\n')).toContain('Pat Homeowner');
+  });
+
+  test('directional/suffix abbreviations still confirm against the stored long form', async () => {
+    mockState.rows.customers = [
+      { id: 'c-7', first_name: 'Dir', last_name: 'Ectional', address_line1: '100 North Palm Avenue', city: 'Bradenton' },
+    ];
+    const triage = await loadThreadTriageContext({
+      phone: null,
+      triggerBody: 'quote for 100 N Palm Ave please',
+    });
+    expect(triage.matchedExistingCustomer).toBe(true);
+    expect(triage.lines.join('\n')).toContain('100 North Palm Avenue');
   });
 
   test('a stated locality that disagrees with the row is NOT a match', async () => {

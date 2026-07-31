@@ -103,4 +103,4 @@ function sameStreetAddress(a, b, { requireExactUnit = false } = {}) {
   return true;
 }
 
-module.exports = { sameStreetAddress, addressAddsLocality };
+module.exports = { sameStreetAddress, addressAddsLocality, STREET_TOKEN_ALIASES };

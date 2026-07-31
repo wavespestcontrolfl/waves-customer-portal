@@ -28,7 +28,7 @@
 
 const logger = require('../logger');
 const { last10 } = require('../external-phone');
-const { sameStreetAddress } = require('./address-compare');
+const { sameStreetAddress, STREET_TOKEN_ALIASES } = require('./address-compare');
 const { CUSTOMER_STAGES, whereLiveCustomer } = require('../customer-stages');
 
 function scopeGuardsEnabled() {
@@ -60,9 +60,16 @@ const OUT_OF_SCOPE_RE = new RegExp(
     '\\bpainting\\b', 'paint\\s+(?:job|work|quote|estimate|my|the|our|interior|exterior|house|home)',
     'pool\\s*(?:clean\\w*|service|maint\\w*)',
     'window\\s*(?:clean\\w*|wash\\w*)', 'carpet\\s*clean\\w*', 'duct\\s*clean\\w*',
-    '\\bhvac\\b', 'air\\s*condition\\w*', 'plumb(?:ing|er)s?\\b',
-    '\\belectricians?\\b', 'electrical\\s*(?:work|repair)',
-    '\\bhandyman\\b', '\\bdrywall\\b', 'solar\\s*panel', 'seal\\s*coat\\w*',
+    // Trade nouns need request context too — "Joe Plumber" the person and
+    // "Handyman Hardware" the store are not service requests.
+    'hvac\\s+(?:service|repair|work|quote|install\\w*|maint\\w*|system|unit|tech)',
+    'service\\s+(?:my|the|our)\\s+hvac', 'air\\s*conditioning\\s+(?:service|repair|work)',
+    'plumbing\\s+(?:work|issue|problem|repair|leak|service|quote)',
+    '(?:need|want|looking\\s+for|find|hire|recommend\\w*|get)\\s+an?\\s+(?:plumber|electrician|handyman)',
+    'electrical\\s*(?:work|repair)',
+    'handyman\\s+(?:service|work|job)s?',
+    'drywall\\s+(?:repair|work|patch\\w*|install\\w*|job|quote)',
+    'solar\\s*panel', 'seal\\s*coat\\w*',
     'christmas\\s*light', 'remodel\\w*',
   ].join('|'),
   'i',
@@ -132,6 +139,20 @@ function extractAddressCandidates(text) {
     });
   }
   return out;
+}
+
+// ILIKE prefixes for a candidate's first street word, expanded through the
+// suffix/directional alias table — "100 N Palm" must fetch a row stored as
+// "100 North Palm Avenue" (sameStreetAddress normalizes both at confirm
+// time, but a prefix that never fetches the row never gets confirmed).
+function prefixVariants(num, firstWord) {
+  const lower = String(firstWord || '').toLowerCase();
+  const words = new Set([firstWord]);
+  if (STREET_TOKEN_ALIASES[lower]) words.add(STREET_TOKEN_ALIASES[lower]);
+  for (const [long, short] of Object.entries(STREET_TOKEN_ALIASES)) {
+    if (short === lower) words.add(long);
+  }
+  return [...words].map((w) => `${num} ${w}%`);
 }
 
 // A prefix-fetched row only counts as "this customer's property" when the
@@ -253,10 +274,10 @@ async function loadTriageInner({ phone, triggerBody }) {
 
   for (const cand of extractAddressCandidates(searchText)) {
     const label = `Message thread names address "${cand.num} ${cand.firstWord}…" which matches`;
-    const prefix = `${cand.num} ${cand.firstWord}%`;
+    const prefixes = prefixVariants(cand.num, cand.firstWord);
     const rows = await db('customers')
       .modify(whereLiveCustomer)
-      .where('address_line1', 'ilike', prefix)
+      .whereRaw('address_line1 ILIKE ANY(?)', [prefixes])
       .limit(5)
       .select('id', 'first_name', 'last_name', 'address_line1', 'city', 'zip');
     for (const row of rows) {
@@ -278,7 +299,7 @@ async function loadTriageInner({ phone, triggerBody }) {
         // Sold/deactivated properties are somebody else's address now — a
         // new occupant's quote must not ground against the old owner.
         .where('cp.active', true)
-        .where('cp.address_line1', 'ilike', prefix)
+        .whereRaw('cp.address_line1 ILIKE ANY(?)', [prefixes])
         .limit(5)
         .select('c.id', 'c.first_name', 'c.last_name',
           'cp.address_line1 as address_line1', 'cp.city', 'cp.zip');
@@ -327,6 +348,6 @@ module.exports = {
   extractAddressCandidates,
   loadThreadTriageContext,
   _private: {
-    OUT_OF_SCOPE_RE, IN_SCOPE_RE, candidateMatchesRow, loadTriageInner, TRIAGE_TIMEOUT_MS,
+    OUT_OF_SCOPE_RE, IN_SCOPE_RE, candidateMatchesRow, loadTriageInner, TRIAGE_TIMEOUT_MS, prefixVariants,
   },
 };
