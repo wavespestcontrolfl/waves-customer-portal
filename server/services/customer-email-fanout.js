@@ -288,16 +288,21 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
     // update-and-catch: a caught unique violation would poison the caller's
     // transaction (Postgres aborts it), so the rare true race is left to
     // bubble up and roll the whole edit back — half-synced is worse.
-    // FOR UPDATE + status CASes below (Codex #3084 r44, mirroring the r43
-    // prior-target pass): a one-click or admin unsubscribe committing
-    // after this read must never be deleted by the merge branch or moved
-    // by the retarget — the opt-out record wins.
-    const oldSub = await conn('newsletter_subscribers')
+    // Snapshot read WITHOUT a lock, then deliveries, THEN the FOR UPDATE
+    // re-read (Codex #3084 r46): the SendGrid webhook writes a delivery
+    // row and then its subscriber (webhooks-sendgrid handleNewsletterEvent)
+    // — locking the subscriber before touching its deliveries here was the
+    // reverse acquisition order, a deadlock Postgres breaks by aborting
+    // the customer edit or the webhook. The locked re-read (not the
+    // snapshot) drives every status decision below, so the r43/r44 opt-out
+    // safety is unchanged: an unsubscribe committing before our lock is
+    // seen; one committing after it waits on the row lock.
+    const oldSubSnapshot = await conn('newsletter_subscribers')
       .where({ customer_id: customerId })
       .whereRaw('LOWER(email) = ?', [oldEmail])
-      .forUpdate()
-      .first();
-    if (oldSub) {
+      .first('id');
+    let oldSub = null;
+    if (oldSubSnapshot) {
       // The old inbox's already-DELIVERED quiz/feedback/event links must stop
       // resolving once the address moves — each delivery row's engagement_token
       // is a bearer credential mailed to the OLD mailbox (which, on a typo fix,
@@ -308,8 +313,14 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
       // by delivery id, not token — nothing recorded is lost — and future
       // sends read the token at send time, so they pick up the new values.
       counts.newsletterDeliveries += await conn('newsletter_send_deliveries')
-        .where({ subscriber_id: oldSub.id })
+        .where({ subscriber_id: oldSubSnapshot.id })
         .update({ engagement_token: conn.raw('gen_random_uuid()'), updated_at: now });
+      oldSub = await conn('newsletter_subscribers')
+        .where({ id: oldSubSnapshot.id })
+        .forUpdate()
+        .first();
+    }
+    if (oldSub) {
       const targetSub = await conn('newsletter_subscribers')
         .whereRaw('LOWER(email) = ?', [newEmail])
         .first();
@@ -392,29 +403,35 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
   // selection only — an unlinked or foreign-owned row at a prior target is
   // never touched (the extraction can be a stranger's real address).
   if (priorHoldTargets.length) {
-    // FOR UPDATE (Codex #3084 r43): the retarget and delete below act on
-    // the snapshot's status, and an unsubscribe committing between this
-    // read and those writes must never be overwritten (retarget writes
-    // status 'pending') or erased (the redundant-row delete). The lock
-    // order matches every other path (first_touch_holds → subscribers).
-    // The status predicates on the writes below are the belt for callers
-    // outside a transaction.
-    const priorTargetSubs = await conn('newsletter_subscribers')
+    // Unlocked snapshot → deliveries → FOR UPDATE re-read (Codex #3084
+    // r43/r46): the retarget and delete act on the LOCKED read's status,
+    // so an unsubscribe committing after our lock waits and one before it
+    // is seen — while the delivery rotation happens BEFORE the subscriber
+    // locks, matching the SendGrid webhook's delivery-then-subscriber
+    // write order (no deadlock cycle). The status predicates on the
+    // writes below are the belt for callers outside a transaction.
+    const priorTargetSnapshot = await conn('newsletter_subscribers')
       .where({ customer_id: customerId })
       .where(function atPriorTargets() {
         for (const target of priorHoldTargets) this.orWhereRaw('LOWER(email) = ?', [target]);
       })
-      .forUpdate()
-      .select('*');
-    if (priorTargetSubs.length) {
+      .select('id');
+    let priorTargetSubs = [];
+    if (priorTargetSnapshot.length) {
       // Bearer links already DELIVERED to the prior targets die regardless
       // of what happens to each row (the r18 rule — a rejected extraction
       // can be a real third party's inbox).
-      for (const sub of priorTargetSubs) {
+      for (const sub of priorTargetSnapshot) {
         counts.newsletterDeliveries += await conn('newsletter_send_deliveries')
           .where({ subscriber_id: sub.id })
           .update({ engagement_token: conn.raw('gen_random_uuid()'), updated_at: now });
       }
+      priorTargetSubs = await conn('newsletter_subscribers')
+        .whereIn('id', priorTargetSnapshot.map((s) => s.id))
+        .forUpdate()
+        .select('*');
+    }
+    if (priorTargetSubs.length) {
       // 'unsubscribed' (or any other status) is an opt-out record — never
       // retargeted, never deleted; only its delivered links rotate above.
       const eligible = priorTargetSubs.filter((s) => ['pending', 'active'].includes(String(s.status || '')));

@@ -178,7 +178,7 @@ const HOLD_AFTER = { id: 'cust-1', email: 'samtypo@example.com' };
 describe('propagateCustomerEmailChange', () => {
   test('syncs lead, estimate, and newsletter copies and resolves the email review card', async () => {
     const conn = makeConn({
-      newsletter_subscribers: { firstQueue: [{ id: 739, email: 'charlesw.robb@gmail.com' }, null] },
+      newsletter_subscribers: { firstQueue: [{ id: 739 }, { id: 739, email: 'charlesw.robb@gmail.com' }, null] },
       email_template_automation_runs: {
         rows: [{ id: 'run-1', payload: { customer_email: 'charlesw.robb@gmail.com', first_name: 'Charles' } }],
       },
@@ -264,7 +264,8 @@ describe('propagateCustomerEmailChange', () => {
     const conn = makeConn({
       newsletter_subscribers: {
         firstQueue: [
-          { id: 739, email: 'charlesw.robb@gmail.com', customer_id: 'cust-1' },   // old row
+          { id: 739 }, // unlocked snapshot (r46: deliveries rotate before the lock)
+          { id: 739, email: 'charlesw.robb@gmail.com', customer_id: 'cust-1' },   // locked old row
           { id: 900, email: 'charleswrobb@gmail.com', customer_id: 'cust-other' }, // target, already linked elsewhere
         ],
       },
@@ -299,7 +300,8 @@ describe('propagateCustomerEmailChange', () => {
     const conn = makeConn({
       newsletter_subscribers: {
         firstQueue: [
-          { id: 739, email: 'charlesw.robb@gmail.com', customer_id: 'cust-1' }, // old row
+          { id: 739 }, // unlocked snapshot (r46)
+          { id: 739, email: 'charlesw.robb@gmail.com', customer_id: 'cust-1' }, // locked old row
           { id: 900, email: 'charleswrobb@gmail.com', customer_id: null },      // unlinked target
         ],
       },
@@ -336,6 +338,7 @@ describe('propagateCustomerEmailChange', () => {
     const conn = makeConn({
       newsletter_subscribers: {
         firstQueue: [
+          { id: 739 }, // unlocked snapshot (r46)
           { id: 739, email: 'charlesw.robb@gmail.com', customer_id: 'cust-1', status: 'pending', confirmation_token: 'tok-1', first_name: 'Charles' },
           null, // no row on the corrected spelling
         ],
@@ -363,7 +366,7 @@ describe('propagateCustomerEmailChange', () => {
     // Newsletter footers delivered the unsubscribe link to the old mailbox.
     const conn = makeConn({
       newsletter_subscribers: {
-        firstQueue: [{ id: 739, email: 'charlesw.robb@gmail.com', customer_id: 'cust-1', status: 'active' }, null],
+        firstQueue: [{ id: 739 }, { id: 739, email: 'charlesw.robb@gmail.com', customer_id: 'cust-1', status: 'active' }, null],
       },
     });
     await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
@@ -378,7 +381,7 @@ describe('propagateCustomerEmailChange', () => {
   test('an ACTIVE subscriber move carries no pendingConfirmation', async () => {
     const conn = makeConn({
       newsletter_subscribers: {
-        firstQueue: [{ id: 739, email: 'charlesw.robb@gmail.com', customer_id: 'cust-1', status: 'active' }, null],
+        firstQueue: [{ id: 739 }, { id: 739, email: 'charlesw.robb@gmail.com', customer_id: 'cust-1', status: 'active' }, null],
       },
     });
     const result = await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
@@ -392,6 +395,7 @@ describe('propagateCustomerEmailChange', () => {
     const conn = makeConn({
       newsletter_subscribers: {
         firstQueue: [
+          { id: 739 }, // unlocked snapshot (r46)
           { id: 739, email: 'sam.typo@example.com', customer_id: 'cust-1', status: 'pending', confirmation_token: 'tok-1' },
           null, // no row on the corrected spelling
         ],
@@ -440,6 +444,13 @@ describe('propagateCustomerEmailChange', () => {
     // The retarget CASes on a still-subscribable status (r43).
     expect(conn.__calls.some((c) => c.table === 'newsletter_subscribers' && c.op === 'whereIn'
       && c.arg.col === 'status' && String(c.arg.vals) === 'pending,active')).toBe(true);
+    // Deliveries rotate BEFORE the subscriber FOR UPDATE locks (r46) —
+    // the SendGrid webhook writes delivery-then-subscriber, and the
+    // reverse acquisition order here was a deadlock cycle.
+    const deliveryIdx = conn.__calls.findIndex((c) => c.table === 'newsletter_send_deliveries' && c.op === 'update');
+    const lockIdx = conn.__calls.findIndex((c) => c.table === 'newsletter_subscribers' && c.op === 'forUpdate');
+    expect(deliveryIdx).toBeGreaterThan(-1);
+    expect(deliveryIdx).toBeLessThan(lockIdx);
   });
 
   test('newsletter: an unsubscribe committing after the snapshot wins over the retarget', async () => {
@@ -469,6 +480,7 @@ describe('propagateCustomerEmailChange', () => {
       first_touch_holds: { rows: [{ id: 11, held_email: 'held.extract@example.com', call_log_id: 'call-x' }] },
       newsletter_subscribers: {
         firstQueue: [
+          { id: 739 }, // unlocked snapshot (r46)
           { id: 739, email: 'sam.typo@example.com', customer_id: 'cust-1', status: 'pending', confirmation_token: 'tok-1' },
           null, // no row on the corrected spelling — the old row retargets
         ],
@@ -605,6 +617,7 @@ describe('propagateCustomerEmailChange', () => {
     const conn = makeConn({
       newsletter_subscribers: {
         firstQueue: [
+          { id: 811 }, // unlocked snapshot (r46)
           { id: 811, email: HOLD_BEFORE.email, customer_id: 'cust-1', status: 'pending', confirmation_token: 'tok-1', first_name: 'Sam' },
           null,
         ],

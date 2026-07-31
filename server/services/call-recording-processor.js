@@ -1167,6 +1167,21 @@ function isNonLeadCallContent(extracted = {}) {
 async function recordFirstTouchHoldOwned(args, procToken) {
   try {
     return await db.transaction(async (trx) => {
+      // Lock ORDER matters (Codex #3084 r46): the email-correction fanout
+      // locks first_touch_holds FOR UPDATE and then UPDATES the same
+      // call's call_log row (the review_status sync) — locking call_log
+      // first here was the reverse acquisition order, a deadlock Postgres
+      // breaks by aborting one side (a 500 on the operator's correction).
+      // Take the call's existing hold rows FIRST, then the
+      // token-conditioned call_log lock — the same
+      // first_touch_holds → call_log order the fanout uses, with hold
+      // INSERTS on both paths coming only after their call_log access.
+      if (await trx.schema.hasTable('first_touch_holds')) {
+        await trx('first_touch_holds')
+          .where({ call_log_id: args.callLogId })
+          .forUpdate()
+          .select('id');
+      }
       const owned = await trx('call_log')
         .where({ id: args.callLogId })
         .where('processing_token', procToken)
@@ -8980,13 +8995,39 @@ const CallRecordingProcessor = {
           : (call.metadata || {});
         const custRow = await db('customers').where({ id: customerId }).first('email', 'first_name', 'last_name');
         if (custRow && String(rebuildMeta?.created_customer_id || '') === String(customerId)) {
-          newsletterCandidate = {
-            customerId,
-            email: custRow.email || extracted.email || null,
-            firstName: custRow.first_name || (extracted.first_name ? capitalizeName(extracted.first_name) : null),
-            lastName: custRow.last_name || null,
-          };
-          logger.info(`[call-proc] Rebuilt newsletter candidate for call-created customer on retry (${maskSid(callSid)})`);
+          // Honor DELIVERY EVIDENCE before rebuilding (Codex #3084 r46):
+          // the dead worker may have died AFTER its DOI send but before
+          // the final call_log status write — every recovery pass would
+          // then take subscribeOrResubscribe's confirmation_resent path
+          // and mail the same confirmation again. A pending subscriber at
+          // the candidate address with a RECENT confirmation_sent_at is
+          // that evidence (the resume path clears the stamp on a visibly
+          // failed send, r13), so only crashes before the send replay it.
+          // The rare crash inside the pre-stamp→send window costs one
+          // undelivered DOI — recoverable via the stale-pending purge and
+          // re-signup, strictly better than a duplicate per recovery loop.
+          const rebuildEmailLc = String(custRow.email || extracted.email || '').trim().toLowerCase();
+          const priorDoi = rebuildEmailLc
+            ? await db('newsletter_subscribers')
+              .whereRaw('LOWER(email) = ?', [rebuildEmailLc])
+              .first('status', 'confirmation_sent_at')
+            : null;
+          const doiRecentlySent = priorDoi
+            && String(priorDoi.status) === 'pending'
+            && priorDoi.confirmation_sent_at
+            && (Date.now() - new Date(priorDoi.confirmation_sent_at).getTime()) < 24 * 60 * 60 * 1000;
+          if (doiRecentlySent) {
+            newsletterResult = newsletterResult || { skipped: 'confirmation_recently_sent' };
+            logger.info(`[call-proc] Skipping newsletter rebuild on retry — a recent DOI already went out (${maskSid(callSid)})`);
+          } else {
+            newsletterCandidate = {
+              customerId,
+              email: custRow.email || extracted.email || null,
+              firstName: custRow.first_name || (extracted.first_name ? capitalizeName(extracted.first_name) : null),
+              lastName: custRow.last_name || null,
+            };
+            logger.info(`[call-proc] Rebuilt newsletter candidate for call-created customer on retry (${maskSid(callSid)})`);
+          }
         }
       } catch (rebuildErr) {
         logger.warn(`[call-proc] newsletter candidate rebuild failed for ${maskSid(callSid)}: ${rebuildErr.code || rebuildErr.name || 'db_error'}`);
