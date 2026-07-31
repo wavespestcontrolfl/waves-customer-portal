@@ -1385,6 +1385,7 @@ const ReviewService = {
     techName,
     serviceType,
     serviceDate,
+    technicianId = null,
     serviceRecordId = null,
     sequenceId = null,
     sequenceStep = null,
@@ -1396,6 +1397,47 @@ const ReviewService = {
     if (customer.deleted_at) return { ok: false, reason: "deleted", terminal: true };
     if (customer.has_left_google_review) {
       return { ok: false, reason: "already_reviewed", terminal: true };
+    }
+
+    // Cadence steps carry only serviceRecordId — recover the visit context the
+    // legacy create() path preserves (technician_id drives the rate page's
+    // tech photo, service_date the visit line; Codex P2, r1). Best-effort: a
+    // lookup failure just sends without them.
+    if (serviceRecordId && (!technicianId || !serviceDate || !techName || !serviceType)) {
+      try {
+        const sr = await db("service_records")
+          .where({ "service_records.id": serviceRecordId })
+          .leftJoin("technicians", "service_records.technician_id", "technicians.id")
+          .select(
+            "service_records.service_type",
+            "service_records.service_date",
+            "service_records.technician_id",
+            "service_records.scheduled_service_id",
+            "technicians.name as tech_name",
+          )
+          .first();
+        if (sr) {
+          technicianId = technicianId || sr.technician_id || null;
+          serviceDate = serviceDate || sr.service_date || null;
+          techName = techName || sr.tech_name || null;
+          serviceType = serviceType || sr.service_type || null;
+          // Same fallback as create(): legacy rows without a technician on the
+          // service record inherit the assigned tech from the linked visit.
+          if (!technicianId && sr.scheduled_service_id) {
+            const ss = await db("scheduled_services")
+              .where({ "scheduled_services.id": sr.scheduled_service_id })
+              .leftJoin("technicians", "scheduled_services.technician_id", "technicians.id")
+              .select("scheduled_services.technician_id", "technicians.name as tech_name")
+              .first();
+            if (ss?.technician_id) {
+              technicianId = ss.technician_id;
+              techName = techName || ss.tech_name || null;
+            }
+          }
+        }
+      } catch (err) {
+        logger.warn(`[review] outreach visit-context recovery failed (serviceRecordId=${serviceRecordId}): ${err.message}`);
+      }
     }
 
     // SMS identity is consent-gated; EMAIL identity is not (the #2948
@@ -1506,6 +1548,7 @@ const ReviewService = {
         customer_id: customer.id,
         service_record_id: serviceRecordId,
         location_id: locationId || resolveLocation(customer),
+        technician_id: technicianId || null,
         tech_name: techName || null,
         service_type: serviceType || null,
         service_date: serviceDate || null,

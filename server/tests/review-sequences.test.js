@@ -593,6 +593,23 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(mock.__state.rows.review_sequences).toHaveLength(0);
   });
 
+  test('a cadence touch recovers technician_id + service_date from the service record (rate-page context)', async () => {
+    const svcDate = '2026-07-27';
+    const mock = makeMock({
+      customers: [{ id: 'vc-1', first_name: 'Kim', last_name: 'H', phone: '+19410000050', nearest_location_id: 'bradenton' }],
+      service_records: [{ id: 'sr-1', customer_id: 'vc-1', service_type: 'Quarterly Pest Control', service_date: svcDate, technician_id: 'tech-7', scheduled_service_id: null }],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.startReviewSequence({ customerId: 'vc-1', serviceRecordId: 'sr-1', serviceType: 'Quarterly Pest Control', techName: 'Adam', startedBy: 'admin-1' });
+
+    expect(result.started).toBe(true);
+    const touch = mock.__state.rows.review_requests[0];
+    expect(touch.technician_id).toBe('tech-7');
+    expect(touch.service_date).toBe(svcDate);
+    expect(touch.service_record_id).toBe('sr-1');
+  });
+
   test('a cadence stops with reason "clicked" once a touch was redirected to Google (direct-link engagement)', async () => {
     const mock = makeMock({
       customers: [{ id: 'cl-1', first_name: 'Ivy', last_name: 'W', phone: '+19410000034', nearest_location_id: 'bradenton' }],

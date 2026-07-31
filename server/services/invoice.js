@@ -2237,9 +2237,21 @@ const InvoiceService = {
         const ReviewService = require("./review-request");
         const inv = await db("invoices")
           .where({ id: invoiceId })
-          .select("customer_id", "service_record_id")
+          .select("customer_id", "service_record_id", "status")
           .first();
-        if (inv) {
+        // Unpaid COMPLETION invoices defer the review ask to payment — the
+        // Stripe paid-invoice webhook enrolls then, reading the completion's
+        // requestReview intent from the service record. Enrolling here would
+        // text a review ask alongside an open pay link (Codex P1, PR #3104
+        // r1). Standalone invoices (no service_record_id) keep the legacy
+        // at-delivery ask: their operator opt-in has no other trigger (a
+        // cash/manual payment never reaches the webhook).
+        const deferToPayment = inv
+          && inv.service_record_id
+          && !["paid", "prepaid"].includes(String(inv.status || ""));
+        if (deferToPayment) {
+          logger.info(`[invoice] Review ask deferred to payment for invoice ${invoiceId} (unpaid completion invoice)`);
+        } else if (inv) {
           await ReviewService.enrollPostService({
             customerId: inv.customer_id,
             serviceRecordId: inv.service_record_id || null,
@@ -2359,13 +2371,24 @@ const InvoiceService = {
     // stored flags itself and already took the review decision.
     if (updated && effectiveRequestReview) {
       try {
-        const ReviewService = require("./review-request");
-        await ReviewService.enrollPostService({
-          customerId: invoice.customer_id,
-          serviceRecordId: invoice.service_record_id || null,
-          triggeredBy: "auto",
-          delayMinutes: effectiveReviewDelayMinutes,
-        });
+        // Same unpaid-completion-invoice hold as sendViaSMSAndEmail (Codex
+        // P1, PR #3104 r1): delivery of an unpaid completion invoice must
+        // not start review outreach — the paid webhook enrolls on payment
+        // from the service record's requestReview intent. Standalone
+        // invoices (no service_record_id) keep the legacy at-delivery ask.
+        const deferToPayment = finalInvoice.service_record_id
+          && !["paid", "prepaid"].includes(String(finalInvoice.status || ""));
+        if (deferToPayment) {
+          logger.info(`[invoice] Review ask deferred to payment for invoice ${invoiceId} (unpaid completion invoice, source=${source})`);
+        } else {
+          const ReviewService = require("./review-request");
+          await ReviewService.enrollPostService({
+            customerId: invoice.customer_id,
+            serviceRecordId: invoice.service_record_id || null,
+            triggeredBy: "auto",
+            delayMinutes: effectiveReviewDelayMinutes,
+          });
+        }
       } catch (err) {
         logger.error(
           `[invoice] Review request schedule failed after ${source}: ${err.message}`,

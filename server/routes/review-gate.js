@@ -39,13 +39,19 @@ function categorizeScore(score) {
 }
 
 // Direct-link redirects are cheap and unauthenticated — cap per IP so the
-// token space can't be probed at volume.
+// token space can't be probed at volume. Over-limit requests are REDIRECTED
+// to the rate page rather than 429'd (Codex P2, r1): customers behind a
+// shared carrier/NAT IP — or following a batch a scanner just burned through
+// — must still land somewhere that works. The redirect handler does no DB
+// work, so the probing protection (no token-existence oracle) holds.
 const directLinkLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 30,
   standardHeaders: true,
   legacyHeaders: false,
+  handler: (req, res) => res.redirect(302, `/rate/${encodeURIComponent(String(req.params?.token || ''))}`),
 });
+const { isBotUserAgent } = require('../utils/bot-ua');
 
 // GET /api/rate/:token/go — tracked redirect straight to the Google review
 // form (GATE_REVIEW_DIRECT_LINK rollout; the SMS/email {review_url} resolves
@@ -69,6 +75,15 @@ router.get('/:token/go', directLinkLimiter, async (req, res) => {
     const loc = resolveReviewLocation(request, customer);
     if (!loc || !loc.googleReviewUrl) return res.redirect(302, ratePageFallback);
 
+    // Scanner/preview fetches (iMessage unfurlers, carrier link scanners,
+    // Slack/WhatsApp previews) follow SMS links without a human tap. Issue
+    // the 302 so the link keeps working, but record NOTHING — a scanned
+    // Day-0 link must not stamp a click, stop the cadence, or bell the
+    // owner (Codex P1, r1; same contract as public-shortlinks.js).
+    if (isBotUserAgent(req.headers['user-agent'])) {
+      return res.redirect(302, loc.googleReviewUrl);
+    }
+
     const firstClick = !request.redirected_at;
     try {
       const updates = {
@@ -88,14 +103,22 @@ router.get('/:token/go', directLinkLimiter, async (req, res) => {
     }
 
     // They acted on the ask — stop the cadence so no further touches chase
-    // a customer who already visited the review form.
-    if (request.sequence_id) {
-      try {
-        const ReviewService = require('../services/review-request');
+    // a customer who already visited the review form. A one-off/legacy link
+    // has no sequence_id, but the CUSTOMER may still have an active cadence
+    // (older unexpired link clicked mid-cadence) — stop that one too
+    // (Codex P2, r1).
+    try {
+      const ReviewService = require('../services/review-request');
+      if (request.sequence_id) {
         await ReviewService.stopReviewSequence(request.sequence_id, 'clicked');
-      } catch (err) {
-        logger.warn(`[review-gate] cadence stop on click failed: ${err.message}`);
+      } else {
+        const activeSeq = await db('review_sequences')
+          .where({ customer_id: request.customer_id, status: 'active' })
+          .first();
+        if (activeSeq) await ReviewService.stopReviewSequence(activeSeq.id, 'clicked');
       }
+    } catch (err) {
+      logger.warn(`[review-gate] cadence stop on click failed: ${err.message}`);
     }
 
     // Owner bell (first click only): Google won't tell us who reviewed, so

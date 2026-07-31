@@ -7293,6 +7293,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       }
     }
 
+    const reviewCadenceEnabled = require('../config/feature-gates').isEnabled('reviewSequences');
     const shouldBundleReview =
       effectiveSendCompletionSms &&
       !completionSmsAlreadyHandled &&
@@ -7304,7 +7305,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // Cadence mode owns the ask: the review link is its own Day-0 message at
       // the smart send window, never bundled into the completion/receipt SMS
       // (bundling would also dodge the sequence's cap/cooldown bookkeeping).
-      !require('../config/feature-gates').isEnabled('reviewSequences');
+      !reviewCadenceEnabled;
 
     let bundledReviewUrl = null;
     let bundledReviewRequestId = null;
@@ -8001,7 +8002,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
 
     // Only schedule the delayed follow-up message when the review wasn't
     // already bundled into the completion SMS above.
-    if (effectiveRequestReview && svc.cust_phone && !bundledReviewUrl) {
+    // Legacy mode is SMS-only, so no phone = no ask. Cadence mode has its own
+    // channel resolver with an SMS→email fallback (sendOutreachTouch), so an
+    // email-only customer must still reach enrollment (Codex P2, r1) — the
+    // resolver stops the sequence with no_contact/opted_out when neither
+    // channel is available.
+    if (effectiveRequestReview && (svc.cust_phone || reviewCadenceEnabled) && !bundledReviewUrl) {
       try {
         const ReviewService = require('../services/review-request');
         await ReviewService.enrollPostService({
