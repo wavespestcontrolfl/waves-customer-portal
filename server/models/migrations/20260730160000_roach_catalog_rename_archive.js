@@ -40,6 +40,30 @@ const ARCHIVE_PATCH = {
 // reach before its invoice is built.
 const TERMINAL_VISIT_STATUSES = ['completed', 'cancelled', 'skipped', 'no_show'];
 
+// Exact-match label swap on an invoice snapshot's title + line-item
+// description/category strings. AMOUNTS ARE NEVER TOUCHED. Returns null when
+// nothing matches (an admin-edited title/line stays theirs).
+function relabelInvoiceSnapshot(inv, fromName, toName) {
+  const patch = {};
+  if (inv.title === fromName) patch.title = toName;
+  let items = inv.line_items;
+  if (typeof items === 'string') {
+    try { items = JSON.parse(items); } catch { items = null; }
+  }
+  if (Array.isArray(items)) {
+    let changed = false;
+    const next = items.map((item) => {
+      if (!item || typeof item !== 'object') return item;
+      const out = { ...item };
+      if (out.description === fromName) { out.description = toName; changed = true; }
+      if (out.category === fromName) { out.category = toName; changed = true; }
+      return out;
+    });
+    if (changed) patch.line_items = JSON.stringify(next);
+  }
+  return Object.keys(patch).length ? patch : null;
+}
+
 async function loadState(knex) {
   if (!(await knex.schema.hasTable('system_settings'))) return null;
   const row = await knex('system_settings').where({ key: STATE_KEY }).first();
@@ -64,7 +88,13 @@ async function saveState(knex, state) {
 
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('services'))) return;
-  const state = { renamedFields: [], archived: {}, backfilledVisitIds: [], profileSnapshotUpdated: false };
+  const state = {
+    renamedFields: [],
+    archived: {},
+    backfilledVisitIds: [],
+    relabeledInvoiceIds: [],
+    profileSnapshotUpdated: false,
+  };
 
   // Rename — only fields still carrying the shipped values (an admin rename
   // in the Service Library wins), and record which fields we touched.
@@ -118,6 +148,27 @@ exports.up = async function up(knex) {
     if (ids.length) {
       await knex('scheduled_services').whereIn('id', ids).update({ service_type: NEW_NAME });
       state.backfilledVisitIds = ids;
+    }
+  }
+
+  // Pre-minted DRAFT invoices for the backfilled visits (codex #3108 r3):
+  // completion REUSES a pre-minted invoice instead of rebuilding it
+  // (scheduled-invoice-mint), so a draft minted before this migration would
+  // complete under the old label after catalog and visit both renamed.
+  // Drafts only — sent/viewed/paid/void/prepaid invoices are
+  // customer-visible or terminal history and keep their snapshot. Labels
+  // only (title + exact-match line-item description/category); amounts,
+  // totals, and every other invoice field are never touched.
+  if (state.backfilledVisitIds.length && (await knex.schema.hasTable('invoices'))) {
+    const drafts = await knex('invoices')
+      .whereIn('scheduled_service_id', state.backfilledVisitIds)
+      .where({ status: 'draft' })
+      .select('id', 'title', 'line_items');
+    for (const inv of drafts) {
+      const patch = relabelInvoiceSnapshot(inv, OLD_NAME, NEW_NAME);
+      if (!patch) continue;
+      await knex('invoices').where({ id: inv.id }).update(patch);
+      state.relabeledInvoiceIds.push(inv.id);
     }
   }
 
@@ -182,6 +233,21 @@ exports.down = async function down(knex) {
       .where({ service_type: NEW_NAME })
       .whereNotIn('status', TERMINAL_VISIT_STATUSES)
       .update({ service_type: OLD_NAME });
+  }
+
+  // Reverse the recorded draft-invoice relabels — still drafts only; an
+  // invoice sent/paid since up() is history under the label it went out with.
+  const invoiceIds = Array.isArray(state.relabeledInvoiceIds) ? state.relabeledInvoiceIds : [];
+  if (invoiceIds.length && (await knex.schema.hasTable('invoices'))) {
+    const drafts = await knex('invoices')
+      .whereIn('id', invoiceIds)
+      .where({ status: 'draft' })
+      .select('id', 'title', 'line_items');
+    for (const inv of drafts) {
+      const patch = relabelInvoiceSnapshot(inv, NEW_NAME, OLD_NAME);
+      if (!patch) continue;
+      await knex('invoices').where({ id: inv.id }).update(patch);
+    }
   }
 
   if (state.profileSnapshotUpdated && (await knex.schema.hasTable('service_completion_profiles'))) {

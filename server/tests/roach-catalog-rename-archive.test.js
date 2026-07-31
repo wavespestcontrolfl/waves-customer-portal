@@ -32,6 +32,24 @@ function seedDb() {
     service_completion_profiles: [
       { service_key: 'cockroach_control', service_name_snapshot: OLD_NAME },
     ],
+    invoices: [
+      {
+        id: 'inv-draft',
+        scheduled_service_id: 'v-open-1',
+        status: 'draft',
+        title: OLD_NAME,
+        line_items: JSON.stringify([
+          { description: OLD_NAME, category: OLD_NAME, quantity: 1, unit_price: 350, amount: 350 },
+        ]),
+      },
+      {
+        id: 'inv-sent',
+        scheduled_service_id: 'v-open-2',
+        status: 'sent',
+        title: OLD_NAME,
+        line_items: JSON.stringify([{ description: OLD_NAME, category: OLD_NAME, amount: 350 }]),
+      },
+    ],
     system_settings: [],
   };
 }
@@ -91,6 +109,7 @@ function fakeKnex(db, { missingTables = [] } = {}) {
 }
 
 const byKey = (db, key) => db.services.find((r) => r.service_key === key);
+const invoiceById = (db, id) => db.invoices.find((r) => r.id === id);
 const visit = (db, id) => db.scheduled_services.find((r) => r.id === id);
 const stateRow = (db) => db.system_settings.find((r) => r.key === STATE_KEY);
 
@@ -211,6 +230,48 @@ describe('20260730160000 roach catalog rename + archive', () => {
     // Not in the archived state down() owns — left exactly as the admin set it.
     expect(byKey(db, 'pest_initial_palmetto_knockdown')).toMatchObject({ is_active: true, is_archived: true });
     expect(byKey(db, 'pest_initial_german_knockdown')).toMatchObject(LIVE);
+  });
+
+  test('pre-minted DRAFT invoice labels backfill; sent invoices stay frozen (codex #3108 r3)', async () => {
+    const db = seedDb();
+    const knex = fakeKnex(db);
+    await migration.up(knex);
+
+    const draft = invoiceById(db, 'inv-draft');
+    expect(draft.title).toBe(NEW_NAME);
+    const items = JSON.parse(draft.line_items);
+    expect(items[0].description).toBe(NEW_NAME);
+    expect(items[0].category).toBe(NEW_NAME);
+    // Amounts are untouched.
+    expect(items[0].unit_price).toBe(350);
+    expect(items[0].amount).toBe(350);
+    // The sent invoice already reached the customer — frozen.
+    expect(invoiceById(db, 'inv-sent').title).toBe(OLD_NAME);
+
+    const state = JSON.parse(stateRow(db).value);
+    expect(state.relabeledInvoiceIds).toEqual(['inv-draft']);
+
+    await migration.down(knex);
+    const reverted = invoiceById(db, 'inv-draft');
+    expect(reverted.title).toBe(OLD_NAME);
+    expect(JSON.parse(reverted.line_items)[0].description).toBe(OLD_NAME);
+  });
+
+  test('an admin-edited draft title is not relabeled; an invoice sent after up() keeps the new label through rollback', async () => {
+    const db = seedDb();
+    invoiceById(db, 'inv-draft').title = 'Kitchen Roach Job — Unit 4';
+    const knex = fakeKnex(db);
+    await migration.up(knex);
+
+    // Exact-match only: the custom title stays, the matching line items swap.
+    const draft = invoiceById(db, 'inv-draft');
+    expect(draft.title).toBe('Kitchen Roach Job — Unit 4');
+    expect(JSON.parse(draft.line_items)[0].description).toBe(NEW_NAME);
+
+    // The draft goes out to the customer before a rollback — history now.
+    draft.status = 'sent';
+    await migration.down(knex);
+    expect(JSON.parse(invoiceById(db, 'inv-draft').line_items)[0].description).toBe(NEW_NAME);
   });
 
   test('down() leaves a visit that completed after up() alone (codex #3108 r2)', async () => {
