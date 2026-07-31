@@ -53,6 +53,17 @@ describe('appointmentManagedProjectTypes', () => {
     expect(managed).toEqual(new Set(['bed_bug']));
   });
 
+  test('an ACTIVE project_required bed_bug profile outranks the code retirement (drift-skip case)', async () => {
+    // The untype migration loud-skips a drifted/project_required row — the
+    // surviving profile still requires the Projects lane, so the retired
+    // union must not hide it (codex P2 r7).
+    const managed = await appointmentManagedProjectTypes(makeKnex({
+      rows: [{ project_type: 'cockroach' }],
+      backedRows: [{ project_type: 'bed_bug' }],
+    }));
+    expect(managed).toEqual(new Set(['cockroach']));
+  });
+
   test('fails open to empty set when the table is missing or the query errors', async () => {
     expect((await appointmentManagedProjectTypes(makeKnex({ hasTable: false }))).size).toBe(0);
     expect((await appointmentManagedProjectTypes(makeKnex({ throwOnQuery: true }))).size).toBe(0);

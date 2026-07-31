@@ -3269,6 +3269,22 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           },
         };
       }
+      // Untyped ALERT-policy lanes (bed_bug post-20260731400000) keep their
+      // typed-era billing parity: a performed infestation treatment must
+      // mint its invoice, so the no-invoice recap bypass stays closed —
+      // keyed on the profile's follow-up semantics, not findings type
+      // (codex P1 r7). The untyped pest one-time family (followup 'none')
+      // keeps its recap-only option unchanged.
+      if (!typedFindingsType && oneTimeRecapOnly && !isIncompleteVisit
+        && completionProfile?.followupPolicy === 'alert') {
+        return {
+          status: 409,
+          body: {
+            error: 'This service bills per treatment — the no-invoice recap is not available for it.',
+            code: 'recap_only_not_allowed',
+          },
+        };
+      }
       if (typedFindingsType && !isIncompleteVisit && structuredFindings == null) {
         return {
           status: 422,

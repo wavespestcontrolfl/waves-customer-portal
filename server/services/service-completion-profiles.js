@@ -332,8 +332,11 @@ async function appointmentManagedProjectTypes(knex = db) {
         // creatable as standalone projects; completion routing untouched.
         .filter((type) => !PROJECT_CREATION_KEPT_TYPES.has(type)),
       // Untyped-retired types stay appointment-managed by code — their
-      // pointer is NULL so the query above can no longer see them.
-      ...UNTYPED_RETIRED_PROJECT_TYPES,
+      // pointer is NULL so the query above can no longer see them. But an
+      // ACTIVE project_required profile outranks the retirement (the
+      // migration loud-skips drifted rows, and the surviving profile still
+      // requires the Projects lane — codex P2 r7).
+      ...[...UNTYPED_RETIRED_PROJECT_TYPES].filter((type) => !backed.has(type)),
     ]);
   } catch {
     return new Set();

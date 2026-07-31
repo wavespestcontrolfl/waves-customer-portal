@@ -13304,6 +13304,10 @@ export function CompletionPanel({
                   {payerBanner}
                 </div>
               )}{" "}
+              {/* Bed bug never offers the no-invoice recap: a performed
+                  treatment must mint its invoice (typed-era parity; the
+                  server 409s this too — codex P1 r7). */}
+              {!isBedBugVisit && (
               <label
                 style={{
                   display: "flex",
@@ -13331,7 +13335,8 @@ export function CompletionPanel({
                 <span style={{ fontFamily: font, fontSize: 15, color: M.ink }}>
                   One-time recap + review only (no invoice)
                 </span>{" "}
-              </label>{" "}
+              </label>
+              )}{" "}
               {backfillEligible && (
                 <label
                   style={{
@@ -15159,6 +15164,9 @@ export function CompletionPanel({
               {payerBanner}
             </div>
           )}{" "}
+          {/* Bed bug never offers the no-invoice recap (typed-era parity;
+              server 409s this too — codex P1 r7). */}
+          {!isBedBugVisit && (
           <label
             style={{
               ...checkboxRow,
@@ -15174,7 +15182,8 @@ export function CompletionPanel({
               onChange={(e) => handleOneTimeRecapOnlyChange(e.target.checked)}
             />{" "}
             <span>One-time recap + review only (no invoice)</span>{" "}
-          </label>{" "}
+          </label>
+          )}{" "}
           {backfillEligible && (
             <label
               style={{

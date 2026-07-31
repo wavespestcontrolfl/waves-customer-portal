@@ -1363,6 +1363,14 @@ function shouldAddNoActivityFinding({ service = {}, structured = {}, protocol = 
   // seen — synthesizing "all zones clear" beside it re-creates the exact
   // contradiction the insert guard now prevents (codex P1 #3043 r2).
   const rating = Number(service.client_pest_rating);
+  // Infestation-class interior lanes (bed bug, untyped post-20260731400000)
+  // never INFER "no activity" from blank optional fields — the visit exists
+  // because activity was found; only an EXPLICIT 0 rating states the zero
+  // (mirrors the completion-side insert guard, codex P2 r7).
+  if (/\bbed\s*bugs?\b/i.test(String(service.service_type || ''))
+    && !(Number.isFinite(rating) && rating === 0)) {
+    return false;
+  }
   return visitOutcome === 'completed'
     && !(protocol.observations || []).length
     && !(protocol.recommendations || []).length
