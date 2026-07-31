@@ -154,10 +154,13 @@ const _recommendationRuns = new Map();
 // an instruction, not a guarantee. Text that advises against/defers a product
 // class the technician ALREADY applied on the visit must never be stored —
 // that's the exact AI-vs-technician contradiction this lane exists to kill.
+// Each class matches its product name AND the customer-facing synonyms the
+// model actually writes — the shipped contradiction said "active disease
+// treatment", not "fungicide" (codex P1 r6).
 const TREATMENT_CLASS_TERMS = {
-  fungicide: /\bfungicid/i,
-  herbicide: /\bherbicid|\bweed\s+(?:treatment|control|application)\b/i,
-  insecticide: /\binsecticid/i,
+  fungicide: /\bfungicid|\bfung(?:us|al)\s+(?:treatment|application|control|spray)|\bdisease\s+(?:treatment|application|control|spray)/i,
+  herbicide: /\bherbicid|\bweed\s+(?:treatment|control|application|killer|spray)/i,
+  insecticide: /\binsecticid|\binsect\s+(?:treatment|control|application|spray)|\b(?:grub|chinch\s*bug|webworm)\s+(?:treatment|control|application)/i,
 };
 const DEFER_LANGUAGE = /\b(?:defer|hold\s+off|wait|avoid|do\s+not\s+(?:apply|make|treat)|don['’]t\s+(?:apply|make|treat)|before\s+(?:making|applying)|not\s+(?:currently\s+)?(?:support|warrant|recommend)|until\s+.{0,50}\b(?:confirmed|verified|supports?)\b|without\s+(?:first|further))\b/i;
 
@@ -502,7 +505,7 @@ const KnowledgeBridge = {
   // Called after lawn assessment is confirmed, and again after service
   // completion persists the visit's products (grounded regen).
   // ────────────────────────────────────────────────────────────
-  async generateAssessmentRecommendations(assessmentId) {
+  async generateAssessmentRecommendations(assessmentId, { timeoutMs = null } = {}) {
     // Serialize runs per assessment: the confirm-time run can still be in
     // flight when the post-completion grounded regen starts, and both write
     // lawn_assessments.recommendations unconditionally — unserialized, the
@@ -510,16 +513,27 @@ const KnowledgeBridge = {
     // on the previous run's settled promise makes the later caller's result
     // the final write. In-process is sufficient: the portal runs as a single
     // Railway service instance.
+    //
+    // timeoutMs (codex P1 r6): callers on a customer-facing request path
+    // pass a deadline. The caller's await resolves null at the deadline, and
+    // the still-running generation SKIPS ITS WRITE once expired — a late
+    // stale write after the caller moved on would reintroduce the artifact
+    // race the deadline exists to bound.
+    const deadlineAt = timeoutMs ? Date.now() + timeoutMs : null;
     const prev = _recommendationRuns.get(assessmentId) || Promise.resolve();
-    const run = prev.catch(() => {}).then(() => this._generateAssessmentRecommendationsInner(assessmentId));
+    const run = prev.catch(() => {}).then(() => this._generateAssessmentRecommendationsInner(assessmentId, deadlineAt));
     _recommendationRuns.set(assessmentId, run);
     run.finally(() => {
       if (_recommendationRuns.get(assessmentId) === run) _recommendationRuns.delete(assessmentId);
     }).catch(() => {});
-    return run;
+    if (!deadlineAt) return run;
+    return Promise.race([
+      run,
+      new Promise((resolve) => { setTimeout(() => resolve(null), timeoutMs).unref?.(); }),
+    ]);
   },
 
-  async _generateAssessmentRecommendationsInner(assessmentId) {
+  async _generateAssessmentRecommendationsInner(assessmentId, deadlineAt = null) {
     try {
       const assessment = await db('lawn_assessments').where({ id: assessmentId }).first();
       if (!assessment) return null;
@@ -657,6 +671,14 @@ Return a JSON object with:
         const { parsed, dropped } = sanitizeRecommendationsAgainstTreatment(raw, appliedProducts);
         if (dropped) {
           logger.warn(`[knowledge-bridge] dropped ${dropped} treatment-contradicting field(s) from recommendations for assessment ${assessmentId}`);
+        }
+
+        // Deadline expired while the model was generating: the caller has
+        // already moved on (artifacts may be building from the stored copy) —
+        // a late write here would swap data under them (codex P1 r6).
+        if (deadlineAt && Date.now() > deadlineAt) {
+          logger.warn(`[knowledge-bridge] recommendation run for assessment ${assessmentId} finished past its deadline — write skipped`);
+          return null;
         }
 
         // Save to assessment (summary may have been stripped by the guard —

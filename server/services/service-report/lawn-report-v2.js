@@ -193,6 +193,7 @@ function mapWater(waterContext, waterSnapshot = null) {
       confidence: waterSnapshot.confidence || 'medium',
       explanation: snapshotWaterExplanation(waterSnapshot, grassLabel),
       source: 'area_snapshot',
+      rainProvider: 'area',
       // A POSITIVE stored per-week irrigation figure means the customer has a real
       // schedule on file — the "add your watering schedule" CTA should not show. A
       // 0 (or null) reads as no usable schedule (mirrors buildIrrigationAdvice's
@@ -212,6 +213,9 @@ function mapWater(waterContext, waterSnapshot = null) {
     confidence: advice.profileMissing ? 'low' : (advice.rainKnown ? 'high' : 'medium'),
     explanation: waterExplanation(advice, target, grassLabel),
     source: 'irrigation_advice',
+    // True provider of rainfallInches7d (open_meteo | fawn) — the Source row
+    // credits the real one (codex P2 r6).
+    rainProvider: waterContext.rainfall7dProvider || null,
     // The customer has a usable irrigation schedule on file only when the advice
     // engine says the profile is present. profileMissing already accounts for a
     // 0/absent/disabled schedule (irrigation <= 0), so trust it directly — a raw

@@ -1974,7 +1974,7 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
           weatherCall={data.dynamicContext?.premiumExperience?.weatherCall}
           live={mode === 'live'}
           weeklyRainIn={data.serviceLine === 'lawn' ? (data.reportV2?.water?.rainInches ?? null) : null}
-          weeklyRainSource={data.reportV2?.water?.source === 'area_snapshot' ? 'local area rain records' : 'Open-Meteo'}
+          weeklyRainSource={{ open_meteo: 'Open-Meteo', fawn: 'FAWN', area: 'local area rain records' }[data.reportV2?.water?.rainProvider] || null}
         />
       </div>
     </section>

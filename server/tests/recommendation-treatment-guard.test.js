@@ -57,6 +57,16 @@ describe('sanitizeRecommendationsAgainstTreatment', () => {
     expect(parsed.recommendations).toHaveLength(1);
   });
 
+  test('catches the shipped audit phrase via the disease-treatment synonym', () => {
+    const { parsed, dropped } = _test.sanitizeRecommendationsAgainstTreatment({
+      recommendations: [
+        { priority: 1, action: 'Inspect the blotchy areas at the next service.', reason: 'Field observations do not currently support active disease treatment; no drought or insect decline was observed.', timeframe: 'Next visit' },
+      ],
+    }, APPLIED);
+    expect(dropped).toBe(1);
+    expect(parsed.recommendations).toHaveLength(0);
+  });
+
   test('supportive mentions of the applied class pass through', () => {
     const { parsed, dropped } = _test.sanitizeRecommendationsAgainstTreatment({
       recommendations: [

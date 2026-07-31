@@ -306,6 +306,12 @@ function buildLawnWaterContext({ assessment = {}, turfProfile = null, propertyPr
     fawnSnapshot.rainfall_last_7d,
     fawnSnapshot.precipitation_7d,
   );
+  // Which provider actually supplied the weekly figure — the customer-facing
+  // Source row must credit the real one (codex P2 #3093 r6: a FAWN fallback
+  // week was labeled Open-Meteo).
+  const rainfall7dProvider = completionRainfall7dInches != null
+    ? 'open_meteo'
+    : (rainfallInches7d != null ? 'fawn' : null);
   const dailyInputs = [irrigationInchesPerDay, rainfallInchesToday].filter((value) => value != null);
   const weeklyInputs = [irrigationInchesPerWeek, rainfallInches7d].filter((value) => value != null);
 
@@ -347,6 +353,7 @@ function buildLawnWaterContext({ assessment = {}, turfProfile = null, propertyPr
     rainfallSource: rainfallInches7d == null && rainfallInchesToday != null
       ? 'fawn_daily_observation'
       : (rainfallInches7d != null ? 'fawn_7_day_observation' : null),
+    rainfall7dProvider,
     // Per-day rainfall over the trailing 7 days at the client's lat/lng (same
     // Open-Meteo source as rainfallInches7d), raw as [{ date, inches }]. The
     // report's 7-day chart renders from this so it matches the weekly total and
