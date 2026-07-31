@@ -285,6 +285,15 @@ describe('scope guards (GATE_ESTIMATOR_SCOPE_GUARDS)', () => {
     expect(mockNotify).not.toHaveBeenCalled();
   });
 
+  test('a grounded response missing the veto booleans fails closed (no bell)', async () => {
+    mockLoadTriage.mockResolvedValueOnce({ lines: [], matchedExistingCustomer: false });
+    mockDispatch.mockResolvedValueOnce({ ok: true, json: { quote_request: true, confidence: 0.9 } });
+    const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: 'quote for pest control please' });
+    expect(result.skipped).toBe('no_quote_intent_ai_malformed_grounded');
+    expect(mockNotify).not.toHaveBeenCalled();
+    expect(mockRunDraftPipeline).not.toHaveBeenCalled();
+  });
+
   test('a clean grounded yes still bells and drafts (guards must not eat real leads)', async () => {
     mockLoadTriage.mockResolvedValueOnce({ lines: [], matchedExistingCustomer: false });
     mockDispatch.mockResolvedValueOnce({

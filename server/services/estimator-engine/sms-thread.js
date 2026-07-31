@@ -115,6 +115,13 @@ Return ONLY JSON: {"quote_request":true|false,"confidence":0.0-1.0}`;
       // Grounded vetoes are the point of the context: an in-confidence
       // "quote" for a service Waves doesn't offer, or for an existing
       // customer's already-covered job, must not mint an owed-quote task.
+      // Both veto fields must be REAL booleans — a syntactically valid but
+      // incomplete response ({"quote_request":true,...} with the veto keys
+      // missing) would otherwise bypass both vetoes; treat it like any
+      // other malformed classifier output (fail-closed).
+      if (typeof j.service_offered !== 'boolean' || typeof j.relates_to_existing_job !== 'boolean') {
+        return { quoteRequest: false, method: 'ai_malformed_grounded', confidence: j.confidence };
+      }
       if (j.service_offered === false) {
         return { quoteRequest: false, method: 'ai_out_of_scope', confidence: j.confidence };
       }

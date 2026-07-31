@@ -29,6 +29,7 @@
 const logger = require('../logger');
 const { last10 } = require('../external-phone');
 const { sameStreetAddress } = require('./address-compare');
+const { CUSTOMER_STAGES, whereLiveCustomer } = require('../customer-stages');
 
 function scopeGuardsEnabled() {
   const flag = process.env.GATE_ESTIMATOR_SCOPE_GUARDS;
@@ -96,12 +97,17 @@ function deterministicOutOfScope(text) {
 // suffix/directional normalization).
 function extractAddressCandidates(text) {
   const out = [];
-  const re = /\b(\d{2,6})\s+([A-Za-z][A-Za-z'.-]*(?:\s+[A-Za-z][A-Za-z'.-]*){0,3})/g;
+  // House numbers may be a single digit ("7 Palm Ave") and street names may
+  // be numbered ("123 5th Ave") — the full-street confirmation downstream is
+  // the precision gate, so the grammar here stays broad.
+  const re = /\b(\d{1,6})\s+([A-Za-z0-9][A-Za-z0-9'.-]*(?:\s+[A-Za-z][A-Za-z0-9'.-]*){0,3})/g;
   let m;
   while (out.length < 3 && (m = re.exec(String(text || ''))) !== null) {
     const words = m[2].split(/\s+/);
-    // Skip obvious non-addresses: "24 hours", "30 minutes", "2 pm".
+    // Skip obvious non-addresses: "24 hours", "30 minutes", "2 pm", and
+    // bare number-pairs ("4 30") — numbered streets carry a suffix ("5th").
     if (/^(?:hours?|hrs?|minutes?|mins?|days?|weeks?|months?|years?|am|pm)$/i.test(words[0])) continue;
+    if (/^\d+$/.test(words[0])) continue;
     out.push({
       num: m[1],
       firstWord: words[0],
@@ -130,7 +136,14 @@ async function loadTriageInner({ phone, triggerBody }) {
   const seenCustomerIds = new Set();
   let matchedExistingCustomer = false;
 
-  const describeCustomer = async (customer, how, addressLine) => {
+  // scope: when the match came from a specific address in the message,
+  // visits are scoped to THAT property — a multi-property customer's booked
+  // visit at property A must not present as coordination context for a new
+  // quote at property B. Visits stamp service_address_line1 at booking time
+  // (nullable; legacy rows COALESCE to the primary address), so a stamped
+  // visit must street-match the matched address, and an unstamped one only
+  // counts when the matched address IS the primary.
+  const describeCustomer = async (customer, how, addressLine, scope = null) => {
     if (seenCustomerIds.has(customer.id)) return;
     seenCustomerIds.add(customer.id);
     matchedExistingCustomer = true;
@@ -142,10 +155,20 @@ async function loadTriageInner({ phone, triggerBody }) {
         .whereNotIn('status', ['cancelled'])
         .whereRaw("scheduled_date >= (NOW() AT TIME ZONE 'America/New_York')::date - INTERVAL '30 days'")
         .orderBy('scheduled_date', 'asc')
-        .limit(3)
-        .select('service_type', 'scheduled_date', 'status');
-      if (visits.length) {
-        visitNote = ` — booked: ${visits
+        .limit(6)
+        .select('service_type', 'scheduled_date', 'status', 'service_address_line1');
+      const scoped = !scope ? visits : visits.filter((v) => {
+        if (v.service_address_line1) {
+          try {
+            return sameStreetAddress(v.service_address_line1, scope.address);
+          } catch (err) {
+            return false;
+          }
+        }
+        return scope.isPrimary;
+      });
+      if (scoped.length) {
+        visitNote = ` — booked: ${scoped.slice(0, 3)
           .map((v) => `${v.service_type} ${String(v.scheduled_date).slice(0, 10)} (${v.status})`)
           .join('; ')}`;
       }
@@ -158,10 +181,15 @@ async function loadTriageInner({ phone, triggerBody }) {
   if (phone) {
     const { loadCustomerByPhone } = require('./context-builder');
     const senderMatch = await loadCustomerByPhone(phone, null);
-    // active === true is required, not merely "not false": the select may
-    // omit the column, and an inactive/former customer texting a NEW quote
-    // request must stay a prospect (no existing-job grounding).
-    if (senderMatch?.customer && !senderMatch.ambiguous && senderMatch.customer.active === true) {
+    // Grounding requires a REAL customer: active === true (not merely "not
+    // false" — the select may omit the column) AND an established customer
+    // stage. The Twilio webhook creates an active pipeline_stage='new_lead'
+    // customers row for first contacts right before this triage runs — a
+    // prospect must never read as an existing customer here, or their own
+    // quote request vetoes itself as an "existing job".
+    if (senderMatch?.customer && !senderMatch.ambiguous
+      && senderMatch.customer.active === true
+      && CUSTOMER_STAGES.includes(senderMatch.customer.pipeline_stage)) {
       await describeCustomer(senderMatch.customer, 'Sender phone matches');
     }
   }
@@ -189,14 +217,13 @@ async function loadTriageInner({ phone, triggerBody }) {
     const label = `Message thread names address "${cand.num} ${cand.firstWord}…" which matches`;
     const prefix = `${cand.num} ${cand.firstWord}%`;
     const rows = await db('customers')
-      .where({ active: true })
-      .whereNull('deleted_at')
+      .modify(whereLiveCustomer)
       .where('address_line1', 'ilike', prefix)
       .limit(5)
       .select('id', 'first_name', 'last_name', 'address_line1');
     for (const row of rows) {
       if (candidateMatchesRow(cand, row.address_line1)) {
-        await describeCustomer(row, label, row.address_line1);
+        await describeCustomer(row, label, row.address_line1, { address: row.address_line1, isPrimary: true });
       }
     }
     // Secondary properties: customers.address_line1 mirrors only the
@@ -208,6 +235,7 @@ async function loadTriageInner({ phone, triggerBody }) {
         .join('customers as c', 'c.id', 'cp.customer_id')
         .where('c.active', true)
         .whereNull('c.deleted_at')
+        .whereIn('c.pipeline_stage', CUSTOMER_STAGES)
         .where('cp.address_line1', 'ilike', prefix)
         .limit(5)
         .select('c.id', 'c.first_name', 'c.last_name', 'cp.address_line1 as property_address');
@@ -217,6 +245,7 @@ async function loadTriageInner({ phone, triggerBody }) {
             { id: row.id, first_name: row.first_name, last_name: row.last_name },
             label,
             `${row.property_address} (secondary property)`,
+            { address: row.property_address, isPrimary: false },
           );
         }
       }

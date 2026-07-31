@@ -22,11 +22,13 @@ jest.mock('../models/db', () => {
     const chain = {
       where() { return chain; },
       whereNull() { return chain; },
+      whereIn() { return chain; },
       whereNotIn() { return chain; },
       whereRaw() { return chain; },
       orderBy() { return chain; },
       limit() { return chain; },
       join() { return chain; },
+      modify(fn) { fn(chain); return chain; },
       async select() {
         if (mockState.throwOn === table) throw new Error(`${table} query down`);
         if (mockState.hangOn === table) return new Promise(() => {});
@@ -157,6 +159,12 @@ describe('extractAddressCandidates', () => {
     expect(extractAddressCandidates('call me back in 24 hours or 30 minutes')).toEqual([]);
   });
 
+  test('accepts short house numbers and numbered streets, skips bare number pairs', () => {
+    expect(extractAddressCandidates('quote for 7 Palm Ave please')[0].variants).toContain('7 Palm Ave');
+    expect(extractAddressCandidates('we are at 123 5th Ave')[0].variants).toContain('123 5th Ave');
+    expect(extractAddressCandidates('see you at 4 30 tomorrow')).toEqual([]);
+  });
+
   test('caps at three candidates', () => {
     const text = '100 Alpha St, 200 Beta Ave, 300 Gamma Rd, 400 Delta Ct';
     expect(extractAddressCandidates(text)).toHaveLength(3);
@@ -166,7 +174,7 @@ describe('extractAddressCandidates', () => {
 describe('loadThreadTriageContext', () => {
   test('describes active sender and full-street-confirmed address matches with booked visits', async () => {
     mockLoadCustomerByPhone.mockResolvedValue({
-      customer: { id: 'c-1', first_name: 'Taylor', last_name: 'Sample', address_line1: '99 Placeholder Way', active: true },
+      customer: { id: 'c-1', first_name: 'Taylor', last_name: 'Sample', address_line1: '99 Placeholder Way', active: true, pipeline_stage: 'active_customer' },
       ambiguous: false,
     });
     mockState.rows.customers = [
@@ -204,11 +212,38 @@ describe('loadThreadTriageContext', () => {
     expect(triage.lines).toEqual([]);
 
     mockLoadCustomerByPhone.mockResolvedValue({
-      customer: { id: 'c-1', first_name: 'Shared', last_name: 'Line', active: true },
+      customer: { id: 'c-1', first_name: 'Shared', last_name: 'Line', active: true, pipeline_stage: 'active_customer' },
       ambiguous: true,
     });
     triage = await loadThreadTriageContext({ phone: '+17245550000', triggerBody: 'quote please' });
     expect(triage.lines).toEqual([]);
+  });
+
+  test('a webhook-minted prospect row (active, pipeline_stage new_lead) never grounds', async () => {
+    mockLoadCustomerByPhone.mockResolvedValue({
+      customer: { id: 'c-1', first_name: 'Fresh', last_name: 'Prospect', active: true, pipeline_stage: 'new_lead' },
+      ambiguous: false,
+    });
+    const triage = await loadThreadTriageContext({ phone: '+17245550000', triggerBody: 'quote please' });
+    expect(triage.matchedExistingCustomer).toBe(false);
+    expect(triage.lines).toEqual([]);
+  });
+
+  test('address-matched grounding scopes booked visits to THAT property', async () => {
+    mockState.rows.customers = [
+      { id: 'c-2', first_name: 'Pat', last_name: 'Homeowner', address_line1: '4021 Coral Bay Loop' },
+    ];
+    mockState.rows.scheduled_services = [
+      { service_type: 'Quarterly Pest Control Service', scheduled_date: '2026-08-01', status: 'pending', service_address_line1: '4021 Coral Bay Loop' },
+      { service_type: 'Lawn Care Visit', scheduled_date: '2026-08-03', status: 'pending', service_address_line1: '900 Other Property Rd' },
+    ];
+    const triage = await loadThreadTriageContext({
+      phone: null,
+      triggerBody: 'need a treatment at 4021 Coral Bay Loop',
+    });
+    const joined = triage.lines.join('\n');
+    expect(joined).toContain('Quarterly Pest Control Service 2026-08-01 (pending)');
+    expect(joined).not.toContain('Lawn Care Visit');
   });
 
   test('a same-prefix different street is NOT a match (100 Palm Ave vs 100 Palm St)', async () => {
