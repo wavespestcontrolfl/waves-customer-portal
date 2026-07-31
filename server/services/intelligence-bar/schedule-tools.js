@@ -639,11 +639,18 @@ async function moveStopsToDay(input) {
               // different slot on the row.
               expectSchedule: { date: dateStr, windowStart: start },
             });
-            if (sync && sync.skippedStale) {
-              // A newer move won — it owns the customer messaging. Sending
-              // (or letting the helper's failure path re-arm) would disturb
-              // the winner's reminder state.
-              notificationFailures.push({ id: s.id, reason: 'Appointment changed again before the text could be sent' });
+            if (!sync || sync.skippedStale) {
+              // skippedStale: a newer move won and owns the customer
+              // messaging. Falsy: the guarded sync itself failed — a
+              // still-pending deferred confirmation would then follow our
+              // text as a duplicate. Either way: report, don't send (the
+              // cron's fallback reminders remain armed).
+              notificationFailures.push({
+                id: s.id,
+                reason: sync && sync.skippedStale
+                  ? 'Appointment changed again before the text could be sent'
+                  : 'Reminder sync failed — not texted (automated reminders still cover the new time)',
+              });
             } else {
               const { sendRescheduleNoticeForVisit } = require('../../routes/admin-schedule');
               const notice = await sendRescheduleNoticeForVisit(s.id, dateStr, start);

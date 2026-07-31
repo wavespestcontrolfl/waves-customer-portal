@@ -5039,6 +5039,13 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
       );
       return;
     }
+    // Same no-op guard as the manual path: a suggestion can equal the
+    // current slot (the visit excludes itself from conflict checks), and
+    // submitting it would log a reschedule and text an unchanged customer.
+    if (opt.date === currentDateOnly && suggestedBlock.start === currentStart) {
+      alert("The appointment is already scheduled at that date and time.");
+      return;
+    }
     setSending(true);
     try {
       const result = await adminFetch(
