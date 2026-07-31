@@ -241,16 +241,111 @@ function resolveWeekRain(propSeries = [], cellSeriesList = []) {
 // NOTE: Open-Meteo returns et0_fao_evapotranspiration in the precipitation unit
 // (inches here). Eyeball a real report once — a ~25× value would mean it came
 // back in mm.
+// ── Rain engine mode (GATE_RAIN_MRMS) ───────────────────────────────────────────
+// 'off'    (unset/anything else): Open-Meteo only — the pre-engine behavior,
+//          zero extra external calls.
+// 'shadow' : fetch MRMS too, log the weekly delta vs Open-Meteo, but RETURN
+//            the Open-Meteo result — a week of these logs is the flip evidence.
+// 'live'   ('true'): MRMS-primary ladder is what reports/emails consume.
+// Kill switch = unset the var.
+function rainMrmsMode() {
+  const raw = String(process.env.GATE_RAIN_MRMS || '').toLowerCase();
+  if (raw === 'true') return 'live';
+  if (raw === 'shadow') return 'shadow';
+  return 'off';
+}
+
+function etTodayYmd() {
+  // en-CA formats as YYYY-MM-DD; the ET calendar day decides whether the
+  // window's last day is still accumulating.
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+}
+
+// Merge an MRMS daily series into the Open-Meteo week. Pure — exported for
+// tests. Returns the merged value or null when MRMS adds nothing usable
+// (caller keeps the Open-Meteo result).
+//
+// Per-day ladder: a CLOSED day takes the MRMS observation when present and
+// falls back to the Open-Meteo estimate on a gap; the UNCLOSED visit day
+// takes the larger of MRMS-so-far and the Open-Meteo day value (the model
+// includes hours that haven't happened yet — the observation is a floor,
+// never a cap). A day with neither source fails the whole merge: partial
+// windows are never trusted as weekly totals (same rule as the OM path).
+function mergeMrmsIntoWeek({ om, mrms, todayYmd } = {}) {
+  if (!mrms || !Array.isArray(mrms.days) || !mrms.days.length) return null;
+  const round2 = (n) => (Number.isFinite(Number(n)) ? Math.round(Number(n) * 100) / 100 : null);
+  const omByDate = new Map((om?.dailyRain || []).map((d) => [d.date, d.inches]));
+  const days = [];
+  let mrmsDays = 0;
+  for (const day of mrms.days) {
+    const omVal = Number.isFinite(Number(omByDate.get(day.date))) ? Number(omByDate.get(day.date)) : null;
+    const mrmsVal = day.inches;
+    let inches = null;
+    let provider = null;
+    if (day.date === todayYmd && mrmsVal != null && omVal != null) {
+      inches = Math.max(mrmsVal, omVal);
+      provider = mrmsVal >= omVal ? 'mrms' : 'open_meteo';
+    } else if (mrmsVal != null) {
+      inches = mrmsVal;
+      provider = 'mrms';
+    } else if (omVal != null) {
+      inches = omVal;
+      provider = 'open_meteo';
+    } else {
+      return null;
+    }
+    if (provider === 'mrms') mrmsDays += 1;
+    days.push({ date: day.date, inches: round2(inches), provider });
+  }
+  if (!mrmsDays) return null;
+  return {
+    rainInches: round2(days.reduce((sum, d) => sum + (d.inches || 0), 0)),
+    // MRMS carries no evapotranspiration — ET₀ stays the Open-Meteo value.
+    et0Inches: om?.et0Inches ?? null,
+    dailyRain: days,
+    // Measured days are high-trust by nature; the 'low' city-collective badge
+    // only survives when Open-Meteo days that used it are still in the mix.
+    rainConfidence: days.some((d) => d.provider === 'open_meteo') && om?.rainConfidence === 'low' ? 'low' : null,
+    rainSource: mrmsDays === days.length ? 'mrms' : 'mrms+open_meteo',
+  };
+}
+
 async function fetchServiceWeekWeather({ latitude, longitude, serviceDate } = {}) {
   const empty = { rainInches: null, et0Inches: null, dailyRain: null, rainConfidence: null, rainSource: null };
   const lat = Number.isFinite(Number(latitude)) ? Number(latitude) : null;
   const lon = Number.isFinite(Number(longitude)) ? Number(longitude) : null;
   const range = rainWindowEndingOn(serviceDate, 7);
   if (lat == null || lon == null || !range) return empty;
-  const key = rainCacheKey(lat, lon, range.end);
+  const mode = rainMrmsMode();
+  // Mode participates in the key so a gate flip never serves the other
+  // mode's cached week for up to 6h.
+  const key = `${mode}|${rainCacheKey(lat, lon, range.end)}`;
   const cached = _rainCache.get(key);
   if (cached && Date.now() - cached.at < RAIN_TTL_MS) return cached.value;
 
+  const om = await fetchOpenMeteoServiceWeek({ lat, lon, range, empty });
+  let value = om;
+  if (mode !== 'off') {
+    const { fetchMrmsDailyRain } = require('../mrms-qpe');
+    const mrms = await fetchMrmsDailyRain({ latitude: lat, longitude: lon, start: range.start, end: range.end }).catch(() => null);
+    const merged = mergeMrmsIntoWeek({ om, mrms, todayYmd: etTodayYmd() });
+    if (merged) {
+      const delta = Math.round(((merged.rainInches || 0) - (om.rainInches || 0)) * 100) / 100;
+      logger.info(`[rain-engine] mode=${mode} week mrms=${merged.rainInches} om=${om.rainInches ?? 'null'} delta=${delta} source=${merged.rainSource} @${lat.toFixed(3)},${lon.toFixed(3)} end=${range.end}`);
+      if (mode === 'live') value = merged;
+    } else if (mode === 'live') {
+      logger.warn(`[rain-engine] mode=live but MRMS unusable for ${range.start}..${range.end} @${lat.toFixed(3)},${lon.toFixed(3)} — Open-Meteo fallback`);
+    }
+  }
+  if (value.rainInches != null || value.et0Inches != null) {
+    _rainCache.set(key, { at: Date.now(), value });
+  }
+  return value;
+}
+
+// The pre-engine Open-Meteo week fetch, verbatim behavior (city-grid spike
+// guard, full-window trust rule). Returns `empty` on any miss.
+async function fetchOpenMeteoServiceWeek({ lat, lon, range, empty }) {
   // Sample the whole city (property cell + neighbour ring) in ONE multi-location call
   // so a single spiked grid cell can be caught against the city median (see notes above).
   const grid = citySampleGrid(lat, lon);
@@ -326,7 +421,8 @@ async function fetchServiceWeekWeather({ latitude, longitude, serviceDate } = {}
       rainConfidence: suspect ? 'low' : null,
       rainSource: source,
     };
-    _rainCache.set(key, { at: Date.now(), value });
+    // Caching moved to fetchServiceWeekWeather — the cache key carries the
+    // engine mode, which this extracted fetcher doesn't know about.
     return value;
   } catch (err) {
     logger.warn(`[application-conditions] service-week weather fetch failed: ${err.message}`);
@@ -383,6 +479,8 @@ module.exports = {
   et0SumToInches,
   rainWindowEndingOn,
   resolveWeekRain,
+  mergeMrmsIntoWeek,
+  rainMrmsMode,
   normalizeFawnConditions,
   weatherCodeLabel,
 };
