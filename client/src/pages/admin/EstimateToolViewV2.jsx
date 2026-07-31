@@ -5527,6 +5527,14 @@ export default function EstimateToolViewV2({
                     </span>
                     <span>{turfSliderMax.toLocaleString()} sf</span>
                   </div>
+                  {enrichedProfile?.turfObservation === "unobservable" &&
+                    confirmedTurfSqFt === null && (
+                      <div className="mt-2 text-11 text-amber-700">
+                        Low confidence — satellite imagery appears to predate
+                        construction, so this lot-based estimate is unverified.
+                        Confirm sq ft before pricing.
+                      </div>
+                    )}
                   {needsTurfConfirmation && (
                     <div className="mt-3 px-3 py-2 bg-alert-bg border-hairline border-alert-fg rounded-xs text-12 text-alert-fg">
                       AI turf is over 20,000 sf. Confirm treatable lawn area

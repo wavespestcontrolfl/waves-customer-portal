@@ -1073,6 +1073,40 @@ function detectUnassessedVacantParcel(record) {
   };
 }
 
+// The inverse of the vacant-parcel window: the county roll assesses a
+// COMPLETED building but the satellite vision pass measured an empty lot —
+// an explicit 0 for BOTH treatable turf and impervious surface. With an
+// assessed structure on the parcel, 0% impervious cover is internally
+// impossible (the roof alone is impervious), so those zeros describe the
+// IMAGERY, not the property: the tiles predate construction (Static Maps
+// carries no capture date to compare against — this contradiction is the
+// only freshness signal available) or missed the parcel. A genuine no-lawn
+// property (paved / rock / artificial turf) reads HIGH impervious with the
+// structure visible, so a confirmed vision 0 never trips this — that
+// explicit-zero-is-a-measurement rule stays intact. Prod sweep 2026-07-30:
+// 33 of 229 cached lookups matched, every sampled one a 2024–26 build in
+// Parrish / Palmetto / LWR / Sarasota. Returns the conflict evidence
+// (drives the profile sanitization + HIGH verify flag in
+// buildEnrichedProfile and the short cache TTL in lookup-cache) or null.
+function detectStaleImageryTurfConflict(record, ai) {
+  if (!record || !ai) return null;
+  const countySqFt = Number(record.squareFootage);
+  if (!Number.isFinite(countySqFt) || countySqFt <= 0) return null;
+  // Belt: a vacant-roll parcel carrying a defaulted dimension is the OTHER
+  // window (imagery may be the fresher source there) — never both.
+  if (detectUnassessedVacantParcel(record)) return null;
+  // Both zeros must be EXPLICIT — null/undefined means "not measured" and
+  // Number(null) === 0 would false-positive on it.
+  const explicitZero = (value) => value === 0 || value === '0';
+  if (!explicitZero(ai.estimatedTurfSf)) return null;
+  const impervious = ai.imperviousSurfacePercent ?? ai.imperviosSurfacePercent;
+  if (!explicitZero(impervious)) return null;
+  return {
+    countySqFt,
+    yearBuilt: record.yearBuilt || null,
+  };
+}
+
 // Non-detached residential types the county land-use description captures but
 // the PAO building-type text / numeric DOR code flatten to "Single Family".
 const COUNTY_GIS_SPECIFIC_TYPES = new Set(['Townhome', 'Interior Townhome', 'Condo', 'Duplex', 'Multifamily']);
@@ -4375,6 +4409,7 @@ module.exports = {
   hasCountyEvidence,
   buildPropertyDataQuality,
   detectUnassessedVacantParcel,
+  detectStaleImageryTurfConflict,
   canonicalLookupAddress,
   lookupStoriesFromAI,
   lookupStoriesEvidenceFromAI,

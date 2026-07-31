@@ -16,7 +16,7 @@ const router = express.Router();
 const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const MODELS = require('../config/models');
-const { auditAddressHouseNumber, hasCountyEvidence, canonicalLookupAddress, lookupStoriesEvidenceFromAI, lookupPropertyFromAITrio, buildPropertyDataQuality, detectUnassessedVacantParcel } = require('../services/property-lookup/ai-property-lookup');
+const { auditAddressHouseNumber, hasCountyEvidence, canonicalLookupAddress, lookupStoriesEvidenceFromAI, lookupPropertyFromAITrio, buildPropertyDataQuality, detectUnassessedVacantParcel, detectStaleImageryTurfConflict } = require('../services/property-lookup/ai-property-lookup');
 const { lookupFloodZoneByPoint } = require('../services/property-lookup/fema-nfhl');
 const { lookupPoolPermitsByParcel } = require('../services/property-lookup/county-permits');
 const { outerRing, simplifyRing } = require('../services/property-lookup/parcel-gis');
@@ -1329,6 +1329,40 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   // like _floodZone); record-less lookups pass it alongside since there is no
   // record to ride.
   const addressAudit = addressAuditParam || rc?._addressAudit || null;
+  // Stale/invalid-imagery guard: the county roll assesses a completed home
+  // but vision measured an empty lot (explicit 0 turf AND 0% impervious —
+  // impossible with a building on the parcel; see
+  // detectStaleImageryTurfConflict). Those zeros describe the imagery, not
+  // the property — drop the vision AREA fields so every downstream consumer
+  // (this profile, the estimator's lot-estimate fallback, pricing's
+  // computeTurfArea) falls back to its documented lot-based defaults instead
+  // of treating "known 0% hardscape / 0 sf beds" as fact and pricing the
+  // FULL lot as treatable turf. The county turf prior is ALSO skipped below:
+  // with the parcel unobservable there is no basis to grade a
+  // 50%-of-ceiling seed above the default ladder. Non-area vision fields
+  // stay — county evidence already out-ranks them where it exists (pool,
+  // cage), and widening the sanitization is deliberately out of scope.
+  // Running here (not in the lookup pipeline) means cache-hit rebuilds
+  // sanitize rows poisoned before this shipped, no backfill needed.
+  const staleImageryConflict = detectStaleImageryTurfConflict(rc, ai);
+  if (staleImageryConflict) {
+    ai = { ...ai };
+    delete ai.estimatedTurfSf;
+    delete ai.imperviousSurfacePercent;
+    delete ai.imperviosSurfacePercent;
+    delete ai.estimatedBedAreaSf;
+    delete ai.estimatedBedAreaPercent;
+    // Fires on every profile build for a conflicted address (fresh + cache
+    // hit) — greppable in Railway to judge how often the guard runs and,
+    // against later confirmed sq ft, whether the lot-based default is
+    // generally close enough or the polygon-measurement lane is warranted.
+    logger.info('[property-lookup] stale-imagery turf conflict — vision area fields discarded', {
+      address: rc?.formattedAddress || null,
+      lotSqFt: rc?.lotSize || null,
+      countySqFt: staleImageryConflict.countySqFt,
+      yearBuilt: staleImageryConflict.yearBuilt,
+    });
+  }
   const footprintTurf = computeFootprintTurf(rc);
   const waterProximity = ai?.waterProximity || ai?.nearWater || 'NONE';
   const waterDistance = ai?.waterDistance || 'NONE';
@@ -1386,6 +1420,11 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   // profile IS the association/owner, so it doesn't apply there.
   const countyTurfPriorSf = (
     !visionTurfKnown
+    // A stale-imagery conflict cleared the vision fields, but seeding the
+    // ratio prior would just trade one unsupported point estimate for
+    // another — the default lot ladder (with its verify flag) is the
+    // documented fallback there.
+    && !staleImageryConflict
     && !turfCountyPriorDisabled()
     && countyCeiling
     && countyCeiling.turfSf >= TURF_COUNTY_PRIOR_MIN_CEILING_SF
@@ -1393,6 +1432,13 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   ) ? Math.round(countyCeiling.turfSf * TURF_COUNTY_PRIOR_RATIO) : null;
 
   const fieldVerifyFlags = buildFieldVerifyFlags(rc, ai, addressAudit);
+  if (staleImageryConflict) {
+    fieldVerifyFlags.push({
+      field: 'estimatedTurfSf',
+      reason: `Satellite analysis conflicts with county records — the imagery shows undeveloped land but the county assesses a ${staleImageryConflict.countySqFt.toLocaleString()} sq ft home${staleImageryConflict.yearBuilt ? ` (built ${staleImageryConflict.yearBuilt})` : ''}. Imagery is likely stale or misaligned; its turf/hardscape estimates were discarded. Confirm treatable lawn area before pricing.`,
+      priority: 'HIGH',
+    });
+  }
   if (countyTurfPriorSf) {
     fieldVerifyFlags.push({
       field: 'estimatedTurfSf',
@@ -1559,6 +1605,15 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     // (see countyTurfPriorSf above); 'none' = no basis — pricing falls back
     // to its lot-based estimate.
     turfSource: visionTurfKnown ? 'vision' : (countyTurfPriorSf ? 'county_prior' : 'none'),
+    // Machine-readable twin of the stale-imagery verify flag (like
+    // unassessedVacantParcel): 'unobservable' = the vision area fields were
+    // discarded by the conflict guard, so the lot-based fallback everything
+    // now shows is a heuristic, not a measurement — consumers must keep the
+    // confirm-before-pricing posture. Absent on normal profiles; an explicit
+    // vision 0 with the structure visible is a real measurement and never
+    // carries this.
+    turfObservation: staleImageryConflict ? 'unobservable' : undefined,
+    turfReason: staleImageryConflict ? 'county_structure_vision_bare_land_conflict' : undefined,
     countyTurfPriorSf,
     // TRUSTED ceiling (county-complete + county-sourced dims) — feeds the
     // exceeds-ceiling review reason; null when the facts are too weak to
