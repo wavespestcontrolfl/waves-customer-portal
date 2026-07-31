@@ -10,6 +10,10 @@ jest.mock('../config/feature-gates', () => ({
   isEnabled: (g) => !!mockGates[g],
   gates: mockGates,
 }));
+// Personalized-ask drafter (own suite: review-ask-drafter.test.js). Default
+// null = template path, matching the gate-off production posture.
+const mockDraftAskBody = jest.fn(async () => null);
+jest.mock('../services/review-ask-drafter', () => ({ draftAskBody: (...a) => mockDraftAskBody(...a) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: (...a) => mockSendCustomerMessage(...a) }));
 jest.mock('../services/email-template-library', () => ({ sendTemplate: (...a) => mockEmailSendTemplate(...a) }));
@@ -97,6 +101,7 @@ beforeEach(() => {
   mockEmailSendTemplate.mockClear();
   mockGates.reviewSequences = false;
   mockGates.reviewDirectLink = false;
+  mockDraftAskBody.mockReset().mockResolvedValue(null);
 });
 
 describe('review sequences — cadence engine', () => {
@@ -762,6 +767,44 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
     expect(out.stopped).toBe(1);
     expect(mock.__state.rows.review_sequences[0].stop_reason).toBe('superseded');
+  });
+
+  test('a personalized draft becomes the touch body (persisted as custom_body, link substituted)', async () => {
+    const draft = 'Hi Stan, Adam here — hope the ants are staying gone after Tuesday. If we earned it: {review_url}. Anything off, just reply here.';
+    mockDraftAskBody.mockResolvedValue(draft);
+    const mock = makeMock({
+      customers: [{ id: 'pd-1', first_name: 'Stan', last_name: 'Q', phone: '+19410000040', nearest_location_id: 'bradenton' }],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.startReviewSequence({ customerId: 'pd-1', serviceType: 'pest control', techName: 'Adam', startedBy: 'admin-1' });
+
+    expect(result.started).toBe(true);
+    expect(mockDraftAskBody).toHaveBeenCalledWith(expect.objectContaining({ serviceType: 'pest control', techName: 'Adam' }));
+    const touch = mock.__state.rows.review_requests[0];
+    expect(touch.custom_body).toBe(draft);
+    // The sent SMS is the draft with {review_url} resolved to the tokenized link.
+    const sentBody = mockSendCustomerMessage.mock.calls[0][0].body;
+    expect(sentBody).toContain('hope the ants are staying gone after Tuesday');
+    expect(sentBody).toContain(`https://portal.test/rate/${touch.token}`);
+    expect(sentBody).not.toContain('{review_url}');
+  });
+
+  test('a rejected/failed draft falls back to the standard template (ask still sends)', async () => {
+    mockDraftAskBody.mockResolvedValue(null);
+    const mock = makeMock({
+      customers: [{ id: 'pd-2', first_name: 'Ada', last_name: 'V', phone: '+19410000041', nearest_location_id: 'venice' }],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.startReviewSequence({ customerId: 'pd-2', serviceType: 'pest control', techName: 'Adam', startedBy: 'admin-1' });
+
+    expect(result.started).toBe(true);
+    const touch = mock.__state.rows.review_requests[0];
+    expect(touch.custom_body == null).toBe(true);
+    expect(touch.template_key).toBe('friendly_ask');
+    const sentBody = mockSendCustomerMessage.mock.calls[0][0].body;
+    expect(sentBody).toContain('Waves Pest Control'); // friendly_ask template copy
   });
 
   test('a cadence stops with reason "clicked" once a touch was redirected to Google (direct-link engagement)', async () => {

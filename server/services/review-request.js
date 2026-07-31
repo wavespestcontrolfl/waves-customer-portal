@@ -1612,7 +1612,24 @@ const ReviewService = {
     // rather than reverting to the template.
     const smsTemplateId = templateId || (customBody && customBody.trim() ? null : "friendly_ask");
     const recordedTemplateKey = actualChannel === "email" ? "review_request_email" : smsTemplateId || "custom";
-    const persistedBody = actualChannel === "sms" && customBody && customBody.trim() ? customBody : null;
+    let persistedBody = actualChannel === "sms" && customBody && customBody.trim() ? customBody : null;
+
+    // Personalized ask body (GATE_REVIEW_ASK_PERSONALIZED): SMS ask touches
+    // are drafted from the customer's own call/SMS history at send time.
+    // Operator-provided copy always wins; private no-link check-ins and email
+    // touches keep their templates. A null draft (gate off, no grounding,
+    // model down, or failed verification) falls through to the template.
+    // Persisted as custom_body below so a provider retry re-sends the same copy.
+    if (actualChannel === "sms" && !persistedBody && !noLinkSend) {
+      const drafted = await require("./review-ask-drafter").draftAskBody({
+        customer,
+        serviceType,
+        techName,
+        sequenceStep,
+        serviceDate,
+      });
+      if (drafted) persistedBody = drafted;
+    }
 
     // A no-link template (resolution_check / satisfaction_confirm) is a PRIVATE
     // check-in, not a review ask — so it must NOT trigger the legacy Day-3
@@ -1657,7 +1674,7 @@ const ReviewService = {
     if (actualChannel === "email") {
       return this._sendOutreachEmail({ request, customer, contact: emailContact, reviewUrl, techName, manageRetryVia });
     }
-    return this._sendOutreachSms({ request, customer, contact, vars, templateId: smsTemplateId, customBody, manageRetryVia });
+    return this._sendOutreachSms({ request, customer, contact, vars, templateId: smsTemplateId, customBody: persistedBody ?? customBody, manageRetryVia });
   },
 
   async _sendOutreachSms({ request, customer, contact, vars, templateId, customBody, manageRetryVia }) {
@@ -2099,6 +2116,10 @@ const ReviewService = {
         locationId: seq.location_id,
         techName: seq.tech_name,
         serviceType: seq.service_type,
+        // serviceDate is NOT passed here: sendOutreachTouch recovers the real
+        // service_date (and technician) from service_record_id, which grounds
+        // both the touch row and the drafter's "completed N days ago" fact —
+        // seq.started_at would shadow that recovery with a timestamp.
         serviceRecordId: seq.service_record_id,
         sequenceId: seq.id,
         sequenceStep: seq.current_step,

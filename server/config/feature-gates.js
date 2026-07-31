@@ -136,6 +136,14 @@ const gates = {
   // One-off manual sends from the same tab are NOT gated by this.
   reviewSequences: process.env.GATE_REVIEW_SEQUENCES === 'true',
 
+  // Personalized review-ask bodies: cadence SMS touches are drafted from the
+  // customer's own call/SMS history (review-ask-drafter.js) and AUTO-SEND
+  // after deterministic verification, per owner ruling 2026-07-30 (scoped to
+  // this lane — inbound-reply drafts stay approval-gated). Off = cadence
+  // touches send the standard outreach templates. Customer-facing generated
+  // text → explicit opt-in in EVERY env.
+  reviewAskPersonalized: process.env.GATE_REVIEW_ASK_PERSONALIZED === 'true',
+
   // Review asks link STRAIGHT to the Google review form (via the tracked
   // /api/rate/:token/go redirect) instead of the 1-10 rate page. Kill switch
   // for the direct-link rollout: off = every ask body resolves {review_url}
