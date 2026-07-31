@@ -689,7 +689,7 @@ describe('rain-out service', () => {
       // every send to UCS-2 and doubles the segment bill (codex P1).
       expect(detectEncoding(BODY).encoding).toBe('GSM_7');
       const rendered = BODY
-        .replace('{first_name}', 'Jaden')
+        .replace('{first_name}', 'Riley')
         .replace('{weather_lead}', 'rain is moving through your area this afternoon')
         .replace('{service_type}', 'quarterly pest control')
         .replace('{new_option}', 'Sun, Aug 2, 9:00 AM - 11:00 AM')

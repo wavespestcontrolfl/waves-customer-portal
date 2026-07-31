@@ -8,10 +8,10 @@ const mockDb = jest.fn();
 mockDb.schema = { hasTable: jest.fn(async () => true) };
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/weather-forecast', () => ({
-  getDailyRainOutlook: jest.fn().mockResolvedValue(null),
+  getDailyRainOutlookBounded: jest.fn().mockResolvedValue(null),
 }));
 
-const { getDailyRainOutlook } = require('../services/weather-forecast');
+const { getDailyRainOutlookBounded } = require('../services/weather-forecast');
 const reschedulePublicRouter = require('../routes/reschedule-public');
 const { smsLineFor } = require('../services/reschedule-link');
 const smsMigration = require('../models/migrations/20260702000011_reschedule_link_sms_templates');
@@ -287,7 +287,7 @@ describe('weatherMove banner context (GATE_RAINOUT_MOVE_BANNER)', () => {
   test('gate on: a recent weather move the visit still sits on returns was/now + forecast chances', async () => {
     process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
     wireLog(LOG);
-    getDailyRainOutlook.mockResolvedValueOnce({
+    getDailyRainOutlookBounded.mockResolvedValueOnce({
       '2026-07-03': { rainChance: 80 },
       '2026-07-04': { rainChance: 15 },
     });
@@ -300,13 +300,13 @@ describe('weatherMove banner context (GATE_RAINOUT_MOVE_BANNER)', () => {
       fromChance: 80,
       toChance: 15,
     });
-    expect(getDailyRainOutlook).toHaveBeenCalledWith(27.4, -82.4);
+    expect(getDailyRainOutlookBounded).toHaveBeenCalledWith('27.4', '-82.4', { deadlineMs: 1500 });
   });
 
   test('forecast failure or no coverage is fail-open: move present, chips null', async () => {
     process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
     wireLog(LOG);
-    getDailyRainOutlook.mockRejectedValueOnce(new Error('nws down'));
+    getDailyRainOutlookBounded.mockRejectedValueOnce(new Error('nws down'));
 
     const move = await loadWeatherMove(SVC, NOW);
     expect(move).toMatchObject({ fromChance: null, toChance: null });
@@ -340,6 +340,7 @@ describe('weatherMove banner context (GATE_RAINOUT_MOVE_BANNER)', () => {
     wireLog(LOG);
     const move = await loadWeatherMove({ ...SVC, latitude: null, longitude: null }, NOW);
     expect(move).toMatchObject({ fromChance: null, toChance: null });
-    expect(getDailyRainOutlook).not.toHaveBeenCalled();
+    // Bounded lookup is still invoked; it no-ops on null coords itself.
+    expect(getDailyRainOutlookBounded).toHaveBeenCalledWith(null, null, { deadlineMs: 1500 });
   });
 });
