@@ -381,10 +381,15 @@ async function fetchServiceWeekWeather({ latitude, longitude, serviceDate } = {}
     }
   }
   if (value.rainInches != null || value.et0Inches != null) {
-    // A merged week that survived an Open-Meteo outage carries et0Inches
-    // null — cache it briefly so ET₀ retries once Open-Meteo recovers,
-    // instead of pinning the seasonal fallback target for 6h (codex P2 r5).
-    const effectiveTtlMs = value.et0Inches == null ? Math.min(ttlMs, 30 * 60 * 1000) : ttlMs;
+    // Short retry TTL whenever an independent input is missing (codex P2
+    // r5+r6): et0Inches null (Open-Meteo outage survived by MRMS) retries
+    // ET₀ once the model recovers; in LIVE mode a week that isn't pure MRMS
+    // (merge failed → modeled, or gap days filled by the model) retries the
+    // primary source so IEM's late backfills upgrade it instead of being
+    // pinned behind the 6h TTL.
+    const missingIndependentInput = value.et0Inches == null
+      || (mode === 'live' && value.rainSource !== 'mrms');
+    const effectiveTtlMs = missingIndependentInput ? Math.min(ttlMs, 30 * 60 * 1000) : ttlMs;
     _rainCache.set(key, { at: Date.now(), ttlMs: effectiveTtlMs, value });
   }
   return value;
