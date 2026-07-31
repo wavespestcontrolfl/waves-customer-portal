@@ -103,6 +103,11 @@ describe('moot-condition resolves', () => {
       call_extraction_v1: JSON.stringify({ address_line1: '456 Other Rd', city: 'Bradenton', zip: null }),
     });
     expect(classifyTriageItem(v1Heard, noBookings, { now: NOW })).toBeNull();
+    // A UNIT alone in the legacy extraction is new partial evidence too.
+    expect(classifyTriageItem(item({
+      customer_address_line1: '123 Sample St', customer_zip: '34205',
+      call_extraction_v1: JSON.stringify({ address_line1: null, address_line2: 'Unit B', city: null, zip: null }),
+    }), noBookings, { now: NOW })).toBeNull();
     // Unparseable V1 fails closed; a NULL V1 leaves the V2 verdict standing.
     expect(classifyTriageItem(item({
       customer_address_line1: '123 Sample St', customer_zip: '34205',

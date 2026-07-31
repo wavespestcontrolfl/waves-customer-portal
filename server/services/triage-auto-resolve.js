@@ -187,6 +187,9 @@ function callSuppliedAddress(v2Raw, v1Raw) {
   }
   return Boolean(
     String(v1?.address_line1 || '').trim()
+    // A unit alone ("it's Unit B at the same street") is new partial
+    // address evidence — the routing demotion treats address_line2 as such.
+    || String(v1?.address_line2 || '').trim()
     || String(v1?.city || '').trim()
     || String(v1?.zip || '').trim(),
   );
@@ -328,12 +331,18 @@ async function sweep({ now = new Date() } = {}) {
     );
 
   // Booking provenance in one bulk query — for ALL candidate calls, since
-  // both booking_outcome AND the confirmed-unbooked address guard consult it.
+  // both booking_outcome AND the confirmed-unbooked address guard consult
+  // it. Mirrors the canonical source-link lookup's predicates: cancelled/
+  // rescheduled rows and follow-up children are NOT live bookings — a
+  // reprocessed call whose earlier appointment was cancelled must not count
+  // as booked.
   const allItemCallIds = [...new Set(items.map((i) => i.call_log_id))];
   const bookedCallIds = new Set();
   if (allItemCallIds.length) {
     const booked = await db('scheduled_services')
       .whereIn('source_call_log_id', allItemCallIds)
+      .whereNull('parent_service_id')
+      .whereNotIn('status', ['cancelled', 'rescheduled'])
       .distinct('source_call_log_id');
     for (const b of booked) bookedCallIds.add(b.source_call_log_id);
   }

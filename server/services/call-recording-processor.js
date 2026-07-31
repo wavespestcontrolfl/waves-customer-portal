@@ -26,6 +26,7 @@ const { subscribeOrResubscribe, EMAIL_RE } = require('./newsletter-subscribers')
 const { sendConfirmationEmail } = require('./newsletter-confirm');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { isLikelyE164 } = require('../utils/phone');
+const { lockTriageCall } = require('../utils/triage-locks');
 const { resolveLocation } = require('../config/locations');
 const { parseETDateTime, formatETDate, formatETTime, etDateString, etParts } = require('../utils/datetime-et');
 const { promoteCustomerOnBooking } = require('./customer-stages');
@@ -4725,10 +4726,18 @@ const CallRecordingProcessor = {
       // filed for this call — clearing review_status alone doesn't remove them
       // (the inbox lists from triage_items.status), so they'd stay actionable.
       try {
-        const dismissed = await db('triage_items')
-          .where({ call_log_id: call.id })
-          .whereIn('status', ['open', 'in_progress'])
-          .update({ status: 'dismissed', resolution_note: 'Transcript rejected as an implausible hallucination.', resolved_at: new Date(), updated_at: new Date() });
+        // Shared per-call lock contract (utils/triage-locks.js) with the
+        // nightly sweep / admin-triage / email-fanout writers — an unordered
+        // bulk card update outside the protocol can deadlock against their
+        // sibling pre-locks, and an aborted statement here would leave stale
+        // open cards under an already-cleared review_status.
+        const dismissed = await db.transaction(async (trx) => {
+          await lockTriageCall(trx, call.id);
+          return trx('triage_items')
+            .where({ call_log_id: call.id })
+            .whereIn('status', ['open', 'in_progress'])
+            .update({ status: 'dismissed', resolution_note: 'Transcript rejected as an implausible hallucination.', resolved_at: new Date(), updated_at: new Date() });
+        });
         if (dismissed > 0) logger.info(`[call-proc] Dismissed ${dismissed} stale triage card(s) for ${maskSid(callSid)} after transcript rejection`);
       } catch (trErr) {
         logger.warn(`[call-proc] stale-triage dismissal skipped for ${maskSid(callSid)}: ${trErr.message}`);
