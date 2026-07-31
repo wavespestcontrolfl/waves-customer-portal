@@ -141,6 +141,8 @@ exports.up = async function up(knex) {
     renamedFields: [],
     archived: {},
     backfilledVisitIds: [],
+    relabeledAddonIds: [],
+    addonParentVisitIds: [],
     relabeledInvoices: {},
     relabeledReminders: {},
     profileSnapshotUpdated: false,
@@ -220,9 +222,42 @@ exports.up = async function up(knex) {
   // customer-visible or terminal history and keep their snapshot. Labels
   // only (title + exact-match line-item description/category); amounts,
   // totals, and every other invoice field are never touched.
-  if (state.backfilledVisitIds.length && (await knex.schema.hasTable('invoices'))) {
+  // Cockroach-as-ADD-ON rows carry their own service_name snapshot
+  // (admin-schedule snapshots the catalog name; invoice generation and
+  // reminder registration render it verbatim), so an OPEN parent visit with
+  // the roach add-on must relabel too (codex #3108 r5). Same scoping as
+  // visits: linked to the cockroach_control row, exact old label, open
+  // parent only.
+  if (catalogCarriesNewName && row && (await knex.schema.hasTable('scheduled_service_addons'))) {
+    const addons = await knex('scheduled_service_addons')
+      .where({ service_id: row.id, service_name: OLD_NAME })
+      .select('id', 'scheduled_service_id');
+    const parentIds = [...new Set(addons.map((a) => a.scheduled_service_id).filter(Boolean))];
+    const openParentIds = new Set(
+      parentIds.length && (await knex.schema.hasTable('scheduled_services'))
+        ? (await knex('scheduled_services')
+          .whereIn('id', parentIds)
+          .whereNotIn('status', TERMINAL_VISIT_STATUSES)
+          .select('id')).map((v) => v.id)
+        : []
+    );
+    const targets = addons.filter((a) => openParentIds.has(a.scheduled_service_id));
+    if (targets.length) {
+      await knex('scheduled_service_addons')
+        .whereIn('id', targets.map((a) => a.id))
+        .update({ service_name: NEW_NAME });
+      state.relabeledAddonIds = targets.map((a) => a.id);
+      state.addonParentVisitIds = [...new Set(targets.map((a) => a.scheduled_service_id))];
+    }
+  }
+
+  // Invoices and reminders relabel for BOTH primary cockroach visits and
+  // open parents of a relabeled cockroach add-on.
+  const snapshotVisitIds = [...new Set([...state.backfilledVisitIds, ...state.addonParentVisitIds])];
+
+  if (snapshotVisitIds.length && (await knex.schema.hasTable('invoices'))) {
     const drafts = await knex('invoices')
-      .whereIn('scheduled_service_id', state.backfilledVisitIds)
+      .whereIn('scheduled_service_id', snapshotVisitIds)
       .where({ status: 'draft' })
       .select('id', 'title', 'line_items', 'service_type', 'scheduled_service_id');
     for (const inv of drafts) {
@@ -242,11 +277,27 @@ exports.up = async function up(knex) {
   // visits (exact-matching parts of possibly '&'-merged labels), recording
   // each row's prior + written value for exact rollback. Direct updates
   // send nothing; the senders are crons that read at send time.
-  if (state.backfilledVisitIds.length && (await knex.schema.hasTable('appointment_reminders'))) {
-    const reminders = await knex('appointment_reminders')
-      .whereIn('scheduled_service_id', state.backfilledVisitIds)
-      .select('id', 'service_type');
-    for (const rem of reminders) {
+  if (snapshotVisitIds.length && (await knex.schema.hasTable('appointment_reminders'))) {
+    const linked = await knex('appointment_reminders')
+      .whereIn('scheduled_service_id', snapshotVisitIds)
+      .select('id', 'service_type', 'customer_id', 'appointment_time');
+    // When a cockroach visit registered SECOND into a shared customer/time
+    // slot, the reminder merger stores the combined label on the EARLIER
+    // visit's OWNER row and suppresses the cockroach-linked row with a
+    // pristine label (codex #3108 r5) — sweep same-slot sibling rows so the
+    // deliverable owner relabels too. Slot fan-out is per linked reminder;
+    // counts here are single digits.
+    const targets = new Map(linked.map((r) => [r.id, r]));
+    for (const rem of linked) {
+      if (rem.customer_id == null || rem.appointment_time == null) continue;
+      const siblings = await knex('appointment_reminders')
+        .where({ customer_id: rem.customer_id, appointment_time: rem.appointment_time })
+        .select('id', 'service_type', 'customer_id', 'appointment_time');
+      for (const sib of siblings) {
+        if (!targets.has(sib.id)) targets.set(sib.id, sib);
+      }
+    }
+    for (const rem of targets.values()) {
       const next = relabelReminderServiceType(rem.service_type, OLD_NAME, NEW_NAME);
       if (next === null) continue;
       await knex('appointment_reminders')
@@ -352,6 +403,32 @@ exports.down = async function down(knex) {
       const patch = rollbackInvoiceSnapshot(inv, rec, NEW_NAME, OLD_NAME);
       if (!patch) continue;
       await knex('invoices').where({ id: inv.id }).update(patch);
+    }
+  }
+
+  // Revert the recorded add-on relabels — same policy as visits: a parent
+  // that went terminal since up() completed under the new label, and its
+  // add-on snapshot stays with it.
+  const addonIds = Array.isArray(state.relabeledAddonIds) ? state.relabeledAddonIds : [];
+  if (addonIds.length && (await knex.schema.hasTable('scheduled_service_addons'))) {
+    const addons = await knex('scheduled_service_addons')
+      .whereIn('id', addonIds)
+      .where({ service_name: NEW_NAME })
+      .select('id', 'scheduled_service_id');
+    const parentIds = [...new Set(addons.map((a) => a.scheduled_service_id).filter(Boolean))];
+    const terminalParents = new Set(
+      parentIds.length && (await knex.schema.hasTable('scheduled_services'))
+        ? (await knex('scheduled_services')
+          .whereIn('id', parentIds)
+          .whereIn('status', TERMINAL_VISIT_STATUSES)
+          .select('id')).map((v) => v.id)
+        : []
+    );
+    const revertIds = addons.filter((a) => !terminalParents.has(a.scheduled_service_id)).map((a) => a.id);
+    if (revertIds.length) {
+      await knex('scheduled_service_addons')
+        .whereIn('id', revertIds)
+        .update({ service_name: OLD_NAME });
     }
   }
 

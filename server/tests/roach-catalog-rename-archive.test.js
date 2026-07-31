@@ -29,11 +29,24 @@ function seedDb() {
       { id: 'v-open-2', service_type: OLD_NAME, status: 'confirmed', service_id: null },
       { id: 'v-done', service_type: OLD_NAME, status: 'completed', service_id: 'svc-roach' },
       { id: 'v-other', service_type: 'Lawn Care Service', status: 'pending', service_id: 'svc-general' },
+      // Open non-roach visit carrying the roach ADD-ON (codex r5).
+      { id: 'v-parent', service_type: 'Quarterly Pest Control Service', status: 'confirmed', service_id: 'svc-general' },
+    ],
+    scheduled_service_addons: [
+      { id: 'add-open', scheduled_service_id: 'v-parent', service_id: 'svc-roach', service_name: OLD_NAME },
+      // Add-on on a completed visit — history, never relabeled.
+      { id: 'add-done', scheduled_service_id: 'v-done', service_id: 'svc-roach', service_name: OLD_NAME },
     ],
     appointment_reminders: [
-      { id: 'rem-1', scheduled_service_id: 'v-open-1', service_type: OLD_NAME, updated_at: 'orig' },
-      { id: 'rem-merged', scheduled_service_id: 'v-open-2', service_type: `Quarterly Pest Control Service & ${OLD_NAME}`, updated_at: 'orig' },
-      { id: 'rem-other', scheduled_service_id: 'v-other', service_type: 'Lawn Care Service', updated_at: 'orig' },
+      { id: 'rem-1', scheduled_service_id: 'v-open-1', service_type: OLD_NAME, customer_id: 'cust-1', appointment_time: 'T1', updated_at: 'orig' },
+      // Real second-registration shape (codex r5): the cockroach visit's own
+      // row is suppressed with a PRISTINE label; the merged label lives on
+      // the sibling OWNER row linked to the earlier (lawn) visit.
+      { id: 'rem-suppressed', scheduled_service_id: 'v-open-2', service_type: OLD_NAME, suppressed_by_sibling: true, customer_id: 'cust-2', appointment_time: 'T2', updated_at: 'orig' },
+      { id: 'rem-owner', scheduled_service_id: 'v-other', service_type: `Lawn Care Service & ${OLD_NAME}`, customer_id: 'cust-2', appointment_time: 'T2', updated_at: 'orig' },
+      // Reminder on the add-on parent — merged label includes the add-on.
+      { id: 'rem-parent', scheduled_service_id: 'v-parent', service_type: `Quarterly Pest Control Service & ${OLD_NAME}`, customer_id: 'cust-4', appointment_time: 'T4', updated_at: 'orig' },
+      { id: 'rem-unrelated', scheduled_service_id: 'v-other', service_type: 'Lawn Care Service', customer_id: 'cust-3', appointment_time: 'T3', updated_at: 'orig' },
     ],
     service_completion_profiles: [
       { service_key: 'cockroach_control', service_name_snapshot: OLD_NAME },
@@ -55,6 +68,18 @@ function seedDb() {
         status: 'sent',
         title: OLD_NAME,
         line_items: JSON.stringify([{ description: OLD_NAME, category: OLD_NAME, amount: 350 }]),
+      },
+      // Draft on the ADD-ON parent: only the add-on line matches.
+      {
+        id: 'inv-parent',
+        scheduled_service_id: 'v-parent',
+        status: 'draft',
+        title: 'Quarterly Pest Control Service',
+        service_type: 'Quarterly Pest Control Service',
+        line_items: JSON.stringify([
+          { description: 'Quarterly Pest Control Service', category: 'General Pest', amount: 150 },
+          { description: OLD_NAME, category: OLD_NAME, amount: 350 },
+        ]),
       },
     ],
     system_settings: [],
@@ -259,25 +284,48 @@ describe('20260730160000 roach catalog rename + archive', () => {
     expect(invoiceById(db, 'inv-sent').title).toBe(OLD_NAME);
 
     const state = JSON.parse(stateRow(db).value);
-    expect(Object.keys(state.relabeledInvoices)).toEqual(['inv-draft']);
+    expect(Object.keys(state.relabeledInvoices).sort()).toEqual(['inv-draft', 'inv-parent']);
     expect(state.relabeledInvoices['inv-draft']).toMatchObject({ title: true, service_type: true });
+    // The parent draft claimed only its matching add-on line.
+    expect(state.relabeledInvoices['inv-parent']).toMatchObject({ title: false, service_type: false });
 
-    // Reminders linked to backfilled visits relabel too — including the
-    // exact-matching part of a merged multi-service label.
-    expect(db.appointment_reminders.find((r) => r.id === 'rem-1').service_type).toBe(NEW_NAME);
-    expect(db.appointment_reminders.find((r) => r.id === 'rem-merged').service_type)
-      .toBe(`Quarterly Pest Control Service & ${NEW_NAME}`);
-    expect(db.appointment_reminders.find((r) => r.id === 'rem-other').service_type).toBe('Lawn Care Service');
+    // Reminders: directly-linked rows, the same-slot sibling OWNER row
+    // holding the merged label, and the add-on parent's merged row all
+    // relabel; unrelated rows untouched.
+    const rem = (id) => db.appointment_reminders.find((r) => r.id === id);
+    expect(rem('rem-1').service_type).toBe(NEW_NAME);
+    expect(rem('rem-suppressed').service_type).toBe(NEW_NAME);
+    expect(rem('rem-owner').service_type).toBe(`Lawn Care Service & ${NEW_NAME}`);
+    expect(rem('rem-parent').service_type).toBe(`Quarterly Pest Control Service & ${NEW_NAME}`);
+    expect(rem('rem-unrelated').service_type).toBe('Lawn Care Service');
+
+    // Add-on snapshots: open parent relabels, completed parent is history.
+    const addon = (id) => db.scheduled_service_addons.find((a) => a.id === id);
+    expect(addon('add-open').service_name).toBe(NEW_NAME);
+    expect(addon('add-done').service_name).toBe(OLD_NAME);
+    expect(state.relabeledAddonIds).toEqual(['add-open']);
+    expect(state.addonParentVisitIds).toEqual(['v-parent']);
+
+    // The add-on PARENT's draft invoice relabels its matching add-on line
+    // only — the primary line and title stay the parent's own.
+    const parentInv = invoiceById(db, 'inv-parent');
+    expect(parentInv.title).toBe('Quarterly Pest Control Service');
+    const parentItems = JSON.parse(parentInv.line_items);
+    expect(parentItems[0].description).toBe('Quarterly Pest Control Service');
+    expect(parentItems[1].description).toBe(NEW_NAME);
+    expect(parentItems[1].amount).toBe(350);
 
     await migration.down(knex);
     const reverted = invoiceById(db, 'inv-draft');
     expect(reverted.title).toBe(OLD_NAME);
     expect(reverted.service_type).toBe(OLD_NAME);
     expect(JSON.parse(reverted.line_items)[0].description).toBe(OLD_NAME);
-    // Reminders restore to their recorded prior values.
-    expect(db.appointment_reminders.find((r) => r.id === 'rem-1').service_type).toBe(OLD_NAME);
-    expect(db.appointment_reminders.find((r) => r.id === 'rem-merged').service_type)
-      .toBe(`Quarterly Pest Control Service & ${OLD_NAME}`);
+    // Reminders and add-ons restore to their recorded prior values.
+    const remAfter = (id) => db.appointment_reminders.find((r) => r.id === id);
+    expect(remAfter('rem-1').service_type).toBe(OLD_NAME);
+    expect(remAfter('rem-owner').service_type).toBe(`Lawn Care Service & ${OLD_NAME}`);
+    expect(remAfter('rem-parent').service_type).toBe(`Quarterly Pest Control Service & ${OLD_NAME}`);
+    expect(db.scheduled_service_addons.find((a) => a.id === 'add-open').service_name).toBe(OLD_NAME);
   });
 
   test('a pre-relabeled invoice field is never claimed, so rollback leaves it (codex #3108 r4)', async () => {
@@ -433,6 +481,20 @@ describe('20260730160000 roach catalog rename + archive', () => {
     expect(byKey(db, 'pest_initial_german_knockdown').is_archived).toBe(false);
     const state = JSON.parse(stateRow(db).value);
     expect(Object.keys(state.archived)).toEqual(['pest_initial_palmetto_knockdown']);
+  });
+
+  test('addon rollback is skipped when the parent completed after up() (codex #3108 r5)', async () => {
+    const db = seedDb();
+    const knex = fakeKnex(db);
+    await migration.up(knex);
+    visit(db, 'v-parent').status = 'completed';
+
+    await migration.down(knex);
+
+    // The completed parent's add-on snapshot stays with the visit's label.
+    expect(db.scheduled_service_addons.find((a) => a.id === 'add-open').service_name).toBe(NEW_NAME);
+    expect(invoiceById(db, 'inv-parent').title).toBe('Quarterly Pest Control Service');
+    expect(JSON.parse(invoiceById(db, 'inv-parent').line_items)[1].description).toBe(NEW_NAME);
   });
 
   test('down() with no ownership record restores nothing', async () => {
