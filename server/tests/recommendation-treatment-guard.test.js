@@ -85,6 +85,16 @@ describe('sanitizeRecommendationsAgainstTreatment', () => {
     expect(parsed.recommendations).toHaveLength(0);
   });
 
+  test('passive deferrals are caught (r10)', () => {
+    const { parsed, dropped } = _test.sanitizeRecommendationsAgainstTreatment({
+      recommendations: [
+        { priority: 1, action: 'A fungicide application should be deferred until disease is confirmed.', reason: 'Scores are healthy.', timeframe: 'Next visit' },
+      ],
+    }, APPLIED);
+    expect(dropped).toBe(1);
+    expect(parsed.recommendations).toHaveLength(0);
+  });
+
   test('legitimate aftercare mentioning the class passes (defer must govern the treatment)', () => {
     const { parsed, dropped } = _test.sanitizeRecommendationsAgainstTreatment({
       recommendations: [

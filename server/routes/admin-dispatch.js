@@ -6311,7 +6311,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         'SERVICE_REPORT_MMS_PREVIEW_ENABLED',
         false,
       );
-      if (mmsPreviewEnabled && reportToken) {
+      // A grounded-recommendation regen still pending past its bounded wait
+      // means this preview could bake the stale confirm-time copy into an
+      // image TEXTED to the customer — unrecallable, unlike the PDF (which
+      // re-queues) and the web report (which heals). Omit the image on that
+      // rare path; the SMS still links to the live report (codex P1 r10).
+      if (mmsPreviewEnabled && reportToken && lawnRecRegenTimedOut) {
+        logger.warn(`[dispatch] MMS preview omitted for ${record.id} — grounded recommendation regen still pending; SMS sends without an image`);
+      } else if (mmsPreviewEnabled && reportToken) {
         serviceReportPreviewAsset = await buildAndStoreSmsPreviewImage({
           recordId: record.id,
           token: reportToken,

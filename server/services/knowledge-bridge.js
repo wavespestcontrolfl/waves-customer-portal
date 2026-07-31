@@ -180,6 +180,10 @@ function governedContradictionRegex(cls) {
     `\\bbefore\\s+(?:making|applying)\\s+(?:an?\\s+)?(?:[\\w'’-]+\\s+){0,2}${CLASS}`,
     // "<class> ... is not needed/warranted/required"
     `${CLASS}[^.!?]{0,50}\\bnot\\s+(?:currently\\s+)?(?:needed|necessary|required|warranted|supported|recommended)\\b`,
+    // passive deferrals — "a fungicide application should be deferred until
+    // disease is confirmed" (codex P1 r10)
+    `${CLASS}[^.!?]{0,60}\\b(?:should|could|can|may|will|must)\\s+(?:be\\s+)?(?:deferred|delayed|postponed|skipped|avoided|withheld|held\\s+off)\\b`,
+    `${CLASS}[^.!?]{0,50}\\bis\\s+(?:being\\s+)?(?:deferred|delayed|postponed|withheld)\\b`,
     // "no <class> is needed", "confirm no fungicide is needed"
     `\\b(?:confirm|verify)\\s+(?:that\\s+)?no\\s+(?:[\\w'’-]+\\s+){0,2}${CLASS}`,
     // "do not currently support active disease treatment"
