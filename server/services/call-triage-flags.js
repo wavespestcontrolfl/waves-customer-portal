@@ -567,17 +567,33 @@ function agentCommitmentSentenceVerified(quote, transcript, confirmedStartAt, ca
     else sawCaller = true;
   }
   if (!agentTurns.length || !sawCaller) return false;
+  // Negation/conditional screens run on the WHOLE TURN (codex P0, round 7l:
+  // "If the homeowner approves. We will see you Sunday at noon." — an
+  // adjacent conditional sentence must poison the commitment sentence next
+  // to it); vocabulary, affirmative form, and slot binding stay scoped to
+  // the single sentence containing the pinned quote.
+  // Terminal closure for adjacent-sentence bypasses (codex P0, round 7m:
+  // "Subject to homeowner approval. We will see you Sunday at noon."):
+  // EVERY sentence of the grounding turn must itself pass the closed
+  // commitment vocabulary — which cannot express conditions, approvals, or
+  // retractions — so any surrounding sentence with out-of-vocabulary words
+  // poisons the whole turn. Multi-sentence turns discussing anything beyond
+  // the commitment (SMS logistics, addresses, names) fail closed to triage;
+  // the pinned single-sentence commitment turn is the supported shape.
   const containing = [];
   for (const turn of agentTurns) {
-    for (const sentence of String(turn).replace(/\b([ap])\.\s?m\.?/gi, '$1m').split(/[.!?;]+/)) {
-      const ns = normalizeCommitmentText(sentence);
-      if (ns && ns.includes(q)) containing.push(ns);
+    const wholeTurn = normalizeCommitmentText(turn);
+    const sentences = String(turn).replace(/\b([ap])\.\s?m\.?/gi, '$1m').split(/[.!?;]+/)
+      .map((s) => normalizeCommitmentText(s)).filter(Boolean);
+    const turnFullyInVocabulary = sentences.every((s) => commitmentTurnVocabularyOk(s));
+    for (const ns of sentences) {
+      if (ns.includes(q)) containing.push({ ns, wholeTurn, turnFullyInVocabulary });
     }
   }
   if (!containing.length) return false;
-  return containing.every((ns) => !turnHasNegationOrHedge(ns)
-    && !turnHasUnresolvedConditional(ns)
-    && commitmentTurnVocabularyOk(ns)
+  return containing.every(({ ns, wholeTurn, turnFullyInVocabulary }) => turnFullyInVocabulary
+    && !turnHasNegationOrHedge(wholeTurn)
+    && !turnHasUnresolvedConditional(wholeTurn)
     && turnHasAffirmativeCommitmentForm(ns)
     && quoteBindsConfirmedSlot(ns, confirmedStartAt, callStartedAt));
 }
