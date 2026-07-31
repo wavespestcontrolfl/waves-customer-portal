@@ -176,6 +176,33 @@ describe('multi-situs master parcel record', () => {
     expect(parsed.yearBuilt).toBe(1998);
   });
 
+  test('a park with a commercial clubhouse/office building still goes slim', () => {
+    // A land-lease park's one assessed building is often its office — a
+    // commercial primary building must not defeat the guard at community
+    // scale and publish park-wide facts with an Office type.
+    const parsed = _private.parseManateePaoRecord({
+      address: '4512 Seagrape Cir, Palmetto, FL 34221',
+      search: { parcelId: '900000100', situsAddress: '4512 SEAGRAPE CIR', city: 'PALMETTO', situsCount: 143 },
+      land: parkLand,
+      buildings: {
+        cols: [
+          { title: 'Type' }, { title: 'Bldg' }, { title: 'Classification' }, { title: 'Yrblt' },
+          { title: 'Effyr' }, { title: 'Stories' }, { title: 'UnRoof' }, { title: 'LivBus' },
+          { title: 'Rooms' }, { title: 'Const/ExtWall' }, { title: 'RoofMaterial' }, { title: 'RoofType' },
+        ],
+        rows: [
+          ['OFFICE', '1', 'OFFICE', '1985', '1999', '1', '3,200', '2,800', '', 'CONCRETE BLOCK', 'SHINGLE', 'GABLE'],
+        ],
+      },
+      features: null,
+    });
+
+    expect(parsed._multiSitusParcel).toEqual({ situsCount: 143 });
+    expect(parsed.propertyType).toBeNull();
+    expect(parsed.squareFootage).toBeNull();
+    expect(parsed.lotSize).toBeNull();
+  });
+
   test('park signal survives an AI-trio merge the county record does not win', () => {
     const countyRecord = {
       _source: 'county',

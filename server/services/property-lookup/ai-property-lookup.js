@@ -796,6 +796,12 @@ function isCommercialBuildingType(propertyType) {
   return COMMERCIAL_BUILDING_PROPERTY_TYPES.has(String(propertyType || ''));
 }
 
+// Multi-situs parcels whose primary building classifies commercial keep the
+// full parcel-wide parse only up to this many situs addresses (storefront
+// scale). Above it, the parcel reads as a community whose one commercial
+// building is an amenity (park office/clubhouse), not a shopping center.
+const COMMERCIAL_MULTI_SITUS_MAX = 12;
+
 // County parcels signal commercial through the DOR use code (majors 10-39
 // commercial, 40-49 industrial) or the county land-use description even when
 // neither maps to an estimator property type ("Warehousing, Distribution"
@@ -3136,10 +3142,19 @@ function parseManateePaoRecord({ address, search, land, buildings, features }) {
   // with situsCount (park semantics only at association scale, ≥5).
   // COMMERCIAL multi-situs parcels (a shopping center's storefront
   // addresses) keep the full parse: the commercial lane prices whole
-  // buildings, so the parcel-wide facts are the right ones there.
+  // buildings, so the parcel-wide facts are the right ones there. But a
+  // commercial PRIMARY BUILDING alone is not parcel-level corroboration —
+  // a land-lease park's one assessed building is often its office or
+  // clubhouse, and publishing park-wide facts with an Office type would
+  // route a resident commercially. Storefront parcels carry a handful of
+  // situs addresses; land-lease communities carry dozens to hundreds — the
+  // situs count is the strongest in-lane discriminator, so the commercial
+  // exemption only holds at storefront scale.
   // Before the situs-cell split these rows could never match at all, so no
   // valid county dimensions are lost relative to the old behavior.
-  if ((search.situsCount || 1) > 1 && !commercialSized) {
+  const situsCount = search.situsCount || 1;
+  const commercialStorefrontScale = commercialSized && situsCount <= COMMERCIAL_MULTI_SITUS_MAX;
+  if (situsCount > 1 && !commercialStorefrontScale) {
     return {
       squareFootage: null,
       lotSize: null,
