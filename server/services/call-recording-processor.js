@@ -3535,7 +3535,11 @@ const RECURRING_OVERRIDE_SOURCES = new Set([
   'mud dauber nest removal',
   'fire ant treatment',
   'general pest control',
+  // Both roach forms: the catalog row renamed Cockroach Control Service →
+  // Cockroach Treatment (migration 20260730160000), and stored pre-rename
+  // extractions still carry the old name.
   'cockroach control',
+  'cockroach treatment',
   'initial pest cleanout',
 ]);
 // Strips the "Service" token at the end OR before a parenthetical, so both

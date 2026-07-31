@@ -138,6 +138,13 @@ describe('applyRecurringIntentDefault', () => {
   test('generic one-time pest catalog names are covered (knockdown protocols deliberately not)', () => {
     expect(applyRecurringIntentDefault(lead({ matched_service: 'Cockroach Control Service' }), 'Caller: I want a recurring package.').matched_service)
       .toBe('Quarterly Pest Control Service');
+    // The renamed catalog row (migration 20260730160000) — new extractions
+    // emit this name, so it must override exactly like the legacy one
+    // (codex #3108 P1: the extractor's example cites the new name, and a
+    // missing entry booked the one-time roach service over the asked-for
+    // recurring program).
+    expect(applyRecurringIntentDefault(lead({ matched_service: 'Cockroach Treatment' }), 'Caller: I want a recurring package.').matched_service)
+      .toBe('Quarterly Pest Control Service');
     expect(applyRecurringIntentDefault(lead({ matched_service: 'Initial Pest Cleanout' }), 'Caller: sign me up for the quarterly plan.').matched_service)
       .toBe('Quarterly Pest Control Service');
     expect(applyRecurringIntentDefault(lead({ matched_service: 'Initial German Roach Knockdown Service' }), 'Caller: I want a recurring package.').matched_service)
