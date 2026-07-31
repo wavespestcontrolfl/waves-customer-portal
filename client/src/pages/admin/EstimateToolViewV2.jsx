@@ -2802,13 +2802,17 @@ export default function EstimateToolViewV2({
     setVerifySaveState("");
   }, [form.address, form.homeSqFt, form.lotSqFt, form.stories]);
 
-  // Live engine preview for the stale-imagery turf fallback (codex P1 r2
-  // #3098). profile.turfFallbackPreviewSf is computed from lookup-time
-  // facts; when the rep edits the dims/features that drive the engine's
-  // legacy fallback, re-ask /turf-preview so the displayed number keeps
-  // tracking what /calculate-estimate will price. Debounced; a sequence
-  // counter drops out-of-order responses. Null while no fresh answer —
-  // the render falls back to the profile's lookup-time value.
+  // Live engine preview for the stale-imagery turf fallback (codex P1 r2 +
+  // pre-push P1 r3 #3098). profile.turfFallbackPreviewSf is computed from
+  // lookup-time facts; when the rep edits the fields that feed pricing,
+  // re-ask /turf-preview so the displayed number keeps tracking what
+  // /calculate-estimate will price. The payload is the SAME profile shape
+  // doGenerate builds (spread profile + the identical form overrides,
+  // parseInt semantics and the blank-bed-area→0 default included) so the
+  // server can run it through the real translate/engine boundary.
+  // Debounced; a sequence counter drops out-of-order responses. Null while
+  // no fresh answer — the render falls back to the profile's lookup-time
+  // value.
   const [staleImageryPreviewSf, setStaleImageryPreviewSf] = useState(null);
   const staleImageryPreviewSeq = useRef(0);
   const turfUnobservable = enrichedProfile?.turfObservation === "unobservable";
@@ -2818,26 +2822,35 @@ export default function EstimateToolViewV2({
     const seq = ++staleImageryPreviewSeq.current;
     const timer = setTimeout(async () => {
       try {
+        // Mirrors doGenerate's manualNumber (parseInt; blank keeps fallback).
+        const manualNumber = (value, fallback = 0) => {
+          const n = parseInt(value, 10);
+          return Number.isFinite(n) ? n : fallback;
+        };
+        const baseProfile = enrichedProfile || {};
+        const previewProfile = {
+          ...baseProfile,
+          homeSqFt: manualNumber(form.homeSqFt, Number(baseProfile.homeSqFt) || 0),
+          lotSqFt: manualNumber(form.lotSqFt, Number(baseProfile.lotSqFt) || 0),
+          stories: manualNumber(form.stories, Number(baseProfile.stories) || 1),
+          estimatedBedAreaSf: manualNumber(form.bedArea, Number(baseProfile.estimatedBedAreaSf) || 0),
+          pool: form.hasPool === "YES" ? "YES" : "NO",
+          poolCage: form.hasPoolCage === "YES" ? "YES" : "NO",
+          shrubDensity: form.shrubDensity || baseProfile.shrubDensity,
+          treeDensity: form.treeDensity || baseProfile.treeDensity,
+          landscapeComplexity: form.landscapeComplexity || baseProfile.landscapeComplexity,
+          nearWater: form.nearWater === "YES" ? "YES" : "NO",
+          propertyType: form.propertyType || baseProfile.propertyType,
+        };
+        // Preview only renders while Confirmed Sq Ft is blank.
+        delete previewProfile.measuredTurfSf;
         const r = await fetch("/api/admin/estimator/turf-preview", {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
             Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
           },
-          body: JSON.stringify({
-            lotSqFt: Number(form.lotSqFt) || 0,
-            homeSqFt: Number(form.homeSqFt) || 0,
-            stories: Number(form.stories) || 1,
-            propertyType: form.propertyType,
-            features: {
-              pool: form.hasPool === "YES",
-              poolCage: form.hasPoolCage === "YES",
-              shrubs: String(form.shrubDensity || "").toLowerCase(),
-              trees: String(form.treeDensity || "").toLowerCase(),
-              complexity: String(form.landscapeComplexity || "").toLowerCase(),
-              nearWater: form.nearWater === "YES",
-            },
-          }),
+          body: JSON.stringify({ profile: previewProfile }),
         });
         if (!r.ok) return;
         const data = await r.json();
@@ -2851,9 +2864,11 @@ export default function EstimateToolViewV2({
     return () => clearTimeout(timer);
   }, [
     turfUnobservable,
+    enrichedProfile,
     form.lotSqFt,
     form.homeSqFt,
     form.stories,
+    form.bedArea,
     form.propertyType,
     form.hasPool,
     form.hasPoolCage,

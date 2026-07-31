@@ -30,7 +30,7 @@ jest.mock('../services/logger', () => ({
 }));
 
 const { detectStaleImageryTurfConflict } = require('../services/property-lookup/ai-property-lookup');
-const { buildEnrichedProfile } = require('../routes/property-lookup-v2');
+const { buildEnrichedProfile, translateV2CallToV1Input } = require('../routes/property-lookup-v2');
 const { computeTurfArea, calculatePropertyProfile } = require('../services/pricing-engine/property-calculator');
 
 // Recent build — the detector only sanitizes new-construction
@@ -219,45 +219,32 @@ describe('buildEnrichedProfile stale-imagery sanitization', () => {
 });
 
 describe('pricing parity after sanitization', () => {
-  // The number an unconfirmed estimate is actually priced with comes from
-  // calculatePropertyProfile, which always hands computeTurfArea its legacy
-  // building/hardscape fallback — NOT the bare lot ladder (codex P1 #3098).
-  // This input mirrors the /calculate-estimate request path for the
-  // sanitized profile: same dims, no turf/impervious/bed fields.
-  function engineInputFromProfile(profile, extra = {}) {
-    return {
-      lotSqFt: profile.lotSqFt,
-      homeSqFt: profile.homeSqFt,
-      stories: profile.stories,
-      footprintSqFt: profile.footprint,
-      propertyType: 'single_family',
-      estimatedTurfSf: profile.estimatedTurfSf,
-      turfSource: profile.turfSource,
-      imperviousSurfacePercent: profile.imperviousSurfacePercent,
-      imperviosSurfacePercent: profile.imperviosSurfacePercent,
-      estimatedBedAreaSf: profile.estimatedBedAreaSf,
-      features: {
-        pool: false,
-        poolCage: false,
-        shrubs: 'light',
-        trees: 'light',
-        complexity: 'simple',
-        nearWater: false,
-      },
-      ...extra,
+  // Faithfulness is judged against the REAL request path (pre-push P1 r3
+  // #3098): doGenerate spreads the profile, defaults a blank bed-area field
+  // to estimatedBedAreaSf 0, and /calculate-estimate runs
+  // translateV2CallToV1Input -> calculatePropertyProfile. That explicit
+  // bed-0 flips computeTurfArea off the legacy fallback and onto the
+  // plausible-max-capped lot ladder — a hand-built engine input misses it.
+  function clientProfileFor(profile, overrides = {}) {
+    const clientProfile = {
+      ...profile,
+      estimatedBedAreaSf: Number(profile.estimatedBedAreaSf) || 0,
+      ...overrides,
     };
+    delete clientProfile.measuredTurfSf;
+    return clientProfile;
   }
 
-  test('turfFallbackPreviewSf IS the number the engine prices on the real path', () => {
+  function pricedTurfSf(profileLike) {
+    const v1Input = translateV2CallToV1Input(profileLike, [], {});
+    return Math.round(calculatePropertyProfile(v1Input).lawnSqFt);
+  }
+
+  test('turfFallbackPreviewSf IS the number the real request path prices', () => {
     const profile = buildEnrichedProfile(newBuildRecord(), bareDirtAi(), 27.58, -82.42);
     expect(profile.turfFallbackPreviewSf).toBeGreaterThan(0);
-    // Sanity: a building/hardscape fallback, not the full lot and not zero.
     expect(profile.turfFallbackPreviewSf).toBeLessThan(profile.lotSqFt);
-
-    const engine = calculatePropertyProfile(engineInputFromProfile(profile));
-    expect(engine.lawnSqFt).toBe(profile.turfFallbackPreviewSf);
-    // The engine grades this as its legacy fallback: LOW + field-verify.
-    expect(engine.turfEstimated ?? true).toBe(true);
+    expect(profile.turfFallbackPreviewSf).toBe(pricedTurfSf(clientProfileFor(profile)));
   });
 
   test('REGRESSION — the unsanitized poisoned shape prices the FULL lot as turf', () => {
@@ -277,8 +264,7 @@ describe('pricing parity after sanitization', () => {
 
   test('a measured turf entry out-ranks the guard fallback (override precedence)', () => {
     const profile = buildEnrichedProfile(newBuildRecord(), bareDirtAi(), 27.58, -82.42);
-    const engine = calculatePropertyProfile(engineInputFromProfile(profile, { measuredTurfSf: 5200 }));
-    expect(engine.lawnSqFt).toBe(5200);
+    expect(pricedTurfSf({ ...clientProfileFor(profile), measuredTurfSf: 5200 })).toBe(5200);
   });
 
   test('no preview on normal profiles — the field only exists when the guard fired', () => {
@@ -289,11 +275,27 @@ describe('pricing parity after sanitization', () => {
 });
 
 describe('POST /turf-preview (live engine preview for form edits)', () => {
-  // codex P1 r2 #3098: the client re-asks the engine when the rep edits the
-  // dims/features after lookup, so the displayed fallback keeps tracking
-  // what /calculate-estimate prices. Handler invoked off the router stack
-  // (repo has no supertest); it is pure computation, no DB.
+  // codex P1 r2 + pre-push P1 r3 #3098: the client re-sends the SAME
+  // doGenerate-shaped profile as the form is edited; the endpoint runs it
+  // through the SAME translate/engine boundary /calculate-estimate uses.
+  // Handler invoked off the router stack (repo has no supertest); pure
+  // computation, no DB.
   const router = require('../routes/property-lookup-v2');
+
+  function clientProfileFor(profile, overrides = {}) {
+    const clientProfile = {
+      ...profile,
+      estimatedBedAreaSf: Number(profile.estimatedBedAreaSf) || 0,
+      ...overrides,
+    };
+    delete clientProfile.measuredTurfSf;
+    return clientProfile;
+  }
+
+  function pricedTurfSf(profileLike) {
+    const v1Input = translateV2CallToV1Input(profileLike, [], {});
+    return Math.round(calculatePropertyProfile(v1Input).lawnSqFt);
+  }
 
   function invoke(body) {
     const layer = router.stack.find((l) => l.route?.path === '/turf-preview' && l.route.methods.post);
@@ -308,39 +310,28 @@ describe('POST /turf-preview (live engine preview for form edits)', () => {
     });
   }
 
-  const LIGHT_SIMPLE = { pool: false, poolCage: false, shrubs: 'light', trees: 'light', complexity: 'simple', nearWater: false };
-
-  test('returns the engine number, matching the lookup-time profile preview', async () => {
-    const { status, payload } = await invoke({
-      lotSqFt: 6985, homeSqFt: 2362, stories: 2,
-      propertyType: 'Single Family', features: LIGHT_SIMPLE,
-    });
-    expect(status).toBe(200);
-    const engine = calculatePropertyProfile({
-      lotSqFt: 6985, homeSqFt: 2362, stories: 2,
-      propertyType: 'single_family', features: LIGHT_SIMPLE,
-    });
-    expect(payload.turfSf).toBe(Math.round(engine.lawnSqFt));
+  test('returns the real-request-path number, matching the lookup-time profile preview', async () => {
     const profile = buildEnrichedProfile(newBuildRecord(), bareDirtAi(), 27.58, -82.42);
+    const clientProfile = clientProfileFor(profile);
+    const { status, payload } = await invoke({ profile: clientProfile });
+    expect(status).toBe(200);
+    expect(payload.turfSf).toBe(pricedTurfSf(clientProfile));
     expect(payload.turfSf).toBe(profile.turfFallbackPreviewSf);
   });
 
-  test("tracks edited dims — codex's 10,000 sf lot example prices via the engine", async () => {
-    const { payload } = await invoke({
-      lotSqFt: 10000, homeSqFt: 2362, stories: 2,
-      propertyType: 'Single Family', features: LIGHT_SIMPLE,
-    });
-    const engine = calculatePropertyProfile({
-      lotSqFt: 10000, homeSqFt: 2362, stories: 2,
-      propertyType: 'single_family', features: LIGHT_SIMPLE,
-    });
-    expect(payload.turfSf).toBe(Math.round(engine.lawnSqFt));
-    expect(payload.turfSf).toBeGreaterThan(0);
+  test("tracks edited dims — the reviewer's 10,000 sf lot example prices via the real path", async () => {
+    const profile = buildEnrichedProfile(newBuildRecord(), bareDirtAi(), 27.58, -82.42);
+    const edited = clientProfileFor(profile, { lotSqFt: 10000 });
+    const { payload } = await invoke({ profile: edited });
+    expect(payload.turfSf).toBe(pricedTurfSf(edited));
+    expect(payload.turfSf).toBeGreaterThan(profile.turfFallbackPreviewSf);
   });
 
-  test('junk input degrades to turfSf 0 without throwing', async () => {
-    const { status, payload } = await invoke({ lotSqFt: 'x', stories: -4, features: ['nope'] });
+  test('missing profile is a 400; junk profile degrades without throwing', async () => {
+    expect((await invoke({})).status).toBe(400);
+    expect((await invoke({ profile: [1, 2] })).status).toBe(400);
+    const { status, payload } = await invoke({ profile: { lotSqFt: 'x', stories: -4 } });
     expect(status).toBe(200);
-    expect(payload.turfSf).toBe(0);
+    expect(payload.turfSf).toBeGreaterThanOrEqual(0);
   });
 });

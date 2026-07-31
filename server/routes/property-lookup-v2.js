@@ -776,41 +776,24 @@ router.post('/property-lookup/verify', async (req, res) => {
 });
 
 // Engine-faithful treatable-turf fallback preview for the estimator's
-// stale-imagery path (codex P1 r2 #3098). When the conflict guard discarded
-// the vision areas and Confirmed Sq Ft is blank, the client must display
-// the number /calculate-estimate would actually price — and keep displaying
-// it as the rep edits lot/home/stories/features. Recomputed HERE so the
-// hardscape brackets and turf factors never fork into the client bundle.
-// Pure computation off the request body; no DB, no external calls.
+// stale-imagery path (codex P1 r2 + pre-push P1 r3 #3098). When the
+// conflict guard discarded the vision areas and Confirmed Sq Ft is blank,
+// the client must display the number /calculate-estimate would actually
+// price — and keep displaying it as the rep edits the form. The body is the
+// SAME client-built profile shape doGenerate sends (bed-area defaulted to
+// 0, pool/densities folded in), run through the SAME
+// translateV2CallToV1Input boundary /calculate-estimate uses — a
+// hand-built engine input here previewed 6,196 where the real request
+// priced 7,944 (bed-0 + plausible-max cap path). Pure computation; no DB.
 // (Router-level adminAuthenticate + requireTechOrAdmin already cover this.)
 router.post('/turf-preview', (req, res) => {
-  const body = req.body || {};
-  const boundedNumber = (value, max) => {
-    const n = Number(value);
-    return Number.isFinite(n) && n >= 0 && n <= max ? n : 0;
-  };
-  const enumOr = (value, allowed, fallback) => {
-    const s = String(value || '').toLowerCase();
-    return allowed.includes(s) ? s : fallback;
-  };
-  const rawFeatures = body.features && typeof body.features === 'object' && !Array.isArray(body.features)
-    ? body.features
-    : {};
+  const profile = req.body?.profile;
+  if (!profile || typeof profile !== 'object' || Array.isArray(profile)) {
+    return res.status(400).json({ error: 'profile required' });
+  }
   try {
-    const enginePreview = calculatePropertyProfile({
-      lotSqFt: boundedNumber(body.lotSqFt, 50_000_000),
-      homeSqFt: boundedNumber(body.homeSqFt, 5_000_000),
-      stories: Math.max(1, boundedNumber(body.stories, 100) || 1),
-      propertyType: normalizePricingPropertyType(body.propertyType) || 'single_family',
-      features: {
-        pool: rawFeatures.pool === true,
-        poolCage: rawFeatures.poolCage === true,
-        shrubs: enumOr(rawFeatures.shrubs, ['light', 'moderate', 'heavy'], 'moderate'),
-        trees: enumOr(rawFeatures.trees, ['light', 'moderate', 'heavy'], 'moderate'),
-        complexity: enumOr(rawFeatures.complexity, ['simple', 'moderate', 'complex'], 'moderate'),
-        nearWater: rawFeatures.nearWater === true,
-      },
-    });
+    const v1Input = translateV2CallToV1Input(profile, [], {});
+    const enginePreview = calculatePropertyProfile(v1Input);
     res.json({ turfSf: Math.max(0, Math.round(Number(enginePreview?.lawnSqFt) || 0)) });
   } catch (err) {
     logger.warn('[property-lookup] turf-preview failed', { error: err.message });
@@ -1804,37 +1787,25 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
   };
 
   // The number the pricing engine will actually use on this profile if the
-  // operator leaves Confirmed Sq Ft blank: calculatePropertyProfile always
-  // supplies its legacy building/hardscape fallback to computeTurfArea, so
-  // the client's own 20%-hardscape/15%-beds lot heuristic would preview a
-  // DIFFERENT number than gets priced (codex P1 #3098). Run the real engine
-  // on the same facts that prefill the estimator form and expose the
-  // result; the client's lot-estimate fallback displays this when the
-  // conflict guard fired. Static by design — post-load form edits re-price
-  // through /calculate-estimate anyway, and the HIGH confirm-before-pricing
-  // flag stands either way. Fail-open: a preview miss leaves the client on
-  // its own heuristic rather than breaking the profile.
+  // operator leaves Confirmed Sq Ft blank (codex P1 r1 + pre-push P1 r3
+  // #3098). Faithfulness is structural, not approximated: the profile goes
+  // through the SAME translateV2CallToV1Input boundary /calculate-estimate
+  // uses, with the one client-side transform doGenerate always applies —
+  // a blank bed-area field lands as estimatedBedAreaSf 0 — folded in
+  // (that explicit 0 flips computeTurfArea from the legacy fallback onto
+  // the plausible-max-capped lot ladder, a materially different number).
+  // The client's lot-estimate fallback displays this when the conflict
+  // guard fired, and re-asks /turf-preview (same computation) as the form
+  // is edited. Fail-open: a preview miss leaves the client on its own
+  // heuristic rather than breaking the profile.
   if (staleImageryConflict) {
     try {
-      const enginePreview = calculatePropertyProfile({
-        lotSqFt: profile.lotSqFt,
-        homeSqFt: profile.homeSqFt,
-        stories: profile.stories,
-        footprintSqFt: profile.footprint,
-        // Same normalization the estimate request path applies before the
-        // engine sees the type (estimateHardscape keys on the v1 tokens).
-        propertyType: normalizePricingPropertyType(profile.propertyType) || 'single_family',
-        estimatedTurfSf: profile.estimatedTurfSf,
-        turfSource: profile.turfSource,
-        features: {
-          pool: profile.pool === 'YES',
-          poolCage: profile.poolCage === 'YES',
-          shrubs: String(profile.shrubDensity || 'MODERATE').toLowerCase(),
-          trees: String(profile.treeDensity || 'MODERATE').toLowerCase(),
-          complexity: String(profile.landscapeComplexity || 'MODERATE').toLowerCase(),
-          nearWater: profile.nearWater === 'YES',
-        },
-      });
+      const previewProfile = {
+        ...profile,
+        estimatedBedAreaSf: Number(profile.estimatedBedAreaSf) || 0,
+      };
+      delete previewProfile.measuredTurfSf;
+      const enginePreview = calculatePropertyProfile(translateV2CallToV1Input(previewProfile, [], {}));
       const previewSf = Number(enginePreview?.lawnSqFt);
       profile.turfFallbackPreviewSf = Number.isFinite(previewSf) && previewSf > 0
         ? Math.round(previewSf)
