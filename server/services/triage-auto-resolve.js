@@ -12,12 +12,14 @@
  * auto-applies with an audit trail, exceptions stay parked):
  *
  *   RESOLVE (the flagged condition is PROVABLY moot now):
- *   - address flags → the call's customer now has a service address on file
- *     (address_line1 + zip both present)
- *   - missing_last_name → the customer now has a last name
- *   - scheduling/quality flags → the call verifiably produced a booking
- *     (scheduled_services.source_call_log_id provenance — not same-day
- *     coincidence)
+ *   - address flags → a trusted, pre-existing, live customer record has a
+ *     service address on file AND the call supplied no address of its own
+ *   - missing_last_name → a trusted, pre-existing, live customer record has
+ *     a surname the call did not itself supply, for a caller whose first
+ *     name agrees with that record
+ *   (Scheduling-doubt cards get NO booking-based auto-resolution: linkage
+ *   timestamps can't distinguish a current routing outcome from a stale
+ *   pre-reprocess booking, so those cards wait for human verdicts.)
  *
  *   DISMISS (informational card aged out unactioned):
  *   - spam_or_wrong_number after SPAM_AGE_DAYS
@@ -64,19 +66,6 @@ const ADDRESS_MOOT_CODES = new Set([
 // not treat it as authoritative either.
 const TRUSTED_CUSTOMER_STAGES = new Set(['active_customer', 'won', 'at_risk']);
 
-// Cleared when THIS call provably produced a booking (source_call_log_id
-// provenance): the SCHEDULING doubt the card raised was answered by the
-// booking itself. Deliberately EXCLUDES reschedule_or_cancel and
-// existing_appointment_coordination (cards carrying a requested schedule
-// TRANSITION a new booking proves nothing about) and
-// low_extraction_confidence (the fail-open path books DESPITE the doubt and
-// files the card so the office confirms the low-confidence customer/
-// service/contact fields — booking creation validates none of them).
-const BOOKING_OUTCOME_CODES = new Set([
-  'not_confirmed', 'confirmed_without_start_time', 'ambiguous_scheduling',
-  'ambiguous_pest_or_service', 'voicemail',
-]);
-
 // Informational flags with no owed work attached — they inform a record edit
 // or a callback that either happened long ago or never will. Aged cards keep
 // their payload (nothing is deleted) and dedup re-arms on terminal status,
@@ -115,7 +104,6 @@ const ADVISORY_AGE_CODES = new Set([
 const RULE_NOTES = {
   address_moot: 'Auto-resolved: customer record now has a service address on file (street + zip); address flag is moot.',
   name_moot: 'Auto-resolved: customer record now has a last name; flag is moot.',
-  booking_outcome: 'Auto-resolved: this call produced a booking (scheduled_services source_call_log_id linkage); the scheduling/quality flag is moot.',
   spam_aged: `Auto-dismissed: spam/wrong-number advisory unactioned after ${SPAM_AGE_DAYS} days.`,
   advisory_aged: `Auto-dismissed: informational flag unactioned after ${ADVISORY_AGE_DAYS} days.`,
 };
@@ -202,6 +190,34 @@ function callSuppliedAddress(v2Raw, v1Raw) {
   );
 }
 
+// Does the caller's heard FIRST name agree with the linked customer record?
+// The phone matcher deliberately falls back to the sole phone owner even
+// when name matching fails — a spouse or new phone owner can be linked to
+// an account whose surname is not theirs, and that surname must not moot
+// the caller's own full-name task. Fail closed: no heard first name or an
+// unparseable extraction keeps the card.
+function callerMatchesCustomerFirstName(item) {
+  const onFile = String(item.customer_first_name || '').trim().toLowerCase();
+  if (!onFile) return false;
+  const heard = [];
+  for (const raw of [item.call_extraction_v1, item.call_extraction]) {
+    if (raw == null) continue;
+    let parsed = raw;
+    if (typeof parsed === 'string') {
+      try {
+        parsed = JSON.parse(parsed);
+      } catch {
+        return false;
+      }
+    }
+    const v1Name = String(parsed?.first_name || '').trim().toLowerCase();
+    const v2Name = String(parsed?.caller?.first_name || '').trim().toLowerCase();
+    if (v1Name) heard.push(v1Name);
+    if (v2Name) heard.push(v2Name);
+  }
+  return heard.length > 0 && heard.includes(onFile);
+}
+
 // Was the customer record created BEFORE this call? If the record was born
 // from (or after) the call, its on-file address most plausibly came from
 // this very call's unvalidated extraction — resolving the card against it
@@ -277,6 +293,7 @@ function classifyTriageItem(item, ctx, { now = new Date() } = {}) {
   // mirror of the routing guard's on-file-address recovery condition. A
   // call that DID state an address keeps its card held for validation.
   if (ADDRESS_MOOT_CODES.has(code)
+      && !item.customer_deleted_at
       && TRUSTED_CUSTOMER_STAGES.has(String(item.customer_pipeline_stage || '').trim().toLowerCase())
       && customerPredatesCall(item)
       && !hasNewAddressEvidence(item.payload)
@@ -292,22 +309,16 @@ function classifyTriageItem(item, ctx, { now = new Date() } = {}) {
   // that predates the call (record older than the call AND not matching
   // what the call heard) is independent evidence.
   if (code === 'missing_last_name'
+      && !item.customer_deleted_at
+      && TRUSTED_CUSTOMER_STAGES.has(String(item.customer_pipeline_stage || '').trim().toLowerCase())
       && customerPredatesCall(item)
+      && callerMatchesCustomerFirstName(item)
       && !surnameCameFromCall(item)
       && String(item.customer_last_name || '').trim() !== '') {
     return { action: 'resolve', rule: 'name_moot' };
   }
-  // Booking-outcome requires the booking to be the CURRENT routing result:
-  // the live source-linked row must have been created at/after this card. A
-  // pre-reprocess booking surviving while the new extraction filed fresh
-  // doubt cards is a discrepancy to review, not a resolution.
-  if (BOOKING_OUTCOME_CODES.has(code)) {
-    const bookedAt = ctx.bookedCallLatest?.get(item.call_log_id);
-    if (bookedAt && item.created_at && new Date(bookedAt) >= new Date(item.created_at)) {
-      return { action: 'resolve', rule: 'booking_outcome' };
-    }
-  }
-  if (code === 'spam_or_wrong_number' && ageDays(item.created_at, now) >= SPAM_AGE_DAYS) {
+  if (code === 'spam_or_wrong_number'
+      && ageDays(item.created_at, now) >= SPAM_AGE_DAYS) {
     return { action: 'dismiss', rule: 'spam_aged' };
   }
   if (ADVISORY_AGE_CODES.has(code)
@@ -340,38 +351,34 @@ async function sweep({ now = new Date() } = {}) {
       'cl.ai_extraction_enriched as call_extraction',
       'cl.ai_extraction as call_extraction_v1',
       'c.created_at as customer_created_at',
+      'c.deleted_at as customer_deleted_at',
       'c.pipeline_stage as customer_pipeline_stage',
       'c.address_line1 as customer_address_line1',
       'c.zip as customer_zip',
+      'c.first_name as customer_first_name',
       'c.last_name as customer_last_name',
     );
 
-  // Booking provenance in one bulk query — for ALL candidate calls, since
-  // both booking_outcome AND the confirmed-unbooked address guard consult
-  // it. Mirrors the canonical source-link lookup's predicates: cancelled/
-  // rescheduled rows and follow-up children are NOT live bookings — a
-  // reprocessed call whose earlier appointment was cancelled must not count
-  // as booked.
-  const allItemCallIds = [...new Set(items.map((i) => i.call_log_id))];
-  const bookedCallIds = new Set();
-  const bookedCallLatest = new Map();
-  if (allItemCallIds.length) {
-    const booked = await db('scheduled_services')
-      .whereIn('source_call_log_id', allItemCallIds)
+  // Booking provenance (live source-linked rows only — the canonical
+  // lookup's predicates: no cancelled/rescheduled rows, no follow-up
+  // children) feeds the confirmed-unbooked address guard.
+  const loadBookedCallIds = async (conn, callIds) => {
+    const set = new Set();
+    if (!callIds.length) return set;
+    const booked = await conn('scheduled_services')
+      .whereIn('source_call_log_id', callIds)
       .whereNull('parent_service_id')
       .whereNotIn('status', ['cancelled', 'rescheduled'])
-      .groupBy('source_call_log_id')
-      .select('source_call_log_id')
-      .max('created_at as latest_created_at');
-    for (const b of booked) {
-      bookedCallIds.add(b.source_call_log_id);
-      bookedCallLatest.set(b.source_call_log_id, b.latest_created_at);
-    }
-  }
+      .distinct('source_call_log_id');
+    for (const b of booked) set.add(b.source_call_log_id);
+    return set;
+  };
+  const allItemCallIds = [...new Set(items.map((i) => i.call_log_id))];
+  const bookedCallIds = await loadBookedCallIds(db, allItemCallIds);
 
   const decisions = [];
   for (const item of items) {
-    const decision = classifyTriageItem(item, { bookedCallIds, bookedCallLatest }, { now });
+    const decision = classifyTriageItem(item, { bookedCallIds }, { now });
     if (decision) decisions.push({ item, ...decision });
   }
   const applied = decisions.slice(0, MAX_TRANSITIONS_PER_RUN);
@@ -408,9 +415,18 @@ async function sweep({ now = new Date() } = {}) {
         .forUpdate()
         .select('id');
     }
+    // Re-verify every decision UNDER the locks with fresh booking
+    // provenance: a source-linked appointment cancelled between the initial
+    // scan and this transaction must re-arm the confirmed-unbooked guard —
+    // the pre-lock classification is a candidate list, not a verdict.
+    const freshBookedCallIds = await loadBookedCallIds(trx, allCallIds);
+    const reverified = applied.filter((d) => {
+      const again = classifyTriageItem(d.item, { bookedCallIds: freshBookedCallIds }, { now });
+      return again && again.rule === d.rule && again.action === d.action;
+    });
     const touchedCalls = new Map(); // call_log_id -> status we applied last
     for (const rule of Object.keys(RULE_NOTES)) {
-      const group = applied.filter((d) => d.rule === rule);
+      const group = reverified.filter((d) => d.rule === rule);
       if (!group.length) continue;
       const action = group[0].action;
       const status = action === 'resolve' ? 'resolved' : 'dismissed';
@@ -466,7 +482,6 @@ module.exports = {
   callConfirmedUnbooked,
   surnameCameFromCall,
   ADDRESS_MOOT_CODES,
-  BOOKING_OUTCOME_CODES,
   ADVISORY_AGE_CODES,
   RULE_NOTES,
   SPAM_AGE_DAYS,

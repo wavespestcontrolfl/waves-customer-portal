@@ -31,9 +31,11 @@ function item(over = {}) {
     id: 't1', call_log_id: 'call-1', reason_code: 'address_unverifiable',
     status: 'open', severity: 'advisory', created_at: FRESH, payload: { flag: 'address_unverifiable', confidence: 0.5 },
     call_created_at: CALL_AT, customer_created_at: CUSTOMER_BEFORE,
-    customer_pipeline_stage: 'active_customer',
+    customer_pipeline_stage: 'active_customer', customer_deleted_at: null,
     call_extraction: NO_ADDR_EXTRACTION,
-    customer_address_line1: null, customer_zip: null, customer_last_name: null,
+    call_extraction_v1: JSON.stringify({ first_name: 'Pat', last_name: null }),
+    customer_address_line1: null, customer_zip: null,
+    customer_first_name: 'Pat', customer_last_name: null,
     ...over,
   };
 }
@@ -135,6 +137,33 @@ describe('moot-condition resolves', () => {
       .toEqual({ action: 'resolve', rule: 'address_moot' });
   });
 
+  test('a soft-deleted customer never moots address or surname cards', () => {
+    const deletedAt = new Date(NOW.getTime() - 5 * 24 * 3600 * 1000).toISOString();
+    expect(classifyTriageItem(item({
+      customer_address_line1: '123 Sample St', customer_zip: '34205',
+      customer_deleted_at: deletedAt,
+    }), noBookings, { now: NOW })).toBeNull();
+    expect(classifyTriageItem(item({
+      reason_code: 'missing_last_name', customer_last_name: 'Sample',
+      customer_deleted_at: deletedAt,
+    }), noBookings, { now: NOW })).toBeNull();
+  });
+
+  test('a caller whose first name disagrees with the linked record never moots the surname card (phone-fallback link)', () => {
+    // Phone matched the account, but the caller is someone else (spouse/new owner).
+    expect(classifyTriageItem(item({
+      reason_code: 'missing_last_name', customer_last_name: 'Sample',
+      customer_first_name: 'Alex',
+      call_extraction_v1: JSON.stringify({ first_name: 'Pat', last_name: null }),
+    }), noBookings, { now: NOW })).toBeNull();
+    // No heard first name at all fails closed.
+    expect(classifyTriageItem(item({
+      reason_code: 'missing_last_name', customer_last_name: 'Sample',
+      call_extraction_v1: JSON.stringify({ first_name: null, last_name: null }),
+      call_extraction: NO_ADDR_EXTRACTION,
+    }), noBookings, { now: NOW })).toBeNull();
+  });
+
   test('terminal/dormant customer stages never moot address cards (stale on-file data)', () => {
     for (const stage of ['lost', 'disqualified', 'duplicate', 'churned', null]) {
       expect(classifyTriageItem(item({
@@ -142,15 +171,6 @@ describe('moot-condition resolves', () => {
         customer_pipeline_stage: stage,
       }), noBookings, { now: NOW })).toBeNull();
     }
-  });
-
-  test('a STALE pre-reprocess booking (older than the card) does not clear scheduling doubt', () => {
-    const beforeCard = new Date(new Date(FRESH).getTime() - 24 * 3600 * 1000).toISOString();
-    expect(classifyTriageItem(
-      item({ reason_code: 'not_confirmed' }),
-      bookedCtx('call-1', beforeCard),
-      { now: NOW },
-    )).toBeNull();
   });
 
   test('a customer created FROM/AFTER the call never moots its own address card (circular provenance)', () => {
@@ -192,21 +212,12 @@ describe('moot-condition resolves', () => {
       reason_code: 'missing_last_name', customer_last_name: 'Sample',
       call_extraction_v1: 'not-json{',
     }), noBookings, { now: NOW })).toBeNull();
-    // A surname the call did NOT hear is independent → resolves.
+    // A surname the call did NOT hear is independent → resolves (caller's
+    // first name still agrees with the record).
     expect(classifyTriageItem(item({
       reason_code: 'missing_last_name', customer_last_name: 'Independent',
-      call_extraction_v1: JSON.stringify({ last_name: 'Sample' }),
+      call_extraction_v1: JSON.stringify({ first_name: 'Pat', last_name: 'Sample' }),
     }), noBookings, { now: NOW })).toEqual({ action: 'resolve', rule: 'name_moot' });
-  });
-
-  test('scheduling flags resolve only on source_call_log_id booking provenance', () => {
-    const booked = bookedCtx('call-1');
-    expect(classifyTriageItem(item({ reason_code: 'not_confirmed' }), booked, { now: NOW }))
-      .toEqual({ action: 'resolve', rule: 'booking_outcome' });
-    // Same code, no provenance → untouched.
-    expect(classifyTriageItem(item({ reason_code: 'not_confirmed' }), noBookings, { now: NOW })).toBeNull();
-    // Provenance for a DIFFERENT call never clears.
-    expect(classifyTriageItem(item({ reason_code: 'not_confirmed', call_log_id: 'call-2' }), booked, { now: NOW })).toBeNull();
   });
 
   test('a card both old AND moot records the moot rule, not the age rule', () => {
@@ -256,6 +267,8 @@ describe('fail-closed allowlist — owed work is NEVER swept', () => {
     'email_unverified', 'email_invalid', 'caller_not_authorized',
     'rental_or_tenant_occupied', 'second_service_address',
     'secondary_contact_captured', 'name_email_mismatch',
+    'not_confirmed', 'confirmed_without_start_time', 'ambiguous_scheduling',
+    'ambiguous_pest_or_service',
     'some_future_unknown_code',
   ];
   // missing_last_name never AGE-dismisses (owed identity task) — but the
@@ -277,7 +290,7 @@ describe('fail-closed allowlist — owed work is NEVER swept', () => {
     expect(classifyTriageItem(item({ reason_code: 'existing_appointment_coordination' }), booked, { now: NOW })).toBeNull();
   });
 
-  test('a created booking does NOT clear low_extraction_confidence (fail-open books DESPITE the doubt)', () => {
+  test('low_extraction_confidence never auto-clears (no booking rule, no age rule)', () => {
     const booked = bookedCtx('call-1');
     expect(classifyTriageItem(item({ reason_code: 'low_extraction_confidence' }), booked, { now: NOW })).toBeNull();
     // Nor does age: the office owes confirming the doubted fields.
