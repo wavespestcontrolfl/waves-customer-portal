@@ -331,11 +331,16 @@ async function fetchServiceWeekWeather({ latitude, longitude, serviceDate } = {}
   // accumulating — cache it briefly (30 min) so afternoon convection shows
   // up instead of being pinned behind the 6h TTL (codex P2 #3096 r2);
   // closed windows keep the full TTL.
-  // Four-decimal coordinates (~11 m) in the key: the legacy two-decimal
-  // rainCacheKey (~1.1 km) collides neighbouring properties into one MRMS
-  // radar cell's cached week (codex P2 #3096 r4) — MRMS is queried at four
-  // decimals, so the key must be at least that precise.
-  const key = `${mode}|${lat.toFixed(4)},${lon.toFixed(4)},${range.end}`;
+  // Key precision is MODE-SCOPED (codex P2 #3096 r4+r5): shadow/live use
+  // four decimals (~11 m) because MRMS resolves ~1 km cells and two-decimal
+  // keys collide neighbouring properties into one cached week; OFF mode
+  // keeps the legacy two-decimal (~1.1 km) key — that coarseness is what
+  // batches the Monday sweep's ~500 sequential Open-Meteo lookups for
+  // nearby customers, and off-mode results are city-grid data anyway.
+  const keyCoords = mode === 'off'
+    ? `${lat.toFixed(2)},${lon.toFixed(2)}`
+    : `${lat.toFixed(4)},${lon.toFixed(4)}`;
+  const key = `${mode}|${keyCoords},${range.end}`;
   const windowUnclosed = range.end >= etTodayYmd();
   // TTL is decided at WRITE time and stored with the entry — recomputing at
   // read let an entry cached just before ET midnight inherit the 6h TTL
@@ -376,7 +381,11 @@ async function fetchServiceWeekWeather({ latitude, longitude, serviceDate } = {}
     }
   }
   if (value.rainInches != null || value.et0Inches != null) {
-    _rainCache.set(key, { at: Date.now(), ttlMs, value });
+    // A merged week that survived an Open-Meteo outage carries et0Inches
+    // null — cache it briefly so ET₀ retries once Open-Meteo recovers,
+    // instead of pinning the seasonal fallback target for 6h (codex P2 r5).
+    const effectiveTtlMs = value.et0Inches == null ? Math.min(ttlMs, 30 * 60 * 1000) : ttlMs;
+    _rainCache.set(key, { at: Date.now(), ttlMs: effectiveTtlMs, value });
   }
   return value;
 }
