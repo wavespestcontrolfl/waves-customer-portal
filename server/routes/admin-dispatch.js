@@ -8071,57 +8071,40 @@ router.post('/:serviceId/complete', async (req, res, next) => {
 
     if (serviceReportEmailEligible({ serviceReportV1Delivery, suppressTypedCustomerComms }) && serviceReportEmailEnabled) {
       const latestNotes = parseJsonObject(record.structured_notes);
-      const emailAlreadyHandled = ['queued', 'sending', 'sent', 'skipped', 'deferred_grounding'].includes(latestNotes.serviceReportV1EmailStatus);
-      // The email worker rebuilds and ATTACHES the current PDF — an emailed
-      // attachment is unrecallable, so while grounded copy is still pending
-      // the enqueue is deferred behind final-copy settlement (grounded write
-      // or deterministic sanitize) instead of racing it (codex P1 r15).
-      if (!emailAlreadyHandled && lawnRecRegenAttempted && !lawnRecRegenGrounded && lawnRecFinalCopyPromise) {
-        const deferredNotes = { ...latestNotes, serviceReportV1EmailStatus: 'deferred_grounding' };
-        await db('service_records').where({ id: record.id })
-          .update({ structured_notes: serializeJsonb(deferredNotes) })
-          .catch((updErr) => logger.warn(`[dispatch] deferred email status write failed: ${updErr.message}`));
-        record.structured_notes = deferredNotes;
-        logger.info(`[dispatch] report email deferred for ${record.id} until grounded copy settles`);
-        lawnRecFinalCopyPromise.then(async () => {
-          try {
-            const queued = await enqueueServiceReportV1EmailDelivery({
-              serviceRecordId: record.id,
-              customerId: svc.customer_id,
-              token: reportToken,
-              reportUrl,
-              pdfUrl: reportToken ? `${portalUrl}/api/reports/${reportToken}` : null,
-              payload: { scheduled_service_id: svc.id, source: 'dispatch_complete_deferred' },
-            });
-            const fresh = await db('service_records').where({ id: record.id }).first('structured_notes');
-            const freshNotes = parseJsonObject(fresh?.structured_notes);
-            await db('service_records').where({ id: record.id }).update({
-              structured_notes: serializeJsonb({
-                ...freshNotes,
-                serviceReportV1EmailStatus: queued.delivery?.status || (queued.skipped ? 'skipped' : 'queued'),
-                serviceReportV1EmailDeliveryId: queued.delivery?.id || null,
-                serviceReportV1EmailQueuedAt: queued.delivery?.created_at || new Date().toISOString(),
-                serviceReportV1EmailError: queued.ok ? null : queued.error || null,
-              }),
-            });
-            logger.info(`[dispatch] deferred report email enqueued for ${record.id} after grounded copy settled`);
-          } catch (deferErr) {
-            logger.warn(`[dispatch] deferred report email enqueue failed for ${record.id}: ${deferErr.message}`);
-          }
-        }).catch(() => {});
-      } else if (!emailAlreadyHandled) {
+      const emailAlreadyHandled = ['queued', 'sending', 'sent', 'skipped'].includes(latestNotes.serviceReportV1EmailStatus);
+      if (!emailAlreadyHandled) {
         try {
+          // The email worker rebuilds and ATTACHES the current PDF at send
+          // time — an emailed attachment is unrecallable. While grounded
+          // copy is still pending, the job is enqueued DURABLY with a
+          // 20-minute hold (survives a process restart, unlike a promise
+          // callback — codex P1 r15+r16); the settlement callback below
+          // pulls next_attempt_at forward the moment copy settles, so the
+          // hold only fully elapses if the process died — and by then the
+          // locked late write/sanitize has landed anyway.
+          const emailHoldMs = lawnRecRegenAttempted && !lawnRecRegenGrounded ? 20 * 60 * 1000 : 0;
           const queued = await enqueueServiceReportV1EmailDelivery({
             serviceRecordId: record.id,
             customerId: svc.customer_id,
             token: reportToken,
             reportUrl,
             pdfUrl: reportToken ? `${portalUrl}/api/reports/${reportToken}` : null,
+            delayMs: emailHoldMs,
             payload: {
               scheduled_service_id: svc.id,
-              source: 'dispatch_complete',
+              source: emailHoldMs ? 'dispatch_complete_held_for_grounding' : 'dispatch_complete',
             },
           });
+          if (emailHoldMs && queued.delivery?.id && lawnRecFinalCopyPromise) {
+            const heldDeliveryId = queued.delivery.id;
+            logger.info(`[dispatch] report email held ${Math.round(emailHoldMs / 60000)}m for ${record.id} pending grounded copy`);
+            lawnRecFinalCopyPromise.then(async () => {
+              await db('service_report_deliveries')
+                .where({ id: heldDeliveryId, status: 'queued' })
+                .update({ next_attempt_at: new Date(), updated_at: new Date() })
+                .catch((pullErr) => logger.warn(`[dispatch] held email pull-forward failed for ${record.id}: ${pullErr.message}`));
+            }).catch(() => {});
+          }
           const queuedNotes = {
             ...latestNotes,
             serviceReportV1EmailStatus: queued.delivery?.status || (queued.skipped ? 'skipped' : 'queued'),

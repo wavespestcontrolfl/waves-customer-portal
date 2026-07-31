@@ -36,6 +36,11 @@ async function enqueueServiceReportV1EmailDelivery({
   reportUrl,
   pdfUrl,
   payload,
+  // Earliest dispatch delay — used to durably hold the email while grounded
+  // report copy settles (the worker attaches the CURRENT pdf at send time,
+  // so a held job self-heals; a process-local deferral would strand on
+  // restart — codex P1 #3093 r16).
+  delayMs = 0,
 } = {}, knex = db) {
   if (!serviceRecordId) throw new Error('serviceRecordId is required');
 
@@ -61,7 +66,7 @@ async function enqueueServiceReportV1EmailDelivery({
       payload: payload || {},
       attempts: 0,
       max_attempts: DEFAULT_MAX_ATTEMPTS,
-      next_attempt_at: new Date(),
+      next_attempt_at: new Date(Date.now() + Math.max(0, Number(delayMs) || 0)),
       created_at: new Date(),
       updated_at: new Date(),
     };
