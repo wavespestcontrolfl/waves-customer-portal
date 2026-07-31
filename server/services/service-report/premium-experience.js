@@ -1,6 +1,14 @@
 const crypto = require('crypto');
 const db = require('../../models/db');
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
+const { detectServiceLine } = require('./service-line-configs');
+
+// Legacy service_records rows can have a null service_line while
+// service_type still identifies a lawn visit — defaulting them to 'pest'
+// would keep pest-only copy on permanent lawn report links (codex P2 r17).
+function resolveServiceLine(record = {}) {
+  return record.service_line || detectServiceLine(record.service_type) || 'pest';
+}
 
 const PROMPT_VERSION = 'service_report_premium_experience_v1';
 
@@ -150,7 +158,7 @@ function applicationMethod(product = {}, serviceLine = 'pest') {
 }
 
 function normalizeApplication(product = {}, record = {}) {
-  const method = applicationMethod(product, record.service_line || 'pest');
+  const method = applicationMethod(product, resolveServiceLine(record));
   return {
     id: product.id,
     productName: cleanText(product.product_name) || 'Product application',
@@ -682,7 +690,7 @@ async function buildPremiumExperienceContext({
     primaryMove,
     findings: rows.findings,
     applications: rows.applications,
-    serviceLine: record.service_line || 'pest',
+    serviceLine: resolveServiceLine(record),
     now,
   });
   const propertyDefenseStatus = buildPropertyDefenseStatusContext({
@@ -758,7 +766,7 @@ module.exports = {
         primaryMove,
         findings: normalizedFindings,
         applications: normalizedApplications,
-        serviceLine: record.service_line || 'pest',
+        serviceLine: resolveServiceLine(record),
         now,
       }),
       primaryMove,

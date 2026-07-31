@@ -8093,6 +8093,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             payload: {
               scheduled_service_id: svc.id,
               source: emailHoldMs ? 'dispatch_complete_held_for_grounding' : 'dispatch_complete',
+              // The delivery worker enforces grounding readiness itself for
+              // held jobs (elapsed time is not proof the settlement ran —
+              // codex P1 r17).
+              ...(emailHoldMs ? { awaiting_grounding: true, lawn_assessment_id: completedLawnAssessmentId } : {}),
             },
           });
           if (emailHoldMs && queued.delivery?.id && lawnRecFinalCopyPromise) {

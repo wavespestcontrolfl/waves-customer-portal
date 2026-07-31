@@ -230,6 +230,23 @@ async function processServiceReportDelivery(delivery, knex = db) {
     return { status: 'skipped' };
   }
 
+  // Jobs held for grounding: an elapsed hold is NOT proof the grounded
+  // write/sanitize ran (the enqueuing process may have died) — the worker
+  // enforces readiness itself by running the deterministic sanitize before
+  // sending (idempotent, advisory-locked, no-op on already-grounded copy).
+  // A sanitize ERROR means safety is unverified — defer via the normal
+  // failure/backoff path instead of emailing possibly-stale copy (codex P1
+  // #3093 r17).
+  const heldPayload = (delivery.payload && typeof delivery.payload === 'object') ? delivery.payload : {};
+  if (heldPayload.awaiting_grounding && heldPayload.lawn_assessment_id) {
+    const KnowledgeBridge = require('../knowledge-bridge');
+    const sanitized = await KnowledgeBridge.sanitizeStoredRecommendations(heldPayload.lawn_assessment_id);
+    if (sanitized?.error) {
+      const status = await markDeliveryFailed(delivery, new Error(`grounding readiness unverified: ${sanitized.error}`), knex);
+      return { status, error: sanitized.error };
+    }
+  }
+
   try {
     const result = await sendServiceReportV1Email(delivery.service_record_id, {
       token: delivery.report_token,

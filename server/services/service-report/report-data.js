@@ -2243,8 +2243,11 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // P1 #3093). The softened wording claims nothing beyond the record: no
   // structured corrective finding was logged.
   if (serviceLine === 'lawn' && findings.some((f) => f.category === 'no_activity')) {
-    const correctiveApplied = rawProducts.some((p) =>
-      /fungicide|herbicide/i.test(String(p.product_category || '')));
+    // Enriched rows, not rawProducts: legacy rows with a null
+    // product_category recover it from the catalog via
+    // attachApprovedReportProductFacts (codex P2 r17).
+    const correctiveApplied = products.some((p) =>
+      /fungicide|herbicide/i.test(String(p.product_category || p.approved_report_product_facts?.category || '')));
     if (correctiveApplied) {
       for (const finding of findings) {
         if (finding.category === 'no_activity') {

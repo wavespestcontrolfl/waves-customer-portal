@@ -566,23 +566,31 @@ const KnowledgeBridge = {
           ? JSON.parse(assessment.recommendations)
           : (assessment.recommendations || null);
       } catch { stored = null; }
-      if (!stored || typeof stored !== 'object') return { changed: false, dropped: 0 };
-      const { parsed, dropped, appliedClasses } = sanitizeRecommendationsAgainstTreatment(stored, appliedProducts);
+      // ai_summary is persisted independently of the recommendations payload
+      // — a missing/unparseable payload must not skip the summary check
+      // (codex P1 r17).
+      const appliedClasses = appliedTreatmentClasses(appliedProducts);
       const summaryContradicts = contradictsAppliedTreatment(assessment.ai_summary, appliedClasses);
-      if (!dropped && !summaryContradicts) return { changed: false, dropped: 0 };
-      if (summaryContradicts) {
-        parsed.summary = 'Today’s applications are in place — we’ll track how the lawn responds and adjust at the next visit.';
+      let parsed = stored && typeof stored === 'object' ? stored : null;
+      let dropped = 0;
+      if (parsed) {
+        ({ parsed, dropped } = sanitizeRecommendationsAgainstTreatment(parsed, appliedProducts));
       }
-      await trx('lawn_assessments').where({ id: assessmentId }).update({
-        ...(parsed.summary ? { ai_summary: parsed.summary } : {}),
-        recommendations: JSON.stringify(parsed),
-        updated_at: new Date(),
-      });
+      if (!dropped && !summaryContradicts) return { changed: false, dropped: 0 };
+      const update = { updated_at: new Date() };
+      if (summaryContradicts) {
+        update.ai_summary = 'Today’s applications are in place — we’ll track how the lawn responds and adjust at the next visit.';
+        if (parsed) parsed.summary = update.ai_summary;
+      }
+      if (parsed && dropped) update.recommendations = JSON.stringify(parsed);
+      await trx('lawn_assessments').where({ id: assessmentId }).update(update);
       logger.warn(`[knowledge-bridge] stored recommendations sanitized for assessment ${assessmentId} (${dropped} field(s) dropped${summaryContradicts ? ', summary neutralized' : ''})`);
       return { changed: true, dropped };
     }).catch((err) => {
       logger.error(`[knowledge-bridge] sanitizeStoredRecommendations failed: ${err.message}`);
-      return { changed: false, dropped: 0 };
+      // error (not a clean no-op): callers gating unrecallable sends must
+      // treat this as NOT-verified and defer (codex P1 r17).
+      return { changed: false, dropped: 0, error: err.message };
     });
   },
 
