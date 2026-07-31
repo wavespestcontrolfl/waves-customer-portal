@@ -20,10 +20,18 @@ const FRESH = new Date(NOW.getTime() - 2 * 24 * 3600 * 1000).toISOString();
 const OLD_31D = new Date(NOW.getTime() - 31 * 24 * 3600 * 1000).toISOString();
 const OLD_8D = new Date(NOW.getTime() - 8 * 24 * 3600 * 1000).toISOString();
 
+const CALL_AT = new Date(NOW.getTime() - 3 * 24 * 3600 * 1000).toISOString();
+const CUSTOMER_BEFORE = new Date(NOW.getTime() - 100 * 24 * 3600 * 1000).toISOString();
+const CUSTOMER_AFTER = new Date(new Date(CALL_AT).getTime() + 20 * 60 * 1000).toISOString();
+// Extraction with no address supplied — the moot-eligible shape.
+const NO_ADDR_EXTRACTION = { property: { service_address: { raw_text: null, street_line_1: null, city: null, postal_code: null } } };
+
 function item(over = {}) {
   return {
     id: 't1', call_log_id: 'call-1', reason_code: 'address_unverifiable',
     status: 'open', severity: 'advisory', created_at: FRESH, payload: { flag: 'address_unverifiable', confidence: 0.5 },
+    call_created_at: CALL_AT, customer_created_at: CUSTOMER_BEFORE,
+    call_extraction: NO_ADDR_EXTRACTION,
     customer_address_line1: null, customer_zip: null, customer_last_name: null,
     ...over,
   };
@@ -56,6 +64,35 @@ describe('moot-condition resolves', () => {
     expect(classifyTriageItem(item({
       customer_address_line1: '123 Sample St', customer_zip: '34205',
       payload: 'not-json{',
+    }), noBookings, { now: NOW })).toBeNull();
+  });
+
+  test('a call whose EXTRACTION supplied an address never resolves from the on-file primary (base-payload blocking cards)', () => {
+    const suppliedAddr = item({
+      customer_address_line1: '123 Sample St', customer_zip: '34205',
+      call_extraction: { property: { service_address: { raw_text: 'a condo on Other Rd', street_line_1: null } } },
+    });
+    expect(classifyTriageItem(suppliedAddr, noBookings, { now: NOW })).toBeNull();
+    // Stringified and missing extractions fail closed.
+    expect(classifyTriageItem(item({
+      customer_address_line1: '123 Sample St', customer_zip: '34205',
+      call_extraction: JSON.stringify({ property: { service_address: { street_line_1: '456 Other Rd' } } }),
+    }), noBookings, { now: NOW })).toBeNull();
+    expect(classifyTriageItem(item({
+      customer_address_line1: '123 Sample St', customer_zip: '34205',
+      call_extraction: null,
+    }), noBookings, { now: NOW })).toBeNull();
+  });
+
+  test('a customer created FROM/AFTER the call never moots its own address card (circular provenance)', () => {
+    expect(classifyTriageItem(item({
+      customer_address_line1: '123 Sample St', customer_zip: '34205',
+      customer_created_at: CUSTOMER_AFTER,
+    }), noBookings, { now: NOW })).toBeNull();
+    // Missing timestamps fail closed.
+    expect(classifyTriageItem(item({
+      customer_address_line1: '123 Sample St', customer_zip: '34205',
+      customer_created_at: null,
     }), noBookings, { now: NOW })).toBeNull();
   });
 

@@ -125,6 +125,42 @@ function hasNewAddressEvidence(payloadRaw) {
   );
 }
 
+// Did the CALL's own extraction supply a service address? The blocking-loop
+// insert sites create address cards with BASE payloads (no address fields),
+// so the payload check above cannot see the held-for-validation case there —
+// the authoritative signal is the stored V2 extraction. Fail closed: a
+// missing/unparseable extraction keeps the card (we cannot prove the call
+// supplied nothing).
+function callSuppliedAddress(extractionRaw) {
+  let extraction = extractionRaw;
+  if (!extraction) return true;
+  if (typeof extraction === 'string') {
+    try {
+      extraction = JSON.parse(extraction);
+    } catch {
+      return true;
+    }
+  }
+  const addr = extraction?.property?.service_address || {};
+  return Boolean(
+    String(addr.raw_text || '').trim()
+    || String(addr.street_line_1 || '').trim()
+    || String(addr.city || '').trim()
+    || String(addr.postal_code || '').trim(),
+  );
+}
+
+// Was the customer record created BEFORE this call? If the record was born
+// from (or after) the call, its on-file address most plausibly came from
+// this very call's unvalidated extraction — resolving the card against it
+// would be circular. Fail closed on missing timestamps.
+function customerPredatesCall(item) {
+  const cust = item.customer_created_at ? new Date(item.customer_created_at) : null;
+  const call = item.call_created_at ? new Date(item.call_created_at) : null;
+  if (!cust || !call || Number.isNaN(cust.getTime()) || Number.isNaN(call.getTime())) return false;
+  return cust < call;
+}
+
 // Pure classifier, exported for tests. `item` is a triage_items row joined
 // with its call's customer fields; `ctx.bookedCallIds` is a Set of
 // call_log_ids that have a scheduled_services row via source_call_log_id.
@@ -135,8 +171,15 @@ function classifyTriageItem(item, ctx, { now = new Date() } = {}) {
   if (item.status !== 'open') return null;
   const code = item.reason_code;
 
+  // Address cards are moot ONLY for a customer who existed before the call,
+  // has a full on-file address, and whose call supplied no address of its
+  // own (payload evidence AND the call's extraction both empty) — the
+  // mirror of the routing guard's on-file-address recovery condition. A
+  // call that DID state an address keeps its card held for validation.
   if (ADDRESS_MOOT_CODES.has(code)
+      && customerPredatesCall(item)
       && !hasNewAddressEvidence(item.payload)
+      && !callSuppliedAddress(item.call_extraction)
       && String(item.customer_address_line1 || '').trim() !== ''
       && String(item.customer_zip || '').trim() !== '') {
     return { action: 'resolve', rule: 'address_moot' };
@@ -176,6 +219,9 @@ async function sweep({ now = new Date() } = {}) {
     .select(
       't.id', 't.call_log_id', 't.reason_code', 't.status', 't.severity',
       't.created_at', 't.payload',
+      'cl.created_at as call_created_at',
+      'cl.ai_extraction_enriched as call_extraction',
+      'c.created_at as customer_created_at',
       'c.address_line1 as customer_address_line1',
       'c.zip as customer_zip',
       'c.last_name as customer_last_name',
@@ -259,6 +305,8 @@ module.exports = {
   runTriageAutoResolve,
   classifyTriageItem,
   hasNewAddressEvidence,
+  callSuppliedAddress,
+  customerPredatesCall,
   ADDRESS_MOOT_CODES,
   BOOKING_OUTCOME_CODES,
   ADVISORY_AGE_CODES,
