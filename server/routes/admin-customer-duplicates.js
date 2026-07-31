@@ -158,6 +158,8 @@ router.get('/merges', async (req, res) => {
         'j.evidence',
         'w.first_name as winner_first_name', 'w.last_name as winner_last_name',
         'w.active as winner_active', 'w.deleted_at as winner_deleted_at',
+        // Compared server-side for the revertible flag ONLY — never emitted.
+        'w.stripe_customer_id as winner_stripe_customer_id',
       )
       .orderBy('j.created_at', 'desc')
       .limit(20);
@@ -181,6 +183,14 @@ router.get('/merges', async (req, res) => {
             && (!recorded.payment_method_flags || ids.some((id) => !recorded.payment_method_flags[id])));
         const linkedPropertyUnrecorded = evidence?.via === 'admin_link_as_property'
           && !(recorded && 'linked_property_id' in recorded);
+        // Transferred Stripe id no longer on the winner + moved saved cards:
+        // revertMerge refuses (the repointed cards would reference a Stripe
+        // profile the restored customer doesn't have).
+        const stripeDriftStrandsCards = Boolean(recorded?.stripe_transferred_id)
+          && row.winner_stripe_customer_id !== recorded.stripe_transferred_id
+          && Boolean(recorded?.tables) && Object.entries(recorded.tables)
+            .some(([key, ids]) => key.startsWith('payment_methods.')
+              && (Array.isArray(ids) ? ids.length > 0 : true));
         return {
           journalId: row.id,
           winnerId: row.winner_customer_id,
@@ -204,7 +214,8 @@ router.get('/merges', async (req, res) => {
             && !row.winner_deleted_at
             && !collisionHandled
             && !pmMovedWithoutFlags
-            && !linkedPropertyUnrecorded,
+            && !linkedPropertyUnrecorded
+            && !stripeDriftStrandsCards,
           ),
         };
       }),

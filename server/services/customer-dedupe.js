@@ -1073,6 +1073,13 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
           updated_at: trx.fn.now(),
         });
         repointed['referral_promoters.consolidated'] = `folded promoter ${loserPromoter.id} into ${winnerPromoter.id} (loser kept as code alias)`;
+        // This consolidation folded balances/counters and retired the loser
+        // promoter as a customer-less alias — moves repointed_ids has no
+        // per-row record of, exactly like a unique-collision fold. Register
+        // it so revertMerge 409s and GET /merges shows revertible:false.
+        // (A loser-only enrollment repoints plainly in the FK sweep above
+        // and stays revertible.)
+        if (!collisionHandlers.includes('referral_promoters')) collisionHandlers.push('referral_promoters');
       }
     }
 
@@ -1112,7 +1119,18 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
       autopayRestrictions.autopay_paused_until = loser.autopay_paused_until;
       if (loser.autopay_pause_reason) autopayRestrictions.autopay_pause_reason = loser.autopay_pause_reason;
     }
+    // Journal the winner's ORIGINAL customer-level autopay fields for
+    // exactly the columns this block overwrites (applied directly, not via
+    // winner_backfills), so an undo can put the winner's own autopay state
+    // back when it is still the merge-written value. Pre-upgrade journals
+    // lack this key and keep today's behavior: the winner stays
+    // most-restrictive after an undo (never a silent re-enable).
+    let winnerAutopayBefore = null;
     if (Object.keys(autopayRestrictions).length) {
+      winnerAutopayBefore = { before: {}, applied: autopayRestrictions };
+      for (const col of Object.keys(autopayRestrictions)) {
+        winnerAutopayBefore.before[col] = winner[col] === undefined ? null : winner[col];
+      }
       await trx('customers').where({ id: winnerId })
         .update({ ...autopayRestrictions, updated_at: trx.fn.now() });
       repointed['customers.autopay_restrictions'] = Object.keys(autopayRestrictions).join(', ');
@@ -1218,6 +1236,9 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
     ];
     let movedContactSlot = false;
     let movedContactPhone = false;
+    // Winner values the merge deliberately OVERWROTE with null (as opposed
+    // to fill-if-empty backfills) — journaled so the undo can restore them.
+    const winnerPriorValues = {};
     const winnerHadAnyContact = CONTACT_SLOTS.some((slot) => slot.some((f) => !isEmptyValue(winner[f])));
     for (const slot of CONTACT_SLOTS) {
       const winnerSlotEmpty = slot.every((f) => isEmptyValue(winner[f]));
@@ -1253,6 +1274,14 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
       backfills.service_contacts_consent_at = null;
       backfills.service_contacts_consent_source = null;
       backfills.service_contacts_consent_text_version = null;
+      // winner_backfills records the APPLIED value (null) — journal the
+      // winner's PRIOR stamps separately so an undo can restore them once
+      // the appended loser contacts are gone (the stamp describes the
+      // winner's own list again). Pre-upgrade journals lack this key and
+      // keep today's behavior (stamp stays cleared; re-attest by hand).
+      winnerPriorValues.service_contacts_consent_at = winner.service_contacts_consent_at;
+      winnerPriorValues.service_contacts_consent_source = winner.service_contacts_consent_source ?? null;
+      winnerPriorValues.service_contacts_consent_text_version = winner.service_contacts_consent_text_version ?? null;
     }
     if (Object.keys(backfills).length) {
       await trx('customers').where({ id: winnerId }).update({ ...backfills, updated_at: trx.fn.now() });
@@ -1279,6 +1308,13 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
         // folded/merged/dropped, not plainly repointed, so the merge is not
         // auto-revertible (the revert endpoint 409s when any are listed).
         collision_handlers: collisionHandlers,
+        // The winner's ORIGINAL customer-level autopay fields for the exact
+        // columns the most-restrictive block overwrote ({ before, applied }),
+        // or null when the merge left the winner's autopay alone.
+        winner_autopay_before: winnerAutopayBefore,
+        // Winner values the merge deliberately NULLED (consent stamps) —
+        // the prior values, keyed by column, for the undo to restore.
+        winner_prior_values: winnerPriorValues,
       }),
       winner_backfills: JSON.stringify(backfills),
       tier: mode === 'auto' ? 'green' : 'manual',
@@ -1382,24 +1418,52 @@ async function runRedPairAutoDismissSweep({ performedBy = 'auto:red-tier' } = {}
     logger.warn(`[customer-dedupe] red-pair auto-dismiss aborted — dismissals unreadable: ${e.message}`);
     return { dismissed: [], aborted: 'dismissals_unreadable' };
   }
-  const results = { dismissed: [] };
+  const results = { dismissed: [], skippedStale: 0 };
   for (const group of groups) {
     for (const candidate of group.candidates) {
       if (candidate.tier !== 'red') continue;
       const [a, b] = pairKey(group.winner.id, candidate.loser.id);
       try {
-        // Idempotent by the ordered-pair unique constraint — a re-run or a
-        // race with a manual dismissal is an ignored conflict, never an error.
-        await db('customer_duplicate_dismissals')
-          .insert({
-            customer_id_a: a,
-            customer_id_b: b,
-            reason: `auto-dismissed: red tier (${candidate.reasons.join(', ')})`.slice(0, 500),
-            created_by: performedBy,
-          })
-          .onConflict(['customer_id_a', 'customer_id_b'])
-          .ignore();
-        results.dismissed.push({ winnerId: group.winner.id, loserId: candidate.loser.id });
+        const outcome = await db.transaction(async (trx) => {
+          // The red verdict came from a findDuplicateGroups read that
+          // finished BEFORE this write — an admin edit in between (name
+          // fix, address correction, retire) can turn the pair non-red, and
+          // a PERMANENT dismissal must never land on it. Re-read both rows
+          // under lock and re-apply the detection red rule at write time:
+          // still-live rows sharing the phone, with different last names AND
+          // a positively different address.
+          const rows = await trx('customers').whereIn('id', [a, b]).forUpdate().select('*');
+          const rowA = rows.find((r) => r.id === a);
+          const rowB = rows.find((r) => r.id === b);
+          const stillRed = Boolean(rowA && rowB
+            && !rowA.deleted_at && !rowB.deleted_at
+            && rowA.active !== false && rowB.active !== false
+            && phone10(rowA.phone) && phone10(rowA.phone) === phone10(rowB.phone)
+            && normName(rowA.last_name) && normName(rowB.last_name)
+            && normName(rowA.last_name) !== normName(rowB.last_name)
+            && ADDRESS_CONFLICTS.has(addressCompat(rowA, rowB).status));
+          if (!stillRed) return 'no_longer_red';
+          // Idempotent by the ordered-pair unique constraint — a re-run or a
+          // race with a manual dismissal is an ignored conflict, never an
+          // error.
+          await trx('customer_duplicate_dismissals')
+            .insert({
+              customer_id_a: a,
+              customer_id_b: b,
+              reason: `auto-dismissed: red tier (${candidate.reasons.join(', ')})`.slice(0, 500),
+              created_by: performedBy,
+            })
+            .onConflict(['customer_id_a', 'customer_id_b'])
+            .ignore();
+          return 'dismissed';
+        });
+        if (outcome === 'dismissed') {
+          results.dismissed.push({ winnerId: group.winner.id, loserId: candidate.loser.id });
+        } else {
+          // Counted in the digest metadata; the pair simply stays queued for
+          // the next sweep to re-classify.
+          results.skippedStale += 1;
+        }
       } catch (e) {
         // One bad pair must not stop the sweep; the pair simply stays queued.
         logger.warn(`[customer-dedupe] red-pair auto-dismiss failed for ${a}/${b}: ${e.message}`);
@@ -1417,7 +1481,7 @@ async function runRedPairAutoDismissSweep({ performedBy = 'auto:red-tier' } = {}
         'Different last names at a different address on a shared phone — the detector\'s own "two people" verdict, so these pairs can never be merged. Removed from the duplicate review queue; to re-surface one, delete its customer_duplicate_dismissals row.',
         {
           link: '/admin/customers/duplicates',
-          metadata: { dismissed: results.dismissed },
+          metadata: { dismissed: results.dismissed, skippedStale: results.skippedStale },
         },
       );
     } catch (notifyErr) {
@@ -1470,6 +1534,18 @@ function parseJsonb(value) {
   if (value === null || value === undefined) return null;
   if (typeof value === 'object') return value;
   try { return JSON.parse(value); } catch { return null; }
+}
+
+// "Still the merge-written value" comparison for directly-applied winner
+// fields (autopay). Timestamps round-trip through the journal's JSON as ISO
+// strings while knex reads them back as Date objects — when both sides parse
+// as instants, compare the instants.
+function mergeWrittenValueUnchanged(current, applied) {
+  if (backfillValueUnchanged(current, applied)) return true;
+  if (current === null || current === undefined || applied === null || applied === undefined) return false;
+  const ta = current instanceof Date ? current.getTime() : Date.parse(current);
+  const tb = applied instanceof Date ? applied.getTime() : Date.parse(applied);
+  return Number.isFinite(ta) && Number.isFinite(tb) && ta === tb;
 }
 
 /**
@@ -1554,6 +1630,23 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     }
     if (!loserRow) refuse('The merged-away customer row was purged — cannot restore it');
     if (!loserRow.deleted_at) refuse('The merged-away customer is already live — nothing to undo');
+
+    // Stripe drift + moved saved cards is a REFUSAL, not a skip: when the
+    // journal records a transferred Stripe id that no longer sits on the
+    // winner, the id cannot move back — but the recorded payment_methods
+    // rows WOULD still repoint, leaving the restored customer holding saved
+    // cards that reference a Stripe profile its row doesn't have. A
+    // financially-relevant restoration that can't be exact refuses whole
+    // (409, zero writes). Without moved cards the id is merely reported as
+    // not restored (skip) below.
+    const transferredStripe = recorded.stripe_transferred_id || null;
+    const pmRowsRecorded = pmTableKeys.some((key) => {
+      const ids = recorded.tables[key];
+      return Array.isArray(ids) ? ids.length > 0 : true;
+    });
+    if (transferredStripe && winner.stripe_customer_id !== transferredStripe && pmRowsRecorded) {
+      refuse("The kept customer's Stripe profile has changed since the merge, and saved payment methods were moved — repointing the cards back would leave them referencing a Stripe profile the restored customer no longer has; revert by hand");
+    }
 
     // Verification pass BEFORE any write: every recorded row must still point
     // at the winner, or it is state that moved on since the merge.
@@ -1667,7 +1760,6 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     const backfills = parseJsonb(journal.winner_backfills) || {};
     const winnerPatch = {};
     let stripeMovedBack = false;
-    const transferredStripe = recorded.stripe_transferred_id || null;
     if (transferredStripe) {
       if (winner.stripe_customer_id === transferredStripe) {
         winnerPatch.stripe_customer_id = null;
@@ -1686,6 +1778,41 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       if (value === null || value === undefined) continue;
       if (backfillValueUnchanged(winner[field], value)) {
         winnerPatch[field] = null;
+      } else {
+        skipped.push({ key: `customers.${field}`, reason: 'winner_value_changed_since_merge' });
+      }
+    }
+    // Winner customer-level autopay state the merge overwrote directly (the
+    // most-restrictive carry): restore the winner's ORIGINAL values, but
+    // only where the current value is still the merge-written one — an
+    // admin's later autopay change stays put and is reported. Pre-upgrade
+    // journals lack winner_autopay_before (no way to detect an
+    // autopay-affected merge retroactively) and keep today's behavior: the
+    // winner simply stays most-restrictive, never a silent re-enable.
+    const autopayBefore = recorded.winner_autopay_before || null;
+    if (autopayBefore && autopayBefore.applied && autopayBefore.before) {
+      for (const [col, appliedVal] of Object.entries(autopayBefore.applied)) {
+        if (mergeWrittenValueUnchanged(winner[col], appliedVal)) {
+          winnerPatch[col] = Object.prototype.hasOwnProperty.call(autopayBefore.before, col)
+            ? autopayBefore.before[col]
+            : null;
+        } else {
+          skipped.push({ key: `customers.${col}`, reason: 'winner_value_changed_since_merge' });
+        }
+      }
+    }
+    // Winner fields the merge deliberately NULLED (consent stamps cleared
+    // when loser contacts joined the winner's list): the appended contact
+    // backfills vacated above, so the stamp describes the winner's own list
+    // again — restore each journaled prior value while the current value is
+    // still the merge-written null. Pre-upgrade journals lack
+    // winner_prior_values: the stamp stays cleared (re-attest by hand).
+    const priorValues = recorded.winner_prior_values || {};
+    for (const [field, prior] of Object.entries(priorValues)) {
+      if (prior === null || prior === undefined) continue;
+      const current = winner[field];
+      if (current === null || current === undefined || String(current).trim() === '') {
+        winnerPatch[field] = prior;
       } else {
         skipped.push({ key: `customers.${field}`, reason: 'winner_value_changed_since_merge' });
       }

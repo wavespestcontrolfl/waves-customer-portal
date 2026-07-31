@@ -69,10 +69,15 @@ describe('runRedPairAutoDismissSweep', () => {
     pipeline_stage: 'new_lead', created_at: '2026-07-09',
   };
 
-  function install({ customers, dismissalsError = false }) {
+  function install({ customers, lockedCustomers = null, dismissalsError = false }) {
     const inserted = [];
-    installDb((table, q) => {
-      if (table === 'customers') return customers;
+    const router = (table, q) => {
+      if (table === 'customers') {
+        // The FOR UPDATE re-read at write time can see different rows than
+        // the detection read (that gap is the race the sweep must survive).
+        if (q.called('forUpdate')) return lockedCustomers || customers;
+        return customers;
+      }
       if (table === 'customer_duplicate_dismissals') {
         if (q.called('insert')) {
           inserted.push({ row: q.args('insert')[0], onConflict: q.called('onConflict'), ignored: q.called('ignore') });
@@ -82,6 +87,12 @@ describe('runRedPairAutoDismissSweep', () => {
         return [];
       }
       return [];
+    };
+    installDb(router);
+    db.transaction.mockImplementation(async (fn) => {
+      const trx = jest.fn((table) => makeChain(table, (q) => router(table, q)));
+      trx.fn = { now: () => 'NOW' };
+      return fn(trx);
     });
     return inserted;
   }
@@ -122,6 +133,33 @@ describe('runRedPairAutoDismissSweep', () => {
     expect(result.aborted).toBe('dismissals_unreadable');
     expect(inserted).toHaveLength(0);
     expect(notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  it('skips the permanent dismissal when the pair is no longer red at write time (races an admin edit)', async () => {
+    // Detection classifies red from an earlier read; before the write lands,
+    // an admin fixes the last name — the FOR UPDATE re-read sees compatible
+    // names, so the red predicate no longer holds and NO dismissal may land.
+    const inserted = install({
+      customers: [personA, personB],
+      lockedCustomers: [personA, { ...personB, last_name: 'Sampleone' }],
+    });
+    const result = await dedupe.runRedPairAutoDismissSweep();
+    expect(result.dismissed).toHaveLength(0);
+    expect(result.skippedStale).toBe(1);
+    expect(inserted).toHaveLength(0);
+    // Nothing dismissed → no digest bell.
+    expect(notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  it('skips when a locked row was retired between detection and the write', async () => {
+    const inserted = install({
+      customers: [personA, personB],
+      lockedCustomers: [personA, { ...personB, deleted_at: '2026-07-31T00:00:00Z' }],
+    });
+    const result = await dedupe.runRedPairAutoDismissSweep();
+    expect(result.dismissed).toHaveLength(0);
+    expect(result.skippedStale).toBe(1);
+    expect(inserted).toHaveLength(0);
   });
 });
 
@@ -189,6 +227,129 @@ describe('executeMerge repointed_ids journal record', () => {
     // No payment methods, no collisions — clean revertible record.
     expect(recorded.payment_method_flags).toEqual({});
     expect(recorded.collision_handlers).toEqual([]);
+    // Autopay untouched and nothing deliberately nulled on the winner.
+    expect(recorded.winner_autopay_before).toBe(null);
+    expect(recorded.winner_prior_values).toEqual({});
+  });
+
+  it("journals the winner's ORIGINAL autopay state and the consent stamps the merge deliberately nulled", async () => {
+    const winner = {
+      id: WINNER, first_name: 'Winner', last_name: 'Testcase', phone: '+15550000001',
+      autopay_enabled: true, autopay_paused_until: null,
+      // Slot 1 partially filled (name only) — the winner HAS contacts, so a
+      // loser phone joining the list invalidates the winner's stamp.
+      service_contact_name: 'Owner Sample', service_contact_phone: null,
+      service_contact_email: null, service_contact_role: null,
+      service_contact2_name: null, service_contact2_phone: null,
+      service_contact2_email: null, service_contact2_role: null,
+      service_contacts_consent_at: '2026-06-01T00:00:00.000Z',
+      service_contacts_consent_source: 'portal_form',
+      service_contacts_consent_text_version: 'v2',
+    };
+    const loser = {
+      id: LOSER, first_name: 'Winner', last_name: null, phone: '5550000001',
+      autopay_enabled: false,
+      service_contact2_name: 'Tenant Sample', service_contact2_phone: '+15550000042',
+    };
+    const state = { journal: null };
+    const route = (table, q) => {
+      if (table === 'customers') {
+        if (q.called('forUpdate')) return [winner, loser];
+        if (q.called('update')) return 1;
+        return [];
+      }
+      if (table === 'customer_merge_journal') {
+        state.journal = q.args('insert')[0];
+        return [{ id: 'j1' }];
+      }
+      if (q.called('first')) return null;
+      if (q.called('update')) return 0;
+      return [];
+    };
+    const trx = jest.fn((table) => makeChain(table, (q) => route(table, q)));
+    trx.raw = jest.fn(async () => ({ rows: [] }));
+    trx.transaction = jest.fn(async (fn) => fn(trx));
+    trx.fn = { now: () => 'NOW()' };
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+
+    const result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+
+    const recorded = JSON.parse(state.journal.repointed_ids);
+    // The most-restrictive block applied the loser's opt-out DIRECTLY (not a
+    // backfill) — the journal keeps the winner's pre-merge values for the
+    // exact columns it overwrote so the undo can put them back.
+    expect(recorded.winner_autopay_before).toEqual({
+      before: { autopay_enabled: true },
+      applied: { autopay_enabled: false },
+    });
+    // The merge cleared the winner's consent stamps (mixed contact list);
+    // winner_backfills records the APPLIED nulls, winner_prior_values the
+    // originals the undo restores.
+    const backfills = JSON.parse(state.journal.winner_backfills);
+    expect(backfills.service_contacts_consent_at).toBe(null);
+    expect(recorded.winner_prior_values).toEqual({
+      service_contacts_consent_at: '2026-06-01T00:00:00.000Z',
+      service_contacts_consent_source: 'portal_form',
+      service_contacts_consent_text_version: 'v2',
+    });
+    expect(result.backfills.service_contact2_phone).toBe('+15550000042');
+  });
+
+  it('registers the referral-promoter consolidation in collision_handlers (folded rewards cannot be split back)', async () => {
+    const winner = { id: WINNER, first_name: 'Winner', last_name: 'Testcase', phone: '+15550000001' };
+    const loser = { id: LOSER, first_name: 'Winner', last_name: null, phone: '5550000001' };
+    const winnerPromoter = {
+      id: 7, customer_id: WINNER, referral_balance_cents: 0,
+      total_earned_cents: 0, total_paid_out_cents: 0, total_clicks: 0,
+      total_referrals_sent: 0, total_referrals_converted: 0,
+      available_balance_cents: 0, pending_earnings_cents: 0,
+    };
+    const loserPromoterRow = {
+      id: 9, customer_id: LOSER, referral_balance_cents: 200,
+      total_earned_cents: 250, total_paid_out_cents: 0, total_clicks: 2,
+      total_referrals_sent: 3, total_referrals_converted: 1,
+      available_balance_cents: 300, pending_earnings_cents: 50,
+    };
+    const state = { journal: null };
+    const route = (table, q) => {
+      if (table === 'customers') {
+        if (q.called('forUpdate')) return [winner, loser];
+        if (q.called('update')) return 1;
+        return [];
+      }
+      if (table === 'customer_merge_journal') {
+        state.journal = q.args('insert')[0];
+        return [{ id: 'j1' }];
+      }
+      if (table === 'referral_promoters') {
+        if (q.called('first')) {
+          const w = q.args('where')[0];
+          if (w.customer_id === LOSER) return { id: 9 };
+          if (w.customer_id === WINNER) return winnerPromoter;
+          if (w.id === 9) return loserPromoterRow;
+          return null;
+        }
+        if (q.called('update')) return 1;
+      }
+      if (q.called('first')) return null;
+      if (q.called('update')) return 1;
+      return [];
+    };
+    const trx = jest.fn((table) => makeChain(table, (q) => route(table, q)));
+    trx.raw = jest.fn(async () => ({ rows: [] }));
+    trx.transaction = jest.fn(async (fn) => fn(trx));
+    trx.fn = { now: () => 'NOW()' };
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+
+    const result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+
+    expect(result.repointed['referral_promoters.consolidated']).toMatch(/9 into 7/);
+    // The consolidation moved referrals/payouts, zeroed balances, and
+    // retired the loser promoter — none of it row-recorded, so the merge
+    // must read as non-revertible (revertMerge 409s; GET /merges shows
+    // revertible:false).
+    const recorded = JSON.parse(state.journal.repointed_ids);
+    expect(recorded.collision_handlers).toContain('referral_promoters');
   });
 
   it('journals collision handlers and the ORIGINAL per-card default/autopay flags', async () => {
@@ -424,7 +585,10 @@ describe('revertMerge', () => {
     expect(state.journalUpdate).toBe(null);
   });
 
-  it('skips-and-reports changed rows on low-stakes tables and leaves a changed Stripe id alone', async () => {
+  it('skips-and-reports changed rows on low-stakes tables and leaves a changed Stripe id alone (NO moved cards)', async () => {
+    // Boundary of the stripe-drift refusal: with no payment_methods rows in
+    // the journal, a drifted Stripe id is merely reported — the refusal
+    // below only fires when saved cards would repoint to the loser.
     const journal = baseJournal();
     journal.repointed_ids.tables = { 'leads.customer_id': ['lead-1', 'lead-2'] };
     const { trx, state } = buildRevertTrx({
@@ -587,6 +751,117 @@ describe('revertMerge', () => {
         where: { id: 'pm-2', customer_id: LOSER },
         payload: expect.objectContaining({ is_default: false, autopay_enabled: false }),
       }),
+    ]));
+  });
+
+  it("refuses (409, zero writes) when the winner's Stripe id changed since the merge AND payment methods were moved", async () => {
+    // The transferred id can't move back (it no longer sits on the winner),
+    // but the recorded payment_methods rows WOULD repoint — the restored
+    // customer would hold saved cards referencing a Stripe profile its row
+    // doesn't have. Financially-relevant restoration can't be exact → refuse
+    // whole, never the old skip-and-split.
+    const journal = baseJournal();
+    journal.repointed_ids.tables = { 'payment_methods.customer_id': ['pm-1'] };
+    journal.repointed_ids.payment_method_flags = { 'pm-1': { is_default: true, autopay_enabled: true } };
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: { ...baseWinner(), stripe_customer_id: 'cus_DIFFERENT' },
+      loser: baseLoser(),
+      tables: { payment_methods: { stillOnWinner: ['pm-1'] } },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/Stripe profile has changed .* payment methods were moved/) });
+    expect(state.repointedBack).toHaveLength(0);
+    expect(state.flagRestores).toHaveLength(0);
+    expect(state.journalUpdate).toBe(null);
+  });
+
+  it("restores the winner's ORIGINAL autopay state when still the merge-written value; edited fields stay and report", async () => {
+    const journal = baseJournal();
+    journal.repointed_ids.winner_autopay_before = {
+      before: { autopay_enabled: true, autopay_paused_until: null, autopay_pause_reason: null },
+      applied: {
+        autopay_enabled: false,
+        autopay_paused_until: '2026-08-15T00:00:00.000Z',
+        autopay_pause_reason: 'customer asked to hold',
+      },
+    };
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: {
+        ...baseWinner(),
+        autopay_enabled: false, // still the merge-written opt-out → restored
+        autopay_paused_until: '2026-09-30T00:00:00.000Z', // admin re-paused later → stays, reported
+        autopay_pause_reason: 'customer asked to hold', // unchanged → restored
+      },
+      loser: baseLoser(),
+      tables: { leads: { stillOnWinner: ['lead-1', 'lead-2'] }, invoices: { stillOnWinner: ['inv-1'] } },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+    expect(state.winnerPatch.autopay_enabled).toBe(true);
+    expect(state.winnerPatch.autopay_pause_reason).toBe(null);
+    expect(state.winnerPatch.autopay_paused_until).toBeUndefined();
+    expect(result.skipped).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: 'customers.autopay_paused_until', reason: 'winner_value_changed_since_merge' }),
+    ]));
+  });
+
+  it('pre-upgrade journal without winner_autopay_before: no autopay restore, no refusal (documented behavior)', async () => {
+    const journal = baseJournal(); // no winner_autopay_before key
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: { ...baseWinner(), autopay_enabled: false },
+      loser: baseLoser(),
+      tables: { leads: { stillOnWinner: ['lead-1', 'lead-2'] }, invoices: { stillOnWinner: ['inv-1'] } },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+    // Winner stays most-restrictive — never a silent re-enable.
+    expect(state.winnerPatch?.autopay_enabled).toBeUndefined();
+    expect(result.skipped).toHaveLength(0);
+  });
+
+  it('restores the consent stamps the merge deliberately nulled, only while still null on the winner', async () => {
+    const journal = baseJournal();
+    journal.winner_backfills = {
+      ...journal.winner_backfills,
+      service_contact2_name: 'Tenant Sample',
+      service_contact2_phone: '+15550000042',
+      service_contacts_consent_at: null,
+      service_contacts_consent_source: null,
+      service_contacts_consent_text_version: null,
+    };
+    journal.repointed_ids.winner_prior_values = {
+      service_contacts_consent_at: '2026-06-01T00:00:00.000Z',
+      service_contacts_consent_source: 'portal_form',
+      service_contacts_consent_text_version: 'v2',
+    };
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: {
+        ...baseWinner(),
+        service_contact2_name: 'Tenant Sample', // unchanged backfill → vacates
+        service_contact2_phone: '+15550000042',
+        service_contacts_consent_at: null, // still the merge-written null → restored
+        service_contacts_consent_source: null,
+        service_contacts_consent_text_version: 'v9', // re-attested since → stays, reported
+      },
+      loser: baseLoser(),
+      tables: { leads: { stillOnWinner: ['lead-1', 'lead-2'] }, invoices: { stillOnWinner: ['inv-1'] } },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+    // Appended loser contacts vacate the winner...
+    expect(state.winnerPatch.service_contact2_name).toBe(null);
+    expect(state.winnerPatch.service_contact2_phone).toBe(null);
+    // ...and the winner's own pre-merge consent stamps come back.
+    expect(state.winnerPatch.service_contacts_consent_at).toBe('2026-06-01T00:00:00.000Z');
+    expect(state.winnerPatch.service_contacts_consent_source).toBe('portal_form');
+    expect(state.winnerPatch.service_contacts_consent_text_version).toBeUndefined();
+    expect(result.skipped).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: 'customers.service_contacts_consent_text_version', reason: 'winner_value_changed_since_merge' }),
     ]));
   });
 

@@ -17,14 +17,16 @@ const {
   applyInventoryUnitFix,
   resolveInventoryUnitAlias,
   runInventoryUnitAutofixSweep,
-  _test: { CANONICAL_STORAGE_UNITS, OZ_FAMILY_SQL, isAutofixCandidateUnit },
+  _test: {
+    BATCH_CAP, CANDIDATE_PAGE_SIZE, CANONICAL_STORAGE_UNITS, OZ_FAMILY_SQL, isAutofixCandidateUnit,
+  },
 } = require('../services/inventory-unit-review');
 
 function makeChain(table, route) {
   const q = { _table: table, _calls: [] };
   const methods = [
     'where', 'whereIn', 'whereRaw', 'whereNull', 'whereNotNull', 'whereNotIn', 'select', 'orderBy',
-    'forUpdate', 'update', 'insert', 'count', 'first', 'limit',
+    'forUpdate', 'update', 'insert', 'count', 'first', 'limit', 'offset',
   ];
   for (const m of methods) {
     q[m] = jest.fn((...args) => { q._calls.push([m, args]); return q; });
@@ -207,12 +209,17 @@ describe('applyInventoryUnitFix (sweep mode)', () => {
 // ---------------------------------------------------------------------------
 
 describe('runInventoryUnitAutofixSweep', () => {
-  function buildSweepDbi({ candidates, products, remaining = 4 }) {
+  function buildSweepDbi({ candidates, products, remaining = 4, pages = null }) {
     const state = { updates: [], movements: [] };
     const route = (table, q) => {
       if (table === 'products_catalog') {
         if (q.called('count')) return { count: remaining };
-        if (q.called('limit')) return candidates;
+        // The candidate scan pages with limit+offset; `pages` (keyed by
+        // offset) simulates multi-page scans, `candidates` a single page.
+        if (q.called('limit')) {
+          if (pages) return pages[q.args('offset')?.[0] ?? 0] || [];
+          return (q.args('offset')?.[0] ?? 0) === 0 ? candidates : [];
+        }
         if (q.called('forUpdate')) return products[q.args('where')[0].id] || null;
         if (q.called('update')) { state.updates.push({ where: q.args('where')[0], payload: q.args('update')[0] }); return 1; }
         if (q.called('first')) return {};
@@ -262,6 +269,48 @@ describe('runInventoryUnitAutofixSweep', () => {
     expect(title).toMatch(/1 unit alias auto-fixed/);
     expect(body).toMatch(/4 products still need unit review/);
     expect(opts.link).toBe('/admin/inventory?tab=unit-review');
+  });
+
+  it('parked rows never consume the cap — a full page of unrecognizable units cannot starve fixable aliases behind it', async () => {
+    isEnabled.mockImplementation((gate) => gate === 'inventoryUnitAutofix');
+    // A whole first page of park-only rows (sorted ahead of the fixable
+    // alias): the pre-fix code applied LIMIT BATCH_CAP to the raw candidate
+    // set, so these rows filled the batch on every run and 'ZZZ Talstar'
+    // never got fixed. Resolvability now filters BEFORE the cap and the
+    // scan pages past the parked rows.
+    const parkedPage = Array.from({ length: CANDIDATE_PAGE_SIZE }, (_, i) => (
+      { id: `bag-${i}`, name: `AAA Bags ${i}`, inventory_unit: 'bags' }
+    ));
+    const pages = {
+      0: parkedPage,
+      [CANDIDATE_PAGE_SIZE]: [{ id: 'p-gal', name: 'ZZZ Talstar', inventory_unit: 'Gallons' }],
+    };
+    const products = {
+      'p-gal': { id: 'p-gal', name: 'ZZZ Talstar', inventory_unit: 'Gallons', inventory_on_hand: '2.5', low_stock_threshold: null },
+    };
+    const { dbi, state } = buildSweepDbi({ candidates: null, products, pages, remaining: 200 });
+    const result = await runInventoryUnitAutofixSweep({ dbi });
+
+    expect(result.applied).toBe(1);
+    expect(result.parked).toBe(CANDIDATE_PAGE_SIZE);
+    expect(state.updates).toHaveLength(1);
+    expect(state.updates[0].payload.inventory_unit).toBe('gal');
+  });
+
+  it('the cap still bounds WRITES per run (applies to resolvable rows, not scan size)', async () => {
+    isEnabled.mockImplementation((gate) => gate === 'inventoryUnitAutofix');
+    const n = BATCH_CAP + 10;
+    const candidates = Array.from({ length: n }, (_, i) => (
+      { id: `g-${i}`, name: `Product ${String(i).padStart(3, '0')}`, inventory_unit: 'Gallons' }
+    ));
+    const products = Object.fromEntries(candidates.map((c) => [
+      c.id, { ...c, inventory_on_hand: '1', low_stock_threshold: null },
+    ]));
+    const { dbi, state } = buildSweepDbi({ candidates, products, remaining: 0 });
+    const result = await runInventoryUnitAutofixSweep({ dbi });
+
+    expect(result.applied).toBe(BATCH_CAP);
+    expect(state.updates).toHaveLength(BATCH_CAP);
   });
 
   it('goes stale instead of overwriting a row an admin fixed mid-sweep', async () => {

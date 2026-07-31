@@ -32,6 +32,14 @@ const {
 // Same clamp posture as data-hygiene auto-apply: env-tunable, hard ceiling.
 const BATCH_CAP = clampCap(process.env.INVENTORY_UNIT_AUTOFIX_BATCH, 50);
 
+// Candidate SCAN page size — deliberately independent of BATCH_CAP. The
+// candidate predicate also selects park-only rows ('bottles', 'cases', ...)
+// so an identically-ordered LIMIT BATCH_CAP could fill with the same parked
+// rows on every run and starve the fixable aliases sorted behind them
+// forever. The sweep pages through candidates and filters RESOLVABLE
+// aliases BEFORE applying the cap, so parked rows never consume batch slots.
+const CANDIDATE_PAGE_SIZE = 200;
+
 function clampCap(raw, fallback) {
   const parsed = Number.parseInt(raw, 10);
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
@@ -250,18 +258,33 @@ async function runInventoryUnitAutofixSweep({ dbi = db } = {}) {
     return { skipped: 'gate_off' };
   }
 
-  const candidates = await applyAutofixCandidateFilter(dbi('products_catalog'))
-    .select('id', 'name', 'inventory_unit')
-    .orderBy('name')
-    .limit(BATCH_CAP);
-
-  const results = { applied: 0, parked: 0, stale: 0, errors: 0, fixes: [] };
-  for (const candidate of candidates) {
-    const target = resolveInventoryUnitAlias(candidate.inventory_unit);
-    if (!target) {
-      results.parked += 1;
-      continue;
+  // Scan candidates in stable pages (name, id) and take the first BATCH_CAP
+  // RESOLVABLE aliases — parked (unresolvable) rows are counted but never
+  // occupy a batch slot, so they can't starve fixable rows sorted after
+  // them. The cap still bounds the number of WRITES per run.
+  const fixable = [];
+  let parked = 0;
+  for (let offset = 0; ; offset += CANDIDATE_PAGE_SIZE) {
+    const page = await applyAutofixCandidateFilter(dbi('products_catalog'))
+      .select('id', 'name', 'inventory_unit')
+      .orderBy('name')
+      .orderBy('id')
+      .limit(CANDIDATE_PAGE_SIZE)
+      .offset(offset);
+    for (const candidate of page) {
+      const target = resolveInventoryUnitAlias(candidate.inventory_unit);
+      if (!target) {
+        parked += 1;
+        continue;
+      }
+      if (fixable.length < BATCH_CAP) fixable.push({ ...candidate, target });
     }
+    if (fixable.length >= BATCH_CAP || page.length < CANDIDATE_PAGE_SIZE) break;
+  }
+
+  const results = { applied: 0, parked, stale: 0, errors: 0, fixes: [] };
+  for (const candidate of fixable) {
+    const { target } = candidate;
     try {
       const { outcome } = await applyInventoryUnitFix({
         dbi,
@@ -339,6 +362,7 @@ module.exports = {
   runInventoryUnitAutofixSweep,
   _test: {
     BATCH_CAP,
+    CANDIDATE_PAGE_SIZE,
     CANONICAL_UNIT,
     UNSUPPORTED_UNIT_SQL,
     CANONICAL_STORAGE_UNITS,
