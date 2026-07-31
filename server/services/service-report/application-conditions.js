@@ -170,10 +170,6 @@ function rainWindowEndingOn(serviceDate, days = 7) {
 const _rainCache = new Map();
 const RAIN_TTL_MS = 6 * 60 * 60 * 1000; // 6h
 
-function rainCacheKey(lat, lon, end) {
-  return `${Number(lat).toFixed(2)},${Number(lon).toFixed(2)},${end}`;
-}
-
 // ── City-collective rainfall (single-cell model-spike guard) ────────────────────
 // Open-Meteo's daily precipitation_sum is a per-grid-cell modelled value. On summer
 // convective days a single cell can carry a spurious 3–8" bullseye its own neighbours
@@ -335,7 +331,11 @@ async function fetchServiceWeekWeather({ latitude, longitude, serviceDate } = {}
   // accumulating — cache it briefly (30 min) so afternoon convection shows
   // up instead of being pinned behind the 6h TTL (codex P2 #3096 r2);
   // closed windows keep the full TTL.
-  const key = `${mode}|${rainCacheKey(lat, lon, range.end)}`;
+  // Four-decimal coordinates (~11 m) in the key: the legacy two-decimal
+  // rainCacheKey (~1.1 km) collides neighbouring properties into one MRMS
+  // radar cell's cached week (codex P2 #3096 r4) — MRMS is queried at four
+  // decimals, so the key must be at least that precise.
+  const key = `${mode}|${lat.toFixed(4)},${lon.toFixed(4)},${range.end}`;
   const windowUnclosed = range.end >= etTodayYmd();
   // TTL is decided at WRITE time and stored with the entry — recomputing at
   // read let an entry cached just before ET midnight inherit the 6h TTL
