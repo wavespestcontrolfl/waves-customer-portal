@@ -3,13 +3,17 @@
 //   X · Edit header · Review & checkout CTA · Customer (chevron to Customer 360)
 //   · Services and items · Date and time · Location (map deep-link) ·
 //   Appointment note (editable) · Booked on <date> footer ·
-//   Cancel appointment / Mark as no-show / Book next appointment.
+//   Cancel appointment / Quick Move Appointment / Book next appointment.
 //
 // Review & checkout  → opens MobileCheckoutSheet (Square-style pricing review
 //                      → MobilePaymentSheet → Tap to Pay / Cash / etc.).
 // Edit (top-right)   → opens EditServiceModal (existing V1).
-// Cancel / No-show   → PUT /admin/dispatch/:id/status with status="cancelled"
-//                      or status="no_show" (existing endpoint).
+// Cancel             → PUT /admin/dispatch/:id/status with status="cancelled"
+//                      (existing endpoint). The manual Mark-as-no-show button
+//                      was removed 2026-07-31 (owner call) — misses go through
+//                      the Quick Move sheet's soft No-show reason (rebook +
+//                      text); the terminal no_show status stays reachable via
+//                      the API and the nightly missed-appointment detection.
 // Book next          → opens CreateAppointmentModal with this customer
 //                      pre-filled (defaultCustomer prop).
 // Note save          → PATCH /admin/dispatch/:id/note (new endpoint).
@@ -116,7 +120,6 @@ export default function MobileAppointmentDetailSheet({
   onCompleteService,
   onBookNext,
   onCancelled,
-  onNoShow,
   onRescheduled,
 }) {
   const [note, setNote] = useState(service?.notes || '');
@@ -325,21 +328,6 @@ export default function MobileAppointmentDetailSheet({
       onClose?.();
     } catch (err) {
       alert('Failed to cancel: ' + err.message);
-    } finally { setActionBusy(''); }
-  };
-
-  const markNoShow = async () => {
-    if (!window.confirm(`Mark ${service.customerName || 'customer'} as a no-show?`)) return;
-    setActionBusy('noshow');
-    try {
-      await adminFetch(`/admin/dispatch/${service.id}/status`, {
-        method: 'PUT',
-        body: JSON.stringify({ status: 'no_show' }),
-      });
-      onNoShow?.(service);
-      onClose?.();
-    } catch (err) {
-      alert('Failed to mark no-show: ' + err.message);
     } finally { setActionBusy(''); }
   };
 
@@ -773,15 +761,6 @@ export default function MobileAppointmentDetailSheet({
                   </div>
                 </div>
               )}
-              <button
-                type="button"
-                onClick={markNoShow}
-                disabled={!!actionBusy}
-                className="w-full rounded-full bg-white border border-hairline border-zinc-200 text-zinc-900 font-medium u-focus-ring disabled:opacity-50"
-                style={{ padding: '14px 20px', fontSize: 16 }}
-              >
-                {actionBusy === 'noshow' ? 'Saving…' : 'Mark as no-show'}
-              </button>
             </>
           )}
           {canRainOut && (
