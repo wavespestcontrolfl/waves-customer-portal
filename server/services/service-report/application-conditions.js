@@ -282,7 +282,13 @@ function mergeMrmsIntoWeek({ om, mrms, todayYmd } = {}) {
     const mrmsVal = day.inches;
     let inches = null;
     let provider = null;
-    if (day.date === todayYmd && mrmsVal != null && omVal != null) {
+    if (day.date === todayYmd) {
+      // The unclosed day NEEDS the model value: MRMS alone is an explicitly
+      // partial "so far" accumulation, and accepting it as a full day would
+      // understate the week (codex P2 #3096 r2). No model value → the merge
+      // fails and the caller degrades to rain_unknown, exactly like the
+      // pre-engine path. Outage survival still holds for CLOSED windows.
+      if (mrmsVal == null || omVal == null) return null;
       inches = Math.max(mrmsVal, omVal);
       provider = mrmsVal >= omVal ? 'mrms' : 'open_meteo';
     } else if (mrmsVal != null) {
@@ -318,10 +324,15 @@ async function fetchServiceWeekWeather({ latitude, longitude, serviceDate } = {}
   if (lat == null || lon == null || !range) return empty;
   const mode = rainMrmsMode();
   // Mode participates in the key so a gate flip never serves the other
-  // mode's cached week for up to 6h.
+  // mode's cached week for up to 6h. A window ending TODAY is still
+  // accumulating — cache it briefly (30 min) so afternoon convection shows
+  // up instead of being pinned behind the 6h TTL (codex P2 #3096 r2);
+  // closed windows keep the full TTL.
   const key = `${mode}|${rainCacheKey(lat, lon, range.end)}`;
+  const windowUnclosed = range.end >= etTodayYmd();
+  const ttlMs = windowUnclosed ? 30 * 60 * 1000 : RAIN_TTL_MS;
   const cached = _rainCache.get(key);
-  if (cached && Date.now() - cached.at < RAIN_TTL_MS) return cached.value;
+  if (cached && Date.now() - cached.at < ttlMs) return cached.value;
 
   // The two sources are independent — fetch concurrently so a slow pair
   // costs max(timeouts), not their sum (codex P2 #3096).
@@ -339,11 +350,18 @@ async function fetchServiceWeekWeather({ latitude, longitude, serviceDate } = {}
     // (codex P1 #3096) — an opaque hash still lets a week of shadow lines
     // be grouped per property.
     const loc = require('crypto').createHash('sha256').update(`${lat.toFixed(4)},${lon.toFixed(4)}`).digest('hex').slice(0, 8);
-    if (merged) {
-      const delta = Math.round(((merged.rainInches || 0) - (om.rainInches || 0)) * 100) / 100;
-      logger.info(`[rain-engine] mode=${mode} week mrms=${merged.rainInches} om=${om.rainInches ?? 'null'} delta=${delta} source=${merged.rainSource} loc=${loc} end=${range.end}`);
-      if (mode === 'live') value = merged;
-    } else if (mode === 'live') {
+    // Telemetry must not bias the shadow experiment (codex P2 r2): missing
+    // sources are logged as explicit 'unavailable' outcomes — never as a
+    // numeric delta against zero, and never silently skipped — so the
+    // live-flip evidence includes availability, not just agreement.
+    const omWeek = om.rainInches;
+    const mrmsWeek = merged ? merged.rainInches : null;
+    const delta = (mrmsWeek != null && omWeek != null)
+      ? Math.round((mrmsWeek - omWeek) * 100) / 100
+      : null;
+    logger.info(`[rain-engine] mode=${mode} mrms=${mrmsWeek ?? 'unavailable'} om=${omWeek ?? 'unavailable'} delta=${delta ?? 'n/a'} source=${merged ? merged.rainSource : 'open_meteo_only'} loc=${loc} end=${range.end}`);
+    if (merged && mode === 'live') value = merged;
+    if (!merged && mode === 'live') {
       logger.warn(`[rain-engine] mode=live but MRMS unusable for ${range.start}..${range.end} loc=${loc} — Open-Meteo fallback`);
     }
   }

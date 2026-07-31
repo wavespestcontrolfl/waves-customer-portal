@@ -91,15 +91,24 @@ describe('mergeMrmsIntoWeek', () => {
     expect(merged).toBeNull();
   });
 
-  test('MRMS-complete week survives an Open-Meteo outage', () => {
+  test('MRMS-complete CLOSED week survives an Open-Meteo outage', () => {
     const merged = mergeMrmsIntoWeek({
       om: { rainInches: null, et0Inches: null, dailyRain: null, rainConfidence: null, rainSource: null },
       mrms: mrmsDays([0.29, 0, 1.14, 1.1, 0, 0, 0.39]),
-      todayYmd: '2026-07-29',
+      todayYmd: '2026-07-31',
     });
     expect(merged.rainSource).toBe('mrms');
     expect(merged.rainInches).toBeCloseTo(2.92, 2);
     expect(merged.et0Inches).toBeNull();
+  });
+
+  test('unclosed day with MRMS-so-far but no model value fails the merge (r2)', () => {
+    const merged = mergeMrmsIntoWeek({
+      om: { rainInches: null, et0Inches: null, dailyRain: null, rainConfidence: null, rainSource: null },
+      mrms: mrmsDays([0.29, 0, 1.14, 1.1, 0, 0, 0.39]),
+      todayYmd: '2026-07-30',
+    });
+    expect(merged).toBeNull();
   });
 
   test('all-gaps MRMS adds nothing → null (caller keeps Open-Meteo)', () => {
