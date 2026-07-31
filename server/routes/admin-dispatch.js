@@ -7635,7 +7635,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               // (codex P1 #3007 r13).
               applications: (typeof products !== 'undefined' && Array.isArray(products)) ? products : [],
               tracedExteriorZone: await require('../services/service-report/reentry')
-                .resolveTracedExteriorZone({ scheduled_service_id: record.scheduled_service_id || svc.id, service_type: svc.service_type }),
+                .resolveTracedExteriorZone({
+                  scheduled_service_id: record.scheduled_service_id || svc.id,
+                  service_type: svc.service_type,
+                  interior_only_lane: completionProfile?.serviceKey === 'bed_bug_treatment',
+                }),
             },
             service: svc,
             reportUrl,

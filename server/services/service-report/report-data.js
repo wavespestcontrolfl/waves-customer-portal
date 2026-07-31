@@ -489,9 +489,11 @@ async function resolveTracedExteriorZone(record, knex = db) {
   // Interior-only treatments (bed bug): a trace saved before the tracer was
   // hidden for this lane is stale EXTERIOR evidence — never let it drive
   // the exterior dry-down timer. Single choke point for the report payload,
-  // the re-entry context, and the completion SMS (codex P2 r8; callers
-  // pass service_type when they have the row).
-  if (/\bbed\s*bugs?\b/i.test(String(record.service_type || ''))) return false;
+  // the re-entry context, and the completion SMS (codex P2 r8). Callers
+  // with the resolved profile pass interior_only_lane (stable key, r9);
+  // the label regex covers callers that only have the row.
+  if (record.interior_only_lane === true
+    || /\bbed\s*bugs?\b/i.test(String(record.service_type || ''))) return false;
   try {
     return !!(await knex('treatment_zone_maps')
       .where({ scheduled_service_id: record.scheduled_service_id })
@@ -1362,7 +1364,7 @@ function stripLiveOnlyScheduleFields(data) {
   return data;
 }
 
-function shouldAddNoActivityFinding({ service = {}, structured = {}, protocol = {} } = {}) {
+function shouldAddNoActivityFinding({ service = {}, structured = {}, protocol = {}, interiorOnlyLane = false } = {}) {
   const visitOutcome = String(protocol.visitOutcome || service.visit_outcome || service.status || 'completed').toLowerCase();
   const concernText = structuredCustomerConcern(structured);
   // A positive activity rating recorded at completion means SOMETHING was
@@ -1375,7 +1377,7 @@ function shouldAddNoActivityFinding({ service = {}, structured = {}, protocol = 
   // (mirrors the completion-side insert guard, codex P2 r7). Raw-null check
   // first: Number(null) coerces to 0, which would read a MISSING rating as
   // an explicit zero (codex P2 r8).
-  if (/\bbed\s*bugs?\b/i.test(String(service.service_type || ''))
+  if ((interiorOnlyLane || /\bbed\s*bugs?\b/i.test(String(service.service_type || '')))
     && !(service.client_pest_rating != null && Number(service.client_pest_rating) === 0)) {
     return false;
   }
@@ -2083,11 +2085,27 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   const scheduledServiceRow = service.scheduled_service_id
     ? await knex('scheduled_services')
       .where({ id: service.scheduled_service_id })
-      .first('service_type')
+      .first('id', 'service_id', 'service_type')
       .catch(() => null)
     : null;
   const linkedServiceName = String(scheduledServiceRow?.service_type || '').trim()
     || serviceDisplayName(service);
+  // Interior-only lane classification (bed bug): display labels are
+  // admin-editable, so the report-time guards (stale-trace suppression,
+  // exterior re-entry evidence, no-activity synth) key on the linked
+  // profile's STABLE service key, with the label regex as the
+  // unlinked/legacy fallback (codex P2 r9). Fail-soft: a resolver error
+  // leaves the label fallback standing.
+  let interiorOnlyLane = /\bbed\s*bugs?\b/i.test(
+    `${service.service_type || ''} ${scheduledServiceRow?.service_type || ''}`,
+  );
+  if (!interiorOnlyLane && scheduledServiceRow) {
+    try {
+      const { resolveCompletionProfileForScheduledService } = require('../service-completion-profiles');
+      const laneProfile = await resolveCompletionProfileForScheduledService(scheduledServiceRow, knex);
+      interiorOnlyLane = laneProfile?.serviceKey === 'bed_bug_treatment';
+    } catch { /* label fallback stands */ }
+  }
   const structured = parseJsonObject(service.structured_notes);
   const serviceData = parseJsonObject(service.service_data);
   const protocol = buildProtocolPayload(service);
@@ -2232,7 +2250,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // Typed reports carry their real findings in the snapshot (rendered by
   // TypedFindingsCard) — the legacy no-activity fallback would contradict
   // e.g. an active cockroach visit's snapshot.
-  if (!typedSnapshot && !findings.length && !hasLawnAssessmentSignal && shouldAddNoActivityFinding({ service, structured, protocol })) {
+  if (!typedSnapshot && !findings.length && !hasLawnAssessmentSignal && shouldAddNoActivityFinding({ service, structured, protocol, interiorOnlyLane })) {
     findings.push({
       id: `no-activity-${service.id}`,
       zoneId: null,
@@ -2472,9 +2490,8 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // Interior-only treatments (bed bug) never render a satellite spray
     // outline — a trace saved before the tracer was hidden for this lane
     // is stale exterior evidence on an interior treatment's report
-    // (codex P2 r6 on the bed-bug untype).
-    const interiorOnlyReport = /\bbed\s*bugs?\b/i.test(String(service.service_type || ''));
-    if (featureGates.isEnabled('treatmentZoneMap') && service.scheduled_service_id && !interiorOnlyReport) {
+    // (codex P2 r6; stable-key classification r9).
+    if (featureGates.isEnabled('treatmentZoneMap') && service.scheduled_service_id && !interiorOnlyLane) {
       const tracedRow = await knex('treatment_zone_maps')
         .where({ scheduled_service_id: service.scheduled_service_id })
         .first()
@@ -2632,7 +2649,9 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   const photoChain = photos.some((photo) => photo.hash_sha256)
     ? validatePhotoChainRows(photos)
     : { valid: null, photo_count: photos.length, broken_at: null };
-  const payloadTracedExteriorZone = await resolveTracedExteriorZone(service, knex);
+  const payloadTracedExteriorZone = interiorOnlyLane
+    ? false
+    : await resolveTracedExteriorZone(service, knex);
   const advisory = normalizeAdvisoryForTreatmentScope({
     ...config.advisoryDefaults,
     ...parseJsonObject(service.advisory),

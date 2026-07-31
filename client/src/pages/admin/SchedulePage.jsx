@@ -9774,7 +9774,11 @@ export function CompletionPanel({
     );
     setReviewTiming(savedDraft.reviewTiming || "120");
     setReviewCustomAt(savedDraft.reviewCustomAt || "");
-    setOneTimeRecapOnly(!!savedDraft.oneTimeRecapOnly);
+    // Bed bug hides the recap-only control (typed-era billing parity) — a
+    // pre-migration draft must not restore the flag into invisible state
+    // where the server's recap_only_not_allowed 409 becomes unclearable
+    // (codex P2 r9).
+    setOneTimeRecapOnly(isBedBugVisit ? false : !!savedDraft.oneTimeRecapOnly);
     // Quiet/loud choice + typed minutes come back exactly as saved; a legacy
     // draft without the fields falls back to the panel default. Consumers all
     // gate on backfillEligible, so this stays inert if the visit is somehow
@@ -11823,7 +11827,7 @@ export function CompletionPanel({
               {/* completionAdvisories are deliberately NOT rendered here —
                   the success screen stays minimal (owner 2026-07-29); they
                   are recorded server-side and surface in Customer 360. */}
-              {completionResult?.typedDeliveryMode === "internal_only" && (
+              {["internal_only", "disabled"].includes(completionResult?.typedDeliveryMode) && (
                 <div
                   style={{
                     fontFamily: font,
@@ -11833,8 +11837,9 @@ export function CompletionPanel({
                     textAlign: "center",
                   }}
                 >
-                  Report stored — customer delivery is off for this service
-                  type.
+                  {completionResult.typedDeliveryMode === "internal_only"
+                    ? "Report stored — customer delivery is off for this service type."
+                    : "Customer delivery is off for this service — no report or SMS was sent."}
                 </div>
               )}
               {recapEligible && (
@@ -13744,7 +13749,7 @@ export function CompletionPanel({
                     : "SMS + Report sent"}{" "}
               for {service.customerName}
             </div>{" "}
-            {completionResult?.typedDeliveryMode === "internal_only" && (
+            {["internal_only", "disabled"].includes(completionResult?.typedDeliveryMode) && (
               <div
                 style={{
                   fontSize: 13,
@@ -13753,7 +13758,9 @@ export function CompletionPanel({
                   textAlign: "center",
                 }}
               >
-                Report stored — customer delivery is off for this service type.
+                {completionResult.typedDeliveryMode === "internal_only"
+                  ? "Report stored — customer delivery is off for this service type."
+                  : "Customer delivery is off for this service — no report or SMS was sent."}
               </div>
             )}
             {recapEligible && !completionResult?.followupSuggestion?.required && (
