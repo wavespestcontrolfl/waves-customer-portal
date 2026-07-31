@@ -5541,6 +5541,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     let lawnRecRegenAttempted = false;
     let lawnRecRegenGrounded = false;
     let lawnRecRegenTimedOut = false;
+    // Resolves true once customer-safe copy is durable: grounded write OR
+    // deterministic sanitize after failure. Gates unrecallable artifacts
+    // (report email) queued later in this handler.
+    let lawnRecFinalCopyPromise = null;
     const completedLawnAssessmentId =
       linkedLawnAssessmentId || parseJsonObject(record.structured_notes).lawnAssessmentId || null;
     if (!isIncompleteVisit && completedLawnAssessmentId) {
@@ -5584,12 +5588,27 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         lawnRecRegenAttempted = true;
         lawnRecRegenPromise = KnowledgeBridge.generateAssessmentRecommendations(completedAssessment.id)
           .catch((recErr) => { logger.warn(`[dispatch] post-completion recommendation regen failed (non-blocking): ${recErr.message}`); return null; });
+        // LIVE grounded flag (codex P2 r15): the promise updates it whenever
+        // it settles — a run that lands grounded just after the race must
+        // not stay suppressed at the later MMS/SMS checks. Attached before
+        // the race so a fast settle updates the flag before the await
+        // returns.
+        lawnRecRegenPromise.then((result) => { lawnRecRegenGrounded = !!result; }).catch(() => {});
+        // Final-copy settlement: grounded write, or deterministic sanitize
+        // when the run failed (idempotent — the fast-fail inline sanitize
+        // below and this chain can both run; the advisory lock orders them
+        // and the second pass is a no-op).
+        lawnRecFinalCopyPromise = lawnRecRegenPromise.then(async (result) => {
+          if (result) return true;
+          const sanitized = await KnowledgeBridge.sanitizeStoredRecommendations(completedAssessment.id)
+            .catch(() => ({ changed: false }));
+          return sanitized.changed;
+        });
         const regenOutcome = await Promise.race([
-          lawnRecRegenPromise.then((result) => ({ settled: true, grounded: !!result })),
-          new Promise((resolve) => { setTimeout(() => resolve({ settled: false, grounded: false }), 60000).unref?.(); }),
+          lawnRecRegenPromise.then(() => ({ settled: true })),
+          new Promise((resolve) => { setTimeout(() => resolve({ settled: false }), 60000).unref?.(); }),
         ]);
         lawnRecRegenTimedOut = !regenOutcome.settled;
-        lawnRecRegenGrounded = regenOutcome.settled && regenOutcome.grounded;
         if (lawnRecRegenTimedOut) {
           logger.warn('[dispatch] lawn recommendation regen still running after 60s — completion continues; PDF re-queues when the grounded write lands');
         } else if (!lawnRecRegenGrounded) {
@@ -8052,8 +8071,45 @@ router.post('/:serviceId/complete', async (req, res, next) => {
 
     if (serviceReportEmailEligible({ serviceReportV1Delivery, suppressTypedCustomerComms }) && serviceReportEmailEnabled) {
       const latestNotes = parseJsonObject(record.structured_notes);
-      const emailAlreadyHandled = ['queued', 'sending', 'sent', 'skipped'].includes(latestNotes.serviceReportV1EmailStatus);
-      if (!emailAlreadyHandled) {
+      const emailAlreadyHandled = ['queued', 'sending', 'sent', 'skipped', 'deferred_grounding'].includes(latestNotes.serviceReportV1EmailStatus);
+      // The email worker rebuilds and ATTACHES the current PDF — an emailed
+      // attachment is unrecallable, so while grounded copy is still pending
+      // the enqueue is deferred behind final-copy settlement (grounded write
+      // or deterministic sanitize) instead of racing it (codex P1 r15).
+      if (!emailAlreadyHandled && lawnRecRegenAttempted && !lawnRecRegenGrounded && lawnRecFinalCopyPromise) {
+        const deferredNotes = { ...latestNotes, serviceReportV1EmailStatus: 'deferred_grounding' };
+        await db('service_records').where({ id: record.id })
+          .update({ structured_notes: serializeJsonb(deferredNotes) })
+          .catch((updErr) => logger.warn(`[dispatch] deferred email status write failed: ${updErr.message}`));
+        record.structured_notes = deferredNotes;
+        logger.info(`[dispatch] report email deferred for ${record.id} until grounded copy settles`);
+        lawnRecFinalCopyPromise.then(async () => {
+          try {
+            const queued = await enqueueServiceReportV1EmailDelivery({
+              serviceRecordId: record.id,
+              customerId: svc.customer_id,
+              token: reportToken,
+              reportUrl,
+              pdfUrl: reportToken ? `${portalUrl}/api/reports/${reportToken}` : null,
+              payload: { scheduled_service_id: svc.id, source: 'dispatch_complete_deferred' },
+            });
+            const fresh = await db('service_records').where({ id: record.id }).first('structured_notes');
+            const freshNotes = parseJsonObject(fresh?.structured_notes);
+            await db('service_records').where({ id: record.id }).update({
+              structured_notes: serializeJsonb({
+                ...freshNotes,
+                serviceReportV1EmailStatus: queued.delivery?.status || (queued.skipped ? 'skipped' : 'queued'),
+                serviceReportV1EmailDeliveryId: queued.delivery?.id || null,
+                serviceReportV1EmailQueuedAt: queued.delivery?.created_at || new Date().toISOString(),
+                serviceReportV1EmailError: queued.ok ? null : queued.error || null,
+              }),
+            });
+            logger.info(`[dispatch] deferred report email enqueued for ${record.id} after grounded copy settled`);
+          } catch (deferErr) {
+            logger.warn(`[dispatch] deferred report email enqueue failed for ${record.id}: ${deferErr.message}`);
+          }
+        }).catch(() => {});
+      } else if (!emailAlreadyHandled) {
         try {
           const queued = await enqueueServiceReportV1EmailDelivery({
             serviceRecordId: record.id,
