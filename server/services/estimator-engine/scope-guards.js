@@ -46,6 +46,11 @@ const TRIAGE_TIMEOUT_MS = 1200;
 // texts (address in one message, the ask in the next).
 const THREAD_WINDOW_HOURS = 48;
 const THREAD_WINDOW_LIMIT = 5;
+// The HARD scope veto only trusts the current exchange — texts this recent.
+// A power-washing mention from yesterday must not deterministically kill
+// today's vague-but-valid "can I get that quote?"; stale context is the
+// grounded classifier's judgment call, not the regex's.
+const VETO_BURST_MINUTES = 90;
 
 // Services Waves does NOT offer, phrased as service REQUESTS (noun +
 // action/service context), not bare nouns — "Jane Painter" introducing
@@ -114,20 +119,30 @@ function extractAddressCandidates(text) {
   // the precision gate, so the grammar here stays broad.
   const re = /\b(\d{1,6})\s+([A-Za-z0-9][A-Za-z0-9'.-]*(?:\s+[A-Za-z][A-Za-z0-9'.-]*){0,3})/g;
   let m;
+  const UNIT_WORD_RE = /^(?:apt|apartment|unit|suite|ste|#)$/i;
   while (out.length < 3 && (m = re.exec(src)) !== null) {
-    const words = m[2].split(/\s+/);
+    let words = m[2].split(/\s+/);
     // Skip obvious non-addresses: "24 hours", "30 minutes", "2 pm", and
     // bare number-pairs ("4 30") — numbered streets carry a suffix ("5th").
     if (/^(?:hours?|hrs?|minutes?|mins?|days?|weeks?|months?|years?|am|pm)$/i.test(words[0])) continue;
     if (/^\d+$/.test(words[0])) continue;
-    // Explicit locality after the street run ("…, Bradenton FL 34205"):
-    // captured only behind a comma (a bare following word is prose, not a
-    // city) so a same-street customer in a DIFFERENT named city can be
-    // rejected. Localities the message doesn't state stay unknown and
-    // compare conservatively equal downstream.
-    const tailSrc = src.slice(m.index + m[0].length, m.index + m[0].length + 45);
-    const cityM = tailSrc.match(/^\s*,\s*([A-Za-z][A-Za-z .'-]{2,28}?)\s*(?:,|\bFL\b|\bFlorida\b|\d{5}|$)/i);
-    const zipM = tailSrc.match(/\b(\d{5})\b/);
+    // The street-word run may have swallowed a unit designator ("100 Palm
+    // Ave Apt 6" → words [Palm, Ave, Apt]) — cut the street there and read
+    // the unit id from the source after the designator.
+    const designatorIdx = words.findIndex((w) => UNIT_WORD_RE.test(w));
+    if (designatorIdx > 0) words = words.slice(0, designatorIdx);
+    const afterStreet = src.slice(m.index + m[0].length, m.index + m[0].length + 60);
+    const unitM = `${m[2]} ${afterStreet}`.match(/\b(?:apt|apartment|unit|suite|ste)\.?\s*#?\s*([A-Za-z0-9-]{1,8})\b/i);
+    // An explicitly-stated unit rides on EVERY variant: sameStreetAddress
+    // treats a missing unit as conservatively equal, so a unit-less variant
+    // of "Apt 6" would happily ground against the customer in Apt 1.
+    const unitSuffix = unitM ? ` Apt ${unitM[1]}` : '';
+    // Explicit locality after the street run — attached ONLY when a state
+    // or ZIP validates it ("…, Bradenton FL" / "…, Venice 34285"). A comma
+    // alone is ordinary prose ("100 Palm Ave, please") and must not become
+    // a fake city that rejects the real customer row.
+    const cityM = afterStreet.match(/^\s*,\s*([A-Za-z][A-Za-z .'-]{2,28}?)\s*,?\s*(?:\bFL\b|\bFlorida\b|\d{5})/i);
+    const zipM = afterStreet.match(/\b(\d{5})\b/);
     const locality = (cityM || zipM)
       ? `, ${cityM ? cityM[1].trim() : ''} ${zipM ? zipM[1] : ''}`.trimEnd()
       : '';
@@ -135,7 +150,7 @@ function extractAddressCandidates(text) {
       num: m[1],
       firstWord: words[0],
       locality,
-      variants: words.map((_, i) => `${m[1]} ${words.slice(0, i + 1).join(' ')}`),
+      variants: words.map((_, i) => `${m[1]} ${words.slice(0, i + 1).join(' ')}${unitSuffix}`),
     });
   }
   return out;
@@ -163,7 +178,11 @@ function prefixVariants(num, firstWord) {
 // missing city/ZIP as conservatively equal and a stated disagreement as a
 // mismatch, which is exactly the wanted asymmetry.
 function candidateMatchesRow(candidate, row) {
-  const rowFull = [row.address_line1, [row.city, row.zip].filter(Boolean).join(' ')]
+  // address_line2 carries the row's unit — include it so an explicit
+  // candidate unit ("Apt 6") is compared against the row's explicit unit
+  // ("Apt 1") instead of matching conservatively on the bare street.
+  const line1 = [row.address_line1, row.address_line2].filter(Boolean).join(' ');
+  const rowFull = [line1, [row.city, row.zip].filter(Boolean).join(' ')]
     .filter(Boolean).join(', ');
   return candidate.variants.some((v) => {
     try {
@@ -255,6 +274,7 @@ async function loadTriageInner({ phone, triggerBody }) {
   // classifier prompt.
   let searchText = String(triggerBody || '');
   let recentTexts = [];
+  let vetoTexts = [];
   const digits = last10(phone);
   if (digits) {
     try {
@@ -264,8 +284,13 @@ async function loadTriageInner({ phone, triggerBody }) {
         .whereRaw(`created_at >= NOW() - INTERVAL '${THREAD_WINDOW_HOURS} hours'`)
         .orderBy('created_at', 'desc')
         .limit(THREAD_WINDOW_LIMIT)
-        .select('message_body');
+        .select('message_body', 'created_at');
       recentTexts = priorTexts.map((t) => String(t.message_body || '')).filter(Boolean);
+      const burstFloor = Date.now() - VETO_BURST_MINUTES * 60 * 1000;
+      vetoTexts = priorTexts
+        .filter((t) => t.created_at && new Date(t.created_at).getTime() >= burstFloor)
+        .map((t) => String(t.message_body || ''))
+        .filter(Boolean);
       searchText += `\n${recentTexts.join('\n')}`;
     } catch (err) {
       logger.warn(`[estimator-scope] triage thread lookup failed: ${err.message}`);
@@ -279,7 +304,7 @@ async function loadTriageInner({ phone, triggerBody }) {
       .modify(whereLiveCustomer)
       .whereRaw('address_line1 ILIKE ANY(?)', [prefixes])
       .limit(5)
-      .select('id', 'first_name', 'last_name', 'address_line1', 'city', 'zip');
+      .select('id', 'first_name', 'last_name', 'address_line1', 'address_line2', 'city', 'zip');
     for (const row of rows) {
       if (candidateMatchesRow(cand, row)) {
         const shown = [row.address_line1, row.city].filter(Boolean).join(', ');
@@ -302,7 +327,7 @@ async function loadTriageInner({ phone, triggerBody }) {
         .whereRaw('cp.address_line1 ILIKE ANY(?)', [prefixes])
         .limit(5)
         .select('c.id', 'c.first_name', 'c.last_name',
-          'cp.address_line1 as address_line1', 'cp.city', 'cp.zip');
+          'cp.address_line1 as address_line1', 'cp.address_line2 as address_line2', 'cp.city', 'cp.zip');
       for (const row of propRows) {
         if (candidateMatchesRow(cand, row)) {
           const shown = [row.address_line1, row.city].filter(Boolean).join(', ');
@@ -319,7 +344,7 @@ async function loadTriageInner({ phone, triggerBody }) {
     }
   }
 
-  return { lines, matchedExistingCustomer, recentTexts };
+  return { lines, matchedExistingCustomer, recentTexts, vetoTexts };
 }
 
 // Compact "what Waves knows" block for the triage classifier. Fail-open on

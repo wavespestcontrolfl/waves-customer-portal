@@ -174,10 +174,19 @@ describe('extractAddressCandidates', () => {
     expect(extractAddressCandidates('see you at 4 30 tomorrow')).toEqual([]);
   });
 
-  test('captures explicit locality after a comma', () => {
+  test('captures locality only when a state or ZIP validates it', () => {
     const [cand] = extractAddressCandidates('quote for 100 Palm Ave, Venice FL 34285 please');
     expect(cand.locality).toBe(', Venice 34285');
     expect(extractAddressCandidates('quote for 100 Palm Ave before Saturday')[0].locality).toBe('');
+    // Comma-separated prose is NOT a city.
+    expect(extractAddressCandidates('quote for 100 Palm Ave, please')[0].locality).toBe('');
+    expect(extractAddressCandidates('100 Palm Ave, spray before Saturday.')[0].locality).toBe('');
+  });
+
+  test('captures explicit units onto every variant', () => {
+    const [cand] = extractAddressCandidates('quote for 100 Palm Ave Apt 6 please');
+    expect(cand.variants.every((v) => v.endsWith(' Apt 6'))).toBe(true);
+    expect(cand.variants).toContain('100 Palm Ave Apt 6');
   });
 
   test('prefixVariants expands directional and suffix aliases both ways', () => {
@@ -305,6 +314,38 @@ describe('loadThreadTriageContext', () => {
     });
     expect(triage.matchedExistingCustomer).toBe(true);
     expect(triage.lines.join('\n')).toContain('100 North Palm Avenue');
+  });
+
+  test('an explicit unit must match the row unit (Apt 6 never grounds against Apt 1)', async () => {
+    mockState.rows.customers = [
+      { id: 'c-8', first_name: 'Unit', last_name: 'One', address_line1: '100 Palm Ave', address_line2: 'Apt 1', city: 'Bradenton' },
+    ];
+    let triage = await loadThreadTriageContext({
+      phone: null,
+      triggerBody: 'new quote for 100 Palm Ave Apt 6 please',
+    });
+    expect(triage.matchedExistingCustomer).toBe(false);
+
+    mockState.rows.customers = [
+      { id: 'c-8', first_name: 'Unit', last_name: 'Six', address_line1: '100 Palm Ave', address_line2: 'Apt 6', city: 'Bradenton' },
+    ];
+    triage = await loadThreadTriageContext({
+      phone: null,
+      triggerBody: 'new quote for 100 Palm Ave Apt 6 please',
+    });
+    expect(triage.matchedExistingCustomer).toBe(true);
+  });
+
+  test('vetoTexts is burst-scoped; recentTexts keeps the full window', async () => {
+    const now = new Date().toISOString();
+    const old = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
+    mockState.rows.sms_log = [
+      { message_body: 'fresh text', created_at: now },
+      { message_body: 'stale text', created_at: old },
+    ];
+    const triage = await loadThreadTriageContext({ phone: '+17245550000', triggerBody: 'quote please' });
+    expect(triage.recentTexts).toEqual(['fresh text', 'stale text']);
+    expect(triage.vetoTexts).toEqual(['fresh text']);
   });
 
   test('a stated locality that disagrees with the row is NOT a match', async () => {

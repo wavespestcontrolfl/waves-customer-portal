@@ -88,7 +88,7 @@ ${contextBlock}${threadBlock}
 Decide three things about the sender's message:
 - quote_request: are they asking for a QUOTE or PRICING for a service (new or additional service, "how much", describing a pest/lawn problem they want serviced)?
 - service_offered: does the request map to a service Waves offers? (true when it's unclear which service they mean)
-- relates_to_existing_job: is this coordinating, scheduling, or adding detail to service for an existing customer at a known address — including a third party texting on a customer's behalf? Work at a known customer's serviced property is an operations request, not a new quote.
+- relates_to_existing_job: is this coordinating, scheduling, or adding detail to a visit that is ALREADY BOOKED, or asking for work the customer's CURRENT services already cover — including a third party texting on a customer's behalf? Pricing for a NEW or ADDITIONAL service is a quote request even from an existing customer at a known address (quote_request true, relates_to_existing_job false) — e.g. a pest-control customer asking what a mosquito program costs.
 
 NOT a quote request: appointment confirmations/rescheduling, payment/billing questions about existing service, thanks/acknowledgments, complaints about a completed job, wrong numbers.
 
@@ -256,11 +256,15 @@ async function startSmsThreadDraft({ phone, triggerBody = '', skipIntentGate = f
       }
       // Grounding for the classifier (fail-open → ungrounded prompt).
       const triage = guarded ? await loadThreadTriageContext({ phone, triggerBody }) : null;
-      // Second deterministic pass over the WHOLE recent thread: "Do you do
-      // power washing?" followed by "How much?" — the ask and the service
-      // live in different texts, and only the combined view can veto it.
-      if (guarded && (triage?.recentTexts || []).length
-        && deterministicOutOfScope([triggerBody, ...triage.recentTexts].join('\n'))) {
+      // Second deterministic pass over the CURRENT exchange only: "Do you
+      // do power washing?" followed minutes later by "How much?" — the ask
+      // and the service live in different texts. vetoTexts is burst-scoped
+      // (VETO_BURST_MINUTES) so a stale out-of-scope mention from an older
+      // conversation can't hard-kill a new valid request; the grounded
+      // classifier still sees the full recent thread and judges stale
+      // context itself.
+      if (guarded && (triage?.vetoTexts || []).length
+        && deterministicOutOfScope([triggerBody, ...triage.vetoTexts].join('\n'))) {
         result.skipped = 'out_of_scope_service_thread';
         return result;
       }

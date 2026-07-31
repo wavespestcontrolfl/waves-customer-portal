@@ -290,6 +290,7 @@ describe('scope guards (GATE_ESTIMATOR_SCOPE_GUARDS)', () => {
       lines: [],
       matchedExistingCustomer: false,
       recentTexts: ['Do you do power washing?'],
+      vetoTexts: ['Do you do power washing?'],
     });
     // The real veto sees "power washing" only in the combined thread text.
     mockDeterministicOutOfScope.mockImplementation((text) => /power washing/i.test(text));
@@ -297,6 +298,23 @@ describe('scope guards (GATE_ESTIMATOR_SCOPE_GUARDS)', () => {
     expect(result.skipped).toBe('out_of_scope_service_thread');
     expect(mockDispatch).not.toHaveBeenCalled();
     expect(mockNotify).not.toHaveBeenCalled();
+  });
+
+  test('a STALE out-of-scope mention (outside the burst window) never hard-vetoes', async () => {
+    mockLoadTriage.mockResolvedValueOnce({
+      lines: [],
+      matchedExistingCustomer: false,
+      recentTexts: ['Do you do power washing?'],
+      vetoTexts: [],
+    });
+    mockDeterministicOutOfScope.mockImplementation((text) => /power washing/i.test(text));
+    mockDispatch.mockResolvedValueOnce({
+      ok: true,
+      json: { quote_request: true, service_offered: true, relates_to_existing_job: false, confidence: 0.9 },
+    });
+    const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: 'Can I get that quote?' });
+    expect(result.started).toBe(true);
+    expect(mockNotify).toHaveBeenCalledTimes(1);
   });
 
   test('recent texts ride into the grounded classifier prompt', async () => {
