@@ -1831,6 +1831,27 @@ const AppointmentReminders = {
         return null;
       }
 
+      // Optional stale-move guard: a caller that committed its own schedule
+      // write earlier (IB batch mover) passes the slot it committed; if a
+      // NEWER reschedule has already landed a different date/start on the
+      // service row, this invocation is stale — skip rather than rewrite
+      // the reminder to a time the schedule no longer holds.
+      if (options.expectSchedule && options.expectSchedule.date) {
+        const svcRow = await db('scheduled_services')
+          .where({ id: scheduledServiceId })
+          .first('scheduled_date', 'window_start');
+        const rowDate = svcRow?.scheduled_date instanceof Date
+          ? svcRow.scheduled_date.toISOString().slice(0, 10)
+          : (svcRow?.scheduled_date ? String(svcRow.scheduled_date).slice(0, 10) : null);
+        const norm = (v) => (v ? String(v).slice(0, 5) : null);
+        const expectStart = norm(options.expectSchedule.windowStart);
+        if (rowDate !== String(options.expectSchedule.date)
+          || (expectStart && norm(svcRow?.window_start) !== expectStart)) {
+          logger.info(`[appt-remind] Reschedule sync skipped for ${scheduledServiceId} — the service moved again (now ${rowDate} ${norm(svcRow?.window_start) || 'no-start'})`);
+          return null;
+        }
+      }
+
       const newApptTime = parseETDateTime(newTime);
       if (isNaN(newApptTime.getTime())) {
         logger.error(`[appt-remind] Reschedule: invalid time ${newTime}`);

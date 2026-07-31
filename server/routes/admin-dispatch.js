@@ -892,12 +892,18 @@ function formatRescheduleTemplateVars(svc) {
   const dateOnly = serviceDateOnly(svc?.scheduled_date);
   const start = svc?.window_start || '08:00';
   const apptTime = parseETDateTime(`${dateOnly}T${start}`);
+  // Customer-facing {time} is ALWAYS the 2-hour arrival window from the
+  // start — never the exact start (owner directive; matches the shared
+  // schedule notice helper). Exact-time fallback only if the start is
+  // unparseable.
+  const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
+  const windowText = formatSmsTimeRange(arrivalWindowRange(String(start).slice(0, 5)));
   return {
     first_name: svc?.first_name || 'there',
     service_type: svc?.service_type || 'service',
     day: formatETDay(apptTime),
     date: formatETDate(apptTime),
-    time: formatETTime(apptTime),
+    time: windowText || formatETTime(apptTime),
   };
 }
 

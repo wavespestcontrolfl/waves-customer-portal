@@ -224,14 +224,17 @@ class SmartRebooker {
       // reschedule() enforces. Without this, busy days surface suggestions
       // that can never be selected.
       const effDuration = (() => {
-        const d = parseInt(service.estimated_duration_minutes, 10);
-        if (Number.isInteger(d) && d > 0) return d;
+        // Stored span FIRST, then the duration estimate — the same order
+        // the RescheduleModal uses to build the window it submits, so the
+        // probe tests exactly the block Select will commit.
         if (service.window_start && service.window_end) {
           const [h1, m1] = String(service.window_start).split(':').map(Number);
           const [h2, m2] = String(service.window_end).split(':').map(Number);
           const span = (h2 * 60 + (m2 || 0)) - (h1 * 60 + (m1 || 0));
           if (span > 0) return span;
         }
+        const d = parseInt(service.estimated_duration_minutes, 10);
+        if (Number.isInteger(d) && d > 0) return d;
         return 60;
       })();
       const startMin = (() => {

@@ -625,6 +625,9 @@ async function moveStopsToDay(input) {
             await AppointmentReminders.handleReschedule(s.id, `${dateStr}T${start}`, {
               sendNotification: false,
               coverDueWindows: true,
+              // Stale-move guard: skip the reminder rewrite if a newer
+              // reschedule already landed a different slot on the row.
+              expectSchedule: { date: dateStr, windowStart: start },
             });
             const { sendRescheduleNoticeForVisit } = require('../../routes/admin-schedule');
             const notice = await sendRescheduleNoticeForVisit(s.id, dateStr, start);
