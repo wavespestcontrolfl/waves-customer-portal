@@ -10,6 +10,7 @@
 let mockFirstResult = null;
 let mockFirstError = null;
 let mockInsertError = null;
+let mockUpdateError = null;
 jest.mock('../models/db', () => {
   const chain = {
     where: jest.fn(() => chain),
@@ -18,10 +19,14 @@ jest.mock('../models/db', () => {
     insert: jest.fn(() => { if (mockInsertError) throw mockInsertError; return chain; }),
     onConflict: jest.fn(() => chain),
     ignore: jest.fn(async () => 1),
+    // The r43/r44 fresh-review claim invalidation runs after the recovery
+    // marker insert — a plain fence-bumping hold update.
+    update: jest.fn(() => (mockUpdateError ? Promise.reject(mockUpdateError) : Promise.resolve(1))),
   };
   const db = jest.fn(() => chain);
   db._chain = chain;
   db.raw = jest.fn((x) => x);
+  db.schema = { hasTable: jest.fn(async () => true) };
   return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -36,6 +41,7 @@ beforeEach(() => {
   mockFirstResult = null;
   mockFirstError = null;
   mockInsertError = null;
+  mockUpdateError = null;
   jest.clearAllMocks();
 });
 
@@ -68,5 +74,18 @@ describe('shouldHoldLeadEmailEnrollment', () => {
     await expect(shouldHoldLeadEmailEnrollment('call-1')).rejects.toMatchObject({
       emailReviewStateUnavailable: true,
     });
+  });
+
+  test('marker persisted but claim invalidation failing fails the run too (r44)', async () => {
+    // The recovery card is a live review — with the card durably inserted
+    // and an in-flight claimant's fence NOT invalidated, that claimant
+    // could send the unreviewed address (Codex #3084 r44). The failure
+    // routes into the extraction_failed retry, which re-runs both writes.
+    mockFirstError = new Error('db down');
+    mockUpdateError = new Error('write down');
+    await expect(shouldHoldLeadEmailEnrollment('call-1')).rejects.toMatchObject({
+      emailReviewStateUnavailable: true,
+    });
+    expect(db._chain.insert).toHaveBeenCalled();
   });
 });
