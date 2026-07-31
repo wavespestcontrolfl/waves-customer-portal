@@ -582,6 +582,15 @@ async function moveStopsToDay(input) {
     } catch (err) {
       logger.error(`[intelligence-bar:schedule] reschedule_log insert failed for ${s.id}: ${err.message}`);
     }
+
+  }
+
+  // Notification phase — runs only after EVERY approved stop has been
+  // moved, released, and audited above, so one slow SMS provider can
+  // never delay or strand the rest of the confirmed batch. Best-effort
+  // per stop; failures land in notification_failures.
+  for (const s of movable) {
+    if (!movedIds.has(s.id)) continue;
     // Opt-in customer text — LAST: after the live-job release and the
     // reschedule_log audit, so a slow
     // SMS provider can never hold tech_status/tracker on the moved job.

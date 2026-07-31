@@ -2582,7 +2582,8 @@ router.get('/month', async (req, res, next) => {
         'scheduled_services.id', 'scheduled_services.customer_id',
         'scheduled_services.scheduled_date',
         'scheduled_services.service_type', 'scheduled_services.status',
-        'scheduled_services.window_start', 'scheduled_services.zone',
+        'scheduled_services.window_start', 'scheduled_services.window_end',
+        'scheduled_services.zone',
         'scheduled_services.technician_id', 'scheduled_services.estimated_duration_minutes',
         'scheduled_services.is_recurring',
         'scheduled_services.recurring_parent_id',
@@ -4265,11 +4266,23 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 const reminderBefore = await db('appointment_reminders')
                   .where({ scheduled_service_id: id })
                   .first('id', 'confirmation_sent', 'suppressed_by_sibling');
+                // An unreviewed outbound-callback booking never texts (the
+                // office confirms first) — and routing it through the silent
+                // path below also re-arms the pending creation confirmation
+                // the cover call would otherwise claim.
+                const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('../services/call-booking-source-actions');
+                const reviewFlags = bulkNotify
+                  ? await db('scheduled_services').where({ id }).first('source_action', 'status', 'customer_confirmed')
+                  : null;
+                const unreviewedCallback = !!reviewFlags
+                  && reviewFlags.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
+                  && String(reviewFlags.status) === 'pending'
+                  && !reviewFlags.customer_confirmed;
                 // A sibling-suppressed row's slot OWNER carries the customer
                 // messaging — sending here too would text the customer once
                 // per sibling for one slot. Suppressed rows move silently
                 // (by design, so not a notification failure).
-                const notifyThisRow = bulkNotify && !!reminderBefore && !reminderBefore.suppressed_by_sibling;
+                const notifyThisRow = bulkNotify && !!reminderBefore && !reminderBefore.suppressed_by_sibling && !unreviewedCallback;
                 await AppointmentReminders.handleReschedule(id, reminderSyncTime, {
                   sendNotification: false,
                   coverDueWindows: notifyThisRow,
@@ -4284,6 +4297,8 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                   if (!notice.sent) {
                     notificationFailures.push({ id, reason: notice.error || 'reschedule text was not sent' });
                   }
+                } else if (bulkNotify && unreviewedCallback) {
+                  notificationFailures.push({ id, reason: 'Pending office review (outbound-callback booking) — not texted' });
                 } else if (bulkNotify && !reminderBefore) {
                   notificationFailures.push({ id, reason: 'No reminder record for this visit — not texted' });
                 }
@@ -5670,21 +5685,38 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         notificationError = 'No arrival time is set for this visit, so no reschedule text was sent';
       } else {
         const AppointmentReminders = require('../services/appointment-reminders');
-        try {
-          // Cover any already-due reminder window before sending so the
-          // 15-min cron can't fire a day-before reminder in the gap between
-          // the commit above and the notice landing (same coverDueWindows
-          // contract the dispatch reschedule route uses).
-          await AppointmentReminders.handleReschedule(req.params.id, `${scheduleMoveForNotice.date}T${scheduleMoveForNotice.start}`, {
-            sendNotification: false,
-            coverDueWindows: true,
-          });
-        } catch (e) {
-          logger.warn(`[schedule/update-details] reminder cover before reschedule notice failed for ${req.params.id}: ${e.message}`);
+        // Check the review gate BEFORE the cover call — handleReschedule
+        // claims a still-pending creation confirmation, and an unreviewed
+        // outbound-callback booking must keep that confirmation pending
+        // (the office-confirm sender is its customer message).
+        const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('../services/call-booking-source-actions');
+        const reviewFlags = await db('scheduled_services')
+          .where({ id: req.params.id })
+          .first('source_action', 'status', 'customer_confirmed');
+        const unreviewedCallback = !!reviewFlags
+          && reviewFlags.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
+          && String(reviewFlags.status) === 'pending'
+          && !reviewFlags.customer_confirmed;
+        if (unreviewedCallback) {
+          notificationSent = false;
+          notificationError = 'This outbound-callback booking is pending office review — no reschedule text was sent';
+        } else {
+          try {
+            // Cover any already-due reminder window before sending so the
+            // 15-min cron can't fire a day-before reminder in the gap between
+            // the commit above and the notice landing (same coverDueWindows
+            // contract the dispatch reschedule route uses).
+            await AppointmentReminders.handleReschedule(req.params.id, `${scheduleMoveForNotice.date}T${scheduleMoveForNotice.start}`, {
+              sendNotification: false,
+              coverDueWindows: true,
+            });
+          } catch (e) {
+            logger.warn(`[schedule/update-details] reminder cover before reschedule notice failed for ${req.params.id}: ${e.message}`);
+          }
+          const notice = await sendRescheduleNoticeForVisit(req.params.id, scheduleMoveForNotice.date, scheduleMoveForNotice.start);
+          notificationSent = notice.sent;
+          notificationError = notice.error;
         }
-        const notice = await sendRescheduleNoticeForVisit(req.params.id, scheduleMoveForNotice.date, scheduleMoveForNotice.start);
-        notificationSent = notice.sent;
-        notificationError = notice.error;
       }
     }
 
