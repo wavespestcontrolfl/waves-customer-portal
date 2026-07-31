@@ -229,7 +229,6 @@ function lastSentence(text) {
 //   1. money in the closer — a currency/percent symbol ("…starts at $49.99.")
 //   2. sales terms riding a CTA-shaped sentence ("Learn more about saving
 //      big with Waves.")
-const CURRENCY_OR_PERCENT_RE = /[%$]/;
 // Transactional sentences that are neither CTA-shaped nor carry a symbol —
 // "Ask Waves for a quote on treatment." / "A treatment estimate is available
 // today." (Codex r4). Two shapes, bounded to the sentence: a solicitation
@@ -245,14 +244,14 @@ const CURRENCY_OR_PERCENT_RE = /[%$]/;
 const TRANSACTIONAL_SENTENCE_RE = /\b(ask|call|text|contact|request|get|book|schedule)\b[^.!?]{0,40}?\b(quote|estimate|pricing|price|deal|offer|discount)s?\b|\b(quote|estimate|pricing|price|deal|offer|discount)s?\b[^.!?]{0,30}?\b(today|now)\b|\b(starts?\s+at|starting\s+at|as\s+low\s+as|for\s+(?:just|only))\s+\$\d|\b(waves|we)\s+(offers?|provides?|sells?)\b/i;
 // EVERY sentence is scanned for the sales shapes — a pitch followed by an
 // informational closer ("Learn more about saving big with Waves. This guide
-// explains…") is still sales copy (Codex r5). Currency/percent stays
-// CLOSER-ONLY by design: mid-meta figures are usually legitimate stats
-// ("$5 billion in yearly damage", "40% of lawns") while the closer is the
-// pitch slot.
+// explains…") is still sales copy (Codex r5). There is deliberately NO bare
+// currency/percent check (Codex r7): "$5 billion in property damage" and
+// "40% of lawns" are legitimate stats wherever they sit — dollar amounts
+// only count as sales copy inside a price-marketing frame ("starts at
+// $49.99"), which TRANSACTIONAL_SENTENCE_RE carries.
 function metaHasSalesCopy(text) {
   const sentences = metaSentences(text);
   if (!sentences.length) return false;
-  if (CURRENCY_OR_PERCENT_RE.test(sentences[sentences.length - 1])) return true;
   return sentences.some((s) => TRANSACTIONAL_SENTENCE_RE.test(s) || (SOFT_CTA_RE.test(s) && CTA_SALES_TERMS_RE.test(s)));
 }
 

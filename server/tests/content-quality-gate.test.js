@@ -1055,6 +1055,15 @@ describe('soft CTA final sentence must BE a CTA (round-5 hardening)', () => {
     expect(r.reason).toBe('blog_meta_sales_copy');
   });
 
+  test('a statistic closer with currency stays publishable (r7: no bare symbol check — intent lives in the frame)', () => {
+    for (const tail of [
+      'Termites cause more than $5 billion in property damage every year.',
+      'Chinch bugs hit about 40% of St. Augustine lawns in Southwest Florida.',
+    ]) {
+      expect(checkBlogMetaContract({ meta_description: `${LEAD}${tail}` }).ok).toBe(true);
+    }
+  });
+
   test('informational sales nouns in the closer do NOT hard-fail (r3: transactional usage only)', () => {
     for (const tail of [
       'A guide to what quarterly pest plans offer Southwest Florida homeowners.',
