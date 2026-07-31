@@ -2830,15 +2830,19 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
       }
       if (emailSync?.heldNewsletterResume) {
         // Deferred held-newsletter DOI (2026-07-30 lane) — execute now that
-        // the edit committed (fire-and-forget; never throws).
-        void require('../services/lead-first-touch-resume').resumeHeldNewsletterPostCommit(emailSync.heldNewsletterResume);
+        // the edit committed. Fire-and-forget WITH an owner (Codex #3084
+        // r47): the helper catches its own failures by contract, but an
+        // unexpected escape must land in a logged rejection handler, never
+        // an unhandled rejection. Sanitized code only.
+        require('../services/lead-first-touch-resume').resumeHeldNewsletterPostCommit(emailSync.heldNewsletterResume)
+          .catch((err) => logger.error(`[customers] deferred held-newsletter resume failed: ${err.code || err.name || 'resume_failed'}`));
       }
       if (emailSync?.pendingConfirmation) {
         // The moved DOI row's confirmation went to the old typo — re-send to
-        // the corrected address now that the edit is committed
-        // (fire-and-forget; the helper stamps confirmation_sent_at on
-        // success and never throws).
-        void require('../services/customer-email-fanout').resendPendingConfirmation(emailSync.pendingConfirmation);
+        // the corrected address now that the edit is committed (same
+        // fire-and-forget-with-owner contract, r47).
+        require('../services/customer-email-fanout').resendPendingConfirmation(emailSync.pendingConfirmation)
+          .catch((err) => logger.error(`[customers] deferred DOI re-send failed: ${err.code || err.name || 'resend_failed'}`));
       }
       if (changed.some(field => sensitiveFields.includes(field))) {
         await auditCustomerMutation(req, 'customer.update_sensitive', req.params.id, {

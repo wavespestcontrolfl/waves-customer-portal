@@ -1079,15 +1079,19 @@ async function updateCustomer(customerId, updates) {
   // numeric counts are exposed.
   const { pendingConfirmation: emailPendingConfirmation, heldNewsletterResume: emailHeldNewsletterResume, ...emailSyncCounts } = emailSync || {};
   if (emailHeldNewsletterResume) {
-    // Deferred held-newsletter DOI (2026-07-30 lane) — post-commit,
-    // fire-and-forget, never throws.
-    void require('../lead-first-touch-resume').resumeHeldNewsletterPostCommit(emailHeldNewsletterResume);
+    // Deferred held-newsletter DOI (2026-07-30 lane) — post-commit.
+    // Fire-and-forget WITH an owner (Codex #3084 r47): an unexpected
+    // escape lands in a logged rejection handler, never an unhandled
+    // rejection. Sanitized code only.
+    require('../lead-first-touch-resume').resumeHeldNewsletterPostCommit(emailHeldNewsletterResume)
+      .catch((err) => logger.error(`[ib] deferred held-newsletter resume failed: ${err.code || err.name || 'resume_failed'}`));
   }
   if (emailPendingConfirmation) {
     // The moved DOI row's confirmation went to the old typo — re-send to the
-    // corrected address now that the edit is committed (fire-and-forget; the
-    // helper stamps confirmation_sent_at on success and never throws).
-    void require('../customer-email-fanout').resendPendingConfirmation(emailPendingConfirmation);
+    // corrected address now that the edit is committed (same
+    // fire-and-forget-with-owner contract, r47).
+    require('../customer-email-fanout').resendPendingConfirmation(emailPendingConfirmation)
+      .catch((err) => logger.error(`[ib] deferred DOI re-send failed: ${err.code || err.name || 'resend_failed'}`));
   }
   if (addressSubmitted) {
     // Coords may point at the old address — clear + re-geocode, then re-mirror the

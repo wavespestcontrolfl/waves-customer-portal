@@ -1478,8 +1478,12 @@ async function runOnePostCommitResume(payload, holdIds, dbh, claims = new Map())
  */
 const HOLD_RECORD_ATTEMPTS = 3;
 
-async function recordFirstTouchHold({ callLogId, customerId = null, heldEmail, heldDrip = false, heldNewsletter = false, runStartedAt = null, dbh = db }) {
-  for (let attempt = 1; attempt <= HOLD_RECORD_ATTEMPTS; attempt++) {
+// `attempts` (Codex #3084 r47): callers running INSIDE a transaction pass
+// 1 — a statement error aborts their transaction, so in-place retries
+// could only fail with 25P02; those callers retry around a FRESH
+// transaction instead (recordFirstTouchHoldOwned).
+async function recordFirstTouchHold({ callLogId, customerId = null, heldEmail, heldDrip = false, heldNewsletter = false, runStartedAt = null, dbh = db, attempts = HOLD_RECORD_ATTEMPTS }) {
+  for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
       if (!(await dbh.schema.hasTable('first_touch_holds'))) return null;
       const now = new Date();
@@ -1607,8 +1611,8 @@ async function recordFirstTouchHold({ callLogId, customerId = null, heldEmail, h
         });
       return true;
     } catch (err) {
-      if (attempt === HOLD_RECORD_ATTEMPTS) {
-        logger.error(`[first-touch-resume] hold record failed for call ${callLogId} after ${HOLD_RECORD_ATTEMPTS} attempts: ${err.message}`);
+      if (attempt === attempts) {
+        logger.error(`[first-touch-resume] hold record failed for call ${callLogId} after ${attempts} attempt(s): ${err.message}`);
         return null;
       }
       await new Promise((resolve) => setTimeout(resolve, 200 * attempt));

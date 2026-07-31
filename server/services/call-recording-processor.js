@@ -1165,39 +1165,52 @@ function isNonLeadCallContent(extracted = {}) {
 // owns the ledger record), or null on a failed/unverifiable write (the
 // end-of-run retry re-attempts).
 async function recordFirstTouchHoldOwned(args, procToken) {
-  try {
-    return await db.transaction(async (trx) => {
-      // Lock ORDER matters (Codex #3084 r46): the email-correction fanout
-      // locks first_touch_holds FOR UPDATE and then UPDATES the same
-      // call's call_log row (the review_status sync) — locking call_log
-      // first here was the reverse acquisition order, a deadlock Postgres
-      // breaks by aborting one side (a 500 on the operator's correction).
-      // Take the call's existing hold rows FIRST, then the
-      // token-conditioned call_log lock — the same
-      // first_touch_holds → call_log order the fanout uses, with hold
-      // INSERTS on both paths coming only after their call_log access.
-      if (await trx.schema.hasTable('first_touch_holds')) {
-        await trx('first_touch_holds')
-          .where({ call_log_id: args.callLogId })
+  // Retry around the WHOLE transaction (Codex #3084 r47): a statement
+  // error ABORTS the transaction, so the helper's internal per-attempt
+  // retries could only fail with 25P02 in here — each attempt gets a
+  // fresh transaction instead (the helper runs single-attempt inside it),
+  // keeping the advertised transient-failure tolerance before the run is
+  // pushed into extraction recovery.
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const outcome = await db.transaction(async (trx) => {
+        // Lock ORDER matters (Codex #3084 r46): the email-correction fanout
+        // locks first_touch_holds FOR UPDATE and then UPDATES the same
+        // call's call_log row (the review_status sync) — locking call_log
+        // first here was the reverse acquisition order, a deadlock Postgres
+        // breaks by aborting one side (a 500 on the operator's correction).
+        // Take the call's existing hold rows FIRST, then the
+        // token-conditioned call_log lock — the same
+        // first_touch_holds → call_log order the fanout uses, with hold
+        // INSERTS on both paths coming only after their call_log access.
+        if (await trx.schema.hasTable('first_touch_holds')) {
+          await trx('first_touch_holds')
+            .where({ call_log_id: args.callLogId })
+            .forUpdate()
+            .select('id');
+        }
+        const owned = await trx('call_log')
+          .where({ id: args.callLogId })
+          .where('processing_token', procToken)
           .forUpdate()
-          .select('id');
-      }
-      const owned = await trx('call_log')
-        .where({ id: args.callLogId })
-        .where('processing_token', procToken)
-        .forUpdate()
-        .first('id');
-      if (!owned) {
-        logger.info('[call-proc] processing claim lost — skipping the hold ledger write (the owner records it)');
-        return 'claim_lost';
-      }
-      const { recordFirstTouchHold } = require('./lead-first-touch-resume');
-      return await recordFirstTouchHold({ ...args, dbh: trx });
-    });
-  } catch (claimErr) {
-    logger.warn(`[call-proc] token-fenced hold record failed: ${claimErr.message} — the end-of-run retry re-attempts`);
-    return null;
+          .first('id');
+        if (!owned) {
+          logger.info('[call-proc] processing claim lost — skipping the hold ledger write (the owner records it)');
+          return 'claim_lost';
+        }
+        const { recordFirstTouchHold } = require('./lead-first-touch-resume');
+        return await recordFirstTouchHold({ ...args, dbh: trx, attempts: 1 });
+      });
+      if (outcome !== null) return outcome; // recorded, or 'claim_lost'
+      // null: the single in-transaction attempt failed and was swallowed —
+      // fall through to a fresh transaction.
+    } catch (claimErr) {
+      logger.warn(`[call-proc] token-fenced hold record attempt ${attempt} failed: ${claimErr.message}`);
+    }
+    if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, 200 * attempt));
   }
+  logger.warn('[call-proc] token-fenced hold record failed after 3 transactions — the end-of-run retry re-attempts');
+  return null;
 }
 
 // True when the call has a live email read-back card — the extracted address
@@ -8995,27 +9008,19 @@ const CallRecordingProcessor = {
           : (call.metadata || {});
         const custRow = await db('customers').where({ id: customerId }).first('email', 'first_name', 'last_name');
         if (custRow && String(rebuildMeta?.created_customer_id || '') === String(customerId)) {
-          // Honor DELIVERY EVIDENCE before rebuilding (Codex #3084 r46):
-          // the dead worker may have died AFTER its DOI send but before
-          // the final call_log status write — every recovery pass would
-          // then take subscribeOrResubscribe's confirmation_resent path
-          // and mail the same confirmation again. A pending subscriber at
-          // the candidate address with a RECENT confirmation_sent_at is
-          // that evidence (the resume path clears the stamp on a visibly
-          // failed send, r13), so only crashes before the send replay it.
-          // The rare crash inside the pre-stamp→send window costs one
-          // undelivered DOI — recoverable via the stale-pending purge and
-          // re-signup, strictly better than a duplicate per recovery loop.
-          const rebuildEmailLc = String(custRow.email || extracted.email || '').trim().toLowerCase();
-          const priorDoi = rebuildEmailLc
-            ? await db('newsletter_subscribers')
-              .whereRaw('LOWER(email) = ?', [rebuildEmailLc])
-              .first('status', 'confirmation_sent_at')
-            : null;
-          const doiRecentlySent = priorDoi
-            && String(priorDoi.status) === 'pending'
-            && priorDoi.confirmation_sent_at
-            && (Date.now() - new Date(priorDoi.confirmation_sent_at).getTime()) < 24 * 60 * 60 * 1000;
+          // Honor DELIVERY EVIDENCE before rebuilding (Codex #3084
+          // r46/r47): the dead worker may have died AFTER its DOI send but
+          // before the final call_log status write — every recovery pass
+          // would then take subscribeOrResubscribe's confirmation_resent
+          // path and mail the same confirmation again. The evidence is the
+          // POST-PROVIDER completion marker Step 8 stamps into
+          // call_log.metadata only after sendConfirmationEmail returned —
+          // never the subscriber's confirmation_sent_at, which is written
+          // BEFORE the provider call and cannot prove delivery (r47): a
+          // crash in that pre-stamp→send window now correctly REPLAYS the
+          // send instead of stranding the customer pending forever.
+          const doiRecentlySent = rebuildMeta?.newsletter_doi_sent_at
+            && (Date.now() - new Date(rebuildMeta.newsletter_doi_sent_at).getTime()) < 24 * 60 * 60 * 1000;
           if (doiRecentlySent) {
             newsletterResult = newsletterResult || { skipped: 'confirmation_recently_sent' };
             logger.info(`[call-proc] Skipping newsletter rebuild on retry — a recent DOI already went out (${maskSid(callSid)})`);
@@ -9139,6 +9144,29 @@ const CallRecordingProcessor = {
       if (stillOwned) {
         try {
           newsletterResult = await subscribeNewCallCustomerToNewsletter(newsletterCandidate);
+          if (newsletterResult?.confirmationEmailSent === true) {
+            // POST-PROVIDER completion marker (Codex #3084 r47): the
+            // subscriber's confirmation_sent_at is stamped BEFORE the
+            // provider call, so it cannot prove delivery — this durable
+            // per-call marker is written only after sendConfirmationEmail
+            // returned, and the recovery rebuild keys its skip on it.
+            // Token-fenced; best-effort: a lost write costs one duplicate
+            // DOI on a recovery pass, never a missed one.
+            try {
+              await db('call_log')
+                .where({ id: call.id })
+                .where('processing_token', procToken)
+                .update({
+                  metadata: db.raw(
+                    "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{newsletter_doi_sent_at}', ?::jsonb, true)",
+                    [JSON.stringify(new Date().toISOString())],
+                  ),
+                  updated_at: new Date(),
+                });
+            } catch (markErr) {
+              logger.warn(`[call-proc] DOI completion marker write failed for ${maskSid(callSid)}: ${markErr.code || markErr.name || 'db_error'}`);
+            }
+          }
         } catch (e) {
           logger.warn(`[call-proc] Newsletter subscribe failed for customer ${newsletterCandidate.customerId}`);
           newsletterResult = { error: 'newsletter_subscribe_failed' };
