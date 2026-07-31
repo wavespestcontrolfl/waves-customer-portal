@@ -74,7 +74,9 @@ async function loadCustomerByPhone(phone, extraction) {
     const rows = await db('customers')
       .select('id', 'first_name', 'last_name', 'phone', 'email', 'address_line1', 'city', 'state', 'zip',
         'pipeline_stage', 'waveguard_tier', 'member_since', 'lawn_type', 'property_sqft', 'lot_sqft',
-        'property_type', 'company_name')
+        // active: consumed by the scope-guards triage (an inactive/former
+        // customer texting a NEW quote must read as a prospect there).
+        'property_type', 'company_name', 'active')
       .whereRaw("regexp_replace(coalesce(phone, ''), '\\D', '', 'g') LIKE ?", [`%${digits}`])
       .whereNull('deleted_at')
       .orderBy('created_at', 'desc')

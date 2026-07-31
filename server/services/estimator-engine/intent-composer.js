@@ -82,6 +82,20 @@ OUTPUT CONTRACT:
   "confidence": "high" | "medium" | "low"
 }`;
 
+// Gated prompt addendum (GATE_ESTIMATOR_SCOPE_GUARDS): the existing-job
+// skip rule plus a machine-readable skip class. Kept OUT of SYSTEM_PROMPT
+// so gate-off prompts are byte-identical to today's.
+const SCOPE_GUARDS_ADDENDUM = `
+
+ADDITIONAL SKIP RULE: skip when the sender is coordinating logistics for service already booked or covered for an existing customer — their own service, or a third party texting on a customer's behalf ("this is X with customer Y at <address>, can you treat before Saturday"). That is an operations request, not a quote.
+
+SKIP CATEGORY: whenever decision="skip", also set "skip_category" to exactly one of: "out_of_scope" (the work maps to no vocabulary key / Waves doesn't offer it), "not_a_quote" (wrong number, vendor, complaint, reschedule), "existing_job" (the additional skip rule above), "ambiguous" (cannot tell what service is wanted), "needs_human_scoping" (mixed-use/multi-parcel or other human scoping). When decision="draft", use null or omit it.`;
+
+function buildSystemPrompt() {
+  const { scopeGuardsEnabled } = require('./scope-guards');
+  return scopeGuardsEnabled() ? SYSTEM_PROMPT + SCOPE_GUARDS_ADDENDUM : SYSTEM_PROMPT;
+}
+
 function compactExtraction(extraction) {
   if (!extraction) return null;
   // Only the sections that inform service selection — the composer gets the
@@ -193,7 +207,7 @@ async function composeIntent(context, propertyFacts) {
     const response = await createDeepMessage(client, {
       model: process.env.ESTIMATOR_ENGINE_MODEL || MODELS.DEEP,
       max_tokens: MAX_TOKENS,
-      system: SYSTEM_PROMPT,
+      system: buildSystemPrompt(),
       messages,
     });
 
@@ -231,4 +245,7 @@ async function composeIntent(context, propertyFacts) {
   return { intent: null, errors: lastErrors };
 }
 
-module.exports = { composeIntent, _private: { buildUserContent, parseIntentText, SYSTEM_PROMPT } };
+module.exports = {
+  composeIntent,
+  _private: { buildUserContent, parseIntentText, SYSTEM_PROMPT, SCOPE_GUARDS_ADDENDUM, buildSystemPrompt },
+};

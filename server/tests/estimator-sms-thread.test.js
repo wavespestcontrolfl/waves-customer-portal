@@ -50,6 +50,18 @@ jest.mock('../services/estimator-engine/context-builder', () => ({
   buildSmsThreadContext: (...args) => mockBuildSmsThreadContext(...args),
 }));
 
+// Scope guards (GATE_ESTIMATOR_SCOPE_GUARDS) — controllable per test; the
+// default (disabled, no veto, no triage) preserves the legacy path for
+// every pre-existing test in this file.
+const mockScopeGuardsEnabled = jest.fn(() => false);
+const mockDeterministicOutOfScope = jest.fn(() => false);
+const mockLoadTriage = jest.fn(async () => null);
+jest.mock('../services/estimator-engine/scope-guards', () => ({
+  scopeGuardsEnabled: () => mockScopeGuardsEnabled(),
+  deterministicOutOfScope: (...args) => mockDeterministicOutOfScope(...args),
+  loadThreadTriageContext: (...args) => mockLoadTriage(...args),
+}));
+
 const {
   startSmsThreadDraft,
   smsThreadDraftsEnabled,
@@ -211,5 +223,94 @@ describe('_private.threadQuoteSignal', () => {
     mockDispatch.mockResolvedValueOnce({ ok: true, json: { quote_request: true, confidence: 0.4 } });
     const signal = await _private.threadQuoteSignal('price?');
     expect(signal.quoteRequest).toBe(false);
+  });
+});
+
+describe('scope guards (GATE_ESTIMATOR_SCOPE_GUARDS)', () => {
+  beforeEach(() => {
+    mockScopeGuardsEnabled.mockReturnValue(true);
+  });
+
+  test('deterministic out-of-scope veto skips before any model call or bell', async () => {
+    mockDeterministicOutOfScope.mockReturnValueOnce(true);
+    const result = await startSmsThreadDraft({
+      phone: PHONE,
+      triggerBody: 'I would like to know if you available for power washing service',
+    });
+    expect(result.skipped).toBe('out_of_scope_service');
+    expect(mockDispatch).not.toHaveBeenCalled();
+    expect(mockLoadTriage).not.toHaveBeenCalled();
+    expect(mockNotify).not.toHaveBeenCalled();
+  });
+
+  test('triage grounding rides into the classifier prompt', async () => {
+    mockLoadTriage.mockResolvedValueOnce({
+      lines: ['Message thread names address "4021 Coral…" which matches: existing active customer Pat Homeowner, 4021 Coral Bay Loop — booked: Quarterly Pest Control Service 2026-08-01 (pending)'],
+      matchedExistingCustomer: true,
+    });
+    await startSmsThreadDraft({ phone: PHONE, triggerBody: 'can you spray for spiders at 4021 Coral Bay Loop before Saturday?' });
+    const prompt = mockDispatch.mock.calls[0][1].text;
+    expect(prompt).toContain('SERVICES WAVES OFFERS');
+    expect(prompt).toContain('NOT OFFERED: power washing');
+    expect(prompt).toContain('Pat Homeowner');
+    expect(prompt).toContain('relates_to_existing_job');
+  });
+
+  test('grounded classifier vetoes: not-offered service never bells', async () => {
+    mockLoadTriage.mockResolvedValueOnce({ lines: [], matchedExistingCustomer: false });
+    mockDispatch.mockResolvedValueOnce({
+      ok: true,
+      json: { quote_request: true, service_offered: false, relates_to_existing_job: false, confidence: 0.9 },
+    });
+    const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: 'how much to pressure treat my deck service' });
+    expect(result.skipped).toBe('no_quote_intent_ai_out_of_scope');
+    expect(mockNotify).not.toHaveBeenCalled();
+    expect(mockRunDraftPipeline).not.toHaveBeenCalled();
+  });
+
+  test('grounded classifier vetoes: existing-job coordination never bells', async () => {
+    mockLoadTriage.mockResolvedValueOnce({
+      lines: ['Message thread names address "4021 Coral…" which matches: existing active customer Pat Homeowner'],
+      matchedExistingCustomer: true,
+    });
+    mockDispatch.mockResolvedValueOnce({
+      ok: true,
+      json: { quote_request: true, service_offered: true, relates_to_existing_job: true, confidence: 0.9 },
+    });
+    const result = await startSmsThreadDraft({
+      phone: PHONE,
+      triggerBody: 'this is the property coordinator for Pat Homeowner at 4021 Coral Bay Loop, can you spray before Saturday?',
+    });
+    expect(result.skipped).toBe('no_quote_intent_ai_existing_job');
+    expect(mockNotify).not.toHaveBeenCalled();
+  });
+
+  test('a clean grounded yes still bells and drafts (guards must not eat real leads)', async () => {
+    mockLoadTriage.mockResolvedValueOnce({ lines: [], matchedExistingCustomer: false });
+    mockDispatch.mockResolvedValueOnce({
+      ok: true,
+      json: { quote_request: true, service_offered: true, relates_to_existing_job: false, confidence: 0.9 },
+    });
+    const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: 'how much for quarterly pest control?' });
+    expect(result.started).toBe(true);
+    expect(mockNotify).toHaveBeenCalledTimes(1);
+    await result.draftPromise;
+    expect(mockRunDraftPipeline).toHaveBeenCalledTimes(1);
+  });
+
+  test('triage failure falls back to the ungrounded prompt (fail-open)', async () => {
+    mockLoadTriage.mockResolvedValueOnce(null);
+    await startSmsThreadDraft({ phone: PHONE, triggerBody: 'quote for pest control please' });
+    const prompt = mockDispatch.mock.calls[0][1].text;
+    expect(prompt).not.toContain('SERVICES WAVES OFFERS');
+  });
+
+  test('gate off never consults the guards (dark ship)', async () => {
+    mockScopeGuardsEnabled.mockReturnValue(false);
+    await startSmsThreadDraft({ phone: PHONE, triggerBody: 'quote for pest control please' });
+    expect(mockDeterministicOutOfScope).not.toHaveBeenCalled();
+    expect(mockLoadTriage).not.toHaveBeenCalled();
+    const prompt = mockDispatch.mock.calls[0][1].text;
+    expect(prompt).not.toContain('SERVICES WAVES OFFERS');
   });
 });

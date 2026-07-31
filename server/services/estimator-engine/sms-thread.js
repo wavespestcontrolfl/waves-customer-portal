@@ -17,7 +17,11 @@
  *
  * Trigger cheapness: every inbound SMS passes through here, so a regex
  * prefilter gates the FAST-tier confirm classifier, which gates the DEEP
- * composer. There is deliberately NO phone-only duplicate precheck: an open
+ * composer. With GATE_ESTIMATOR_SCOPE_GUARDS on (scope-guards.js), the
+ * classifier is additionally grounded in Waves records — offered services,
+ * sender/address→customer matches, booked visits — so existing-job
+ * coordination texts and out-of-scope services (power washing) stop
+ * minting owed-quote bells. There is deliberately NO phone-only duplicate precheck: an open
  * estimate can be for a DIFFERENT property, and only the composer can read
  * the address out of the thread — the draft-time guard keeps its
  * address-aware bypass, and true duplicates exit through the blocked path's
@@ -54,14 +58,39 @@ const QUOTE_HINT_RE = new RegExp(
 /**
  * FAST-tier confirm: is this inbound text (in the context of a thread with
  * a pest-control company) actually requesting a quote/pricing for service?
- * Fail-closed: any classifier failure means "no" — a missed draft costs a
- * manual quote, a false positive costs a DEEP composer run per text.
+ * Fail-closed: any classifier failure means "no". Cost asymmetry, learned
+ * the hard way (2026-07-30): a missed draft costs a manual quote, but a
+ * false positive costs an owner-facing owed-quote bell that nothing can
+ * retract — and possibly a parked customer-facing clarify draft — not just
+ * a DEEP composer run. Hence the scope guards: with
+ * GATE_ESTIMATOR_SCOPE_GUARDS on, the classifier is grounded in what Waves
+ * actually knows (offered services, sender/address→customer matches,
+ * booked visits) instead of judging the message text alone.
  */
-async function threadQuoteSignal(body) {
+async function threadQuoteSignal(body, triage = null) {
   const text = String(body || '').trim();
   if (!text || !QUOTE_HINT_RE.test(text)) return { quoteRequest: false, method: 'regex' };
   try {
-    const prompt = `An SMS arrived at Waves Pest Control (pest control + lawn care). Decide if the sender is asking for a QUOTE or PRICING for a service (new or additional service, "how much", "can you give me a price", describing a pest/lawn problem they want serviced).
+    const grounded = !!triage;
+    const contextBlock = grounded && triage.lines.length
+      ? `\nKNOWN WAVES RECORDS (matched from this message):\n${triage.lines.map((l) => `- ${l}`).join('\n')}\n`
+      : (grounded ? '\nKNOWN WAVES RECORDS: no matching customer records.\n' : '');
+    const prompt = grounded
+      ? `An SMS arrived at Waves Pest Control (pest control + lawn care company).
+
+SERVICES WAVES OFFERS: recurring & one-time pest control, lawn health programs & one-time lawn treatments, tree & shrub care, mosquito programs, termite bait/monitoring and termite/WDO inspections, rodent bait stations, flea/tick, chemical bed bug treatment, wasp/hornet/bee removal. NOT OFFERED: power washing, roofing, gutters, painting, pools, plumbing, HVAC, electrical, cleaning, junk removal, handyman work.
+${contextBlock}
+Decide three things about the sender's message:
+- quote_request: are they asking for a QUOTE or PRICING for a service (new or additional service, "how much", describing a pest/lawn problem they want serviced)?
+- service_offered: does the request map to a service Waves offers? (true when it's unclear which service they mean)
+- relates_to_existing_job: is this coordinating, scheduling, or adding detail to service for an existing customer at a known address — including a third party texting on a customer's behalf? Work at a known customer's serviced property is an operations request, not a new quote.
+
+NOT a quote request: appointment confirmations/rescheduling, payment/billing questions about existing service, thanks/acknowledgments, complaints about a completed job, wrong numbers.
+
+Message: ${JSON.stringify(text)}
+
+Return ONLY JSON: {"quote_request":true|false,"service_offered":true|false,"relates_to_existing_job":true|false,"confidence":0.0-1.0}`
+      : `An SMS arrived at Waves Pest Control (pest control + lawn care). Decide if the sender is asking for a QUOTE or PRICING for a service (new or additional service, "how much", "can you give me a price", describing a pest/lawn problem they want serviced).
 
 NOT a quote request: appointment confirmations/rescheduling, payment/billing questions about existing service, thanks/acknowledgments, complaints about a completed job, wrong numbers.
 
@@ -71,7 +100,8 @@ Return ONLY JSON: {"quote_request":true|false,"confidence":0.0-1.0}`;
     const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructured, {
       text: prompt,
       jsonMode: true,
-      maxTokens: 60,
+      // The grounded response carries three booleans instead of one.
+      maxTokens: grounded ? 100 : 60,
       // Webhook-safe ceiling: the Twilio handler AWAITS this classifier
       // before returning TwiML, and without it the dispatcher's default
       // multi-minute fallback budget could hold the webhook past Twilio's
@@ -79,9 +109,20 @@ Return ONLY JSON: {"quote_request":true|false,"confidence":0.0-1.0}`;
       timeoutMs: 3500,
     });
     if (!response.ok || !response.json) return { quoteRequest: false, method: 'ai_failed' };
-    const quoteRequest = response.json.quote_request === true
-      && Number(response.json.confidence || 0) >= 0.6;
-    return { quoteRequest, method: 'ai', confidence: response.json.confidence };
+    const j = response.json;
+    const confident = j.quote_request === true && Number(j.confidence || 0) >= 0.6;
+    if (grounded && confident) {
+      // Grounded vetoes are the point of the context: an in-confidence
+      // "quote" for a service Waves doesn't offer, or for an existing
+      // customer's already-covered job, must not mint an owed-quote task.
+      if (j.service_offered === false) {
+        return { quoteRequest: false, method: 'ai_out_of_scope', confidence: j.confidence };
+      }
+      if (j.relates_to_existing_job === true) {
+        return { quoteRequest: false, method: 'ai_existing_job', confidence: j.confidence };
+      }
+    }
+    return { quoteRequest: confident, method: 'ai', confidence: j.confidence };
   } catch (err) {
     logger.warn(`[estimator-sms] quote-signal classify failed: ${err.message}`);
     return { quoteRequest: false, method: 'ai_failed' };
@@ -191,7 +232,19 @@ async function startSmsThreadDraft({ phone, triggerBody = '', skipIntentGate = f
       }
     }
     if (!skipIntentGate) {
-      const signal = await threadQuoteSignal(triggerBody);
+      const {
+        scopeGuardsEnabled, deterministicOutOfScope, loadThreadTriageContext,
+      } = require('./scope-guards');
+      const guarded = scopeGuardsEnabled();
+      // Deterministic backstop before any model call: a text naming only an
+      // out-of-scope home service ("power washing service") is not a lead.
+      if (guarded && deterministicOutOfScope(triggerBody)) {
+        result.skipped = 'out_of_scope_service';
+        return result;
+      }
+      // Grounding for the classifier (fail-open → ungrounded prompt).
+      const triage = guarded ? await loadThreadTriageContext({ phone, triggerBody }) : null;
+      const signal = await threadQuoteSignal(triggerBody, triage);
       if (!signal.quoteRequest) {
         result.skipped = `no_quote_intent_${signal.method}`;
         return result;
