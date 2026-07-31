@@ -321,6 +321,72 @@ function adminFetch(path, options = {}) {
   });
 }
 
+// The turf-relevant slice of the request-profile build, SHARED between
+// doGenerate and the stale-imagery /turf-preview effect so the previewed
+// number can never drift from the priced one (pre-push P1 #3098 — the
+// preview once kept the lookup-time footprint while doGenerate recomputed
+// it). Every transform here reaches computeTurfArea through
+// translateV2CallToV1Input: dims + bed area (blank field → explicit 0),
+// the footprintUnknown clear + footprint recompute, pool/cage (hardscape),
+// densities/complexity (turf-factor score), and propertyType (hardscape
+// brackets). Service-specific fields (palms, trenching, Bora-Care, slab,
+// commercial) stay in doGenerate — they don't feed turf.
+function buildTurfRequestProfile(baseProfile, form) {
+  const manualNumber = (value, fallback = 0) => {
+    const n = parseInt(value, 10);
+    return Number.isFinite(n) ? n : fallback;
+  };
+  const profile = {
+    ...baseProfile,
+    homeSqFt: manualNumber(
+      form.homeSqFt,
+      Number(baseProfile.homeSqFt || baseProfile.squareFootage) || 0,
+    ),
+    lotSqFt: manualNumber(form.lotSqFt, Number(baseProfile.lotSqFt) || 0),
+    stories: manualNumber(form.stories, Number(baseProfile.stories) || 1),
+    estimatedBedAreaSf: manualNumber(
+      form.bedArea,
+      Number(baseProfile.estimatedBedAreaSf) || 0,
+    ),
+  };
+  // footprintUnknown (association aggregate, story count unknown): the
+  // summed living area over a defaulted story count is NOT a ground-floor
+  // footprint — deriving one here would hand pricing the exact fake slab
+  // the lookup suppressed (codex P1 #2721). A story count the operator
+  // MANUALLY entered supplies exactly the missing datum, so the flag
+  // clears and derivation (and footprint-driven pricing) resumes off the
+  // corrected value (codex P2 r7 #2721). The edit flag alone is not
+  // enough — a cleared/invalid Stories box would fall back to the
+  // default and re-derive the fake slab (codex P2 r8 #2721).
+  if (
+    profile.footprintUnknown === true &&
+    form._storiesEdited &&
+    Number(form.stories) >= 1
+  )
+    profile.footprintUnknown = false;
+  if (profile.homeSqFt && profile.footprintUnknown !== true)
+    profile.footprint = Math.round(profile.homeSqFt / (profile.stories || 1));
+  profile.pool = form.hasPool === "YES" ? "YES" : "NO";
+  profile.poolCage = form.hasPoolCage === "YES" ? "YES" : "NO";
+  profile.poolCageSize =
+    form.hasPoolCage === "YES" ? form.poolCageSize || "MEDIUM" : "NONE";
+  profile.poolCageSizeInferred =
+    !!baseProfile.poolCageSizeInferred &&
+    !form._poolCageSizeEdited &&
+    profile.poolCage === "YES" &&
+    profile.poolCageSize === "MEDIUM";
+  profile.storiesSource = form._storiesEdited
+    ? "manual"
+    : baseProfile.storiesSource;
+  profile.shrubDensity = form.shrubDensity || profile.shrubDensity;
+  profile.treeDensity = form.treeDensity || profile.treeDensity;
+  profile.landscapeComplexity =
+    form.landscapeComplexity || profile.landscapeComplexity;
+  profile.nearWater = form.nearWater === "YES" ? "YES" : "NO";
+  profile.propertyType = form.propertyType || profile.propertyType;
+  return profile;
+}
+
 function summarizeEstimateSend(data) {
   const parts = [];
   if (data?.channels?.sms) {
@@ -2822,26 +2888,9 @@ export default function EstimateToolViewV2({
     const seq = ++staleImageryPreviewSeq.current;
     const timer = setTimeout(async () => {
       try {
-        // Mirrors doGenerate's manualNumber (parseInt; blank keeps fallback).
-        const manualNumber = (value, fallback = 0) => {
-          const n = parseInt(value, 10);
-          return Number.isFinite(n) ? n : fallback;
-        };
-        const baseProfile = enrichedProfile || {};
-        const previewProfile = {
-          ...baseProfile,
-          homeSqFt: manualNumber(form.homeSqFt, Number(baseProfile.homeSqFt) || 0),
-          lotSqFt: manualNumber(form.lotSqFt, Number(baseProfile.lotSqFt) || 0),
-          stories: manualNumber(form.stories, Number(baseProfile.stories) || 1),
-          estimatedBedAreaSf: manualNumber(form.bedArea, Number(baseProfile.estimatedBedAreaSf) || 0),
-          pool: form.hasPool === "YES" ? "YES" : "NO",
-          poolCage: form.hasPoolCage === "YES" ? "YES" : "NO",
-          shrubDensity: form.shrubDensity || baseProfile.shrubDensity,
-          treeDensity: form.treeDensity || baseProfile.treeDensity,
-          landscapeComplexity: form.landscapeComplexity || baseProfile.landscapeComplexity,
-          nearWater: form.nearWater === "YES" ? "YES" : "NO",
-          propertyType: form.propertyType || baseProfile.propertyType,
-        };
+        // The SAME builder doGenerate uses — preview and priced request
+        // share one profile construction by design.
+        const previewProfile = buildTurfRequestProfile(enrichedProfile || {}, form);
         // Preview only renders while Confirmed Sq Ft is blank.
         delete previewProfile.measuredTurfSf;
         const r = await fetch("/api/admin/estimator/turf-preview", {
@@ -2872,6 +2921,9 @@ export default function EstimateToolViewV2({
     form.propertyType,
     form.hasPool,
     form.hasPoolCage,
+    form.poolCageSize,
+    form._poolCageSizeEdited,
+    form._storiesEdited,
     form.shrubDensity,
     form.treeDensity,
     form.landscapeComplexity,
@@ -3762,61 +3814,34 @@ export default function EstimateToolViewV2({
         Number(baseProfile.treeCount || baseProfile.estimatedTreeCount) || 0,
       );
       const measuredTurfSf = optionalNumber(form.measuredTurfSf);
-      const profile = {
-        ...baseProfile,
-        homeSqFt: manualNumber(
-          form.homeSqFt,
-          Number(baseProfile.homeSqFt || baseProfile.squareFootage) || 0,
-        ),
-        lotSqFt: manualNumber(form.lotSqFt, Number(baseProfile.lotSqFt) || 0),
-        stories: manualNumber(form.stories, Number(baseProfile.stories) || 1),
-        estimatedBedAreaSf: manualNumber(
-          form.bedArea,
-          Number(baseProfile.estimatedBedAreaSf) || 0,
-        ),
-        // Palm pricing requires an explicit positive integer. The property-level
-        // count is used only as a prefill/default; the palmInjection service
-        // payload below carries the number of palms treated for this line.
-        ...(() => {
-          const fallback = parsePositiveInteger(baseProfile.palmCount)
-            ?? parsePositiveInteger(baseProfile.palmInventory?.palmCount)
-            ?? parsePositiveInteger(baseProfile.estimatedPalmCount);
-          const value = propertyPalmCount ?? fallback;
-          return value
-            ? {
-                palmCount: value,
-                estimatedPalmCount: value,
-                palmInventory: { ...(baseProfile.palmInventory || {}), palmCount: value },
-              }
-            : {};
-        })(),
-        estimatedTreeCount: treeCount,
-        treeCount,
-      };
+      // Turf-relevant transforms (dims, bed area, footprint, pool/cage,
+      // densities, type) live in buildTurfRequestProfile, SHARED with the
+      // stale-imagery /turf-preview effect — edit them there, not here
+      // (pre-push P1 #3098).
+      const profile = buildTurfRequestProfile(baseProfile, form);
+      // Palm pricing requires an explicit positive integer. The property-level
+      // count is used only as a prefill/default; the palmInjection service
+      // payload below carries the number of palms treated for this line.
+      Object.assign(profile, (() => {
+        const fallback = parsePositiveInteger(baseProfile.palmCount)
+          ?? parsePositiveInteger(baseProfile.palmInventory?.palmCount)
+          ?? parsePositiveInteger(baseProfile.estimatedPalmCount);
+        const value = propertyPalmCount ?? fallback;
+        return value
+          ? {
+              palmCount: value,
+              estimatedPalmCount: value,
+              palmInventory: { ...(baseProfile.palmInventory || {}), palmCount: value },
+            }
+          : {};
+      })());
+      profile.estimatedTreeCount = treeCount;
+      profile.treeCount = treeCount;
       if (measuredTurfSf !== undefined) {
         profile.measuredTurfSf = measuredTurfSf;
       } else {
         delete profile.measuredTurfSf;
       }
-      // footprintUnknown (association aggregate, story count unknown): the
-      // summed living area over a defaulted story count is NOT a ground-floor
-      // footprint — deriving one here would hand pricing the exact fake slab
-      // the lookup suppressed (codex P1 #2721). A story count the operator
-      // MANUALLY entered supplies exactly the missing datum, so the flag
-      // clears and derivation (and footprint-driven pricing) resumes off the
-      // corrected value (codex P2 r7 #2721). The edit flag alone is not
-      // enough — a cleared/invalid Stories box would fall back to the
-      // default and re-derive the fake slab (codex P2 r8 #2721).
-      if (
-        profile.footprintUnknown === true &&
-        form._storiesEdited &&
-        Number(form.stories) >= 1
-      )
-        profile.footprintUnknown = false;
-      if (profile.homeSqFt && profile.footprintUnknown !== true)
-        profile.footprint = Math.round(
-          profile.homeSqFt / (profile.stories || 1),
-        );
       if (trenchingPerimeterLF) profile.perimeterLF = trenchingPerimeterLF;
       if (boracareSqft) {
         profile.atticSqFt = boracareSqft;
@@ -3831,24 +3856,8 @@ export default function EstimateToolViewV2({
         delete profile.woodTreatmentSqFt;
       }
       if (preslabSqft) profile.slabSqFt = preslabSqft;
-      profile.pool = form.hasPool === "YES" ? "YES" : "NO";
-      profile.poolCage = form.hasPoolCage === "YES" ? "YES" : "NO";
-      profile.poolCageSize =
-        form.hasPoolCage === "YES" ? form.poolCageSize || "MEDIUM" : "NONE";
-      profile.poolCageSizeInferred =
-        !!baseProfile.poolCageSizeInferred &&
-        !form._poolCageSizeEdited &&
-        profile.poolCage === "YES" &&
-        profile.poolCageSize === "MEDIUM";
-      profile.storiesSource = form._storiesEdited
-        ? "manual"
-        : baseProfile.storiesSource;
-      profile.shrubDensity = form.shrubDensity || profile.shrubDensity;
-      profile.treeDensity = form.treeDensity || profile.treeDensity;
-      profile.landscapeComplexity =
-        form.landscapeComplexity || profile.landscapeComplexity;
-      profile.nearWater = form.nearWater === "YES" ? "YES" : "NO";
-      profile.propertyType = form.propertyType || profile.propertyType;
+      // pool/cage, storiesSource, densities, nearWater, and propertyType
+      // are set by buildTurfRequestProfile above.
       profile.isCommercial = formIsCommercial;
       profile.commercialSubtype = formIsCommercial ? form.commercialSubtype || null : null;
       profile.commercialRiskType = formIsCommercial ? form.commercialRiskType || null : null;

@@ -2096,6 +2096,24 @@ function needsTurfManualConfirmation(profile = {}, selectedServices = [], option
   };
   if (turfServices.every((service) => areaBoundedExempt[service])) return null;
 
+  // Stale-imagery conflict profiles (turfObservation 'unobservable') have
+  // NO trustworthy turf basis — the vision zeros were discarded and the
+  // engine would otherwise price its lot/hardscape fallback silently
+  // (estimatedTurfSf is 0 here, so the >threshold check below never
+  // fires). A low-confidence fallback must route to confirmation, not
+  // auto-apply (pre-push P1 #3098): require a measured turf entry for
+  // whole-lawn pricing. Manual turf and the bounded-area add-on exemptions
+  // above already cleared.
+  if (profile.turfObservation === 'unobservable') {
+    return {
+      field: 'measuredTurfSf',
+      turfObservation: 'unobservable',
+      estimatedTurfSf: 0,
+      reasons: turfRiskReasons(profile),
+      message: 'Satellite imagery conflicts with county records for this property, so there is no reliable turf estimate. Confirm treatable lawn area before generating lawn pricing.',
+    };
+  }
+
   const estimatedTurfSf = firstNonNegativeNumber(profile.estimatedTurfSf, profile.estimatedTurfSqFt);
   if (estimatedTurfSf === undefined || estimatedTurfSf <= TURF_MANUAL_CONFIRMATION_SQFT) return null;
 

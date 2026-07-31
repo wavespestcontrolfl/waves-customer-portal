@@ -1097,29 +1097,35 @@ function detectStaleImageryTurfConflict(record, ai) {
   const countySqFt = Number(record.squareFootage);
   if (!Number.isFinite(countySqFt) || countySqFt <= 0) return null;
   // The building evidence must be AUTHORITATIVE: merged records also carry
-  // listing- and AI-sourced square footage, and a vacant-roll parcel with a
-  // stale listing value would slip past detectUnassessedVacantParcel (it
-  // returns early on any positive squareFootage) — discarding vision zeros
-  // that are the CORRECT reading of a bare lot (codex P1 #3098). Same
-  // trust bar as the route's trustedCountyTurfCeiling (COUNTY_DIM_SOURCES),
-  // accepting both _fieldEvidence shapes: merged `{ sourceType }` and raw
-  // single-source `[items]`.
-  const sqftEvidence = record._fieldEvidence?.squareFootage;
-  const sqftSourceType = Array.isArray(sqftEvidence)
-    ? sqftEvidence[0]?.sourceType
-    : sqftEvidence?.sourceType;
-  if (!['county', 'cadastral', 'verified'].includes(String(sqftSourceType || '').toLowerCase())) {
-    return null;
-  }
+  // listing- and AI-sourced values, and a vacant-roll parcel with a stale
+  // listing sqft would slip past detectUnassessedVacantParcel (it returns
+  // early on any positive squareFootage) — discarding vision zeros that
+  // are the CORRECT reading of a bare lot (codex P1 #3098). Same trust bar
+  // as the route's trustedCountyTurfCeiling (COUNTY_DIM_SOURCES), accepting
+  // both _fieldEvidence shapes: merged `{ sourceType }` and raw
+  // single-source `[items]`. The bar applies to BOTH load-bearing facts:
+  // squareFootage (a building exists) and yearBuilt (it is a recent build)
+  // — a county-sourced old building with a listing/AI-sourced recent year
+  // must stay ambiguous (pre-push P1 #3098). Prod sweep 2026-07-30: the
+  // county-sourced contradiction rows all carry county yearBuilt evidence,
+  // so the gate keeps the real class covered.
+  const authoritativeEvidence = (field) => {
+    const entry = record._fieldEvidence?.[field];
+    const sourceType = Array.isArray(entry) ? entry[0]?.sourceType : entry?.sourceType;
+    return ['county', 'cadastral', 'verified'].includes(String(sourceType || '').toLowerCase());
+  };
+  if (!authoritativeEvidence('squareFootage')) return null;
   // Belt: a vacant-roll parcel carrying a defaulted dimension is the OTHER
   // window (imagery may be the fresher source there) — never both.
   if (detectUnassessedVacantParcel(record)) return null;
   // Only a RECENT build proves which side of the contradiction is stale
   // (codex P2 #3098): against an old assessed home, bare-land vision can be
   // the CORRECT reading of a demolition/teardown — the roll carries no
-  // demolition signal to tell them apart. Ambiguous (old or unknown
-  // yearBuilt) contradictions keep the explicit vision zeros — the right
-  // answer for a teardown — under the existing explicit-zero rule.
+  // demolition signal to tell them apart. Ambiguous (old, unknown, or
+  // non-authoritative yearBuilt) contradictions keep the explicit vision
+  // zeros — the right answer for a teardown — under the existing
+  // explicit-zero rule.
+  if (!authoritativeEvidence('yearBuilt')) return null;
   const yearBuilt = Number(record.yearBuilt);
   const currentYear = new Date().getFullYear();
   if (!Number.isFinite(yearBuilt)

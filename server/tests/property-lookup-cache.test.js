@@ -202,7 +202,7 @@ describe('getCachedLookup', () => {
         stories: 2,
         lotSize: 6985,
         yearBuilt: new Date().getFullYear() - 1,
-        _fieldEvidence: { squareFootage: { sourceType: 'county' } },
+        _fieldEvidence: { squareFootage: { sourceType: 'county' }, yearBuilt: { sourceType: 'county' } },
       },
       ai_analysis: { estimatedTurfSf: 0, imperviousSurfacePercent: 0, estimatedBedAreaSf: 0 },
       expires_at: new Date(Date.now() + 180 * 86400000).toISOString(),
@@ -318,7 +318,7 @@ describe('saveLookup', () => {
         stories: 2,
         lotSize: 6985,
         yearBuilt: new Date().getFullYear() - 1,
-        _fieldEvidence: { squareFootage: { sourceType: 'county' } },
+        _fieldEvidence: { squareFootage: { sourceType: 'county' }, yearBuilt: { sourceType: 'county' } },
       },
       aiAnalysis: { estimatedTurfSf: 0, imperviousSurfacePercent: 0, estimatedBedAreaSf: 0 },
     };

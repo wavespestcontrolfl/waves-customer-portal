@@ -55,6 +55,7 @@ function newBuildRecord() {
     _fieldEvidence: {
       lotSize: { sourceType: 'county' },
       squareFootage: { sourceType: 'county' },
+      yearBuilt: { sourceType: 'county' },
     },
   };
 }
@@ -113,9 +114,24 @@ describe('detectStaleImageryTurfConflict', () => {
       _fieldEvidence: {
         lotSize: { sourceType: 'county' },
         squareFootage: { sourceType: 'ai_search' },
+        yearBuilt: { sourceType: 'county' },
       },
     };
     expect(detectStaleImageryTurfConflict(listingSourced, bareDirtAi())).toBeNull();
+
+    // County-sourced building but listing/AI-sourced recent yearBuilt: the
+    // recency claim itself is unverified — a county-sourced OLD home with a
+    // wrong listing year would otherwise discard truthful teardown zeros
+    // (pre-push P1 r4 #3098).
+    const listingYear = {
+      ...newBuildRecord(),
+      _fieldEvidence: {
+        lotSize: { sourceType: 'county' },
+        squareFootage: { sourceType: 'county' },
+        yearBuilt: { sourceType: 'listing' },
+      },
+    };
+    expect(detectStaleImageryTurfConflict(listingYear, bareDirtAi())).toBeNull();
 
     const noEvidence = { ...newBuildRecord(), _fieldEvidence: {} };
     expect(detectStaleImageryTurfConflict(noEvidence, bareDirtAi())).toBeNull();
@@ -142,6 +158,7 @@ describe('detectStaleImageryTurfConflict', () => {
       _fieldEvidence: {
         lotSize: [{ sourceType: 'cadastral' }],
         squareFootage: [{ sourceType: 'cadastral' }],
+        yearBuilt: [{ sourceType: 'cadastral' }],
       },
     };
     expect(detectStaleImageryTurfConflict(arrayShape, bareDirtAi()))
@@ -333,5 +350,42 @@ describe('POST /turf-preview (live engine preview for form edits)', () => {
     const { status, payload } = await invoke({ profile: { lotSqFt: 'x', stories: -4 } });
     expect(status).toBe(200);
     expect(payload.turfSf).toBeGreaterThanOrEqual(0);
+  });
+});
+
+describe('needsTurfManualConfirmation on unobservable profiles', () => {
+  // Pre-push P1 r4 #3098: an unobservable-turf profile carries
+  // estimatedTurfSf 0, so the existing >20k threshold never fires and the
+  // engine's lot/hardscape fallback would price whole-lawn services with no
+  // measurement. The estimator-authority rule routes that to confirmation.
+  const { needsTurfManualConfirmation } = require('../routes/property-lookup-v2');
+
+  function unobservableProfile(extra = {}) {
+    return {
+      ...buildEnrichedProfile(newBuildRecord(), bareDirtAi(), 27.58, -82.42),
+      ...extra,
+    };
+  }
+
+  test('whole-lawn pricing without a measurement is blocked', () => {
+    const gate = needsTurfManualConfirmation(unobservableProfile(), ['LAWN'], {});
+    expect(gate).not.toBeNull();
+    expect(gate.field).toBe('measuredTurfSf');
+    expect(gate.turfObservation).toBe('unobservable');
+  });
+
+  test('a confirmed measurement clears the gate', () => {
+    expect(needsTurfManualConfirmation(unobservableProfile({ measuredTurfSf: 4500 }), ['LAWN'], {})).toBeNull();
+  });
+
+  test('bounded-area add-ons keep their exemption', () => {
+    expect(needsTurfManualConfirmation(unobservableProfile(), ['TOPDRESS'], { topDressArea: 800 })).toBeNull();
+  });
+
+  test('non-turf services and normal profiles are untouched', () => {
+    expect(needsTurfManualConfirmation(unobservableProfile(), ['PEST'], {})).toBeNull();
+    const paved = { ...bareDirtAi(), imperviousSurfacePercent: 85, imperviosSurfacePercent: 85 };
+    const normal = buildEnrichedProfile(newBuildRecord(), paved, 27.58, -82.42);
+    expect(needsTurfManualConfirmation(normal, ['LAWN'], {})).toBeNull();
   });
 });
