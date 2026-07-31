@@ -2325,7 +2325,7 @@ describe('validateRewrittenMeta enforces the blog meta contract (owner rule 2026
   test('sales terms in the final sentence still park (Codex P1: not demoted with the CTA)', () => {
     const r = rem.validateRewrittenMeta('A no-panic Southwest Florida guide to spider identification covering the widow species and the recluse myth. Learn more about saving big with Waves.', CTX);
     expect(r.ok).toBe(false);
-    expect(r.reason).toMatch(/blog_meta_final_sentence_sales_terms/);
+    expect(r.reason).toMatch(/blog_meta_sales_copy/);
   });
 
   test('bare 10-digit phone in a rewritten meta still parks (Codex r4)', () => {

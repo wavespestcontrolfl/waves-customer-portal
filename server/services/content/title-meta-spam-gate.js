@@ -208,13 +208,16 @@ const ABBREV_DOT_RE = /\b(St|Dr|Mt|Ft|Mr|Mrs|Ms|vs|No)\./gi;
 // splitting there hands downstream checks a bare "99" and hides the money
 // term (Codex r3).
 const DECIMAL_DOT_RE = /(\d)\.(\d)/g;
-function lastSentence(text) {
+function metaSentences(text) {
   const t = String(text || '').trim();
-  if (!t) return '';
+  if (!t) return [];
   const masked = t
     .replace(ABBREV_DOT_RE, (m) => m.replace('.', '\u0001'))
     .replace(DECIMAL_DOT_RE, '$1\u0001$2');
-  const sentences = masked.split(/[.!?]+/).map((s) => s.replace(/\u0001/g, '.').trim()).filter(Boolean);
+  return masked.split(/[.!?]+/).map((s) => s.replace(/\u0001/g, '.').trim()).filter(Boolean);
+}
+function lastSentence(text) {
+  const sentences = metaSentences(text);
   return sentences[sentences.length - 1] || '';
 }
 
@@ -227,19 +230,24 @@ function lastSentence(text) {
 //   2. sales terms riding a CTA-shaped sentence ("Learn more about saving
 //      big with Waves.")
 const CURRENCY_OR_PERCENT_RE = /[%$]/;
-// Transactional closers that are neither CTA-shaped nor carry a symbol —
+// Transactional sentences that are neither CTA-shaped nor carry a symbol —
 // "Ask Waves for a quote on treatment." / "A treatment estimate is available
 // today." (Codex r4). Two shapes, bounded to the sentence: a solicitation
-// verb reaching a sales noun, or a sales noun marketed as available/now/
-// today. Informational grammar ("an estimate of the damage helps you plan")
-// matches neither.
-const TRANSACTIONAL_CLOSER_RE = /\b(ask|call|text|contact|request|get|book|schedule)\b[^.!?]{0,40}?\b(quote|estimate|pricing|price|deal|offer|discount)s?\b|\b(quote|estimate|pricing|price|deal|offer|discount)s?\b[^.!?]{0,30}?\b(available|today|now)\b/i;
-function lastSentenceSalesTerms(text) {
-  const last = lastSentence(text);
-  if (!last) return false;
-  if (CURRENCY_OR_PERCENT_RE.test(last)) return true;
-  if (TRANSACTIONAL_CLOSER_RE.test(last)) return true;
-  return SOFT_CTA_RE.test(last) && CTA_SALES_TERMS_RE.test(last);
+// verb reaching a sales noun, or a sales noun with immediate now/today
+// urgency. Plain availability is NOT enough ("a damage estimate is available
+// in the county public record" is informational — Codex r5).
+const TRANSACTIONAL_SENTENCE_RE = /\b(ask|call|text|contact|request|get|book|schedule)\b[^.!?]{0,40}?\b(quote|estimate|pricing|price|deal|offer|discount)s?\b|\b(quote|estimate|pricing|price|deal|offer|discount)s?\b[^.!?]{0,30}?\b(today|now)\b/i;
+// EVERY sentence is scanned for the sales shapes — a pitch followed by an
+// informational closer ("Learn more about saving big with Waves. This guide
+// explains…") is still sales copy (Codex r5). Currency/percent stays
+// CLOSER-ONLY by design: mid-meta figures are usually legitimate stats
+// ("$5 billion in yearly damage", "40% of lawns") while the closer is the
+// pitch slot.
+function metaHasSalesCopy(text) {
+  const sentences = metaSentences(text);
+  if (!sentences.length) return false;
+  if (CURRENCY_OR_PERCENT_RE.test(sentences[sentences.length - 1])) return true;
+  return sentences.some((s) => TRANSACTIONAL_SENTENCE_RE.test(s) || (SOFT_CTA_RE.test(s) && CTA_SALES_TERMS_RE.test(s)));
 }
 
 // Waves' own number typed WITHOUT separators ("Call 9412972606") slips both
@@ -263,7 +271,7 @@ module.exports = {
   SALESY_META_RE,
   SOFT_CTA_RE,
   endsWithSoftCta,
-  lastSentenceSalesTerms,
+  metaHasSalesCopy,
   BARE_PHONE_DIGITS_RE,
   HYPE_TERMS,
   COMMERCIAL_TERMS,

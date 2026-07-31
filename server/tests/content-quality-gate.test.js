@@ -1046,13 +1046,13 @@ describe('soft CTA final sentence must BE a CTA (round-5 hardening)', () => {
   test('sales terms cannot ride in through the about-clause — still HARD (Codex P1: not demoted with the CTA)', () => {
     const r = checkBlogMetaContract({ meta_description: `${LEAD}Learn more about saving big with Waves.` });
     expect(r.ok).toBe(false);
-    expect(r.reason).toBe('blog_meta_final_sentence_sales_terms');
+    expect(r.reason).toBe('blog_meta_sales_copy');
   });
 
   test('decimal price in the closer still HARD-fails (r3: decimal dot is not a sentence boundary)', () => {
     const r = checkBlogMetaContract({ meta_description: `${LEAD}A treatment estimate starts at $49.99.` });
     expect(r.ok).toBe(false);
-    expect(r.reason).toBe('blog_meta_final_sentence_sales_terms');
+    expect(r.reason).toBe('blog_meta_sales_copy');
   });
 
   test('informational sales nouns in the closer do NOT hard-fail (r3: transactional usage only)', () => {
@@ -1068,8 +1068,24 @@ describe('soft CTA final sentence must BE a CTA (round-5 hardening)', () => {
     for (const tail of ['Ask Waves for a quote on treatment.', 'A professional treatment estimate is available today.']) {
       const r = checkBlogMetaContract({ meta_description: `${LEAD}${tail}` });
       expect(r.ok).toBe(false);
-      expect(r.reason).toBe('blog_meta_final_sentence_sales_terms');
+      expect(r.reason).toBe('blog_meta_sales_copy');
     }
+  });
+
+  test('a sales sentence followed by an informational closer still HARD-fails (r5: every sentence scanned)', () => {
+    const r = checkBlogMetaContract({ meta_description: 'Learn more about saving big with Waves. This guide explains common pests in Southwest Florida and what treatment involves for homes.' });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('blog_meta_sales_copy');
+  });
+
+  test('plain availability is NOT transactional (r5: "available in the county public record" passes hard)', () => {
+    const r = checkBlogMetaContract({ meta_description: `${LEAD}A damage estimate is available in the county public record.` });
+    expect(r.ok).toBe(true);
+  });
+
+  test('mid-meta damage stats with currency stay publishable (currency is closer-only by design)', () => {
+    const r = checkBlogMetaContract({ meta_description: 'Termites cause $5 billion in damage across the US every year. This guide covers the warning signs Southwest Florida homeowners see first.' });
+    expect(r.ok).toBe(true);
   });
 
   test('bare 10-digit phone in a blog meta still HARD-fails (r4: separator-less number slips the shaped regex)', () => {

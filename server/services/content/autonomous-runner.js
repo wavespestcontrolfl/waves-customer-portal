@@ -968,11 +968,20 @@ class AutonomousRunner {
         || seoCompletionResult?.error || prePublishVisibilityResult?.error) || qualityInfraFailure;
       if (!gatesPass && !brief.human_review_required && !gateInfraError) {
         const summary = this._summarizeForReviewer(uniquenessResult, qualityResult, seoCompletionResult, brief);
+        // Guardrails P2 nudges from the PASSING guardrails run still ride
+        // this redraft's feedback — the refresh quality bundle has no
+        // blog_meta_soft_cta check, so without this a refresh draft's CTA
+        // nudge (BLOG_META_MISSING_SOFT_CTA) never reaches the writer
+        // (Codex r5 P2). Pass/fail semantics unchanged.
+        const guardAdvisory = (run.content_guardrails_result?.findings || []).filter((f) => f.severity === 'P2').slice(0, 2);
+        const notes = guardAdvisory.length
+          ? `${summary} | guardrail nudges (non-blocking): ${guardAdvisory.map((f) => f.code).join(', ')}`
+          : summary;
         return this._gateFailRetryOrSkip(queue, opp, run, t0, finalize, {
           claimToken,
           skipReason: autoPublish ? 'auto_publish_gate_fail' : 'gate_fail',
-          notes: summary,
-          blocking: aggregateGateFindings({ uniquenessResult, qualityResult, seoCompletionResult, prePublishVisibilityResult, summary }),
+          notes,
+          blocking: [...aggregateGateFindings({ uniquenessResult, qualityResult, seoCompletionResult, prePublishVisibilityResult, summary }), ...guardAdvisory],
         });
       }
       // Remaining combinations are genuine human decisions (gate infra
