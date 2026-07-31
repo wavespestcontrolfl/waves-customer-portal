@@ -1611,24 +1611,55 @@ const ReviewService = {
     // (custom_body) so a provider retry re-sends the operator's copy
     // rather than reverting to the template.
     const smsTemplateId = templateId || (customBody && customBody.trim() ? null : "friendly_ask");
-    const recordedTemplateKey = actualChannel === "email" ? "review_request_email" : smsTemplateId || "custom";
+    let recordedTemplateKey = actualChannel === "email" ? "review_request_email" : smsTemplateId || "custom";
     let persistedBody = actualChannel === "sms" && customBody && customBody.trim() ? customBody : null;
 
-    // Personalized ask body (GATE_REVIEW_ASK_PERSONALIZED): SMS ask touches
-    // are drafted from the customer's own call/SMS history at send time.
-    // Operator-provided copy always wins; private no-link check-ins and email
-    // touches keep their templates. A null draft (gate off, no grounding,
-    // model down, or failed verification) falls through to the template.
-    // Persisted as custom_body below so a provider retry re-sends the same copy.
-    if (actualChannel === "sms" && !persistedBody && !noLinkSend) {
-      const drafted = await require("./review-ask-drafter").draftAskBody({
-        customer,
-        serviceType,
-        techName,
-        sequenceStep,
-        serviceDate,
-      });
-      if (drafted) persistedBody = drafted;
+    // Personalized ask body (GATE_REVIEW_ASK_PERSONALIZED): CADENCE SMS ask
+    // touches only (sequenceId required — a CSR's one-off send keeps exactly
+    // the template they picked; Codex P1, r1). Operator-provided copy always
+    // wins; private no-link check-ins and email touches keep their templates.
+    // A null draft (gate off, no grounding, model down, failed verification,
+    // or a recipient who isn't the account holder) falls through to the
+    // template.
+    if (actualChannel === "sms" && !persistedBody && !noLinkSend && sequenceId != null) {
+      // Retry reuse: a deferred/transiently-failed step re-enters here with no
+      // customBody — reuse the draft already persisted for this exact step so
+      // one touch can never send two different drafts (Codex P2, r1).
+      try {
+        const prior = await db("review_requests")
+          .where({ sequence_id: sequenceId, sequence_step: sequenceStep })
+          .whereNotNull("custom_body")
+          .orderBy("created_at", "desc")
+          .first();
+        if (prior?.custom_body) persistedBody = prior.custom_body;
+      } catch { /* reuse is best-effort; a fresh draft is still verified */ }
+
+      // Identity guard (Codex P1, r1): the SMS goes to the RESOLVED service
+      // contact. The account's call/SMS history only belongs to the account
+      // holder — when the recipient is someone else (tenant, buyer, realtor),
+      // skip drafting entirely so their message can't carry the account
+      // holder's name or private conversation details.
+      const recipientIsAccountHolder = !!(contact.phone && customer.phone
+        && (toE164(contact.phone) || contact.phone) === (toE164(customer.phone) || customer.phone));
+      if (!persistedBody && recipientIsAccountHolder) {
+        const drafted = await require("./review-ask-drafter").draftAskBody({
+          customer,
+          recipientFirstName: firstNameFrom(contact.name) || customer.first_name || "",
+          serviceType,
+          techName,
+          sequenceStep,
+          serviceDate,
+        });
+        if (drafted) persistedBody = drafted;
+      }
+      // Analytics provenance (Codex P1, r1): personalized touches must not be
+      // credited to the control template — the outreach funnel groups by
+      // template_key, so a gated rollout is only measurable with a distinct
+      // variant key. Body resolution is unaffected (custom_body wins first;
+      // _sendOutreachSms renders from the real templateId param).
+      if (persistedBody) {
+        recordedTemplateKey = `${smsTemplateId || "custom"}_personalized`;
+      }
     }
 
     // A no-link template (resolution_check / satisfaction_confirm) is a PRIVATE
