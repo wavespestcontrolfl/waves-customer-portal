@@ -613,7 +613,10 @@ function buildWeatherCallContext({ record } = {}) {
     body = 'A breezy window was recorded during the service and noted with today’s record.';
   } else if ((!Number.isFinite(rain) || rain <= 0.1) && (!Number.isFinite(wind) || wind <= 10)) {
     headline = 'Good treatment window.';
-    body = 'Low rainfall and moderate wind supported exterior application.';
+    // Window-explicit: this card reads the 24-hour capture, and on lawn
+    // reports it sits beside a WEEKLY rain figure — bare "low rainfall"
+    // would contradict a wet week (codex P2 #3093 r7).
+    body = 'Low rainfall in the 24 hours before the visit and moderate wind supported exterior application.';
   }
   return {
     headline,

@@ -67,6 +67,24 @@ describe('sanitizeRecommendationsAgainstTreatment', () => {
     expect(parsed.recommendations).toHaveLength(0);
   });
 
+  test('catches "confirm no fungicide is needed" phrasings (r7)', () => {
+    const { parsed } = _test.sanitizeRecommendationsAgainstTreatment({
+      recommendations: [],
+      nextVisitFocus: 'Confirm no fungicide is needed.',
+    }, APPLIED);
+    expect(parsed.nextVisitFocus).toMatch(/Recheck the areas treated today/);
+  });
+
+  test('catches "no herbicide required" phrasings (r7)', () => {
+    const { parsed, dropped } = _test.sanitizeRecommendationsAgainstTreatment({
+      recommendations: [
+        { priority: 1, action: 'Note that no weed treatment is required at this time.', reason: 'Weed suppression is strong.', timeframe: 'n/a' },
+      ],
+    }, APPLIED);
+    expect(dropped).toBe(1);
+    expect(parsed.recommendations).toHaveLength(0);
+  });
+
   test('supportive mentions of the applied class pass through', () => {
     const { parsed, dropped } = _test.sanitizeRecommendationsAgainstTreatment({
       recommendations: [

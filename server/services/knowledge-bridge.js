@@ -162,7 +162,7 @@ const TREATMENT_CLASS_TERMS = {
   herbicide: /\bherbicid|\bweed\s+(?:treatment|control|application|killer|spray)/i,
   insecticide: /\binsecticid|\binsect\s+(?:treatment|control|application|spray)|\b(?:grub|chinch\s*bug|webworm)\s+(?:treatment|control|application)/i,
 };
-const DEFER_LANGUAGE = /\b(?:defer|hold\s+off|wait|avoid|do\s+not\s+(?:apply|make|treat)|don['’]t\s+(?:apply|make|treat)|before\s+(?:making|applying)|not\s+(?:currently\s+)?(?:support|warrant|recommend)|until\s+.{0,50}\b(?:confirmed|verified|supports?)\b|without\s+(?:first|further))\b/i;
+const DEFER_LANGUAGE = /\b(?:defer|hold\s+off|wait|avoid|do\s+not\s+(?:apply|make|treat)|don['’]t\s+(?:apply|make|treat)|before\s+(?:making|applying)|not\s+(?:currently\s+)?(?:support|warrant|recommend)|until\s+.{0,50}\b(?:confirmed|verified|supports?)\b|without\s+(?:first|further)|(?:confirm|verify)\s+(?:that\s+)?no\b|\bno\s+[^.!?]{0,40}\b(?:is|are|was|were)?\s*(?:needed|necessary|required|warranted)|\bnot\s+(?:needed|necessary|required))\b/i;
 
 function contradictsAppliedTreatment(text, appliedClasses) {
   const t = String(text || '');
@@ -174,10 +174,14 @@ function contradictsAppliedTreatment(text, appliedClasses) {
 // Violating recommendation items are dropped; violating scalar fields fall
 // back to neutral monitoring copy (nextVisitFocus) or are removed so the
 // previously stored value stands (summary/customerTip).
-function sanitizeRecommendationsAgainstTreatment(parsed, appliedProducts) {
-  const appliedClasses = Object.keys(TREATMENT_CLASS_TERMS).filter((cls) =>
+function appliedTreatmentClasses(appliedProducts) {
+  return Object.keys(TREATMENT_CLASS_TERMS).filter((cls) =>
     (appliedProducts || []).some((p) => new RegExp(cls, 'i').test(String(p.product_category || ''))));
-  if (!appliedClasses.length || !parsed || typeof parsed !== 'object') return { parsed, dropped: 0 };
+}
+
+function sanitizeRecommendationsAgainstTreatment(parsed, appliedProducts) {
+  const appliedClasses = appliedTreatmentClasses(appliedProducts);
+  if (!appliedClasses.length || !parsed || typeof parsed !== 'object') return { parsed, dropped: 0, appliedClasses };
   let dropped = 0;
   if (Array.isArray(parsed.recommendations)) {
     const kept = parsed.recommendations.filter((rec) => {
@@ -194,7 +198,7 @@ function sanitizeRecommendationsAgainstTreatment(parsed, appliedProducts) {
     parsed.nextVisitFocus = 'Recheck the areas treated today and confirm how the lawn is responding to the applications.';
     dropped += 1;
   }
-  return { parsed, dropped };
+  return { parsed, dropped, appliedClasses };
 }
 
 const KnowledgeBridge = {
@@ -668,9 +672,18 @@ Return a JSON object with:
 
         // Model output advising against a product class applied today must
         // never persist (codex P1 r5) — the prompt rule is not a guarantee.
-        const { parsed, dropped } = sanitizeRecommendationsAgainstTreatment(raw, appliedProducts);
+        const { parsed, dropped, appliedClasses } = sanitizeRecommendationsAgainstTreatment(raw, appliedProducts);
         if (dropped) {
           logger.warn(`[knowledge-bridge] dropped ${dropped} treatment-contradicting field(s) from recommendations for assessment ${assessmentId}`);
+        }
+
+        // When the replacement summary was stripped, "keep the stored one"
+        // is only safe if the STORED one doesn't contradict today's
+        // treatment too — the confirm-time summary is exactly the text the
+        // grounded regen exists to replace (codex P1 r7). Contradicting
+        // stored copy gets a neutral deterministic summary instead.
+        if (!parsed.summary && contradictsAppliedTreatment(assessment.ai_summary, appliedClasses)) {
+          parsed.summary = 'Today’s applications are in place — we’ll track how the lawn responds and adjust at the next visit.';
         }
 
         // Deadline expired while the model was generating: the caller has
