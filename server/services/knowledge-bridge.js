@@ -178,6 +178,10 @@ function governedContradictionRegex(cls) {
     `\\b(?:defer|hold\\s+off\\s+on|avoid|skip|withhold|do\\s+not\\s+(?:apply|make|use)|don['’]t\\s+(?:apply|make|use)|no|not)\\s+(?:[\\w'’-]+\\s+){0,2}${CLASS}`,
     // "before making a fungicide application"
     `\\bbefore\\s+(?:making|applying)\\s+(?:an?\\s+)?(?:[\\w'’-]+\\s+){0,2}${CLASS}`,
+    // active wait/delay-to-apply forms — "wait to apply fungicide until
+    // disease is confirmed" (codex P1 r13). Bound to the apply verb so
+    // "wait until today's fungicide has dried" still passes.
+    `\\b(?:wait\\s+to|hold\\s+off\\s+on|delay|postpone|refrain\\s+from)\\s+(?:apply(?:ing)?|mak(?:e|ing)|us(?:e|ing))\\s+(?:an?\\s+)?(?:[\\w'’-]+\\s+){0,2}${CLASS}`,
     // "<class> ... is not needed/warranted/required"
     `${CLASS}[^.!?]{0,50}\\bnot\\s+(?:currently\\s+)?(?:needed|necessary|required|warranted|supported|recommended)\\b`,
     // passive deferrals — modal, past-tense, and progressive forms: "should
@@ -541,6 +545,47 @@ const KnowledgeBridge = {
   // Called after lawn assessment is confirmed, and again after service
   // completion persists the visit's products (grounded regen).
   // ────────────────────────────────────────────────────────────
+  // Deterministic (no-LLM) sanitization of the STORED recommendations
+  // against the visit's applied products — the fallback when the grounded
+  // regeneration fails fast: the confirm-time copy stays customer-visible
+  // (portal + queued PDF) and must not keep a treatment contradiction just
+  // because the replacement generation errored (codex P1 #3093 r13). Same
+  // advisory lock as generation so it can never interleave with a run.
+  async sanitizeStoredRecommendations(assessmentId) {
+    if (!assessmentId) return { changed: false, dropped: 0 };
+    return db.transaction(async (trx) => {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`lawn_rec_${assessmentId}`]);
+      const assessment = await trx('lawn_assessments').where({ id: assessmentId }).first();
+      if (!assessment || !assessment.service_record_id) return { changed: false, dropped: 0 };
+      const appliedProducts = await trx('service_products')
+        .where({ service_record_id: assessment.service_record_id })
+        .select('product_name', 'product_category');
+      let stored;
+      try {
+        stored = typeof assessment.recommendations === 'string'
+          ? JSON.parse(assessment.recommendations)
+          : (assessment.recommendations || null);
+      } catch { stored = null; }
+      if (!stored || typeof stored !== 'object') return { changed: false, dropped: 0 };
+      const { parsed, dropped, appliedClasses } = sanitizeRecommendationsAgainstTreatment(stored, appliedProducts);
+      const summaryContradicts = contradictsAppliedTreatment(assessment.ai_summary, appliedClasses);
+      if (!dropped && !summaryContradicts) return { changed: false, dropped: 0 };
+      if (summaryContradicts) {
+        parsed.summary = 'Today’s applications are in place — we’ll track how the lawn responds and adjust at the next visit.';
+      }
+      await trx('lawn_assessments').where({ id: assessmentId }).update({
+        ...(parsed.summary ? { ai_summary: parsed.summary } : {}),
+        recommendations: JSON.stringify(parsed),
+        updated_at: new Date(),
+      });
+      logger.warn(`[knowledge-bridge] stored recommendations sanitized for assessment ${assessmentId} (${dropped} field(s) dropped${summaryContradicts ? ', summary neutralized' : ''})`);
+      return { changed: true, dropped };
+    }).catch((err) => {
+      logger.error(`[knowledge-bridge] sanitizeStoredRecommendations failed: ${err.message}`);
+      return { changed: false, dropped: 0 };
+    });
+  },
+
   async generateAssessmentRecommendations(assessmentId) {
     // Serialize runs per assessment: the confirm-time run can still be in
     // flight when the post-completion grounded regen starts, and both write

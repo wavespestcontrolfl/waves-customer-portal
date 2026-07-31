@@ -5593,7 +5593,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         if (lawnRecRegenTimedOut) {
           logger.warn('[dispatch] lawn recommendation regen still running after 60s — completion continues; PDF re-queues when the grounded write lands');
         } else if (!lawnRecRegenGrounded) {
-          logger.warn('[dispatch] lawn recommendation regen failed — recommendation-derived customer output suppressed for this completion');
+          // A fast failure leaves the confirm-time copy stored and customer-
+          // visible (portal + the PDF queued below) — deterministically
+          // sanitize it against today's applications so no treatment
+          // contradiction survives even without a successful regeneration
+          // (codex P1 r13). No LLM involved; fast and fail-soft.
+          logger.warn('[dispatch] lawn recommendation regen failed — sanitizing stored copy and suppressing recommendation-derived customer output');
+          await KnowledgeBridge.sanitizeStoredRecommendations(completedAssessment.id)
+            .catch((sanErr) => logger.warn(`[dispatch] stored recommendation sanitize failed (non-blocking): ${sanErr.message}`));
         }
       } catch (err) {
         logger.error(`[dispatch] Lawn assessment service_record link failed (non-blocking): ${err.message}`);

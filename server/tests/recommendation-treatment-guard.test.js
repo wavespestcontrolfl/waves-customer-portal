@@ -108,6 +108,13 @@ describe('sanitizeRecommendationsAgainstTreatment', () => {
     }
   });
 
+  test('active wait-to-apply deferrals are caught (r13)', () => {
+    const { dropped } = _test.sanitizeRecommendationsAgainstTreatment({
+      recommendations: [{ priority: 1, action: 'Wait to apply fungicide until disease is confirmed.', reason: 'x', timeframe: 'y' }],
+    }, APPLIED);
+    expect(dropped).toBe(1);
+  });
+
   test('legitimate aftercare mentioning the class passes (defer must govern the treatment)', () => {
     const { parsed, dropped } = _test.sanitizeRecommendationsAgainstTreatment({
       recommendations: [
