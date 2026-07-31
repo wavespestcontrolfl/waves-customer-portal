@@ -9395,3 +9395,8 @@ module.exports = router;
 // route-load cycle) by services/recurring-series-extend.js so the dispatch
 // completion routes run the same refill/alert logic as this route's step 4b.
 module.exports.runRecurringSeriesMaintenance = runRecurringSeriesMaintenance;
+// Shared "your appointment moved" notice (arrival-window copy, recipient
+// routing, terminal/slot recheck, guarded reminder close/re-arm) — consumed
+// lazily by the IB move_stops_to_day tool so its opt-in customer texts go
+// through the exact same path as update-details and the bulk reschedule.
+module.exports.sendRescheduleNoticeForVisit = sendRescheduleNoticeForVisit;

@@ -87,6 +87,9 @@ export default function ScheduleCustomerSidebar({
   onBookNext,
   onSavedNote,
   onCancel,
+  // Optional: opens the smart-slot Reschedule modal (suggested on-route
+  // dates). Menu item renders only when the host page wires it.
+  onReschedule,
 }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -265,6 +268,18 @@ export default function ScheduleCustomerSidebar({
             )}
             {canCancelAppointment && menuOpen && (
               <div className="absolute right-11 top-10 z-20 w-56 rounded-sm border-hairline border-zinc-200 bg-white py-1 shadow-xl">
+                {typeof onReschedule === 'function' && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMenuOpen(false);
+                      onReschedule(service);
+                    }}
+                    className="w-full px-3 py-2 text-left text-13 font-medium text-zinc-900 hover:bg-zinc-50 u-focus-ring"
+                  >
+                    Reschedule appointment
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => {

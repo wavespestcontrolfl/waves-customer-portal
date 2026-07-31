@@ -3112,6 +3112,10 @@ export default function DispatchPageV2({
             setSelectedScheduleService(null);
             setEditingService(svc);
           }}
+          onReschedule={(svc) => {
+            setSelectedScheduleService(null);
+            setRescheduleService(svc);
+          }}
           onSavedNote={(svc, notes) => {
             setSelectedScheduleService((prev) =>
               prev && prev.id === svc.id ? { ...prev, notes } : prev,

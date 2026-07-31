@@ -51,13 +51,14 @@ const SCHEDULE_TOOLS = [
   },
   {
     name: 'move_stops_to_day',
-    description: `Move one or more scheduled services to a different date. Use when operator says "move the Lakewood stops to Thursday" or "push these to next week." Your call returns a PREVIEW; the operator approves or rejects it on the confirmation card in the portal. Call ONCE per intended action — never retry, never claim completion.`,
+    description: `Move one or more scheduled services to a different date. Use when operator says "move the Lakewood stops to Thursday" or "push these to next week." Your call returns a PREVIEW; the operator approves or rejects it on the confirmation card in the portal. Call ONCE per intended action — never retry, never claim completion. Moves are SILENT by default; set notify_customers true ONLY when the operator explicitly asks to text the customers.`,
     input_schema: {
       type: 'object',
       properties: {
         service_ids: { type: 'array', items: { type: 'string' }, description: 'Scheduled service IDs to move' },
         new_date: { type: 'string', description: 'YYYY-MM-DD target date' },
         reason: { type: 'string' },
+        notify_customers: { type: 'boolean', description: 'Text each customer the new date and arrival window. Default false (silent move) — only set true when the operator explicitly asks to notify customers.' },
       },
       required: ['service_ids', 'new_date'],
     },
@@ -394,6 +395,7 @@ const LIVE_MOVE_STATUSES = new Set(['en_route', 'on_site']);
 
 async function moveStopsToDay(input) {
   const { service_ids: serviceIds, new_date: newDate, reason, confirmed } = input;
+  const notifyCustomers = input.notify_customers === true;
 
   // scheduled_date is a plain DATE column holding ET calendar dates — a
   // garbage, impossible (2099-02-31), or past target moves stops where no
@@ -456,10 +458,13 @@ async function moveStopsToDay(input) {
       would_move_to: dateStr,
       stop_count: stops.length,
       reason: reason || null,
+      // Surfaced on the confirmation card — the operator must see whether
+      // committing will text the customers.
+      will_text_customers: notifyCustomers,
       stops,
       ...(skippedElapsed.length ? { skipped_elapsed: skippedElapsed } : {}),
       ...(skippedTerminal.length ? { skipped_terminal: skippedTerminal } : {}),
-      note: `Would move ${stops.length} stop(s) to ${dateStr}. Re-call with confirmed:true to apply.`,
+      note: `Would move ${stops.length} stop(s) to ${dateStr}${notifyCustomers ? ' and TEXT each customer the new arrival window' : ' silently (no customer texts)'}. Re-call with confirmed:true to apply.`,
     };
   }
 
@@ -467,6 +472,10 @@ async function moveStopsToDay(input) {
   const { LIVE_LIFECYCLE_RESET, applyLiveMoveSideEffects } = require('../rebooker');
   const movedIds = new Set();
   const skippedConflict = [];
+  // Moved rows whose requested customer text did NOT go out — reported so
+  // the operator learns the move committed but someone wasn't notified.
+  const notificationFailures = [];
+  let textedCount = 0;
   for (const s of movable) {
     const oldDate = s.scheduled_date;
     // A live (en_route/on_site) stop being moved rewinds its tracker
@@ -531,6 +540,45 @@ async function moveStopsToDay(input) {
       continue;
     }
     movedIds.add(s.id);
+    // Opt-in customer text — same shared path as update-details and the bulk
+    // reschedule (arrival-window copy, recipient routing, terminal/slot
+    // recheck, guarded reminder close/re-arm). Best-effort per stop: a send
+    // failure is reported, never unwinds the committed move.
+    if (notifyCustomers) {
+      try {
+        const start = s.window_start ? String(s.window_start).slice(0, 5) : null;
+        if (!start) {
+          notificationFailures.push({ id: s.id, reason: 'No arrival time is set for this visit, so no reschedule text was sent' });
+        } else {
+          const reminderRow = await db('appointment_reminders')
+            .where({ scheduled_service_id: s.id })
+            .first('suppressed_by_sibling')
+            .catch(() => null);
+          if (!reminderRow) {
+            notificationFailures.push({ id: s.id, reason: 'No reminder record for this visit — not texted' });
+          } else if (reminderRow.suppressed_by_sibling) {
+            // Slot owner carries the customer messaging — a suppressed
+            // sibling moves silently by design (not a failure).
+          } else {
+            const AppointmentReminders = require('../appointment-reminders');
+            // Cover any already-due reminder window before our text so the
+            // 15-min cron can't double-text in the send gap (the caller-side
+            // contract of sendRescheduleNoticeForVisit).
+            await AppointmentReminders.handleReschedule(s.id, `${dateStr}T${start}`, {
+              sendNotification: false,
+              coverDueWindows: true,
+            });
+            const { sendRescheduleNoticeForVisit } = require('../../routes/admin-schedule');
+            const notice = await sendRescheduleNoticeForVisit(s.id, dateStr, start);
+            if (notice.sent) textedCount++;
+            else notificationFailures.push({ id: s.id, reason: notice.error || 'reschedule text was not sent' });
+          }
+        }
+      } catch (err) {
+        notificationFailures.push({ id: s.id, reason: err.message });
+        logger.error(`[intelligence-bar:schedule] move notice failed for ${s.id}: ${err.message}`);
+      }
+    }
     // Rebooker-parity side effects of the live → confirmed flip above:
     // job_status_history audit row, tech_status release, customer tracker
     // refresh. Best-effort: the move is committed — a side-effect failure
@@ -580,6 +628,7 @@ async function moveStopsToDay(input) {
     moved_count: movedStops.length,
     new_date: dateStr,
     stops: movedStops,
+    ...(notifyCustomers ? { texted_count: textedCount, notification_failures: notificationFailures } : {}),
     ...(skippedTerminal.length ? { skipped_terminal: skippedTerminal } : {}),
     ...(skippedElapsed.length ? { skipped_elapsed: skippedElapsed } : {}),
     ...(skippedConflict.length ? { skipped_conflict: skippedConflict } : {}),
