@@ -1216,11 +1216,12 @@ export default function ReschedulePage() {
           start_time: selectedSlot.start_time,
           end_time: selectedSlot.end_time,
           technician_id: selectedSlot.technician_id || null,
-          // Scope pin: the series behavior this page DISCLOSED. A gate flip
-          // between render and commit 409s (SCOPE_CHANGED) instead of
-          // silently doing something the customer wasn't told about.
-          // Omitted (undefined) when the payload predates the field.
-          disclosed_collective: data?.collectiveAnchor != null ? !!data.collectiveAnchor : undefined,
+          // Scope pin: the series behavior this page DISCLOSED, and the
+          // anchor date that promise was framed against. A gate flip or a
+          // dispatch race between render and commit 409s (SCOPE_CHANGED)
+          // instead of silently doing something the customer wasn't told.
+          disclosed_collective: !!data?.collectiveAnchor,
+          disclosed_current_date: data?.current?.date || null,
         }),
       });
       const body = await res.json().catch(() => ({}));

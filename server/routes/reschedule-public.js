@@ -118,17 +118,27 @@ function shouldReanchor(svc, targetDateStr) {
   return pullForwardDays(apptDateStr(svc.scheduled_date), targetDateStr) >= REANCHOR_PULLFORWARD_DAYS;
 }
 
-// GET→POST scope pin (codex P1): the page disclosed whether a date move
-// shifts the whole series (payload.collectiveAnchor), and the customer
-// confirmed against that promise. If the gate flips between that render
-// and this commit — rollout, kill switch, mixed-version deploy — honoring
-// the CURRENT mode would silently break the disclosed behavior in either
-// direction. Reject on mismatch so the page reloads and re-discloses.
-// Field-absent (older cached client JS mid-deploy) skips the pin.
-function seriesScopeMismatch(svc, disclosed) {
-  return isSeriesVisit(svc)
-    && typeof disclosed === 'boolean'
-    && disclosed !== collectiveAnchorActive();
+// GET→POST scope pin (codex P1, hardened r2): the page disclosed whether a
+// date move shifts the whole series (payload.collectiveAnchor) AND against
+// which current date that promise was framed. A series commit is rejected
+// (409 SCOPE_CHANGED → the page reloads and re-discloses) when:
+//   - the disclosure is ABSENT — fail closed: a pre-deploy page left open
+//     across the gate flip omits the field, and honoring its commit could
+//     shift a series the page promised was a single move;
+//   - the disclosed mode no longer matches the gate (flip in either
+//     direction between render and commit);
+//   - the anchor DATE moved since the render (dispatch race) — the
+//     date-vs-time-only scope decision was framed against the rendered
+//     date, so a moved anchor invalidates it both ways.
+// Non-series visits never pin: scope disclosure only exists for series.
+function seriesScopeMismatch(svc, body) {
+  if (!isSeriesVisit(svc)) return false;
+  const disclosed = body?.disclosed_collective;
+  if (typeof disclosed !== 'boolean') return true;
+  if (disclosed !== collectiveAnchorActive()) return true;
+  const disclosedDate = String(body?.disclosed_current_date || '').slice(0, 10);
+  if (!disclosedDate || disclosedDate !== apptDateStr(svc.scheduled_date)) return true;
+  return false;
 }
 
 router.use(rateLimit({
@@ -644,7 +654,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     const newWindow = { start: slot.start_time, end: slot.end_time };
     // Series-scope consent pin — see seriesScopeMismatch. Mismatch means the
     // page's disclosure no longer matches what this commit would do.
-    if (seriesScopeMismatch(svc, req.body?.disclosed_collective)) {
+    if (seriesScopeMismatch(svc, req.body)) {
       return res.status(409).json({
         error: 'The scheduling details for your plan just updated — please review the latest options.',
         code: 'SCOPE_CHANGED',

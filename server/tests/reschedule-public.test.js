@@ -380,19 +380,26 @@ describe('weatherMove banner context (GATE_RAINOUT_MOVE_BANNER)', () => {
 describe('collective series anchoring (GATE_COLLECTIVE_SERIES_ANCHOR)', () => {
   afterEach(() => { delete process.env.GATE_COLLECTIVE_SERIES_ANCHOR; });
 
-  test('GET→POST scope pin: a gate flip between render and commit is rejected, either direction (codex P1)', () => {
+  test('GET→POST scope pin: gate flips, missing disclosure, and anchor-date races all reject (codex P1 r1+r2)', () => {
     const series = { is_recurring: true, scheduled_date: '2026-08-13' };
-    // Disclosed legacy, gate now collective → mismatch.
+    const ok = { disclosed_collective: true, disclosed_current_date: '2026-08-13' };
     process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
-    expect(seriesScopeMismatch(series, false)).toBe(true);
-    expect(seriesScopeMismatch(series, true)).toBe(false);
-    // Disclosed collective, gate now off → mismatch.
+    expect(seriesScopeMismatch(series, ok)).toBe(false);
+    // Disclosed legacy while the gate is collective → mismatch.
+    expect(seriesScopeMismatch(series, { ...ok, disclosed_collective: false })).toBe(true);
+    // FAIL CLOSED: a pre-deploy page omits the disclosure entirely.
+    expect(seriesScopeMismatch(series, {})).toBe(true);
+    expect(seriesScopeMismatch(series, undefined)).toBe(true);
+    // Anchor date moved since the render (dispatch race) → mismatch, both
+    // when the disclosed date is stale and when it is absent.
+    expect(seriesScopeMismatch(series, { ...ok, disclosed_current_date: '2026-08-12' })).toBe(true);
+    expect(seriesScopeMismatch(series, { disclosed_collective: true })).toBe(true);
+    // Gate now off: a collective disclosure mismatches; legacy matches.
     delete process.env.GATE_COLLECTIVE_SERIES_ANCHOR;
-    expect(seriesScopeMismatch(series, true)).toBe(true);
-    expect(seriesScopeMismatch(series, false)).toBe(false);
-    // Non-series visits and pre-disclosure clients (field absent) never pin.
-    expect(seriesScopeMismatch({ is_recurring: false }, true)).toBe(false);
-    expect(seriesScopeMismatch(series, undefined)).toBe(false);
+    expect(seriesScopeMismatch(series, ok)).toBe(true);
+    expect(seriesScopeMismatch(series, { ...ok, disclosed_collective: false })).toBe(false);
+    // Non-series visits never pin.
+    expect(seriesScopeMismatch({ is_recurring: false }, {})).toBe(false);
   });
 
   test('gate on: ANY date change re-anchors a series visit — both directions, any size', () => {

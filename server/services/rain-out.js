@@ -755,12 +755,20 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
           // park it for the office instead of failing the rain-out.
           try {
             const NotificationService = require('./notification-service');
-            await NotificationService.notifyAdmin(
+            // notifyAdmin swallows DB errors and resolves null (codex P2) —
+            // a falsy result means the cadence is intentionally broken with
+            // NO card prompting repair. Log at error with full context (the
+            // durable signal Sentry picks up); the moved visit itself is
+            // committed and must not read as retryable.
+            const card = await NotificationService.notifyAdmin(
               'schedule_conflict',
               'Rain-out series shift needs a look',
               `A rain-out moved a recurring visit to ${target.date} but its future visits could not shift with it (a later occurrence conflicts). The plan's cadence no longer follows the moved visit — adjust from dispatch.`,
               { metadata: { scheduledServiceId: job.id, customerId: job.customer_id || null, targetDate: target.date, reasonCode } }
             );
+            if (!card) {
+              logger.error(`[rain-out] schedule_conflict card insert FAILED for ${job.id} — series cadence broken with no admin card; targetDate=${target.date} reason=${reasonCode}`);
+            }
           } catch (notifyErr) {
             logger.error(`[rain-out] schedule_conflict notification failed for ${job.id}: ${notifyErr.message}`);
           }
@@ -829,12 +837,15 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
       if (conflicted.length) {
         try {
           const NotificationService = require('./notification-service');
-          await NotificationService.notifyAdmin(
+          const card = await NotificationService.notifyAdmin(
             'schedule_conflict',
             'Rain-out series shift needs a look',
             `A rain-out shifted a recurring series; ${conflicted.length} future visit(s) landed on already-booked windows and were left UNASSIGNED (${conflicted.map((c) => c.date).join(', ')}). Reassign from dispatch.`,
             { metadata: { scheduledServiceId: job.id, conflicts: conflicted, reasonCode } }
           );
+          if (!card) {
+            logger.error(`[rain-out] schedule_conflict card insert FAILED for ${job.id} — unassigned siblings with no admin card: ${JSON.stringify(conflicted)}`);
+          }
         } catch (err) {
           logger.error(`[rain-out] schedule_conflict notification failed for ${job.id}: ${err.message}`);
         }

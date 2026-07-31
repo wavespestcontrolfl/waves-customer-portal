@@ -618,7 +618,9 @@ describe('ReschedulePage collective anchoring', () => {
 
     await waitFor(() => expect(screen.getByText("You're all set")).toBeInTheDocument());
     const postCall = fetchMock.mock.calls.find(([, opts]) => opts?.method === 'POST');
-    expect(JSON.parse(postCall[1].body).disclosed_collective).toBe(true);
+    const posted = JSON.parse(postCall[1].body);
+    expect(posted.disclosed_collective).toBe(true);
+    expect(posted.disclosed_current_date).toBe('2026-07-10');
   });
 
   it('keeps the legacy conditional note when collectiveAnchor is absent', async () => {
