@@ -502,7 +502,15 @@ const ReviewService = {
       // payment deferral instead of silently reverting to the default
       // (Codex P2, r3). An absolute time already elapsed sends immediately.
       let delayMinutes;
-      const storedAt = notes.reviewScheduledFor ? new Date(notes.reviewScheduledFor) : null;
+      // reviewScheduledFor is the TIMEZONE-LESS Eastern wall-clock string the
+      // completion panel posts — new Date() on a UTC server would read it
+      // 4-5h early (Codex P1, r5). Parse naive strings as ET, same as the
+      // completion validation; an explicit offset/Z (defensive) parses as-is.
+      let storedAt = null;
+      if (notes.reviewScheduledFor) {
+        const raw = String(notes.reviewScheduledFor);
+        storedAt = /Z$|[+-]\d{2}:?\d{2}$/.test(raw) ? new Date(raw) : parseETDateTime(raw);
+      }
       if (storedAt && !Number.isNaN(storedAt.getTime())) {
         delayMinutes = Math.max(0, Math.round((storedAt.getTime() - Date.now()) / 60000));
       } else if (notes.reviewDelayMinutes != null && Number.isFinite(Number(notes.reviewDelayMinutes))) {
@@ -2042,13 +2050,16 @@ const ReviewService = {
     // the cron freezes active rows in place — completions deliver legacy asks
     // in the meantime, and re-enabling the gate would otherwise resume relic
     // steps. Two deterministic retirements:
-    //  - stale: the whole plan spans ~4 days, so an active sequence started
-    //    over 30 days ago can only be a resumed relic — retire it;
+    //  - stale: a step OVERDUE by more than 7 days can only be a resumed
+    //    relic (normal cron lag is minutes). Overdue-based, NOT age-based —
+    //    an operator may legitimately schedule the first touch up to 30 days
+    //    out, and that step arrives just-due, never deeply overdue
+    //    (Codex P2, r5). A NULL next_run_at (inline start) is brand new.
     //  - superseded: an ask DELIVERED outside this sequence since 30 days ago
     //    (legacy path, manual one-off) means the customer was already
     //    contacted — another touch inside the cooldown would double-ask.
-    const startedAtMs = new Date(seq.started_at).getTime();
-    if (Number.isFinite(startedAtMs) && Date.now() - startedAtMs > 30 * 86400000) {
+    const dueAtMs = seq.next_run_at ? new Date(seq.next_run_at).getTime() : null;
+    if (dueAtMs != null && Number.isFinite(dueAtMs) && Date.now() - dueAtMs > 7 * 86400000) {
       return stop("stale");
     }
     let recentAskRows = [];

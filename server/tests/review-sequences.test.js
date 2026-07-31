@@ -609,6 +609,26 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(scheduled).toBeLessThanOrEqual(before + 31 * 60000);
   });
 
+  test('enrollForPaidInvoice parses a naive ET reviewScheduledFor as Eastern wall-clock', async () => {
+    mockGates.reviewSequences = true;
+    // The completion panel posts timezone-less ET ('YYYY-MM-DDTHH:mm'). Build
+    // one ~6h out in ET and confirm the schedule lands on the ET instant, not
+    // the (4-5h earlier) UTC misread.
+    const targetMs = Date.now() + 6 * 3600000;
+    const naiveEt = new Date(targetMs).toLocaleString('sv-SE', { timeZone: 'America/New_York' }).replace(' ', 'T').slice(0, 16);
+    const mock = makeMock({
+      customers: [{ id: 'et-1', first_name: 'Ria', last_name: 'W', phone: '+19410000075', nearest_location_id: 'bradenton' }],
+      service_records: [{ id: 'sr-et', customer_id: 'et-1', structured_notes: JSON.stringify({ requestReview: true, reviewScheduledFor: naiveEt }) }],
+    });
+    db.mockImplementation(mock);
+
+    const out = await ReviewService.enrollForPaidInvoice({ id: 'inv-et', customer_id: 'et-1', service_record_id: 'sr-et' });
+
+    expect(out.enrolled).toBe(true);
+    const runAt = mock.__state.rows.review_sequences[0].next_run_at.getTime();
+    expect(Math.abs(runAt - targetMs)).toBeLessThanOrEqual(120000);
+  });
+
   test('enrollForPaidInvoice honors the completion panel timing stored on the service record', async () => {
     mockGates.reviewSequences = true;
     const scheduledAt = new Date(Date.now() + 6 * 3600000).toISOString(); // custom time, 6h out
@@ -682,13 +702,14 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(touch.service_record_id).toBe('sr-1');
   });
 
-  test('a relic sequence resumed after 30+ days (gate toggled off/on) retires as stale instead of firing', async () => {
+  test('a step overdue by more than 7 days (gate toggled off/on) retires as stale instead of firing', async () => {
     const mock = makeMock({
       customers: [{ id: 'st-1', first_name: 'Ana', last_name: 'F', phone: '+19410000080', nearest_location_id: 'bradenton' }],
       review_sequences: [{
         id: 'seq-st', customer_id: 'st-1', status: 'active', current_step: 1, touches_sent: 1,
         plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }, { day: 3, channel: 'sms', templateKey: 'soft_reminder' }]),
-        started_at: new Date(Date.now() - 40 * 86400000), next_run_at: new Date(Date.now() - 60000),
+        // Due 10 days ago — the cron was frozen (gate off) and just came back.
+        started_at: new Date(Date.now() - 13 * 86400000), next_run_at: new Date(Date.now() - 10 * 86400000),
       }],
     });
     db.mockImplementation(mock);
@@ -698,6 +719,25 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
     expect(out.stopped).toBe(1);
     expect(mock.__state.rows.review_sequences[0].stop_reason).toBe('stale');
+  });
+
+  test('a first touch legitimately scheduled ~30 days out fires when just-due (not stale)', async () => {
+    const mock = makeMock({
+      customers: [{ id: 'st-2', first_name: 'Bo', last_name: 'K', phone: '+19410000082', nearest_location_id: 'bradenton' }],
+      review_sequences: [{
+        id: 'seq-st2', customer_id: 'st-2', status: 'active', current_step: 0, touches_sent: 0,
+        plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }]),
+        // Operator scheduled the start 30 days out; it just came due.
+        started_at: new Date(Date.now() - 30 * 86400000), next_run_at: new Date(Date.now() - 120000),
+      }],
+    });
+    db.mockImplementation(mock);
+
+    const out = await ReviewService.processReviewSequences();
+
+    expect(out.sent).toBe(1);
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(mock.__state.rows.review_sequences[0].status).toBe('completed');
   });
 
   test('an ask delivered outside the sequence (legacy path while gate was off) supersedes the cadence', async () => {
