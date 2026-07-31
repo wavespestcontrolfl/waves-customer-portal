@@ -7,6 +7,8 @@
  * POST /link-as-property — merge, then preserve the loser's address as an
  *                     additional property on the winner (multi-property case)
  * POST /dismiss     — record a "not a duplicate" verdict for a pair
+ * GET  /merges      — recent merge-journal rows (winner/loser, revertibility)
+ * POST /merges/:journalId/revert — journal-backed undo of a merge
  *
  * Merge is destructive-adjacent (soft-delete + FK repoint, journaled), so the
  * whole router requires full admin, not tech.
@@ -15,7 +17,7 @@ const express = require('express');
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
-const { findDuplicateGroups, executeMerge } = require('../services/customer-dedupe');
+const { findDuplicateGroups, executeMerge, revertMerge } = require('../services/customer-dedupe');
 
 const router = express.Router();
 router.use(adminAuthenticate, requireAdmin);
@@ -115,6 +117,85 @@ async function handleMerge(req, res, { linkAsProperty }) {
 
 router.post('/merge', (req, res) => handleMerge(req, res, { linkAsProperty: false }));
 router.post('/link-as-property', (req, res) => handleMerge(req, res, { linkAsProperty: true }));
+
+// Recent merges for the review page's undo surface. Read-only, no gate —
+// like the queue itself. Names come from the live winner row and the loser's
+// journal snapshot (the loser row is retired).
+router.get('/merges', async (req, res) => {
+  try {
+    const rows = await db('customer_merge_journal as j')
+      .leftJoin('customers as w', 'j.winner_customer_id', 'w.id')
+      .select(
+        'j.id', 'j.winner_customer_id', 'j.loser_customer_id', 'j.tier', 'j.performed_by',
+        'j.created_at', 'j.undone_at', 'j.undone_by', 'j.loser_snapshot', 'j.repointed_ids',
+        'w.first_name as winner_first_name', 'w.last_name as winner_last_name',
+        'w.active as winner_active', 'w.deleted_at as winner_deleted_at',
+      )
+      .orderBy('j.created_at', 'desc')
+      .limit(20);
+    const parse = (v) => {
+      if (v === null || v === undefined) return null;
+      if (typeof v === 'object') return v;
+      try { return JSON.parse(v); } catch { return null; }
+    };
+    res.json({
+      merges: rows.map((row) => {
+        const snapshot = parse(row.loser_snapshot);
+        const recorded = parse(row.repointed_ids);
+        return {
+          journalId: row.id,
+          winnerId: row.winner_customer_id,
+          loserId: row.loser_customer_id,
+          winnerName: [row.winner_first_name, row.winner_last_name].filter(Boolean).join(' ') || 'Unknown',
+          loserName: [snapshot?.first_name, snapshot?.last_name].filter(Boolean).join(' ') || 'Unknown',
+          tier: row.tier,
+          performedBy: row.performed_by,
+          createdAt: row.created_at,
+          undoneAt: row.undone_at,
+          undoneBy: row.undone_by,
+          // Pre-upgrade merges (no row-level repoint record) are not
+          // auto-revertible; neither is a merge whose winner is gone/retired.
+          revertible: Boolean(
+            !row.undone_at
+            && snapshot?.id
+            && recorded?.tables
+            && row.winner_active !== false
+            && !row.winner_deleted_at,
+          ),
+        };
+      }),
+    });
+  } catch (err) {
+    logger.error(`[admin-customer-duplicates] merges list failed: ${err.message}`);
+    res.status(500).json({ error: 'Failed to load recent merges' });
+  }
+});
+
+// Journal-backed undo. Owner-initiated, so it works regardless of the
+// autonomy gates. Repoints OWNERSHIP rows only — never touches Stripe itself
+// and never creates or modifies charges (revertMerge's contract).
+router.post('/merges/:journalId/revert', async (req, res) => {
+  if (!UUID_RE.test(String(req.params.journalId))) {
+    return res.status(400).json({ error: 'journalId must be a journal UUID' });
+  }
+  try {
+    const result = await revertMerge({
+      journalId: req.params.journalId,
+      performedBy: performedBy(req),
+    });
+    res.json({
+      ok: true,
+      winnerId: result.winnerId,
+      loserId: result.loserId,
+      repointedBack: result.repointedBack,
+      skipped: result.skipped,
+      stripeMovedBack: result.stripeMovedBack,
+    });
+  } catch (err) {
+    logger.error(`[admin-customer-duplicates] revert failed: ${err.message}`);
+    res.status(err.statusCode || 500).json({ error: err.message });
+  }
+});
 
 router.post('/dismiss', async (req, res) => {
   const { customerIdA, customerIdB, reason } = req.body || {};

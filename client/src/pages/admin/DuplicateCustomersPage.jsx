@@ -79,6 +79,7 @@ function CustomerLine({ customer, isWinner }) {
 
 export default function DuplicateCustomersPage() {
   const [groups, setGroups] = useState([]);
+  const [merges, setMerges] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [toast, setToast] = useState("");
@@ -90,6 +91,10 @@ export default function DuplicateCustomersPage() {
     try {
       const data = await api("/admin/customer-duplicates");
       setGroups(data.groups || []);
+      // The undo surface is secondary — a merges-list failure must not blank
+      // the review queue, so it degrades to an empty section silently.
+      const journal = await api("/admin/customer-duplicates/merges").catch(() => ({ merges: [] }));
+      setMerges(journal.merges || []);
     } catch (err) {
       setError(err.message || "Could not load duplicate customers");
     } finally {
@@ -261,6 +266,81 @@ export default function DuplicateCustomersPage() {
           </Card>
         ))}
       </div>
+
+      {merges.length > 0 && (
+        <div className="mt-4">
+          <div className="mb-2 flex items-center gap-2">
+            <span className="u-label text-ink-secondary">Recent merges</span>
+            <span className="text-11 text-ink-secondary">last {merges.length} · every merge is journaled and can be undone</span>
+          </div>
+          <Card>
+            <CardBody>
+              <div className="grid gap-2">
+                {merges.map((merge) => (
+                  <div
+                    key={merge.journalId}
+                    className="flex flex-wrap items-center justify-between gap-3 rounded-sm border-hairline border-zinc-200 px-3 py-2"
+                  >
+                    <div className="min-w-[240px] flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-13 font-medium text-zinc-900">{merge.loserName}</span>
+                        <span className="text-12 text-ink-secondary">merged into</span>
+                        <Link
+                          to={`/admin/customers?customerId=${encodeURIComponent(merge.winnerId)}`}
+                          className="text-13 font-medium text-zinc-900 underline-offset-2 hover:underline"
+                        >
+                          {merge.winnerName}
+                        </Link>
+                        <Badge tone={merge.tier === "green" ? "strong" : "neutral"}>
+                          {merge.tier === "green" ? "Auto" : "Manual"}
+                        </Badge>
+                      </div>
+                      <div className="truncate text-11 text-ink-secondary">
+                        {[
+                          merge.performedBy,
+                          fmtDate(merge.createdAt),
+                          merge.undoneAt ? `undone ${fmtDate(merge.undoneAt)}${merge.undoneBy ? ` by ${merge.undoneBy}` : ""}` : null,
+                        ].filter(Boolean).join(" · ")}
+                      </div>
+                    </div>
+                    <div className="flex shrink-0 items-center gap-2">
+                      {merge.undoneAt ? (
+                        <span className="text-11 text-ink-secondary">Undone</span>
+                      ) : merge.revertible ? (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          disabled={actionKey === `${merge.journalId}:revert`}
+                          onClick={() => runAction({
+                            key: `${merge.journalId}:revert`,
+                            endpoint: `/admin/customer-duplicates/merges/${merge.journalId}/revert`,
+                            body: {},
+                            confirmText: `Undo this merge? ${merge.loserName} will be restored as a separate customer and their history moved back.`,
+                            // The revert can commit while some rows stayed on
+                            // the kept customer — report the partial outcome.
+                            onResult: (res) => {
+                              if (res?.skipped?.length) {
+                                setError(`Merge undone, but ${res.skipped.length} item(s) could not be restored automatically — details in the admin notification.`);
+                              } else {
+                                setToast("Merge undone");
+                              }
+                            },
+                          })}
+                        >
+                          Undo merge
+                        </Button>
+                      ) : (
+                        // Pre-upgrade merges have no row-level repoint record.
+                        <span className="text-11 text-ink-secondary">Not undoable</span>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </CardBody>
+          </Card>
+        </div>
+      )}
     </div>
   );
 }

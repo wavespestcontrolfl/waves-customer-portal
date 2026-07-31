@@ -439,6 +439,11 @@ async function findDuplicateGroups(database = db, { failClosedOnDismissals = fal
 // dismissal pair must not collapse into a self-pair.
 const REPOINT_EXCLUDED_TABLES = new Set(['customer_merge_journal', 'customer_duplicate_dismissals']);
 
+// Above this many rows in one table the journal records count-only instead of
+// per-row ids (an unbounded id list would bloat the journal row); the revert
+// endpoint treats count-only tables as not auto-revertible and reports them.
+const REPOINT_ID_CAP = 10000;
+
 // One-row-per-customer preference tables: when both sides have a row, the
 // loser's row can't just be dropped — it may hold opted-OUT notification
 // consent or gate/pet/safety details the winner's row lacks. Boolean
@@ -852,6 +857,14 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
     }
 
     const repointed = {};
+    // Row-precise record of every PLAIN repoint for the journal's
+    // repointed_ids column — what the revert endpoint replays. Values are
+    // arrays of moved row ids, or { count } when ids could not be captured
+    // (no plain `id` PK, over REPOINT_ID_CAP, or a mid-merge insert made the
+    // list unreliable). Collision-handled tables (prefs folds, dropped
+    // derived rows, conversation merges) are deliberately NOT recorded —
+    // those moves are not plain repoints and are not auto-revertible.
+    const repointedIds = {};
 
     // BEFORE the sweep: an unstamped visit renders its address via
     // COALESCE(scheduled_services.service_address_line1, customers.
@@ -896,10 +909,29 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
     // handled without poisoning the outer transaction.
     const fks = await customerFkColumns(trx);
     for (const { table_name: table, column_name: column } of fks) {
+      // Capture the moving row ids BEFORE the update, in an own savepoint: a
+      // table without a plain `id` PK must not poison the outer transaction —
+      // it just journals count-only and stays non-revertible.
+      let rowIds = null;
+      try {
+        await trx.transaction(async (sp) => {
+          rowIds = (await sp(table).where(column, loserId).select('id')).map((r) => r.id);
+        });
+      } catch {
+        rowIds = null;
+      }
       try {
         await trx.transaction(async (sp) => {
           const count = await sp(table).where(column, loserId).update({ [column]: winnerId });
-          if (count) repointed[`${table}.${column}`] = count;
+          if (count) {
+            repointed[`${table}.${column}`] = count;
+            // Record ids only when the update provably covered exactly them
+            // (READ COMMITTED: a row committed between the id select and the
+            // update makes the list unreliable — fall back to count-only).
+            repointedIds[`${table}.${column}`] = (rowIds && rowIds.length === count && count <= REPOINT_ID_CAP)
+              ? rowIds
+              : { count };
+          }
         });
       } catch (e) {
         const uniqueViolation = e && e.code === '23505';
@@ -925,12 +957,27 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
     // POLYMORPHIC_CUSTOMER_POINTERS. Same fail-closed contract as the FK
     // sweep: any failure aborts the merge.
     for (const { table, typeColumn, idColumn } of POLYMORPHIC_CUSTOMER_POINTERS) {
+      let rowIds = null;
+      try {
+        await trx.transaction(async (sp) => {
+          rowIds = (await sp(table)
+            .where({ [typeColumn]: 'customer', [idColumn]: loserId })
+            .select('id')).map((r) => r.id);
+        });
+      } catch {
+        rowIds = null;
+      }
       try {
         await trx.transaction(async (sp) => {
           const count = await sp(table)
             .where({ [typeColumn]: 'customer', [idColumn]: loserId })
             .update({ [idColumn]: winnerId });
-          if (count) repointed[`${table}.${idColumn}`] = count;
+          if (count) {
+            repointed[`${table}.${idColumn}`] = count;
+            repointedIds[`${table}.${idColumn}`] = (rowIds && rowIds.length === count && count <= REPOINT_ID_CAP)
+              ? rowIds
+              : { count };
+          }
         });
       } catch (e) {
         throw new Error(`executeMerge: repoint failed on ${table}.${idColumn}: ${e.message}`);
@@ -1198,6 +1245,14 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
       loser_customer_id: loserId,
       loser_snapshot: JSON.stringify(loser),
       repointed: JSON.stringify(repointed),
+      // Row-precise repoint record + the transferred Stripe id — everything
+      // revertMerge needs. Additive column (nullable); the pre-existing
+      // repointed COUNTS map keeps its exact shape for old readers.
+      repointed_ids: JSON.stringify({
+        version: 1,
+        tables: repointedIds,
+        stripe_transferred_id: backfills.stripe_customer_id || null,
+      }),
       winner_backfills: JSON.stringify(backfills),
       tier: mode === 'auto' ? 'green' : 'manual',
       evidence: JSON.stringify(evidence),
@@ -1275,10 +1330,302 @@ async function runAutoMergeSweep({ performedBy = 'auto:dedupe-cron' } = {}) {
   return results;
 }
 
+// ---------------------------------------------------------------------------
+// Red-pair auto-dismiss sweep (cron entry point — caller owns the gate)
+// ---------------------------------------------------------------------------
+//
+// Red tier is the detector's own "two different people sharing a phone"
+// verdict (different last names AND a positively different address) — those
+// pairs can never be merged from the queue, so left alone they park in the
+// owner's review list forever. This sweep records the same "not a duplicate"
+// dismissal an operator would click, attributed 'auto:red-tier'. Dismissal
+// semantics are untouched (display reads them fail-open at :299, the
+// auto-merge sweep fail-closed): a dismissal only hides the pair from the
+// QUEUE — identity-conflict demotion is structural (cluster count) and keeps
+// green shells demoted, and a dismissed pair can never be auto-merged even
+// if the rows later drift toward matching. Reversal = delete the row.
+async function runRedPairAutoDismissSweep({ performedBy = 'auto:red-tier' } = {}) {
+  let groups;
+  try {
+    // Fail-closed like the auto-merge sweep: the upsert itself is idempotent,
+    // but an unreadable dismissals table means adjudication state we cannot
+    // see — an autonomous writer does not act blind to it.
+    groups = await findDuplicateGroups(db, { failClosedOnDismissals: true });
+  } catch (e) {
+    logger.warn(`[customer-dedupe] red-pair auto-dismiss aborted — dismissals unreadable: ${e.message}`);
+    return { dismissed: [], aborted: 'dismissals_unreadable' };
+  }
+  const results = { dismissed: [] };
+  for (const group of groups) {
+    for (const candidate of group.candidates) {
+      if (candidate.tier !== 'red') continue;
+      const [a, b] = pairKey(group.winner.id, candidate.loser.id);
+      try {
+        // Idempotent by the ordered-pair unique constraint — a re-run or a
+        // race with a manual dismissal is an ignored conflict, never an error.
+        await db('customer_duplicate_dismissals')
+          .insert({
+            customer_id_a: a,
+            customer_id_b: b,
+            reason: `auto-dismissed: red tier (${candidate.reasons.join(', ')})`.slice(0, 500),
+            created_by: performedBy,
+          })
+          .onConflict(['customer_id_a', 'customer_id_b'])
+          .ignore();
+        results.dismissed.push({ winnerId: group.winner.id, loserId: candidate.loser.id });
+      } catch (e) {
+        // One bad pair must not stop the sweep; the pair simply stays queued.
+        logger.warn(`[customer-dedupe] red-pair auto-dismiss failed for ${a}/${b}: ${e.message}`);
+      }
+    }
+  }
+
+  // ONE digest bell per sweep, mirroring the merge digest above.
+  if (results.dismissed.length) {
+    try {
+      const n = results.dismissed.length;
+      await require('./notification-service').notifyAdmin(
+        'customer',
+        `${n} duplicate pair${n === 1 ? '' : 's'} auto-dismissed as different people`,
+        'Different last names at a different address on a shared phone — the detector\'s own "two people" verdict, so these pairs can never be merged. Removed from the duplicate review queue; to re-surface one, delete its customer_duplicate_dismissals row.',
+        {
+          link: '/admin/customers/duplicates',
+          metadata: { dismissed: results.dismissed },
+        },
+      );
+    } catch (notifyErr) {
+      logger.warn(`[customer-dedupe] red-dismiss digest notify failed (non-blocking): ${notifyErr.message}`);
+    }
+  }
+  return results;
+}
+
+// ---------------------------------------------------------------------------
+// Merge undo (journal-backed revert — owner-initiated, no gate)
+// ---------------------------------------------------------------------------
+
+// Refuse-vs-skip policy for the revert's per-row ownership checks: money
+// OWNERSHIP must never be partially reverted — if ANY recorded invoice or
+// payment row no longer points at the winner (or was journaled count-only),
+// the whole revert refuses and the split is a hand job from the journal
+// snapshot. Everything else (call logs, notifications, leads, derived
+// snapshot rows, ...) is history/derived data where a row that moved on is
+// skipped and reported — a partial revert there is strictly better than
+// refusing the whole undo.
+const REVERT_REFUSE_ON_MISMATCH_TABLES = new Set(['invoices', 'payments']);
+
+function parseJsonb(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'object') return value;
+  try { return JSON.parse(value); } catch { return null; }
+}
+
+/**
+ * Revert a journaled merge: un-retire the loser from its snapshot, repoint
+ * the recorded row ids back, move a transferred Stripe id back ONLY when it
+ * provably still sits on the winner, stamp undone_at/undone_by, one admin
+ * bell. Repoints OWNERSHIP records only — never touches Stripe itself and
+ * never creates or modifies charges. Refusals throw with statusCode 409 and
+ * a human-readable reason.
+ */
+async function revertMerge({ journalId, performedBy }) {
+  const refuse = (reason) => {
+    const err = new Error(reason);
+    err.statusCode = 409;
+    throw err;
+  };
+  const result = await db.transaction(async (trx) => {
+    const journal = await trx('customer_merge_journal').where({ id: journalId }).forUpdate().first();
+    if (!journal) refuse('Merge journal entry not found');
+    if (journal.undone_at) refuse('This merge has already been undone');
+    const snapshot = parseJsonb(journal.loser_snapshot);
+    if (!snapshot || !snapshot.id) refuse('Journal has no loser snapshot — cannot revert');
+    const recorded = parseJsonb(journal.repointed_ids);
+    if (!recorded || !recorded.tables) {
+      refuse('This merge predates row-level undo records and cannot be auto-reverted — restore by hand from the journal snapshot');
+    }
+    const winnerId = journal.winner_customer_id;
+    const loserId = journal.loser_customer_id;
+    const locked = await trx('customers').whereIn('id', [winnerId, loserId]).forUpdate().select('*');
+    const winner = locked.find((r) => r.id === winnerId);
+    const loserRow = locked.find((r) => r.id === loserId);
+    if (!winner) refuse('The kept customer no longer exists');
+    if (winner.deleted_at || winner.active === false) {
+      refuse('The kept customer is inactive or deleted — reactivate it before undoing the merge');
+    }
+    if (!loserRow) refuse('The merged-away customer row was purged — cannot restore it');
+    if (!loserRow.deleted_at) refuse('The merged-away customer is already live — nothing to undo');
+
+    // Verification pass BEFORE any write: every recorded row must still point
+    // at the winner, or it is state that moved on since the merge.
+    const skipped = [];
+    const plans = [];
+    for (const [key, ids] of Object.entries(recorded.tables)) {
+      const dot = key.indexOf('.');
+      const table = key.slice(0, dot);
+      const column = key.slice(dot + 1);
+      if (!table || !column) continue;
+      if (!Array.isArray(ids)) {
+        // Count-only record (no plain id PK / over cap / mid-merge race).
+        if (REVERT_REFUSE_ON_MISMATCH_TABLES.has(table)) {
+          refuse(`${table} rows were repointed without row-level records — revert by hand from the journal`);
+        }
+        skipped.push({ key, reason: 'no_row_ids_recorded' });
+        continue;
+      }
+      if (!ids.length) continue;
+      let stillOnWinner = [];
+      try {
+        stillOnWinner = (await trx(table).whereIn('id', ids).where(column, winnerId).select('id'))
+          .map((r) => r.id);
+      } catch (e) {
+        if (REVERT_REFUSE_ON_MISMATCH_TABLES.has(table)) {
+          refuse(`Cannot verify ${table} ownership (${e.message}) — refusing to revert`);
+        }
+        skipped.push({ key, reason: `verify_failed: ${e.message}`, count: ids.length });
+        continue;
+      }
+      const moved = ids.length - stillOnWinner.length;
+      if (moved > 0) {
+        if (REVERT_REFUSE_ON_MISMATCH_TABLES.has(table)) {
+          refuse(`${moved} ${table} row(s) no longer belong to the kept customer — state has moved on; revert by hand`);
+        }
+        skipped.push({ key, reason: 'rows_changed_since_merge', count: moved });
+      }
+      if (stillOnWinner.length) plans.push({ key, table, column, ids: stillOnWinner });
+    }
+
+    const repointedBack = {};
+    for (const plan of plans) {
+      const count = await trx(plan.table)
+        .whereIn('id', plan.ids)
+        .where(plan.column, winnerId)
+        .update({ [plan.column]: loserId });
+      if (count) repointedBack[plan.key] = count;
+    }
+
+    // Winner-side undo: the transferred Stripe id, a primary-profile
+    // promotion, and the moved cached credits. Backfilled CONTACT fields
+    // (name/address copies) deliberately stay on the winner — clearing them
+    // changes no behavior and the snapshot keeps the provenance — EXCEPT the
+    // email, which must vacate the winner when it blocks restoring the
+    // loser's identity (uniqueness).
+    const backfills = parseJsonb(journal.winner_backfills) || {};
+    const winnerPatch = {};
+    let stripeMovedBack = false;
+    const transferredStripe = recorded.stripe_transferred_id || null;
+    if (transferredStripe) {
+      if (winner.stripe_customer_id === transferredStripe) {
+        winnerPatch.stripe_customer_id = null;
+        stripeMovedBack = true;
+      } else {
+        skipped.push({ key: 'customers.stripe_customer_id', reason: 'winner_stripe_changed_since_merge' });
+      }
+    }
+    if (backfills.is_primary_profile === true && winner.is_primary_profile === true) {
+      winnerPatch.is_primary_profile = false;
+    }
+    if (backfills.email && winner.email === backfills.email
+      && snapshot.email && backfills.email === snapshot.email) {
+      winnerPatch.email = null;
+    }
+    // Cached credit balance moves back only when the winner still holds at
+    // least what the merge moved over (the loser's ledger rows repoint back
+    // with the plan above, keeping cache == ledger-sum on both rows).
+    const movedCredits = Math.round(Number(snapshot.account_credits || 0) * 100) / 100;
+    let creditsMovedBack = 0;
+    if (movedCredits > 0) {
+      if (Number(winner.account_credits || 0) >= movedCredits) {
+        creditsMovedBack = movedCredits;
+      } else {
+        skipped.push({ key: 'customers.account_credits', reason: 'winner_balance_below_moved_amount' });
+      }
+    }
+    if (Object.keys(winnerPatch).length) {
+      await trx('customers').where({ id: winnerId }).update({ ...winnerPatch, updated_at: trx.fn.now() });
+    }
+    if (creditsMovedBack) {
+      await trx('customers').where({ id: winnerId }).decrement('account_credits', creditsMovedBack);
+    }
+
+    // Un-retire the loser from the snapshot: exactly what the retire cleared.
+    // Anything the merge merely folded (notes appends, pref merges, dropped
+    // derived rows) is out of scope — the snapshot keeps the originals.
+    const restore = {
+      active: true,
+      deleted_at: null,
+      phone: snapshot.phone,
+      email: snapshot.email || null,
+      payer_id: snapshot.payer_id || null,
+      billing_mode: snapshot.billing_mode || null,
+      is_primary_profile: snapshot.is_primary_profile === true,
+      account_credits: creditsMovedBack,
+      updated_at: trx.fn.now(),
+    };
+    if (stripeMovedBack) restore.stripe_customer_id = snapshot.stripe_customer_id || null;
+    try {
+      await trx.transaction(async (sp) => {
+        await sp('customers').where({ id: loserId }).update(restore);
+      });
+    } catch (e) {
+      if (!(e && e.code === '23505')) throw e;
+      // Email uniqueness tripped (another live row holds it now): restore
+      // everything else and report the email as not restored.
+      const { email: _email, ...rest } = restore;
+      await trx('customers').where({ id: loserId }).update({ ...rest, email: null });
+      skipped.push({ key: 'customers.email', reason: 'email_now_in_use_elsewhere' });
+    }
+
+    await trx('customer_merge_journal').where({ id: journalId }).update({
+      undone_at: trx.fn.now(),
+      undone_by: performedBy || 'unknown',
+    });
+
+    logger.info(`[customer-dedupe] merge ${journalId} reverted: ${loserId} split back out of ${winnerId} by ${performedBy}`);
+    return {
+      journalId,
+      winnerId,
+      loserId,
+      repointedBack,
+      skipped,
+      stripeMovedBack,
+      creditsMovedBack,
+      loserName: [snapshot.first_name, snapshot.last_name].filter(Boolean).join(' ') || 'Unknown',
+      winnerName: [winner.first_name, winner.last_name].filter(Boolean).join(' ') || 'Unknown',
+    };
+  });
+
+  // Post-commit on purpose: a failed bell must never roll back the revert.
+  try {
+    const back = Object.values(result.repointedBack).reduce((n, c) => n + Number(c || 0), 0);
+    const skippedNote = result.skipped.length
+      ? ` ${result.skipped.length} item(s) could not be restored automatically (state moved on since the merge).`
+      : '';
+    await require('./notification-service').notifyAdmin(
+      'customer',
+      `Merge undone: ${result.loserName} restored`,
+      `${result.loserName} was split back out of ${result.winnerName}; ${back} row(s) repointed back.${skippedNote}`,
+      {
+        link: `/admin/customers?customerId=${result.loserId}`,
+        metadata: {
+          journalId: result.journalId,
+          skipped: result.skipped,
+          stripeMovedBack: result.stripeMovedBack,
+        },
+      },
+    );
+  } catch (notifyErr) {
+    logger.warn(`[customer-dedupe] revert notify failed (non-blocking): ${notifyErr.message}`);
+  }
+  return result;
+}
+
 module.exports = {
   findDuplicateGroups,
   executeMerge,
   runAutoMergeSweep,
+  runRedPairAutoDismissSweep,
+  revertMerge,
   // exported for tests
   _test: {
     phone10,
