@@ -3489,6 +3489,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       completionMode: completionProfile?.completionMode,
       profileDeliveryMode: completionProfile?.deliveryMode,
       specialtyDeliveryDisabled: process.env.SPECIALTY_REPORT_DELIVERY_DISABLED === 'true',
+      profileCategory: completionProfile?.category,
     });
     let typedDeliveryMode = deliveryPosture.typedDeliveryMode;
     let suppressTypedCustomerComms = deliveryPosture.suppressCustomerComms;
@@ -4279,6 +4280,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       !typedFindingsType
       && completionProfile?.followupPolicy === 'alert'
       && !isIncompleteVisit
+      // No treatment happened on declined/inspection-only visits — the
+      // profile promise anchors to a PERFORMED first treatment, so a false
+      // obligation must not park or mint the included $0 CTA (codex P2 r3;
+      // same performed-visit definition the billing path uses).
+      && visitPerformed
       && claim.action === 'proceed'
     ) {
       followupSuggestion = typedFollowupVerdict({

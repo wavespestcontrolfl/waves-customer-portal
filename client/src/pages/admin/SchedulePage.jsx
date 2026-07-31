@@ -6804,6 +6804,12 @@ export function defaultApplicationMethod(product = {}, serviceType = "") {
   if (serviceLine === "lawn") return category.includes("herb") ? "spot_treatment" : "broadcast_spray";
   if (serviceLine === "palm" || serviceLine === "tree_shrub") return "foliar_spray";
   if (serviceLine === "termite" || serviceLine === "rodent") return "station_check";
+  // Bed bug is an interior treatment: the pest perimeter_spray fallback
+  // recorded interior work as exterior AND demanded perimeter footage the
+  // (hidden) zone tracer would have prefilled, blocking a routine closeout
+  // — default methodless products to an interior spot application instead
+  // (codex P1 on the bed-bug untype).
+  if (/\bbed\s*bugs?\b/i.test(String(serviceType || ""))) return "spot_treatment";
   return "perimeter_spray";
 }
 

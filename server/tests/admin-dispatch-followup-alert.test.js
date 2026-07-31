@@ -153,8 +153,11 @@ describe('/complete parks the alert atomically (source contracts)', () => {
     // the dedupe index still covers it (20260730500000 predicate).
     const legIdx = dispatchSource.indexOf("completionProfile?.followupPolicy === 'alert'\n      && !isIncompleteVisit");
     expect(legIdx).toBeGreaterThan(-1);
-    const leg = dispatchSource.slice(legIdx, legIdx + 500);
+    const leg = dispatchSource.slice(legIdx, legIdx + 900);
     expect(leg).toContain("claim.action === 'proceed'");
+    // Declined/inspection-only visits owe nothing — the promise anchors to
+    // a PERFORMED first treatment (codex P2 r3).
+    expect(leg).toContain('&& visitPerformed');
     expect(leg).toContain('findingsType: null');
     // The leg sits BEFORE the durable trx like the typed one.
     expect(legIdx).toBeLessThan(dispatchSource.indexOf('let record;'));

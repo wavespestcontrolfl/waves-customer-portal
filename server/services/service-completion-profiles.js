@@ -362,16 +362,27 @@ function resolveCompletionDeliveryPosture({
   completionMode = null,
   profileDeliveryMode = null,
   specialtyDeliveryDisabled = false,
+  profileCategory = null,
 } = {}) {
   const isInternalOnly = !typedFindingsType && completionMode === 'internal_only';
   let typedDeliveryMode;
   if (typedFindingsType) {
     typedDeliveryMode = specialtyDeliveryDisabled ? 'disabled' : (profileDeliveryMode || 'auto_send');
   } else {
-    typedDeliveryMode = isInternalOnly ? 'disabled' : 'auto_send';
+    // Untyped lanes default to auto_send, but ops kill switches SURVIVE an
+    // untype (bed_bug, 20260731400000): an explicitly suppressing profile
+    // delivery_mode, and the specialty-wide env kill for specialty-category
+    // profiles, must not be bypassed by clearing the typed pointer —
+    // otherwise the next completion mints a public report and sends
+    // customer comms against an active switch (codex P1 r3).
+    const suppressedByProfile = ['internal_only', 'disabled'].includes(String(profileDeliveryMode || ''));
+    const suppressedBySpecialtyKill = specialtyDeliveryDisabled && String(profileCategory || '') === 'specialty';
+    typedDeliveryMode = (isInternalOnly || suppressedByProfile || suppressedBySpecialtyKill) ? 'disabled' : 'auto_send';
   }
-  const suppressCustomerComms = isInternalOnly
-    || (!!typedFindingsType && typedDeliveryMode !== 'auto_send');
+  // Equivalent to the previous expression for every typed input and every
+  // pre-existing untyped input (untyped mode was auto_send unless
+  // isInternalOnly); the suppressing untyped modes above now suppress too.
+  const suppressCustomerComms = isInternalOnly || typedDeliveryMode !== 'auto_send';
   return { typedDeliveryMode, suppressCustomerComms, isInternalOnly };
 }
 
