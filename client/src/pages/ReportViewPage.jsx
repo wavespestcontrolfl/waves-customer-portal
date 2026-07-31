@@ -8186,6 +8186,18 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               token={token}
               mode={mode}
               tracedMap={data.treatmentMap?.traced || null}
+              /* Pressure trend rides INSIDE the hero (owner 2026-07-30:
+                 "merge into one block") — the standalone card below is
+                 suppressed whenever this slot is filled. */
+              pressureTrendSlot={dynamicContext.pressureTrend && data.pestReportV2?.status ? (
+                <PressureTrendCard
+                  context={dynamicContext.pressureTrend}
+                  neighborhood={dynamicContext.neighborhoodPressure}
+                  mode={mode}
+                  token={token}
+                  embedded
+                />
+              ) : null}
             />
           </div>
         )}
@@ -8335,7 +8347,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             there — same pattern as LawnProgramOverviewCard below. */}
         {!data.reportV2 && <LawnProtocolCard protocol={dynamicContext.lawnProtocol} />}
 
-        {dynamicContext.pressureTrend && !pressureGaugeVisible && (
+        {/* Standalone trend card: only for layouts that embed it nowhere
+            else — the gauge card hosts it on recurring reports, and the pest
+            V2 hero hosts it on dashboard reports (owner 2026-07-30). */}
+        {dynamicContext.pressureTrend && !pressureGaugeVisible && !data.pestReportV2?.status && (
           <PressureTrendCard
             context={dynamicContext.pressureTrend}
             neighborhood={dynamicContext.neighborhoodPressure}
