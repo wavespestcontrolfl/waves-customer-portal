@@ -10096,7 +10096,9 @@ router.put('/:token/accept', async (req, res, next) => {
         billingTerm,
         annualPrepayAmount: annualPrepayQuotedAmount,
       });
-      await NotificationService.notifyAdmin('estimate', notificationPayload.adminTitle, notificationPayload.adminBody, { icon: '\u2705', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId, invoiceId } });
+      // bell: true \u2014 accepted estimates must ring the admin bell even under
+      // GATE_ADMIN_BELL_POLICY (category 'estimate' is otherwise silenced).
+      await NotificationService.notifyAdmin('estimate', notificationPayload.adminTitle, notificationPayload.adminBody, { icon: '\u2705', link: '/admin/estimates', bell: true, metadata: { estimateId: estimate.id, customerId, invoiceId } });
       if (customerId) {
         await NotificationService.notifyCustomer(customerId, 'account', notificationPayload.customerTitle, notificationPayload.customerBody, {
           icon: '\u2705',
@@ -10826,7 +10828,11 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
         'estimate',
         `Extension auto-granted: ${estimate.customer_name}`,
         `${estimate.address || 'no address'} — ${expiredLine}; customer self-served +7 days (through ${granted.newExpiry.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' })}); ${smsLine}; ${emailLine}`,
-        { icon: '⏳', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id } },
+        // bell: true — this is a required operator handoff (AGENTS.md: the
+        // office must hear about every self-serve grant). Under
+        // GATE_ADMIN_BELL_POLICY a suppression would return a truthy
+        // sentinel that the retry/claim logic below reads as delivered.
+        { icon: '⏳', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id }, bell: true },
       );
       const autoNotification = (await notifyAutoGrant()) || (await notifyAutoGrant());
       if (!autoNotification) {
@@ -10867,7 +10873,10 @@ router.post('/:token/extension-request', extensionRequestLimiter, async (req, re
       'estimate',
       `Extension requested (again): ${estimate.customer_name}`,
       `${estimate.address || 'no address'} — ${expiredLine}; customer already used their self-serve extension and asked for more time`,
-      { icon: '⏳', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id } },
+      // bell: true — here the notification IS the deliverable: a policy
+      // suppression's truthy sentinel would keep the 24h claim and 201
+      // "request sent" with nothing delivered to anyone.
+      { icon: '⏳', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId: estimate.customer_id }, bell: true },
     );
     if (!notification) {
       await db('estimates').where({ id: estimate.id }).update({ extension_requested_at: null })

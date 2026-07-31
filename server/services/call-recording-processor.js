@@ -6618,6 +6618,10 @@ const CallRecordingProcessor = {
                 {
                   link: `/admin/leads?lead=${leadId}`,
                   metadata: { leadId, phone, callSid: call.twilio_call_sid },
+                  // These ARE new leads — category 'lead' is default-denied
+                  // under GATE_ADMIN_BELL_POLICY, but an unattributed call
+                  // lead must ring like every other new lead.
+                  bell: true,
                 },
               );
             } catch (notifyErr) {
