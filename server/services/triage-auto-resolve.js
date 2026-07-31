@@ -338,9 +338,12 @@ async function runTriageAutoResolve({ now = new Date() } = {}) {
   return runExclusive('triage-auto-resolve', () => sweep({ now }));
 }
 
-async function sweep({ now = new Date() } = {}) {
-  // OPEN only — in_progress is human-claimed and must never be swept.
-  const items = await db('triage_items as t')
+// The joined evidence rows the classifier consumes. OPEN only —
+// in_progress is human-claimed and must never be swept. With `itemIds`,
+// reloads exactly those cards (still open-only) — used for the locked
+// revalidation pass.
+function loadCandidateItems(conn, itemIds = null) {
+  const q = conn('triage_items as t')
     .leftJoin('call_log as cl', 'cl.id', 't.call_log_id')
     .leftJoin('customers as c', 'c.id', 'cl.customer_id')
     .where('t.status', 'open')
@@ -358,18 +361,30 @@ async function sweep({ now = new Date() } = {}) {
       'c.first_name as customer_first_name',
       'c.last_name as customer_last_name',
     );
+  if (itemIds) q.whereIn('t.id', itemIds);
+  return q;
+}
+
+async function sweep({ now = new Date() } = {}) {
+  const items = await loadCandidateItems(db);
 
   // Booking provenance (live source-linked rows only — the canonical
   // lookup's predicates: no cancelled/rescheduled rows, no follow-up
   // children) feeds the confirmed-unbooked address guard.
-  const loadBookedCallIds = async (conn, callIds) => {
+  const loadBookedCallIds = async (conn, callIds, { lock = false } = {}) => {
     const set = new Set();
     if (!callIds.length) return set;
-    const booked = await conn('scheduled_services')
+    const q = conn('scheduled_services')
       .whereIn('source_call_log_id', callIds)
       .whereNull('parent_service_id')
       .whereNotIn('status', ['cancelled', 'rescheduled'])
-      .distinct('source_call_log_id');
+      .orderBy('id', 'asc')
+      .select('source_call_log_id');
+    // Under the apply transaction the qualifying booking rows are HELD until
+    // commit — a scheduling writer cancelling one blocks and lands after us,
+    // where the booking-miss watchdog picks up the newly-unbooked state.
+    if (lock) q.forUpdate();
+    const booked = await q;
     for (const b of booked) set.add(b.source_call_log_id);
     return set;
   };
@@ -415,13 +430,20 @@ async function sweep({ now = new Date() } = {}) {
         .forUpdate()
         .select('id');
     }
-    // Re-verify every decision UNDER the locks with fresh booking
-    // provenance: a source-linked appointment cancelled between the initial
-    // scan and this transaction must re-arm the confirmed-unbooked guard —
-    // the pre-lock classification is a candidate list, not a verdict.
-    const freshBookedCallIds = await loadBookedCallIds(trx, allCallIds);
+    // Re-verify every decision UNDER the locks from FRESH evidence — the
+    // pre-lock classification is a candidate list, not a verdict. Both the
+    // joined card/call/customer rows (a customer soft-deleted, demoted, or
+    // stripped of the address/surname in the gap must re-arm its guards)
+    // and booking provenance (rows held FOR UPDATE until commit, so
+    // scheduling writers serialize behind us) are reloaded inside the
+    // transaction.
+    const freshRows = await loadCandidateItems(trx, applied.map((d) => d.item.id));
+    const freshById = new Map(freshRows.map((r) => [r.id, r]));
+    const freshBookedCallIds = await loadBookedCallIds(trx, allCallIds, { lock: true });
     const reverified = applied.filter((d) => {
-      const again = classifyTriageItem(d.item, { bookedCallIds: freshBookedCallIds }, { now });
+      const fresh = freshById.get(d.item.id);
+      if (!fresh) return false; // no longer open — lost the race
+      const again = classifyTriageItem(fresh, { bookedCallIds: freshBookedCallIds }, { now });
       return again && again.rule === d.rule && again.action === d.action;
     });
     const touchedCalls = new Map(); // call_log_id -> status we applied last
