@@ -28,12 +28,14 @@ jest.mock('../services/lead-first-touch-resume', () => ({
     if (claimStamp) qb.where({ status: 'releasing', updated_at: new Date(claimStamp) });
     return qb;
   },
-  // Same contract as the real r34 pre-send gate: one fenced CAS that
-  // refuses denials, consumes markers, and extends the lease. The stub
-  // conn's consume knobs (consumeError/consumeCounts) drive its outcome.
-  gateHoldForSend: async (holdId, claimStamp, dbh) => {
+  // Same contract as the real r34/r35 pre-send gate: one fenced CAS that
+  // refuses denials, consumes markers, extends the lease, and binds to
+  // the captured target. The stub conn's consume knobs
+  // (consumeError/consumeCounts) drive its outcome.
+  gateHoldForSend: async (holdId, claimStamp, dbh, targetEmailLc = null) => {
     const qb = dbh('first_touch_holds').where({ id: holdId });
     if (claimStamp) qb.where({ status: 'releasing', updated_at: new Date(claimStamp) });
+    if (targetEmailLc != null) qb.whereRaw("LOWER(COALESCE(held_email, '')) = ?", [targetEmailLc]);
     const stamp = new Date();
     const gated = await qb.update({ last_error: null, updated_at: stamp });
     return gated > 0 ? stamp : null;
@@ -107,6 +109,8 @@ function makeConn(cfg = {}) {
           if (Array.isArray(t.consumeCounts)) return Promise.resolve(t.consumeCounts.shift() ?? 1);
           return Promise.resolve(t.updateCount ?? 1);
         }
+        // clearError (r35): fail only the pre-stamp LIFT ({confirmation_sent_at: null})
+        if (patch && patch.confirmation_sent_at === null && t.clearError) return Promise.reject(t.clearError);
         if (t.updateError) return Promise.reject(t.updateError);
         return Promise.resolve(t.updateCount ?? 1);
       },
@@ -576,7 +580,8 @@ describe('propagateCustomerEmailChange', () => {
     // the retargeted hold with no retry trigger left (Codex #3084 r34).
     const conn = makeConn({
       first_touch_holds: { rows: [{ id: 'hold-1', held_email: 'extracted.x@example.com', call_log_id: 'call-9' }] },
-      triage_items: { rowsQueue: [[], [{ call_log_id: 'call-9' }]] },
+      // list reads: open-card resolve, reviewedCalls (marker set), carded
+      triage_items: { rowsQueue: [[], [], [{ call_log_id: 'call-9' }]] },
     });
     await propagateCustomerEmailChange({ before: HOLD_BEFORE, after: HOLD_AFTER }, conn);
     const flip = conn.__updates('triage_items')
@@ -590,6 +595,24 @@ describe('propagateCustomerEmailChange', () => {
     expect(conn.__calls.filter((c) => c.table === 'triage_items' && c.op === 'insert')).toHaveLength(0);
   });
 
+  test('correction evidence covers marker-only calls — a pre-Step-6 dismissed card flips too', async () => {
+    // The correction can land BEFORE the processor's Step-6 hold write:
+    // no hold row exists yet (heldCallIds is empty), but the reviewed
+    // call gets a zero-work marker — and its latest dismissed card must
+    // still flip to resolved, or the merged-in work later re-pends
+    // against a card state the sweep rejects forever (Codex #3084 r35).
+    const conn = makeConn({
+      triage_items: { rowsQueue: [[], [{ call_log_id: 'call-7' }], [{ call_log_id: 'call-7' }]] },
+    });
+    await propagateCustomerEmailChange({ before: HOLD_BEFORE, after: HOLD_AFTER }, conn);
+    const flip = conn.__updates('triage_items')
+      .find((u) => String(u.arg.resolution_note || '').includes('after dismissal'));
+    expect(flip).toBeTruthy();
+    expect(flip.arg.status).toBe('resolved');
+    // The zero-work marker upsert for the reviewed call landed too.
+    expect(conn.__calls.some((c) => c.table === 'first_touch_holds' && c.op === 'insert')).toBe(true);
+  });
+
   test('a correction leaves a synthetic RESOLVED card when the held call never got one', async () => {
     // A hold whose read-back card was never created (the insert failed)
     // has no review surface at all — the correction is the review, and
@@ -597,7 +620,7 @@ describe('propagateCustomerEmailChange', () => {
     // rule admit the call (Codex #3084 r34).
     const conn = makeConn({
       first_touch_holds: { rows: [{ id: 'hold-1', held_email: 'extracted.x@example.com', call_log_id: 'call-9' }] },
-      triage_items: { rowsQueue: [[], []] },
+      triage_items: { rowsQueue: [[], [], []] },
     });
     await propagateCustomerEmailChange({ before: HOLD_BEFORE, after: HOLD_AFTER }, conn);
     const inserts = conn.__calls.filter((c) => c.table === 'triage_items' && c.op === 'insert');
@@ -864,6 +887,46 @@ describe('resendPendingConfirmation', () => {
     expect(repens).toHaveLength(1);
     expect(repens[0].arg.last_error).toBeUndefined();
     expect(conn.__updates('newsletter_subscribers').at(-1).arg.confirmation_sent_at).toBeNull();
+  });
+
+  test('the pre-send gate binds to the captured target — a silent retarget cannot pass the fence', async () => {
+    // A correction retargets a releasing hold WITHOUT bumping its fence
+    // (extending a dead claimant's stale window would be worse), so the
+    // gate's held_email CAS is the only thing standing between a
+    // just-superseded target and the send (Codex #3084 r35).
+    sendConfirmationEmail.mockRejectedValueOnce(new Error('sendgrid down'));
+    const payload = { id: 811, email: 'samtypo@example.com', confirmation_token: 'tok-1', heldNewsletterHoldIds: ['hold-1'] };
+    const conn = makeConn(matchRow(payload));
+    await resendPendingConfirmation(payload, conn);
+    // With the send failing, the only held_email predicate on the hold
+    // table is the gate's target bind.
+    const targetBind = conn.__calls.find((c) => c.table === 'first_touch_holds' && c.op === 'whereRaw'
+      && String(c.arg.sql).includes('held_email')
+      && Array.isArray(c.arg.bindings) && c.arg.bindings[0] === 'samtypo@example.com');
+    expect(targetBind).toBeDefined();
+  });
+
+  test('a failed pre-stamp lift on gate abort arms the force-resend ticket', async () => {
+    // The gate refused (nothing sent) but the best-effort lift of our own
+    // pre-stamp ALSO failed — an unmarked hold re-pended plainly would
+    // meet the retry's dedupe guard trusting that stamp and settle an
+    // undelivered DOI (Codex #3084 r35). The abort arms the verified
+    // force-resend ticket instead.
+    const sendsBefore = sendConfirmationEmail.mock.calls.length;
+    const payload = { id: 811, email: 'samtypo@example.com', confirmation_token: 'tok-1', heldNewsletterHoldIds: ['hold-1'] };
+    const base = matchRow(payload);
+    const conn = makeConn({
+      ...base,
+      first_touch_holds: { consumeCounts: [0] },
+      newsletter_subscribers: { ...base.newsletter_subscribers, clearError: new Error('db down') },
+    });
+    const ok = await resendPendingConfirmation(payload, conn);
+    expect(ok).toBe(false);
+    expect(sendConfirmationEmail.mock.calls.length).toBe(sendsBefore);
+    // Ticket verify bound to the attempted subscriber id + token (r31/r32).
+    expect(mockSendFailedMarker).toHaveBeenCalledWith('samtypo@example.com', conn, 811, 'tok-1');
+    const marked = conn.__updates('first_touch_holds').filter((u) => u.arg.last_error === 'newsletter_doi_not_confirmed');
+    expect(marked).toHaveLength(1);
   });
 
   test('grouped pre-send gates run in ONE transaction — a mid-group miss aborts, nothing half-consumed', async () => {

@@ -152,21 +152,29 @@ function fencedHoldWrite(qb, claimStamp) {
 // r31–r33 layout gated only MARKED holds, leaving ordinary holds with no
 // fenced write between the lease renewal and the send, so a denial landing
 // in that window still mailed the rejected address); and (4) extends the
-// lease so the sweep cannot reclaim mid-send. Returns the fresh fence
-// stamp, or null — the row belongs to a denier or reclaimer; walk away.
-// Stamp-less legacy payloads gate unfenced (the deny guard still applies).
+// lease so the sweep cannot reclaim mid-send; and (5) binds to the TARGET
+// this send captured (Codex #3084 r35): a correction deliberately retargets
+// a releasing row WITHOUT bumping updated_at (bumping would extend a
+// possibly-dead claimant's stale window), so the fence alone cannot see a
+// retarget landing after the caller's target re-read — the gate's
+// held_email CAS refuses instead of mailing the superseded, possibly
+// hard-bounced address. Returns the fresh fence stamp, or null — the row
+// belongs to a denier, reclaimer, or newer correction; the caller re-pends
+// fenced (a no-op when the fence is gone) and walks away.
+// Stamp-less legacy payloads gate unfenced (deny + target guards apply).
 // Throws propagate: group callers run their gates all-or-nothing in one
 // transaction and abort the whole send.
-async function gateHoldForSend(holdId, claimStamp, dbh = db) {
+async function gateHoldForSend(holdId, claimStamp, dbh = db, targetEmailLc = null) {
   const stamp = new Date();
-  const gated = await fencedHoldWrite(
-    dbh('first_touch_holds')
-      .where({ id: holdId })
-      .where(function notDenied() {
-        this.whereNull('last_error').orWhereNot('last_error', 'email_denied_await_correction');
-      }),
-    claimStamp,
-  )
+  const qb = dbh('first_touch_holds')
+    .where({ id: holdId })
+    .where(function notDenied() {
+      this.whereNull('last_error').orWhereNot('last_error', 'email_denied_await_correction');
+    });
+  if (targetEmailLc != null) {
+    qb.whereRaw("LOWER(COALESCE(held_email, '')) = ?", [targetEmailLc]);
+  }
+  const gated = await fencedHoldWrite(qb, claimStamp)
     .update({ last_error: null, updated_at: stamp });
   return gated > 0 ? stamp : null;
 }
@@ -376,7 +384,29 @@ async function runNewsletterResume(payload, dbh = db, { skipDedupe = false } = {
   }
   const CRP = require('./call-recording-processor');
   if (typeof CRP.resumeNewsletterForCallCustomer !== 'function') return null;
-  return CRP.resumeNewsletterForCallCustomer(payload);
+  const outcome = await CRP.resumeNewsletterForCallCustomer(payload);
+  // Link the resumed subscriber to the held customer (Codex #3084 r35):
+  // subscribeOrResubscribe links only when the address matches
+  // customers.email, and a held extraction can deliberately DIFFER from
+  // the stored address — an unlinked subscriber is invisible to the email
+  // fanout's customer-scoped token rotation, stranding its confirmation
+  // and unsubscribe tokens outside every future correction. Adopt-only
+  // (never steal an existing link), mirroring the dedupe branch above. A
+  // failed linkage keeps the hold retryable WITHOUT re-sending: the
+  // retry's dedupe guard sees the fresh confirmation_sent_at stamp,
+  // suppresses the duplicate DOI, and re-attempts exactly this linkage.
+  if (payload.customerId && outcome) {
+    try {
+      await dbh('newsletter_subscribers')
+        .whereRaw('LOWER(email) = ?', [String(payload.email || '').trim().toLowerCase()])
+        .whereNull('customer_id')
+        .update({ customer_id: payload.customerId, updated_at: new Date() });
+    } catch (linkErr) {
+      logger.warn(`[first-touch-resume] resume linkage failed for customer ${payload.customerId}: ${linkErr.code || linkErr.name || 'db_error'}`);
+      return { confirmationEmailSent: false, retryReason: 'dedupe_linkage_failed' };
+    }
+  }
+  return outcome;
 }
 
 /**
@@ -703,9 +733,18 @@ async function resumeHeldFirstTouch({
           // recorded (the enroll is idempotent by template+customer).
           let skipDedupe = false;
           try {
-            const gateStamp = await gateHoldForSend(hold.id, claimStamp, dbh);
+            // Target-bound (r35): a correction retargeting this releasing
+            // row after the pre-send re-read preserves the fence, so the
+            // gate's held_email CAS is what refuses the stale send.
+            const gateStamp = await gateHoldForSend(hold.id, claimStamp, dbh, sendEmail);
             if (!gateStamp) {
-              logger.info('[first-touch-resume] pre-send gate refused (deny/reclaim) — abandoning hold untouched');
+              logger.info('[first-touch-resume] pre-send gate refused (deny/reclaim/retarget) — abandoning hold');
+              // Fenced plain re-pend: a RETARGETED row (fence intact) goes
+              // straight back to pending for the prompt retry at the newer
+              // address; a denied or reclaimed row (fence gone) is left
+              // untouched — its owner's state is authoritative.
+              await fencedHoldWrite(dbh('first_touch_holds').where({ id: hold.id }), claimStamp)
+                .update({ status: 'pending', updated_at: new Date() });
               result.skipped = result.skipped || 'claim_lost';
               continue;
             }
@@ -1005,12 +1044,16 @@ async function runOnePostCommitResume(payload, holdIds, dbh, claims = new Map())
     // force-resend marker under 'claim_lost'; plain re-pends cannot).
     // Legacy stamp-less payloads gate unfenced (deny guard only).
     let skipDedupe = false;
+    const sentEmailLc = String(sendPayload.email || '').trim().toLowerCase();
     if (holdIds.length) {
       try {
         const gatedStamps = new Map();
         await dbh.transaction(async (trx) => {
           for (const holdId of holdIds) {
-            const gated = await gateHoldForSend(holdId, fenceOf(holdId), trx);
+            // Target-bound (r35): a correction retargeting a releasing row
+            // preserves its fence, so only the held_email CAS can refuse
+            // the superseded send.
+            const gated = await gateHoldForSend(holdId, fenceOf(holdId), trx, sentEmailLc);
             if (!gated) {
               const lost = new Error(`pre-send gate refused for hold ${holdId}`);
               lost.code = 'send_gate_lost';
@@ -1038,7 +1081,6 @@ async function runOnePostCommitResume(payload, holdIds, dbh, claims = new Map())
       }
     }
     const outcome = await runNewsletterResume(sendPayload, dbh, { skipDedupe });
-    const sentEmailLc = String(sendPayload.email || '').trim().toLowerCase();
     for (const holdId of holdIds) {
       if (newsletterDelivered(outcome)) {
         const hold = await dbh('first_touch_holds').where({ id: holdId }).first('held_drip', 'released_drip');

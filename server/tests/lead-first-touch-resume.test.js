@@ -462,9 +462,38 @@ describe('resumeHeldFirstTouch (ledger release engine)', () => {
     const res = await resumeHeldFirstTouch({ callLogId: 'call-1' });
     expect(res.skipped).toBe('claim_lost');
     expect(mockNewsletter).not.toHaveBeenCalled();
-    // The claim is the ONLY ledger write — abandoned untouched.
-    expect(mockHoldUpdates).toHaveLength(1);
+    // The claim, then the guarded plain re-pend attempt (r35): a
+    // RETARGETED row (fence intact) goes promptly back to pending; a
+    // denied/reclaimed row's fence is gone, so the write no-ops in prod
+    // (the stub records the attempt). last_error stays untouched.
+    expect(mockHoldUpdates).toHaveLength(2);
     expect(mockHoldUpdates[0]).toMatchObject({ status: 'releasing' });
+    expect(mockHoldUpdates[1]).toMatchObject({ status: 'pending' });
+    expect(mockHoldUpdates[1].last_error).toBeUndefined();
+  });
+
+  test('the resumed DOI subscriber is adopt-linked to the held customer', async () => {
+    // subscribeOrResubscribe links only when the address matches
+    // customers.email, and a held extraction can deliberately differ —
+    // an unlinked subscriber's tokens are invisible to the correction
+    // fanout's customer-scoped rotation (Codex #3084 r35). Adopt-only.
+    mockHold = baseHold({ held_drip: false });
+    const res = await resumeHeldFirstTouch({ callLogId: 'call-1' });
+    expect(res.resumed).toBe(true);
+    expect(mockNewsletter).toHaveBeenCalled();
+    expect(mockSubscriberUpdates.some((u) => u.customer_id === 'cust-1')).toBe(true);
+  });
+
+  test('a failed post-send linkage keeps the hold retryable without re-sending', async () => {
+    // The DOI went out but the adopt-link write failed — the hold stays
+    // retryable with a NON-force marker: the retry's dedupe guard sees
+    // the fresh stamp, suppresses the duplicate send, and re-attempts
+    // exactly this linkage (Codex #3084 r35, the r17 semantics).
+    mockHold = baseHold({ held_drip: false });
+    mockSubscriberUpdateError = new Error('db down');
+    await resumeHeldFirstTouch({ callLogId: 'call-1' });
+    expect(mockNewsletter).toHaveBeenCalledTimes(1); // the send itself ran once
+    expect(mockHoldUpdates.at(-1)).toMatchObject({ status: 'pending', last_error: 'dedupe_linkage_failed' });
   });
 
   test('the pre-send gate refuses an UNMARKED hold too — a denial after the claim never sends', async () => {
@@ -477,8 +506,12 @@ describe('resumeHeldFirstTouch (ledger release engine)', () => {
     const res = await resumeHeldFirstTouch({ callLogId: 'call-1' });
     expect(res.skipped).toBe('claim_lost');
     expect(mockNewsletter).not.toHaveBeenCalled();
-    expect(mockHoldUpdates).toHaveLength(1); // the claim only — abandoned untouched
+    // Claim, then the guarded plain re-pend attempt (r35) — no marker, no
+    // deny overwrite, and nothing sent.
+    expect(mockHoldUpdates).toHaveLength(2);
     expect(mockHoldUpdates[0]).toMatchObject({ status: 'releasing' });
+    expect(mockHoldUpdates[1]).toMatchObject({ status: 'pending' });
+    expect(mockHoldUpdates[1].last_error).toBeUndefined();
   });
 
   test('the deferred payload carries the post-bookkeeping lease stamp', async () => {
@@ -508,9 +541,13 @@ describe('resumeHeldFirstTouch (ledger release engine)', () => {
     const res = await resumeHeldFirstTouch({ callLogId: 'call-1' });
     expect(res.skipped).toBe('claim_lost');
     expect(mockNewsletter).not.toHaveBeenCalled();
-    // The claim, then the in-trx drip settlement (r30) — nothing after.
-    expect(mockHoldUpdates).toHaveLength(2);
+    // The claim, the in-trx drip settlement (r30), then the refused
+    // gate's guarded plain re-pend attempt (r35 — a no-op in prod when
+    // the fence is gone; the stub records it). Nothing else.
+    expect(mockHoldUpdates).toHaveLength(3);
     expect(mockHoldUpdates[1]).toMatchObject({ released_drip: true });
+    expect(mockHoldUpdates[2]).toMatchObject({ status: 'pending' });
+    expect(mockHoldUpdates[2].last_error).toBeUndefined();
   });
 
   test('a post-commit callback that lost its claims abandons the deferred DOI', async () => {

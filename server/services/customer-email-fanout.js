@@ -388,52 +388,6 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
     }
   }
 
-  // A correction is itself the ANSWER to a dismissed read-back card (Codex
-  // #3084 r34): dismissal is "not actionable", so the ledger sweep's
-  // latest-card-resolved rule deliberately excludes those calls — but once
-  // the operator asserts the address, a transient release failure (the
-  // resume below re-pending, or its deferred DOI callback failing) would
-  // strand the retargeted hold forever: this correction is already
-  // consumed, no open card is left to resolve, and the sweep never admits
-  // the call. Flip the HELD calls' dismissed email cards to resolved —
-  // documenting the supersession — so the sweep owns the retry. A held
-  // call with NO email card at all (the processor's card insert failed)
-  // gets a synthetic RESOLVED card for the same reason: the operator's
-  // correction IS the review. Scoped to calls with hold rows; both writes
-  // ride the correction transaction.
-  if (heldCallIds.length) {
-    counts.reviewCards += await conn('triage_items')
-      .whereIn('call_log_id', heldCallIds)
-      .whereIn('reason_code', EMAIL_REVIEW_REASON_CODES)
-      .where({ status: 'dismissed' })
-      .update({
-        status: 'resolved',
-        resolution_note: `Email corrected on the customer record after dismissal (${String(source).slice(0, 100)})`,
-        resolved_at: now,
-        updated_at: now,
-      });
-    const carded = new Set((await conn('triage_items')
-      .whereIn('call_log_id', heldCallIds)
-      .whereIn('reason_code', EMAIL_REVIEW_REASON_CODES)
-      .select('call_log_id')).map((r) => r.call_log_id));
-    const cardless = heldCallIds.filter((id) => !carded.has(id));
-    if (cardless.length) {
-      const { buildTriageItem } = require('./call-routing-gates');
-      await conn('triage_items').insert(cardless.map((callId) => ({
-        ...buildTriageItem({
-          callLogId: callId,
-          flag: 'email_unverified',
-          extraction: null,
-          severity: 'advisory',
-          extraPayload: { hold_reason: 'email_corrected_no_card' },
-        }),
-        status: 'resolved',
-        resolution_note: `Email corrected on the customer record; no read-back card existed (${String(source).slice(0, 100)})`,
-        resolved_at: now,
-        updated_at: now,
-      })));
-    }
-  }
 
   // A correction that answers a call's read-back BEFORE the processor's
   // Step-6 hold write must still leave its answer in the ledger (Codex
@@ -522,7 +476,8 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
     // value. Real rows (any held flag, or pending/releasing/blocked) are
     // never touched by the CASE.
     const zeroWorkMarker = "first_touch_holds.status = 'released' AND NOT first_touch_holds.held_drip AND NOT first_touch_holds.held_newsletter";
-    for (const callId of [...new Set(reviewedCalls.map((r) => r.call_log_id).filter(Boolean))]) {
+    const reviewedCallIds = [...new Set(reviewedCalls.map((r) => r.call_log_id).filter(Boolean))];
+    for (const callId of reviewedCallIds) {
       await conn('first_touch_holds')
         .insert({
           call_log_id: callId,
@@ -540,6 +495,62 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
           held_email: conn.raw(`CASE WHEN ${zeroWorkMarker} THEN excluded.held_email ELSE first_touch_holds.held_email END`),
           released_at: conn.raw(`CASE WHEN ${zeroWorkMarker} THEN excluded.released_at ELSE first_touch_holds.released_at END`),
         });
+    }
+
+    // A correction is itself the ANSWER to a dismissed read-back card
+    // (Codex #3084 r34): dismissal is "not actionable", so the ledger
+    // sweep's latest-card-resolved rule deliberately excludes those
+    // calls — but once the operator asserts the address, a transient
+    // release failure (the resume below re-pending, or its deferred DOI
+    // callback failing) would strand the retargeted hold forever: this
+    // correction is already consumed, no open card is left to resolve,
+    // and the sweep never admits the call. Flip the dismissed email cards
+    // to resolved — documenting the supersession — so the sweep owns the
+    // retry. The evidence covers the calls holding rows AND the reviewed
+    // calls that only got a zero-work marker above (Codex #3084 r35): in
+    // the pre-Step-6 window the correction lands before the processor's
+    // hold write, so heldCallIds alone misses the call whose merged-in
+    // work will later re-pend against a latest-dismissed card. A covered
+    // call with NO email card at all (the processor's card insert failed)
+    // gets a synthetic RESOLVED card for the same reason: the operator's
+    // correction IS the review. Both writes ride the correction
+    // transaction.
+    const evidenceCallIds = [...new Set([...heldCallIds, ...reviewedCallIds])];
+    if (evidenceCallIds.length) {
+      // Deliberately NOT added to counts.reviewCards — that count reports
+      // OPEN cards this correction answered; the flip re-labels an
+      // already-terminal card.
+      await conn('triage_items')
+        .whereIn('call_log_id', evidenceCallIds)
+        .whereIn('reason_code', EMAIL_REVIEW_REASON_CODES)
+        .where({ status: 'dismissed' })
+        .update({
+          status: 'resolved',
+          resolution_note: `Email corrected on the customer record after dismissal (${String(source).slice(0, 100)})`,
+          resolved_at: now,
+          updated_at: now,
+        });
+      const carded = new Set((await conn('triage_items')
+        .whereIn('call_log_id', evidenceCallIds)
+        .whereIn('reason_code', EMAIL_REVIEW_REASON_CODES)
+        .select('call_log_id')).map((r) => r.call_log_id));
+      const cardless = evidenceCallIds.filter((id) => !carded.has(id));
+      if (cardless.length) {
+        const { buildTriageItem } = require('./call-routing-gates');
+        await conn('triage_items').insert(cardless.map((callId) => ({
+          ...buildTriageItem({
+            callLogId: callId,
+            flag: 'email_unverified',
+            extraction: null,
+            severity: 'advisory',
+            extraPayload: { hold_reason: 'email_corrected_no_card' },
+          }),
+          status: 'resolved',
+          resolution_note: `Email corrected on the customer record; no read-back card existed (${String(source).slice(0, 100)})`,
+          resolved_at: now,
+          updated_at: now,
+        })));
+      }
     }
   }
 
@@ -819,7 +830,10 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
       const gatedStamps = {};
       await conn.transaction(async (trx) => {
         for (const holdId of holdIds) {
-          const gated = await gateHoldForSend(holdId, fenceOf(holdId), trx);
+          // Target-bound (r35): a correction retargeting a releasing row
+          // preserves its fence, so only the held_email CAS can refuse
+          // the superseded send.
+          const gated = await gateHoldForSend(holdId, fenceOf(holdId), trx, sentEmailLc);
           if (!gated) {
             const lost = new Error(`pre-send gate refused for hold ${holdId}`);
             lost.code = 'send_gate_lost';
@@ -841,20 +855,38 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
     // Nothing was sent, so lift our own pre-stamp (conditional on the row
     // still being the verified payload — a rotation owns its delivery):
     // a marker-less retry path must not trust a stamp for a DOI that
-    // never went out. Best-effort — if this clear fails, the intact
-    // marker still forces the next actual send past the stamp.
+    // never went out.
+    let stampLifted = false;
     try {
       await verifiedRowQuery().update({ confirmation_sent_at: null, updated_at: new Date() });
+      stampLifted = true;
     } catch (clearErr) {
       logger.warn(`[email-fanout] pre-stamp clear failed for subscriber ${pendingConfirmation.id}: ${clearErr.code || clearErr.name || 'db_error'}`);
     }
-    for (const holdId of holdIds) {
-      try {
-        await fencedHoldWrite(conn('first_touch_holds').where({ id: holdId }), fenceOf(holdId))
-          .update({ status: 'pending', updated_at: new Date() });
-      } catch (repenErr) {
-        logger.warn(`[email-fanout] hold ${holdId} re-pend failed: ${repenErr.code || repenErr.name || 'db_error'} (stale-claim window will reclaim)`);
+    if (stampLifted) {
+      // Plain fenced re-pends: markers and deny stamps stay untouched.
+      for (const holdId of holdIds) {
+        try {
+          await fencedHoldWrite(conn('first_touch_holds').where({ id: holdId }), fenceOf(holdId))
+            .update({ status: 'pending', updated_at: new Date() });
+        } catch (repenErr) {
+          logger.warn(`[email-fanout] hold ${holdId} re-pend failed: ${repenErr.code || repenErr.name || 'db_error'} (stale-claim window will reclaim)`);
+        }
       }
+    } else {
+      // The UNSENT pre-stamp survived the failed lift (Codex #3084 r35):
+      // an ordinary unmarked hold re-pended plainly would meet the
+      // retry's dedupe guard trusting that stamp — settling the hold
+      // without the DOI ever going out. Arm the force-resend ticket
+      // instead (verified against the attempted subscriber id + token,
+      // r31/r32; deny-preserving, r23) so the retry actually sends.
+      const { sendFailedMarkerFor } = require('./lead-first-touch-resume');
+      await repenHolds(await sendFailedMarkerFor(
+        pendingConfirmation.email,
+        conn,
+        pendingConfirmation.id,
+        pendingConfirmation.confirmation_token || null,
+      ));
     }
     return false;
   }
