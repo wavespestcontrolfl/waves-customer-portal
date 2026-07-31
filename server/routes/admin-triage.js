@@ -136,7 +136,21 @@ async function transitionCore({ id, nextStatus, note, assignedTo }) {
   // null = not checked (not resolving an email card); the release below runs
   // only when the check ran inside the transaction and found none live.
   let siblingLive = null;
+  const holdsTable = emailReviewCard && await db.schema.hasTable('first_touch_holds');
   await db.transaction(async (trx) => {
+    // Lock-order discipline (Codex #3084 r33): the email-correction fanout
+    // locks first_touch_holds FOR UPDATE and then settles triage_items in
+    // ONE transaction; this transaction wrote the triage row first and
+    // then updated the hold — the opposite order, a deadlock Postgres
+    // breaks by aborting one side (a 500 on whichever loses). Take the
+    // call's hold-row locks FIRST so every path acquires
+    // first_touch_holds → triage_items.
+    if (holdsTable) {
+      await trx('first_touch_holds')
+        .where({ call_log_id: item.call_log_id })
+        .forUpdate()
+        .select('id');
+    }
     updated = await trx('triage_items')
       .where({ id })
       .whereIn('status', OPEN_STATES)
@@ -159,14 +173,27 @@ async function transitionCore({ id, nextStatus, note, assignedTo }) {
         .whereIn('reason_code', EMAIL_REVIEW_REASON_CODES)
         .whereIn('status', OPEN_STATES)
         .first('id'));
-      if (!siblingLive && await trx.schema.hasTable('first_touch_holds')) {
+      if (!siblingLive && holdsTable) {
         // A resolve-as-is is an explicit approval — it supersedes a deny
         // stamp left by an EARLIER review cycle (force-reprocess), which
         // would otherwise gate every automated release forever (Codex
         // #3084 r17; atomic with the resolve since r18).
         await trx('first_touch_holds')
           .where({ call_log_id: item.call_log_id, last_error: 'email_denied_await_correction' })
-          .update({ last_error: null, updated_at: new Date() });
+          .update({
+            last_error: null,
+            // A deny-stamped releasing row is OWNERLESS — the deny's own
+            // updated_at bump already fenced its worker out (r27) — so
+            // clearing the stamp must also hand the row back to 'pending',
+            // or the resume this resolve triggers cannot claim it and
+            // first-touch delivery waits out the stale window + sweep
+            // (Codex #3084 r33). The bump is safe: the only lease that can
+            // exist here belongs to a worker that claimed an
+            // already-denied row, whose own deny check was about to
+            // abandon it anyway.
+            status: trx.raw("CASE WHEN status = 'releasing' THEN 'pending' ELSE status END"),
+            updated_at: new Date(),
+          });
       }
     }
   });
@@ -307,6 +334,17 @@ router.post('/:id/verdict', async (req, res) => {
     let resolved = 0;
     let emailCardResolved = false;
     await db.transaction(async (trx) => {
+      // Lock-order discipline (Codex #3084 r33): the email-correction
+      // fanout locks first_touch_holds FOR UPDATE and then settles
+      // triage_items in ONE transaction — writing the triage rows first
+      // here and then touching the hold is the opposite order, a deadlock
+      // Postgres breaks by aborting one side. Hold-row locks FIRST.
+      if (holdsTable) {
+        await trx('first_touch_holds')
+          .where({ call_log_id: item.call_log_id })
+          .forUpdate()
+          .select('id');
+      }
       const resolvedRows = await trx('triage_items')
         .where({ call_log_id: item.call_log_id })
         .whereNot('reason_code', 'email_bounce_reverify')
@@ -353,12 +391,18 @@ router.post('/:id/verdict', async (req, res) => {
             .where({ call_log_id: item.call_log_id, last_error: 'email_denied_await_correction' })
             .update({
               last_error: null,
-              // A live claim's updated_at is its fence stamp (Codex #3084
-              // r27) — bumping it on a releasing row would fence out the
-              // in-flight worker this approval wants to succeed. (The deny
-              // stamp above deliberately keeps its bump: fencing a worker
-              // out of a denied send is the point.)
-              updated_at: trx.raw("CASE WHEN status = 'releasing' THEN updated_at ELSE ? END", [now]),
+              // A deny-stamped releasing row is OWNERLESS: the deny's own
+              // updated_at bump already fenced any in-flight worker out
+              // (r27), so r27's preserve-the-stamp guard here just
+              // stranded the row — still 'releasing', unclaimable by the
+              // resume this verdict fires, waiting out the stale window +
+              // sweep (Codex #3084 r33). Hand it back to 'pending'. The
+              // bump is safe: the only lease that can exist on a
+              // deny-stamped row belongs to a worker that claimed it
+              // already denied, whose own deny check was about to abandon
+              // it anyway.
+              status: trx.raw("CASE WHEN status = 'releasing' THEN 'pending' ELSE status END"),
+              updated_at: now,
             });
         }
       }

@@ -86,9 +86,12 @@ function makeConn(cfg = {}) {
         // The r31 marker consume is the only {last_error: null}-shaped
         // write — it gets its own error knob so `updateError` can keep
         // modeling post-send settle failures without aborting the send.
+        // consumeCounts (r33) models per-clear row counts: a zero means
+        // the fenced clear missed (deny/reclaim bumped the row).
         const isConsume = patch && patch.last_error === null && Object.keys(patch).length === 1;
         if (isConsume) {
           if (t.consumeError) return Promise.reject(t.consumeError);
+          if (Array.isArray(t.consumeCounts)) return Promise.resolve(t.consumeCounts.shift() ?? 1);
           return Promise.resolve(t.updateCount ?? 1);
         }
         if (t.updateError) return Promise.reject(t.updateError);
@@ -108,6 +111,11 @@ function makeConn(cfg = {}) {
   };
   conn.raw = (sql) => ({ __raw: sql });
   conn.schema = { hasTable: async () => true };
+  // Savepoint-style passthrough (the r33 all-or-nothing marker consume);
+  // the counter lets tests pin that grouped clears share ONE transaction.
+  let trxCount = 0;
+  conn.transaction = async (fn) => { trxCount += 1; return fn(conn); };
+  conn.__trxCount = () => trxCount;
   conn.__calls = calls;
   conn.__updates = (table) => calls.filter((c) => c.table === table && c.op === 'update');
   return conn;
@@ -628,9 +636,10 @@ describe('resendPendingConfirmation', () => {
     const conn = makeConn(matchRow(payload));
     const ok = await resendPendingConfirmation(payload, conn);
     expect(ok).toBe(false);
-    // [0] is the r31 pre-send marker consume; the re-pend follows.
+    // No marker was armed, so the r33 marked-set read skips the consume
+    // entirely; the send-failure re-pend is the only hold write.
     const holdUpdates = conn.__updates('first_touch_holds');
-    expect(holdUpdates).toHaveLength(2);
+    expect(holdUpdates).toHaveLength(1);
     expect(holdUpdates.at(-1).arg).toMatchObject({ status: 'pending', last_error: 'newsletter_doi_not_confirmed' });
   });
 
@@ -643,13 +652,13 @@ describe('resendPendingConfirmation', () => {
     const conn = makeConn({ ...matchRow(payload), first_touch_holds: { updateCount: 0 } });
     const ok = await resendPendingConfirmation(payload, conn);
     expect(ok).toBe(false);
-    // marker consume (r31), then the guarded attempt, then the
-    // stamp-preserving fallback
+    // the guarded attempt, then the stamp-preserving fallback (no marker
+    // armed → the r33 marked-set read skips the consume)
     const holdUpdates = conn.__updates('first_touch_holds');
-    expect(holdUpdates).toHaveLength(3);
-    expect(holdUpdates[1].arg).toMatchObject({ status: 'pending', last_error: 'newsletter_doi_not_confirmed' });
-    expect(holdUpdates[2].arg).toMatchObject({ status: 'pending' });
-    expect(holdUpdates[2].arg.last_error).toBeUndefined();
+    expect(holdUpdates).toHaveLength(2);
+    expect(holdUpdates[0].arg).toMatchObject({ status: 'pending', last_error: 'newsletter_doi_not_confirmed' });
+    expect(holdUpdates[1].arg).toMatchObject({ status: 'pending' });
+    expect(holdUpdates[1].arg.last_error).toBeUndefined();
   });
 
   test('a failed send never throws and clears the pre-stamp', async () => {
@@ -722,9 +731,9 @@ describe('resendPendingConfirmation', () => {
     const ok = await resendPendingConfirmation(payload, conn);
     expect(ok).toBe(false);
     expect(sendConfirmationEmail.mock.calls.length).toBe(sendsBefore + 1);
-    // [0] is the r31 pre-send marker consume; the re-pend follows.
+    // No marker armed → no consume write; the re-pend is the only one.
     const holdUpdates = conn.__updates('first_touch_holds');
-    expect(holdUpdates).toHaveLength(2);
+    expect(holdUpdates).toHaveLength(1);
     expect(holdUpdates.at(-1).arg).toMatchObject({ status: 'pending', last_error: 'target_verify_failed' });
     expect(holdUpdates.at(-1).arg.released_newsletter).toBeUndefined();
   });
@@ -764,16 +773,77 @@ describe('resendPendingConfirmation', () => {
   test('a failed marker consume aborts the re-send with the markers intact', async () => {
     // Proceeding would leave the marker armed while this send goes out —
     // recreating the duplicate-on-reclaim window the consume closes
-    // (Codex #3084 r32). Plain re-pends keep last_error untouched.
+    // (Codex #3084 r32). Plain re-pends keep last_error untouched, and
+    // the abort lifts the pre-stamp (r33): nothing was sent, so a
+    // marker-less retry path must not trust it.
     const sendsBefore = sendConfirmationEmail.mock.calls.length;
     const payload = { id: 811, email: 'samtypo@example.com', confirmation_token: 'tok-1', heldNewsletterHoldIds: ['hold-1'] };
-    const conn = makeConn({ ...matchRow(payload), first_touch_holds: { consumeError: new Error('db down') } });
+    const conn = makeConn({
+      ...matchRow(payload),
+      first_touch_holds: { rows: [{ id: 'hold-1' }], consumeError: new Error('db down') },
+    });
     const ok = await resendPendingConfirmation(payload, conn);
     expect(ok).toBe(false);
     expect(sendConfirmationEmail.mock.calls.length).toBe(sendsBefore);
     const repens = conn.__updates('first_touch_holds').filter((u) => u.arg.status === 'pending');
     expect(repens).toHaveLength(1);
     expect(repens[0].arg.last_error).toBeUndefined(); // marker untouched
+    const nsUpdates = conn.__updates('newsletter_subscribers');
+    expect(nsUpdates.at(-1).arg.confirmation_sent_at).toBeNull();
+  });
+
+  test('a zero-row marker clear aborts before the send — a denial fenced us out', async () => {
+    // The marked set was read moments after the lease renewal, so a
+    // fenced clear that misses means a denial or reclaim bumped the row
+    // in between — sending would mail the operator-rejected address
+    // (Codex #3084 r33).
+    const sendsBefore = sendConfirmationEmail.mock.calls.length;
+    const payload = { id: 811, email: 'samtypo@example.com', confirmation_token: 'tok-1', heldNewsletterHoldIds: ['hold-1'] };
+    const conn = makeConn({
+      ...matchRow(payload),
+      first_touch_holds: { rows: [{ id: 'hold-1' }], consumeCounts: [0] },
+    });
+    const ok = await resendPendingConfirmation(payload, conn);
+    expect(ok).toBe(false);
+    expect(sendConfirmationEmail.mock.calls.length).toBe(sendsBefore);
+    // The plain re-pend keeps last_error untouched (the deny survives),
+    // and the pre-stamp lifts for the unsent DOI.
+    const repens = conn.__updates('first_touch_holds').filter((u) => u.arg.status === 'pending');
+    expect(repens).toHaveLength(1);
+    expect(repens[0].arg.last_error).toBeUndefined();
+    expect(conn.__updates('newsletter_subscribers').at(-1).arg.confirmation_sent_at).toBeNull();
+  });
+
+  test('grouped marker clears run in ONE transaction — a mid-group miss aborts, nothing half-consumed', async () => {
+    // Per-hold clears committing independently meant a mid-group failure
+    // re-pended the group with the first marker already gone — the next
+    // release then trusted the pre-stamp with no force-resend ticket
+    // left, settling holds whose DOI never delivered (Codex #3084 r33).
+    const stamp1 = new Date();
+    const stamp2 = new Date();
+    const sendsBefore = sendConfirmationEmail.mock.calls.length;
+    const payload = {
+      id: 811,
+      email: 'samtypo@example.com',
+      confirmation_token: 'tok-1',
+      heldNewsletterHoldIds: ['hold-1', 'hold-2'],
+      heldNewsletterHoldClaims: { 'hold-1': stamp1, 'hold-2': stamp2 },
+    };
+    const conn = makeConn({
+      ...matchRow(payload),
+      first_touch_holds: { rows: [{ id: 'hold-1' }, { id: 'hold-2' }], consumeCounts: [1, 0] },
+    });
+    const ok = await resendPendingConfirmation(payload, conn);
+    expect(ok).toBe(false);
+    expect(sendConfirmationEmail.mock.calls.length).toBe(sendsBefore);
+    // Both clears attempted under a single transaction (the stub cannot
+    // roll back, but the wrapper is the rollback boundary in prod).
+    expect(conn.__trxCount()).toBe(1);
+    const consumes = conn.__updates('first_touch_holds').filter((u) => u.arg.last_error === null && Object.keys(u.arg).length === 1);
+    expect(consumes).toHaveLength(2);
+    const repens = conn.__updates('first_touch_holds').filter((u) => u.arg.status === 'pending');
+    expect(repens).toHaveLength(2);
+    for (const r of repens) expect(r.arg.last_error).toBeUndefined();
   });
 
   test('a send failure binds the marker verify to the attempted subscriber id', async () => {

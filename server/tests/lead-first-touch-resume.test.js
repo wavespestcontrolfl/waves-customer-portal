@@ -34,6 +34,7 @@ let mockClaimStampById = {}; // claim fence stamps recorded per hold id (r27)
 let mockClaimLost = false; // fence reads report the claim as reclaimed (r27)
 let mockRenewLostIds = new Set(); // per-hold lease-renewal refusals (r28)
 let mockConsumeError = null; // thrown by the r31 marker-consume write (r32)
+let mockConsumeZeroOnce = false; // next marker-consume clear matches 0 rows (r33: deny/reclaim bumped the fence)
 jest.mock('../models/db', () => {
   const handler = (table) => {
     let markerFilter = false; // this chain filters on the resend marker
@@ -89,9 +90,10 @@ jest.mock('../models/db', () => {
             return 1;
           }
           // The r31 marker consume is the only {last_error: null}-shaped
-          // write — its own error knob (r32).
-          if (patch.last_error === null && Object.keys(patch).length === 1 && mockConsumeError) {
-            throw mockConsumeError;
+          // write — its own error knob (r32) and zero-row knob (r33).
+          if (patch.last_error === null && Object.keys(patch).length === 1) {
+            if (mockConsumeError) throw mockConsumeError;
+            if (mockConsumeZeroOnce) { mockConsumeZeroOnce = false; return 0; }
           }
           if (patch.status === 'released' && mockReleasedSettleZeroOnce) {
             mockReleasedSettleZeroOnce = false;
@@ -162,11 +164,22 @@ jest.mock('../models/db', () => {
         if (table === 'automation_templates') return { key: 'new_lead' };
         return null;
       }),
-      then: (resolve, reject) => Promise.resolve(
-        table === 'email_suppressions' ? (mockSuppressionRow ? [mockSuppressionRow] : [])
-          : table === 'first_touch_holds' ? (mockHolds || (mockHold ? [mockHold] : []))
-            : []
-      ).then(resolve, reject),
+      then: (resolve, reject) => {
+        // The r33 marked-set read filters on the resend marker — serve it
+        // from the same knobs as the old first('id') lookup so tests can
+        // model "no marker armed" vs "sibling marked".
+        if (table === 'first_touch_holds' && markerFilter) {
+          return (mockDoiMarkerError
+            ? Promise.reject(mockDoiMarkerError)
+            : Promise.resolve(mockDoiMarkerRow ? [mockDoiMarkerRow] : [])
+          ).then(resolve, reject);
+        }
+        return Promise.resolve(
+          table === 'email_suppressions' ? (mockSuppressionRow ? [mockSuppressionRow] : [])
+            : table === 'first_touch_holds' ? (mockHolds || (mockHold ? [mockHold] : []))
+              : []
+        ).then(resolve, reject);
+      },
     };
     return chain;
   };
@@ -240,6 +253,7 @@ beforeEach(() => {
   mockClaimLost = false;
   mockRenewLostIds = new Set();
   mockConsumeError = null;
+  mockConsumeZeroOnce = false;
 });
 
 // The merge's held_email is a bound CASE since r20 (an ACTIVE claim's target
@@ -420,6 +434,22 @@ describe('resumeHeldFirstTouch (ledger release engine)', () => {
     const last = mockHoldUpdates.at(-1);
     expect(last).toMatchObject({ status: 'pending' });
     expect(last.last_error).toBeUndefined(); // marker untouched
+  });
+
+  test('a zero-row marker consume aborts before the DOI — a denial fenced us out', async () => {
+    // The claim snapshot showed the marker and the lease was renewed
+    // moments before, so a fenced clear that misses means a denial or
+    // reclaim bumped the row in between (Codex #3084 r33) — degrading to
+    // the dedupe guard could settle on a stale stamp, and a guard-passing
+    // send would mail a rejected address.
+    mockHold = baseHold({ held_drip: false, last_error: 'newsletter_doi_not_confirmed' });
+    mockConsumeZeroOnce = true;
+    const res = await resumeHeldFirstTouch({ callLogId: 'call-1' });
+    expect(res.skipped).toBe('claim_lost');
+    expect(mockNewsletter).not.toHaveBeenCalled();
+    const last = mockHoldUpdates.at(-1);
+    expect(last).toMatchObject({ status: 'pending' });
+    expect(last.last_error).toBeUndefined(); // deny/marker untouched
   });
 
   test('the deferred payload carries the post-bookkeeping lease stamp', async () => {
@@ -720,6 +750,27 @@ describe('resumeHeldNewsletterPostCommit failure paths', () => {
       { holdId: 'hold-2', customerId: 'cust-1', email: 'same@example.com' },
     ]);
     expect(mockNewsletter).toHaveBeenCalledTimes(1); // resent despite the stamp
+  });
+
+  test('a mid-group marker clear miss aborts the whole coalesced send — nothing half-consumed', async () => {
+    // The marked sibling's fenced clear misses (a denial or reclaim
+    // bumped it between the renewal and the clear) — the whole group
+    // aborts before the send, and the clears run in ONE transaction so
+    // the abort leaves no marker half-consumed for the retry's dedupe
+    // guard to bypass (Codex #3084 r33).
+    mockHold = { held_drip: false, released_drip: false };
+    mockDoiMarkerRow = { id: 'hold-2' };
+    mockConsumeZeroOnce = true;
+    const outcomes = await resumeHeldNewsletterPostCommit([
+      { holdId: 'hold-1', customerId: 'cust-1', email: 'same@example.com' },
+      { holdId: 'hold-2', customerId: 'cust-1', email: 'same@example.com' },
+    ]);
+    expect(outcomes[0]).toMatchObject({ skipped: 'doi_state_unverified' });
+    expect(mockNewsletter).not.toHaveBeenCalled();
+    // Plain re-pends keep last_error untouched (marker and deny survive).
+    const repens = mockHoldUpdates.filter((u) => u.status === 'pending');
+    expect(repens).toHaveLength(2);
+    for (const r of repens) expect(r.last_error).toBeUndefined();
   });
 
   test('a deny stamped on a still-releasing hold vetoes the post-commit send', async () => {

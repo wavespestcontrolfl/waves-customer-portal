@@ -698,7 +698,22 @@ async function resumeHeldFirstTouch({
                   last_error: 'newsletter_doi_not_confirmed',
                 })
                 .update({ last_error: null });
-              skipDedupe = consumed > 0;
+              if (!consumed) {
+                // Zero rows on a hold the claim snapshot showed MARKED
+                // (Codex #3084 r33): the lease was renewed moments ago, so
+                // the miss means a denial or reclaim bumped the row since —
+                // degrading to the dedupe guard could settle on a stale
+                // stamp, and a guard-passing send would mail a rejected
+                // address. Abort; the plain re-pend no-ops if the fence is
+                // gone, leaving the row exactly as the denier/reclaimer
+                // stamped it.
+                logger.info('[first-touch-resume] resend-marker consume fenced out — abandoning hold');
+                await fencedHoldWrite(dbh('first_touch_holds').where({ id: hold.id }), claimStamp)
+                  .update({ status: 'pending', updated_at: new Date() });
+                result.skipped = result.skipped || 'claim_lost';
+                continue;
+              }
+              skipDedupe = true;
             } catch (consumeErr) {
               // ABORT, never degrade to the dedupe guard (Codex #3084
               // r32): this marker means a prior send FAILED and its
@@ -914,6 +929,7 @@ async function runOnePostCommitResume(payload, holdIds, dbh, claims = new Map())
     // Fail-closed: an unverifiable marker state re-pends instead of
     // trusting the stamp.
     let holdWasDoiUnconfirmed = false;
+    let markedHoldIds = [];
     if (holdIds.length) {
       try {
         // Deny veto BEFORE the send, not only in the settle (Codex #3084
@@ -934,11 +950,12 @@ async function runOnePostCommitResume(payload, holdIds, dbh, claims = new Map())
           logger.info('[first-touch-resume] post-commit deny veto — hold(s) stay pending');
           return { skipped: 'email_denied' };
         }
-        const markerRow = await dbh('first_touch_holds')
+        const markerRows = await dbh('first_touch_holds')
           .whereIn('id', holdIds)
           .where({ last_error: 'newsletter_doi_not_confirmed' })
-          .first('id');
-        holdWasDoiUnconfirmed = !!markerRow;
+          .select('id');
+        markedHoldIds = markerRows.map((r) => r.id);
+        holdWasDoiUnconfirmed = markedHoldIds.length > 0;
       } catch (markerErr) {
         logger.warn(`[first-touch-resume] resend-marker lookup failed: ${markerErr.code || markerErr.name || 'db_error'} — hold(s) stay pending`);
         for (const holdId of holdIds) {
@@ -1015,25 +1032,35 @@ async function runOnePostCommitResume(payload, holdIds, dbh, claims = new Map())
     // settling holds whose DOI never delivered. The plain fenced re-pends
     // keep last_error untouched, so both the marker and any deny survive
     // for the retry.
+    // A clear of ZERO rows aborts too (Codex #3084 r33): the marked set
+    // was read above and the lease renewed just now, so a miss means a
+    // denial or reclaim bumped the row in between — proceeding would mail
+    // a rejected or reclaimed address. And the clears are ALL-OR-NOTHING
+    // (r33): one transaction, so a mid-group failure rolls the
+    // already-cleared siblings back — a half-consumed group would leave
+    // the retry's dedupe guard trusting a stale stamp with no
+    // force-resend ticket left.
     let skipDedupe = false;
     if (holdWasDoiUnconfirmed) {
-      let consumeFailed = false;
-      for (const holdId of holdIds) {
-        try {
-          const consumed = await fencedHoldWrite(
-            dbh('first_touch_holds')
-              .where({ id: holdId, last_error: 'newsletter_doi_not_confirmed' }),
-            fenceOf(holdId),
-          )
-            .update({ last_error: null });
-          if (consumed) skipDedupe = true;
-        } catch (consumeErr) {
-          consumeFailed = true;
-          logger.warn(`[first-touch-resume] resend-marker consume failed for hold ${holdId}: ${consumeErr.code || consumeErr.name || 'db_error'}`);
-        }
-      }
-      if (consumeFailed) {
-        logger.warn('[first-touch-resume] post-commit resend-marker consume incomplete — aborting the group send, markers intact');
+      try {
+        await dbh.transaction(async (trx) => {
+          for (const holdId of markedHoldIds) {
+            const consumed = await fencedHoldWrite(
+              trx('first_touch_holds')
+                .where({ id: holdId, last_error: 'newsletter_doi_not_confirmed' }),
+              fenceOf(holdId),
+            )
+              .update({ last_error: null });
+            if (!consumed) {
+              const lost = new Error(`resend-marker consume fenced out for hold ${holdId}`);
+              lost.code = 'consume_fenced_out';
+              throw lost;
+            }
+          }
+        });
+        skipDedupe = true;
+      } catch (consumeErr) {
+        logger.warn(`[first-touch-resume] post-commit resend-marker consume failed: ${consumeErr.code || consumeErr.name || 'db_error'} — aborting the group send, markers intact`);
         for (const holdId of holdIds) {
           try {
             await fencedHoldWrite(dbh('first_touch_holds').where({ id: holdId }), fenceOf(holdId))

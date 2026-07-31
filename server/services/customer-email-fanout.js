@@ -762,22 +762,54 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
   // the duplicate-on-reclaim window the consume exists to close. The
   // plain fenced re-pends keep last_error untouched (marker and deny
   // survive); the sweep's retry re-runs the whole release, marker-forced.
+  // A consume that clears ZERO rows aborts too (Codex #3084 r33): the
+  // marked set is read just below, so a fenced clear missing means a
+  // denial or reclaim bumped the row between the lease renewal above and
+  // this write — proceeding would mail the operator-rejected (or
+  // reclaimed) address. And the clears are ALL-OR-NOTHING (r33): they run
+  // in one transaction, so a mid-group failure rolls the already-cleared
+  // siblings back — an abort with a marker half-consumed would leave the
+  // next release trusting the pre-stamp with no force-resend ticket left,
+  // settling holds whose DOI never delivered.
   let consumeFailed = false;
-  for (const holdId of holdIds) {
-    try {
-      await fencedHoldWrite(
-        conn('first_touch_holds')
-          .where({ id: holdId, last_error: 'newsletter_doi_not_confirmed' }),
-        fenceOf(holdId),
-      )
-        .update({ last_error: null });
-    } catch (consumeErr) {
-      consumeFailed = true;
-      logger.warn(`[email-fanout] resend-marker consume failed for hold ${holdId}: ${consumeErr.code || consumeErr.name || 'db_error'}`);
+  try {
+    const markedIds = (await conn('first_touch_holds')
+      .whereIn('id', holdIds)
+      .where({ last_error: 'newsletter_doi_not_confirmed' })
+      .select('id')).map((r) => r.id);
+    if (markedIds.length) {
+      await conn.transaction(async (trx) => {
+        for (const holdId of markedIds) {
+          const cleared = await fencedHoldWrite(
+            trx('first_touch_holds')
+              .where({ id: holdId, last_error: 'newsletter_doi_not_confirmed' }),
+            fenceOf(holdId),
+          )
+            .update({ last_error: null });
+          if (!cleared) {
+            const lost = new Error(`resend-marker consume fenced out for hold ${holdId}`);
+            lost.code = 'consume_fenced_out';
+            throw lost;
+          }
+        }
+      });
     }
+  } catch (consumeErr) {
+    consumeFailed = true;
+    logger.warn(`[email-fanout] resend-marker consume failed for subscriber ${pendingConfirmation.id}: ${consumeErr.code || consumeErr.name || 'db_error'}`);
   }
   if (consumeFailed) {
     logger.warn(`[email-fanout] resend-marker consume incomplete for subscriber ${pendingConfirmation.id} — aborting the re-send, markers intact`);
+    // Nothing was sent, so lift our own pre-stamp (conditional on the row
+    // still being the verified payload — a rotation owns its delivery):
+    // a marker-less retry path must not trust a stamp for a DOI that
+    // never went out. Best-effort — if this clear fails, the intact
+    // marker still forces the next actual send past the stamp.
+    try {
+      await verifiedRowQuery().update({ confirmation_sent_at: null, updated_at: new Date() });
+    } catch (clearErr) {
+      logger.warn(`[email-fanout] pre-stamp clear failed for subscriber ${pendingConfirmation.id}: ${clearErr.code || clearErr.name || 'db_error'}`);
+    }
     for (const holdId of holdIds) {
       try {
         await fencedHoldWrite(conn('first_touch_holds').where({ id: holdId }), fenceOf(holdId))
