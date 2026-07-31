@@ -2443,14 +2443,23 @@ async function handleRefundFailed(refund) {
   // no-payments case it throws for the same reason — nothing else was
   // written, so the retry is a clean re-run.
   const insertBounceNotification = async (conn, body) => {
-    await conn('notifications').insert({
-      recipient_type: 'admin',
+    // Through NotificationService (connection: conn keeps it inside the
+    // caller's transaction) so the admin bell policy chokepoint covers it.
+    // bell: true — a failed refund is a money failure and must keep ringing
+    // under GATE_ADMIN_BELL_POLICY. create() swallows insert errors into
+    // null; rethrow so the transactional/throw-on-failure contract above
+    // holds and Stripe retries the event.
+    const notif = await NotificationService.create({
+      recipientType: 'admin',
       category: 'billing',
       title: `Refund FAILED at the bank: $${failedDollars.toFixed(2)}`,
       body: `Stripe refund ${refundId || '(unknown id)'} on charge ${chargeId || piId || '(unknown)'} did not clear (${refund?.failure_reason || 'no reason given'}). ${body}`,
       icon: '⚠️',
       link: '/admin/invoices',
+      bell: true,
+      connection: conn,
     });
+    if (!notif) throw new Error('refund-failure notification insert failed');
   };
 
   if (!payment) {

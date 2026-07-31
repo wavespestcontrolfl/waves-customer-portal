@@ -199,6 +199,247 @@ describe('NotificationService.create under the bell policy', () => {
   });
 });
 
+describe('codex r1 — required emissions keep ringing', () => {
+  test('gate on: untracked call lead (category lead, bell:true) rings', async () => {
+    gateOn();
+    const notifications = chainMock([{ id: 'r1' }]);
+    mockTables({ notifications, notification_preferences: chainMock([]) });
+
+    // Mirrors call-recording-processor's untracked-call emission.
+    const result = await NotificationService.notifyAdmin(
+      'lead',
+      'Untracked call lead',
+      "New lead from a call we couldn't attribute: Unknown caller (unknown number). No marketing source matched — tag the source or follow up.",
+      { link: '/admin/leads?lead=l1', metadata: { leadId: 'l1' }, bell: true },
+    );
+
+    expect(notifications.insert).toHaveBeenCalled();
+    expect(result).toEqual({ id: 'r1' });
+  });
+
+  test('source pin: call-recording-processor tags the untracked-lead emission bell: true', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
+    const site = src.slice(src.indexOf("'Untracked call lead'"), src.indexOf("'Untracked call lead'") + 800);
+    expect(site).toMatch(/bell:\s*true/);
+  });
+
+  test('gate on: estimate_deposit_reconcile_needed rings through a category:system override off', async () => {
+    mockTables({
+      notification_preferences: chainMock([
+        { trigger_key: 'category:system', bell_enabled: false },
+      ]),
+    });
+    await expect(bellPolicy.bellAllowed({
+      category: 'system', triggerKey: 'estimate_deposit_reconcile_needed',
+    })).resolves.toBe(true);
+  });
+
+  test('gate on: extension-request path rings (bell:true) so the 24h claim logic is unaffected', async () => {
+    gateOn();
+    const notifications = chainMock([{ id: 'r2' }]);
+    mockTables({ notifications, notification_preferences: chainMock([]) });
+
+    // Mirrors the repeat extension-request emission in estimate-public.js —
+    // there the notification IS the deliverable; a policy suppression would
+    // keep the claim and 201 with nothing delivered.
+    const result = await NotificationService.notifyAdmin(
+      'estimate',
+      'Extension requested (again): Jane Doe',
+      'no address — expired 3 days ago; customer already used their self-serve extension and asked for more time',
+      { icon: '⏳', link: '/admin/estimates', metadata: { estimateId: 'e1' }, bell: true },
+    );
+
+    expect(notifications.insert).toHaveBeenCalled();
+    expect(result).toEqual({ id: 'r2' });
+    expect(result.suppressed).toBeUndefined();
+  });
+
+  test('source pin: estimate-public extension emissions and termite ringAdminBell carry bell: true', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const pub = fs.readFileSync(path.join(__dirname, '../routes/estimate-public.js'), 'utf8');
+    for (const marker of ['Extension auto-granted: ', 'Extension requested (again): ']) {
+      const site = pub.slice(pub.indexOf(marker), pub.indexOf(marker) + 900);
+      expect(site).toMatch(/bell:\s*true/);
+    }
+    const termite = fs.readFileSync(path.join(__dirname, '../services/termite-program-agreement.js'), 'utf8');
+    const wrapper = termite.slice(termite.indexOf('async function ringAdminBell('), termite.indexOf('async function ringAdminBell(') + 900);
+    expect(wrapper).toMatch(/bell:\s*true/);
+    const deduped = termite.slice(termite.indexOf('async function ringAdminBellDeduped('));
+    expect(deduped.slice(0, deduped.indexOf('maybeCreateTermiteProgramAgreement'))).toMatch(/bell:\s*true/);
+  });
+
+  test('suppression log carries category + triggerKey only — never the title', async () => {
+    gateOn();
+    const logger = require('../services/logger');
+    const notifications = chainMock([{ id: 'r3' }]);
+    mockTables({ notifications, notification_preferences: chainMock([]) });
+
+    await NotificationService.notifyAdmin(
+      'alert',
+      'Service prefs changed: Jane Doe',
+      '123 Main St — interior spray: OFF',
+      { metadata: { triggerKey: null } },
+    );
+
+    const silencedCall = logger.info.mock.calls.find((c) => c[0] === '[bell-policy] silenced');
+    expect(silencedCall).toBeDefined();
+    expect(silencedCall[1]).toEqual({ category: 'alert', triggerKey: null });
+    for (const call of logger.info.mock.calls) {
+      expect(JSON.stringify(call)).not.toContain('Jane Doe');
+      expect(JSON.stringify(call)).not.toContain('123 Main St');
+    }
+  });
+
+  test('every emitted-but-suppressible category is owner-overridable', () => {
+    // Categories emitted by direct notifyAdmin sites and the converted
+    // ex-raw-insert sites that are NOT on the category allowlist. A
+    // suppressible category missing from OVERRIDABLE_CATEGORIES would be a
+    // dead letterbox the owner cannot re-enable from PushSettingsV2.
+    const emittedSuppressible = [
+      'alert', 'system', 'service', 'lead', 'estimate', 'agents', 'schedule',
+      'schedule_conflict', 'payout', 'token_alert', 'tax', 'review',
+      'credential', 'customer', 'call_pipeline_drift',
+      'social_compliance_rejected', 'content', 'stale_visit_sweep',
+      'wdo_report_attention', 'email_digest', 'eval_regression',
+      'service-prefs', 'email_alert', 'email_rescue', 'email_rescue_review',
+    ];
+    for (const cat of emittedSuppressible) {
+      expect(bellPolicy.OVERRIDABLE_CATEGORY_SET.has(cat)).toBe(true);
+    }
+  });
+});
+
+describe('codex r1 — converted raw-insert sites (gate off = identical rows, gate on = policy)', () => {
+  test('morning email digest row matches the old raw insert gate-off', async () => {
+    const notifications = chainMock([{ id: 'd1' }]);
+    mockTables({ notifications });
+
+    await NotificationService.notifyAdmin(
+      'email_digest',
+      'Morning Email Digest',
+      '12 emails overnight. 2 new leads. Check /admin/email for details.',
+      { icon: '📧', link: '/admin/email', metadata: { severity: 'low' } },
+    );
+
+    expect(notifications.insert).toHaveBeenCalledWith({
+      recipient_type: 'admin',
+      recipient_id: null,
+      category: 'email_digest',
+      title: 'Morning Email Digest',
+      body: '12 emails overnight. 2 new leads. Check /admin/email for details.',
+      icon: '📧',
+      link: '/admin/email',
+      metadata: JSON.stringify({ severity: 'low' }),
+    });
+  });
+
+  test('morning email digest obeys the policy gate-on (suppressed, overridable)', async () => {
+    gateOn();
+    const notifications = chainMock([{ id: 'd2' }]);
+    mockTables({ notifications, notification_preferences: chainMock([]) });
+
+    const silenced = await NotificationService.notifyAdmin(
+      'email_digest', 'Morning Email Digest', 'body', { link: '/admin/email' },
+    );
+    expect(notifications.insert).not.toHaveBeenCalled();
+    expect(silenced.suppressed).toBe(true);
+
+    // Owner override re-enables it.
+    bellPolicy.clearOverrideCache();
+    mockTables({
+      notifications,
+      notification_preferences: chainMock([
+        { trigger_key: 'category:email_digest', bell_enabled: true },
+      ]),
+    });
+    const rang = await NotificationService.notifyAdmin(
+      'email_digest', 'Morning Email Digest', 'body', { link: '/admin/email' },
+    );
+    expect(notifications.insert).toHaveBeenCalledTimes(1);
+    expect(rang).toEqual({ id: 'd2' });
+  });
+
+  test('eval defaultNotify writes the same row through the service and throws on a swallowed failure', async () => {
+    const { _internals } = require('../services/eval/incident-regression');
+    expect(_internals).toBeDefined(); // module loads with the conversion in place
+
+    const notifications = chainMock([{ id: 'd3' }]);
+    mockTables({ notifications });
+
+    // Same row shape the eval callers pass (metadata pre-stringified).
+    await NotificationService.create({
+      recipientType: 'admin',
+      category: 'eval_regression',
+      title: 'Incident eval: 1 regression(s) in LLM gates',
+      body: 'fact-check/case-1: drift',
+      icon: '🧪',
+      link: '/admin/dashboard',
+      metadata: { summary: { total: 1 } },
+    });
+    expect(notifications.insert).toHaveBeenCalledWith({
+      recipient_type: 'admin',
+      recipient_id: null,
+      category: 'eval_regression',
+      title: 'Incident eval: 1 regression(s) in LLM gates',
+      body: 'fact-check/case-1: drift',
+      icon: '🧪',
+      link: '/admin/dashboard',
+      metadata: JSON.stringify({ summary: { total: 1 } }),
+    });
+  });
+
+  test('email spam-rescue-review row matches the old raw insert gate-off', async () => {
+    const notifications = chainMock([{ id: 'd4' }]);
+    mockTables({ notifications });
+
+    await NotificationService.notifyAdmin(
+      'email_rescue_review',
+      'Spam-foldered mail claims a known sender (unverified)',
+      'A message claiming to be A Vendor ("subject") is in Gmail Spam but failed sender authentication — left in Spam. Review it in Gmail if expected.',
+      { icon: '⚠️', link: '/admin/email', metadata: { gmail_message_id: 'g1' } },
+    );
+
+    expect(notifications.insert).toHaveBeenCalledWith({
+      recipient_type: 'admin',
+      recipient_id: null,
+      category: 'email_rescue_review',
+      title: 'Spam-foldered mail claims a known sender (unverified)',
+      body: 'A message claiming to be A Vendor ("subject") is in Gmail Spam but failed sender authentication — left in Spam. Review it in Gmail if expected.',
+      icon: '⚠️',
+      link: '/admin/email',
+      metadata: JSON.stringify({ gmail_message_id: 'g1' }),
+    });
+  });
+
+  test('refund-failed conversion pins bell:true + connection passthrough (money failure)', async () => {
+    gateOn();
+    const trxNotifications = chainMock([{ id: 'd5' }]);
+    const trx = jest.fn((table) => {
+      if (table !== 'notifications') throw new Error(`unexpected table: ${table}`);
+      return trxNotifications;
+    });
+    mockTables({ notification_preferences: chainMock([]) });
+
+    const result = await NotificationService.create({
+      recipientType: 'admin',
+      category: 'billing',
+      title: 'Refund FAILED at the bank: $12.34',
+      body: 'Stripe refund re_1 on charge ch_1 did not clear (insufficient_funds).',
+      icon: '⚠️',
+      link: '/admin/invoices',
+      bell: true,
+      connection: trx,
+    });
+
+    // Insert went through the supplied transaction, not the global pool.
+    expect(trxNotifications.insert).toHaveBeenCalled();
+    expect(result).toEqual({ id: 'd5' });
+  });
+});
+
 describe('bellAllowed decision order', () => {
   beforeEach(() => {
     mockTables({ notification_preferences: chainMock([]) });

@@ -88,7 +88,12 @@ const NotificationService = {
               options: { bell },
             });
             if (!allowed) {
-              logger.info('[bell-policy] silenced', { category, title });
+              // Category + triggerKey only — titles/bodies carry customer
+              // names and addresses, which must not leak into logs.
+              logger.info('[bell-policy] silenced', {
+                category,
+                triggerKey: metadata?.triggerKey || null,
+              });
               return { id: null, suppressed: true, reason: 'bell_policy' };
             }
           }

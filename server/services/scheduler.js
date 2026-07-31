@@ -2630,16 +2630,18 @@ function initScheduledJobs() {
         logger.warn(`[email-digest] nudge collection failed: ${e.message}`);
       }
 
-      await db('notifications').insert({
-        recipient_type: 'admin',
-        category: 'email_digest',
-        title: 'Morning Email Digest',
-        body: `${emails.length} emails overnight. ${parts.join(', ')}.${nudgeLines} Check /admin/email for details.`,
-        icon: '\uD83D\uDCE7',
-        link: '/admin/email',
-        metadata: JSON.stringify({ severity: (parseInt(unread?.c || 0) > 10 || nudgeLines || quarantineIssues > 0) ? 'high' : 'low' }),
-        created_at: new Date(),
-      }).catch(() => {});
+      // Through NotificationService (not a raw insert) so the admin bell
+      // policy chokepoint covers the digest; notifyAdmin never throws.
+      await require('./notification-service').notifyAdmin(
+        'email_digest',
+        'Morning Email Digest',
+        `${emails.length} emails overnight. ${parts.join(', ')}.${nudgeLines} Check /admin/email for details.`,
+        {
+          icon: '\uD83D\uDCE7',
+          link: '/admin/email',
+          metadata: { severity: (parseInt(unread?.c || 0) > 10 || nudgeLines || quarantineIssues > 0) ? 'high' : 'low' },
+        },
+      );
 
       logger.info(`[email-digest] Morning digest: ${emails.length} emails, ${leads} leads, ${spam} spam`);
     } catch (err) {

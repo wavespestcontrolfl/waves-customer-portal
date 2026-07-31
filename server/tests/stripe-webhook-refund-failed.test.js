@@ -141,7 +141,10 @@ describe('handleRefundFailed', () => {
       metadata: null,
     };
     trxUpdate = jest.fn().mockResolvedValue(1);
-    notificationInsert = jest.fn().mockResolvedValue([1]);
+    // Builder-shaped: the bounce notification now lands via
+    // NotificationService.create (bell-policy chokepoint), which chains
+    // .insert(row).returning('*').
+    notificationInsert = jest.fn((row) => ({ returning: jest.fn(async () => [{ id: 'notif-1', ...row }]) }));
 
     const trxPaymentsQuery = {
       where: jest.fn(() => trxPaymentsQuery),
@@ -482,7 +485,12 @@ describe('handleRefundFailed', () => {
       where: jest.fn(() => emptyQuery),
       first: jest.fn(async () => undefined),
     };
-    notificationInsert.mockRejectedValue(new Error('insert failed'));
+    // NotificationService.create swallows the DB error into null; the
+    // webhook's wrapper converts that back into a throw so the fence
+    // transaction still rolls back and Stripe retries.
+    notificationInsert.mockImplementation(() => ({
+      returning: jest.fn(async () => { throw new Error('insert failed'); }),
+    }));
     db.mockImplementation((table) => {
       if (table === 'payments') return emptyQuery;
       if (table === 'estimate_deposits') return depQuery;

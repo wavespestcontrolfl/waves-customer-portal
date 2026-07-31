@@ -33,6 +33,11 @@ const TRIGGER_BELL_ALLOWLIST = new Set([
   'payment_failed',
   'bill_payment_error',
   'twilio_failure',
+  // Deposit ledger mismatch = money failure: a paid acceptance deposit sat
+  // on the ledger but the first-invoice credit failed — money is in limbo
+  // until a human reconciles it, so it must ring through its 'system'
+  // category's default deny.
+  'estimate_deposit_reconcile_needed',
 ]);
 
 const TRIGGER_BELL_DENYLIST = new Set([
@@ -57,6 +62,11 @@ const CATEGORY_BELL_ALLOWLIST = new Set([
 // validation list for PUT /api/admin/push/preferences — unknown category
 // keys are rejected. Longest entry ('category:social_compliance_rejected',
 // 35 chars) fits trigger_key varchar(50).
+// INVARIANT: every admin category the portal emits that is NOT on
+// CATEGORY_BELL_ALLOWLIST must appear here — a suppressible category the
+// owner cannot re-enable is a dead letterbox. When adding a new admin
+// notification category, add it to one of the two lists (and to
+// BELL_CATEGORY_LABELS in client PushSettingsV2.jsx if it lands here).
 const OVERRIDABLE_CATEGORIES = [
   'alert',
   'system',
@@ -81,6 +91,10 @@ const OVERRIDABLE_CATEGORIES = [
   'social_compliance_rejected',
   'customer',
   'eval_regression',
+  'service-prefs',
+  'email_alert',
+  'email_rescue',
+  'email_rescue_review',
 ];
 const OVERRIDABLE_CATEGORY_SET = new Set(OVERRIDABLE_CATEGORIES);
 

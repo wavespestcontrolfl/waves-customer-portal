@@ -84,6 +84,10 @@ const BELL_CATEGORY_LABELS = {
   social_compliance_rejected: "Social compliance rejections",
   customer: "Customer account events",
   eval_regression: "Eval regressions",
+  "service-prefs": "Service preference changes",
+  email_alert: "Email alerts (complaints, lead review)",
+  email_rescue: "Email rescued from spam",
+  email_rescue_review: "Spam rescue needs review",
 };
 
 const bellCategoryLabel = (cat) =>
