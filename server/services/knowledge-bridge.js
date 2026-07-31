@@ -215,6 +215,28 @@ function appliedTreatmentClasses(appliedProducts) {
     (appliedProducts || []).some((p) => new RegExp(cls, 'i').test(String(p.product_category || ''))));
 }
 
+// Applied-product rows with categories recovered from the catalog: legacy
+// service_products rows can carry a null product_category while product_id
+// still identifies a catalog fungicide/herbicide — the classifier must see
+// the real class or the guard never fires for those visits (codex P2 r18;
+// mirrors attachApprovedReportProductFacts in report-data).
+async function loadAppliedProductsWithCategories(serviceRecordId, knexOrTrx) {
+  const rows = await knexOrTrx('service_products')
+    .where({ service_record_id: serviceRecordId })
+    .select('product_name', 'product_category', 'product_id');
+  const missingIds = [...new Set(rows.filter((r) => !r.product_category && r.product_id).map((r) => String(r.product_id)))];
+  if (!missingIds.length) return rows;
+  try {
+    const catalogRows = await knexOrTrx('products_catalog').whereIn('id', missingIds).select('id', 'category');
+    const categoryById = new Map(catalogRows.map((c) => [String(c.id), c.category]));
+    return rows.map((r) => ((r.product_category || !r.product_id)
+      ? r
+      : { ...r, product_category: categoryById.get(String(r.product_id)) || r.product_category }));
+  } catch {
+    return rows;
+  }
+}
+
 function sanitizeRecommendationsAgainstTreatment(parsed, appliedProducts) {
   const appliedClasses = appliedTreatmentClasses(appliedProducts);
   if (!appliedClasses.length || !parsed || typeof parsed !== 'object') return { parsed, dropped: 0, appliedClasses };
@@ -557,9 +579,7 @@ const KnowledgeBridge = {
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`lawn_rec_${assessmentId}`]);
       const assessment = await trx('lawn_assessments').where({ id: assessmentId }).first();
       if (!assessment || !assessment.service_record_id) return { changed: false, dropped: 0 };
-      const appliedProducts = await trx('service_products')
-        .where({ service_record_id: assessment.service_record_id })
-        .select('product_name', 'product_category');
+      const appliedProducts = await loadAppliedProductsWithCategories(assessment.service_record_id, trx);
       let stored;
       try {
         stored = typeof assessment.recommendations === 'string'
@@ -726,9 +746,7 @@ const KnowledgeBridge = {
       let appliedProducts = [];
       if (assessment.service_record_id) {
         try {
-          appliedProducts = await trx('service_products')
-            .where({ service_record_id: assessment.service_record_id })
-            .select('product_name', 'product_category');
+          appliedProducts = await loadAppliedProductsWithCategories(assessment.service_record_id, trx);
         } catch (treatmentErr) {
           logger.warn(`[knowledge-bridge] treatment context unavailable for assessment ${assessmentId}: ${treatmentErr.message}`);
         }

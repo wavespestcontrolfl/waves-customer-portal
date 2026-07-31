@@ -245,6 +245,15 @@ async function processServiceReportDelivery(delivery, knex = db) {
       const status = await markDeliveryFailed(delivery, new Error(`grounding readiness unverified: ${sanitized.error}`), knex);
       return { status, error: sanitized.error };
     }
+    if (sanitized?.changed) {
+      // The copy just changed — a PDF stored by the initial render is stale,
+      // and getOrRenderServiceReportPdf would serve it on key match. Clear
+      // the key so the email attaches a fresh render (codex P1 r18).
+      await knex('service_records')
+        .where({ id: delivery.service_record_id })
+        .update({ pdf_storage_key: null })
+        .catch(() => {});
+    }
   }
 
   try {
