@@ -509,6 +509,23 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
         });
     }
 
+    // FINAL enrollment retarget, after the marker merges (Codex #3084
+    // r37): a release can insert its hold row AND commit an active
+    // new_lead enrollment after the sweep above ran — the marker merge is
+    // the correction's first write that waits out that release's row
+    // lock, and its retarget fixes only the HOLD. The freshly committed,
+    // immediately-due enrollment still carries the rejected address, and
+    // its prior target is unknowable here (the merge already rewrote the
+    // hold), so this sweep matches by OWNERSHIP alone: an ACTIVE,
+    // customer-LINKED new-lead-era enrollment at any address other than
+    // the corrected one is this customer's mail stream, and the
+    // correction is the operator's assertion of THE address for this
+    // customer. Unlinked rows stay untouched (the r26 ownership rule).
+    counts.automations += await conn('automation_enrollments')
+      .where({ customer_id: customerId, status: 'active' })
+      .whereRaw('LOWER(email) != ?', [newEmail.toLowerCase()])
+      .update({ email: newEmail, updated_at: now });
+
     // A correction is itself the ANSWER to a dismissed read-back card
     // (Codex #3084 r34): dismissal is "not actionable", so the ledger
     // sweep's latest-card-resolved rule deliberately excludes those
@@ -836,11 +853,21 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
   // The rollback restores every marker already consumed, and the plain
   // fenced re-pends keep last_error untouched — markers and deny stamps
   // survive for the retry.
+  // The gates and the SEND share the transaction (Codex #3084 r37): the
+  // gate CASes take the deduped holds' row locks, and the correction
+  // fanout's FIRST statement locks these same rows FOR UPDATE — holding
+  // the transaction open across the provider call excludes a correction
+  // from retargeting any grouped row (its fence deliberately unchanged)
+  // between the gates and the actual send. A send failure is CAUGHT
+  // inside — a rollback after the send would restore consumed markers for
+  // a DOI that already went out.
   let gateFailed = false;
+  let sentOk = false;
+  let sendErr = null;
   if (holdIds.length) {
     try {
-      const gatedStamps = {};
       await conn.transaction(async (trx) => {
+        const gatedStamps = {};
         for (const holdId of holdIds) {
           // Target-bound (r35): a correction retargeting a releasing row
           // preserves its fence, so only the held_email CAS can refuse
@@ -853,13 +880,29 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
           }
           gatedStamps[holdId] = gated;
         }
+        // All gates landed — the transaction always commits from here
+        // (the send below never rethrows), so the fresh stamps are safe
+        // to adopt; a gate abort above leaves holdClaims on the OLD
+        // stamps the rollback restored.
+        Object.assign(holdClaims, gatedStamps);
+        try {
+          await require('./newsletter-confirm').sendConfirmationEmail(pendingConfirmation);
+          sentOk = true;
+        } catch (e) {
+          sendErr = e;
+        }
       });
-      // Fresh stamps only after the commit — an abort rolls the DB back to
-      // the OLD stamps, and the re-pends below must fence on those.
-      Object.assign(holdClaims, gatedStamps);
     } catch (gateErr) {
       gateFailed = true;
       logger.warn(`[email-fanout] pre-send gate ${gateErr.code === 'send_gate_lost' ? 'refused' : 'failed'} for subscriber ${pendingConfirmation.id}: ${gateErr.code || gateErr.name || 'db_error'}`);
+    }
+  } else {
+    // No deduped holds — nothing to lock; plain re-send.
+    try {
+      await require('./newsletter-confirm').sendConfirmationEmail(pendingConfirmation);
+      sentOk = true;
+    } catch (e) {
+      sendErr = e;
     }
   }
   if (gateFailed) {
@@ -902,9 +945,8 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
     }
     return false;
   }
-  try {
-    await require('./newsletter-confirm').sendConfirmationEmail(pendingConfirmation);
-  } catch (e) {
+  if (!sentOk) {
+    const e = sendErr || new Error('send_failed');
     // Provider error bodies can echo the recipient address — log only the
     // subscriber id and a sanitized code (this path exists BECAUSE the email
     // is being corrected; it must not leak into logs).

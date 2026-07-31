@@ -129,9 +129,16 @@ function makeConn(cfg = {}) {
   conn.raw = (sql) => ({ __raw: sql });
   conn.schema = { hasTable: async () => true };
   // Savepoint-style passthrough (the r33 all-or-nothing marker consume);
-  // the counter lets tests pin that grouped clears share ONE transaction.
+  // the counter lets tests pin that grouped clears share ONE transaction,
+  // and the begin/end markers let them pin what ran INSIDE it (r37).
   let trxCount = 0;
-  conn.transaction = async (fn) => { trxCount += 1; return fn(conn); };
+  conn.transaction = async (fn) => {
+    trxCount += 1;
+    calls.push({ table: '__trx', op: 'begin' });
+    const result = await fn(conn);
+    calls.push({ table: '__trx', op: 'end' });
+    return result;
+  };
   conn.__trxCount = () => trxCount;
   conn.__calls = calls;
   conn.__updates = (table) => calls.filter((c) => c.table === table && c.op === 'update');
@@ -156,9 +163,10 @@ describe('propagateCustomerEmailChange', () => {
       triage_items: { rows: [{ id: 'ti-1', call_log_id: 'call-1' }], countQueue: [{ n: 0 }] },
     });
     const counts = await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
-    // automations: 2 — the enrollment sweep runs twice (before AND after the
-    // hold retargets, Codex #3084 r26); the stub counts each idempotent pass.
-    expect(counts).toEqual({ leads: 1, estimates: 2, newsletter: 1, newsletterDeliveries: 1, automations: 2, templateRuns: 1, promoters: 1, billingPrefs: 1, contracts: 1, bookingIntents: 1, reviewCards: 1, heldDripResumed: 0 });
+    // automations: 3 — the enrollment sweep runs before AND after the hold
+    // retargets (Codex #3084 r26) plus the final ownership-scoped retarget
+    // after the marker merges (r37); the stub counts each idempotent pass.
+    expect(counts).toEqual({ leads: 1, estimates: 2, newsletter: 1, newsletterDeliveries: 1, automations: 3, templateRuns: 1, promoters: 1, billingPrefs: 1, contracts: 1, bookingIntents: 1, reviewCards: 1, heldDripResumed: 0 });
 
     expect(conn.__updates('leads')[0].arg.email).toBe('charleswrobb@gmail.com');
     expect(conn.__updates('estimates')[0].arg.customer_email).toBe('charleswrobb@gmail.com');
@@ -646,6 +654,20 @@ describe('propagateCustomerEmailChange', () => {
     expect(merge.arg.updated_at).toBeUndefined();
   });
 
+  test('a final ownership-scoped enrollment retarget runs after the marker merges', async () => {
+    // A release can commit an active enrollment AFTER the earlier sweeps
+    // ran — the marker merge is the correction's first write that waits
+    // out that release's row lock, so one last retarget catches the late
+    // enrollment at ANY stale address (customer-linked + active = this
+    // customer's mail stream; Codex #3084 r37).
+    const conn = makeConn();
+    await propagateCustomerEmailChange({ before: HOLD_BEFORE, after: HOLD_AFTER }, conn);
+    const finalSweep = conn.__calls.find((c) => c.table === 'automation_enrollments'
+      && c.op === 'whereRaw' && String(c.arg.sql).includes('!=')
+      && Array.isArray(c.arg.bindings) && c.arg.bindings[0] === 'samtypo@example.com');
+    expect(finalSweep).toBeDefined();
+  });
+
   test('deferred newsletter holds pass through when no pending subscriber was moved', async () => {
     mockResume.mockResolvedValueOnce({
       resumed: true,
@@ -943,6 +965,30 @@ describe('resendPendingConfirmation', () => {
     expect(mockSendFailedMarker).toHaveBeenCalledWith('samtypo@example.com', conn, 811, 'tok-1');
     const marked = conn.__updates('first_touch_holds').filter((u) => u.arg.last_error === 'newsletter_doi_not_confirmed');
     expect(marked).toHaveLength(1);
+  });
+
+  test('the DOI send happens INSIDE the gate transaction — corrections queue on the row locks', async () => {
+    // The gate CASes take the holds' row locks and the correction
+    // fanout's first statement locks these same rows — keeping the
+    // transaction open across the provider call excludes a retarget
+    // between the gate and the actual send (Codex #3084 r37).
+    const payload = { id: 811, email: 'samtypo@example.com', confirmation_token: 'tok-1', heldNewsletterHoldIds: ['hold-1'] };
+    const conn = makeConn({
+      ...matchRow(payload),
+      first_touch_holds: { firstQueue: [{ held_drip: false, released_drip: false }] },
+    });
+    sendConfirmationEmail.mockImplementationOnce(async () => {
+      conn.__calls.push({ table: '__send', op: 'send' });
+      return true;
+    });
+    const ok = await resendPendingConfirmation(payload, conn);
+    expect(ok).toBe(true);
+    const begin = conn.__calls.findIndex((c) => c.table === '__trx' && c.op === 'begin');
+    const send = conn.__calls.findIndex((c) => c.table === '__send');
+    const end = conn.__calls.findIndex((c) => c.table === '__trx' && c.op === 'end');
+    expect(begin).toBeGreaterThanOrEqual(0);
+    expect(send).toBeGreaterThan(begin);
+    expect(end).toBeGreaterThan(send);
   });
 
   test('grouped pre-send gates run in ONE transaction — a mid-group miss aborts, nothing half-consumed', async () => {

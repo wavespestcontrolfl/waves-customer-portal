@@ -716,7 +716,8 @@ describe('recordFirstTouchHold (durable hold ledger writes)', () => {
     // run's start.
     const heldEmailCase = mockMergeArgs.at(-1).held_email;
     expect(String(heldEmailCase.sql)).toContain('first_touch_holds.released_at >= ?');
-    expect(heldEmailCase.bindings[0]).toBe(runStartedAt);
+    // bindings: [staleThreshold (r37 live-lease), runStartedAt, runStartedAt, email]
+    expect(heldEmailCase.bindings[1]).toBe(runStartedAt);
   });
 
   test('a hold released in an EARLIER cycle re-pends normally with the fresh address', async () => {
@@ -770,7 +771,11 @@ describe('recordFirstTouchHold (durable hold ledger writes)', () => {
     // duplicate DOI.
     mockHold = null;
     await recordFirstTouchHold({ callLogId: 'call-1', customerId: 'cust-1', heldEmail: 'a@example.com', heldDrip: true });
-    expect(String(mockMergeArgs.at(-1).status)).toContain("WHEN first_touch_holds.status IN ('releasing', 'blocked') THEN first_touch_holds.status");
+    // LIVE releasing (lease within the stale window) and blocked keep
+    // their status; a STALE releasing row flips back to claimable (r37).
+    const statusCase = mockMergeArgs.at(-1).status;
+    expect(String(statusCase.sql)).toContain("first_touch_holds.status = 'releasing' AND first_touch_holds.updated_at >= ?");
+    expect(String(statusCase.sql)).toContain("OR first_touch_holds.status = 'blocked' THEN first_touch_holds.status ELSE 'pending'");
   });
 
   test("the merge never overwrites an ACTIVE claim's target with a fresh extraction guess", async () => {
@@ -781,8 +786,10 @@ describe('recordFirstTouchHold (durable hold ledger writes)', () => {
     mockHold = null;
     await recordFirstTouchHold({ callLogId: 'call-1', customerId: 'cust-1', heldEmail: 'guess@example.com', heldDrip: true });
     const merged = mockMergeArgs.at(-1).held_email;
-    expect(String(merged.sql)).toContain("WHEN first_touch_holds.status = 'releasing' THEN first_touch_holds.held_email");
-    expect(merged.bindings[0]).toBe('guess@example.com');
+    // Live-lease bound since r37: a STALE releasing row's target is a dead
+    // claimant's prior-cycle value and adopts the fresh extraction.
+    expect(String(merged.sql)).toContain("WHEN first_touch_holds.status = 'releasing' AND first_touch_holds.updated_at >= ? THEN first_touch_holds.held_email");
+    expect(merged.bindings.at(-1)).toBe('guess@example.com');
   });
 
   test('a target written DURING the run survives the merge — retryably re-pended corrections included', async () => {
@@ -811,8 +818,10 @@ describe('recordFirstTouchHold (durable hold ledger writes)', () => {
     // claimant's stale-claim window (the r12 rationale).
     mockHold = null;
     await recordFirstTouchHold({ callLogId: 'call-1', customerId: 'cust-1', heldEmail: 'a@example.com', heldNewsletter: true });
-    expect(String(mockMergeArgs.at(-1).updated_at)).toContain(
-      "WHEN first_touch_holds.status = 'releasing' THEN first_touch_holds.updated_at",
+    // Live-lease bound since r37: a stale releasing row takes the merge
+    // time along with its flip back to 'pending'.
+    expect(String(mockMergeArgs.at(-1).updated_at.sql)).toContain(
+      "first_touch_holds.updated_at >= ? THEN first_touch_holds.updated_at",
     );
   });
 });

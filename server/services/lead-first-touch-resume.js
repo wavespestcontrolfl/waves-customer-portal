@@ -742,39 +742,57 @@ async function resumeHeldFirstTouch({
           // denier or reclaimer, and the drip work already done is
           // recorded (the enroll is idempotent by template+customer).
           let skipDedupe = false;
+          let gateRefused = false;
+          let outcome = null;
           try {
-            // Target-bound (r35): a correction retargeting this releasing
-            // row after the pre-send re-read preserves the fence, so the
-            // gate's held_email CAS is what refuses the stale send.
-            const gateStamp = await gateHoldForSend(hold.id, claimStamp, dbh, sendEmail);
-            if (!gateStamp) {
-              logger.info('[first-touch-resume] pre-send gate refused (deny/reclaim/retarget) — abandoning hold');
-              // Fenced plain re-pend: a RETARGETED row (fence intact) goes
-              // straight back to pending for the prompt retry at the newer
-              // address; a denied or reclaimed row (fence gone) is left
-              // untouched — its owner's state is authoritative.
-              await fencedHoldWrite(dbh('first_touch_holds').where({ id: hold.id }), claimStamp)
-                .update({ status: 'pending', updated_at: new Date() });
-              result.skipped = result.skipped || 'claim_lost';
-              continue;
-            }
-            claimStamp = gateStamp;
-            claimStamps.set(hold.id, gateStamp);
-            // The gate consumed atomically; the claim snapshot says
-            // whether a marker was there to consume — that incarnation
-            // holds the skipDedupe ticket (r31). A send failure re-arms
-            // it via sendFailedMarkerFor below.
-            // A RECLAIMED attempt forces the actual resend too (Codex
-            // #3084 r36): claiming a STALE 'releasing' row means a worker
-            // died mid-attempt — possibly after subscribeOrResubscribe's
-            // (or the fanout's) pre-stamp but before the send, and a
-            // crash leaves no failure marker. Trusting the stamp would
-            // terminally settle a hold whose DOI never went out. The rare
-            // worst case (the worker died after the send, before its
-            // settle) is one duplicate confirmation email — strictly
-            // better than a permanently unconfirmed subscriber.
-            skipDedupe = hold.last_error === 'newsletter_doi_not_confirmed'
-              || String(hold.status) === 'releasing';
+            // The gate and the SEND share ONE transaction (Codex #3084
+            // r37): the gate's CAS takes the hold's row lock, and the
+            // correction fanout's FIRST statement locks these same rows
+            // FOR UPDATE — so holding this transaction open across the
+            // provider call EXCLUDES a correction from retargeting the
+            // row (its fence deliberately unchanged) between the gate
+            // and the actual send. The correction queues for the send's
+            // duration (this lane is low-volume; the wait is one
+            // provider call) and then proceeds against settled state.
+            // Every inner failure is CAUGHT — a throw after the send
+            // would roll the gate back (marker restored, lease
+            // unrenewed) with the DOI already out.
+            await dbh.transaction(async (trx) => {
+              // Target-bound (r35): a correction retargeting this
+              // releasing row after the pre-send re-read preserves the
+              // fence, so the gate's held_email CAS is what refuses the
+              // stale send.
+              const gateStamp = await gateHoldForSend(hold.id, claimStamp, trx, sendEmail);
+              if (!gateStamp) {
+                gateRefused = true;
+                return;
+              }
+              claimStamp = gateStamp;
+              claimStamps.set(hold.id, gateStamp);
+              // The gate consumed atomically; the claim snapshot says
+              // whether a marker was there to consume — that incarnation
+              // holds the skipDedupe ticket (r31). A send failure re-arms
+              // it via sendFailedMarkerFor below.
+              // A RECLAIMED attempt forces the actual resend too (Codex
+              // #3084 r36): claiming a STALE 'releasing' row means a
+              // worker died mid-attempt — possibly after the pre-stamp
+              // but before the send, and a crash leaves no failure
+              // marker. Trusting the stamp would terminally settle a
+              // hold whose DOI never went out; the rare died-after-send
+              // case costs one duplicate confirmation email.
+              skipDedupe = hold.last_error === 'newsletter_doi_not_confirmed'
+                || String(hold.status) === 'releasing';
+              try {
+                outcome = await runNewsletterResume({
+                  customerId: holdCustomerId,
+                  email: sendEmail,
+                  firstName: customer.first_name || null,
+                  lastName: customer.last_name || null,
+                }, trx, { skipDedupe });
+              } catch (newsletterErr) {
+                logger.warn(`[first-touch-resume] newsletter resume failed for customer ${holdCustomerId}: ${newsletterErr.code || newsletterErr.name || 'resume_failed'}`);
+              }
+            });
           } catch (gateErr) {
             // ABORT, never degrade to the dedupe guard (Codex #3084
             // r32): an unverifiable gate may have left the marker armed,
@@ -788,16 +806,16 @@ async function resumeHeldFirstTouch({
             result.skipped = result.skipped || 'doi_state_unverified';
             continue;
           }
-          let outcome = null;
-          try {
-            outcome = await runNewsletterResume({
-              customerId: holdCustomerId,
-              email: sendEmail,
-              firstName: customer.first_name || null,
-              lastName: customer.last_name || null,
-            }, dbh, { skipDedupe });
-          } catch (newsletterErr) {
-            logger.warn(`[first-touch-resume] newsletter resume failed for customer ${holdCustomerId}: ${newsletterErr.code || newsletterErr.name || 'resume_failed'}`);
+          if (gateRefused) {
+            logger.info('[first-touch-resume] pre-send gate refused (deny/reclaim/retarget) — abandoning hold');
+            // Fenced plain re-pend: a RETARGETED row (fence intact) goes
+            // straight back to pending for the prompt retry at the newer
+            // address; a denied or reclaimed row (fence gone) is left
+            // untouched — its owner's state is authoritative.
+            await fencedHoldWrite(dbh('first_touch_holds').where({ id: hold.id }), claimStamp)
+              .update({ status: 'pending', updated_at: new Date() });
+            result.skipped = result.skipped || 'claim_lost';
+            continue;
           }
           result.newsletter = outcome;
           if (newsletterDelivered(outcome)) {
@@ -1063,12 +1081,22 @@ async function runOnePostCommitResume(payload, holdIds, dbh, claims = new Map())
     // renewal-abort's deny-preserving re-pend could bury a sibling's
     // force-resend marker under 'claim_lost'; plain re-pends cannot).
     // Legacy stamp-less payloads gate unfenced (deny guard only).
+    // The gates and the SEND share the transaction (Codex #3084 r37): the
+    // gate CASes take the group's row locks, and the correction fanout's
+    // FIRST statement locks these same rows FOR UPDATE — holding the
+    // transaction open across the provider call excludes a correction
+    // from retargeting any grouped row (its fence deliberately unchanged)
+    // between the gates and the actual send. Send failures are CAUGHT
+    // inside — a rollback after the send would restore consumed markers
+    // for a DOI that already went out (a duplicate on retry).
     let skipDedupe = false;
+    let outcome = null;
+    let resumeThrow = null;
     const sentEmailLc = String(sendPayload.email || '').trim().toLowerCase();
     if (holdIds.length) {
       try {
-        const gatedStamps = new Map();
         await dbh.transaction(async (trx) => {
+          const gatedStamps = new Map();
           for (const holdId of holdIds) {
             // Target-bound (r35): a correction retargeting a releasing row
             // preserves its fence, so only the held_email CAS can refuse
@@ -1081,11 +1109,24 @@ async function runOnePostCommitResume(payload, holdIds, dbh, claims = new Map())
             }
             gatedStamps.set(holdId, gated);
           }
+          // All gates landed — from here the transaction always commits
+          // (the send below never rethrows), so the fresh stamps are safe
+          // to adopt; a gate abort above leaves the map untouched and the
+          // re-pends fence on the OLD stamps the rollback restored.
+          for (const [holdId, stamp] of gatedStamps) claims.set(holdId, stamp);
+          skipDedupe = holdWasDoiUnconfirmed;
+          try {
+            outcome = await runNewsletterResume(sendPayload, trx, { skipDedupe });
+          } catch (sendErr) {
+            // Sanitized code only (a unique-violation message can echo
+            // the subscriber email). A THROWN resume is an unverified
+            // state — the re-pend below carries the sanitized retry code,
+            // NOT the force-resend marker (the r22 rule: never arm
+            // skipDedupe on an unverifiable outcome).
+            resumeThrow = sendErr;
+            logger.warn(`[first-touch-resume] post-commit newsletter resume failed: ${sendErr.code || sendErr.name || 'resume_failed'}`);
+          }
         });
-        // Fresh stamps only after the commit — an abort rolls the DB back
-        // to the OLD stamps, and the re-pends below must fence on those.
-        for (const [holdId, stamp] of gatedStamps) claims.set(holdId, stamp);
-        skipDedupe = holdWasDoiUnconfirmed;
       } catch (gateErr) {
         const lostToOwner = gateErr.code === 'send_gate_lost';
         logger.warn(`[first-touch-resume] post-commit pre-send gate ${lostToOwner ? 'refused' : 'failed'}: ${gateErr.code || gateErr.name || 'db_error'} — aborting the group send, markers intact`);
@@ -1099,8 +1140,9 @@ async function runOnePostCommitResume(payload, holdIds, dbh, claims = new Map())
         }
         return { skipped: lostToOwner ? 'claim_lost' : 'doi_state_unverified' };
       }
+    } else {
+      outcome = await runNewsletterResume(sendPayload, dbh, { skipDedupe });
     }
-    const outcome = await runNewsletterResume(sendPayload, dbh, { skipDedupe });
     for (const holdId of holdIds) {
       if (newsletterDelivered(outcome)) {
         const hold = await dbh('first_touch_holds').where({ id: holdId }).first('held_drip', 'released_drip');
@@ -1123,7 +1165,8 @@ async function runOnePostCommitResume(payload, holdIds, dbh, claims = new Map())
         // subscriber still carries the attempted address (r25), bound to
         // the attempted subscriber id when known (r31).
         await repenHoldPreservingDeny(holdId, outcome?.retryReason
-          || await sendFailedMarkerFor(sentEmailLc, dbh, outcome?.subscriberId || null, outcome?.confirmationToken || null), dbh, fenceOf(holdId));
+          || (resumeThrow ? `newsletter_resume_failed: ${resumeThrow.code || resumeThrow.name || 'resume_failed'}`
+            : await sendFailedMarkerFor(sentEmailLc, dbh, outcome?.subscriberId || null, outcome?.confirmationToken || null)), dbh, fenceOf(holdId));
       }
     }
     return outcome;
@@ -1215,6 +1258,14 @@ async function recordFirstTouchHold({ callLogId, customerId = null, heldEmail, h
           }
         }
       }
+      // A 'releasing' row is OWNED only while its lease is LIVE (Codex
+      // #3084 r37): a claim older than the stale window belongs to a dead
+      // worker, is reclaimable by anyone, and must not pin a PRIOR
+      // cycle's target — a force-reprocess minting a fresh review card
+      // for extraction B would otherwise leave target A on the row, and
+      // resolving the new card could reclaim and release A.
+      const liveLease = "first_touch_holds.status = 'releasing' AND first_touch_holds.updated_at >= ?";
+      const staleThreshold = new Date(Date.now() - STALE_CLAIM_MS);
       await dbh('first_touch_holds')
         .insert({
           call_log_id: callLogId,
@@ -1247,39 +1298,47 @@ async function recordFirstTouchHold({ callLogId, customerId = null, heldEmail, h
           // marks the row as carrying an operator-era value the stale
           // in-memory extraction must not overwrite. A pre-existing row
           // from an earlier run keeps updated_at < runStartedAt and
-          // still adopts the reprocess's fresh extraction.
+          // still adopts the reprocess's fresh extraction. STALE
+          // releasing rows adopt the fresh extraction too (r37) — their
+          // dead claimant's target is a prior cycle's value.
           held_email: runStartedAt
             ? dbh.raw(
-              "CASE WHEN first_touch_holds.status = 'releasing' THEN first_touch_holds.held_email"
+              `CASE WHEN ${liveLease} THEN first_touch_holds.held_email`
               + " WHEN first_touch_holds.released_at IS NOT NULL AND first_touch_holds.released_at >= ?"
               + " AND COALESCE(first_touch_holds.held_email, '') <> '' THEN first_touch_holds.held_email"
               + ' WHEN first_touch_holds.updated_at >= ?'
               + " AND COALESCE(first_touch_holds.held_email, '') <> '' THEN first_touch_holds.held_email"
               + ' ELSE ? END',
-              [runStartedAt, runStartedAt, emailToRecord],
+              [staleThreshold, runStartedAt, runStartedAt, emailToRecord],
             )
             : dbh.raw(
-              "CASE WHEN first_touch_holds.status = 'releasing' THEN first_touch_holds.held_email ELSE ? END",
-              [emailToRecord],
+              `CASE WHEN ${liveLease} THEN first_touch_holds.held_email ELSE ? END`,
+              [staleThreshold, emailToRecord],
             ),
           held_drip: dbh.raw('first_touch_holds.held_drip OR excluded.held_drip'),
           held_newsletter: dbh.raw('first_touch_holds.held_newsletter OR excluded.held_newsletter'),
           // Never demote an ACTIVE 'releasing' claim back to 'pending' — a
           // triage accept or correction may be mid-release on this row, and
           // re-pending it would let a second release path claim it and send
-          // a duplicate DOI. 'blocked' is the do-not-contact CONSENT
-          // terminal (Codex #3084 r19): a force-reprocess whose fresh
-          // extraction omits the earlier request must not resurrect the
-          // hold into a releasable state. Released/pending re-pend as
-          // before.
-          status: dbh.raw("CASE WHEN first_touch_holds.status IN ('releasing', 'blocked') THEN first_touch_holds.status ELSE 'pending' END"),
+          // a duplicate DOI. A STALE releasing row returns to 'pending'
+          // (claimable) instead (r37) — its worker is dead. 'blocked' is
+          // the do-not-contact CONSENT terminal (Codex #3084 r19): a
+          // force-reprocess whose fresh extraction omits the earlier
+          // request must not resurrect the hold into a releasable state.
+          // Released/pending re-pend as before.
+          status: dbh.raw(
+            `CASE WHEN (${liveLease}) OR first_touch_holds.status = 'blocked' THEN first_touch_holds.status ELSE 'pending' END`,
+            [staleThreshold],
+          ),
           // A live claim's updated_at IS its fence stamp (Codex #3084 r27)
           // — bumping it here would fence out the owning worker mid-release
           // AND extend a dead claimant's stale-claim window (the r12
-          // rationale). Releasing rows keep their stamp; everything else
-          // records the merge time as before.
+          // rationale). LIVE releasing rows keep their stamp; a stale
+          // releasing row takes the merge time with its flip to 'pending'
+          // (r37); everything else records the merge time as before.
           updated_at: dbh.raw(
-            "CASE WHEN first_touch_holds.status = 'releasing' THEN first_touch_holds.updated_at ELSE excluded.updated_at END",
+            `CASE WHEN ${liveLease} THEN first_touch_holds.updated_at ELSE excluded.updated_at END`,
+            [staleThreshold],
           ),
         });
       return true;
