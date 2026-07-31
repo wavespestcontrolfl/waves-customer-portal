@@ -57,6 +57,13 @@ const ADDRESS_MOOT_CODES = new Set([
   'address_unverified', 'address_validation_unavailable',
 ]);
 
+// Mirror of FAIL_OPEN_CUSTOMER_STAGES in call-recording-processor.js: only
+// these pipeline stages carry a trustworthy on-file address. Terminal and
+// dormant records (lost, disqualified, duplicate, churned, …) hold stale
+// data that routing deliberately refuses to recover from — the sweep must
+// not treat it as authoritative either.
+const TRUSTED_CUSTOMER_STAGES = new Set(['active_customer', 'won', 'at_risk']);
+
 // Cleared when THIS call provably produced a booking (source_call_log_id
 // provenance): the SCHEDULING doubt the card raised was answered by the
 // booking itself. Deliberately EXCLUDES reschedule_or_cancel and
@@ -270,6 +277,7 @@ function classifyTriageItem(item, ctx, { now = new Date() } = {}) {
   // mirror of the routing guard's on-file-address recovery condition. A
   // call that DID state an address keeps its card held for validation.
   if (ADDRESS_MOOT_CODES.has(code)
+      && TRUSTED_CUSTOMER_STAGES.has(String(item.customer_pipeline_stage || '').trim().toLowerCase())
       && customerPredatesCall(item)
       && !hasNewAddressEvidence(item.payload)
       && !callSuppliedAddress(item.call_extraction, item.call_extraction_v1)
@@ -289,8 +297,15 @@ function classifyTriageItem(item, ctx, { now = new Date() } = {}) {
       && String(item.customer_last_name || '').trim() !== '') {
     return { action: 'resolve', rule: 'name_moot' };
   }
-  if (BOOKING_OUTCOME_CODES.has(code) && ctx.bookedCallIds.has(item.call_log_id)) {
-    return { action: 'resolve', rule: 'booking_outcome' };
+  // Booking-outcome requires the booking to be the CURRENT routing result:
+  // the live source-linked row must have been created at/after this card. A
+  // pre-reprocess booking surviving while the new extraction filed fresh
+  // doubt cards is a discrepancy to review, not a resolution.
+  if (BOOKING_OUTCOME_CODES.has(code)) {
+    const bookedAt = ctx.bookedCallLatest?.get(item.call_log_id);
+    if (bookedAt && item.created_at && new Date(bookedAt) >= new Date(item.created_at)) {
+      return { action: 'resolve', rule: 'booking_outcome' };
+    }
   }
   if (code === 'spam_or_wrong_number' && ageDays(item.created_at, now) >= SPAM_AGE_DAYS) {
     return { action: 'dismiss', rule: 'spam_aged' };
@@ -325,6 +340,7 @@ async function sweep({ now = new Date() } = {}) {
       'cl.ai_extraction_enriched as call_extraction',
       'cl.ai_extraction as call_extraction_v1',
       'c.created_at as customer_created_at',
+      'c.pipeline_stage as customer_pipeline_stage',
       'c.address_line1 as customer_address_line1',
       'c.zip as customer_zip',
       'c.last_name as customer_last_name',
@@ -338,18 +354,24 @@ async function sweep({ now = new Date() } = {}) {
   // as booked.
   const allItemCallIds = [...new Set(items.map((i) => i.call_log_id))];
   const bookedCallIds = new Set();
+  const bookedCallLatest = new Map();
   if (allItemCallIds.length) {
     const booked = await db('scheduled_services')
       .whereIn('source_call_log_id', allItemCallIds)
       .whereNull('parent_service_id')
       .whereNotIn('status', ['cancelled', 'rescheduled'])
-      .distinct('source_call_log_id');
-    for (const b of booked) bookedCallIds.add(b.source_call_log_id);
+      .groupBy('source_call_log_id')
+      .select('source_call_log_id')
+      .max('created_at as latest_created_at');
+    for (const b of booked) {
+      bookedCallIds.add(b.source_call_log_id);
+      bookedCallLatest.set(b.source_call_log_id, b.latest_created_at);
+    }
   }
 
   const decisions = [];
   for (const item of items) {
-    const decision = classifyTriageItem(item, { bookedCallIds }, { now });
+    const decision = classifyTriageItem(item, { bookedCallIds, bookedCallLatest }, { now });
     if (decision) decisions.push({ item, ...decision });
   }
   const applied = decisions.slice(0, MAX_TRANSITIONS_PER_RUN);

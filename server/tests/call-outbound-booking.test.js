@@ -108,6 +108,10 @@ function confirmHookDb({ cardPayload = null, fallbackLeads = [], leadRow = null 
     return q;
   };
   fn.fn = { now: () => new Date() };
+  // Same-conn transaction passthrough + raw — the triage resolver now runs
+  // inside a transaction that takes the shared per-call advisory lock.
+  fn.transaction = async (cb) => cb(fn);
+  fn.raw = jest.fn(async () => ({}));
   fn._state = state;
   return fn;
 }
