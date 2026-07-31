@@ -29,7 +29,11 @@ jest.mock('../services/customer-contact', () => ({
   // The SMS resolver mirrors getServiceContact in these fixtures (no
   // service-contact phones are modeled, so gating never diverges).
   getServiceContactSmsRecipient: (c) => ({
-    phone: c.phone !== undefined ? c.phone : '+19410000000',
+    // service_contact_phone models a consented service contact who is NOT the
+    // account holder (recipient-identity guard tests).
+    phone: c.service_contact_phone !== undefined
+      ? c.service_contact_phone
+      : (c.phone !== undefined ? c.phone : '+19410000000'),
     email: c.email !== undefined ? c.email : 'x@y.com',
     name: c.first_name || 'Stan',
   }),
@@ -853,6 +857,32 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(retry.custom_body).toBe(priorDraft);
     const sentBody = mockSendCustomerMessage.mock.calls[0][0].body;
     expect(sentBody).toContain('hope the ants stayed gone');
+  });
+
+  test('a retry does NOT reuse a persisted draft when the recipient is no longer the account holder', async () => {
+    const priorDraft = 'Hi Stan, hope the ants stayed gone. If we earned it: {review_url}. Anything off, just reply here.';
+    const mock = makeMock({
+      // SMS now routes to a service contact whose phone differs from the
+      // account holder's — the account-holder draft must NOT follow them.
+      customers: [{ id: 'rc-1', first_name: 'Stan', last_name: 'P', phone: '+19410000061', service_contact_phone: '+19419999999', nearest_location_id: 'bradenton' }],
+      review_sequences: [{
+        id: 'seq-rc', customer_id: 'rc-1', status: 'active', current_step: 0, touches_sent: 0,
+        plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }]),
+        started_at: new Date(Date.now() - 3600000), next_run_at: new Date(Date.now() - 60000),
+      }],
+      review_requests: [{ id: 'rr-rc', sequence_id: 'seq-rc', sequence_step: 0, customer_id: 'rc-1', channel: 'sms', custom_body: priorDraft, status: 'deferred', created_at: new Date(Date.now() - 1800000) }],
+    });
+    db.mockImplementation(mock);
+
+    const out = await ReviewService.processReviewSequences();
+
+    expect(out.sent).toBe(1);
+    expect(mockDraftAskBody).not.toHaveBeenCalled();
+    const retry = mock.__state.rows.review_requests.find((r) => r.id !== 'rr-rc');
+    expect(retry.custom_body == null).toBe(true);
+    const sentBody = mockSendCustomerMessage.mock.calls[0][0].body;
+    expect(sentBody).not.toContain('hope the ants stayed gone');
+    expect(sentBody).toContain('Waves Pest Control'); // friendly_ask template
   });
 
   test('a cadence stops with reason "clicked" once a touch was redirected to Google (direct-link engagement)', async () => {

@@ -131,12 +131,34 @@ function verifyDraftBody(body, { firstName } = {}) {
   return null;
 }
 
+// A service date can arrive as a DATE-ONLY value: pg date columns come back
+// as 'YYYY-MM-DD' strings or as JS Dates pinned to UTC midnight. Running
+// those through new Date() + etDateString would shift them to the PREVIOUS
+// Eastern calendar day (UTC midnight = 8 PM ET the night before), grounding a
+// same-day touch as "1 day ago" (Codex P1, r2). Date-only values ARE the ET
+// calendar day — take them literally; only real timestamps go through the ET
+// wall-clock conversion.
+function etCalendarDayOf(value) {
+  if (typeof value === "string") {
+    const m = value.match(/^(\d{4}-\d{2}-\d{2})(?:$|T00:00:00(?:\.0+)?(?:Z)?$)/);
+    if (m) return m[1];
+  }
+  if (value instanceof Date
+    && value.getUTCHours() === 0 && value.getUTCMinutes() === 0
+    && value.getUTCSeconds() === 0 && value.getUTCMilliseconds() === 0) {
+    // Exactly UTC midnight = a pg DATE deserialized by node-postgres. A real
+    // completion at 00:00:00.000Z (8 PM ET) is not a plausible timestamp.
+    return value.toISOString().slice(0, 10);
+  }
+  return etDateString(value instanceof Date ? value : new Date(value));
+}
+
 // ET-calendar day difference — a customer-facing "completed N days ago" must
 // follow America/New_York calendar dates, not elapsed-ms rounding that flips
 // across a midnight-crossing delay (Codex P1, r1).
 function etCalendarDaysBetween(a, b) {
-  const dayA = Date.parse(`${etDateString(a)}T00:00:00Z`);
-  const dayB = Date.parse(`${etDateString(b)}T00:00:00Z`);
+  const dayA = Date.parse(`${etCalendarDayOf(a)}T00:00:00Z`);
+  const dayB = Date.parse(`${etCalendarDayOf(b)}T00:00:00Z`);
   return Math.max(0, Math.round((dayB - dayA) / 86400000));
 }
 
@@ -250,7 +272,7 @@ const ReviewAskDrafter = {
 
       const firstName = recipientFirstName || customer.first_name || "";
       const now = new Date();
-      const serviceDaysAgo = serviceDate ? etCalendarDaysBetween(new Date(serviceDate), now) : null;
+      const serviceDaysAgo = serviceDate ? etCalendarDaysBetween(serviceDate, now) : null;
       const stepKind = resolveStepKind(sequenceStep, serviceDaysAgo);
       const facts = buildFactsBlock({
         firstName,
@@ -294,7 +316,7 @@ const ReviewAskDrafter = {
   },
 
   verifyDraftBody,
-  __private: { normalizeSmsPunctuation, etCalendarDaysBetween, resolveStepKind },
+  __private: { normalizeSmsPunctuation, etCalendarDaysBetween, etCalendarDayOf, resolveStepKind },
 };
 
 module.exports = ReviewAskDrafter;

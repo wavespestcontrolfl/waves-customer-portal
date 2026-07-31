@@ -1622,25 +1622,30 @@ const ReviewService = {
     // or a recipient who isn't the account holder) falls through to the
     // template.
     if (actualChannel === "sms" && !persistedBody && !noLinkSend && sequenceId != null) {
-      // Retry reuse: a deferred/transiently-failed step re-enters here with no
-      // customBody — reuse the draft already persisted for this exact step so
-      // one touch can never send two different drafts (Codex P2, r1).
-      try {
-        const prior = await db("review_requests")
-          .where({ sequence_id: sequenceId, sequence_step: sequenceStep })
-          .whereNotNull("custom_body")
-          .orderBy("created_at", "desc")
-          .first();
-        if (prior?.custom_body) persistedBody = prior.custom_body;
-      } catch { /* reuse is best-effort; a fresh draft is still verified */ }
-
       // Identity guard (Codex P1, r1): the SMS goes to the RESOLVED service
       // contact. The account's call/SMS history only belongs to the account
       // holder — when the recipient is someone else (tenant, buyer, realtor),
       // skip drafting entirely so their message can't carry the account
-      // holder's name or private conversation details.
+      // holder's name or private conversation details. Checked BEFORE retry
+      // reuse: a draft persisted for the account holder must not be re-sent
+      // to a recipient who changed between attempts (Codex P1, r2).
       const recipientIsAccountHolder = !!(contact.phone && customer.phone
         && (toE164(contact.phone) || contact.phone) === (toE164(customer.phone) || customer.phone));
+
+      // Retry reuse: a deferred/transiently-failed step re-enters here with no
+      // customBody — reuse the draft already persisted for this exact step so
+      // one touch can never send two different drafts (Codex P2, r1).
+      if (recipientIsAccountHolder) {
+        try {
+          const prior = await db("review_requests")
+            .where({ sequence_id: sequenceId, sequence_step: sequenceStep })
+            .whereNotNull("custom_body")
+            .orderBy("created_at", "desc")
+            .first();
+          if (prior?.custom_body) persistedBody = prior.custom_body;
+        } catch { /* reuse is best-effort; a fresh draft is still verified */ }
+      }
+
       if (!persistedBody && recipientIsAccountHolder) {
         const drafted = await require("./review-ask-drafter").draftAskBody({
           customer,

@@ -114,6 +114,27 @@ describe('verifyDraftBody — the auto-send safety net', () => {
   });
 });
 
+describe('etCalendarDayOf — pg date-only values stay on their ET calendar day', () => {
+  const { etCalendarDayOf, etCalendarDaysBetween } = Drafter.__private;
+
+  test('a YYYY-MM-DD string is taken literally, not shifted through UTC', () => {
+    expect(etCalendarDayOf('2026-07-27')).toBe('2026-07-27');
+    // Same-day step-0: service date 07-27, drafting at 2 PM ET on 07-27 → 0 days.
+    expect(etCalendarDaysBetween('2026-07-27', new Date('2026-07-27T14:00:00-04:00'))).toBe(0);
+  });
+
+  test('a pg DATE deserialized as UTC-midnight Date is taken literally', () => {
+    const pgDate = new Date('2026-07-27T00:00:00.000Z'); // 8 PM ET on 07-26 as a timestamp
+    expect(etCalendarDayOf(pgDate)).toBe('2026-07-27');
+    expect(etCalendarDaysBetween(pgDate, new Date('2026-07-27T14:00:00-04:00'))).toBe(0);
+  });
+
+  test('a real timestamp still converts through the ET wall clock', () => {
+    // 11 PM ET on 07-26 (03:00Z on 07-27) is ET calendar day 07-26.
+    expect(etCalendarDayOf(new Date('2026-07-27T03:00:00.000Z'))).toBe('2026-07-26');
+  });
+});
+
 describe('draftAskBody — gating + fallback contract', () => {
   test('gate off → null, and no model call is made', async () => {
     mockGates.reviewAskPersonalized = false;
