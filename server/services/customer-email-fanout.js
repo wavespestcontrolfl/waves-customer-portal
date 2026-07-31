@@ -52,6 +52,7 @@ const { randomUUID } = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const { cleanValidEmailOrNull } = require('../utils/intake-normalize');
+const { lockTriageCall } = require('../utils/triage-locks');
 
 // Mirrors customer-address-fanout (which mirrors SENDABLE_ESTIMATE_STATUSES in
 // routes/admin-estimates.js and CLOSED_STATUSES in intelligence-bar/leads-tools.js).
@@ -324,25 +325,36 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
     .whereIn('call_log_id', conn('call_log').select('id').where({ customer_id: customerId }))
     .select('id', 'call_log_id');
   if (openItems.length) {
-    counts.reviewCards += await conn('triage_items')
-      .whereIn('id', openItems.map((i) => i.id))
-      .whereIn('status', OPEN_REVIEW_STATES)
-      .update({
-        status: 'resolved',
-        resolution_note: `Email corrected on the customer record (${String(source).slice(0, 100)})`,
-        resolved_at: now,
-        updated_at: now,
-      });
-    for (const callId of [...new Set(openItems.map((i) => i.call_log_id).filter(Boolean))]) {
-      const stillOpen = await conn('triage_items')
-        .where({ call_log_id: callId })
+    // Shared per-call lock contract (utils/triage-locks.js) with the nightly
+    // auto-resolve sweep and admin-triage: sorted acquisition BEFORE any card
+    // write, inside a transaction, so overlapping writers on the same call
+    // serialize instead of deadlocking (an aborted deadlock here would roll
+    // back the operator's email edit).
+    const resolveCards = async (trx) => {
+      const callIds = [...new Set(openItems.map((i) => i.call_log_id).filter(Boolean))].sort();
+      for (const callId of callIds) await lockTriageCall(trx, callId);
+      const updated = await trx('triage_items')
+        .whereIn('id', openItems.map((i) => i.id))
         .whereIn('status', OPEN_REVIEW_STATES)
-        .count('* as n')
-        .first();
-      await conn('call_log')
-        .where({ id: callId })
-        .update({ review_status: parseInt(stillOpen?.n || 0, 10) > 0 ? 'open' : 'resolved', updated_at: now });
-    }
+        .update({
+          status: 'resolved',
+          resolution_note: `Email corrected on the customer record (${String(source).slice(0, 100)})`,
+          resolved_at: now,
+          updated_at: now,
+        });
+      for (const callId of callIds) {
+        const stillOpen = await trx('triage_items')
+          .where({ call_log_id: callId })
+          .whereIn('status', OPEN_REVIEW_STATES)
+          .count('* as n')
+          .first();
+        await trx('call_log')
+          .where({ id: callId })
+          .update({ review_status: parseInt(stillOpen?.n || 0, 10) > 0 ? 'open' : 'resolved', updated_at: now });
+      }
+      return updated;
+    };
+    counts.reviewCards += await (conn.isTransaction ? resolveCards(conn) : conn.transaction(resolveCards));
   }
 
   if (Object.values(counts).some(Boolean)) {

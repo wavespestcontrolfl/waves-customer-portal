@@ -43,7 +43,10 @@ function makeConn(cfg = {}) {
     };
     return qb;
   };
-  conn.raw = (sql) => ({ __raw: sql });
+  conn.raw = (sql, bindings) => { calls.push({ table: '__raw', op: 'raw', arg: { sql, bindings } }); return { __raw: sql, __bindings: bindings }; };
+  // Same-conn transaction passthrough — the review-card block wraps its
+  // writes in conn.transaction (shared per-call lock contract).
+  conn.transaction = async (fn) => fn(conn);
   conn.__calls = calls;
   conn.__updates = (table) => calls.filter((c) => c.table === table && c.op === 'update');
   return conn;
