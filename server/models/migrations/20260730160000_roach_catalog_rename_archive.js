@@ -103,13 +103,17 @@ function rollbackInvoiceSnapshot(inv, changed, fromName, toName) {
   return Object.keys(patch).length ? patch : null;
 }
 
-// Reminder labels can be a single service name or an ' & '-merged multi-
-// service label ("Quarterly Pest Control Service & Initial German Roach
-// Knockdown Service") — swap exact-matching PARTS only.
+// Reminder labels persist in several list formats: a single name, a pair
+// "A & B" (buildServiceLabel / the sibling merger), Oxford "A, B, and C"
+// (three or more services), and merged "A, B & C". Tokenize on every
+// separator (", and " before ", " so the Oxford form splits correctly),
+// swap exact-matching COMPONENTS only, and rejoin with the original
+// separators — a name that itself contains " & " (Wasp & Hornet Control)
+// splits into non-matching tokens and rejoins byte-identical.
 function relabelReminderServiceType(value, fromName, toName) {
   if (typeof value !== 'string' || !value) return null;
-  const parts = value.split(' & ');
-  const next = parts.map((p) => (p === fromName ? toName : p)).join(' & ');
+  const tokens = value.split(/(\s+&\s+|,\s+and\s+|,\s+)/);
+  const next = tokens.map((t, i) => (i % 2 === 0 && t === fromName ? toName : t)).join('');
   return next === value ? null : next;
 }
 

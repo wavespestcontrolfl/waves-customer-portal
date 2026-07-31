@@ -44,8 +44,14 @@ function seedDb() {
       // the sibling OWNER row linked to the earlier (lawn) visit.
       { id: 'rem-suppressed', scheduled_service_id: 'v-open-2', service_type: OLD_NAME, suppressed_by_sibling: true, customer_id: 'cust-2', appointment_time: 'T2', updated_at: 'orig' },
       { id: 'rem-owner', scheduled_service_id: 'v-other', service_type: `Lawn Care Service & ${OLD_NAME}`, customer_id: 'cust-2', appointment_time: 'T2', updated_at: 'orig' },
-      // Reminder on the add-on parent — merged label includes the add-on.
-      { id: 'rem-parent', scheduled_service_id: 'v-parent', service_type: `Quarterly Pest Control Service & ${OLD_NAME}`, customer_id: 'cust-4', appointment_time: 'T4', updated_at: 'orig' },
+      // Reminder on the add-on parent — Oxford 3+ label with the old name
+      // EMBEDDED mid-list, plus a component that itself contains " & "
+      // (codex r6: splitting only on " & " left the old name inside a
+      // larger component).
+      { id: 'rem-parent', scheduled_service_id: 'v-parent', service_type: `Quarterly Pest Control Service, ${OLD_NAME}, and Wasp & Hornet Control`, customer_id: 'cust-4', appointment_time: 'T4', updated_at: 'orig' },
+      // Mixed merged form "A, B & C" on the shared slot — reached via the
+      // sibling sweep.
+      { id: 'rem-owner-mixed', scheduled_service_id: 'v-other', service_type: `Bed Bug Treatment, ${OLD_NAME} & Flea Treatment`, customer_id: 'cust-2', appointment_time: 'T2', updated_at: 'orig' },
       { id: 'rem-unrelated', scheduled_service_id: 'v-other', service_type: 'Lawn Care Service', customer_id: 'cust-3', appointment_time: 'T3', updated_at: 'orig' },
     ],
     service_completion_profiles: [
@@ -296,7 +302,11 @@ describe('20260730160000 roach catalog rename + archive', () => {
     expect(rem('rem-1').service_type).toBe(NEW_NAME);
     expect(rem('rem-suppressed').service_type).toBe(NEW_NAME);
     expect(rem('rem-owner').service_type).toBe(`Lawn Care Service & ${NEW_NAME}`);
-    expect(rem('rem-parent').service_type).toBe(`Quarterly Pest Control Service & ${NEW_NAME}`);
+    // Oxford 3+ form: the embedded component swaps; "Wasp & Hornet Control"
+    // splits on its own '&' but rejoins byte-identical.
+    expect(rem('rem-parent').service_type).toBe(`Quarterly Pest Control Service, ${NEW_NAME}, and Wasp & Hornet Control`);
+    // Mixed "A, B & C" merged form via the sibling sweep.
+    expect(rem('rem-owner-mixed').service_type).toBe(`Bed Bug Treatment, ${NEW_NAME} & Flea Treatment`);
     expect(rem('rem-unrelated').service_type).toBe('Lawn Care Service');
 
     // Add-on snapshots: open parent relabels, completed parent is history.
@@ -324,7 +334,8 @@ describe('20260730160000 roach catalog rename + archive', () => {
     const remAfter = (id) => db.appointment_reminders.find((r) => r.id === id);
     expect(remAfter('rem-1').service_type).toBe(OLD_NAME);
     expect(remAfter('rem-owner').service_type).toBe(`Lawn Care Service & ${OLD_NAME}`);
-    expect(remAfter('rem-parent').service_type).toBe(`Quarterly Pest Control Service & ${OLD_NAME}`);
+    expect(remAfter('rem-parent').service_type).toBe(`Quarterly Pest Control Service, ${OLD_NAME}, and Wasp & Hornet Control`);
+    expect(remAfter('rem-owner-mixed').service_type).toBe(`Bed Bug Treatment, ${OLD_NAME} & Flea Treatment`);
     expect(db.scheduled_service_addons.find((a) => a.id === 'add-open').service_name).toBe(OLD_NAME);
   });
 
