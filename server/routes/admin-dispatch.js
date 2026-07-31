@@ -5548,6 +5548,22 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     const completedLawnAssessmentId =
       linkedLawnAssessmentId || parseJsonObject(record.structured_notes).lawnAssessmentId || null;
     if (!isIncompleteVisit && completedLawnAssessmentId) {
+      // FAIL CLOSED (codex P1 r21): the safety gate arms BEFORE any fallible
+      // setup — a transient failure in the assessment lookup/relink below
+      // must leave the MMS/SMS-tip/email gates CLOSED (not-grounded), not
+      // silently open because `attempted` was never set. The catch installs
+      // a sanitize-based finalCopy chain so held artifacts still settle.
+      const KnowledgeBridgeGate = require('../services/knowledge-bridge');
+      const lawnRecSanitizeWithRetry = async (tries = 4) => {
+        for (let attempt = 0; attempt < tries; attempt += 1) {
+          const res = await KnowledgeBridgeGate.sanitizeStoredRecommendations(completedLawnAssessmentId)
+            .catch((e) => ({ changed: false, error: e.message }));
+          if (!res.error) return res;
+          await new Promise((resolve) => { setTimeout(resolve, 15000 * (attempt + 1)).unref?.(); });
+        }
+        return { changed: false, error: 'sanitize retries exhausted' };
+      };
+      lawnRecRegenAttempted = true;
       try {
         const completedAssessment = await db('lawn_assessments')
           .where({
@@ -5584,8 +5600,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // the grounded correction still becomes durable and the PDF-queue
         // block re-renders the artifact when it lands (r8) — no permanent
         // stale copy on either path.
-        const KnowledgeBridge = require('../services/knowledge-bridge');
-        lawnRecRegenAttempted = true;
+        const KnowledgeBridge = KnowledgeBridgeGate;
         lawnRecRegenPromise = KnowledgeBridge.generateAssessmentRecommendations(completedAssessment.id)
           .catch((recErr) => { logger.warn(`[dispatch] post-completion recommendation regen failed (non-blocking): ${recErr.message}`); return null; });
         // LIVE grounded flag (codex P2 r15): the promise updates it whenever
@@ -5600,18 +5615,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // rejecting, so the chain retries with backoff and resolves
         // { verified, changed } — consumers must not treat an errored
         // sanitize as a clean no-op.
-        const sanitizeWithRetry = async (tries = 4) => {
-          for (let attempt = 0; attempt < tries; attempt += 1) {
-            const res = await KnowledgeBridge.sanitizeStoredRecommendations(completedAssessment.id)
-              .catch((e) => ({ changed: false, error: e.message }));
-            if (!res.error) return res;
-            await new Promise((resolve) => { setTimeout(resolve, 15000 * (attempt + 1)).unref?.(); });
-          }
-          return { changed: false, error: 'sanitize retries exhausted' };
-        };
         lawnRecFinalCopyPromise = lawnRecRegenPromise.then(async (result) => {
           if (result) return { verified: true, changed: true };
-          const sanitized = await sanitizeWithRetry();
+          const sanitized = await lawnRecSanitizeWithRetry();
           if (sanitized.error) {
             logger.error(`[dispatch] stored-copy sanitize UNVERIFIED for assessment ${completedAssessment.id}: ${sanitized.error} — held email stays gated by the worker`);
           }
@@ -5633,6 +5639,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         }
       } catch (err) {
         logger.error(`[dispatch] Lawn assessment service_record link failed (non-blocking): ${err.message}`);
+        // Setup failed before (or during) regen creation: keep the gates
+        // closed and install a sanitize-based settlement chain so the held
+        // email / recovery render still converge on safe copy (codex P1 r21).
+        if (!lawnRecFinalCopyPromise) {
+          lawnRecFinalCopyPromise = lawnRecSanitizeWithRetry().then((res) => ({ verified: !res.error, changed: !!res.changed }));
+          void lawnRecFinalCopyPromise.catch((chainErr) => logger.error(`[dispatch] fallback sanitize chain failed: ${chainErr.message}`));
+        }
       }
     }
 

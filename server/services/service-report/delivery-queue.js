@@ -261,10 +261,17 @@ async function processServiceReportDelivery(delivery, knex = db) {
       const status = await markDeliveryFailed(delivery, new Error('deferred: PDF render in flight while finalizing held delivery'), knex);
       return { status, error: 'pdf render in flight' };
     }
-    await knex('service_records')
-      .where({ id: delivery.service_record_id })
-      .update({ pdf_storage_key: null })
-      .catch(() => {});
+    try {
+      await knex('service_records')
+        .where({ id: delivery.service_record_id })
+        .update({ pdf_storage_key: null });
+    } catch (invalidateErr) {
+      // Invalidation failed → the stale key would be accepted by
+      // getOrRenderServiceReportPdf and the pre-grounding PDF emailed.
+      // Retryable delivery failure instead of sending (codex P1 r21).
+      const status = await markDeliveryFailed(delivery, new Error(`pdf invalidation failed: ${invalidateErr.message}`), knex);
+      return { status, error: invalidateErr.message };
+    }
   }
 
   try {

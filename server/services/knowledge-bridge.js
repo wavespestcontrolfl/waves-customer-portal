@@ -262,15 +262,16 @@ async function loadAppliedProductsWithCategories(serviceRecordId, knexOrTrx) {
     .select('product_name', 'product_category', 'product_id');
   const missingIds = [...new Set(rows.filter((r) => !r.product_category && r.product_id).map((r) => String(r.product_id)))];
   if (!missingIds.length) return rows;
-  try {
-    const catalogRows = await knexOrTrx('products_catalog').whereIn('id', missingIds).select('id', 'category');
-    const categoryById = new Map(catalogRows.map((c) => [String(c.id), c.category]));
-    return rows.map((r) => ((r.product_category || !r.product_id)
-      ? r
-      : { ...r, product_category: categoryById.get(String(r.product_id)) || r.product_category }));
-  } catch {
-    return rows;
-  }
+  // A transient catalog failure must PROPAGATE (codex P1 r21): swallowing it
+  // returns unenriched rows, the classifier misses the applied class, and
+  // both generation and sanitation report success while blind to today's
+  // treatments. Throwing routes the generation run to null/unverified and
+  // the sanitize transaction to its { error } result.
+  const catalogRows = await knexOrTrx('products_catalog').whereIn('id', missingIds).select('id', 'category');
+  const categoryById = new Map(catalogRows.map((c) => [String(c.id), c.category]));
+  return rows.map((r) => ((r.product_category || !r.product_id)
+    ? r
+    : { ...r, product_category: categoryById.get(String(r.product_id)) || r.product_category }));
 }
 
 function sanitizeRecommendationsAgainstTreatment(parsed, appliedProducts) {
