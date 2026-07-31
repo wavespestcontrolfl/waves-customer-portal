@@ -211,15 +211,20 @@ router.get('/preferences', async (req, res, next) => {
     });
     // Bell-category overrides ('category:<cat>' pseudo-keys) for the admin
     // bell policy (GATE_ADMIN_BELL_POLICY). Default OFF — no row means the
-    // category stays silenced while the gate is on.
-    const bellCategories = [...OVERRIDABLE_CATEGORY_SET].map((cat) => {
-      const r = byKey.get(`category:${cat}`);
-      return {
-        key: `category:${cat}`,
-        category: cat,
-        bell_enabled: r ? r.bell_enabled === true : false,
-      };
-    });
+    // category stays silenced while the gate is on. ADMIN-ONLY on read as
+    // well as write: the PUT 403s category keys from techs, so returning
+    // them here would make the settings page unsavable for technicians
+    // (the client round-trips whatever it received).
+    const bellCategories = req.techRole === 'admin'
+      ? [...OVERRIDABLE_CATEGORY_SET].map((cat) => {
+        const r = byKey.get(`category:${cat}`);
+        return {
+          key: `category:${cat}`,
+          category: cat,
+          bell_enabled: r ? r.bell_enabled === true : false,
+        };
+      })
+      : [];
     res.json({ preferences: merged, bellCategories });
   } catch (err) { next(err); }
 });
