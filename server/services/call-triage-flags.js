@@ -583,15 +583,22 @@ function agentCommitmentSentenceVerified(quote, transcript, confirmedStartAt, ca
   const containing = [];
   for (const turn of agentTurns) {
     const wholeTurn = normalizeCommitmentText(turn);
-    const sentences = String(turn).replace(/\b([ap])\.\s?m\.?/gi, '$1m').split(/[.!?;]+/)
-      .map((s) => normalizeCommitmentText(s)).filter(Boolean);
-    const turnFullyInVocabulary = sentences.every((s) => commitmentTurnVocabularyOk(s));
-    for (const ns of sentences) {
-      if (ns.includes(q)) containing.push({ ns, wholeTurn, turnFullyInVocabulary });
+    // Sentence chunks KEEP their terminator (codex P0, round 7n): splitting
+    // on [.!?;]+ discarded the "?" that makes "So we will confirm it for
+    // noon on Sunday?" a QUESTION — an interrogative sentence can never be
+    // the commitment sentence.
+    const chunks = (String(turn).replace(/\b([ap])\.\s?m\.?/gi, '$1m').match(/[^.!?;]+[.!?;]*/g) || []);
+    const sentences = chunks
+      .map((c) => ({ ns: normalizeCommitmentText(c), interrogative: c.includes('?') }))
+      .filter((s) => s.ns);
+    const turnFullyInVocabulary = sentences.every((s) => commitmentTurnVocabularyOk(s.ns));
+    for (const s of sentences) {
+      if (s.ns.includes(q)) containing.push({ ...s, wholeTurn, turnFullyInVocabulary });
     }
   }
   if (!containing.length) return false;
-  return containing.every(({ ns, wholeTurn, turnFullyInVocabulary }) => turnFullyInVocabulary
+  return containing.every(({ ns, interrogative, wholeTurn, turnFullyInVocabulary }) => !interrogative
+    && turnFullyInVocabulary
     && !turnHasNegationOrHedge(wholeTurn)
     && !turnHasUnresolvedConditional(wholeTurn)
     && turnHasAffirmativeCommitmentForm(ns)
