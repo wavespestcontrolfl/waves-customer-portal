@@ -263,6 +263,7 @@ describe('weatherMove banner context (GATE_RAINOUT_MOVE_BANNER)', () => {
   };
   const LOG = {
     reason_code: 'weather_rain',
+    initiated_by: 'tech',
     original_date: '2026-07-03',
     original_window: '12:00:00-14:00:00',
     new_date: '2026-07-04',
@@ -316,6 +317,16 @@ describe('weatherMove banner context (GATE_RAINOUT_MOVE_BANNER)', () => {
   test('a non-weather newest log row means no banner — later moves supersede the story', async () => {
     process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
     wireLog({ ...LOG, reason_code: 'customer_request' });
+    expect(await loadWeatherMove(SVC, NOW)).toBeNull();
+  });
+
+  test('a customer-initiated move keeping the weather reason is the customer\'s pick, not a banner (codex r3)', async () => {
+    process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+    // reschedule-sms reply flow logs customer_sms with the original
+    // weather_* reason; the self-serve page logs customer_self_serve.
+    wireLog({ ...LOG, initiated_by: 'customer_sms' });
+    expect(await loadWeatherMove(SVC, NOW)).toBeNull();
+    wireLog({ ...LOG, initiated_by: 'customer_self_serve' });
     expect(await loadWeatherMove(SVC, NOW)).toBeNull();
   });
 
