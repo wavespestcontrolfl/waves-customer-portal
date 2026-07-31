@@ -84,6 +84,25 @@ describe('moot-condition resolves', () => {
     }), noBookings, { now: NOW })).toBeNull();
   });
 
+  test('V1-ONLY address evidence blocks the resolve even when V2 heard nothing (the bridge-demotion case)', () => {
+    const v1Heard = item({
+      reason_code: 'address_unverified',
+      customer_address_line1: '123 Sample St', customer_zip: '34205',
+      call_extraction: NO_ADDR_EXTRACTION,
+      call_extraction_v1: JSON.stringify({ address_line1: '456 Other Rd', city: 'Bradenton', zip: null }),
+    });
+    expect(classifyTriageItem(v1Heard, noBookings, { now: NOW })).toBeNull();
+    // Unparseable V1 fails closed; a NULL V1 leaves the V2 verdict standing.
+    expect(classifyTriageItem(item({
+      customer_address_line1: '123 Sample St', customer_zip: '34205',
+      call_extraction_v1: 'not-json{',
+    }), noBookings, { now: NOW })).toBeNull();
+    expect(classifyTriageItem(item({
+      customer_address_line1: '123 Sample St', customer_zip: '34205',
+      call_extraction_v1: null,
+    }), noBookings, { now: NOW })).toEqual({ action: 'resolve', rule: 'address_moot' });
+  });
+
   test('a customer created FROM/AFTER the call never moots its own address card (circular provenance)', () => {
     expect(classifyTriageItem(item({
       customer_address_line1: '123 Sample St', customer_zip: '34205',
@@ -158,7 +177,12 @@ describe('fail-closed allowlist — owed work is NEVER swept', () => {
     'email_bounce_reverify', 'extraction_failed_permanent',
     'v2_extraction_invalid', 'shared_phone_ambiguous', 'out_of_service_area',
     'do_not_contact_requested', 'hoa_common_area_requires_approval',
-    'implied_consent_non_ani_recipient', 'some_future_unknown_code',
+    'implied_consent_non_ani_recipient',
+    // Advisory-by-design cards carrying OWED office confirmations — never
+    // age out (the read-back/identity check stands until performed).
+    'address_recovered', 'address_readback', 'caller_phone_not_on_file',
+    'email_unverified', 'email_invalid',
+    'some_future_unknown_code',
   ];
   test.each(owedCodes)('%s stays open even when ancient', (code) => {
     expect(classifyTriageItem(item({ reason_code: code, created_at: OLD_31D }), noBookings, { now: NOW })).toBeNull();

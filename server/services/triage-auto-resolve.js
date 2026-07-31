@@ -75,16 +75,23 @@ const BOOKING_OUTCOME_CODES = new Set([
 // Age dismissal additionally requires the ROW's severity = 'advisory': the
 // same reason code can be inserted blocking at one site and advisory at
 // another (insert-site severity in call-recording-processor), and a blocking
-// card is owed review no matter how old it gets. NOT listed on purpose:
-// implied_consent_non_ani_recipient (explicitly asks the office to confirm
-// the recipient before the held confirmation SMS goes out — owed work).
+// card is owed review no matter how old it gets.
+//
+// NOT listed on purpose — advisory-by-design cards that carry an OWED
+// office confirmation which stands until performed, no matter how old
+// (an appointment booked 30+ days out still needs its read-back):
+// address_recovered / address_readback (recovered street must be read back
+// before the visit), caller_phone_not_on_file (identity check before the
+// ANI is saved), email_unverified / email_invalid (dictated-email
+// read-back; customer-email-fanout resolves them on correction), and
+// implied_consent_non_ani_recipient (confirm the recipient before the held
+// confirmation SMS goes out).
 const ADVISORY_AGE_CODES = new Set([
   'rental_or_tenant_occupied', 'secondary_contact_captured',
-  'second_service_address', 'multi_property_call', 'address_recovered',
-  'address_readback', 'caller_phone_not_on_file', 'name_email_mismatch',
+  'second_service_address', 'multi_property_call', 'name_email_mismatch',
   'no_sms_consent_captured', 'sms_consent_missing',
   'low_extraction_confidence', 'voicemail', 'caller_not_authorized',
-  'email_unverified', 'email_invalid', 'missing_last_name',
+  'missing_last_name',
 ]);
 
 const RULE_NOTES = {
@@ -125,28 +132,47 @@ function hasNewAddressEvidence(payloadRaw) {
   );
 }
 
-// Did the CALL's own extraction supply a service address? The blocking-loop
+// Did the CALL's own extractions supply a service address? The blocking-loop
 // insert sites create address cards with BASE payloads (no address fields),
 // so the payload check above cannot see the held-for-validation case there —
-// the authoritative signal is the stored V2 extraction. Fail closed: a
-// missing/unparseable extraction keeps the card (we cannot prove the call
+// the authoritative signals are the stored extractions. BOTH are checked:
+// the V1↔V2 bridge deliberately opens a blocking address_unverified card
+// when V2 heard no address but V1 captured one, so V2 alone would wrongly
+// prove "no address supplied" exactly there. Fail closed: a missing V2 or
+// an unparseable extraction keeps the card (we cannot prove the call
 // supplied nothing).
-function callSuppliedAddress(extractionRaw) {
-  let extraction = extractionRaw;
-  if (!extraction) return true;
-  if (typeof extraction === 'string') {
+function callSuppliedAddress(v2Raw, v1Raw) {
+  let v2 = v2Raw;
+  if (!v2) return true;
+  if (typeof v2 === 'string') {
     try {
-      extraction = JSON.parse(extraction);
+      v2 = JSON.parse(v2);
     } catch {
       return true;
     }
   }
-  const addr = extraction?.property?.service_address || {};
+  const addr = v2?.property?.service_address || {};
+  if (String(addr.raw_text || '').trim()
+      || String(addr.street_line_1 || '').trim()
+      || String(addr.city || '').trim()
+      || String(addr.postal_code || '').trim()) {
+    return true;
+  }
+  // V1 (legacy flat shape): a null V1 means no legacy evidence to consult;
+  // an unparseable one fails closed.
+  let v1 = v1Raw;
+  if (v1 == null) return false;
+  if (typeof v1 === 'string') {
+    try {
+      v1 = JSON.parse(v1);
+    } catch {
+      return true;
+    }
+  }
   return Boolean(
-    String(addr.raw_text || '').trim()
-    || String(addr.street_line_1 || '').trim()
-    || String(addr.city || '').trim()
-    || String(addr.postal_code || '').trim(),
+    String(v1?.address_line1 || '').trim()
+    || String(v1?.city || '').trim()
+    || String(v1?.zip || '').trim(),
   );
 }
 
@@ -179,7 +205,7 @@ function classifyTriageItem(item, ctx, { now = new Date() } = {}) {
   if (ADDRESS_MOOT_CODES.has(code)
       && customerPredatesCall(item)
       && !hasNewAddressEvidence(item.payload)
-      && !callSuppliedAddress(item.call_extraction)
+      && !callSuppliedAddress(item.call_extraction, item.call_extraction_v1)
       && String(item.customer_address_line1 || '').trim() !== ''
       && String(item.customer_zip || '').trim() !== '') {
     return { action: 'resolve', rule: 'address_moot' };
@@ -227,6 +253,7 @@ async function sweep({ now = new Date() } = {}) {
       't.created_at', 't.payload',
       'cl.created_at as call_created_at',
       'cl.ai_extraction_enriched as call_extraction',
+      'cl.ai_extraction as call_extraction_v1',
       'c.created_at as customer_created_at',
       'c.address_line1 as customer_address_line1',
       'c.zip as customer_zip',
@@ -293,8 +320,16 @@ async function sweep({ now = new Date() } = {}) {
 
     // Mirror admin-triage transitionCore's review_status sync: a call with
     // open/in_progress cards remaining stays 'open'; otherwise it takes the
-    // status of the transition that cleared it.
+    // status of the transition that cleared it. Sibling cards are row-locked
+    // (FOR UPDATE) before counting: a concurrent operator/event-driven
+    // transition on a sibling either committed before the lock (our count
+    // sees it) or blocks until this transaction commits (their subsequent
+    // count sees our terminal rows) — without this, two writers can each
+    // count the other's uncommitted card as open and strand review_status
+    // 'open' on a fully-terminal call, which the open-cards-only sweep could
+    // never repair.
     for (const [callLogId, appliedStatus] of touchedCalls) {
+      await trx('triage_items').where({ call_log_id: callLogId }).forUpdate().select('id');
       const remaining = await trx('triage_items')
         .where({ call_log_id: callLogId })
         .whereIn('status', ['open', 'in_progress'])
