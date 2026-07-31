@@ -13,9 +13,10 @@ const {
 } = require('../services/service-completion-profiles');
 
 function makeKnex({ rows = [], backedRows = [], hasTable = true, throwOnQuery = false } = {}) {
-  // The helper now runs two distinct() queries — project_required rows
-  // (still-backed types) first, then service_report rows. Discriminate on
-  // the captured where() mode so each query gets its own row set.
+  // The helper now runs two distinct() queries — project-backed rows
+  // (whereIn project_required/special_project) first, then service_report
+  // rows (where completion_mode). Discriminate on which clause captured the
+  // mode so each query gets its own row set.
   const knex = jest.fn(() => {
     let mode = null;
     const chain = {
@@ -23,11 +24,15 @@ function makeKnex({ rows = [], backedRows = [], hasTable = true, throwOnQuery = 
         if (args && args.completion_mode) mode = args.completion_mode;
         return chain;
       }),
+      whereIn: jest.fn((col) => {
+        if (col === 'completion_mode') mode = 'project_backed';
+        return chain;
+      }),
       whereNotNull: jest.fn(() => chain),
       whereNotIn: jest.fn(() => chain),
       distinct: jest.fn(async () => {
         if (throwOnQuery) throw new Error('boom');
-        return mode === 'project_required' ? backedRows : rows;
+        return mode === 'project_backed' ? backedRows : rows;
       }),
     };
     return chain;
@@ -51,6 +56,17 @@ describe('appointmentManagedProjectTypes', () => {
     // the retired project form as a second completion lane (codex P1).
     const managed = await appointmentManagedProjectTypes(makeKnex({ rows: [] }));
     expect(managed).toEqual(new Set(['bed_bug']));
+  });
+
+  test('an ACTIVE special_project bed_bug profile also outranks the code retirement (codex P2 r11)', async () => {
+    // serializeProfile treats special_project as project-backed too — a
+    // drifted special_project row keeps its Projects lane like
+    // project_required does.
+    const managed = await appointmentManagedProjectTypes(makeKnex({
+      rows: [{ project_type: 'cockroach' }],
+      backedRows: [{ project_type: 'bed_bug', completion_mode: 'special_project' }],
+    }));
+    expect(managed).toEqual(new Set(['cockroach']));
   });
 
   test('an ACTIVE project_required bed_bug profile outranks the code retirement (drift-skip case)', async () => {

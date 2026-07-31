@@ -309,10 +309,20 @@ async function appointmentManagedProjectTypes(knex = db) {
   if (!(await tableAvailable(knex))) return new Set();
   try {
     const stillBacked = await knex('service_completion_profiles')
-      .where({ completion_mode: 'project_required', active: true })
+      .whereIn('completion_mode', ['project_required', 'special_project'])
+      .where({ active: true })
       .whereNotNull('project_type')
-      .distinct('project_type');
-    const backed = new Set(stillBacked.map((row) => row.project_type).filter(Boolean));
+      .distinct(['project_type', 'completion_mode']);
+    // Original partially-cutover semantics stay keyed to project_required
+    // (rows without a completion_mode in test doubles default there too).
+    const backed = new Set(stillBacked
+      .filter((row) => (row.completion_mode || 'project_required') === 'project_required')
+      .map((row) => row.project_type)
+      .filter(Boolean));
+    // The RETIREMENT override is wider: ANY active project-backed mode
+    // (project_required OR special_project — serializeProfile treats both
+    // as project-backed) outranks the code retirement (codex P2 r11).
+    const retirementOverridden = new Set(stillBacked.map((row) => row.project_type).filter(Boolean));
     const rows = await knex('service_completion_profiles')
       .where({ completion_mode: 'service_report', active: true })
       .whereNotNull('project_type')
@@ -333,10 +343,11 @@ async function appointmentManagedProjectTypes(knex = db) {
         .filter((type) => !PROJECT_CREATION_KEPT_TYPES.has(type)),
       // Untyped-retired types stay appointment-managed by code — their
       // pointer is NULL so the query above can no longer see them. But an
-      // ACTIVE project_required profile outranks the retirement (the
-      // migration loud-skips drifted rows, and the surviving profile still
-      // requires the Projects lane — codex P2 r7).
-      ...[...UNTYPED_RETIRED_PROJECT_TYPES].filter((type) => !backed.has(type)),
+      // ACTIVE project-backed profile (project_required OR special_project)
+      // outranks the retirement (the migration loud-skips drifted rows, and
+      // the surviving profile still requires the Projects lane — codex P2
+      // r7 + r11).
+      ...[...UNTYPED_RETIRED_PROJECT_TYPES].filter((type) => !retirementOverridden.has(type)),
     ]);
   } catch {
     return new Set();
