@@ -243,31 +243,36 @@ async function startSmsThreadDraft({ phone, triggerBody = '', skipIntentGate = f
         return result;
       }
     }
+    // Scope guards run for EVERY entry path — including clarify-reply
+    // resumes (skipIntentGate), which bypass only the redundant
+    // quote-intent classifier. A customer answering a clarify question
+    // with "power washing" must not mint an owed-quote bell just because
+    // quote intent was established earlier in the flow.
+    const {
+      scopeGuardsEnabled, deterministicOutOfScope, loadThreadTriageContext,
+    } = require('./scope-guards');
+    const guarded = scopeGuardsEnabled();
+    // Deterministic backstop before any model call: a text naming only an
+    // out-of-scope home service ("power washing service") is not a lead.
+    if (guarded && deterministicOutOfScope(triggerBody)) {
+      result.skipped = 'out_of_scope_service';
+      return result;
+    }
+    // Grounding for the classifier (fail-open → ungrounded prompt).
+    const triage = guarded ? await loadThreadTriageContext({ phone, triggerBody }) : null;
+    // Second deterministic pass over the CURRENT exchange only: "Do you
+    // do power washing?" followed minutes later by "How much?" — the ask
+    // and the service live in different texts. vetoTexts is burst-scoped
+    // (VETO_BURST_MINUTES) so a stale out-of-scope mention from an older
+    // conversation can't hard-kill a new valid request; the grounded
+    // classifier still sees the full recent thread and judges stale
+    // context itself.
+    if (guarded && (triage?.vetoTexts || []).length
+      && deterministicOutOfScope([triggerBody, ...triage.vetoTexts].join('\n'))) {
+      result.skipped = 'out_of_scope_service_thread';
+      return result;
+    }
     if (!skipIntentGate) {
-      const {
-        scopeGuardsEnabled, deterministicOutOfScope, loadThreadTriageContext,
-      } = require('./scope-guards');
-      const guarded = scopeGuardsEnabled();
-      // Deterministic backstop before any model call: a text naming only an
-      // out-of-scope home service ("power washing service") is not a lead.
-      if (guarded && deterministicOutOfScope(triggerBody)) {
-        result.skipped = 'out_of_scope_service';
-        return result;
-      }
-      // Grounding for the classifier (fail-open → ungrounded prompt).
-      const triage = guarded ? await loadThreadTriageContext({ phone, triggerBody }) : null;
-      // Second deterministic pass over the CURRENT exchange only: "Do you
-      // do power washing?" followed minutes later by "How much?" — the ask
-      // and the service live in different texts. vetoTexts is burst-scoped
-      // (VETO_BURST_MINUTES) so a stale out-of-scope mention from an older
-      // conversation can't hard-kill a new valid request; the grounded
-      // classifier still sees the full recent thread and judges stale
-      // context itself.
-      if (guarded && (triage?.vetoTexts || []).length
-        && deterministicOutOfScope([triggerBody, ...triage.vetoTexts].join('\n'))) {
-        result.skipped = 'out_of_scope_service_thread';
-        return result;
-      }
       const signal = await threadQuoteSignal(triggerBody, triage);
       if (!signal.quoteRequest) {
         result.skipped = `no_quote_intent_${signal.method}`;

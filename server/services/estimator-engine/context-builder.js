@@ -67,20 +67,39 @@ function pickCustomerMatch(rows, extraction) {
   return { customer: byName[0] || rows[0], ambiguous: true };
 }
 
-async function loadCustomerByPhone(phone, extraction) {
+// opts (both consumed by the scope-guards triage; composer callers omit
+// them and keep today's behavior exactly):
+//  - timeoutMs: knex cancel-timeout so the triage deadline bounds the WORK.
+//  - includeServiceContacts: also match the configured service-contact
+//    phone slots — a spouse/tenant/manager texting from
+//    service_contact*_phone is an established customer identity elsewhere
+//    (customer-contact.js, call-spam-classifier.js) and must ground.
+async function loadCustomerByPhone(phone, extraction, { timeoutMs = null, includeServiceContacts = false } = {}) {
   const digits = last10(phone);
   if (!digits) return { customer: null, ambiguous: false };
   try {
-    const rows = await db('customers')
+    let q = db('customers')
       .select('id', 'first_name', 'last_name', 'phone', 'email', 'address_line1', 'city', 'state', 'zip',
         'pipeline_stage', 'waveguard_tier', 'member_since', 'lawn_type', 'property_sqft', 'lot_sqft',
         // active: consumed by the scope-guards triage (an inactive/former
         // customer texting a NEW quote must read as a prospect there).
         'property_type', 'company_name', 'active')
-      .whereRaw("regexp_replace(coalesce(phone, ''), '\\D', '', 'g') LIKE ?", [`%${digits}`])
       .whereNull('deleted_at')
       .orderBy('created_at', 'desc')
       .limit(5);
+    const like = `%${digits}`;
+    if (includeServiceContacts) {
+      q = q.where(function orPhones() {
+        this.whereRaw("regexp_replace(coalesce(phone, ''), '\\D', '', 'g') LIKE ?", [like])
+          .orWhereRaw("regexp_replace(coalesce(service_contact_phone, ''), '\\D', '', 'g') LIKE ?", [like])
+          .orWhereRaw("regexp_replace(coalesce(service_contact2_phone, ''), '\\D', '', 'g') LIKE ?", [like])
+          .orWhereRaw("regexp_replace(coalesce(service_contact3_phone, ''), '\\D', '', 'g') LIKE ?", [like]);
+      });
+    } else {
+      q = q.whereRaw("regexp_replace(coalesce(phone, ''), '\\D', '', 'g') LIKE ?", [like]);
+    }
+    if (timeoutMs) q = q.timeout(timeoutMs, { cancel: true });
+    const rows = await q;
     return pickCustomerMatch(rows, extraction);
   } catch (err) {
     logger.warn(`[estimator-engine] customer load failed: ${err.message}`);

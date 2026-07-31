@@ -358,6 +358,19 @@ describe('scope guards (GATE_ESTIMATOR_SCOPE_GUARDS)', () => {
     expect(prompt).not.toContain('SERVICES WAVES OFFERS');
   });
 
+  test('clarify resumes (skipIntentGate) still hit the scope vetoes', async () => {
+    mockDeterministicOutOfScope.mockReturnValueOnce(true);
+    const result = await startSmsThreadDraft({
+      phone: PHONE,
+      triggerBody: 'power washing please',
+      skipIntentGate: true,
+      skipCooldown: true,
+    });
+    expect(result.skipped).toBe('out_of_scope_service');
+    expect(mockNotify).not.toHaveBeenCalled();
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
   test('gate off never consults the guards (dark ship)', async () => {
     mockScopeGuardsEnabled.mockReturnValue(false);
     await startSmsThreadDraft({ phone: PHONE, triggerBody: 'quote for pest control please' });

@@ -117,7 +117,10 @@ function extractAddressCandidates(text) {
   // House numbers may be a single digit ("7 Palm Ave") and street names may
   // be numbered ("123 5th Ave") — the full-street confirmation downstream is
   // the precision gate, so the grammar here stays broad.
-  const re = /\b(\d{1,6})\s+([A-Za-z0-9][A-Za-z0-9'.-]*(?:\s+[A-Za-z][A-Za-z0-9'.-]*){0,3})/g;
+  // Up to seven street words ("100 Dr Martin Luther King Jr Blvd") — the
+  // full-street confirmation requires complete equality, so a truncated
+  // capture would permanently miss long street names.
+  const re = /\b(\d{1,6})\s+([A-Za-z0-9][A-Za-z0-9'.-]*(?:\s+[A-Za-z][A-Za-z0-9'.-]*){0,6})/g;
   let m;
   const UNIT_WORD_RE = /^(?:apt|apartment|unit|suite|ste|#)$/i;
   while (out.length < 3 && (m = re.exec(src)) !== null) {
@@ -146,13 +149,27 @@ function extractAddressCandidates(text) {
     // ("…, Bradenton FL" / "…, Venice 34285"), and a bare ZIP counts only
     // when it directly follows the street. Comma prose ("100 Palm Ave,
     // please") and unrelated numbers ("budget of 15000") must not become a
-    // fake locality that rejects the real customer row.
-    const locM = afterStreet.match(/^\s*,\s*([A-Za-z][A-Za-z .'-]{2,28}?)\s*,?\s*(\bFL\b|\bFlorida\b)?\s*(\d{5})?\b/i);
+    // fake locality that rejects the real customer row. A unit expression
+    // between street and locality ("Apt 6, Venice FL 34285") is stripped
+    // first so the anchor still reaches the city/ZIP.
+    let localitySrc = afterStreet;
+    if (designatorIdx > 0) {
+      // Designator was swallowed into the street words; afterStreet starts
+      // with the bare unit VALUE.
+      localitySrc = localitySrc.replace(/^\s*#?\s*[A-Za-z0-9-]{1,8}\b/, '');
+    } else if (unitM) {
+      localitySrc = localitySrc.replace(/^\s*,?\s*(?:(?:apt|apartment|unit|suite|ste)\.?|#)\s*#?\s*[A-Za-z0-9-]{1,8}\b/i, '');
+    }
+    const locM = localitySrc.match(/^\s*,\s*([A-Za-z][A-Za-z .'-]{2,28}?)\s*,?\s*(\bFL\b|\bFlorida\b)?\s*(\d{5})?\b/i);
     let locality = '';
     if (locM && (locM[2] || locM[3])) {
       locality = `, ${locM[1].trim()}${locM[3] ? ` ${locM[3]}` : ''}`;
     } else {
-      const zipDirect = afterStreet.match(/^\s*,?\s*(\d{5})\b/);
+      // Bare-ZIP form requires the comma ("…, 34285") — with street runs up
+      // to seven words, a zip-like number after uncomma'd prose ("with a
+      // budget of 15000") must stay unbound; a missing locality still
+      // compares conservatively equal downstream.
+      const zipDirect = localitySrc.match(/^\s*,\s*(\d{5})\b/);
       if (zipDirect) locality = `, ${zipDirect[1]}`;
     }
     out.push({
@@ -234,7 +251,13 @@ async function loadTriageInner({ phone, triggerBody, deadline = Date.now() + TRI
   if (phone) {
     assertTime();
     const { loadCustomerByPhone } = require('./context-builder');
-    const senderMatch = await loadCustomerByPhone(phone, null);
+    // Bounded like every other triage query, and matched against the
+    // configured service-contact phone slots too — a spouse/tenant/manager
+    // texting from an on-file contact number is an established identity.
+    const senderMatch = await loadCustomerByPhone(phone, null, {
+      timeoutMs: Math.max(60, timeLeft()),
+      includeServiceContacts: true,
+    });
     // Grounding requires a REAL customer: active === true (not merely "not
     // false" — the select may omit the column) AND an established customer
     // stage. The Twilio webhook creates an active pipeline_stage='new_lead'
@@ -342,6 +365,32 @@ async function loadTriageInner({ phone, triggerBody, deadline = Date.now() + TRI
   // evidence for the property the text is actually about.
   const lines = [];
   const scopedIds = new Set(entries.filter((e) => e.scope).map((e) => e.customer.id));
+  // Active recurring coverage per customer (repo convention: distinct
+  // recurring, non-cancelled scheduled_services — see
+  // ai-assistant/tools-expanded.js). The classifier judges "work current
+  // services already cover" — without this a covered callback between
+  // visits reads as a new quote.
+  const coverageCache = new Map();
+  const recurringCoverage = async (customerId) => {
+    if (coverageCache.has(customerId)) return coverageCache.get(customerId);
+    let note = '';
+    try {
+      assertTime();
+      const rows = await bounded(db('scheduled_services')
+        .where({ customer_id: customerId, is_recurring: true })
+        .whereNot('status', 'cancelled')
+        .limit(20))
+        .distinct('service_type');
+      if (rows.length) {
+        note = `; recurring services on file: ${rows.map((r) => r.service_type).filter(Boolean).slice(0, 5).join(', ')}`;
+      }
+    } catch (err) {
+      if (err.deadline) throw err;
+      logger.warn(`[estimator-scope] triage coverage lookup failed: ${err.message}`);
+    }
+    coverageCache.set(customerId, note);
+    return note;
+  };
   const stampFull = (line1, line2, city, zip) => [
     [line1, line2].filter(Boolean).join(' '),
     [city, zip].filter(Boolean).join(' '),
@@ -349,8 +398,9 @@ async function loadTriageInner({ phone, triggerBody, deadline = Date.now() + TRI
   for (const e of entries) {
     const name = `${e.customer.first_name || ''} ${e.customer.last_name || ''}`.trim() || 'existing customer';
     const shownAddress = e.addressLine || e.customer.address_line1 || 'address on file';
+    const coverage = await recurringCoverage(e.customer.id);
     if (!e.scope && scopedIds.has(e.customer.id)) {
-      lines.push(`${e.how}: existing active customer ${name}, ${shownAddress} (booked work listed under the matched property below)`);
+      lines.push(`${e.how}: existing active customer ${name}, ${shownAddress}${coverage} (booked work listed under the matched property below)`);
       continue;
     }
     let visitNote = '';
@@ -363,7 +413,10 @@ async function loadTriageInner({ phone, triggerBody, deadline = Date.now() + TRI
         .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site'])
         .whereRaw("scheduled_date >= (NOW() AT TIME ZONE 'America/New_York')::date - INTERVAL '30 days'")
         .orderBy('scheduled_date', 'asc')
-        .limit(6))
+        // Wide sanity bound, NOT a display limit: the address-scope filter
+        // runs in JS below, and a tight SQL limit would let property A's
+        // visits crowd the matched property's visit out of the fetch.
+        .limit(25))
         .select('service_type', 'scheduled_date', 'status',
           'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip');
       const scopeFull = e.scope
@@ -391,7 +444,7 @@ async function loadTriageInner({ phone, triggerBody, deadline = Date.now() + TRI
       if (err.deadline) throw err;
       logger.warn(`[estimator-scope] triage visit lookup failed: ${err.message}`);
     }
-    lines.push(`${e.how}: existing active customer ${name}, ${shownAddress}${visitNote}`);
+    lines.push(`${e.how}: existing active customer ${name}, ${shownAddress}${coverage}${visitNote}`);
   }
 
   return { lines, matchedExistingCustomer: entries.length > 0, recentTexts, vetoTexts };

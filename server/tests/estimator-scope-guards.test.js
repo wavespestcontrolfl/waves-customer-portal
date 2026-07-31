@@ -30,6 +30,11 @@ jest.mock('../models/db', () => {
       join() { return chain; },
       modify(fn) { fn(chain); return chain; },
       timeout() { return chain; },
+      whereNot() { return chain; },
+      async distinct() {
+        if (mockState.throwOn === table) throw new Error(`${table} query down`);
+        return mockState.rows[`${table}:distinct`] || [];
+      },
       async select() {
         if (mockState.throwOn === table) throw new Error(`${table} query down`);
         if (mockState.hangOn === table) return new Promise(() => {});
@@ -204,6 +209,19 @@ describe('extractAddressCandidates', () => {
     expect(_private.prefixVariants('100', 'N')).toEqual(expect.arrayContaining(['100 N%', '100 north%']));
     expect(_private.prefixVariants('100', 'North')).toEqual(expect.arrayContaining(['100 North%', '100 n%']));
     expect(_private.prefixVariants('100', 'Palm')).toEqual(['100 Palm%']);
+  });
+
+  test('locality still parses after an explicit unit', () => {
+    const [cand] = extractAddressCandidates('quote for 100 Palm Ave Apt 6, Venice FL 34285');
+    expect(cand.variants).toContain('100 Palm Ave Apt 6');
+    expect(cand.locality).toBe(', Venice 34285');
+    const [hash] = extractAddressCandidates('quote for 100 Palm Ave #6, Venice FL 34285');
+    expect(hash.locality).toBe(', Venice 34285');
+  });
+
+  test('captures long street names (up to seven words)', () => {
+    const [cand] = extractAddressCandidates('service at 100 Dr Martin Luther King Jr Blvd please');
+    expect(cand.variants).toContain('100 Dr Martin Luther King Jr Blvd');
   });
 
   test('caps at three candidates', () => {
@@ -407,6 +425,16 @@ describe('loadThreadTriageContext', () => {
     });
     expect(triage.matchedExistingCustomer).toBe(true);
     expect(triage.lines.join('\n')).toContain('77 Rental Cove (secondary property)');
+  });
+
+  test('grounding lines carry the customer\'s recurring service coverage', async () => {
+    mockLoadCustomerByPhone.mockResolvedValue({
+      customer: { id: 'c-1', first_name: 'Taylor', last_name: 'Sample', address_line1: '99 Placeholder Way', active: true, pipeline_stage: 'active_customer' },
+      ambiguous: false,
+    });
+    mockState.rows['scheduled_services:distinct'] = [{ service_type: 'Quarterly Pest Control Service' }];
+    const triage = await loadThreadTriageContext({ phone: '+17245550000', triggerBody: 'quote please' });
+    expect(triage.lines[0]).toContain('recurring services on file: Quarterly Pest Control Service');
   });
 
   test('fails open to null on query errors', async () => {
