@@ -245,6 +245,49 @@ describe('getCachedLookup', () => {
     expect(await getCachedLookup('100 Main St')).toBeNull();
     expect(await getVerifiedOverrides('100 Main St')).toBeNull();
   });
+
+  it('stale-imagery-conflict rows age out on the SHORT TTL despite a long stored expiry', async () => {
+    // The 33 prod rows poisoned before the guard shipped carry the 180-day
+    // expires_at — the read-side short TTL is what actually refreshes them.
+    const conflictRow = {
+      ...freshRow,
+      property_record: {
+        squareFootage: 2362,
+        stories: 2,
+        lotSize: 6985,
+        yearBuilt: new Date().getFullYear() - 1,
+        // County-backed record: keeps main's roll-miss short TTL out of this
+        // test's way so it isolates the stale-imagery TTL behavior.
+        _source: 'county',
+        _fieldEvidence: { squareFootage: { sourceType: 'county' }, yearBuilt: { sourceType: 'county' } },
+      },
+      ai_analysis: { estimatedTurfSf: 0, imperviousSurfacePercent: 0, estimatedBedAreaSf: 0 },
+      expires_at: new Date(Date.now() + 180 * 86400000).toISOString(),
+    };
+
+    // Past the 21-day short TTL → miss, even though expires_at is months out.
+    mockDbHandler = () => fakeTable({
+      row: { ...conflictRow, data_saved_at: new Date(Date.now() - 30 * 86400000).toISOString() },
+    });
+    expect(await getCachedLookup('100 Sample Build Ct')).toBeNull();
+
+    // Inside the short TTL → still a hit.
+    mockDbHandler = () => fakeTable({
+      row: { ...conflictRow, data_saved_at: new Date(Date.now() - 86400000).toISOString() },
+    });
+    expect(await getCachedLookup('100 Sample Build Ct')).toBeTruthy();
+
+    // A normal completed-property row (impervious measured > 0) at the same
+    // age keeps the standard TTL — no false eviction.
+    mockDbHandler = () => fakeTable({
+      row: {
+        ...conflictRow,
+        ai_analysis: { estimatedTurfSf: 0, imperviousSurfacePercent: 85 },
+        data_saved_at: new Date(Date.now() - 30 * 86400000).toISOString(),
+      },
+    });
+    expect(await getCachedLookup('100 Paved Ct')).toBeTruthy();
+  });
 });
 
 describe('saveLookup', () => {
@@ -331,6 +374,32 @@ describe('saveLookup', () => {
   it('fails open on db errors', async () => {
     mockDbHandler = () => { throw new Error('db down'); };
     await expect(saveLookup('100 Main St', result)).resolves.toBeUndefined();
+  });
+
+  it('a stale-imagery-conflict save gets the short TTL, a normal save keeps the base TTL', async () => {
+    const writes = [];
+    mockDbHandler = () => fakeTable({ writes });
+    const conflictResult = {
+      ...result,
+      propertyRecord: {
+        ...result.propertyRecord,
+        squareFootage: 2362,
+        stories: 2,
+        lotSize: 6985,
+        yearBuilt: new Date().getFullYear() - 1,
+        _fieldEvidence: { squareFootage: { sourceType: 'county' }, yearBuilt: { sourceType: 'county' } },
+      },
+      aiAnalysis: { estimatedTurfSf: 0, imperviousSurfacePercent: 0, estimatedBedAreaSf: 0 },
+    };
+    await saveLookup('100 Sample Build Ct, Parrish, FL 34219', conflictResult);
+    await saveLookup('2965 Rock Creek Dr, Port Charlotte, FL 33948', result);
+
+    const conflictExpiry = writes[0][1].expires_at.getTime() - Date.now();
+    const normalExpiry = writes[1][1].expires_at.getTime() - Date.now();
+    // Short (vacant-parcel) TTL = 21 days; base TTL = 180 days.
+    expect(conflictExpiry).toBeLessThanOrEqual(21 * 86400000);
+    expect(conflictExpiry).toBeGreaterThan(20 * 86400000);
+    expect(normalExpiry).toBeGreaterThan(179 * 86400000);
   });
 });
 
