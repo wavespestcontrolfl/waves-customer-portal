@@ -285,6 +285,32 @@ describe('scope guards (GATE_ESTIMATOR_SCOPE_GUARDS)', () => {
     expect(mockNotify).not.toHaveBeenCalled();
   });
 
+  test('an out-of-scope ask living in an EARLIER text vetoes the thread', async () => {
+    mockLoadTriage.mockResolvedValueOnce({
+      lines: [],
+      matchedExistingCustomer: false,
+      recentTexts: ['Do you do power washing?'],
+    });
+    // The real veto sees "power washing" only in the combined thread text.
+    mockDeterministicOutOfScope.mockImplementation((text) => /power washing/i.test(text));
+    const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: 'How much would that cost?' });
+    expect(result.skipped).toBe('out_of_scope_service_thread');
+    expect(mockDispatch).not.toHaveBeenCalled();
+    expect(mockNotify).not.toHaveBeenCalled();
+  });
+
+  test('recent texts ride into the grounded classifier prompt', async () => {
+    mockLoadTriage.mockResolvedValueOnce({
+      lines: [],
+      matchedExistingCustomer: false,
+      recentTexts: ['we talked about the spiders yesterday'],
+    });
+    await startSmsThreadDraft({ phone: PHONE, triggerBody: 'how much for that treatment?' });
+    const prompt = mockDispatch.mock.calls[0][1].text;
+    expect(prompt).toContain('RECENT TEXTS FROM THIS NUMBER');
+    expect(prompt).toContain('spiders yesterday');
+  });
+
   test('a grounded response missing the veto booleans fails closed (no bell)', async () => {
     mockLoadTriage.mockResolvedValueOnce({ lines: [], matchedExistingCustomer: false });
     mockDispatch.mockResolvedValueOnce({ ok: true, json: { quote_request: true, confidence: 0.9 } });

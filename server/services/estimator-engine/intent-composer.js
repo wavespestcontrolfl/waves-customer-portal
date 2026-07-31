@@ -221,7 +221,15 @@ async function composeIntent(context, propertyFacts) {
 
     if (intent) {
       const { valid, errors } = validateIntent(intent);
-      if (valid) {
+      // Gated contract tightening: a skip without its machine-readable
+      // category defeats the clarify-suppression logic downstream (an
+      // out-of-scope skip would read as "ambiguous, ask the customer").
+      // Enforced here with the same repair-retry the schema gets; the red
+      // lane additionally treats a still-missing category as unclarifiable.
+      const { scopeGuardsEnabled } = require('./scope-guards');
+      if (valid && scopeGuardsEnabled() && intent.decision === 'skip' && !intent.skip_category) {
+        lastErrors = ['skip_category is required whenever decision="skip" — set exactly one of: out_of_scope, not_a_quote, existing_job, ambiguous, needs_human_scoping'];
+      } else if (valid) {
         logger.info('[estimator-engine] intent composed', {
           model: response.model,
           decision: intent.decision,
@@ -231,7 +239,7 @@ async function composeIntent(context, propertyFacts) {
         });
         return { intent, model: response.model };
       }
-      lastErrors = errors;
+      if (!valid) lastErrors = errors;
     }
 
     // Repair retry: feed the exact validation errors back once.

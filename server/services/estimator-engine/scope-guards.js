@@ -76,7 +76,11 @@ const OUT_OF_SCOPE_RE = new RegExp(
 const IN_SCOPE_RE = new RegExp(
   '\\b(?:pest\\w*|bugs?|ants?|roach\\w*|termites?|mosquito\\w*|rodents?|rats?|mice'
   + '|fleas?|bed\\s*bugs?|wasps?|hornets?|bees?|spiders?|scorpions?|ticks?|snakes?'
-  + '|lawn|grass|weeds?|fertiliz\\w*|shrubs?|trees?|palms?|wdo|exterminat\\w*)\\b',
+  + '|lawn|grass|weeds?|fertiliz\\w*|shrubs?|trees?|palms?|wdo|exterminat\\w*'
+  // Generic treatment phrasing counts as in-scope: a mixed request ("spray
+  // my yard and pressure wash the driveway") must reach the grounded
+  // classifier, never die in the deterministic veto.
+  + '|spray\\w*|treat\\w*|infest\\w*|yard)\\b',
   'i',
 );
 
@@ -97,20 +101,33 @@ function deterministicOutOfScope(text) {
 // suffix/directional normalization).
 function extractAddressCandidates(text) {
   const out = [];
+  const src = String(text || '');
   // House numbers may be a single digit ("7 Palm Ave") and street names may
   // be numbered ("123 5th Ave") — the full-street confirmation downstream is
   // the precision gate, so the grammar here stays broad.
   const re = /\b(\d{1,6})\s+([A-Za-z0-9][A-Za-z0-9'.-]*(?:\s+[A-Za-z][A-Za-z0-9'.-]*){0,3})/g;
   let m;
-  while (out.length < 3 && (m = re.exec(String(text || ''))) !== null) {
+  while (out.length < 3 && (m = re.exec(src)) !== null) {
     const words = m[2].split(/\s+/);
     // Skip obvious non-addresses: "24 hours", "30 minutes", "2 pm", and
     // bare number-pairs ("4 30") — numbered streets carry a suffix ("5th").
     if (/^(?:hours?|hrs?|minutes?|mins?|days?|weeks?|months?|years?|am|pm)$/i.test(words[0])) continue;
     if (/^\d+$/.test(words[0])) continue;
+    // Explicit locality after the street run ("…, Bradenton FL 34205"):
+    // captured only behind a comma (a bare following word is prose, not a
+    // city) so a same-street customer in a DIFFERENT named city can be
+    // rejected. Localities the message doesn't state stay unknown and
+    // compare conservatively equal downstream.
+    const tailSrc = src.slice(m.index + m[0].length, m.index + m[0].length + 45);
+    const cityM = tailSrc.match(/^\s*,\s*([A-Za-z][A-Za-z .'-]{2,28}?)\s*(?:,|\bFL\b|\bFlorida\b|\d{5}|$)/i);
+    const zipM = tailSrc.match(/\b(\d{5})\b/);
+    const locality = (cityM || zipM)
+      ? `, ${cityM ? cityM[1].trim() : ''} ${zipM ? zipM[1] : ''}`.trimEnd()
+      : '';
     out.push({
       num: m[1],
       firstWord: words[0],
+      locality,
       variants: words.map((_, i) => `${m[1]} ${words.slice(0, i + 1).join(' ')}`),
     });
   }
@@ -119,11 +136,17 @@ function extractAddressCandidates(text) {
 
 // A prefix-fetched row only counts as "this customer's property" when the
 // message's street run truly matches the row's full normalized street —
-// "100 Palm Ave" must not ground against a customer at "100 Palm St".
-function candidateMatchesRow(candidate, rowAddressLine1) {
+// "100 Palm Ave" must not ground against a customer at "100 Palm St" — and,
+// when the message states a locality, in the row's city/ZIP too. Compare
+// both sides WITH their known localities: sameStreetAddress treats a
+// missing city/ZIP as conservatively equal and a stated disagreement as a
+// mismatch, which is exactly the wanted asymmetry.
+function candidateMatchesRow(candidate, row) {
+  const rowFull = [row.address_line1, [row.city, row.zip].filter(Boolean).join(' ')]
+    .filter(Boolean).join(', ');
   return candidate.variants.some((v) => {
     try {
-      return sameStreetAddress(v, rowAddressLine1);
+      return sameStreetAddress(`${v}${candidate.locality || ''}`, rowFull);
     } catch (err) {
       return false;
     }
@@ -133,7 +156,12 @@ function candidateMatchesRow(candidate, rowAddressLine1) {
 async function loadTriageInner({ phone, triggerBody }) {
   const db = require('../../models/db');
   const lines = [];
-  const seenCustomerIds = new Set();
+  // Dedup key is customer + scope: a sender-phone match is UNSCOPED, and an
+  // address-specific match for the same customer must still add its own
+  // scoped line — otherwise a multi-property customer texting about
+  // property B would only ever ground with primary-address/every-property
+  // context (the sender entry) and property scoping would be dead code.
+  const seenMatches = new Set();
   let matchedExistingCustomer = false;
 
   // scope: when the match came from a specific address in the message,
@@ -144,15 +172,19 @@ async function loadTriageInner({ phone, triggerBody }) {
   // visit must street-match the matched address, and an unstamped one only
   // counts when the matched address IS the primary.
   const describeCustomer = async (customer, how, addressLine, scope = null) => {
-    if (seenCustomerIds.has(customer.id)) return;
-    seenCustomerIds.add(customer.id);
+    const matchKey = `${customer.id}|${scope ? scope.address : 'unscoped'}`;
+    if (seenMatches.has(matchKey)) return;
+    seenMatches.add(matchKey);
     matchedExistingCustomer = true;
     const name = `${customer.first_name || ''} ${customer.last_name || ''}`.trim() || 'existing customer';
     let visitNote = '';
     try {
+      // "booked" means OPEN work only — completed/skipped/superseded rows
+      // are history, not coordination context, and must not crowd out (or
+      // stand in for) an upcoming visit.
       const visits = await db('scheduled_services')
         .where({ customer_id: customer.id })
-        .whereNotIn('status', ['cancelled'])
+        .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site'])
         .whereRaw("scheduled_date >= (NOW() AT TIME ZONE 'America/New_York')::date - INTERVAL '30 days'")
         .orderBy('scheduled_date', 'asc')
         .limit(6)
@@ -194,9 +226,14 @@ async function loadTriageInner({ phone, triggerBody }) {
     }
   }
 
-  // Split-context threads: the address may sit in an earlier text of the
-  // same conversation, not the quote-flavored one that triggered triage.
+  // Split-context threads: the address — or the service being asked about
+  // ("Do you do power washing?" … "How much?") — may sit in an earlier text
+  // of the same conversation, not the quote-flavored one that triggered
+  // triage. The recent bodies feed address extraction here AND ride back to
+  // the caller (recentTexts) for the combined-thread scope veto and the
+  // classifier prompt.
   let searchText = String(triggerBody || '');
+  let recentTexts = [];
   const digits = last10(phone);
   if (digits) {
     try {
@@ -207,7 +244,8 @@ async function loadTriageInner({ phone, triggerBody }) {
         .orderBy('created_at', 'desc')
         .limit(THREAD_WINDOW_LIMIT)
         .select('message_body');
-      searchText += `\n${priorTexts.map((t) => t.message_body || '').join('\n')}`;
+      recentTexts = priorTexts.map((t) => String(t.message_body || '')).filter(Boolean);
+      searchText += `\n${recentTexts.join('\n')}`;
     } catch (err) {
       logger.warn(`[estimator-scope] triage thread lookup failed: ${err.message}`);
     }
@@ -220,10 +258,11 @@ async function loadTriageInner({ phone, triggerBody }) {
       .modify(whereLiveCustomer)
       .where('address_line1', 'ilike', prefix)
       .limit(5)
-      .select('id', 'first_name', 'last_name', 'address_line1');
+      .select('id', 'first_name', 'last_name', 'address_line1', 'city', 'zip');
     for (const row of rows) {
-      if (candidateMatchesRow(cand, row.address_line1)) {
-        await describeCustomer(row, label, row.address_line1, { address: row.address_line1, isPrimary: true });
+      if (candidateMatchesRow(cand, row)) {
+        const shown = [row.address_line1, row.city].filter(Boolean).join(', ');
+        await describeCustomer(row, label, shown, { address: row.address_line1, isPrimary: true });
       }
     }
     // Secondary properties: customers.address_line1 mirrors only the
@@ -236,16 +275,21 @@ async function loadTriageInner({ phone, triggerBody }) {
         .where('c.active', true)
         .whereNull('c.deleted_at')
         .whereIn('c.pipeline_stage', CUSTOMER_STAGES)
+        // Sold/deactivated properties are somebody else's address now — a
+        // new occupant's quote must not ground against the old owner.
+        .where('cp.active', true)
         .where('cp.address_line1', 'ilike', prefix)
         .limit(5)
-        .select('c.id', 'c.first_name', 'c.last_name', 'cp.address_line1 as property_address');
+        .select('c.id', 'c.first_name', 'c.last_name',
+          'cp.address_line1 as address_line1', 'cp.city', 'cp.zip');
       for (const row of propRows) {
-        if (candidateMatchesRow(cand, row.property_address)) {
+        if (candidateMatchesRow(cand, row)) {
+          const shown = [row.address_line1, row.city].filter(Boolean).join(', ');
           await describeCustomer(
             { id: row.id, first_name: row.first_name, last_name: row.last_name },
             label,
-            `${row.property_address} (secondary property)`,
-            { address: row.property_address, isPrimary: false },
+            `${shown} (secondary property)`,
+            { address: row.address_line1, isPrimary: false },
           );
         }
       }
@@ -254,7 +298,7 @@ async function loadTriageInner({ phone, triggerBody }) {
     }
   }
 
-  return { lines, matchedExistingCustomer };
+  return { lines, matchedExistingCustomer, recentTexts };
 }
 
 // Compact "what Waves knows" block for the triage classifier. Fail-open on

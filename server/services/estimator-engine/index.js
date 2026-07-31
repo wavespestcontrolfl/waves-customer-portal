@@ -673,9 +673,15 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
             // are indistinguishable from "ambiguous" by the empty services
             // object alone; skip_category is the composer's disambiguator.
             const { scopeGuardsEnabled } = require('./scope-guards');
+            // A gated skip with NO category counts as unclarifiable too:
+            // the composer retries once to obtain one, so a still-missing
+            // category means the model isn't honoring the contract — and
+            // the conservative failure mode is "don't text the customer",
+            // never "ask a which-service question that may be nonsense".
             const unclarifiableSkip = scopeGuardsEnabled()
               && intent.decision === 'skip'
-              && ['out_of_scope', 'not_a_quote', 'existing_job'].includes(intent.skip_category);
+              && (['out_of_scope', 'not_a_quote', 'existing_job'].includes(intent.skip_category)
+                || !intent.skip_category);
             if (missing.length && context.phone && !unclarifiableSkip) {
               const { parkClarifyAsk } = require('../estimate-clarify-asks');
               await parkClarifyAsk({

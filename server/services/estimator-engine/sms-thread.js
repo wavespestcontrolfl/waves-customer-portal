@@ -75,11 +75,16 @@ async function threadQuoteSignal(body, triage = null) {
     const contextBlock = grounded && triage.lines.length
       ? `\nKNOWN WAVES RECORDS (matched from this message):\n${triage.lines.map((l) => `- ${l}`).join('\n')}\n`
       : (grounded ? '\nKNOWN WAVES RECORDS: no matching customer records.\n' : '');
+    // The service being asked about may live in an earlier text ("Do you do
+    // power washing?" … "How much?") — judge the message in its thread.
+    const threadBlock = grounded && (triage.recentTexts || []).length
+      ? `\nRECENT TEXTS FROM THIS NUMBER (newest first):\n${triage.recentTexts.slice(0, 5).map((t) => `- ${JSON.stringify(t.slice(0, 200))}`).join('\n')}\n`
+      : '';
     const prompt = grounded
       ? `An SMS arrived at Waves Pest Control (pest control + lawn care company).
 
 SERVICES WAVES OFFERS: recurring & one-time pest control, lawn health programs & one-time lawn treatments, tree & shrub care, mosquito programs, termite bait/monitoring and termite/WDO inspections, rodent bait stations, flea/tick, chemical bed bug treatment, wasp/hornet/bee removal. NOT OFFERED: power washing, roofing, gutters, painting, pools, plumbing, HVAC, electrical, cleaning, junk removal, handyman work.
-${contextBlock}
+${contextBlock}${threadBlock}
 Decide three things about the sender's message:
 - quote_request: are they asking for a QUOTE or PRICING for a service (new or additional service, "how much", describing a pest/lawn problem they want serviced)?
 - service_offered: does the request map to a service Waves offers? (true when it's unclear which service they mean)
@@ -251,6 +256,14 @@ async function startSmsThreadDraft({ phone, triggerBody = '', skipIntentGate = f
       }
       // Grounding for the classifier (fail-open → ungrounded prompt).
       const triage = guarded ? await loadThreadTriageContext({ phone, triggerBody }) : null;
+      // Second deterministic pass over the WHOLE recent thread: "Do you do
+      // power washing?" followed by "How much?" — the ask and the service
+      // live in different texts, and only the combined view can veto it.
+      if (guarded && (triage?.recentTexts || []).length
+        && deterministicOutOfScope([triggerBody, ...triage.recentTexts].join('\n'))) {
+        result.skipped = 'out_of_scope_service_thread';
+        return result;
+      }
       const signal = await threadQuoteSignal(triggerBody, triage);
       if (!signal.quoteRequest) {
         result.skipped = `no_quote_intent_${signal.method}`;

@@ -134,6 +134,8 @@ describe('deterministicOutOfScope', () => {
 
   test('never vetoes when a pest/lawn noun is present', () => {
     expect(deterministicOutOfScope('power wash the patio and spray for ants')).toBe(false);
+    expect(deterministicOutOfScope('Can you spray my yard and pressure wash the driveway?')).toBe(false);
+    expect(deterministicOutOfScope('need the house treated and the roof cleaned')).toBe(false);
     expect(deterministicOutOfScope('spiders at the house, can you spray the lanai?')).toBe(false);
     expect(deterministicOutOfScope('how much for quarterly pest control')).toBe(false);
   });
@@ -163,6 +165,12 @@ describe('extractAddressCandidates', () => {
     expect(extractAddressCandidates('quote for 7 Palm Ave please')[0].variants).toContain('7 Palm Ave');
     expect(extractAddressCandidates('we are at 123 5th Ave')[0].variants).toContain('123 5th Ave');
     expect(extractAddressCandidates('see you at 4 30 tomorrow')).toEqual([]);
+  });
+
+  test('captures explicit locality after a comma', () => {
+    const [cand] = extractAddressCandidates('quote for 100 Palm Ave, Venice FL 34285 please');
+    expect(cand.locality).toBe(', Venice 34285');
+    expect(extractAddressCandidates('quote for 100 Palm Ave before Saturday')[0].locality).toBe('');
   });
 
   test('caps at three candidates', () => {
@@ -273,9 +281,37 @@ describe('loadThreadTriageContext', () => {
     expect(triage.lines.join('\n')).toContain('Pat Homeowner');
   });
 
+  test('a stated locality that disagrees with the row is NOT a match', async () => {
+    mockState.rows.customers = [
+      { id: 'c-9', first_name: 'Other', last_name: 'City', address_line1: '100 Palm Ave', city: 'Bradenton', zip: '34205' },
+    ];
+    const triage = await loadThreadTriageContext({
+      phone: null,
+      triggerBody: 'new quote please for 100 Palm Ave, Venice FL 34285',
+    });
+    expect(triage.matchedExistingCustomer).toBe(false);
+  });
+
+  test('sender match and a scoped address match for the SAME customer both ground', async () => {
+    mockLoadCustomerByPhone.mockResolvedValue({
+      customer: { id: 'c-2', first_name: 'Multi', last_name: 'Property', address_line1: '1 Primary St', active: true, pipeline_stage: 'active_customer' },
+      ambiguous: false,
+    });
+    mockState.rows.customers = [
+      { id: 'c-2', first_name: 'Multi', last_name: 'Property', address_line1: '4021 Coral Bay Loop' },
+    ];
+    const triage = await loadThreadTriageContext({
+      phone: '+17245550000',
+      triggerBody: 'about 4021 Coral Bay Loop please',
+    });
+    expect(triage.lines).toHaveLength(2);
+    expect(triage.lines[0]).toContain('Sender phone matches');
+    expect(triage.lines[1]).toContain('4021 Coral Bay Loop');
+  });
+
   test('matches secondary customer_properties addresses', async () => {
     mockState.rows['customer_properties as cp'] = [
-      { id: 'c-3', first_name: 'Multi', last_name: 'Property', property_address: '77 Rental Cove' },
+      { id: 'c-3', first_name: 'Multi', last_name: 'Property', address_line1: '77 Rental Cove' },
     ];
     const triage = await loadThreadTriageContext({
       phone: null,
@@ -405,14 +441,22 @@ describe('clarify suppression in the red lane', () => {
     }
   });
 
-  test('gate on: ambiguous and uncategorized skips still park (today\'s behavior)', async () => {
+  test('gate on: ambiguous and needs_human_scoping skips still park', async () => {
     process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
-    for (const category of ['ambiguous', undefined]) {
+    for (const category of ['ambiguous', 'needs_human_scoping']) {
       mockParkClarify.mockClear();
       mockComposeIntent.mockResolvedValue({ intent: skipIntent(category), model: 'test-model' });
       await run();
       expect(mockParkClarify).toHaveBeenCalled();
     }
+  });
+
+  test('gate on: a skip with NO category is unclarifiable (conservative: no customer text)', async () => {
+    process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
+    mockComposeIntent.mockResolvedValue({ intent: skipIntent(undefined), model: 'test-model' });
+    await run();
+    expect(mockNotifyAdmin).toHaveBeenCalled();
+    expect(mockParkClarify).not.toHaveBeenCalled();
   });
 
   test('gate off: even a scope-based skip parks exactly as today', async () => {
