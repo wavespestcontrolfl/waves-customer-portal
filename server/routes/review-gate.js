@@ -92,14 +92,19 @@ router.get('/:token/go', directLinkLimiter, async (req, res) => {
     }
 
     // The route contract: a customer only reaches Google AFTER the click is
-    // recorded and their cadence is stopped. If either required write fails
+    // recorded and their cadence is stopped. If any required write fails
     // (transient Postgres outage), fall back to the rate page instead of
     // proceeding — otherwise the still-active sequence would keep chasing a
     // customer who already reached the review form (Codex P2, r3).
-    const firstClick = !request.redirected_at;
+    // Ordering (Codex P2, r4): the base stamp (SQL-side counter, no stale
+    // read) and the cadence stop both land BEFORE the first-click claim, and
+    // the claim itself is a conditional UPDATE ... WHERE redirected_at IS
+    // NULL — so overlapping requests can't double-notify or lose an
+    // open_count increment, and a stamp-ok/stop-failed request leaves the
+    // claim unconsumed for the retry to notify on.
     try {
       const updates = {
-        open_count: (request.open_count || 0) + 1,
+        open_count: db.raw('COALESCE(open_count, 0) + 1'),
         google_review_clicked: true,
         redirected_to_google: true,
         google_location: loc.id,
@@ -108,7 +113,6 @@ router.get('/:token/go', directLinkLimiter, async (req, res) => {
         updates.opened_at = new Date();
         if (request.status === 'sent') updates.status = 'opened';
       }
-      if (firstClick) updates.redirected_at = new Date();
       await db('review_requests').where({ id: request.id }).update(updates);
     } catch (err) {
       logger.warn(`[review-gate] direct-link click stamp failed — rate-page fallback: ${err.message}`);
@@ -132,6 +136,20 @@ router.get('/:token/go', directLinkLimiter, async (req, res) => {
       }
     } catch (err) {
       logger.warn(`[review-gate] cadence stop on click failed — rate-page fallback: ${err.message}`);
+      return res.redirect(302, ratePageFallback);
+    }
+
+    // Atomic first-click claim: only the request that flips redirected_at
+    // from NULL owns the owner notification.
+    let firstClick = false;
+    try {
+      const claimed = await db('review_requests')
+        .where({ id: request.id })
+        .whereNull('redirected_at')
+        .update({ redirected_at: new Date() });
+      firstClick = claimed > 0;
+    } catch (err) {
+      logger.warn(`[review-gate] first-click claim failed — rate-page fallback: ${err.message}`);
       return res.redirect(302, ratePageFallback);
     }
 

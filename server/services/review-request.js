@@ -2038,6 +2038,35 @@ const ReviewService = {
       /* ignore */
     }
 
+    // Gate-toggle hygiene (Codex P2, r4): while GATE_REVIEW_SEQUENCES is off
+    // the cron freezes active rows in place — completions deliver legacy asks
+    // in the meantime, and re-enabling the gate would otherwise resume relic
+    // steps. Two deterministic retirements:
+    //  - stale: the whole plan spans ~4 days, so an active sequence started
+    //    over 30 days ago can only be a resumed relic — retire it;
+    //  - superseded: an ask DELIVERED outside this sequence since 30 days ago
+    //    (legacy path, manual one-off) means the customer was already
+    //    contacted — another touch inside the cooldown would double-ask.
+    const startedAtMs = new Date(seq.started_at).getTime();
+    if (Number.isFinite(startedAtMs) && Date.now() - startedAtMs > 30 * 86400000) {
+      return stop("stale");
+    }
+    let recentAskRows = [];
+    try {
+      recentAskRows = await db("review_requests")
+        .where({ customer_id: seq.customer_id })
+        .where("created_at", ">", new Date(Date.now() - 30 * 86400000))
+        .whereRaw("(sms_sent_at IS NOT NULL OR sent_at IS NOT NULL)")
+        .whereRaw(ASK_TOUCH_SQL)
+        .select("sequence_id", "sms_sent_at", "sent_at");
+    } catch {
+      recentAskRows = []; // hygiene check is best-effort; the cap/cooldown guards below still hold
+    }
+    const externallyAsked = recentAskRows.some(
+      (r) => (r.sms_sent_at || r.sent_at) && r.sequence_id !== seq.id,
+    );
+    if (externallyAsked) return stop("superseded");
+
     const step = plan[seq.current_step] || {};
 
     // Final atomic claim right before sending: an admin Stop (or a completing

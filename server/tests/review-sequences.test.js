@@ -682,6 +682,48 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(touch.service_record_id).toBe('sr-1');
   });
 
+  test('a relic sequence resumed after 30+ days (gate toggled off/on) retires as stale instead of firing', async () => {
+    const mock = makeMock({
+      customers: [{ id: 'st-1', first_name: 'Ana', last_name: 'F', phone: '+19410000080', nearest_location_id: 'bradenton' }],
+      review_sequences: [{
+        id: 'seq-st', customer_id: 'st-1', status: 'active', current_step: 1, touches_sent: 1,
+        plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }, { day: 3, channel: 'sms', templateKey: 'soft_reminder' }]),
+        started_at: new Date(Date.now() - 40 * 86400000), next_run_at: new Date(Date.now() - 60000),
+      }],
+    });
+    db.mockImplementation(mock);
+
+    const out = await ReviewService.processReviewSequences();
+
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(out.stopped).toBe(1);
+    expect(mock.__state.rows.review_sequences[0].stop_reason).toBe('stale');
+  });
+
+  test('an ask delivered outside the sequence (legacy path while gate was off) supersedes the cadence', async () => {
+    const mock = makeMock({
+      customers: [{ id: 'sp-1', first_name: 'Eli', last_name: 'G', phone: '+19410000081', nearest_location_id: 'venice' }],
+      review_sequences: [{
+        id: 'seq-sp', customer_id: 'sp-1', status: 'active', current_step: 1, touches_sent: 1,
+        plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }, { day: 3, channel: 'sms', templateKey: 'soft_reminder' }]),
+        started_at: new Date(Date.now() - 5 * 86400000), next_run_at: new Date(Date.now() - 60000),
+      }],
+      review_requests: [
+        // The cadence's own touch — must NOT count as external.
+        { id: 'rr-own', sequence_id: 'seq-sp', customer_id: 'sp-1', channel: 'sms', sms_sent_at: new Date(Date.now() - 5 * 86400000), created_at: new Date(Date.now() - 5 * 86400000) },
+        // A legacy one-off ask delivered yesterday (no sequence linkage).
+        { id: 'rr-ext', sequence_id: null, customer_id: 'sp-1', channel: 'sms', sms_sent_at: new Date(Date.now() - 86400000), created_at: new Date(Date.now() - 86400000) },
+      ],
+    });
+    db.mockImplementation(mock);
+
+    const out = await ReviewService.processReviewSequences();
+
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(out.stopped).toBe(1);
+    expect(mock.__state.rows.review_sequences[0].stop_reason).toBe('superseded');
+  });
+
   test('a cadence stops with reason "clicked" once a touch was redirected to Google (direct-link engagement)', async () => {
     const mock = makeMock({
       customers: [{ id: 'cl-1', first_name: 'Ivy', last_name: 'W', phone: '+19410000034', nearest_location_id: 'bradenton' }],

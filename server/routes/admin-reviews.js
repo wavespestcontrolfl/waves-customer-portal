@@ -646,7 +646,12 @@ router.post('/send-request', requireAdmin, async (req, res, next) => {
       // An active cadence already owns this customer's review ASKS (and its
       // touches can sit 'deferred' where the queued-row check can't see them), so
       // a one-off ASK here would double-contact. Check-ins are allowed through.
-      if (isAsk) {
+      // Only enforced while GATE_REVIEW_SEQUENCES is ON — with the gate off the
+      // cadence cron is frozen, so a stranded 'active' row must not lock the
+      // customer out of one-off asks forever (Codex P2, PR #3104 r4); the
+      // per-step staleness/supersede checks retire that row if the gate later
+      // returns.
+      if (isAsk && isEnabled('reviewSequences')) {
         const activeSeq = await db('review_sequences')
           .where({ customer_id: customer.id, status: 'active' }).first().catch(() => null);
         if (activeSeq) {
