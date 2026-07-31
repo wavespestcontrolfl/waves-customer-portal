@@ -492,8 +492,20 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
         })
         .onConflict('call_log_id')
         .merge({
-          held_email: conn.raw(`CASE WHEN ${zeroWorkMarker} THEN excluded.held_email ELSE first_touch_holds.held_email END`),
+          // Real pending/releasing rows RETARGET here too (Codex #3084
+          // r36): recordFirstTouchHold can insert the first real row
+          // after this transaction's retarget updates already found
+          // nothing — the conflict merge is the last correction write
+          // that can still see it, and preserving its extracted target
+          // would let a claimant (or the resolved-card sweep) send to
+          // the address the operator just rejected. Deny-lift and the
+          // ownerless releasing→pending flip mirror the retarget
+          // updates; updated_at stays untouched (never extend a
+          // possibly-dead claimant's stale window).
+          held_email: conn.raw(`CASE WHEN ${zeroWorkMarker} OR first_touch_holds.status IN ('pending', 'releasing') THEN excluded.held_email ELSE first_touch_holds.held_email END`),
           released_at: conn.raw(`CASE WHEN ${zeroWorkMarker} THEN excluded.released_at ELSE first_touch_holds.released_at END`),
+          status: conn.raw("CASE WHEN first_touch_holds.status = 'releasing' AND first_touch_holds.last_error = 'email_denied_await_correction' THEN 'pending' ELSE first_touch_holds.status END"),
+          last_error: conn.raw("CASE WHEN first_touch_holds.status IN ('pending', 'releasing') AND first_touch_holds.last_error = 'email_denied_await_correction' THEN NULL ELSE first_touch_holds.last_error END"),
         });
     }
 

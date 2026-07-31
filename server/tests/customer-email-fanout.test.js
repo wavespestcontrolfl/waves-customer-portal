@@ -630,6 +630,22 @@ describe('propagateCustomerEmailChange', () => {
     expect(String(row.resolution_note)).toContain('no read-back card existed');
   });
 
+  test('the correction marker merge retargets a real pending/releasing row too', async () => {
+    // recordFirstTouchHold can insert the FIRST real row after this
+    // transaction's retarget updates already found nothing — the marker
+    // upsert's conflict merge is the last correction write that can
+    // still see it (Codex #3084 r36). Deny-lift and the ownerless
+    // releasing→pending flip mirror the retarget updates; updated_at is
+    // never touched.
+    const conn = makeConn({ triage_items: { rows: [{ id: 'ti-1', call_log_id: 'call-1' }] } });
+    await propagateCustomerEmailChange({ before: HOLD_BEFORE, after: HOLD_AFTER }, conn);
+    const merge = conn.__calls.find((c) => c.table === 'first_touch_holds' && c.op === 'merge');
+    expect(String(merge.arg.held_email.__raw)).toContain("IN ('pending', 'releasing')");
+    expect(String(merge.arg.last_error.__raw)).toContain('email_denied_await_correction');
+    expect(String(merge.arg.status.__raw)).toContain("THEN 'pending'");
+    expect(merge.arg.updated_at).toBeUndefined();
+  });
+
   test('deferred newsletter holds pass through when no pending subscriber was moved', async () => {
     mockResume.mockResolvedValueOnce({
       resumed: true,

@@ -346,16 +346,20 @@ async function runNewsletterResume(payload, dbh = db, { skipDedupe = false } = {
       const emailLc = String(payload.email || '').trim().toLowerCase();
       const existing = await dbh('newsletter_subscribers')
         .whereRaw('LOWER(email) = ?', [emailLc])
-        .first('status', 'confirmation_sent_at');
+        .first('id', 'status', 'confirmation_sent_at');
       if (existing && String(existing.status) === 'pending' && existing.confirmation_sent_at
           && (Date.now() - new Date(existing.confirmation_sent_at).getTime()) < RESUME_DOI_DEDUPE_MS) {
         // Preserve canonical linkage even when the send is deduped (Codex
         // #3084 r14): the pending row may predate the call customer, and an
         // unlinked subscriber is invisible to the email fanout's token
-        // rotation. Adopt only unlinked rows — never steal a link.
+        // rotation. Adopt only unlinked rows — never steal a link — and
+        // BIND to the row this lookup found (Codex #3084 r36): a rotation
+        // freeing the address for an unrelated signup between the read and
+        // this write must not link a stranger's subscription.
         if (payload.customerId) {
           try {
             await dbh('newsletter_subscribers')
+              .where({ id: existing.id })
               .whereRaw('LOWER(email) = ?', [emailLc])
               .whereNull('customer_id')
               .update({ customer_id: payload.customerId, updated_at: new Date() });
@@ -391,13 +395,19 @@ async function runNewsletterResume(payload, dbh = db, { skipDedupe = false } = {
   // the stored address — an unlinked subscriber is invisible to the email
   // fanout's customer-scoped token rotation, stranding its confirmation
   // and unsubscribe tokens outside every future correction. Adopt-only
-  // (never steal an existing link), mirroring the dedupe branch above. A
-  // failed linkage keeps the hold retryable WITHOUT re-sending: the
-  // retry's dedupe guard sees the fresh confirmation_sent_at stamp,
-  // suppresses the duplicate DOI, and re-attempts exactly this linkage.
-  if (payload.customerId && outcome) {
+  // (never steal an existing link), mirroring the dedupe branch above,
+  // and BOUND to the subscriber the resume actually touched (Codex #3084
+  // r36): an email-only match could adopt an unrelated signup that
+  // claimed the address after a rotation — future corrections would then
+  // rotate a stranger's tokens. No subscriberId in the outcome = nothing
+  // safely identifiable = no adoption. A failed linkage keeps the hold
+  // retryable WITHOUT re-sending: the retry's dedupe guard sees the
+  // fresh confirmation_sent_at stamp, suppresses the duplicate DOI, and
+  // re-attempts exactly this linkage.
+  if (payload.customerId && outcome && outcome.subscriberId) {
     try {
       await dbh('newsletter_subscribers')
+        .where({ id: outcome.subscriberId })
         .whereRaw('LOWER(email) = ?', [String(payload.email || '').trim().toLowerCase()])
         .whereNull('customer_id')
         .update({ customer_id: payload.customerId, updated_at: new Date() });
@@ -754,7 +764,17 @@ async function resumeHeldFirstTouch({
             // whether a marker was there to consume — that incarnation
             // holds the skipDedupe ticket (r31). A send failure re-arms
             // it via sendFailedMarkerFor below.
-            skipDedupe = hold.last_error === 'newsletter_doi_not_confirmed';
+            // A RECLAIMED attempt forces the actual resend too (Codex
+            // #3084 r36): claiming a STALE 'releasing' row means a worker
+            // died mid-attempt — possibly after subscribeOrResubscribe's
+            // (or the fanout's) pre-stamp but before the send, and a
+            // crash leaves no failure marker. Trusting the stamp would
+            // terminally settle a hold whose DOI never went out. The rare
+            // worst case (the worker died after the send, before its
+            // settle) is one duplicate confirmation email — strictly
+            // better than a permanently unconfirmed subscriber.
+            skipDedupe = hold.last_error === 'newsletter_doi_not_confirmed'
+              || String(hold.status) === 'releasing';
           } catch (gateErr) {
             // ABORT, never degrade to the dedupe guard (Codex #3084
             // r32): an unverifiable gate may have left the marker armed,
@@ -1220,13 +1240,23 @@ async function recordFirstTouchHold({ callLogId, customerId = null, heldEmail, h
           // read→merge gap — the CASE inspects the CURRENT row, so the
           // operator-confirmed value survives no matter when the
           // correction lands.
+          // A target WRITTEN during this run survives too (Codex #3084
+          // r36): a mid-run correction retargets the pending row, and a
+          // retryable release failure re-pends it with NO released_at —
+          // every such write bumps updated_at, so a during-run stamp
+          // marks the row as carrying an operator-era value the stale
+          // in-memory extraction must not overwrite. A pre-existing row
+          // from an earlier run keeps updated_at < runStartedAt and
+          // still adopts the reprocess's fresh extraction.
           held_email: runStartedAt
             ? dbh.raw(
               "CASE WHEN first_touch_holds.status = 'releasing' THEN first_touch_holds.held_email"
               + " WHEN first_touch_holds.released_at IS NOT NULL AND first_touch_holds.released_at >= ?"
               + " AND COALESCE(first_touch_holds.held_email, '') <> '' THEN first_touch_holds.held_email"
+              + ' WHEN first_touch_holds.updated_at >= ?'
+              + " AND COALESCE(first_touch_holds.held_email, '') <> '' THEN first_touch_holds.held_email"
               + ' ELSE ? END',
-              [runStartedAt, emailToRecord],
+              [runStartedAt, runStartedAt, emailToRecord],
             )
             : dbh.raw(
               "CASE WHEN first_touch_holds.status = 'releasing' THEN first_touch_holds.held_email ELSE ? END",

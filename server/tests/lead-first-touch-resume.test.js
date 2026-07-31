@@ -212,7 +212,7 @@ jest.mock('../services/automation-runner', () => ({
   automationSuppressionMatches: (_t, row) => String(row?.suppression_type || '') === 'bounce' || !row?.group_key,
 }));
 
-const mockNewsletter = jest.fn(async () => ({ subscribed: true, confirmationEmailSent: true }));
+const mockNewsletter = jest.fn(async () => ({ subscribed: true, confirmationEmailSent: true, subscriberId: 'sub-1' }));
 jest.mock('../services/call-recording-processor', () => ({
   resumeNewsletterForCallCustomer: (...a) => mockNewsletter(...a),
 }));
@@ -496,6 +496,31 @@ describe('resumeHeldFirstTouch (ledger release engine)', () => {
     expect(mockHoldUpdates.at(-1)).toMatchObject({ status: 'pending', last_error: 'dedupe_linkage_failed' });
   });
 
+  test('a reclaimed stale claim forces the actual resend past the pre-send stamp', async () => {
+    // A worker that died mid-attempt may have pre-stamped
+    // confirmation_sent_at WITHOUT sending — a crash leaves no failure
+    // marker, so the reclaimer must not trust the stamp (Codex #3084
+    // r36): claiming a stale 'releasing' row forces skipDedupe, and the
+    // rare died-after-send case costs one duplicate confirmation instead
+    // of a permanently unconfirmed subscriber.
+    mockHold = baseHold({ held_drip: false, status: 'releasing' });
+    mockSubscriberRow = { id: 'sub-1', status: 'pending', confirmation_sent_at: new Date() };
+    const res = await resumeHeldFirstTouch({ callLogId: 'call-1' });
+    expect(res.resumed).toBe(true);
+    expect(mockNewsletter).toHaveBeenCalled(); // dedupe guard bypassed — real resend
+  });
+
+  test('adoption is skipped when the resume outcome carries no subscriber id', async () => {
+    // Email-only adoption could link an unrelated signup that claimed
+    // the freed address after a rotation (Codex #3084 r36) — without the
+    // outcome's subscriberId nothing is safely identifiable, so nothing
+    // links.
+    mockNewsletter.mockResolvedValueOnce({ subscribed: true, confirmationEmailSent: true });
+    mockHold = baseHold({ held_drip: false });
+    await resumeHeldFirstTouch({ callLogId: 'call-1' });
+    expect(mockSubscriberUpdates).toHaveLength(0);
+  });
+
   test('the pre-send gate refuses an UNMARKED hold too — a denial after the claim never sends', async () => {
     // The r31–r33 layout fenced only MARKED holds between the renewal and
     // the send; the r34 gate runs the same last-instant CAS for every
@@ -758,6 +783,25 @@ describe('recordFirstTouchHold (durable hold ledger writes)', () => {
     const merged = mockMergeArgs.at(-1).held_email;
     expect(String(merged.sql)).toContain("WHEN first_touch_holds.status = 'releasing' THEN first_touch_holds.held_email");
     expect(merged.bindings[0]).toBe('guess@example.com');
+  });
+
+  test('a target written DURING the run survives the merge — retryably re-pended corrections included', async () => {
+    // A mid-run correction retargets the pending row and the release
+    // re-pends retryably (updated_at bumps, no released_at lands) —
+    // Step 8's merge must not overwrite the operator-approved address
+    // with the stale in-memory extraction (Codex #3084 r36).
+    mockHold = null;
+    await recordFirstTouchHold({
+      callLogId: 'call-1',
+      customerId: 'cust-1',
+      heldEmail: 'stale.guess@example.com',
+      heldNewsletter: true,
+      runStartedAt: new Date(Date.now() - 60_000),
+    });
+    const merged = mockMergeArgs.at(-1).held_email;
+    expect(String(merged.sql)).toContain('first_touch_holds.updated_at >= ?');
+    // The fresh-extraction fallback stays the LAST binding.
+    expect(merged.bindings.at(-1)).toBe('stale.guess@example.com');
   });
 
   test("the merge never bumps an ACTIVE claim's updated_at — it IS the fence stamp", async () => {
