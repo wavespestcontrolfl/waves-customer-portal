@@ -244,6 +244,12 @@ async function loadByToken(token) {
 // any later move (customer, dispatch) supersedes the rain-out narrative, so
 // the banner disappears rather than describing a stale transition.
 const WEATHER_REASON_CODES = new Set(['weather_rain', 'weather_wind', 'weather_lightning', 'weather_heat']);
+// Waves-initiated actors only: a customer answering an earlier reply-based
+// rain-out SMS logs initiated_by='customer_sms' with the original weather_*
+// reason kept (reschedule-sms.js) — that move is the customer's own pick,
+// not a move Waves made for weather, and must supersede the banner rather
+// than be narrated by it (codex r3 P2).
+const WEATHER_MOVE_INITIATORS = new Set(['tech', 'admin', 'weather_auto']);
 const WEATHER_MOVE_MAX_AGE_DAYS = 14;
 // Fail-open decoration budget. The BOUNDED lookup (not a raw race) is the
 // right tool for a public page: it shares one in-flight NWS lookup per
@@ -256,8 +262,9 @@ async function loadWeatherMove(svc, now = new Date()) {
   const log = await db('reschedule_log')
     .where({ scheduled_service_id: svc.id })
     .orderBy('created_at', 'desc')
-    .first('reason_code', 'original_date', 'original_window', 'new_date', 'new_window', 'created_at');
+    .first('reason_code', 'initiated_by', 'original_date', 'original_window', 'new_date', 'new_window', 'created_at');
   if (!log || !WEATHER_REASON_CODES.has(log.reason_code)) return null;
+  if (!WEATHER_MOVE_INITIATORS.has(log.initiated_by)) return null;
   const ageMs = now - new Date(log.created_at);
   if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs > WEATHER_MOVE_MAX_AGE_DAYS * 86400000) return null;
   // Still on the moved-to slot? Compare the log's landing date/start against

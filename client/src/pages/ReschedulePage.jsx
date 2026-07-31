@@ -180,8 +180,12 @@ function showsWhyMove(move, serviceType) {
     && !WHY_MOVE_EXEMPT_SERVICE.test(String(serviceType || ''));
 }
 
-function WeatherMoveChip({ chance, sunny }) {
+function WeatherMoveChip({ chance }) {
   if (chance == null || !Number.isFinite(Number(chance))) return null;
+  // Icon follows the FORECAST, not which row it sits on — the rain-out
+  // chooser doesn't guarantee a dry destination, so a sun beside "90% rain"
+  // must be impossible (codex r3 P2). Same ≤40% bar as the dry-heading rule.
+  const sunny = Number(chance) <= 40;
   return (
     <span data-glass="chip" data-glass-pill="" style={{
       display: 'inline-flex', alignItems: 'center', gap: 4, flexShrink: 0,
@@ -221,7 +225,7 @@ function WeatherMoveRow({ label, date, windowStart, chance, isNow }) {
           </small>
         ) : null}
       </span>
-      <WeatherMoveChip chance={chance} sunny={isNow} />
+      <WeatherMoveChip chance={chance} />
     </div>
   );
 }
