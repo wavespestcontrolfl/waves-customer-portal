@@ -149,25 +149,30 @@ describe('multi-situs master parcel record', () => {
     expect(parsed.lotSize).toBe(200000); // existing LOT_SQFT_MAX clamp path
   });
 
-  test('commercial multi-situs parcels keep the full parcel-wide parse', () => {
+  const RETAIL_BUILDINGS = {
+    cols: [
+      { title: 'Type' }, { title: 'Bldg' }, { title: 'Classification' }, { title: 'Yrblt' },
+      { title: 'Effyr' }, { title: 'Stories' }, { title: 'UnRoof' }, { title: 'LivBus' },
+      { title: 'Rooms' }, { title: 'Const/ExtWall' }, { title: 'RoofMaterial' }, { title: 'RoofType' },
+    ],
+    rows: [
+      ['RETAIL STORE', '1', 'RETAIL', '1998', '2005', '1', '42,000', '38,500', '', 'CONCRETE BLOCK', 'BUILT-UP', 'FLAT'],
+    ],
+  };
+
+  test('commercial multi-situs parcels keep the full parse — with parcel-level evidence', () => {
     // A shopping center's storefront addresses share one parcel, but the
     // commercial lane prices whole buildings — the parcel-wide facts are
-    // the right ones and must not be discarded as "residential units".
+    // the right ones. The exemption requires the parcel ROLL to classify
+    // commercial with zero residential units; a commercial building alone
+    // is not evidence.
     const parsed = _private.parseManateePaoRecord({
       address: '210 Commerce Way, Bradenton, FL 34205',
       search: { parcelId: '900000400', situsAddress: '210 COMMERCE WAY', city: 'BRADENTON', situsCount: 5 },
       land: parkLand,
-      buildings: {
-        cols: [
-          { title: 'Type' }, { title: 'Bldg' }, { title: 'Classification' }, { title: 'Yrblt' },
-          { title: 'Effyr' }, { title: 'Stories' }, { title: 'UnRoof' }, { title: 'LivBus' },
-          { title: 'Rooms' }, { title: 'Const/ExtWall' }, { title: 'RoofMaterial' }, { title: 'RoofType' },
-        ],
-        rows: [
-          ['RETAIL STORE', '1', 'RETAIL', '1998', '2005', '1', '42,000', '38,500', '', 'CONCRETE BLOCK', 'BUILT-UP', 'FLAT'],
-        ],
-      },
+      buildings: RETAIL_BUILDINGS,
       features: null,
+      parcelAttrs: { dorUseCode: '1100', landUseDescription: 'Stores, one story', residentialUnits: 0 },
     });
 
     expect(parsed._multiSitusParcel).toBeUndefined();
@@ -176,28 +181,36 @@ describe('multi-situs master parcel record', () => {
     expect(parsed.yearBuilt).toBe(1998);
   });
 
-  test('a park with a commercial clubhouse/office building still goes slim', () => {
-    // A land-lease park's one assessed building is often its office — a
-    // commercial primary building must not defeat the guard at community
-    // scale and publish park-wide facts with an Office type.
+  test('without parcel-level evidence a commercial-looking multi-situs parcel stays slim', () => {
+    // Fail-safe: a verify flag on a storefront is a nuisance; park-wide
+    // dimensions on a resident's quote is a mispricing.
     const parsed = _private.parseManateePaoRecord({
-      address: '4512 Seagrape Cir, Palmetto, FL 34221',
-      search: { parcelId: '900000100', situsAddress: '4512 SEAGRAPE CIR', city: 'PALMETTO', situsCount: 143 },
+      address: '210 Commerce Way, Bradenton, FL 34205',
+      search: { parcelId: '900000400', situsAddress: '210 COMMERCE WAY', city: 'BRADENTON', situsCount: 5 },
+      land: parkLand,
+      buildings: RETAIL_BUILDINGS,
+      features: null,
+      parcelAttrs: null,
+    });
+    expect(parsed._multiSitusParcel).toEqual({ situsCount: 5 });
+    expect(parsed.squareFootage).toBeNull();
+  });
+
+  test('a SMALL park with an assessed office still goes slim with park identity', () => {
+    // codex P1 r3: no address-count threshold can split a 9-home park with
+    // an office from a 9-storefront plaza — the parcel roll can.
+    const parsed = _private.parseManateePaoRecord({
+      address: '4501 Seagrape Cir, Palmetto, FL 34221',
+      search: { parcelId: '900000500', situsAddress: '4501 SEAGRAPE CIR', city: 'PALMETTO', situsCount: 9 },
       land: parkLand,
       buildings: {
-        cols: [
-          { title: 'Type' }, { title: 'Bldg' }, { title: 'Classification' }, { title: 'Yrblt' },
-          { title: 'Effyr' }, { title: 'Stories' }, { title: 'UnRoof' }, { title: 'LivBus' },
-          { title: 'Rooms' }, { title: 'Const/ExtWall' }, { title: 'RoofMaterial' }, { title: 'RoofType' },
-        ],
-        rows: [
-          ['OFFICE', '1', 'OFFICE', '1985', '1999', '1', '3,200', '2,800', '', 'CONCRETE BLOCK', 'SHINGLE', 'GABLE'],
-        ],
+        ...RETAIL_BUILDINGS,
+        rows: [['OFFICE', '1', 'OFFICE', '1985', '1999', '1', '3,200', '2,800', '', 'CONCRETE BLOCK', 'SHINGLE', 'GABLE']],
       },
       features: null,
+      parcelAttrs: { dorUseCode: '28', landUseDescription: 'Mobile Home Parks (1555)', residentialUnits: 9 },
     });
-
-    expect(parsed._multiSitusParcel).toEqual({ situsCount: 143 });
+    expect(parsed._multiSitusParcel).toEqual({ situsCount: 9, parkConfirmed: true });
     expect(parsed.propertyType).toBeNull();
     expect(parsed.squareFootage).toBeNull();
     expect(parsed.lotSize).toBeNull();

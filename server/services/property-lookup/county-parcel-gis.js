@@ -660,6 +660,59 @@ const SITUS_ZIP_FIELDS = {
   Charlotte: 'zipcode',
 };
 
+// Parcel-ID field per county layer (mirrors each parse function's getter).
+const PARCEL_ID_QUERY_FIELDS = {
+  Manatee: 'PARID',
+  Sarasota: 'id',
+  Charlotte: 'ACCOUNT',
+};
+
+// Roll attributes for ONE known parcel (no geometry) — parcel-level
+// evidence (DOR use code, land-use description, living units) for callers
+// that already hold a parcel id from another lane, e.g. the multi-situs
+// master-parcel classifier deciding park-vs-shopping-center. Fail-open
+// null on error/timeout/miss; the id is stripped to [A-Za-z0-9-] before
+// interpolation, so no quoting is reachable.
+async function lookupCountyParcelAttributesById(county, parcelId, options = {}) {
+  if (isDisabled()) return null;
+  const layer = COUNTY_LAYERS[county];
+  const idField = PARCEL_ID_QUERY_FIELDS[county];
+  const id = String(parcelId || '').trim().replace(/[^A-Za-z0-9-]/g, '');
+  if (!layer || !idField || !id) return null;
+
+  const params = new URLSearchParams({
+    f: 'json',
+    where: `${idField} = '${id}'`,
+    outFields: layer.outFields.join(','),
+    returnGeometry: 'false',
+    resultRecordCount: '1',
+  });
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMsFor(options));
+  const t0 = Date.now();
+  try {
+    const resp = await fetch(`${layer.url}?${params.toString()}`, { signal: controller.signal });
+    if (!resp.ok) throw new Error(`${county} parcel-id GIS ${resp.status}`);
+    const data = await resp.json();
+    if (data?.error) throw new Error(`${county} parcel-id GIS error: ${data.error.message || data.error.code}`);
+    const attrs = data?.features?.[0]?.attributes;
+    if (!attrs) return null;
+    const parsed = layer.parse(ciAttr(attrs));
+    logger.info('[county-parcel-gis] parcel-id attribute query', {
+      county, elapsedMs: Date.now() - t0,
+    });
+    return parsed;
+  } catch (err) {
+    logger.warn('[county-parcel-gis] parcel-id attribute query failed', {
+      county, elapsedMs: Date.now() - t0, error: err.message,
+    });
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // All situs strings on the county roll whose address contains the given
 // street text ("TOBERMORY" → every parcel on Tobermory Way, including
 // multi-situs paired-villa rows). Returns { situs, zips, truncated } — zips
@@ -815,6 +868,7 @@ async function lookupSubdivisionMedianLivingSqft({ county, subdivision } = {}, o
 
 module.exports = {
   lookupCountyParcelByPoint,
+  lookupCountyParcelAttributesById,
   queryStreetSitusAddresses,
   countyUseDescToPropertyType,
   dorMajorCategory,

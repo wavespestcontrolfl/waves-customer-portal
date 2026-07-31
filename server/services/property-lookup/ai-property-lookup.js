@@ -21,7 +21,7 @@
 const logger = require('../logger');
 const MODELS = require('../../config/models');
 const { lookupParcelByPoint, parcelGisTimeoutMs } = require('./parcel-gis');
-const { lookupCountyParcelByPoint, queryStreetSitusAddresses, countyUseDescToPropertyType, dorMajorCategory, normalizeCountyName } = require('./county-parcel-gis');
+const { lookupCountyParcelByPoint, lookupCountyParcelAttributesById, queryStreetSitusAddresses, countyUseDescToPropertyType, dorMajorCategory, normalizeCountyName } = require('./county-parcel-gis');
 
 const DEFAULT_TIMEOUT_MS = 30000;
 const DEFAULT_MAX_SEARCHES = 5;
@@ -415,7 +415,7 @@ async function fetchManateeParcelDetails(search, address, timeoutMs, t0 = Date.n
   const remainingMs = remainingCountyLookupMs(t0, timeoutMs);
   if (remainingMs < COUNTY_LOOKUP_MIN_REMAINING_MS) return null;
 
-  const [land, buildings, features] = await Promise.all([
+  const [land, buildings, features, parcelAttrs] = await Promise.all([
     fetchManateePaoJson(`${MANATEE_PAO_LAND_URL}?parid=${encodeURIComponent(search.parcelId)}`, remainingMs),
     fetchManateePaoJson(`${MANATEE_PAO_BUILDINGS_URL}?parid=${encodeURIComponent(search.parcelId)}`, remainingMs),
     // Pool/cage/spa evidence only — a features failure must never sink the
@@ -425,9 +425,17 @@ async function fetchManateeParcelDetails(search, address, timeoutMs, t0 = Date.n
     // parser-regression label — instead of a provider failure.
     fetchManateePaoJson(`${MANATEE_PAO_FEATURES_URL}?parid=${encodeURIComponent(search.parcelId)}`, remainingMs)
       .catch((err) => { if (opts.rethrowErrors) throw err; return null; }),
+    // Parcel-level classification evidence, fetched ONLY for multi-situs
+    // matches: the DOR use code / land-use description / living-unit count
+    // are what split a land-lease park (slim record) from a storefront
+    // parcel (full commercial parse) — no building-type or address-count
+    // heuristic can. Fail-open null → the slim default below.
+    (search.situsCount || 1) > 1
+      ? lookupCountyParcelAttributesById('Manatee', search.parcelId, { timeoutMs: remainingMs }).catch(() => null)
+      : Promise.resolve(null),
   ]);
 
-  const parsed = parseManateePaoRecord({ address, search, land, buildings, features });
+  const parsed = parseManateePaoRecord({ address, search, land, buildings, features, parcelAttrs });
   // A multi-situs master-parcel match carries no per-unit facts BY DESIGN —
   // it must still ship: the roll vouched for the address, and the park
   // marker is what the panel surfaces instead of "not found on the roll".
@@ -795,12 +803,6 @@ const COMMERCIAL_BUILDING_PROPERTY_TYPES = new Set([
 function isCommercialBuildingType(propertyType) {
   return COMMERCIAL_BUILDING_PROPERTY_TYPES.has(String(propertyType || ''));
 }
-
-// Multi-situs parcels whose primary building classifies commercial keep the
-// full parcel-wide parse only up to this many situs addresses (storefront
-// scale). Above it, the parcel reads as a community whose one commercial
-// building is an amenity (park office/clubhouse), not a shopping center.
-const COMMERCIAL_MULTI_SITUS_MAX = 12;
 
 // County parcels signal commercial through the DOR use code (majors 10-39
 // commercial, 40-49 industrial) or the county land-use description even when
@@ -3120,7 +3122,7 @@ function charlottePoolFeatures(detailHtml) {
   };
 }
 
-function parseManateePaoRecord({ address, search, land, buildings, features }) {
+function parseManateePaoRecord({ address, search, land, buildings, features, parcelAttrs }) {
   const buildingRows = parsePaoRows(buildings);
   const landRows = parsePaoRows(land);
   const primaryBuilding = pickPrimaryManateeBuilding(buildingRows);
@@ -3142,19 +3144,23 @@ function parseManateePaoRecord({ address, search, land, buildings, features }) {
   // with situsCount (park semantics only at association scale, ≥5).
   // COMMERCIAL multi-situs parcels (a shopping center's storefront
   // addresses) keep the full parse: the commercial lane prices whole
-  // buildings, so the parcel-wide facts are the right ones there. But a
-  // commercial PRIMARY BUILDING alone is not parcel-level corroboration —
-  // a land-lease park's one assessed building is often its office or
-  // clubhouse, and publishing park-wide facts with an Office type would
-  // route a resident commercially. Storefront parcels carry a handful of
-  // situs addresses; land-lease communities carry dozens to hundreds — the
-  // situs count is the strongest in-lane discriminator, so the commercial
-  // exemption only holds at storefront scale.
+  // buildings, so the parcel-wide facts are the right ones there. The
+  // exemption requires PARCEL-LEVEL evidence (the GIS roll's DOR code /
+  // land-use with zero residential units) — a commercial primary BUILDING
+  // alone is a land-lease park's office/clubhouse as often as a store, and
+  // no address-count heuristic splits a 9-home park from a 9-storefront
+  // plaza. Unavailable evidence (GIS outage) defaults to the slim record:
+  // a verify flag on a storefront is a nuisance; park-wide dimensions on a
+  // resident's quote is a mispricing.
   // Before the situs-cell split these rows could never match at all, so no
   // valid county dimensions are lost relative to the old behavior.
   const situsCount = search.situsCount || 1;
-  const commercialStorefrontScale = commercialSized && situsCount <= COMMERCIAL_MULTI_SITUS_MAX;
-  if (situsCount > 1 && !commercialStorefrontScale) {
+  const parkParcel = isMobileHomeParkParcel(parcelAttrs);
+  const commercialParcelConfirmed = Boolean(parcelAttrs)
+    && !parkParcel
+    && parcelLooksCommercial(parcelAttrs)
+    && !(Number(parcelAttrs.residentialUnits) > 0);
+  if (situsCount > 1 && !commercialParcelConfirmed) {
     return {
       squareFootage: null,
       lotSize: null,
@@ -3169,7 +3175,12 @@ function parseManateePaoRecord({ address, search, land, buildings, features }) {
       confidence: 'high',
       county: 'Manatee',
       formattedAddress: [search.situsAddress, search.city, 'FL'].filter(Boolean).join(', ') || address,
-      _multiSitusParcel: { situsCount: search.situsCount },
+      _multiSitusParcel: {
+        situsCount,
+        // Positive park identity from the parcel roll — keeps the flag copy
+        // park-branded even at small counts (see the GIS-lane marker).
+        ...(parkParcel ? { parkConfirmed: true } : {}),
+      },
     };
   }
 
