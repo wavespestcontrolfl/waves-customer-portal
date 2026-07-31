@@ -382,6 +382,16 @@ describe('needsTurfManualConfirmation on unobservable profiles', () => {
     expect(needsTurfManualConfirmation(unobservableProfile(), ['TOPDRESS'], { topDressArea: 800 })).toBeNull();
   });
 
+  test('commercial profiles are gated too — commercial lawn auto-prices in the pilot', () => {
+    // The commercial filter used to strip LAWN before the gate ran,
+    // letting a conflicted commercial profile price unverified fallback
+    // turf through priceCommercialLawn (pre-push P1 r6 #3098).
+    const commercial = unobservableProfile({ isCommercial: true, propertyType: 'Commercial' });
+    const gate = needsTurfManualConfirmation(commercial, ['LAWN'], {});
+    expect(gate).not.toBeNull();
+    expect(gate.turfObservation).toBe('unobservable');
+  });
+
   test('non-turf services and normal profiles are untouched', () => {
     expect(needsTurfManualConfirmation(unobservableProfile(), ['PEST'], {})).toBeNull();
     const paved = { ...bareDirtAi(), imperviousSurfacePercent: 85, imperviosSurfacePercent: 85 };

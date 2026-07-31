@@ -2072,19 +2072,8 @@ function turfRiskReasons(source = {}) {
 }
 
 function needsTurfManualConfirmation(profile = {}, selectedServices = [], options = {}) {
-  let turfServices = selectedTurfPricedServices(selectedServices);
-  if (isCommercialProfile(profile, options)) {
-    // Commercial turf services are manual quote in PR 1; do not block them
-    // with residential lawn pricing measurement confirmation.
-    turfServices = turfServices.filter((service) => ![
-      'LAWN',
-      'OT_LAWN',
-      'TOPDRESS',
-      'DETHATCH',
-      'PLUGGING',
-    ].includes(service));
-  }
-  if (turfServices.length === 0) return null;
+  const allTurfServices = selectedTurfPricedServices(selectedServices);
+  if (allTurfServices.length === 0) return null;
   const manualTurfSf = firstNonNegativeNumber(profile.measuredTurfSf, profile.lawnSqFt);
   if (manualTurfSf !== undefined) return null;
   // Services whose treated area is entered directly (front/back-yard scope)
@@ -2098,16 +2087,19 @@ function needsTurfManualConfirmation(profile = {}, selectedServices = [], option
     PLUGGING: plugArea > 0,
     TOPDRESS: topDressArea > 0,
   };
-  if (turfServices.every((service) => areaBoundedExempt[service])) return null;
+  if (allTurfServices.every((service) => areaBoundedExempt[service])) return null;
 
   // Stale-imagery conflict profiles (turfObservation 'unobservable') have
   // NO trustworthy turf basis — the vision zeros were discarded and the
   // engine would otherwise price its lot/hardscape fallback silently
   // (estimatedTurfSf is 0 here, so the >threshold check below never
   // fires). A low-confidence fallback must route to confirmation, not
-  // auto-apply (pre-push P1 #3098): require a measured turf entry for
-  // whole-lawn pricing. Manual turf and the bounded-area add-on exemptions
-  // above already cleared.
+  // auto-apply (pre-push P1 #3098): require a measured turf entry.
+  // Deliberately BEFORE the commercial filter below — commercial lawn
+  // auto-prices through priceCommercialLawn in the small-commercial pilot,
+  // so a conflicted commercial profile needs the same confirmation
+  // (pre-push P1 r6 #3098). Manual turf and the bounded-area add-on
+  // exemptions above already cleared.
   if (profile.turfObservation === 'unobservable') {
     return {
       field: 'measuredTurfSf',
@@ -2117,6 +2109,21 @@ function needsTurfManualConfirmation(profile = {}, selectedServices = [], option
       message: 'Satellite imagery conflicts with county records for this property, so there is no reliable turf estimate. Confirm treatable lawn area before generating lawn pricing.',
     };
   }
+
+  let turfServices = allTurfServices;
+  if (isCommercialProfile(profile, options)) {
+    // Commercial turf services are manual quote in PR 1; do not block them
+    // with the residential >threshold measurement confirmation below. (The
+    // unobservable gate above still applies to them.)
+    turfServices = turfServices.filter((service) => ![
+      'LAWN',
+      'OT_LAWN',
+      'TOPDRESS',
+      'DETHATCH',
+      'PLUGGING',
+    ].includes(service));
+  }
+  if (turfServices.length === 0) return null;
 
   const estimatedTurfSf = firstNonNegativeNumber(profile.estimatedTurfSf, profile.estimatedTurfSqFt);
   if (estimatedTurfSf === undefined || estimatedTurfSf <= TURF_MANUAL_CONFIRMATION_SQFT) return null;
