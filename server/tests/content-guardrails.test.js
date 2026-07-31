@@ -2168,13 +2168,13 @@ describe('blog meta contract on refresh (owner rule 2026-07-29 refinement)', () 
   });
 });
 
-describe('blog meta soft-CTA requirement on refresh (owner rule 2026-07-29)', () => {
-  test('blog changed meta without a soft CTA P1s', () => {
+describe('blog meta soft-CTA on refresh (owner ruling 2026-07-30: nudge, never a blocker)', () => {
+  test('blog changed meta without a soft CTA emits NO finding', () => {
     const r = guardrails.evaluate(
       { body: 'Refreshed blog body.', frontmatter: { meta_description: 'How to tell chinch bug damage from drought stress in a Southwest Florida lawn, and what a full turf recovery actually takes this season.' } },
       { isRefresh: true, priorBody: 'old body', liveMetaDescription: 'Old blog meta.', targetIsBlog: true },
     );
-    expect(r.findings.some((f) => f.code === 'BLOG_META_MISSING_SOFT_CTA')).toBe(true);
+    expect(r.findings.some((f) => f.code === 'BLOG_META_MISSING_SOFT_CTA')).toBe(false);
   });
 });
 

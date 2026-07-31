@@ -2317,10 +2317,9 @@ describe('validateRewrittenMeta enforces the blog meta contract (owner rule 2026
     expect(r.reason).toMatch(/blog_meta_salesy/);
   });
 
-  test('a rewritten meta without a final soft CTA parks', () => {
+  test('a rewritten meta without a final soft CTA does NOT park (owner ruling 2026-07-30: CTA is a nudge, never a blocker)', () => {
     const r = rem.validateRewrittenMeta('A no-panic Southwest Florida guide to spider identification covering the widow species, the recluse myth, and the harmless mosquito eaters.', CTX);
-    expect(r.ok).toBe(false);
-    expect(r.reason).toMatch(/blog_meta_missing_soft_cta/);
+    expect(r.ok).toBe(true);
   });
 });
 

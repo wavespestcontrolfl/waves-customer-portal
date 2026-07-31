@@ -479,10 +479,13 @@ describe('evaluate (full gate)', () => {
     const commonSum = HARD_CHECKS.reduce((s, c) => s + c.weight, 0);
     for (const [pageType, checks] of Object.entries(PAGE_TYPE_CHECKS)) {
       const hardSum = commonSum + checks.filter((c) => c.isHard).reduce((s, c) => s + c.weight, 0);
-      const softChecks = checks.filter((c) => !c.isHard);
-      // With >= 2 soft checks the threshold must demand soft compliance
-      // beyond the hard checks; a single-soft bundle's one-worst-miss
-      // floor legitimately equals its hard sum (that one soft may miss).
+      // Weight-0 soft checks (blog_meta_soft_cta) are signal-only BY DESIGN
+      // (owner ruling 2026-07-30) — they can't demand score, so only
+      // WEIGHTED soft checks count toward the strict inequality.
+      const softChecks = checks.filter((c) => !c.isHard && c.weight > 0);
+      // With >= 2 weighted soft checks the threshold must demand soft
+      // compliance beyond the hard checks; a single-soft bundle's
+      // one-worst-miss floor legitimately equals its hard sum.
       if (softChecks.length >= 2) {
         expect(MIN_TOTAL_SCORES[pageType]).toBeGreaterThan(hardSum);
       } else {
@@ -961,13 +964,20 @@ describe('meta phone-token contract (owner rule 2026-07-29)', () => {
 });
 
 describe('meta contract bundle checks + refinements (owner rule 2026-07-29)', () => {
-  const { checkMetaPhoneTokenPresent, checkCityServiceMetaPhone, checkBlogMetaContract } = require('../services/content/content-quality-gate')._internals;
+  const { checkMetaPhoneTokenPresent, checkCityServiceMetaPhone, checkBlogMetaContract, checkBlogMetaSoftCta } = require('../services/content/content-quality-gate')._internals;
   const BLOG = { target_page_type: 'supporting-blog' };
 
-  test('blog meta without a soft CTA fails', () => {
-    const r = checkMetaPhoneTokenPresent({ meta_description: 'How to tell chinch bug damage from drought stress in a Southwest Florida lawn, and what a full turf recovery actually takes this season.' }, BLOG);
-    expect(r.ok).toBe(false);
-    expect(r.reason).toBe('blog_meta_missing_soft_cta');
+  test('blog meta without a soft CTA passes the hard contract but flags the soft check (owner ruling 2026-07-30)', () => {
+    const draft = { meta_description: 'How to tell chinch bug damage from drought stress in a Southwest Florida lawn, and what a full turf recovery actually takes this season.' };
+    expect(checkMetaPhoneTokenPresent(draft, BLOG).ok).toBe(true);
+    const soft = checkBlogMetaSoftCta(draft, BLOG);
+    expect(soft.ok).toBe(false);
+    expect(soft.reason).toBe('blog_meta_missing_soft_cta');
+  });
+
+  test('soft-CTA soft check skips page targets and empty metas', () => {
+    expect(checkBlogMetaSoftCta({ meta_description: 'No CTA here at all in this page meta text.' }, { target_page_type: 'page' }).ok).toBe(true);
+    expect(checkBlogMetaSoftCta({ frontmatter: {} }, BLOG).ok).toBe(true);
   });
 
   test('expanded salesy phrases are rejected on blog metas', () => {
@@ -996,10 +1006,13 @@ describe('meta contract round-3 hardening (Codex findings)', () => {
   const BLOG = { target_page_type: 'supporting-blog' };
   const PAGE = { target_page_type: 'page' };
 
-  test('soft CTA must END the meta — a mid-meta mention with a promotional tail fails', () => {
-    const r = checkBlogMetaContract({ meta_description: 'Learn more about chinch bugs. Professional lawn treatment is available from Waves whenever you need a local turf expert in Southwest Florida.' });
-    expect(r.ok).toBe(false);
-    expect(r.reason).toBe('blog_meta_missing_soft_cta');
+  test('soft CTA must END the meta — a mid-meta mention flags the SOFT check only (never the hard contract)', () => {
+    const draft = { meta_description: 'Learn more about chinch bugs. Professional lawn treatment is available from Waves whenever you need a local turf expert in Southwest Florida.' };
+    expect(checkBlogMetaContract(draft).ok).toBe(true);
+    const { checkBlogMetaSoftCta } = require('../services/content/content-quality-gate')._internals;
+    const soft = checkBlogMetaSoftCta(draft, BLOG);
+    expect(soft.ok).toBe(false);
+    expect(soft.reason).toBe('blog_meta_missing_soft_cta');
   });
 
   test('literal phone in a publishable title fails on every lane', () => {
@@ -1030,9 +1043,11 @@ describe('soft CTA final sentence must BE a CTA (round-5 hardening)', () => {
     }
   });
 
-  test('sales terms cannot ride in through the about-clause', () => {
-    const r = checkBlogMetaContract({ meta_description: `${LEAD}Learn more about saving big with Waves.` });
-    expect(r.ok).toBe(false);
+  test('sales terms riding the about-clause flag the SOFT check (contract itself passes — 2026-07-30 ruling)', () => {
+    const { checkBlogMetaSoftCta } = require('../services/content/content-quality-gate')._internals;
+    const draft = { meta_description: `${LEAD}Learn more about saving big with Waves.` };
+    expect(checkBlogMetaContract(draft).ok).toBe(true);
+    expect(checkBlogMetaSoftCta(draft, { target_page_type: 'supporting-blog' }).ok).toBe(false);
   });
 });
 
