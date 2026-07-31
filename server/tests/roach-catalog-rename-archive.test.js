@@ -38,6 +38,7 @@ function seedDb() {
         scheduled_service_id: 'v-open-1',
         status: 'draft',
         title: OLD_NAME,
+        service_type: OLD_NAME,
         line_items: JSON.stringify([
           { description: OLD_NAME, category: OLD_NAME, quantity: 1, unit_price: 350, amount: 350 },
         ]),
@@ -239,6 +240,8 @@ describe('20260730160000 roach catalog rename + archive', () => {
 
     const draft = invoiceById(db, 'inv-draft');
     expect(draft.title).toBe(NEW_NAME);
+    // service_type is its own rendered snapshot (pay/receipt, emails, PDFs).
+    expect(draft.service_type).toBe(NEW_NAME);
     const items = JSON.parse(draft.line_items);
     expect(items[0].description).toBe(NEW_NAME);
     expect(items[0].category).toBe(NEW_NAME);
@@ -254,7 +257,19 @@ describe('20260730160000 roach catalog rename + archive', () => {
     await migration.down(knex);
     const reverted = invoiceById(db, 'inv-draft');
     expect(reverted.title).toBe(OLD_NAME);
+    expect(reverted.service_type).toBe(OLD_NAME);
     expect(JSON.parse(reverted.line_items)[0].description).toBe(OLD_NAME);
+  });
+
+  test('rescheduled visits are superseded history — never relabeled (local audit P1)', async () => {
+    const db = seedDb();
+    db.scheduled_services.push({ id: 'v-resched', service_type: OLD_NAME, status: 'rescheduled' });
+
+    await migration.up(fakeKnex(db));
+
+    expect(visit(db, 'v-resched').service_type).toBe(OLD_NAME);
+    const state = JSON.parse(stateRow(db).value);
+    expect(state.backfilledVisitIds).not.toContain('v-resched');
   });
 
   test('an admin-edited draft title is not relabeled; an invoice sent after up() keeps the new label through rollback', async () => {

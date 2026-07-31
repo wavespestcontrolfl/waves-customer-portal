@@ -36,9 +36,11 @@ const ARCHIVE_PATCH = {
   customer_visible: false,
 };
 // Visits in these states are history — their invoices/reports keep the label
-// they were completed under. Everything else is open work the rename must
-// reach before its invoice is built.
-const TERMINAL_VISIT_STATUSES = ['completed', 'cancelled', 'skipped', 'no_show'];
+// they were completed under. `rescheduled` rows are superseded by a newer
+// visit row and read as non-live history throughout the lifecycle code.
+// Everything else is open work the rename must reach before its invoice is
+// built.
+const TERMINAL_VISIT_STATUSES = ['completed', 'cancelled', 'skipped', 'no_show', 'rescheduled'];
 
 // Exact-match label swap on an invoice snapshot's title + line-item
 // description/category strings. AMOUNTS ARE NEVER TOUCHED. Returns null when
@@ -46,6 +48,9 @@ const TERMINAL_VISIT_STATUSES = ['completed', 'cancelled', 'skipped', 'no_show']
 function relabelInvoiceSnapshot(inv, fromName, toName) {
   const patch = {};
   if (inv.title === fromName) patch.title = toName;
+  // service_type is its own rendered snapshot (pay/receipt APIs, invoice
+  // emails, PDFs) — same exact-match rule.
+  if (inv.service_type === fromName) patch.service_type = toName;
   let items = inv.line_items;
   if (typeof items === 'string') {
     try { items = JSON.parse(items); } catch { items = null; }
@@ -70,7 +75,7 @@ async function loadState(knex) {
   if (!row || !row.value) return null;
   try {
     return JSON.parse(row.value);
-  } catch (err) {
+  } catch {
     return null;
   }
 }
@@ -163,7 +168,7 @@ exports.up = async function up(knex) {
     const drafts = await knex('invoices')
       .whereIn('scheduled_service_id', state.backfilledVisitIds)
       .where({ status: 'draft' })
-      .select('id', 'title', 'line_items');
+      .select('id', 'title', 'line_items', 'service_type');
     for (const inv of drafts) {
       const patch = relabelInvoiceSnapshot(inv, OLD_NAME, NEW_NAME);
       if (!patch) continue;
@@ -242,7 +247,7 @@ exports.down = async function down(knex) {
     const drafts = await knex('invoices')
       .whereIn('id', invoiceIds)
       .where({ status: 'draft' })
-      .select('id', 'title', 'line_items');
+      .select('id', 'title', 'line_items', 'service_type');
     for (const inv of drafts) {
       const patch = relabelInvoiceSnapshot(inv, NEW_NAME, OLD_NAME);
       if (!patch) continue;
