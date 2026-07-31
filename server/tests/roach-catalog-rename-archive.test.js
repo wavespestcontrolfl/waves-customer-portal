@@ -18,16 +18,22 @@ const ARCHIVED = { is_active: false, is_archived: true, booking_enabled: false, 
 function seedDb() {
   return {
     services: [
-      { service_key: 'cockroach_control', name: OLD_NAME, short_name: 'Cockroach Control', ...LIVE, updated_at: 'orig' },
-      { service_key: 'pest_initial_palmetto_knockdown', name: 'Initial Native Roach Knockdown Service', short_name: null, ...LIVE, updated_at: 'orig' },
-      { service_key: 'pest_initial_german_knockdown', name: 'Initial German Roach Knockdown Service', short_name: null, ...LIVE, updated_at: 'orig' },
-      { service_key: 'general_pest', name: 'General Pest Control', short_name: 'General Pest', ...LIVE, updated_at: 'orig' },
+      { id: 'svc-roach', service_key: 'cockroach_control', name: OLD_NAME, short_name: 'Cockroach Control', ...LIVE, updated_at: 'orig' },
+      { id: 'svc-palmetto', service_key: 'pest_initial_palmetto_knockdown', name: 'Initial Native Roach Knockdown Service', short_name: null, ...LIVE, updated_at: 'orig' },
+      { id: 'svc-german', service_key: 'pest_initial_german_knockdown', name: 'Initial German Roach Knockdown Service', short_name: null, ...LIVE, updated_at: 'orig' },
+      { id: 'svc-general', service_key: 'general_pest', name: 'General Pest Control', short_name: 'General Pest', ...LIVE, updated_at: 'orig' },
     ],
     scheduled_services: [
-      { id: 'v-open-1', service_type: OLD_NAME, status: 'pending' },
-      { id: 'v-open-2', service_type: OLD_NAME, status: 'confirmed' },
-      { id: 'v-done', service_type: OLD_NAME, status: 'completed' },
-      { id: 'v-other', service_type: 'Lawn Care Service', status: 'pending' },
+      // v-open-2 has a legacy NULL service_id — the exact-label fallback path.
+      { id: 'v-open-1', service_type: OLD_NAME, status: 'pending', service_id: 'svc-roach' },
+      { id: 'v-open-2', service_type: OLD_NAME, status: 'confirmed', service_id: null },
+      { id: 'v-done', service_type: OLD_NAME, status: 'completed', service_id: 'svc-roach' },
+      { id: 'v-other', service_type: 'Lawn Care Service', status: 'pending', service_id: 'svc-general' },
+    ],
+    appointment_reminders: [
+      { id: 'rem-1', scheduled_service_id: 'v-open-1', service_type: OLD_NAME, updated_at: 'orig' },
+      { id: 'rem-merged', scheduled_service_id: 'v-open-2', service_type: `Quarterly Pest Control Service & ${OLD_NAME}`, updated_at: 'orig' },
+      { id: 'rem-other', scheduled_service_id: 'v-other', service_type: 'Lawn Care Service', updated_at: 'orig' },
     ],
     service_completion_profiles: [
       { service_key: 'cockroach_control', service_name_snapshot: OLD_NAME },
@@ -70,6 +76,7 @@ function fakeKnex(db, { missingTables = [] } = {}) {
       where(cond) { filters.push(cond); return q; },
       whereIn(col, vals) { inClauses.push({ col, vals }); return q; },
       whereNotIn(col, vals) { notInClauses.push({ col, vals }); return q; },
+      whereNull(col) { filters.push({ [col]: null }); return q; },
       select(...cols) {
         return Promise.resolve(rowsNow().filter(rowMatch).map((r) => {
           if (!cols.length) return { ...r };
@@ -252,13 +259,74 @@ describe('20260730160000 roach catalog rename + archive', () => {
     expect(invoiceById(db, 'inv-sent').title).toBe(OLD_NAME);
 
     const state = JSON.parse(stateRow(db).value);
-    expect(state.relabeledInvoiceIds).toEqual(['inv-draft']);
+    expect(Object.keys(state.relabeledInvoices)).toEqual(['inv-draft']);
+    expect(state.relabeledInvoices['inv-draft']).toMatchObject({ title: true, service_type: true });
+
+    // Reminders linked to backfilled visits relabel too — including the
+    // exact-matching part of a merged multi-service label.
+    expect(db.appointment_reminders.find((r) => r.id === 'rem-1').service_type).toBe(NEW_NAME);
+    expect(db.appointment_reminders.find((r) => r.id === 'rem-merged').service_type)
+      .toBe(`Quarterly Pest Control Service & ${NEW_NAME}`);
+    expect(db.appointment_reminders.find((r) => r.id === 'rem-other').service_type).toBe('Lawn Care Service');
 
     await migration.down(knex);
     const reverted = invoiceById(db, 'inv-draft');
     expect(reverted.title).toBe(OLD_NAME);
     expect(reverted.service_type).toBe(OLD_NAME);
     expect(JSON.parse(reverted.line_items)[0].description).toBe(OLD_NAME);
+    // Reminders restore to their recorded prior values.
+    expect(db.appointment_reminders.find((r) => r.id === 'rem-1').service_type).toBe(OLD_NAME);
+    expect(db.appointment_reminders.find((r) => r.id === 'rem-merged').service_type)
+      .toBe(`Quarterly Pest Control Service & ${OLD_NAME}`);
+  });
+
+  test('a pre-relabeled invoice field is never claimed, so rollback leaves it (codex #3108 r4)', async () => {
+    const db = seedDb();
+    // The draft's title already carried the new name before up() ran.
+    invoiceById(db, 'inv-draft').title = NEW_NAME;
+    const knex = fakeKnex(db);
+    await migration.up(knex);
+
+    const state = JSON.parse(stateRow(db).value);
+    expect(state.relabeledInvoices['inv-draft']).toMatchObject({ title: false, service_type: true });
+
+    await migration.down(knex);
+    const inv = invoiceById(db, 'inv-draft');
+    // The unclaimed title keeps the new name; the claimed fields revert.
+    expect(inv.title).toBe(NEW_NAME);
+    expect(inv.service_type).toBe(OLD_NAME);
+    expect(JSON.parse(inv.line_items)[0].description).toBe(OLD_NAME);
+  });
+
+  test('invoice rollback is skipped when the linked visit completed after up() (codex #3108 r4)', async () => {
+    const db = seedDb();
+    const knex = fakeKnex(db);
+    await migration.up(knex);
+    // The visit completes via the backfill-completion lane; its invoice
+    // deliberately stays a draft for operator review.
+    visit(db, 'v-open-1').status = 'completed';
+
+    await migration.down(knex);
+
+    // The completed visit kept the new label — its draft invoice must agree.
+    expect(visit(db, 'v-open-1').service_type).toBe(NEW_NAME);
+    expect(invoiceById(db, 'inv-draft').title).toBe(NEW_NAME);
+    expect(invoiceById(db, 'inv-draft').service_type).toBe(NEW_NAME);
+  });
+
+  test('a different catalog row sharing the legacy label is not swept (codex #3108 r4)', async () => {
+    const db = seedDb();
+    db.services.push({ id: 'svc-clone', service_key: 'roach_clone', name: OLD_NAME, short_name: null, ...LIVE, updated_at: 'orig' });
+    db.scheduled_services.push({ id: 'v-clone', service_type: OLD_NAME, status: 'pending', service_id: 'svc-clone' });
+
+    await migration.up(fakeKnex(db));
+
+    // Linked to a DIFFERENT row — its own catalog entry did not rename.
+    expect(visit(db, 'v-clone').service_type).toBe(OLD_NAME);
+    const state = JSON.parse(stateRow(db).value);
+    expect(state.backfilledVisitIds).not.toContain('v-clone');
+    // The cockroach_control-linked and legacy-NULL visits still backfill.
+    expect(state.backfilledVisitIds.sort()).toEqual(['v-open-1', 'v-open-2']);
   });
 
   test('rescheduled visits are superseded history — never relabeled (local audit P1)', async () => {

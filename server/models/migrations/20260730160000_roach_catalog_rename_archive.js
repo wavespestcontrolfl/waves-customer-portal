@@ -42,31 +42,75 @@ const ARCHIVE_PATCH = {
 // built.
 const TERMINAL_VISIT_STATUSES = ['completed', 'cancelled', 'skipped', 'no_show', 'rescheduled'];
 
-// Exact-match label swap on an invoice snapshot's title + line-item
-// description/category strings. AMOUNTS ARE NEVER TOUCHED. Returns null when
-// nothing matches (an admin-edited title/line stays theirs).
-function relabelInvoiceSnapshot(inv, fromName, toName) {
-  const patch = {};
-  if (inv.title === fromName) patch.title = toName;
-  // service_type is its own rendered snapshot (pay/receipt APIs, invoice
-  // emails, PDFs) — same exact-match rule.
-  if (inv.service_type === fromName) patch.service_type = toName;
-  let items = inv.line_items;
+function parseLineItems(raw) {
+  let items = raw;
   if (typeof items === 'string') {
     try { items = JSON.parse(items); } catch { items = null; }
   }
-  if (Array.isArray(items)) {
-    let changed = false;
-    const next = items.map((item) => {
+  return Array.isArray(items) ? items : null;
+}
+
+// Exact-match label swap on an invoice snapshot's title, service_type, and
+// line-item description/category strings. AMOUNTS ARE NEVER TOUCHED. Returns
+// null when nothing matches (an admin-edited title/line stays theirs);
+// otherwise { patch, changed } where `changed` names each field / item-index
+// this swap touched, so rollback owns EXACTLY those (a field that already
+// carried the target value beforehand is never claimed).
+function relabelInvoiceSnapshot(inv, fromName, toName) {
+  const patch = {};
+  const changed = { title: false, service_type: false, items: [] };
+  if (inv.title === fromName) { patch.title = toName; changed.title = true; }
+  // service_type is its own rendered snapshot (pay/receipt APIs, invoice
+  // emails, PDFs) — same exact-match rule.
+  if (inv.service_type === fromName) { patch.service_type = toName; changed.service_type = true; }
+  const items = parseLineItems(inv.line_items);
+  if (items) {
+    let itemsChanged = false;
+    const next = items.map((item, i) => {
       if (!item || typeof item !== 'object') return item;
       const out = { ...item };
-      if (out.description === fromName) { out.description = toName; changed = true; }
-      if (out.category === fromName) { out.category = toName; changed = true; }
+      const rec = { i, description: false, category: false };
+      if (out.description === fromName) { out.description = toName; rec.description = true; itemsChanged = true; }
+      if (out.category === fromName) { out.category = toName; rec.category = true; itemsChanged = true; }
+      if (rec.description || rec.category) changed.items.push(rec);
       return out;
     });
-    if (changed) patch.line_items = JSON.stringify(next);
+    if (itemsChanged) patch.line_items = JSON.stringify(next);
+  }
+  return Object.keys(patch).length ? { patch, changed } : null;
+}
+
+// Inverse of relabelInvoiceSnapshot restricted to a recorded `changed` map:
+// reverts only the fields / item-indexes up() claimed, and only where the
+// current value is still the one up() wrote.
+function rollbackInvoiceSnapshot(inv, changed, fromName, toName) {
+  const patch = {};
+  if (changed.title && inv.title === fromName) patch.title = toName;
+  if (changed.service_type && inv.service_type === fromName) patch.service_type = toName;
+  const items = parseLineItems(inv.line_items);
+  if (items && Array.isArray(changed.items) && changed.items.length) {
+    let itemsChanged = false;
+    const next = items.map((item, i) => {
+      const rec = changed.items.find((r) => r && r.i === i);
+      if (!rec || !item || typeof item !== 'object') return item;
+      const out = { ...item };
+      if (rec.description && out.description === fromName) { out.description = toName; itemsChanged = true; }
+      if (rec.category && out.category === fromName) { out.category = toName; itemsChanged = true; }
+      return out;
+    });
+    if (itemsChanged) patch.line_items = JSON.stringify(next);
   }
   return Object.keys(patch).length ? patch : null;
+}
+
+// Reminder labels can be a single service name or an ' & '-merged multi-
+// service label ("Quarterly Pest Control Service & Initial German Roach
+// Knockdown Service") — swap exact-matching PARTS only.
+function relabelReminderServiceType(value, fromName, toName) {
+  if (typeof value !== 'string' || !value) return null;
+  const parts = value.split(' & ');
+  const next = parts.map((p) => (p === fromName ? toName : p)).join(' & ');
+  return next === value ? null : next;
 }
 
 async function loadState(knex) {
@@ -97,7 +141,8 @@ exports.up = async function up(knex) {
     renamedFields: [],
     archived: {},
     backfilledVisitIds: [],
-    relabeledInvoiceIds: [],
+    relabeledInvoices: {},
+    relabeledReminders: {},
     profileSnapshotUpdated: false,
   };
 
@@ -143,13 +188,24 @@ exports.up = async function up(knex) {
     || (row && row.name === NEW_NAME);
 
   // Open-visit label snapshots. Direct service_type updates fire no customer
-  // communications (no scheduling columns move).
-  if (catalogCarriesNewName && (await knex.schema.hasTable('scheduled_services'))) {
-    const visits = await knex('scheduled_services')
-      .where({ service_type: OLD_NAME })
+  // communications (no scheduling columns move). Scoped to visits actually
+  // LINKED to the cockroach_control row — services.name is not unique, so a
+  // label-only predicate could sweep another catalog entry's appointments.
+  // Legacy rows with a NULL service_id relabel on the exact label match
+  // (policy: the label IS the identity for pre-service_id rows; prod-verified
+  // 2026-07-31 that no other catalog row shares the name and every current
+  // roach visit carries the cockroach_control id).
+  if (catalogCarriesNewName && row && (await knex.schema.hasTable('scheduled_services'))) {
+    const linked = await knex('scheduled_services')
+      .where({ service_type: OLD_NAME, service_id: row.id })
       .whereNotIn('status', TERMINAL_VISIT_STATUSES)
       .select('id');
-    const ids = visits.map((v) => v.id);
+    const legacy = await knex('scheduled_services')
+      .where({ service_type: OLD_NAME })
+      .whereNull('service_id')
+      .whereNotIn('status', TERMINAL_VISIT_STATUSES)
+      .select('id');
+    const ids = [...linked, ...legacy].map((v) => v.id);
     if (ids.length) {
       await knex('scheduled_services').whereIn('id', ids).update({ service_type: NEW_NAME });
       state.backfilledVisitIds = ids;
@@ -168,12 +224,35 @@ exports.up = async function up(knex) {
     const drafts = await knex('invoices')
       .whereIn('scheduled_service_id', state.backfilledVisitIds)
       .where({ status: 'draft' })
-      .select('id', 'title', 'line_items', 'service_type');
+      .select('id', 'title', 'line_items', 'service_type', 'scheduled_service_id');
     for (const inv of drafts) {
-      const patch = relabelInvoiceSnapshot(inv, OLD_NAME, NEW_NAME);
-      if (!patch) continue;
-      await knex('invoices').where({ id: inv.id }).update(patch);
-      state.relabeledInvoiceIds.push(inv.id);
+      const result = relabelInvoiceSnapshot(inv, OLD_NAME, NEW_NAME);
+      if (!result) continue;
+      await knex('invoices').where({ id: inv.id }).update(result.patch);
+      // Per-field ownership: rollback reverts only these fields/item-indexes.
+      state.relabeledInvoices[inv.id] = {
+        ...result.changed,
+        scheduled_service_id: inv.scheduled_service_id,
+      };
+    }
+  }
+
+  // Persisted reminder registrations render their own service_type verbatim
+  // in the 72h/24h SMS senders — relabel rows linked to the backfilled
+  // visits (exact-matching parts of possibly '&'-merged labels), recording
+  // each row's prior + written value for exact rollback. Direct updates
+  // send nothing; the senders are crons that read at send time.
+  if (state.backfilledVisitIds.length && (await knex.schema.hasTable('appointment_reminders'))) {
+    const reminders = await knex('appointment_reminders')
+      .whereIn('scheduled_service_id', state.backfilledVisitIds)
+      .select('id', 'service_type');
+    for (const rem of reminders) {
+      const next = relabelReminderServiceType(rem.service_type, OLD_NAME, NEW_NAME);
+      if (next === null) continue;
+      await knex('appointment_reminders')
+        .where({ id: rem.id })
+        .update({ service_type: next, updated_at: knex.fn.now() });
+      state.relabeledReminders[rem.id] = { prior: rem.service_type, written: next };
     }
   }
 
@@ -240,18 +319,53 @@ exports.down = async function down(knex) {
       .update({ service_type: OLD_NAME });
   }
 
-  // Reverse the recorded draft-invoice relabels — still drafts only; an
-  // invoice sent/paid since up() is history under the label it went out with.
-  const invoiceIds = Array.isArray(state.relabeledInvoiceIds) ? state.relabeledInvoiceIds : [];
+  // Reverse the recorded draft-invoice relabels — per recorded field only,
+  // still drafts only (an invoice sent/paid since up() is history under the
+  // label it went out with), and only while the LINKED VISIT is still open:
+  // a visit completed since up() keeps its new label (visit rollback above
+  // skips terminal rows), and its deliberately-still-draft invoice must
+  // agree with the completed visit and report, not flip back.
+  const relabeledInvoices = state.relabeledInvoices && typeof state.relabeledInvoices === 'object'
+    ? state.relabeledInvoices
+    : {};
+  const invoiceIds = Object.keys(relabeledInvoices);
   if (invoiceIds.length && (await knex.schema.hasTable('invoices'))) {
+    const linkedVisitIds = [...new Set(
+      Object.values(relabeledInvoices).map((rec) => rec && rec.scheduled_service_id).filter(Boolean)
+    )];
+    const terminalVisitIds = new Set(
+      linkedVisitIds.length && (await knex.schema.hasTable('scheduled_services'))
+        ? (await knex('scheduled_services')
+          .whereIn('id', linkedVisitIds)
+          .whereIn('status', TERMINAL_VISIT_STATUSES)
+          .select('id')).map((v) => v.id)
+        : []
+    );
     const drafts = await knex('invoices')
       .whereIn('id', invoiceIds)
       .where({ status: 'draft' })
-      .select('id', 'title', 'line_items', 'service_type');
+      .select('id', 'title', 'line_items', 'service_type', 'scheduled_service_id');
     for (const inv of drafts) {
-      const patch = relabelInvoiceSnapshot(inv, NEW_NAME, OLD_NAME);
+      const rec = relabeledInvoices[inv.id];
+      if (!rec) continue;
+      if (terminalVisitIds.has(rec.scheduled_service_id) || terminalVisitIds.has(inv.scheduled_service_id)) continue;
+      const patch = rollbackInvoiceSnapshot(inv, rec, NEW_NAME, OLD_NAME);
       if (!patch) continue;
       await knex('invoices').where({ id: inv.id }).update(patch);
+    }
+  }
+
+  // Restore reminder labels to their recorded prior value — only where the
+  // row still carries exactly what up() wrote.
+  const relabeledReminders = state.relabeledReminders && typeof state.relabeledReminders === 'object'
+    ? state.relabeledReminders
+    : {};
+  if (Object.keys(relabeledReminders).length && (await knex.schema.hasTable('appointment_reminders'))) {
+    for (const [id, rec] of Object.entries(relabeledReminders)) {
+      if (!rec || typeof rec.prior !== 'string' || typeof rec.written !== 'string') continue;
+      await knex('appointment_reminders')
+        .where({ id, service_type: rec.written })
+        .update({ service_type: rec.prior, updated_at: knex.fn.now() });
     }
   }
 
