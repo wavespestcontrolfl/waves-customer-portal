@@ -794,9 +794,14 @@ function conditionRows(conditions = {}, { weeklyRainIn = null, weeklyRainSource 
   // point-capture source — the property-week series is Open-Meteo, but the
   // area-snapshot fallback's rainfall is local area records, not Open-Meteo
   // (codex P2 #3093 ×2).
-  const sourceValue = usingWeeklyRain && weeklyRainSource && conditions.source
-      && !String(conditions.source).toLowerCase().includes(String(weeklyRainSource).toLowerCase())
-    ? `${conditions.source} + ${weeklyRainSource}`
+  const sourceValue = usingWeeklyRain && weeklyRainSource
+    ? (conditions.source
+      ? (String(conditions.source).toLowerCase().includes(String(weeklyRainSource).toLowerCase())
+        ? conditions.source
+        : `${conditions.source} + ${weeklyRainSource}`)
+      // No point-capture source on the record — the weekly figure still has
+      // a known provider, and the Source row must credit it (codex P2 r14).
+      : weeklyRainSource)
     : conditions.source;
   const rows = [
     ['Air temp', conditions.temp_f ?? conditions.temp, '°F'],

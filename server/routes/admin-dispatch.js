@@ -6265,7 +6265,17 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // doesn't permanently carry the stale confirm-time copy (codex P1 r8).
       if (lawnRecRegenTimedOut && lawnRecRegenPromise) {
         lawnRecRegenPromise.then(async (lateResult) => {
-          if (!lateResult) return;
+          // Timed-out AND then failed: no grounded write is coming, so
+          // deterministically sanitize the stored copy (same as the fast-
+          // failure path) and re-render only if it actually changed —
+          // otherwise the confirm-time contradiction stays durable in the
+          // already-queued PDF and live report (codex P1 r14).
+          if (!lateResult) {
+            const KnowledgeBridgeLate = require('../services/knowledge-bridge');
+            const sanitized = await KnowledgeBridgeLate.sanitizeStoredRecommendations(completedLawnAssessmentId)
+              .catch((sanErr) => { logger.warn(`[dispatch] late stored-recommendation sanitize failed: ${sanErr.message}`); return { changed: false }; });
+            if (!sanitized.changed) return;
+          }
           try {
             // enqueuePdfRenderJob dedupes against an ACTIVE job — a render
             // already in flight may have loaded pre-write data, so a deduped
