@@ -181,6 +181,26 @@ describe('getCachedLookup', () => {
     expect(await getCachedLookup('100 Main St')).toBeNull();
   });
 
+  it('invalidates pre-marker park rows outright (cached before the park guards)', async () => {
+    // Cached while the GIS lane still retained park parcels: park-wide
+    // dimensions under a hybrid source, park identity in _parcel, no
+    // multiSitusParcel marker. hasCountyEvidence counts this as county
+    // evidence, so only the outright invalidation catches it.
+    const preMarkerPark = {
+      squareFootage: 2800,
+      lotSize: 200000,
+      _source: 'hybrid',
+      _parcel: { parcelId: '900000100', dorUseCode: '28', landUseDescription: 'Mobile Home Parks (1555)', residentialUnits: 226 },
+    };
+    mockDbHandler = () => fakeTable({ row: { ...freshRow, property_record: preMarkerPark } });
+    expect(await getCachedLookup('100 Main St')).toBeNull();
+
+    // The same identity WITH the marker is a post-guard record — still a hit.
+    const marked = { ...preMarkerPark, _raw: { multiSitusParcel: { situsCount: 226, parkConfirmed: true } } };
+    mockDbHandler = () => fakeTable({ row: { ...freshRow, property_record: marked } });
+    expect(await getCachedLookup('100 Main St')).toBeTruthy();
+  });
+
   it('roll-miss rows (no county evidence) age out on the short TTL', async () => {
     const aiOnly = { squareFootage: 1200, _source: 'ai' };
     const days = (n) => new Date(Date.now() - n * 86400000).toISOString();

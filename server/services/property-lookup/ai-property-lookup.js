@@ -1177,6 +1177,21 @@ function detectMultiSitusMasterParcel(record) {
   return signal;
 }
 
+// Pre-marker park rows in the lookup cache: a record whose stored GIS
+// parcel meta (or preserved land-use text) classifies as a mobile-home park
+// but which lacks the multiSitusParcel marker was cached BEFORE the park
+// guards shipped — its dimensions/classification can be park-wide, and its
+// cadastral/hybrid source shape keeps it out of the roll-miss short TTL.
+// The cache treats such rows as expired. Post-guard lookups can never
+// produce this shape: a park GIS parcel is nulled before attachParcelMeta
+// and every park-classified record carries the marker, so this cannot
+// re-expire fresh rows in a loop.
+function isPreMarkerParkRecord(record) {
+  if (!record || record._raw?.multiSitusParcel) return false;
+  if (isMobileHomeParkParcel(record._parcel)) return true;
+  return /mobile\s*home\s*park/i.test(String(record._raw?.landUse || ''));
+}
+
 // Same survival problem as the land-use description: the merge spreads only
 // the winning record, so when the live PAO record wins the tie its (usually
 // null — the features scrape is Manatee-detail-only) imperviousAreaSf drops
@@ -4576,6 +4591,7 @@ module.exports = {
   buildPropertyDataQuality,
   detectUnassessedVacantParcel,
   detectMultiSitusMasterParcel,
+  isPreMarkerParkRecord,
   canonicalLookupAddress,
   lookupStoriesFromAI,
   lookupStoriesEvidenceFromAI,

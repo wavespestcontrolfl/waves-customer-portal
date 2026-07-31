@@ -37,7 +37,7 @@ jest.mock('../services/property-lookup/county-parcel-gis', () => {
 });
 
 const { lookupCountyParcelByPoint } = require('../services/property-lookup/county-parcel-gis');
-const { detectMultiSitusMasterParcel, lookupPropertyFromAITrio, _private } = require('../services/property-lookup/ai-property-lookup');
+const { detectMultiSitusMasterParcel, isPreMarkerParkRecord, lookupPropertyFromAITrio, _private } = require('../services/property-lookup/ai-property-lookup');
 const { _private: routePrivate } = require('../routes/property-lookup-v2');
 
 const PARK_SEARCH_RESULTS = {
@@ -268,6 +268,16 @@ describe('GIS by-point lane: mobile-home-park master parcels', () => {
     // keeps the positive park evidence so the flag copy never reads duplex.
     expect(_private.mobileHomeParkSignalFromParcel({ landUseDescription: 'Mobile Home Park' })).toMatchObject({ situsCount: 2, parkConfirmed: true });
     expect(_private.mobileHomeParkSignalFromParcel({ dorUseCode: '0100' })).toBeNull();
+  });
+
+  test('isPreMarkerParkRecord flags park-shaped records only when the marker is missing', () => {
+    const parkParcelMeta = { dorUseCode: '28', landUseDescription: 'Mobile Home Parks (1555)', residentialUnits: 226 };
+    expect(isPreMarkerParkRecord({ _parcel: parkParcelMeta, _raw: {} })).toBe(true);
+    expect(isPreMarkerParkRecord({ _raw: { landUse: 'Mobile Home Parks (1555)' } })).toBe(true);
+    // Marker present = post-guard record; ordinary parcels never match.
+    expect(isPreMarkerParkRecord({ _parcel: parkParcelMeta, _raw: { multiSitusParcel: { situsCount: 226 } } })).toBe(false);
+    expect(isPreMarkerParkRecord({ _parcel: { dorUseCode: '0100', residentialUnits: 1 }, _raw: {} })).toBe(false);
+    expect(isPreMarkerParkRecord(null)).toBe(false);
   });
 
   test('stamped GIS signal reaches the detector like the address-search marker', () => {

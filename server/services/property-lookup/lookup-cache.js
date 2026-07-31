@@ -29,7 +29,7 @@ const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { normalizeLeadAddress } = require('../../utils/address-normalizer');
-const { buildPropertyDataQuality, detectUnassessedVacantParcel, hasCountyEvidence } = require('./ai-property-lookup');
+const { buildPropertyDataQuality, detectUnassessedVacantParcel, hasCountyEvidence, isPreMarkerParkRecord } = require('./ai-property-lookup');
 
 const DEFAULT_TTL_DAYS = 180;
 // Unassessed vacant parcel (vacant roll parcel, no building record — often
@@ -222,6 +222,17 @@ async function getCachedLookup(address) {
         logger.info('[lookup-cache] vacant-parcel row past the short TTL — treating as miss');
         return null;
       }
+    }
+    // Pre-marker park rows are invalidated OUTRIGHT, not short-TTL'd: their
+    // GIS parcel meta classifies as a mobile-home park but the record lacks
+    // the multiSitusParcel marker, meaning it was cached before the park
+    // guards shipped and can carry park-wide dimensions under a
+    // cadastral/hybrid source — a shape hasCountyEvidence counts as county
+    // evidence, so the roll-miss TTL below never touches it (codex P2 r3
+    // #3095). A live re-run rebuilds the record with the marker.
+    if (isPreMarkerParkRecord(row.property_record)) {
+      logger.info('[lookup-cache] pre-marker park-parcel row — treating as miss');
+      return null;
     }
     // Roll-miss rows (no county evidence) age out on the short TTL the same
     // way — rows cached before the multi-situs situs-cell split are exactly
