@@ -145,6 +145,7 @@ exports.up = async function up(knex) {
     renamedFields: [],
     archived: {},
     backfilledVisitIds: [],
+    relabeledSelfBookingIds: [],
     relabeledAddonIds: [],
     addonParentVisitIds: [],
     relabeledInvoices: {},
@@ -201,20 +202,45 @@ exports.up = async function up(knex) {
   // (policy: the label IS the identity for pre-service_id rows; prod-verified
   // 2026-07-31 that no other catalog row shares the name and every current
   // roach visit carries the cockroach_control id).
+  const selfBookingIdsByVisit = new Map();
   if (catalogCarriesNewName && row && (await knex.schema.hasTable('scheduled_services'))) {
     const linked = await knex('scheduled_services')
       .where({ service_type: OLD_NAME, service_id: row.id })
       .whereNotIn('status', TERMINAL_VISIT_STATUSES)
-      .select('id');
+      .select('id', 'self_booking_id');
     const legacy = await knex('scheduled_services')
       .where({ service_type: OLD_NAME })
       .whereNull('service_id')
       .whereNotIn('status', TERMINAL_VISIT_STATUSES)
-      .select('id');
-    const ids = [...linked, ...legacy].map((v) => v.id);
+      .select('id', 'self_booking_id');
+    const visits = [...linked, ...legacy];
+    const ids = visits.map((v) => v.id);
     if (ids.length) {
-      await knex('scheduled_services').whereIn('id', ids).update({ service_type: NEW_NAME });
+      // The status predicate rides ON the update, not just the select — a
+      // visit that completes between the two must keep the label its
+      // completion artifacts recorded (codex #3108 r7 TOCTOU).
+      await knex('scheduled_services')
+        .whereIn('id', ids)
+        .whereNotIn('status', TERMINAL_VISIT_STATUSES)
+        .update({ service_type: NEW_NAME });
       state.backfilledVisitIds = ids;
+      visits.forEach((v) => { if (v.self_booking_id) selfBookingIdsByVisit.set(v.id, v.self_booking_id); });
+    }
+  }
+
+  // Self-booking snapshots: the booking flow writes the same label to the
+  // linked self_booked_appointments row, and /api/booking/status exposes
+  // that copy directly (codex #3108 r7).
+  if (selfBookingIdsByVisit.size && (await knex.schema.hasTable('self_booked_appointments'))) {
+    const sbRows = await knex('self_booked_appointments')
+      .whereIn('id', [...selfBookingIdsByVisit.values()])
+      .where({ service_type: OLD_NAME })
+      .select('id');
+    for (const sb of sbRows) {
+      await knex('self_booked_appointments')
+        .where({ id: sb.id, service_type: OLD_NAME })
+        .update({ service_type: NEW_NAME });
+      state.relabeledSelfBookingIds.push(sb.id);
     }
   }
 
@@ -247,8 +273,13 @@ exports.up = async function up(knex) {
     );
     const targets = addons.filter((a) => openParentIds.has(a.scheduled_service_id));
     if (targets.length) {
+      // Same TOCTOU guard as the visit update: the open-parent predicate
+      // rides on the update via a subquery, so a parent completing between
+      // classification and write keeps its add-on label.
       await knex('scheduled_service_addons')
         .whereIn('id', targets.map((a) => a.id))
+        .whereIn('scheduled_service_id',
+          knex('scheduled_services').whereNotIn('status', TERMINAL_VISIT_STATUSES).select('id'))
         .update({ service_name: NEW_NAME });
       state.relabeledAddonIds = targets.map((a) => a.id);
       state.addonParentVisitIds = [...new Set(targets.map((a) => a.scheduled_service_id))];
@@ -407,6 +438,27 @@ exports.down = async function down(knex) {
       const patch = rollbackInvoiceSnapshot(inv, rec, NEW_NAME, OLD_NAME);
       if (!patch) continue;
       await knex('invoices').where({ id: inv.id }).update(patch);
+    }
+  }
+
+  // Revert the recorded self-booking relabels — only rows still carrying
+  // what up() wrote, and only while the linked visit is still open (the
+  // visit rollback above keeps terminal rows on the new label).
+  const selfBookingIds = Array.isArray(state.relabeledSelfBookingIds) ? state.relabeledSelfBookingIds : [];
+  if (selfBookingIds.length && (await knex.schema.hasTable('self_booked_appointments'))
+    && (await knex.schema.hasTable('scheduled_services'))) {
+    const openLinkedSb = new Set(
+      (await knex('scheduled_services')
+        .whereIn('self_booking_id', selfBookingIds)
+        .whereNotIn('status', TERMINAL_VISIT_STATUSES)
+        .select('self_booking_id')).map((v) => v.self_booking_id)
+    );
+    const revertSb = selfBookingIds.filter((id) => openLinkedSb.has(id));
+    if (revertSb.length) {
+      await knex('self_booked_appointments')
+        .whereIn('id', revertSb)
+        .where({ service_type: NEW_NAME })
+        .update({ service_type: OLD_NAME });
     }
   }
 

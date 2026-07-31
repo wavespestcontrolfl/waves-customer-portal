@@ -25,12 +25,15 @@ function seedDb() {
     ],
     scheduled_services: [
       // v-open-2 has a legacy NULL service_id — the exact-label fallback path.
-      { id: 'v-open-1', service_type: OLD_NAME, status: 'pending', service_id: 'svc-roach' },
+      { id: 'v-open-1', service_type: OLD_NAME, status: 'pending', service_id: 'svc-roach', self_booking_id: 'sb-1' },
       { id: 'v-open-2', service_type: OLD_NAME, status: 'confirmed', service_id: null },
       { id: 'v-done', service_type: OLD_NAME, status: 'completed', service_id: 'svc-roach' },
       { id: 'v-other', service_type: 'Lawn Care Service', status: 'pending', service_id: 'svc-general' },
       // Open non-roach visit carrying the roach ADD-ON (codex r5).
       { id: 'v-parent', service_type: 'Quarterly Pest Control Service', status: 'confirmed', service_id: 'svc-general' },
+    ],
+    self_booked_appointments: [
+      { id: 'sb-1', service_type: OLD_NAME, status: 'confirmed' },
     ],
     scheduled_service_addons: [
       { id: 'add-open', scheduled_service_id: 'v-parent', service_id: 'svc-roach', service_name: OLD_NAME },
@@ -103,24 +106,37 @@ function fakeKnex(db, { missingTables = [] } = {}) {
       && notInClauses.every((c) => !c.vals.includes(r[c.col]))
       && filters.every((cond) => Object.entries(cond).every(([k, v]) => r[k] === v))
     );
+    // Real knex accepts a query builder as the whereIn value (subquery) —
+    // resolve any thenable value lists before filtering, extracting the
+    // single selected column from row objects.
+    const resolveSubqueries = async () => {
+      for (const c of inClauses) {
+        if (c.vals && typeof c.vals.then === 'function') {
+          c.vals = (await c.vals).map((v) => (v && typeof v === 'object' ? Object.values(v)[0] : v));
+        }
+      }
+    };
     const q = {
       where(cond) { filters.push(cond); return q; },
       whereIn(col, vals) { inClauses.push({ col, vals }); return q; },
       whereNotIn(col, vals) { notInClauses.push({ col, vals }); return q; },
       whereNull(col) { filters.push({ [col]: null }); return q; },
-      select(...cols) {
-        return Promise.resolve(rowsNow().filter(rowMatch).map((r) => {
+      async select(...cols) {
+        await resolveSubqueries();
+        return rowsNow().filter(rowMatch).map((r) => {
           if (!cols.length) return { ...r };
           const out = {};
           cols.forEach((c) => { out[c] = r[c]; });
           return out;
-        }));
+        });
       },
       first: async () => {
+        await resolveSubqueries();
         const hit = rowsNow().find(rowMatch);
         return hit ? { ...hit } : undefined;
       },
       update: async (patch) => {
+        await resolveSubqueries();
         const hits = rowsNow().filter(rowMatch);
         hits.forEach((r) => Object.assign(r, patch));
         return hits.length;
@@ -309,6 +325,11 @@ describe('20260730160000 roach catalog rename + archive', () => {
     expect(rem('rem-owner-mixed').service_type).toBe(`Bed Bug Treatment, ${NEW_NAME} & Flea Treatment`);
     expect(rem('rem-unrelated').service_type).toBe('Lawn Care Service');
 
+    // Self-booking snapshot (exposed by /api/booking/status) relabels with
+    // its linked open visit.
+    expect(db.self_booked_appointments.find((s) => s.id === 'sb-1').service_type).toBe(NEW_NAME);
+    expect(state.relabeledSelfBookingIds).toEqual(['sb-1']);
+
     // Add-on snapshots: open parent relabels, completed parent is history.
     const addon = (id) => db.scheduled_service_addons.find((a) => a.id === id);
     expect(addon('add-open').service_name).toBe(NEW_NAME);
@@ -337,6 +358,7 @@ describe('20260730160000 roach catalog rename + archive', () => {
     expect(remAfter('rem-parent').service_type).toBe(`Quarterly Pest Control Service, ${OLD_NAME}, and Wasp & Hornet Control`);
     expect(remAfter('rem-owner-mixed').service_type).toBe(`Bed Bug Treatment, ${OLD_NAME} & Flea Treatment`);
     expect(db.scheduled_service_addons.find((a) => a.id === 'add-open').service_name).toBe(OLD_NAME);
+    expect(db.self_booked_appointments.find((s) => s.id === 'sb-1').service_type).toBe(OLD_NAME);
   });
 
   test('a pre-relabeled invoice field is never claimed, so rollback leaves it (codex #3108 r4)', async () => {
