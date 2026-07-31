@@ -4446,6 +4446,25 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // =========================================================================
+  // NIGHTLY 3:20 AM — Triage dead-letter drain. Auto-resolves provably-moot
+  // open triage cards and auto-dismisses aged informational flags so the
+  // triage inbox stays an exception queue instead of a landfill (~1,800
+  // open vs 32 resolved when built). Owed-work cards never touched. Dark
+  // behind GATE_TRIAGE_AUTO_RESOLVE. See server/services/triage-auto-resolve.js.
+  // =========================================================================
+  cron.schedule('20 3 * * *', async () => {
+    try {
+      const { runTriageAutoResolve } = require('./triage-auto-resolve');
+      const result = await runTriageAutoResolve();
+      if (!result.skipped && result.applied > 0) {
+        logger.info(`[triage-sweep] applied=${result.applied} deferred=${result.deferred} rules=${JSON.stringify(result.counts)}`);
+      }
+    } catch (err) {
+      logger.error(`Triage auto-resolve tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   logger.info('Scheduled jobs initialized');
 }
 
