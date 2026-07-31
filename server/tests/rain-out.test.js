@@ -765,6 +765,46 @@ describe('rain-out service', () => {
       });
     });
 
+    test('gate on: customer_noshow REJECTS route scope — a no-show is about one customer, never the whole route', async () => {
+      process.env.GATE_QUICKMOVE_EXTRA_REASONS = 'true';
+      wireSingle();
+
+      const result = await RainOut.commit({ ...COMMIT_ARGS, reasonCode: 'customer_noshow', scope: 'route' });
+
+      expect(result).toMatchObject({ ok: false, reason: 'noshow_route_scope' });
+      expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    test('gate on: running_late rejects same-day targets at/before the current window, allows later + day moves', async () => {
+      process.env.GATE_QUICKMOVE_EXTRA_REASONS = 'true';
+
+      // SERVICE sits on 2026-06-11 at 09:00. Earlier same-day → reject.
+      wireSingle();
+      let result = await RainOut.commit({
+        ...COMMIT_ARGS,
+        target: { date: '2026-06-11', window: { start: '08:00', end: '09:00' } },
+      });
+      expect(result).toMatchObject({ ok: false, reason: 'target_not_later' });
+
+      // Equal start is a no-op "move" — reject too.
+      wireSingle();
+      result = await RainOut.commit({
+        ...COMMIT_ARGS,
+        target: { date: '2026-06-11', window: { start: '09:00', end: '10:00' } },
+      });
+      expect(result).toMatchObject({ ok: false, reason: 'target_not_later' });
+      expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+
+      // An earlier clock time on a DIFFERENT day contradicts nothing.
+      wireSingle();
+      result = await RainOut.commit({
+        ...COMMIT_ARGS,
+        target: { date: '2026-06-12', window: { start: '08:00', end: '09:00' } },
+      });
+      expect(result.ok).toBe(true);
+    });
+
     test('gate on: customer_noshow is the SOFT no-show — rebooker logs the missed-outreach reason and the SMS says we missed you', async () => {
       process.env.GATE_QUICKMOVE_EXTRA_REASONS = 'true';
       wireSingle();

@@ -614,6 +614,33 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
   if (!target?.date || !target.window?.start || !target.window?.end) {
     return { ok: false, reason: 'bad_target' };
   }
+  // A no-show is about THIS customer only — route scope would move every
+  // remaining stop, text each unrelated customer "we missed you", and stamp
+  // each with a customer_noshow log row that counts toward the
+  // missed-appointment outreach threshold (codex P1). The sheets hide the
+  // scope toggle for this reason; the server is the enforcer.
+  if (reasonCode === 'customer_noshow' && scope === 'route') {
+    return { ok: false, reason: 'noshow_route_scope' };
+  }
+  // "Running behind" can only push a same-day visit LATER. The generic
+  // same-day options are now+2h/+4h with no regard for the current window,
+  // so a morning Quick Move on an afternoon visit could otherwise pull it
+  // earlier while the SMS claims we ran behind (codex P2). Day moves are
+  // exempt — landing earlier on a DIFFERENT day contradicts nothing. The
+  // sheets filter their same-day presets to match; this is the enforcer.
+  if (reasonCode === 'running_late') {
+    const currentDateStr = service.scheduled_date
+      ? String(service.scheduled_date instanceof Date
+          ? service.scheduled_date.toISOString()
+          : service.scheduled_date).slice(0, 10)
+      : null;
+    const currentStartMin = hhmmToMinutes(service.window_start);
+    const targetStartMin = hhmmToMinutes(target.window.start);
+    if (currentDateStr && String(target.date) === currentDateStr
+        && currentStartMin != null && targetStartMin != null && targetStartMin <= currentStartMin) {
+      return { ok: false, reason: 'target_not_later' };
+    }
+  }
 
   const todayStr = etDateString();
   let jobs;

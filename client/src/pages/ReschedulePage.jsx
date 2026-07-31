@@ -243,12 +243,16 @@ function WeatherMoveRow({ label, date, windowStart, chance, isNow }) {
 }
 
 // Non-weather Quick Move reasons: no "dry/better window" claim, just the
-// honest operational story ahead of the was/now rows.
+// honest operational story ahead of the was/now rows. Date-neutral on
+// purpose — this banner can be opened up to 14 days after the move
+// (WEATHER_MOVE_MAX_AGE_DAYS), so "today" would misdate the story; the
+// SMS keeps "today" because it goes out in the moment. The was/now rows
+// right below carry the actual dates.
 const SCHEDULE_MOVE_LEADS = {
-  running_late: 'our schedule ran behind today',
-  equipment_issue: 'equipment trouble slowed us down today',
+  running_late: 'our schedule ran behind',
+  equipment_issue: 'equipment trouble slowed us down',
   tech_emergency: 'an emergency came up on our end',
-  customer_noshow: 'we missed you today',
+  customer_noshow: 'we missed you',
 };
 
 function weatherMoveHeading({ move, firstName, serviceType }) {

@@ -4153,9 +4153,19 @@ function initScheduledJobs() {
           // onSkip inserts a reschedule_log row unconditionally — with the
           // sweep spanning two days, a service yesterday's pass already
           // flagged must not be re-flagged toward the
-          // 2-noshows-in-90-days outreach trigger.
+          // 2-noshows-in-90-days outreach trigger. Occurrence-aware: a soft
+          // Quick Move no-show recorded an EARLIER slot of this same row
+          // (original_date = that missed slot) and must not suppress
+          // flagging a genuine later miss; NULL original_date matches
+          // legacy rows to keep their old per-row dedup.
+          const missedDateStr = svc.scheduled_date
+            ? String(svc.scheduled_date instanceof Date ? svc.scheduled_date.toISOString() : svc.scheduled_date).slice(0, 10)
+            : null;
           const alreadyFlagged = await db('reschedule_log')
             .where({ scheduled_service_id: svc.id, reason_code: 'customer_noshow' })
+            .where(function occurrenceMatch() {
+              if (missedDateStr) this.where('original_date', missedDateStr).orWhereNull('original_date');
+            })
             .first('id');
           if (alreadyFlagged) continue;
           try {

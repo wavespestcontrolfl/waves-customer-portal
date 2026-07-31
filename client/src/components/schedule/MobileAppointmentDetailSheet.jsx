@@ -807,9 +807,10 @@ export default function MobileAppointmentDetailSheet({
           onDone={(result) => {
             // Some stops moved — refresh the board regardless.
             onRescheduled?.(service);
-            // Only dismiss on a clean move; a partial failure keeps the
-            // RainOutSheet open showing which stops still need attention.
-            if (!result?.failedCount) {
+            // Only dismiss on a clean move; a partial failure or a
+            // moved-but-not-texted result keeps the RainOutSheet open
+            // showing what still needs attention.
+            if (!result?.failedCount && !result?.notTexted) {
               setShowRainOut(false);
               onClose?.();
             }

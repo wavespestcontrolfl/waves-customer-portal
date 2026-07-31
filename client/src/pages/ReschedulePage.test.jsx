@@ -570,7 +570,8 @@ describe('ReschedulePage weather-move banner', () => {
     renderPage();
 
     expect(await screen.findByText('Schedule update')).toBeInTheDocument();
-    expect(screen.getByText(/Hi Pat — our schedule ran behind today, so we moved your pest control to a new window/)).toBeInTheDocument();
+    // Date-neutral: the banner can be read days after the move, so no "today".
+    expect(screen.getByText(/Hi Pat — our schedule ran behind, so we moved your pest control to a new window/)).toBeInTheDocument();
     expect(screen.queryByText('Moved for weather')).not.toBeInTheDocument();
     // The was/now story still tells the move.
     expect(screen.getByText('Was')).toBeInTheDocument();
@@ -585,9 +586,9 @@ describe('ReschedulePage weather-move banner', () => {
 
   it('each non-weather reason gets its own operational heading under the schedule pill', async () => {
     const cases = [
-      ['equipment_issue', /equipment trouble slowed us down today, so we moved your pest control to a new window/],
+      ['equipment_issue', /equipment trouble slowed us down, so we moved your pest control to a new window/],
       ['tech_emergency', /an emergency came up on our end, so we moved your pest control to a new window/],
-      ['customer_noshow', /we missed you today, so we moved your pest control to a new window/],
+      ['customer_noshow', /we missed you, so we moved your pest control to a new window/],
     ];
     for (const [reasonCode, heading] of cases) {
       stubFetch({
