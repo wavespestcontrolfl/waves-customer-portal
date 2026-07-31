@@ -30,6 +30,10 @@ const logger = require('../logger');
 const { last10 } = require('../external-phone');
 const { sameStreetAddress, STREET_TOKEN_ALIASES } = require('./address-compare');
 const { CUSTOMER_STAGES, whereLiveCustomer } = require('../customer-stages');
+// Canonical "not live coverage" status set (also excludes completed,
+// no_show, skipped, and the phantom 'rescheduled' rows) — mirroring only
+// 'cancelled' here would count dead rows as active recurring coverage.
+const { TERMINAL_STATUSES } = require('../waveguard-existing-services');
 
 function scopeGuardsEnabled() {
   const flag = process.env.GATE_ESTIMATOR_SCOPE_GUARDS;
@@ -60,7 +64,11 @@ const VETO_BURST_MINUTES = 90;
 const OUT_OF_SCOPE_RE = new RegExp(
   [
     'power\\s*wash\\w*', 'pressure\\s*wash\\w*', 'soft\\s*wash\\w*',
-    '\\broofing\\b', 'roof\\s*(?:repair|replace\\w*|clean\\w*|leak|work)',
+    // No bare 'roofing': org names ("Gulf Coast Roofing" asking for a pest
+    // quote) must not trip the veto — roof terms need request context like
+    // every other trade noun.
+    'roof(?:ing)?\\s*(?:repair|replace\\w*|clean\\w*|leak|work|job|quote|estimate)',
+    '(?:need|want|looking\\s+for|find|hire|get)\\s+(?:a\\s+)?(?:new\\s+)?roof\\b',
     'gutter\\s*(?:clean\\w*|repair\\w*|guard)', 'clean\\w*\\s+(?:my|the|our)\\s+gutters',
     '\\bpainting\\b', 'paint\\s+(?:job|work|quote|estimate|my|the|our|interior|exterior|house|home)',
     'pool\\s*(?:clean\\w*|service|maint\\w*)',
@@ -120,7 +128,13 @@ function extractAddressCandidates(text) {
   // Up to seven street words ("100 Dr Martin Luther King Jr Blvd") — the
   // full-street confirmation requires complete equality, so a truncated
   // capture would permanently miss long street names.
-  const re = /\b(\d{1,6})\s+([A-Za-z0-9][A-Za-z0-9'.-]*(?:\s+[A-Za-z][A-Za-z0-9'.-]*){0,6})/g;
+  // Numbered ROUTES ("123 US 41", "123 State Road 64", "6812 US Highway
+  // 301") carry an all-numeric street token — accepted only right after a
+  // route designator (lookbehind), so a neighboring address's house number
+  // ("100 Palm Ave and 200 Oak St") or prose numbers are never swallowed
+  // into the street run, and the bare-number-pair guard below ("4 30
+  // tomorrow") keeps its job on the FIRST word.
+  const re = /\b(\d{1,6})\s+([A-Za-z0-9][A-Za-z0-9'.-]*(?:\s+(?:[A-Za-z][A-Za-z0-9'.-]*|(?<=\s(?:us|sr|cr|rte|rt|route|hwy|highway|road|rd)\s+)\d{1,4}\b)){0,6})/gi;
   let m;
   const UNIT_WORD_RE = /^(?:apt|apartment|unit|suite|ste|#)$/i;
   while (out.length < 3 && (m = re.exec(src)) !== null) {
@@ -311,7 +325,11 @@ async function loadTriageInner({ phone, triggerBody, deadline = Date.now() + TRI
     const rows = await bounded(db('customers')
       .modify(whereLiveCustomer)
       .whereRaw('address_line1 ILIKE ANY(?)', [prefixes])
-      .limit(5))
+      // Wide sanity bound, NOT a display limit: confirmation
+      // (candidateMatchesRow) still gates every row. A tight limit lets 5
+      // same-street rows crowd out the named unit's row ("Apt 20" in a
+      // complex) before confirmation ever sees it.
+      .limit(25))
       .select('id', 'first_name', 'last_name', 'address_line1', 'address_line2', 'city', 'zip');
     for (const row of rows) {
       if (candidateMatchesRow(cand, row)) {
@@ -336,7 +354,9 @@ async function loadTriageInner({ phone, triggerBody, deadline = Date.now() + TRI
         // new occupant's quote must not ground against the old owner.
         .where('cp.active', true)
         .whereRaw('cp.address_line1 ILIKE ANY(?)', [prefixes])
-        .limit(5))
+        // Same wide sanity bound as the customers query above — never a
+        // display limit; confirmation gates.
+        .limit(25))
         .select('c.id', 'c.first_name', 'c.last_name',
           'cp.address_line1 as address_line1', 'cp.address_line2 as address_line2', 'cp.city', 'cp.zip');
       for (const row of propRows) {
@@ -365,40 +385,61 @@ async function loadTriageInner({ phone, triggerBody, deadline = Date.now() + TRI
   // evidence for the property the text is actually about.
   const lines = [];
   const scopedIds = new Set(entries.filter((e) => e.scope).map((e) => e.customer.id));
-  // Active recurring coverage per customer (repo convention: distinct
-  // recurring, non-cancelled scheduled_services — see
-  // ai-assistant/tools-expanded.js). The classifier judges "work current
-  // services already cover" — without this a covered callback between
-  // visits reads as a new quote.
+  const stampFull = (line1, line2, city, zip) => [
+    [line1, line2].filter(Boolean).join(' '),
+    [city, zip].filter(Boolean).join(' '),
+  ].filter(Boolean).join(', ');
+  // Active recurring coverage — live rows only (TERMINAL_STATUSES is the
+  // canonical exclusion from waveguard-existing-services; 'cancelled' alone
+  // would count completed/skipped/phantom-rescheduled rows as coverage).
+  // Coverage is PER ENTRY, not per customer: an address-scoped entry only
+  // carries coverage stamped at THAT property (unstamped legacy rows count
+  // only for the primary-address match, same rule as the visit path) — a
+  // multi-property customer's plan at home must not read as coverage for
+  // their rental. Unscoped (sender) entries keep customer-wide coverage, so
+  // the cache keys by customerId + scope stamp.
   const coverageCache = new Map();
-  const recurringCoverage = async (customerId) => {
-    if (coverageCache.has(customerId)) return coverageCache.get(customerId);
+  const recurringCoverage = async (customerId, scope = null) => {
+    const scopeFull = scope ? stampFull(scope.address, scope.line2, scope.city, scope.zip) : null;
+    const cacheKey = `${customerId}|${scopeFull || 'unscoped'}`;
+    if (coverageCache.has(cacheKey)) return coverageCache.get(cacheKey);
     let note = '';
     try {
       assertTime();
       const rows = await bounded(db('scheduled_services')
         .where({ customer_id: customerId, is_recurring: true })
-        .whereNot('status', 'cancelled')
+        .whereNotIn('status', TERMINAL_STATUSES)
         .limit(20))
-        .distinct('service_type');
-      if (rows.length) {
-        note = `; recurring services on file: ${rows.map((r) => r.service_type).filter(Boolean).slice(0, 5).join(', ')}`;
+        .distinct('service_type',
+          'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip');
+      const scoped = !scope ? rows : rows.filter((r) => {
+        if (r.service_address_line1) {
+          try {
+            return sameStreetAddress(
+              stampFull(r.service_address_line1, r.service_address_line2, r.service_address_city, r.service_address_zip),
+              scopeFull,
+            );
+          } catch (err) {
+            return false;
+          }
+        }
+        return scope.isPrimary;
+      });
+      const types = [...new Set(scoped.map((r) => r.service_type).filter(Boolean))];
+      if (types.length) {
+        note = `; recurring services on file: ${types.slice(0, 5).join(', ')}`;
       }
     } catch (err) {
       if (err.deadline) throw err;
       logger.warn(`[estimator-scope] triage coverage lookup failed: ${err.message}`);
     }
-    coverageCache.set(customerId, note);
+    coverageCache.set(cacheKey, note);
     return note;
   };
-  const stampFull = (line1, line2, city, zip) => [
-    [line1, line2].filter(Boolean).join(' '),
-    [city, zip].filter(Boolean).join(' '),
-  ].filter(Boolean).join(', ');
   for (const e of entries) {
     const name = `${e.customer.first_name || ''} ${e.customer.last_name || ''}`.trim() || 'existing customer';
     const shownAddress = e.addressLine || e.customer.address_line1 || 'address on file';
-    const coverage = await recurringCoverage(e.customer.id);
+    const coverage = await recurringCoverage(e.customer.id, e.scope);
     if (!e.scope && scopedIds.has(e.customer.id)) {
       lines.push(`${e.how}: existing active customer ${name}, ${shownAddress}${coverage} (booked work listed under the matched property below)`);
       continue;

@@ -23,10 +23,19 @@ jest.mock('../models/db', () => {
       where() { return chain; },
       whereNull() { return chain; },
       whereIn() { return chain; },
-      whereNotIn() { return chain; },
+      // Builder-arg recorders: the chain can't express row-count effects
+      // (limit crowding, status filtering), so pins assert the ARGS the
+      // query was built with instead.
+      whereNotIn(col, vals) {
+        (mockState.whereNotIn = mockState.whereNotIn || []).push({ table, col, vals });
+        return chain;
+      },
       whereRaw() { return chain; },
       orderBy() { return chain; },
-      limit() { return chain; },
+      limit(n) {
+        (mockState.limits = mockState.limits || {})[table] = n;
+        return chain;
+      },
       join() { return chain; },
       modify(fn) { fn(chain); return chain; },
       timeout() { return chain; },
@@ -159,6 +168,16 @@ describe('deterministicOutOfScope', () => {
     expect(deterministicOutOfScope('drywall repair estimate?')).toBe(true);
   });
 
+  test('roofing org names never trip the veto; roofing service requests still do', () => {
+    // An org introducing itself while asking for OUR service is a lead.
+    expect(deterministicOutOfScope('Hi, this is Gulf Coast Roofing — can we get a quote for our office?')).toBe(false);
+    // …while actual roofing requests still veto.
+    expect(deterministicOutOfScope('roofing quote please')).toBe(true);
+    expect(deterministicOutOfScope('how much for a roof replacement estimate')).toBe(true);
+    expect(deterministicOutOfScope('we need a new roof, do you do that?')).toBe(true);
+    expect(deterministicOutOfScope('roof leak, can you help')).toBe(true);
+  });
+
   test('does not fire on plain quote chatter', () => {
     expect(deterministicOutOfScope('how much do you charge?')).toBe(false);
     expect(deterministicOutOfScope('')).toBe(false);
@@ -178,6 +197,18 @@ describe('extractAddressCandidates', () => {
     expect(extractAddressCandidates('quote for 7 Palm Ave please')[0].variants).toContain('7 Palm Ave');
     expect(extractAddressCandidates('we are at 123 5th Ave')[0].variants).toContain('123 5th Ave');
     expect(extractAddressCandidates('see you at 4 30 tomorrow')).toEqual([]);
+  });
+
+  test('numeric route tokens after the first street word are captured (US 41, State Road 64)', () => {
+    expect(extractAddressCandidates('quote for 123 US 41 please')[0].variants).toContain('123 US 41');
+    expect(extractAddressCandidates('service at 123 State Road 64, thanks')[0].variants).toContain('123 State Road 64');
+    // The bare-number-pair and time guards stay intact.
+    expect(extractAddressCandidates('see you at 4 30 tomorrow')).toEqual([]);
+    expect(extractAddressCandidates('see you at 2 pm')).toEqual([]);
+    // Full street + validated locality extraction is unchanged.
+    const [cand] = extractAddressCandidates('quote for 100 Palm Ave, Venice FL 34285 please');
+    expect(cand.variants).toContain('100 Palm Ave');
+    expect(cand.locality).toBe(', Venice 34285');
   });
 
   test('captures locality only when a state or ZIP validates it', () => {
@@ -435,6 +466,101 @@ describe('loadThreadTriageContext', () => {
     mockState.rows['scheduled_services:distinct'] = [{ service_type: 'Quarterly Pest Control Service' }];
     const triage = await loadThreadTriageContext({ phone: '+17245550000', triggerBody: 'quote please' });
     expect(triage.lines[0]).toContain('recurring services on file: Quarterly Pest Control Service');
+  });
+
+  test('address-scoped coverage keeps only rows stamped at THAT property', async () => {
+    mockState.rows.customers = [
+      { id: 'c-2', first_name: 'Pat', last_name: 'Homeowner', address_line1: '4021 Coral Bay Loop' },
+    ];
+    mockState.rows['scheduled_services:distinct'] = [
+      { service_type: 'Quarterly Pest Control Service', service_address_line1: '4021 Coral Bay Loop' },
+      { service_type: 'Lawn Care Program', service_address_line1: '900 Other Property Rd' },
+    ];
+    const triage = await loadThreadTriageContext({
+      phone: null,
+      triggerBody: 'need a treatment at 4021 Coral Bay Loop',
+    });
+    const joined = triage.lines.join('\n');
+    expect(joined).toContain('recurring services on file: Quarterly Pest Control Service');
+    expect(joined).not.toContain('Lawn Care Program');
+  });
+
+  test('unstamped recurring rows count for the primary-address match only', async () => {
+    mockState.rows['scheduled_services:distinct'] = [{ service_type: 'Quarterly Pest Control Service' }];
+    mockState.rows.customers = [
+      { id: 'c-2', first_name: 'Pat', last_name: 'Homeowner', address_line1: '4021 Coral Bay Loop' },
+    ];
+    let triage = await loadThreadTriageContext({
+      phone: null,
+      triggerBody: 'need a treatment at 4021 Coral Bay Loop',
+    });
+    expect(triage.lines.join('\n')).toContain('recurring services on file');
+
+    // Same unstamped row against a SECONDARY property match: not coverage.
+    mockState.rows.customers = [];
+    mockState.rows['customer_properties as cp'] = [
+      { id: 'c-3', first_name: 'Multi', last_name: 'Property', address_line1: '77 Rental Cove' },
+    ];
+    triage = await loadThreadTriageContext({
+      phone: null,
+      triggerBody: 'need service at 77 Rental Cove',
+    });
+    expect(triage.matchedExistingCustomer).toBe(true);
+    expect(triage.lines.join('\n')).not.toContain('recurring services on file');
+  });
+
+  test('multi-property counter-case: coverage is per entry, never cached customer-wide', async () => {
+    // Sender line (unscoped) sees the customer-wide plan; the address-scoped
+    // line for the OTHER property must not inherit it from a
+    // customerId-keyed cache — the plan is stamped at the primary.
+    mockLoadCustomerByPhone.mockResolvedValue({
+      customer: { id: 'c-2', first_name: 'Multi', last_name: 'Property', address_line1: '1 Primary St', active: true, pipeline_stage: 'active_customer' },
+      ambiguous: false,
+    });
+    mockState.rows.customers = [
+      { id: 'c-2', first_name: 'Multi', last_name: 'Property', address_line1: '4021 Coral Bay Loop' },
+    ];
+    mockState.rows['scheduled_services:distinct'] = [
+      { service_type: 'Quarterly Pest Control Service', service_address_line1: '1 Primary St' },
+    ];
+    const triage = await loadThreadTriageContext({
+      phone: '+17245550000',
+      triggerBody: 'about 4021 Coral Bay Loop please',
+    });
+    expect(triage.lines).toHaveLength(2);
+    expect(triage.lines[0]).toContain('Sender phone matches');
+    expect(triage.lines[0]).toContain('recurring services on file: Quarterly Pest Control Service');
+    expect(triage.lines[1]).toContain('4021 Coral Bay Loop');
+    expect(triage.lines[1]).not.toContain('recurring services on file');
+  });
+
+  test('coverage excludes the CANONICAL terminal statuses, not just cancelled', async () => {
+    const { TERMINAL_STATUSES } = require('../services/waveguard-existing-services');
+    mockLoadCustomerByPhone.mockResolvedValue({
+      customer: { id: 'c-1', first_name: 'Taylor', last_name: 'Sample', active: true, pipeline_stage: 'active_customer' },
+      ambiguous: false,
+    });
+    await loadThreadTriageContext({ phone: '+17245550000', triggerBody: 'quote please' });
+    const statusFilters = (mockState.whereNotIn || [])
+      .filter((c) => c.table === 'scheduled_services' && c.col === 'status');
+    expect(statusFilters.length).toBeGreaterThan(0);
+    expect(statusFilters[0].vals).toEqual(TERMINAL_STATUSES);
+    expect(statusFilters[0].vals).toEqual(
+      expect.arrayContaining(['cancelled', 'completed', 'no_show', 'skipped', 'rescheduled']),
+    );
+  });
+
+  test('address-row fetches use the wide sanity bound (25) so a named unit cannot be crowded out', async () => {
+    // The chainable mock cannot express row counts, so pin the builder arg:
+    // both address queries must fetch 25 before candidateMatchesRow gates.
+    mockState.rows.customers = [];
+    mockState.rows['customer_properties as cp'] = [];
+    await loadThreadTriageContext({
+      phone: null,
+      triggerBody: 'quote for 100 Palm Ave Apt 20 please',
+    });
+    expect(mockState.limits.customers).toBe(25);
+    expect(mockState.limits['customer_properties as cp']).toBe(25);
   });
 
   test('fails open to null on query errors', async () => {

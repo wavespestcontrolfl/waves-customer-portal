@@ -12,13 +12,28 @@
 let mockCallRow = null;
 let mockCustomersFail = false;
 let mockCustomerRows = [];
+// Records the customers-table whereRaw/orWhereRaw SQL so the SMS-path
+// contact-slot pin can assert which phone columns the lookup matched.
+let mockCustomerWhereSql = [];
 
 jest.mock('../models/db', () => {
   const db = (table) => ({
     select() { return this; },
-    where() { return this; },
-    whereRaw() { return this; },
+    where(arg) {
+      if (typeof arg === 'function') arg.call(this);
+      return this;
+    },
+    whereRaw(sql) {
+      if (table === 'customers') mockCustomerWhereSql.push(sql);
+      return this;
+    },
+    orWhereRaw(sql) {
+      if (table === 'customers') mockCustomerWhereSql.push(sql);
+      return this;
+    },
+    orWhere() { return this; },
     whereNull() { return this; },
+    whereNot() { return this; },
     orderBy() { return this; },
     limit() { return this; },
     async first() {
@@ -42,7 +57,7 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
-const { buildCallContext } = require('../services/estimator-engine/context-builder');
+const { buildCallContext, buildSmsThreadContext } = require('../services/estimator-engine/context-builder');
 
 const CALL = (overrides = {}) => ({
   id: 'call-1',
@@ -61,6 +76,12 @@ beforeEach(() => {
   mockCallRow = null;
   mockCustomersFail = false;
   mockCustomerRows = [];
+  mockCustomerWhereSql = [];
+  delete process.env.GATE_ESTIMATOR_SCOPE_GUARDS;
+});
+
+afterAll(() => {
+  delete process.env.GATE_ESTIMATOR_SCOPE_GUARDS;
 });
 
 test('processor-resolved customer whose load fails ⇒ customer_lookup_unavailable (no phone rematch)', async () => {
@@ -122,4 +143,38 @@ test('a genuine NO-MATCH (empty result, no error) still builds lead context (reg
   expect(context.error).toBeUndefined();
   expect(context.customer).toBeNull();
   expect(context.isExistingCustomer).toBe(false);
+});
+
+describe('buildSmsThreadContext sender lookup (GATE_ESTIMATOR_SCOPE_GUARDS)', () => {
+  // A service-contact sender must not lose the customer on the DRAFT
+  // context (estimate would persist customer_id null) — but only gate-on:
+  // gate-off keeps the primary-phone-only lookup byte-identical.
+  const SMS_ARGS = {
+    phone: '+19415550123',
+    triggerBody: 'can I get a quote for quarterly pest control at my home please?',
+  };
+
+  test('gate ON matches the configured service-contact phone slots', async () => {
+    process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
+    await buildSmsThreadContext(SMS_ARGS);
+    const joined = mockCustomerWhereSql.join('\n');
+    expect(joined).toContain('service_contact_phone');
+    expect(joined).toContain('service_contact2_phone');
+    expect(joined).toContain('service_contact3_phone');
+  });
+
+  test('gate OFF keeps the primary-phone-only lookup (dark ship)', async () => {
+    await buildSmsThreadContext(SMS_ARGS);
+    const joined = mockCustomerWhereSql.join('\n');
+    expect(joined).toContain('phone');
+    expect(joined).not.toContain('service_contact');
+  });
+
+  test('call-path lookups never include contact slots, even gate ON', async () => {
+    process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
+    mockCallRow = CALL();
+    mockCustomerRows = [];
+    await buildCallContext('call-1');
+    expect(mockCustomerWhereSql.join('\n')).not.toContain('service_contact');
+  });
 });

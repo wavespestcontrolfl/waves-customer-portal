@@ -419,7 +419,17 @@ async function buildCallContext(callLogId) {
 // caller-name extraction exists to disambiguate.
 async function buildSmsThreadContext({ phone, triggerAt = new Date(), triggerBody = '' }) {
   if (!last10(phone)) return { error: 'no_usable_phone' };
-  const customerMatch = await loadCustomerByPhone(phone, null);
+  // SMS path only: a service-contact sender (spouse/tenant/manager on the
+  // configured contact slots) is an established identity — without the
+  // contact-slot match their DRAFT context loses the customer and the
+  // estimate persists customer_id null even though triage grounded them.
+  // Gated behind GATE_ESTIMATOR_SCOPE_GUARDS (lazy require avoids a module
+  // cycle) so gate-off behavior stays byte-identical. Call-path
+  // loadCustomerByPhone callers are intentionally unchanged.
+  const { scopeGuardsEnabled } = require('./scope-guards');
+  const customerMatch = await loadCustomerByPhone(
+    phone, null, scopeGuardsEnabled() ? { includeServiceContacts: true } : {},
+  );
   if (customerMatch.ambiguous) return { error: 'ambiguous_phone' };
   // A FAILED lookup is not a no-match: an existing member could be hiding
   // behind the error, and pricing them as a prospect would drop membership
