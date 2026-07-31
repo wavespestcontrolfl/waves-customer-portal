@@ -285,12 +285,19 @@ function mergeMrmsIntoWeek({ om, mrms, todayYmd } = {}) {
     if (day.date === todayYmd) {
       // The unclosed day NEEDS the model value: MRMS alone is an explicitly
       // partial "so far" accumulation, and accepting it as a full day would
-      // understate the week (codex P2 #3096 r2). No model value → the merge
-      // fails and the caller degrades to rain_unknown, exactly like the
-      // pre-engine path. Outage survival still holds for CLOSED windows.
-      if (mrmsVal == null || omVal == null) return null;
-      inches = Math.max(mrmsVal, omVal);
-      provider = mrmsVal >= omVal ? 'mrms' : 'open_meteo';
+      // understate the week (codex P2 #3096 r2). Only a missing MODEL value
+      // fails the merge — a missing MRMS row for today (delayed IEM
+      // backfill) just uses the model for that day and keeps the closed-day
+      // measurements (codex P2 r3: the inverse outage must not discard six
+      // good MRMS days).
+      if (omVal == null) return null;
+      if (mrmsVal != null) {
+        inches = Math.max(mrmsVal, omVal);
+        provider = mrmsVal >= omVal ? 'mrms' : 'open_meteo';
+      } else {
+        inches = omVal;
+        provider = 'open_meteo';
+      }
     } else if (mrmsVal != null) {
       inches = mrmsVal;
       provider = 'mrms';
@@ -330,9 +337,12 @@ async function fetchServiceWeekWeather({ latitude, longitude, serviceDate } = {}
   // closed windows keep the full TTL.
   const key = `${mode}|${rainCacheKey(lat, lon, range.end)}`;
   const windowUnclosed = range.end >= etTodayYmd();
+  // TTL is decided at WRITE time and stored with the entry — recomputing at
+  // read let an entry cached just before ET midnight inherit the 6h TTL
+  // after midnight and pin the partial visit-day value (codex P2 #3096 r3).
   const ttlMs = windowUnclosed ? 30 * 60 * 1000 : RAIN_TTL_MS;
   const cached = _rainCache.get(key);
-  if (cached && Date.now() - cached.at < ttlMs) return cached.value;
+  if (cached && Date.now() - cached.at < (cached.ttlMs ?? RAIN_TTL_MS)) return cached.value;
 
   // The two sources are independent — fetch concurrently so a slow pair
   // costs max(timeouts), not their sum (codex P2 #3096).
@@ -366,7 +376,7 @@ async function fetchServiceWeekWeather({ latitude, longitude, serviceDate } = {}
     }
   }
   if (value.rainInches != null || value.et0Inches != null) {
-    _rainCache.set(key, { at: Date.now(), value });
+    _rainCache.set(key, { at: Date.now(), ttlMs, value });
   }
   return value;
 }

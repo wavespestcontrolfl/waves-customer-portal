@@ -102,6 +102,18 @@ describe('mergeMrmsIntoWeek', () => {
     expect(merged.et0Inches).toBeNull();
   });
 
+  test('missing MRMS row for today uses the model and keeps closed-day measurements (r3)', () => {
+    const merged = mergeMrmsIntoWeek({
+      om: OM_WEEK,
+      mrms: mrmsDays([0.29, 0, 1.14, 1.1, 0, 0, null]),
+      todayYmd: '2026-07-30',
+    });
+    expect(merged.rainSource).toBe('mrms+open_meteo');
+    const today = merged.dailyRain.find((d) => d.date === '2026-07-30');
+    expect(today).toEqual({ date: '2026-07-30', inches: 0.05, provider: 'open_meteo' });
+    expect(merged.dailyRain.filter((d) => d.provider === 'mrms')).toHaveLength(6);
+  });
+
   test('unclosed day with MRMS-so-far but no model value fails the merge (r2)', () => {
     const merged = mergeMrmsIntoWeek({
       om: { rainInches: null, et0Inches: null, dailyRain: null, rainConfidence: null, rainSource: null },
