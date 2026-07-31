@@ -1149,6 +1149,27 @@ function isNonLeadCallContent(extracted = {}) {
   return NON_LEAD_CALL_TYPES.has(callType);
 }
 
+// A stale worker that lost its processing_token claim must not record or
+// merge first-touch holds (Codex #3084 r44): the peer that reclaimed the
+// call mints the fresh review card and records extraction B — a late merge
+// from this worker would overwrite the pending ledger target with the stale
+// extraction A, and resolving the visible B card would then release
+// first-touch mail to the unreviewed A address. Verified immediately before
+// each ledger write; a lost (or unverifiable) claim skips the write — the
+// reclaiming peer's own Step 6/8 owns the ledger record.
+async function stillOwnsProcessingClaim(callId, procToken) {
+  try {
+    const owned = await db('call_log')
+      .where({ id: callId })
+      .where('processing_token', procToken)
+      .first('id');
+    return !!owned;
+  } catch (claimErr) {
+    logger.warn(`[call-proc] processing-claim check failed: ${claimErr.message} — skipping the ledger write (the owner records it)`);
+    return false;
+  }
+}
+
 // True when the call has a live email read-back card — the extracted address
 // is a transcription guess and must not receive first-touch email until the
 // office confirms it. 'in_progress' counts as live (canonical open-review set,
@@ -1181,7 +1202,8 @@ async function shouldHoldLeadEmailEnrollment(callLogId) {
         .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
         .ignore();
       // The recovery card is a live review too — invalidate any in-flight
-      // release claim for the call (Codex #3084 r43; never throws).
+      // release claim for the call (Codex #3084 r43). A failure throws
+      // (r44) and the catch below fails the run.
       const { repenHoldsForFreshEmailReview } = require('./lead-first-touch-resume');
       await repenHoldsForFreshEmailReview(callLogId, db);
     } catch (markerErr) {
@@ -5757,12 +5779,19 @@ const CallRecordingProcessor = {
             // A fresh email card puts the address back under review — an
             // in-flight release claimed BEFORE this card landed must not
             // send it (Codex #3084 r43): the fence-invalidating re-pend
-            // makes that claimant's pre-send gate refuse. Never throws.
+            // makes that claimant's pre-send gate refuse. A FAILED
+            // invalidation throws the durable-state error (r44) — the
+            // catch below rethrows it into the extraction_failed retry.
             const { repenHoldsForFreshEmailReview } = require('./lead-first-touch-resume');
             await repenHoldsForFreshEmailReview(call.id, db);
           }
         }
       } catch (bridgeErr) {
+        // The bridge is advisory EXCEPT for the r44 invalidation: with the
+        // card durably inserted and the hold claims NOT invalidated, an
+        // in-flight release can send the unreviewed address — that state
+        // must fail the run, not be skipped.
+        if (bridgeErr.emailReviewStateUnavailable) throw bridgeErr;
         logger.warn(`[call-proc-bridge] address/identity bridge skipped for ${maskSid(callSid)}: ${bridgeErr.message}`);
       }
     } else {
@@ -5835,12 +5864,15 @@ const CallRecordingProcessor = {
             }
           }
           if (emailReasons.includes('email_unverified') || emailReasons.includes('email_invalid')) {
-            // Same r43 claim invalidation as the shadow branch above.
+            // Same r43 claim invalidation as the shadow branch above; a
+            // failure throws into the extraction_failed retry (r44).
             const { repenHoldsForFreshEmailReview } = require('./lead-first-touch-resume');
             await repenHoldsForFreshEmailReview(call.id, db);
           }
         }
       } catch (emailErr) {
+        // Advisory EXCEPT the r44 invalidation — see the shadow branch.
+        if (emailErr.emailReviewStateUnavailable) throw emailErr;
         logger.warn(`[call-proc] email review skipped for ${maskSid(callSid)}: ${emailErr.message}`);
       }
     }
@@ -8853,7 +8885,12 @@ const CallRecordingProcessor = {
       // helper keep a live earlier-run card's address (the one the operator
       // is reviewing) instead of overwriting it with a fresh unreviewed guess.
       const { recordFirstTouchHold } = require('./lead-first-touch-resume');
-      dripHoldRecorded = await recordFirstTouchHold({ callLogId: call.id, customerId, heldEmail: extracted.email, heldDrip: true, runStartedAt: processingStartedAt });
+      // Token-fenced (Codex #3084 r44): a stale worker must not merge its
+      // extraction over the reclaiming peer's ledger record. null keeps
+      // the end-of-run retry eligible (which re-checks ownership).
+      dripHoldRecorded = (await stillOwnsProcessingClaim(call.id, procToken))
+        ? await recordFirstTouchHold({ callLogId: call.id, customerId, heldEmail: extracted.email, heldDrip: true, runStartedAt: processingStartedAt })
+        : null;
     } else if (customerId && !extracted.email && extracted.email_raw && !v2EmailBlocked
         && (emailReviewHeldThisRun || await shouldHoldLeadEmailEnrollment(call.id))) {
       // A DEMOTED address (dictation policy moved the unconfirmed guess to
@@ -8867,7 +8904,10 @@ const CallRecordingProcessor = {
       logger.info(`[call-proc] Skipping new_lead automation enroll for ${maskSid(callSid)}: extracted email was demoted to read-back review`);
       beehiivResult = { skipped: 'email_under_review' };
       const { recordFirstTouchHold } = require('./lead-first-touch-resume');
-      dripHoldRecorded = await recordFirstTouchHold({ callLogId: call.id, customerId, heldEmail: '', heldDrip: true, runStartedAt: processingStartedAt });
+      // Token-fenced (r44) — see the primary drip-hold site above.
+      dripHoldRecorded = (await stillOwnsProcessingClaim(call.id, procToken))
+        ? await recordFirstTouchHold({ callLogId: call.id, customerId, heldEmail: '', heldDrip: true, runStartedAt: processingStartedAt })
+        : null;
     } else if (customerId && extracted.email) {
       try {
         const AutomationRunner = require('./automation-runner');
@@ -9029,7 +9069,10 @@ const CallRecordingProcessor = {
       // recording it here would let the new card's resolution release both
       // sends to an address the operator never read back. No extracted
       // email (demoted) → empty inert address, correction-only release.
-      newsletterHoldRecorded = await recordFirstTouchHold({ callLogId: call.id, customerId, heldEmail: extracted.email || '', heldNewsletter: true, runStartedAt: processingStartedAt });
+      // Token-fenced (r44) — see the drip-hold sites.
+      newsletterHoldRecorded = (await stillOwnsProcessingClaim(call.id, procToken))
+        ? await recordFirstTouchHold({ callLogId: call.id, customerId, heldEmail: extracted.email || '', heldNewsletter: true, runStartedAt: processingStartedAt })
+        : null;
     } else if (newsletterCandidate) {
       const stillOwned = await db('call_log')
         .where({ id: call.id })
@@ -9063,6 +9106,13 @@ const CallRecordingProcessor = {
         const dripHeld = beehiivResult?.skipped === 'email_under_review';
         const newsHeld = newsletterResult?.skipped === 'email_under_review';
         if ((dripHeld && dripHoldRecorded === null) || (newsHeld && newsletterHoldRecorded === null)) {
+          // Token-fenced like the primary sites (Codex #3084 r44): a lost
+          // claim hands the ledger to the reclaiming peer's own run — the
+          // retry (and its six-failures escalation) applies only while
+          // this worker still owns the call.
+          if (!(await stillOwnsProcessingClaim(call.id, procToken))) {
+            logger.info(`[call-proc] processing claim lost for ${maskSid(callSid)} — the reclaiming peer records the hold ledger`);
+          } else {
           const { recordFirstTouchHold } = require('./lead-first-touch-resume');
           const retried = await recordFirstTouchHold({
             callLogId: call.id,
@@ -9086,6 +9136,7 @@ const CallRecordingProcessor = {
             const ledgerErr = new Error('first_touch_hold_ledger_unavailable');
             ledgerErr.holdLedgerUnavailable = true;
             throw ledgerErr;
+          }
           }
         }
         if (!(await shouldHoldLeadEmailEnrollment(call.id))) {
@@ -9123,8 +9174,8 @@ const CallRecordingProcessor = {
               .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
               .ignore();
             // The recovery card is a live review too — invalidate any
-            // in-flight release claim for the call (Codex #3084 r43;
-            // never throws).
+            // in-flight release claim for the call (Codex #3084 r43). A
+            // failure throws (r44) and the catch below fails the run.
             const { repenHoldsForFreshEmailReview } = require('./lead-first-touch-resume');
             await repenHoldsForFreshEmailReview(call.id, db);
             } catch (markerErr) {

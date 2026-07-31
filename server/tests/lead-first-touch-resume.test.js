@@ -1465,6 +1465,20 @@ describe('DOI dedupe guard and ledger sweep', () => {
     expect(repen.last_error).toBeUndefined();
   });
 
+  test('a FAILED fresh-review invalidation throws the durable-state error instead of returning success', async () => {
+    // The invalidation is the only synchronization for a card minted after
+    // a claimant's live-card check (Codex #3084 r44) — swallowing a
+    // transient failure would let that claimant enroll or send the
+    // unreviewed address. The mint sites route this error into the
+    // extraction_failed retry path.
+    const mockDb = require('../models/db');
+    mockDb.schema.hasTable.mockImplementationOnce(async () => { throw new Error('connection reset'); });
+    await expect(repenHoldsForFreshEmailReview('call-1')).rejects.toMatchObject({
+      message: 'email_review_state_unavailable',
+      emailReviewStateUnavailable: true,
+    });
+  });
+
   test('a failed pre-send target re-read re-pends instead of sending on a stale guess', async () => {
     const dbErr = new Error('read timeout');
     dbErr.code = 'ETIMEDOUT';

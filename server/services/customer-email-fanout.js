@@ -288,9 +288,14 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
     // update-and-catch: a caught unique violation would poison the caller's
     // transaction (Postgres aborts it), so the rare true race is left to
     // bubble up and roll the whole edit back — half-synced is worse.
+    // FOR UPDATE + status CASes below (Codex #3084 r44, mirroring the r43
+    // prior-target pass): a one-click or admin unsubscribe committing
+    // after this read must never be deleted by the merge branch or moved
+    // by the retarget — the opt-out record wins.
     const oldSub = await conn('newsletter_subscribers')
       .where({ customer_id: customerId })
       .whereRaw('LOWER(email) = ?', [oldEmail])
+      .forUpdate()
       .first();
     if (oldSub) {
       // The old inbox's already-DELIVERED quiz/feedback/event links must stop
@@ -323,7 +328,12 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
             .whereNull('customer_id')
             .update({ customer_id: customerId, updated_at: now });
         }
-        counts.newsletter += await conn('newsletter_subscribers').where({ id: oldSub.id }).del();
+        // Status CAS (r44): an unsubscribe committing after the snapshot
+        // wins — the opt-out record is never deleted.
+        counts.newsletter += await conn('newsletter_subscribers')
+          .where({ id: oldSub.id })
+          .whereIn('status', ['pending', 'active'])
+          .del();
       } else {
         // ROTATE both bearer tokens with the move: the old confirmation and
         // unsubscribe links were DELIVERED to the old mailbox (DOI email,
@@ -331,8 +341,12 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
         // party's inbox — the stale tokens would let that mailbox confirm
         // or unsubscribe the corrected address.
         const freshConfirmationToken = randomUUID();
-        counts.newsletter += await conn('newsletter_subscribers')
+        // Status CAS (r44): a concurrent unsubscribe wins — its record
+        // stays at the old address, unmoved, and no confirmation is
+        // re-sent for it.
+        const moved = await conn('newsletter_subscribers')
           .where({ id: oldSub.id })
+          .whereIn('status', ['pending', 'active'])
           .update({
             email: newEmail,
             confirmation_token: freshConfirmationToken,
@@ -346,10 +360,12 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
             confirmation_sent_at: conn.raw("CASE WHEN status = 'pending' THEN NULL ELSE confirmation_sent_at END"),
             updated_at: now,
           });
+        counts.newsletter += moved;
         // A PENDING row's DOI confirmation went to the old typo — hand the
         // caller what it needs to re-send post-commit (see @returns), keyed
-        // to the FRESH token (the old one is dead by design).
-        if (String(oldSub.status || '') === 'pending') {
+        // to the FRESH token (the old one is dead by design). Only when the
+        // move actually landed (r44).
+        if (moved && String(oldSub.status || '') === 'pending') {
           pendingConfirmation = {
             id: oldSub.id,
             email: newEmail,
@@ -357,10 +373,12 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
             confirmation_token: freshConfirmationToken,
           };
         }
+        // The retarget branch leaves a subscriber at the corrected address
+        // only when the move landed (r44); the merge branch always does
+        // (targetSub exists there).
+        subscriberAtCorrectedAddress = subscriberAtCorrectedAddress || moved > 0;
       }
-      // Both branches leave a subscriber at the corrected address (the
-      // retarget moved oldSub there; the merge kept targetSub).
-      subscriberAtCorrectedAddress = true;
+      if (targetSub) subscriberAtCorrectedAddress = true;
     }
   }
 

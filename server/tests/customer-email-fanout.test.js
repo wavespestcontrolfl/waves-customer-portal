@@ -274,6 +274,12 @@ describe('propagateCustomerEmailChange', () => {
     expect(conn.__calls.some((c) => c.table === 'newsletter_subscribers' && c.op === 'del')).toBe(true);
     // A row linked to ANOTHER customer is never re-linked.
     expect(conn.__updates('newsletter_subscribers')).toHaveLength(0);
+    // The merge delete CASes on a still-subscribable status and the oldSub
+    // read is locked (r44) — an unsubscribe committing after the snapshot
+    // is never deleted.
+    expect(conn.__calls.some((c) => c.table === 'newsletter_subscribers' && c.op === 'whereIn'
+      && c.arg.col === 'status' && String(c.arg.vals) === 'pending,active')).toBe(true);
+    expect(conn.__calls.some((c) => c.table === 'newsletter_subscribers' && c.op === 'forUpdate')).toBe(true);
     // Delivered engagement tokens rotate BEFORE the del() — the delete sets
     // subscriber_id NULL, after which the rows would be unreachable by id.
     const rotation = conn.__updates('newsletter_send_deliveries')[0];
@@ -377,6 +383,24 @@ describe('propagateCustomerEmailChange', () => {
     });
     const result = await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
     expect(result.pendingConfirmation).toBeUndefined();
+  });
+
+  test('newsletter: an unsubscribe committing after the snapshot wins over the STORED-EMAIL move', async () => {
+    // Same r43 opt-out rule for the oldEmail pass (Codex #3084 r44): the
+    // retarget's status CAS misses, the opt-out row stays at the old
+    // address unmoved, no confirmation is queued, and no count is taken.
+    const conn = makeConn({
+      newsletter_subscribers: {
+        firstQueue: [
+          { id: 739, email: 'sam.typo@example.com', customer_id: 'cust-1', status: 'pending', confirmation_token: 'tok-1' },
+          null, // no row on the corrected spelling
+        ],
+        updateCount: 0, // the CAS missed: the row became unsubscribed
+      },
+    });
+    const result = await propagateCustomerEmailChange({ before: HOLD_BEFORE, after: HOLD_AFTER }, conn);
+    expect(result.pendingConfirmation).toBeUndefined();
+    expect(result.newsletter).toBe(0);
   });
 
   test('newsletter: a linked subscriber at a PRIOR HOLD TARGET rotates to the corrected address', async () => {

@@ -222,9 +222,14 @@ async function repenAmbiguousDelivery(holdId, fenceStamps, dbh = db, marker = 'd
 // (the r37 send transaction holds the row lock, so a card landing mid-send
 // queues behind the in-flight provider call and invalidates the NEXT
 // attempt instead). Plain re-pend: deny stamps and retry markers stay
-// untouched; released and blocked rows are not claims and stay put. Never
-// throws — the in-claim live-card check and the pre-send re-read remain
-// the guards if this write is lost.
+// untouched; released and blocked rows are not claims and stay put.
+// A FAILED invalidation THROWS the canonical durable-state error (Codex
+// #3084 r44): this write is the ONLY synchronization for a card minted
+// after a claimant's live-card check — the check and the target re-read
+// cannot guard a card that did not exist when they ran, so swallowing the
+// failure would let that claimant enroll or send the unreviewed address.
+// Every mint site routes the error into the extraction_failed retry path,
+// and the retry re-runs the card insert AND this invalidation.
 async function repenHoldsForFreshEmailReview(callLogId, dbh = db) {
   if (!callLogId) return 0;
   try {
@@ -234,8 +239,10 @@ async function repenHoldsForFreshEmailReview(callLogId, dbh = db) {
       .whereIn('status', ['pending', 'releasing'])
       .update({ status: 'pending', updated_at: new Date() });
   } catch (invalidateErr) {
-    logger.warn(`[first-touch-resume] fresh-review hold invalidation failed: ${invalidateErr.code || invalidateErr.name || 'db_error'} (pre-send checks remain the guard)`);
-    return 0;
+    logger.warn(`[first-touch-resume] fresh-review hold invalidation failed: ${invalidateErr.code || invalidateErr.name || 'db_error'} — failing the run so the retry re-synchronizes`);
+    const stateErr = new Error('email_review_state_unavailable');
+    stateErr.emailReviewStateUnavailable = true;
+    throw stateErr;
   }
 }
 
