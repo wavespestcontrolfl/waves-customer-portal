@@ -36,6 +36,7 @@ let mockRenewLostIds = new Set(); // per-hold lease-renewal refusals (r28)
 let mockConsumeError = null; // thrown by the r31 marker-consume write (r32)
 let mockConsumeZeroOnce = false; // next marker-consume clear matches 0 rows (r33: deny/reclaim bumped the fence)
 let mockTrxCommitFailOnce = false; // next db.transaction runs its callback, then fails at COMMIT (r38)
+let mockSubscriberAdoptZero = false; // subscriber adoption updates match 0 rows (r39: row linked elsewhere)
 jest.mock('../models/db', () => {
   const handler = (table) => {
     let markerFilter = false; // this chain filters on the resend marker
@@ -123,6 +124,7 @@ jest.mock('../models/db', () => {
         if (table === 'newsletter_subscribers') {
           if (mockSubscriberUpdateError) throw mockSubscriberUpdateError;
           mockSubscriberUpdates.push(patch);
+          if (mockSubscriberAdoptZero) return 0;
         }
         if (table === 'automation_enrollments') {
           mockEnrollmentUpdates.push(patch);
@@ -279,6 +281,7 @@ beforeEach(() => {
   mockConsumeError = null;
   mockConsumeZeroOnce = false;
   mockTrxCommitFailOnce = false;
+  mockSubscriberAdoptZero = false;
 });
 
 // The merge's held_email is a bound CASE since r20 (an ACTIVE claim's target
@@ -520,6 +523,19 @@ describe('resumeHeldFirstTouch (ledger release engine)', () => {
     const res = await resumeHeldFirstTouch({ callLogId: 'call-1' });
     expect(res.resumed).toBe(true);
     expect(mockNewsletter).toHaveBeenCalled(); // dedupe guard bypassed — real resend
+  });
+
+  test("an adoption matching another customer's subscriber keeps the hold retryable", async () => {
+    // The unlinked-only adoption affected zero rows and the reread shows
+    // the row linked to a DIFFERENT customer (Codex #3084 r39): settling
+    // would strand that subscriber's tokens outside this customer's
+    // correction rotation — the hold stays retryable and visible instead.
+    mockHold = baseHold({ held_drip: false });
+    mockSubscriberRow = { id: 'sub-1', customer_id: 'cust-other' };
+    mockSubscriberAdoptZero = true;
+    const res = await resumeHeldFirstTouch({ callLogId: 'call-1' });
+    expect(res.resumed).toBe(false);
+    expect(mockHoldUpdates.at(-1)).toMatchObject({ status: 'pending', last_error: 'dedupe_linkage_failed' });
   });
 
   test('adoption is skipped when the resume outcome carries no subscriber id', async () => {
@@ -833,7 +849,10 @@ describe('recordFirstTouchHold (durable hold ledger writes)', () => {
       runStartedAt: new Date(Date.now() - 60_000),
     });
     const merged = mockMergeArgs.at(-1).held_email;
-    expect(String(merged.sql)).toContain('first_touch_holds.updated_at >= ?');
+    // corrected_at, NOT updated_at (r39): only the fanout retargets write
+    // the marker — sweep claims and re-pends bump updated_at too and must
+    // not read as operator approval.
+    expect(String(merged.sql)).toContain('first_touch_holds.corrected_at IS NOT NULL AND first_touch_holds.corrected_at >= ?');
     // The fresh-extraction fallback stays the LAST binding.
     expect(merged.bindings.at(-1)).toBe('stale.guess@example.com');
   });
@@ -861,8 +880,11 @@ describe('resumeHeldNewsletterPostCommit failure paths', () => {
     const outcome = await resumeHeldNewsletterPostCommit({ holdId: 'hold-1', customerId: 'cust-1', email: 'private@example.com' });
     expect(outcome).toBeNull();
     // Retryable state restored — the claim must not linger 'releasing'.
-    expect(mockHoldUpdates.at(-1)).toMatchObject({ status: 'pending' });
-    expect(String(mockHoldUpdates.at(-1).last_error)).toContain('newsletter_resume_failed: 23505');
+    // A thrown resume arms the VERIFIED force-resend ticket (Codex #3084
+    // r39): subscribeOrResubscribe pre-stamps before linkage/reread, so a
+    // pre-provider throw would otherwise let the retry's dedupe guard
+    // trust that stamp and never deliver.
+    expect(mockHoldUpdates.at(-1)).toMatchObject({ status: 'pending', last_error: 'newsletter_doi_not_confirmed' });
     // No raw error message (which can echo the subscriber email) in logs.
     for (const call of logger.warn.mock.calls) {
       expect(String(call[0])).not.toContain('private@example.com');

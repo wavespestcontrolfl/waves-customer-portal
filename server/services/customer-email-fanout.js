@@ -425,6 +425,11 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
       .where({ customer_id: customerId, status: 'releasing' })
       .update({
         held_email: newEmail,
+        // The EXPLICIT correction marker (Codex #3084 r39): only these
+        // fanout retargets write it, so recordFirstTouchHold's merge can
+        // distinguish an operator-asserted target from a claim/re-pend
+        // bump when deciding what a reprocess may overwrite.
+        corrected_at: now,
         status: conn.raw("CASE WHEN last_error = 'email_denied_await_correction' THEN 'pending' ELSE status END"),
         last_error: conn.raw("CASE WHEN last_error = 'email_denied_await_correction' THEN NULL ELSE last_error END"),
       });
@@ -440,6 +445,7 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
       .where({ customer_id: customerId, status: 'pending' })
       .update({
         held_email: newEmail,
+        corrected_at: now,
         last_error: conn.raw("CASE WHEN last_error = 'email_denied_await_correction' THEN NULL ELSE last_error END"),
         updated_at: now,
       });
@@ -456,8 +462,12 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
     // which can differ from the customer's stored old email — an
     // oldEmail-only match would leave that enrollment mailing the
     // rejected (possibly hard-bounced) address forever.
+    // Scoped to the new_lead template (Codex #3084 r39): the hold lane
+    // only ever creates new_lead enrollments, and a billing-recipient
+    // automation's deliberately separate address (notification_prefs)
+    // must not be rewritten even when it happens to match a hold target.
     counts.automations += await conn('automation_enrollments')
-      .where({ customer_id: customerId, status: 'active' })
+      .where({ customer_id: customerId, status: 'active', template_key: 'new_lead' })
       .where(function priorTargets() {
         this.whereRaw('LOWER(email) = ?', [oldEmail]);
         for (const target of priorHoldTargets) {
@@ -487,6 +497,7 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
           held_newsletter: false,
           status: 'released',
           released_at: now,
+          corrected_at: now,
           created_at: now,
           updated_at: now,
         })
@@ -504,6 +515,7 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
           // possibly-dead claimant's stale window).
           held_email: conn.raw(`CASE WHEN ${zeroWorkMarker} OR first_touch_holds.status IN ('pending', 'releasing') THEN excluded.held_email ELSE first_touch_holds.held_email END`),
           released_at: conn.raw(`CASE WHEN ${zeroWorkMarker} THEN excluded.released_at ELSE first_touch_holds.released_at END`),
+          corrected_at: conn.raw(`CASE WHEN ${zeroWorkMarker} OR first_touch_holds.status IN ('pending', 'releasing') THEN excluded.corrected_at ELSE first_touch_holds.corrected_at END`),
           status: conn.raw("CASE WHEN first_touch_holds.status = 'releasing' AND first_touch_holds.last_error = 'email_denied_await_correction' THEN 'pending' ELSE first_touch_holds.status END"),
           last_error: conn.raw("CASE WHEN first_touch_holds.status IN ('pending', 'releasing') AND first_touch_holds.last_error = 'email_denied_await_correction' THEN NULL ELSE first_touch_holds.last_error END"),
         });
@@ -872,10 +884,10 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
   // these stamps in the DB — the post-send settles must fence on them,
   // not on the rolled-back gate stamps.
   const preGateClaims = { ...holdClaims };
+  const gatedStamps = {};
   if (holdIds.length) {
     try {
       await conn.transaction(async (trx) => {
-        const gatedStamps = {};
         for (const holdId of holdIds) {
           // Target-bound (r35): a correction retargeting a releasing row
           // preserves its fence, so only the held_email CAS can refuse
@@ -902,19 +914,31 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
       });
     } catch (gateErr) {
       if (sentOk) {
-        // The COMMIT failed after the provider accepted the message
-        // (Codex #3084 r38) — the DOI is out, the rollback restored the
-        // consumed markers and pre-gate stamps. Treating this as unsent
-        // would lift the durable pre-stamp and leave the force-resend
-        // markers armed: a duplicate confirmation on the next sweep.
-        // Instead fall through to the NORMAL post-send path on the
-        // pre-gate fences (which the DB now carries again): the released
-        // settles clear the restored markers, and the kept pre-stamp is
-        // the delivery evidence the dedupe guard honors.
-        logger.warn(`[email-fanout] gate commit failed AFTER the send for subscriber ${pendingConfirmation.id}: ${gateErr.code || gateErr.name || 'db_error'} — settling on the pre-gate fences`);
+        // The COMMIT errored after the provider accepted the message
+        // (Codex #3084 r38) — the DOI is out. A commit error is
+        // AMBIGUOUS (r39): the rows may durably carry either the
+        // pre-gate stamps (rolled back, markers restored) or the gate
+        // stamps (committed, acknowledgment lost) — settling on the
+        // wrong set makes every settle miss and the stale reclaimer
+        // force-resend a DOI the provider already accepted. Reread which
+        // fence each row durably carries and fall through to the NORMAL
+        // post-send path on those: the released settles clear any
+        // restored markers, and the kept pre-stamp is the delivery
+        // evidence the dedupe guard honors.
+        logger.warn(`[email-fanout] gate commit errored AFTER the send for subscriber ${pendingConfirmation.id}: ${gateErr.code || gateErr.name || 'db_error'} — reconciling the durable fences`);
         for (const holdId of holdIds) {
-          if (preGateClaims[holdId] === undefined) delete holdClaims[holdId];
-          else holdClaims[holdId] = preGateClaims[holdId];
+          let durable = preGateClaims[holdId];
+          const gated = gatedStamps[holdId];
+          if (gated) {
+            try {
+              const row = await conn('first_touch_holds').where({ id: holdId }).first('updated_at');
+              if (row && +new Date(row.updated_at) === +gated) durable = gated;
+            } catch (rereadErr) {
+              logger.warn(`[email-fanout] fence reconcile read failed for hold ${holdId}: ${rereadErr.code || rereadErr.name || 'db_error'} — assuming rollback`);
+            }
+          }
+          if (durable === undefined) delete holdClaims[holdId];
+          else holdClaims[holdId] = durable;
         }
       } else {
         gateFailed = true;

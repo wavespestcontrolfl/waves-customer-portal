@@ -358,11 +358,26 @@ async function runNewsletterResume(payload, dbh = db, { skipDedupe = false } = {
         // this write must not link a stranger's subscription.
         if (payload.customerId) {
           try {
-            await dbh('newsletter_subscribers')
+            const adopted = await dbh('newsletter_subscribers')
               .where({ id: existing.id })
               .whereRaw('LOWER(email) = ?', [emailLc])
               .whereNull('customer_id')
               .update({ customer_id: payload.customerId, updated_at: new Date() });
+            // Zero rows is fine ONLY when the row already belongs to this
+            // customer (Codex #3084 r39): a subscriber linked to a
+            // DIFFERENT customer stays outside this customer's correction
+            // fanout, so settling would strand its tokens outside every
+            // future rotation — keep the hold retryable and visible
+            // instead.
+            if (!adopted) {
+              const fresh = await dbh('newsletter_subscribers')
+                .where({ id: existing.id })
+                .first('customer_id');
+              if (!fresh || String(fresh.customer_id || '') !== String(payload.customerId)) {
+                logger.warn(`[first-touch-resume] subscriber at the held address belongs to another customer — hold stays retryable (customer ${payload.customerId})`);
+                return { confirmationEmailSent: false, retryReason: 'dedupe_linkage_failed' };
+              }
+            }
           } catch (linkErr) {
             logger.warn(`[first-touch-resume] dedupe linkage failed for customer ${payload.customerId}: ${linkErr.code || linkErr.name || 'db_error'}`);
             // Retryable, never terminal (Codex #3084 r17): releasing the
@@ -406,11 +421,22 @@ async function runNewsletterResume(payload, dbh = db, { skipDedupe = false } = {
   // re-attempts exactly this linkage.
   if (payload.customerId && outcome && outcome.subscriberId) {
     try {
-      await dbh('newsletter_subscribers')
+      const adopted = await dbh('newsletter_subscribers')
         .where({ id: outcome.subscriberId })
         .whereRaw('LOWER(email) = ?', [String(payload.email || '').trim().toLowerCase()])
         .whereNull('customer_id')
         .update({ customer_id: payload.customerId, updated_at: new Date() });
+      // Zero rows is fine ONLY when the row already belongs to this
+      // customer (Codex #3084 r39) — see the dedupe branch above.
+      if (!adopted) {
+        const fresh = await dbh('newsletter_subscribers')
+          .where({ id: outcome.subscriberId })
+          .first('customer_id');
+        if (!fresh || String(fresh.customer_id || '') !== String(payload.customerId)) {
+          logger.warn(`[first-touch-resume] resumed subscriber belongs to another customer — hold stays retryable (customer ${payload.customerId})`);
+          return { confirmationEmailSent: false, retryReason: 'dedupe_linkage_failed' };
+        }
+      }
     } catch (linkErr) {
       logger.warn(`[first-touch-resume] resume linkage failed for customer ${payload.customerId}: ${linkErr.code || linkErr.name || 'db_error'}`);
       return { confirmationEmailSent: false, retryReason: 'dedupe_linkage_failed' };
@@ -798,17 +824,28 @@ async function resumeHeldFirstTouch({
             });
           } catch (gateErr) {
             if (outcome !== null) {
-              // The COMMIT failed after the resume already ran (Codex
-              // #3084 r38) — the DOI may be out, and the rollback
-              // restored the pre-gate stamp and any consumed marker.
-              // Aborting would leave the marker armed for a delivered
-              // send (a duplicate on retry); instead fall through to the
-              // normal settles on the pre-gate fence the DB now carries
-              // — a delivered outcome settles released and clears the
-              // restored marker with it.
-              logger.warn(`[first-touch-resume] gate commit failed AFTER the send: ${gateErr.code || gateErr.name || 'db_error'} — settling on the pre-gate fence`);
-              claimStamp = preGateStamp;
-              claimStamps.set(hold.id, preGateStamp);
+              // The COMMIT errored after the resume already ran (Codex
+              // #3084 r38) — the DOI may be out. A commit ERROR is
+              // AMBIGUOUS (r39): PostgreSQL can commit and lose the
+              // connection before acknowledging, so the row may durably
+              // carry EITHER the pre-gate stamp (rolled back) or the
+              // gate stamp (committed). Assuming rollback made every
+              // settle miss on a committed gate — ten minutes later the
+              // stale reclaimer force-resent a DOI the provider had
+              // already accepted. Reread which fence is durable and
+              // settle on THAT; a delivered outcome then settles
+              // released and clears any restored marker with it.
+              logger.warn(`[first-touch-resume] gate commit errored AFTER the send: ${gateErr.code || gateErr.name || 'db_error'} — reconciling the durable fence`);
+              const gateStampCandidate = claimStamp; // assigned inside the transaction
+              let durableStamp = preGateStamp;
+              try {
+                const row = await dbh('first_touch_holds').where({ id: hold.id }).first('updated_at');
+                if (row && +new Date(row.updated_at) === +gateStampCandidate) durableStamp = gateStampCandidate;
+              } catch (rereadErr) {
+                logger.warn(`[first-touch-resume] fence reconcile read failed: ${rereadErr.code || rereadErr.name || 'db_error'} — assuming rollback`);
+              }
+              claimStamp = durableStamp;
+              claimStamps.set(hold.id, durableStamp);
             } else {
               // ABORT, never degrade to the dedupe guard (Codex #3084
               // r32): an unverifiable gate may have left the marker
@@ -1114,10 +1151,10 @@ async function runOnePostCommitResume(payload, holdIds, dbh, claims = new Map())
     // Pre-gate fence snapshot (r38): a commit failure after the provider
     // call rolls the DB back to these stamps.
     const preGateClaims = new Map(claims);
+    const gatedStamps = new Map();
     if (holdIds.length) {
       try {
         await dbh.transaction(async (trx) => {
-          const gatedStamps = new Map();
           for (const holdId of holdIds) {
             // Target-bound (r35): a correction retargeting a releasing row
             // preserves its fence, so only the held_email CAS can refuse
@@ -1150,16 +1187,28 @@ async function runOnePostCommitResume(payload, holdIds, dbh, claims = new Map())
         });
       } catch (gateErr) {
         if (outcome !== null || resumeThrow) {
-          // The COMMIT failed after the resume already ran (Codex #3084
-          // r38) — the DOI may be out, and the rollback restored the
-          // consumed markers and pre-gate stamps. Aborting would leave
-          // markers armed for a possibly-delivered send (duplicates on
-          // retry); instead fall through to the normal settles on the
-          // pre-gate fences the DB now carries — a delivered outcome
-          // settles released and clears the restored markers with it.
-          logger.warn(`[first-touch-resume] post-commit gate commit failed AFTER the send: ${gateErr.code || gateErr.name || 'db_error'} — settling on the pre-gate fences`);
+          // The COMMIT errored after the resume already ran (Codex #3084
+          // r38) — the DOI may be out. A commit error is AMBIGUOUS
+          // (r39): the row may durably carry either the pre-gate stamps
+          // (rolled back) or the gate stamps (committed, acknowledgment
+          // lost) — settling on the wrong set makes every settle miss
+          // and the stale reclaimer force-resend a DOI the provider
+          // already accepted. Reread which fence each row durably
+          // carries and settle on that; a delivered outcome settles
+          // released and clears any restored markers with it.
+          logger.warn(`[first-touch-resume] post-commit gate commit errored AFTER the send: ${gateErr.code || gateErr.name || 'db_error'} — reconciling the durable fences`);
           for (const holdId of holdIds) {
-            if (preGateClaims.has(holdId)) claims.set(holdId, preGateClaims.get(holdId));
+            let durable = preGateClaims.has(holdId) ? preGateClaims.get(holdId) : null;
+            const gated = gatedStamps.get(holdId);
+            if (gated) {
+              try {
+                const row = await dbh('first_touch_holds').where({ id: holdId }).first('updated_at');
+                if (row && +new Date(row.updated_at) === +gated) durable = gated;
+              } catch (rereadErr) {
+                logger.warn(`[first-touch-resume] fence reconcile read failed for hold ${holdId}: ${rereadErr.code || rereadErr.name || 'db_error'} — assuming rollback`);
+              }
+            }
+            if (durable) claims.set(holdId, durable);
             else claims.delete(holdId);
           }
         } else {
@@ -1200,9 +1249,18 @@ async function runOnePostCommitResume(payload, holdIds, dbh, claims = new Map())
         // Deny-preserving (r22); the force-resend marker only when the
         // subscriber still carries the attempted address (r25), bound to
         // the attempted subscriber id when known (r31).
+        // A THROWN resume also goes through the VERIFIED ticket (Codex
+        // #3084 r39): subscribeOrResubscribe stamps confirmation_sent_at
+        // before linkToCustomer and its final reread, either of which can
+        // throw BEFORE the provider send — a generic retry code would let
+        // the retry's dedupe guard trust that pre-send stamp and settle a
+        // hold whose DOI never went out. sendFailedMarkerFor arms the
+        // force-resend only when a pending subscriber still carries the
+        // attempted address; the rare threw-after-provider-accept case
+        // costs one duplicate confirmation, strictly better than a
+        // permanently unconfirmed subscriber (the r36 trade).
         await repenHoldPreservingDeny(holdId, outcome?.retryReason
-          || (resumeThrow ? `newsletter_resume_failed: ${resumeThrow.code || resumeThrow.name || 'resume_failed'}`
-            : await sendFailedMarkerFor(sentEmailLc, dbh, outcome?.subscriberId || null, outcome?.confirmationToken || null)), dbh, fenceOf(holdId));
+          || await sendFailedMarkerFor(sentEmailLc, dbh, outcome?.subscriberId || null, outcome?.confirmationToken || null), dbh, fenceOf(holdId));
       }
     }
     return outcome;
@@ -1327,22 +1385,24 @@ async function recordFirstTouchHold({ callLogId, customerId = null, heldEmail, h
           // read→merge gap — the CASE inspects the CURRENT row, so the
           // operator-confirmed value survives no matter when the
           // correction lands.
-          // A target WRITTEN during this run survives too (Codex #3084
-          // r36): a mid-run correction retargets the pending row, and a
-          // retryable release failure re-pends it with NO released_at —
-          // every such write bumps updated_at, so a during-run stamp
-          // marks the row as carrying an operator-era value the stale
-          // in-memory extraction must not overwrite. A pre-existing row
-          // from an earlier run keeps updated_at < runStartedAt and
-          // still adopts the reprocess's fresh extraction. STALE
-          // releasing rows adopt the fresh extraction too (r37) — their
-          // dead claimant's target is a prior cycle's value.
+          // A target CORRECTED during this run survives too (Codex #3084
+          // r36, marker-bound since r39): a mid-run correction retargets
+          // the pending row and stamps corrected_at — the EXPLICIT
+          // operator-assertion marker only the fanout retargets write —
+          // and a retryable release failure re-pends without clearing
+          // it. updated_at is NOT that marker (r39): sweep claims and
+          // live-card re-pends bump it too, and preserving on any
+          // during-run bump let a claim racing a force-reprocess pin the
+          // prior cycle's unreviewed address. Rows without a during-run
+          // corrected_at adopt the reprocess's fresh extraction; STALE
+          // releasing rows adopt it too (r37) — their dead claimant's
+          // target is a prior cycle's value.
           held_email: runStartedAt
             ? dbh.raw(
               `CASE WHEN ${liveLease} THEN first_touch_holds.held_email`
               + " WHEN first_touch_holds.released_at IS NOT NULL AND first_touch_holds.released_at >= ?"
               + " AND COALESCE(first_touch_holds.held_email, '') <> '' THEN first_touch_holds.held_email"
-              + ' WHEN first_touch_holds.updated_at >= ?'
+              + ' WHEN first_touch_holds.corrected_at IS NOT NULL AND first_touch_holds.corrected_at >= ?'
               + " AND COALESCE(first_touch_holds.held_email, '') <> '' THEN first_touch_holds.held_email"
               + ' ELSE ? END',
               [staleThreshold, runStartedAt, runStartedAt, emailToRecord],

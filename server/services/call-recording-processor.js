@@ -8870,6 +8870,67 @@ const CallRecordingProcessor = {
       }
     }
 
+    // A RETRY run (extraction_failed → reprocess) re-enters with
+    // call_log.customer_id already persisted by the failed attempt, so the
+    // creation branch above never rebuilds newsletterCandidate — and the
+    // whole newsletter chain below would be skipped, leaving the
+    // call-created customer without a DOI or a held_newsletter flag forever
+    // (Codex #3084 r20). Reconstruct the candidate for customers CREATED BY
+    // THIS CALL (durable provenance marker below, r23), reading the CURRENT
+    // stored email so a correction made during the failed window wins.
+    // Matched pre-existing customers keep the old behavior: no
+    // auto-subscribe.
+    // Gated on the pre-claim processing_status (Codex #3084 r21):
+    // `call.processing_status` was read BEFORE the claim, so it still says
+    // whether THIS run is a recovery pass — the extraction_failed retry, or
+    // a stale-claim reclaim ('processing': a worker died after persisting
+    // customer_id but before the newsletter step, Codex #3084 r22). An
+    // admin force reprocess of a PROCESSED call must not rebuild — its
+    // subscribe path re-sends the pending DOI (confirmation_resent) on
+    // every force.
+    // Runs BEFORE Step 7's customer_interactions insert (Codex #3084 r39):
+    // this block can THROW into the extraction_failed retry path, and the
+    // unguarded timeline insert below is not idempotent — each replay
+    // would duplicate the interaction entry, so the only throwing recovery
+    // step sits ahead of it.
+    if (!newsletterCandidate && customerId && !createdCustomerFromCall
+        && ['extraction_failed', 'processing'].includes(call.processing_status)) {
+      try {
+        // ACTUAL call-creation provenance, not timestamps (Codex #3084
+        // r23): the creation branch stamps created_customer_id into
+        // call_log.metadata, so a customer someone else created between
+        // the call row and the failed attempt (merely matched by it) can
+        // never be classified as call-created and auto-subscribed.
+        const rebuildMeta = typeof call.metadata === 'string'
+          ? (() => { try { return JSON.parse(call.metadata); } catch { return {}; } })()
+          : (call.metadata || {});
+        const custRow = await db('customers').where({ id: customerId }).first('email', 'first_name', 'last_name');
+        if (custRow && String(rebuildMeta?.created_customer_id || '') === String(customerId)) {
+          newsletterCandidate = {
+            customerId,
+            email: custRow.email || extracted.email || null,
+            firstName: custRow.first_name || (extracted.first_name ? capitalizeName(extracted.first_name) : null),
+            lastName: custRow.last_name || null,
+          };
+          logger.info(`[call-proc] Rebuilt newsletter candidate for call-created customer on retry (${maskSid(callSid)})`);
+        }
+      } catch (rebuildErr) {
+        logger.warn(`[call-proc] newsletter candidate rebuild failed for ${maskSid(callSid)}: ${rebuildErr.code || rebuildErr.name || 'db_error'}`);
+        // A recovery run that cannot rebuild the candidate must NOT
+        // finalize 'processed' (Codex #3084 r30): the retry sweep never
+        // revisits a processed call, so a transient customers-read failure
+        // here would permanently cost the call-created customer its DOI
+        // and its durable held_newsletter record. Same contract as the
+        // ledger-unavailable throw in the reconciliation below: land in
+        // the outer procErr catch, which stamps extraction_failed with the
+        // capped retry budget — this branch only runs on recovery passes,
+        // so a normal first attempt is never affected.
+        const recoverErr = new Error('newsletter_rebuild_unavailable');
+        recoverErr.newsletterRebuildUnavailable = true;
+        throw recoverErr;
+      }
+    }
+
     // Step 7: Log activity
     if (customerId) {
       await db('customer_interactions').insert({
@@ -8932,61 +8993,6 @@ const CallRecordingProcessor = {
       }
     }
 
-    // A RETRY run (extraction_failed → reprocess) re-enters with
-    // call_log.customer_id already persisted by the failed attempt, so the
-    // creation branch above never rebuilds newsletterCandidate — and the
-    // whole newsletter chain below would be skipped, leaving the
-    // call-created customer without a DOI or a held_newsletter flag forever
-    // (Codex #3084 r20). Reconstruct the candidate for customers CREATED BY
-    // THIS CALL (durable provenance marker below, r23), reading the CURRENT
-    // stored email so a correction made during the failed window wins.
-    // Matched pre-existing customers keep the old behavior: no
-    // auto-subscribe.
-    // Gated on the pre-claim processing_status (Codex #3084 r21):
-    // `call.processing_status` was read BEFORE the claim, so it still says
-    // whether THIS run is a recovery pass — the extraction_failed retry, or
-    // a stale-claim reclaim ('processing': a worker died after persisting
-    // customer_id but before the newsletter step, Codex #3084 r22). An
-    // admin force reprocess of a PROCESSED call must not rebuild — its
-    // subscribe path re-sends the pending DOI (confirmation_resent) on
-    // every force.
-    if (!newsletterCandidate && customerId && !createdCustomerFromCall
-        && ['extraction_failed', 'processing'].includes(call.processing_status)) {
-      try {
-        // ACTUAL call-creation provenance, not timestamps (Codex #3084
-        // r23): the creation branch stamps created_customer_id into
-        // call_log.metadata, so a customer someone else created between
-        // the call row and the failed attempt (merely matched by it) can
-        // never be classified as call-created and auto-subscribed.
-        const rebuildMeta = typeof call.metadata === 'string'
-          ? (() => { try { return JSON.parse(call.metadata); } catch { return {}; } })()
-          : (call.metadata || {});
-        const custRow = await db('customers').where({ id: customerId }).first('email', 'first_name', 'last_name');
-        if (custRow && String(rebuildMeta?.created_customer_id || '') === String(customerId)) {
-          newsletterCandidate = {
-            customerId,
-            email: custRow.email || extracted.email || null,
-            firstName: custRow.first_name || (extracted.first_name ? capitalizeName(extracted.first_name) : null),
-            lastName: custRow.last_name || null,
-          };
-          logger.info(`[call-proc] Rebuilt newsletter candidate for call-created customer on retry (${maskSid(callSid)})`);
-        }
-      } catch (rebuildErr) {
-        logger.warn(`[call-proc] newsletter candidate rebuild failed for ${maskSid(callSid)}: ${rebuildErr.code || rebuildErr.name || 'db_error'}`);
-        // A recovery run that cannot rebuild the candidate must NOT
-        // finalize 'processed' (Codex #3084 r30): the retry sweep never
-        // revisits a processed call, so a transient customers-read failure
-        // here would permanently cost the call-created customer its DOI
-        // and its durable held_newsletter record. Same contract as the
-        // ledger-unavailable throw in the reconciliation below: land in
-        // the outer procErr catch, which stamps extraction_failed with the
-        // capped retry budget — this branch only runs on recovery passes,
-        // so a normal first attempt is never affected.
-        const recoverErr = new Error('newsletter_rebuild_unavailable');
-        recoverErr.newsletterRebuildUnavailable = true;
-        throw recoverErr;
-      }
-    }
     if (newsletterCandidate && v2EmailBlocked) {
       logger.info(`[call-proc] Skipping newsletter subscribe for ${callSid}: v2 TCPA gate blocked all outbound (do_not_contact)`);
     } else if (newsletterCandidate

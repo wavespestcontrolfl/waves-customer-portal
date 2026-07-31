@@ -522,6 +522,9 @@ describe('propagateCustomerEmailChange', () => {
     // it lifts a deny stamp so the sweep can release the retargeted row.
     expect(String(pendingRetarget.arg.last_error.__raw)).toContain('email_denied_await_correction');
     expect(String(pendingRetarget.arg.last_error.__raw)).toContain('THEN NULL');
+    // And it stamps corrected_at — the EXPLICIT marker only fanout
+    // retargets write, which the hold merge preserves targets by (r39).
+    expect(pendingRetarget.arg.corrected_at).toBeInstanceOf(Date);
   });
 
   test('the marker persists even when the email card was ALREADY resolved (deny-then-correct)', async () => {
@@ -675,12 +678,13 @@ describe('propagateCustomerEmailChange', () => {
       && c.op === 'whereRaw' && String(c.arg.sql).includes('!=')
       && Array.isArray(c.arg.bindings) && c.arg.bindings[0] === 'samtypo@example.com');
     expect(finalSweep).toBeDefined();
-    // Scoped to the new_lead template (r38): a billing-recipient
-    // automation's deliberately separate address must never be rewritten
-    // by this ownership-only repair.
-    const scoped = conn.__calls.find((c) => c.table === 'automation_enrollments'
+    // Scoped to the new_lead template (r38, and the prior-target sweep
+    // too since r39): a billing-recipient automation's deliberately
+    // separate address must never be rewritten by these hold-lane
+    // repairs — BOTH sweeps carry the scope.
+    const scopedWheres = conn.__calls.filter((c) => c.table === 'automation_enrollments'
       && c.op === 'where' && c.arg && c.arg.template_key === 'new_lead');
-    expect(scoped).toBeDefined();
+    expect(scopedWheres.length).toBeGreaterThanOrEqual(2);
   });
 
   test('deferred newsletter holds pass through when no pending subscriber was moved', async () => {
