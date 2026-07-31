@@ -16,7 +16,7 @@ const router = express.Router();
 const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
 const MODELS = require('../config/models');
-const { auditAddressHouseNumber, hasCountyEvidence, canonicalLookupAddress, lookupStoriesEvidenceFromAI, lookupPropertyFromAITrio, buildPropertyDataQuality, detectUnassessedVacantParcel } = require('../services/property-lookup/ai-property-lookup');
+const { auditAddressHouseNumber, hasCountyEvidence, canonicalLookupAddress, lookupStoriesEvidenceFromAI, lookupPropertyFromAITrio, buildPropertyDataQuality, detectUnassessedVacantParcel, detectMultiSitusMasterParcel } = require('../services/property-lookup/ai-property-lookup');
 const { lookupFloodZoneByPoint } = require('../services/property-lookup/fema-nfhl');
 const { lookupPoolPermitsByParcel } = require('../services/property-lookup/county-permits');
 const { outerRing, simplifyRing } = require('../services/property-lookup/parcel-gis');
@@ -1474,6 +1474,10 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     // that would otherwise trust the defaulted dimensions can see they're
     // placeholders.
     unassessedVacantParcel: detectUnassessedVacantParcel(rc) ? true : undefined,
+    // Machine-readable twin of the parkParcel verify flag (multi-situs master
+    // parcel — land-lease mobile-home park or similar; the roll vouches for
+    // the address but not for any per-unit dimension).
+    multiSitusMasterParcel: detectMultiSitusMasterParcel(rc) ? true : undefined,
     stories: rc?.stories || 1,
     // Provenance for the `stories` value so the client can decide whether to
     // amber-nudge the estimator to eyeball the photos. 'ai' = verified public
@@ -2606,6 +2610,25 @@ function buildFieldVerifyFlags(rc, ai, addressAudit = null) {
     flags.push({
       field: 'vacantParcel',
       reason: `County roll shows ${vacantParcel.landUseDescription || 'vacant land'} with no building record — an unbuilt lot, or new construction the county hasn't assessed yet. If a home is standing or under way, ask the customer for plan sq ft and stories and save them as field-verified.`,
+      priority: 'HIGH',
+    });
+  }
+
+  // Multi-situs master parcel: the roll DID match the address, but as one
+  // situs line of a parcel shared with other units, so parcel-level
+  // dimensions describe the whole parcel and the county record
+  // intentionally ships without sqft/lot/stories. Park semantics are only
+  // claimed at association scale (≥5 addresses, the same threshold the
+  // stacked-parcel aggregation uses) or when the GIS lane confirmed DOR 28
+  // — a 2–4 address parcel is more likely a duplex/small multi-unit and
+  // gets neutral copy.
+  const parkParcel = detectMultiSitusMasterParcel(rc);
+  if (parkParcel) {
+    flags.push({
+      field: 'parkParcel',
+      reason: (parkParcel.parkConfirmed || parkParcel.situsCount >= 5)
+        ? `Address is one of ${parkParcel.situsCount} homes on a single county master parcel — a land-lease community (mobile-home park or similar), so per-home sq ft, lot size, and stories are not on the roll. Get home dimensions from the customer or on site and save them as field-verified.`
+        : `Address shares one county parcel with ${parkParcel.situsCount - 1} other unit(s) — a duplex or small multi-unit parcel, so the roll's dimensions describe the whole building and lot, not this unit. Get the unit's sq ft and stories from the customer or on site and save them as field-verified.`,
       priority: 'HIGH',
     });
   }

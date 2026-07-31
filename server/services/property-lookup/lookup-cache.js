@@ -15,6 +15,10 @@
  *     records (vacant roll parcel, no building record; default 21 — often
  *     new construction, and the county posts the home after CO, so these
  *     must re-fetch soon; applied on read AND write)
+ *   PROPERTY_LOOKUP_ROLL_MISS_TTL_DAYS — lifetime for records with no
+ *     county/cadastral evidence (mistyped street, land-lease park cached
+ *     before the multi-situs fix, new plat; default 21 — the county lookup
+ *     keeps improving at exactly these addresses; applied on read AND write)
  *   PROPERTY_LOOKUP_CACHE_DISABLED=1 — kill switch (reads AND writes skip;
  *     verified overrides still apply — they are corrections, not cache)
  *
@@ -25,7 +29,7 @@ const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { normalizeLeadAddress } = require('../../utils/address-normalizer');
-const { buildPropertyDataQuality, detectUnassessedVacantParcel } = require('./ai-property-lookup');
+const { buildPropertyDataQuality, detectUnassessedVacantParcel, hasCountyEvidence, isPreMarkerParkRecord } = require('./ai-property-lookup');
 
 const DEFAULT_TTL_DAYS = 180;
 // Unassessed vacant parcel (vacant roll parcel, no building record — often
@@ -35,6 +39,15 @@ const DEFAULT_TTL_DAYS = 180;
 // invalidates the hit immediately. Enforced on WRITE (expires_at) and on
 // READ (rows cached before this shipped carry the old 180-day expiry).
 const VACANT_PARCEL_TTL_DAYS = 21;
+
+// Roll-miss records (no county/cadastral evidence at all — a mistyped
+// street, a land-lease park cached before the multi-situs situs-cell split,
+// a brand-new plat) keep the same short window: the county lookup keeps
+// getting better at exactly these addresses (the multi-situs fix being the
+// motivating case), and the base 180-day TTL would pin the records a
+// re-run could now correct. Enforced on WRITE (expires_at) and on READ
+// (rows cached before this shipped carry the old expiry).
+const ROLL_MISS_TTL_DAYS = 21;
 
 // Fields a tech may verify from the field. Mirrors the estimator's editable
 // dimensions; anything else in a /verify payload is dropped.
@@ -143,6 +156,12 @@ function vacantParcelTtlDays() {
   return Math.min(days, cacheTtlDays());
 }
 
+function rollMissTtlDays() {
+  const n = Number(process.env.PROPERTY_LOOKUP_ROLL_MISS_TTL_DAYS);
+  const days = Number.isFinite(n) && n > 0 ? n : ROLL_MISS_TTL_DAYS;
+  return Math.min(days, cacheTtlDays());
+}
+
 function isCacheDisabled() {
   return process.env.PROPERTY_LOOKUP_CACHE_DISABLED === '1'
     || process.env.PROPERTY_LOOKUP_CACHE_DISABLED === 'true';
@@ -201,6 +220,29 @@ async function getCachedLookup(address) {
       const maxAgeMs = vacantParcelTtlDays() * 24 * 60 * 60 * 1000;
       if (!savedAt || Date.now() - savedAt > maxAgeMs) {
         logger.info('[lookup-cache] vacant-parcel row past the short TTL — treating as miss');
+        return null;
+      }
+    }
+    // Pre-marker park rows are invalidated OUTRIGHT, not short-TTL'd: their
+    // GIS parcel meta classifies as a mobile-home park but the record lacks
+    // the multiSitusParcel marker, meaning it was cached before the park
+    // guards shipped and can carry park-wide dimensions under a
+    // cadastral/hybrid source — a shape hasCountyEvidence counts as county
+    // evidence, so the roll-miss TTL below never touches it (codex P2 r3
+    // #3095). A live re-run rebuilds the record with the marker.
+    if (isPreMarkerParkRecord(row.property_record)) {
+      logger.info('[lookup-cache] pre-marker park-parcel row — treating as miss');
+      return null;
+    }
+    // Roll-miss rows (no county evidence) age out on the short TTL the same
+    // way — rows cached before the multi-situs situs-cell split are exactly
+    // the ones a re-run can now resolve against the roll (codex P2 #3095),
+    // and their stored expires_at still says 180 days.
+    if (!hasCountyEvidence(row.property_record)) {
+      const savedAt = row.data_saved_at ? new Date(row.data_saved_at).getTime() : 0;
+      const maxAgeMs = rollMissTtlDays() * 24 * 60 * 60 * 1000;
+      if (!savedAt || Date.now() - savedAt > maxAgeMs) {
+        logger.info('[lookup-cache] roll-miss row past the short TTL — treating as miss');
         return null;
       }
     }
@@ -301,7 +343,10 @@ async function saveLookup(address, result) {
     // compare as newer than the data so the next hit invalidates.
     const dataAsOf = result.meta?.timestamp ? new Date(result.meta.timestamp) : new Date();
     const vacantParcel = Boolean(detectUnassessedVacantParcel(record));
-    const ttlDays = vacantParcel ? vacantParcelTtlDays() : cacheTtlDays();
+    const rollMiss = !hasCountyEvidence(record);
+    const ttlDays = vacantParcel ? vacantParcelTtlDays()
+      : rollMiss ? rollMissTtlDays()
+      : cacheTtlDays();
     const expiresAt = new Date(Date.now() + ttlDays * 24 * 60 * 60 * 1000);
     const payload = {
       address_hash: hash,
