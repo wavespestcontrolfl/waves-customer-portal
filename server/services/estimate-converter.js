@@ -3200,7 +3200,11 @@ const EstimateConverter = {
         type: 'estimate_converted',
         title: `Commercial schedule needed: ${customer.first_name} ${customer.last_name}`,
         body: `Accepted commercial recurring estimate #${estimateId} — ${scheduleNote} (auto-scheduling for commercial cadences is pending).`,
-        options: { icon: '\u{1F4C5}', link: '/admin/dispatch', metadata: { estimateId, customerId } },
+        // bell: true — an accepted estimate needing a commercial schedule must
+        // ring even under GATE_ADMIN_BELL_POLICY. Covers both dispatch paths:
+        // the direct notify below and the deferred post-commit send in
+        // estimate-manual-acceptance (both pass these options through).
+        options: { icon: '\u{1F4C5}', link: '/admin/dispatch', bell: true, metadata: { estimateId, customerId } },
       };
       if (opts.deferCommercialScheduleNotification === true) {
         // In-transaction callers (public accept, manual Mark Won) dispatch this

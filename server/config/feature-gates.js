@@ -957,6 +957,21 @@ const gates = {
   // every payload and the chips disappear.
   bookingRainChips: process.env.GATE_BOOKING_RAIN_CHIPS === 'true',
 
+  // Admin bell policy — the shared admin bell rings ONLY for new leads,
+  // inbound SMS, voicemail callbacks, accepted estimates, and money failures
+  // (payment failures, billing exceptions, disputes, refund failures, PCI
+  // events) plus twilio_failure; everything else is silenced at the
+  // NotificationService chokepoint with a per-category owner override in
+  // Settings → Notifications, and the live dashboard-alert overlay stops
+  // merging into the bell (the dashboard banner is untouched). Changes what
+  // the owner SEES for operational exceptions, so explicit opt-in in EVERY
+  // environment (dev too — a dev bell that silently drops categories would
+  // mask notification regressions during testing). Kill switch: unset (or
+  // any non-'true' value) — every insert and the live overlay revert to
+  // today's behavior byte-for-byte; override rows stay inert in
+  // notification_preferences.
+  adminBellPolicy: process.env.GATE_ADMIN_BELL_POLICY === 'true',
+
   // WaveGuard auto-tier from recurring coverage (owner directive 2026-07-28),
   // BOTH directions: a customer with upcoming recurring qualifying services
   // on the schedule is stamped a tier automatically (1 family = Bronze,

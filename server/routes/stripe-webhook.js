@@ -14,6 +14,9 @@ const {
   STALE_CLAIM_WINDOW_MS,
 } = require('./stripe-webhook-helpers');
 const { triggerNotification } = require('../services/notification-triggers');
+// Admin bell rows go through NotificationService (not raw inserts) so the
+// GATE_ADMIN_BELL_POLICY chokepoint covers them.
+const NotificationService = require('../services/notification-service');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderRequiredSmsTemplate } = require('../services/sms-template-renderer');
 const { etDateString, etParts, addETDays } = require('../utils/datetime-et');
@@ -858,14 +861,12 @@ async function handleStatementPaymentIntentEvent(paymentIntent, eventType, event
     if (eventType === 'failed' && reverted) {
       const reasonMsg = paymentIntent.last_payment_error?.message || 'bank/card declined';
       try {
-        await db('notifications').insert({
-          recipient_type: 'admin',
-          category: 'payment',
-          title: `Statement payment failed: S-${statementId}`,
-          body: `PI ${piId} failed after confirmation — ${reasonMsg}. Statement reopened for collection.`,
-          icon: '⚠️',
-          link: '/admin/payers',
-        });
+        await NotificationService.notifyAdmin(
+          'payment',
+          `Statement payment failed: S-${statementId}`,
+          `PI ${piId} failed after confirmation — ${reasonMsg}. Statement reopened for collection.`,
+          { icon: '⚠️', link: '/admin/payers' },
+        );
       } catch (e) { logger.error(`[stripe-webhook] statement S-${statementId} failure notification insert failed: ${e.message}`); }
       logger.warn(`[stripe-webhook] statement S-${statementId} payment FAILED after confirmation via PI ${piId} (${reasonMsg}) — reverted to payable`);
     }
@@ -3160,25 +3161,21 @@ async function handlePayoutEvent(payout, eventType) {
 
   try {
     if (eventType === 'payout.paid') {
-      await db('notifications').insert({
-        recipient_type: 'admin',
-        category: 'payout',
-        title: `Payout deposited: $${(payout.amount / 100).toFixed(2)}`,
-        body: `Stripe payout of $${(payout.amount / 100).toFixed(2)} has been deposited to your Capital One account.`,
-        icon: '\uD83C\uDFE6',
-        link: '/admin/banking',
-      });
+      await NotificationService.notifyAdmin(
+        'payout',
+        `Payout deposited: $${(payout.amount / 100).toFixed(2)}`,
+        `Stripe payout of $${(payout.amount / 100).toFixed(2)} has been deposited to your Capital One account.`,
+        { icon: '\uD83C\uDFE6', link: '/admin/banking' },
+      );
     }
 
     if (eventType === 'payout.failed') {
-      await db('notifications').insert({
-        recipient_type: 'admin',
-        category: 'payout',
-        title: `Payout FAILED: $${(payout.amount / 100).toFixed(2)}`,
-        body: `Payout failed: ${payout.failure_message || 'Unknown reason'}. Check your bank details.`,
-        icon: '\u26A0\uFE0F',
-        link: '/admin/banking',
-      });
+      await NotificationService.notifyAdmin(
+        'payout',
+        `Payout FAILED: $${(payout.amount / 100).toFixed(2)}`,
+        `Payout failed: ${payout.failure_message || 'Unknown reason'}. Check your bank details.`,
+        { icon: '\u26A0\uFE0F', link: '/admin/banking' },
+      );
     }
   } catch (err) {
     logger.error(`[stripe-webhook] Payout notification failed: ${err.message}`);
@@ -4027,14 +4024,12 @@ async function handleDisputeCreated(dispute) {
         }
       });
       try {
-        await db('notifications').insert({
-          recipient_type: 'admin',
-          category: 'dispute',
-          title: `Statement dispute opened: $${amount}`,
-          body: `Statement S-${disputedStmt.id} chargeback (${reason}). PI ${dispute.payment_intent}. Charge ${chargeId}.`,
-          icon: '⚠️',
-          link: '/admin/payers',
-        });
+        await NotificationService.notifyAdmin(
+          'dispute',
+          `Statement dispute opened: $${amount}`,
+          `Statement S-${disputedStmt.id} chargeback (${reason}). PI ${dispute.payment_intent}. Charge ${chargeId}.`,
+          { icon: '⚠️', link: '/admin/payers' },
+        );
       } catch (err) { logger.error(`[stripe-webhook] Statement dispute notification failed: ${err.message}`); }
       return;
     }
@@ -4126,14 +4121,12 @@ async function handleDisputeCreated(dispute) {
 
   // Admin notification
   try {
-    await db('notifications').insert({
-      recipient_type: 'admin',
-      category: 'dispute',
-      title: `Dispute opened: $${amount}`,
-      body: `Reason: ${reason}. Respond by ${dispute.evidence_details?.due_by ? new Date(dispute.evidence_details.due_by * 1000).toLocaleDateString('en-US', { timeZone: 'America/New_York' }) : 'soon'}. Charge: ${chargeId}`,
-      icon: '\u26A0\uFE0F',
-      link: '/admin/invoices',
-    });
+    await NotificationService.notifyAdmin(
+      'dispute',
+      `Dispute opened: $${amount}`,
+      `Reason: ${reason}. Respond by ${dispute.evidence_details?.due_by ? new Date(dispute.evidence_details.due_by * 1000).toLocaleDateString('en-US', { timeZone: 'America/New_York' }) : 'soon'}. Charge: ${chargeId}`,
+      { icon: '\u26A0\uFE0F', link: '/admin/invoices' },
+    );
   } catch (err) {
     logger.error(`[stripe-webhook] Dispute notification failed: ${err.message}`);
   }
@@ -4352,14 +4345,12 @@ async function handleDisputeClosed(dispute) {
   }
 
   try {
-    await db('notifications').insert({
-      recipient_type: 'admin',
-      category: 'dispute',
-      title: `Dispute ${status}: $${amount}`,
-      body: `Dispute on charge ${chargeId} closed as ${status}.`,
-      icon: status === 'won' ? '\u2705' : '\u274C',
-      link: '/admin/invoices',
-    });
+    await NotificationService.notifyAdmin(
+      'dispute',
+      `Dispute ${status}: $${amount}`,
+      `Dispute on charge ${chargeId} closed as ${status}.`,
+      { icon: status === 'won' ? '\u2705' : '\u274C', link: '/admin/invoices' },
+    );
   } catch { /* non-critical */ }
 }
 

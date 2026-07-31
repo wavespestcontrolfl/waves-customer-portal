@@ -10096,7 +10096,9 @@ router.put('/:token/accept', async (req, res, next) => {
         billingTerm,
         annualPrepayAmount: annualPrepayQuotedAmount,
       });
-      await NotificationService.notifyAdmin('estimate', notificationPayload.adminTitle, notificationPayload.adminBody, { icon: '\u2705', link: '/admin/estimates', metadata: { estimateId: estimate.id, customerId, invoiceId } });
+      // bell: true \u2014 accepted estimates must ring the admin bell even under
+      // GATE_ADMIN_BELL_POLICY (category 'estimate' is otherwise silenced).
+      await NotificationService.notifyAdmin('estimate', notificationPayload.adminTitle, notificationPayload.adminBody, { icon: '\u2705', link: '/admin/estimates', bell: true, metadata: { estimateId: estimate.id, customerId, invoiceId } });
       if (customerId) {
         await NotificationService.notifyCustomer(customerId, 'account', notificationPayload.customerTitle, notificationPayload.customerBody, {
           icon: '\u2705',

@@ -6144,7 +6144,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             'billing',
             'Visit covered by membership dues — stamped price not billed',
             `A completed recurring visit for a monthly-membership customer carried a $${Number(svc.estimated_price).toFixed(2)} per-visit price${svc.create_invoice_on_complete ? " and the series' create-invoice default" : ''}. Membership dues cover plan visits, so NO invoice was cut. If this series is actually a separately billable add-on, bill this visit manually and KEEP its per-visit price — every visit in the series will complete uninvoiced the same way, so bill each manually or roll the add-on into the customer's monthly rate.`,
-            { link: `/admin/customers/${svc.customer_id}`, metadata: { scheduledServiceId: svc.id, customerId: svc.customer_id, dedupeKey }, connection: trx },
+            // bell: false — billing FYI, not a money failure; silenced under
+            // GATE_ADMIN_BELL_POLICY even though category 'billing' rings.
+            { link: `/admin/customers/${svc.customer_id}`, bell: false, metadata: { scheduledServiceId: svc.id, customerId: svc.customer_id, dedupeKey }, connection: trx },
           );
         });
       } catch (e) { logger.warn(`[dispatch] dues-covered review alert failed: ${e.message}`); }
