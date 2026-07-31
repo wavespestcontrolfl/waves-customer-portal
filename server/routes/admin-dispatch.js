@@ -5533,9 +5533,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       record.structured_notes = photoNotes;
     }
 
-    // Grounded-recommendation regen state — the PDF-queue block below uses
-    // these to re-render artifacts if the regen lands after its bounded wait.
+    // Grounded-recommendation regen state — the artifact/SMS blocks below
+    // key on these. `Grounded` is true ONLY on a settled run with a truthy
+    // result: a quick provider/parse failure must not be mistaken for a
+    // grounded success (codex P1 r12).
     let lawnRecRegenPromise = null;
+    let lawnRecRegenAttempted = false;
+    let lawnRecRegenGrounded = false;
     let lawnRecRegenTimedOut = false;
     const completedLawnAssessmentId =
       linkedLawnAssessmentId || parseJsonObject(record.structured_notes).lawnAssessmentId || null;
@@ -5577,14 +5581,19 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // block re-renders the artifact when it lands (r8) — no permanent
         // stale copy on either path.
         const KnowledgeBridge = require('../services/knowledge-bridge');
+        lawnRecRegenAttempted = true;
         lawnRecRegenPromise = KnowledgeBridge.generateAssessmentRecommendations(completedAssessment.id)
           .catch((recErr) => { logger.warn(`[dispatch] post-completion recommendation regen failed (non-blocking): ${recErr.message}`); return null; });
-        lawnRecRegenTimedOut = await Promise.race([
-          lawnRecRegenPromise.then(() => false),
-          new Promise((resolve) => { setTimeout(() => resolve(true), 60000).unref?.(); }),
+        const regenOutcome = await Promise.race([
+          lawnRecRegenPromise.then((result) => ({ settled: true, grounded: !!result })),
+          new Promise((resolve) => { setTimeout(() => resolve({ settled: false, grounded: false }), 60000).unref?.(); }),
         ]);
+        lawnRecRegenTimedOut = !regenOutcome.settled;
+        lawnRecRegenGrounded = regenOutcome.settled && regenOutcome.grounded;
         if (lawnRecRegenTimedOut) {
           logger.warn('[dispatch] lawn recommendation regen still running after 60s — completion continues; PDF re-queues when the grounded write lands');
+        } else if (!lawnRecRegenGrounded) {
+          logger.warn('[dispatch] lawn recommendation regen failed — recommendation-derived customer output suppressed for this completion');
         }
       } catch (err) {
         logger.error(`[dispatch] Lawn assessment service_record link failed (non-blocking): ${err.message}`);
@@ -6329,8 +6338,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // image TEXTED to the customer — unrecallable, unlike the PDF (which
       // re-queues) and the web report (which heals). Omit the image on that
       // rare path; the SMS still links to the live report (codex P1 r10).
-      if (mmsPreviewEnabled && reportToken && lawnRecRegenTimedOut) {
-        logger.warn(`[dispatch] MMS preview omitted for ${record.id} — grounded recommendation regen still pending; SMS sends without an image`);
+      if (mmsPreviewEnabled && reportToken && lawnRecRegenAttempted && !lawnRecRegenGrounded) {
+        logger.warn(`[dispatch] MMS preview omitted for ${record.id} — grounded recommendation regen ${lawnRecRegenTimedOut ? 'still pending' : 'failed'}; SMS sends without an image`);
       } else if (mmsPreviewEnabled && reportToken) {
         serviceReportPreviewAsset = await buildAndStoreSmsPreviewImage({
           recordId: record.id,
@@ -7790,6 +7799,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           try {
             const LawnIntel = require('../services/lawn-intelligence');
             const scoreParts = await LawnIntel.buildCompletionScoreBlock(completedLawnAssessmentId);
+            // The tip is recommendation-derived: unless the grounded regen
+            // SUCCEEDED, it may be the stale confirm-time text that
+            // contradicts today's applications — an SMS is unrecallable, so
+            // suppress the tip and send the score alone (codex P1 r12). The
+            // score line is tech-confirmed assessment data, not
+            // recommendation output.
+            if (scoreParts && lawnRecRegenAttempted && !lawnRecRegenGrounded) {
+              scoreParts.tipLine = '';
+            }
             if (scoreParts?.scoreLine) {
               const folded = foldLawnScoreIntoCompletionSms(sentSmsBody, scoreParts, { maxSegments: 2 });
               if (folded.folded) {
