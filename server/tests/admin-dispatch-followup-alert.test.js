@@ -51,6 +51,31 @@ describe('typedFollowupVerdict — the shared override chain', () => {
     expect(v.alertType).toBe('follow_up_needed');
   });
 
+  test('UNTYPED bed bug (post-20260731400000): the profile alone still owes the 14-day follow-up', () => {
+    // After the untype migration the completion has no typed findings —
+    // findingsType null, empty values. The verdict must reduce to the pure
+    // profile suggestion (no typed overrides apply), or the untype would
+    // silently reintroduce the dropped-follow-up bug this lane fixed.
+    const v = typedFollowupVerdict({
+      scheduledService: VISIT,
+      profile: BED_BUG_PROFILE,
+      findingsType: null,
+      values: {},
+    });
+    expect(v.required).toBe(true);
+    expect(v.days).toBe(14);
+    expect(v.alertType).toBe('follow_up_needed');
+    // The included-visit-2 exemption is serviceKey-driven and survives untyping.
+    const included = typedFollowupVerdict({
+      scheduledService: { ...VISIT, followup_included: true },
+      profile: BED_BUG_PROFILE,
+      findingsType: null,
+      values: {},
+    });
+    expect(included.required).toBe(false);
+    expect(included.reason).toBe('included_followup_visit');
+  });
+
   test('two-treatment packages stop at visit 2: the included follow-up owes nothing', () => {
     expect(TWO_TREATMENT_PACKAGE_KEYS.has('bed_bug_treatment')).toBe(true);
     expect(TWO_TREATMENT_PACKAGE_KEYS.has('cockroach_control')).toBe(true);
@@ -121,6 +146,20 @@ describe('/complete parks the alert atomically (source contracts)', () => {
     expect(guard).toContain("claim.action === 'proceed'");
   });
 
+  test('untyped alert-policy profiles derive the profile follow-up on the proceed path (bed_bug post-untype)', () => {
+    // The else-if leg: no typed findings, but the profile declares
+    // followup_policy 'alert' — the verdict chain reduces to the pure
+    // profile suggestion, and the alert keeps source 'typed_completion' so
+    // the dedupe index still covers it (20260730500000 predicate).
+    const legIdx = dispatchSource.indexOf("completionProfile?.followupPolicy === 'alert'\n      && !isIncompleteVisit");
+    expect(legIdx).toBeGreaterThan(-1);
+    const leg = dispatchSource.slice(legIdx, legIdx + 500);
+    expect(leg).toContain("claim.action === 'proceed'");
+    expect(leg).toContain('findingsType: null');
+    // The leg sits BEFORE the durable trx like the typed one.
+    expect(legIdx).toBeLessThan(dispatchSource.indexOf('let record;'));
+  });
+
   test('park runs INSIDE the completion trx, right after the service_record insert', () => {
     const insertIdx = dispatchSource.indexOf("[record] = await trx('service_records').insert(recordInsert)");
     const parkIdx = dispatchSource.indexOf('await parkFollowupAlert({', insertIdx);
@@ -138,7 +177,9 @@ describe('/complete parks the alert atomically (source contracts)', () => {
     const resumeIdx = dispatchSource.indexOf('await typedFollowupObligationForCompletedSource({');
     expect(resumeIdx).toBeGreaterThan(-1);
     const guard = dispatchSource.slice(dispatchSource.lastIndexOf('if (resumingCommittedCompletion', resumeIdx), resumeIdx);
-    expect(guard).toContain('typedFindingsType && !isIncompleteVisit && !followupSuggestion');
+    // Untyped alert-policy profiles (bed_bug_treatment post-20260731400000)
+    // resume through the same lane via their frozen verdict.
+    expect(guard).toContain("(typedFindingsType || completionProfile?.followupPolicy === 'alert') && !isIncompleteVisit && !followupSuggestion");
     const block = dispatchSource.slice(resumeIdx, resumeIdx + 1400);
     expect(block).toContain('resumed follow-up derivation failed');
     expect(block).toContain('logger.warn');

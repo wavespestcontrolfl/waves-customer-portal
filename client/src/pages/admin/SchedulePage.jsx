@@ -172,6 +172,21 @@ const AREAS_BY_SERVICE = {
     "Fence line",
     "Trash area",
   ],
+  // Bed bug is an interior treatment — yard/fence chips read wrong on its
+  // closeout (owner 2026-07-31, untype lane). Vocabulary carries over the
+  // retired typed form's treatment surfaces. Labels never contain commas
+  // (the per-product area field comma-joins selections).
+  bed_bug: [
+    "Primary bedroom",
+    "Guest bedroom",
+    "Living room",
+    "Mattress & box spring",
+    "Bed frame & headboard",
+    "Baseboards",
+    "Furniture & upholstery",
+    "Closets",
+    "Adjacent rooms",
+  ],
   lawn: [
     "Front yard",
     "Back yard",
@@ -8829,6 +8844,10 @@ export function CompletionPanel({
   })();
   const canApproveOfficeExceptions = currentAdminUser?.role === "admin";
   const serviceCategory = detectServiceCategory(service.serviceType);
+  // Bed bug closeouts get interior-specific treated-area chips and skip the
+  // satellite spray-trace (a perimeter trace has no meaning for an interior
+  // treatment) — owner 2026-07-31, bed-bug untype lane.
+  const isBedBugVisit = /\bbed\s*bugs?\b/.test(String(service.serviceType || "").toLowerCase());
   const serviceLineForCloseout = serviceLineFromType(serviceTypeForArea);
   // Tree & shrub / palm visits swap the Targets picker suggestions to the
   // ornamental pest list (see targetPickerConfig).
@@ -8928,7 +8947,9 @@ export function CompletionPanel({
   // "Follow-up recommended") were dropped everywhere (owner 2026-07-30):
   // they aren't areas and don't belong in the treated-areas list.
   const areaOptions = [
-    ...(AREAS_BY_SERVICE[serviceCategory] || AREAS_BY_SERVICE.pest),
+    ...(isBedBugVisit
+      ? AREAS_BY_SERVICE.bed_bug
+      : (AREAS_BY_SERVICE[serviceCategory] || AREAS_BY_SERVICE.pest)),
   ];
   const onSiteEntry = (service.statusLog || []).find(
     (e) => e.status === "on_site",
@@ -12465,7 +12486,11 @@ export function CompletionPanel({
                 Lawn Assessment block above, which flow into the report gallery,
                 so this redundant second upload is hidden. Combined visits keep
                 it (companions have their own completion-photo gates). */}
-            {!quickComplete && (
+            {/* Interior-only treatments (bed bug) skip the tracer: it is a
+                SATELLITE perimeter tool, and an exterior spray outline on an
+                interior treatment's report would be wrong. Photos carry the
+                visual story; a room-level interior marker is its own lane. */}
+            {!quickComplete && !isBedBugVisit && (
               <Field label="Treatment zone map">
                 <button
                   type="button"

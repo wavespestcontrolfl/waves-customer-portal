@@ -122,6 +122,11 @@ const ONE_TIME_GENERIC_BY_DESIGN = [
   'bee_wasp_removal',
   'mud_dauber_removal',
   'pest_initial_cleanout',
+  // Owner ruling 2026-07-31 (migration 20260731400000): the typed bed_bug
+  // form was retired the same way — basic form + AI photo analysis; the
+  // profile keeps one_time billing AND followup_policy 'alert' (the 14-day
+  // follow-up now derives from the profile on untyped completions).
+  'bed_bug_treatment',
 ];
 
 // Registered typed findings schemas — a typed pointer that isn't a real

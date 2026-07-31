@@ -4268,6 +4268,25 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         findingsType: typedFindingsType,
         values: typedFindings.values || {},
       });
+    } else if (
+      // UNTYPED completions on an alert-policy profile (bed_bug_treatment
+      // after the 20260731400000 untype) owe the same profile-declared
+      // follow-up — deriving only for typed forms silently dropped the
+      // obligation, the exact bug the typed lane fixed. The verdict chain
+      // reduces to the pure profile suggestion (no typed values to apply
+      // overrides against), and the alert keeps source 'typed_completion'
+      // so the (type, job_id) dedupe index still covers it.
+      !typedFindingsType
+      && completionProfile?.followupPolicy === 'alert'
+      && !isIncompleteVisit
+      && claim.action === 'proceed'
+    ) {
+      followupSuggestion = typedFollowupVerdict({
+        scheduledService: svc,
+        profile: completionProfile,
+        findingsType: null,
+        values: {},
+      });
     }
 
     let record;
@@ -8124,7 +8143,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // resumed response still carries the CTA, and best-effort re-park to
     // cover completions committed before the in-trx park deployed (the
     // dedup + live-child guards make this a no-op everywhere else).
-    if (resumingCommittedCompletion && typedFindingsType && !isIncompleteVisit && !followupSuggestion) {
+    // Untyped alert-policy profiles (bed_bug_treatment post-untype) resume
+    // through the same lane: their completion froze typedFollowupVerdict
+    // into structured_notes, and the frozen-verdict read below is
+    // form-independent.
+    if (resumingCommittedCompletion && (typedFindingsType || completionProfile?.followupPolicy === 'alert') && !isIncompleteVisit && !followupSuggestion) {
       try {
         const obligation = await typedFollowupObligationForCompletedSource({
           scheduledService: { ...svc, status: 'completed' },
