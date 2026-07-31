@@ -284,6 +284,16 @@ describe('pricing parity after sanitization', () => {
     expect(pricedTurfSf({ ...clientProfileFor(profile), measuredTurfSf: 5200 })).toBe(5200);
   });
 
+  test('an engine ZERO is preserved, not coerced to null (codex P2 r4)', () => {
+    // Footprint + hardscape consume a 1,400 sf lot — the engine's 0 is the
+    // authoritative answer; null would make the client fall back to a
+    // stale positive number.
+    const tinyLot = { ...newBuildRecord(), lotSize: 1400 };
+    const profile = buildEnrichedProfile(tinyLot, bareDirtAi(), 27.58, -82.42);
+    expect(profile.turfFallbackPreviewSf).toBe(0);
+    expect(pricedTurfSf(clientProfileFor(profile))).toBe(0);
+  });
+
   test('no preview on normal profiles — the field only exists when the guard fired', () => {
     const paved = { ...bareDirtAi(), imperviousSurfacePercent: 85, imperviosSurfacePercent: 85 };
     const profile = buildEnrichedProfile(newBuildRecord(), paved, 27.58, -82.42);

@@ -1811,7 +1811,9 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
       delete previewProfile.measuredTurfSf;
       const enginePreview = calculatePropertyProfile(translateV2CallToV1Input(previewProfile, [], {}));
       const previewSf = Number(enginePreview?.lawnSqFt);
-      profile.turfFallbackPreviewSf = Number.isFinite(previewSf) && previewSf > 0
+      // Zero is a REAL engine answer (footprint + hardscape can consume the
+      // lot) — null means only "could not compute" (codex P2 r4 #3098).
+      profile.turfFallbackPreviewSf = Number.isFinite(previewSf) && previewSf >= 0
         ? Math.round(previewSf)
         : null;
     } catch (err) {

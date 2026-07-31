@@ -2915,7 +2915,10 @@ export default function EstimateToolViewV2({
         const data = await r.json();
         if (seq !== staleImageryPreviewSeq.current) return;
         const sf = Number(data?.turfSf);
-        setStaleImageryPreviewSf(Number.isFinite(sf) && sf > 0 ? Math.round(sf) : null);
+        // Zero is a REAL engine answer (footprint + hardscape can consume
+        // the lot) — coercing it to null would fall back to a stale
+        // positive number (codex P2 r4 #3098). Null only for no-answer.
+        setStaleImageryPreviewSf(Number.isFinite(sf) && sf >= 0 ? Math.round(sf) : null);
       } catch {
         // Fall back to the lookup-time profile value.
       }
@@ -4508,7 +4511,11 @@ export default function EstimateToolViewV2({
         ? (staleImageryPreviewSf ?? enrichedProfile?.turfFallbackPreviewSf)
         : null,
     );
-    if (enginePreview > 0) return enginePreview;
+    // Zero included: an engine 0 (footprint + hardscape consume the lot) is
+    // the authoritative answer, not a miss — falling through to the local
+    // heuristic would display a positive area the engine won't price
+    // (codex P2 r4 #3098).
+    if (enginePreview !== null) return enginePreview;
     if (lotSqFtForTurf <= 0) return null;
     const pct = parseNonNegativeNumber(enrichedProfile?.imperviousSurfacePercent) ?? 20;
     const open = Math.round(lotSqFtForTurf * (1 - Math.min(1, pct / 100)));
