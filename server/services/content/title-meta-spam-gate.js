@@ -204,22 +204,34 @@ const CTA_SALES_TERMS_RE = /\b(sav(?:e|ing|ings)|deal|offer|price|pricing|discou
 // St. Augustine grass." must keep its CTA sentence intact (St. Augustine is
 // the dominant SWFL turf, so this is the common case, not the edge).
 const ABBREV_DOT_RE = /\b(St|Dr|Mt|Ft|Mr|Mrs|Ms|vs|No)\./gi;
+// Decimal points in amounts ("$49.99") are NOT sentence boundaries either —
+// splitting there hands downstream checks a bare "99" and hides the money
+// term (Codex r3).
+const DECIMAL_DOT_RE = /(\d)\.(\d)/g;
 function lastSentence(text) {
   const t = String(text || '').trim();
   if (!t) return '';
-  const masked = t.replace(ABBREV_DOT_RE, (m) => m.replace('.', '\u0001'));
+  const masked = t
+    .replace(ABBREV_DOT_RE, (m) => m.replace('.', '\u0001'))
+    .replace(DECIMAL_DOT_RE, '$1\u0001$2');
   const sentences = masked.split(/[.!?]+/).map((s) => s.replace(/\u0001/g, '.').trim()).filter(Boolean);
   return sentences[sentences.length - 1] || '';
 }
 
-// Money/deal terms in the meta's FINAL sentence are sales copy regardless of
-// CTA shape ("Learn more about saving big with Waves."). This stays a HARD
-// contract term even though CTA presence itself became a soft nudge (owner
-// ruling 2026-07-30) — demoting endsWithSoftCta wholesale would have demoted
-// this rejection with it.
+// TRANSACTIONAL sales copy in the meta's FINAL sentence stays a HARD
+// contract term even though CTA presence became a soft nudge (owner ruling
+// 2026-07-30). Two shapes qualify (Codex r3: informational grammar like
+// "what quarterly plans offer homeowners" or "an estimate of the damage"
+// must NOT hard-fail — that would recreate the parks the ruling removed):
+//   1. money in the closer — a currency/percent symbol ("…starts at $49.99.")
+//   2. sales terms riding a CTA-shaped sentence ("Learn more about saving
+//      big with Waves.")
+const CURRENCY_OR_PERCENT_RE = /[%$]/;
 function lastSentenceSalesTerms(text) {
   const last = lastSentence(text);
-  return Boolean(last) && CTA_SALES_TERMS_RE.test(last);
+  if (!last) return false;
+  if (CURRENCY_OR_PERCENT_RE.test(last)) return true;
+  return SOFT_CTA_RE.test(last) && CTA_SALES_TERMS_RE.test(last);
 }
 
 function endsWithSoftCta(text) {

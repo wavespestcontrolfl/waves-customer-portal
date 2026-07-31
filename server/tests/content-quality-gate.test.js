@@ -1048,6 +1048,17 @@ describe('soft CTA final sentence must BE a CTA (round-5 hardening)', () => {
     expect(r.ok).toBe(false);
     expect(r.reason).toBe('blog_meta_final_sentence_sales_terms');
   });
+
+  test('decimal price in the closer still HARD-fails (r3: decimal dot is not a sentence boundary)', () => {
+    const r = checkBlogMetaContract({ meta_description: `${LEAD}A treatment estimate starts at $49.99.` });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('blog_meta_final_sentence_sales_terms');
+  });
+
+  test('informational sales nouns in the closer do NOT hard-fail (r3: transactional usage only)', () => {
+    const r = checkBlogMetaContract({ meta_description: `${LEAD}A guide to what quarterly pest plans offer Southwest Florida homeowners.` });
+    expect(r.ok).toBe(true);
+  });
 });
 
 describe('meta contract round-6 hardening (Codex findings)', () => {
