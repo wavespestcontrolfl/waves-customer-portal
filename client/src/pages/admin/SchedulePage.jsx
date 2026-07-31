@@ -5007,6 +5007,9 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
       onClose();
     } catch (e) {
       console.error(e);
+      alert(
+        `Reschedule failed: ${e.message || "the slot may have just been taken — pick another"}`,
+      );
     }
     setSending(false);
   };
@@ -5044,6 +5047,9 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
       onClose();
     } catch (e) {
       console.error(e);
+      alert(
+        `Reschedule failed: ${e.message || "the slot may have just been taken — pick another"}`,
+      );
     }
     setSending(false);
   };
@@ -5310,12 +5316,25 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
                 <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>
                   Start Time
                 </div>{" "}
-                <input
-                  type="time"
+                {/* Appointment windows ALWAYS start on the hour (owner
+                    directive) — an hour select instead of a free time input
+                    so an off-hour start can't be submitted. */}
+                <select
                   value={manualTime}
                   onChange={(e) => setManualTime(e.target.value)}
                   style={inputSt}
-                />{" "}
+                >
+                  {Array.from({ length: 13 }, (_, i) => {
+                    const h = i + 6;
+                    const value = `${String(h).padStart(2, "0")}:00`;
+                    const label = `${h % 12 || 12}:00 ${h >= 12 ? "PM" : "AM"}`;
+                    return (
+                      <option key={value} value={value}>
+                        {label}
+                      </option>
+                    );
+                  })}
+                </select>{" "}
               </div>{" "}
               <div style={{ display: "flex", alignItems: "flex-end" }}>
                 {" "}

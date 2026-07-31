@@ -431,13 +431,25 @@ async function moveStopsToDay(input) {
   // rebooker's shared cutoff logic (window_end preferred, else window_start),
   // and report them so the operator sees what stayed behind. A stop with a
   // still-future window today, or any move to a future date, is unaffected.
-  const movable = nonTerminal.filter((s) => !sameDayWindowElapsed(dateStr, s.window_end || s.window_start));
+  const movableAnyDate = nonTerminal.filter((s) => !sameDayWindowElapsed(dateStr, s.window_end || s.window_start));
   const skippedElapsed = nonTerminal
     .filter((s) => sameDayWindowElapsed(dateStr, s.window_end || s.window_start))
     .map((s) => ({ id: s.id, status: s.status }));
+  // A stop already on the target date has nothing to move — drop it here so
+  // neither the preview nor the commit rewrites it or texts its customer
+  // about an "unchanged" appointment (and never closes its reminder windows
+  // as if a real reschedule notice replaced them).
+  const stopDateOnly = (v) => (v instanceof Date ? v.toISOString().slice(0, 10) : (v ? String(v).slice(0, 10) : null));
+  const movable = movableAnyDate.filter((s) => stopDateOnly(s.scheduled_date) !== dateStr);
+  const skippedUnchanged = movableAnyDate
+    .filter((s) => stopDateOnly(s.scheduled_date) === dateStr)
+    .map((s) => ({ id: s.id }));
   if (!movable.length) {
     return {
-      error: 'Every movable stop\'s window has already passed today — pick a later window or a future date',
+      error: skippedUnchanged.length && !skippedElapsed.length
+        ? 'Every selected stop is already on that date — nothing to move'
+        : 'Every movable stop\'s window has already passed today — pick a later window or a future date',
+      ...(skippedUnchanged.length ? { skipped_unchanged: skippedUnchanged } : {}),
       ...(skippedElapsed.length ? { skipped_elapsed: skippedElapsed } : {}),
       ...(skippedTerminal.length ? { skipped_terminal: skippedTerminal } : {}),
     };
@@ -462,6 +474,7 @@ async function moveStopsToDay(input) {
       // committing will text the customers.
       will_text_customers: notifyCustomers,
       stops,
+      ...(skippedUnchanged.length ? { skipped_unchanged: skippedUnchanged } : {}),
       ...(skippedElapsed.length ? { skipped_elapsed: skippedElapsed } : {}),
       ...(skippedTerminal.length ? { skipped_terminal: skippedTerminal } : {}),
       note: `Would move ${stops.length} stop(s) to ${dateStr}${notifyCustomers ? ' and TEXT each customer the new arrival window' : ' silently (no customer texts)'}. Re-call with confirmed:true to apply.`,
@@ -540,7 +553,20 @@ async function moveStopsToDay(input) {
       continue;
     }
     movedIds.add(s.id);
-    // Opt-in customer text — same shared path as update-details and the bulk
+    // Rebooker-parity side effects of the live → confirmed flip above:
+    // job_status_history audit row, tech_status release, customer tracker
+    // refresh. Best-effort: the move is committed — a side-effect failure
+    // must not report the whole batch as failed.
+    if (wasLive) {
+      try {
+        await applyLiveMoveSideEffects(db, s);
+      } catch (err) {
+        logger.error(`[intelligence-bar:schedule] live-move side effects failed for ${s.id}: ${err.message}`);
+      }
+    }
+    // Opt-in customer text — AFTER the live-job release above, so a slow
+    // SMS provider can never hold tech_status/tracker on the moved job.
+    // Same shared path as update-details and the bulk
     // reschedule (arrival-window copy, recipient routing, terminal/slot
     // recheck, guarded reminder close/re-arm). Best-effort per stop: a send
     // failure is reported, never unwinds the committed move.
@@ -577,17 +603,6 @@ async function moveStopsToDay(input) {
       } catch (err) {
         notificationFailures.push({ id: s.id, reason: err.message });
         logger.error(`[intelligence-bar:schedule] move notice failed for ${s.id}: ${err.message}`);
-      }
-    }
-    // Rebooker-parity side effects of the live → confirmed flip above:
-    // job_status_history audit row, tech_status release, customer tracker
-    // refresh. Best-effort: the move is committed — a side-effect failure
-    // must not report the whole batch as failed.
-    if (wasLive) {
-      try {
-        await applyLiveMoveSideEffects(db, s);
-      } catch (err) {
-        logger.error(`[intelligence-bar:schedule] live-move side effects failed for ${s.id}: ${err.message}`);
       }
     }
     // Audit row matching the rebooker's reschedule_log conventions.
@@ -629,6 +644,13 @@ async function moveStopsToDay(input) {
     new_date: dateStr,
     stops: movedStops,
     ...(notifyCustomers ? { texted_count: textedCount, notification_failures: notificationFailures } : {}),
+    // Top-level partial-failure signal: /confirm-action reports success (the
+    // moves DID commit), so without this the card shows a bare "Done" and
+    // the operator assumes every customer was texted.
+    ...(notifyCustomers && notificationFailures.length
+      ? { warning: `Moved ${movedStops.length} stop(s), but ${notificationFailures.length} customer(s) were not texted: ${notificationFailures.map((f) => f.reason).slice(0, 3).join('; ')}${notificationFailures.length > 3 ? '…' : ''}` }
+      : {}),
+    ...(skippedUnchanged.length ? { skipped_unchanged: skippedUnchanged } : {}),
     ...(skippedTerminal.length ? { skipped_terminal: skippedTerminal } : {}),
     ...(skippedElapsed.length ? { skipped_elapsed: skippedElapsed } : {}),
     ...(skippedConflict.length ? { skipped_conflict: skippedConflict } : {}),
