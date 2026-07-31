@@ -11,6 +11,9 @@ jest.mock('../services/notification-service', () => ({
 jest.mock('../services/appointment-reminders', () => ({
   handleReschedule: jest.fn().mockResolvedValue(undefined),
 }));
+jest.mock('../services/dispatch-assignment', () => ({
+  emitDispatchJobUpdate: jest.fn().mockResolvedValue(undefined),
+}));
 jest.mock('../services/sms-template-renderer', () => ({
   renderSmsTemplate: jest.fn().mockResolvedValue('rendered body'),
 }));
@@ -767,12 +770,82 @@ describe('rain-out service', () => {
       // Siblings re-arm silently; the anchor is left to the calling route.
       expect(AppointmentReminders.handleReschedule).toHaveBeenCalledTimes(2);
       expect(AppointmentReminders.handleReschedule).toHaveBeenCalledWith(
-        'sib-1', '2026-09-12T09:00', { sendNotification: false, coverDueWindows: true },
+        'sib-1', '2026-09-12T09:00', { sendNotification: false },
       );
       // The kept-tech double-book parked for reassignment.
       expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
       expect(NotificationService.notifyAdmin.mock.calls[0][0]).toBe('schedule_conflict');
       expect(NotificationService.notifyAdmin.mock.calls[0][2]).toContain('2026-12-12');
+      // Live boards get a job_update per shifted SIBLING (the calling
+      // routes broadcast only their own loop ids) — never the anchor twice.
+      const { emitDispatchJobUpdate } = require('../services/dispatch-assignment');
+      expect(emitDispatchJobUpdate.mock.calls.map((c) => c[0].jobId).sort()).toEqual(['sib-1', 'sib-2']);
+    });
+
+    test('gate on: a rejected series shift falls back WITH the anchor CAS — a concurrent move is never overwritten', async () => {
+      process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+      wireRecurring();
+      SmartRebooker.rescheduleSeries.mockRejectedValueOnce(
+        Object.assign(new Error('Cannot reschedule — appointment changed concurrently'), { statusCode: 409, code: 'SLOT_TAKEN' }),
+      );
+
+      await RainOut.commit(DAY_MOVE_ARGS);
+
+      // The single fallback carries the same expected-state predicate the
+      // series call pinned — the rebooker 409s on a stale anchor instead of
+      // overwriting the newer choice (codex P1).
+      expect(SmartRebooker.reschedule).toHaveBeenCalledWith(
+        'svc-1', '2026-06-12', { start: '13:00', end: '14:00' }, 'weather_rain', 'tech',
+        {
+          allowLive: true,
+          excludeServiceIds: ['svc-1'],
+          expect: { scheduled_date: '2026-06-11', window_start: '09:00' },
+        },
+      );
+    });
+
+    test('gate on: an off-hour tech-supplied target is normalized on-the-hour before the series mints it (codex P1)', async () => {
+      process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+      wireRecurring();
+
+      await RainOut.commit({
+        ...DAY_MOVE_ARGS,
+        target: { date: '2026-06-12', window: { start: '09:30', end: '10:30' } },
+      });
+
+      expect(SmartRebooker.rescheduleSeries).toHaveBeenCalledTimes(1);
+      expect(SmartRebooker.rescheduleSeries.mock.calls[0][2]).toEqual({ start: '09:00', end: '10:00' });
+    });
+
+    test('route scope: recurring SIBLINGS series-shift too — the route query carries is_recurring (codex P1)', async () => {
+      process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+      wireDb({
+        scheduled_services: [
+          chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) }),
+          chain({ rows: [{
+            id: 'svc-2', status: 'pending', scheduled_date: '2026-06-11',
+            window_start: '11:00', window_end: '12:00', customer_id: 'cust-2',
+            service_type: 'Quarterly Pest Control', route_order: 2, is_recurring: true,
+          }] }),
+        ],
+      });
+
+      await RainOut.commit({
+        serviceId: 'svc-1',
+        technicianId: 'tech-1',
+        reasonCode: 'weather_rain',
+        scope: 'route',
+        target: { date: '2026-06-12', window: { start: '09:00', end: '10:00' } },
+        notifyCustomer: false,
+      });
+
+      // Non-recurring anchor takes the single path; the recurring route
+      // sibling series-shifts with its own window kept.
+      expect(SmartRebooker.rescheduleSeries).toHaveBeenCalledTimes(1);
+      expect(SmartRebooker.rescheduleSeries.mock.calls[0][0]).toBe('svc-2');
+      expect(SmartRebooker.rescheduleSeries.mock.calls[0][2]).toEqual({ start: '11:00', end: '12:00' });
+      expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(1);
+      expect(SmartRebooker.reschedule.mock.calls[0][0]).toBe('svc-1');
     });
 
     test('gate on: an un-shiftable series never fails the rain-out — the visit moves alone and the series parks', async () => {
@@ -788,7 +861,12 @@ describe('rain-out service', () => {
       expect(result.results[0].ok).toBe(true);
       expect(SmartRebooker.reschedule).toHaveBeenCalledWith(
         'svc-1', '2026-06-12', { start: '13:00', end: '14:00' }, 'weather_rain', 'tech',
-        { allowLive: true, excludeServiceIds: ['svc-1'] },
+        {
+          allowLive: true,
+          excludeServiceIds: ['svc-1'],
+          // Fallback keeps the anchor CAS the series call pinned.
+          expect: { scheduled_date: '2026-06-11', window_start: '09:00' },
+        },
       );
       expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
       expect(NotificationService.notifyAdmin.mock.calls[0][2]).toContain('could not shift');

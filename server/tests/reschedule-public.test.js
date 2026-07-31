@@ -21,6 +21,7 @@ const {
   eligibility, bookingRange, searchParseOpts, apptDateStr, label12,
   pullForwardDays, shouldReanchor, REANCHOR_PULLFORWARD_DAYS,
   loadWeatherMove, WEATHER_MOVE_MAX_AGE_DAYS, collectiveAnchorActive,
+  seriesScopeMismatch,
 } = reschedulePublicRouter._test;
 
 // Fixed "now": 2026-07-02 12:00 ET (16:00 UTC, EDT).
@@ -320,6 +321,18 @@ describe('weatherMove banner context (GATE_RAINOUT_MOVE_BANNER)', () => {
     expect(await loadWeatherMove(SVC, NOW)).toBeNull();
   });
 
+  test('a series rain-out (reason weather_rain_series) still banners with the normalized reason (codex P2)', async () => {
+    process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+    wireLog({ ...LOG, reason_code: 'weather_rain_series' });
+    getDailyRainOutlookBounded.mockResolvedValueOnce({
+      '2026-07-03': { rainChance: 80 },
+      '2026-07-04': { rainChance: 15 },
+    });
+
+    const move = await loadWeatherMove(SVC, NOW);
+    expect(move).toMatchObject({ reasonCode: 'weather_rain', fromChance: 80, toChance: 15 });
+  });
+
   test('a customer-initiated move keeping the weather reason is the customer\'s pick, not a banner (codex r3)', async () => {
     process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
     // reschedule-sms reply flow logs customer_sms with the original
@@ -366,6 +379,21 @@ describe('weatherMove banner context (GATE_RAINOUT_MOVE_BANNER)', () => {
 
 describe('collective series anchoring (GATE_COLLECTIVE_SERIES_ANCHOR)', () => {
   afterEach(() => { delete process.env.GATE_COLLECTIVE_SERIES_ANCHOR; });
+
+  test('GET→POST scope pin: a gate flip between render and commit is rejected, either direction (codex P1)', () => {
+    const series = { is_recurring: true, scheduled_date: '2026-08-13' };
+    // Disclosed legacy, gate now collective → mismatch.
+    process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+    expect(seriesScopeMismatch(series, false)).toBe(true);
+    expect(seriesScopeMismatch(series, true)).toBe(false);
+    // Disclosed collective, gate now off → mismatch.
+    delete process.env.GATE_COLLECTIVE_SERIES_ANCHOR;
+    expect(seriesScopeMismatch(series, true)).toBe(true);
+    expect(seriesScopeMismatch(series, false)).toBe(false);
+    // Non-series visits and pre-disclosure clients (field absent) never pin.
+    expect(seriesScopeMismatch({ is_recurring: false }, true)).toBe(false);
+    expect(seriesScopeMismatch(series, undefined)).toBe(false);
+  });
 
   test('gate on: ANY date change re-anchors a series visit — both directions, any size', () => {
     process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';

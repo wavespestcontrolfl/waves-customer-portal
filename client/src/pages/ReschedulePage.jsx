@@ -145,7 +145,13 @@ function slotReanchors(data, slotDate) {
 // replaces the legacy conditional pull-forward warning.
 function recurringNoteCopy(data, selectedSlot) {
   if (data?.collectiveAnchor) {
-    return 'This visit is part of your regular plan — moving it shifts your later visits by the same amount, so your schedule always follows your last treatment.';
+    // A same-date selection is a time-only move — the server's
+    // shouldReanchor never shifts the series for it, so the note must not
+    // promise a shift the commit won't perform (codex P1).
+    if (selectedSlot && String(selectedSlot.date) === String(data?.current?.date || '')) {
+      return "Only this visit will move — a same-day time change doesn't shift the rest of your plan.";
+    }
+    return 'This visit is part of your regular plan — moving it to a different day shifts your later visits by the same amount, so your schedule always follows your last treatment.';
   }
   return selectedSlot && slotReanchors(data, selectedSlot.date)
     ? 'This time is far enough ahead of your current date that your following visits will shift to match it — your regular schedule follows the new date.'
@@ -1210,11 +1216,22 @@ export default function ReschedulePage() {
           start_time: selectedSlot.start_time,
           end_time: selectedSlot.end_time,
           technician_id: selectedSlot.technician_id || null,
+          // Scope pin: the series behavior this page DISCLOSED. A gate flip
+          // between render and commit 409s (SCOPE_CHANGED) instead of
+          // silently doing something the customer wasn't told about.
+          // Omitted (undefined) when the payload predates the field.
+          disclosed_collective: data?.collectiveAnchor != null ? !!data.collectiveAnchor : undefined,
         }),
       });
       const body = await res.json().catch(() => ({}));
       if (res.ok && body.success) {
         setResult(body);
+        return;
+      }
+      if (body.code === 'SCOPE_CHANGED') {
+        setSelectedSlot(null);
+        await load();
+        setSubmitError('The scheduling details for your plan just updated — here is the latest.');
         return;
       }
       if (body.code === 'SLOT_TAKEN') {

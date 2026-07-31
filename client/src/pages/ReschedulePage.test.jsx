@@ -579,6 +579,48 @@ describe('ReschedulePage collective anchoring', () => {
     expect(screen.queryByText(/moving this far up shifts your whole plan/)).not.toBeInTheDocument();
   });
 
+  it('a same-date selection keeps the single-visit wording — no false shift promise (codex P1)', async () => {
+    stubFetch({
+      get: jsonResponse(reschedulablePayload({
+        isRecurring: true, collectiveAnchor: true, reanchorPullForwardDays: 14,
+        availability: {
+          days: [{
+            date: '2026-07-10', // SAME date as current — a time-only move
+            fullDate: 'Friday, July 10',
+            nearby: false,
+            slots: [{ start_time: '13:00', end_time: '14:00', start_label: '1:00 PM', end_label: '2:00 PM', technician_id: 'tech-1' }],
+          }],
+        },
+      })),
+    });
+
+    renderPage({ classic: true });
+
+    expect(await screen.findByText(/your schedule always follows your last treatment/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '1:00 PM' }));
+    expect(screen.getByText(/a same-day time change doesn't shift the rest of your plan/)).toBeInTheDocument();
+    expect(screen.queryByText(/your schedule always follows your last treatment/)).not.toBeInTheDocument();
+  });
+
+  it('the commit POST discloses the collective scope the page rendered under (codex P1)', async () => {
+    const fetchMock = stubFetch({
+      get: jsonResponse(reschedulablePayload({ isRecurring: true, collectiveAnchor: true })),
+      post: jsonResponse({
+        success: true, originalDate: '2026-07-10', newDate: '2026-07-12',
+        window: { start: '13:00', end: '14:00' }, startLabel: '1:00 PM', endLabel: '2:00 PM',
+      }),
+    });
+
+    renderPage({ classic: true });
+
+    fireEvent.click(await screen.findByRole('button', { name: '1:00 PM' }));
+    fireEvent.click(screen.getByRole('button', { name: /Move to Sunday, July 12/ }));
+
+    await waitFor(() => expect(screen.getByText("You're all set")).toBeInTheDocument());
+    const postCall = fetchMock.mock.calls.find(([, opts]) => opts?.method === 'POST');
+    expect(JSON.parse(postCall[1].body).disclosed_collective).toBe(true);
+  });
+
   it('keeps the legacy conditional note when collectiveAnchor is absent', async () => {
     stubFetch({ get: jsonResponse(reschedulablePayload({ isRecurring: true })) });
 

@@ -270,6 +270,10 @@ async function remainingRouteJobs(technicianId, todayStr, excludeServiceId = nul
       'id', 'status', 'scheduled_date', 'window_start', 'window_end', 'customer_id', 'service_type', 'route_order',
       // Stamped service-address fields feed the moved-SMS forecast copy.
       'lat', 'lng', 'service_address_zip',
+      // Collective anchoring needs recurrence membership for EVERY route
+      // stop, not just the anchor — omitting it silently routed recurring
+      // siblings down the single-visit path (codex P1).
+      'is_recurring',
     );
   if (excludeServiceId) query.whereNot('id', excludeServiceId);
   if (anchor) {
@@ -696,6 +700,18 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
     const wantsSeriesShift = process.env.GATE_COLLECTIVE_SERIES_ANCHOR === 'true'
       && !!job.is_recurring
       && String(target.date) !== jobDateStr;
+    // Owner rule: windows are ALWAYS on the hour. The series mover writes
+    // its anchor's start to every shifted occurrence, so an off-hour
+    // TECH-SUPPLIED target (custom input passes the routes' date-only
+    // validation) would mint a whole off-hour series — normalize through
+    // the same on-the-hour block the options sheet books (codex P1).
+    // Scoped to the rain-out's own anchor: route SIBLINGS keep their
+    // existing windows on a day move, and rounding a legacy half-hour
+    // window would silently shift that customer's time.
+    if (wantsSeriesShift && job.id === serviceId
+      && (hhmmToMinutes(newWindow?.start) ?? 0) % 60 !== 0) {
+      newWindow = oneHourWindow(newWindow.start);
+    }
     let shiftedOccurrences = null;
     try {
       if (wantsSeriesShift) {
@@ -703,8 +719,7 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
           const seriesResult = await SmartRebooker.rescheduleSeries(job.id, target.date, newWindow, reasonCode, initiatedBy, {
             allowLive: true,
             // Pin the anchor to the state this loop read — a concurrent
-            // move means the delta is stale; fall back to the single path,
-            // which re-checks everything itself.
+            // move means the delta is stale and the series must not shift.
             expectAnchor: { scheduled_date: job.scheduled_date, window_start: job.window_start },
           });
           shiftedOccurrences = Array.isArray(seriesResult?.rescheduledOccurrences)
@@ -721,9 +736,19 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
         // probe: an already-committed position is real occupancy, and hiding
         // it let another actor re-move a committed member into a later
         // member's target unseen.
+        //
+        // Fallback-after-series keeps the anchor CAS (codex P1): the series
+        // call may have rejected precisely BECAUSE the anchor moved
+        // concurrently (expectAnchor), and re-reading the now-current row
+        // would let this fallback overwrite the newer choice. The same
+        // expected-state predicate makes the single path 409 instead —
+        // caught below as a per-member failure the tech re-runs.
         await SmartRebooker.reschedule(job.id, target.date, newWindow, reasonCode, initiatedBy, {
           allowLive: true,
           excludeServiceIds: [job.id],
+          ...(wantsSeriesShift
+            ? { expect: { scheduled_date: job.scheduled_date, window_start: job.window_start } }
+            : {}),
         });
         if (wantsSeriesShift) {
           // The visit moved but the series could not shift atomically —
@@ -757,12 +782,14 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
     // must never mark the job failed, or the tech retries and
     // double-reschedules / double-texts an already-moved appointment.
 
-    // Series shift committed: re-arm every shifted SIBLING's reminders
-    // silently (the anchor's re-arm stays with the calling route, and the
-    // anchor's rain-out SMS is the only text — the plan note on the
-    // /reschedule page explains that the schedule follows the visit).
-    // coverDueWindows mirrors the public series path: an already-due 24h
-    // window must not let the cron text a stale reminder mid-shift.
+    // Series shift committed: re-arm every shifted SIBLING's reminders as a
+    // SILENT move — sendNotification:false WITHOUT coverDueWindows. The
+    // rain-out sends only the anchor's SMS and no series notice, so a
+    // sibling shifted inside its 24h window must keep that window pending
+    // for the cron's normal day-before reminder; covering it would strand
+    // the customer with no message at all (codex P1 — coverDueWindows is
+    // reserved for callers that send their own notice). The anchor's
+    // re-arm stays with the calling route.
     if (shiftedOccurrences) {
       const AppointmentReminders = require('./appointment-reminders');
       for (const occ of shiftedOccurrences) {
@@ -771,11 +798,28 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
           await AppointmentReminders.handleReschedule(
             occ.id,
             `${String(occ.date).split('T')[0]}T${toHHMM(occ.windowStart) || newWindow.start}`,
-            { sendNotification: false, coverDueWindows: true }
+            { sendNotification: false }
           );
         } catch (err) {
           logger.error(`[rain-out] series reminder sync failed for ${occ.id}: ${err.message}`);
         }
+      }
+      // Live boards track every shifted sibling, not just the loop's own
+      // jobs — the admin/tech callers broadcast only their route ids, so
+      // future-date siblings would sit stale on any open board (codex P2).
+      // Per-occurrence isolation like the public series path.
+      try {
+        const { emitDispatchJobUpdate } = require('./dispatch-assignment');
+        for (const occ of shiftedOccurrences) {
+          if (String(occ.id) === String(job.id)) continue;
+          try {
+            await emitDispatchJobUpdate({ jobId: occ.id, actorId: null });
+          } catch (err) {
+            logger.error(`[rain-out] board broadcast failed for ${occ.id}: ${err.message}`);
+          }
+        }
+      } catch (err) {
+        logger.error(`[rain-out] board broadcast unavailable: ${err.message}`);
       }
       // Kept-tech double-books were committed UNASSIGNED by the rebooker —
       // park them for reassignment, same as the public series path.

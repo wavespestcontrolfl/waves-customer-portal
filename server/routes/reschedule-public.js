@@ -118,6 +118,19 @@ function shouldReanchor(svc, targetDateStr) {
   return pullForwardDays(apptDateStr(svc.scheduled_date), targetDateStr) >= REANCHOR_PULLFORWARD_DAYS;
 }
 
+// GET→POST scope pin (codex P1): the page disclosed whether a date move
+// shifts the whole series (payload.collectiveAnchor), and the customer
+// confirmed against that promise. If the gate flips between that render
+// and this commit — rollout, kill switch, mixed-version deploy — honoring
+// the CURRENT mode would silently break the disclosed behavior in either
+// direction. Reject on mismatch so the page reloads and re-discloses.
+// Field-absent (older cached client JS mid-deploy) skips the pin.
+function seriesScopeMismatch(svc, disclosed) {
+  return isSeriesVisit(svc)
+    && typeof disclosed === 'boolean'
+    && disclosed !== collectiveAnchorActive();
+}
+
 router.use(rateLimit({
   windowMs: 60 * 1000,
   max: 60,
@@ -280,7 +293,11 @@ async function loadWeatherMove(svc, now = new Date()) {
     .where({ scheduled_service_id: svc.id })
     .orderBy('created_at', 'desc')
     .first('reason_code', 'initiated_by', 'original_date', 'original_window', 'new_date', 'new_window', 'created_at');
-  if (!log || !WEATHER_REASON_CODES.has(log.reason_code)) return null;
+  // Series rain-outs log '<reason>_series' (rescheduleSeries) — normalize so
+  // a collective-anchor rain-out still banners (codex P2). The payload keeps
+  // the unsuffixed code the client's copy map speaks.
+  const reasonCode = String(log?.reason_code || '').replace(/_series$/, '');
+  if (!log || !WEATHER_REASON_CODES.has(reasonCode)) return null;
   if (!WEATHER_MOVE_INITIATORS.has(log.initiated_by)) return null;
   const ageMs = now - new Date(log.created_at);
   if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs > WEATHER_MOVE_MAX_AGE_DAYS * 86400000) return null;
@@ -291,7 +308,7 @@ async function loadWeatherMove(svc, now = new Date()) {
   if (loggedStart && hhmm(svc.window_start) && loggedStart !== hhmm(svc.window_start)) return null;
 
   const move = {
-    reasonCode: log.reason_code,
+    reasonCode,
     from: {
       date: apptDateStr(log.original_date),
       windowStart: hhmm(String(log.original_window || '').split('-')[0] || null),
@@ -310,7 +327,7 @@ async function loadWeatherMove(svc, now = new Date()) {
   // decisions run on wind speed and temperature (reschedule-rules.js), and
   // "0% rain" beside a wind-out obscures the move instead of explaining it
   // (codex r4 P2). Non-rain reasons render the banner without chips.
-  if (log.reason_code === 'weather_rain' || log.reason_code === 'weather_lightning') {
+  if (reasonCode === 'weather_rain' || reasonCode === 'weather_lightning') {
     try {
       // Bounded lookup handles null/invalid coordinates itself and returns
       // null on deadline/failure — banner renders without chips either way.
@@ -625,6 +642,14 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     }
 
     const newWindow = { start: slot.start_time, end: slot.end_time };
+    // Series-scope consent pin — see seriesScopeMismatch. Mismatch means the
+    // page's disclosure no longer matches what this commit would do.
+    if (seriesScopeMismatch(svc, req.body?.disclosed_collective)) {
+      return res.status(409).json({
+        error: 'The scheduling details for your plan just updated — please review the latest options.',
+        code: 'SCOPE_CHANGED',
+      });
+    }
     // Big pull-forward on a recurring visit re-anchors the whole series
     // (owner ruling 2026-07-13): the customer getting service ~a month early
     // should have every later visit follow, not sit a double interval out.
@@ -889,6 +914,7 @@ router._test = {
   loadWeatherMove,
   WEATHER_MOVE_MAX_AGE_DAYS,
   collectiveAnchorActive,
+  seriesScopeMismatch,
 };
 
 module.exports = router;
