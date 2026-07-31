@@ -194,7 +194,7 @@ describe('fail-closed allowlist — owed work is NEVER swept', () => {
     'address_recovered', 'address_readback', 'caller_phone_not_on_file',
     'email_unverified', 'email_invalid', 'caller_not_authorized',
     'rental_or_tenant_occupied', 'second_service_address',
-    'secondary_contact_captured',
+    'secondary_contact_captured', 'name_email_mismatch',
     'some_future_unknown_code',
   ];
   // missing_last_name never AGE-dismisses (owed identity task) — but the
@@ -214,6 +214,13 @@ describe('fail-closed allowlist — owed work is NEVER swept', () => {
     const booked = { bookedCallIds: new Set(['call-1']) };
     expect(classifyTriageItem(item({ reason_code: 'reschedule_or_cancel' }), booked, { now: NOW })).toBeNull();
     expect(classifyTriageItem(item({ reason_code: 'existing_appointment_coordination' }), booked, { now: NOW })).toBeNull();
+  });
+
+  test('a created booking does NOT clear low_extraction_confidence (fail-open books DESPITE the doubt)', () => {
+    const booked = { bookedCallIds: new Set(['call-1']) };
+    expect(classifyTriageItem(item({ reason_code: 'low_extraction_confidence' }), booked, { now: NOW })).toBeNull();
+    // Nor does age: the office owes confirming the doubted fields.
+    expect(classifyTriageItem(item({ reason_code: 'low_extraction_confidence', created_at: OLD_31D }), noBookings, { now: NOW })).toBeNull();
   });
 
   test('in_progress (human-claimed) is untouchable regardless of rule match', () => {

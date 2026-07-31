@@ -57,14 +57,16 @@ const ADDRESS_MOOT_CODES = new Set([
 ]);
 
 // Cleared when THIS call provably produced a booking (source_call_log_id
-// provenance): the scheduling ambiguity / quality doubt the card raised was
-// answered by the booking itself. Deliberately EXCLUDES reschedule_or_cancel
-// and existing_appointment_coordination — those cards carry a requested
-// schedule TRANSITION for the office to apply, and a created booking proves
-// nothing about whether the cancellation/reschedule/coordination happened.
+// provenance): the SCHEDULING doubt the card raised was answered by the
+// booking itself. Deliberately EXCLUDES reschedule_or_cancel and
+// existing_appointment_coordination (cards carrying a requested schedule
+// TRANSITION a new booking proves nothing about) and
+// low_extraction_confidence (the fail-open path books DESPITE the doubt and
+// files the card so the office confirms the low-confidence customer/
+// service/contact fields — booking creation validates none of them).
 const BOOKING_OUTCOME_CODES = new Set([
   'not_confirmed', 'confirmed_without_start_time', 'ambiguous_scheduling',
-  'ambiguous_pest_or_service', 'voicemail', 'low_extraction_confidence',
+  'ambiguous_pest_or_service', 'voicemail',
 ]);
 
 // Informational flags with no owed work attached — they inform a record edit
@@ -87,14 +89,19 @@ const BOOKING_OUTCOME_CODES = new Set([
 // (recipient confirmation before the held SMS), caller_not_authorized
 // (account-holder confirmation), rental_or_tenant_occupied (access/
 // property confirmation), second_service_address and
-// secondary_contact_captured (captured data awaiting application), and
-// missing_last_name (the office owes obtaining the full name — lead
-// qualification requires it; the name_moot rule above closes the card the
-// moment an independent record proves the surname exists).
+// secondary_contact_captured (captured data awaiting application),
+// missing_last_name (owed full-name capture — the name_moot rule closes it
+// on independent surname evidence), and the fail-open confirmation pair
+// low_extraction_confidence / name_email_mismatch (the office owes
+// confirming the doubted fields; analogous to email_unverified).
+//
+// What remains is purely informational: multi-property mentions, the
+// SMS-only consent-capture notes (consent enforcement lives in the
+// messaging validators, not this card), and voicemail markers.
 const ADVISORY_AGE_CODES = new Set([
-  'multi_property_call', 'name_email_mismatch',
+  'multi_property_call',
   'no_sms_consent_captured', 'sms_consent_missing',
-  'low_extraction_confidence', 'voicemail',
+  'voicemail',
 ]);
 
 const RULE_NOTES = {
