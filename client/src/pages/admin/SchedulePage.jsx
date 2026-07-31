@@ -4988,7 +4988,9 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
   // only. Duration: the service's estimate, else the original window span,
   // else 60 minutes.
   const durationMinutes = (() => {
-    const d = parseInt(service.estimatedDuration, 10);
+    // Month-view payloads expose `duration`; day/week payloads expose
+    // `estimatedDuration` — accept either before falling back.
+    const d = parseInt(service.estimatedDuration ?? service.duration, 10);
     if (Number.isInteger(d) && d > 0) return d;
     const [ws, we] = [service.windowStart, service.windowEnd];
     if (ws && we) {

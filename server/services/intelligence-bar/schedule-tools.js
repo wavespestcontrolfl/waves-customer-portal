@@ -564,7 +564,26 @@ async function moveStopsToDay(input) {
         logger.error(`[intelligence-bar:schedule] live-move side effects failed for ${s.id}: ${err.message}`);
       }
     }
-    // Opt-in customer text — AFTER the live-job release above, so a slow
+    // Audit row matching the rebooker's reschedule_log conventions.
+    // Best-effort: the move is committed — a log failure must not report
+    // the whole batch as failed.
+    try {
+      await db('reschedule_log').insert({
+        scheduled_service_id: s.id,
+        customer_id: s.customer_id,
+        original_date: oldDate,
+        new_date: dateStr,
+        reason_code: 'admin',
+        initiated_by: 'admin_ib',
+        original_window: s.window_start ? `${s.window_start}-${s.window_end}` : null,
+        new_window: s.window_start ? `${s.window_start}-${s.window_end}` : null,
+        notes: reason || null,
+      });
+    } catch (err) {
+      logger.error(`[intelligence-bar:schedule] reschedule_log insert failed for ${s.id}: ${err.message}`);
+    }
+    // Opt-in customer text — LAST: after the live-job release and the
+    // reschedule_log audit, so a slow
     // SMS provider can never hold tech_status/tracker on the moved job.
     // Same shared path as update-details and the bulk
     // reschedule (arrival-window copy, recipient routing, terminal/slot
@@ -583,8 +602,11 @@ async function moveStopsToDay(input) {
           if (!reminderRow) {
             notificationFailures.push({ id: s.id, reason: 'No reminder record for this visit — not texted' });
           } else if (reminderRow.suppressed_by_sibling) {
-            // Slot owner carries the customer messaging — a suppressed
-            // sibling moves silently by design (not a failure).
+            // The destination slot's reminder owner carries this customer's
+            // messaging, and that owner may not be part of this move — so
+            // no reschedule text goes out here. Report it rather than let
+            // the operator assume the customer was told (codex #3102 r3).
+            notificationFailures.push({ id: s.id, reason: 'Another visit that day carries this customer\'s reminders — no reschedule text was sent for this stop' });
           } else {
             const AppointmentReminders = require('../appointment-reminders');
             // Cover any already-due reminder window before our text so the
@@ -604,24 +626,6 @@ async function moveStopsToDay(input) {
         notificationFailures.push({ id: s.id, reason: err.message });
         logger.error(`[intelligence-bar:schedule] move notice failed for ${s.id}: ${err.message}`);
       }
-    }
-    // Audit row matching the rebooker's reschedule_log conventions.
-    // Best-effort: the move is committed — a log failure must not report
-    // the whole batch as failed.
-    try {
-      await db('reschedule_log').insert({
-        scheduled_service_id: s.id,
-        customer_id: s.customer_id,
-        original_date: oldDate,
-        new_date: dateStr,
-        reason_code: 'admin',
-        initiated_by: 'admin_ib',
-        original_window: s.window_start ? `${s.window_start}-${s.window_end}` : null,
-        new_window: s.window_start ? `${s.window_start}-${s.window_end}` : null,
-        notes: reason || null,
-      });
-    } catch (err) {
-      logger.error(`[intelligence-bar:schedule] reschedule_log insert failed for ${s.id}: ${err.message}`);
     }
   }
 
