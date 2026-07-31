@@ -490,10 +490,26 @@ async function resolveTracedExteriorZone(record, knex = db) {
   // hidden for this lane is stale EXTERIOR evidence — never let it drive
   // the exterior dry-down timer. Single choke point for the report payload,
   // the re-entry context, and the completion SMS (codex P2 r8). Callers
-  // with the resolved profile pass interior_only_lane (stable key, r9);
-  // the label regex covers callers that only have the row.
+  // with the resolved profile pass interior_only_lane (stable key, r9).
   if (record.interior_only_lane === true
     || /\bbed\s*bugs?\b/i.test(String(record.service_type || ''))) return false;
+  // No caller classification at all (dynamic-context/reentry paths load
+  // only service_records.*): resolve the stable lane HERE — a relabeled
+  // bed-bug appointment must not slip the label regex (codex P2 r12).
+  // Fail-soft: resolver errors fall through to the ordinary trace lookup.
+  if (record.interior_only_lane === undefined) {
+    try {
+      const scheduledRow = await knex('scheduled_services')
+        .where({ id: record.scheduled_service_id })
+        .first('id', 'service_id', 'service_type');
+      if (scheduledRow) {
+        if (/\bbed\s*bugs?\b/i.test(String(scheduledRow.service_type || ''))) return false;
+        const { resolveCompletionProfileForScheduledService } = require('../service-completion-profiles');
+        const laneProfile = await resolveCompletionProfileForScheduledService(scheduledRow, knex);
+        if (laneProfile?.serviceKey === 'bed_bug_treatment') return false;
+      }
+    } catch { /* label fallback above already ran; proceed to the lookup */ }
+  }
   try {
     return !!(await knex('treatment_zone_maps')
       .where({ scheduled_service_id: record.scheduled_service_id })
@@ -2649,9 +2665,11 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   const photoChain = photos.some((photo) => photo.hash_sha256)
     ? validatePhotoChainRows(photos)
     : { valid: null, photo_count: photos.length, broken_at: null };
+  // Pass the already-resolved classification so the resolver does not
+  // re-resolve the profile for the report payload path.
   const payloadTracedExteriorZone = interiorOnlyLane
     ? false
-    : await resolveTracedExteriorZone(service, knex);
+    : await resolveTracedExteriorZone({ ...service, interior_only_lane: false }, knex);
   const advisory = normalizeAdvisoryForTreatmentScope({
     ...config.advisoryDefaults,
     ...parseJsonObject(service.advisory),
