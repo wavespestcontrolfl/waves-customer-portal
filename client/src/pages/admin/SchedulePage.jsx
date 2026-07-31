@@ -588,7 +588,6 @@ export function completionReviewSuppressionReason({
   backfillQuietCloseout = false,
   visitOutcome = "completed",
   customerConcernInteraction = false,
-  willInvoice = false,
 } = {}) {
   if (isIncompleteVisit) return "incomplete";
   if (backfillQuietCloseout) return "backfill";
@@ -596,20 +595,22 @@ export function completionReviewSuppressionReason({
   if (visitOutcome === "customer_concern" || customerConcernInteraction) {
     return "customer_concern";
   }
-  return willInvoice ? "invoice_created" : null;
+  // NOTE (coverage fix, 2026-07-30): an invoiced completion is deliberately
+  // NOT a client-side suppression anymore. The server owns the invoice rule —
+  // a completion-time ask is blocked only while the invoice is UNPAID
+  // (admin-dispatch effectiveRequestReview), and the paid-invoice webhook
+  // queues the ask when payment lands. The old blanket willInvoice=false here
+  // posted requestReview=false, which killed the ask on BOTH sides — including
+  // completions paid on the spot — and drove review coverage to near zero.
+  return null;
 }
 
 export function completionWillReview({
   oneTimeRecapOnly = false,
   requestReview = true,
-  willInvoice = false,
   reviewSuppressionReason = null,
 } = {}) {
-  return (
-    (oneTimeRecapOnly || !!requestReview) &&
-    !willInvoice &&
-    !reviewSuppressionReason
-  );
+  return (oneTimeRecapOnly || !!requestReview) && !reviewSuppressionReason;
 }
 
 function completionDraftKey(serviceId) {
@@ -9014,12 +9015,10 @@ export function CompletionPanel({
     visitOutcome,
     customerConcernInteraction:
       isCustomerConcernInteraction(customerInteraction),
-    willInvoice,
   });
   const willReview = completionWillReview({
     oneTimeRecapOnly,
     requestReview,
-    willInvoice,
     reviewSuppressionReason,
   });
   const effectiveSendSms =

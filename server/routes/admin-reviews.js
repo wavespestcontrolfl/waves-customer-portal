@@ -660,7 +660,7 @@ router.post('/send-request', requireAdmin, async (req, res, next) => {
       // it throws to next(err) rather than the old silent catch→0.
       if (isAsk) {
         const stats = await ReviewService.getDeliveredAskStats(customer.id);
-        if (stats.count >= 3) return { status: 409, payload: { error: 'Customer has already received 3 review requests' } };
+        if (stats.count >= 3) return { status: 409, payload: { error: 'Customer has already received 3 review requests in the last 6 months' } };
         if (stats.lastAt && new Date(stats.lastAt).getTime() >= thirtyDaysAgo) {
           return { status: 409, payload: { error: 'Customer received a review request in the last 30 days' } };
         }
@@ -803,7 +803,7 @@ router.post('/outreach/start-sequence', requireAdmin, async (req, res, next) => 
   try {
     // Don't start cadences while the gate is off: the cron won't advance them,
     // so the row would sit 'active' forever — firing Day 0 then blocking the
-    // customer from one-off sends without ever delivering Day 3/7.
+    // customer from one-off sends without ever delivering Day 3/4.
     if (!isEnabled('reviewSequences')) {
       return res.status(409).json({ error: 'Review cadences are disabled (GATE_REVIEW_SEQUENCES is off). Use a one-off send instead.' });
     }

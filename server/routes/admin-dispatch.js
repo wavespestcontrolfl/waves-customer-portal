@@ -7300,7 +7300,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       effectiveRequestReview &&
       svc.cust_phone &&
       !serviceReportV1Delivery &&
-      (completionReviewDelayMinutes === undefined || completionReviewDelayMinutes === 0);
+      (completionReviewDelayMinutes === undefined || completionReviewDelayMinutes === 0) &&
+      // Cadence mode owns the ask: the review link is its own Day-0 message at
+      // the smart send window, never bundled into the completion/receipt SMS
+      // (bundling would also dodge the sequence's cap/cooldown bookkeeping).
+      !require('../config/feature-gates').isEnabled('reviewSequences');
 
     let bundledReviewUrl = null;
     let bundledReviewRequestId = null;
@@ -8000,9 +8004,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     if (effectiveRequestReview && svc.cust_phone && !bundledReviewUrl) {
       try {
         const ReviewService = require('../services/review-request');
-        await ReviewService.create({
+        await ReviewService.enrollPostService({
           customerId: svc.customer_id,
           serviceRecordId: record.id,
+          serviceType: svc.service_type || null,
+          techName: svc.tech_name || null,
+          completedAt: new Date(),
           triggeredBy: 'auto',
           delayMinutes: completionReviewDelayMinutes === undefined
             ? 120

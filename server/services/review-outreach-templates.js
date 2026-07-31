@@ -33,7 +33,7 @@ const OUTREACH_TEMPLATES = [
   },
   {
     id: 'final_nudge',
-    name: 'Final Nudge (Day 7)',
+    name: 'Final Nudge (Day 4 email)',
     sentiment: 'happy',
     body: "Hey {first} — last one from us, promise! If you've been happy with Waves, a 15-second Google review would mean a lot to our crew.\n\n{review_url}\n\nEither way, thank you for trusting us with your home!",
   },
@@ -122,16 +122,17 @@ const ASK_TOUCH_SQL =
     : "(1=1)";
 
 /**
- * Default multi-touch cadence: Day 0 SMS → Day 3 SMS → Day 7 email.
- * Mirrors ReviewRover's "a couple of SMS then an email" pattern. The day
- * offsets are measured from the sequence start. Channel is the *intent*; the
- * sender downgrades/swaps based on what contact info + opt-ins the customer
- * actually has.
+ * Default multi-touch cadence (owner spec 2026-07-30): Day 0 SMS right after
+ * service → Day 3 SMS on WEEKDAYS ONLY → Day 4 email. The day offsets are
+ * measured from the sequence start. Channel is the *intent*; the sender
+ * downgrades/swaps based on what contact info + opt-ins the customer actually
+ * has. `weekdaysOnly` steps that land on a Sat/Sun ET are shifted to the next
+ * Monday morning by the sequence scheduler (review-request.js).
  */
 const DEFAULT_SEQUENCE_PLAN = [
   { day: 0, channel: 'sms', templateKey: 'friendly_ask' },
-  { day: 3, channel: 'sms', templateKey: 'soft_reminder' },
-  { day: 7, channel: 'email', templateKey: 'final_nudge' },
+  { day: 3, channel: 'sms', templateKey: 'soft_reminder', weekdaysOnly: true },
+  { day: 4, channel: 'email', templateKey: 'final_nudge' },
 ];
 
 function getOutreachTemplate(id) {

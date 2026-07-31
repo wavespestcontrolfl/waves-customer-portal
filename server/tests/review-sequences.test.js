@@ -3,6 +3,13 @@ const mockSendCustomerMessage = jest.fn(async () => ({ sent: true, auditLogId: '
 const mockEmailSendTemplate = jest.fn(async () => ({ sent: true, message: { id: 'em-1' } }));
 
 jest.mock('../models/db', () => jest.fn());
+// Mutable gate flags for the 2026-07-30 revamp tests (post-service auto-enroll
+// + direct Google link). Both default OFF = pre-rollout behavior.
+const mockGates = { reviewSequences: false, reviewDirectLink: false };
+jest.mock('../config/feature-gates', () => ({
+  isEnabled: (g) => !!mockGates[g],
+  gates: mockGates,
+}));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: (...a) => mockSendCustomerMessage(...a) }));
 jest.mock('../services/email-template-library', () => ({ sendTemplate: (...a) => mockEmailSendTemplate(...a) }));
@@ -88,6 +95,8 @@ function makeMock(initial = {}, opts = {}) {
 beforeEach(() => {
   mockSendCustomerMessage.mockClear();
   mockEmailSendTemplate.mockClear();
+  mockGates.reviewSequences = false;
+  mockGates.reviewDirectLink = false;
 });
 
 describe('review sequences — cadence engine', () => {
@@ -462,5 +471,144 @@ describe('review sequences — cadence engine', () => {
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
     expect(out.stopped).toBe(1);
     expect(mock.__state.rows.review_sequences[0].stop_reason).toBe('opted_out');
+  });
+});
+
+describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () => {
+  const { nextTouchRunAt, shiftToWeekdayMorning, buildReviewUrl } = ReviewService.__private;
+
+  // 2026-08-01 is a Saturday, 2026-08-02 a Sunday, 2026-08-03 a Monday (EDT).
+  const SAT = new Date('2026-08-01T14:00:00-04:00');
+  const SUN = new Date('2026-08-02T09:00:00-04:00');
+  const WED = new Date('2026-07-29T14:00:00-04:00');
+  const MON_10 = new Date('2026-08-03T10:00:00-04:00').getTime();
+  const MON_1030 = new Date('2026-08-03T10:30:00-04:00').getTime();
+
+  test('shiftToWeekdayMorning moves Sat and Sun sends to Monday 10:00-10:30 ET, leaves weekdays alone', () => {
+    for (const weekend of [SAT, SUN]) {
+      const shifted = shiftToWeekdayMorning(weekend);
+      expect(shifted.getTime()).toBeGreaterThanOrEqual(MON_10);
+      expect(shifted.getTime()).toBeLessThanOrEqual(MON_1030);
+    }
+    expect(shiftToWeekdayMorning(WED)).toBe(WED);
+  });
+
+  test('a weekdaysOnly Day-3 step landing on Saturday fires Monday morning instead', () => {
+    const at = nextTouchRunAt({
+      startedAt: WED, // Wed + 3d = Sat
+      step: { day: 3, channel: 'sms', weekdaysOnly: true },
+      now: new Date(WED.getTime() + 60000),
+    });
+    expect(at.getTime()).toBeGreaterThanOrEqual(MON_10);
+    expect(at.getTime()).toBeLessThanOrEqual(MON_1030);
+  });
+
+  test('an already-due later step keeps ~20h spacing after the touch that just sent (no back-to-back asks)', () => {
+    // Weekend-shifted Day-3 SMS just fired Monday morning; the Day-4 email's
+    // base time (Sunday) is already past — it must NOT fire a minute later.
+    const now = new Date('2026-08-03T10:15:00-04:00');
+    const at = nextTouchRunAt({ startedAt: WED, step: { day: 4, channel: 'email' }, now });
+    expect(at.getTime()).toBe(now.getTime() + 20 * 3600000);
+  });
+
+  test('a future step is scheduled exactly at started_at + day offset', () => {
+    const at = nextTouchRunAt({ startedAt: WED, step: { day: 3, channel: 'sms' }, now: WED });
+    expect(at.getTime()).toBe(WED.getTime() + 3 * 86400000);
+  });
+
+  test('buildReviewUrl resolves to the rate page by default and to the tracked Google redirect under GATE_REVIEW_DIRECT_LINK', async () => {
+    const request = { id: 'rr-9', token: 'ab'.repeat(32) };
+    expect(await buildReviewUrl(request, 'cust-9')).toBe(`https://portal.test/rate/${request.token}`);
+    mockGates.reviewDirectLink = true;
+    expect(await buildReviewUrl(request, 'cust-9')).toBe(`https://portal.test/api/rate/${request.token}/go`);
+  });
+
+  test('enrollPostService with the gate OFF queues the legacy single ask (no sequence)', async () => {
+    const mock = makeMock({
+      customers: [{ id: 'en-1', first_name: 'Lee', last_name: 'K', phone: '+19410000031', nearest_location_id: 'parrish' }],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({ customerId: 'en-1', delayMinutes: 120 });
+
+    expect(mock.__state.rows.review_sequences).toHaveLength(0);
+    expect(mock.__state.rows.review_requests).toHaveLength(1);
+    expect(mock.__state.rows.review_requests[0]).toMatchObject({ customer_id: 'en-1', status: 'pending', triggered_by: 'auto' });
+    expect(mock.__state.rows.review_requests[0].scheduled_for).toBeInstanceOf(Date);
+    expect(result.id).toBe(mock.__state.rows.review_requests[0].id);
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('enrollPostService with the gate ON starts a cadence scheduled at the smart send window (nothing sends inline)', async () => {
+    mockGates.reviewSequences = true;
+    const mock = makeMock({
+      customers: [{ id: 'en-2', first_name: 'Ana', last_name: 'M', phone: '+19410000032', nearest_location_id: 'sarasota' }],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({
+      customerId: 'en-2',
+      serviceType: 'Quarterly Pest Control',
+      techName: 'Adam',
+      completedAt: new Date(),
+    });
+
+    expect(result.started).toBe(true);
+    expect(result.scheduledFor).toBeInstanceOf(Date);
+    expect(mock.__state.rows.review_requests).toHaveLength(0);
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    const seq = mock.__state.rows.review_sequences[0];
+    expect(seq).toMatchObject({ customer_id: 'en-2', status: 'active', current_step: 0, touches_sent: 0, started_by: 'post_service' });
+    expect(seq.next_run_at).toBeInstanceOf(Date);
+    // The cron picks it up at next_run_at — never more than ~26h out (the
+    // smart window's worst case is "next morning 10 AM" + Sat→Sun overrides).
+    expect(seq.next_run_at.getTime()).toBeGreaterThan(Date.now() - 1000);
+    expect(seq.next_run_at.getTime()).toBeLessThan(Date.now() + 48 * 3600000);
+  });
+
+  test('enrollPostService is idempotent per customer — an active cadence blocks a second enrollment', async () => {
+    mockGates.reviewSequences = true;
+    const mock = makeMock({
+      customers: [{ id: 'en-3', first_name: 'Roy', last_name: 'T', phone: '+19410000033', nearest_location_id: 'venice' }],
+      review_sequences: [{ id: 'seq-live', customer_id: 'en-3', status: 'active', current_step: 0, touches_sent: 0, plan: '[]', started_at: new Date(), next_run_at: new Date() }],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({ customerId: 'en-3', completedAt: new Date() });
+
+    expect(result.started).toBe(false);
+    expect(result.reason).toBe('already_active');
+    expect(mock.__state.rows.review_sequences).toHaveLength(1);
+  });
+
+  test('enrollPostService never throws — an archived customer under the gate reports started:false', async () => {
+    mockGates.reviewSequences = true;
+    const mock = makeMock({
+      customers: [{ id: 'en-4', first_name: 'Gil', last_name: 'B', deleted_at: new Date(), nearest_location_id: 'bradenton' }],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({ customerId: 'en-4', completedAt: new Date() });
+    expect(result.started).toBe(false);
+    expect(mock.__state.rows.review_sequences).toHaveLength(0);
+  });
+
+  test('a cadence stops with reason "clicked" once a touch was redirected to Google (direct-link engagement)', async () => {
+    const mock = makeMock({
+      customers: [{ id: 'cl-1', first_name: 'Ivy', last_name: 'W', phone: '+19410000034', nearest_location_id: 'bradenton' }],
+      review_sequences: [{
+        id: 'seq-cl', customer_id: 'cl-1', status: 'active', current_step: 1, touches_sent: 1,
+        plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }, { day: 3, channel: 'sms', templateKey: 'soft_reminder', weekdaysOnly: true }]),
+        started_at: new Date(Date.now() - 3 * 86400000), next_run_at: new Date(Date.now() - 60000),
+      }],
+      review_requests: [{ id: 'rr-cl', sequence_id: 'seq-cl', customer_id: 'cl-1', channel: 'sms', sms_sent_at: new Date(Date.now() - 3 * 86400000), redirected_at: new Date(Date.now() - 2 * 86400000), redirected_to_google: true }],
+    });
+    db.mockImplementation(mock);
+
+    const out = await ReviewService.processReviewSequences();
+
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(out.stopped).toBe(1);
+    expect(mock.__state.rows.review_sequences[0].stop_reason).toBe('clicked');
   });
 });

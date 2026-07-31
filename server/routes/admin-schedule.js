@@ -7772,7 +7772,7 @@ async function scheduleReviewRequest(svc) {
     }
 
     const ReviewService = require('../services/review-request');
-    await ReviewService.create({
+    await ReviewService.enrollPostService({
       customerId: customer.id,
       serviceRecordId,
       triggeredBy: 'auto',
@@ -7781,9 +7781,10 @@ async function scheduleReviewRequest(svc) {
       serviceType: svc.service_type || null,
       serviceDate: svc.scheduled_date || null,
       technicianId: svc.technician_id || null,
+      completedAt: new Date(),
     });
 
-    logger.info(`[review-auto] Review request queued for customer ${customer.id} (sends in 2h)`);
+    logger.info(`[review-auto] Review request queued for customer ${customer.id}`);
   } catch (err) {
     logger.error(`[review-auto] Failed to queue review request: ${err.message}`);
   }

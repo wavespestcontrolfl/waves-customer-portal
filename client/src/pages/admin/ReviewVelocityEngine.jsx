@@ -193,7 +193,7 @@ const TEMPLATES = [
   },
   {
     id: "final_nudge",
-    name: "Final Nudge (Day 7)",
+    name: "Final Nudge (Day 4 email)",
     sentiment: "happy",
     body: "Hey {first} — last one from us, promise! If you've been happy with Waves, a 15-second Google review would mean a lot to our crew.\n\n{review_url}\n\nEither way, thank you for trusting us with your home!",
   },
@@ -396,7 +396,7 @@ const ELIGIBILITY_LABELS = {
   email_preferred: "Customer prefers email — use a cadence",
   opted_out: "Opted out of review texts",
   suppressed: "On the do-not-contact list",
-  at_cap: "Already asked 3 times",
+  at_cap: "Already asked 3 times in the last 6 months",
   cooldown: "Asked within the last 30 days",
   in_sequence: "Already in an active cadence",
   already_active: "Already in an active cadence",
@@ -641,7 +641,7 @@ export default function ReviewVelocityEngine() {
     [updateCustomer, loadAnalytics, loadActivity],
   );
 
-  // Start a multi-touch cadence (Day 0/3/7) for one customer.
+  // Start a multi-touch cadence (Day 0/3/4) for one customer.
   const startSequence = useCallback(
     async (customer) => {
       try {
@@ -1808,7 +1808,7 @@ function Pipeline({
                       {sequencesEnabled && c.cadenceable && !c.sequence && (
                         <button
                           type="button"
-                          title="Start a Day 0/3/7 review cadence"
+                          title="Start a Day 0/3/4 review cadence"
                           onClick={(e) => {
                             e.stopPropagation();
                             quickStartSequence(c.id);

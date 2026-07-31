@@ -3881,7 +3881,7 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // EVERY 30 MIN — Multi-touch review cadence driver (Day 0/3/7 SMS+email).
+  // EVERY 30 MIN — Multi-touch review cadence driver (Day 0/3/4 SMS+email).
   // Advances operator-started review_sequences whose next_run_at has passed,
   // auto-stopping on review/opt-out. Dark behind GATE_REVIEW_SEQUENCES so a
   // preview/dev env with live creds can't text/email real customers.

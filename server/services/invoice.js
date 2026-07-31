@@ -2240,7 +2240,7 @@ const InvoiceService = {
           .select("customer_id", "service_record_id")
           .first();
         if (inv) {
-          await ReviewService.create({
+          await ReviewService.enrollPostService({
             customerId: inv.customer_id,
             serviceRecordId: inv.service_record_id || null,
             triggeredBy: "auto",
@@ -2360,7 +2360,7 @@ const InvoiceService = {
     if (updated && effectiveRequestReview) {
       try {
         const ReviewService = require("./review-request");
-        await ReviewService.create({
+        await ReviewService.enrollPostService({
           customerId: invoice.customer_id,
           serviceRecordId: invoice.service_record_id || null,
           triggeredBy: "auto",

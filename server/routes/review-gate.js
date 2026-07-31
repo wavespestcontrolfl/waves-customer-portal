@@ -38,6 +38,99 @@ function categorizeScore(score) {
   return 'detractor';
 }
 
+// Direct-link redirects are cheap and unauthenticated — cap per IP so the
+// token space can't be probed at volume.
+const directLinkLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+// GET /api/rate/:token/go — tracked redirect straight to the Google review
+// form (GATE_REVIEW_DIRECT_LINK rollout; the SMS/email {review_url} resolves
+// here via a /l/ short link). Stamps the open + click on the review_requests
+// row, stops the customer's active cadence (they acted — no Day-3/4 chasers),
+// bells the owner so an unmatched review can be manually attributed, and 302s
+// to the location's GBP review URL. Every failure path degrades to the /rate
+// page, which already renders not-found/expired states.
+router.get('/:token/go', directLinkLimiter, async (req, res) => {
+  const token = String(req.params.token || '');
+  const ratePageFallback = `/rate/${encodeURIComponent(token)}`;
+  try {
+    if (!/^[a-f0-9]{64}$/.test(token)) return res.redirect(302, ratePageFallback);
+    const request = await db('review_requests').where({ token }).first();
+    if (!request) return res.redirect(302, ratePageFallback);
+    if (request.expires_at && new Date(request.expires_at) < new Date()) {
+      return res.redirect(302, ratePageFallback);
+    }
+
+    const customer = await db('customers').where({ id: request.customer_id }).first();
+    const loc = resolveReviewLocation(request, customer);
+    if (!loc || !loc.googleReviewUrl) return res.redirect(302, ratePageFallback);
+
+    const firstClick = !request.redirected_at;
+    try {
+      const updates = {
+        open_count: (request.open_count || 0) + 1,
+        google_review_clicked: true,
+        redirected_to_google: true,
+        google_location: loc.id,
+      };
+      if (!request.opened_at) {
+        updates.opened_at = new Date();
+        if (request.status === 'sent') updates.status = 'opened';
+      }
+      if (firstClick) updates.redirected_at = new Date();
+      await db('review_requests').where({ id: request.id }).update(updates);
+    } catch (err) {
+      logger.warn(`[review-gate] direct-link click stamp failed: ${err.message}`);
+    }
+
+    // They acted on the ask — stop the cadence so no further touches chase
+    // a customer who already visited the review form.
+    if (request.sequence_id) {
+      try {
+        const ReviewService = require('../services/review-request');
+        await ReviewService.stopReviewSequence(request.sequence_id, 'clicked');
+      } catch (err) {
+        logger.warn(`[review-gate] cadence stop on click failed: ${err.message}`);
+      }
+    }
+
+    // Owner bell (first click only): Google won't tell us who reviewed, so
+    // Adam checks the GBP and flips "Left Google review" on the profile when
+    // it lands. Best-effort — never blocks the redirect.
+    if (firstClick && customer) {
+      try {
+        const NotificationService = require('../services/notification-service');
+        const name = `${customer.first_name || ''} ${customer.last_name || ''}`.trim() || 'A customer';
+        await NotificationService.notifyAdmin(
+          'review',
+          'Review link clicked',
+          `${name} clicked through to the ${loc.name} Google review form. If their review shows up (any reviewer name), mark "Left Google review" on their profile so review asks stop.`,
+          {
+            link: `/admin/customers?customerId=${customer.id}`,
+            metadata: {
+              reviewRequestId: request.id,
+              customerId: customer.id,
+              locationId: loc.id,
+              sequenceId: request.sequence_id || null,
+            },
+          },
+        );
+      } catch (err) {
+        logger.warn(`[review-gate] click notification failed: ${err.message}`);
+      }
+    }
+
+    return res.redirect(302, loc.googleReviewUrl);
+  } catch (err) {
+    logger.error(`[review-gate] direct-link redirect failed: ${err.message}`);
+    return res.redirect(302, ratePageFallback);
+  }
+});
+
 // GET /api/rate/:token — public page data for the review funnel
 router.get('/:token', async (req, res, next) => {
   try {
