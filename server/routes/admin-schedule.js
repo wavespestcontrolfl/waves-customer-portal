@@ -7798,11 +7798,22 @@ router.post('/:id/regenerate-brief', async (req, res, next) => {
 async function scheduleReviewRequest(svc) {
   try {
     const customer = await db('customers').where({ id: svc.customer_id }).first();
-    if (!customer || !customer.phone) return;
+    if (!customer) return;
+    // Legacy mode is SMS-only: no phone / SMS opt-out ends it here. Cadence
+    // mode (GATE_REVIEW_SEQUENCES) resolves channels itself with an SMS→email
+    // fallback, so an email-only or SMS-opted-out customer must still reach
+    // enrollment (Codex P2, PR #3104 r1) — only the review_request opt-out is
+    // universal.
+    const cadenceEnabled = require('../config/feature-gates').isEnabled('reviewSequences');
+    if (!customer.phone && !cadenceEnabled) return;
 
     const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first();
-    if (prefs && (prefs.sms_enabled === false || prefs.review_request === false)) {
-      logger.info(`[review-auto] Skipping review request for customer ${customer.id} — SMS/review request disabled`);
+    if (prefs && prefs.review_request === false) {
+      logger.info(`[review-auto] Skipping review request for customer ${customer.id} — review requests disabled`);
+      return;
+    }
+    if (!cadenceEnabled && prefs && prefs.sms_enabled === false) {
+      logger.info(`[review-auto] Skipping review request for customer ${customer.id} — SMS disabled`);
       return;
     }
 
@@ -7840,18 +7851,21 @@ async function scheduleReviewRequest(svc) {
     }
 
     const ReviewService = require('../services/review-request');
-    await ReviewService.create({
+    await ReviewService.enrollPostService({
       customerId: customer.id,
       serviceRecordId,
       triggeredBy: 'auto',
-      delayMinutes: 120,
+      // Historical hardcoded default, not an operator choice — legacy path
+      // only; cadence mode uses the smart send window.
+      legacyDelayMinutes: 120,
       techName,
       serviceType: svc.service_type || null,
       serviceDate: svc.scheduled_date || null,
       technicianId: svc.technician_id || null,
+      completedAt: new Date(),
     });
 
-    logger.info(`[review-auto] Review request queued for customer ${customer.id} (sends in 2h)`);
+    logger.info(`[review-auto] Review request queued for customer ${customer.id}`);
   } catch (err) {
     logger.error(`[review-auto] Failed to queue review request: ${err.message}`);
   }

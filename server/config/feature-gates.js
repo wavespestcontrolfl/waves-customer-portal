@@ -129,12 +129,19 @@ const gates = {
   techArrivedSms: process.env.GATE_TECH_ARRIVED_SMS === 'true',
 
   // Multi-touch review-request cadence (Review Outreach tab). When on, the
-  // processReviewSequences cron advances operator-started Day 0/3/7 SMS+email
+  // processReviewSequences cron advances Day 0/3/4 SMS+email
   // sequences. Customer-facing auto-send → explicit opt-in in EVERY env (off in
   // dev/preview too) so a preview env with real Twilio/SendGrid creds can't
   // text/email real customers. Still subject to twilioSms + per-customer pref.
   // One-off manual sends from the same tab are NOT gated by this.
   reviewSequences: process.env.GATE_REVIEW_SEQUENCES === 'true',
+
+  // Review asks link STRAIGHT to the Google review form (via the tracked
+  // /api/rate/:token/go redirect) instead of the 1-10 rate page. Kill switch
+  // for the direct-link rollout: off = every ask body resolves {review_url}
+  // to the tokenized /rate/<token> NPS page exactly as before. The /rate page
+  // itself stays live either way (old links, fallback for unknown locations).
+  reviewDirectLink: process.env.GATE_REVIEW_DIRECT_LINK === 'true',
 
   // Digital business card — the card.issued email a customer gets after their
   // FIRST completed visit (services/customer-card.js). The card row and the

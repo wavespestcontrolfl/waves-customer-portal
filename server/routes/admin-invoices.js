@@ -1566,6 +1566,20 @@ router.post('/:id/record-payment', requireAdmin, async (req, res, next) => {
       logger.warn(`[admin-invoices:record-payment] stopOnPayment failed: ${err.message}`);
     }
 
+    // A completion invoice delivered unpaid deferred its review ask to
+    // payment — an off-Stripe settlement (cash/check/Zelle) never reaches the
+    // Stripe webhook, so trigger the same shared enrollment here (Codex P2,
+    // PR #3104 r2). Guards (completion opt-out, visit outcome, dedupe,
+    // cap/cooldown) all live in the helper; standalone invoices no-op.
+    if (updatedInvoice.status === 'paid') {
+      try {
+        const ReviewService = require('../services/review-request');
+        await ReviewService.enrollForPaidInvoice(updatedInvoice, { source: 'record_payment' });
+      } catch (err) {
+        logger.warn(`[admin-invoices:record-payment] review enrollment failed: ${err.message}`);
+      }
+    }
+
     // Fire-and-forget: a manually recorded payment (check/cash/Zelle) may
     // settle an invoice gating a payment-held WDO report — nudge the release
     // sweep (60s interval is the fallback).
@@ -1825,6 +1839,19 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
       await FollowUps.stopOnPayment(id);
     } catch (err) {
       logger.warn(`[admin-invoices:apply-credit] stopOnPayment failed: ${err.message}`);
+    }
+
+    // Full-credit settlement is a payment event too: a completion invoice
+    // delivered unpaid deferred its review ask to payment, and this path
+    // reaches neither the Stripe webhook nor record-payment — enroll here or
+    // the requested ask is permanently lost (Codex P2, PR #3104 r3). Guards
+    // (completion opt-out, visit outcome, dedupe) live in the helper;
+    // standalone invoices no-op.
+    try {
+      const ReviewService = require('../services/review-request');
+      await ReviewService.enrollForPaidInvoice(covered, { source: 'apply_credit' });
+    } catch (err) {
+      logger.warn(`[admin-invoices:apply-credit] review enrollment failed: ${err.message}`);
     }
 
     // Fire-and-forget: a credit-covered (prepaid) invoice may be gating a

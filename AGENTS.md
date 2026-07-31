@@ -921,11 +921,17 @@ finding and warns on P1. Reviewers must return JSON matching
   returns the review-request context by token, POST submits the customer's
   review. No auth beyond the review-request token).
   `/api/rate/:token` (+ `/:token/score`, `/:token/submit`,
-  `/:token/generate-review`) (review-gate; token-scoped customer rating flow
-  from a review-request link — high → the nearest GBP write-a-review URL, low →
-  private feedback capture. No auth beyond the review-request token; picks
-  nearest GBP by geocoded address. The bare `/api/rate` mount is not itself a
-  route — only the token-scoped family is public).
+  `/:token/generate-review`, `/:token/go`) (review-gate; token-scoped customer
+  rating flow from a review-request link — high → the nearest GBP
+  write-a-review URL, low → private feedback capture. `/:token/go` is the
+  GATE_REVIEW_DIRECT_LINK tracked redirect: 64-hex token format gate, 30
+  req/min per-IP limit, stamps open/click on the review_requests row, stops
+  the customer's active review cadence, and 302s to the location's GBP review
+  URL — every failure path degrades to the /rate page, and the ONLY redirect
+  targets are config/locations.js googleReviewUrl values (never
+  request-derived). No auth beyond the review-request token; picks nearest GBP
+  by geocoded address. The bare `/api/rate` mount is not itself a route — only
+  the token-scoped family is public).
   `/api/reports/project/:token/fdacs-pdf` (read-only; streams the filled, signed
   FDACS-13645 PDF for a WDO report so the public report page can show the official
   form instead of a blank template. Same long-lived report token + format gate as

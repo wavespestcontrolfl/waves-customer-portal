@@ -17,13 +17,13 @@ const ASK_TOUCH_SQL = OUTREACH.ASK_TOUCH_SQL;
 const { toE164 } = require("../utils/phone");
 const { runExclusive } = require("../utils/cron-lock");
 
-// GBP review links per location
-const REVIEW_LINKS = {
-  "bradenton": "https://g.page/r/CVRc_P5butTMEBM/review",
-  sarasota: "https://g.page/r/CRkzS6M4EpncEBM/review",
-  venice: "https://g.page/r/CURA5pQ1KatBEBM/review",
-  parrish: "https://g.page/r/Ca-4KKoWwFacEBM/review",
-};
+// GBP review links per location — derived from the canonical office map
+// (config/locations.js) so a GBP link change lands everywhere at once instead
+// of drifting across the three copies this module/satisfaction.js used to hold.
+const { WAVES_LOCATIONS } = require("../config/locations");
+const REVIEW_LINKS = Object.fromEntries(
+  WAVES_LOCATIONS.filter((l) => l.googleReviewUrl).map((l) => [l.id, l.googleReviewUrl]),
+);
 
 // City → location for review routing. Shares the canonical office map
 // (config/locations.js) so cities added there — including ZIP-recovered ones
@@ -49,6 +49,70 @@ function resolveLocation(customer) {
 
 function generateToken() {
   return crypto.randomBytes(32).toString("hex");
+}
+
+// Rolling window for the 3-delivered-asks cap (owner policy 2026-07-30:
+// a never-engaging customer may get a fresh cadence at most every ~6 months).
+const ASK_CAP_WINDOW_DAYS = 180;
+
+/**
+ * Build the (shortened) review link for an ask. Behind GATE_REVIEW_DIRECT_LINK
+ * the link is the tracked server redirect that stamps the open/click on the
+ * review_requests row and 302s STRAIGHT to the location's Google review form —
+ * the 1-10 rate page produced zero Google click-throughs in four months, so
+ * the gate removes that friction. Gate off = the tokenized /rate/<token> page,
+ * exactly the pre-rollout behavior.
+ */
+async function buildReviewUrl(request, customerId) {
+  const { isEnabled } = require("../config/feature-gates");
+  const domain = publicPortalUrl();
+  const longUrl = isEnabled("reviewDirectLink")
+    ? `${domain}/api/rate/${request.token}/go`
+    : `${domain}/rate/${request.token}`;
+  return shortenOrPassthrough(longUrl, {
+    kind: "review",
+    entityType: "review_requests",
+    entityId: request.id,
+    customerId,
+  });
+}
+
+/**
+ * ET-wall-clock weekday shift: a send scheduled for Sat/Sun moves to Monday
+ * 10:00 AM ET (±15 min jitter). Weekday sends pass through untouched.
+ */
+function shiftToWeekdayMorning(date) {
+  let p = etParts(date);
+  if (p.dayOfWeek !== 0 && p.dayOfWeek !== 6) return date;
+  let shifted = date;
+  while (p.dayOfWeek === 0 || p.dayOfWeek === 6) {
+    shifted = addETDays(shifted, 1);
+    p = etParts(shifted);
+  }
+  const minute = Math.floor(Math.random() * 31); // 10:00–10:30, spread the batch
+  const naive = `${p.year}-${String(p.month).padStart(2, "0")}-${String(p.day).padStart(2, "0")}T10:${String(minute).padStart(2, "0")}`;
+  return parseETDateTime(naive);
+}
+
+/**
+ * When the next sequence touch should fire. Base schedule is
+ * started_at + step.day days; three corrections:
+ *  - catch-up: a base time already in the past fires in ~60s, EXCEPT
+ *  - min spacing: a later step never fires sooner than ~20h after the touch
+ *    that just went out (a weekend-shifted Day-3 SMS would otherwise be
+ *    chased by the already-due Day-4 email a minute later);
+ *  - weekdaysOnly steps land Mon-Fri (ET) — Sat/Sun shifts to Monday 10 AM.
+ */
+function nextTouchRunAt({ startedAt, step, now = new Date() }) {
+  const dayOffset = Number(step?.day) || 0;
+  let at = new Date(new Date(startedAt).getTime() + dayOffset * 86400000);
+  if (at <= now) at = new Date(now.getTime() + 60000);
+  if (dayOffset > 0) {
+    const minAt = new Date(now.getTime() + 20 * 3600000);
+    if (at < minAt) at = minAt;
+  }
+  if (step?.weekdaysOnly) at = shiftToWeekdayMorning(at);
+  return at;
 }
 
 /**
@@ -310,6 +374,166 @@ const ReviewService = {
   },
 
   /**
+   * Post-service enrollment — the single entry point every "service is done,
+   * ask for a review" trigger (dispatch completion, schedule completion,
+   * invoice send/paid, Stripe paid webhook) funnels through.
+   *
+   * GATE_REVIEW_SEQUENCES on  → start the multi-touch cadence (Day 0 SMS at
+   *   the smart send window → Day 3 weekday SMS → Day 4 email). Idempotent
+   *   per customer (one active sequence), capped 3 asks / rolling 180 days,
+   *   30-day cooldown, all the per-customer suppressions.
+   * GATE_REVIEW_SEQUENCES off → the legacy single scheduled ask
+   *   (ReviewService.create), byte-for-byte the pre-rollout behavior.
+   *
+   * Never throws — auto callers (webhooks, completion flows) must not fail
+   * their own transaction over a review ask.
+   */
+  async enrollPostService({
+    customerId,
+    serviceRecordId = null,
+    serviceType = null,
+    serviceDate = null,
+    techName = null,
+    technicianId = null,
+    completedAt = null,
+    // delayMinutes = an EXPLICIT operator/config choice (completion panel
+    // timing selector, invoice scheduled_review_delay_minutes) — honored in
+    // BOTH modes. legacyDelayMinutes = a caller's historical hardcoded
+    // default — applied only on the legacy path so cadence mode can use the
+    // smart send window instead (Codex P2, r2).
+    delayMinutes,
+    legacyDelayMinutes,
+    triggeredBy = "auto",
+  }) {
+    const { isEnabled } = require("../config/feature-gates");
+    if (!isEnabled("reviewSequences")) {
+      return this.create({
+        customerId,
+        serviceRecordId,
+        triggeredBy,
+        delayMinutes: delayMinutes !== undefined && delayMinutes !== null ? delayMinutes : legacyDelayMinutes,
+        techName,
+        serviceType,
+        serviceDate,
+        technicianId,
+      });
+    }
+    try {
+      let svcType = serviceType;
+      let tName = techName;
+      if ((!svcType || !tName) && serviceRecordId) {
+        const sr = await db("service_records")
+          .where({ "service_records.id": serviceRecordId })
+          .leftJoin("technicians", "service_records.technician_id", "technicians.id")
+          .select("service_records.service_type", "technicians.name as tech_name")
+          .first()
+          .catch(() => null);
+        svcType = svcType || sr?.service_type || null;
+        tName = tName || sr?.tech_name || null;
+      }
+      // An explicit timing choice (completion panel "Now"/"Tomorrow 8 AM"/
+      // custom, invoice scheduled minutes) wins over the smart send window —
+      // the operator's selection must not be silently ignored in cadence
+      // mode (Codex P2, r2). 0 = "Now" → first cron tick.
+      const explicitDelay = Number(delayMinutes);
+      const firstTouchAt = delayMinutes !== undefined && delayMinutes !== null && Number.isFinite(explicitDelay)
+        ? new Date(Date.now() + Math.max(0, explicitDelay) * 60000)
+        : calculateReviewSendTime(
+          completedAt ? new Date(completedAt) : new Date(),
+          svcType,
+        );
+      const result = await this.startReviewSequence({
+        customerId,
+        serviceRecordId,
+        serviceType: svcType,
+        techName: tName,
+        startedBy: "post_service",
+        firstTouchAt,
+      });
+      if (result?.started) {
+        logger.info(
+          `[review] Post-service cadence enrolled (customerId=${customerId} sequenceId=${result.sequence?.id} firstTouch=${firstTouchAt.toISOString()})`,
+        );
+      } else {
+        logger.info(
+          `[review] Post-service cadence skipped (customerId=${customerId} reason=${result?.reason || "unknown"})`,
+        );
+      }
+      return result;
+    } catch (err) {
+      logger.error(`[review] Post-service cadence enroll failed (customerId=${customerId} errType=${err?.name || "Error"}): ${err.message}`);
+      return { started: false, reason: "error" };
+    }
+  },
+
+  /**
+   * Post-PAYMENT enrollment for a COMPLETION invoice (has service_record_id)
+   * whose review ask was deferred at delivery (unpaid-invoice hold). Shared
+   * by the Stripe paid webhook and the admin record-payment path so an
+   * off-Stripe settlement (cash/check/Zelle) still triggers the ask
+   * (Codex P2, r2). Honors the completion's stored requestReview intent and
+   * visit outcome. Standalone invoices are NOT handled here — they enrolled
+   * at delivery. Never throws.
+   */
+  async enrollForPaidInvoice(invoice, { source = "invoice_paid" } = {}) {
+    try {
+      if (!invoice?.customer_id || !invoice?.service_record_id) {
+        return { enrolled: false, reason: "not_completion_invoice" };
+      }
+      const label = invoice.invoice_number || invoice.id;
+      const serviceRecord = await db("service_records")
+        .where({ id: invoice.service_record_id })
+        .select("structured_notes")
+        .first();
+      let notes = serviceRecord?.structured_notes || {};
+      if (typeof notes === "string") {
+        try { notes = JSON.parse(notes); } catch { notes = {}; }
+      }
+      if (notes.requestReview === false) {
+        logger.info(`[review] Skipping paid-invoice review request for invoice ${label} (${source}): completion opted out`);
+        return { enrolled: false, reason: "completion_opted_out" };
+      }
+      if (notes.visitOutcome && notes.visitOutcome !== "completed") {
+        logger.info(`[review] Skipping paid-invoice review request for invoice ${label} (${source}): visit outcome ${notes.visitOutcome}`);
+        return { enrolled: false, reason: "visit_outcome" };
+      }
+      // The completion panel's explicit timing selection (Now / Tomorrow 8 AM
+      // / custom) is persisted on the service record — honor it through the
+      // payment deferral instead of silently reverting to the default
+      // (Codex P2, r3). An absolute time already elapsed sends immediately.
+      let delayMinutes;
+      // reviewScheduledFor is the TIMEZONE-LESS Eastern wall-clock string the
+      // completion panel posts — new Date() on a UTC server would read it
+      // 4-5h early (Codex P1, r5). Parse naive strings as ET, same as the
+      // completion validation; an explicit offset/Z (defensive) parses as-is.
+      let storedAt = null;
+      if (notes.reviewScheduledFor) {
+        const raw = String(notes.reviewScheduledFor);
+        storedAt = /Z$|[+-]\d{2}:?\d{2}$/.test(raw) ? new Date(raw) : parseETDateTime(raw);
+      }
+      if (storedAt && !Number.isNaN(storedAt.getTime())) {
+        delayMinutes = Math.max(0, Math.round((storedAt.getTime() - Date.now()) / 60000));
+      } else if (notes.reviewDelayMinutes != null && Number.isFinite(Number(notes.reviewDelayMinutes))) {
+        delayMinutes = Math.max(0, Number(notes.reviewDelayMinutes));
+      }
+      // Legacy create() dedupes by service_record_id; the cadence path is
+      // idempotent per active sequence + capped/cooled-down — safe under
+      // webhook retries and double-clicked payment forms alike.
+      const result = await this.enrollPostService({
+        customerId: invoice.customer_id,
+        serviceRecordId: invoice.service_record_id,
+        triggeredBy: "auto",
+        delayMinutes,
+        legacyDelayMinutes: 120,
+      });
+      return { enrolled: true, result };
+    } catch (err) {
+      logger.error(`[review] Paid-invoice enrollment failed (invoiceId=${invoice?.id} source=${source}): ${err.message}`);
+      return { enrolled: false, reason: "error" };
+    }
+  },
+
+  /**
    * Send the review request SMS.
    */
   async sendSMS(requestId) {
@@ -362,14 +586,7 @@ const ReviewService = {
       return;
     }
 
-    const domain = publicPortalUrl();
-    const longReviewUrl = `${domain}/rate/${request.token}`;
-    const reviewUrl = await shortenOrPassthrough(longReviewUrl, {
-      kind: "review",
-      entityType: "review_requests",
-      entityId: request.id,
-      customerId: customer.id,
-    });
+    const reviewUrl = await buildReviewUrl(request, customer.id);
     const techName = request.tech_name || "Our team";
 
     // Body source priority so a deferred/retried send keeps the operator's
@@ -605,14 +822,7 @@ const ReviewService = {
         ) {
           return null;
         }
-        const domain = publicPortalUrl();
-        const longUrl = `${domain}/rate/${existing.token}`;
-        const url = await shortenOrPassthrough(longUrl, {
-          kind: "review",
-          entityType: "review_requests",
-          entityId: existing.id,
-          customerId,
-        });
+        const url = await buildReviewUrl(existing, customerId);
         return { url, requestId: existing.id, token: existing.token };
       }
     }
@@ -684,14 +894,7 @@ const ReviewService = {
       `[review] Created inline request (customerId=${customer.id} requestId=${request.id} bundled-with=completion_sms)`,
     );
 
-    const domain = publicPortalUrl();
-    const longUrl = `${domain}/rate/${request.token}`;
-    const url = await shortenOrPassthrough(longUrl, {
-      kind: "review",
-      entityType: "review_requests",
-      entityId: request.id,
-      customerId,
-    });
+    const url = await buildReviewUrl(request, customerId);
     return { url, requestId: request.id, token: request.token };
   },
 
@@ -1262,6 +1465,7 @@ const ReviewService = {
     techName,
     serviceType,
     serviceDate,
+    technicianId = null,
     serviceRecordId = null,
     sequenceId = null,
     sequenceStep = null,
@@ -1273,6 +1477,47 @@ const ReviewService = {
     if (customer.deleted_at) return { ok: false, reason: "deleted", terminal: true };
     if (customer.has_left_google_review) {
       return { ok: false, reason: "already_reviewed", terminal: true };
+    }
+
+    // Cadence steps carry only serviceRecordId — recover the visit context the
+    // legacy create() path preserves (technician_id drives the rate page's
+    // tech photo, service_date the visit line; Codex P2, r1). Best-effort: a
+    // lookup failure just sends without them.
+    if (serviceRecordId && (!technicianId || !serviceDate || !techName || !serviceType)) {
+      try {
+        const sr = await db("service_records")
+          .where({ "service_records.id": serviceRecordId })
+          .leftJoin("technicians", "service_records.technician_id", "technicians.id")
+          .select(
+            "service_records.service_type",
+            "service_records.service_date",
+            "service_records.technician_id",
+            "service_records.scheduled_service_id",
+            "technicians.name as tech_name",
+          )
+          .first();
+        if (sr) {
+          technicianId = technicianId || sr.technician_id || null;
+          serviceDate = serviceDate || sr.service_date || null;
+          techName = techName || sr.tech_name || null;
+          serviceType = serviceType || sr.service_type || null;
+          // Same fallback as create(): legacy rows without a technician on the
+          // service record inherit the assigned tech from the linked visit.
+          if (!technicianId && sr.scheduled_service_id) {
+            const ss = await db("scheduled_services")
+              .where({ "scheduled_services.id": sr.scheduled_service_id })
+              .leftJoin("technicians", "scheduled_services.technician_id", "technicians.id")
+              .select("scheduled_services.technician_id", "technicians.name as tech_name")
+              .first();
+            if (ss?.technician_id) {
+              technicianId = ss.technician_id;
+              techName = techName || ss.tech_name || null;
+            }
+          }
+        }
+      } catch (err) {
+        logger.warn(`[review] outreach visit-context recovery failed (serviceRecordId=${serviceRecordId}): ${err.message}`);
+      }
     }
 
     // SMS identity is consent-gated; EMAIL identity is not (the #2948
@@ -1343,7 +1588,7 @@ const ReviewService = {
     // Per-type channel preference. Only 'email' is treated as an EXCLUSIVE
     // choice (it is never the column default, so it's deliberate): an 'email'
     // preference must not fall back to SMS. 'sms' is the backfill DEFAULT, so it
-    // is NOT a deliberate opt-out — it must keep the email fallback / Day-7 email
+    // is NOT a deliberate opt-out — it must keep the email fallback / Day-4 email
     // step working. 'both' / unset allow either with fallback.
     const prefChannel = prefs && prefs.review_request_channel;
     const allowSms = canSms && (noLinkSend || prefChannel !== "email");
@@ -1383,6 +1628,7 @@ const ReviewService = {
         customer_id: customer.id,
         service_record_id: serviceRecordId,
         location_id: locationId || resolveLocation(customer),
+        technician_id: technicianId || null,
         tech_name: techName || null,
         service_type: serviceType || null,
         service_date: serviceDate || null,
@@ -1399,14 +1645,7 @@ const ReviewService = {
       })
       .returning("*");
 
-    const domain = publicPortalUrl();
-    const longUrl = `${domain}/rate/${token}`;
-    const reviewUrl = await shortenOrPassthrough(longUrl, {
-      kind: "review",
-      entityType: "review_requests",
-      entityId: request.id,
-      customerId: customer.id,
-    });
+    const reviewUrl = await buildReviewUrl(request, customer.id);
 
     const vars = {
       first: firstNameFrom(contact.name) || customer.first_name || "",
@@ -1555,7 +1794,7 @@ const ReviewService = {
         // Stable per sequence STEP (not per touch row): a sequence retry inserts
         // a fresh review_requests row, so a request.id-based key would change
         // each retry and bypass the email library's dedupe — re-sending the same
-        // Day-7 email if a prior attempt was accepted but then threw.
+        // Day-4 email if a prior attempt was accepted but then threw.
         idempotencyKey:
           request.sequence_id != null && request.sequence_step != null
             ? `review_seq:${request.sequence_id}:${request.sequence_step}`
@@ -1602,7 +1841,7 @@ const ReviewService = {
    * with an active sequence returns that one instead of starting a second
    * (also enforced by the partial unique index). Fires step 0 immediately.
    */
-  async startReviewSequence({ customerId, plan, startedBy, locationId, serviceType, techName, serviceRecordId }) {
+  async startReviewSequence({ customerId, plan, startedBy, locationId, serviceType, techName, serviceRecordId, firstTouchAt = null }) {
     const customer = await db("customers").where({ id: customerId }).first();
     if (!customer) throw new Error("Customer not found");
     if (customer.deleted_at) throw new Error("Customer is archived");
@@ -1616,7 +1855,7 @@ const ReviewService = {
     // these, but this endpoint can be hit directly / in bulk / racing a recent
     // send). Counts asks across BOTH channels. Fail CLOSED — a DB blip must not
     // let an at-cap / in-cooldown customer through (no .catch → it throws and
-    // the route records the customer as not-started). Day 3/7 still bypass cooldown.
+    // the route records the customer as not-started). Day 3/4 still bypass cooldown.
     const thirtyDaysAgo = new Date(Date.now() - 30 * 86400000);
     const stats = await this.getDeliveredAskStats(customerId);
     if (stats.count >= 3) return { started: false, reason: "at_cap" };
@@ -1661,12 +1900,16 @@ const ReviewService = {
           plan: JSON.stringify(usePlan),
           current_step: 0,
           touches_sent: 0,
-          // Insert with next_run_at NULL so the cron (which only picks rows with
-          // a non-null next_run_at <= now) can't grab this row and fire step 0
-          // in parallel with the inline _runSequenceStep below — the cron lock
-          // serializes cron workers, not this admin path. _runSequenceStep sets
-          // next_run_at when it advances/retries.
-          next_run_at: null,
+          // Without firstTouchAt: insert with next_run_at NULL so the cron
+          // (which only picks rows with a non-null next_run_at <= now) can't
+          // grab this row and fire step 0 in parallel with the inline
+          // _runSequenceStep below — the cron lock serializes cron workers,
+          // not this admin path. _runSequenceStep sets next_run_at when it
+          // advances/retries.
+          // With firstTouchAt (post-service auto-enroll): the Day-0 touch is
+          // NOT fired inline — it's scheduled at the smart send window and the
+          // sequence cron delivers it.
+          next_run_at: firstTouchAt || null,
           service_record_id: serviceRecordId || null,
           tech_name: tName,
           service_type: svcType,
@@ -1680,6 +1923,13 @@ const ReviewService = {
         return { started: false, reason: "already_active", sequence: existing };
       }
       throw err;
+    }
+
+    // Scheduled start: the cron fires step 0 at firstTouchAt; nothing to run
+    // inline. (The stop conditions re-run inside _runSequenceStep at send
+    // time, so a customer who reviews/opts out in the gap is still skipped.)
+    if (firstTouchAt) {
+      return { started: true, sequence, scheduledFor: firstTouchAt };
     }
 
     let firstTouch;
@@ -1761,6 +2011,16 @@ const ReviewService = {
           .first()
           .catch(() => null);
     if (submitted || rated || lowDraft) return stop("responded");
+    // Direct-link engagement: with GATE_REVIEW_DIRECT_LINK there is no submit
+    // event — the tracked redirect stamping redirected_at IS the response.
+    // The redirect route stops the sequence inline; this is the backstop for
+    // legacy google_review_clicked stamps and any missed inline stop.
+    const clicked = await db("review_requests")
+      .where({ sequence_id: seq.id })
+      .where((b) => b.whereNotNull("redirected_at").orWhere("google_review_clicked", true))
+      .first()
+      .catch(() => null);
+    if (clicked) return stop("clicked");
     if (seq.current_step >= plan.length) return stop("completed");
     // Keep the whole cadence within the lifetime 3-ask cap: a customer who had
     // 1-2 prior asks must not reach 4-5 via the cadence. Delivered ask touches
@@ -1785,6 +2045,38 @@ const ReviewService = {
     } catch {
       /* ignore */
     }
+
+    // Gate-toggle hygiene (Codex P2, r4): while GATE_REVIEW_SEQUENCES is off
+    // the cron freezes active rows in place — completions deliver legacy asks
+    // in the meantime, and re-enabling the gate would otherwise resume relic
+    // steps. Two deterministic retirements:
+    //  - stale: a step OVERDUE by more than 7 days can only be a resumed
+    //    relic (normal cron lag is minutes). Overdue-based, NOT age-based —
+    //    an operator may legitimately schedule the first touch up to 30 days
+    //    out, and that step arrives just-due, never deeply overdue
+    //    (Codex P2, r5). A NULL next_run_at (inline start) is brand new.
+    //  - superseded: an ask DELIVERED outside this sequence since 30 days ago
+    //    (legacy path, manual one-off) means the customer was already
+    //    contacted — another touch inside the cooldown would double-ask.
+    const dueAtMs = seq.next_run_at ? new Date(seq.next_run_at).getTime() : null;
+    if (dueAtMs != null && Number.isFinite(dueAtMs) && Date.now() - dueAtMs > 7 * 86400000) {
+      return stop("stale");
+    }
+    let recentAskRows = [];
+    try {
+      recentAskRows = await db("review_requests")
+        .where({ customer_id: seq.customer_id })
+        .where("created_at", ">", new Date(Date.now() - 30 * 86400000))
+        .whereRaw("(sms_sent_at IS NOT NULL OR sent_at IS NOT NULL)")
+        .whereRaw(ASK_TOUCH_SQL)
+        .select("sequence_id", "sms_sent_at", "sent_at");
+    } catch {
+      recentAskRows = []; // hygiene check is best-effort; the cap/cooldown guards below still hold
+    }
+    const externallyAsked = recentAskRows.some(
+      (r) => (r.sms_sent_at || r.sent_at) && r.sequence_id !== seq.id,
+    );
+    if (externallyAsked) return stop("superseded");
 
     const step = plan[seq.current_step] || {};
 
@@ -1845,8 +2137,7 @@ const ReviewService = {
         });
         return { ran: true, sent: true, completed: true, step: seq.current_step };
       }
-      const plannedAt = new Date(new Date(seq.started_at).getTime() + (Number(plan[nextStep].day) || 0) * 86400000);
-      const next_run_at = plannedAt > new Date() ? plannedAt : new Date(Date.now() + 60000);
+      const next_run_at = nextTouchRunAt({ startedAt: seq.started_at, step: plan[nextStep] });
       await db("review_sequences").where({ id: seq.id, status: "active" }).update({
         current_step: nextStep,
         touches_sent: seq.touches_sent + 1,
@@ -1918,9 +2209,15 @@ const ReviewService = {
    * dodge the cooldown via email). Used by the cap + 30-day cooldown guards.
    */
   async getDeliveredAskStats(customerId) {
+    // Cap window (owner policy 2026-07-30): the 3-ask cap is a ROLLING
+    // 180-day window, not lifetime — a customer who never engages becomes
+    // eligible for a fresh cadence every ~6 months. `lastAt` (the 30-day
+    // cooldown input) is still all-time.
+    const windowStart = new Date(Date.now() - ASK_CAP_WINDOW_DAYS * 86400000);
     const countRow = await db("review_requests")
       .where({ customer_id: customerId })
       .whereRaw("(sms_sent_at IS NOT NULL OR sent_at IS NOT NULL)")
+      .whereRaw("COALESCE(sms_sent_at, sent_at) >= ?", [windowStart])
       .whereRaw(ASK_TOUCH_SQL)
       .count("* as count")
       .first();
@@ -1939,6 +2236,9 @@ const ReviewService = {
   /** Batched getDeliveredAskStats for the candidate list. */
   async getDeliveredAskStatsBatch(ids = []) {
     if (!ids.length) return {};
+    // Same rolling 180-day cap window as getDeliveredAskStats; last_at stays
+    // all-time (cooldown input).
+    const windowStart = new Date(Date.now() - ASK_CAP_WINDOW_DAYS * 86400000);
     const rows = await db("review_requests")
       .whereIn("customer_id", ids)
       .whereRaw("(sms_sent_at IS NOT NULL OR sent_at IS NOT NULL)")
@@ -1946,7 +2246,7 @@ const ReviewService = {
       .groupBy("customer_id")
       .select(
         "customer_id",
-        db.raw("COUNT(*) AS count"),
+        db.raw("COUNT(*) FILTER (WHERE COALESCE(sms_sent_at, sent_at) >= ?) AS count", [windowStart]),
         db.raw("MAX(COALESCE(sms_sent_at, sent_at)) AS last_at"),
       );
     const map = {};
@@ -2186,6 +2486,9 @@ const ReviewService = {
 ReviewService.__private = {
   retryAtForDeferredSend,
   calculateReviewSendTime,
+  nextTouchRunAt,
+  shiftToWeekdayMorning,
+  buildReviewUrl,
 };
 
 // The digital-card mint (services/customer-card.js) routes its review QR with

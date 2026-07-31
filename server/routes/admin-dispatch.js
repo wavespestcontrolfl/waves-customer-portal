@@ -7284,6 +7284,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       }
     }
 
+    const reviewCadenceEnabled = require('../config/feature-gates').isEnabled('reviewSequences');
     const shouldBundleReview =
       effectiveSendCompletionSms &&
       !completionSmsAlreadyHandled &&
@@ -7291,7 +7292,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       effectiveRequestReview &&
       svc.cust_phone &&
       !serviceReportV1Delivery &&
-      (completionReviewDelayMinutes === undefined || completionReviewDelayMinutes === 0);
+      (completionReviewDelayMinutes === undefined || completionReviewDelayMinutes === 0) &&
+      // Cadence mode owns the ask: the review link is its own Day-0 message at
+      // the smart send window, never bundled into the completion/receipt SMS
+      // (bundling would also dodge the sequence's cap/cooldown bookkeeping).
+      !reviewCadenceEnabled;
 
     let bundledReviewUrl = null;
     let bundledReviewRequestId = null;
@@ -7988,16 +7993,26 @@ router.post('/:serviceId/complete', async (req, res, next) => {
 
     // Only schedule the delayed follow-up message when the review wasn't
     // already bundled into the completion SMS above.
-    if (effectiveRequestReview && svc.cust_phone && !bundledReviewUrl) {
+    // Legacy mode is SMS-only, so no phone = no ask. Cadence mode has its own
+    // channel resolver with an SMS→email fallback (sendOutreachTouch), so an
+    // email-only customer must still reach enrollment (Codex P2, r1) — the
+    // resolver stops the sequence with no_contact/opted_out when neither
+    // channel is available.
+    if (effectiveRequestReview && (svc.cust_phone || reviewCadenceEnabled) && !bundledReviewUrl) {
       try {
         const ReviewService = require('../services/review-request');
-        await ReviewService.create({
+        await ReviewService.enrollPostService({
           customerId: svc.customer_id,
           serviceRecordId: record.id,
+          serviceType: svc.service_type || null,
+          techName: svc.tech_name || null,
+          completedAt: new Date(),
           triggeredBy: 'auto',
-          delayMinutes: completionReviewDelayMinutes === undefined
-            ? 120
-            : completionReviewDelayMinutes,
+          // Only an operator-SELECTED timing travels as an explicit delay —
+          // it wins in both modes (Codex P2, r2). Untouched selector =
+          // undefined = legacy 120-min default / cadence smart window.
+          delayMinutes: completionReviewDelayMinutes,
+          legacyDelayMinutes: 120,
         });
       } catch (e) { logger.error(`[dispatch] Review request schedule failed: ${e.message}`); }
     }

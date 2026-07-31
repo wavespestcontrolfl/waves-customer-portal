@@ -3,6 +3,13 @@ const mockSendCustomerMessage = jest.fn(async () => ({ sent: true, auditLogId: '
 const mockEmailSendTemplate = jest.fn(async () => ({ sent: true, message: { id: 'em-1' } }));
 
 jest.mock('../models/db', () => jest.fn());
+// Mutable gate flags for the 2026-07-30 revamp tests (post-service auto-enroll
+// + direct Google link). Both default OFF = pre-rollout behavior.
+const mockGates = { reviewSequences: false, reviewDirectLink: false };
+jest.mock('../config/feature-gates', () => ({
+  isEnabled: (g) => !!mockGates[g],
+  gates: mockGates,
+}));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: (...a) => mockSendCustomerMessage(...a) }));
 jest.mock('../services/email-template-library', () => ({ sendTemplate: (...a) => mockEmailSendTemplate(...a) }));
@@ -88,6 +95,8 @@ function makeMock(initial = {}, opts = {}) {
 beforeEach(() => {
   mockSendCustomerMessage.mockClear();
   mockEmailSendTemplate.mockClear();
+  mockGates.reviewSequences = false;
+  mockGates.reviewDirectLink = false;
 });
 
 describe('review sequences — cadence engine', () => {
@@ -462,5 +471,315 @@ describe('review sequences — cadence engine', () => {
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
     expect(out.stopped).toBe(1);
     expect(mock.__state.rows.review_sequences[0].stop_reason).toBe('opted_out');
+  });
+});
+
+describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () => {
+  const { nextTouchRunAt, shiftToWeekdayMorning, buildReviewUrl } = ReviewService.__private;
+
+  // 2026-08-01 is a Saturday, 2026-08-02 a Sunday, 2026-08-03 a Monday (EDT).
+  const SAT = new Date('2026-08-01T14:00:00-04:00');
+  const SUN = new Date('2026-08-02T09:00:00-04:00');
+  const WED = new Date('2026-07-29T14:00:00-04:00');
+  const MON_10 = new Date('2026-08-03T10:00:00-04:00').getTime();
+  const MON_1030 = new Date('2026-08-03T10:30:00-04:00').getTime();
+
+  test('shiftToWeekdayMorning moves Sat and Sun sends to Monday 10:00-10:30 ET, leaves weekdays alone', () => {
+    for (const weekend of [SAT, SUN]) {
+      const shifted = shiftToWeekdayMorning(weekend);
+      expect(shifted.getTime()).toBeGreaterThanOrEqual(MON_10);
+      expect(shifted.getTime()).toBeLessThanOrEqual(MON_1030);
+    }
+    expect(shiftToWeekdayMorning(WED)).toBe(WED);
+  });
+
+  test('a weekdaysOnly Day-3 step landing on Saturday fires Monday morning instead', () => {
+    const at = nextTouchRunAt({
+      startedAt: WED, // Wed + 3d = Sat
+      step: { day: 3, channel: 'sms', weekdaysOnly: true },
+      now: new Date(WED.getTime() + 60000),
+    });
+    expect(at.getTime()).toBeGreaterThanOrEqual(MON_10);
+    expect(at.getTime()).toBeLessThanOrEqual(MON_1030);
+  });
+
+  test('an already-due later step keeps ~20h spacing after the touch that just sent (no back-to-back asks)', () => {
+    // Weekend-shifted Day-3 SMS just fired Monday morning; the Day-4 email's
+    // base time (Sunday) is already past — it must NOT fire a minute later.
+    const now = new Date('2026-08-03T10:15:00-04:00');
+    const at = nextTouchRunAt({ startedAt: WED, step: { day: 4, channel: 'email' }, now });
+    expect(at.getTime()).toBe(now.getTime() + 20 * 3600000);
+  });
+
+  test('a future step is scheduled exactly at started_at + day offset', () => {
+    const at = nextTouchRunAt({ startedAt: WED, step: { day: 3, channel: 'sms' }, now: WED });
+    expect(at.getTime()).toBe(WED.getTime() + 3 * 86400000);
+  });
+
+  test('buildReviewUrl resolves to the rate page by default and to the tracked Google redirect under GATE_REVIEW_DIRECT_LINK', async () => {
+    const request = { id: 'rr-9', token: 'ab'.repeat(32) };
+    expect(await buildReviewUrl(request, 'cust-9')).toBe(`https://portal.test/rate/${request.token}`);
+    mockGates.reviewDirectLink = true;
+    expect(await buildReviewUrl(request, 'cust-9')).toBe(`https://portal.test/api/rate/${request.token}/go`);
+  });
+
+  test('enrollPostService with the gate OFF queues the legacy single ask (no sequence)', async () => {
+    const mock = makeMock({
+      customers: [{ id: 'en-1', first_name: 'Lee', last_name: 'K', phone: '+19410000031', nearest_location_id: 'parrish' }],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({ customerId: 'en-1', delayMinutes: 120 });
+
+    expect(mock.__state.rows.review_sequences).toHaveLength(0);
+    expect(mock.__state.rows.review_requests).toHaveLength(1);
+    expect(mock.__state.rows.review_requests[0]).toMatchObject({ customer_id: 'en-1', status: 'pending', triggered_by: 'auto' });
+    expect(mock.__state.rows.review_requests[0].scheduled_for).toBeInstanceOf(Date);
+    expect(result.id).toBe(mock.__state.rows.review_requests[0].id);
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('enrollPostService with the gate ON starts a cadence scheduled at the smart send window (nothing sends inline)', async () => {
+    mockGates.reviewSequences = true;
+    const mock = makeMock({
+      customers: [{ id: 'en-2', first_name: 'Ana', last_name: 'M', phone: '+19410000032', nearest_location_id: 'sarasota' }],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({
+      customerId: 'en-2',
+      serviceType: 'Quarterly Pest Control',
+      techName: 'Adam',
+      completedAt: new Date(),
+    });
+
+    expect(result.started).toBe(true);
+    expect(result.scheduledFor).toBeInstanceOf(Date);
+    expect(mock.__state.rows.review_requests).toHaveLength(0);
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    const seq = mock.__state.rows.review_sequences[0];
+    expect(seq).toMatchObject({ customer_id: 'en-2', status: 'active', current_step: 0, touches_sent: 0, started_by: 'post_service' });
+    expect(seq.next_run_at).toBeInstanceOf(Date);
+    // The cron picks it up at next_run_at — never more than ~26h out (the
+    // smart window's worst case is "next morning 10 AM" + Sat→Sun overrides).
+    expect(seq.next_run_at.getTime()).toBeGreaterThan(Date.now() - 1000);
+    expect(seq.next_run_at.getTime()).toBeLessThan(Date.now() + 48 * 3600000);
+  });
+
+  test('enrollPostService is idempotent per customer — an active cadence blocks a second enrollment', async () => {
+    mockGates.reviewSequences = true;
+    const mock = makeMock({
+      customers: [{ id: 'en-3', first_name: 'Roy', last_name: 'T', phone: '+19410000033', nearest_location_id: 'venice' }],
+      review_sequences: [{ id: 'seq-live', customer_id: 'en-3', status: 'active', current_step: 0, touches_sent: 0, plan: '[]', started_at: new Date(), next_run_at: new Date() }],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({ customerId: 'en-3', completedAt: new Date() });
+
+    expect(result.started).toBe(false);
+    expect(result.reason).toBe('already_active');
+    expect(mock.__state.rows.review_sequences).toHaveLength(1);
+  });
+
+  test('enrollPostService never throws — an archived customer under the gate reports started:false', async () => {
+    mockGates.reviewSequences = true;
+    const mock = makeMock({
+      customers: [{ id: 'en-4', first_name: 'Gil', last_name: 'B', deleted_at: new Date(), nearest_location_id: 'bradenton' }],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.enrollPostService({ customerId: 'en-4', completedAt: new Date() });
+    expect(result.started).toBe(false);
+    expect(mock.__state.rows.review_sequences).toHaveLength(0);
+  });
+
+  test('an explicit operator delay wins over the smart send window in cadence mode', async () => {
+    mockGates.reviewSequences = true;
+    const mock = makeMock({
+      customers: [{ id: 'td-1', first_name: 'Val', last_name: 'N', phone: '+19410000070', nearest_location_id: 'bradenton' }],
+    });
+    db.mockImplementation(mock);
+
+    const before = Date.now();
+    const result = await ReviewService.enrollPostService({ customerId: 'td-1', delayMinutes: 30, legacyDelayMinutes: 120, completedAt: new Date() });
+
+    expect(result.started).toBe(true);
+    const scheduled = result.scheduledFor.getTime();
+    expect(scheduled).toBeGreaterThanOrEqual(before + 29 * 60000);
+    expect(scheduled).toBeLessThanOrEqual(before + 31 * 60000);
+  });
+
+  test('enrollForPaidInvoice parses a naive ET reviewScheduledFor as Eastern wall-clock', async () => {
+    mockGates.reviewSequences = true;
+    // The completion panel posts timezone-less ET ('YYYY-MM-DDTHH:mm'). Build
+    // one ~6h out in ET and confirm the schedule lands on the ET instant, not
+    // the (4-5h earlier) UTC misread.
+    const targetMs = Date.now() + 6 * 3600000;
+    const naiveEt = new Date(targetMs).toLocaleString('sv-SE', { timeZone: 'America/New_York' }).replace(' ', 'T').slice(0, 16);
+    const mock = makeMock({
+      customers: [{ id: 'et-1', first_name: 'Ria', last_name: 'W', phone: '+19410000075', nearest_location_id: 'bradenton' }],
+      service_records: [{ id: 'sr-et', customer_id: 'et-1', structured_notes: JSON.stringify({ requestReview: true, reviewScheduledFor: naiveEt }) }],
+    });
+    db.mockImplementation(mock);
+
+    const out = await ReviewService.enrollForPaidInvoice({ id: 'inv-et', customer_id: 'et-1', service_record_id: 'sr-et' });
+
+    expect(out.enrolled).toBe(true);
+    const runAt = mock.__state.rows.review_sequences[0].next_run_at.getTime();
+    expect(Math.abs(runAt - targetMs)).toBeLessThanOrEqual(120000);
+  });
+
+  test('enrollForPaidInvoice honors the completion panel timing stored on the service record', async () => {
+    mockGates.reviewSequences = true;
+    const scheduledAt = new Date(Date.now() + 6 * 3600000).toISOString(); // custom time, 6h out
+    const mock = makeMock({
+      customers: [{ id: 'pt-1', first_name: 'Iva', last_name: 'S', phone: '+19410000073', nearest_location_id: 'bradenton' }],
+      service_records: [{ id: 'sr-pt', customer_id: 'pt-1', structured_notes: JSON.stringify({ requestReview: true, visitOutcome: 'completed', reviewScheduledFor: scheduledAt }) }],
+    });
+    db.mockImplementation(mock);
+
+    const out = await ReviewService.enrollForPaidInvoice({ id: 'inv-pt', customer_id: 'pt-1', service_record_id: 'sr-pt' });
+
+    expect(out.enrolled).toBe(true);
+    const runAt = mock.__state.rows.review_sequences[0].next_run_at.getTime();
+    const target = new Date(scheduledAt).getTime();
+    expect(Math.abs(runAt - target)).toBeLessThanOrEqual(90000);
+
+    // An elapsed stored time sends immediately (first cron tick), not never.
+    const mock2 = makeMock({
+      customers: [{ id: 'pt-2', first_name: 'Ugo', last_name: 'T', phone: '+19410000074', nearest_location_id: 'bradenton' }],
+      service_records: [{ id: 'sr-pt2', customer_id: 'pt-2', structured_notes: JSON.stringify({ requestReview: true, reviewDelayMinutes: 0 }) }],
+    });
+    db.mockImplementation(mock2);
+    const before = Date.now();
+    const out2 = await ReviewService.enrollForPaidInvoice({ id: 'inv-pt2', customer_id: 'pt-2', service_record_id: 'sr-pt2' });
+    expect(out2.enrolled).toBe(true);
+    const runAt2 = mock2.__state.rows.review_sequences[0].next_run_at.getTime();
+    expect(runAt2).toBeLessThanOrEqual(before + 60000 + 5000);
+  });
+
+  test('enrollForPaidInvoice enrolls a completion invoice and honors the completion opt-out', async () => {
+    mockGates.reviewSequences = true;
+    const mock = makeMock({
+      customers: [{ id: 'pi-1', first_name: 'Ned', last_name: 'C', phone: '+19410000071', nearest_location_id: 'venice' }],
+      service_records: [{ id: 'sr-pi', customer_id: 'pi-1', structured_notes: JSON.stringify({ requestReview: true, visitOutcome: 'completed' }) }],
+    });
+    db.mockImplementation(mock);
+
+    const out = await ReviewService.enrollForPaidInvoice({ id: 'inv-pi', customer_id: 'pi-1', service_record_id: 'sr-pi', invoice_number: 'WPC-1' }, { source: 'record_payment' });
+    expect(out.enrolled).toBe(true);
+    expect(mock.__state.rows.review_sequences).toHaveLength(1);
+
+    // Opt-out recorded at completion blocks it.
+    const mock2 = makeMock({
+      customers: [{ id: 'pi-2', first_name: 'Oli', last_name: 'D', phone: '+19410000072', nearest_location_id: 'venice' }],
+      service_records: [{ id: 'sr-pi2', customer_id: 'pi-2', structured_notes: JSON.stringify({ requestReview: false }) }],
+    });
+    db.mockImplementation(mock2);
+    const out2 = await ReviewService.enrollForPaidInvoice({ id: 'inv-pi2', customer_id: 'pi-2', service_record_id: 'sr-pi2' });
+    expect(out2).toEqual({ enrolled: false, reason: 'completion_opted_out' });
+    expect(mock2.__state.rows.review_sequences).toHaveLength(0);
+
+    // Standalone invoices (no service record) are a no-op here.
+    const out3 = await ReviewService.enrollForPaidInvoice({ id: 'inv-pi3', customer_id: 'pi-2', service_record_id: null });
+    expect(out3).toEqual({ enrolled: false, reason: 'not_completion_invoice' });
+  });
+
+  test('a cadence touch recovers technician_id + service_date from the service record (rate-page context)', async () => {
+    const svcDate = '2026-07-27';
+    const mock = makeMock({
+      customers: [{ id: 'vc-1', first_name: 'Kim', last_name: 'H', phone: '+19410000050', nearest_location_id: 'bradenton' }],
+      service_records: [{ id: 'sr-1', customer_id: 'vc-1', service_type: 'Quarterly Pest Control', service_date: svcDate, technician_id: 'tech-7', scheduled_service_id: null }],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.startReviewSequence({ customerId: 'vc-1', serviceRecordId: 'sr-1', serviceType: 'Quarterly Pest Control', techName: 'Adam', startedBy: 'admin-1' });
+
+    expect(result.started).toBe(true);
+    const touch = mock.__state.rows.review_requests[0];
+    expect(touch.technician_id).toBe('tech-7');
+    expect(touch.service_date).toBe(svcDate);
+    expect(touch.service_record_id).toBe('sr-1');
+  });
+
+  test('a step overdue by more than 7 days (gate toggled off/on) retires as stale instead of firing', async () => {
+    const mock = makeMock({
+      customers: [{ id: 'st-1', first_name: 'Ana', last_name: 'F', phone: '+19410000080', nearest_location_id: 'bradenton' }],
+      review_sequences: [{
+        id: 'seq-st', customer_id: 'st-1', status: 'active', current_step: 1, touches_sent: 1,
+        plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }, { day: 3, channel: 'sms', templateKey: 'soft_reminder' }]),
+        // Due 10 days ago — the cron was frozen (gate off) and just came back.
+        started_at: new Date(Date.now() - 13 * 86400000), next_run_at: new Date(Date.now() - 10 * 86400000),
+      }],
+    });
+    db.mockImplementation(mock);
+
+    const out = await ReviewService.processReviewSequences();
+
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(out.stopped).toBe(1);
+    expect(mock.__state.rows.review_sequences[0].stop_reason).toBe('stale');
+  });
+
+  test('a first touch legitimately scheduled ~30 days out fires when just-due (not stale)', async () => {
+    const mock = makeMock({
+      customers: [{ id: 'st-2', first_name: 'Bo', last_name: 'K', phone: '+19410000082', nearest_location_id: 'bradenton' }],
+      review_sequences: [{
+        id: 'seq-st2', customer_id: 'st-2', status: 'active', current_step: 0, touches_sent: 0,
+        plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }]),
+        // Operator scheduled the start 30 days out; it just came due.
+        started_at: new Date(Date.now() - 30 * 86400000), next_run_at: new Date(Date.now() - 120000),
+      }],
+    });
+    db.mockImplementation(mock);
+
+    const out = await ReviewService.processReviewSequences();
+
+    expect(out.sent).toBe(1);
+    expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(mock.__state.rows.review_sequences[0].status).toBe('completed');
+  });
+
+  test('an ask delivered outside the sequence (legacy path while gate was off) supersedes the cadence', async () => {
+    const mock = makeMock({
+      customers: [{ id: 'sp-1', first_name: 'Eli', last_name: 'G', phone: '+19410000081', nearest_location_id: 'venice' }],
+      review_sequences: [{
+        id: 'seq-sp', customer_id: 'sp-1', status: 'active', current_step: 1, touches_sent: 1,
+        plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }, { day: 3, channel: 'sms', templateKey: 'soft_reminder' }]),
+        started_at: new Date(Date.now() - 5 * 86400000), next_run_at: new Date(Date.now() - 60000),
+      }],
+      review_requests: [
+        // The cadence's own touch — must NOT count as external.
+        { id: 'rr-own', sequence_id: 'seq-sp', customer_id: 'sp-1', channel: 'sms', sms_sent_at: new Date(Date.now() - 5 * 86400000), created_at: new Date(Date.now() - 5 * 86400000) },
+        // A legacy one-off ask delivered yesterday (no sequence linkage).
+        { id: 'rr-ext', sequence_id: null, customer_id: 'sp-1', channel: 'sms', sms_sent_at: new Date(Date.now() - 86400000), created_at: new Date(Date.now() - 86400000) },
+      ],
+    });
+    db.mockImplementation(mock);
+
+    const out = await ReviewService.processReviewSequences();
+
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(out.stopped).toBe(1);
+    expect(mock.__state.rows.review_sequences[0].stop_reason).toBe('superseded');
+  });
+
+  test('a cadence stops with reason "clicked" once a touch was redirected to Google (direct-link engagement)', async () => {
+    const mock = makeMock({
+      customers: [{ id: 'cl-1', first_name: 'Ivy', last_name: 'W', phone: '+19410000034', nearest_location_id: 'bradenton' }],
+      review_sequences: [{
+        id: 'seq-cl', customer_id: 'cl-1', status: 'active', current_step: 1, touches_sent: 1,
+        plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }, { day: 3, channel: 'sms', templateKey: 'soft_reminder', weekdaysOnly: true }]),
+        started_at: new Date(Date.now() - 3 * 86400000), next_run_at: new Date(Date.now() - 60000),
+      }],
+      review_requests: [{ id: 'rr-cl', sequence_id: 'seq-cl', customer_id: 'cl-1', channel: 'sms', sms_sent_at: new Date(Date.now() - 3 * 86400000), redirected_at: new Date(Date.now() - 2 * 86400000), redirected_to_google: true }],
+    });
+    db.mockImplementation(mock);
+
+    const out = await ReviewService.processReviewSequences();
+
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(out.stopped).toBe(1);
+    expect(mock.__state.rows.review_sequences[0].stop_reason).toBe('clicked');
   });
 });

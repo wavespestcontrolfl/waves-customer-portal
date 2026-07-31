@@ -20,7 +20,7 @@ jest.mock('../services/invoice-email', () => ({
   sendInvoiceEmail: jest.fn(async () => ({ ok: true })),
 }));
 jest.mock('../services/review-request', () => ({
-  create: jest.fn(async () => ({ id: 'rr-1' })),
+  enrollPostService: jest.fn(async () => ({ id: 'rr-1' })),
 }));
 jest.mock('../services/invoice-followups', () => ({
   scheduleForInvoice: jest.fn(async () => {}),
@@ -62,7 +62,7 @@ function scheduledInvoice(overrides = {}) {
 //   5. success-path update
 // The chains are permissive, so the same sequence also covers runs where
 // the review block is skipped (call 4 becomes the success update).
-function mockSendSequence(invoice) {
+function mockSendSequence(invoice, reviewRead = {}) {
   db
     .mockReturnValueOnce(chain({ first: invoice }))
     .mockReturnValueOnce(chain({ first: invoice }))
@@ -72,6 +72,10 @@ function mockSendSequence(invoice) {
         first: {
           customer_id: invoice.customer_id,
           service_record_id: invoice.service_record_id,
+          // What the review block reads back AFTER delivery: an unpaid
+          // completion invoice is 'sent' at this point.
+          status: 'sent',
+          ...reviewRead,
         },
       }),
     )
@@ -90,18 +94,38 @@ describe('InvoiceService.sendViaSMSAndEmail scheduled-review fallback', () => {
     jest.restoreAllMocks();
   });
 
-  test('no review options → inherits the scheduled review request', async () => {
+  test('unpaid COMPLETION invoice → review ask deferred to the paid webhook (Codex P1, PR #3104 r1)', async () => {
     mockSendSequence(scheduledInvoice());
 
     const result = await InvoiceService.sendViaSMSAndEmail('inv-1', {});
 
     expect(result.ok).toBe(true);
-    expect(ReviewService.create).toHaveBeenCalledWith({
+    expect(ReviewService.enrollPostService).not.toHaveBeenCalled();
+  });
+
+  test('prepaid completion invoice → inherits the scheduled review request at delivery', async () => {
+    mockSendSequence(scheduledInvoice(), { status: 'prepaid' });
+
+    const result = await InvoiceService.sendViaSMSAndEmail('inv-1', {});
+
+    expect(result.ok).toBe(true);
+    expect(ReviewService.enrollPostService).toHaveBeenCalledWith({
       customerId: 'cust-1',
       serviceRecordId: 'sr-1',
       triggeredBy: 'auto',
       delayMinutes: 120,
     });
+  });
+
+  test('standalone unpaid invoice (no service record) keeps the legacy at-delivery ask', async () => {
+    mockSendSequence(scheduledInvoice({ service_record_id: null }));
+
+    const result = await InvoiceService.sendViaSMSAndEmail('inv-1', {});
+
+    expect(result.ok).toBe(true);
+    expect(ReviewService.enrollPostService).toHaveBeenCalledWith(
+      expect.objectContaining({ customerId: 'cust-1', serviceRecordId: null }),
+    );
   });
 
   test('explicit requestReview: false overrides the stored flag', async () => {
@@ -112,7 +136,7 @@ describe('InvoiceService.sendViaSMSAndEmail scheduled-review fallback', () => {
     });
 
     expect(result.ok).toBe(true);
-    expect(ReviewService.create).not.toHaveBeenCalled();
+    expect(ReviewService.enrollPostService).not.toHaveBeenCalled();
   });
 
   test('no review options + no stored flag → no review request', async () => {
@@ -126,11 +150,11 @@ describe('InvoiceService.sendViaSMSAndEmail scheduled-review fallback', () => {
     const result = await InvoiceService.sendViaSMSAndEmail('inv-1', {});
 
     expect(result.ok).toBe(true);
-    expect(ReviewService.create).not.toHaveBeenCalled();
+    expect(ReviewService.enrollPostService).not.toHaveBeenCalled();
   });
 
   test('explicit requestReview + delay wins over stored minutes', async () => {
-    mockSendSequence(scheduledInvoice());
+    mockSendSequence(scheduledInvoice(), { status: 'prepaid' });
 
     const result = await InvoiceService.sendViaSMSAndEmail('inv-1', {
       requestReview: true,
@@ -138,7 +162,7 @@ describe('InvoiceService.sendViaSMSAndEmail scheduled-review fallback', () => {
     });
 
     expect(result.ok).toBe(true);
-    expect(ReviewService.create).toHaveBeenCalledWith(
+    expect(ReviewService.enrollPostService).toHaveBeenCalledWith(
       expect.objectContaining({ delayMinutes: 30 }),
     );
   });
@@ -166,7 +190,7 @@ describe('InvoiceService.markDeliverySent scheduled-review fallback', () => {
     jest.clearAllMocks();
   });
 
-  test('no review options → inherits the scheduled review request', async () => {
+  test('unpaid COMPLETION invoice → review ask deferred to the paid webhook (Codex P1, PR #3104 r1)', async () => {
     mockMarkDeliverySequence(scheduledInvoice());
 
     const result = await InvoiceService.markDeliverySent('inv-1', {
@@ -176,9 +200,22 @@ describe('InvoiceService.markDeliverySent scheduled-review fallback', () => {
     });
 
     expect(result.status).toBe('sent');
-    expect(ReviewService.create).toHaveBeenCalledWith({
+    expect(ReviewService.enrollPostService).not.toHaveBeenCalled();
+  });
+
+  test('standalone invoice (no service record) still inherits the scheduled review request', async () => {
+    mockMarkDeliverySequence(scheduledInvoice({ service_record_id: null }));
+
+    const result = await InvoiceService.markDeliverySent('inv-1', {
+      sms: true,
+      email: true,
+      source: 'project_report_with_invoice',
+    });
+
+    expect(result.status).toBe('sent');
+    expect(ReviewService.enrollPostService).toHaveBeenCalledWith({
       customerId: 'cust-1',
-      serviceRecordId: 'sr-1',
+      serviceRecordId: null,
       triggeredBy: 'auto',
       delayMinutes: 120,
     });
@@ -192,7 +229,7 @@ describe('InvoiceService.markDeliverySent scheduled-review fallback', () => {
       requestReview: false,
     });
 
-    expect(ReviewService.create).not.toHaveBeenCalled();
+    expect(ReviewService.enrollPostService).not.toHaveBeenCalled();
   });
 
   test('no stored flag → no review request', async () => {
@@ -205,7 +242,7 @@ describe('InvoiceService.markDeliverySent scheduled-review fallback', () => {
 
     await InvoiceService.markDeliverySent('inv-1', { email: true });
 
-    expect(ReviewService.create).not.toHaveBeenCalled();
+    expect(ReviewService.enrollPostService).not.toHaveBeenCalled();
   });
 
   test('concurrent finalization won the race → no duplicate review request', async () => {
@@ -213,7 +250,7 @@ describe('InvoiceService.markDeliverySent scheduled-review fallback', () => {
 
     await InvoiceService.markDeliverySent('inv-1', { email: true });
 
-    expect(ReviewService.create).not.toHaveBeenCalled();
+    expect(ReviewService.enrollPostService).not.toHaveBeenCalled();
   });
 
   test('non-finalizable status returns early without queueing', async () => {
@@ -222,6 +259,6 @@ describe('InvoiceService.markDeliverySent scheduled-review fallback', () => {
     const result = await InvoiceService.markDeliverySent('inv-1', { email: true });
 
     expect(result.status).toBe('paid');
-    expect(ReviewService.create).not.toHaveBeenCalled();
+    expect(ReviewService.enrollPostService).not.toHaveBeenCalled();
   });
 });
