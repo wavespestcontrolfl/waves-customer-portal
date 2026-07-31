@@ -6784,7 +6784,7 @@ function normalizeApplicationMethod(value = "") {
   return normalized;
 }
 
-export function defaultApplicationMethod(product = {}, serviceType = "") {
+export function defaultApplicationMethod(product = {}, serviceType = "", { interiorLane = false } = {}) {
   const category = String(product.category || product.product_category || "").toLowerCase();
   const explicit = product.application_method || product.method;
   if (explicit) return normalizeApplicationMethod(explicit);
@@ -6808,8 +6808,9 @@ export function defaultApplicationMethod(product = {}, serviceType = "") {
   // recorded interior work as exterior AND demanded perimeter footage the
   // (hidden) zone tracer would have prefilled, blocking a routine closeout
   // — default methodless products to an interior spot application instead
-  // (codex P1 on the bed-bug untype).
-  if (/\bbed\s*bugs?\b/i.test(String(serviceType || ""))) return "spot_treatment";
+  // (codex P1 on the bed-bug untype). interiorLane comes from the STABLE
+  // profile key; the name regex is the fallback for callers without it.
+  if (interiorLane || /\bbed\s*bugs?\b/i.test(String(serviceType || ""))) return "spot_treatment";
   return "perimeter_spray";
 }
 
@@ -8850,10 +8851,14 @@ export function CompletionPanel({
   })();
   const canApproveOfficeExceptions = currentAdminUser?.role === "admin";
   const serviceCategory = detectServiceCategory(service.serviceType);
-  // Bed bug closeouts get interior-specific treated-area chips and skip the
+  // Bed bug closeouts get interior-specific treated-area chips, skip the
   // satellite spray-trace (a perimeter trace has no meaning for an interior
-  // treatment) — owner 2026-07-31, bed-bug untype lane.
-  const isBedBugVisit = /\bbed\s*bugs?\b/.test(String(service.serviceType || "").toLowerCase());
+  // treatment), and hide the no-invoice recap — owner 2026-07-31, bed-bug
+  // untype lane. The STABLE profile key is authoritative (display labels
+  // are admin-editable); the name regex is only a fallback for rows whose
+  // profile did not resolve (codex P2 r8).
+  const isBedBugVisit = service.completionProfile?.serviceKey === "bed_bug_treatment"
+    || /\bbed\s*bugs?\b/.test(String(service.serviceType || "").toLowerCase());
   const serviceLineForCloseout = serviceLineFromType(serviceTypeForArea);
   // Tree & shrub / palm visits swap the Targets picker suggestions to the
   // ornamental pest list (see targetPickerConfig).
@@ -10425,7 +10430,7 @@ export function CompletionPanel({
     // the response is about to write (built from the pre-draft snapshot).
     if (generating) return;
     if (selectedProducts.find((p) => p.productId === product.id)) return;
-    const applicationMethod = defaultApplicationMethod(product, serviceTypeForArea);
+    const applicationMethod = defaultApplicationMethod(product, serviceTypeForArea, { interiorLane: isBedBugVisit });
     const areaRequirement = requiredApplicationArea(
       applicationMethod,
       serviceTypeForArea,

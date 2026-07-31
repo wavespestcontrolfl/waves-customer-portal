@@ -4771,8 +4771,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // Interior-only treatments (bed bug, post-20260731400000): a
             // trace saved before the tracer was hidden for this lane is
             // stale EXTERIOR evidence — it must not resurrect the exterior
-            // dry-down timer on an interior visit (codex P2 r6).
-            const interiorOnlyVisit = /\bbed\s*bugs?\b/i.test(String(svc.service_type || ''));
+            // dry-down timer on an interior visit (codex P2 r6). The stable
+            // profile key is authoritative; the label regex is the fallback
+            // for unresolved profiles (codex P2 r8).
+            const interiorOnlyVisit = completionProfile?.serviceKey === 'bed_bug_treatment'
+              || /\bbed\s*bugs?\b/i.test(String(svc.service_type || ''));
             try {
               tracedExteriorZone = interiorOnlyVisit ? false : await trx.transaction(async (sp) => !!(await sp('treatment_zone_maps')
                 .where({ scheduled_service_id: svc.id })
@@ -7632,7 +7635,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               // (codex P1 #3007 r13).
               applications: (typeof products !== 'undefined' && Array.isArray(products)) ? products : [],
               tracedExteriorZone: await require('../services/service-report/reentry')
-                .resolveTracedExteriorZone({ scheduled_service_id: record.scheduled_service_id || svc.id }),
+                .resolveTracedExteriorZone({ scheduled_service_id: record.scheduled_service_id || svc.id, service_type: svc.service_type }),
             },
             service: svc,
             reportUrl,
@@ -8371,12 +8374,17 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         typedFindingsType,
         typedDeliveryMode,
         followupSuggestion,
-      } : (followupSuggestion ? {
+      } : {
         // Untyped alert-policy completions (bed_bug post-20260731400000)
         // parked the same obligation — the panel needs the suggestion to
         // render its Book-follow-up CTA (codex P1 r1).
-        followupSuggestion,
-      } : {})),
+        ...(followupSuggestion ? { followupSuggestion } : {}),
+        // A suppressed untyped delivery posture must reach the panel too:
+        // the success overlays disclose internal-only/disabled delivery
+        // from typedDeliveryMode, else they claim "SMS + Report sent" on a
+        // completion the server suppressed (codex P2 r8).
+        ...(typedDeliveryMode !== 'auto_send' ? { typedDeliveryMode } : {}),
+      }),
     };
     // Refresh the stored response with the final invoice info — this is an
     // UPDATE of an already-succeeded row (set above immediately after the

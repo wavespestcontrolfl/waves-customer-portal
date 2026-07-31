@@ -486,6 +486,12 @@ function normalizeAdvisoryForTreatmentScope(advisory = {}, { service = {}, appli
 // require cycle.
 async function resolveTracedExteriorZone(record, knex = db) {
   if (!record?.scheduled_service_id) return false;
+  // Interior-only treatments (bed bug): a trace saved before the tracer was
+  // hidden for this lane is stale EXTERIOR evidence — never let it drive
+  // the exterior dry-down timer. Single choke point for the report payload,
+  // the re-entry context, and the completion SMS (codex P2 r8; callers
+  // pass service_type when they have the row).
+  if (/\bbed\s*bugs?\b/i.test(String(record.service_type || ''))) return false;
   try {
     return !!(await knex('treatment_zone_maps')
       .where({ scheduled_service_id: record.scheduled_service_id })
@@ -1366,9 +1372,11 @@ function shouldAddNoActivityFinding({ service = {}, structured = {}, protocol = 
   // Infestation-class interior lanes (bed bug, untyped post-20260731400000)
   // never INFER "no activity" from blank optional fields — the visit exists
   // because activity was found; only an EXPLICIT 0 rating states the zero
-  // (mirrors the completion-side insert guard, codex P2 r7).
+  // (mirrors the completion-side insert guard, codex P2 r7). Raw-null check
+  // first: Number(null) coerces to 0, which would read a MISSING rating as
+  // an explicit zero (codex P2 r8).
   if (/\bbed\s*bugs?\b/i.test(String(service.service_type || ''))
-    && !(Number.isFinite(rating) && rating === 0)) {
+    && !(service.client_pest_rating != null && Number(service.client_pest_rating) === 0)) {
     return false;
   }
   return visitOutcome === 'completed'
