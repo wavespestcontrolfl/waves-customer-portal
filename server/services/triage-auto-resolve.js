@@ -250,51 +250,55 @@ async function sweep({ now = new Date() } = {}) {
   // Apply per rule in batched CAS updates (status='open' re-checked at write
   // time — an operator or event-driven resolver may have raced us). Touched
   // calls derive from RETURNING on the successful update only: a decision
-  // whose row lost the race must not drive the review_status sync below.
+  // whose row lost the race must not drive the review_status sync.
+  //
+  // The whole apply phase — transitions AND the review_status sync — runs in
+  // ONE transaction: a crash between them would otherwise strand terminal
+  // cards under a call still marked 'open', and the next sweep (which scans
+  // only open cards) could never repair the stale aggregate. A failure rolls
+  // everything back; the nightly rerun is idempotent.
   const counts = {};
-  const touchedCalls = new Map(); // call_log_id -> status we applied last
-  const itemCallById = new Map(applied.map((d) => [d.item.id, d.item.call_log_id]));
-  for (const rule of Object.keys(RULE_NOTES)) {
-    const group = applied.filter((d) => d.rule === rule);
-    if (!group.length) continue;
-    const action = group[0].action;
-    const status = action === 'resolve' ? 'resolved' : 'dismissed';
-    const updatedRows = await db('triage_items')
-      .whereIn('id', group.map((d) => d.item.id))
-      .where({ status: 'open' })
-      .update({
-        status,
-        resolution_note: RULE_NOTES[rule],
-        resolved_at: now,
-        updated_at: now,
-      })
-      .returning('id');
-    counts[rule] = updatedRows.length;
-    for (const row of updatedRows) {
-      const id = row?.id ?? row;
-      const callLogId = itemCallById.get(id);
-      if (callLogId) touchedCalls.set(callLogId, status);
-    }
-  }
-
-  // Mirror admin-triage transitionCore's review_status sync: a call with
-  // open/in_progress cards remaining stays 'open'; otherwise it takes the
-  // status of the transition that cleared it.
   let callsSynced = 0;
-  for (const [callLogId, appliedStatus] of touchedCalls) {
-    try {
-      const remaining = await db('triage_items')
+  const itemCallById = new Map(applied.map((d) => [d.item.id, d.item.call_log_id]));
+  await db.transaction(async (trx) => {
+    const touchedCalls = new Map(); // call_log_id -> status we applied last
+    for (const rule of Object.keys(RULE_NOTES)) {
+      const group = applied.filter((d) => d.rule === rule);
+      if (!group.length) continue;
+      const action = group[0].action;
+      const status = action === 'resolve' ? 'resolved' : 'dismissed';
+      const updatedRows = await trx('triage_items')
+        .whereIn('id', group.map((d) => d.item.id))
+        .where({ status: 'open' })
+        .update({
+          status,
+          resolution_note: RULE_NOTES[rule],
+          resolved_at: now,
+          updated_at: now,
+        })
+        .returning('id');
+      counts[rule] = updatedRows.length;
+      for (const row of updatedRows) {
+        const id = row?.id ?? row;
+        const callLogId = itemCallById.get(id);
+        if (callLogId) touchedCalls.set(callLogId, status);
+      }
+    }
+
+    // Mirror admin-triage transitionCore's review_status sync: a call with
+    // open/in_progress cards remaining stays 'open'; otherwise it takes the
+    // status of the transition that cleared it.
+    for (const [callLogId, appliedStatus] of touchedCalls) {
+      const remaining = await trx('triage_items')
         .where({ call_log_id: callLogId })
         .whereIn('status', ['open', 'in_progress'])
         .count({ n: '*' })
         .first();
       const next = Number(remaining?.n || 0) > 0 ? 'open' : appliedStatus;
-      await db('call_log').where({ id: callLogId }).update({ review_status: next, updated_at: now });
+      await trx('call_log').where({ id: callLogId }).update({ review_status: next, updated_at: now });
       callsSynced += 1;
-    } catch (err) {
-      logger.warn(`[triage-sweep] review_status sync failed for call ${callLogId}: ${err.message}`);
     }
-  }
+  });
 
   const totalApplied = Object.values(counts).reduce((a, b) => a + b, 0);
   logger.info(`[triage-sweep] scanned=${items.length} applied=${totalApplied} deferred=${deferred} rules=${JSON.stringify(counts)} callsSynced=${callsSynced}`);
