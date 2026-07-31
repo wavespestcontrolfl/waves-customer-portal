@@ -3157,9 +3157,20 @@ export default function EstimateToolViewV2({
       return;
     }
     if (key === "__custom__") {
+      // "Custom…" is a hardcoded sentinel, not a catalog row, so there is no
+      // discount_type to source the manual type from the way the preset
+      // branch below does. Leaving the type alone meant a fresh form kept
+      // its "NONE" default, buildManualDiscountPayload returned null, and
+      // the operator's amount was dropped with no warning at all. Seed
+      // PERCENT (the common custom case) while preserving a type the
+      // operator already chose, so switching presets never clobbers it.
       setForm((f) => ({
         ...f,
         manualDiscountPreset: key,
+        manualDiscountType:
+          f.manualDiscountType && f.manualDiscountType !== "NONE"
+            ? f.manualDiscountType
+            : "PERCENT",
       }));
       return;
     }
@@ -3614,6 +3625,16 @@ export default function EstimateToolViewV2({
       const selectedManualPreset = discountPresets.find(
         (x) => x.discount_key === form.manualDiscountPreset,
       );
+      // An amount with no type is the silent-drop case: every guard below is
+      // itself gated on type !== NONE, and buildManualDiscountPayload returns
+      // null for a NONE type — so without this the estimate regenerated at
+      // full price with no error and the discount vanished. Fail loudly.
+      if (manualDiscountType === "NONE" && manualDiscountValue > 0) {
+        alert(
+          "Pick a discount type (Percent % or Dollar $) — a discount amount with no type is not applied.",
+        );
+        return null;
+      }
       if (manualDiscountType !== "NONE" && (form.manualDiscountPreset || manualDiscountValue > 0) && manualDiscountValue <= 0) {
         alert("Manual discount amount must be greater than zero.");
         return null;
