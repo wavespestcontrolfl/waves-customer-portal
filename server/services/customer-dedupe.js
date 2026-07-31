@@ -1778,12 +1778,31 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       const transferToLoser = async () => trx('customer_properties')
         .where(propWhere)
         .update({ customer_id: loserId, updated_at: trx.fn.now() });
-      const referencingVisit = await trx('scheduled_services')
+      const referencingVisits = await trx('scheduled_services')
         .where({ property_id: recorded.linked_property_id })
-        .first('id');
+        .select('id', 'customer_id');
+      // A visit booked for the WINNER after the merge (references the
+      // property, still winner-owned, absent from the journaled repoint set
+      // — journaled visits were the loser's and moved back above) would be
+      // STRANDED by the transfer: its customer stays the winner while its
+      // property moves to the loser. Moving visits between customers has
+      // billing/comms side effects we must not automate — REFUSE (409; the
+      // throw rolls the transaction back to zero writes). Rebook or
+      // reassign the appointment first, then revert.
+      const journaledVisitIds = new Set();
+      for (const [key, ids] of Object.entries(recorded.tables)) {
+        if (key.startsWith('scheduled_services.') && Array.isArray(ids)) {
+          for (const id of ids) journaledVisitIds.add(id);
+        }
+      }
+      const postMergeVisits = referencingVisits
+        .filter((v) => v.customer_id === winnerId && !journaledVisitIds.has(v.id));
+      if (postMergeVisits.length) {
+        refuse(`${postMergeVisits.length} appointment(s) booked for the kept customer after the merge still reference the linked property — moving visits between customers has billing/comms side effects; rebook or reassign them first, then revert`);
+      }
       let removed = 0;
       let transferred = 0;
-      if (referencingVisit) {
+      if (referencingVisits.length) {
         transferred = await transferToLoser();
         if (transferred) {
           repointedBack['customer_properties.linked_property_transferred'] = transferred;
@@ -1844,6 +1863,58 @@ async function revertMerge({ journalId, performedBy, performedById }) {
         winnerPatch[field] = null;
       } else {
         skipped.push({ key: `customers.${field}`, reason: 'winner_value_changed_since_merge' });
+      }
+    }
+    // Email-bound artifacts created AFTER the merge: the merge backfilled
+    // the loser's email onto the winner, and comms/billing surfaces created
+    // since then deliver to it — open estimates (estimates.customer_email),
+    // active automation enrollments (denormalized email), and active
+    // newsletter subscriptions. Clearing the email out from under them
+    // orphans their delivery target, and re-pointing or rotating them has
+    // comms side effects we must not automate — REFUSE (409, zero writes).
+    // Journaled rows are pre-merge (they move back with the undo) and the
+    // created_at cut excludes them too. Only runs when the undo would
+    // actually clear the email; a since-edited winner email skips the clear
+    // and needs no probe. An unreadable probe table refuses too — an
+    // artifact we can't check is an artifact we can't clear from under.
+    if (backfills.email && winnerPatch.email === null
+      && Object.prototype.hasOwnProperty.call(winnerPatch, 'email')) {
+      const emailLower = String(backfills.email).trim().toLowerCase();
+      const mergeAt = journal.created_at || null;
+      const journaledIdsFor = (table) => {
+        const set = new Set();
+        for (const [key, ids] of Object.entries(recorded.tables)) {
+          if (key.startsWith(`${table}.`) && Array.isArray(ids)) {
+            for (const id of ids) set.add(id);
+          }
+        }
+        return set;
+      };
+      const EMAIL_BOUND_PROBES = [
+        { table: 'estimates', emailColumn: 'customer_email', active: (q) => q.whereIn('status', ['draft', 'sent', 'viewed']), label: 'open estimate(s)' },
+        { table: 'automation_enrollments', emailColumn: 'email', active: (q) => q.where({ status: 'active' }), label: 'active automation enrollment(s)' },
+        { table: 'newsletter_subscribers', emailColumn: 'email', active: (q) => q.where({ status: 'active' }), label: 'active newsletter subscription(s)' },
+      ];
+      const emailBlockers = [];
+      for (const probe of EMAIL_BOUND_PROBES) {
+        let rows = [];
+        try {
+          let query = trx(probe.table)
+            .where({ customer_id: winnerId })
+            .whereRaw(`lower(${probe.emailColumn}) = ?`, [emailLower])
+            .select('id');
+          query = probe.active(query);
+          if (mergeAt) query = query.where('created_at', '>', mergeAt);
+          rows = await query;
+        } catch (e) {
+          refuse(`Cannot verify ${probe.table} for artifacts bound to the merged-in email (${e.message}) — refusing to revert`);
+        }
+        const journaled = journaledIdsFor(probe.table);
+        const found = rows.filter((r) => !journaled.has(r.id));
+        if (found.length) emailBlockers.push(`${found.length} ${probe.label}`);
+      }
+      if (emailBlockers.length) {
+        refuse(`The kept customer has ${emailBlockers.join(', ')} created after the merge that deliver to the merged-in email — clearing it would orphan them; resolve or re-address those first, then revert`);
       }
     }
     // Winner customer-level autopay state the merge overwrote directly (the
@@ -1943,7 +2014,16 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       account_credits: loserCreditsAfter,
       updated_at: trx.fn.now(),
     };
-    if (stripeMovedBack) restore.stripe_customer_id = snapshot.stripe_customer_id || null;
+    // Restore the RECORDED transferred id, not the snapshot's: in the
+    // derived-Stripe case (neither customer row named a profile, the
+    // loser's saved cards identified one) the snapshot holds null while the
+    // repointed cards live on the derived profile — the restored loser must
+    // own it or its cards reference a Stripe customer its row doesn't
+    // have. In the loser-only-profile case the two values are identical.
+    // Guarded as elsewhere: stripeMovedBack is only true when the id
+    // provably still sat on the winner (drift and post-merge-cards
+    // refusals above).
+    if (stripeMovedBack) restore.stripe_customer_id = transferredStripe;
     try {
       await trx.transaction(async (sp) => {
         await sp('customers').where({ id: loserId }).update(restore);

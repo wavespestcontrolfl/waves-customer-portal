@@ -10,6 +10,11 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => null) }));
+// Pass-through auth so the /merges revertible flag can be pinned end-to-end.
+jest.mock('../middleware/admin-auth', () => ({
+  adminAuthenticate: (req, res, next) => next(),
+  requireAdmin: (req, res, next) => next(),
+}));
 
 const db = require('../models/db');
 const { notifyAdmin } = require('../services/notification-service');
@@ -22,7 +27,7 @@ function makeChain(table, route) {
   const methods = [
     'where', 'whereIn', 'whereRaw', 'whereNull', 'whereNotNull', 'whereNotIn', 'whereNot', 'select', 'groupBy',
     'orderBy', 'forUpdate', 'update', 'insert', 'del', 'count', 'sum', 'onConflict',
-    'ignore', 'returning', 'first', 'increment', 'decrement', 'limit',
+    'ignore', 'returning', 'first', 'increment', 'decrement', 'limit', 'leftJoin',
   ];
   for (const m of methods) {
     q[m] = jest.fn((...args) => { q._calls.push([m, args]); return q; });
@@ -492,10 +497,20 @@ describe('revertMerge', () => {
         }
         return [];
       }
-      // The linked-property undo probes for referencing visits first
-      // (the FK is ON DELETE SET NULL, so only this probe can catch them).
-      if (table === 'scheduled_services' && q.called('first')) {
-        return (tables.scheduled_services && tables.scheduled_services.referencingVisit) || null;
+      // Row-id verification selects are the only ones using whereIn('id',…)
+      // — everything else on these tables is a probe.
+      const isIdVerification = q.called('whereIn') && q.args('whereIn')?.[0] === 'id';
+      // The linked-property undo probes for referencing visits (the FK is
+      // ON DELETE SET NULL, so only this probe can catch them).
+      if (table === 'scheduled_services' && q.called('select') && !isIdVerification) {
+        return (tables.scheduled_services && tables.scheduled_services.referencingVisits) || [];
+      }
+      // Email-bound artifact probes (open estimates, active automation
+      // enrollments, active newsletter subscriptions). The estimates probe
+      // filters status via whereIn — still a probe, not a verification.
+      if (['estimates', 'automation_enrollments', 'newsletter_subscribers'].includes(table)
+        && q.called('select') && !isIdVerification) {
+        return (tables[table] && tables[table].emailArtifacts) || [];
       }
       if (table === 'customer_properties') {
         if (q.called('del')) { state.propertyDeleted = q.args('where')[0]; return 1; }
@@ -984,9 +999,10 @@ describe('revertMerge', () => {
       tables: {
         leads: { stillOnWinner: ['lead-1', 'lead-2'] },
         invoices: { stillOnWinner: ['inv-1'] },
-        // A later appointment points at the property — deleting would
-        // SET NULL its property_id without ever erroring.
-        scheduled_services: { referencingVisit: { id: 'visit-1' } },
+        // The loser's own appointment (moved back with the undo) points at
+        // the property — deleting would SET NULL its property_id without
+        // ever erroring, so the row must transfer instead.
+        scheduled_services: { referencingVisits: [{ id: 'visit-1', customer_id: LOSER }] },
       },
     });
     db.transaction.mockImplementation(async (fn) => fn(trx));
@@ -998,6 +1014,124 @@ describe('revertMerge', () => {
     expect(state.propertyTransferred.payload.customer_id).toBe(LOSER);
     expect(result.repointedBack['customer_properties.linked_property_transferred']).toBe(1);
     expect(result.repointedBack['customer_properties.linked_property_removed']).toBeUndefined();
+  });
+
+  it('refuses (409) when a WINNER-owned post-merge appointment references the linked property (transfer would strand it)', async () => {
+    const journal = baseJournal();
+    journal.evidence = { via: 'admin_link_as_property' };
+    journal.repointed_ids.linked_property_id = 'prop-9';
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: { stillOnWinner: ['inv-1'] },
+        // Booked for the WINNER after the merge, absent from the journal —
+        // moving the property to the loser would leave the visit's customer
+        // and property on different accounts.
+        scheduled_services: { referencingVisits: [{ id: 'visit-new', customer_id: WINNER }] },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/appointment.*booked for the kept customer after the merge/) });
+    // The refusal throw rolls the transaction back — journal never stamped,
+    // property neither transferred nor deleted.
+    expect(state.journalUpdate).toBe(null);
+    expect(state.propertyTransferred).toBe(null);
+    expect(state.propertyDeleted).toBe(null);
+  });
+
+  it('still TRANSFERS when the only referencing visits are in the journaled repoint set (they move back anyway)', async () => {
+    const journal = baseJournal();
+    journal.evidence = { via: 'admin_link_as_property' };
+    journal.repointed_ids.linked_property_id = 'prop-9';
+    // visit-1 is journaled: it was the loser's, repointed by the merge, and
+    // the undo moves it back — winner-owned at probe time must NOT refuse.
+    journal.repointed_ids.tables['scheduled_services.customer_id'] = ['visit-1'];
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: { stillOnWinner: ['inv-1'] },
+        scheduled_services: {
+          stillOnWinner: ['visit-1'],
+          referencingVisits: [{ id: 'visit-1', customer_id: WINNER }],
+        },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+    expect(state.propertyTransferred.payload.customer_id).toBe(LOSER);
+    expect(result.repointedBack['customer_properties.linked_property_transferred']).toBe(1);
+    expect(result.repointedBack['scheduled_services.customer_id']).toBe(1);
+  });
+
+  it("restores the DERIVED transferred Stripe id on the loser (snapshot holds null — the cards' profile was derived)", async () => {
+    const journal = baseJournal();
+    // Neither customer row named a profile at merge time; the loser's saved
+    // cards identified cus_derived and executeMerge journaled it.
+    journal.loser_snapshot.stripe_customer_id = null;
+    journal.repointed_ids.stripe_transferred_id = 'cus_derived';
+    journal.winner_backfills = { email: 'loser.testcase@example.com', stripe_customer_id: 'cus_derived' };
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: { ...baseWinner(), stripe_customer_id: 'cus_derived' },
+      loser: baseLoser(),
+      tables: { leads: { stillOnWinner: ['lead-1', 'lead-2'] }, invoices: { stillOnWinner: ['inv-1'] } },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+    expect(result.stripeMovedBack).toBe(true);
+    expect(state.winnerPatch.stripe_customer_id).toBe(null);
+    // The RECORDED id, not the snapshot's null — the repointed cards live
+    // on cus_derived and the restored loser must own it.
+    expect(state.loserRestore.stripe_customer_id).toBe('cus_derived');
+  });
+
+  it('refuses (409) when active email-bound artifacts were created on the backfilled email after the merge', async () => {
+    const journal = baseJournal(); // winner_backfills.email = loser's email, unchanged on winner
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: { stillOnWinner: ['inv-1'] },
+        // An open estimate created post-merge delivers to the merged-in
+        // email — clearing the email would orphan it.
+        estimates: { emailArtifacts: [{ id: 'est-new' }] },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/1 open estimate.*deliver to the merged-in email/) });
+    expect(state.journalUpdate).toBe(null);
+  });
+
+  it('proceeds when the only email-bound artifacts are journaled rows (pre-merge, moving back with the undo)', async () => {
+    const journal = baseJournal();
+    journal.repointed_ids.tables['estimates.customer_id'] = ['est-1'];
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: { stillOnWinner: ['inv-1'] },
+        estimates: { stillOnWinner: ['est-1'], emailArtifacts: [{ id: 'est-1' }] },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+    // Email cleared as before; the journaled estimate moved back to the
+    // restored loser along with the email it delivers to.
+    expect(state.winnerPatch.email).toBe(null);
+    expect(result.repointedBack['estimates.customer_id']).toBe(1);
+    expect(state.journalUpdate.undone_at).toBeTruthy();
   });
 
   it('refuses (409, zero writes) when NEW payment methods joined the transferred Stripe profile after the merge', async () => {
@@ -1094,6 +1228,72 @@ describe('revertMerge', () => {
     await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
       .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/never recorded in the journal/) });
     expect(state.journalUpdate).toBe(null);
+  });
+
+  it('GET /merges: a PURGED winner (left-join null columns) reads revertible:false; a live winner reads true', async () => {
+    // No supertest in this repo — real router on an ephemeral port, hit
+    // with the built-in fetch (same pattern as public-ui-flags.test.js).
+    const express = require('express');
+    const journalRow = (overrides) => ({
+      id: JOURNAL,
+      winner_customer_id: WINNER,
+      loser_customer_id: LOSER,
+      tier: 'manual',
+      performed_by: 'admin:test',
+      created_at: '2026-07-30T04:00:00Z',
+      undone_at: null,
+      undone_by: null,
+      loser_snapshot: JSON.stringify({ id: LOSER, first_name: 'Loser', last_name: null }),
+      repointed_ids: JSON.stringify({
+        version: 1,
+        tables: { 'leads.customer_id': ['lead-1'] },
+        stripe_transferred_id: null,
+        payment_method_flags: {},
+        collision_handlers: [],
+      }),
+      evidence: JSON.stringify({}),
+      winner_first_name: 'Winner',
+      winner_last_name: 'Testcase',
+      winner_active: true,
+      winner_deleted_at: null,
+      winner_stripe_customer_id: null,
+      ...overrides,
+    });
+    // Purged winner: the left join leaves every winner column null — the
+    // old `winner_active !== false` check read that as alive and offered an
+    // undo that 409s with "kept customer no longer exists".
+    const purged = journalRow({
+      winner_first_name: null, winner_last_name: null, winner_active: null, winner_deleted_at: null,
+    });
+    const live = journalRow({});
+    let listRows = [purged];
+    installDb((table) => {
+      if (table === 'customer_merge_journal as j') return listRows;
+      return [];
+    });
+    const app = express();
+    app.use('/dup', require('../routes/admin-customer-duplicates'));
+    const server = await new Promise((resolve) => {
+      const s = app.listen(0, () => resolve(s));
+    });
+    try {
+      const base = `http://127.0.0.1:${server.address().port}`;
+
+      const resPurged = await fetch(`${base}/dup/merges`);
+      expect(resPurged.status).toBe(200);
+      const bodyPurged = await resPurged.json();
+      expect(bodyPurged.merges[0].revertible).toBe(false);
+
+      // Control: the identical journal with a positively-live winner IS
+      // revertible — the pin bites on the null, not on the fixture.
+      listRows = [live];
+      const resLive = await fetch(`${base}/dup/merges`);
+      expect(resLive.status).toBe(200);
+      const bodyLive = await resLive.json();
+      expect(bodyLive.merges[0].revertible).toBe(true);
+    } finally {
+      await new Promise((resolve) => { server.close(resolve); });
+    }
   });
 
   it('throws (rolls back) when a financial reverse-repoint moves fewer rows than verified', async () => {

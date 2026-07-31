@@ -197,6 +197,32 @@ router.get('/merges', async (req, res) => {
         logger.warn(`[admin-customer-duplicates] payment_methods lookup for revertible flags failed (marking affected merges non-revertible): ${pmErr.message}`);
       }
     }
+    // Post-merge-visit mirror for link-as-property merges: revertMerge
+    // refuses when a WINNER-owned visit outside the journaled repoint set
+    // still references the linked property (transferring the property would
+    // strand the appointment). One batched probe for the page; a failed
+    // lookup marks affected rows non-revertible (fail closed).
+    const linkedPropRows = rows.filter((row) => {
+      if (row.undone_at) return false;
+      const recorded = parse(row.repointed_ids);
+      return Boolean(recorded?.linked_property_id);
+    });
+    const visitsByProperty = new Map();
+    let visitLookupFailed = false;
+    if (linkedPropRows.length) {
+      try {
+        const visitRows = await db('scheduled_services')
+          .whereIn('property_id', [...new Set(linkedPropRows.map((r) => parse(r.repointed_ids).linked_property_id))])
+          .select('id', 'customer_id', 'property_id');
+        for (const visit of visitRows) {
+          if (!visitsByProperty.has(visit.property_id)) visitsByProperty.set(visit.property_id, []);
+          visitsByProperty.get(visit.property_id).push(visit);
+        }
+      } catch (visitErr) {
+        visitLookupFailed = true;
+        logger.warn(`[admin-customer-duplicates] scheduled_services lookup for revertible flags failed (marking affected merges non-revertible): ${visitErr.message}`);
+      }
+    }
     res.json({
       merges: rows.map((row) => {
         const snapshot = parse(row.loser_snapshot);
@@ -241,6 +267,25 @@ router.get('/merges', async (req, res) => {
                 && (!pm.stripe_customer_id || pm.stripe_customer_id === recorded.stripe_transferred_id));
           }
         }
+        // Winner-owned visit outside the journaled repoint set referencing
+        // the linked property: revertMerge refuses (transfer would strand
+        // the appointment on the wrong customer).
+        let postMergeVisitStrand = false;
+        if (!row.undone_at && recorded?.linked_property_id) {
+          if (visitLookupFailed) {
+            postMergeVisitStrand = true;
+          } else {
+            const journaledVisitIds = new Set();
+            for (const [key, ids] of Object.entries(recorded?.tables || {})) {
+              if (key.startsWith('scheduled_services.') && Array.isArray(ids)) {
+                for (const id of ids) journaledVisitIds.add(id);
+              }
+            }
+            postMergeVisitStrand = (visitsByProperty.get(recorded.linked_property_id) || [])
+              .some((visit) => visit.customer_id === row.winner_customer_id
+                && !journaledVisitIds.has(visit.id));
+          }
+        }
         return {
           journalId: row.id,
           winnerId: row.winner_customer_id,
@@ -255,18 +300,28 @@ router.get('/merges', async (req, res) => {
           // Pre-upgrade merges (no row-level repoint record) are not
           // auto-revertible; neither is a merge whose winner is gone/retired,
           // nor one revertMerge would refuse (collisions, missing pm flags,
-          // unrecorded linked property).
+          // unrecorded linked property, stranded cards/visits). The winner
+          // must be POSITIVELY live (=== true): a purged winner row leaves
+          // the left-join columns null, and null must read dead, not alive.
+          // DOCUMENTED EXCEPTION to the never-offer-a-409 contract: the
+          // email-bound-artifact refusal (open estimates / active
+          // automation enrollments / active newsletter subscriptions
+          // created post-merge on a backfilled email) is NOT mirrored here —
+          // it needs three per-merge-time live probes, too heavy for this
+          // list; the revert endpoint 409s with a clear, actionable reason
+          // instead.
           revertible: Boolean(
             !row.undone_at
             && snapshot?.id
             && recorded?.tables
-            && row.winner_active !== false
+            && row.winner_active === true
             && !row.winner_deleted_at
             && !collisionHandled
             && !pmMovedWithoutFlags
             && !linkedPropertyUnrecorded
             && !stripeDriftStrandsCards
-            && !postMergeCardsStrand,
+            && !postMergeCardsStrand
+            && !postMergeVisitStrand,
           ),
         };
       }),
