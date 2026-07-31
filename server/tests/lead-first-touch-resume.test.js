@@ -37,6 +37,7 @@ let mockConsumeError = null; // thrown by the r31 marker-consume write (r32)
 let mockConsumeZeroOnce = false; // next marker-consume clear matches 0 rows (r33: deny/reclaim bumped the fence)
 let mockTrxCommitFailOnce = false; // next db.transaction runs its callback, then fails at COMMIT (r38)
 let mockSubscriberAdoptZero = false; // subscriber adoption updates match 0 rows (r39: row linked elsewhere)
+let mockRawSqls = []; // every whereRaw/orderByRaw sql, for predicate pins (r42)
 jest.mock('../models/db', () => {
   const handler = (table) => {
     let markerFilter = false; // this chain filters on the resend marker
@@ -50,7 +51,8 @@ jest.mock('../models/db', () => {
         return chain;
       }),
       whereIn: jest.fn(() => chain),
-      whereRaw: jest.fn(() => chain),
+      whereRaw: jest.fn((sql) => { mockRawSqls.push(String(sql)); return chain; }),
+      orderByRaw: jest.fn((sql) => { mockRawSqls.push(String(sql)); return chain; }),
       whereNotNull: jest.fn(() => chain),
       whereNull: jest.fn(() => chain),
       whereNot: jest.fn(() => chain),
@@ -282,6 +284,7 @@ beforeEach(() => {
   mockConsumeZeroOnce = false;
   mockTrxCommitFailOnce = false;
   mockSubscriberAdoptZero = false;
+  mockRawSqls = [];
 });
 
 // The merge's held_email is a bound CASE since r20 (an ACTIVE claim's target
@@ -1427,6 +1430,22 @@ describe('DOI dedupe guard and ledger sweep', () => {
     const swept = await sweepAbandonedFirstTouchHolds({});
     expect(swept).toMatchObject({ examined: 1, released: 0 });
     expect(mockEnroll).not.toHaveBeenCalled();
+  });
+
+  test('the sweep orders the review verdict by operator DISPOSITION time, not card creation', async () => {
+    // Sibling cards (email_invalid next to email_unverified — the partial
+    // unique index is per reason_code) make creation order arbitrary: a
+    // resolved card created milliseconds after its sibling must not read
+    // as approval when the operator's LAST action was dismissing that
+    // sibling (Codex #3084 r42). Both the candidates predicate and the
+    // per-row belt check key on disposition time.
+    mockHolds = [baseHold()];
+    mockTriageFirstQueue = [null, { status: 'dismissed' }];
+    await sweepAbandonedFirstTouchHolds({});
+    const predicate = mockRawSqls.find((s) => s.includes('SELECT t.status FROM triage_items'));
+    expect(String(predicate)).toContain('ORDER BY COALESCE(t.resolved_at, t.updated_at, t.created_at) DESC');
+    expect(mockRawSqls).toContain('COALESCE(resolved_at, updated_at, created_at) DESC');
+    expect(mockRawSqls.some((s) => s.includes('ORDER BY t.created_at DESC'))).toBe(false);
   });
 
   test('a failed pre-send target re-read re-pends instead of sending on a stale guess', async () => {

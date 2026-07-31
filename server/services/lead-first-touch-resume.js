@@ -1645,15 +1645,28 @@ async function sweepAbandonedFirstTouchHolds({ dbh = db, limit = 10 } = {}) {
       // release via a correction — sweeping them would just churn through
       // the invalid-address guard every pass.
       .whereNot('held_email', '')
-      // The LATEST review cycle must be the one that resolved — evaluated
+      // The operator's LATEST DISPOSITION must be a resolution — evaluated
       // IN the query (Codex #3084 r17), because a post-limit filter would
       // let ten old dismissed-cycle rows permanently shadow eligible holds
       // behind them. Also implies at least one resolved card exists.
+      // Ordered by DISPOSITION time, not card creation (Codex #3084 r42):
+      // sibling cards (the per-reason_code partial unique index allows an
+      // email_invalid card NEXT TO an email_unverified one — e.g. the
+      // recovery marker) made creation order arbitrary: a resolved card
+      // created later than its sibling read as approval even when the
+      // operator's LAST action was dismissing that sibling — and a
+      // dismissal is never a confirmation. Under disposition order, the
+      // r16/r17 cases keep their semantics (a dismissal AFTER an old
+      // approval blocks; old dismissals never shadow a newer approval) and
+      // a dismissed-last call stays held until a correction (the fanout
+      // flips dismissed cards to resolved) or a fresh cycle resolves.
+      // resolved_at is stamped by BOTH terminal transitions; the COALESCE
+      // covers rows written outside transitionCore.
       .whereRaw(`(
         SELECT t.status FROM triage_items t
         WHERE t.call_log_id = first_touch_holds.call_log_id
           AND t.reason_code IN ('email_unverified', 'email_invalid')
-        ORDER BY t.created_at DESC
+        ORDER BY COALESCE(t.resolved_at, t.updated_at, t.created_at) DESC
         LIMIT 1
       ) = 'resolved'`)
       .whereNotExists(function stillLive() {
@@ -1675,15 +1688,16 @@ async function sweepAbandonedFirstTouchHolds({ dbh = db, limit = 10 } = {}) {
         .whereIn('status', ['open', 'in_progress'])
         .first('id');
       if (live) continue; // still under review — the hold stands
-      // The LATEST review cycle must be the one that resolved (Codex #3084
-      // r16): a force-reprocess can leave an old resolved card next to a
-      // newer DISMISSED one — dismissal is "not actionable", never a
-      // confirmation, and the historical resolution must not release the
-      // newer unconfirmed address.
+      // The operator's LATEST DISPOSITION must be a resolution (Codex
+      // #3084 r16, disposition-ordered since r42): a force-reprocess can
+      // leave an old resolved card next to a newer DISMISSED one, and
+      // sibling cards make creation order arbitrary — dismissal is "not
+      // actionable", never a confirmation, so the LAST operator action
+      // decides.
       const latest = await dbh('triage_items')
         .where({ call_log_id: row.call_log_id })
         .whereIn('reason_code', EMAIL_REVIEW_REASON_CODES)
-        .orderBy('created_at', 'desc')
+        .orderByRaw('COALESCE(resolved_at, updated_at, created_at) DESC')
         .first('status');
       if (!latest || latest.status !== 'resolved') continue;
       const res = await resumeHeldFirstTouch({ callLogId: row.call_log_id, source: 'ledger_sweep' });
