@@ -1801,7 +1801,7 @@ function metaDescriptionContractFinding(frontmatter, { isRefresh = false, liveMe
   // source in title-meta-spam-gate) so the enforcement points can't drift.
   // PHONE_TOKEN_RE covers the publisher's full substitution grammar —
   // whitespace-tolerant, and the phone/tel aliases render a phone too.
-  const { SALESY_META_RE, PHONE_TOKEN_RE, CITY_PHONE_TOKEN_RE, endsWithSoftCta, lastSentenceSalesTerms } = require('./title-meta-spam-gate');
+  const { SALESY_META_RE, PHONE_TOKEN_RE, CITY_PHONE_TOKEN_RE, endsWithSoftCta, lastSentenceSalesTerms, BARE_PHONE_DIGITS_RE } = require('./title-meta-spam-gate');
   // Runs on refresh drafts (both contracts, changed metas only) AND on any
   // caller that declares a blog target — the legacy BlogWriter/admin/
   // calendar publishAstro path runs ONLY guardrails (no supporting-blog
@@ -1818,7 +1818,9 @@ function metaDescriptionContractFinding(frontmatter, { isRefresh = false, liveMe
   // graded in full.
   if (liveMetaDescription != null && draftTrim === String(liveMetaDescription).trim()) return null;
   if (targetIsBlog) {
-    if (PHONE_TOKEN_RE.test(draftTrim) || LITERAL_PHONE_IN_META_RE.test(draftTrim)) {
+    // BARE_PHONE_DIGITS_RE: separator-less "9412972606" slips the shaped
+    // regex and the PII scan (known business number) — Codex r4.
+    if (PHONE_TOKEN_RE.test(draftTrim) || LITERAL_PHONE_IN_META_RE.test(draftTrim) || BARE_PHONE_DIGITS_RE.test(draftTrim)) {
       return finding('P1', 'BLOG_META_CARRIES_PHONE', 'Blog meta descriptions never carry a phone number (owner rule 2026-07-29: informational summary + soft CTA only).');
     }
     if (SALESY_META_RE.test(draftTrim) || lastSentenceSalesTerms(draftTrim)) {

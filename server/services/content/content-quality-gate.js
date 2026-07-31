@@ -33,7 +33,7 @@
  */
 
 const { THRESHOLDS } = require('./scoring-config');
-const { evaluateTitleMetaSpam, renderMetaTokens, PHONE_TOKEN_RE, CITY_PHONE_TOKEN_RE, SALESY_META_RE, endsWithSoftCta, lastSentenceSalesTerms } = require('./title-meta-spam-gate');
+const { evaluateTitleMetaSpam, renderMetaTokens, PHONE_TOKEN_RE, CITY_PHONE_TOKEN_RE, SALESY_META_RE, endsWithSoftCta, lastSentenceSalesTerms, BARE_PHONE_DIGITS_RE } = require('./title-meta-spam-gate');
 const { isFaqBlockedService } = require('./content-guardrails');
 
 // Compute the achievable maximum score PER PAGE TYPE so the pass
@@ -1073,7 +1073,9 @@ function pageMetaPhoneResult(m) {
   return { ok: true };
 }
 function blogMetaContractResult(m) {
-  if (PHONE_TOKEN_RE.test(m) || LITERAL_PHONE_IN_META_RE.test(m)) {
+  // BARE_PHONE_DIGITS_RE: a separator-less "9412972606" slips the shaped
+  // literal-phone regex and the PII scan (known business number) — Codex r4.
+  if (PHONE_TOKEN_RE.test(m) || LITERAL_PHONE_IN_META_RE.test(m) || BARE_PHONE_DIGITS_RE.test(m)) {
     return { ok: false, reason: 'blog_meta_must_not_carry_phone' };
   }
   if (SALESY_META_RE.test(m)) return { ok: false, reason: 'blog_meta_salesy' };

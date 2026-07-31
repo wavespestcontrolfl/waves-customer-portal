@@ -1056,8 +1056,26 @@ describe('soft CTA final sentence must BE a CTA (round-5 hardening)', () => {
   });
 
   test('informational sales nouns in the closer do NOT hard-fail (r3: transactional usage only)', () => {
-    const r = checkBlogMetaContract({ meta_description: `${LEAD}A guide to what quarterly pest plans offer Southwest Florida homeowners.` });
-    expect(r.ok).toBe(true);
+    for (const tail of [
+      'A guide to what quarterly pest plans offer Southwest Florida homeowners.',
+      'An estimate of the damage helps you plan repairs before the rainy season arrives.',
+    ]) {
+      expect(checkBlogMetaContract({ meta_description: `${LEAD}${tail}` }).ok).toBe(true);
+    }
+  });
+
+  test('transactional non-CTA closers still HARD-fail (r4: solicitation verb or availability marketing)', () => {
+    for (const tail of ['Ask Waves for a quote on treatment.', 'A professional treatment estimate is available today.']) {
+      const r = checkBlogMetaContract({ meta_description: `${LEAD}${tail}` });
+      expect(r.ok).toBe(false);
+      expect(r.reason).toBe('blog_meta_final_sentence_sales_terms');
+    }
+  });
+
+  test('bare 10-digit phone in a blog meta still HARD-fails (r4: separator-less number slips the shaped regex)', () => {
+    const r = checkBlogMetaContract({ meta_description: `${LEAD}Call 9412972606 for treatment details.` });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('blog_meta_must_not_carry_phone');
   });
 });
 

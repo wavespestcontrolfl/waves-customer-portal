@@ -871,7 +871,7 @@ function validateRewrittenMeta(metaDescription, factContext = null, deps = {}) {
     // 2026-07-30: never a blocker) — it's a weight-0 soft signal in
     // content-quality-gate only.
     const m = String(metaDescription || '').trim();
-    if (spamGate.PHONE_TOKEN_RE.test(m) || /\(\d{3}\)\s*\d{3}[-.\s]?\d{4}|\b\d{3}[-.]\d{3}[-.]\d{4}\b/.test(m)) {
+    if (spamGate.PHONE_TOKEN_RE.test(m) || /\(\d{3}\)\s*\d{3}[-.\s]?\d{4}|\b\d{3}[-.]\d{3}[-.]\d{4}\b/.test(m) || spamGate.BARE_PHONE_DIGITS_RE.test(m)) {
       return { ok: false, reason: 'blog meta contract: blog_meta_must_not_carry_phone' };
     }
     if (spamGate.SALESY_META_RE.test(m)) {

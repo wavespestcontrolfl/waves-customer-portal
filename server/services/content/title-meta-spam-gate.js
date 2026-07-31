@@ -227,12 +227,26 @@ function lastSentence(text) {
 //   2. sales terms riding a CTA-shaped sentence ("Learn more about saving
 //      big with Waves.")
 const CURRENCY_OR_PERCENT_RE = /[%$]/;
+// Transactional closers that are neither CTA-shaped nor carry a symbol —
+// "Ask Waves for a quote on treatment." / "A treatment estimate is available
+// today." (Codex r4). Two shapes, bounded to the sentence: a solicitation
+// verb reaching a sales noun, or a sales noun marketed as available/now/
+// today. Informational grammar ("an estimate of the damage helps you plan")
+// matches neither.
+const TRANSACTIONAL_CLOSER_RE = /\b(ask|call|text|contact|request|get|book|schedule)\b[^.!?]{0,40}?\b(quote|estimate|pricing|price|deal|offer|discount)s?\b|\b(quote|estimate|pricing|price|deal|offer|discount)s?\b[^.!?]{0,30}?\b(available|today|now)\b/i;
 function lastSentenceSalesTerms(text) {
   const last = lastSentence(text);
   if (!last) return false;
   if (CURRENCY_OR_PERCENT_RE.test(last)) return true;
+  if (TRANSACTIONAL_CLOSER_RE.test(last)) return true;
   return SOFT_CTA_RE.test(last) && CTA_SALES_TERMS_RE.test(last);
 }
+
+// Waves' own number typed WITHOUT separators ("Call 9412972606") slips both
+// the separator-shaped literal-phone regex and the PII scan (known business
+// number). NANP-shaped: optional leading 1, area code and exchange can't
+// start with 0/1 — keeps years, ZIPs, and small counts out (Codex r4).
+const BARE_PHONE_DIGITS_RE = /\b1?[2-9]\d{2}[2-9]\d{6}\b/;
 
 function endsWithSoftCta(text) {
   const last = lastSentence(text);
@@ -250,6 +264,7 @@ module.exports = {
   SOFT_CTA_RE,
   endsWithSoftCta,
   lastSentenceSalesTerms,
+  BARE_PHONE_DIGITS_RE,
   HYPE_TERMS,
   COMMERCIAL_TERMS,
   _internals: {
