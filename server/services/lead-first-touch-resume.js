@@ -187,20 +187,27 @@ async function gateHoldForSend(holdId, claimStamp, dbh = db, targetEmailLc = nul
 // 'releasing' on a stamp no settle matches, until the stale reclaimer
 // FORCES a duplicate DOI ten minutes later. This CAS matches whichever of
 // the two stamps the row actually carries and parks the hold explicitly
-// unresolved-but-retryable: pending, under a NEUTRAL marker that never
-// arms skipDedupe — the retry's dedupe guard then resolves delivery from
-// the durable confirmation_sent_at evidence (commit landed ⇒ the kept
+// unresolved-but-retryable: pending, under the caller's marker. A deny,
+// reclaim, or newer stamp matches neither fence and the row stays its
+// owner's.
+// The marker mirrors what the attempt actually KNOWS (Codex #3084 r41):
+// a DELIVERED outcome parks under the neutral default — never arms
+// skipDedupe, so the retry's dedupe guard resolves delivery from the
+// durable confirmation_sent_at evidence (commit landed ⇒ the kept
 // pre-stamp settles it as recently-sent; rolled back ⇒ a fresh DOI goes
-// out, the r36 duplicate-beats-never-delivered trade). A deny, reclaim,
-// or newer stamp matches neither fence and the row stays its owner's.
-async function repenAmbiguousDelivery(holdId, fenceStamps, dbh = db) {
+// out, the r36 duplicate-beats-never-delivered trade). A KNOWN-UNDELIVERED
+// outcome (send failed/thrown) passes the verified force-resend ticket
+// instead: the resume clears its pre-send stamp only best-effort, and a
+// committed gate with a surviving stale stamp would otherwise let the
+// retry's guard terminally settle a DOI the provider rejected.
+async function repenAmbiguousDelivery(holdId, fenceStamps, dbh = db, marker = 'doi_delivery_ambiguous') {
   const fences = [...new Set((fenceStamps || []).filter(Boolean).map((s) => +new Date(s)))]
     .map((ms) => new Date(ms));
   if (!fences.length) return 0;
   return dbh('first_touch_holds')
     .where({ id: holdId, status: 'releasing' })
     .whereIn('updated_at', fences)
-    .update({ status: 'pending', last_error: 'doi_delivery_ambiguous', updated_at: new Date() });
+    .update({ status: 'pending', last_error: marker, updated_at: new Date() });
 }
 
 async function settleHold(holdId, patch, dbh, claimStamp = null) {
@@ -639,6 +646,26 @@ async function resumeHeldFirstTouch({
       // stored email in BOTH release kinds.
       patch.held_email = sendEmail;
       if (hold.held_drip && !hold.released_drip) {
+        // BOTH outbound vetoes re-run immediately before the side effect
+        // (Codex #3084 r41): the claim-time checks above race a bounce
+        // suppression or a do-not-contact request landing while the
+        // target stays unchanged — the pre-send re-read and the gate
+        // validate fence/deny/target, none of which sees a fresh veto.
+        // The post-commit send path already re-checks at send time (r18);
+        // the direct path now does the same before the enroll and again
+        // before the DOI below.
+        if (await customerCallDoNotContact(holdCustomerId, dbh)) {
+          await settleHold(hold.id, { status: 'blocked', last_error: 'do_not_contact' }, dbh, claimStamp);
+          logger.info(`[first-touch-resume] customer ${holdCustomerId}: do-not-contact veto at the enroll — hold blocked (${source})`);
+          result.skipped = result.skipped || 'do_not_contact';
+          continue;
+        }
+        if (await emailSuppressedForNewLead(sendEmail, dbh)) {
+          await settleHold(hold.id, { status: 'pending', last_error: 'email_suppressed' }, dbh, claimStamp);
+          logger.info(`[first-touch-resume] customer ${holdCustomerId}: address suppressed at the enroll — hold stays pending (${source})`);
+          result.skipped = result.skipped || 'email_suppressed';
+          continue;
+        }
         // Enrollment creation and its validation are ATOMIC (Codex #3084
         // r29, replacing the r26/r28 post-enroll repair): the fresh
         // enrollment's first step is immediately due, and the scheduler
@@ -791,6 +818,24 @@ async function resumeHeldFirstTouch({
           // misses walks away without writes: the row belongs to its
           // denier or reclaimer, and the drip work already done is
           // recorded (the enroll is idempotent by template+customer).
+          // BOTH outbound vetoes re-run immediately before the DOI too
+          // (Codex #3084 r41): the enroll above can be slow, and a bounce
+          // suppression or do-not-contact request landing after the
+          // enroll-time recheck would otherwise still get the send — the
+          // gate validates only fence/deny/target. Mirrors the
+          // post-commit path's send-time rechecks (r18).
+          if (await customerCallDoNotContact(holdCustomerId, dbh)) {
+            await settleHold(hold.id, { status: 'blocked', last_error: 'do_not_contact' }, dbh, claimStamp);
+            logger.info(`[first-touch-resume] customer ${holdCustomerId}: do-not-contact veto at the DOI — hold blocked (${source})`);
+            result.skipped = result.skipped || 'do_not_contact';
+            continue;
+          }
+          if (await emailSuppressedForNewLead(sendEmail, dbh)) {
+            await settleHold(hold.id, { status: 'pending', last_error: 'email_suppressed' }, dbh, claimStamp);
+            logger.info(`[first-touch-resume] customer ${holdCustomerId}: address suppressed at the DOI — hold stays pending (${source})`);
+            result.skipped = result.skipped || 'email_suppressed';
+            continue;
+          }
           let skipDedupe = false;
           let gateRefused = false;
           let outcome = null;
@@ -877,11 +922,18 @@ async function resumeHeldFirstTouch({
                 // #3084 r40): if the commit actually landed, pre-gate
                 // fenced settles all miss and the stale reclaimer forces
                 // a duplicate DOI. Park the hold on whichever fence it
-                // durably carries instead — pending, neutral marker — and
-                // let the retry's dedupe guard resolve delivery from the
-                // durable pre-stamp evidence.
+                // durably carries instead. A KNOWN-UNDELIVERED outcome
+                // parks under the verified force-resend ticket, not the
+                // neutral marker (Codex #3084 r41): the resume's pre-stamp
+                // cleanup is best-effort, and a committed gate with a
+                // surviving stale stamp would let the retry's dedupe guard
+                // terminally settle a DOI the provider rejected.
                 try {
-                  await repenAmbiguousDelivery(hold.id, [preGateStamp, gateStampCandidate], dbh);
+                  const parkMarker = newsletterDelivered(outcome)
+                    ? 'doi_delivery_ambiguous'
+                    : (outcome?.retryReason
+                      || await sendFailedMarkerFor(sendEmail, dbh, outcome?.subscriberId || null, outcome?.confirmationToken || null));
+                  await repenAmbiguousDelivery(hold.id, [preGateStamp, gateStampCandidate], dbh, parkMarker);
                 } catch (parkErr) {
                   logger.warn(`[first-touch-resume] ambiguous-delivery park failed: ${parkErr.code || parkErr.name || 'db_error'} (stale-claim window will reclaim)`);
                 }
@@ -1245,6 +1297,22 @@ async function runOnePostCommitResume(payload, holdIds, dbh, claims = new Map())
           // carries and settle on that; a delivered outcome settles
           // released and clears any restored markers with it.
           logger.warn(`[first-touch-resume] post-commit gate commit errored AFTER the send: ${gateErr.code || gateErr.name || 'db_error'} — reconciling the durable fences`);
+          // Park marker for any unreadable reconcile below (Codex #3084
+          // r41): a delivered outcome parks neutral; a failed or THROWN
+          // resume parks under the verified force-resend ticket — the
+          // pre-stamp cleanup is best-effort, and a committed gate with a
+          // surviving stale stamp would let the retry's dedupe guard
+          // terminally settle a DOI that never delivered. Computed once
+          // for the group (the verify read is shared state).
+          let unresolvedParkMarker = null;
+          const parkMarkerFor = async () => {
+            if (unresolvedParkMarker) return unresolvedParkMarker;
+            unresolvedParkMarker = newsletterDelivered(outcome)
+              ? 'doi_delivery_ambiguous'
+              : (outcome?.retryReason
+                || await sendFailedMarkerFor(sentEmailLc, dbh, outcome?.subscriberId || null, outcome?.confirmationToken || null));
+            return unresolvedParkMarker;
+          };
           for (const holdId of holdIds) {
             let durable = preGateClaims.has(holdId) ? preGateClaims.get(holdId) : null;
             const gated = gatedStamps.get(holdId);
@@ -1262,7 +1330,7 @@ async function runOnePostCommitResume(payload, holdIds, dbh, claims = new Map())
                 // resolves delivery from the durable pre-stamp evidence.
                 logger.warn(`[first-touch-resume] fence reconcile read failed for hold ${holdId}: ${rereadErr.code || rereadErr.name || 'db_error'} — parking the hold unresolved`);
                 try {
-                  await repenAmbiguousDelivery(holdId, [durable, gated], dbh);
+                  await repenAmbiguousDelivery(holdId, [durable, gated], dbh, await parkMarkerFor());
                 } catch (parkErr) {
                   logger.warn(`[first-touch-resume] hold ${holdId} ambiguous-delivery park failed: ${parkErr.code || parkErr.name || 'db_error'} (stale-claim window will reclaim)`);
                 }

@@ -587,6 +587,71 @@ describe('resumeHeldFirstTouch (ledger release engine)', () => {
     expect(mockHoldUpdates.some((u) => u.last_error === 'newsletter_doi_not_confirmed')).toBe(false);
   });
 
+  test('a KNOWN-UNDELIVERED outcome parks under the VERIFIED resend ticket, not the neutral marker', async () => {
+    // The provider rejected the send, then the commit errored and the
+    // reconcile reread failed (Codex #3084 r41). The resume's pre-stamp
+    // cleanup is best-effort — a committed gate with a surviving stale
+    // stamp plus the NEUTRAL marker would let the retry's dedupe guard
+    // terminally settle a DOI that never delivered. The park carries the
+    // verified force-resend ticket instead.
+    mockHold = baseHold({ held_drip: false });
+    mockTrxCommitFailOnce = true;
+    mockSubscriberRow = { id: 'sub-1', status: 'pending', confirmation_sent_at: null };
+    mockNewsletter.mockResolvedValueOnce({ subscribed: true, confirmationEmailSent: false, subscriberId: 'sub-1' });
+    mockHoldFirstQueue = [
+      { held_email: 'confirmed@example.com', last_error: null }, // pre-send re-read
+      new Error('connection reset'),                             // reconcile reread fails
+    ];
+    const res = await resumeHeldFirstTouch({ callLogId: 'call-1' });
+    expect(res.skipped).toBe('doi_state_unverified');
+    expect(mockHoldUpdates.at(-1)).toMatchObject({ status: 'pending', last_error: 'newsletter_doi_not_confirmed' });
+    expect(mockHoldUpdates.some((u) => u.status === 'released')).toBe(false);
+  });
+
+  test('a do-not-contact request landing after the claim-time check blocks BEFORE the enroll', async () => {
+    // The claim-time vetoes race a dnc request landing while the target
+    // stays unchanged (Codex #3084 r41) — the recheck immediately before
+    // the enroll refuses, and no enrollment or DOI ever exists.
+    mockHold = baseHold();
+    mockHoldFirstQueue = {
+      length: 1,
+      shift() {
+        this.length = 0;
+        mockDncRow = { id: 'call-1' }; // lands between claim-time check and the enroll
+        return { held_email: 'confirmed@example.com', last_error: null };
+      },
+    };
+    const res = await resumeHeldFirstTouch({ callLogId: 'call-1' });
+    expect(res.skipped).toBe('do_not_contact');
+    expect(mockEnroll).not.toHaveBeenCalled();
+    expect(mockNewsletter).not.toHaveBeenCalled();
+    expect(mockHoldUpdates.at(-1)).toMatchObject({ status: 'blocked', last_error: 'do_not_contact' });
+  });
+
+  test('a do-not-contact request landing after the enroll blocks the DOI at the send-time recheck', async () => {
+    mockHold = baseHold();
+    mockEnroll.mockImplementationOnce(async () => {
+      mockDncRow = { id: 'call-1' }; // lands during the (slow) enroll
+      return { enrolled: true };
+    });
+    const res = await resumeHeldFirstTouch({ callLogId: 'call-1' });
+    expect(res.skipped).toBe('do_not_contact');
+    expect(mockNewsletter).not.toHaveBeenCalled();
+    expect(mockHoldUpdates.at(-1)).toMatchObject({ status: 'blocked', last_error: 'do_not_contact' });
+  });
+
+  test('a bounce suppression landing after the enroll re-pends the DOI at the send-time recheck', async () => {
+    mockHold = baseHold();
+    mockEnroll.mockImplementationOnce(async () => {
+      mockSuppressionRow = { suppression_type: 'bounce', group_key: 'g-1' };
+      return { enrolled: true };
+    });
+    const res = await resumeHeldFirstTouch({ callLogId: 'call-1' });
+    expect(res.skipped).toBe('email_suppressed');
+    expect(mockNewsletter).not.toHaveBeenCalled();
+    expect(mockHoldUpdates.at(-1)).toMatchObject({ status: 'pending', last_error: 'email_suppressed' });
+  });
+
   test('the pre-send gate refuses an UNMARKED hold too — a denial after the claim never sends', async () => {
     // The r31–r33 layout fenced only MARKED holds between the renewal and
     // the send; the r34 gate runs the same last-instant CAS for every
@@ -939,6 +1004,25 @@ describe('resumeHeldNewsletterPostCommit failure paths', () => {
     expect(mockHoldUpdates.at(-1)).toMatchObject({ status: 'pending', last_error: 'doi_delivery_ambiguous' });
     expect(mockHoldUpdates.some((u) => u.status === 'released')).toBe(false);
     expect(mockHoldUpdates.some((u) => u.last_error === 'newsletter_doi_not_confirmed')).toBe(false);
+  });
+
+  test('post-commit: a THROWN resume parks under the verified ticket on an unreadable reconcile', async () => {
+    // The resume threw (possibly pre-provider, after its internal
+    // pre-stamp), the commit errored, and the reconcile reread failed
+    // (Codex #3084 r41): the neutral marker would let a rollback-restored
+    // stale stamp settle a DOI that never went out — the park carries the
+    // verified force-resend ticket instead.
+    mockHold = { held_drip: false, released_drip: false };
+    mockTrxCommitFailOnce = true;
+    mockSubscriberRow = { id: 'sub-1', status: 'pending', confirmation_sent_at: null };
+    mockNewsletter.mockRejectedValueOnce(Object.assign(new Error('conn reset'), { code: 'ECONNRESET' }));
+    mockHoldFirstQueue = [
+      { held_email: 'ok@example.com', last_error: null }, // target re-read
+      new Error('connection reset'),                      // reconcile reread fails
+    ];
+    await resumeHeldNewsletterPostCommit({ holdId: 'hold-1', customerId: 'cust-1', email: 'ok@example.com' });
+    expect(mockHoldUpdates.at(-1)).toMatchObject({ status: 'pending', last_error: 'newsletter_doi_not_confirmed' });
+    expect(mockHoldUpdates.some((u) => u.status === 'released')).toBe(false);
   });
 
   test('payloads for the same recipient coalesce into ONE DOI that settles every hold', async () => {
