@@ -183,6 +183,18 @@ describe('NotificationService.create under the bell policy', () => {
     expect(result).toEqual({ id: 'n6' });
   });
 
+  test('override rows only count from ADMIN-role technicians (query is role-filtered)', async () => {
+    gateOn();
+    const notifications = chainMock([{ id: 'n6b' }]);
+    const prefs = chainMock([{ trigger_key: 'category:alert', bell_enabled: true }]);
+    mockTables({ notifications, notification_preferences: prefs });
+
+    await NotificationService.notifyAdmin('alert', 'Re-enabled alert', 'body');
+    // The loader must exclude non-admin technicians — a field tech's row
+    // may never widen the shared admin bell.
+    expect(prefs.where).toHaveBeenCalledWith('technicians.role', 'admin');
+  });
+
   test('gate on: override query failure falls back to the static lists', async () => {
     gateOn();
     const notifications = chainMock([{ id: 'n7' }]);

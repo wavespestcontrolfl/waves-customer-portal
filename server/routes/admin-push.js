@@ -242,6 +242,12 @@ router.put('/preferences', async (req, res, next) => {
         if (!OVERRIDABLE_CATEGORY_SET.has(cat)) {
           return res.status(400).json({ error: `Unknown bell category: ${cat}` });
         }
+        // Category overrides re-open the SHARED admin bell — owner
+        // controls, admin role only. Techs keep their per-user push/sound
+        // preferences; they don't get to widen the global bell.
+        if (req.techRole !== 'admin') {
+          return res.status(403).json({ error: 'Bell category overrides require the admin role' });
+        }
       }
     }
     let touchedCategoryKey = false;

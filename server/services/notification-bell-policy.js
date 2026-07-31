@@ -117,6 +117,11 @@ async function loadCategoryOverrides() {
     const rows = await db('notification_preferences')
       .join('technicians', 'technicians.id', 'notification_preferences.admin_user_id')
       .where('technicians.active', true)
+      // Category overrides are OWNER controls on the shared bell — only
+      // admin-role rows count. A field tech's row (whether written before
+      // the PUT-side role gate existed, or via any other path) must never
+      // re-open a silenced category globally.
+      .where('technicians.role', 'admin')
       .where('notification_preferences.trigger_key', 'like', 'category:%')
       .select('notification_preferences.trigger_key', 'notification_preferences.bell_enabled');
     const map = new Map();
