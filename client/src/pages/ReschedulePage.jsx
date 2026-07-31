@@ -178,9 +178,11 @@ const WEATHER_MOVE_LEADS = {
 // — same exemption set as the SMS efficacy clause in services/rain-out.js.
 // Mosquito is deliberately NOT listed: those visits can be Bti tablets,
 // stations, or IGR/larval work (protocols.json), not barrier sprays.
+// Cleanouts pass the \bpest\b allowlist by name but run on gel bait,
+// vacuuming, and point-source IGR (roach cleanout protocol) — exempted.
 // Widening the allowlist to another service family is an owner call.
 const WHY_MOVE_LIQUID_SPRAY_SERVICE = /\bpest\b|waveguard/i;
-const WHY_MOVE_EXEMPT_SERVICE = /interior|granular|termite|wdo|inspection|bait/i;
+const WHY_MOVE_EXEMPT_SERVICE = /interior|granular|termite|wdo|inspection|bait|cleanout|roach/i;
 
 function showsWhyMove(move, serviceType) {
   const st = String(serviceType || '');
