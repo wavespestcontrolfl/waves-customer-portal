@@ -29,6 +29,7 @@ jest.mock('../models/db', () => {
       limit() { return chain; },
       join() { return chain; },
       modify(fn) { fn(chain); return chain; },
+      timeout() { return chain; },
       async select() {
         if (mockState.throwOn === table) throw new Error(`${table} query down`);
         if (mockState.hangOn === table) return new Promise(() => {});
@@ -183,10 +184,19 @@ describe('extractAddressCandidates', () => {
     expect(extractAddressCandidates('100 Palm Ave, spray before Saturday.')[0].locality).toBe('');
   });
 
-  test('captures explicit units onto every variant', () => {
+  test('captures explicit units onto every variant (word and hash forms)', () => {
     const [cand] = extractAddressCandidates('quote for 100 Palm Ave Apt 6 please');
     expect(cand.variants.every((v) => v.endsWith(' Apt 6'))).toBe(true);
     expect(cand.variants).toContain('100 Palm Ave Apt 6');
+    const [hash] = extractAddressCandidates('quote for 100 Palm Ave #6 please');
+    expect(hash.variants.every((v) => v.endsWith(' Apt 6'))).toBe(true);
+  });
+
+  test('ZIPs bind only to the matched address, never to distant numbers', () => {
+    const cands = extractAddressCandidates('quotes for 100 Palm Ave and 200 Oak St, Venice FL 34285');
+    expect(cands[0].locality).toBe('');
+    expect(cands[1].locality).toBe(', Venice 34285');
+    expect(extractAddressCandidates('quote for 100 Palm Ave with a budget of 15000')[0].locality).toBe('');
   });
 
   test('prefixVariants expands directional and suffix aliases both ways', () => {
@@ -267,6 +277,7 @@ describe('loadThreadTriageContext', () => {
     mockState.rows.scheduled_services = [
       { service_type: 'Quarterly Pest Control Service', scheduled_date: '2026-08-01', status: 'pending', service_address_line1: '4021 Coral Bay Loop' },
       { service_type: 'Lawn Care Visit', scheduled_date: '2026-08-03', status: 'pending', service_address_line1: '900 Other Property Rd' },
+      { service_type: 'Flea Treatment', scheduled_date: '2026-08-04', status: 'pending', service_address_line1: '4021 Coral Bay Loop', service_address_city: 'North Port' },
     ];
     const triage = await loadThreadTriageContext({
       phone: null,
@@ -359,7 +370,7 @@ describe('loadThreadTriageContext', () => {
     expect(triage.matchedExistingCustomer).toBe(false);
   });
 
-  test('sender match and a scoped address match for the SAME customer both ground', async () => {
+  test('sender match and a scoped address match for the SAME customer both ground — but only the scoped line carries visits', async () => {
     mockLoadCustomerByPhone.mockResolvedValue({
       customer: { id: 'c-2', first_name: 'Multi', last_name: 'Property', address_line1: '1 Primary St', active: true, pipeline_stage: 'active_customer' },
       ambiguous: false,
@@ -367,13 +378,23 @@ describe('loadThreadTriageContext', () => {
     mockState.rows.customers = [
       { id: 'c-2', first_name: 'Multi', last_name: 'Property', address_line1: '4021 Coral Bay Loop' },
     ];
+    // An open visit at the PRIMARY property must not appear anywhere when
+    // the text is about the other property: the sender line loses its
+    // visit list (scoped sibling exists) and the scoped line's full-stamp
+    // filter rejects the primary-address visit.
+    mockState.rows.scheduled_services = [
+      { service_type: 'Quarterly Pest Control Service', scheduled_date: '2026-08-01', status: 'pending', service_address_line1: '1 Primary St' },
+    ];
     const triage = await loadThreadTriageContext({
       phone: '+17245550000',
       triggerBody: 'about 4021 Coral Bay Loop please',
     });
     expect(triage.lines).toHaveLength(2);
     expect(triage.lines[0]).toContain('Sender phone matches');
+    expect(triage.lines[0]).toContain('booked work listed under the matched property below');
+    expect(triage.lines[0]).not.toContain('booked:');
     expect(triage.lines[1]).toContain('4021 Coral Bay Loop');
+    expect(triage.lines[1]).not.toContain('Quarterly Pest Control Service');
   });
 
   test('matches secondary customer_properties addresses', async () => {

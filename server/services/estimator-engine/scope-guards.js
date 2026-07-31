@@ -132,20 +132,29 @@ function extractAddressCandidates(text) {
     const designatorIdx = words.findIndex((w) => UNIT_WORD_RE.test(w));
     if (designatorIdx > 0) words = words.slice(0, designatorIdx);
     const afterStreet = src.slice(m.index + m[0].length, m.index + m[0].length + 60);
-    const unitM = `${m[2]} ${afterStreet}`.match(/\b(?:apt|apartment|unit|suite|ste)\.?\s*#?\s*([A-Za-z0-9-]{1,8})\b/i);
+    // Unit forms: "Apt 6", "Unit B", "#6". The hash form is only trusted
+    // right next to the street run — a "#" further into the prose (ticket
+    // numbers, "order #12") is not this address's unit.
+    const nearStreet = `${m[2]} ${afterStreet.slice(0, 15)}`;
+    const unitM = nearStreet.match(/(?:\b(?:apt|apartment|unit|suite|ste)\.?\s*#?\s*|#\s*)([A-Za-z0-9-]{1,8})\b/i);
     // An explicitly-stated unit rides on EVERY variant: sameStreetAddress
     // treats a missing unit as conservatively equal, so a unit-less variant
     // of "Apt 6" would happily ground against the customer in Apt 1.
     const unitSuffix = unitM ? ` Apt ${unitM[1]}` : '';
-    // Explicit locality after the street run — attached ONLY when a state
-    // or ZIP validates it ("…, Bradenton FL" / "…, Venice 34285"). A comma
-    // alone is ordinary prose ("100 Palm Ave, please") and must not become
-    // a fake city that rejects the real customer row.
-    const cityM = afterStreet.match(/^\s*,\s*([A-Za-z][A-Za-z .'-]{2,28}?)\s*,?\s*(?:\bFL\b|\bFlorida\b|\d{5})/i);
-    const zipM = afterStreet.match(/\b(\d{5})\b/);
-    const locality = (cityM || zipM)
-      ? `, ${cityM ? cityM[1].trim() : ''} ${zipM ? zipM[1] : ''}`.trimEnd()
-      : '';
+    // Explicit locality after the street run — attached ONLY when anchored
+    // AND validated: a comma-led city needs FL/Florida or a ZIP behind it
+    // ("…, Bradenton FL" / "…, Venice 34285"), and a bare ZIP counts only
+    // when it directly follows the street. Comma prose ("100 Palm Ave,
+    // please") and unrelated numbers ("budget of 15000") must not become a
+    // fake locality that rejects the real customer row.
+    const locM = afterStreet.match(/^\s*,\s*([A-Za-z][A-Za-z .'-]{2,28}?)\s*,?\s*(\bFL\b|\bFlorida\b)?\s*(\d{5})?\b/i);
+    let locality = '';
+    if (locM && (locM[2] || locM[3])) {
+      locality = `, ${locM[1].trim()}${locM[3] ? ` ${locM[3]}` : ''}`;
+    } else {
+      const zipDirect = afterStreet.match(/^\s*,?\s*(\d{5})\b/);
+      if (zipDirect) locality = `, ${zipDirect[1]}`;
+    }
     out.push({
       num: m[1],
       firstWord: words[0],
@@ -193,64 +202,37 @@ function candidateMatchesRow(candidate, row) {
   });
 }
 
-async function loadTriageInner({ phone, triggerBody }) {
+async function loadTriageInner({ phone, triggerBody, deadline = Date.now() + TRIAGE_TIMEOUT_MS }) {
   const db = require('../../models/db');
-  const lines = [];
-  // Dedup key is customer + scope: a sender-phone match is UNSCOPED, and an
-  // address-specific match for the same customer must still add its own
-  // scoped line — otherwise a multi-property customer texting about
-  // property B would only ever ground with primary-address/every-property
-  // context (the sender entry) and property scoping would be dead code.
-  const seenMatches = new Set();
-  let matchedExistingCustomer = false;
+  // Cooperative deadline: Promise.race in the wrapper bounds the RESPONSE,
+  // this bounds the WORK — an expired budget stops issuing queries (and the
+  // knex cancel-timeout aborts the in-flight one) instead of leaving an
+  // abandoned query waterfall holding pool slots behind the webhook.
+  const timeLeft = () => deadline - Date.now();
+  const assertTime = () => {
+    if (timeLeft() <= 50) {
+      const err = new Error('triage_deadline');
+      err.deadline = true;
+      throw err;
+    }
+  };
+  const bounded = (qb) => qb.timeout(Math.max(60, timeLeft()), { cancel: true });
 
-  // scope: when the match came from a specific address in the message,
-  // visits are scoped to THAT property — a multi-property customer's booked
-  // visit at property A must not present as coordination context for a new
-  // quote at property B. Visits stamp service_address_line1 at booking time
-  // (nullable; legacy rows COALESCE to the primary address), so a stamped
-  // visit must street-match the matched address, and an unstamped one only
-  // counts when the matched address IS the primary.
-  const describeCustomer = async (customer, how, addressLine, scope = null) => {
+  // COLLECT first, render after: an unscoped sender entry must not carry
+  // visit evidence when the text also names a specific property — a booked
+  // visit at property A listed on the sender line would still read as
+  // existing-job evidence against a new quote at property B.
+  const entries = [];
+  const seenMatches = new Set();
+  const addEntry = (customer, how, addressLine, scope = null) => {
     const matchKey = `${customer.id}|${scope ? scope.address : 'unscoped'}`;
     if (seenMatches.has(matchKey)) return;
     seenMatches.add(matchKey);
-    matchedExistingCustomer = true;
-    const name = `${customer.first_name || ''} ${customer.last_name || ''}`.trim() || 'existing customer';
-    let visitNote = '';
-    try {
-      // "booked" means OPEN work only — completed/skipped/superseded rows
-      // are history, not coordination context, and must not crowd out (or
-      // stand in for) an upcoming visit.
-      const visits = await db('scheduled_services')
-        .where({ customer_id: customer.id })
-        .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site'])
-        .whereRaw("scheduled_date >= (NOW() AT TIME ZONE 'America/New_York')::date - INTERVAL '30 days'")
-        .orderBy('scheduled_date', 'asc')
-        .limit(6)
-        .select('service_type', 'scheduled_date', 'status', 'service_address_line1');
-      const scoped = !scope ? visits : visits.filter((v) => {
-        if (v.service_address_line1) {
-          try {
-            return sameStreetAddress(v.service_address_line1, scope.address);
-          } catch (err) {
-            return false;
-          }
-        }
-        return scope.isPrimary;
-      });
-      if (scoped.length) {
-        visitNote = ` — booked: ${scoped.slice(0, 3)
-          .map((v) => `${v.service_type} ${String(v.scheduled_date).slice(0, 10)} (${v.status})`)
-          .join('; ')}`;
-      }
-    } catch (err) {
-      logger.warn(`[estimator-scope] triage visit lookup failed: ${err.message}`);
-    }
-    lines.push(`${how}: existing active customer ${name}, ${addressLine || customer.address_line1 || 'address on file'}${visitNote}`);
+    entries.push({ customer, how, addressLine, scope });
   };
 
   if (phone) {
+    assertTime();
     const { loadCustomerByPhone } = require('./context-builder');
     const senderMatch = await loadCustomerByPhone(phone, null);
     // Grounding requires a REAL customer: active === true (not merely "not
@@ -262,7 +244,7 @@ async function loadTriageInner({ phone, triggerBody }) {
     if (senderMatch?.customer && !senderMatch.ambiguous
       && senderMatch.customer.active === true
       && CUSTOMER_STAGES.includes(senderMatch.customer.pipeline_stage)) {
-      await describeCustomer(senderMatch.customer, 'Sender phone matches');
+      addEntry(senderMatch.customer, 'Sender phone matches');
     }
   }
 
@@ -270,20 +252,21 @@ async function loadTriageInner({ phone, triggerBody }) {
   // ("Do you do power washing?" … "How much?") — may sit in an earlier text
   // of the same conversation, not the quote-flavored one that triggered
   // triage. The recent bodies feed address extraction here AND ride back to
-  // the caller (recentTexts) for the combined-thread scope veto and the
-  // classifier prompt.
+  // the caller: recentTexts (full window) for the classifier prompt,
+  // vetoTexts (current burst only) for the hard scope veto.
   let searchText = String(triggerBody || '');
   let recentTexts = [];
   let vetoTexts = [];
   const digits = last10(phone);
   if (digits) {
     try {
-      const priorTexts = await db('sms_log')
+      assertTime();
+      const priorTexts = await bounded(db('sms_log')
         .where({ direction: 'inbound' })
         .whereRaw("regexp_replace(coalesce(from_phone, ''), '\\D', '', 'g') LIKE ?", [`%${digits}`])
         .whereRaw(`created_at >= NOW() - INTERVAL '${THREAD_WINDOW_HOURS} hours'`)
         .orderBy('created_at', 'desc')
-        .limit(THREAD_WINDOW_LIMIT)
+        .limit(THREAD_WINDOW_LIMIT))
         .select('message_body', 'created_at');
       recentTexts = priorTexts.map((t) => String(t.message_body || '')).filter(Boolean);
       const burstFloor = Date.now() - VETO_BURST_MINUTES * 60 * 1000;
@@ -293,6 +276,7 @@ async function loadTriageInner({ phone, triggerBody }) {
         .filter(Boolean);
       searchText += `\n${recentTexts.join('\n')}`;
     } catch (err) {
+      if (err.deadline) throw err;
       logger.warn(`[estimator-scope] triage thread lookup failed: ${err.message}`);
     }
   }
@@ -300,15 +284,18 @@ async function loadTriageInner({ phone, triggerBody }) {
   for (const cand of extractAddressCandidates(searchText)) {
     const label = `Message thread names address "${cand.num} ${cand.firstWord}…" which matches`;
     const prefixes = prefixVariants(cand.num, cand.firstWord);
-    const rows = await db('customers')
+    assertTime();
+    const rows = await bounded(db('customers')
       .modify(whereLiveCustomer)
       .whereRaw('address_line1 ILIKE ANY(?)', [prefixes])
-      .limit(5)
+      .limit(5))
       .select('id', 'first_name', 'last_name', 'address_line1', 'address_line2', 'city', 'zip');
     for (const row of rows) {
       if (candidateMatchesRow(cand, row)) {
         const shown = [row.address_line1, row.city].filter(Boolean).join(', ');
-        await describeCustomer(row, label, shown, { address: row.address_line1, isPrimary: true });
+        addEntry(row, label, shown, {
+          address: row.address_line1, line2: row.address_line2, city: row.city, zip: row.zip, isPrimary: true,
+        });
       }
     }
     // Secondary properties: customers.address_line1 mirrors only the
@@ -316,7 +303,8 @@ async function loadTriageInner({ phone, triggerBody }) {
     // seasonal property matches customer_properties instead. try/catch its
     // own query: a schema surprise here must not sink the primary path.
     try {
-      const propRows = await db('customer_properties as cp')
+      assertTime();
+      const propRows = await bounded(db('customer_properties as cp')
         .join('customers as c', 'c.id', 'cp.customer_id')
         .where('c.active', true)
         .whereNull('c.deleted_at')
@@ -325,38 +313,102 @@ async function loadTriageInner({ phone, triggerBody }) {
         // new occupant's quote must not ground against the old owner.
         .where('cp.active', true)
         .whereRaw('cp.address_line1 ILIKE ANY(?)', [prefixes])
-        .limit(5)
+        .limit(5))
         .select('c.id', 'c.first_name', 'c.last_name',
           'cp.address_line1 as address_line1', 'cp.address_line2 as address_line2', 'cp.city', 'cp.zip');
       for (const row of propRows) {
         if (candidateMatchesRow(cand, row)) {
           const shown = [row.address_line1, row.city].filter(Boolean).join(', ');
-          await describeCustomer(
+          addEntry(
             { id: row.id, first_name: row.first_name, last_name: row.last_name },
             label,
             `${shown} (secondary property)`,
-            { address: row.address_line1, isPrimary: false },
+            { address: row.address_line1, line2: row.address_line2, city: row.city, zip: row.zip, isPrimary: false },
           );
         }
       }
     } catch (err) {
+      if (err.deadline) throw err;
       logger.warn(`[estimator-scope] triage property lookup failed: ${err.message}`);
     }
   }
 
-  return { lines, matchedExistingCustomer, recentTexts, vetoTexts };
+  // RENDER. Visits are scoped to the matched property using the FULL
+  // booking stamp (line1+line2, city, zip) — Apt 1's visit is not evidence
+  // about Apt 6, and the same street line in another city is a different
+  // parcel. Unstamped legacy rows count only for primary-address matches.
+  // An unscoped sender entry whose customer also has an address-scoped
+  // entry carries NO visit list — the scoped line owns the booked-work
+  // evidence for the property the text is actually about.
+  const lines = [];
+  const scopedIds = new Set(entries.filter((e) => e.scope).map((e) => e.customer.id));
+  const stampFull = (line1, line2, city, zip) => [
+    [line1, line2].filter(Boolean).join(' '),
+    [city, zip].filter(Boolean).join(' '),
+  ].filter(Boolean).join(', ');
+  for (const e of entries) {
+    const name = `${e.customer.first_name || ''} ${e.customer.last_name || ''}`.trim() || 'existing customer';
+    const shownAddress = e.addressLine || e.customer.address_line1 || 'address on file';
+    if (!e.scope && scopedIds.has(e.customer.id)) {
+      lines.push(`${e.how}: existing active customer ${name}, ${shownAddress} (booked work listed under the matched property below)`);
+      continue;
+    }
+    let visitNote = '';
+    try {
+      assertTime();
+      // "booked" means OPEN work only — completed/skipped/superseded rows
+      // are history, not coordination context.
+      const visits = await bounded(db('scheduled_services')
+        .where({ customer_id: e.customer.id })
+        .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site'])
+        .whereRaw("scheduled_date >= (NOW() AT TIME ZONE 'America/New_York')::date - INTERVAL '30 days'")
+        .orderBy('scheduled_date', 'asc')
+        .limit(6))
+        .select('service_type', 'scheduled_date', 'status',
+          'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip');
+      const scopeFull = e.scope
+        ? stampFull(e.scope.address, e.scope.line2, e.scope.city, e.scope.zip)
+        : null;
+      const scoped = !e.scope ? visits : visits.filter((v) => {
+        if (v.service_address_line1) {
+          try {
+            return sameStreetAddress(
+              stampFull(v.service_address_line1, v.service_address_line2, v.service_address_city, v.service_address_zip),
+              scopeFull,
+            );
+          } catch (err) {
+            return false;
+          }
+        }
+        return e.scope.isPrimary;
+      });
+      if (scoped.length) {
+        visitNote = ` — booked: ${scoped.slice(0, 3)
+          .map((v) => `${v.service_type} ${String(v.scheduled_date).slice(0, 10)} (${v.status})`)
+          .join('; ')}`;
+      }
+    } catch (err) {
+      if (err.deadline) throw err;
+      logger.warn(`[estimator-scope] triage visit lookup failed: ${err.message}`);
+    }
+    lines.push(`${e.how}: existing active customer ${name}, ${shownAddress}${visitNote}`);
+  }
+
+  return { lines, matchedExistingCustomer: entries.length > 0, recentTexts, vetoTexts };
 }
 
 // Compact "what Waves knows" block for the triage classifier. Fail-open on
 // error AND on the time budget: null → the caller uses the ungrounded
-// prompt, exactly today's behavior.
+// prompt, exactly today's behavior. The deadline is shared with the inner
+// loader so expiry stops the WORK, not just the response.
 async function loadThreadTriageContext({ phone, triggerBody }) {
   let timer = null;
   try {
+    const deadline = Date.now() + TRIAGE_TIMEOUT_MS;
     const timeout = new Promise((resolve) => {
       timer = setTimeout(() => resolve(null), TRIAGE_TIMEOUT_MS);
     });
-    const result = await Promise.race([loadTriageInner({ phone, triggerBody }), timeout]);
+    const result = await Promise.race([loadTriageInner({ phone, triggerBody, deadline }), timeout]);
     if (!result) logger.warn('[estimator-scope] triage context timed out (falling back ungrounded)');
     return result;
   } catch (err) {
