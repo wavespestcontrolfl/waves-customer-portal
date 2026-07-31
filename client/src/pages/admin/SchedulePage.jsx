@@ -9759,9 +9759,21 @@ export function CompletionPanel({
     setNotes(savedDraft.notes || "");
     setSelectedProducts(
       Array.isArray(savedDraft.selectedProducts)
-        ? savedDraft.selectedProducts.map((product) =>
-            normalizeProductArea(product, serviceTypeForArea),
-          )
+        ? savedDraft.selectedProducts.map((product) => {
+            const normalized = normalizeProductArea(product, serviceTypeForArea);
+            // Bed bug: a pre-migration draft carries the old inferred
+            // perimeter default — reclassify it to the interior default so
+            // a restored draft can't demand perimeter footage or record
+            // interior work as exterior (codex P2 r10).
+            if (
+              isBedBugVisit &&
+              effectiveApplicationMethod(normalized.applicationMethod) ===
+                "perimeter_spray"
+            ) {
+              return { ...normalized, applicationMethod: "spot_treatment" };
+            }
+            return normalized;
+          })
         : [],
     );
     setSendSms(savedDraft.sendSms !== false);
@@ -11813,15 +11825,17 @@ export function CompletionPanel({
                   textAlign: "center",
                 }}
               >
-                {completionResult?.completionSmsStatus === "sent"
-                  ? "SMS + report sent"
-                  : completionResult?.completionSmsStatus === "blocked"
-                    ? `Report saved. SMS blocked${completionResult?.completionSmsError ? `: ${completionResult.completionSmsError}` : ""}`
-                    : completionResult?.completionSmsStatus === "failed"
-                      ? `Report saved. SMS failed${completionResult?.completionSmsError ? `: ${completionResult.completionSmsError}` : ""}`
-                      : effectiveSendSms
-                        ? "Report saved"
-                        : "Report saved"}{" "}
+                {completionResult?.typedDeliveryMode === "disabled"
+                  ? "Completion recorded"
+                  : completionResult?.typedDeliveryMode === "internal_only"
+                    ? "Report stored internally"
+                    : completionResult?.completionSmsStatus === "sent"
+                      ? "SMS + report sent"
+                      : completionResult?.completionSmsStatus === "blocked"
+                        ? `Report saved. SMS blocked${completionResult?.completionSmsError ? `: ${completionResult.completionSmsError}` : ""}`
+                        : completionResult?.completionSmsStatus === "failed"
+                          ? `Report saved. SMS failed${completionResult?.completionSmsError ? `: ${completionResult.completionSmsError}` : ""}`
+                          : "Report saved"}{" "}
                 for {service.customerName}
               </div>{" "}
               {/* completionAdvisories are deliberately NOT rendered here —
@@ -13740,13 +13754,17 @@ export function CompletionPanel({
               Service Completed!
             </div>{" "}
             <div style={{ fontSize: 14, color: D.muted, marginTop: 8 }}>
-              {!effectiveSendSms
-                ? "Report saved"
-                : completionResult?.completionSmsStatus === "blocked"
-                  ? `Report saved. SMS blocked${completionResult?.completionSmsError ? `: ${completionResult.completionSmsError}` : ""}`
-                  : completionResult?.completionSmsStatus === "failed"
-                    ? `Report saved. SMS failed${completionResult?.completionSmsError ? `: ${completionResult.completionSmsError}` : ""}`
-                    : "SMS + Report sent"}{" "}
+              {completionResult?.typedDeliveryMode === "disabled"
+                ? "Completion recorded"
+                : completionResult?.typedDeliveryMode === "internal_only"
+                  ? "Report stored internally"
+                  : !effectiveSendSms
+                    ? "Report saved"
+                    : completionResult?.completionSmsStatus === "blocked"
+                      ? `Report saved. SMS blocked${completionResult?.completionSmsError ? `: ${completionResult.completionSmsError}` : ""}`
+                      : completionResult?.completionSmsStatus === "failed"
+                        ? `Report saved. SMS failed${completionResult?.completionSmsError ? `: ${completionResult.completionSmsError}` : ""}`
+                        : "SMS + Report sent"}{" "}
               for {service.customerName}
             </div>{" "}
             {["internal_only", "disabled"].includes(completionResult?.typedDeliveryMode) && (
