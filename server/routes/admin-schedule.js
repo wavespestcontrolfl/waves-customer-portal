@@ -608,9 +608,21 @@ async function sendRescheduleNoticeForVisit(serviceId, dateStr, startHHMM) {
   let sent = false;
   let error = null;
   try {
-    const svc = await db('scheduled_services').where({ id: serviceId }).first('customer_id', 'service_type');
+    const svc = await db('scheduled_services')
+      .where({ id: serviceId })
+      .first('customer_id', 'service_type', 'status', 'customer_confirmed', 'source_action');
+    // An unreviewed outbound-callback booking must never receive a definitive
+    // reschedule text — the office confirms it first (same guard the dispatch
+    // routes apply before any customer-facing transition).
+    const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('../services/call-booking-source-actions');
+    const unreviewedCallback = svc
+      && svc.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
+      && String(svc.status) === 'pending'
+      && !svc.customer_confirmed;
     const customer = svc?.customer_id ? await db('customers').where({ id: svc.customer_id }).first() : null;
-    if (!customer) {
+    if (unreviewedCallback) {
+      error = 'This outbound-callback booking is pending office review — no reschedule text was sent';
+    } else if (!customer) {
       error = 'Customer not found';
     } else {
       // Fail CLOSED on an unreadable prefs row (the PREFS_UNAVAILABLE
@@ -2617,6 +2629,10 @@ router.get('/month', async (req, res, next) => {
         tier: s.waveguard_tier,
         zone: s.zone || getZone(s.city, s.zip),
         windowStart: s.window_start,
+        // windowEnd is additive: the month-launched RescheduleModal derives
+        // the visit's true occupancy span from the stored window rather than
+        // trusting the fabricated ||30 duration below.
+        windowEnd: s.window_end,
         duration: s.estimated_duration_minutes || 30,
         isRecurring: s.is_recurring,
         recurringParentId: s.recurring_parent_id || null,

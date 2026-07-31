@@ -4988,17 +4988,20 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
   // only. Duration: the service's estimate, else the original window span,
   // else 60 minutes.
   const durationMinutes = (() => {
-    // Month-view payloads expose `duration`; day/week payloads expose
-    // `estimatedDuration` — accept either before falling back.
-    const d = parseInt(service.estimatedDuration ?? service.duration, 10);
-    if (Number.isInteger(d) && d > 0) return d;
+    // Stored window span FIRST — the feeds fabricate defaults for
+    // null-duration rows (Day: ||60, Month: ||30), so metadata can lie
+    // while the persisted span cannot. Metadata (estimatedDuration on
+    // day/week payloads, duration on month payloads) is the fallback for
+    // windowless rows, then 60.
     const [ws, we] = [service.windowStart, service.windowEnd];
     if (ws && we) {
       const [h1, m1] = String(ws).split(":").map(Number);
       const [h2, m2] = String(we).split(":").map(Number);
-      const span = h2 * 60 + m2 - (h1 * 60 + m1);
+      const span = h2 * 60 + (m2 || 0) - (h1 * 60 + (m1 || 0));
       if (span > 0) return span;
     }
+    const d = parseInt(service.estimatedDuration ?? service.duration, 10);
+    if (Number.isInteger(d) && d > 0) return d;
     return 60;
   })();
 

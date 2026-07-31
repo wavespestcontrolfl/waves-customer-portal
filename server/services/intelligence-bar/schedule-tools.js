@@ -592,7 +592,17 @@ async function moveStopsToDay(input) {
     if (notifyCustomers) {
       try {
         const start = s.window_start ? String(s.window_start).slice(0, 5) : null;
-        if (!start) {
+        // An unreviewed outbound-callback booking gets NO customer text and
+        // no handleReschedule cover (which would claim its still-pending
+        // confirmation slot) — the office reviews it first, same guard as
+        // the dispatch routes.
+        const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('../call-booking-source-actions');
+        const unreviewedCallback = s.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
+          && String(s.status) === 'pending'
+          && !s.customer_confirmed;
+        if (unreviewedCallback) {
+          notificationFailures.push({ id: s.id, reason: 'Pending office review (outbound-callback booking) — not texted' });
+        } else if (!start) {
           notificationFailures.push({ id: s.id, reason: 'No arrival time is set for this visit, so no reschedule text was sent' });
         } else {
           const reminderRow = await db('appointment_reminders')
