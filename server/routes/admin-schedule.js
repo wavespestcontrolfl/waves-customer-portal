@@ -2136,6 +2136,9 @@ router.get('/', async (req, res, next) => {
         lat: s.visit_lat != null ? Number(s.visit_lat) : null,
         lng: s.visit_lng != null ? Number(s.visit_lng) : null,
         customerConfirmed: s.customer_confirmed,
+        // Lets the sidebar hide actions that the review gate would 409
+        // (unreviewed outbound-callback bookings).
+        sourceAction: s.source_action || null,
         waveguardTier: s.waveguard_tier, monthlyRate: parseFloat(s.monthly_rate || 0),
         isCallback: !!s.is_callback,
         leadScore: s.lead_score, lawnType: s.lawn_type,
@@ -4271,9 +4274,17 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 // path below also re-arms the pending creation confirmation
                 // the cover call would otherwise claim.
                 const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('../services/call-booking-source-actions');
-                const reviewFlags = bulkNotify
-                  ? await db('scheduled_services').where({ id }).first('source_action', 'status', 'customer_confirmed')
-                  : null;
+                // Own catch, fail-closed: a transient failure here must not
+                // ride the outer empty catch and silently skip both the
+                // reminder sync and the failure report.
+                let reviewFlags = null;
+                let reviewLookupFailed = false;
+                if (bulkNotify) {
+                  try {
+                    reviewFlags = await db('scheduled_services').where({ id }).first('source_action', 'status', 'customer_confirmed');
+                    if (!reviewFlags) reviewLookupFailed = true;
+                  } catch { reviewLookupFailed = true; }
+                }
                 const unreviewedCallback = !!reviewFlags
                   && reviewFlags.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
                   && String(reviewFlags.status) === 'pending'
@@ -4282,7 +4293,7 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                 // messaging — sending here too would text the customer once
                 // per sibling for one slot. Suppressed rows move silently
                 // (by design, so not a notification failure).
-                const notifyThisRow = bulkNotify && !!reminderBefore && !reminderBefore.suppressed_by_sibling && !unreviewedCallback;
+                const notifyThisRow = bulkNotify && !!reminderBefore && !reminderBefore.suppressed_by_sibling && !unreviewedCallback && !reviewLookupFailed;
                 await AppointmentReminders.handleReschedule(id, reminderSyncTime, {
                   sendNotification: false,
                   coverDueWindows: notifyThisRow,
@@ -4297,6 +4308,8 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
                   if (!notice.sent) {
                     notificationFailures.push({ id, reason: notice.error || 'reschedule text was not sent' });
                   }
+                } else if (bulkNotify && reviewLookupFailed) {
+                  notificationFailures.push({ id, reason: 'Could not verify the booking\'s review status — not texted' });
                 } else if (bulkNotify && unreviewedCallback) {
                   notificationFailures.push({ id, reason: 'Pending office review (outbound-callback booking) — not texted' });
                 } else if (bulkNotify && !reminderBefore) {

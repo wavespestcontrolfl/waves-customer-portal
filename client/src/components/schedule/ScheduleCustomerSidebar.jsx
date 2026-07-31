@@ -162,8 +162,16 @@ export default function ScheduleCustomerSidebar({
   const canCancelSeries = !!service?.isRecurring;
   const canCancelAppointment = !['completed', 'skipped', 'cancelled'].includes(String(service?.status || '').toLowerCase());
   // Stricter than the cancel gate: SmartRebooker.reschedule 409s a no_show
-  // (terminal), so the menu must not offer a reschedule that can never work.
-  const canRescheduleAppointment = !['completed', 'skipped', 'cancelled', 'no_show'].includes(String(service?.status || '').toLowerCase());
+  // (terminal), and the dispatch route 409s an unreviewed outbound-callback
+  // booking (outbound_review_unconfirmed) — the menu must not offer a
+  // reschedule that can never work.
+  const unreviewedCallbackBooking =
+    service?.sourceAction === 'ai_call_outbound_review'
+    && String(service?.status || '').toLowerCase() === 'pending'
+    && !service?.customerConfirmed;
+  const canRescheduleAppointment =
+    !['completed', 'skipped', 'cancelled', 'no_show'].includes(String(service?.status || '').toLowerCase())
+    && !unreviewedCallbackBooking;
 
   const appointmentHistory = useMemo(() => {
     const currentId = service?.id;

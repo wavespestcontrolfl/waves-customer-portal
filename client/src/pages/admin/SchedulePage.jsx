@@ -5057,6 +5057,9 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
             // Re-derive the block from the visit's own duration — the
             // suggested window's 2-3h span is arrival copy, not occupancy.
             newWindow: suggestedBlock,
+            // Server re-derives window_end from the CURRENT row, so a stale
+            // board snapshot can't shrink or expand the visit's block.
+            deriveWindowFromCurrentVisit: true,
             reasonCode: reason,
             reasonText: notes,
             notifyCustomer,
@@ -5104,6 +5107,9 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
           body: JSON.stringify({
             newDate: manualDate,
             newWindow: window,
+            // Server re-derives window_end from the CURRENT row, so a stale
+            // board snapshot can't shrink or expand the visit's block.
+            deriveWindowFromCurrentVisit: true,
             reasonCode: reason,
             reasonText: notes,
             notifyCustomer,
