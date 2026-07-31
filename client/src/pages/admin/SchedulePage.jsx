@@ -9890,8 +9890,24 @@ export function CompletionPanel({
         : {};
     if (typedFindingsSchema?.fields) {
       pruneRestoredFindingsValues(restoredFindings, typedFindingsSchema.fields);
+      setFindingsValues(restoredFindings);
+    } else {
+      // The profile untyped since this draft was saved (bed_bug,
+      // 20260731400000): the typed controls no longer render and the submit
+      // path would silently drop these entries as invisible state — discard
+      // them LOUDLY instead so the tech re-enters what still matters
+      // (codex P2 r1). Generic fields (notes, products, rating…) still
+      // restore normally.
+      const draftHadTypedEntries = Object.values(restoredFindings).some((v) =>
+        Array.isArray(v) ? v.length > 0 : String(v ?? "").trim() !== "",
+      );
+      if (draftHadTypedEntries) {
+        alert(
+          "This service now completes with the standard form. The typed findings saved in this draft (rooms, evidence, treatment…) can't be restored — re-enter anything still needed in the notes or observations.",
+        );
+      }
+      setFindingsValues({});
     }
-    setFindingsValues(restoredFindings);
     setTypedActivityScore(
       Number.isInteger(savedDraft.typedActivityScore)
         ? savedDraft.typedActivityScore

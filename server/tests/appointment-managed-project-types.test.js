@@ -45,9 +45,12 @@ describe('appointmentManagedProjectTypes', () => {
     expect(managed).toEqual(new Set(['cockroach', 'bed_bug']));
   });
 
-  test('pre-cutover (no flipped rows) is an empty set — Projects creation unchanged', async () => {
+  test('pre-cutover (no flipped rows) still carries the code-enforced retired-untyped types', async () => {
+    // bed_bug's pointer was CLEARED by the 20260731400000 untype — the type
+    // must stay appointment-managed by code or /admin/projects re-exposes
+    // the retired project form as a second completion lane (codex P1).
     const managed = await appointmentManagedProjectTypes(makeKnex({ rows: [] }));
-    expect(managed.size).toBe(0);
+    expect(managed).toEqual(new Set(['bed_bug']));
   });
 
   test('fails open to empty set when the table is missing or the query errors', async () => {
@@ -65,7 +68,7 @@ describe('appointmentManagedProjectTypes', () => {
       backedRows: [{ project_type: 'rodent_trapping' }],
     });
     const managed = await appointmentManagedProjectTypes(knex);
-    expect(managed).toEqual(new Set(['cockroach']));
+    expect(managed).toEqual(new Set(['cockroach', 'bed_bug']));
   });
 
   // Owner directive 2026-07-13 (supersedes 2026-07-04): the flea + rodent
@@ -78,7 +81,7 @@ describe('appointmentManagedProjectTypes', () => {
       rows: [{ project_type: 'flea' }, { project_type: 'rodent_trapping' }, { project_type: 'cockroach' }],
     });
     const managed = await appointmentManagedProjectTypes(knex);
-    expect(managed).toEqual(new Set(['flea', 'rodent_trapping', 'cockroach']));
+    expect(managed).toEqual(new Set(['flea', 'rodent_trapping', 'cockroach', 'bed_bug']));
     expect(PROJECT_CREATION_KEPT_TYPES.size).toBe(0);
   });
 
@@ -115,7 +118,7 @@ describe('appointmentManagedProjectTypes', () => {
       rows: [{ project_type: 'wdo_inspection' }, { project_type: 'cockroach' }],
     });
     const managed = await appointmentManagedProjectTypes(knex);
-    expect(managed).toEqual(new Set(['cockroach']));
+    expect(managed).toEqual(new Set(['cockroach', 'bed_bug']));
     expect(V1_EXCLUDED_PROJECT_TYPES.has('wdo_inspection')).toBe(true);
   });
 });

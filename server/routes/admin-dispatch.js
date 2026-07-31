@@ -4964,6 +4964,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           && serviceFindingsAvailable
           && !typedFindingsType
           && !isInternalOnlyCompletion
+          // Infestation-class untyped closeouts (alert-policy profiles —
+          // bed_bug post-20260731400000) never INFER "no activity" from
+          // blank optional fields: the visit exists because activity was
+          // found, and a contradictory zero would print on the customer
+          // report. Only an explicit 0 rating states it (codex P2 r1).
+          && !(completionProfile?.followupPolicy === 'alert'
+            && (activityScore ?? clientPestRating) == null)
           && shouldInsertNoActivityFinding({
             visitOutcome,
             observations: reportObservations,
@@ -8327,7 +8334,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         typedFindingsType,
         typedDeliveryMode,
         followupSuggestion,
-      } : {}),
+      } : (followupSuggestion ? {
+        // Untyped alert-policy completions (bed_bug post-20260731400000)
+        // parked the same obligation — the panel needs the suggestion to
+        // render its Book-follow-up CTA (codex P1 r1).
+        followupSuggestion,
+      } : {})),
     };
     // Refresh the stored response with the final invoice info — this is an
     // UPDATE of an already-succeeded row (set above immediately after the
@@ -8560,7 +8572,11 @@ router.post('/:serviceId/schedule-followup', async (req, res, next) => {
     if (!svc) return res.status(404).json({ error: 'Service not found' });
 
     const profile = await resolveCompletionProfileForScheduledService(svc).catch(() => null);
-    if (!profile?.findingsType) {
+    // Untyped alert-policy profiles (bed_bug post-20260731400000) book from
+    // the FROZEN verdict their completion persisted; the typed-snapshot
+    // gates below stay authoritative for typed profiles (codex P1 r1).
+    const untypedAlertProfile = !!profile && !profile.findingsType && profile.followupPolicy === 'alert';
+    if (!profile?.findingsType && !untypedAlertProfile) {
       return res.status(409).json({
         error: 'Follow-up booking from completion is only available for typed specialty services.',
         code: 'followup_not_typed',
@@ -8589,7 +8605,19 @@ router.post('/:serviceId/schedule-followup', async (req, res, next) => {
       .first()
       .catch(() => null);
     const snapshot = parseJsonObject(sourceRecord?.service_data)?.typedReportSnapshot;
-    if (!snapshot || String(snapshot.type || '') !== String(profile.findingsType)) {
+    const preAuthFrozenVerdict = parseJsonObject(sourceRecord?.structured_notes)?.typedFollowupVerdict;
+    if (untypedAlertProfile) {
+      // Untyped completions always freeze their verdict; a legacy TYPED
+      // completion on the now-untyped profile still carries its snapshot.
+      // Neither present → the visit never earned the CTA — same "can't mint
+      // an included $0 follow-up" guarantee as the typed gate.
+      if (!(preAuthFrozenVerdict && typeof preAuthFrozenVerdict.required === 'boolean') && !snapshot) {
+        return res.status(409).json({
+          error: 'This visit was not completed through the follow-up flow.',
+          code: 'followup_no_typed_completion',
+        });
+      }
+    } else if (!snapshot || String(snapshot.type || '') !== String(profile.findingsType)) {
       return res.status(409).json({
         error: 'This visit was not completed through the typed report flow.',
         code: 'followup_no_typed_completion',
@@ -8604,13 +8632,17 @@ router.post('/:serviceId/schedule-followup', async (req, res, next) => {
     // cockroach_control exemption, two-treatment visit-2 stop, German
     // "No"/window selection, palmetto "Yes" upgrade) — a stale or crafted
     // POST still can't mint an included $0 follow-up the verdict withheld.
-    const frozenCtaVerdict = parseJsonObject(sourceRecord?.structured_notes)?.typedFollowupVerdict;
+    const frozenCtaVerdict = preAuthFrozenVerdict;
     const suggestion = (frozenCtaVerdict && typeof frozenCtaVerdict.required === 'boolean')
       ? frozenCtaVerdict
       : typedFollowupVerdict({
         scheduledService: svc,
         profile,
-        findingsType: profile.findingsType,
+        // Pre-freeze legacy records on a now-untyped profile re-derive
+        // through their own snapshot's type — the pointer was cleared, not
+        // the record (codex P1 r1). The snapshot-presence gate above makes
+        // this reachable only with a snapshot in the untyped case.
+        findingsType: profile.findingsType || snapshot?.type || null,
         values: snapshot?.values || {},
       });
     if (!suggestion?.required) {

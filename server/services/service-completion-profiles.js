@@ -30,6 +30,14 @@ const COMPANION_EXCLUDED_TYPES = new Set([...V1_EXCLUDED_PROJECT_TYPES, 'pre_tre
 // cut over (#2708), every fully-typed family now completes through the
 // appointment flow only. The mechanism stays for a future exemption.
 const PROJECT_CREATION_KEPT_TYPES = new Set([]);
+// Retired-typed pointers (untype migrations, e.g. bed_bug in
+// 20260731400000): clearing the profile pointer changes the completion
+// FORM, it does not resurrect the retired Projects creation path. Without
+// this code-enforced set, the pointer going NULL would drop the type from
+// appointmentManagedProjectTypes and /admin/projects would re-expose the
+// retired project form as a second, conflicting completion lane
+// (codex P1 r1 on the bed-bug untype).
+const UNTYPED_RETIRED_PROJECT_TYPES = new Set(['bed_bug']);
 // Compliance project types create ONLY from their scheduled visit (owner
 // ruling 2026-07-13: "we don't ever do a WDO or pre-treat without something
 // scheduled"). Creation-side only — completion stays on the project flow
@@ -309,8 +317,8 @@ async function appointmentManagedProjectTypes(knex = db) {
       .where({ completion_mode: 'service_report', active: true })
       .whereNotNull('project_type')
       .distinct('project_type');
-    return new Set(
-      rows
+    return new Set([
+      ...rows
         .map((row) => row.project_type)
         .filter(Boolean)
         // Partially-cutover types (some keys still project_required) stay
@@ -323,7 +331,10 @@ async function appointmentManagedProjectTypes(knex = db) {
         // Owner-kept documentation types (see PROJECT_CREATION_KEPT_TYPES) —
         // creatable as standalone projects; completion routing untouched.
         .filter((type) => !PROJECT_CREATION_KEPT_TYPES.has(type)),
-    );
+      // Untyped-retired types stay appointment-managed by code — their
+      // pointer is NULL so the query above can no longer see them.
+      ...UNTYPED_RETIRED_PROJECT_TYPES,
+    ]);
   } catch {
     return new Set();
   }

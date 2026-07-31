@@ -190,13 +190,20 @@ describe('/schedule-followup (source contracts)', () => {
   test('the CTA books the FROZEN completion verdict; legacy records fall back to the shared chain', () => {
     const routeIdx = dispatchSource.indexOf("router.post('/:serviceId/schedule-followup'");
     const routeTail = dispatchSource.slice(routeIdx);
-    const frozenIdx = routeTail.indexOf('const frozenCtaVerdict = parseJsonObject(sourceRecord?.structured_notes)?.typedFollowupVerdict;');
+    const frozenIdx = routeTail.indexOf('const frozenCtaVerdict = preAuthFrozenVerdict;');
     expect(frozenIdx).toBeGreaterThan(-1);
-    // Snapshot gate still fails closed on missing/mismatched snapshots.
+    // Snapshot gate still fails closed on missing/mismatched snapshots —
+    // and the untyped alert-profile leg (bed_bug post-20260731400000)
+    // requires a frozen verdict OR a legacy typed snapshot before booking.
     expect(routeTail.slice(0, frozenIdx)).toContain('followup_no_typed_completion');
-    const verdictBlock = routeTail.slice(frozenIdx, frozenIdx + 900);
+    expect(routeTail.slice(0, frozenIdx)).toContain('const untypedAlertProfile = !!profile && !profile.findingsType && profile.followupPolicy === \'alert\';');
+    expect(routeTail.slice(0, frozenIdx)).toContain('const preAuthFrozenVerdict = parseJsonObject(sourceRecord?.structured_notes)?.typedFollowupVerdict;');
+    const verdictBlock = routeTail.slice(frozenIdx, frozenIdx + 1100);
     expect(verdictBlock).toContain("typeof frozenCtaVerdict.required === 'boolean'");
     expect(verdictBlock).toContain(': typedFollowupVerdict({');
+    // Pre-freeze legacy records on a now-untyped profile re-derive through
+    // their own snapshot's type.
+    expect(verdictBlock).toContain('findingsType: profile.findingsType || snapshot?.type || null');
     expect(verdictBlock).toContain('values: snapshot?.values || {}');
     expect(verdictBlock).toContain('followup_not_required');
   });
