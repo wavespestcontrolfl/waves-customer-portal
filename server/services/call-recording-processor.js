@@ -3812,7 +3812,7 @@ async function extractCallData(transcription, callerPhone, opts = {}) {
   // problem, or asking about billing (not leads).
   const knownCaller = opts.knownCaller || null;
   // matched_service picks from the live bookable catalog first (specific
-  // services like "Cockroach Control Service"), backstopped by the legacy
+  // services like "Cockroach Treatment"), backstopped by the legacy
   // coarse labels so intent gating (canonicalWavesService) keeps working.
   const LEGACY_MATCHED_SERVICES = [
     'General Pest Control', 'Lawn Care', 'Mosquito Control', 'Termite Inspection', 'WDO Inspection',
@@ -3861,7 +3861,7 @@ Extract the following as JSON. Use null for anything not clearly stated:
   "pain_points": "brief summary of customer concerns or pest issues",
   "call_summary": "2-3 sentence summary of the call",
   "lead_quality": "hot/warm/cold/spam",
-  "matched_service": "best match from: ${matchedServiceList}, or null — prefer the MOST SPECIFIC service that fits (e.g. a German/kitchen cockroach infestation cleanout is Cockroach Control Service, not General Pest Control)",
+  "matched_service": "best match from: ${matchedServiceList}, or null — prefer the MOST SPECIFIC service that fits (e.g. a German/kitchen cockroach infestation cleanout is Cockroach Treatment, not General Pest Control)",
   "quoted_price": number or null,
   "quote_requested": true/false,
   "quote_promised": true/false,
