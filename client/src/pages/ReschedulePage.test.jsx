@@ -537,7 +537,7 @@ describe('ReschedulePage weather-move banner', () => {
 
   it('the capsule claim fails CLOSED — only liquid pest sprays see it (codex r4/r5)', async () => {
     // Denylist gaps: lawn fertilizers, rodent exclusion, bed-bug heat work.
-    for (const type of ['Lawn Care', 'Rodent Exclusion & Trapping', 'Bed Bug Treatment', 'Mosquito Service']) {
+    for (const type of ['Lawn Care', 'Rodent Exclusion & Trapping', 'Bed Bug Treatment', 'Mosquito Service', 'Initial Pest Cleanout']) {
       stubFetch({
         get: jsonResponse(reschedulablePayload({ service: { type }, weatherMove })),
       });
