@@ -59,6 +59,17 @@ function checkTcpaConsent(extraction, opts = {}) {
   return { canSms: false, canEmail: true, reason: 'sms_consent_not_given' };
 }
 
+// v2-1.1.0: agent-commitment authorization (gated demotion of
+// caller_not_authorized) changed what canAutoRoute can decide — the
+// route_decisions migration contract requires a version bump so reprocessing
+// a call writes a NEW decision row instead of being onConflict-ignored into
+// the stale pre-rule one. EVERY consumer must use these constants: the
+// producer and same-run outcome update take V2_DECISION_VERSION (they own
+// only rows this code writes); history-spanning readers (admin review
+// queues) take V2_DECISION_VERSIONS so pre-bump rows stay visible.
+const V2_DECISION_VERSION = 'v2-1.1.0';
+const V2_DECISION_VERSIONS = ['v2-1.0.0', 'v2-1.1.0'];
+
 function buildRouteDecision({
   callLogId,
   extraction,
@@ -72,7 +83,7 @@ function buildRouteDecision({
 
   return {
     call_log_id: callLogId,
-    decision_version: 'v2-1.0.0',
+    decision_version: V2_DECISION_VERSION,
     mode,
     validator_recommendation: routingResult?.allowed
       ? (scheduling.status === 'confirmed' ? 'auto_create_appointment' : 'upsert_customer_only')
@@ -256,4 +267,6 @@ module.exports = {
   checkTcpaConsent,
   buildRouteDecision,
   buildTriageItem,
+  V2_DECISION_VERSION,
+  V2_DECISION_VERSIONS,
 };

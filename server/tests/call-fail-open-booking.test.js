@@ -168,6 +168,480 @@ describe('canAutoRoute fail-open booking', () => {
   });
 });
 
+describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BOOKING)', () => {
+  // Live miss 2026-07-30: a third-party arranger (realtor booking a WDO
+  // inspection for a buyer) confirmed a slot the agent verbally accepted on
+  // the call ("we'll confirm it for noon on Sunday") — the booking still
+  // parked in triage on caller_not_authorized. All names/quotes here are
+  // synthetic.
+  const AGENT_COMMIT_QUOTE = "So we'll confirm it for noon on Sunday, and just let us know if anything changes.";
+  const TRANSCRIPT = [
+    'Caller: Hi, I want to confirm the inspection for noon on Sunday.',
+    'Agent: Sounds good, let me grab the address.',
+    'Caller: 100 Example Street in Venice.',
+    `Agent: ${AGENT_COMMIT_QUOTE}`,
+    'Caller: Okay, thank you.',
+  ].join('\n');
+
+  function agentCommitted(flags = ['caller_not_authorized'], { claim = true, speaker = 'agent', quote = AGENT_COMMIT_QUOTE } = {}) {
+    const ex = extraction(flags);
+    // Slot must match the committed quote ("noon on Sunday") — 2026-08-02 is
+    // a Sunday; slot binding rejects a quote↔confirmed_start_at mismatch.
+    ex.scheduling.confirmed_start_at = '2026-08-02T12:00:00-04:00';
+    ex.scheduling.agent_committed_booking = claim;
+    ex.evidence = quote === null ? [] : [
+      { field_path: '/scheduling/agent_committed_booking', quote, speaker, transcript_offset_ms: null },
+    ];
+    return ex;
+  }
+  // Call Thursday 7/30; committed slot Sunday 8/2 — inside the 7-day window
+  // that makes a spoken weekday a unique calendar date.
+  const opts = (extra = {}) => ({ agentCommitFailOpen: true, transcriptLabelsTrusted: true, transcript: TRANSCRIPT, callStartedAt: '2026-07-30T15:50:00-04:00', ...extra });
+
+  test('agent commitment demotes caller_not_authorized to failedOpenFlags and books', () => {
+    const r = canAutoRoute(agentCommitted(), opts());
+    expect(r.allowed).toBe(true);
+    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+  });
+
+  test('gate off → caller_not_authorized still hard-blocks even with a pinned agent commitment', () => {
+    const r = canAutoRoute(agentCommitted(), { transcript: TRANSCRIPT });
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('caller-attributed evidence cannot satisfy the commitment (trust boundary)', () => {
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { speaker: 'caller' }), opts());
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('a hallucinated quote that never appears in the transcript stays blocked (P0: evidence is untrusted)', () => {
+    const r = canAutoRoute(
+      agentCommitted(['caller_not_authorized'], { quote: "You're all booked for Sunday at noon, guaranteed." }),
+      opts()
+    );
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('a quote spoken by the CALLER cannot ground even with an agent speaker label (P0)', () => {
+    const r = canAutoRoute(
+      agentCommitted(['caller_not_authorized'], { quote: 'Hi, I want to confirm the inspection for noon on Sunday.' }),
+      opts()
+    );
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('no transcript / unlabeled transcript → fail closed', () => {
+    for (const transcript of [null, '', 'we will confirm it for noon on Sunday and just let us know if anything changes']) {
+      const r = canAutoRoute(agentCommitted(), opts({ transcript }));
+      expect(r.allowed).toBe(false);
+      expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+    }
+  });
+
+  test('untrusted transcript labels fail closed — LLM-inferred Agent:/Caller: prefixes never clear the hard block (round-2 P1)', () => {
+    for (const trusted of [undefined, false, 'true']) {
+      const r = canAutoRoute(agentCommitted(), opts({ transcriptLabelsTrusted: trusted }));
+      expect(r.allowed).toBe(false);
+      expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+    }
+  });
+
+  test('the commitment quote must bind to the confirmed slot — a Tuesday-at-10 commitment never unlocks a Sunday-noon booking (round-2 P1)', () => {
+    // Same call, but the model mixed slots: commitment quote says Tuesday at
+    // 10 while confirmed_start_at holds Sunday noon.
+    const tueQuote = "So we'll get you on the schedule for Tuesday at 10, and just let us know if anything changes.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, tueQuote);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: tueQuote }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('slot binding requires the weekday too — an hour-only commitment quote stays in triage (round-2 P1)', () => {
+    const vagueQuote = "So we'll confirm it for noon then, and just let us know if anything changes.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, vagueQuote);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: vagueQuote }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('AM/PM must corroborate — a "10 AM" commitment never authorizes a 10 PM slot (round-4 P1)', () => {
+    const amQuote = "So we'll see you Sunday at 10 AM, and just let us know if anything changes.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, amQuote);
+    const mk = (startAt) => {
+      const ex = agentCommitted(['caller_not_authorized'], { quote: amQuote });
+      ex.scheduling.confirmed_start_at = startAt;
+      return ex;
+    };
+    const pm = canAutoRoute(mk('2026-08-02T22:00:00-04:00'), opts({ transcript }));
+    expect(pm.allowed).toBe(false);
+    expect(pm.appointmentBlockingFlags).toContain('caller_not_authorized');
+    const am = canAutoRoute(mk('2026-08-02T10:00:00-04:00'), opts({ transcript }));
+    expect(am.allowed).toBe(true);
+    expect(am.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+  });
+
+  test("a period-less \"10 o'clock\" commitment is ambiguous and fails closed (round-4 P1)", () => {
+    const bare = "So we'll see you Sunday at 10 o'clock, and just let us know if anything changes.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, bare);
+    const ex = agentCommitted(['caller_not_authorized'], { quote: bare });
+    ex.scheduling.confirmed_start_at = '2026-08-02T10:00:00-04:00';
+    const r = canAutoRoute(ex, opts({ transcript }));
+    expect(r.allowed).toBe(false);
+  });
+
+  test('a multi-slot turn never binds — rejected 10 AM + committed 11 AM fails for BOTH slots (round-5 P1)', () => {
+    const multi = "Sunday at 10 AM won't work, but we'll see you at 11 AM, and just let us know if anything changes.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, multi);
+    for (const startAt of ['2026-08-02T10:00:00-04:00', '2026-08-02T11:00:00-04:00']) {
+      const ex = agentCommitted(['caller_not_authorized'], { quote: multi });
+      ex.scheduling.confirmed_start_at = startAt;
+      const r = canAutoRoute(ex, opts({ transcript }));
+      expect(r.allowed).toBe(false);
+      expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+    }
+  });
+
+  test('two weekday names in the quote are ambiguous and fail closed (round-5 P1)', () => {
+    const twoDays = "Saturday is booked solid, so we'll confirm it for noon on Sunday instead, just let us know.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, twoDays);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: twoDays }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+  });
+
+  test('a committed slot more than 7 days after the call fails closed — weekday is not a unique date (round-5 P1)', () => {
+    const ex = agentCommitted();
+    ex.scheduling.confirmed_start_at = '2026-08-09T12:00:00-04:00'; // Sunday AFTER next
+    const r = canAutoRoute(ex, opts());
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('missing callStartedAt fails closed (round-5 P1)', () => {
+    const r = canAutoRoute(agentCommitted(), opts({ callStartedAt: undefined }));
+    expect(r.allowed).toBe(false);
+  });
+
+  test('a SAME-ET-DAY slot is ambiguous and fails closed — "Sunday" on a Sunday could mean next week (round-7 P1)', () => {
+    const r = canAutoRoute(agentCommitted(), opts({ callStartedAt: '2026-08-02T09:00:00-04:00' }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('a day-7 slot (same weekday next week) fails closed — ET calendar-date diff, not a 168h window (round-7 P1)', () => {
+    const ex = agentCommitted();
+    ex.scheduling.confirmed_start_at = '2026-08-02T12:00:00-04:00';
+    const r = canAutoRoute(ex, opts({ callStartedAt: '2026-07-26T12:00:00-04:00' })); // prior Sunday, exactly 7 ET days
+    expect(r.allowed).toBe(false);
+  });
+
+  test('a pinned FRAGMENT cannot strip negation — the whole grounding turn is screened (round-6 P1)', () => {
+    const rejectingTurn = "Sunday at 10 AM won't work, but I'll ask someone to call you back.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, rejectingTurn);
+    const ex = agentCommitted(['caller_not_authorized'], { quote: 'Sunday at 10 AM' });
+    ex.scheduling.confirmed_start_at = '2026-08-02T10:00:00-04:00';
+    const r = canAutoRoute(ex, opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('punctuated day periods bind — "Sunday at 10 a.m." matches a 10 AM slot (round-6 P2)', () => {
+    const punctuated = "So we'll see you Sunday at 10 a.m., and just let us know if anything changes.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, punctuated);
+    const ex = agentCommitted(['caller_not_authorized'], { quote: punctuated });
+    ex.scheduling.confirmed_start_at = '2026-08-02T10:00:00-04:00';
+    const r = canAutoRoute(ex, opts({ transcript }));
+    expect(r.allowed).toBe(true);
+    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+  });
+
+  test('a CONDITIONAL commitment never books — "If the homeowner approves, we will see you Sunday at noon" (P0)', () => {
+    const conditional = "If the homeowner approves, we will see you Sunday at noon, thanks so much.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, conditional);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: conditional }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('a trailing non-benign conditional also fails — "…Sunday at noon if the buyer signs off" (P0)', () => {
+    const conditional = "So we'll see you Sunday at noon if the buyer signs off on everything.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, conditional);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: conditional }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+  });
+
+  test('the benign closer "just let us know if anything changes" still books (P0 counter-case)', () => {
+    const r = canAutoRoute(agentCommitted(), opts());
+    expect(r.allowed).toBe(true);
+  });
+
+  test('an explicit date in the quote must match the slot — "Sunday, August 9, at noon" never books an August 2 slot (P1)', () => {
+    const wrongDate = "So we'll confirm it for Sunday, August 9, at noon, and just let us know if anything changes.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, wrongDate);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: wrongDate }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('a MATCHING explicit date binds — "Sunday, August 2nd, at noon" books the August 2 slot (P1 counter-case)', () => {
+    const rightDate = "So we'll confirm it for Sunday, August 2nd, at noon, and just let us know if anything changes.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, rightDate);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: rightDate }), opts({ transcript }));
+    expect(r.allowed).toBe(true);
+    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+  });
+
+  test('a standalone mismatched ordinal day ("the 9th") fails closed (P1)', () => {
+    const ordinal = "So we'll confirm it for noon on Sunday the 9th, and just let us know if anything changes.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, ordinal);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: ordinal }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+  });
+
+  test('out-of-vocabulary commitment language fails closed — "subject to homeowner approval" (P0 contract)', () => {
+    const subj = "We will see you Sunday at noon, subject to homeowner approval.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, subj);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: subj }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('any unexpected wording fails the vocabulary contract — "we will swing by Sunday at noon" (P0 contract)', () => {
+    const swing = "We will swing by Sunday at noon with all the equipment loaded.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, swing);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: swing }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+  });
+
+  test('a numeric date must match the slot — "Sunday 8/9 at noon" never books an August 2 slot (P1)', () => {
+    const numeric = "So we will see you Sunday 8/9 at noon, and just let us know if anything changes.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, numeric);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: numeric }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+  });
+
+  test('a MATCHING numeric date binds — "Sunday 8/2 at noon" books the August 2 slot (P1 counter-case)', () => {
+    const numeric = "So we will see you Sunday 8/2 at noon, and just let us know if anything changes.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, numeric);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: numeric }), opts({ transcript }));
+    expect(r.allowed).toBe(true);
+  });
+
+  test('a wrong year fails closed (P1)', () => {
+    const yearQuote = "So we will see you Sunday at noon August 2 2027, and just let us know if anything changes.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, yearQuote);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: yearQuote }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+  });
+
+  test('an interrogative turn never commits — "Will you be there Sunday at noon?" (P0 regression)', () => {
+    const question = 'Will you be there Sunday at noon?';
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, question);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: question }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('a first-person REQUEST is not a commitment — "We will need you to confirm Sunday at noon" (P0 regression)', () => {
+    const request = 'We will need you to confirm Sunday at noon.';
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, request);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: request }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('a conditional BOOKING with a benign-looking tail fails — "we will book you for Sunday at noon if anything changes" (P0 regression)', () => {
+    const conditionalBooking = 'We will book you for Sunday at noon if anything changes.';
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, conditionalBooking);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: conditionalBooking }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('binding validates the CANONICAL wall clock booking writes — a July "-05:00" noon books noon and binds "noon" (P0 wall-clock)', () => {
+    // Wrong seasonal offset: the instant is 13:00 EDT but v2IsoToEtWallClock
+    // books the LITERAL wall clock (noon). The noon quote must bind.
+    const ex = agentCommitted();
+    ex.scheduling.confirmed_start_at = '2026-08-02T12:00:00-05:00';
+    const r = canAutoRoute(ex, opts());
+    expect(r.allowed).toBe(true);
+  });
+
+  test('an instant-equivalent quote does NOT bind the wall clock — "1 PM" against a "-05:00" noon stays blocked (P0 wall-clock)', () => {
+    const onePm = "So we'll see you Sunday at 1 PM, and just let us know if anything changes.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, onePm);
+    const ex = agentCommitted(['caller_not_authorized'], { quote: onePm });
+    ex.scheduling.confirmed_start_at = '2026-08-02T12:00:00-05:00';
+    const r = canAutoRoute(ex, opts({ transcript }));
+    expect(r.allowed).toBe(false);
+  });
+
+  test('a foreign offset whose ET wall clock is off-hour fails the guard — raw ":00" with "+05:30" (P0 wall-clock)', () => {
+    const ex = agentCommitted();
+    ex.scheduling.confirmed_start_at = '2026-08-02T12:00:00+05:30'; // 02:30 ET wall
+    const r = canAutoRoute(ex, opts());
+    expect(r.allowed).toBe(false);
+  });
+
+  test('the SAME sentence must carry form + slot — a pinned question after a commitment sentence never books (P0 splice regression)', () => {
+    const splice = 'We will see you Tuesday at 10 AM. Are you booked Sunday at noon?';
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, splice);
+    const ex = agentCommitted(['caller_not_authorized'], { quote: 'Are you booked Sunday at noon' });
+    const r = canAutoRoute(ex, opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('a two-digit year must match — "Sunday 8/2/27 at noon" never books a 2026 slot (P0 regression)', () => {
+    const wrongYear = "So we'll see you Sunday 8/2/27 at noon, and just let us know if anything changes.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, wrongYear);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: wrongYear }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('a matching two-digit year binds — "Sunday 8/2/26 at noon" books the 2026-08-02 slot (counter-case)', () => {
+    const rightYear = "So we'll see you Sunday 8/2/26 at noon, and just let us know if anything changes.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, rightYear);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: rightYear }), opts({ transcript }));
+    expect(r.allowed).toBe(true);
+  });
+
+  test('a confirmation-required tail is not a commitment — "You are all set to confirm Sunday at noon" (P0 regression)', () => {
+    const tail = 'You are all set to confirm Sunday at noon.';
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, tail);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: tail }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+  });
+
+  test('a trailing obligation never books — "We will see you Sunday at noon and you need to confirm" (P0 regression)', () => {
+    const tail = 'We will see you Sunday at noon and you need to confirm.';
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, tail);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: tail }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+  });
+
+  test('positional date shapes — "Sunday 8/2/2 at noon" never books a 2026-08-02 slot (P1 regression)', () => {
+    const odd = "So we'll see you Sunday 8/2/2 at noon, and just let us know if anything changes.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, odd);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: odd }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+  });
+
+  test('an ADJACENT conditional sentence poisons the turn — "If the homeowner approves. We will see you Sunday at noon." (P0 regression)', () => {
+    const adjacent = 'If the homeowner approves. We will see you Sunday at noon.';
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, adjacent);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: 'We will see you Sunday at noon' }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('an adjacent out-of-vocabulary sentence poisons the turn — "Subject to homeowner approval. We will see you Sunday at noon." (P0 regression)', () => {
+    const adjacent = 'Subject to homeowner approval. We will see you Sunday at noon.';
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, adjacent);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: 'We will see you Sunday at noon' }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('a declarative QUESTION never commits — "So we will confirm it for noon on Sunday?" (P0 regression)', () => {
+    const question = 'So we will confirm it for noon on Sunday?';
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, question);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: question }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test("a TAG QUESTION poisons the turn — \"You're booked Sunday at noon. Right?\" (round-7o P1 regression)", () => {
+    const tag = "You're booked Sunday at noon. Right?";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, tag);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: "You're booked Sunday at noon" }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('nonzero SECONDS in confirmed_start_at fail the on-the-hour guard (round-4 P1)', () => {
+    const ex = agentCommitted();
+    ex.scheduling.confirmed_start_at = '2026-08-02T12:00:30-04:00';
+    const r = canAutoRoute(ex, opts());
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('demoted caller_not_authorized survives a block by another gate as failedOpenFlags (round-4 P2)', () => {
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized', 'prior_complaint_unresolved']), opts());
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('prior_complaint_unresolved');
+    expect(r.appointmentBlockingFlags).not.toContain('caller_not_authorized');
+    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized']));
+  });
+
+  test('an off-hour confirmed start (2:30 PM) is never demoted — windows start on the hour (P1)', () => {
+    const ex = agentCommitted();
+    ex.scheduling.confirmed_start_at = '2026-08-02T14:30:00-04:00';
+    const r = canAutoRoute(ex, opts());
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('a partially-labeled transcript (any unlabeled non-empty line) fails closed (P1)', () => {
+    const partial = TRANSCRIPT + '\nAnd we are all set for Sunday then.';
+    const r = canAutoRoute(agentCommitted(), opts({ transcript: partial }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('an agent-only-labeled transcript (no caller turns) fails closed (P1)', () => {
+    const agentOnly = ['Agent: Hello, you have reached Waves.', `Agent: ${AGENT_COMMIT_QUOTE}`].join('\n');
+    const r = canAutoRoute(agentCommitted(), opts({ transcript: agentOnly }));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('a trivially short quote ("sounds good") cannot ground a commitment', () => {
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: 'Sounds good' }), opts());
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('a bare boolean claim with no pinned evidence stays blocked', () => {
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: null }), opts());
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('evidence without the claim (agent_committed_booking false) stays blocked', () => {
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { claim: false }), opts());
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('an unconfirmed booking is never demoted (confirmed-with-start contract)', () => {
+    const ex = agentCommitted();
+    ex.scheduling.status = 'offered';
+    const r = canAutoRoute(ex, opts());
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('caller_not_authorized');
+  });
+
+  test('other hard blocks are untouched — out_of_service_area still vetoes an agent-committed booking', () => {
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized', 'out_of_service_area']), opts());
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toContain('out_of_service_area');
+    expect(r.appointmentBlockingFlags).not.toContain('caller_not_authorized');
+  });
+
+  test('composes with contact-field fail-open: both gates demote their flags on one call', () => {
+    const ex = agentCommitted(['caller_not_authorized', 'caller_phone_missing']);
+    const r = canAutoRoute(ex, opts({ failOpen: true, callerAni: '+19415550100' }));
+    expect(r.allowed).toBe(true);
+    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['caller_not_authorized', 'caller_phone_missing']));
+  });
+});
+
 describe('checkTcpaConsent inbound implied consent', () => {
   test('no explicit consent → canSms false by default', () => {
     expect(checkTcpaConsent({ consent: { sms_consent_given: false } }).canSms).toBe(false);

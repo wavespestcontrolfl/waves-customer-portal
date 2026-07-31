@@ -30,6 +30,7 @@ const FIELD_GROUPS = {
   high: [
     'appointment_confirmed',
     'preferred_date_time',
+    'agent_committed_booking',
     'is_spam',
     'is_voicemail',
     'matched_service',
@@ -291,6 +292,11 @@ function normalizeField(field, value) {
   if (field === 'phone') return normalizePhone(value);
   if (field === 'email') return normalizeString(value);
   if (field === 'appointment_confirmed' || field === 'is_spam' || field === 'is_voicemail') return normalizeBool(value);
+  // agent_committed_booking postdates every legacy extraction: absent/null
+  // means "not committed", identical to false — collapse them so replays
+  // don't report a spurious high-severity delta on every pre-1.8.0 row
+  // (codex P2). A genuine true↔false disagreement still surfaces.
+  if (field === 'agent_committed_booking') return normalizeBool(value) === true;
   if (field === 'preferred_date_time') return normalizeDateTime(value);
   return normalizeString(value);
 }

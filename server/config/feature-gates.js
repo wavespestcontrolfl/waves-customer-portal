@@ -545,6 +545,24 @@ const gates = {
   // blocks (out_of_service_area, do_not_contact, caller_not_authorized, spam)
   // stay. Creates real appointments — owner-flip only.
   callFailOpenBooking: process.env.GATE_CALL_FAIL_OPEN_BOOKING === 'true',
+  // Agent-commitment booking authorization: when OUR agent explicitly
+  // committed to the confirmed slot on the call ("we'll confirm it for noon
+  // on Sunday" — evidence-pinned to an AGENT-spoken quote), a third-party
+  // caller (realtor/PM booking for a buyer/tenant) no longer hard-blocks on
+  // caller_not_authorized: the appointment books and the flag files as an
+  // advisory "confirm the account holder" card (book-and-flag). All other
+  // hard blocks stay. Independent of callFailOpenBooking. Creates real
+  // appointments — owner-flip only.
+  callAgentCommitBooking: process.env.GATE_CALL_AGENT_COMMIT_BOOKING === 'true',
+  // Companion trust gate for callAgentCommitBooking: the Agent:/Caller:
+  // transcript labels the commitment-grounding relies on are LLM-inferred
+  // today (labelTranscriptWithOpenAI infers unclear identities; its integrity
+  // check preserves words, not attribution). Flip ONLY when speaker labels
+  // come from a deterministic source (dual-channel recording / channel-
+  // derived diarization) — or when the owner explicitly accepts LLM-label
+  // risk. Without this gate the agent-commitment demotion never fires, even
+  // with GATE_CALL_AGENT_COMMIT_BOOKING on. Owner-flip only.
+  callAgentCommitTrustedLabels: process.env.GATE_CALL_AGENT_COMMIT_TRUSTED_LABELS === 'true',
   // Implied consent for INBOUND bookings: a caller who called us and agreed to
   // a time has implied consent for the transactional confirmation SMS
   // (established business relationship). do-not-contact always overrides.
