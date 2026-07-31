@@ -5317,7 +5317,11 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
                     {opt.displayDate}
                   </div>{" "}
                   <div style={{ fontSize: 12, color: D.muted }}>
-                    {opt.suggestedWindow?.display} · {opt.currentLoad} jobs ·{" "}
+                    {/* Show the block Select actually books (duration-derived),
+                        not the server's wider 2-3h span. */}
+                    {windowFor(opt.suggestedWindow?.start)?.display ||
+                      opt.suggestedWindow?.display}{" "}
+                    · {opt.currentLoad} jobs ·{" "}
                     {opt.sameAreaServices} same area
                   </div>{" "}
                 </div>{" "}
