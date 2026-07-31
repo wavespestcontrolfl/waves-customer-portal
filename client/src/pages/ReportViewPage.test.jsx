@@ -457,6 +457,17 @@ describe('ReportViewPage visit timeline helpers', () => {
     // No typed work recorded → the generic fallback stands.
     expect(visitWorkSummary({ typedReport: { findings: [] } }, 'Service completed today.'))
       .toBe('Service completed today.');
+    // Rooms WITHOUT any work action never stand alone — a bare location is
+    // not a statement of what Waves did (codex P2 post-merge).
+    const roomsOnly = {
+      typedReport: {
+        findings: [
+          { fieldKey: 'rooms_treated', customerValueLabel: 'Primary bedroom' },
+        ],
+      },
+    };
+    expect(visitWorkSummary(roomsOnly, 'Service completed today.'))
+      .toBe('Service completed today.');
   });
 
   it('collapses same-time on-site and service-completed events to the completion event', () => {
