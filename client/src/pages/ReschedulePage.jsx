@@ -182,7 +182,7 @@ const WEATHER_MOVE_LEADS = {
 // vacuuming, and point-source IGR (roach cleanout protocol) — exempted.
 // Widening the allowlist to another service family is an owner call.
 const WHY_MOVE_LIQUID_SPRAY_SERVICE = /\bpest\b|waveguard/i;
-const WHY_MOVE_EXEMPT_SERVICE = /interior|granular|termite|wdo|inspection|bait|cleanout|roach|setup/i;
+const WHY_MOVE_EXEMPT_SERVICE = /interior|granular|termite|wdo|inspection|bait|cleanout|roach|setup|rodent|appointment/i;
 
 function showsWhyMove(move, serviceType) {
   const st = String(serviceType || '');
@@ -306,7 +306,8 @@ function WeatherMoveBanner({ move, firstName, serviceType, hero = false }) {
             microencapsulated — the active ingredient rides in microscopic capsules that
             lock onto treated surfaces and release gradually — adding residual staying power
             against everyday Southwest Florida rain. No application is weatherproof, though,
-            which is exactly why we move your visit to a dry window — at no charge to you.
+            which is exactly why we re-time visits around heavy rain — always at no charge
+            to you.
           </div>
         </details>
       ) : null}
