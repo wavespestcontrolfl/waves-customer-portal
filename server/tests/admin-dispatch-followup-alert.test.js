@@ -182,7 +182,11 @@ describe('/complete parks the alert atomically (source contracts)', () => {
     const guard = dispatchSource.slice(dispatchSource.lastIndexOf('if (resumingCommittedCompletion', resumeIdx), resumeIdx);
     // Untyped alert-policy profiles (bed_bug_treatment post-20260731400000)
     // resume through the same lane via their frozen verdict.
-    expect(guard).toContain("(typedFindingsType || completionProfile?.followupPolicy === 'alert') && !isIncompleteVisit && !followupSuggestion");
+    // NO profile condition on the resume gate — a profile deactivated or
+    // repointed between the commit and a crash retry must not hide the
+    // frozen promise from the resumed response (codex P2 r6).
+    expect(guard).toContain('resumingCommittedCompletion && !isIncompleteVisit && !followupSuggestion');
+    expect(guard).not.toContain("completionProfile?.followupPolicy === 'alert') && !isIncompleteVisit");
     const block = dispatchSource.slice(resumeIdx, resumeIdx + 1400);
     expect(block).toContain('resumed follow-up derivation failed');
     expect(block).toContain('logger.warn');

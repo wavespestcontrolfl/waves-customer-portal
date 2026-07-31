@@ -4752,8 +4752,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // transaction rolls back only the savepoint and the completion
             // proceeds with chip/action scope.
             let tracedExteriorZone = false;
+            // Interior-only treatments (bed bug, post-20260731400000): a
+            // trace saved before the tracer was hidden for this lane is
+            // stale EXTERIOR evidence — it must not resurrect the exterior
+            // dry-down timer on an interior visit (codex P2 r6).
+            const interiorOnlyVisit = /\bbed\s*bugs?\b/i.test(String(svc.service_type || ''));
             try {
-              tracedExteriorZone = await trx.transaction(async (sp) => !!(await sp('treatment_zone_maps')
+              tracedExteriorZone = interiorOnlyVisit ? false : await trx.transaction(async (sp) => !!(await sp('treatment_zone_maps')
                 .where({ scheduled_service_id: svc.id })
                 .first()));
             } catch (traceErr) {
@@ -8165,8 +8170,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // Untyped alert-policy profiles (bed_bug_treatment post-untype) resume
     // through the same lane: their completion froze typedFollowupVerdict
     // into structured_notes, and the frozen-verdict read below is
-    // form-independent.
-    if (resumingCommittedCompletion && (typedFindingsType || completionProfile?.followupPolicy === 'alert') && !isIncompleteVisit && !followupSuggestion) {
+    // form-independent. NO profile condition here — a profile deactivated,
+    // repointed, or policy-cleared between the commit and a crash retry
+    // must not hide the persisted promise from the resumed response; the
+    // obligation helper reads the frozen verdict first and returns null
+    // cheaply for lanes that never froze one (codex P2 r6).
+    if (resumingCommittedCompletion && !isIncompleteVisit && !followupSuggestion) {
       try {
         const obligation = await typedFollowupObligationForCompletedSource({
           scheduledService: { ...svc, status: 'completed' },
@@ -8769,7 +8778,11 @@ router.post('/:serviceId/schedule-followup', async (req, res, next) => {
       }
       throw err;
     }
-    logger.info(`[dispatch] follow-up ${appointment.id} booked from ${svc.id} (${profile.findingsType}) for ${date}`);
+    // profile can be null on the frozen-verdict lane (transient resolver
+    // failure) — a post-insert throw here would 500 AFTER the booking
+    // committed and permanently skip reminder registration on the retry
+    // (codex P2 r6).
+    logger.info(`[dispatch] follow-up ${appointment.id} booked from ${svc.id} (${profile?.findingsType || 'untyped'}) for ${date}`);
     await resolveOpenFollowupAlerts();
     // Without this the visit never enters appointment_reminders, so the
     // 72h/24h reminder cron can't see it (the cron reads only that table).

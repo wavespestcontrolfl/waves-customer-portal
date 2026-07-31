@@ -2453,7 +2453,12 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // break report rendering. Gated by GATE_TREATMENT_ZONE_MAP.
   let tracedTreatmentZone = null;
   try {
-    if (featureGates.isEnabled('treatmentZoneMap') && service.scheduled_service_id) {
+    // Interior-only treatments (bed bug) never render a satellite spray
+    // outline — a trace saved before the tracer was hidden for this lane
+    // is stale exterior evidence on an interior treatment's report
+    // (codex P2 r6 on the bed-bug untype).
+    const interiorOnlyReport = /\bbed\s*bugs?\b/i.test(String(service.service_type || ''));
+    if (featureGates.isEnabled('treatmentZoneMap') && service.scheduled_service_id && !interiorOnlyReport) {
       const tracedRow = await knex('treatment_zone_maps')
         .where({ scheduled_service_id: service.scheduled_service_id })
         .first()
