@@ -172,6 +172,7 @@ export function PestStatusHero({ status, statusSummary, supportingMetric, aiSumm
         token={token}
         live={mode === 'live'}
         onRefreshed={refreshFromPestPressure}
+        onSettled={() => setTrendStale(true)}
       />
       {aiSummary?.body ? (
         <p style={{ fontSize: 14, color: MUTED, lineHeight: 1.5, margin: '12px 0 0' }}>{aiSummary.body}</p>
@@ -213,7 +214,7 @@ function SupportingMetric({ metric }) {
 
 // One-shot customer calibration (replaces the suppressed legacy PestPressureCard
 // picker). Posts to the same token route; live mode only; hides once submitted.
-function PestPressureRating({ metric, token, live, onRefreshed }) {
+function PestPressureRating({ metric, token, live, onRefreshed, onSettled }) {
   const [submitted, setSubmitted] = useState(Boolean(metric && metric.submittedRating != null));
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
@@ -244,6 +245,11 @@ function PestPressureRating({ metric, token, live, onRefreshed }) {
       // not a dead picker.
       if (res.ok || res.status === 409) {
         setSubmitted(true);
+        // Accepted OR duplicate (another tab/device won the one-shot): a
+        // rating exists server-side either way, so the page's original
+        // trend chart is pre-recalc and must hide (codex P2 #3100) —
+        // notify BEFORE the body parse so the 409's empty body can't skip it.
+        if (onSettled) onSettled();
         // The route recalculates the score with the new signal and returns
         // the updated pestPressure — surface it (legacy card parity).
         if (res.ok && onRefreshed) {
