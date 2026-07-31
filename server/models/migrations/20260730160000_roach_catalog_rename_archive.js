@@ -170,7 +170,11 @@ exports.up = async function up(knex) {
   // predicate and ownership derives from the returning set, so an admin edit
   // committing between our read and the row lock wins the race too and is
   // never overwritten or claimed (codex #3108 r9).
-  const row = await knex('services').where({ service_key: RENAME_KEY }).first();
+  // FOR UPDATE: the catalogCarriesNewName decision below (which gates every
+  // snapshot backfill) reads this row — locking it holds off a concurrent
+  // admin rename until the migration commits, so the backfills can't run
+  // against a catalog name that just changed under them (codex #3108 r10).
+  const row = await knex('services').where({ service_key: RENAME_KEY }).forUpdate().first();
   if (row) {
     if (row.name === OLD_NAME) {
       const ret = await knex('services')
@@ -244,14 +248,15 @@ exports.up = async function up(knex) {
     const visits = [...linked, ...legacy];
     const ids = visits.map((v) => v.id);
     if (ids.length) {
-      // The status predicate rides ON the update, not just the select — a
-      // visit that completes between the two must keep the label its
-      // completion artifacts recorded (codex #3108 r7 TOCTOU) — and the
-      // RECORDED ids come from the UPDATE's returning set, so a visit the
-      // predicate skipped is neither recorded nor has its self-booking /
-      // invoice / reminder snapshots queued (codex #3108 r8).
+      // Full expected prior state rides ON the update — status (a visit
+      // completing concurrently keeps its completion-artifact label, codex
+      // r7) AND service_type (an admin switching the visit's service
+      // concurrently keeps their edit, codex r10) — and the RECORDED ids
+      // come from the returning set, so a skipped visit is neither recorded
+      // nor has its snapshots queued (codex r8).
       const updatedRows = await knex('scheduled_services')
         .whereIn('id', ids)
+        .where({ service_type: OLD_NAME })
         .whereNotIn('status', TERMINAL_VISIT_STATUSES)
         .update({ service_type: NEW_NAME }, ['id']);
       const updatedIds = (Array.isArray(updatedRows) ? updatedRows : [])
@@ -317,11 +322,20 @@ exports.up = async function up(knex) {
     );
     const targets = addons.filter((a) => openParentIds.has(a.scheduled_service_id));
     if (targets.length) {
-      await knex('scheduled_service_addons')
+      // Expected prior value in the predicate + returning-derived record,
+      // like every other write in this migration.
+      const ret = await knex('scheduled_service_addons')
         .whereIn('id', targets.map((a) => a.id))
-        .update({ service_name: NEW_NAME });
-      state.relabeledAddonIds = targets.map((a) => a.id);
-      state.addonParentVisitIds = [...new Set(targets.map((a) => a.scheduled_service_id))];
+        .where({ service_name: OLD_NAME })
+        .update({ service_name: NEW_NAME }, ['id']);
+      const updatedAddonIds = (Array.isArray(ret) ? ret : [])
+        .map((r) => (r && typeof r === 'object' ? r.id : r))
+        .filter(Boolean);
+      const updatedAddonSet = new Set(updatedAddonIds);
+      state.relabeledAddonIds = updatedAddonIds;
+      state.addonParentVisitIds = [...new Set(
+        targets.filter((a) => updatedAddonSet.has(a.id)).map((a) => a.scheduled_service_id)
+      )];
     }
   }
 
@@ -343,7 +357,15 @@ exports.up = async function up(knex) {
       if (inv.payer_statement_id && frozenStatementIds.has(inv.payer_statement_id)) continue;
       const result = relabelInvoiceSnapshot(inv, OLD_NAME, NEW_NAME);
       if (!result) continue;
-      await knex('invoices').where({ id: inv.id }).update(result.patch);
+      // Status rechecked ON the update (a scheduled-send claim flips the
+      // status to 'sending' and delivers — that invoice is history, codex
+      // #3108 r10), and the record only claims an invoice the update
+      // actually hit.
+      const count = await knex('invoices')
+        .where({ id: inv.id })
+        .whereIn('status', ['draft', 'scheduled'])
+        .update(result.patch);
+      if (!count) continue;
       // Per-field ownership: rollback reverts only these fields/item-indexes.
       state.relabeledInvoices[inv.id] = {
         ...result.changed,
@@ -380,9 +402,11 @@ exports.up = async function up(knex) {
     for (const rem of targets.values()) {
       const next = relabelReminderServiceType(rem.service_type, OLD_NAME, NEW_NAME);
       if (next === null) continue;
-      await knex('appointment_reminders')
-        .where({ id: rem.id })
+      // Expected prior value in the predicate; claim only what was hit.
+      const count = await knex('appointment_reminders')
+        .where({ id: rem.id, service_type: rem.service_type })
         .update({ service_type: next, updated_at: knex.fn.now() });
+      if (!count) continue;
       state.relabeledReminders[rem.id] = { prior: rem.service_type, written: next };
     }
   }
@@ -490,7 +514,10 @@ exports.down = async function down(knex) {
       if (inv.payer_statement_id && frozenStatementIds.has(inv.payer_statement_id)) continue;
       const patch = rollbackInvoiceSnapshot(inv, rec, NEW_NAME, OLD_NAME);
       if (!patch) continue;
-      await knex('invoices').where({ id: inv.id }).update(patch);
+      await knex('invoices')
+        .where({ id: inv.id })
+        .whereIn('status', ['draft', 'scheduled'])
+        .update(patch);
     }
   }
 
