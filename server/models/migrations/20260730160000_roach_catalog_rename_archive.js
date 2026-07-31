@@ -166,16 +166,23 @@ exports.up = async function up(knex) {
   };
 
   // Rename — only fields still carrying the shipped values (an admin rename
-  // in the Service Library wins), and record which fields we touched.
+  // in the Service Library wins). The expected old value rides IN the update
+  // predicate and ownership derives from the returning set, so an admin edit
+  // committing between our read and the row lock wins the race too and is
+  // never overwritten or claimed (codex #3108 r9).
   const row = await knex('services').where({ service_key: RENAME_KEY }).first();
   if (row) {
-    const patch = {};
-    if (row.name === OLD_NAME) { patch.name = NEW_NAME; state.renamedFields.push('name'); }
-    if (row.short_name === OLD_SHORT_NAME) { patch.short_name = NEW_NAME; state.renamedFields.push('short_name'); }
-    if (Object.keys(patch).length) {
-      await knex('services')
-        .where({ service_key: RENAME_KEY })
-        .update({ ...patch, updated_at: knex.fn.now() });
+    if (row.name === OLD_NAME) {
+      const ret = await knex('services')
+        .where({ service_key: RENAME_KEY, name: OLD_NAME })
+        .update({ name: NEW_NAME, updated_at: knex.fn.now() }, ['id']);
+      if (Array.isArray(ret) && ret.length) state.renamedFields.push('name');
+    }
+    if (row.short_name === OLD_SHORT_NAME) {
+      const ret = await knex('services')
+        .where({ service_key: RENAME_KEY, short_name: OLD_SHORT_NAME })
+        .update({ short_name: NEW_NAME, updated_at: knex.fn.now() }, ['id']);
+      if (Array.isArray(ret) && ret.length) state.renamedFields.push('short_name');
     }
   }
 
@@ -187,15 +194,24 @@ exports.up = async function up(knex) {
   const knockdownRows = await knex('services').whereIn('service_key', ARCHIVE_KEYS);
   for (const kd of knockdownRows) {
     if (kd.is_active !== true || kd.is_archived === true) continue;
+    // Same race guard as the rename: the read state rides in the update
+    // predicate (whereNull for NULL flags — `= NULL` never matches) and the
+    // claim derives from the returning set, so an admin archiving/editing
+    // the row concurrently wins and is never claimed.
+    let guard = knex('services').where({ service_key: kd.service_key });
+    for (const col of ['is_active', 'is_archived', 'booking_enabled', 'customer_visible']) {
+      guard = (kd[col] === null || kd[col] === undefined)
+        ? guard.whereNull(col)
+        : guard.where({ [col]: kd[col] });
+    }
+    const ret = await guard.update({ ...ARCHIVE_PATCH, updated_at: knex.fn.now() }, ['id']);
+    if (!Array.isArray(ret) || !ret.length) continue;
     state.archived[kd.service_key] = {
       is_active: kd.is_active === undefined ? null : kd.is_active,
       is_archived: kd.is_archived === undefined ? null : kd.is_archived,
       booking_enabled: kd.booking_enabled === undefined ? null : kd.booking_enabled,
       customer_visible: kd.customer_visible === undefined ? null : kd.customer_visible,
     };
-    await knex('services')
-      .where({ service_key: kd.service_key })
-      .update({ ...ARCHIVE_PATCH, updated_at: knex.fn.now() });
   }
 
   // Snapshot backfills apply ONLY when the catalog row actually carries the
@@ -269,10 +285,12 @@ exports.up = async function up(knex) {
   // completion REUSES a pre-minted invoice instead of rebuilding it
   // (scheduled-invoice-mint), so a draft minted before this migration would
   // complete under the old label after catalog and visit both renamed.
-  // Drafts only — sent/viewed/paid/void/prepaid invoices are
-  // customer-visible or terminal history and keep their snapshot. Labels
-  // only (title + exact-match line-item description/category); amounts,
-  // totals, and every other invoice field are never touched.
+  // Draft AND scheduled — a schedule-queued invoice is unsent and delivers
+  // from its stored title/service_type/line_items later (codex #3108 r9);
+  // sent/viewed/paid/void/prepaid invoices are customer-visible or terminal
+  // history and keep their snapshot. Labels only (title + exact-match
+  // line-item description/category); amounts, totals, and every other
+  // invoice field are never touched.
   // Cockroach-as-ADD-ON rows carry their own service_name snapshot
   // (admin-schedule snapshots the catalog name; invoice generation and
   // reminder registration render it verbatim), so an OPEN parent visit with
@@ -314,7 +332,7 @@ exports.up = async function up(knex) {
   if (snapshotVisitIds.length && (await knex.schema.hasTable('invoices'))) {
     const drafts = await knex('invoices')
       .whereIn('scheduled_service_id', snapshotVisitIds)
-      .where({ status: 'draft' })
+      .whereIn('status', ['draft', 'scheduled'])
       .select('id', 'title', 'line_items', 'service_type', 'scheduled_service_id', 'payer_statement_id');
     // A draft already accrued to a FROZEN payer statement (anything not
     // 'open' is a finalized/issued billing document) stays untouched —
@@ -389,16 +407,20 @@ exports.down = async function down(knex) {
   if (!state) return;
 
   // Restore only the fields up() recorded changing, and only if they still
-  // carry the value it wrote (a later admin rename survives rollback).
+  // carry the value it wrote (a later admin rename survives rollback). The
+  // expected value rides in the update predicate — same concurrent-admin
+  // race guard as up() (codex #3108 r9).
   const row = await knex('services').where({ service_key: RENAME_KEY }).first();
   if (row) {
-    const patch = {};
-    if ((state.renamedFields || []).includes('name') && row.name === NEW_NAME) patch.name = OLD_NAME;
-    if ((state.renamedFields || []).includes('short_name') && row.short_name === NEW_NAME) patch.short_name = OLD_SHORT_NAME;
-    if (Object.keys(patch).length) {
+    if ((state.renamedFields || []).includes('name') && row.name === NEW_NAME) {
       await knex('services')
-        .where({ service_key: RENAME_KEY })
-        .update({ ...patch, updated_at: knex.fn.now() });
+        .where({ service_key: RENAME_KEY, name: NEW_NAME })
+        .update({ name: OLD_NAME, updated_at: knex.fn.now() });
+    }
+    if ((state.renamedFields || []).includes('short_name') && row.short_name === NEW_NAME) {
+      await knex('services')
+        .where({ service_key: RENAME_KEY, short_name: NEW_NAME })
+        .update({ short_name: OLD_SHORT_NAME, updated_at: knex.fn.now() });
     }
   }
 
@@ -432,9 +454,9 @@ exports.down = async function down(knex) {
       .update({ service_type: OLD_NAME });
   }
 
-  // Reverse the recorded draft-invoice relabels — per recorded field only,
-  // still drafts only (an invoice sent/paid since up() is history under the
-  // label it went out with), and only while the LINKED VISIT is still open:
+  // Reverse the recorded invoice relabels — per recorded field only, still
+  // draft/scheduled only (an invoice sent/paid since up() is history under
+  // the label it went out with), and only while the LINKED VISIT is still open:
   // a visit completed since up() keeps its new label (visit rollback above
   // skips terminal rows), and its deliberately-still-draft invoice must
   // agree with the completed visit and report, not flip back.
@@ -456,7 +478,7 @@ exports.down = async function down(knex) {
     );
     const drafts = await knex('invoices')
       .whereIn('id', invoiceIds)
-      .where({ status: 'draft' })
+      .whereIn('status', ['draft', 'scheduled'])
       .select('id', 'title', 'line_items', 'service_type', 'scheduled_service_id', 'payer_statement_id');
     // Same frozen-statement rule on the way back: a draft that accrued to a
     // finalized statement since up() is part of an issued document now.

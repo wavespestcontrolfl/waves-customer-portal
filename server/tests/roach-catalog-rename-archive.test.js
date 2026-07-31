@@ -529,6 +529,28 @@ describe('20260730160000 roach catalog rename + archive', () => {
     expect(Object.keys(state.archived)).toEqual(['pest_initial_palmetto_knockdown']);
   });
 
+  test('schedule-queued invoices relabel like drafts (codex #3108 r9)', async () => {
+    const db = seedDb();
+    // Queued through the schedule-send path: unsent, delivers later from
+    // its stored title/service_type/line_items.
+    db.invoices.push({
+      id: 'inv-scheduled',
+      scheduled_service_id: 'v-open-2',
+      status: 'scheduled',
+      title: OLD_NAME,
+      service_type: OLD_NAME,
+      line_items: JSON.stringify([{ description: OLD_NAME, category: OLD_NAME, amount: 350 }]),
+    });
+    const knex = fakeKnex(db);
+    await migration.up(knex);
+
+    expect(invoiceById(db, 'inv-scheduled').title).toBe(NEW_NAME);
+    expect(invoiceById(db, 'inv-scheduled').service_type).toBe(NEW_NAME);
+
+    await migration.down(knex);
+    expect(invoiceById(db, 'inv-scheduled').title).toBe(OLD_NAME);
+  });
+
   test('drafts accrued to a frozen payer statement stay untouched both ways (codex #3108 r8)', async () => {
     const db = seedDb();
     // Two drafts on the backfilled visit: one accrued to a FINALIZED
