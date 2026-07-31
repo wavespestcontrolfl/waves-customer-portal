@@ -269,12 +269,17 @@ function newsletterDelivered(outcome) {
 // its id is known (Codex #3084 r31): a DIFFERENT subscriber claiming the
 // now-free address before the failure lands would otherwise satisfy an
 // email-only lookup and arm the force-resend for a hold that meanwhile
-// targets the rotated address — a duplicate DOI on its next release.
-async function sendFailedMarkerFor(sentEmailLc, dbh, subscriberId = null) {
+// targets the rotated address — a duplicate DOI on its next release. The
+// ATTEMPTED confirmation token binds too when known (Codex #3084 r32):
+// corrections rotate the token, and an A→B→A rotation restores id+email
+// with a NEWER token whose DOI may already be delivered — the stale
+// attempt's failure must read as superseded, never as a force-resend.
+async function sendFailedMarkerFor(sentEmailLc, dbh, subscriberId = null, confirmationToken = null) {
   try {
     let q = dbh('newsletter_subscribers')
       .whereRaw('LOWER(email) = ?', [String(sentEmailLc || '').trim().toLowerCase()]);
     if (subscriberId) q = q.where({ id: subscriberId });
+    if (confirmationToken) q = q.where({ confirmation_token: confirmationToken });
     const sub = await q.first('id');
     return sub ? 'newsletter_doi_not_confirmed' : 'superseded_during_send';
   } catch (verifyErr) {
@@ -628,13 +633,14 @@ async function resumeHeldFirstTouch({
 
       let newsletterSettled = !hold.held_newsletter || hold.released_newsletter;
       let deferredThisHold = false;
+      let deferredPayload = null;
       if (hold.held_newsletter && !hold.released_newsletter) {
         if (deferNewsletter) {
           // Transactional caller: DOI executes post-commit via
           // resumeHeldNewsletterPostCommit, which settles the row itself.
           // The claim stays 'releasing' until then (stale-claim window
           // reclaims it if the process dies before commit).
-          result.newsletterResume.push({
+          deferredPayload = {
             holdId: hold.id,
             customerId: holdCustomerId,
             email: sendEmail,
@@ -642,9 +648,11 @@ async function resumeHeldFirstTouch({
             lastName: customer.last_name || null,
             // The claim's fence stamp rides the payload (Codex #3084 r27)
             // so the post-commit callback can prove it still owns the row
-            // before sending or settling.
+            // before sending or settling. The bookkeeping settle below can
+            // renew this stamp in place (r32).
             claimStamp,
-          });
+          };
+          result.newsletterResume.push(deferredPayload);
           deferredThisHold = true;
         } else {
           // Direct (non-deferred) path: a thrown resume must not escape to
@@ -681,15 +689,31 @@ async function resumeHeldFirstTouch({
           // the marker through sendFailedMarkerFor below.
           let skipDedupe = false;
           if (hold.last_error === 'newsletter_doi_not_confirmed') {
-            const consumed = await dbh('first_touch_holds')
-              .where({
-                id: hold.id,
-                status: 'releasing',
-                updated_at: new Date(claimStamp),
-                last_error: 'newsletter_doi_not_confirmed',
-              })
-              .update({ last_error: null });
-            skipDedupe = consumed > 0;
+            try {
+              const consumed = await dbh('first_touch_holds')
+                .where({
+                  id: hold.id,
+                  status: 'releasing',
+                  updated_at: new Date(claimStamp),
+                  last_error: 'newsletter_doi_not_confirmed',
+                })
+                .update({ last_error: null });
+              skipDedupe = consumed > 0;
+            } catch (consumeErr) {
+              // ABORT, never degrade to the dedupe guard (Codex #3084
+              // r32): this marker means a prior send FAILED and its
+              // pre-send confirmation_sent_at cleanup may also have
+              // failed — a guard run against that surviving stamp would
+              // report confirmation_recently_sent and settle a hold whose
+              // DOI never delivered. The plain fenced re-pend keeps
+              // last_error untouched, so the marker survives for the
+              // retry's consume.
+              logger.warn(`[first-touch-resume] resend-marker consume failed: ${consumeErr.code || consumeErr.name || 'db_error'} — hold stays pending, marker intact`);
+              await fencedHoldWrite(dbh('first_touch_holds').where({ id: hold.id }), claimStamp)
+                .update({ status: 'pending', updated_at: new Date() });
+              result.skipped = result.skipped || 'doi_state_unverified';
+              continue;
+            }
           }
           let outcome = null;
           try {
@@ -712,7 +736,7 @@ async function resumeHeldFirstTouch({
             // the send-failed marker — it must not trigger skipDedupe.
             // Bound to the attempted subscriber when known (r31).
             patch.last_error = outcome?.retryReason
-              || await sendFailedMarkerFor(sendEmail, dbh, outcome?.subscriberId || null);
+              || await sendFailedMarkerFor(sendEmail, dbh, outcome?.subscriberId || null, outcome?.confirmationToken || null);
           }
         }
       }
@@ -739,6 +763,7 @@ async function resumeHeldFirstTouch({
         // On a mismatch (or a mid-attempt deny), everything EXCEPT
         // held_email still settles via the deny-preserving path. Fenced
         // (r27): a reclaimed row belongs to the reclaimer.
+        const settleStamp = new Date();
         const settled = await fencedHoldWrite(
           dbh('first_touch_holds')
             .where({ id: hold.id })
@@ -748,10 +773,19 @@ async function resumeHeldFirstTouch({
           .where(function notDenied() {
             this.whereNull('last_error').orWhereNot('last_error', 'email_denied_await_correction');
           })
-          .update({ ...patch, updated_at: new Date() });
+          .update({ ...patch, updated_at: settleStamp });
         if (!settled) {
           const { held_email, ...rest } = patch;
           await settleHold(hold.id, { ...rest, status: 'pending' }, dbh, claimStamp);
+        } else if (deferredThisHold && deferredPayload) {
+          // The bookkeeping settle's updated_at IS the claim's new lease
+          // stamp (Codex #3084 r32): the deferred payload captured the
+          // pre-settle stamp, and without this renewal the post-commit
+          // callback's renewClaim would read every deferred DOI as
+          // claim-lost — parking the corrected send behind the full
+          // stale-claim window plus the next sweep.
+          deferredPayload.claimStamp = settleStamp;
+          claimStamps.set(hold.id, settleStamp);
         }
       }
 
@@ -975,8 +1009,15 @@ async function runOnePostCommitResume(payload, holdIds, dbh, claims = new Map())
     // settles leaves the marker for the sweep's reclaimer, which would
     // bypass the dedupe guard and double-mail. Exactly one incarnation
     // wins the fenced clear; a send failure below re-arms the marker.
+    // A consume that THROWS aborts the whole group (Codex #3084 r32):
+    // degrading to the dedupe guard would trust a confirmation_sent_at
+    // stamp that the marker's failed-send cleanup may have left behind —
+    // settling holds whose DOI never delivered. The plain fenced re-pends
+    // keep last_error untouched, so both the marker and any deny survive
+    // for the retry.
     let skipDedupe = false;
     if (holdWasDoiUnconfirmed) {
+      let consumeFailed = false;
       for (const holdId of holdIds) {
         try {
           const consumed = await fencedHoldWrite(
@@ -987,8 +1028,21 @@ async function runOnePostCommitResume(payload, holdIds, dbh, claims = new Map())
             .update({ last_error: null });
           if (consumed) skipDedupe = true;
         } catch (consumeErr) {
+          consumeFailed = true;
           logger.warn(`[first-touch-resume] resend-marker consume failed for hold ${holdId}: ${consumeErr.code || consumeErr.name || 'db_error'}`);
         }
+      }
+      if (consumeFailed) {
+        logger.warn('[first-touch-resume] post-commit resend-marker consume incomplete — aborting the group send, markers intact');
+        for (const holdId of holdIds) {
+          try {
+            await fencedHoldWrite(dbh('first_touch_holds').where({ id: holdId }), fenceOf(holdId))
+              .update({ status: 'pending', updated_at: new Date() });
+          } catch (repenErr) {
+            logger.warn(`[first-touch-resume] hold ${holdId} re-pend failed: ${repenErr.code || repenErr.name || 'db_error'} (stale-claim window will reclaim)`);
+          }
+        }
+        return { skipped: 'doi_state_unverified' };
       }
     }
     const outcome = await runNewsletterResume(sendPayload, dbh, { skipDedupe });
@@ -1015,7 +1069,7 @@ async function runOnePostCommitResume(payload, holdIds, dbh, claims = new Map())
         // subscriber still carries the attempted address (r25), bound to
         // the attempted subscriber id when known (r31).
         await repenHoldPreservingDeny(holdId, outcome?.retryReason
-          || await sendFailedMarkerFor(sentEmailLc, dbh, outcome?.subscriberId || null), dbh, fenceOf(holdId));
+          || await sendFailedMarkerFor(sentEmailLc, dbh, outcome?.subscriberId || null, outcome?.confirmationToken || null), dbh, fenceOf(holdId));
       }
     }
     return outcome;

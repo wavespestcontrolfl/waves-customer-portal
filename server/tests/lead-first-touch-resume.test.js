@@ -33,6 +33,7 @@ let mockEnrollmentUpdates = []; // automation_enrollments update() patches
 let mockClaimStampById = {}; // claim fence stamps recorded per hold id (r27)
 let mockClaimLost = false; // fence reads report the claim as reclaimed (r27)
 let mockRenewLostIds = new Set(); // per-hold lease-renewal refusals (r28)
+let mockConsumeError = null; // thrown by the r31 marker-consume write (r32)
 jest.mock('../models/db', () => {
   const handler = (table) => {
     let markerFilter = false; // this chain filters on the resend marker
@@ -86,6 +87,11 @@ jest.mock('../models/db', () => {
             if (mockClaimLost || mockRenewLostIds.has(whereId)) return 0;
             if (whereId != null) mockClaimStampById[whereId] = patch.updated_at;
             return 1;
+          }
+          // The r31 marker consume is the only {last_error: null}-shaped
+          // write — its own error knob (r32).
+          if (patch.last_error === null && Object.keys(patch).length === 1 && mockConsumeError) {
+            throw mockConsumeError;
           }
           if (patch.status === 'released' && mockReleasedSettleZeroOnce) {
             mockReleasedSettleZeroOnce = false;
@@ -233,6 +239,7 @@ beforeEach(() => {
   mockClaimStampById = {};
   mockClaimLost = false;
   mockRenewLostIds = new Set();
+  mockConsumeError = null;
 });
 
 // The merge's held_email is a bound CASE since r20 (an ACTIVE claim's target
@@ -398,6 +405,33 @@ describe('resumeHeldFirstTouch (ledger release engine)', () => {
     // claim → marker consume ({last_error: null} only) → released settle
     expect(mockHoldUpdates[1]).toEqual({ last_error: null });
     expect(mockHoldUpdates.at(-1)).toMatchObject({ status: 'released', released_newsletter: true });
+  });
+
+  test('a failed marker consume aborts before the DOI — the marker survives', async () => {
+    // Degrading to the dedupe guard would trust a confirmation_sent_at
+    // stamp the marker's failed-send cleanup may have left behind —
+    // settling a hold whose DOI never delivered (Codex #3084 r32). The
+    // plain fenced re-pend keeps last_error untouched for the retry.
+    mockHold = baseHold({ held_drip: false, last_error: 'newsletter_doi_not_confirmed' });
+    mockConsumeError = new Error('db down');
+    const res = await resumeHeldFirstTouch({ callLogId: 'call-1' });
+    expect(res.skipped).toBe('doi_state_unverified');
+    expect(mockNewsletter).not.toHaveBeenCalled();
+    const last = mockHoldUpdates.at(-1);
+    expect(last).toMatchObject({ status: 'pending' });
+    expect(last.last_error).toBeUndefined(); // marker untouched
+  });
+
+  test('the deferred payload carries the post-bookkeeping lease stamp', async () => {
+    // The bookkeeping settle bumps updated_at AFTER the payload was built
+    // (Codex #3084 r32): without renewing the payload's stamp in place,
+    // every deferred DOI callback would read its claim as lost and park
+    // the corrected send behind the stale-claim window plus the sweep.
+    const res = await resumeHeldFirstTouch({ customerId: 'cust-1', email: 'corrected@example.com', deferNewsletter: true });
+    const payload = res.newsletterResume[0];
+    const bookkeeping = mockHoldUpdates.at(-1);
+    expect(bookkeeping.held_email).toBe('corrected@example.com');
+    expect(payload.claimStamp).toBe(bookkeeping.updated_at);
   });
 
   test('a claim lost after the enroll transaction never sends the DOI', async () => {

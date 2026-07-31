@@ -757,6 +757,12 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
   // which would bypass the dedupe guard and mail the DOI again. Placed
   // AFTER the pre-stamp so its failure path (which never sent) keeps the
   // marker; a send failure below re-arms it via sendFailedMarkerFor.
+  // A consume that THROWS aborts the send (Codex #3084 r32): proceeding
+  // would leave the marker armed while this send goes out — recreating
+  // the duplicate-on-reclaim window the consume exists to close. The
+  // plain fenced re-pends keep last_error untouched (marker and deny
+  // survive); the sweep's retry re-runs the whole release, marker-forced.
+  let consumeFailed = false;
   for (const holdId of holdIds) {
     try {
       await fencedHoldWrite(
@@ -766,8 +772,21 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
       )
         .update({ last_error: null });
     } catch (consumeErr) {
+      consumeFailed = true;
       logger.warn(`[email-fanout] resend-marker consume failed for hold ${holdId}: ${consumeErr.code || consumeErr.name || 'db_error'}`);
     }
+  }
+  if (consumeFailed) {
+    logger.warn(`[email-fanout] resend-marker consume incomplete for subscriber ${pendingConfirmation.id} — aborting the re-send, markers intact`);
+    for (const holdId of holdIds) {
+      try {
+        await fencedHoldWrite(conn('first_touch_holds').where({ id: holdId }), fenceOf(holdId))
+          .update({ status: 'pending', updated_at: new Date() });
+      } catch (repenErr) {
+        logger.warn(`[email-fanout] hold ${holdId} re-pend failed: ${repenErr.code || repenErr.name || 'db_error'} (stale-claim window will reclaim)`);
+      }
+    }
+    return false;
   }
   try {
     await require('./newsletter-confirm').sendConfirmationEmail(pendingConfirmation);
@@ -797,7 +816,7 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
     // Bound to the ATTEMPTED subscriber id (r31): an unrelated signup
     // claiming the freed address must not satisfy the verify and arm a
     // force-resend for a hold that meanwhile targets the rotation.
-    await repenHolds(await sendFailedMarkerFor(pendingConfirmation.email, conn, pendingConfirmation.id));
+    await repenHolds(await sendFailedMarkerFor(pendingConfirmation.email, conn, pendingConfirmation.id, pendingConfirmation.confirmation_token || null));
     return false;
   }
   // Post-send rotation check, now read-only (the stamp already landed):

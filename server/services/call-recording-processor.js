@@ -2167,6 +2167,11 @@ async function subscribeNewCallCustomerToNewsletter({ customerId, email, firstNa
   return {
     action: result.action,
     subscriberId: result.subscriber?.id || null,
+    // The attempted token rides the outcome (Codex #3084 r32) so a send
+    // failure can be verified against the EXACT attempt — corrections
+    // rotate the token, and an A→B→A rotation restores id+email with a
+    // newer token whose DOI may already be delivered.
+    confirmationToken: result.subscriber?.confirmation_token || null,
     confirmationEmailSent,
   };
 }

@@ -83,6 +83,14 @@ function makeConn(cfg = {}) {
           : ((t.firstQueue || []).shift() ?? null)),
       update: (patch) => {
         calls.push({ table, op: 'update', arg: patch });
+        // The r31 marker consume is the only {last_error: null}-shaped
+        // write — it gets its own error knob so `updateError` can keep
+        // modeling post-send settle failures without aborting the send.
+        const isConsume = patch && patch.last_error === null && Object.keys(patch).length === 1;
+        if (isConsume) {
+          if (t.consumeError) return Promise.reject(t.consumeError);
+          return Promise.resolve(t.updateCount ?? 1);
+        }
         if (t.updateError) return Promise.reject(t.updateError);
         return Promise.resolve(t.updateCount ?? 1);
       },
@@ -753,6 +761,21 @@ describe('resendPendingConfirmation', () => {
     expect(repens).toHaveLength(2);
   });
 
+  test('a failed marker consume aborts the re-send with the markers intact', async () => {
+    // Proceeding would leave the marker armed while this send goes out —
+    // recreating the duplicate-on-reclaim window the consume closes
+    // (Codex #3084 r32). Plain re-pends keep last_error untouched.
+    const sendsBefore = sendConfirmationEmail.mock.calls.length;
+    const payload = { id: 811, email: 'samtypo@example.com', confirmation_token: 'tok-1', heldNewsletterHoldIds: ['hold-1'] };
+    const conn = makeConn({ ...matchRow(payload), first_touch_holds: { consumeError: new Error('db down') } });
+    const ok = await resendPendingConfirmation(payload, conn);
+    expect(ok).toBe(false);
+    expect(sendConfirmationEmail.mock.calls.length).toBe(sendsBefore);
+    const repens = conn.__updates('first_touch_holds').filter((u) => u.arg.status === 'pending');
+    expect(repens).toHaveLength(1);
+    expect(repens[0].arg.last_error).toBeUndefined(); // marker untouched
+  });
+
   test('a send failure binds the marker verify to the attempted subscriber id', async () => {
     // An unrelated signup claiming the freed address must not satisfy an
     // email-only verify and arm the force-resend for a hold that
@@ -761,7 +784,8 @@ describe('resendPendingConfirmation', () => {
     const payload = { id: 811, email: 'samtypo@example.com', confirmation_token: 'tok-1', heldNewsletterHoldIds: ['hold-1'] };
     const conn = makeConn(matchRow(payload));
     await resendPendingConfirmation(payload, conn);
-    expect(mockSendFailedMarker).toHaveBeenCalledWith('samtypo@example.com', conn, 811);
+    // Bound to the attempted subscriber id AND confirmation token (r31/r32).
+    expect(mockSendFailedMarker).toHaveBeenCalledWith('samtypo@example.com', conn, 811, 'tok-1');
   });
 
   test('a do-not-contact request vetoes the coalesced DOI re-send and blocks the holds', async () => {
