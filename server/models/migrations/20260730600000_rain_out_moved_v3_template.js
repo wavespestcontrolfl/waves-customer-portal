@@ -26,7 +26,11 @@
 
 const TEMPLATE_KEY = 'rain_out_moved_v3';
 
-const BODY = 'Hi {first_name} — {weather_lead}, so we moved your {service_type} to {new_option}.{link_clause}\n\nQuestions? Reply here. Reply STOP to opt out.';
+// GSM-7 only — an em dash (or any non-GSM char) flips the whole message to
+// UCS-2 and roughly doubles the segment count, defeating this template's
+// entire purpose. House style for SMS dashes is the plain hyphen (see
+// composeBetterDayClause). Encoding is regression-tested in rain-out.test.js.
+const BODY = 'Hi {first_name} - {weather_lead}, so we moved your {service_type} to {new_option}.{link_clause}\n\nQuestions? Reply here. Reply STOP to opt out.';
 
 const VARIABLES = ['first_name', 'weather_lead', 'service_type', 'new_option', 'link_clause'];
 
@@ -53,3 +57,6 @@ exports.down = async function down(knex) {
   if (!(await knex.schema.hasTable('sms_templates'))) return;
   await knex('sms_templates').where({ template_key: TEMPLATE_KEY }).del();
 };
+
+// Exported for the GSM-7 encoding regression in rain-out.test.js.
+exports._test = { BODY };

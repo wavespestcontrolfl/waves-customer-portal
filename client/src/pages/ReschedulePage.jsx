@@ -169,9 +169,16 @@ const WEATHER_MOVE_LEADS = {
   weather_heat: 'extreme heat moved your',
 };
 
-// Rain washes uncured product away; wind/heat moves are operational and the
-// bonding explainer would be off-topic there.
-const WHY_MOVE_REASONS = new Set(['weather_rain', 'weather_lightning']);
+// The bonding explainer is a RAIN story about liquid applications: lightning
+// and wind/heat moves are operational, and interior/granular/termite/WDO/
+// inspection/bait work isn't washed by rain — same exemption the SMS
+// efficacy clause uses (EFFICACY_EXEMPT_SERVICE in services/rain-out.js).
+const WHY_MOVE_EXEMPT_SERVICE = /interior|granular|termite|wdo|inspection|bait/i;
+
+function showsWhyMove(move, serviceType) {
+  return move?.reasonCode === 'weather_rain'
+    && !WHY_MOVE_EXEMPT_SERVICE.test(String(serviceType || ''));
+}
 
 function WeatherMoveChip({ chance, sunny }) {
   if (chance == null || !Number.isFinite(Number(chance))) return null;
@@ -221,7 +228,12 @@ function WeatherMoveRow({ label, date, windowStart, chance, isNow }) {
 
 function weatherMoveHeading({ move, firstName, serviceType }) {
   const lead = WEATHER_MOVE_LEADS[move.reasonCode] || 'weather moved your';
-  const dry = move.reasonCode === 'weather_rain' || move.reasonCode === 'weather_lightning';
+  // "Dry" only when the forecast actually supports it — same ≤40% bar the
+  // SMS better-day clause uses; no forecast coverage means no dry claim
+  // (the rain-out chooser doesn't enforce a dry target, so reasonCode alone
+  // can't promise one).
+  const dry = (move.reasonCode === 'weather_rain' || move.reasonCode === 'weather_lightning')
+    && move.toChance != null && Number(move.toChance) <= 40;
   return `${firstName ? `Hi ${firstName} — ` : ''}${lead} ${(serviceType || 'service').toLowerCase()} to a ${dry ? 'dry' : 'better'} window.`;
 }
 
@@ -260,7 +272,7 @@ function WeatherMoveBanner({ move, firstName, serviceType, hero = false }) {
       <WeatherMoveRow label="Was" date={move.from?.date} windowStart={move.from?.windowStart} chance={move.fromChance} isNow={false} />
       <WeatherMoveRow label="Now" date={move.to?.date} windowStart={move.to?.windowStart} chance={move.toChance} isNow />
 
-      {WHY_MOVE_REASONS.has(move.reasonCode) ? (
+      {showsWhyMove(move, serviceType) ? (
         <details data-glass="soft" style={{
           marginTop: 12, background: S.soft, border: `1px solid ${S.softBorder}`, borderRadius: 8,
         }}>

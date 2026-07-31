@@ -682,6 +682,22 @@ describe('rain-out service', () => {
       expect(sendCustomerMessage).not.toHaveBeenCalled();
     });
 
+    test('v3 template body stays GSM-7 and a representative render fits 2 segments', () => {
+      const { BODY } = require('../models/migrations/20260730600000_rain_out_moved_v3_template')._test;
+      const { detectEncoding, countSegments } = require('../services/messaging/segment-counter');
+      // The template literal itself must be GSM-7 — one stray em dash flips
+      // every send to UCS-2 and doubles the segment bill (codex P1).
+      expect(detectEncoding(BODY).encoding).toBe('GSM_7');
+      const rendered = BODY
+        .replace('{first_name}', 'Jaden')
+        .replace('{weather_lead}', 'rain is moving through your area this afternoon')
+        .replace('{service_type}', 'quarterly pest control')
+        .replace('{new_option}', 'Sun, Aug 2, 9:00 AM - 11:00 AM')
+        .replace('{link_clause}', ' New time, forecast & other options: https://wavespestcontrol.com/l/t42w2x');
+      expect(detectEncoding(rendered).encoding).toBe('GSM_7');
+      expect(countSegments(rendered).segmentCount).toBeLessThanOrEqual(2);
+    });
+
     test('gate off: v3 is never rendered — v2 stays the default', async () => {
       wireSingle();
 

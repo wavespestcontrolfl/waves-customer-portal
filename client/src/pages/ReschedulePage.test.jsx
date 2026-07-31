@@ -506,6 +506,35 @@ describe('ReschedulePage weather-move banner', () => {
     expect(screen.queryByText(/% rain/)).not.toBeInTheDocument();
   });
 
+  it('never claims a dry window without forecast support (codex P2)', async () => {
+    stubFetch({
+      get: jsonResponse(reschedulablePayload({
+        weatherMove: { ...weatherMove, toChance: null },
+      })),
+    });
+
+    renderPage();
+
+    expect(await screen.findByText(/rain moved your pest control to a better window/)).toBeInTheDocument();
+    // The heading never says "dry" (the explainer body may still discuss dry
+    // windows generically — that's education, not a forecast claim).
+    expect(screen.queryByText(/moved your pest control to a dry window/)).not.toBeInTheDocument();
+  });
+
+  it('exempt services skip the liquid-bonding explainer even on rain moves (codex P2)', async () => {
+    stubFetch({
+      get: jsonResponse(reschedulablePayload({
+        service: { type: 'Termite Bait Check' },
+        weatherMove,
+      })),
+    });
+
+    renderPage();
+
+    expect(await screen.findByText('Moved for weather')).toBeInTheDocument();
+    expect(screen.queryByText('Why the move?')).not.toBeInTheDocument();
+  });
+
   it('shows the banner on the classic layout too', async () => {
     stubFetch({ get: jsonResponse(reschedulablePayload({ weatherMove })) });
 
