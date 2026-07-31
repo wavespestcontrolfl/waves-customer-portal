@@ -43,6 +43,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { lockTriageCall } = require('../utils/triage-locks');
 
 const SPAM_AGE_DAYS = 7;
 const ADVISORY_AGE_DAYS = 30;
@@ -202,6 +203,54 @@ function customerPredatesCall(item) {
   return cust < call;
 }
 
+// Did this call CONFIRM an appointment that never became a booking? With
+// GATE_CALL_FAIL_OPEN_BOOKING off, a confirmed call from an existing
+// customer can be held solely on its address card — that card is then the
+// ONLY visible trace of the lost booking, and resolving it as "address
+// moot" would hide a confirmed-but-unbooked appointment. Fail closed on an
+// unparseable extraction.
+function callConfirmedUnbooked(item, ctx) {
+  let v2 = item.call_extraction;
+  if (!v2) return false; // no V2 → no confirmed-slot claim to protect
+  if (typeof v2 === 'string') {
+    try {
+      v2 = JSON.parse(v2);
+    } catch {
+      return true;
+    }
+  }
+  if (v2?.scheduling?.status !== 'confirmed') return false;
+  return !ctx.bookedCallIds.has(item.call_log_id);
+}
+
+// Does the customer's current surname match what THIS call's extractions
+// heard? backfillCustomerFromAppointmentContact writes last_name onto even
+// PRE-EXISTING customers from the call's merged extraction (a V1-only
+// surname survives the merge while V2 emits missing_last_name) — a matching
+// surname is therefore not independent evidence. Fail closed on an
+// unparseable extraction.
+function surnameCameFromCall(item) {
+  const onFile = String(item.customer_last_name || '').trim().toLowerCase();
+  if (!onFile) return false;
+  const heard = [];
+  for (const raw of [item.call_extraction_v1, item.call_extraction]) {
+    if (raw == null) continue;
+    let parsed = raw;
+    if (typeof parsed === 'string') {
+      try {
+        parsed = JSON.parse(parsed);
+      } catch {
+        return true;
+      }
+    }
+    const v1Name = String(parsed?.last_name || '').trim().toLowerCase();
+    const v2Name = String(parsed?.caller?.last_name || '').trim().toLowerCase();
+    if (v1Name) heard.push(v1Name);
+    if (v2Name) heard.push(v2Name);
+  }
+  return heard.includes(onFile);
+}
+
 // Pure classifier, exported for tests. `item` is a triage_items row joined
 // with its call's customer fields; `ctx.bookedCallIds` is a Set of
 // call_log_ids that have a scheduled_services row via source_call_log_id.
@@ -221,16 +270,19 @@ function classifyTriageItem(item, ctx, { now = new Date() } = {}) {
       && customerPredatesCall(item)
       && !hasNewAddressEvidence(item.payload)
       && !callSuppliedAddress(item.call_extraction, item.call_extraction_v1)
+      && !callConfirmedUnbooked(item, ctx)
       && String(item.customer_address_line1 || '').trim() !== ''
       && String(item.customer_zip || '').trim() !== '') {
     return { action: 'resolve', rule: 'address_moot' };
   }
-  // Same provenance guard as addresses: a customer created FROM this call
-  // can carry a model-heard (V1-merged) surname — resolving the identity
-  // card against that value would be circular. Only a record that existed
-  // before the call is independent evidence of the surname.
+  // Same provenance guards as addresses: a customer created FROM this call
+  // — or a pre-existing one whose surname was BACKFILLED from this call's
+  // merged extraction — cannot moot its own identity card. Only a surname
+  // that predates the call (record older than the call AND not matching
+  // what the call heard) is independent evidence.
   if (code === 'missing_last_name'
       && customerPredatesCall(item)
+      && !surnameCameFromCall(item)
       && String(item.customer_last_name || '').trim() !== '') {
     return { action: 'resolve', rule: 'name_moot' };
   }
@@ -275,14 +327,13 @@ async function sweep({ now = new Date() } = {}) {
       'c.last_name as customer_last_name',
     );
 
-  // Booking provenance in one bulk query (only for calls that need it).
-  const bookingCandidateCallIds = [...new Set(
-    items.filter((i) => BOOKING_OUTCOME_CODES.has(i.reason_code)).map((i) => i.call_log_id),
-  )];
+  // Booking provenance in one bulk query — for ALL candidate calls, since
+  // both booking_outcome AND the confirmed-unbooked address guard consult it.
+  const allItemCallIds = [...new Set(items.map((i) => i.call_log_id))];
   const bookedCallIds = new Set();
-  if (bookingCandidateCallIds.length) {
+  if (allItemCallIds.length) {
     const booked = await db('scheduled_services')
-      .whereIn('source_call_log_id', bookingCandidateCallIds)
+      .whereIn('source_call_log_id', allItemCallIds)
       .distinct('source_call_log_id');
     for (const b of booked) bookedCallIds.add(b.source_call_log_id);
   }
@@ -309,13 +360,16 @@ async function sweep({ now = new Date() } = {}) {
   let callsSynced = 0;
   const itemCallById = new Map(applied.map((d) => [d.item.id, d.item.call_log_id]));
   await db.transaction(async (trx) => {
-    // ALL sibling locks acquired UP FRONT in one statement, ordered by id —
-    // before any modification. Locking after our own updates inverted the
-    // acquisition order against admin-triage's multi-row verdict update and
-    // could deadlock; a single sorted acquisition while holding nothing
-    // makes this side's order deterministic and leaves nothing for the
-    // deadlock detector to abort mid-sweep.
-    const allCallIds = [...new Set(applied.map((d) => d.item.call_log_id))];
+    // Per-call ADVISORY locks first (sorted), then the row pre-locks — the
+    // shared lockTriageCall contract with admin-triage's transitionCore and
+    // verdict writers. Ordering our own row locks was not enough: the admin
+    // verdict's bulk UPDATE acquires siblings in planner order, so only a
+    // common per-call lock taken by BOTH writers before any card write
+    // removes the deadlock and the interleaved-count aggregate race.
+    const allCallIds = [...new Set(applied.map((d) => d.item.call_log_id))].sort();
+    for (const callLogId of allCallIds) {
+      await lockTriageCall(trx, callLogId);
+    }
     if (allCallIds.length) {
       await trx('triage_items')
         .whereIn('call_log_id', allCallIds)
@@ -378,6 +432,8 @@ module.exports = {
   hasNewAddressEvidence,
   callSuppliedAddress,
   customerPredatesCall,
+  callConfirmedUnbooked,
+  surnameCameFromCall,
   ADDRESS_MOOT_CODES,
   BOOKING_OUTCOME_CODES,
   ADVISORY_AGE_CODES,

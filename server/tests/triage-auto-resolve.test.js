@@ -114,6 +114,17 @@ describe('moot-condition resolves', () => {
     }), noBookings, { now: NOW })).toEqual({ action: 'resolve', rule: 'address_moot' });
   });
 
+  test('an address card on a CONFIRMED-but-unbooked call is never resolved (only trace of the lost booking)', () => {
+    const confirmedUnbooked = item({
+      customer_address_line1: '123 Sample St', customer_zip: '34205',
+      call_extraction: { ...NO_ADDR_EXTRACTION, scheduling: { status: 'confirmed', confirmed_start_at: '2026-08-05T10:00:00-04:00' } },
+    });
+    expect(classifyTriageItem(confirmedUnbooked, noBookings, { now: NOW })).toBeNull();
+    // Same call WITH booking provenance → the guard releases and it moots.
+    expect(classifyTriageItem(confirmedUnbooked, { bookedCallIds: new Set(['call-1']) }, { now: NOW }))
+      .toEqual({ action: 'resolve', rule: 'address_moot' });
+  });
+
   test('a customer created FROM/AFTER the call never moots its own address card (circular provenance)', () => {
     expect(classifyTriageItem(item({
       customer_address_line1: '123 Sample St', customer_zip: '34205',
@@ -136,6 +147,28 @@ describe('moot-condition resolves', () => {
       reason_code: 'missing_last_name', customer_last_name: 'Sample',
       customer_created_at: CUSTOMER_AFTER,
     }), noBookings, { now: NOW })).toBeNull();
+  });
+
+  test('a PRE-EXISTING customer whose surname matches what THIS call heard never moots (backfill provenance)', () => {
+    // V1 heard "Sample" and the booking backfill wrote it onto the old record.
+    expect(classifyTriageItem(item({
+      reason_code: 'missing_last_name', customer_last_name: 'Sample',
+      call_extraction_v1: JSON.stringify({ first_name: 'Pat', last_name: 'Sample' }),
+    }), noBookings, { now: NOW })).toBeNull();
+    // Case-insensitive match still blocks; unparseable V1 fails closed.
+    expect(classifyTriageItem(item({
+      reason_code: 'missing_last_name', customer_last_name: 'SAMPLE',
+      call_extraction_v1: JSON.stringify({ last_name: 'sample' }),
+    }), noBookings, { now: NOW })).toBeNull();
+    expect(classifyTriageItem(item({
+      reason_code: 'missing_last_name', customer_last_name: 'Sample',
+      call_extraction_v1: 'not-json{',
+    }), noBookings, { now: NOW })).toBeNull();
+    // A surname the call did NOT hear is independent → resolves.
+    expect(classifyTriageItem(item({
+      reason_code: 'missing_last_name', customer_last_name: 'Independent',
+      call_extraction_v1: JSON.stringify({ last_name: 'Sample' }),
+    }), noBookings, { now: NOW })).toEqual({ action: 'resolve', rule: 'name_moot' });
   });
 
   test('scheduling flags resolve only on source_call_log_id booking provenance', () => {

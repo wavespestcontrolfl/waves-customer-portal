@@ -12,6 +12,7 @@ const router = express.Router();
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { lockTriageCall } = require('../utils/triage-locks');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -122,36 +123,45 @@ async function transitionCore({ id, nextStatus, note, assignedTo }) {
   if (!item) return { outcome: 'not_found' };
   if (!OPEN_STATES.includes(item.status)) return { outcome: 'already', current: item.status };
 
-  // Atomic compare-and-swap: only transition if the row is STILL open. Two staff
-  // actioning the same item concurrently can both pass the read above; the
-  // conditional update + affected-row count makes the loser a no-op so only the
-  // winner mutates the row (and, for verdicts, only the winner writes feedback).
-  const updated = await db('triage_items')
-    .where({ id })
-    .whereIn('status', OPEN_STATES)
-    .update({
-      status: nextStatus,
-      resolution_note: note,
-      assigned_to: assignedTo,
-      resolved_at: new Date(),
-      updated_at: new Date(),
-    });
-  if (updated === 0) return { outcome: 'conflict' };
+  // Per-call advisory lock + transaction: the shared lockTriageCall contract
+  // with the nightly auto-resolve sweep. Serializing per call removes both
+  // the row-lock ordering deadlock against the sweep's bulk pre-lock and the
+  // interleaved-count race that could strand call_log.review_status 'open'
+  // on a fully-terminal call.
+  return db.transaction(async (trx) => {
+    await lockTriageCall(trx, item.call_log_id);
 
-  // Keep call_log.review_status in sync with the call's remaining open items.
-  if (item.call_log_id) {
-    const stillOpen = await db('triage_items')
-      .where({ call_log_id: item.call_log_id })
+    // Atomic compare-and-swap: only transition if the row is STILL open. Two staff
+    // actioning the same item concurrently can both pass the read above; the
+    // conditional update + affected-row count makes the loser a no-op so only the
+    // winner mutates the row (and, for verdicts, only the winner writes feedback).
+    const updated = await trx('triage_items')
+      .where({ id })
       .whereIn('status', OPEN_STATES)
-      .count('* as n')
-      .first();
-    const remaining = parseInt(stillOpen?.n || 0, 10);
-    await db('call_log')
-      .where({ id: item.call_log_id })
-      .update({ review_status: remaining > 0 ? 'open' : nextStatus, updated_at: new Date() });
-  }
+      .update({
+        status: nextStatus,
+        resolution_note: note,
+        assigned_to: assignedTo,
+        resolved_at: new Date(),
+        updated_at: new Date(),
+      });
+    if (updated === 0) return { outcome: 'conflict' };
 
-  return { outcome: 'ok', item };
+    // Keep call_log.review_status in sync with the call's remaining open items.
+    if (item.call_log_id) {
+      const stillOpen = await trx('triage_items')
+        .where({ call_log_id: item.call_log_id })
+        .whereIn('status', OPEN_STATES)
+        .count('* as n')
+        .first();
+      const remaining = parseInt(stillOpen?.n || 0, 10);
+      await trx('call_log')
+        .where({ id: item.call_log_id })
+        .update({ review_status: remaining > 0 ? 'open' : nextStatus, updated_at: new Date() });
+    }
+
+    return { outcome: 'ok', item };
+  });
 }
 
 function sendTransitionResult(res, result, id, nextStatus) {
@@ -226,30 +236,39 @@ router.post('/:id/verdict', async (req, res) => {
     // reviewer sees 0 open rows, gets a 409, and writes no feedback.
     // email_bounce_reverify rows are excluded: the reviewer is judging the
     // CALL, and a pending bounce follow-up must survive that judgment.
-    const resolved = await db('triage_items')
-      .where({ call_log_id: item.call_log_id })
-      .whereNot('reason_code', 'email_bounce_reverify')
-      .whereIn('status', OPEN_STATES)
-      .update({
-        status: 'resolved',
-        resolution_note: note,
-        assigned_to: req.technicianId,
-        resolved_at: new Date(),
-        updated_at: new Date(),
-      });
+    // Per-call advisory lock + transaction: the shared lockTriageCall
+    // contract with the nightly auto-resolve sweep — the bulk update's
+    // planner-order row locks could otherwise deadlock against the sweep's
+    // ordered pre-lock, and interleaved counts could strand review_status.
+    const resolved = await db.transaction(async (trx) => {
+      await lockTriageCall(trx, item.call_log_id);
+      const count = await trx('triage_items')
+        .where({ call_log_id: item.call_log_id })
+        .whereNot('reason_code', 'email_bounce_reverify')
+        .whereIn('status', OPEN_STATES)
+        .update({
+          status: 'resolved',
+          resolution_note: note,
+          assigned_to: req.technicianId,
+          resolved_at: new Date(),
+          updated_at: new Date(),
+        });
+      if (count === 0) return 0;
+
+      // A surviving bounce card keeps the call visible in review.
+      const stillOpen = await trx('triage_items')
+        .where({ call_log_id: item.call_log_id })
+        .whereIn('status', OPEN_STATES)
+        .count('* as n')
+        .first();
+      await trx('call_log')
+        .where({ id: item.call_log_id })
+        .update({ review_status: parseInt(stillOpen?.n || 0, 10) > 0 ? 'open' : 'resolved', updated_at: new Date() });
+      return count;
+    });
     if (resolved === 0) {
       return res.status(409).json({ error: 'Call was just actioned by someone else' });
     }
-
-    // A surviving bounce card keeps the call visible in review.
-    const stillOpen = await db('triage_items')
-      .where({ call_log_id: item.call_log_id })
-      .whereIn('status', OPEN_STATES)
-      .count('* as n')
-      .first();
-    await db('call_log')
-      .where({ id: item.call_log_id })
-      .update({ review_status: parseInt(stillOpen?.n || 0, 10) > 0 ? 'open' : 'resolved', updated_at: new Date() });
 
     await upsertFeedback({
       callLogId: item.call_log_id,
