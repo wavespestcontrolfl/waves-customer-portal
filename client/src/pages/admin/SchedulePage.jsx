@@ -4982,7 +4982,70 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
 
   const notifyCustomer = notificationType === "sms";
 
+  // window_end is the visit's SCHEDULING block — it must carry the visit's
+  // own duration, never a flat 2-hour span (that inflates occupancy and
+  // blocks real slots). The 2-hour arrival range is customer-facing copy
+  // only. Duration: the service's estimate, else the original window span,
+  // else 60 minutes.
+  const durationMinutes = (() => {
+    // Stored window span FIRST — the feeds fabricate defaults for
+    // null-duration rows (Day: ||60, Month: ||30), so metadata can lie
+    // while the persisted span cannot. Metadata (estimatedDuration on
+    // day/week payloads, duration on month payloads) is the fallback for
+    // windowless rows, then 60.
+    const [ws, we] = [service.windowStart, service.windowEnd];
+    if (ws && we) {
+      const [h1, m1] = String(ws).split(":").map(Number);
+      const [h2, m2] = String(we).split(":").map(Number);
+      const span = h2 * 60 + (m2 || 0) - (h1 * 60 + (m1 || 0));
+      if (span > 0) return span;
+    }
+    const d = parseInt(service.estimatedDuration ?? service.duration, 10);
+    if (Number.isInteger(d) && d > 0) return d;
+    return 60;
+  })();
+
+  const windowFor = (startHHMM) => {
+    const [h, m] = String(startHHMM).split(":").map(Number);
+    if (Number.isNaN(h)) return null;
+    const endTotal = h * 60 + (m || 0) + durationMinutes;
+    // A start whose full duration crosses midnight would truncate the
+    // visit's occupancy block and let another booking land inside time the
+    // job still needs — reject instead of clamping.
+    if (endTotal > 23 * 60 + 59) return null;
+    const end = `${String(Math.floor(endTotal / 60)).padStart(2, "0")}:${String(endTotal % 60).padStart(2, "0")}`;
+    const start = `${String(h).padStart(2, "0")}:${String(m || 0).padStart(2, "0")}`;
+    return {
+      start,
+      end,
+      display: `${formatTimeDisplay(start)} - ${formatTimeDisplay(end)}`,
+    };
+  };
+
+  const currentDateOnly = service.scheduledDate
+    ? String(service.scheduledDate).split("T")[0]
+    : "";
+  const currentStart = service.windowStart
+    ? String(service.windowStart).slice(0, 5)
+    : "";
+
   const handleReschedule = async (opt) => {
+    // Suggested starts are morning slots, but stay consistent with the
+    // manual path: never submit a midnight-truncated block.
+    const suggestedBlock = windowFor(opt.suggestedWindow?.start);
+    if (!suggestedBlock) {
+      alert(
+        "That start time would run past midnight for this visit's duration — pick another slot.",
+      );
+      return;
+    }
+    // Same no-op guard as the manual path: a suggestion can equal the
+    // current slot (the visit excludes itself from conflict checks), and
+    // submitting it would log a reschedule and text an unchanged customer.
+    if (opt.date === currentDateOnly && suggestedBlock.start === currentStart) {
+      alert("The appointment is already scheduled at that date and time.");
+      return;
+    }
     setSending(true);
     try {
       const result = await adminFetch(
@@ -4991,7 +5054,12 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
           method: "POST",
           body: JSON.stringify({
             newDate: opt.date,
-            newWindow: opt.suggestedWindow,
+            // Re-derive the block from the visit's own duration — the
+            // suggested window's 2-3h span is arrival copy, not occupancy.
+            newWindow: suggestedBlock,
+            // Server re-derives window_end from the CURRENT row, so a stale
+            // board snapshot can't shrink or expand the visit's block.
+            deriveWindowFromCurrentVisit: true,
             reasonCode: reason,
             reasonText: notes,
             notifyCustomer,
@@ -5007,20 +5075,30 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
       onClose();
     } catch (e) {
       console.error(e);
+      alert(
+        `Reschedule failed: ${e.message || "the slot may have just been taken — pick another"}`,
+      );
     }
     setSending(false);
   };
 
   const handleManualReschedule = async () => {
     if (!manualDate) return;
+    // No-op guard: submitting the visit's existing slot would log a
+    // reschedule and (with Text selected) tell the customer their
+    // appointment moved when nothing changed.
+    if (manualDate === currentDateOnly && manualTime === currentStart) {
+      alert("The appointment is already scheduled at that date and time.");
+      return;
+    }
+    const window = windowFor(manualTime);
+    if (!window) {
+      alert(
+        "That start time would run past midnight for this visit's duration — pick an earlier hour.",
+      );
+      return;
+    }
     setSending(true);
-    const [h, m] = manualTime.split(":");
-    const endH = String(Math.min(23, parseInt(h) + 2)).padStart(2, "0");
-    const window = {
-      start: manualTime,
-      end: `${endH}:${m}`,
-      display: `${formatTimeDisplay(manualTime)} - ${formatTimeDisplay(`${endH}:${m}`)}`,
-    };
     try {
       const result = await adminFetch(
         `/admin/dispatch/${service.id}/reschedule`,
@@ -5029,6 +5107,9 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
           body: JSON.stringify({
             newDate: manualDate,
             newWindow: window,
+            // Server re-derives window_end from the CURRENT row, so a stale
+            // board snapshot can't shrink or expand the visit's block.
+            deriveWindowFromCurrentVisit: true,
             reasonCode: reason,
             reasonText: notes,
             notifyCustomer,
@@ -5044,6 +5125,9 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
       onClose();
     } catch (e) {
       console.error(e);
+      alert(
+        `Reschedule failed: ${e.message || "the slot may have just been taken — pick another"}`,
+      );
     }
     setSending(false);
   };
@@ -5239,7 +5323,11 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
                     {opt.displayDate}
                   </div>{" "}
                   <div style={{ fontSize: 12, color: D.muted }}>
-                    {opt.suggestedWindow?.display} · {opt.currentLoad} jobs ·{" "}
+                    {/* Show the block Select actually books (duration-derived),
+                        not the server's wider 2-3h span. */}
+                    {windowFor(opt.suggestedWindow?.start)?.display ||
+                      opt.suggestedWindow?.display}{" "}
+                    · {opt.currentLoad} jobs ·{" "}
                     {opt.sameAreaServices} same area
                   </div>{" "}
                 </div>{" "}
@@ -5310,12 +5398,25 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
                 <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>
                   Start Time
                 </div>{" "}
-                <input
-                  type="time"
+                {/* Appointment windows ALWAYS start on the hour (owner
+                    directive) — an hour select instead of a free time input
+                    so an off-hour start can't be submitted. */}
+                <select
                   value={manualTime}
                   onChange={(e) => setManualTime(e.target.value)}
                   style={inputSt}
-                />{" "}
+                >
+                  {Array.from({ length: 13 }, (_, i) => {
+                    const h = i + 6;
+                    const value = `${String(h).padStart(2, "0")}:00`;
+                    const label = `${h % 12 || 12}:00 ${h >= 12 ? "PM" : "AM"}`;
+                    return (
+                      <option key={value} value={value}>
+                        {label}
+                      </option>
+                    );
+                  })}
+                </select>{" "}
               </div>{" "}
               <div style={{ display: "flex", alignItems: "flex-end" }}>
                 {" "}

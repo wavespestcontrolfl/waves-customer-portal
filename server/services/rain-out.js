@@ -331,7 +331,10 @@ async function getOptions(serviceId) {
   const { isBlackoutDate } = require('./scheduling/blackout-dates');
   const sameDay = (await isBlackoutDate(todayStr)) ? [] : sameDayOptions();
 
-  const dayOptionsRaw = await SmartRebooker.findRescheduleOptions(serviceId, 'weather_rain');
+  // probeSpanMinutes: this flow commits oneHourWindow(start), not the
+  // visit's own block — probe occupancy for exactly that hour so options
+  // can't 409 deterministically (short visits) or over-filter (long ones).
+  const dayOptionsRaw = await SmartRebooker.findRescheduleOptions(serviceId, 'weather_rain', { probeSpanMinutes: 60 });
 
   // Rain badges — best effort, never blocking. Customer coords first,
   // falling back to nothing (options render without percentages).

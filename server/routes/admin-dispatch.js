@@ -888,18 +888,9 @@ function treeShrubPhotoUploadRequiredError(uploadResult, minimum = TREE_SHRUB_MI
   return err;
 }
 
-function formatRescheduleTemplateVars(svc) {
-  const dateOnly = serviceDateOnly(svc?.scheduled_date);
-  const start = svc?.window_start || '08:00';
-  const apptTime = parseETDateTime(`${dateOnly}T${start}`);
-  return {
-    first_name: svc?.first_name || 'there',
-    service_type: svc?.service_type || 'service',
-    day: formatETDay(apptTime),
-    date: formatETDate(apptTime),
-    time: formatETTime(apptTime),
-  };
-}
+// formatRescheduleTemplateVars was removed with the inline single-reschedule
+// send — that path now routes through admin-schedule's
+// sendRescheduleNoticeForVisit (recipient routing + arrival-window copy).
 
 async function actualProductBlackoutBlocks(svc, submittedProducts = []) {
   const productIds = [...new Set((submittedProducts || []).map((p) => p.productId).filter(Boolean))];
@@ -9493,63 +9484,62 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
       }
       rescheduleOptions.technicianId = newTechId;
     }
-    const result = await SmartRebooker.reschedule(req.params.serviceId, newDate, newWindow, reasonCode || 'admin', 'admin', rescheduleOptions);
-    await syncRescheduleReminder(req.params.serviceId, newDate, newWindow, { willNotify: notifyCustomer !== false });
-    // Snapshot the just-synced reminder state BEFORE the SMS, so the no-send
-    // re-arm below can't stomp a newer reschedule that lands during the send.
-    const reminderGuards = await captureReminderGuards(req.params.serviceId);
+    // Callers with a possibly-stale board snapshot (the RescheduleModal)
+    // opt in to server-side block derivation: window_end is rebuilt from
+    // the CURRENT row's own span/duration at the submitted start, so a
+    // concurrent duration edit can't be overwritten with a stale block.
+    let effectiveWindow = newWindow;
+    if (req.body.deriveWindowFromCurrentVisit === true && newWindow?.start) {
+      const row = await db('scheduled_services')
+        .where({ id: req.params.serviceId })
+        .first('window_start', 'window_end', 'estimated_duration_minutes');
+      if (row) {
+        const dur = (() => {
+          if (row.window_start && row.window_end) {
+            const [h1, m1] = String(row.window_start).split(':').map(Number);
+            const [h2, m2] = String(row.window_end).split(':').map(Number);
+            const span = (h2 * 60 + (m2 || 0)) - (h1 * 60 + (m1 || 0));
+            if (span > 0) return span;
+          }
+          const d = parseInt(row.estimated_duration_minutes, 10);
+          if (Number.isInteger(d) && d > 0) return d;
+          return 60;
+        })();
+        const [sh, sm] = String(effectiveWindow.start).split(':').map(Number);
+        const endTotal = sh * 60 + (sm || 0) + dur;
+        if (endTotal > 23 * 60 + 59) {
+          return res.status(409).json({
+            error: "That start time would run past midnight for this visit's duration — pick an earlier hour",
+            code: 'WINDOW_CROSSES_MIDNIGHT',
+          });
+        }
+        const end = `${String(Math.floor(endTotal / 60)).padStart(2, '0')}:${String(endTotal % 60).padStart(2, '0')}`;
+        effectiveWindow = { ...effectiveWindow, end };
+      }
+    }
+    const result = await SmartRebooker.reschedule(req.params.serviceId, newDate, effectiveWindow, reasonCode || 'admin', 'admin', rescheduleOptions);
+    await syncRescheduleReminder(req.params.serviceId, newDate, effectiveWindow, { willNotify: notifyCustomer !== false });
     try {
       await emitDispatchJobUpdate({ jobId: req.params.serviceId, actorId: req.technicianId });
     } catch (err) {
       logger.error(`[dispatch] reschedule board broadcast failed for ${req.params.serviceId}: ${err.message}`);
     }
     if (notifyCustomer !== false) {
-      const svc = await db('scheduled_services')
-        .where('scheduled_services.id', req.params.serviceId)
-        .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
-        .select('scheduled_services.*', 'customers.first_name', 'customers.phone', 'customers.id as customer_id')
-        .first();
-      let notificationSent = false;
-      let notificationError = null;
-      if (!svc?.phone) {
-        notificationError = 'Customer phone unavailable';
-      } else {
-        try {
-          const vars = formatRescheduleTemplateVars(svc);
-          const body = await renderRequiredTemplate('appointment_rescheduled', vars, {
-            workflow: 'dispatch_reschedule',
-            entity_type: 'scheduled_service',
-            entity_id: req.params.serviceId,
-          });
-          const msg = await sendCustomerMessage({
-            to: svc.phone,
-            body,
-            channel: 'sms',
-            audience: 'customer',
-            purpose: 'appointment',
-            customerId: svc.customer_id,
-            identityTrustLevel: 'phone_matches_customer',
-            metadata: { original_message_type: 'reschedule_confirmation', reasonText },
-          });
-          notificationSent = !(msg?.blocked || msg?.sent === false);
-          if (!notificationSent) notificationError = msg?.code || msg?.reason || 'blocked';
-          if (notificationSent) {
-            await markRescheduleReminderNotified(req.params.serviceId);
-          }
-        } catch (err) {
-          notificationError = err.message;
-          logger.warn(`[dispatch] Reschedule committed for ${req.params.serviceId}, but SMS notification failed: ${err.message}`);
-        }
-      }
-      if (!notificationSent) {
-        // Fallback scope for a failed guard snapshot: the visit's NEW time,
-        // recomputed exactly as syncRescheduleReminder stamped it above.
-        await rearmRescheduleReminderWindows(reminderGuards, [{
-          scheduledServiceId: req.params.serviceId,
-          appointmentTime: parseETDateTime(rescheduleReminderTime(newDate, newWindow)),
-        }]);
-      }
-      return res.json({ ...result, notificationSent, notificationError });
+      // Shared notice path (recipient routing incl. appointment_notify_primary
+      // and service contacts, arrival-window copy, terminal/slot recheck at
+      // the provider handoff, guarded reminder close/re-arm) — replaces this
+      // route's former inline send, which texted customers.phone directly and
+      // closed reminder windows unguarded. syncRescheduleReminder(willNotify)
+      // above satisfies the helper's cover contract. Lazy require both ways —
+      // admin-schedule lazily requires this module too; neither runs at load.
+      const { sendRescheduleNoticeForVisit } = require('./admin-schedule');
+      const win = parseRescheduleWindow(effectiveWindow);
+      const notice = await sendRescheduleNoticeForVisit(
+        req.params.serviceId,
+        String(newDate).split('T')[0],
+        win.start,
+      );
+      return res.json({ ...result, notificationSent: notice.sent, notificationError: notice.error });
     }
     res.json(result);
   } catch (err) {

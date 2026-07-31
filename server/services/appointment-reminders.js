@@ -1831,6 +1831,30 @@ const AppointmentReminders = {
         return null;
       }
 
+      // Optional stale-move guard: a caller that committed its own schedule
+      // write earlier (IB batch mover) passes the slot it committed; if a
+      // NEWER reschedule has already landed a different date/start on the
+      // service row, this invocation is stale. Enforced ATOMICALLY below —
+      // the reminder UPDATE itself carries a WHERE EXISTS on the service
+      // row still holding the expected slot, so a move that lands between
+      // any read here and the write makes the update miss instead of
+      // stomping the winner's reminder state.
+      const expectGuard = (query) => {
+        if (!(options.expectSchedule && options.expectSchedule.date)) return query;
+        const expectStart = options.expectSchedule.windowStart
+          ? String(options.expectSchedule.windowStart).slice(0, 5)
+          : null;
+        return query.whereExists(function whereServiceStillAtSlot() {
+          this.select(1)
+            .from('scheduled_services')
+            .where('scheduled_services.id', scheduledServiceId)
+            .whereRaw('scheduled_services.scheduled_date = ?::date', [String(options.expectSchedule.date)])
+            .modify((q) => {
+              if (expectStart) q.whereRaw("to_char(scheduled_services.window_start, 'HH24:MI') = ?", [expectStart]);
+            });
+        });
+      };
+
       const newApptTime = parseETDateTime(newTime);
       if (isNaN(newApptTime.getTime())) {
         logger.error(`[appt-remind] Reschedule: invalid time ${newTime}`);
@@ -1916,9 +1940,13 @@ const AppointmentReminders = {
         rescheduleUpdate.confirmation_sent = true;
         rescheduleUpdate.confirmation_sent_at = new Date();
       }
-      await db('appointment_reminders')
-        .where({ id: record.id })
-        .update(rescheduleUpdate);
+      const syncedRows = await expectGuard(
+        db('appointment_reminders').where({ id: record.id }),
+      ).update(rescheduleUpdate);
+      if (options.expectSchedule && syncedRows === 0) {
+        logger.info(`[appt-remind] Reschedule sync skipped for ${scheduledServiceId} — the service no longer holds the caller's slot`);
+        return { skippedStale: true };
+      }
 
       if (!sendNotification) {
         logger.info(`[appt-remind] Reschedule notice suppressed for ${scheduledServiceId}`);

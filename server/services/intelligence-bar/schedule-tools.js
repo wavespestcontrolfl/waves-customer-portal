@@ -51,13 +51,14 @@ const SCHEDULE_TOOLS = [
   },
   {
     name: 'move_stops_to_day',
-    description: `Move one or more scheduled services to a different date. Use when operator says "move the Lakewood stops to Thursday" or "push these to next week." Your call returns a PREVIEW; the operator approves or rejects it on the confirmation card in the portal. Call ONCE per intended action — never retry, never claim completion.`,
+    description: `Move one or more scheduled services to a different date. Use when operator says "move the Lakewood stops to Thursday" or "push these to next week." Your call returns a PREVIEW; the operator approves or rejects it on the confirmation card in the portal. Call ONCE per intended action — never retry, never claim completion. Moves are SILENT by default; set notify_customers true ONLY when the operator explicitly asks to text the customers.`,
     input_schema: {
       type: 'object',
       properties: {
         service_ids: { type: 'array', items: { type: 'string' }, description: 'Scheduled service IDs to move' },
         new_date: { type: 'string', description: 'YYYY-MM-DD target date' },
         reason: { type: 'string' },
+        notify_customers: { type: 'boolean', description: 'Text each customer the new date and arrival window. Default false (silent move) — only set true when the operator explicitly asks to notify customers.' },
       },
       required: ['service_ids', 'new_date'],
     },
@@ -394,6 +395,7 @@ const LIVE_MOVE_STATUSES = new Set(['en_route', 'on_site']);
 
 async function moveStopsToDay(input) {
   const { service_ids: serviceIds, new_date: newDate, reason, confirmed } = input;
+  const notifyCustomers = input.notify_customers === true;
 
   // scheduled_date is a plain DATE column holding ET calendar dates — a
   // garbage, impossible (2099-02-31), or past target moves stops where no
@@ -429,13 +431,25 @@ async function moveStopsToDay(input) {
   // rebooker's shared cutoff logic (window_end preferred, else window_start),
   // and report them so the operator sees what stayed behind. A stop with a
   // still-future window today, or any move to a future date, is unaffected.
-  const movable = nonTerminal.filter((s) => !sameDayWindowElapsed(dateStr, s.window_end || s.window_start));
+  const movableAnyDate = nonTerminal.filter((s) => !sameDayWindowElapsed(dateStr, s.window_end || s.window_start));
   const skippedElapsed = nonTerminal
     .filter((s) => sameDayWindowElapsed(dateStr, s.window_end || s.window_start))
     .map((s) => ({ id: s.id, status: s.status }));
+  // A stop already on the target date has nothing to move — drop it here so
+  // neither the preview nor the commit rewrites it or texts its customer
+  // about an "unchanged" appointment (and never closes its reminder windows
+  // as if a real reschedule notice replaced them).
+  const stopDateOnly = (v) => (v instanceof Date ? v.toISOString().slice(0, 10) : (v ? String(v).slice(0, 10) : null));
+  const movable = movableAnyDate.filter((s) => stopDateOnly(s.scheduled_date) !== dateStr);
+  const skippedUnchanged = movableAnyDate
+    .filter((s) => stopDateOnly(s.scheduled_date) === dateStr)
+    .map((s) => ({ id: s.id }));
   if (!movable.length) {
     return {
-      error: 'Every movable stop\'s window has already passed today — pick a later window or a future date',
+      error: skippedUnchanged.length && !skippedElapsed.length
+        ? 'Every selected stop is already on that date — nothing to move'
+        : 'Every movable stop\'s window has already passed today — pick a later window or a future date',
+      ...(skippedUnchanged.length ? { skipped_unchanged: skippedUnchanged } : {}),
       ...(skippedElapsed.length ? { skipped_elapsed: skippedElapsed } : {}),
       ...(skippedTerminal.length ? { skipped_terminal: skippedTerminal } : {}),
     };
@@ -456,10 +470,14 @@ async function moveStopsToDay(input) {
       would_move_to: dateStr,
       stop_count: stops.length,
       reason: reason || null,
+      // Surfaced on the confirmation card — the operator must see whether
+      // committing will text the customers.
+      will_text_customers: notifyCustomers,
       stops,
+      ...(skippedUnchanged.length ? { skipped_unchanged: skippedUnchanged } : {}),
       ...(skippedElapsed.length ? { skipped_elapsed: skippedElapsed } : {}),
       ...(skippedTerminal.length ? { skipped_terminal: skippedTerminal } : {}),
-      note: `Would move ${stops.length} stop(s) to ${dateStr}. Re-call with confirmed:true to apply.`,
+      note: `Would move ${stops.length} stop(s) to ${dateStr}${notifyCustomers ? ' and TEXT each customer the new arrival window' : ' silently (no customer texts)'}. Re-call with confirmed:true to apply.`,
     };
   }
 
@@ -467,6 +485,10 @@ async function moveStopsToDay(input) {
   const { LIVE_LIFECYCLE_RESET, applyLiveMoveSideEffects } = require('../rebooker');
   const movedIds = new Set();
   const skippedConflict = [];
+  // Moved rows whose requested customer text did NOT go out — reported so
+  // the operator learns the move committed but someone wasn't notified.
+  const notificationFailures = [];
+  let textedCount = 0;
   for (const s of movable) {
     const oldDate = s.scheduled_date;
     // A live (en_route/on_site) stop being moved rewinds its tracker
@@ -560,6 +582,88 @@ async function moveStopsToDay(input) {
     } catch (err) {
       logger.error(`[intelligence-bar:schedule] reschedule_log insert failed for ${s.id}: ${err.message}`);
     }
+
+  }
+
+  // Notification phase — runs only after EVERY approved stop has been
+  // moved, released, and audited above, so one slow SMS provider can
+  // never delay or strand the rest of the confirmed batch. Best-effort
+  // per stop; failures land in notification_failures.
+  for (const s of movable) {
+    if (!movedIds.has(s.id)) continue;
+    // Opt-in customer text — LAST: after the live-job release and the
+    // reschedule_log audit, so a slow
+    // SMS provider can never hold tech_status/tracker on the moved job.
+    // Same shared path as update-details and the bulk
+    // reschedule (arrival-window copy, recipient routing, terminal/slot
+    // recheck, guarded reminder close/re-arm). Best-effort per stop: a send
+    // failure is reported, never unwinds the committed move.
+    if (notifyCustomers) {
+      try {
+        const start = s.window_start ? String(s.window_start).slice(0, 5) : null;
+        // An unreviewed outbound-callback booking gets NO customer text and
+        // no handleReschedule cover (which would claim its still-pending
+        // confirmation slot) — the office reviews it first, same guard as
+        // the dispatch routes.
+        const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('../call-booking-source-actions');
+        const unreviewedCallback = s.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
+          && String(s.status) === 'pending'
+          && !s.customer_confirmed;
+        if (unreviewedCallback) {
+          notificationFailures.push({ id: s.id, reason: 'Pending office review (outbound-callback booking) — not texted' });
+        } else if (!start) {
+          notificationFailures.push({ id: s.id, reason: 'No arrival time is set for this visit, so no reschedule text was sent' });
+        } else {
+          const reminderRow = await db('appointment_reminders')
+            .where({ scheduled_service_id: s.id })
+            .first('suppressed_by_sibling')
+            .catch(() => null);
+          if (!reminderRow) {
+            notificationFailures.push({ id: s.id, reason: 'No reminder record for this visit — not texted' });
+          } else if (reminderRow.suppressed_by_sibling) {
+            // The destination slot's reminder owner carries this customer's
+            // messaging, and that owner may not be part of this move — so
+            // no reschedule text goes out here. Report it rather than let
+            // the operator assume the customer was told (codex #3102 r3).
+            notificationFailures.push({ id: s.id, reason: 'Another visit that day carries this customer\'s reminders — no reschedule text was sent for this stop' });
+          } else {
+            const AppointmentReminders = require('../appointment-reminders');
+            // Cover any already-due reminder window before our text so the
+            // 15-min cron can't double-text in the send gap (the caller-side
+            // contract of sendRescheduleNoticeForVisit).
+            const sync = await AppointmentReminders.handleReschedule(s.id, `${dateStr}T${start}`, {
+              sendNotification: false,
+              coverDueWindows: true,
+              // Stale-move guard (atomic in the service): the reminder
+              // rewrite misses if a newer reschedule already landed a
+              // different slot on the row.
+              expectSchedule: { date: dateStr, windowStart: start },
+            });
+            if (!sync || sync.skippedStale) {
+              // skippedStale: a newer move won and owns the customer
+              // messaging. Falsy: the guarded sync itself failed — a
+              // still-pending deferred confirmation would then follow our
+              // text as a duplicate. Either way: report, don't send (the
+              // cron's fallback reminders remain armed).
+              notificationFailures.push({
+                id: s.id,
+                reason: sync && sync.skippedStale
+                  ? 'Appointment changed again before the text could be sent'
+                  : 'Reminder sync failed — not texted (automated reminders still cover the new time)',
+              });
+            } else {
+              const { sendRescheduleNoticeForVisit } = require('../../routes/admin-schedule');
+              const notice = await sendRescheduleNoticeForVisit(s.id, dateStr, start);
+              if (notice.sent) textedCount++;
+              else notificationFailures.push({ id: s.id, reason: notice.error || 'reschedule text was not sent' });
+            }
+          }
+        }
+      } catch (err) {
+        notificationFailures.push({ id: s.id, reason: err.message });
+        logger.error(`[intelligence-bar:schedule] move notice failed for ${s.id}: ${err.message}`);
+      }
+    }
   }
 
   const movedStops = stops.filter((st) => movedIds.has(st.id));
@@ -580,6 +684,14 @@ async function moveStopsToDay(input) {
     moved_count: movedStops.length,
     new_date: dateStr,
     stops: movedStops,
+    ...(notifyCustomers ? { texted_count: textedCount, notification_failures: notificationFailures } : {}),
+    // Top-level partial-failure signal: /confirm-action reports success (the
+    // moves DID commit), so without this the card shows a bare "Done" and
+    // the operator assumes every customer was texted.
+    ...(notifyCustomers && notificationFailures.length
+      ? { warning: `Moved ${movedStops.length} stop(s), but ${notificationFailures.length} customer(s) were not texted: ${notificationFailures.map((f) => f.reason).slice(0, 3).join('; ')}${notificationFailures.length > 3 ? '…' : ''}` }
+      : {}),
+    ...(skippedUnchanged.length ? { skipped_unchanged: skippedUnchanged } : {}),
     ...(skippedTerminal.length ? { skipped_terminal: skippedTerminal } : {}),
     ...(skippedElapsed.length ? { skipped_elapsed: skippedElapsed } : {}),
     ...(skippedConflict.length ? { skipped_conflict: skippedConflict } : {}),
