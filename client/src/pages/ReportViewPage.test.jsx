@@ -430,7 +430,7 @@ describe('ReportViewPage visit timeline helpers', () => {
       },
     };
     expect(visitWorkSummary(data, 'Service completed today.'))
-      .toBe('3 treatment steps completed · Primary bedroom, guest bedroom');
+      .toBe('3 service steps completed · Primary bedroom, guest bedroom');
     // Long free-text rooms drop out of the cell instead of overflowing it.
     const longRooms = {
       typedReport: {
@@ -441,7 +441,19 @@ describe('ReportViewPage visit timeline helpers', () => {
       },
     };
     expect(visitWorkSummary(longRooms, 'Service completed today.'))
-      .toBe('1 treatment step completed');
+      .toBe('1 service step completed');
+    // Legacy snapshots persist chips as one comma-joined string — never
+    // split (labels can contain commas); a countless neutral phrase stands.
+    const legacy = {
+      typedReport: {
+        findings: [
+          { fieldKey: 'rooms_treated', customerValueLabel: 'Primary bedroom' },
+          { fieldKey: 'work_completed', value: 'Crack & crevice treatment, Steam treatment' },
+        ],
+      },
+    };
+    expect(visitWorkSummary(legacy, 'Service completed today.'))
+      .toBe('Service work completed · Primary bedroom');
     // No typed work recorded → the generic fallback stands.
     expect(visitWorkSummary({ typedReport: { findings: [] } }, 'Service completed today.'))
       .toBe('Service completed today.');

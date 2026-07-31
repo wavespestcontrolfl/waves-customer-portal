@@ -627,14 +627,24 @@ export function visitWorkSummary(data = {}, fallback = '') {
   if (!appCount && !completed.length) {
     const typedFindings = Array.isArray(data.typedReport?.findings) ? data.typedReport.findings : [];
     const work = typedFindings.find((f) => f?.fieldKey === 'work_completed');
-    const workCount = Array.isArray(work?.customerValueParts) ? work.customerValueParts.length
-      : (Array.isArray(work?.value) ? work.value.length : 0);
+    // Count only from authoritative arrays — legacy snapshots persist the
+    // chips as one comma-joined string, and splitting display text would
+    // shred labels containing commas (ratified rule, see the findings-card
+    // chips above). Legacy strings get a countless neutral phrase instead.
+    const workParts = Array.isArray(work?.customerValueParts) && work.customerValueParts.length
+      ? work.customerValueParts
+      : (Array.isArray(work?.value) && work.value.length ? work.value : null);
+    const hasLegacyWorkText = !workParts
+      && [work?.customerValueLabel, work?.value].some((v) => typeof v === 'string' && v.trim());
     const rooms = typedFindings.find((f) => f?.fieldKey === 'rooms_treated');
     const roomsText = [rooms?.customerValueLabel, rooms?.value]
       .map((v) => (typeof v === 'string' ? v.trim() : ''))
       .find(Boolean) || '';
+    // "service steps", not "treatments" — work chips include inspection and
+    // recommendation entries, and a visit of only those must not make a
+    // customer-facing treatment claim.
     const typedParts = [
-      workCount ? `${workCount} treatment step${workCount === 1 ? '' : 's'} completed` : null,
+      workParts ? `${workParts.length} service step${workParts.length === 1 ? '' : 's'} completed` : (hasLegacyWorkText ? 'Service work completed' : null),
       roomsText && roomsText.length <= 40 ? roomsText : null,
       photoCount ? `${photoCount} photo${photoCount === 1 ? '' : 's'} documented` : null,
     ].filter(Boolean);
