@@ -158,9 +158,10 @@ function ReanchorNote() {
 // status pill, heading, then matched Was/Now rows — the design spec is the
 // owner-approved mock from the 2026-07-30 session. Weather chips are the
 // rain blue on BOTH rows (owner call: one weather color, sun icon only
-// signals the dry side). A running_late move (Quick Move sheet) reuses the
-// same banner with a "Schedule update" pill, a schedule heading, and no
-// chips (the server never fetches chances for it).
+// signals the dry side). The non-weather Quick Move reasons (running late,
+// equipment trouble, emergency, no-show) reuse the same banner with a
+// "Schedule update" pill, an operational heading, and no chips (the server
+// never fetches chances for them).
 
 const WEATHER_MOVE_BLUE = '#0369A1';
 
@@ -241,13 +242,20 @@ function WeatherMoveRow({ label, date, windowStart, chance, isNow }) {
   );
 }
 
+// Non-weather Quick Move reasons: no "dry/better window" claim, just the
+// honest operational story ahead of the was/now rows.
+const SCHEDULE_MOVE_LEADS = {
+  running_late: 'our schedule ran behind today',
+  equipment_issue: 'equipment trouble slowed us down today',
+  tech_emergency: 'an emergency came up on our end',
+  customer_noshow: 'we missed you today',
+};
+
 function weatherMoveHeading({ move, firstName, serviceType }) {
   const hi = firstName ? `Hi ${firstName} — ` : '';
   const svc = (serviceType || 'service').toLowerCase();
-  // Running late isn't weather: no "dry/better window" claim, just the
-  // honest schedule story ahead of the was/now rows.
-  if (move.reasonCode === 'running_late') {
-    return `${hi}our schedule ran behind today, so we moved your ${svc} to a new window.`;
+  if (SCHEDULE_MOVE_LEADS[move.reasonCode]) {
+    return `${hi}${SCHEDULE_MOVE_LEADS[move.reasonCode]}, so we moved your ${svc} to a new window.`;
   }
   const lead = WEATHER_MOVE_LEADS[move.reasonCode] || 'weather moved your';
   // "Dry" only when the forecast actually supports it — same ≤40% bar the
@@ -270,7 +278,7 @@ function WeatherMovePill({ move }) {
         display: 'inline-block', width: 6, height: 6, borderRadius: '50%',
         background: WEATHER_MOVE_BLUE, marginRight: 8, verticalAlign: 'middle',
       }} />
-      {move?.reasonCode === 'running_late' ? 'Schedule update' : 'Moved for weather'}
+      {SCHEDULE_MOVE_LEADS[move?.reasonCode] ? 'Schedule update' : 'Moved for weather'}
     </div>
   );
 }

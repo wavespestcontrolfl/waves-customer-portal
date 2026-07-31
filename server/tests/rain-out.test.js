@@ -710,9 +710,9 @@ describe('rain-out service', () => {
     });
   });
 
-  describe('running_late (GATE_RAINOUT_RUNNING_LATE)', () => {
+  describe('extra reasons (GATE_QUICKMOVE_EXTRA_REASONS)', () => {
     afterEach(() => {
-      delete process.env.GATE_RAINOUT_RUNNING_LATE;
+      delete process.env.GATE_QUICKMOVE_EXTRA_REASONS;
       delete process.env.GATE_RAINOUT_MOVE_BANNER;
     });
 
@@ -731,17 +731,17 @@ describe('rain-out service', () => {
       notifyCustomer: true,
     };
 
-    test('gate off: running_late is rejected before any reschedule (fail closed)', async () => {
-      wireSingle();
-
-      const result = await RainOut.commit(COMMIT_ARGS);
-
-      expect(result).toMatchObject({ ok: false, reason: 'bad_reason' });
+    test('gate off: every extra reason is rejected before any reschedule (fail closed)', async () => {
+      for (const reasonCode of ['running_late', 'equipment_issue', 'tech_emergency', 'customer_noshow']) {
+        wireSingle();
+        const result = await RainOut.commit({ ...COMMIT_ARGS, reasonCode });
+        expect(result).toMatchObject({ ok: false, reason: 'bad_reason' });
+      }
       expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
     });
 
     test('gate on: moves and texts the schedule lead with ZERO weather claims (v2 rung)', async () => {
-      process.env.GATE_RAINOUT_RUNNING_LATE = 'true';
+      process.env.GATE_QUICKMOVE_EXTRA_REASONS = 'true';
       wireSingle();
 
       const result = await RainOut.commit(COMMIT_ARGS);
@@ -765,8 +765,25 @@ describe('rain-out service', () => {
       });
     });
 
+    test('gate on: customer_noshow is the SOFT no-show — rebooker logs the missed-outreach reason and the SMS says we missed you', async () => {
+      process.env.GATE_QUICKMOVE_EXTRA_REASONS = 'true';
+      wireSingle();
+
+      const result = await RainOut.commit({ ...COMMIT_ARGS, reasonCode: 'customer_noshow' });
+
+      expect(result.ok).toBe(true);
+      // reason_code customer_noshow on the reschedule_log row is what feeds
+      // the 2-in-90-days missed-appointment outreach counter.
+      expect(SmartRebooker.reschedule).toHaveBeenCalledWith(
+        'svc-1', '2026-06-11', { start: '13:00', end: '14:00' }, 'customer_noshow', 'tech',
+        { allowLive: true, excludeServiceIds: ['svc-1'] },
+      );
+      expect(renderSmsTemplate.mock.calls[0][1].weather_lead).toBe('we missed you today');
+      expect(sendCustomerMessage.mock.calls[0][0].metadata).toMatchObject({ reason_code: 'customer_noshow' });
+    });
+
     test('gate on + banner gate: the v3 link clause drops the forecast word', async () => {
-      process.env.GATE_RAINOUT_RUNNING_LATE = 'true';
+      process.env.GATE_QUICKMOVE_EXTRA_REASONS = 'true';
       process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
       wireSingle();
 
@@ -780,7 +797,7 @@ describe('rain-out service', () => {
     });
 
     test('gate on, ABSENT v2 row: NO legacy reroute — the legacy grammar is weather-only, so the send stops', async () => {
-      process.env.GATE_RAINOUT_RUNNING_LATE = 'true';
+      process.env.GATE_QUICKMOVE_EXTRA_REASONS = 'true';
       wireDb({
         scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) })],
         // v2 render nulls and the row is truly gone (rolled-back migration).
@@ -798,20 +815,26 @@ describe('rain-out service', () => {
       expect(sendCustomerMessage).not.toHaveBeenCalled();
     });
 
-    test('lead composition is the fixed schedule phrase regardless of day/forecast', () => {
+    test('lead composition is the fixed operational phrase regardless of day/forecast', () => {
       const lead = RainOut._test.composeWeatherLead;
       expect(lead({ reasonCode: 'running_late', isSameDay: true, hour: 9, todayChance: 85 }))
         .toBe("we're running behind schedule today");
       expect(lead({ reasonCode: 'running_late', isSameDay: false, hour: 15, todayChance: null }))
         .toBe("we're running behind schedule today");
+      expect(lead({ reasonCode: 'equipment_issue', isSameDay: true, hour: 9 }))
+        .toBe('we had equipment trouble today');
+      expect(lead({ reasonCode: 'tech_emergency', isSameDay: false, hour: 9 }))
+        .toBe('an emergency came up on our end');
+      expect(lead({ reasonCode: 'customer_noshow', isSameDay: true, hour: 16 }))
+        .toBe('we missed you today');
     });
 
-    test('isValidReason: weather codes always, running_late only behind the gate', () => {
-      const { isValidReason } = RainOut._test;
+    test('isValidReason: weather codes always, extra reasons only behind the gate', () => {
+      const { isValidReason, EXTRA_REASON_LEADS } = RainOut._test;
       expect(isValidReason('weather_rain')).toBe(true);
-      expect(isValidReason('running_late')).toBe(false);
-      process.env.GATE_RAINOUT_RUNNING_LATE = 'true';
-      expect(isValidReason('running_late')).toBe(true);
+      for (const code of Object.keys(EXTRA_REASON_LEADS)) expect(isValidReason(code)).toBe(false);
+      process.env.GATE_QUICKMOVE_EXTRA_REASONS = 'true';
+      for (const code of Object.keys(EXTRA_REASON_LEADS)) expect(isValidReason(code)).toBe(true);
       expect(isValidReason('totally_bogus')).toBe(false);
     });
   });
@@ -1155,12 +1178,12 @@ describe('rain-out service', () => {
       expect(options.days[1].window).toEqual({ start: '09:00', end: '10:00' });
       expect(options.remainingRouteCount).toBe(2);
       expect(options.service.hasPhone).toBe(true);
-      // Chip hidden in both sheets while the gate is dark.
-      expect(options.runningLateEnabled).toBe(false);
+      // Chips hidden in both sheets while the gate is dark.
+      expect(options.extraReasonsEnabled).toBe(false);
     });
 
-    test('runningLateEnabled mirrors GATE_RAINOUT_RUNNING_LATE for the sheets', async () => {
-      process.env.GATE_RAINOUT_RUNNING_LATE = 'true';
+    test('extraReasonsEnabled mirrors GATE_QUICKMOVE_EXTRA_REASONS for the sheets', async () => {
+      process.env.GATE_QUICKMOVE_EXTRA_REASONS = 'true';
       try {
         SmartRebooker.findRescheduleOptions.mockResolvedValue([]);
         wireDb({
@@ -1173,9 +1196,9 @@ describe('rain-out service', () => {
         const options = await RainOut.getOptions('svc-1');
 
         expect(options.ok).toBe(true);
-        expect(options.runningLateEnabled).toBe(true);
+        expect(options.extraReasonsEnabled).toBe(true);
       } finally {
-        delete process.env.GATE_RAINOUT_RUNNING_LATE;
+        delete process.env.GATE_QUICKMOVE_EXTRA_REASONS;
       }
     });
   });

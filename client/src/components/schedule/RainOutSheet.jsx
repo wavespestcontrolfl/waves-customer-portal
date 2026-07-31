@@ -17,16 +17,24 @@ import { TIMEZONE } from '../../lib/timezone';
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
 // Same reasons the tech sheet offers; rain-out.js maps each to a
-// customer-facing lead in the SMS. "Running late" is the one non-weather
-// reason and renders only when the options payload says the server gate
-// (GATE_RAINOUT_RUNNING_LATE) is on — the server rejects it otherwise.
+// customer-facing lead in the SMS. The non-weather reasons render only when
+// the options payload says the server gate (GATE_QUICKMOVE_EXTRA_REASONS)
+// is on — the server rejects the codes otherwise. "No-show" here is the
+// SOFT path (visit rebooked + texted); the terminal Mark-as-no-show action
+// on the detail sheet keeps the fee/notice machinery.
 const RAIN_REASONS = [
   { code: 'weather_rain', label: 'Rain' },
   { code: 'weather_lightning', label: 'Lightning' },
   { code: 'weather_wind', label: 'Wind' },
   { code: 'weather_heat', label: 'Heat' },
 ];
-const RUNNING_LATE_REASON = { code: 'running_late', label: 'Running late' };
+const EXTRA_REASONS = [
+  { code: 'running_late', label: 'Running late' },
+  { code: 'equipment_issue', label: 'Equipment trouble' },
+  { code: 'tech_emergency', label: 'Emergency' },
+  { code: 'customer_noshow', label: 'No-show' },
+];
+const EXTRA_REASON_CODES = new Set(EXTRA_REASONS.map((r) => r.code));
 
 // Sentinel selection key for the custom-time option (distinct from the preset
 // keys, which are `${kind}:${date}:${start}`).
@@ -251,7 +259,7 @@ export default function RainOutSheet({ service, onClose, onDone }) {
           <>
             <div style={sectionLabel}>REASON</div>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 18 }}>
-              {(options.runningLateEnabled ? [...RAIN_REASONS, RUNNING_LATE_REASON] : RAIN_REASONS).map((r) => (
+              {(options.extraReasonsEnabled ? [...RAIN_REASONS, ...EXTRA_REASONS] : RAIN_REASONS).map((r) => (
                 <button key={r.code} type="button" onClick={() => setReason(r.code)} style={chipStyle(reason === r.code)}>
                   {r.label}
                 </button>
@@ -280,7 +288,7 @@ export default function RainOutSheet({ service, onClose, onDone }) {
                   >
                     <span>
                       {opt.display}
-                      {opt.kind === 'same_day' && reason !== 'running_late' && (
+                      {opt.kind === 'same_day' && !EXTRA_REASON_CODES.has(reason) && (
                         <span style={{ color: '#71717A', fontWeight: 400 }}> — storm may pass</span>
                       )}
                     </span>

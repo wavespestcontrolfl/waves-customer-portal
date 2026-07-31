@@ -363,17 +363,19 @@ describe('weatherMove banner context (GATE_RAINOUT_MOVE_BANNER)', () => {
     expect(getDailyRainOutlookBounded).toHaveBeenCalledWith(null, null, { deadlineMs: 1500 });
   });
 
-  test('a running_late move (Quick Move sheet) gets the banner with no chips and no forecast fetch', async () => {
+  test('the non-weather Quick Move reasons get the banner with no chips and no forecast fetch', async () => {
     process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
-    wireLog({ ...LOG, reason_code: 'running_late' });
-    const move = await loadWeatherMove(SVC, NOW);
-    expect(move).toMatchObject({
-      reasonCode: 'running_late',
-      from: { date: '2026-07-03', windowStart: '12:00' },
-      to: { date: '2026-07-04', windowStart: '09:00' },
-      fromChance: null,
-      toChance: null,
-    });
+    for (const reasonCode of ['running_late', 'equipment_issue', 'tech_emergency', 'customer_noshow']) {
+      wireLog({ ...LOG, reason_code: reasonCode });
+      const move = await loadWeatherMove(SVC, NOW);
+      expect(move).toMatchObject({
+        reasonCode,
+        from: { date: '2026-07-03', windowStart: '12:00' },
+        to: { date: '2026-07-04', windowStart: '09:00' },
+        fromChance: null,
+        toChance: null,
+      });
+    }
     expect(getDailyRainOutlookBounded).not.toHaveBeenCalled();
   });
 });

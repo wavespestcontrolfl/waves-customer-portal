@@ -243,10 +243,13 @@ async function loadByToken(token) {
 // newest reschedule_log row is a recent weather move it is still sitting on:
 // any later move (customer, dispatch) supersedes the rain-out narrative, so
 // the banner disappears rather than describing a stale transition.
-// running_late rides the same flow (Quick Move sheet, GATE_RAINOUT_RUNNING_LATE):
-// the banner narrates the was/now move with a schedule heading and no rain
-// chips (the chip fetch below is already rain/lightning-only).
-const WEATHER_REASON_CODES = new Set(['weather_rain', 'weather_wind', 'weather_lightning', 'weather_heat', 'running_late']);
+// The non-weather Quick Move reasons (GATE_QUICKMOVE_EXTRA_REASONS) ride the
+// same flow: the banner narrates the was/now move with a schedule heading
+// and no rain chips (the chip fetch below is already rain/lightning-only).
+const WEATHER_REASON_CODES = new Set([
+  'weather_rain', 'weather_wind', 'weather_lightning', 'weather_heat',
+  'running_late', 'equipment_issue', 'tech_emergency', 'customer_noshow',
+]);
 // Waves-initiated actors only: a customer answering an earlier reply-based
 // rain-out SMS logs initiated_by='customer_sms' with the original weather_*
 // reason kept (reschedule-sms.js) — that move is the customer's own pick,

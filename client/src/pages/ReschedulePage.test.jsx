@@ -582,4 +582,27 @@ describe('ReschedulePage weather-move banner', () => {
     // Hero still reframes to the optional-adjustment ask.
     expect(screen.getByText('Want a different time instead?')).toBeInTheDocument();
   });
+
+  it('each non-weather reason gets its own operational heading under the schedule pill', async () => {
+    const cases = [
+      ['equipment_issue', /equipment trouble slowed us down today, so we moved your pest control to a new window/],
+      ['tech_emergency', /an emergency came up on our end, so we moved your pest control to a new window/],
+      ['customer_noshow', /we missed you today, so we moved your pest control to a new window/],
+    ];
+    for (const [reasonCode, heading] of cases) {
+      stubFetch({
+        get: jsonResponse(reschedulablePayload({
+          weatherMove: { ...weatherMove, reasonCode, fromChance: null, toChance: null },
+        })),
+      });
+
+      renderPage();
+
+      expect(await screen.findByText('Schedule update')).toBeInTheDocument();
+      expect(screen.getByText(heading)).toBeInTheDocument();
+      expect(screen.queryByText('Moved for weather')).not.toBeInTheDocument();
+      expect(screen.queryByText('Why the move?')).not.toBeInTheDocument();
+      cleanup();
+    }
+  });
 });

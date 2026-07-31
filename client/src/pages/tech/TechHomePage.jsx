@@ -1150,15 +1150,23 @@ function StatCard({ label, value, color }) {
 // couple hours; day options carry NWS rain % so the tech doesn't
 // reschedule into tomorrow's storms. The server moves the job(s)
 // immediately and texts the customer a self-serve reschedule link.
-// "Running late" is the one non-weather reason and renders only when the
-// options payload says GATE_RAINOUT_RUNNING_LATE is on (server enforces).
+// The non-weather reasons render only when the options payload says
+// GATE_QUICKMOVE_EXTRA_REASONS is on (server enforces). "No-show" is the
+// SOFT path — visit rebooked + texted; the terminal no-show (fee/notice)
+// lives on the admin appointment detail sheet.
 const RAIN_REASONS = [
   { code: 'weather_rain', label: 'Rain' },
   { code: 'weather_lightning', label: 'Lightning' },
   { code: 'weather_wind', label: 'Wind' },
   { code: 'weather_heat', label: 'Heat' },
 ];
-const RUNNING_LATE_REASON = { code: 'running_late', label: 'Running late' };
+const EXTRA_REASONS = [
+  { code: 'running_late', label: 'Running late' },
+  { code: 'equipment_issue', label: 'Equipment trouble' },
+  { code: 'tech_emergency', label: 'Emergency' },
+  { code: 'customer_noshow', label: 'No-show' },
+];
+const EXTRA_REASON_CODES = new Set(EXTRA_REASONS.map((r) => r.code));
 
 function RainOutSheet({ service, onClose, onDone }) {
   const [options, setOptions] = useState(null);
@@ -1280,7 +1288,7 @@ function RainOutSheet({ service, onClose, onDone }) {
           <>
             <div style={{ fontSize: 12, fontWeight: 700, color: DARK.muted, marginBottom: 6 }}>REASON</div>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 16 }}>
-              {(options.runningLateEnabled ? [...RAIN_REASONS, RUNNING_LATE_REASON] : RAIN_REASONS).map((r) => (
+              {(options.extraReasonsEnabled ? [...RAIN_REASONS, ...EXTRA_REASONS] : RAIN_REASONS).map((r) => (
                 <button key={r.code} type="button" onClick={() => setReason(r.code)} style={chip(reason === r.code)}>
                   {r.label}
                 </button>
@@ -1309,7 +1317,7 @@ function RainOutSheet({ service, onClose, onDone }) {
                   >
                     <span>
                       {opt.kind === 'same_day' ? '⏱️ ' : '📅 '}{opt.display}
-                      {opt.kind === 'same_day' && reason !== 'running_late' && (
+                      {opt.kind === 'same_day' && !EXTRA_REASON_CODES.has(reason) && (
                         <span style={{ color: DARK.muted, fontSize: 12 }}> — storm may pass</span>
                       )}
                     </span>

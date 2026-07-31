@@ -36,19 +36,33 @@ const WEATHER_PHRASES = {
   weather_heat: 'extreme heat',
 };
 
-// Non-weather reason: the tech is simply running behind. Same move-first
-// flow and SMS machinery, but the lead states the schedule delay and the
-// copy makes no weather claims (no forecast fetch, no forecast link, no
+// Non-weather "Quick Move" reasons: the same move-first flow and SMS
+// machinery, but the lead states the real operational cause and the copy
+// makes no weather claims (no forecast fetch, no forecast link, no
 // better-day/efficacy clauses — those already gate on rain/lightning).
-// Dark until the owner flips GATE_RAINOUT_RUNNING_LATE: the chip is hidden
-// in both sheets (options payload flag) and commit() rejects the code, so
-// the kill switch is a plain unset.
-const RUNNING_LATE = 'running_late';
-function runningLateEnabled() {
-  return process.env.GATE_RAINOUT_RUNNING_LATE === 'true';
+// customer_noshow here is the SOFT path — visit rebooked + texted; the
+// terminal no_show status flip (card-hold fee, invoice void, missed-you
+// notice) stays on the appointment detail sheet. The rebooker's
+// reschedule_log row (reason_code customer_noshow, customer_id) feeds the
+// 2-in-90-days missed-appointment outreach counter automatically
+// (workflows/missed-appointment.js counts rows by that reason code).
+// All four are dark until the owner flips GATE_QUICKMOVE_EXTRA_REASONS:
+// the chips are hidden in both sheets (options payload flag) and commit()
+// rejects the codes, so the kill switch is a plain unset.
+const EXTRA_REASON_LEADS = {
+  running_late: "we're running behind schedule today",
+  equipment_issue: 'we had equipment trouble today',
+  tech_emergency: 'an emergency came up on our end',
+  customer_noshow: 'we missed you today',
+};
+function extraReasonsEnabled() {
+  return process.env.GATE_QUICKMOVE_EXTRA_REASONS === 'true';
+}
+function isExtraReason(reasonCode) {
+  return Object.prototype.hasOwnProperty.call(EXTRA_REASON_LEADS, reasonCode);
 }
 function isValidReason(reasonCode) {
-  return !!WEATHER_PHRASES[reasonCode] || (reasonCode === RUNNING_LATE && runningLateEnabled());
+  return !!WEATHER_PHRASES[reasonCode] || (isExtraReason(reasonCode) && extraReasonsEnabled());
 }
 
 // Customer-facing lead for the moved SMS, grounded in what we actually know
@@ -58,7 +72,7 @@ function isValidReason(reasonCode) {
 // degrades to an honest generic when we don't (NWS is fail-open). Non-rain
 // reasons state the real operational constraint rather than a weather label.
 function composeWeatherLead({ reasonCode, isSameDay, hour, todayChance }) {
-  if (reasonCode === RUNNING_LATE) return "we're running behind schedule today";
+  if (EXTRA_REASON_LEADS[reasonCode]) return EXTRA_REASON_LEADS[reasonCode];
   if (reasonCode === 'weather_wind') return 'winds are too high to spray safely today';
   if (reasonCode === 'weather_lightning') return "there's lightning in the area";
   if (reasonCode === 'weather_heat') return "today's heat is too extreme to treat safely";
@@ -394,9 +408,9 @@ async function getOptions(serviceId) {
     sameDay,
     days,
     remainingRouteCount: route.length,
-    // Both sheets render the "Running late" chip only when the gate is on —
-    // the server is still the enforcer (commit() rejects the code when off).
-    runningLateEnabled: runningLateEnabled(),
+    // Both sheets render the non-weather reason chips only when the gate is
+    // on — the server is still the enforcer (commit() rejects the codes).
+    extraReasonsEnabled: extraReasonsEnabled(),
   };
 }
 
@@ -421,9 +435,9 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, fore
   const lng = job.lng ?? customer.longitude;
   const zip = job.service_address_zip || customer.zip;
 
-  // A running-late move makes no weather claims: no forecast link and no
-  // NWS decoration below — the fixed schedule lead is the whole story.
-  const forecastLink = reasonCode === RUNNING_LATE ? null : forecastLinkForZip(zip);
+  // A non-weather move makes no weather claims: no forecast link and no
+  // NWS decoration below — the fixed operational lead is the whole story.
+  const forecastLink = isExtraReason(reasonCode) ? null : forecastLinkForZip(zip);
   const forecastClause = forecastLink ? `\n\nYour local forecast: ${forecastLink}` : '';
 
   // Forecast decoration is fail-open (same rule as the options sheet):
@@ -438,7 +452,7 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, fore
   const isSameDay = String(chosen.date) === todayStr;
   let outlook = null;
   let hourly = null;
-  if (lat != null && lng != null && !forecastHealth.degraded && reasonCode !== RUNNING_LATE) {
+  if (lat != null && lng != null && !forecastHealth.degraded && !isExtraReason(reasonCode)) {
     const fetched = await Promise.race([
       Promise.all([
         getDailyRainOutlook(lat, lng).catch(() => null),
@@ -493,9 +507,9 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, fore
       ...sharedVars,
       weather_lead: weatherLead,
       // "forecast" only when the page's banner will actually show one —
-      // a running-late move renders the banner without weather chips.
+      // a non-weather move renders the banner without weather chips.
       link_clause: rescheduleUrl
-        ? (reasonCode === RUNNING_LATE
+        ? (isExtraReason(reasonCode)
           ? ` New time & other options: ${rescheduleUrl}`
           : ` New time, forecast & other options: ${rescheduleUrl}`)
         : ' Need a different time? Reply to this message.',
@@ -526,11 +540,11 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, fore
   if (!body) {
     const v2Row = await db('sms_templates').where({ template_key: 'rain_out_moved_v2' }).first('id');
     // The legacy body's grammar is weather-only ("{weather_phrase} rolled
-    // through your area") — a running-late move can't render it honestly,
+    // through your area") — a non-weather move can't render it honestly,
     // so that edge (v2 migration rolled back) falls through to the
     // missing-template path: visit moved, sheet reports the customer was
     // NOT texted, operator follows up manually.
-    if (!v2Row && reasonCode !== RUNNING_LATE) {
+    if (!v2Row && !isExtraReason(reasonCode)) {
       body = await renderSmsTemplate('rain_out_moved', {
         ...sharedVars,
         ...longFormVars,
@@ -581,7 +595,8 @@ async function sendMovedSms({ job, customer, reasonCode, chosen, serviceId, fore
  * @param {string} args.serviceId       the job the tech is acting on
  * @param {string} args.technicianId    acting tech (route scope filter)
  * @param {string} args.reasonCode      weather_rain | weather_wind | weather_lightning | weather_heat
- *                                       | running_late (GATE_RAINOUT_RUNNING_LATE only)
+ *                                       | running_late | equipment_issue | tech_emergency
+ *                                       | customer_noshow (extra reasons need GATE_QUICKMOVE_EXTRA_REASONS)
  * @param {string} args.scope           'job' | 'route' (this job + the rest of today's route)
  * @param {object} args.target          { date, window: {start, end} } — the ANCHOR books exactly
  *                                       this window (what the tech saw). On a same-day route push
@@ -774,6 +789,6 @@ module.exports = {
   _test: {
     sameDayOptions, customerArrivalOption, minutesToHHMM, hhmmToMinutes, WEATHER_PHRASES,
     composeWeatherLead, composeBetterDayClause, composeEfficacyClause, dayLabel, windowRainChance,
-    RUNNING_LATE, isValidReason,
+    EXTRA_REASON_LEADS, isValidReason,
   },
 };
