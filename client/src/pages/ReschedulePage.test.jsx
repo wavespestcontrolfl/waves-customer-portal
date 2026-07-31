@@ -535,19 +535,20 @@ describe('ReschedulePage weather-move banner', () => {
     expect(screen.queryByText('Why the move?')).not.toBeInTheDocument();
   });
 
-  it('lawn services never see the microencapsulation claim (codex r4)', async () => {
-    stubFetch({
-      get: jsonResponse(reschedulablePayload({
-        service: { type: 'Lawn Care' },
-        weatherMove,
-      })),
-    });
+  it('the capsule claim fails CLOSED — only liquid pest sprays see it (codex r4/r5)', async () => {
+    // Denylist gaps: lawn fertilizers, rodent exclusion, bed-bug heat work.
+    for (const type of ['Lawn Care', 'Rodent Exclusion & Trapping', 'Bed Bug Treatment']) {
+      stubFetch({
+        get: jsonResponse(reschedulablePayload({ service: { type }, weatherMove })),
+      });
 
-    renderPage();
+      renderPage();
 
-    expect(await screen.findByText('Moved for weather')).toBeInTheDocument();
-    expect(screen.queryByText('Why the move?')).not.toBeInTheDocument();
-    expect(screen.queryByText(/microencapsulated/)).not.toBeInTheDocument();
+      expect(await screen.findByText('Moved for weather')).toBeInTheDocument();
+      expect(screen.queryByText('Why the move?')).not.toBeInTheDocument();
+      expect(screen.queryByText(/microencapsulated/)).not.toBeInTheDocument();
+      cleanup();
+    }
   });
 
   it('shows the banner on the classic layout too', async () => {

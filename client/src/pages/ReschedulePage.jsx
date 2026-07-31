@@ -169,18 +169,22 @@ const WEATHER_MOVE_LEADS = {
   weather_heat: 'extreme heat moved your',
 };
 
-// The bonding explainer is a RAIN story about liquid PEST applications:
-// lightning and wind/heat moves are operational; interior/granular/termite/
-// WDO/inspection/bait work isn't washed by rain (same exemption as the SMS
-// efficacy clause, EFFICACY_EXEMPT_SERVICE in services/rain-out.js); and
-// lawn/tree&shrub visits apply fertilizers and herbicides that are NOT
-// microencapsulated — the capsule claim must never reach those customers
-// (codex r4 P2).
-const WHY_MOVE_EXEMPT_SERVICE = /interior|granular|termite|wdo|inspection|bait|lawn|turf|tree|shrub|fertil|weed|herbicide|aerat/i;
+// The bonding explainer is a RAIN story about exterior liquid PEST sprays —
+// the one service family whose products the owner-approved copy (liquid,
+// microencapsulated) actually describes. FAIL CLOSED (codex r5): a positive
+// allowlist, because a denylist kept letting non-spray work through (rodent
+// exclusion, bed-bug heat/steam, lawn fertilizers). Interior/granular/
+// termite/WDO/inspection/bait still carve out overlaps like "Interior Pest"
+// — same exemption set as the SMS efficacy clause in services/rain-out.js.
+// Widening the allowlist to another service family is an owner call.
+const WHY_MOVE_LIQUID_SPRAY_SERVICE = /\bpest\b|waveguard|mosquito/i;
+const WHY_MOVE_EXEMPT_SERVICE = /interior|granular|termite|wdo|inspection|bait/i;
 
 function showsWhyMove(move, serviceType) {
+  const st = String(serviceType || '');
   return move?.reasonCode === 'weather_rain'
-    && !WHY_MOVE_EXEMPT_SERVICE.test(String(serviceType || ''));
+    && WHY_MOVE_LIQUID_SPRAY_SERVICE.test(st)
+    && !WHY_MOVE_EXEMPT_SERVICE.test(st);
 }
 
 function WeatherMoveChip({ chance }) {
