@@ -149,7 +149,7 @@ function parseWindow(w) {
 }
 
 class SmartRebooker {
-  async findRescheduleOptions(serviceId, reason) {
+  async findRescheduleOptions(serviceId, reason, opts = {}) {
     const service = await db('scheduled_services')
       .where('scheduled_services.id', serviceId)
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
@@ -224,6 +224,11 @@ class SmartRebooker {
       // reschedule() enforces. Without this, busy days surface suggestions
       // that can never be selected.
       const effDuration = (() => {
+        // Callers that book a DIFFERENT span than the visit's own block
+        // (rain-out commits a one-hour slot) pass probeSpanMinutes so the
+        // probe tests exactly what they will submit.
+        const forced = parseInt(opts.probeSpanMinutes, 10);
+        if (Number.isInteger(forced) && forced > 0) return forced;
         // Stored span FIRST, then the duration estimate — the same order
         // the RescheduleModal uses to build the window it submits, so the
         // probe tests exactly the block Select will commit.

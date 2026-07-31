@@ -631,17 +631,25 @@ async function moveStopsToDay(input) {
             // Cover any already-due reminder window before our text so the
             // 15-min cron can't double-text in the send gap (the caller-side
             // contract of sendRescheduleNoticeForVisit).
-            await AppointmentReminders.handleReschedule(s.id, `${dateStr}T${start}`, {
+            const sync = await AppointmentReminders.handleReschedule(s.id, `${dateStr}T${start}`, {
               sendNotification: false,
               coverDueWindows: true,
-              // Stale-move guard: skip the reminder rewrite if a newer
-              // reschedule already landed a different slot on the row.
+              // Stale-move guard (atomic in the service): the reminder
+              // rewrite misses if a newer reschedule already landed a
+              // different slot on the row.
               expectSchedule: { date: dateStr, windowStart: start },
             });
-            const { sendRescheduleNoticeForVisit } = require('../../routes/admin-schedule');
-            const notice = await sendRescheduleNoticeForVisit(s.id, dateStr, start);
-            if (notice.sent) textedCount++;
-            else notificationFailures.push({ id: s.id, reason: notice.error || 'reschedule text was not sent' });
+            if (sync && sync.skippedStale) {
+              // A newer move won — it owns the customer messaging. Sending
+              // (or letting the helper's failure path re-arm) would disturb
+              // the winner's reminder state.
+              notificationFailures.push({ id: s.id, reason: 'Appointment changed again before the text could be sent' });
+            } else {
+              const { sendRescheduleNoticeForVisit } = require('../../routes/admin-schedule');
+              const notice = await sendRescheduleNoticeForVisit(s.id, dateStr, start);
+              if (notice.sent) textedCount++;
+              else notificationFailures.push({ id: s.id, reason: notice.error || 'reschedule text was not sent' });
+            }
           }
         }
       } catch (err) {

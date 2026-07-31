@@ -5008,7 +5008,11 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
   const windowFor = (startHHMM) => {
     const [h, m] = String(startHHMM).split(":").map(Number);
     if (Number.isNaN(h)) return null;
-    const endTotal = Math.min(h * 60 + (m || 0) + durationMinutes, 23 * 60 + 59);
+    const endTotal = h * 60 + (m || 0) + durationMinutes;
+    // A start whose full duration crosses midnight would truncate the
+    // visit's occupancy block and let another booking land inside time the
+    // job still needs — reject instead of clamping.
+    if (endTotal > 23 * 60 + 59) return null;
     const end = `${String(Math.floor(endTotal / 60)).padStart(2, "0")}:${String(endTotal % 60).padStart(2, "0")}`;
     const start = `${String(h).padStart(2, "0")}:${String(m || 0).padStart(2, "0")}`;
     return {
@@ -5018,7 +5022,23 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
     };
   };
 
+  const currentDateOnly = service.scheduledDate
+    ? String(service.scheduledDate).split("T")[0]
+    : "";
+  const currentStart = service.windowStart
+    ? String(service.windowStart).slice(0, 5)
+    : "";
+
   const handleReschedule = async (opt) => {
+    // Suggested starts are morning slots, but stay consistent with the
+    // manual path: never submit a midnight-truncated block.
+    const suggestedBlock = windowFor(opt.suggestedWindow?.start);
+    if (!suggestedBlock) {
+      alert(
+        "That start time would run past midnight for this visit's duration — pick another slot.",
+      );
+      return;
+    }
     setSending(true);
     try {
       const result = await adminFetch(
@@ -5029,7 +5049,7 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
             newDate: opt.date,
             // Re-derive the block from the visit's own duration — the
             // suggested window's 2-3h span is arrival copy, not occupancy.
-            newWindow: windowFor(opt.suggestedWindow?.start) || opt.suggestedWindow,
+            newWindow: suggestedBlock,
             reasonCode: reason,
             reasonText: notes,
             notifyCustomer,
@@ -5054,8 +5074,21 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
 
   const handleManualReschedule = async () => {
     if (!manualDate) return;
-    setSending(true);
+    // No-op guard: submitting the visit's existing slot would log a
+    // reschedule and (with Text selected) tell the customer their
+    // appointment moved when nothing changed.
+    if (manualDate === currentDateOnly && manualTime === currentStart) {
+      alert("The appointment is already scheduled at that date and time.");
+      return;
+    }
     const window = windowFor(manualTime);
+    if (!window) {
+      alert(
+        "That start time would run past midnight for this visit's duration — pick an earlier hour.",
+      );
+      return;
+    }
+    setSending(true);
     try {
       const result = await adminFetch(
         `/admin/dispatch/${service.id}/reschedule`,

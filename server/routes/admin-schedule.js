@@ -5690,14 +5690,21 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // outbound-callback booking must keep that confirmation pending
         // (the office-confirm sender is its customer message).
         const { CALL_OUTBOUND_REVIEW_SOURCE_ACTION } = require('../services/call-booking-source-actions');
+        // Best-effort, fail-closed: the edit itself already committed, so a
+        // transient failure here must degrade to "not texted" in the
+        // response — never a 500 that invites a retry of a succeeded edit.
         const reviewFlags = await db('scheduled_services')
           .where({ id: req.params.id })
-          .first('source_action', 'status', 'customer_confirmed');
+          .first('source_action', 'status', 'customer_confirmed')
+          .catch(() => undefined);
         const unreviewedCallback = !!reviewFlags
           && reviewFlags.source_action === CALL_OUTBOUND_REVIEW_SOURCE_ACTION
           && String(reviewFlags.status) === 'pending'
           && !reviewFlags.customer_confirmed;
-        if (unreviewedCallback) {
+        if (!reviewFlags) {
+          notificationSent = false;
+          notificationError = 'Could not verify the booking\'s review status — no reschedule text was sent';
+        } else if (unreviewedCallback) {
           notificationSent = false;
           notificationError = 'This outbound-callback booking is pending office review — no reschedule text was sent';
         } else {
