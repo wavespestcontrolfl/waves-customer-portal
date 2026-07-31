@@ -87,12 +87,14 @@ const BOOKING_OUTCOME_CODES = new Set([
 // (recipient confirmation before the held SMS), caller_not_authorized
 // (account-holder confirmation), rental_or_tenant_occupied (access/
 // property confirmation), second_service_address and
-// secondary_contact_captured (captured data awaiting application).
+// secondary_contact_captured (captured data awaiting application), and
+// missing_last_name (the office owes obtaining the full name — lead
+// qualification requires it; the name_moot rule above closes the card the
+// moment an independent record proves the surname exists).
 const ADVISORY_AGE_CODES = new Set([
   'multi_property_call', 'name_email_mismatch',
   'no_sms_consent_captured', 'sms_consent_missing',
   'low_extraction_confidence', 'voicemail',
-  'missing_last_name',
 ]);
 
 const RULE_NOTES = {

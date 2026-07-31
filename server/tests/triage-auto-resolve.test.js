@@ -197,6 +197,15 @@ describe('fail-closed allowlist — owed work is NEVER swept', () => {
     'secondary_contact_captured',
     'some_future_unknown_code',
   ];
+  // missing_last_name never AGE-dismisses (owed identity task) — but the
+  // moot rule still closes it on independent surname evidence, so it is
+  // asserted separately from the codes above.
+  test('missing_last_name aged 31d with NO surname stays open (identity task owed)', () => {
+    expect(classifyTriageItem(
+      item({ reason_code: 'missing_last_name', customer_last_name: null, created_at: OLD_31D }),
+      noBookings, { now: NOW },
+    )).toBeNull();
+  });
   test.each(owedCodes)('%s stays open even when ancient', (code) => {
     expect(classifyTriageItem(item({ reason_code: code, created_at: OLD_31D }), noBookings, { now: NOW })).toBeNull();
   });
