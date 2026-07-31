@@ -495,12 +495,46 @@ const COMMITMENT_HEADS = [
   'you re all set', 'you are all set', 'you re on the schedule',
   'you are on the schedule', 'it s confirmed',
 ];
+// Complete-sentence grammar (codex P0, round 7k): a prefix-only head check
+// accepted meaning-inverting tails ("you are all set TO CONFIRM Sunday at
+// noon", "we will see you Sunday at noon AND YOU NEED TO CONFIRM"). The
+// whole sentence must now parse as: openers* + commitment head + slot words
+// only + at most one exact benign closer. Slot words are the closed glue/
+// day/date/time set — anything else after the head fails closed.
+const SLOT_WORDS = new Set([
+  'for', 'at', 'on', 'the', 'this', 'it', 'of',
+  'noon', 'midnight', 'am', 'pm', 'a', 'm', 'p', 'o', 'clock',
+  'sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday',
+  'january', 'february', 'march', 'april', 'may', 'june', 'july', 'august',
+  'september', 'october', 'november', 'december',
+]);
+const BENIGN_CLOSERS = [
+  'and just let us know if anything changes',
+  'just let us know if anything changes',
+  'and let us know if anything changes',
+  'let us know if anything changes',
+  'and thanks so much', 'thanks so much', 'thank you', 'see you then',
+];
 function turnHasAffirmativeCommitmentForm(normalizedTurn) {
   const toks = normalizedTurn.split(' ').filter(Boolean);
   let i = 0;
   while (i < toks.length && COMMITMENT_OPENER_TOKENS.has(toks[i])) i += 1;
-  const rest = `${toks.slice(i).join(' ')} `;
-  return COMMITMENT_HEADS.some((h) => rest.startsWith(h));
+  let rest = `${toks.slice(i).join(' ')} `;
+  const head = COMMITMENT_HEADS.find((h) => rest.startsWith(h));
+  if (!head) return false;
+  rest = rest.slice(head.length).trim();
+  for (const closer of BENIGN_CLOSERS) {
+    if (rest === closer || rest.endsWith(` ${closer}`)) {
+      rest = rest.slice(0, rest.length - closer.length).trim();
+      break;
+    }
+  }
+  return rest.split(' ').every((tok) => (
+    !tok
+    || SLOT_WORDS.has(tok)
+    || /^\d{1,4}$/.test(tok)
+    || /^\d{1,2}(st|nd|rd|th)$/.test(tok)
+  ));
 }
 
 // Shared normalization for commitment text: lowercase alnum tokens with the
@@ -651,21 +685,28 @@ function quoteBindsConfirmedSlot(normalizedSentence, confirmedStartAt, callStart
   // is not the ":00" minutes must equal the slot's ET month/day. Any 3–4
   // digit number must be the slot's ET year; anything else is an
   // unvalidated explicit date token and fails closed.
-  for (const pair of q.matchAll(/(?<= )(\d{1,2}) (\d{1,2})(?= )/g)) {
-    if (pair[2] === '00') continue;
-    if (Number(pair[1]) !== wallMo || Number(pair[2]) !== slotDay) return false;
-  }
-  for (const yr of q.matchAll(/(?<= )(\d{3,4})(?= )/g)) {
-    if (Number(yr[1]) !== wallY) return false;
-  }
-  // Full numeric consumption (codex P0, round 7j): every number token in the
-  // sentence must be a value the confirmed slot explains — its 12-hour hour,
-  // ":00" minutes, ET month, ET day, or the 4-/2-digit ET year. "Sunday
-  // 8/2/27 at noon" leaves a 27 the 2026 slot cannot explain and fails
-  // closed; so does any other unconsumed number (street numbers, prices).
-  const allowedNums = new Set([Number(hour12), 0, wallMo, slotDay, wallY, wallY % 100]);
+  // Positional numeric-shape consumption (codex round-7j/7k): every RUN of
+  // consecutive number tokens must parse as a complete shape the slot
+  // explains — position matters, not just membership ("Sunday 8/2/2 at
+  // noon" must not book a 2026-08-02 slot because the trailing 2 happens to
+  // equal the day). Valid shapes: [hour12] · [hour12, 00] (spoken ":00") ·
+  // [month, day] · [month, day, year] with a 2- or 4-digit slot year ·
+  // [day] alone. Anything else — extra components, stray street numbers,
+  // prices — fails closed.
+  const runs = [];
+  let run = [];
   for (const tok of q.split(' ')) {
-    if (/^\d+$/.test(tok) && !allowedNums.has(Number(tok))) return false;
+    if (/^\d{1,4}$/.test(tok)) run.push(Number(tok));
+    else if (run.length) { runs.push(run); run = []; }
+  }
+  if (run.length) runs.push(run);
+  const h12 = Number(hour12);
+  for (const r of runs) {
+    const ok = (r.length === 1 && (r[0] === h12 || r[0] === slotDay))
+      || (r.length === 2 && r[0] === h12 && r[1] === 0)
+      || (r.length === 2 && r[0] === wallMo && r[1] === slotDay)
+      || (r.length === 3 && r[0] === wallMo && r[1] === slotDay && (r[2] === wallY || r[2] === wallY % 100));
+    if (!ok) return false;
   }
   // Exact binding, not presence (codex round-5 P1): a multi-slot turn
   // ("Sunday at 10 AM won't work, but we'll see you at 11 AM") scatters

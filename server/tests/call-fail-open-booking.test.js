@@ -510,6 +510,27 @@ describe('canAutoRoute agent-commitment authorization (GATE_CALL_AGENT_COMMIT_BO
     expect(r.allowed).toBe(true);
   });
 
+  test('a confirmation-required tail is not a commitment — "You are all set to confirm Sunday at noon" (P0 regression)', () => {
+    const tail = 'You are all set to confirm Sunday at noon.';
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, tail);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: tail }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+  });
+
+  test('a trailing obligation never books — "We will see you Sunday at noon and you need to confirm" (P0 regression)', () => {
+    const tail = 'We will see you Sunday at noon and you need to confirm.';
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, tail);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: tail }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+  });
+
+  test('positional date shapes — "Sunday 8/2/2 at noon" never books a 2026-08-02 slot (P1 regression)', () => {
+    const odd = "So we'll see you Sunday 8/2/2 at noon, and just let us know if anything changes.";
+    const transcript = TRANSCRIPT.replace(AGENT_COMMIT_QUOTE, odd);
+    const r = canAutoRoute(agentCommitted(['caller_not_authorized'], { quote: odd }), opts({ transcript }));
+    expect(r.allowed).toBe(false);
+  });
+
   test('nonzero SECONDS in confirmed_start_at fail the on-the-hour guard (round-4 P1)', () => {
     const ex = agentCommitted();
     ex.scheduling.confirmed_start_at = '2026-08-02T12:00:30-04:00';
