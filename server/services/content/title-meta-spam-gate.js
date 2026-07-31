@@ -236,7 +236,13 @@ const CURRENCY_OR_PERCENT_RE = /[%$]/;
 // verb reaching a sales noun, or a sales noun with immediate now/today
 // urgency. Plain availability is NOT enough ("a damage estimate is available
 // in the county public record" is informational — Codex r5).
-const TRANSACTIONAL_SENTENCE_RE = /\b(ask|call|text|contact|request|get|book|schedule)\b[^.!?]{0,40}?\b(quote|estimate|pricing|price|deal|offer|discount)s?\b|\b(quote|estimate|pricing|price|deal|offer|discount)s?\b[^.!?]{0,30}?\b(today|now)\b/i;
+// Four alternations (each round of Codex adversarial review added one):
+//   1. solicitation verb reaching a sales noun ("Ask Waves for a quote")
+//   2. sales noun with now/today urgency ("estimate is available today")
+//   3. price-marketing frame on a dollar amount ("starts at $49.99",
+//      "for just $99") — bare currency elsewhere is a stat, not a pitch
+//   4. brand-as-subject offering ("Waves offers quarterly plans")
+const TRANSACTIONAL_SENTENCE_RE = /\b(ask|call|text|contact|request|get|book|schedule)\b[^.!?]{0,40}?\b(quote|estimate|pricing|price|deal|offer|discount)s?\b|\b(quote|estimate|pricing|price|deal|offer|discount)s?\b[^.!?]{0,30}?\b(today|now)\b|\b(starts?\s+at|starting\s+at|as\s+low\s+as|for\s+(?:just|only))\s+\$\d|\b(waves|we)\s+(offers?|provides?|sells?)\b/i;
 // EVERY sentence is scanned for the sales shapes — a pitch followed by an
 // informational closer ("Learn more about saving big with Waves. This guide
 // explains…") is still sales copy (Codex r5). Currency/percent stays
@@ -254,7 +260,9 @@ function metaHasSalesCopy(text) {
 // the separator-shaped literal-phone regex and the PII scan (known business
 // number). NANP-shaped: optional leading 1, area code and exchange can't
 // start with 0/1 — keeps years, ZIPs, and small counts out (Codex r4).
-const BARE_PHONE_DIGITS_RE = /\b1?[2-9]\d{2}[2-9]\d{6}\b/;
+// Also matches the space/dot/dash-grouped 3-3-4 shape ("941 297 2606") the
+// separator regex misses when groups use bare spaces (Codex r6).
+const BARE_PHONE_DIGITS_RE = /\b1?[2-9]\d{2}[2-9]\d{6}\b|\b1?[\s.-]?[2-9]\d{2}[\s.-][2-9]\d{2}[\s.-]\d{4}\b/;
 
 function endsWithSoftCta(text) {
   const last = lastSentence(text);

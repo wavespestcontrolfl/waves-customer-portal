@@ -1084,8 +1084,30 @@ describe('soft CTA final sentence must BE a CTA (round-5 hardening)', () => {
   });
 
   test('mid-meta damage stats with currency stay publishable (currency is closer-only by design)', () => {
-    const r = checkBlogMetaContract({ meta_description: 'Termites cause $5 billion in damage across the US every year. This guide covers the warning signs Southwest Florida homeowners see first.' });
-    expect(r.ok).toBe(true);
+    for (const meta of [
+      'Termites cause $5 billion in damage across the US every year. This guide covers the warning signs Southwest Florida homeowners see first.',
+      'Repair costs range from $2 billion to $5 billion nationally. This guide covers the warning signs Southwest Florida homeowners see first.',
+    ]) {
+      expect(checkBlogMetaContract({ meta_description: meta }).ok).toBe(true);
+    }
+  });
+
+  test('price-marketing frames mid-meta still HARD-fail (r6: "starts at $49.99" before an informational closer)', () => {
+    const r = checkBlogMetaContract({ meta_description: 'A treatment estimate starts at $49.99 for most homes here. This guide explains common pests in Southwest Florida and what treatment involves.' });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('blog_meta_sales_copy');
+  });
+
+  test('brand-as-subject offers are sales copy (r6: "Waves offers quarterly pest plans")', () => {
+    const r = checkBlogMetaContract({ meta_description: `${LEAD}Waves offers quarterly pest plans for Southwest Florida homeowners.` });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('blog_meta_sales_copy');
+  });
+
+  test('space-separated phone digits still HARD-fail (r6: "941 297 2606")', () => {
+    const r = checkBlogMetaContract({ meta_description: `${LEAD}Call 941 297 2606 for identification help with local species.` });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('blog_meta_must_not_carry_phone');
   });
 
   test('bare 10-digit phone in a blog meta still HARD-fails (r4: separator-less number slips the shaped regex)', () => {
