@@ -1359,23 +1359,29 @@ describe('executeMerge', () => {
       .rejects.toThrow(/multi-property account/);
   });
 
-  it('demotes the loser cards when the winner already has a default payment method', async () => {
+  it('demotes the loser cards when the winner already has a default payment method, journaling their ORIGINAL flags', async () => {
     const winner = { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003', stripe_customer_id: 'cus_shared' };
     const loser = { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003', stripe_customer_id: 'cus_shared' };
-    const state = { demoted: null };
+    const state = { demoted: null, journal: null };
     const trx = jest.fn((table) => makeChain(table, (q) => {
       if (table === 'customers') {
         if (q.called('forUpdate')) return [winner, loser];
         if (q.called('update')) return 1;
         return [];
       }
-      if (table === 'customer_merge_journal') return [{ id: 'j1' }];
+      if (table === 'customer_merge_journal') {
+        state.journal = q.args('insert')[0];
+        return [{ id: 'j1' }];
+      }
       if (table === 'payment_methods') {
         if (q.called('first')) return { id: 'pm-winner-default' };
         if (q.called('select')) {
           return q.args('select')[0] === 'stripe_customer_id'
             ? [{ stripe_customer_id: 'cus_shared' }] // cards live on the shared profile
-            : [{ id: 'pm-loser-1' }, { id: 'pm-loser-2' }];
+            : [
+              { id: 'pm-loser-1', is_default: true, autopay_enabled: true },
+              { id: 'pm-loser-2', is_default: false, autopay_enabled: false },
+            ];
         }
         if (q.called('update') && q.called('whereIn')) {
           state.demoted = { ids: q.args('whereIn')[1], payload: q.args('update')[0] };
@@ -1398,6 +1404,13 @@ describe('executeMerge', () => {
     expect(state.demoted.ids).toEqual(['pm-loser-1', 'pm-loser-2']);
     expect(state.demoted.payload).toMatchObject({ is_default: false, autopay_enabled: false });
     expect(result.repointed['payment_methods.demoted_defaults']).toBe(2);
+    // The journal keeps each card's PRE-demotion flags so the revert can
+    // restore the loser's default/autopay setup exactly.
+    const recorded = JSON.parse(state.journal.repointed_ids);
+    expect(recorded.payment_method_flags).toEqual({
+      'pm-loser-1': { is_default: true, autopay_enabled: true },
+      'pm-loser-2': { is_default: false, autopay_enabled: false },
+    });
   });
 });
 

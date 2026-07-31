@@ -21,7 +21,7 @@ function makeChain(table, route) {
   const q = { _table: table, _calls: [] };
   const methods = [
     'where', 'whereIn', 'whereRaw', 'whereNull', 'whereNotNull', 'whereNotIn', 'whereNot', 'select', 'groupBy',
-    'orderBy', 'forUpdate', 'update', 'insert', 'del', 'count', 'onConflict',
+    'orderBy', 'forUpdate', 'update', 'insert', 'del', 'count', 'sum', 'onConflict',
     'ignore', 'returning', 'first', 'increment', 'decrement', 'limit',
   ];
   for (const m of methods) {
@@ -47,22 +47,24 @@ beforeEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('runRedPairAutoDismissSweep', () => {
-  const diana = {
+  // Clearly synthetic identities only — never real customer names, phones,
+  // or addresses in fixtures.
+  const personA = {
     id: 'aaaaaaaa-0000-0000-0000-000000000001',
-    first_name: 'Diana', last_name: 'Blowers', phone: '+16124074763',
-    address_line1: '4414 Ozark Ave', zip: '34207',
+    first_name: 'Pat', last_name: 'Sampleone', phone: '+15550000001',
+    address_line1: '11 Sample Way', zip: '00001',
     pipeline_stage: 'active_customer', created_at: '2026-07-08',
-    stripe_customer_id: 'cus_d',
+    stripe_customer_id: 'cus_test_a',
   };
-  const nicole = {
+  const personB = {
     id: 'aaaaaaaa-0000-0000-0000-000000000003',
-    first_name: 'Nicole', last_name: 'Tommelleo', phone: '+16124074763',
-    address_line1: '13712 Saw Palm Creek Trl', zip: '34211',
+    first_name: 'Quinn', last_name: 'Sampletwo', phone: '+15550000001',
+    address_line1: '22 Example Ave', zip: '00002',
     pipeline_stage: 'active_customer', created_at: '2026-07-01',
   };
   const shell = {
     id: 'aaaaaaaa-0000-0000-0000-000000000002',
-    first_name: 'Diana', last_name: null, phone: '6124074763',
+    first_name: 'Pat', last_name: null, phone: '5550000001',
     address_line1: null, zip: null,
     pipeline_stage: 'new_lead', created_at: '2026-07-09',
   };
@@ -85,14 +87,14 @@ describe('runRedPairAutoDismissSweep', () => {
   }
 
   it('dismisses only red pairs, attributed auto:red-tier, via the idempotent upsert', async () => {
-    // Diana+Nicole = red (different last names, different addresses on a
+    // personA+personB = red (different last names, different addresses on a
     // shared phone); the shell pair is yellow (identity conflict) and must
     // NOT be dismissed.
-    const inserted = install({ customers: [diana, nicole, shell] });
+    const inserted = install({ customers: [personA, personB, shell] });
     const result = await dedupe.runRedPairAutoDismissSweep();
     expect(result.dismissed).toHaveLength(1);
     expect(inserted).toHaveLength(1);
-    const [a, b] = [diana.id, nicole.id].sort();
+    const [a, b] = [personA.id, personB.id].sort();
     expect(inserted[0].row.customer_id_a).toBe(a);
     expect(inserted[0].row.customer_id_b).toBe(b);
     expect(inserted[0].row.created_by).toBe('auto:red-tier');
@@ -107,7 +109,7 @@ describe('runRedPairAutoDismissSweep', () => {
   });
 
   it('stays silent when there is nothing red', async () => {
-    const inserted = install({ customers: [diana, shell] });
+    const inserted = install({ customers: [personA, shell] });
     const result = await dedupe.runRedPairAutoDismissSweep();
     expect(result.dismissed).toHaveLength(0);
     expect(inserted).toHaveLength(0);
@@ -115,7 +117,7 @@ describe('runRedPairAutoDismissSweep', () => {
   });
 
   it('aborts fail-closed when the dismissals table is unreadable', async () => {
-    const inserted = install({ customers: [diana, nicole], dismissalsError: true });
+    const inserted = install({ customers: [personA, personB], dismissalsError: true });
     const result = await dedupe.runRedPairAutoDismissSweep();
     expect(result.aborted).toBe('dismissals_unreadable');
     expect(inserted).toHaveLength(0);
@@ -132,8 +134,8 @@ describe('executeMerge repointed_ids journal record', () => {
   const LOSER = 'bbbbbbbb-0000-0000-0000-000000000002';
 
   it('journals per-row ids for plain repoints and count-only when ids are unreliable', async () => {
-    const winner = { id: WINNER, first_name: 'Diana', last_name: 'Blowers', phone: '+16124074763' };
-    const loser = { id: LOSER, first_name: 'Diana', last_name: null, phone: '6124074763' };
+    const winner = { id: WINNER, first_name: 'Winner', last_name: 'Testcase', phone: '+15550000001' };
+    const loser = { id: LOSER, first_name: 'Winner', last_name: null, phone: '5550000001' };
     const state = { journal: null };
     const route = (table, q) => {
       if (table === 'customers') {
@@ -184,6 +186,70 @@ describe('executeMerge repointed_ids journal record', () => {
     // Polymorphic pointers record ids too.
     expect(recorded.tables['notifications.recipient_id']).toEqual(['note-1']);
     expect(recorded.stripe_transferred_id).toBe(null);
+    // No payment methods, no collisions — clean revertible record.
+    expect(recorded.payment_method_flags).toEqual({});
+    expect(recorded.collision_handlers).toEqual([]);
+  });
+
+  it('journals collision handlers and the ORIGINAL per-card default/autopay flags', async () => {
+    const winner = { id: WINNER, first_name: 'Winner', last_name: 'Testcase', phone: '+15550000001' };
+    const loser = { id: LOSER, first_name: 'Winner', last_name: null, phone: '5550000001' };
+    const state = { journal: null };
+    const route = (table, q) => {
+      if (table === 'customers') {
+        if (q.called('forUpdate')) return [winner, loser];
+        if (q.called('update')) return 1;
+        return [];
+      }
+      if (table === 'customer_merge_journal') {
+        state.journal = q.args('insert')[0];
+        return [{ id: 'j1' }];
+      }
+      if (table === 'payment_methods') {
+        if (q.called('first')) return null; // winner has no default card
+        if (q.called('select')) {
+          // stripe-profile probe vs the flags capture select.
+          return q.args('select')[0] === 'stripe_customer_id'
+            ? []
+            : [{ id: 'pm-1', is_default: true, autopay_enabled: true }];
+        }
+        if (q.called('update')) return 1;
+      }
+      if (table === 'customer_mrr_snapshots') {
+        if (q.called('select')) return [{ id: 'm1' }];
+        if (q.called('update')) {
+          // Bulk repoint collides; the rowwise drop-collisions handler runs.
+          if (q.args('where')[0] === 'customer_id') {
+            const err = new Error('duplicate key value violates unique constraint');
+            err.code = '23505';
+            throw err;
+          }
+          return 1;
+        }
+      }
+      if (q.called('first')) return null;
+      if (q.called('update')) return 0;
+      return [];
+    };
+    const trx = jest.fn((table) => makeChain(table, (q) => route(table, q)));
+    trx.raw = jest.fn(async () => ({
+      rows: [{ table_name: 'customer_mrr_snapshots', column_name: 'customer_id' }],
+    }));
+    trx.transaction = jest.fn(async (fn) => fn(trx));
+    trx.fn = { now: () => 'NOW()' };
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+
+    await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+
+    const recorded = JSON.parse(state.journal.repointed_ids);
+    // The collision handler moved rows repointed_ids has no record of —
+    // journaled so the revert endpoint refuses this merge.
+    expect(recorded.collision_handlers).toEqual(['customer_mrr_snapshots']);
+    expect(recorded.tables['customer_mrr_snapshots.customer_id']).toBeUndefined();
+    // Original flags journaled per card so an undo can restore them exactly.
+    expect(recorded.payment_method_flags).toEqual({
+      'pm-1': { is_default: true, autopay_enabled: true },
+    });
   });
 });
 
@@ -198,7 +264,8 @@ describe('revertMerge', () => {
 
   function buildRevertTrx({ journal, winner, loser, tables = {} }) {
     const state = {
-      repointedBack: [], winnerPatch: null, loserRestore: null, journalUpdate: null, decremented: null,
+      repointedBack: [], winnerPatch: null, loserRestore: null, journalUpdate: null,
+      decremented: null, flagRestores: [], propertyDeleted: null, verified: [],
     };
     const route = (table, q) => {
       if (table === 'customer_merge_journal') {
@@ -217,13 +284,29 @@ describe('revertMerge', () => {
         }
         return [];
       }
+      if (table === 'customer_properties' && q.called('del')) {
+        state.propertyDeleted = q.args('where')[0];
+        return 1;
+      }
       const cfg = tables[table];
       if (cfg) {
-        if (q.called('update')) {
-          state.repointedBack.push({ table, ids: q.args('whereIn')[1], payload: q.args('update')[0] });
-          return q.args('whereIn')[1].length;
+        if (q.called('sum')) {
+          const whereArg = q.args('where')?.[0] || {};
+          return { total: (cfg.ledgerSums || {})[whereArg.customer_id] ?? 0 };
         }
-        if (q.called('select')) return cfg.stillOnWinner.map((id) => ({ id }));
+        if (q.called('update')) {
+          if (q.called('whereIn')) {
+            state.repointedBack.push({ table, ids: q.args('whereIn')[1], payload: q.args('update')[0] });
+            return cfg.updateCount !== undefined ? cfg.updateCount : q.args('whereIn')[1].length;
+          }
+          // Non-whereIn update = the per-card flag restore.
+          state.flagRestores.push({ table, where: q.args('where')[0], payload: q.args('update')[0] });
+          return 1;
+        }
+        if (q.called('select')) {
+          state.verified.push({ table, forUpdate: q.called('forUpdate') });
+          return cfg.stillOnWinner.map((id) => ({ id }));
+        }
       }
       return [];
     };
@@ -233,25 +316,28 @@ describe('revertMerge', () => {
     return { trx, state };
   }
 
+  // Clearly synthetic identity fixtures only.
   const baseJournal = () => ({
     id: JOURNAL,
     winner_customer_id: WINNER,
     loser_customer_id: LOSER,
     undone_at: null,
     loser_snapshot: {
-      id: LOSER, first_name: 'Diana', last_name: null, phone: '6124074763',
-      email: 'diana@example.com', stripe_customer_id: 'cus_only', account_credits: 0,
+      id: LOSER, first_name: 'Loser', last_name: null, phone: '5550000001',
+      email: 'loser.testcase@example.com', stripe_customer_id: 'cus_only', account_credits: 0,
     },
     repointed_ids: {
       version: 1,
       tables: { 'leads.customer_id': ['lead-1', 'lead-2'], 'invoices.customer_id': ['inv-1'] },
       stripe_transferred_id: 'cus_only',
+      payment_method_flags: {},
+      collision_handlers: [],
     },
-    winner_backfills: { email: 'diana@example.com', stripe_customer_id: 'cus_only' },
+    winner_backfills: { email: 'loser.testcase@example.com', stripe_customer_id: 'cus_only' },
   });
   const baseWinner = () => ({
-    id: WINNER, first_name: 'Diana', last_name: 'Blowers', active: true, deleted_at: null,
-    stripe_customer_id: 'cus_only', email: 'diana@example.com', account_credits: 0,
+    id: WINNER, first_name: 'Winner', last_name: 'Testcase', active: true, deleted_at: null,
+    stripe_customer_id: 'cus_only', email: 'loser.testcase@example.com', account_credits: 0,
   });
   const baseLoser = () => ({
     id: LOSER, active: false, deleted_at: '2026-07-30T04:40:00Z', phone: `merged-${LOSER.slice(0, 8)}`,
@@ -281,9 +367,14 @@ describe('revertMerge', () => {
     // Loser un-retires from the snapshot.
     expect(state.loserRestore.active).toBe(true);
     expect(state.loserRestore.deleted_at).toBe(null);
-    expect(state.loserRestore.phone).toBe('6124074763');
-    expect(state.loserRestore.email).toBe('diana@example.com');
+    expect(state.loserRestore.phone).toBe('5550000001');
+    expect(state.loserRestore.email).toBe('loser.testcase@example.com');
     expect(state.loserRestore.stripe_customer_id).toBe('cus_only');
+    // Financial rows verify under FOR UPDATE; history rows don't need the lock.
+    expect(state.verified).toEqual(expect.arrayContaining([
+      { table: 'invoices', forUpdate: true },
+      { table: 'leads', forUpdate: false },
+    ]));
     expect(state.journalUpdate.undone_at).toBeTruthy();
     expect(state.journalUpdate.undone_by).toBe('admin:test');
     expect(result.stripeMovedBack).toBe(true);
@@ -366,5 +457,198 @@ describe('revertMerge', () => {
     db.transaction.mockImplementation(async (fn) => fn(trx));
     await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
       .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/inactive or deleted/) });
+  });
+
+  it('refuses (409) when a collision handler ran during the merge — folded rows cannot be split back', async () => {
+    const journal = baseJournal();
+    journal.repointed_ids.collision_handlers = ['conversations'];
+    const { trx, state } = buildRevertTrx({ journal, winner: baseWinner(), loser: baseLoser() });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/folded colliding rows \(conversations\)/) });
+    expect(state.repointedBack).toHaveLength(0);
+    expect(state.journalUpdate).toBe(null);
+  });
+
+  it('moves recorded credit-ledger rows back and RECOMPUTES both cached balances from the ledgers', async () => {
+    const journal = baseJournal();
+    journal.repointed_ids.tables = {
+      'leads.customer_id': ['lead-1'],
+      'customer_credit_ledger.customer_id': ['led-1', 'led-2'],
+    };
+    journal.loser_snapshot.account_credits = 25.5;
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: { ...baseWinner(), account_credits: '65.50' },
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1'] },
+        customer_credit_ledger: {
+          stillOnWinner: ['led-1', 'led-2'],
+          // Post-move ledger sums (cache must equal ledger on BOTH sides).
+          ledgerSums: { [WINNER]: 40, [LOSER]: 25.5 },
+        },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+    expect(result.repointedBack['customer_credit_ledger.customer_id']).toBe(2);
+    // Ledger rows verified under FOR UPDATE (financial table).
+    expect(state.verified).toEqual(expect.arrayContaining([
+      { table: 'customer_credit_ledger', forUpdate: true },
+    ]));
+    // Both caches recomputed from the ledgers — no blind decrement.
+    expect(state.winnerPatch.account_credits).toBe(40);
+    expect(state.loserRestore.account_credits).toBe(25.5);
+    expect(state.decremented).toBe(null);
+  });
+
+  it("refuses (409, zero writes) when the winner's spend consumed the moved credit — its ledger would go negative", async () => {
+    const journal = baseJournal();
+    journal.repointed_ids.tables = { 'customer_credit_ledger.customer_id': ['led-1'] };
+    journal.loser_snapshot.account_credits = 25.5;
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        customer_credit_ledger: {
+          stillOnWinner: ['led-1'],
+          ledgerSums: { [WINNER]: -10, [LOSER]: 25.5 },
+        },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/consumed the merged-in credit/) });
+    // The refusal throw rolls the transaction back — journal never stamped.
+    expect(state.journalUpdate).toBe(null);
+  });
+
+  it('clears every UNCHANGED winner backfill (billing + contact) and reports the edited ones', async () => {
+    const journal = baseJournal();
+    journal.winner_backfills = {
+      ...journal.winner_backfills,
+      payer_id: 5,
+      billing_mode: 'per_application',
+      per_application_fee: '65.00',
+      first_name: 'Loser',
+    };
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: {
+        ...baseWinner(),
+        payer_id: 5, // unchanged → cleared
+        billing_mode: 'per_application', // unchanged → cleared
+        per_application_fee: 65, // numeric restringification still counts as unchanged
+        first_name: 'Edited Since', // admin changed it → stays, reported
+      },
+      loser: baseLoser(),
+      tables: { leads: { stillOnWinner: ['lead-1', 'lead-2'] }, invoices: { stillOnWinner: ['inv-1'] } },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+    expect(state.winnerPatch).toMatchObject({
+      payer_id: null,
+      billing_mode: null,
+      per_application_fee: null,
+      email: null,
+    });
+    expect(state.winnerPatch.first_name).toBeUndefined();
+    expect(result.skipped).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: 'customers.first_name', reason: 'winner_value_changed_since_merge' }),
+    ]));
+  });
+
+  it("restores each moved-back payment method's ORIGINAL default/autopay flags", async () => {
+    const journal = baseJournal();
+    journal.repointed_ids.tables = { 'payment_methods.customer_id': ['pm-1', 'pm-2'] };
+    journal.repointed_ids.payment_method_flags = {
+      'pm-1': { is_default: true, autopay_enabled: true },
+      'pm-2': { is_default: false, autopay_enabled: false },
+    };
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: { payment_methods: { stillOnWinner: ['pm-1', 'pm-2'] } },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+    expect(result.repointedBack['payment_methods.customer_id']).toBe(2);
+    expect(state.flagRestores).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        table: 'payment_methods',
+        where: { id: 'pm-1', customer_id: LOSER },
+        payload: expect.objectContaining({ is_default: true, autopay_enabled: true }),
+      }),
+      expect.objectContaining({
+        table: 'payment_methods',
+        where: { id: 'pm-2', customer_id: LOSER },
+        payload: expect.objectContaining({ is_default: false, autopay_enabled: false }),
+      }),
+    ]));
+  });
+
+  it('refuses (409) when payment_methods rows were journaled WITHOUT their flag records (billing continuity)', async () => {
+    const journal = baseJournal();
+    journal.repointed_ids.tables = { 'payment_methods.customer_id': ['pm-1'] };
+    delete journal.repointed_ids.payment_method_flags;
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: { payment_methods: { stillOnWinner: ['pm-1'] } },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/default\/autopay flags/) });
+    expect(state.repointedBack).toHaveLength(0);
+    expect(state.journalUpdate).toBe(null);
+  });
+
+  it('removes the link-as-property row the merge created (it belongs to the restored loser again)', async () => {
+    const journal = baseJournal();
+    journal.evidence = { via: 'admin_link_as_property' };
+    journal.repointed_ids.linked_property_id = 'prop-9';
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: { leads: { stillOnWinner: ['lead-1', 'lead-2'] }, invoices: { stillOnWinner: ['inv-1'] } },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+    expect(state.propertyDeleted).toEqual({ id: 'prop-9', customer_id: WINNER });
+    expect(result.repointedBack['customer_properties.linked_property_removed']).toBe(1);
+  });
+
+  it('refuses (409) a link-as-property merge whose created property was never journaled', async () => {
+    const journal = baseJournal();
+    journal.evidence = { via: 'admin_link_as_property' };
+    // No linked_property_id key — the post-commit journal update failed.
+    const { trx, state } = buildRevertTrx({ journal, winner: baseWinner(), loser: baseLoser() });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/never recorded in the journal/) });
+    expect(state.journalUpdate).toBe(null);
+  });
+
+  it('throws (rolls back) when a financial reverse-repoint moves fewer rows than verified', async () => {
+    const { trx, state } = buildRevertTrx({
+      journal: baseJournal(),
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        // Verified as still-on-winner, but the UPDATE lands on 0 rows.
+        invoices: { stillOnWinner: ['inv-1'], updateCount: 0 },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/invoices changed while reverting/) });
+    // Transaction rollback semantics: the journal was never stamped undone.
+    expect(state.journalUpdate).toBe(null);
   });
 });

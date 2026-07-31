@@ -863,8 +863,11 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
     // (no plain `id` PK, over REPOINT_ID_CAP, or a mid-merge insert made the
     // list unreliable). Collision-handled tables (prefs folds, dropped
     // derived rows, conversation merges) are deliberately NOT recorded —
-    // those moves are not plain repoints and are not auto-revertible.
+    // those moves are not plain repoints and are not auto-revertible, so the
+    // journal lists WHICH handlers ran (collision_handlers) and the revert
+    // endpoint refuses any merge where one did.
     const repointedIds = {};
+    const collisionHandlers = [];
 
     // BEFORE the sweep: an unstamped visit renders its address via
     // COALESCE(scheduled_services.service_address_line1, customers.
@@ -894,8 +897,20 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
     const winnerHadDefault = await trx('payment_methods')
       .where({ customer_id: winnerId, is_default: true })
       .first('id');
-    const loserCardIds = (await trx('payment_methods')
-      .where({ customer_id: loserId }).select('id')).map((r) => r.id);
+    // Capture each loser card's ORIGINAL default/autopay flags for the
+    // journal: the demotion below clears them, and an undo must restore the
+    // loser's cards exactly as they were (billing continuity — autopay picks
+    // the default card).
+    const loserCards = await trx('payment_methods')
+      .where({ customer_id: loserId }).select('id', 'is_default', 'autopay_enabled');
+    const loserCardIds = loserCards.map((r) => r.id);
+    const paymentMethodFlags = {};
+    for (const card of loserCards) {
+      paymentMethodFlags[card.id] = {
+        is_default: card.is_default === true,
+        autopay_enabled: card.autopay_enabled === true,
+      };
+    }
 
     // BEFORE the sweep: remember the loser's referral enrollment — after the
     // sweep both promoter rows sit on the winner and can no longer be told
@@ -938,6 +953,9 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
         const handler = UNIQUE_COLLISION_HANDLERS[table];
         if (uniqueViolation && handler) {
           repointed[`${table}.${column}`] = await handler(trx, table, column, winnerId, loserId);
+          // The handler moved/merged/deleted rows that are NOT in
+          // repointedIds — this merge can no longer be replayed backwards.
+          if (!collisionHandlers.includes(table)) collisionHandlers.push(table);
         } else {
           throw new Error(`executeMerge: repoint failed on ${table}.${column}: ${e.message}`);
         }
@@ -1252,6 +1270,15 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
         version: 1,
         tables: repointedIds,
         stripe_transferred_id: backfills.stripe_customer_id || null,
+        // ORIGINAL per-card default/autopay flags for every loser payment
+        // method (the demotion above may have cleared them on the moved
+        // rows) — the revert restores them, and REFUSES journals that moved
+        // payment_methods rows without this record.
+        payment_method_flags: paymentMethodFlags,
+        // Tables whose unique-collision handler ran: those rows were
+        // folded/merged/dropped, not plainly repointed, so the merge is not
+        // auto-revertible (the revert endpoint 409s when any are listed).
+        collision_handlers: collisionHandlers,
       }),
       winner_backfills: JSON.stringify(backfills),
       tier: mode === 'auto' ? 'green' : 'manual',
@@ -1405,19 +1432,65 @@ async function runRedPairAutoDismissSweep({ performedBy = 'auto:red-tier' } = {}
 // ---------------------------------------------------------------------------
 
 // Refuse-vs-skip policy for the revert's per-row ownership checks: money
-// OWNERSHIP must never be partially reverted — if ANY recorded invoice or
-// payment row no longer points at the winner (or was journaled count-only),
-// the whole revert refuses and the split is a hand job from the journal
-// snapshot. Everything else (call logs, notifications, leads, derived
+// OWNERSHIP must never be partially reverted — if ANY recorded row in a
+// financially-relevant table (invoices, payments, the credit ledger, saved
+// payment methods) no longer points at the winner (or was journaled
+// count-only), the whole revert refuses and the split is a hand job from the
+// journal snapshot. These tables are also verified under SELECT ... FOR
+// UPDATE and their reverse-repoints must move EXACTLY the planned row count
+// (any shortfall rolls the whole transaction back) — a plain READ COMMITTED
+// select-then-update could otherwise verify rows that move on before the
+// update lands. Everything else (call logs, notifications, leads, derived
 // snapshot rows, ...) is history/derived data where a row that moved on is
 // skipped and reported — a partial revert there is strictly better than
 // refusing the whole undo.
-const REVERT_REFUSE_ON_MISMATCH_TABLES = new Set(['invoices', 'payments']);
+const REVERT_FINANCIAL_TABLES = new Set([
+  'invoices', 'payments', 'customer_credit_ledger', 'payment_methods',
+]);
+
+// Winner backfills the generic clearing loop must NOT touch: the Stripe id
+// has its own provably-still-there guard, and is_primary_profile is a
+// boolean demotion, not a null-out.
+const REVERT_BACKFILL_CLEAR_EXCLUDED = new Set(['stripe_customer_id', 'is_primary_profile']);
+
+// "Unchanged since the merge" comparison for backfilled winner fields. DB
+// reads can restringify numerics ('65.00' vs 65), so numeric-looking values
+// compare numerically.
+function backfillValueUnchanged(current, recorded) {
+  if (current === recorded) return true;
+  if (current === null || current === undefined || recorded === null || recorded === undefined) return false;
+  if (String(current) === String(recorded)) return true;
+  const a = Number(current);
+  const b = Number(recorded);
+  return String(current).trim() !== '' && String(recorded).trim() !== ''
+    && Number.isFinite(a) && Number.isFinite(b) && a === b;
+}
 
 function parseJsonb(value) {
   if (value === null || value === undefined) return null;
   if (typeof value === 'object') return value;
   try { return JSON.parse(value); } catch { return null; }
+}
+
+/**
+ * Record the customer_properties row the link-as-property flow created AFTER
+ * the merge transaction committed, so the revert can remove it (the address
+ * belongs to the restored loser again). One atomic jsonb_set — either the
+ * journal knows about the property or the write fails whole; propertyId null
+ * records "link flow completed, nothing created" (deduped / no address).
+ * The revert REFUSES link-as-property merges whose journal lacks this key,
+ * so a failed call here leaves the merge non-revertible, never half-recorded.
+ */
+async function recordLinkedProperty({ journalId, propertyId = null }) {
+  await db('customer_merge_journal')
+    .where({ id: journalId })
+    .update({
+      repointed_ids: db.raw(
+        `jsonb_set(coalesce(repointed_ids, '{}'::jsonb), '{linked_property_id}',
+           coalesce(to_jsonb(?::text), 'null'::jsonb))`,
+        [propertyId],
+      ),
+    });
 }
 
 /**
@@ -1428,7 +1501,7 @@ function parseJsonb(value) {
  * never creates or modifies charges. Refusals throw with statusCode 409 and
  * a human-readable reason.
  */
-async function revertMerge({ journalId, performedBy }) {
+async function revertMerge({ journalId, performedBy, performedById }) {
   const refuse = (reason) => {
     const err = new Error(reason);
     err.statusCode = 409;
@@ -1443,6 +1516,32 @@ async function revertMerge({ journalId, performedBy }) {
     const recorded = parseJsonb(journal.repointed_ids);
     if (!recorded || !recorded.tables) {
       refuse('This merge predates row-level undo records and cannot be auto-reverted — restore by hand from the journal snapshot');
+    }
+    // A unique-collision handler folded/merged/dropped rows the journal has
+    // no per-row record of — replaying the recorded repoints would restore
+    // only part of the loser's data. Not auto-revertible.
+    if (Array.isArray(recorded.collision_handlers) && recorded.collision_handlers.length) {
+      refuse(`This merge folded colliding rows (${recorded.collision_handlers.join(', ')}) that cannot be split back apart automatically — restore by hand from the journal snapshot`);
+    }
+    // Link-as-property merges create the winner-owned property row AFTER the
+    // merge transaction commits; if the journal never learned its id, an
+    // undo would leave the restored loser's address duplicated on the
+    // winner. Fail closed.
+    const evidence = parseJsonb(journal.evidence) || {};
+    if (evidence.via === 'admin_link_as_property' && !('linked_property_id' in recorded)) {
+      refuse('The property row this merge created was never recorded in the journal — revert by hand');
+    }
+    // payment_methods rows moved without their original default/autopay
+    // flags journaled: restoring ownership but not the flags could leave
+    // autopay charging the wrong card. Fail closed (billing continuity).
+    const pmTableKeys = Object.keys(recorded.tables).filter((k) => k.startsWith('payment_methods.'));
+    const pmFlags = recorded.payment_method_flags || null;
+    for (const key of pmTableKeys) {
+      const ids = recorded.tables[key];
+      if (!Array.isArray(ids)) continue; // count-only — refused below as financial
+      if (ids.length && (!pmFlags || ids.some((id) => !pmFlags[id]))) {
+        refuse('Payment methods were moved without their default/autopay flags journaled — revert by hand (billing continuity)');
+      }
     }
     const winnerId = journal.winner_customer_id;
     const loserId = journal.loser_customer_id;
@@ -1467,7 +1566,7 @@ async function revertMerge({ journalId, performedBy }) {
       if (!table || !column) continue;
       if (!Array.isArray(ids)) {
         // Count-only record (no plain id PK / over cap / mid-merge race).
-        if (REVERT_REFUSE_ON_MISMATCH_TABLES.has(table)) {
+        if (REVERT_FINANCIAL_TABLES.has(table)) {
           refuse(`${table} rows were repointed without row-level records — revert by hand from the journal`);
         }
         skipped.push({ key, reason: 'no_row_ids_recorded' });
@@ -1476,10 +1575,14 @@ async function revertMerge({ journalId, performedBy }) {
       if (!ids.length) continue;
       let stillOnWinner = [];
       try {
-        stillOnWinner = (await trx(table).whereIn('id', ids).where(column, winnerId).select('id'))
-          .map((r) => r.id);
+        // Financial rows verify under FOR UPDATE so nothing can move them
+        // between this check and the reverse repoint below; the repoint's
+        // affected-count check is the belt to this suspender.
+        let verifyQuery = trx(table).whereIn('id', ids).where(column, winnerId);
+        if (REVERT_FINANCIAL_TABLES.has(table)) verifyQuery = verifyQuery.forUpdate();
+        stillOnWinner = (await verifyQuery.select('id')).map((r) => r.id);
       } catch (e) {
-        if (REVERT_REFUSE_ON_MISMATCH_TABLES.has(table)) {
+        if (REVERT_FINANCIAL_TABLES.has(table)) {
           refuse(`Cannot verify ${table} ownership (${e.message}) — refusing to revert`);
         }
         skipped.push({ key, reason: `verify_failed: ${e.message}`, count: ids.length });
@@ -1487,7 +1590,7 @@ async function revertMerge({ journalId, performedBy }) {
       }
       const moved = ids.length - stillOnWinner.length;
       if (moved > 0) {
-        if (REVERT_REFUSE_ON_MISMATCH_TABLES.has(table)) {
+        if (REVERT_FINANCIAL_TABLES.has(table)) {
           refuse(`${moved} ${table} row(s) no longer belong to the kept customer — state has moved on; revert by hand`);
         }
         skipped.push({ key, reason: 'rows_changed_since_merge', count: moved });
@@ -1501,15 +1604,66 @@ async function revertMerge({ journalId, performedBy }) {
         .whereIn('id', plan.ids)
         .where(plan.column, winnerId)
         .update({ [plan.column]: loserId });
+      // The update must cover EXACTLY the verified rows. On a financial
+      // table any shortfall aborts (throw → transaction rollback → zero
+      // writes); elsewhere it is reported like any other moved-on row.
+      if (count !== plan.ids.length) {
+        if (REVERT_FINANCIAL_TABLES.has(plan.table)) {
+          refuse(`${plan.table} changed while reverting (${count}/${plan.ids.length} rows moved back) — nothing was changed; retry`);
+        }
+        skipped.push({ key: plan.key, reason: 'rows_changed_during_revert', count: plan.ids.length - count });
+      }
       if (count) repointedBack[plan.key] = count;
     }
 
-    // Winner-side undo: the transferred Stripe id, a primary-profile
-    // promotion, and the moved cached credits. Backfilled CONTACT fields
-    // (name/address copies) deliberately stay on the winner — clearing them
-    // changes no behavior and the snapshot keeps the provenance — EXCEPT the
-    // email, which must vacate the winner when it blocks restoring the
-    // loser's identity (uniqueness).
+    // Restore each moved-back payment method's ORIGINAL default/autopay
+    // flags (the merge demoted them when the winner already had a default).
+    // Presence of a flag record for every moved id was verified above.
+    for (const plan of plans) {
+      if (plan.table !== 'payment_methods') continue;
+      for (const id of plan.ids) {
+        const flags = pmFlags[id];
+        await trx('payment_methods').where({ id, customer_id: loserId }).update({
+          is_default: flags.is_default === true,
+          autopay_enabled: flags.autopay_enabled === true,
+          updated_at: trx.fn.now(),
+        });
+      }
+    }
+
+    // The property row link-as-property created from the loser's address
+    // belongs to the restored loser again — remove it from the winner.
+    // Savepoint so an FK reference acquired since the merge degrades to
+    // deactivation instead of poisoning the transaction.
+    if (recorded.linked_property_id) {
+      let removed = 0;
+      try {
+        await trx.transaction(async (sp) => {
+          removed = await sp('customer_properties')
+            .where({ id: recorded.linked_property_id, customer_id: winnerId })
+            .del();
+        });
+        if (removed) repointedBack['customer_properties.linked_property_removed'] = removed;
+      } catch (e) {
+        const deactivated = await trx('customer_properties')
+          .where({ id: recorded.linked_property_id, customer_id: winnerId })
+          .update({ active: false, is_primary: false, updated_at: trx.fn.now() });
+        if (deactivated) {
+          repointedBack['customer_properties.linked_property_deactivated'] = deactivated;
+          skipped.push({ key: 'customer_properties.linked_property', reason: `deactivated_not_deleted: ${e.message}` });
+        }
+      }
+      if (!removed && !repointedBack['customer_properties.linked_property_deactivated']) {
+        skipped.push({ key: 'customer_properties.linked_property', reason: 'row_missing_or_moved' });
+      }
+    }
+
+    // Winner-side undo: the transferred Stripe id (only when it provably
+    // still sits on the winner), a primary-profile demotion, the moved
+    // cached credits, and EVERY recorded winner backfill (billing AND
+    // contact — payer_id, billing_mode, per_application_fee, name/address
+    // copies, consent stamps, ...) that is UNCHANGED on the winner since the
+    // merge. A backfill an admin has since edited stays put and is reported.
     const backfills = parseJsonb(journal.winner_backfills) || {};
     const winnerPatch = {};
     let stripeMovedBack = false;
@@ -1525,26 +1679,59 @@ async function revertMerge({ journalId, performedBy }) {
     if (backfills.is_primary_profile === true && winner.is_primary_profile === true) {
       winnerPatch.is_primary_profile = false;
     }
-    if (backfills.email && winner.email === backfills.email
-      && snapshot.email && backfills.email === snapshot.email) {
-      winnerPatch.email = null;
-    }
-    // Cached credit balance moves back only when the winner still holds at
-    // least what the merge moved over (the loser's ledger rows repoint back
-    // with the plan above, keeping cache == ledger-sum on both rows).
-    const movedCredits = Math.round(Number(snapshot.account_credits || 0) * 100) / 100;
-    let creditsMovedBack = 0;
-    if (movedCredits > 0) {
-      if (Number(winner.account_credits || 0) >= movedCredits) {
-        creditsMovedBack = movedCredits;
+    for (const [field, value] of Object.entries(backfills)) {
+      if (REVERT_BACKFILL_CLEAR_EXCLUDED.has(field)) continue;
+      // Null backfills (e.g. the consent-stamp clear) copied nothing onto
+      // the winner — there is nothing to vacate.
+      if (value === null || value === undefined) continue;
+      if (backfillValueUnchanged(winner[field], value)) {
+        winnerPatch[field] = null;
       } else {
-        skipped.push({ key: 'customers.account_credits', reason: 'winner_balance_below_moved_amount' });
+        skipped.push({ key: `customers.${field}`, reason: 'winner_value_changed_since_merge' });
+      }
+    }
+    // Cached credit balance: when recorded ledger rows moved back above,
+    // RECOMPUTE both caches from the ledgers post-move so cache == ledger
+    // holds on BOTH sides (customer-credit.js invariant) — and refuse when
+    // the winner's spending since the merge has consumed the loser's credit
+    // (its ledger would sum negative after giving the rows back). Without
+    // moved ledger rows, fall back to moving the snapshot amount only while
+    // the winner still holds it.
+    const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+    const ledgerMovedBack = plans.some((p) => p.table === 'customer_credit_ledger');
+    let creditsMovedBack = 0;
+    let loserCreditsAfter = 0;
+    if (ledgerMovedBack) {
+      const ledgerSum = async (customerId) => {
+        const row = await trx('customer_credit_ledger')
+          .where({ customer_id: customerId }).sum('delta as total').first();
+        return round2(row && row.total);
+      };
+      const winnerLedgerSum = await ledgerSum(winnerId);
+      loserCreditsAfter = await ledgerSum(loserId);
+      if (winnerLedgerSum < 0) {
+        refuse("The kept customer's spending has consumed the merged-in credit — undoing would leave a negative balance; reconcile credits by hand");
+      }
+      if (loserCreditsAfter < 0) {
+        refuse("The restored customer's credit ledger would go negative — reconcile credits by hand");
+      }
+      winnerPatch.account_credits = winnerLedgerSum;
+      creditsMovedBack = loserCreditsAfter;
+    } else {
+      const movedCredits = round2(snapshot.account_credits);
+      if (movedCredits > 0) {
+        if (Number(winner.account_credits || 0) >= movedCredits) {
+          creditsMovedBack = movedCredits;
+          loserCreditsAfter = movedCredits;
+        } else {
+          skipped.push({ key: 'customers.account_credits', reason: 'winner_balance_below_moved_amount' });
+        }
       }
     }
     if (Object.keys(winnerPatch).length) {
       await trx('customers').where({ id: winnerId }).update({ ...winnerPatch, updated_at: trx.fn.now() });
     }
-    if (creditsMovedBack) {
+    if (!ledgerMovedBack && creditsMovedBack) {
       await trx('customers').where({ id: winnerId }).decrement('account_credits', creditsMovedBack);
     }
 
@@ -1559,7 +1746,7 @@ async function revertMerge({ journalId, performedBy }) {
       payer_id: snapshot.payer_id || null,
       billing_mode: snapshot.billing_mode || null,
       is_primary_profile: snapshot.is_primary_profile === true,
-      account_credits: creditsMovedBack,
+      account_credits: loserCreditsAfter,
       updated_at: trx.fn.now(),
     };
     if (stripeMovedBack) restore.stripe_customer_id = snapshot.stripe_customer_id || null;
@@ -1581,7 +1768,9 @@ async function revertMerge({ journalId, performedBy }) {
       undone_by: performedBy || 'unknown',
     });
 
-    logger.info(`[customer-dedupe] merge ${journalId} reverted: ${loserId} split back out of ${winnerId} by ${performedBy}`);
+    // ID-only in plaintext logs — the full staff identity lives in the
+    // journal's undone_by audit column, never the log stream.
+    logger.info(`[customer-dedupe] merge ${journalId} reverted: ${loserId} split back out of ${winnerId} by tech ${performedById || 'unknown'}`);
     return {
       journalId,
       winnerId,
@@ -1626,6 +1815,7 @@ module.exports = {
   runAutoMergeSweep,
   runRedPairAutoDismissSweep,
   revertMerge,
+  recordLinkedProperty,
   // exported for tests
   _test: {
     phone10,

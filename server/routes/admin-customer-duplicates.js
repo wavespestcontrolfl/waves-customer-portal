@@ -17,7 +17,9 @@ const express = require('express');
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
-const { findDuplicateGroups, executeMerge, revertMerge } = require('../services/customer-dedupe');
+const {
+  findDuplicateGroups, executeMerge, revertMerge, recordLinkedProperty,
+} = require('../services/customer-dedupe');
 
 const router = express.Router();
 router.use(adminAuthenticate, requireAdmin);
@@ -27,6 +29,12 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 function performedBy(req) {
   const tech = req.technician || {};
   return `admin:${tech.name || tech.email || req.technicianId || 'unknown'}`;
+}
+
+// ID-only identity for plaintext log lines (the full name/email identity
+// above is journal/audit-column material, never log material).
+function performedById(req) {
+  return req.technicianId || (req.technician && req.technician.id) || null;
 }
 
 router.get('/', async (req, res) => {
@@ -84,25 +92,44 @@ async function handleMerge(req, res, { linkAsProperty }) {
       evidence: { via: linkAsProperty ? 'admin_link_as_property' : 'admin_review_queue' },
     });
     let propertyLinked = false;
-    if (linkAsProperty && result.loserSnapshot?.address_line1) {
+    if (linkAsProperty) {
       // Post-commit on purpose: an aborted merge must not leave a property row.
       // recordCallProperty computes the canonical address_key and dedupes.
-      try {
-        const { recordCallProperty } = require('../services/customer-properties');
-        await recordCallProperty({
-          customerId: winnerId,
-          address_line1: result.loserSnapshot.address_line1,
-          address_line2: result.loserSnapshot.address_line2,
-          city: result.loserSnapshot.city,
-          state: result.loserSnapshot.state,
-          zip: result.loserSnapshot.zip,
-          label: 'From merged duplicate',
-          source: 'manual',
-        });
-        propertyLinked = true;
-      } catch (propErr) {
-        // The merge itself committed — report the partial outcome honestly.
-        logger.error(`[admin-customer-duplicates] merge ok but link-as-property failed: ${propErr.message}`);
+      let createdPropertyId = null;
+      let propertyFlowFailed = false;
+      if (result.loserSnapshot?.address_line1) {
+        try {
+          const { recordCallProperty } = require('../services/customer-properties');
+          const { created, propertyId } = await recordCallProperty({
+            customerId: winnerId,
+            address_line1: result.loserSnapshot.address_line1,
+            address_line2: result.loserSnapshot.address_line2,
+            city: result.loserSnapshot.city,
+            state: result.loserSnapshot.state,
+            zip: result.loserSnapshot.zip,
+            label: 'From merged duplicate',
+            source: 'manual',
+          });
+          propertyLinked = true;
+          if (created) createdPropertyId = propertyId;
+        } catch (propErr) {
+          // The merge itself committed — report the partial outcome honestly.
+          propertyFlowFailed = true;
+          logger.error(`[admin-customer-duplicates] merge ok but link-as-property failed: ${propErr.message}`);
+        }
+      }
+      // The property row was created AFTER the merge transaction committed,
+      // so the journal must learn about it or the undo would leave it
+      // behind on the winner. One atomic jsonb_set; null records "nothing
+      // created" (deduped / address-less loser). If the flow or this write
+      // fails, the journal stays WITHOUT the linked_property_id key and the
+      // revert endpoint refuses — non-revertible beats half-recorded.
+      if (!propertyFlowFailed) {
+        try {
+          await recordLinkedProperty({ journalId: result.journalId, propertyId: createdPropertyId });
+        } catch (journalErr) {
+          logger.error(`[admin-customer-duplicates] merge ok but journal linked-property record failed — merge ${result.journalId} is not auto-revertible: ${journalErr.message}`);
+        }
       }
     }
     res.json({ ok: true, journalId: result.journalId, repointed: result.repointed, backfills: result.backfills, propertyLinked });
@@ -128,6 +155,7 @@ router.get('/merges', async (req, res) => {
       .select(
         'j.id', 'j.winner_customer_id', 'j.loser_customer_id', 'j.tier', 'j.performed_by',
         'j.created_at', 'j.undone_at', 'j.undone_by', 'j.loser_snapshot', 'j.repointed_ids',
+        'j.evidence',
         'w.first_name as winner_first_name', 'w.last_name as winner_last_name',
         'w.active as winner_active', 'w.deleted_at as winner_deleted_at',
       )
@@ -142,6 +170,17 @@ router.get('/merges', async (req, res) => {
       merges: rows.map((row) => {
         const snapshot = parse(row.loser_snapshot);
         const recorded = parse(row.repointed_ids);
+        const evidence = parse(row.evidence);
+        // Mirrors revertMerge's refusals so the UI never offers an undo the
+        // endpoint would 409: collision-handled tables, payment methods
+        // moved without flag records, and link-as-property merges whose
+        // created property was never journaled.
+        const collisionHandled = Boolean(recorded?.collision_handlers?.length);
+        const pmMovedWithoutFlags = Boolean(recorded?.tables) && Object.entries(recorded.tables)
+          .some(([key, ids]) => key.startsWith('payment_methods.') && Array.isArray(ids) && ids.length
+            && (!recorded.payment_method_flags || ids.some((id) => !recorded.payment_method_flags[id])));
+        const linkedPropertyUnrecorded = evidence?.via === 'admin_link_as_property'
+          && !(recorded && 'linked_property_id' in recorded);
         return {
           journalId: row.id,
           winnerId: row.winner_customer_id,
@@ -154,13 +193,18 @@ router.get('/merges', async (req, res) => {
           undoneAt: row.undone_at,
           undoneBy: row.undone_by,
           // Pre-upgrade merges (no row-level repoint record) are not
-          // auto-revertible; neither is a merge whose winner is gone/retired.
+          // auto-revertible; neither is a merge whose winner is gone/retired,
+          // nor one revertMerge would refuse (collisions, missing pm flags,
+          // unrecorded linked property).
           revertible: Boolean(
             !row.undone_at
             && snapshot?.id
             && recorded?.tables
             && row.winner_active !== false
-            && !row.winner_deleted_at,
+            && !row.winner_deleted_at
+            && !collisionHandled
+            && !pmMovedWithoutFlags
+            && !linkedPropertyUnrecorded,
           ),
         };
       }),
@@ -182,6 +226,7 @@ router.post('/merges/:journalId/revert', async (req, res) => {
     const result = await revertMerge({
       journalId: req.params.journalId,
       performedBy: performedBy(req),
+      performedById: performedById(req),
     });
     res.json({
       ok: true,

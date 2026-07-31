@@ -17,12 +17,13 @@ const {
   applyInventoryUnitFix,
   resolveInventoryUnitAlias,
   runInventoryUnitAutofixSweep,
+  _test: { CANONICAL_STORAGE_UNITS, OZ_FAMILY_SQL, isAutofixCandidateUnit },
 } = require('../services/inventory-unit-review');
 
 function makeChain(table, route) {
   const q = { _table: table, _calls: [] };
   const methods = [
-    'where', 'whereIn', 'whereRaw', 'whereNull', 'whereNotNull', 'select', 'orderBy',
+    'where', 'whereIn', 'whereRaw', 'whereNull', 'whereNotNull', 'whereNotIn', 'select', 'orderBy',
     'forUpdate', 'update', 'insert', 'count', 'first', 'limit',
   ];
   for (const m of methods) {
@@ -64,6 +65,66 @@ describe('resolveInventoryUnitAlias', () => {
     expect(resolveInventoryUnitAlias('bottles')).toBe(null);
     expect(resolveInventoryUnitAlias('fl. oz')).toBe(null); // punctuation breaks normalization — human review
     expect(resolveInventoryUnitAlias('cases')).toBe(null);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Sweep candidate predicate — the SQL filter must actually SELECT the
+// aliases the sweep exists to fix ('Gallons'), and must not waste capped
+// batch slots on already-canonical rows ('gal') or the ambiguous oz family.
+// ---------------------------------------------------------------------------
+
+describe('autofix candidate predicate', () => {
+  it("selects alias spellings and excludes exact canonical keys + the oz family (pure mirror of the SQL)", () => {
+    // The very rows the sweep exists to fix.
+    expect(isAutofixCandidateUnit('Gallons')).toBe(true);
+    expect(isAutofixCandidateUnit('Liters')).toBe(true);
+    expect(isAutofixCandidateUnit('FL OZ')).toBe(true);
+    expect(isAutofixCandidateUnit('Gal')).toBe(true); // case variant differs from canonical
+    expect(isAutofixCandidateUnit('bottles')).toBe(true); // selected, then parked by the resolver
+    // Already canonical — never a candidate.
+    for (const unit of CANONICAL_STORAGE_UNITS) expect(isAutofixCandidateUnit(unit)).toBe(false);
+    // Ambiguous oz family — excluded entirely so it can't occupy batch slots.
+    expect(isAutofixCandidateUnit('oz')).toBe(false);
+    expect(isAutofixCandidateUnit('OZ')).toBe(false);
+    expect(isAutofixCandidateUnit('Ounces')).toBe(false);
+    // Missing unit.
+    expect(isAutofixCandidateUnit('')).toBe(false);
+    expect(isAutofixCandidateUnit(null)).toBe(false);
+    expect(isAutofixCandidateUnit('   ')).toBe(false);
+  });
+
+  it("the sweep's actual query filters with the canonical-keys NOT IN (not normalized spellings) and the oz exclusion", async () => {
+    isEnabled.mockImplementation((gate) => gate === 'inventoryUnitAutofix');
+    const chains = [];
+    const dbi = jest.fn((table) => {
+      const chain = makeChain(table, () => []);
+      chains.push(chain);
+      return chain;
+    });
+    dbi.transaction = jest.fn(async (fn) => fn(dbi));
+    await runInventoryUnitAutofixSweep({ dbi });
+
+    const candidateQuery = chains.find((c) => c._table === 'products_catalog' && c.called('limit'));
+    expect(candidateQuery).toBeTruthy();
+    // Exact canonical storage keys ONLY — a normalized-spellings list here
+    // ('gallon', 'liter', ...) is the regression that made 'Gallons'
+    // unreachable. 'gal' is excluded; 'Gallons'/'gallon' are NOT excluded.
+    const [notInColumn, notInList] = candidateQuery.args('whereNotIn');
+    expect(notInColumn).toBe('inventory_unit');
+    expect(notInList).toEqual(['fl_oz', 'gal', 'qt', 'pt', 'ml', 'l', 'lb', 'g', 'kg']);
+    expect(notInList).toContain('gal');
+    expect(notInList).not.toContain('gallon');
+    expect(notInList).not.toContain('Gallons');
+    expect(notInList).not.toContain('liter');
+    // Raw clauses: non-empty unit + NOT (oz family). No normalized
+    // supported-spellings NOT IN anywhere in the candidate query.
+    const rawClauses = candidateQuery._calls
+      .filter(([name]) => name === 'whereRaw')
+      .map(([, args]) => args[0]);
+    expect(rawClauses.some((sql) => sql.includes("nullif(trim(coalesce(inventory_unit, '')), '') is not null"))).toBe(true);
+    expect(rawClauses.some((sql) => sql === `NOT (${OZ_FAMILY_SQL})`)).toBe(true);
+    expect(rawClauses.every((sql) => !sql.includes("'gallon'"))).toBe(true);
   });
 });
 

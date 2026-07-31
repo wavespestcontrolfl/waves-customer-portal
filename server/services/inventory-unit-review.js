@@ -39,14 +39,50 @@ function clampCap(raw, fallback) {
 }
 
 // The unit-review queue's "unsupported unit" branch — MUST stay in lockstep
-// with dashboard-alerts.js and GET /admin/inventory/unit-review. This is the
-// only branch the autofix reads: missing-unit rows need a human to pick a
-// unit, and 'oz'/'ounce' normalize into the supported (ambiguous) set so
-// they never match this predicate.
+// with dashboard-alerts.js and GET /admin/inventory/unit-review. Used by the
+// sweep only for its "remaining for review" digest count. NOT the sweep's
+// candidate filter: this predicate normalizes spellings before its NOT IN,
+// so the very aliases the autofix exists to fix ('Gallons', 'Liters',
+// 'FL OZ') read as supported and would never be selected.
 const UNSUPPORTED_UNIT_SQL = `
   nullif(trim(coalesce(inventory_unit, '')), '') is not null
   AND regexp_replace(lower(replace(trim(inventory_unit), ' ', '_')), 's$', '') NOT IN ('fl_oz','floz','gal','gallon','qt','quart','pt','pint','ml','l','liter','oz','ounce','lb','pound','g','gram','kg')
 `;
+
+// The catalog's CANONICAL storage keys — the exact strings a fixed row ends
+// up holding. The sweep's candidate filter excludes ONLY these exact strings
+// (any other spelling differs from its canonical form and is worth showing
+// to resolveInventoryUnitAlias, which decides park-vs-fix), plus the whole
+// oz family ('oz'/'ounce' in any case/plural), which is ambiguous and must
+// never even occupy a slot in the capped batch.
+const CANONICAL_STORAGE_UNITS = ['fl_oz', 'gal', 'qt', 'pt', 'ml', 'l', 'lb', 'g', 'kg'];
+const OZ_FAMILY_SQL = "regexp_replace(lower(replace(trim(inventory_unit), ' ', '_')), 's$', '') IN ('oz','ounce')";
+
+/**
+ * Candidate filter for the autofix sweep, applied to a knex query on
+ * products_catalog: rows with a non-empty stored unit that is not already an
+ * exact canonical key and not in the oz family. resolveInventoryUnitAlias
+ * makes the actual fix-or-park call per row (bounded by BATCH_CAP).
+ */
+function applyAutofixCandidateFilter(query) {
+  return query
+    .whereRaw("nullif(trim(coalesce(inventory_unit, '')), '') is not null")
+    .whereNotIn('inventory_unit', CANONICAL_STORAGE_UNITS)
+    .whereRaw(`NOT (${OZ_FAMILY_SQL})`);
+}
+
+// Pure JS mirror of applyAutofixCandidateFilter's SQL — one predicate, two
+// dialects, pinned against each other in tests so they cannot drift.
+function isAutofixCandidateUnit(rawUnit) {
+  const raw = String(rawUnit == null ? '' : rawUnit);
+  if (!raw.trim()) return false;
+  // EXACT match like the SQL's NOT IN — ' gal ' or 'Gal' differs from its
+  // canonical form and stays a candidate (the resolver renames it).
+  if (CANONICAL_STORAGE_UNITS.includes(raw)) return false;
+  const squashed = raw.trim().replace(/ /g, '_').toLowerCase().replace(/s$/, '');
+  if (squashed === 'oz' || squashed === 'ounce') return false;
+  return true;
+}
 
 // Long-form supported spellings collapse to the catalog's canonical short
 // unit so "Gallons" lands as gal, not gallon (both are factor-128 volume —
@@ -214,8 +250,7 @@ async function runInventoryUnitAutofixSweep({ dbi = db } = {}) {
     return { skipped: 'gate_off' };
   }
 
-  const candidates = await dbi('products_catalog')
-    .whereRaw(UNSUPPORTED_UNIT_SQL)
+  const candidates = await applyAutofixCandidateFilter(dbi('products_catalog'))
     .select('id', 'name', 'inventory_unit')
     .orderBy('name')
     .limit(BATCH_CAP);
@@ -302,5 +337,13 @@ module.exports = {
   applyInventoryUnitFix,
   resolveInventoryUnitAlias,
   runInventoryUnitAutofixSweep,
-  _test: { BATCH_CAP, CANONICAL_UNIT, UNSUPPORTED_UNIT_SQL },
+  _test: {
+    BATCH_CAP,
+    CANONICAL_UNIT,
+    UNSUPPORTED_UNIT_SQL,
+    CANONICAL_STORAGE_UNITS,
+    OZ_FAMILY_SQL,
+    applyAutofixCandidateFilter,
+    isAutofixCandidateUnit,
+  },
 };
