@@ -289,17 +289,23 @@ async function loadWeatherMove(svc, now = new Date()) {
     fromChance: null,
     toChance: null,
   };
-  try {
-    // Bounded lookup handles null/invalid coordinates itself and returns
-    // null on deadline/failure — banner renders without chips either way.
-    const outlook = await getDailyRainOutlookBounded(svc.latitude, svc.longitude, {
-      deadlineMs: WEATHER_FORECAST_DEADLINE_MS,
-    });
-    if (outlook) {
-      move.fromChance = outlook[move.from.date]?.rainChance ?? null;
-      move.toChance = outlook[move.to.date]?.rainChance ?? null;
-    }
-  } catch { /* fail-open — banner renders without chips */ }
+  // Rain chips only make sense on rain-driven moves: wind and heat
+  // decisions run on wind speed and temperature (reschedule-rules.js), and
+  // "0% rain" beside a wind-out obscures the move instead of explaining it
+  // (codex r4 P2). Non-rain reasons render the banner without chips.
+  if (log.reason_code === 'weather_rain' || log.reason_code === 'weather_lightning') {
+    try {
+      // Bounded lookup handles null/invalid coordinates itself and returns
+      // null on deadline/failure — banner renders without chips either way.
+      const outlook = await getDailyRainOutlookBounded(svc.latitude, svc.longitude, {
+        deadlineMs: WEATHER_FORECAST_DEADLINE_MS,
+      });
+      if (outlook) {
+        move.fromChance = outlook[move.from.date]?.rainChance ?? null;
+        move.toChance = outlook[move.to.date]?.rainChance ?? null;
+      }
+    } catch { /* fail-open — banner renders without chips */ }
+  }
   return move;
 }
 

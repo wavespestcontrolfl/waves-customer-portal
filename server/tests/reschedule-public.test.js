@@ -346,6 +346,14 @@ describe('weatherMove banner context (GATE_RAINOUT_MOVE_BANNER)', () => {
     expect(await loadWeatherMove(SVC, NOW)).toBeNull();
   });
 
+  test('non-rain reasons render the banner without rain chips and never fetch the forecast (codex r4)', async () => {
+    process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+    wireLog({ ...LOG, reason_code: 'weather_wind' });
+    const move = await loadWeatherMove(SVC, NOW);
+    expect(move).toMatchObject({ reasonCode: 'weather_wind', fromChance: null, toChance: null });
+    expect(getDailyRainOutlookBounded).not.toHaveBeenCalled();
+  });
+
   test('missing coordinates skip the forecast but keep the banner', async () => {
     process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
     wireLog(LOG);
