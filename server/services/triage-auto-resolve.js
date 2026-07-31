@@ -80,17 +80,18 @@ const BOOKING_OUTCOME_CODES = new Set([
 // NOT listed on purpose — advisory-by-design cards that carry an OWED
 // office confirmation which stands until performed, no matter how old
 // (an appointment booked 30+ days out still needs its read-back):
-// address_recovered / address_readback (recovered street must be read back
-// before the visit), caller_phone_not_on_file (identity check before the
-// ANI is saved), email_unverified / email_invalid (dictated-email
-// read-back; customer-email-fanout resolves them on correction), and
-// implied_consent_non_ani_recipient (confirm the recipient before the held
-// confirmation SMS goes out).
+// address_recovered / address_readback (street read-back before the visit),
+// caller_phone_not_on_file (identity check before the ANI is saved),
+// email_unverified / email_invalid (dictated-email read-back; fanout
+// resolves them on correction), implied_consent_non_ani_recipient
+// (recipient confirmation before the held SMS), caller_not_authorized
+// (account-holder confirmation), rental_or_tenant_occupied (access/
+// property confirmation), second_service_address and
+// secondary_contact_captured (captured data awaiting application).
 const ADVISORY_AGE_CODES = new Set([
-  'rental_or_tenant_occupied', 'secondary_contact_captured',
-  'second_service_address', 'multi_property_call', 'name_email_mismatch',
+  'multi_property_call', 'name_email_mismatch',
   'no_sms_consent_captured', 'sms_consent_missing',
-  'low_extraction_confidence', 'voicemail', 'caller_not_authorized',
+  'low_extraction_confidence', 'voicemail',
   'missing_last_name',
 ]);
 
@@ -151,11 +152,16 @@ function callSuppliedAddress(v2Raw, v1Raw) {
       return true;
     }
   }
+  // Full component set of the routing guard — partial evidence (a unit /
+  // street_line_2 or a subdivision alone) is still NEW location evidence
+  // that holds the card for review.
   const addr = v2?.property?.service_address || {};
   if (String(addr.raw_text || '').trim()
       || String(addr.street_line_1 || '').trim()
+      || String(addr.street_line_2 || '').trim()
       || String(addr.city || '').trim()
-      || String(addr.postal_code || '').trim()) {
+      || String(addr.postal_code || '').trim()
+      || String(addr.subdivision_or_community || '').trim()) {
     return true;
   }
   // V1 (legacy flat shape): a null V1 means no legacy evidence to consult;
@@ -294,6 +300,20 @@ async function sweep({ now = new Date() } = {}) {
   let callsSynced = 0;
   const itemCallById = new Map(applied.map((d) => [d.item.id, d.item.call_log_id]));
   await db.transaction(async (trx) => {
+    // ALL sibling locks acquired UP FRONT in one statement, ordered by id —
+    // before any modification. Locking after our own updates inverted the
+    // acquisition order against admin-triage's multi-row verdict update and
+    // could deadlock; a single sorted acquisition while holding nothing
+    // makes this side's order deterministic and leaves nothing for the
+    // deadlock detector to abort mid-sweep.
+    const allCallIds = [...new Set(applied.map((d) => d.item.call_log_id))];
+    if (allCallIds.length) {
+      await trx('triage_items')
+        .whereIn('call_log_id', allCallIds)
+        .orderBy('id', 'asc')
+        .forUpdate()
+        .select('id');
+    }
     const touchedCalls = new Map(); // call_log_id -> status we applied last
     for (const rule of Object.keys(RULE_NOTES)) {
       const group = applied.filter((d) => d.rule === rule);
@@ -320,16 +340,13 @@ async function sweep({ now = new Date() } = {}) {
 
     // Mirror admin-triage transitionCore's review_status sync: a call with
     // open/in_progress cards remaining stays 'open'; otherwise it takes the
-    // status of the transition that cleared it. Sibling cards are row-locked
-    // (FOR UPDATE) before counting: a concurrent operator/event-driven
-    // transition on a sibling either committed before the lock (our count
-    // sees it) or blocks until this transaction commits (their subsequent
-    // count sees our terminal rows) — without this, two writers can each
-    // count the other's uncommitted card as open and strand review_status
-    // 'open' on a fully-terminal call, which the open-cards-only sweep could
-    // never repair.
+    // status of the transition that cleared it. The sibling rows are already
+    // locked by the up-front acquisition above, so a concurrent operator/
+    // event-driven transition either committed before our locks (the count
+    // sees it) or blocks until we commit (their subsequent count sees our
+    // terminal rows) — interleaved counts can no longer strand
+    // review_status 'open' on a fully-terminal call.
     for (const [callLogId, appliedStatus] of touchedCalls) {
-      await trx('triage_items').where({ call_log_id: callLogId }).forUpdate().select('id');
       const remaining = await trx('triage_items')
         .where({ call_log_id: callLogId })
         .whereIn('status', ['open', 'in_progress'])

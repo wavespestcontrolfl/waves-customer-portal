@@ -84,6 +84,17 @@ describe('moot-condition resolves', () => {
     }), noBookings, { now: NOW })).toBeNull();
   });
 
+  test('PARTIAL V2 address evidence (unit or subdivision alone) blocks the resolve', () => {
+    expect(classifyTriageItem(item({
+      customer_address_line1: '123 Sample St', customer_zip: '34205',
+      call_extraction: { property: { service_address: { street_line_2: 'Unit 4' } } },
+    }), noBookings, { now: NOW })).toBeNull();
+    expect(classifyTriageItem(item({
+      customer_address_line1: '123 Sample St', customer_zip: '34205',
+      call_extraction: { property: { service_address: { subdivision_or_community: 'Sample Estates' } } },
+    }), noBookings, { now: NOW })).toBeNull();
+  });
+
   test('V1-ONLY address evidence blocks the resolve even when V2 heard nothing (the bridge-demotion case)', () => {
     const v1Heard = item({
       reason_code: 'address_unverified',
@@ -154,14 +165,14 @@ describe('age-based dismissals', () => {
   });
 
   test(`advisory informational flags dismiss after ${ADVISORY_AGE_DAYS} days, not before`, () => {
-    expect(classifyTriageItem(item({ reason_code: 'caller_not_authorized', created_at: OLD_31D }), noBookings, { now: NOW }))
+    expect(classifyTriageItem(item({ reason_code: 'voicemail', created_at: OLD_31D }), noBookings, { now: NOW }))
       .toEqual({ action: 'dismiss', rule: 'advisory_aged' });
-    expect(classifyTriageItem(item({ reason_code: 'caller_not_authorized', created_at: OLD_8D }), noBookings, { now: NOW })).toBeNull();
+    expect(classifyTriageItem(item({ reason_code: 'voicemail', created_at: OLD_8D }), noBookings, { now: NOW })).toBeNull();
   });
 
   test('a BLOCKING-severity row never age-dismisses even for an allowlisted code', () => {
     expect(classifyTriageItem(
-      item({ reason_code: 'caller_not_authorized', severity: 'blocking', created_at: OLD_31D }),
+      item({ reason_code: 'voicemail', severity: 'blocking', created_at: OLD_31D }),
       noBookings, { now: NOW },
     )).toBeNull();
   });
@@ -179,9 +190,11 @@ describe('fail-closed allowlist — owed work is NEVER swept', () => {
     'do_not_contact_requested', 'hoa_common_area_requires_approval',
     'implied_consent_non_ani_recipient',
     // Advisory-by-design cards carrying OWED office confirmations — never
-    // age out (the read-back/identity check stands until performed).
+    // age out (the read-back/identity/access check stands until performed).
     'address_recovered', 'address_readback', 'caller_phone_not_on_file',
-    'email_unverified', 'email_invalid',
+    'email_unverified', 'email_invalid', 'caller_not_authorized',
+    'rental_or_tenant_occupied', 'second_service_address',
+    'secondary_contact_captured',
     'some_future_unknown_code',
   ];
   test.each(owedCodes)('%s stays open even when ancient', (code) => {
