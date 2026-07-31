@@ -184,7 +184,13 @@ function classifyTriageItem(item, ctx, { now = new Date() } = {}) {
       && String(item.customer_zip || '').trim() !== '') {
     return { action: 'resolve', rule: 'address_moot' };
   }
-  if (code === 'missing_last_name' && String(item.customer_last_name || '').trim() !== '') {
+  // Same provenance guard as addresses: a customer created FROM this call
+  // can carry a model-heard (V1-merged) surname — resolving the identity
+  // card against that value would be circular. Only a record that existed
+  // before the call is independent evidence of the surname.
+  if (code === 'missing_last_name'
+      && customerPredatesCall(item)
+      && String(item.customer_last_name || '').trim() !== '') {
     return { action: 'resolve', rule: 'name_moot' };
   }
   if (BOOKING_OUTCOME_CODES.has(code) && ctx.bookedCallIds.has(item.call_log_id)) {

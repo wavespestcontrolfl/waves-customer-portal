@@ -96,9 +96,16 @@ describe('moot-condition resolves', () => {
     }), noBookings, { now: NOW })).toBeNull();
   });
 
-  test('missing_last_name resolves once the customer has a last name', () => {
+  test('missing_last_name resolves once a PRE-EXISTING customer has a last name', () => {
     const d = classifyTriageItem(item({ reason_code: 'missing_last_name', customer_last_name: 'Sample' }), noBookings, { now: NOW });
     expect(d).toEqual({ action: 'resolve', rule: 'name_moot' });
+  });
+
+  test('a customer born from the call never moots its own surname card (V1-merged surname is not independent evidence)', () => {
+    expect(classifyTriageItem(item({
+      reason_code: 'missing_last_name', customer_last_name: 'Sample',
+      customer_created_at: CUSTOMER_AFTER,
+    }), noBookings, { now: NOW })).toBeNull();
   });
 
   test('scheduling flags resolve only on source_call_log_id booking provenance', () => {
