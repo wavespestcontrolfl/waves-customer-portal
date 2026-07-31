@@ -40,6 +40,16 @@ jest.mock('../services/lead-first-touch-resume', () => ({
     const gated = await qb.update({ last_error: null, updated_at: stamp });
     return gated > 0 ? stamp : null;
   },
+  // Same contract as the real r40 helper: an either-fence CAS that parks
+  // the hold pending under the neutral ambiguity marker.
+  repenAmbiguousDelivery: async (holdId, fenceStamps, dbh) => {
+    const fences = (fenceStamps || []).filter(Boolean).map((s) => new Date(s));
+    if (!fences.length) return 0;
+    return dbh('first_touch_holds')
+      .where({ id: holdId, status: 'releasing' })
+      .whereIn('updated_at', fences)
+      .update({ status: 'pending', last_error: 'doi_delivery_ambiguous', updated_at: new Date() });
+  },
 }));
 beforeEach(() => {
   mockResume.mockReset().mockResolvedValue({ resumed: false, enrolled: false, newsletterResume: null });
@@ -88,11 +98,14 @@ function makeConn(cfg = {}) {
       forUpdate: () => { calls.push({ table, op: 'forUpdate' }); return qb; },
       select: () => qb,
       count: () => { counting = true; return qb; },
-      first: () => Promise.resolve(counting
-        ? ((t.countQueue || []).shift() ?? { n: 0 })
-        : denyProbe
-          ? (t.denyRow ?? null)
-          : ((t.firstQueue || []).shift() ?? null)),
+      first: () => {
+        if (counting) return Promise.resolve((t.countQueue || []).shift() ?? { n: 0 });
+        if (denyProbe) return Promise.resolve(t.denyRow ?? null);
+        const next = (t.firstQueue || []).shift() ?? null;
+        // An Error entry models a failed read (r40 reconcile-reread tests).
+        if (next instanceof Error) return Promise.reject(next);
+        return Promise.resolve(next);
+      },
       update: (patch) => {
         calls.push({ table, op: 'update', arg: patch });
         // The r34 pre-send gate ({last_error: null, updated_at}) — and
@@ -364,6 +377,83 @@ describe('propagateCustomerEmailChange', () => {
     });
     const result = await propagateCustomerEmailChange({ before: BEFORE, after: AFTER }, conn);
     expect(result.pendingConfirmation).toBeUndefined();
+  });
+
+  test('newsletter: a linked subscriber at a PRIOR HOLD TARGET rotates to the corrected address', async () => {
+    // The resume adopt-links subscriber X at the held extraction address
+    // while customers.email says A — an oldEmail-only pass never selects
+    // X, stranding its tokens on the rejected mailbox and letting the
+    // next resume mint a SECOND subscriber at B (Codex #3084 r40). With
+    // no row at A or B, the prior-target row itself retargets — DEMOTED
+    // to pending (its DOI state belongs to whoever reads X, not B) with
+    // fresh tokens and the DOI re-send armed.
+    const conn = makeConn({
+      first_touch_holds: { rows: [{ id: 11, held_email: 'held.extract@example.com', call_log_id: 'call-x' }] },
+      newsletter_subscribers: {
+        firstQueue: [null, null], // no row at the stored old email, none at the corrected one
+        rows: [{ id: 902, email: 'held.extract@example.com', customer_id: 'cust-1', status: 'active', first_name: 'Sam' }],
+      },
+    });
+    const result = await propagateCustomerEmailChange({ before: HOLD_BEFORE, after: HOLD_AFTER }, conn);
+    const moved = conn.__updates('newsletter_subscribers')[0].arg;
+    expect(moved.email).toBe('samtypo@example.com');
+    expect(moved.status).toBe('pending');
+    expect(moved.confirmed_at).toBeNull();
+    expect(moved.confirmation_sent_at).toBeNull();
+    expect(moved.confirmation_token).toMatch(/^[0-9a-f-]{36}$/);
+    expect(moved.unsubscribe_token).toMatch(/^[0-9a-f-]{36}$/);
+    expect(result.pendingConfirmation).toMatchObject({ id: 902, email: 'samtypo@example.com', first_name: 'Sam' });
+    // Delivered engagement links to the rejected mailbox die with the move.
+    const rotationScope = conn.__calls.find((c) => c.table === 'newsletter_send_deliveries' && c.op === 'where');
+    expect(rotationScope.arg).toEqual({ subscriber_id: 902 });
+    // Ownership-safe: the selection is customer_id-bound, never email-only.
+    expect(conn.__calls.some((c) => c.table === 'newsletter_subscribers' && c.op === 'where'
+      && c.arg && c.arg.customer_id === 'cust-1')).toBe(true);
+    expect(conn.__calls.some((c) => c.table === 'newsletter_subscribers' && c.op === 'orWhereRaw'
+      && c.arg.bindings && c.arg.bindings[0] === 'held.extract@example.com')).toBe(true);
+  });
+
+  test('newsletter: a prior-target subscriber is deleted when the stored-email row already moved', async () => {
+    // The oldEmail pass retargeted the stored row to B — the adopt-linked
+    // prior-target row is the same person at a rejected address and goes
+    // away (deliveries rotated first) instead of colliding on a later
+    // correction (Codex #3084 r40).
+    const conn = makeConn({
+      first_touch_holds: { rows: [{ id: 11, held_email: 'held.extract@example.com', call_log_id: 'call-x' }] },
+      newsletter_subscribers: {
+        firstQueue: [
+          { id: 739, email: 'sam.typo@example.com', customer_id: 'cust-1', status: 'pending', confirmation_token: 'tok-1' },
+          null, // no row on the corrected spelling — the old row retargets
+        ],
+        rows: [{ id: 902, email: 'held.extract@example.com', customer_id: 'cust-1', status: 'pending' }],
+      },
+    });
+    await propagateCustomerEmailChange({ before: HOLD_BEFORE, after: HOLD_AFTER }, conn);
+    // The stored row moved to B; the prior-target row was deleted, not retargeted.
+    const nsUpdates = conn.__updates('newsletter_subscribers').map((u) => u.arg);
+    expect(nsUpdates.filter((a) => a.email === 'samtypo@example.com')).toHaveLength(1);
+    expect(conn.__calls.some((c) => c.table === 'newsletter_subscribers' && c.op === 'del')).toBe(true);
+    // BOTH rows' delivered engagement links rotated.
+    const rotationScopes = conn.__calls
+      .filter((c) => c.table === 'newsletter_send_deliveries' && c.op === 'where')
+      .map((c) => c.arg.subscriber_id);
+    expect(rotationScopes).toEqual(expect.arrayContaining([739, 902]));
+  });
+
+  test('newsletter: an UNSUBSCRIBED prior-target row keeps its opt-out — only its delivered links rotate', async () => {
+    const conn = makeConn({
+      first_touch_holds: { rows: [{ id: 11, held_email: 'held.extract@example.com', call_log_id: 'call-x' }] },
+      newsletter_subscribers: {
+        firstQueue: [null, null],
+        rows: [{ id: 903, email: 'held.extract@example.com', customer_id: 'cust-1', status: 'unsubscribed' }],
+      },
+    });
+    const result = await propagateCustomerEmailChange({ before: HOLD_BEFORE, after: HOLD_AFTER }, conn);
+    expect(conn.__calls.some((c) => c.table === 'newsletter_subscribers' && c.op === 'del')).toBe(false);
+    expect(conn.__updates('newsletter_subscribers')).toHaveLength(0);
+    expect(result.pendingConfirmation).toBeUndefined();
+    const rotationScope = conn.__calls.find((c) => c.table === 'newsletter_send_deliveries' && c.op === 'where');
+    expect(rotationScope.arg).toEqual({ subscriber_id: 903 });
   });
 
   test('booking-intent sync mirrors the sender predicate — NULL flags count as unsent', async () => {
@@ -1029,6 +1119,31 @@ describe('resendPendingConfirmation', () => {
     // The released settle landed; the pre-stamp was never lifted.
     const settles = conn.__updates('first_touch_holds').filter((u) => u.arg.status === 'released');
     expect(settles).toHaveLength(1);
+    const nsClears = conn.__updates('newsletter_subscribers').filter((u) => u.arg.confirmation_sent_at === null);
+    expect(nsClears).toHaveLength(0);
+  });
+
+  test('an unreadable reconcile parks the hold instead of assuming rollback', async () => {
+    // The commit errored after the provider accepted the message AND the
+    // reconcile reread failed (Codex #3084 r40): assuming rollback fences
+    // every settle on the pre-gate stamp — on a committed gate they all
+    // miss, and the stale reclaimer forces a duplicate DOI. The hold
+    // parks pending under the neutral ambiguity marker via an
+    // either-fence CAS and the settle loop skips it; the durable
+    // pre-stamp remains the delivery evidence for the retry.
+    sendConfirmationEmail.mockResolvedValueOnce(true);
+    const payload = { id: 811, email: 'samtypo@example.com', confirmation_token: 'tok-1', heldNewsletterHoldIds: ['hold-1'] };
+    const conn = makeConn({
+      ...matchRow(payload),
+      first_touch_holds: { firstQueue: [new Error('connection reset')] },
+    });
+    conn.__commitFailOnce = true;
+    const ok = await resendPendingConfirmation(payload, conn);
+    expect(ok).toBe(true); // the DOI went out
+    const holdWrites = conn.__updates('first_touch_holds').map((u) => u.arg);
+    expect(holdWrites.some((a) => a.status === 'pending' && a.last_error === 'doi_delivery_ambiguous')).toBe(true);
+    expect(holdWrites.some((a) => a.status === 'released')).toBe(false);
+    // The durable pre-stamp is never lifted — it is the delivery evidence.
     const nsClears = conn.__updates('newsletter_subscribers').filter((u) => u.arg.confirmation_sent_at === null);
     expect(nsClears).toHaveLength(0);
   });

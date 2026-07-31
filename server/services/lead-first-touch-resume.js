@@ -179,6 +179,30 @@ async function gateHoldForSend(holdId, claimStamp, dbh = db, targetEmailLc = nul
   return gated > 0 ? stamp : null;
 }
 
+// Reconcile-by-WRITE when the durable fence cannot be READ (Codex #3084
+// r40): after a commit error with the send already made, the row durably
+// carries EITHER the pre-gate stamp (rolled back) or the gate stamp
+// (committed, acknowledgment lost). When the reconcile reread ALSO fails,
+// picking either fence is a guess — and the wrong guess leaves the hold
+// 'releasing' on a stamp no settle matches, until the stale reclaimer
+// FORCES a duplicate DOI ten minutes later. This CAS matches whichever of
+// the two stamps the row actually carries and parks the hold explicitly
+// unresolved-but-retryable: pending, under a NEUTRAL marker that never
+// arms skipDedupe — the retry's dedupe guard then resolves delivery from
+// the durable confirmation_sent_at evidence (commit landed ⇒ the kept
+// pre-stamp settles it as recently-sent; rolled back ⇒ a fresh DOI goes
+// out, the r36 duplicate-beats-never-delivered trade). A deny, reclaim,
+// or newer stamp matches neither fence and the row stays its owner's.
+async function repenAmbiguousDelivery(holdId, fenceStamps, dbh = db) {
+  const fences = [...new Set((fenceStamps || []).filter(Boolean).map((s) => +new Date(s)))]
+    .map((ms) => new Date(ms));
+  if (!fences.length) return 0;
+  return dbh('first_touch_holds')
+    .where({ id: holdId, status: 'releasing' })
+    .whereIn('updated_at', fences)
+    .update({ status: 'pending', last_error: 'doi_delivery_ambiguous', updated_at: new Date() });
+}
+
 async function settleHold(holdId, patch, dbh, claimStamp = null) {
   // EVERY retryable settle (pending + a fallback marker) is deny-preserving
   // (Codex #3084 r22): a deny stamping after the pre-send read must not be
@@ -837,12 +861,32 @@ async function resumeHeldFirstTouch({
               // released and clears any restored marker with it.
               logger.warn(`[first-touch-resume] gate commit errored AFTER the send: ${gateErr.code || gateErr.name || 'db_error'} — reconciling the durable fence`);
               const gateStampCandidate = claimStamp; // assigned inside the transaction
-              let durableStamp = preGateStamp;
+              let durableStamp = null;
               try {
                 const row = await dbh('first_touch_holds').where({ id: hold.id }).first('updated_at');
-                if (row && +new Date(row.updated_at) === +gateStampCandidate) durableStamp = gateStampCandidate;
+                if (row) {
+                  durableStamp = +new Date(row.updated_at) === +gateStampCandidate
+                    ? gateStampCandidate
+                    : preGateStamp;
+                }
               } catch (rereadErr) {
-                logger.warn(`[first-touch-resume] fence reconcile read failed: ${rereadErr.code || rereadErr.name || 'db_error'} — assuming rollback`);
+                logger.warn(`[first-touch-resume] fence reconcile read failed: ${rereadErr.code || rereadErr.name || 'db_error'} — parking the hold unresolved`);
+              }
+              if (!durableStamp) {
+                // An UNREADABLE reconcile must not assume rollback (Codex
+                // #3084 r40): if the commit actually landed, pre-gate
+                // fenced settles all miss and the stale reclaimer forces
+                // a duplicate DOI. Park the hold on whichever fence it
+                // durably carries instead — pending, neutral marker — and
+                // let the retry's dedupe guard resolve delivery from the
+                // durable pre-stamp evidence.
+                try {
+                  await repenAmbiguousDelivery(hold.id, [preGateStamp, gateStampCandidate], dbh);
+                } catch (parkErr) {
+                  logger.warn(`[first-touch-resume] ambiguous-delivery park failed: ${parkErr.code || parkErr.name || 'db_error'} (stale-claim window will reclaim)`);
+                }
+                result.skipped = result.skipped || 'doi_state_unverified';
+                continue;
               }
               claimStamp = durableStamp;
               claimStamps.set(hold.id, durableStamp);
@@ -1152,6 +1196,10 @@ async function runOnePostCommitResume(payload, holdIds, dbh, claims = new Map())
     // call rolls the DB back to these stamps.
     const preGateClaims = new Map(claims);
     const gatedStamps = new Map();
+    // Holds parked by the r40 unreadable-reconcile path — the normal
+    // settle loop below must not touch them (their claims are gone, and a
+    // null fence would write UNFENCED over the parked state).
+    const fenceUnresolved = new Set();
     if (holdIds.length) {
       try {
         await dbh.transaction(async (trx) => {
@@ -1205,7 +1253,22 @@ async function runOnePostCommitResume(payload, holdIds, dbh, claims = new Map())
                 const row = await dbh('first_touch_holds').where({ id: holdId }).first('updated_at');
                 if (row && +new Date(row.updated_at) === +gated) durable = gated;
               } catch (rereadErr) {
-                logger.warn(`[first-touch-resume] fence reconcile read failed for hold ${holdId}: ${rereadErr.code || rereadErr.name || 'db_error'} — assuming rollback`);
+                // An UNREADABLE reconcile must not assume rollback (Codex
+                // #3084 r40): if the commit actually landed, pre-gate
+                // fenced settles all miss and the stale reclaimer forces
+                // a duplicate DOI. Park the hold on whichever fence it
+                // durably carries — pending, neutral marker — and keep it
+                // out of the settle loop below; the retry's dedupe guard
+                // resolves delivery from the durable pre-stamp evidence.
+                logger.warn(`[first-touch-resume] fence reconcile read failed for hold ${holdId}: ${rereadErr.code || rereadErr.name || 'db_error'} — parking the hold unresolved`);
+                try {
+                  await repenAmbiguousDelivery(holdId, [durable, gated], dbh);
+                } catch (parkErr) {
+                  logger.warn(`[first-touch-resume] hold ${holdId} ambiguous-delivery park failed: ${parkErr.code || parkErr.name || 'db_error'} (stale-claim window will reclaim)`);
+                }
+                fenceUnresolved.add(holdId);
+                claims.delete(holdId);
+                continue;
               }
             }
             if (durable) claims.set(holdId, durable);
@@ -1229,6 +1292,7 @@ async function runOnePostCommitResume(payload, holdIds, dbh, claims = new Map())
       outcome = await runNewsletterResume(sendPayload, dbh, { skipDedupe });
     }
     for (const holdId of holdIds) {
+      if (fenceUnresolved.has(holdId)) continue;
       if (newsletterDelivered(outcome)) {
         const hold = await dbh('first_touch_holds').where({ id: holdId }).first('held_drip', 'released_drip');
         const dripSettled = !hold || !hold.held_drip || hold.released_drip;
@@ -1584,4 +1648,5 @@ module.exports = {
   renewClaim,
   fencedHoldWrite,
   gateHoldForSend,
+  repenAmbiguousDelivery,
 };

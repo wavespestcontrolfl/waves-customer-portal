@@ -564,6 +564,29 @@ describe('resumeHeldFirstTouch (ledger release engine)', () => {
     expect(mockHoldUpdates.at(-1)).toMatchObject({ status: 'released', released_newsletter: true });
   });
 
+  test('an UNREADABLE reconcile parks the hold on either fence instead of assuming rollback', async () => {
+    // The commit errored after the send AND the reconcile reread failed
+    // (Codex #3084 r40): assuming rollback would fence every settle on the
+    // pre-gate stamp — if the commit actually landed, they all miss and
+    // the stale reclaimer forces a duplicate DOI. The worker instead parks
+    // the hold via a CAS matching WHICHEVER fence the row durably carries:
+    // pending, under a neutral marker that never arms skipDedupe, so the
+    // retry's dedupe guard resolves delivery from the durable pre-stamp.
+    mockHold = baseHold({ held_drip: false });
+    mockTrxCommitFailOnce = true;
+    mockHoldFirstQueue = [
+      { held_email: 'confirmed@example.com', last_error: null }, // pre-send re-read
+      new Error('connection reset'),                             // reconcile reread fails
+    ];
+    const res = await resumeHeldFirstTouch({ callLogId: 'call-1' });
+    expect(res.skipped).toBe('doi_state_unverified');
+    expect(mockNewsletter).toHaveBeenCalledTimes(1); // the send DID go out
+    expect(mockHoldUpdates.at(-1)).toMatchObject({ status: 'pending', last_error: 'doi_delivery_ambiguous' });
+    // Never a blind settle on a guessed fence, never the force-resend marker.
+    expect(mockHoldUpdates.some((u) => u.status === 'released')).toBe(false);
+    expect(mockHoldUpdates.some((u) => u.last_error === 'newsletter_doi_not_confirmed')).toBe(false);
+  });
+
   test('the pre-send gate refuses an UNMARKED hold too — a denial after the claim never sends', async () => {
     // The r31–r33 layout fenced only MARKED holds between the renewal and
     // the send; the r34 gate runs the same last-instant CAS for every
@@ -896,6 +919,26 @@ describe('resumeHeldNewsletterPostCommit failure paths', () => {
     const outcome = await resumeHeldNewsletterPostCommit({ holdId: 'hold-1', customerId: 'cust-1', email: 'ok@example.com' });
     expect(outcome).toMatchObject({ subscribed: true });
     expect(mockHoldUpdates.at(-1)).toMatchObject({ released_newsletter: true, status: 'released' });
+  });
+
+  test('post-commit: an unreadable reconcile parks the hold and skips its settles', async () => {
+    // Commit error after the send AND the per-hold reconcile reread fails
+    // (Codex #3084 r40): instead of assuming rollback (whose pre-gate
+    // fenced settles all miss on a committed gate, handing the hold to
+    // the stale reclaimer's forced resend), the hold parks pending under
+    // the neutral ambiguity marker via an either-fence CAS and stays out
+    // of the settle loop entirely.
+    mockHold = { held_drip: false, released_drip: false };
+    mockTrxCommitFailOnce = true;
+    mockHoldFirstQueue = [
+      { held_email: 'ok@example.com', last_error: null }, // target re-read
+      new Error('connection reset'),                      // reconcile reread fails
+    ];
+    await resumeHeldNewsletterPostCommit({ holdId: 'hold-1', customerId: 'cust-1', email: 'ok@example.com' });
+    expect(mockNewsletter).toHaveBeenCalledTimes(1); // the send DID go out
+    expect(mockHoldUpdates.at(-1)).toMatchObject({ status: 'pending', last_error: 'doi_delivery_ambiguous' });
+    expect(mockHoldUpdates.some((u) => u.status === 'released')).toBe(false);
+    expect(mockHoldUpdates.some((u) => u.last_error === 'newsletter_doi_not_confirmed')).toBe(false);
   });
 
   test('payloads for the same recipient coalesce into ONE DOI that settles every hold', async () => {

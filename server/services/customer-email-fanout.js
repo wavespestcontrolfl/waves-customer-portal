@@ -139,6 +139,11 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
     heldCallIds = [...new Set(lockedHolds.map((r) => r.call_log_id).filter(Boolean))];
   }
 
+  // Set when the oldEmail newsletter pass below leaves a subscriber row at
+  // the corrected address (retarget or merge) — the r40 prior-target pass
+  // reads it to avoid a redundant existence check.
+  let subscriberAtCorrectedAddress = false;
+
   // Snapshot copies exist only when there was an old value to copy.
   if (oldEmail) {
     counts.leads += await conn('leads')
@@ -352,6 +357,84 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
             confirmation_token: freshConfirmationToken,
           };
         }
+      }
+      // Both branches leave a subscriber at the corrected address (the
+      // retarget moved oldSub there; the merge kept targetSub).
+      subscriberAtCorrectedAddress = true;
+    }
+  }
+
+  // The hold lane can ADOPT-LINK a subscriber at a held extraction address
+  // the stored email never matched (Codex #3084 r40): a resumed DOI creates
+  // subscriber X and links it to this customer while customers.email still
+  // says A. The oldEmail-keyed pass above never selects X, so a later
+  // correction A→B would strand X's confirmation/unsubscribe tokens on the
+  // operator-rejected mailbox and let the next resume mint a SECOND
+  // subscriber at B. Ownership-safe by construction: customer_id-bound
+  // selection only — an unlinked or foreign-owned row at a prior target is
+  // never touched (the extraction can be a stranger's real address).
+  if (priorHoldTargets.length) {
+    const priorTargetSubs = await conn('newsletter_subscribers')
+      .where({ customer_id: customerId })
+      .where(function atPriorTargets() {
+        for (const target of priorHoldTargets) this.orWhereRaw('LOWER(email) = ?', [target]);
+      })
+      .select('*');
+    if (priorTargetSubs.length) {
+      // Bearer links already DELIVERED to the prior targets die regardless
+      // of what happens to each row (the r18 rule — a rejected extraction
+      // can be a real third party's inbox).
+      for (const sub of priorTargetSubs) {
+        counts.newsletterDeliveries += await conn('newsletter_send_deliveries')
+          .where({ subscriber_id: sub.id })
+          .update({ engagement_token: conn.raw('gen_random_uuid()'), updated_at: now });
+      }
+      // 'unsubscribed' (or any other status) is an opt-out record — never
+      // retargeted, never deleted; only its delivered links rotate above.
+      const eligible = priorTargetSubs.filter((s) => ['pending', 'active'].includes(String(s.status || '')));
+      let hasRowAtNewEmail = subscriberAtCorrectedAddress;
+      if (!hasRowAtNewEmail && eligible.length) {
+        hasRowAtNewEmail = Boolean(await conn('newsletter_subscribers')
+          .whereRaw('LOWER(email) = ?', [newEmail])
+          .first());
+      }
+      let retargetSub = null;
+      if (!hasRowAtNewEmail && eligible.length) {
+        retargetSub = eligible.find((s) => String(s.status || '') === 'pending') || eligible[0];
+      }
+      // Redundant rows (same person, rejected addresses) go away rather
+      // than colliding with the unique index on a later correction.
+      for (const sub of eligible) {
+        if (retargetSub && sub.id === retargetSub.id) continue;
+        counts.newsletter += await conn('newsletter_subscribers').where({ id: sub.id }).del();
+      }
+      if (retargetSub) {
+        const freshConfirmationToken = randomUUID();
+        counts.newsletter += await conn('newsletter_subscribers')
+          .where({ id: retargetSub.id })
+          .update({
+            email: newEmail,
+            confirmation_token: freshConfirmationToken,
+            unsubscribe_token: randomUUID(),
+            // Unlike the stored-address move above, a prior-target row's
+            // DOI state belongs to the REJECTED mailbox: an 'active' row
+            // here was confirmed by whoever reads X, not by the corrected
+            // address — demote to pending and let the corrected inbox
+            // confirm for itself.
+            status: 'pending',
+            confirmed_at: null,
+            confirmation_sent_at: null,
+            updated_at: now,
+          });
+        if (!pendingConfirmation) {
+          pendingConfirmation = {
+            id: retargetSub.id,
+            email: newEmail,
+            first_name: retargetSub.first_name || null,
+            confirmation_token: freshConfirmationToken,
+          };
+        }
+        subscriberAtCorrectedAddress = true;
       }
     }
   }
@@ -671,7 +754,7 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
   // this callback still owns the row's claim — a delay past the stale-claim
   // window hands reclaimed rows (sends AND settles) to the sweep.
   const holdClaims = { ...(pendingConfirmation.heldNewsletterHoldClaims || {}) };
-  const { renewClaim, fencedHoldWrite, gateHoldForSend } = require('./lead-first-touch-resume');
+  const { renewClaim, fencedHoldWrite, gateHoldForSend, repenAmbiguousDelivery } = require('./lead-first-touch-resume');
   const fenceOf = (holdId) => holdClaims[holdId] || null;
   // The captured payload can be SUPERSEDED before this callback runs
   // (Codex #3084 r18): a second correction committed in the gap rotates the
@@ -885,6 +968,10 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
   // not on the rolled-back gate stamps.
   const preGateClaims = { ...holdClaims };
   const gatedStamps = {};
+  // Holds parked by the r40 unreadable-reconcile path — the post-send
+  // settle loop below must not touch them (their claims are gone, and a
+  // null fence would write UNFENCED over the parked state).
+  const fenceUnresolved = new Set();
   if (holdIds.length) {
     try {
       await conn.transaction(async (trx) => {
@@ -934,7 +1021,22 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
               const row = await conn('first_touch_holds').where({ id: holdId }).first('updated_at');
               if (row && +new Date(row.updated_at) === +gated) durable = gated;
             } catch (rereadErr) {
-              logger.warn(`[email-fanout] fence reconcile read failed for hold ${holdId}: ${rereadErr.code || rereadErr.name || 'db_error'} — assuming rollback`);
+              // An UNREADABLE reconcile must not assume rollback (Codex
+              // #3084 r40): if the commit actually landed, pre-gate fenced
+              // settles all miss and the stale reclaimer forces a
+              // duplicate DOI. Park the hold on whichever fence it durably
+              // carries — pending, neutral marker — and keep it out of the
+              // settle loop below; the retry's dedupe guard resolves
+              // delivery from the durable pre-stamp evidence.
+              logger.warn(`[email-fanout] fence reconcile read failed for hold ${holdId}: ${rereadErr.code || rereadErr.name || 'db_error'} — parking the hold unresolved`);
+              try {
+                await repenAmbiguousDelivery(holdId, [durable, gated], conn);
+              } catch (parkErr) {
+                logger.warn(`[email-fanout] hold ${holdId} ambiguous-delivery park failed: ${parkErr.code || parkErr.name || 'db_error'} (stale-claim window will reclaim)`);
+              }
+              fenceUnresolved.add(holdId);
+              delete holdClaims[holdId];
+              continue;
             }
           }
           if (durable === undefined) delete holdClaims[holdId];
@@ -1049,6 +1151,7 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
   // mid-callback) exactly like the resume paths (Codex #3084 r19).
   const { repenIfWorkMergedDuringClaim } = require('./lead-first-touch-resume');
   for (const holdId of holdIds) {
+    if (fenceUnresolved.has(holdId)) continue;
     try {
       const hold = await conn('first_touch_holds').where({ id: holdId }).first('held_drip', 'released_drip');
       const dripSettled = !hold || !hold.held_drip || hold.released_drip;
