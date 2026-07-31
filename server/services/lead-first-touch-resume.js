@@ -141,6 +141,36 @@ function fencedHoldWrite(qb, claimStamp) {
   return qb;
 }
 
+// The pre-send GATE (Codex #3084 r34): the LAST hold write before an
+// external send, for marked and unmarked holds alike. One CAS atomically
+// (1) validates the fence — a denial or reclaim bumped updated_at, so the
+// write misses; (2) refuses a denied row outright (belt: every deny write
+// today bumps the stamp, so the fence alone would catch it); (3) consumes
+// any force-resend marker (last_error → null), handing exactly one
+// incarnation the skipDedupe ticket (r31) with no gap between the consume
+// and the fence check (the r33 zero-row rule, now for every hold — the
+// r31–r33 layout gated only MARKED holds, leaving ordinary holds with no
+// fenced write between the lease renewal and the send, so a denial landing
+// in that window still mailed the rejected address); and (4) extends the
+// lease so the sweep cannot reclaim mid-send. Returns the fresh fence
+// stamp, or null — the row belongs to a denier or reclaimer; walk away.
+// Stamp-less legacy payloads gate unfenced (the deny guard still applies).
+// Throws propagate: group callers run their gates all-or-nothing in one
+// transaction and abort the whole send.
+async function gateHoldForSend(holdId, claimStamp, dbh = db) {
+  const stamp = new Date();
+  const gated = await fencedHoldWrite(
+    dbh('first_touch_holds')
+      .where({ id: holdId })
+      .where(function notDenied() {
+        this.whereNull('last_error').orWhereNot('last_error', 'email_denied_await_correction');
+      }),
+    claimStamp,
+  )
+    .update({ last_error: null, updated_at: stamp });
+  return gated > 0 ? stamp : null;
+}
+
 async function settleHold(holdId, patch, dbh, claimStamp = null) {
   // EVERY retryable settle (pending + a fallback marker) is deny-preserving
   // (Codex #3084 r22): a deny stamping after the pre-send read must not be
@@ -660,75 +690,44 @@ async function resumeHeldFirstTouch({
           // undelivered (re-pends below) and log only a sanitized code (a
           // unique-violation message can echo the subscriber email),
           // Codex #3084 r10.
-          // Lease renewal immediately before the DOI (Codex #3084 r27,
-          // CAS since r28 — a read-only check races the sweep's reclaim):
-          // the enroll above can be slow, and this claim's snapshot may
-          // carry the skipDedupe marker — a worker that lost the row to
-          // the sweep's reclaim would bypass the dedupe guard and send a
-          // SECOND confirmation. The atomic bump also restarts the
-          // stale-claim window, so the sweep cannot reclaim mid-send. A
-          // lost lease walks away; the drip work already done is recorded
-          // by the reclaimer's own release (the enroll is idempotent by
-          // template+customer).
-          const renewedStamp = await renewClaim(hold.id, claimStamp, dbh);
-          if (!renewedStamp) {
-            logger.info('[first-touch-resume] claim lost before DOI send — abandoning hold untouched');
-            result.skipped = result.skipped || 'claim_lost';
-            continue;
-          }
-          claimStamp = renewedStamp;
-          claimStamps.set(hold.id, renewedStamp);
-          // CONSUME the force-resend marker before the external send
-          // (Codex #3084 r31): a worker suspended AFTER a skipDedupe send
-          // but before its settle leaves the marker on the row — the
-          // sweep's reclaimer would honor it and bypass the durable
-          // confirmation_sent_at guard, mailing a second DOI. The fenced
-          // clear (no updated_at bump — the lease stays intact) hands
-          // exactly one incarnation the skipDedupe ticket; everyone else
-          // falls back to the dedupe guard, and a send FAILURE re-arms
-          // the marker through sendFailedMarkerFor below.
+          // Pre-send GATE (Codex #3084 r34, superseding the r27/r28
+          // renewal + r31–r33 consume pair): the enroll above can be
+          // slow, so ONE CAS immediately before the DOI validates the
+          // fence, refuses a denial, consumes any force-resend marker,
+          // and extends the lease — for marked and unmarked holds alike
+          // (the r33 layout left ordinary holds with no fenced write
+          // between the renewal and the send, so a denial landing in
+          // that gap still mailed the rejected address). A gate that
+          // misses walks away without writes: the row belongs to its
+          // denier or reclaimer, and the drip work already done is
+          // recorded (the enroll is idempotent by template+customer).
           let skipDedupe = false;
-          if (hold.last_error === 'newsletter_doi_not_confirmed') {
-            try {
-              const consumed = await dbh('first_touch_holds')
-                .where({
-                  id: hold.id,
-                  status: 'releasing',
-                  updated_at: new Date(claimStamp),
-                  last_error: 'newsletter_doi_not_confirmed',
-                })
-                .update({ last_error: null });
-              if (!consumed) {
-                // Zero rows on a hold the claim snapshot showed MARKED
-                // (Codex #3084 r33): the lease was renewed moments ago, so
-                // the miss means a denial or reclaim bumped the row since —
-                // degrading to the dedupe guard could settle on a stale
-                // stamp, and a guard-passing send would mail a rejected
-                // address. Abort; the plain re-pend no-ops if the fence is
-                // gone, leaving the row exactly as the denier/reclaimer
-                // stamped it.
-                logger.info('[first-touch-resume] resend-marker consume fenced out — abandoning hold');
-                await fencedHoldWrite(dbh('first_touch_holds').where({ id: hold.id }), claimStamp)
-                  .update({ status: 'pending', updated_at: new Date() });
-                result.skipped = result.skipped || 'claim_lost';
-                continue;
-              }
-              skipDedupe = true;
-            } catch (consumeErr) {
-              // ABORT, never degrade to the dedupe guard (Codex #3084
-              // r32): this marker means a prior send FAILED and its
-              // pre-send confirmation_sent_at cleanup may also have
-              // failed — a guard run against that surviving stamp would
-              // report confirmation_recently_sent and settle a hold whose
-              // DOI never delivered. The plain fenced re-pend keeps
-              // last_error untouched, so the marker survives for the
-              // retry's consume.
-              logger.warn(`[first-touch-resume] resend-marker consume failed: ${consumeErr.code || consumeErr.name || 'db_error'} — hold stays pending, marker intact`);
-              await fencedHoldWrite(dbh('first_touch_holds').where({ id: hold.id }), claimStamp)
-                .update({ status: 'pending', updated_at: new Date() });
-              result.skipped = result.skipped || 'doi_state_unverified';
+          try {
+            const gateStamp = await gateHoldForSend(hold.id, claimStamp, dbh);
+            if (!gateStamp) {
+              logger.info('[first-touch-resume] pre-send gate refused (deny/reclaim) — abandoning hold untouched');
+              result.skipped = result.skipped || 'claim_lost';
               continue;
             }
+            claimStamp = gateStamp;
+            claimStamps.set(hold.id, gateStamp);
+            // The gate consumed atomically; the claim snapshot says
+            // whether a marker was there to consume — that incarnation
+            // holds the skipDedupe ticket (r31). A send failure re-arms
+            // it via sendFailedMarkerFor below.
+            skipDedupe = hold.last_error === 'newsletter_doi_not_confirmed';
+          } catch (gateErr) {
+            // ABORT, never degrade to the dedupe guard (Codex #3084
+            // r32): an unverifiable gate may have left the marker armed,
+            // and a prior failed send's surviving confirmation_sent_at
+            // stamp would make the guard settle a hold whose DOI never
+            // delivered. The plain fenced re-pend keeps last_error
+            // untouched, so the marker survives for the retry.
+            logger.warn(`[first-touch-resume] pre-send gate failed: ${gateErr.code || gateErr.name || 'db_error'} — hold stays pending, marker intact`);
+            await fencedHoldWrite(dbh('first_touch_holds').where({ id: hold.id }), claimStamp)
+              .update({ status: 'pending', updated_at: new Date() });
+            result.skipped = result.skipped || 'doi_state_unverified';
+            continue;
           }
           let outcome = null;
           try {
@@ -991,76 +990,42 @@ async function runOnePostCommitResume(payload, holdIds, dbh, claims = new Map())
       logger.info('[first-touch-resume] post-commit target suppressed — hold(s) stay pending');
       return { skipped: 'email_suppressed' };
     }
-    // Lease renewal immediately before the send (Codex #3084 r27, CAS
-    // since r28): a callback delayed past the stale-claim window lost its
-    // rows to the sweep's reclaim, whose own release owns the send — and
-    // the group's skipDedupe marker would bypass the dedupe guard and
-    // double-mail. The send is shared across the WHOLE group, so ONE
-    // reclaimed sibling abandons it (r28): the reclaimer may already have
-    // sent this exact DOI, and a partial group proceeding would mail it
-    // again. Holds still owned re-pend (fenced, deny-preserving) so the
-    // sweep retries them promptly under the dedupe guard.
-    if (holdIds.length && claims.size) {
-      let anyLost = false;
-      for (const holdId of holdIds) {
-        const stamp = fenceOf(holdId);
-        if (!stamp) continue; // legacy stamp-less payload — unfenced
-        const renewed = await renewClaim(holdId, stamp, dbh);
-        if (renewed) claims.set(holdId, renewed);
-        else anyLost = true;
-      }
-      if (anyLost) {
-        logger.info('[first-touch-resume] post-commit claim(s) lost to a reclaim — abandoning the group send');
-        for (const holdId of holdIds) {
-          try {
-            await repenHoldPreservingDeny(holdId, 'claim_lost', dbh, fenceOf(holdId));
-          } catch (repenErr) {
-            logger.warn(`[first-touch-resume] hold ${holdId} re-pend failed: ${repenErr.code || repenErr.name || 'db_error'} (stale-claim window will reclaim)`);
-          }
-        }
-        return { skipped: 'claim_lost' };
-      }
-    }
-    // CONSUME the group's force-resend marker before the send (Codex #3084
-    // r31): a callback suspended after its skipDedupe send but before the
-    // settles leaves the marker for the sweep's reclaimer, which would
-    // bypass the dedupe guard and double-mail. Exactly one incarnation
-    // wins the fenced clear; a send failure below re-arms the marker.
-    // A consume that THROWS aborts the whole group (Codex #3084 r32):
-    // degrading to the dedupe guard would trust a confirmation_sent_at
-    // stamp that the marker's failed-send cleanup may have left behind —
-    // settling holds whose DOI never delivered. The plain fenced re-pends
-    // keep last_error untouched, so both the marker and any deny survive
-    // for the retry.
-    // A clear of ZERO rows aborts too (Codex #3084 r33): the marked set
-    // was read above and the lease renewed just now, so a miss means a
-    // denial or reclaim bumped the row in between — proceeding would mail
-    // a rejected or reclaimed address. And the clears are ALL-OR-NOTHING
-    // (r33): one transaction, so a mid-group failure rolls the
-    // already-cleared siblings back — a half-consumed group would leave
-    // the retry's dedupe guard trusting a stale stamp with no
-    // force-resend ticket left.
+    // Pre-send GATE for the whole group (Codex #3084 r34, superseding the
+    // r27/r28 renewal loop and the r31–r33 marker consume): one fenced CAS
+    // per hold — validate the fence, refuse a denial, consume any marker,
+    // extend the lease — run ALL-OR-NOTHING in one transaction as the last
+    // hold write before the send. The r33 layout gated only MARKED holds,
+    // so a denial landing after the renewal on an ordinary hold still
+    // mailed the rejected address. The send is shared across the WHOLE
+    // group, so ONE refused sibling aborts it (r28): its denier or
+    // reclaimer owns the send. The rollback restores every marker already
+    // consumed (r33), and the plain fenced re-pends keep last_error
+    // untouched — markers and deny stamps survive for the retry (the old
+    // renewal-abort's deny-preserving re-pend could bury a sibling's
+    // force-resend marker under 'claim_lost'; plain re-pends cannot).
+    // Legacy stamp-less payloads gate unfenced (deny guard only).
     let skipDedupe = false;
-    if (holdWasDoiUnconfirmed) {
+    if (holdIds.length) {
       try {
+        const gatedStamps = new Map();
         await dbh.transaction(async (trx) => {
-          for (const holdId of markedHoldIds) {
-            const consumed = await fencedHoldWrite(
-              trx('first_touch_holds')
-                .where({ id: holdId, last_error: 'newsletter_doi_not_confirmed' }),
-              fenceOf(holdId),
-            )
-              .update({ last_error: null });
-            if (!consumed) {
-              const lost = new Error(`resend-marker consume fenced out for hold ${holdId}`);
-              lost.code = 'consume_fenced_out';
+          for (const holdId of holdIds) {
+            const gated = await gateHoldForSend(holdId, fenceOf(holdId), trx);
+            if (!gated) {
+              const lost = new Error(`pre-send gate refused for hold ${holdId}`);
+              lost.code = 'send_gate_lost';
               throw lost;
             }
+            gatedStamps.set(holdId, gated);
           }
         });
-        skipDedupe = true;
-      } catch (consumeErr) {
-        logger.warn(`[first-touch-resume] post-commit resend-marker consume failed: ${consumeErr.code || consumeErr.name || 'db_error'} — aborting the group send, markers intact`);
+        // Fresh stamps only after the commit — an abort rolls the DB back
+        // to the OLD stamps, and the re-pends below must fence on those.
+        for (const [holdId, stamp] of gatedStamps) claims.set(holdId, stamp);
+        skipDedupe = holdWasDoiUnconfirmed;
+      } catch (gateErr) {
+        const lostToOwner = gateErr.code === 'send_gate_lost';
+        logger.warn(`[first-touch-resume] post-commit pre-send gate ${lostToOwner ? 'refused' : 'failed'}: ${gateErr.code || gateErr.name || 'db_error'} — aborting the group send, markers intact`);
         for (const holdId of holdIds) {
           try {
             await fencedHoldWrite(dbh('first_touch_holds').where({ id: holdId }), fenceOf(holdId))
@@ -1069,7 +1034,7 @@ async function runOnePostCommitResume(payload, holdIds, dbh, claims = new Map())
             logger.warn(`[first-touch-resume] hold ${holdId} re-pend failed: ${repenErr.code || repenErr.name || 'db_error'} (stale-claim window will reclaim)`);
           }
         }
-        return { skipped: 'doi_state_unverified' };
+        return { skipped: lostToOwner ? 'claim_lost' : 'doi_state_unverified' };
       }
     }
     const outcome = await runNewsletterResume(sendPayload, dbh, { skipDedupe });
@@ -1391,4 +1356,5 @@ module.exports = {
   // lease.
   renewClaim,
   fencedHoldWrite,
+  gateHoldForSend,
 };

@@ -123,17 +123,20 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
   // just rejected. Every distinct prior hold target joins the enrollment
   // sweeps' match set.
   let priorHoldTargets = [];
+  let heldCallIds = [];
   if (await conn.schema.hasTable('first_touch_holds')) {
     const lockedHolds = await conn('first_touch_holds')
       .where({ customer_id: customerId })
       .forUpdate()
-      .select('id', 'held_email');
+      .select('id', 'held_email', 'call_log_id');
     const newEmailLc = newEmail.toLowerCase();
     priorHoldTargets = [...new Set(
       lockedHolds
         .map((r) => String(r.held_email || '').trim().toLowerCase())
         .filter((e) => e && e !== newEmailLc && e !== oldEmail),
     )];
+    // The held calls also drive the r34 review-evidence writes below.
+    heldCallIds = [...new Set(lockedHolds.map((r) => r.call_log_id).filter(Boolean))];
   }
 
   // Snapshot copies exist only when there was an old value to copy.
@@ -385,6 +388,53 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
     }
   }
 
+  // A correction is itself the ANSWER to a dismissed read-back card (Codex
+  // #3084 r34): dismissal is "not actionable", so the ledger sweep's
+  // latest-card-resolved rule deliberately excludes those calls — but once
+  // the operator asserts the address, a transient release failure (the
+  // resume below re-pending, or its deferred DOI callback failing) would
+  // strand the retargeted hold forever: this correction is already
+  // consumed, no open card is left to resolve, and the sweep never admits
+  // the call. Flip the HELD calls' dismissed email cards to resolved —
+  // documenting the supersession — so the sweep owns the retry. A held
+  // call with NO email card at all (the processor's card insert failed)
+  // gets a synthetic RESOLVED card for the same reason: the operator's
+  // correction IS the review. Scoped to calls with hold rows; both writes
+  // ride the correction transaction.
+  if (heldCallIds.length) {
+    counts.reviewCards += await conn('triage_items')
+      .whereIn('call_log_id', heldCallIds)
+      .whereIn('reason_code', EMAIL_REVIEW_REASON_CODES)
+      .where({ status: 'dismissed' })
+      .update({
+        status: 'resolved',
+        resolution_note: `Email corrected on the customer record after dismissal (${String(source).slice(0, 100)})`,
+        resolved_at: now,
+        updated_at: now,
+      });
+    const carded = new Set((await conn('triage_items')
+      .whereIn('call_log_id', heldCallIds)
+      .whereIn('reason_code', EMAIL_REVIEW_REASON_CODES)
+      .select('call_log_id')).map((r) => r.call_log_id));
+    const cardless = heldCallIds.filter((id) => !carded.has(id));
+    if (cardless.length) {
+      const { buildTriageItem } = require('./call-routing-gates');
+      await conn('triage_items').insert(cardless.map((callId) => ({
+        ...buildTriageItem({
+          callLogId: callId,
+          flag: 'email_unverified',
+          extraction: null,
+          severity: 'advisory',
+          extraPayload: { hold_reason: 'email_corrected_no_card' },
+        }),
+        status: 'resolved',
+        resolution_note: `Email corrected on the customer record; no read-back card existed (${String(source).slice(0, 100)})`,
+        resolved_at: now,
+        updated_at: now,
+      })));
+    }
+  }
+
   // A correction that answers a call's read-back BEFORE the processor's
   // Step-6 hold write must still leave its answer in the ledger (Codex
   // #3084 r9): in that window the card exists but no first_touch_holds
@@ -566,7 +616,7 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
   // this callback still owns the row's claim — a delay past the stale-claim
   // window hands reclaimed rows (sends AND settles) to the sweep.
   const holdClaims = { ...(pendingConfirmation.heldNewsletterHoldClaims || {}) };
-  const { renewClaim, fencedHoldWrite } = require('./lead-first-touch-resume');
+  const { renewClaim, fencedHoldWrite, gateHoldForSend } = require('./lead-first-touch-resume');
   const fenceOf = (holdId) => holdClaims[holdId] || null;
   // The captured payload can be SUPERSEDED before this callback runs
   // (Codex #3084 r18): a second correction committed in the gap rotates the
@@ -751,55 +801,43 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
   // only (Codex #3084 r16): retries treat that marker as "must actually
   // re-send" (skipDedupe), so a post-send bookkeeping failure marked the
   // same way would double-mail a delivered confirmation.
-  // CONSUME any deduped hold's force-resend marker immediately before the
-  // send (Codex #3084 r31): a callback suspended after a successful send
-  // but before its settles leaves the marker for the sweep's reclaimer,
-  // which would bypass the dedupe guard and mail the DOI again. Placed
-  // AFTER the pre-stamp so its failure path (which never sent) keeps the
-  // marker; a send failure below re-arms it via sendFailedMarkerFor.
-  // A consume that THROWS aborts the send (Codex #3084 r32): proceeding
-  // would leave the marker armed while this send goes out — recreating
-  // the duplicate-on-reclaim window the consume exists to close. The
-  // plain fenced re-pends keep last_error untouched (marker and deny
-  // survive); the sweep's retry re-runs the whole release, marker-forced.
-  // A consume that clears ZERO rows aborts too (Codex #3084 r33): the
-  // marked set is read just below, so a fenced clear missing means a
-  // denial or reclaim bumped the row between the lease renewal above and
-  // this write — proceeding would mail the operator-rejected (or
-  // reclaimed) address. And the clears are ALL-OR-NOTHING (r33): they run
-  // in one transaction, so a mid-group failure rolls the already-cleared
-  // siblings back — an abort with a marker half-consumed would leave the
-  // next release trusting the pre-stamp with no force-resend ticket left,
-  // settling holds whose DOI never delivered.
-  let consumeFailed = false;
-  try {
-    const markedIds = (await conn('first_touch_holds')
-      .whereIn('id', holdIds)
-      .where({ last_error: 'newsletter_doi_not_confirmed' })
-      .select('id')).map((r) => r.id);
-    if (markedIds.length) {
+  // Pre-send GATE (Codex #3084 r34, superseding the r31–r33 marker
+  // consume): one fenced CAS per deduped hold — validate the fence, refuse
+  // a denial, consume any force-resend marker, extend the lease — for
+  // EVERY hold, marked or not, run ALL-OR-NOTHING in one transaction as
+  // the last hold write before the send. The r33 layout gated only marked
+  // holds, so a denial landing between the renewal above and the send on
+  // an ordinary hold still mailed the operator-rejected address. Placed
+  // AFTER the pre-stamp so the abort path (which never sent) lifts it
+  // (r33); a send failure below re-arms the marker via sendFailedMarkerFor.
+  // The rollback restores every marker already consumed, and the plain
+  // fenced re-pends keep last_error untouched — markers and deny stamps
+  // survive for the retry.
+  let gateFailed = false;
+  if (holdIds.length) {
+    try {
+      const gatedStamps = {};
       await conn.transaction(async (trx) => {
-        for (const holdId of markedIds) {
-          const cleared = await fencedHoldWrite(
-            trx('first_touch_holds')
-              .where({ id: holdId, last_error: 'newsletter_doi_not_confirmed' }),
-            fenceOf(holdId),
-          )
-            .update({ last_error: null });
-          if (!cleared) {
-            const lost = new Error(`resend-marker consume fenced out for hold ${holdId}`);
-            lost.code = 'consume_fenced_out';
+        for (const holdId of holdIds) {
+          const gated = await gateHoldForSend(holdId, fenceOf(holdId), trx);
+          if (!gated) {
+            const lost = new Error(`pre-send gate refused for hold ${holdId}`);
+            lost.code = 'send_gate_lost';
             throw lost;
           }
+          gatedStamps[holdId] = gated;
         }
       });
+      // Fresh stamps only after the commit — an abort rolls the DB back to
+      // the OLD stamps, and the re-pends below must fence on those.
+      Object.assign(holdClaims, gatedStamps);
+    } catch (gateErr) {
+      gateFailed = true;
+      logger.warn(`[email-fanout] pre-send gate ${gateErr.code === 'send_gate_lost' ? 'refused' : 'failed'} for subscriber ${pendingConfirmation.id}: ${gateErr.code || gateErr.name || 'db_error'}`);
     }
-  } catch (consumeErr) {
-    consumeFailed = true;
-    logger.warn(`[email-fanout] resend-marker consume failed for subscriber ${pendingConfirmation.id}: ${consumeErr.code || consumeErr.name || 'db_error'}`);
   }
-  if (consumeFailed) {
-    logger.warn(`[email-fanout] resend-marker consume incomplete for subscriber ${pendingConfirmation.id} — aborting the re-send, markers intact`);
+  if (gateFailed) {
+    logger.warn(`[email-fanout] aborting the re-send for subscriber ${pendingConfirmation.id} — markers and deny stamps intact`);
     // Nothing was sent, so lift our own pre-stamp (conditional on the row
     // still being the verified payload — a rotation owns its delivery):
     // a marker-less retry path must not trust a stamp for a DOI that
