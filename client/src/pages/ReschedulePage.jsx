@@ -182,11 +182,14 @@ const WEATHER_MOVE_LEADS = {
   weather_heat: 'extreme heat moved your',
 };
 
-// The bonding explainer is a RAIN story about liquid applications: lightning
-// and wind/heat moves are operational, and interior/granular/termite/WDO/
-// inspection/bait work isn't washed by rain — same exemption the SMS
-// efficacy clause uses (EFFICACY_EXEMPT_SERVICE in services/rain-out.js).
-const WHY_MOVE_EXEMPT_SERVICE = /interior|granular|termite|wdo|inspection|bait/i;
+// The bonding explainer is a RAIN story about liquid PEST applications:
+// lightning and wind/heat moves are operational; interior/granular/termite/
+// WDO/inspection/bait work isn't washed by rain (same exemption as the SMS
+// efficacy clause, EFFICACY_EXEMPT_SERVICE in services/rain-out.js); and
+// lawn/tree&shrub visits apply fertilizers and herbicides that are NOT
+// microencapsulated — the capsule claim must never reach those customers
+// (codex r4 P2).
+const WHY_MOVE_EXEMPT_SERVICE = /interior|granular|termite|wdo|inspection|bait|lawn|turf|tree|shrub|fertil|weed|herbicide|aerat/i;
 
 function showsWhyMove(move, serviceType) {
   return move?.reasonCode === 'weather_rain'

@@ -535,6 +535,21 @@ describe('ReschedulePage weather-move banner', () => {
     expect(screen.queryByText('Why the move?')).not.toBeInTheDocument();
   });
 
+  it('lawn services never see the microencapsulation claim (codex r4)', async () => {
+    stubFetch({
+      get: jsonResponse(reschedulablePayload({
+        service: { type: 'Lawn Care' },
+        weatherMove,
+      })),
+    });
+
+    renderPage();
+
+    expect(await screen.findByText('Moved for weather')).toBeInTheDocument();
+    expect(screen.queryByText('Why the move?')).not.toBeInTheDocument();
+    expect(screen.queryByText(/microencapsulated/)).not.toBeInTheDocument();
+  });
+
   it('shows the banner on the classic layout too', async () => {
     stubFetch({ get: jsonResponse(reschedulablePayload({ weatherMove })) });
 
