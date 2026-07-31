@@ -117,7 +117,7 @@ describe('20260730160000 roach catalog rename + archive', () => {
     const state = JSON.parse(stateRow(db).value);
     expect(state.renamedFields.sort()).toEqual(['name', 'short_name']);
     expect(Object.keys(state.archived).sort()).toEqual(['pest_initial_german_knockdown', 'pest_initial_palmetto_knockdown']);
-    expect(state.archived.pest_initial_palmetto_knockdown).toEqual({ booking_enabled: true, customer_visible: true });
+    expect(state.archived.pest_initial_palmetto_knockdown).toEqual({ is_active: true, is_archived: false, booking_enabled: true, customer_visible: true });
     expect(state.backfilledVisitIds.sort()).toEqual(['v-open-1', 'v-open-2']);
     expect(state.profileSnapshotUpdated).toBe(true);
   });
@@ -137,7 +137,7 @@ describe('20260730160000 roach catalog rename + archive', () => {
     expect(state.renamedFields).toEqual(['short_name']);
     // The pre-archived row is not claimed; the hidden flag is recorded as-is.
     expect(Object.keys(state.archived)).toEqual(['pest_initial_palmetto_knockdown']);
-    expect(state.archived.pest_initial_palmetto_knockdown).toEqual({ booking_enabled: false, customer_visible: true });
+    expect(state.archived.pest_initial_palmetto_knockdown).toEqual({ is_active: true, is_archived: false, booking_enabled: false, customer_visible: true });
     expect(byKey(db, 'pest_initial_german_knockdown').updated_at).toBe('orig');
   });
 
@@ -211,6 +211,84 @@ describe('20260730160000 roach catalog rename + archive', () => {
     // Not in the archived state down() owns — left exactly as the admin set it.
     expect(byKey(db, 'pest_initial_palmetto_knockdown')).toMatchObject({ is_active: true, is_archived: true });
     expect(byKey(db, 'pest_initial_german_knockdown')).toMatchObject(LIVE);
+  });
+
+  test('down() leaves a visit that completed after up() alone (codex #3108 r2)', async () => {
+    const db = seedDb();
+    const knex = fakeKnex(db);
+    await migration.up(knex);
+    // The visit completed between up() and the rollback — its label is
+    // history now (completion snapshots copied it) and must not be rewritten.
+    visit(db, 'v-open-1').status = 'completed';
+
+    await migration.down(knex);
+
+    expect(visit(db, 'v-open-1').service_type).toBe(NEW_NAME);
+    expect(visit(db, 'v-open-2').service_type).toBe(OLD_NAME);
+  });
+
+  test('backfills are skipped when an admin renamed the catalog row to a custom value (codex #3108 r2)', async () => {
+    const db = seedDb();
+    byKey(db, 'cockroach_control').name = 'Adam Roach Special';
+
+    await migration.up(fakeKnex(db));
+
+    // Admin's label owns invoices/reports too — no hardcoded backfill.
+    expect(visit(db, 'v-open-1').service_type).toBe(OLD_NAME);
+    expect(db.service_completion_profiles[0].service_name_snapshot).toBe(OLD_NAME);
+    const state = JSON.parse(stateRow(db).value);
+    expect(state.backfilledVisitIds).toEqual([]);
+    expect(state.profileSnapshotUpdated).toBe(false);
+    // The archive half still applies.
+    expect(byKey(db, 'pest_initial_palmetto_knockdown')).toMatchObject(ARCHIVED);
+  });
+
+  test('backfills still run when the admin pre-renamed to exactly the intended name', async () => {
+    const db = seedDb();
+    byKey(db, 'cockroach_control').name = NEW_NAME;
+
+    await migration.up(fakeKnex(db));
+
+    expect(visit(db, 'v-open-1').service_type).toBe(NEW_NAME);
+    expect(db.service_completion_profiles[0].service_name_snapshot).toBe(NEW_NAME);
+  });
+
+  test('NULL catalog flags are recorded and restored verbatim, never coerced (codex #3108 r2)', async () => {
+    const db = seedDb();
+    // Drifted env: live row with NULL visibility flags.
+    Object.assign(byKey(db, 'pest_initial_palmetto_knockdown'), { is_archived: null, booking_enabled: null, customer_visible: null });
+    const knex = fakeKnex(db);
+    await migration.up(knex);
+
+    const state = JSON.parse(stateRow(db).value);
+    expect(state.archived.pest_initial_palmetto_knockdown).toEqual({
+      is_active: true,
+      is_archived: null,
+      booking_enabled: null,
+      customer_visible: null,
+    });
+    expect(byKey(db, 'pest_initial_palmetto_knockdown')).toMatchObject(ARCHIVED);
+
+    await migration.down(knex);
+    // NULLs come back as NULLs — is_archived: false would newly match
+    // catalog queries requiring it, customer_visible: false would hide it.
+    expect(byKey(db, 'pest_initial_palmetto_knockdown')).toMatchObject({
+      is_active: true,
+      is_archived: null,
+      booking_enabled: null,
+      customer_visible: null,
+    });
+  });
+
+  test('a NULL is_active row is not archived (not affirmatively live)', async () => {
+    const db = seedDb();
+    byKey(db, 'pest_initial_german_knockdown').is_active = null;
+
+    await migration.up(fakeKnex(db));
+
+    expect(byKey(db, 'pest_initial_german_knockdown').is_archived).toBe(false);
+    const state = JSON.parse(stateRow(db).value);
+    expect(Object.keys(state.archived)).toEqual(['pest_initial_palmetto_knockdown']);
   });
 
   test('down() with no ownership record restores nothing', async () => {

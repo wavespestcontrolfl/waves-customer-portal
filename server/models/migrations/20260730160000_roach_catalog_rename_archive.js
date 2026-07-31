@@ -80,23 +80,36 @@ exports.up = async function up(knex) {
     }
   }
 
-  // Archive — only rows still fully live, recording each row's prior
-  // visibility flags so down() can put back exactly what was there.
+  // Archive — only rows affirmatively live (is_active must be true and
+  // is_archived must not be true; a NULL is_archived on an active row still
+  // reads as live everywhere). Record the RAW prior flag values — the
+  // boolean columns are nullable, and rollback must put back exactly what
+  // was there, never a coerced false.
   const knockdownRows = await knex('services').whereIn('service_key', ARCHIVE_KEYS);
   for (const kd of knockdownRows) {
-    if (!kd.is_active || kd.is_archived) continue;
+    if (kd.is_active !== true || kd.is_archived === true) continue;
     state.archived[kd.service_key] = {
-      booking_enabled: kd.booking_enabled === true,
-      customer_visible: kd.customer_visible === true,
+      is_active: kd.is_active === undefined ? null : kd.is_active,
+      is_archived: kd.is_archived === undefined ? null : kd.is_archived,
+      booking_enabled: kd.booking_enabled === undefined ? null : kd.booking_enabled,
+      customer_visible: kd.customer_visible === undefined ? null : kd.customer_visible,
     };
     await knex('services')
       .where({ service_key: kd.service_key })
       .update({ ...ARCHIVE_PATCH, updated_at: knex.fn.now() });
   }
 
+  // Snapshot backfills apply ONLY when the catalog row actually carries the
+  // intended new name — either this migration just renamed it, or an admin
+  // had already renamed it to exactly that value. If the admin renamed it to
+  // a CUSTOM value, their label owns invoices/reports too; writing the
+  // migration's hardcoded label would contradict the admin-wins rule.
+  const catalogCarriesNewName = state.renamedFields.includes('name')
+    || (row && row.name === NEW_NAME);
+
   // Open-visit label snapshots. Direct service_type updates fire no customer
   // communications (no scheduling columns move).
-  if (await knex.schema.hasTable('scheduled_services')) {
+  if (catalogCarriesNewName && (await knex.schema.hasTable('scheduled_services'))) {
     const visits = await knex('scheduled_services')
       .where({ service_type: OLD_NAME })
       .whereNotIn('status', TERMINAL_VISIT_STATUSES)
@@ -110,7 +123,7 @@ exports.up = async function up(knex) {
 
   // Completion-profile snapshot (typed report labels read it via
   // serializeProfile).
-  if (await knex.schema.hasTable('service_completion_profiles')) {
+  if (catalogCarriesNewName && (await knex.schema.hasTable('service_completion_profiles'))) {
     const updated = await knex('service_completion_profiles')
       .where({ service_key: RENAME_KEY, service_name_snapshot: OLD_NAME })
       .update({ service_name_snapshot: NEW_NAME });
@@ -142,27 +155,32 @@ exports.down = async function down(knex) {
   }
 
   // Re-activate only rows up() archived, only if still in the archived state
-  // it wrote, restoring each row's RECORDED prior flags.
+  // it wrote, restoring each row's RECORDED prior flags verbatim — including
+  // NULLs, which read differently from false in catalog queries and
+  // default-visible checks.
   for (const [key, prior] of Object.entries(state.archived || {})) {
     if (!ARCHIVE_KEYS.includes(key)) continue;
     await knex('services')
       .where({ service_key: key, ...ARCHIVE_PATCH })
       .update({
-        is_active: true,
-        is_archived: false,
-        booking_enabled: prior.booking_enabled === true,
-        customer_visible: prior.customer_visible === true,
+        is_active: prior.is_active === undefined ? null : prior.is_active,
+        is_archived: prior.is_archived === undefined ? null : prior.is_archived,
+        booking_enabled: prior.booking_enabled === undefined ? null : prior.booking_enabled,
+        customer_visible: prior.customer_visible === undefined ? null : prior.customer_visible,
         updated_at: knex.fn.now(),
       });
   }
 
   // Revert exactly the visit ids up() backfilled, where the label is still
-  // the one it wrote.
+  // the one it wrote AND the visit is still open — a visit completed since
+  // up() is history now, and rewriting its label would desync it from the
+  // service_records / typed-report snapshots its completion copied.
   const ids = Array.isArray(state.backfilledVisitIds) ? state.backfilledVisitIds : [];
   if (ids.length && (await knex.schema.hasTable('scheduled_services'))) {
     await knex('scheduled_services')
       .whereIn('id', ids)
       .where({ service_type: NEW_NAME })
+      .whereNotIn('status', TERMINAL_VISIT_STATUSES)
       .update({ service_type: OLD_NAME });
   }
 
