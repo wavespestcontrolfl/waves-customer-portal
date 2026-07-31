@@ -9897,38 +9897,47 @@ export function CompletionPanel({
     if (typedFindingsSchema?.fields) {
       pruneRestoredFindingsValues(restoredFindings, typedFindingsSchema.fields);
       setFindingsValues(restoredFindings);
+      setTypedActivityScore(
+        Number.isInteger(savedDraft.typedActivityScore)
+          ? savedDraft.typedActivityScore
+          : null,
+      );
+      setTypedActivityTouched(!!savedDraft.typedActivityTouched);
+      const restoredChips = Array.isArray(savedDraft.typedNextStepChips)
+        ? savedDraft.typedNextStepChips
+        : [];
+      setTypedNextStepChips(
+        typedFindingsSchema?.nextStepChips
+          ? restoredChips.filter((chip) => typedFindingsSchema.nextStepChips.includes(chip))
+          : restoredChips,
+      );
+      setTypedRecommendations(savedDraft.typedRecommendations || "");
     } else {
       // The profile untyped since this draft was saved (bed_bug,
       // 20260731400000): the typed controls no longer render and the submit
-      // path would silently drop these entries as invisible state — discard
-      // them LOUDLY instead so the tech re-enters what still matters
-      // (codex P2 r1). Generic fields (notes, products, rating…) still
-      // restore normally.
-      const draftHadTypedEntries = Object.values(restoredFindings).some((v) =>
-        Array.isArray(v) ? v.length > 0 : String(v ?? "").trim() !== "",
-      );
+      // path would silently drop EVERY retired typed field as invisible
+      // state — findings values, activity score, next-step chips, and the
+      // typed recommendation all count (codex P2 r1 + r4). Discard them
+      // LOUDLY so the tech re-enters what still matters; generic fields
+      // (notes, products, rating…) still restore normally.
+      const draftHadTypedEntries =
+        Object.values(restoredFindings).some((v) =>
+          Array.isArray(v) ? v.length > 0 : String(v ?? "").trim() !== "",
+        )
+        || Number.isInteger(savedDraft.typedActivityScore)
+        || (Array.isArray(savedDraft.typedNextStepChips) && savedDraft.typedNextStepChips.length > 0)
+        || String(savedDraft.typedRecommendations || "").trim() !== "";
       if (draftHadTypedEntries) {
         alert(
-          "This service now completes with the standard form. The typed findings saved in this draft (rooms, evidence, treatment…) can't be restored — re-enter anything still needed in the notes or observations.",
+          "This service now completes with the standard form. The typed findings saved in this draft (rooms, evidence, treatment, activity, next steps…) can't be restored — re-enter anything still needed in the notes or observations.",
         );
       }
       setFindingsValues({});
+      setTypedActivityScore(null);
+      setTypedActivityTouched(false);
+      setTypedNextStepChips([]);
+      setTypedRecommendations("");
     }
-    setTypedActivityScore(
-      Number.isInteger(savedDraft.typedActivityScore)
-        ? savedDraft.typedActivityScore
-        : null,
-    );
-    setTypedActivityTouched(!!savedDraft.typedActivityTouched);
-    const restoredChips = Array.isArray(savedDraft.typedNextStepChips)
-      ? savedDraft.typedNextStepChips
-      : [];
-    setTypedNextStepChips(
-      typedFindingsSchema?.nextStepChips
-        ? restoredChips.filter((chip) => typedFindingsSchema.nextStepChips.includes(chip))
-        : restoredChips,
-    );
-    setTypedRecommendations(savedDraft.typedRecommendations || "");
     // Companion draft state — the same type-aware pruning per companion
     // schema; saved types the profile no longer declares are dropped, and
     // chips are filtered to the schema's current allowlist.

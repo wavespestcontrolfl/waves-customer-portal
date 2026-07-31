@@ -199,14 +199,19 @@ describe('/schedule-followup (source contracts)', () => {
     // and the untyped alert-profile leg (bed_bug post-20260731400000)
     // requires a frozen verdict OR a legacy typed snapshot before booking.
     expect(routeTail.slice(0, frozenIdx)).toContain('followup_no_typed_completion');
-    expect(routeTail.slice(0, frozenIdx)).toContain('const untypedAlertProfile = !!profile && !profile.findingsType && profile.followupPolicy === \'alert\';');
+    // The frozen verdict is read BEFORE the profile gate and authorizes the
+    // lane by itself — later profile mutations (deactivation, repoint,
+    // policy clear) cannot reject the promise the completion made
+    // (codex P2 r4).
+    expect(routeTail.slice(0, frozenIdx)).toContain("const untypedAlertProfile = !profile?.findingsType\n      && (profile?.followupPolicy === 'alert' || frozenVerdictPresent);");
     expect(routeTail.slice(0, frozenIdx)).toContain('const preAuthFrozenVerdict = parseJsonObject(sourceRecord?.structured_notes)?.typedFollowupVerdict;');
+    expect(routeTail.indexOf('const preAuthFrozenVerdict')).toBeLessThan(routeTail.indexOf('followup_not_typed'));
     const verdictBlock = routeTail.slice(frozenIdx, frozenIdx + 1100);
     expect(verdictBlock).toContain("typeof frozenCtaVerdict.required === 'boolean'");
     expect(verdictBlock).toContain(': typedFollowupVerdict({');
     // Pre-freeze legacy records on a now-untyped profile re-derive through
     // their own snapshot's type.
-    expect(verdictBlock).toContain('findingsType: profile.findingsType || snapshot?.type || null');
+    expect(verdictBlock).toContain('findingsType: profile?.findingsType || snapshot?.type || null');
     expect(verdictBlock).toContain('values: snapshot?.values || {}');
     expect(verdictBlock).toContain('followup_not_required');
   });

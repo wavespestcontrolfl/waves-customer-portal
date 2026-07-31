@@ -4533,7 +4533,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // retroactively expose reports that were never sent. Frozen for
             // typed completions AND internal-only consultations (typedDeliveryMode
             // 'disabled') so the no-customer-artifact posture survives resume.
-            ...((typedFindingsType || isInternalOnlyCompletion) ? { typedReportDelivery: typedDeliveryMode } : {}),
+            // Every non-auto_send posture FREEZES, regardless of findings
+            // type — an untyped specialty profile under a delivery kill
+            // switch (bed_bug post-untype) must persist its suppression or
+            // downstream gates (report metadata, resolution sync, pressure
+            // history, crash-resume re-derivation) read the absent field as
+            // auto_send and can mint/send anyway (codex P1 r4).
+            ...((typedFindingsType || isInternalOnlyCompletion || typedDeliveryMode !== 'auto_send') ? { typedReportDelivery: typedDeliveryMode } : {}),
             // Companion delivery postures frozen alongside (same rule):
             // graduation flips on the profile never retro-publish stored
             // companion sections.
@@ -8578,16 +8584,6 @@ router.post('/:serviceId/schedule-followup', async (req, res, next) => {
     if (!svc) return res.status(404).json({ error: 'Service not found' });
 
     const profile = await resolveCompletionProfileForScheduledService(svc).catch(() => null);
-    // Untyped alert-policy profiles (bed_bug post-20260731400000) book from
-    // the FROZEN verdict their completion persisted; the typed-snapshot
-    // gates below stay authoritative for typed profiles (codex P1 r1).
-    const untypedAlertProfile = !!profile && !profile.findingsType && profile.followupPolicy === 'alert';
-    if (!profile?.findingsType && !untypedAlertProfile) {
-      return res.status(409).json({
-        error: 'Follow-up booking from completion is only available for typed specialty services.',
-        code: 'followup_not_typed',
-      });
-    }
 
     // This is the server-side gate for the completion CTA, not a generic
     // booking API — the source visit must be completed and its persisted
@@ -8612,6 +8608,22 @@ router.post('/:serviceId/schedule-followup', async (req, res, next) => {
       .catch(() => null);
     const snapshot = parseJsonObject(sourceRecord?.service_data)?.typedReportSnapshot;
     const preAuthFrozenVerdict = parseJsonObject(sourceRecord?.structured_notes)?.typedFollowupVerdict;
+    const frozenVerdictPresent = !!(preAuthFrozenVerdict && typeof preAuthFrozenVerdict.required === 'boolean');
+    // Untyped alert-policy profiles (bed_bug post-20260731400000) book from
+    // the FROZEN verdict their completion persisted; the typed-snapshot
+    // gates below stay authoritative for typed profiles (codex P1 r1).
+    // A frozen verdict ALSO authorizes the lane by itself: ops deactivating,
+    // repointing, or clearing the alert policy after the completion must not
+    // reject the promise the completion already made — the frozen-promise
+    // contract below applies to this gate too (codex P2 r4).
+    const untypedAlertProfile = !profile?.findingsType
+      && (profile?.followupPolicy === 'alert' || frozenVerdictPresent);
+    if (!profile?.findingsType && !untypedAlertProfile) {
+      return res.status(409).json({
+        error: 'Follow-up booking from completion is only available for typed specialty services.',
+        code: 'followup_not_typed',
+      });
+    }
     if (untypedAlertProfile) {
       // Untyped completions always freeze their verdict; a legacy TYPED
       // completion on the now-untyped profile still carries its snapshot.
@@ -8643,12 +8655,12 @@ router.post('/:serviceId/schedule-followup', async (req, res, next) => {
       ? frozenCtaVerdict
       : typedFollowupVerdict({
         scheduledService: svc,
-        profile,
+        profile: profile || {},
         // Pre-freeze legacy records on a now-untyped profile re-derive
         // through their own snapshot's type — the pointer was cleared, not
         // the record (codex P1 r1). The snapshot-presence gate above makes
         // this reachable only with a snapshot in the untyped case.
-        findingsType: profile.findingsType || snapshot?.type || null,
+        findingsType: profile?.findingsType || snapshot?.type || null,
         values: snapshot?.values || {},
       });
     if (!suggestion?.required) {
