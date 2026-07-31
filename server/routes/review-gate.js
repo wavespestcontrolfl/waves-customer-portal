@@ -91,6 +91,11 @@ router.get('/:token/go', directLinkLimiter, async (req, res) => {
       return res.redirect(302, loc.googleReviewUrl);
     }
 
+    // The route contract: a customer only reaches Google AFTER the click is
+    // recorded and their cadence is stopped. If either required write fails
+    // (transient Postgres outage), fall back to the rate page instead of
+    // proceeding — otherwise the still-active sequence would keep chasing a
+    // customer who already reached the review form (Codex P2, r3).
     const firstClick = !request.redirected_at;
     try {
       const updates = {
@@ -106,7 +111,8 @@ router.get('/:token/go', directLinkLimiter, async (req, res) => {
       if (firstClick) updates.redirected_at = new Date();
       await db('review_requests').where({ id: request.id }).update(updates);
     } catch (err) {
-      logger.warn(`[review-gate] direct-link click stamp failed: ${err.message}`);
+      logger.warn(`[review-gate] direct-link click stamp failed — rate-page fallback: ${err.message}`);
+      return res.redirect(302, ratePageFallback);
     }
 
     // They acted on the ask — stop the cadence so no further touches chase
@@ -125,7 +131,8 @@ router.get('/:token/go', directLinkLimiter, async (req, res) => {
         if (activeSeq) await ReviewService.stopReviewSequence(activeSeq.id, 'clicked');
       }
     } catch (err) {
-      logger.warn(`[review-gate] cadence stop on click failed: ${err.message}`);
+      logger.warn(`[review-gate] cadence stop on click failed — rate-page fallback: ${err.message}`);
+      return res.redirect(302, ratePageFallback);
     }
 
     // Owner bell (first click only): Google won't tell us who reviewed, so

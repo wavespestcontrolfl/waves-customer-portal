@@ -497,6 +497,17 @@ const ReviewService = {
         logger.info(`[review] Skipping paid-invoice review request for invoice ${label} (${source}): visit outcome ${notes.visitOutcome}`);
         return { enrolled: false, reason: "visit_outcome" };
       }
+      // The completion panel's explicit timing selection (Now / Tomorrow 8 AM
+      // / custom) is persisted on the service record — honor it through the
+      // payment deferral instead of silently reverting to the default
+      // (Codex P2, r3). An absolute time already elapsed sends immediately.
+      let delayMinutes;
+      const storedAt = notes.reviewScheduledFor ? new Date(notes.reviewScheduledFor) : null;
+      if (storedAt && !Number.isNaN(storedAt.getTime())) {
+        delayMinutes = Math.max(0, Math.round((storedAt.getTime() - Date.now()) / 60000));
+      } else if (notes.reviewDelayMinutes != null && Number.isFinite(Number(notes.reviewDelayMinutes))) {
+        delayMinutes = Math.max(0, Number(notes.reviewDelayMinutes));
+      }
       // Legacy create() dedupes by service_record_id; the cadence path is
       // idempotent per active sequence + capped/cooled-down — safe under
       // webhook retries and double-clicked payment forms alike.
@@ -504,6 +515,7 @@ const ReviewService = {
         customerId: invoice.customer_id,
         serviceRecordId: invoice.service_record_id,
         triggeredBy: "auto",
+        delayMinutes,
         legacyDelayMinutes: 120,
       });
       return { enrolled: true, result };

@@ -1841,6 +1841,19 @@ router.post('/:id/apply-credit', requireAdmin, async (req, res, next) => {
       logger.warn(`[admin-invoices:apply-credit] stopOnPayment failed: ${err.message}`);
     }
 
+    // Full-credit settlement is a payment event too: a completion invoice
+    // delivered unpaid deferred its review ask to payment, and this path
+    // reaches neither the Stripe webhook nor record-payment — enroll here or
+    // the requested ask is permanently lost (Codex P2, PR #3104 r3). Guards
+    // (completion opt-out, visit outcome, dedupe) live in the helper;
+    // standalone invoices no-op.
+    try {
+      const ReviewService = require('../services/review-request');
+      await ReviewService.enrollForPaidInvoice(covered, { source: 'apply_credit' });
+    } catch (err) {
+      logger.warn(`[admin-invoices:apply-credit] review enrollment failed: ${err.message}`);
+    }
+
     // Fire-and-forget: a credit-covered (prepaid) invoice may be gating a
     // payment-held WDO report — nudge the release sweep.
     require('../services/project-report-hold').scheduleHoldReleaseSweep({ delayMs: 1500 });

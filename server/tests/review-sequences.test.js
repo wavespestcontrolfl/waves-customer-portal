@@ -609,6 +609,35 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(scheduled).toBeLessThanOrEqual(before + 31 * 60000);
   });
 
+  test('enrollForPaidInvoice honors the completion panel timing stored on the service record', async () => {
+    mockGates.reviewSequences = true;
+    const scheduledAt = new Date(Date.now() + 6 * 3600000).toISOString(); // custom time, 6h out
+    const mock = makeMock({
+      customers: [{ id: 'pt-1', first_name: 'Iva', last_name: 'S', phone: '+19410000073', nearest_location_id: 'bradenton' }],
+      service_records: [{ id: 'sr-pt', customer_id: 'pt-1', structured_notes: JSON.stringify({ requestReview: true, visitOutcome: 'completed', reviewScheduledFor: scheduledAt }) }],
+    });
+    db.mockImplementation(mock);
+
+    const out = await ReviewService.enrollForPaidInvoice({ id: 'inv-pt', customer_id: 'pt-1', service_record_id: 'sr-pt' });
+
+    expect(out.enrolled).toBe(true);
+    const runAt = mock.__state.rows.review_sequences[0].next_run_at.getTime();
+    const target = new Date(scheduledAt).getTime();
+    expect(Math.abs(runAt - target)).toBeLessThanOrEqual(90000);
+
+    // An elapsed stored time sends immediately (first cron tick), not never.
+    const mock2 = makeMock({
+      customers: [{ id: 'pt-2', first_name: 'Ugo', last_name: 'T', phone: '+19410000074', nearest_location_id: 'bradenton' }],
+      service_records: [{ id: 'sr-pt2', customer_id: 'pt-2', structured_notes: JSON.stringify({ requestReview: true, reviewDelayMinutes: 0 }) }],
+    });
+    db.mockImplementation(mock2);
+    const before = Date.now();
+    const out2 = await ReviewService.enrollForPaidInvoice({ id: 'inv-pt2', customer_id: 'pt-2', service_record_id: 'sr-pt2' });
+    expect(out2.enrolled).toBe(true);
+    const runAt2 = mock2.__state.rows.review_sequences[0].next_run_at.getTime();
+    expect(runAt2).toBeLessThanOrEqual(before + 60000 + 5000);
+  });
+
   test('enrollForPaidInvoice enrolls a completion invoice and honors the completion opt-out', async () => {
     mockGates.reviewSequences = true;
     const mock = makeMock({
