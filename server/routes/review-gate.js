@@ -64,6 +64,13 @@ router.get('/:token/go', directLinkLimiter, async (req, res) => {
   const token = String(req.params.token || '');
   const ratePageFallback = `/rate/${encodeURIComponent(token)}`;
   try {
+    // Kill switch must govern ALREADY-DELIVERED links too (Codex P1, r2):
+    // with the gate off, /go behaves as a plain alias of the rate page — no
+    // click stamping, no cadence stop, no Google redirect — so unsetting
+    // GATE_REVIEW_DIRECT_LINK rolls the whole direct flow back even for
+    // links sitting in old texts.
+    const { isEnabled } = require('../config/feature-gates');
+    if (!isEnabled('reviewDirectLink')) return res.redirect(302, ratePageFallback);
     if (!/^[a-f0-9]{64}$/.test(token)) return res.redirect(302, ratePageFallback);
     const request = await db('review_requests').where({ token }).first();
     if (!request) return res.redirect(302, ratePageFallback);

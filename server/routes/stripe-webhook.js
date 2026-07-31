@@ -1693,35 +1693,14 @@ async function scheduleReviewAfterPaidInvoice(piId) {
       .first();
     if (!paidInvoice?.customer_id || !paidInvoice?.service_record_id) return;
 
-    const serviceRecord = await db('service_records')
-      .where({ id: paidInvoice.service_record_id })
-      .select('structured_notes')
-      .first();
-    let structuredNotes = serviceRecord?.structured_notes || {};
-    if (typeof structuredNotes === 'string') {
-      try { structuredNotes = JSON.parse(structuredNotes); } catch { structuredNotes = {}; }
-    }
-    if (structuredNotes.requestReview === false) {
-      logger.info(`[stripe-webhook] Skipping paid-invoice review request for invoice ${paidInvoice.invoice_number || paidInvoice.id}: completion opted out`);
-      return;
-    }
-    if (structuredNotes.visitOutcome && structuredNotes.visitOutcome !== 'completed') {
-      logger.info(`[stripe-webhook] Skipping paid-invoice review request for invoice ${paidInvoice.invoice_number || paidInvoice.id}: visit outcome ${structuredNotes.visitOutcome}`);
-      return;
-    }
-
+    // Shared guards + enrollment (also used by the admin record-payment path
+    // for off-Stripe settlements): honors the completion's requestReview
+    // intent + visit outcome, dedupes/idempotent under webhook retries.
     const ReviewService = require('../services/review-request');
-    // Legacy path: ReviewService.create dedupes by service_record_id (returns
-    // the existing row instead of inserting). Cadence path: startReviewSequence
-    // is idempotent per active sequence + capped/cooled-down. Both are safe
-    // under webhook retries.
-    const result = await ReviewService.enrollPostService({
-      customerId: paidInvoice.customer_id,
-      serviceRecordId: paidInvoice.service_record_id,
-      triggeredBy: 'auto',
-      delayMinutes: 120,
-    });
-    logger.info(`[stripe-webhook] Queued review outreach (${result?.id ? `requestId=${result.id}` : `sequence started=${!!result?.started}`}) after invoice ${paidInvoice.invoice_number || paidInvoice.id} payment`);
+    const outcome = await ReviewService.enrollForPaidInvoice(paidInvoice, { source: 'stripe_webhook' });
+    if (outcome.enrolled) {
+      logger.info(`[stripe-webhook] Queued review outreach after invoice ${paidInvoice.invoice_number || paidInvoice.id} payment`);
+    }
   } catch (err) {
     logger.error(`[stripe-webhook] Paid-invoice review request schedule failed for PI ${piId}: ${err.message}`);
   }

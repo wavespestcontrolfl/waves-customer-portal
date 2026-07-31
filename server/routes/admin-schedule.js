@@ -7787,7 +7787,9 @@ async function scheduleReviewRequest(svc) {
       customerId: customer.id,
       serviceRecordId,
       triggeredBy: 'auto',
-      delayMinutes: 120,
+      // Historical hardcoded default, not an operator choice — legacy path
+      // only; cadence mode uses the smart send window.
+      legacyDelayMinutes: 120,
       techName,
       serviceType: svc.service_type || null,
       serviceDate: svc.scheduled_date || null,

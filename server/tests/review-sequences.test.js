@@ -593,6 +593,49 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(mock.__state.rows.review_sequences).toHaveLength(0);
   });
 
+  test('an explicit operator delay wins over the smart send window in cadence mode', async () => {
+    mockGates.reviewSequences = true;
+    const mock = makeMock({
+      customers: [{ id: 'td-1', first_name: 'Val', last_name: 'N', phone: '+19410000070', nearest_location_id: 'bradenton' }],
+    });
+    db.mockImplementation(mock);
+
+    const before = Date.now();
+    const result = await ReviewService.enrollPostService({ customerId: 'td-1', delayMinutes: 30, legacyDelayMinutes: 120, completedAt: new Date() });
+
+    expect(result.started).toBe(true);
+    const scheduled = result.scheduledFor.getTime();
+    expect(scheduled).toBeGreaterThanOrEqual(before + 29 * 60000);
+    expect(scheduled).toBeLessThanOrEqual(before + 31 * 60000);
+  });
+
+  test('enrollForPaidInvoice enrolls a completion invoice and honors the completion opt-out', async () => {
+    mockGates.reviewSequences = true;
+    const mock = makeMock({
+      customers: [{ id: 'pi-1', first_name: 'Ned', last_name: 'C', phone: '+19410000071', nearest_location_id: 'venice' }],
+      service_records: [{ id: 'sr-pi', customer_id: 'pi-1', structured_notes: JSON.stringify({ requestReview: true, visitOutcome: 'completed' }) }],
+    });
+    db.mockImplementation(mock);
+
+    const out = await ReviewService.enrollForPaidInvoice({ id: 'inv-pi', customer_id: 'pi-1', service_record_id: 'sr-pi', invoice_number: 'WPC-1' }, { source: 'record_payment' });
+    expect(out.enrolled).toBe(true);
+    expect(mock.__state.rows.review_sequences).toHaveLength(1);
+
+    // Opt-out recorded at completion blocks it.
+    const mock2 = makeMock({
+      customers: [{ id: 'pi-2', first_name: 'Oli', last_name: 'D', phone: '+19410000072', nearest_location_id: 'venice' }],
+      service_records: [{ id: 'sr-pi2', customer_id: 'pi-2', structured_notes: JSON.stringify({ requestReview: false }) }],
+    });
+    db.mockImplementation(mock2);
+    const out2 = await ReviewService.enrollForPaidInvoice({ id: 'inv-pi2', customer_id: 'pi-2', service_record_id: 'sr-pi2' });
+    expect(out2).toEqual({ enrolled: false, reason: 'completion_opted_out' });
+    expect(mock2.__state.rows.review_sequences).toHaveLength(0);
+
+    // Standalone invoices (no service record) are a no-op here.
+    const out3 = await ReviewService.enrollForPaidInvoice({ id: 'inv-pi3', customer_id: 'pi-2', service_record_id: null });
+    expect(out3).toEqual({ enrolled: false, reason: 'not_completion_invoice' });
+  });
+
   test('a cadence touch recovers technician_id + service_date from the service record (rate-page context)', async () => {
     const svcDate = '2026-07-27';
     const mock = makeMock({

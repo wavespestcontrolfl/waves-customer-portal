@@ -396,7 +396,13 @@ const ReviewService = {
     techName = null,
     technicianId = null,
     completedAt = null,
+    // delayMinutes = an EXPLICIT operator/config choice (completion panel
+    // timing selector, invoice scheduled_review_delay_minutes) — honored in
+    // BOTH modes. legacyDelayMinutes = a caller's historical hardcoded
+    // default — applied only on the legacy path so cadence mode can use the
+    // smart send window instead (Codex P2, r2).
     delayMinutes,
+    legacyDelayMinutes,
     triggeredBy = "auto",
   }) {
     const { isEnabled } = require("../config/feature-gates");
@@ -405,7 +411,7 @@ const ReviewService = {
         customerId,
         serviceRecordId,
         triggeredBy,
-        delayMinutes,
+        delayMinutes: delayMinutes !== undefined && delayMinutes !== null ? delayMinutes : legacyDelayMinutes,
         techName,
         serviceType,
         serviceDate,
@@ -425,10 +431,17 @@ const ReviewService = {
         svcType = svcType || sr?.service_type || null;
         tName = tName || sr?.tech_name || null;
       }
-      const firstTouchAt = calculateReviewSendTime(
-        completedAt ? new Date(completedAt) : new Date(),
-        svcType,
-      );
+      // An explicit timing choice (completion panel "Now"/"Tomorrow 8 AM"/
+      // custom, invoice scheduled minutes) wins over the smart send window —
+      // the operator's selection must not be silently ignored in cadence
+      // mode (Codex P2, r2). 0 = "Now" → first cron tick.
+      const explicitDelay = Number(delayMinutes);
+      const firstTouchAt = delayMinutes !== undefined && delayMinutes !== null && Number.isFinite(explicitDelay)
+        ? new Date(Date.now() + Math.max(0, explicitDelay) * 60000)
+        : calculateReviewSendTime(
+          completedAt ? new Date(completedAt) : new Date(),
+          svcType,
+        );
       const result = await this.startReviewSequence({
         customerId,
         serviceRecordId,
@@ -450,6 +463,53 @@ const ReviewService = {
     } catch (err) {
       logger.error(`[review] Post-service cadence enroll failed (customerId=${customerId} errType=${err?.name || "Error"}): ${err.message}`);
       return { started: false, reason: "error" };
+    }
+  },
+
+  /**
+   * Post-PAYMENT enrollment for a COMPLETION invoice (has service_record_id)
+   * whose review ask was deferred at delivery (unpaid-invoice hold). Shared
+   * by the Stripe paid webhook and the admin record-payment path so an
+   * off-Stripe settlement (cash/check/Zelle) still triggers the ask
+   * (Codex P2, r2). Honors the completion's stored requestReview intent and
+   * visit outcome. Standalone invoices are NOT handled here — they enrolled
+   * at delivery. Never throws.
+   */
+  async enrollForPaidInvoice(invoice, { source = "invoice_paid" } = {}) {
+    try {
+      if (!invoice?.customer_id || !invoice?.service_record_id) {
+        return { enrolled: false, reason: "not_completion_invoice" };
+      }
+      const label = invoice.invoice_number || invoice.id;
+      const serviceRecord = await db("service_records")
+        .where({ id: invoice.service_record_id })
+        .select("structured_notes")
+        .first();
+      let notes = serviceRecord?.structured_notes || {};
+      if (typeof notes === "string") {
+        try { notes = JSON.parse(notes); } catch { notes = {}; }
+      }
+      if (notes.requestReview === false) {
+        logger.info(`[review] Skipping paid-invoice review request for invoice ${label} (${source}): completion opted out`);
+        return { enrolled: false, reason: "completion_opted_out" };
+      }
+      if (notes.visitOutcome && notes.visitOutcome !== "completed") {
+        logger.info(`[review] Skipping paid-invoice review request for invoice ${label} (${source}): visit outcome ${notes.visitOutcome}`);
+        return { enrolled: false, reason: "visit_outcome" };
+      }
+      // Legacy create() dedupes by service_record_id; the cadence path is
+      // idempotent per active sequence + capped/cooled-down — safe under
+      // webhook retries and double-clicked payment forms alike.
+      const result = await this.enrollPostService({
+        customerId: invoice.customer_id,
+        serviceRecordId: invoice.service_record_id,
+        triggeredBy: "auto",
+        legacyDelayMinutes: 120,
+      });
+      return { enrolled: true, result };
+    } catch (err) {
+      logger.error(`[review] Paid-invoice enrollment failed (invoiceId=${invoice?.id} source=${source}): ${err.message}`);
+      return { enrolled: false, reason: "error" };
     }
   },
 

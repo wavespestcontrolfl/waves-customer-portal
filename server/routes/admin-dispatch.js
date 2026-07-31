@@ -8017,9 +8017,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           techName: svc.tech_name || null,
           completedAt: new Date(),
           triggeredBy: 'auto',
-          delayMinutes: completionReviewDelayMinutes === undefined
-            ? 120
-            : completionReviewDelayMinutes,
+          // Only an operator-SELECTED timing travels as an explicit delay —
+          // it wins in both modes (Codex P2, r2). Untouched selector =
+          // undefined = legacy 120-min default / cadence smart window.
+          delayMinutes: completionReviewDelayMinutes,
+          legacyDelayMinutes: 120,
         });
       } catch (e) { logger.error(`[dispatch] Review request schedule failed: ${e.message}`); }
     }
