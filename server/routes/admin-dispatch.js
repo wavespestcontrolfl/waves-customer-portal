@@ -6251,11 +6251,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         lawnRecRegenPromise.then(async (lateResult) => {
           if (!lateResult) return;
           try {
-            await enqueuePdfRenderJob({
-              serviceRecordId: record.id,
-              payload: { source: 'grounded_regen_late', token: reportToken },
-            });
-            logger.info(`[dispatch] PDF re-queued for ${record.id} after late grounded recommendation write`);
+            // enqueuePdfRenderJob dedupes against an ACTIVE job — a render
+            // already in flight may have loaded pre-write data, so a deduped
+            // 'rendering' result is NOT the correction; retry until the
+            // active job settles and a fresh render actually queues (codex
+            // P1 r11). A deduped 'queued' job hasn't started yet and will
+            // read post-write data — that IS the correction.
+            for (let attempt = 0; attempt < 12; attempt += 1) {
+              const res = await enqueuePdfRenderJob({
+                serviceRecordId: record.id,
+                payload: { source: 'grounded_regen_late', token: reportToken },
+              });
+              if (res.queued || res.job?.status === 'queued') {
+                logger.info(`[dispatch] PDF re-queued for ${record.id} after late grounded recommendation write (attempt ${attempt + 1})`);
+                return;
+              }
+              await new Promise((resolve) => { setTimeout(resolve, 15000).unref?.(); });
+            }
+            logger.warn(`[dispatch] late PDF re-queue gave up for ${record.id} — active render never settled`);
           } catch (requeueErr) {
             logger.warn(`[dispatch] late PDF re-queue failed for ${record.id}: ${requeueErr.message}`);
           }

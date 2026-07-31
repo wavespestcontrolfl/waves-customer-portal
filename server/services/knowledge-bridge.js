@@ -180,10 +180,13 @@ function governedContradictionRegex(cls) {
     `\\bbefore\\s+(?:making|applying)\\s+(?:an?\\s+)?(?:[\\w'’-]+\\s+){0,2}${CLASS}`,
     // "<class> ... is not needed/warranted/required"
     `${CLASS}[^.!?]{0,50}\\bnot\\s+(?:currently\\s+)?(?:needed|necessary|required|warranted|supported|recommended)\\b`,
-    // passive deferrals — "a fungicide application should be deferred until
-    // disease is confirmed" (codex P1 r10)
-    `${CLASS}[^.!?]{0,60}\\b(?:should|could|can|may|will|must)\\s+(?:be\\s+)?(?:deferred|delayed|postponed|skipped|avoided|withheld|held\\s+off)\\b`,
-    `${CLASS}[^.!?]{0,50}\\bis\\s+(?:being\\s+)?(?:deferred|delayed|postponed|withheld)\\b`,
+    // passive deferrals — modal, past-tense, and progressive forms: "should
+    // be deferred", "was deferred", "is being postponed" (codex P1 r10+r11)
+    `${CLASS}[^.!?]{0,60}\\b(?:should|could|can|may|will|must|would|shall)\\s+(?:be\\s+)?(?:deferred|delayed|postponed|skipped|avoided|withheld|held\\s+off)\\b`,
+    `${CLASS}[^.!?]{0,60}\\b(?:is|are|was|were|has\\s+been|have\\s+been|being)\\s+(?:being\\s+)?(?:deferred|delayed|postponed|skipped|withheld|held\\s+off)\\b`,
+    // contracted / adverbial negations — "fungicide isn't necessary",
+    // "a fungicide is never warranted right now" (codex P1 r11)
+    `${CLASS}[^.!?]{0,50}\\b(?:isn['’]t|aren['’]t|wasn['’]t|weren['’]t|never|no\\s+longer)\\s+(?:currently\\s+)?(?:needed|necessary|required|warranted|supported|recommended)\\b`,
     // "no <class> is needed", "confirm no fungicide is needed"
     `\\b(?:confirm|verify)\\s+(?:that\\s+)?no\\s+(?:[\\w'’-]+\\s+){0,2}${CLASS}`,
     // "do not currently support active disease treatment"
@@ -559,43 +562,29 @@ const KnowledgeBridge = {
   },
 
   async _generateAssessmentRecommendationsInner(assessmentId) {
-    // Cross-process serialization (codex P1 r8): the xact-scoped advisory
-    // lock orders confirm-time and completion-time runs even when they land
-    // on different instances during a rolling deploy — lock-acquisition
-    // order is run order, so the later (grounded) caller always writes
-    // last. The lock spans the LLM call by design: holding one pool
-    // connection for a rare per-closeout run is the price of a globally
-    // ordered write.
-    return db.transaction(async (trx) => {
-      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`lawn_rec_${assessmentId}`]);
-      return this._generateAssessmentRecommendationsLocked(assessmentId, trx);
-    }).catch((err) => {
-      logger.error(`[knowledge-bridge] generateAssessmentRecommendations transaction failed: ${err.message}`);
-      return null;
-    });
-  },
-
-  async _generateAssessmentRecommendationsLocked(assessmentId, trx) {
+    // Static context (customer, grass, Claudeopedia/wiki entries) is read
+    // BEFORE the transaction on the normal pool — inside the lock every
+    // query must go through trx, because pooled reads while holding the
+    // transaction's connection are nested pool acquisition and can exhaust
+    // the pool under bursts (codex P1 r11). These reads don't need lock
+    // freshness; the assessment + product rows are re-read inside the lock.
+    let context;
     try {
-      // Re-read INSIDE the lock so a run queued behind another sees its write.
-      const assessment = await trx('lawn_assessments').where({ id: assessmentId }).first();
-      if (!assessment) return null;
-
-      const customer = await db('customers').where({ id: assessment.customer_id }).first();
-
+      const preAssessment = await db('lawn_assessments').where({ id: assessmentId }).first();
+      if (!preAssessment) return null;
+      const customer = await db('customers').where({ id: preAssessment.customer_id }).first();
       // Grass context lives on customer_turf_profiles, not customers.
       // track_key is the protocol track id (e.g. 'st_augustine'); it may be
       // null when the customer has no turf profile yet.
-      const grassContext = await loadCustomerGrassContext(assessment.customer_id);
+      const grassContext = await loadCustomerGrassContext(preAssessment.customer_id);
       const grassType = grassContext.grassTypeLabel || 'St. Augustine';
       const grassTrack = grassContext.trackKey || null;
-
-      // Pull relevant Claudeopedia entries (protocols, product info)
+      // Pull relevant Claudeopedia entries (protocols, product info).
+      // Wiki-sync MIRRORS inherit the wiki's review gate (customer-visible
+      // recs); merely-linked curated articles stay visible.
       const protocolEntries = await db('knowledge_base')
         .whereIn('category', ['protocol', 'product', 'lawn_care', 'seasonal'])
         .where({ status: 'active' })
-        // Wiki-sync MIRRORS inherit the wiki's review gate (customer-visible
-        // recs); merely-linked curated articles stay visible.
         .whereNot(function untrustedWikiMirror() {
           this.where('source', 'wiki-sync').whereIn(
             'wiki_entry_id',
@@ -609,10 +598,8 @@ const KnowledgeBridge = {
         })
         .select('title', 'content', 'category')
         .limit(10);
-
-      // Pull relevant wiki outcome data (what's actually worked)
-      // Trusted pages only — these feed customer-visible recommendations,
-      // so red pages awaiting review are excluded (exception-based gate).
+      // Trusted wiki outcome pages only — these feed customer-visible
+      // recommendations (exception-based gate).
       const outcomeEntries = await db('knowledge_entries')
         .whereIn('review_status', TRUSTED_STATUSES)
         .where(function () {
@@ -625,6 +612,38 @@ const KnowledgeBridge = {
         })
         .select('title', 'summary', 'data_point_count', 'confidence')
         .limit(5);
+      context = { customer, grassType, grassTrack, protocolEntries, outcomeEntries };
+    } catch (ctxErr) {
+      logger.error(`[knowledge-bridge] recommendation context load failed: ${ctxErr.message}`);
+      return null;
+    }
+    // Cross-process serialization (codex P1 r8): the xact-scoped advisory
+    // lock orders confirm-time and completion-time runs even when they land
+    // on different instances during a rolling deploy — lock-acquisition
+    // order is run order, so the later (grounded) caller always writes
+    // last. The lock spans the LLM call by design: holding ONE pool
+    // connection (no nested acquisition) for a rare per-closeout run is the
+    // price of a globally ordered write.
+    return db.transaction(async (trx) => {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`lawn_rec_${assessmentId}`]);
+      return this._generateAssessmentRecommendationsLocked(assessmentId, trx, context);
+    }).catch((err) => {
+      logger.error(`[knowledge-bridge] generateAssessmentRecommendations transaction failed: ${err.message}`);
+      return null;
+    });
+  },
+
+  async _generateAssessmentRecommendationsLocked(assessmentId, trx, context) {
+    try {
+      // Re-read INSIDE the lock so a run queued behind another sees its
+      // write. All in-lock queries go through trx — issuing pooled `db`
+      // reads while holding the transaction's connection is nested pool
+      // acquisition and can exhaust the pool under bursts (codex P1 r11);
+      // the static context (customer/grass/knowledge) was gathered BEFORE
+      // the transaction for the same reason.
+      const assessment = await trx('lawn_assessments').where({ id: assessmentId }).first();
+      if (!assessment) return null;
+      const { customer, grassType, grassTrack, protocolEntries, outcomeEntries } = context;
 
       // Build scores context
       const scores = {
@@ -654,7 +673,7 @@ const KnowledgeBridge = {
       let appliedProducts = [];
       if (assessment.service_record_id) {
         try {
-          appliedProducts = await db('service_products')
+          appliedProducts = await trx('service_products')
             .where({ service_record_id: assessment.service_record_id })
             .select('product_name', 'product_category');
         } catch (treatmentErr) {

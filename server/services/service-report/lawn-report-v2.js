@@ -508,11 +508,15 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   // in the photos. When the photo analysis mentions dry/drought/uneven/coverage,
   // the Water row must NOT read "Strong" — downgrade it to a coverage "watch" so it
   // never contradicts the photo caption (the report's biggest trust bug).
-  const obsText = `${lawnAssessment.observations || ''} ${lawnAssessment.aiSummary || ''}`.toLowerCase();
-  // DRY-specific signals only — not generic "stress" (heat/insect), and not
-  // 'moisture'/'irrigation', which appear in WET observations ("algae
-  // indicates excess moisture", "ease irrigation") and would flip a
-  // confirmed-overwatering read into a dry-coverage story (codex P1 r8).
+  // "dry out"/"drying out"/"dries out" is WET-area aftercare ("let the damp
+  // areas dry out") — strip those phrases before testing so they can't
+  // satisfy the dry regex (codex P1 r11), alongside the r8 removals of
+  // 'moisture'/'irrigation' (both appear in wet observations and flipped a
+  // confirmed-overwatering read into a dry-coverage story).
+  const obsText = `${lawnAssessment.observations || ''} ${lawnAssessment.aiSummary || ''}`
+    .toLowerCase()
+    .replace(/\b(?:dry|dries|drying)\s+(?:out|down)\b/g, '');
+  // DRY-specific signals only — not generic "stress" (heat/insect).
   const drySignal = /\b(dry|drier|drought|tan|uneven|coverage|wilt)\b/.test(obsText);
   // The Water/Coverage score is derived from fungus/over-water signals and ignores
   // drought — so a dry/uneven photo read must downgrade it regardless of the weekly

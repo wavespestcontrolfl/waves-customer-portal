@@ -95,6 +95,19 @@ describe('sanitizeRecommendationsAgainstTreatment', () => {
     expect(parsed.recommendations).toHaveLength(0);
   });
 
+  test('past-tense and contracted negations are caught (r11)', () => {
+    const cases = [
+      'A fungicide application was deferred until disease is confirmed.',
+      'A fungicide isn’t necessary at this time.',
+    ];
+    for (const bad of cases) {
+      const { dropped } = _test.sanitizeRecommendationsAgainstTreatment({
+        recommendations: [{ priority: 1, action: bad, reason: 'x', timeframe: 'y' }],
+      }, APPLIED);
+      expect(dropped).toBe(1);
+    }
+  });
+
   test('legitimate aftercare mentioning the class passes (defer must govern the treatment)', () => {
     const { parsed, dropped } = _test.sanitizeRecommendationsAgainstTreatment({
       recommendations: [
