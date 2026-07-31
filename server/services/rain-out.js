@@ -780,6 +780,25 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
     // a throwing provider/audit wrapper, a failed forecast fetch —
     // must never mark the job failed, or the tech retries and
     // double-reschedules / double-texts an already-moved appointment.
+
+    // Soft no-show: the rebooker just logged the occurrence (reason_code
+    // customer_noshow with the missed slot's original_date/window), but
+    // only the terminal path and nightly sweep ever ran the outreach
+    // threshold — two soft no-shows would accumulate without the promised
+    // 2-in-90-days task (codex r2). Evaluate WITHOUT inserting a second
+    // occurrence row. Best-effort: never fails the committed move.
+    if (reasonCode === 'customer_noshow') {
+      try {
+        const MissedAppointment = require('./workflows/missed-appointment');
+        await MissedAppointment.evaluateThreshold(
+          job.customer_id || service.cust_id || service.customer_id,
+          'quick_move_no_show',
+        );
+      } catch (err) {
+        logger.warn(`[rain-out] no-show outreach evaluation failed for ${job.id}: ${err.message}`);
+      }
+    }
+
     const chosen = { date: target.date, window: newWindow };
     let sms = { sent: false, reason: 'not_requested' };
     if (notifyCustomer) {

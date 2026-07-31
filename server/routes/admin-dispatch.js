@@ -2675,17 +2675,27 @@ router.put('/:serviceId/status', async (req, res, next) => {
       try {
         // Occurrence-aware dedup: a soft Quick Move no-show logs
         // customer_noshow for an EARLIER slot of this same row
-        // (original_date = the slot that was missed), and that earlier miss
-        // must not suppress counting THIS one. Match only rows recorded for
-        // the current slot; NULL original_date matches legacy rows
-        // (pre-stamping) to preserve their old per-row dedup.
+        // (original_date + original_window = the slot that was missed), and
+        // that earlier miss must not suppress counting THIS one — including
+        // a rebook LATER THE SAME DAY, which only the window distinguishes
+        // (codex r2). Match only rows recorded for the current slot; NULL
+        // slot fields match legacy rows to preserve their old per-row dedup.
         const missedDateStr = svc.scheduled_date
           ? String(svc.scheduled_date instanceof Date ? svc.scheduled_date.toISOString() : svc.scheduled_date).slice(0, 10)
           : null;
+        const missedWindowStr = svc.window_start ? `${svc.window_start}-${svc.window_end}` : null;
         const alreadyFlagged = await db('reschedule_log')
           .where({ scheduled_service_id: svc.id, reason_code: 'customer_noshow' })
           .where(function occurrenceMatch() {
-            if (missedDateStr) this.where('original_date', missedDateStr).orWhereNull('original_date');
+            if (!missedDateStr) return; // no slot info — legacy per-row dedup
+            this.whereNull('original_date').orWhere(function currentSlot() {
+              this.where('original_date', missedDateStr);
+              if (missedWindowStr) {
+                this.andWhere(function sameWindow() {
+                  this.where('original_window', missedWindowStr).orWhereNull('original_window');
+                });
+              }
+            });
           })
           .first('id');
         if (!alreadyFlagged) {

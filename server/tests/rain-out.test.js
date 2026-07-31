@@ -24,8 +24,12 @@ jest.mock('../services/reschedule-link', () => ({
     line: 'Need a different time? Reschedule online: https://waves.test/r/tok123\n\n',
   }),
 }));
+jest.mock('../services/workflows/missed-appointment', () => ({
+  evaluateThreshold: jest.fn().mockResolvedValue(null),
+}));
 
 const db = require('../models/db');
+const MissedAppointment = require('../services/workflows/missed-appointment');
 const SmartRebooker = require('../services/rebooker');
 const { renderSmsTemplate } = require('../services/sms-template-renderer');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
@@ -820,6 +824,19 @@ describe('rain-out service', () => {
       );
       expect(renderSmsTemplate.mock.calls[0][1].weather_lead).toBe('we missed you today');
       expect(sendCustomerMessage.mock.calls[0][0].metadata).toMatchObject({ reason_code: 'customer_noshow' });
+      // The rebooker logged the occurrence; the outreach THRESHOLD must
+      // still run (codex r2) — evaluate-only, never a second onSkip insert.
+      expect(MissedAppointment.evaluateThreshold).toHaveBeenCalledTimes(1);
+      expect(MissedAppointment.evaluateThreshold).toHaveBeenCalledWith('cust-1', 'quick_move_no_show');
+    });
+
+    test('gate on: non-noshow reasons never run the missed-appointment threshold', async () => {
+      process.env.GATE_QUICKMOVE_EXTRA_REASONS = 'true';
+      wireSingle();
+
+      await RainOut.commit(COMMIT_ARGS);
+
+      expect(MissedAppointment.evaluateThreshold).not.toHaveBeenCalled();
     });
 
     test('gate on + banner gate: the v3 link clause drops the forecast word', async () => {
