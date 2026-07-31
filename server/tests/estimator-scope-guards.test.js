@@ -160,6 +160,9 @@ describe('deterministicOutOfScope', () => {
     expect(deterministicOutOfScope('I live at 12 Roofers Rd, what do you charge?')).toBe(false);
     expect(deterministicOutOfScope('this is Sam Gutter, following up on a quote')).toBe(false);
     expect(deterministicOutOfScope("Hi, I'm Joe Plumber. Can I get a quote?")).toBe(false);
+    expect(deterministicOutOfScope('This is Gulf Coast Painting, can I get a quote for our office?')).toBe(false);
+    expect(deterministicOutOfScope('painting quote please')).toBe(true);
+    expect(deterministicOutOfScope('need some painting done at the house')).toBe(true);
     expect(deterministicOutOfScope('this is Handyman Hardware confirming your service quote')).toBe(false);
     expect(deterministicOutOfScope('quote for the Drywall Bros office please')).toBe(false);
     // …while real trade requests still veto.
@@ -209,6 +212,12 @@ describe('extractAddressCandidates', () => {
     const [cand] = extractAddressCandidates('quote for 100 Palm Ave, Venice FL 34285 please');
     expect(cand.variants).toContain('100 Palm Ave');
     expect(cand.locality).toBe(', Venice 34285');
+  });
+
+  test('binds the ZIP in comma-free locality forms, never after prose', () => {
+    expect(extractAddressCandidates('quote for 100 Palm Ave Venice FL 34285')[0].locality).toBe(', 34285');
+    expect(extractAddressCandidates('quote for 100 Palm Ave 34285')[0].locality).toBe(', 34285');
+    expect(extractAddressCandidates('quote for 100 Palm Ave with a budget of 15000')[0].locality).toBe('');
   });
 
   test('captures locality only when a state or ZIP validates it', () => {

@@ -70,7 +70,9 @@ const OUT_OF_SCOPE_RE = new RegExp(
     'roof(?:ing)?\\s*(?:repair|replace\\w*|clean\\w*|leak|work|job|quote|estimate)',
     '(?:need|want|looking\\s+for|find|hire|get)\\s+(?:a\\s+)?(?:new\\s+)?roof\\b',
     'gutter\\s*(?:clean\\w*|repair\\w*|guard)', 'clean\\w*\\s+(?:my|the|our)\\s+gutters',
-    '\\bpainting\\b', 'paint\\s+(?:job|work|quote|estimate|my|the|our|interior|exterior|house|home)',
+    'painting\\s+(?:quote|estimate|job|work|service)s?',
+    '(?:need|want|looking\\s+for|get)\\s+(?:some\\s+)?painting\\b',
+    'paint\\s+(?:job|work|quote|estimate|my|the|our|interior|exterior|house|home)',
     'pool\\s*(?:clean\\w*|service|maint\\w*)',
     'window\\s*(?:clean\\w*|wash\\w*)', 'carpet\\s*clean\\w*', 'duct\\s*clean\\w*',
     // Trade nouns need request context too — "Joe Plumber" the person and
@@ -185,6 +187,23 @@ function extractAddressCandidates(text) {
       // compares conservatively equal downstream.
       const zipDirect = localitySrc.match(/^\s*,\s*(\d{5})\b/);
       if (zipDirect) locality = `, ${zipDirect[1]}`;
+    }
+    if (!locality) {
+      // No-comma form ("100 Palm Ave Venice FL 34285"): the street run
+      // swallows the city+FL, leaving the anchored matchers at a bare ZIP.
+      // Bind the ZIP (locality-by-ZIP is enough to reject a same-street
+      // row in another city) when the words carry an FL marker, or when
+      // the last street word is a known suffix/directional — never after
+      // swallowed prose ("with a budget of 15000" stays unbound).
+      const zipNC = localitySrc.match(/^\s*(\d{5})\b/);
+      if (zipNC) {
+        const lastWord = String(words[words.length - 1] || '').toLowerCase();
+        const hasFl = words.some((w) => /^(?:fl|florida)$/i.test(w));
+        const suffixes = new Set([
+          ...Object.keys(STREET_TOKEN_ALIASES), ...Object.values(STREET_TOKEN_ALIASES),
+        ]);
+        if (hasFl || suffixes.has(lastWord)) locality = `, ${zipNC[1]}`;
+      }
     }
     out.push({
       num: m[1],
