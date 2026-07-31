@@ -643,9 +643,15 @@ export function visitWorkSummary(data = {}, fallback = '') {
     // "service steps", not "treatments" — work chips include inspection and
     // recommendation entries, and a visit of only those must not make a
     // customer-facing treatment claim.
+    const actionPart = workParts
+      ? `${workParts.length} service step${workParts.length === 1 ? '' : 's'} completed`
+      : (hasLegacyWorkText ? 'Service work completed' : null);
     const typedParts = [
-      workParts ? `${workParts.length} service step${workParts.length === 1 ? '' : 's'} completed` : (hasLegacyWorkText ? 'Service work completed' : null),
-      roomsText && roomsText.length <= 40 ? roomsText : null,
+      actionPart,
+      // Rooms only RIDE ALONG with an action — work_completed is optional,
+      // and a bare location ("Primary bedroom") is not a statement of what
+      // Waves did (codex P2, post-merge on #3111).
+      actionPart && roomsText && roomsText.length <= 40 ? roomsText : null,
       photoCount ? `${photoCount} photo${photoCount === 1 ? '' : 's'} documented` : null,
     ].filter(Boolean);
     if (typedParts.length) return typedParts.join(' · ');
