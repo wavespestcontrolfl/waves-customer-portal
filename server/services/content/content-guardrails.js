@@ -1824,13 +1824,6 @@ function metaDescriptionContractFinding(frontmatter, { isRefresh = false, liveMe
     if (SALESY_META_RE.test(draftTrim) || lastSentenceSalesTerms(draftTrim)) {
       return finding('P1', 'BLOG_META_SALESY', 'Blog meta descriptions stay informational — no sales CTAs or money/deal terms in the final sentence (owner rule 2026-07-29).');
     }
-    // The soft-CTA ending itself is a nudge, never a blocker (owner ruling
-    // 2026-07-30) — P2 warns without parking, and the legacy BlogWriter/
-    // admin/calendar publishAstro lanes (which run ONLY guardrails, no
-    // supporting-blog quality bundle) keep the signal (Codex P2).
-    if (!endsWithSoftCta(draftTrim)) {
-      return finding('P2', 'BLOG_META_MISSING_SOFT_CTA', 'Blog meta descriptions should END with a soft CTA like "Learn more on the Waves blog." (nudge only — owner ruling 2026-07-30: never a publish blocker).');
-    }
   } else {
     // {{cityPhone}} SPECIFICALLY — phone/tel aliases render the generic line.
     if (!CITY_PHONE_TOKEN_RE.test(draftTrim)) {
@@ -1844,6 +1837,15 @@ function metaDescriptionContractFinding(frontmatter, { isRefresh = false, liveMe
   const rendered = renderMetaTokens(draftTrim).trim();
   if (rendered.length > 160) {
     return finding('P1', 'META_OVER_160_RENDERED', `Rewritten meta description renders at ${rendered.length} characters — the cap is 160 (owner rule 2026-07-29).`);
+  }
+  // LAST, after every P1: the soft-CTA ending is a nudge, never a blocker
+  // (owner ruling 2026-07-30) — P2 warns without parking, and the legacy
+  // BlogWriter/admin/calendar publishAstro lanes (which run ONLY guardrails,
+  // no supporting-blog quality bundle) keep the signal. Ordered here so this
+  // single-finding return can never mask a blocking P1 like
+  // META_OVER_160_RENDERED (Codex r2 P1).
+  if (targetIsBlog && !endsWithSoftCta(draftTrim)) {
+    return finding('P2', 'BLOG_META_MISSING_SOFT_CTA', 'Blog meta descriptions should END with a soft CTA like "Learn more on the Waves blog." (nudge only — owner ruling 2026-07-30: never a publish blocker).');
   }
   return null;
 }
