@@ -237,6 +237,7 @@ const {
   recordFirstTouchHold,
   resumeHeldNewsletterPostCommit,
   sweepAbandonedFirstTouchHolds,
+  repenHoldsForFreshEmailReview,
 } = require('../services/lead-first-touch-resume');
 const logger = require('../services/logger');
 
@@ -1444,8 +1445,24 @@ describe('DOI dedupe guard and ledger sweep', () => {
     await sweepAbandonedFirstTouchHolds({});
     const predicate = mockRawSqls.find((s) => s.includes('SELECT t.status FROM triage_items'));
     expect(String(predicate)).toContain('ORDER BY COALESCE(t.resolved_at, t.updated_at, t.created_at) DESC');
-    expect(mockRawSqls).toContain('COALESCE(resolved_at, updated_at, created_at) DESC');
+    // Equal-timestamp ties break toward DISMISSED — deterministic and
+    // fail-toward-hold (Codex #3084 r43) — in the subquery AND the belt.
+    expect(String(predicate)).toContain("(t.status = 'dismissed') DESC");
+    expect(mockRawSqls).toContain("COALESCE(resolved_at, updated_at, created_at) DESC, (status = 'dismissed') DESC, id DESC");
     expect(mockRawSqls.some((s) => s.includes('ORDER BY t.created_at DESC'))).toBe(false);
+  });
+
+  test('a fresh email review card invalidates the call pending/releasing hold claims', async () => {
+    // A force-reprocess can mint a live card AFTER a release's in-claim
+    // live-card check (Codex #3084 r43) — card creation re-pends the
+    // call's claims with a fence-invalidating bump so the claimant's gate
+    // refuses, WITHOUT touching deny stamps or retry markers.
+    const invalidated = await repenHoldsForFreshEmailReview('call-1');
+    expect(invalidated).toBe(1);
+    const repen = mockHoldUpdates.at(-1);
+    expect(repen).toMatchObject({ status: 'pending' });
+    expect(repen.updated_at).toBeInstanceOf(Date);
+    expect(repen.last_error).toBeUndefined();
   });
 
   test('a failed pre-send target re-read re-pends instead of sending on a stale guess', async () => {

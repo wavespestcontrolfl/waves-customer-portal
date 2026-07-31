@@ -210,6 +210,35 @@ async function repenAmbiguousDelivery(holdId, fenceStamps, dbh = db, marker = 'd
     .update({ status: 'pending', last_error: marker, updated_at: new Date() });
 }
 
+// A FRESH email review card puts the call's address question back in play
+// (Codex #3084 r43): a force-reprocess can mint a live card AFTER a
+// release's in-claim live-card check while the claimant still holds its
+// fence — the processor merges the new cycle into the ledger only at Step
+// 6, much later, so the enroll and DOI windows would otherwise send the
+// previously held address with the fresh extraction explicitly awaiting
+// read-back. Card creation therefore invalidates the call's hold claims:
+// pending/releasing rows flip back to 'pending' with a fence-invalidating
+// bump — the claimant's gate CAS misses and every fenced settle walks away
+// (the r37 send transaction holds the row lock, so a card landing mid-send
+// queues behind the in-flight provider call and invalidates the NEXT
+// attempt instead). Plain re-pend: deny stamps and retry markers stay
+// untouched; released and blocked rows are not claims and stay put. Never
+// throws — the in-claim live-card check and the pre-send re-read remain
+// the guards if this write is lost.
+async function repenHoldsForFreshEmailReview(callLogId, dbh = db) {
+  if (!callLogId) return 0;
+  try {
+    if (!(await dbh.schema.hasTable('first_touch_holds'))) return 0;
+    return await dbh('first_touch_holds')
+      .where({ call_log_id: callLogId })
+      .whereIn('status', ['pending', 'releasing'])
+      .update({ status: 'pending', updated_at: new Date() });
+  } catch (invalidateErr) {
+    logger.warn(`[first-touch-resume] fresh-review hold invalidation failed: ${invalidateErr.code || invalidateErr.name || 'db_error'} (pre-send checks remain the guard)`);
+    return 0;
+  }
+}
+
 async function settleHold(holdId, patch, dbh, claimStamp = null) {
   // EVERY retryable settle (pending + a fallback marker) is deny-preserving
   // (Codex #3084 r22): a deny stamping after the pre-send read must not be
@@ -1661,12 +1690,17 @@ async function sweepAbandonedFirstTouchHolds({ dbh = db, limit = 10 } = {}) {
       // a dismissed-last call stays held until a correction (the fanout
       // flips dismissed cards to resolved) or a fresh cycle resolves.
       // resolved_at is stamped by BOTH terminal transitions; the COALESCE
-      // covers rows written outside transitionCore.
+      // covers rows written outside transitionCore. Equal-timestamp ties
+      // break toward DISMISSED (Codex #3084 r43): sibling dispositions can
+      // land in the same millisecond, and without a deterministic
+      // secondary key Postgres may return either row — the tie must fail
+      // toward hold, never toward approval.
       .whereRaw(`(
         SELECT t.status FROM triage_items t
         WHERE t.call_log_id = first_touch_holds.call_log_id
           AND t.reason_code IN ('email_unverified', 'email_invalid')
-        ORDER BY COALESCE(t.resolved_at, t.updated_at, t.created_at) DESC
+        ORDER BY COALESCE(t.resolved_at, t.updated_at, t.created_at) DESC,
+          (t.status = 'dismissed') DESC, t.id DESC
         LIMIT 1
       ) = 'resolved'`)
       .whereNotExists(function stillLive() {
@@ -1697,7 +1731,9 @@ async function sweepAbandonedFirstTouchHolds({ dbh = db, limit = 10 } = {}) {
       const latest = await dbh('triage_items')
         .where({ call_log_id: row.call_log_id })
         .whereIn('reason_code', EMAIL_REVIEW_REASON_CODES)
-        .orderByRaw('COALESCE(resolved_at, updated_at, created_at) DESC')
+        // Equal-timestamp ties break toward DISMISSED (r43) — the tie must
+        // fail toward hold, never toward approval.
+        .orderByRaw("COALESCE(resolved_at, updated_at, created_at) DESC, (status = 'dismissed') DESC, id DESC")
         .first('status');
       if (!latest || latest.status !== 'resolved') continue;
       const res = await resumeHeldFirstTouch({ callLogId: row.call_log_id, source: 'ledger_sweep' });
@@ -1731,4 +1767,5 @@ module.exports = {
   fencedHoldWrite,
   gateHoldForSend,
   repenAmbiguousDelivery,
+  repenHoldsForFreshEmailReview,
 };

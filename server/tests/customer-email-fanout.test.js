@@ -406,11 +406,34 @@ describe('propagateCustomerEmailChange', () => {
     // Delivered engagement links to the rejected mailbox die with the move.
     const rotationScope = conn.__calls.find((c) => c.table === 'newsletter_send_deliveries' && c.op === 'where');
     expect(rotationScope.arg).toEqual({ subscriber_id: 902 });
-    // Ownership-safe: the selection is customer_id-bound, never email-only.
+    // Ownership-safe: the selection is customer_id-bound, never email-only,
+    // and locked FOR UPDATE against concurrent opt-outs (r43).
     expect(conn.__calls.some((c) => c.table === 'newsletter_subscribers' && c.op === 'where'
       && c.arg && c.arg.customer_id === 'cust-1')).toBe(true);
     expect(conn.__calls.some((c) => c.table === 'newsletter_subscribers' && c.op === 'orWhereRaw'
       && c.arg.bindings && c.arg.bindings[0] === 'held.extract@example.com')).toBe(true);
+    expect(conn.__calls.some((c) => c.table === 'newsletter_subscribers' && c.op === 'forUpdate')).toBe(true);
+    // The retarget CASes on a still-subscribable status (r43).
+    expect(conn.__calls.some((c) => c.table === 'newsletter_subscribers' && c.op === 'whereIn'
+      && c.arg.col === 'status' && String(c.arg.vals) === 'pending,active')).toBe(true);
+  });
+
+  test('newsletter: an unsubscribe committing after the snapshot wins over the retarget', async () => {
+    // One-click/admin unsubscribe lands between the prior-target read and
+    // the retarget write (Codex #3084 r43): the status CAS refuses — the
+    // opt-out is never overwritten with 'pending', no confirmation is
+    // queued, and nothing reads as a subscriber at the corrected address.
+    const conn = makeConn({
+      first_touch_holds: { rows: [{ id: 11, held_email: 'held.extract@example.com', call_log_id: 'call-x' }] },
+      newsletter_subscribers: {
+        firstQueue: [null, null],
+        rows: [{ id: 902, email: 'held.extract@example.com', customer_id: 'cust-1', status: 'active', first_name: 'Sam' }],
+        updateCount: 0, // the CAS missed: the row became unsubscribed
+      },
+    });
+    const result = await propagateCustomerEmailChange({ before: HOLD_BEFORE, after: HOLD_AFTER }, conn);
+    expect(result.pendingConfirmation).toBeUndefined();
+    expect(result.newsletter).toBe(0);
   });
 
   test('newsletter: a prior-target subscriber is deleted when the stored-email row already moved', async () => {

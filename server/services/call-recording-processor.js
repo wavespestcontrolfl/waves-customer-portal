@@ -1180,6 +1180,10 @@ async function shouldHoldLeadEmailEnrollment(callLogId) {
         }))
         .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
         .ignore();
+      // The recovery card is a live review too — invalidate any in-flight
+      // release claim for the call (Codex #3084 r43; never throws).
+      const { repenHoldsForFreshEmailReview } = require('./lead-first-touch-resume');
+      await repenHoldsForFreshEmailReview(callLogId, db);
     } catch (markerErr) {
       // Neither the review state nor a recovery marker is available — a
       // silent `true` here would durably hold both sends with no card
@@ -5749,6 +5753,14 @@ const CallRecordingProcessor = {
               logger.warn(`[call-proc-bridge] triage_items insert failed for ${maskSid(callSid)}: ${triageErr.message}`);
             }
           }
+          if (needsConfirmation.includes('email_unverified') || needsConfirmation.includes('email_invalid')) {
+            // A fresh email card puts the address back under review — an
+            // in-flight release claimed BEFORE this card landed must not
+            // send it (Codex #3084 r43): the fence-invalidating re-pend
+            // makes that claimant's pre-send gate refuse. Never throws.
+            const { repenHoldsForFreshEmailReview } = require('./lead-first-touch-resume');
+            await repenHoldsForFreshEmailReview(call.id, db);
+          }
         }
       } catch (bridgeErr) {
         logger.warn(`[call-proc-bridge] address/identity bridge skipped for ${maskSid(callSid)}: ${bridgeErr.message}`);
@@ -5821,6 +5833,11 @@ const CallRecordingProcessor = {
             } catch (triageErr) {
               logger.warn(`[call-proc] email triage_items insert failed for ${maskSid(callSid)}: ${triageErr.message}`);
             }
+          }
+          if (emailReasons.includes('email_unverified') || emailReasons.includes('email_invalid')) {
+            // Same r43 claim invalidation as the shadow branch above.
+            const { repenHoldsForFreshEmailReview } = require('./lead-first-touch-resume');
+            await repenHoldsForFreshEmailReview(call.id, db);
           }
         }
       } catch (emailErr) {
@@ -9105,6 +9122,11 @@ const CallRecordingProcessor = {
               }))
               .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
               .ignore();
+            // The recovery card is a live review too — invalidate any
+            // in-flight release claim for the call (Codex #3084 r43;
+            // never throws).
+            const { repenHoldsForFreshEmailReview } = require('./lead-first-touch-resume');
+            await repenHoldsForFreshEmailReview(call.id, db);
             } catch (markerErr) {
               // Without this card the pending hold is invisible to
               // operators AND ineligible for the sweep (no resolved card

@@ -374,11 +374,19 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
   // selection only — an unlinked or foreign-owned row at a prior target is
   // never touched (the extraction can be a stranger's real address).
   if (priorHoldTargets.length) {
+    // FOR UPDATE (Codex #3084 r43): the retarget and delete below act on
+    // the snapshot's status, and an unsubscribe committing between this
+    // read and those writes must never be overwritten (retarget writes
+    // status 'pending') or erased (the redundant-row delete). The lock
+    // order matches every other path (first_touch_holds → subscribers).
+    // The status predicates on the writes below are the belt for callers
+    // outside a transaction.
     const priorTargetSubs = await conn('newsletter_subscribers')
       .where({ customer_id: customerId })
       .where(function atPriorTargets() {
         for (const target of priorHoldTargets) this.orWhereRaw('LOWER(email) = ?', [target]);
       })
+      .forUpdate()
       .select('*');
     if (priorTargetSubs.length) {
       // Bearer links already DELIVERED to the prior targets die regardless
@@ -403,15 +411,24 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
         retargetSub = eligible.find((s) => String(s.status || '') === 'pending') || eligible[0];
       }
       // Redundant rows (same person, rejected addresses) go away rather
-      // than colliding with the unique index on a later correction.
+      // than colliding with the unique index on a later correction. The
+      // status CAS (r43) refuses when an unsubscribe committed after the
+      // snapshot — an opt-out record is never deleted.
       for (const sub of eligible) {
         if (retargetSub && sub.id === retargetSub.id) continue;
-        counts.newsletter += await conn('newsletter_subscribers').where({ id: sub.id }).del();
+        counts.newsletter += await conn('newsletter_subscribers')
+          .where({ id: sub.id })
+          .whereIn('status', ['pending', 'active'])
+          .del();
       }
       if (retargetSub) {
         const freshConfirmationToken = randomUUID();
-        counts.newsletter += await conn('newsletter_subscribers')
+        // Status CAS (r43): a concurrent unsubscribe wins — the retarget
+        // must never overwrite an opt-out with 'pending' and queue a
+        // fresh confirmation.
+        const retargeted = await conn('newsletter_subscribers')
           .where({ id: retargetSub.id })
+          .whereIn('status', ['pending', 'active'])
           .update({
             email: newEmail,
             confirmation_token: freshConfirmationToken,
@@ -426,7 +443,8 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
             confirmation_sent_at: null,
             updated_at: now,
           });
-        if (!pendingConfirmation) {
+        counts.newsletter += retargeted;
+        if (retargeted && !pendingConfirmation) {
           pendingConfirmation = {
             id: retargetSub.id,
             email: newEmail,
@@ -434,7 +452,7 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
             confirmation_token: freshConfirmationToken,
           };
         }
-        subscriberAtCorrectedAddress = true;
+        if (retargeted) subscriberAtCorrectedAddress = true;
       }
     }
   }
