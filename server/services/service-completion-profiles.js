@@ -375,9 +375,19 @@ function resolveCompletionDeliveryPosture({
     // profiles, must not be bypassed by clearing the typed pointer —
     // otherwise the next completion mints a public report and sends
     // customer comms against an active switch (codex P1 r3).
-    const suppressedByProfile = ['internal_only', 'disabled'].includes(String(profileDeliveryMode || ''));
+    // internal_only is preserved as its OWN posture, not collapsed to
+    // disabled: internal_only still mints the staff-reviewable shadow
+    // report token while suppressing customer delivery; disabled mints
+    // nothing (codex P2 r5).
+    const profileMode = String(profileDeliveryMode || '');
     const suppressedBySpecialtyKill = specialtyDeliveryDisabled && String(profileCategory || '') === 'specialty';
-    typedDeliveryMode = (isInternalOnly || suppressedByProfile || suppressedBySpecialtyKill) ? 'disabled' : 'auto_send';
+    if (isInternalOnly || suppressedBySpecialtyKill || profileMode === 'disabled') {
+      typedDeliveryMode = 'disabled';
+    } else if (profileMode === 'internal_only') {
+      typedDeliveryMode = 'internal_only';
+    } else {
+      typedDeliveryMode = 'auto_send';
+    }
   }
   // Equivalent to the previous expression for every typed input and every
   // pre-existing untyped input (untyped mode was auto_send unless

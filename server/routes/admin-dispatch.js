@@ -8629,13 +8629,18 @@ router.post('/:serviceId/schedule-followup', async (req, res, next) => {
       // completion on the now-untyped profile still carries its snapshot.
       // Neither present → the visit never earned the CTA — same "can't mint
       // an included $0 follow-up" guarantee as the typed gate.
-      if (!(preAuthFrozenVerdict && typeof preAuthFrozenVerdict.required === 'boolean') && !snapshot) {
+      if (!frozenVerdictPresent && !snapshot) {
         return res.status(409).json({
           error: 'This visit was not completed through the follow-up flow.',
           code: 'followup_no_typed_completion',
         });
       }
-    } else if (!snapshot || String(snapshot.type || '') !== String(profile.findingsType)) {
+    } else if (!frozenVerdictPresent && (!snapshot || String(snapshot.type || '') !== String(profile.findingsType))) {
+      // A frozen verdict bypasses the snapshot gate in BOTH directions: an
+      // untyped completion followed by a rollback/repoint that restores the
+      // typed pointer has a frozen promise but no snapshot — the mutable
+      // profile must not reject it (codex P2 r5). Without a frozen verdict
+      // the typed gate stays exactly as before.
       return res.status(409).json({
         error: 'This visit was not completed through the typed report flow.',
         code: 'followup_no_typed_completion',
