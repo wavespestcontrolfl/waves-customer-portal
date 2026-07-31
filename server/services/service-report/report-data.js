@@ -2188,6 +2188,36 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   }
 
   const lawnAssessment = await buildLawnAssessmentReportData(service, serviceLine, knex);
+  // Render-time treatment reconciliation (codex P1 r19): the completion SMS
+  // links this report immediately — a customer can open it BEFORE the
+  // grounded regen or stored-copy sanitize lands, and nothing shown can be
+  // retracted. Reconcile recommendation-derived copy against today's
+  // applications in-memory as the last line of defense (pure, no DB/LLM);
+  // storage is healed separately by the completion pipeline.
+  if (serviceLine === 'lawn' && lawnAssessment?.scores) {
+    try {
+      const { treatmentGuard } = require('../knowledge-bridge');
+      const guardProducts = products.map((p) => ({
+        product_name: p.product_name,
+        product_category: p.product_category || p.approved_report_product_facts?.category || null,
+      }));
+      const appliedClasses = treatmentGuard.appliedTreatmentClasses(guardProducts);
+      if (appliedClasses.length) {
+        const recs = lawnAssessment.scores.recommendations;
+        if (recs && typeof recs === 'object') {
+          const { parsed } = treatmentGuard.sanitizeRecommendationsAgainstTreatment(
+            JSON.parse(JSON.stringify(recs)), guardProducts,
+          );
+          lawnAssessment.scores.recommendations = parsed;
+        }
+        if (treatmentGuard.contradictsAppliedTreatment(lawnAssessment.scores.aiSummary, appliedClasses)) {
+          lawnAssessment.scores.aiSummary = 'Today’s applications are in place — we’ll track how the lawn responds and adjust at the next visit.';
+        }
+      }
+    } catch (guardErr) {
+      console.warn(`[report-data] render-time treatment reconciliation skipped: ${guardErr.message}`);
+    }
+  }
   // Mowing height-of-cut — surfaced at the top level (not inside lawnAssessment)
   // so it shows on lawn reports even when there's no vision assessment. Null when
   // not a lawn visit or no reading was captured. The trend is capped at THIS

@@ -5593,7 +5593,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // not stay suppressed at the later MMS/SMS checks. Attached before
         // the race so a fast settle updates the flag before the await
         // returns.
-        lawnRecRegenPromise.then((result) => { lawnRecRegenGrounded = !!result; }).catch(() => {});
+        void lawnRecRegenPromise.then((result) => { lawnRecRegenGrounded = !!result; })
+          .catch((flagErr) => logger.error(`[dispatch] regen grounded-flag updater failed: ${flagErr.message}`));
         // Final-copy settlement with VERIFIED semantics (codex P1 r18): the
         // sanitizer reports transient DB errors as { error } without
         // rejecting, so the chain retries with backoff and resolves
@@ -6292,7 +6293,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // writes when it lands — re-render the PDF then, so the queued artifact
       // doesn't permanently carry the stale confirm-time copy (codex P1 r8).
       if (lawnRecRegenAttempted && !lawnRecRegenGrounded && lawnRecFinalCopyPromise) {
-        lawnRecFinalCopyPromise.then(async (finalCopy) => {
+        // Deliberately detached recovery chain — explicit void + logged
+        // catch per repo detachment style (codex P1 r19).
+        void lawnRecFinalCopyPromise.then(async (finalCopy) => {
           // Recovery render for EVERY not-grounded-at-wait outcome (fast
           // fail, late grounded, late fail — codex P1 r14+r18): the
           // finalCopy chain has already run the grounded write or the
@@ -6334,7 +6337,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           } catch (requeueErr) {
             logger.warn(`[dispatch] late PDF re-queue failed for ${record.id}: ${requeueErr.message}`);
           }
-        }).catch(() => {});
+        }).catch((recoveryErr) => logger.error(`[dispatch] PDF recovery chain failed for ${record.id}: ${recoveryErr.message}`));
       }
     }
     // Best-effort: queue the "Your Visit, in Motion" recap render for pest visits
@@ -8119,7 +8122,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           if (emailHoldMs && queued.delivery?.id && lawnRecFinalCopyPromise) {
             const heldDeliveryId = queued.delivery.id;
             logger.info(`[dispatch] report email held ${Math.round(emailHoldMs / 60000)}m for ${record.id} pending grounded copy`);
-            lawnRecFinalCopyPromise.then(async (finalCopy) => {
+            void lawnRecFinalCopyPromise.then(async (finalCopy) => {
               // Pull forward only on VERIFIED settlement (codex P1 r18) —
               // unverified keeps the full hold, and the worker's own
               // sanitize gate still protects the send.
@@ -8128,7 +8131,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                 .where({ id: heldDeliveryId, status: 'queued' })
                 .update({ next_attempt_at: new Date(), updated_at: new Date() })
                 .catch((pullErr) => logger.warn(`[dispatch] held email pull-forward failed for ${record.id}: ${pullErr.message}`));
-            }).catch(() => {});
+            }).catch((chainErr) => logger.error(`[dispatch] held email pull-forward chain failed for ${record.id}: ${chainErr.message}`));
           }
           const queuedNotes = {
             ...latestNotes,

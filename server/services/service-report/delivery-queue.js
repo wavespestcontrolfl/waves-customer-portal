@@ -246,9 +246,20 @@ async function processServiceReportDelivery(delivery, knex = db) {
       return { status, error: sanitized.error };
     }
     if (sanitized?.changed) {
-      // The copy just changed — a PDF stored by the initial render is stale,
-      // and getOrRenderServiceReportPdf would serve it on key match. Clear
-      // the key so the email attaches a fresh render (codex P1 r18).
+      // The copy just changed — an ACTIVE renderer may have loaded the
+      // pre-sanitize data and would write its stale key AFTER a bare
+      // invalidation (write-after-invalidate — codex P1 r19). Fence: while
+      // a render is in flight, defer this delivery via the normal backoff;
+      // once no renderer is active, clear the key so the email attaches a
+      // fresh render (a QUEUED job is safe — it reads post-sanitize data).
+      const activeRender = await knex('service_report_pdf_jobs')
+        .where({ service_record_id: delivery.service_record_id, status: 'rendering' })
+        .first('id')
+        .catch(() => null);
+      if (activeRender) {
+        const status = await markDeliveryFailed(delivery, new Error('deferred: PDF render in flight during copy correction'), knex);
+        return { status, error: 'pdf render in flight' };
+      }
       await knex('service_records')
         .where({ id: delivery.service_record_id })
         .update({ pdf_storage_key: null })

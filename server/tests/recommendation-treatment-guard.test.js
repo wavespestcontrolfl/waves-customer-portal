@@ -115,6 +115,20 @@ describe('sanitizeRecommendationsAgainstTreatment', () => {
     expect(dropped).toBe(1);
   });
 
+  test('fertilizer deferrals are caught (r19)', () => {
+    const { dropped } = _test.sanitizeRecommendationsAgainstTreatment({
+      recommendations: [{ priority: 1, action: 'Hold off on fertilizer until the lawn recovers.', reason: 'x', timeframe: 'y' }],
+    }, APPLIED);
+    expect(dropped).toBe(1);
+  });
+
+  test('modal negations are caught (r19)', () => {
+    const { dropped } = _test.sanitizeRecommendationsAgainstTreatment({
+      recommendations: [{ priority: 1, action: 'Fungicide should not be applied until disease is confirmed.', reason: 'x', timeframe: 'y' }],
+    }, APPLIED);
+    expect(dropped).toBe(1);
+  });
+
   test('legitimate aftercare mentioning the class passes (defer must govern the treatment)', () => {
     const { parsed, dropped } = _test.sanitizeRecommendationsAgainstTreatment({
       recommendations: [

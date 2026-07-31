@@ -154,15 +154,36 @@ const _recommendationRuns = new Map();
 // an instruction, not a guarantee. Text that advises against/defers a product
 // class the technician ALREADY applied on the visit must never be stored —
 // that's the exact AI-vs-technician contradiction this lane exists to kill.
-// Each class matches its product name AND the customer-facing synonyms the
-// model actually writes — the shipped contradiction said "active disease
-// treatment", not "fungicide" (codex P1 r6). Stored as pattern SOURCES so
-// the governed-contradiction builder below can compose them.
-const TREATMENT_CLASS_TERMS = {
-  fungicide: 'fungicid\\w*|fung(?:us|al)\\s+(?:treatment|application|control|spray)|disease\\s+(?:treatment|application|control|spray)',
-  herbicide: 'herbicid\\w*|weed\\s+(?:treatment|control|application|killer|spray)',
-  insecticide: 'insecticid\\w*|insect\\s+(?:treatment|control|application|spray)|(?:grub|chinch\\s*bug|webworm)\\s+(?:treatment|control|application)',
+// EVERY customer-visible applied class is guarded (codex P1 r19 — "hold off
+// on fertilizer" is as much a contradiction as the fungicide case). Each
+// entry pairs a product_category matcher with the customer-facing synonyms
+// the model writes ("active disease treatment", not "fungicide" — r6),
+// stored as pattern SOURCES so the governed builder can compose them.
+const TREATMENT_CLASSES = {
+  fungicide: {
+    category: /fungicid/i,
+    terms: 'fungicid\\w*|fung(?:us|al)\\s+(?:treatment|application|control|spray)|disease\\s+(?:treatment|application|control|spray)',
+  },
+  herbicide: {
+    category: /herbicid/i,
+    terms: 'herbicid\\w*|weed\\s+(?:treatment|control|application|killer|spray)',
+  },
+  insecticide: {
+    category: /insecticid/i,
+    terms: 'insecticid\\w*|insect\\s+(?:treatment|control|application|spray)|(?:grub|chinch\\s*bug|webworm)\\s+(?:treatment|control|application)',
+  },
+  fertilizer: {
+    category: /fertiliz|micronutrient/i,
+    terms: 'fertiliz\\w*|fertilization|\\bfeeding\\b|micronutrient\\s+(?:application|blend|treatment)',
+  },
+  pre_emergent: {
+    category: /pre[-\s_]?emergent/i,
+    terms: 'pre[-\\s]?emergent\\w*',
+  },
 };
+const TREATMENT_CLASS_TERMS = Object.fromEntries(
+  Object.entries(TREATMENT_CLASSES).map(([cls, def]) => [cls, def.terms]),
+);
 
 // Defer-language must GOVERN the treatment decision itself — bare
 // co-occurrence deleted legitimate aftercare like "avoid watering after the
@@ -191,6 +212,10 @@ function governedContradictionRegex(cls) {
     // contracted / adverbial negations — "fungicide isn't necessary",
     // "a fungicide is never warranted right now" (codex P1 r11)
     `${CLASS}[^.!?]{0,50}\\b(?:isn['’]t|aren['’]t|wasn['’]t|weren['’]t|never|no\\s+longer)\\s+(?:currently\\s+)?(?:needed|necessary|required|warranted|supported|recommended)\\b`,
+    // modal negations — "fungicide should not be applied until disease is
+    // confirmed", "shouldn't be used" (codex P1 r19)
+    `${CLASS}[^.!?]{0,60}\\b(?:should|must|can|could|may|will|would|shall)\\s+not\\s+(?:be\\s+)?(?:applied|used|made|needed|necessary)\\b`,
+    `${CLASS}[^.!?]{0,60}\\b(?:shouldn['’]t|mustn['’]t|can['’]t|cannot|won['’]t|wouldn['’]t)\\s+(?:be\\s+)?(?:applied|used|made|needed|necessary)\\b`,
     // "no <class> is needed", "confirm no fungicide is needed"
     `\\b(?:confirm|verify)\\s+(?:that\\s+)?no\\s+(?:[\\w'’-]+\\s+){0,2}${CLASS}`,
     // "do not currently support active disease treatment"
@@ -211,8 +236,8 @@ function contradictsAppliedTreatment(text, appliedClasses) {
 // back to neutral monitoring copy (nextVisitFocus) or are removed so the
 // previously stored value stands (summary/customerTip).
 function appliedTreatmentClasses(appliedProducts) {
-  return Object.keys(TREATMENT_CLASS_TERMS).filter((cls) =>
-    (appliedProducts || []).some((p) => new RegExp(cls, 'i').test(String(p.product_category || ''))));
+  return Object.keys(TREATMENT_CLASSES).filter((cls) =>
+    (appliedProducts || []).some((p) => TREATMENT_CLASSES[cls].category.test(String(p.product_category || ''))));
 }
 
 // Applied-product rows with categories recovered from the catalog: legacy
@@ -748,7 +773,13 @@ const KnowledgeBridge = {
         try {
           appliedProducts = await loadAppliedProductsWithCategories(assessment.service_record_id, trx);
         } catch (treatmentErr) {
-          logger.warn(`[knowledge-bridge] treatment context unavailable for assessment ${assessmentId}: ${treatmentErr.message}`);
+          // A transient products-load failure must FAIL the run, not proceed
+          // ungrounded: a truthy result here would release the PDF/MMS/SMS/
+          // email gates while neither the prompt nor the persist-time guard
+          // ever saw today's treatments (codex P1 r19). Returning null routes
+          // the caller to the deterministic-sanitize/retry path.
+          logger.warn(`[knowledge-bridge] treatment context unavailable for assessment ${assessmentId} — failing run as ungrounded: ${treatmentErr.message}`);
+          return null;
         }
       }
 
@@ -1009,4 +1040,7 @@ Return a JSON object with:
 };
 
 module.exports = KnowledgeBridge;
-module.exports._test = { sanitizeRecommendationsAgainstTreatment, contradictsAppliedTreatment };
+module.exports._test = { sanitizeRecommendationsAgainstTreatment, contradictsAppliedTreatment, appliedTreatmentClasses };
+// Pure render-time guard surface (no DB, no LLM) — consumed by report-data
+// as the last line of defense for instantly opened report links.
+module.exports.treatmentGuard = { sanitizeRecommendationsAgainstTreatment, contradictsAppliedTreatment, appliedTreatmentClasses };
