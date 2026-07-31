@@ -58,17 +58,26 @@ const ADDRESS_MOOT_CODES = new Set([
 
 // Cleared when THIS call provably produced a booking (source_call_log_id
 // provenance): the scheduling ambiguity / quality doubt the card raised was
-// answered by the booking itself.
+// answered by the booking itself. Deliberately EXCLUDES reschedule_or_cancel
+// and existing_appointment_coordination — those cards carry a requested
+// schedule TRANSITION for the office to apply, and a created booking proves
+// nothing about whether the cancellation/reschedule/coordination happened.
 const BOOKING_OUTCOME_CODES = new Set([
   'not_confirmed', 'confirmed_without_start_time', 'ambiguous_scheduling',
   'ambiguous_pest_or_service', 'voicemail', 'low_extraction_confidence',
-  'reschedule_or_cancel', 'existing_appointment_coordination',
 ]);
 
 // Informational flags with no owed work attached — they inform a record edit
 // or a callback that either happened long ago or never will. Aged cards keep
 // their payload (nothing is deleted) and dedup re-arms on terminal status,
 // so a recurrence files a fresh card.
+//
+// Age dismissal additionally requires the ROW's severity = 'advisory': the
+// same reason code can be inserted blocking at one site and advisory at
+// another (insert-site severity in call-recording-processor), and a blocking
+// card is owed review no matter how old it gets. NOT listed on purpose:
+// implied_consent_non_ani_recipient (explicitly asks the office to confirm
+// the recipient before the held confirmation SMS goes out — owed work).
 const ADVISORY_AGE_CODES = new Set([
   'rental_or_tenant_occupied', 'secondary_contact_captured',
   'second_service_address', 'multi_property_call', 'address_recovered',
@@ -76,7 +85,6 @@ const ADVISORY_AGE_CODES = new Set([
   'no_sms_consent_captured', 'sms_consent_missing',
   'low_extraction_confidence', 'voicemail', 'caller_not_authorized',
   'email_unverified', 'email_invalid', 'missing_last_name',
-  'implied_consent_non_ani_recipient',
 ]);
 
 const RULE_NOTES = {
@@ -93,6 +101,30 @@ function ageDays(createdAt, now) {
   return (now.getTime() - created.getTime()) / (24 * 3600 * 1000);
 }
 
+// Did THIS call supply new address evidence (heard address, recovery
+// candidates)? The routing guard (call-triage-flags.js fail-open recovery)
+// only falls back to the on-file address when the call carried no new
+// address — mirror that: a card holding a NEW address for validation must
+// not be resolved just because the customer's unrelated primary address
+// exists. Base-payload cards ({flag, confidence, scheduling_status}) carry
+// no such evidence and stay moot-eligible.
+function hasNewAddressEvidence(payloadRaw) {
+  let payload = payloadRaw;
+  if (!payload) return false;
+  if (typeof payload === 'string') {
+    try {
+      payload = JSON.parse(payload);
+    } catch {
+      return true; // unparseable → fail closed, keep the card
+    }
+  }
+  return Boolean(
+    payload.address_as_heard
+    || (Array.isArray(payload.address_candidates) && payload.address_candidates.length)
+    || payload.address_recovered,
+  );
+}
+
 // Pure classifier, exported for tests. `item` is a triage_items row joined
 // with its call's customer fields; `ctx.bookedCallIds` is a Set of
 // call_log_ids that have a scheduled_services row via source_call_log_id.
@@ -104,6 +136,7 @@ function classifyTriageItem(item, ctx, { now = new Date() } = {}) {
   const code = item.reason_code;
 
   if (ADDRESS_MOOT_CODES.has(code)
+      && !hasNewAddressEvidence(item.payload)
       && String(item.customer_address_line1 || '').trim() !== ''
       && String(item.customer_zip || '').trim() !== '') {
     return { action: 'resolve', rule: 'address_moot' };
@@ -117,7 +150,9 @@ function classifyTriageItem(item, ctx, { now = new Date() } = {}) {
   if (code === 'spam_or_wrong_number' && ageDays(item.created_at, now) >= SPAM_AGE_DAYS) {
     return { action: 'dismiss', rule: 'spam_aged' };
   }
-  if (ADVISORY_AGE_CODES.has(code) && ageDays(item.created_at, now) >= ADVISORY_AGE_DAYS) {
+  if (ADVISORY_AGE_CODES.has(code)
+      && item.severity === 'advisory'
+      && ageDays(item.created_at, now) >= ADVISORY_AGE_DAYS) {
     return { action: 'dismiss', rule: 'advisory_aged' };
   }
   return null;
@@ -139,7 +174,8 @@ async function sweep({ now = new Date() } = {}) {
     .leftJoin('customers as c', 'c.id', 'cl.customer_id')
     .where('t.status', 'open')
     .select(
-      't.id', 't.call_log_id', 't.reason_code', 't.status', 't.created_at',
+      't.id', 't.call_log_id', 't.reason_code', 't.status', 't.severity',
+      't.created_at', 't.payload',
       'c.address_line1 as customer_address_line1',
       'c.zip as customer_zip',
       'c.last_name as customer_last_name',
@@ -166,15 +202,18 @@ async function sweep({ now = new Date() } = {}) {
   const deferred = decisions.length - applied.length;
 
   // Apply per rule in batched CAS updates (status='open' re-checked at write
-  // time — an operator or event-driven resolver may have raced us).
+  // time — an operator or event-driven resolver may have raced us). Touched
+  // calls derive from RETURNING on the successful update only: a decision
+  // whose row lost the race must not drive the review_status sync below.
   const counts = {};
   const touchedCalls = new Map(); // call_log_id -> status we applied last
+  const itemCallById = new Map(applied.map((d) => [d.item.id, d.item.call_log_id]));
   for (const rule of Object.keys(RULE_NOTES)) {
     const group = applied.filter((d) => d.rule === rule);
     if (!group.length) continue;
     const action = group[0].action;
     const status = action === 'resolve' ? 'resolved' : 'dismissed';
-    const updated = await db('triage_items')
+    const updatedRows = await db('triage_items')
       .whereIn('id', group.map((d) => d.item.id))
       .where({ status: 'open' })
       .update({
@@ -182,9 +221,14 @@ async function sweep({ now = new Date() } = {}) {
         resolution_note: RULE_NOTES[rule],
         resolved_at: now,
         updated_at: now,
-      });
-    counts[rule] = updated;
-    for (const d of group) touchedCalls.set(d.item.call_log_id, status);
+      })
+      .returning('id');
+    counts[rule] = updatedRows.length;
+    for (const row of updatedRows) {
+      const id = row?.id ?? row;
+      const callLogId = itemCallById.get(id);
+      if (callLogId) touchedCalls.set(callLogId, status);
+    }
   }
 
   // Mirror admin-triage transitionCore's review_status sync: a call with
@@ -214,6 +258,7 @@ async function sweep({ now = new Date() } = {}) {
 module.exports = {
   runTriageAutoResolve,
   classifyTriageItem,
+  hasNewAddressEvidence,
   ADDRESS_MOOT_CODES,
   BOOKING_OUTCOME_CODES,
   ADVISORY_AGE_CODES,

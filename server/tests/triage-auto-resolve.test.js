@@ -23,7 +23,7 @@ const OLD_8D = new Date(NOW.getTime() - 8 * 24 * 3600 * 1000).toISOString();
 function item(over = {}) {
   return {
     id: 't1', call_log_id: 'call-1', reason_code: 'address_unverifiable',
-    status: 'open', created_at: FRESH,
+    status: 'open', severity: 'advisory', created_at: FRESH, payload: { flag: 'address_unverifiable', confidence: 0.5 },
     customer_address_line1: null, customer_zip: null, customer_last_name: null,
     ...over,
   };
@@ -39,6 +39,24 @@ describe('moot-condition resolves', () => {
   test('address flag stays open when either address component is missing', () => {
     expect(classifyTriageItem(item({ customer_address_line1: '123 Sample St', customer_zip: '' }), noBookings, { now: NOW })).toBeNull();
     expect(classifyTriageItem(item({ customer_address_line1: null, customer_zip: '34205' }), noBookings, { now: NOW })).toBeNull();
+  });
+
+  test('a card holding NEW address evidence from the call is never resolved by the on-file primary', () => {
+    const withEvidence = item({
+      reason_code: 'address_unverified',
+      customer_address_line1: '123 Sample St', customer_zip: '34205',
+      payload: { flag: 'address_unverified', address_as_heard: '456 Other Rd', address_candidates: [{ value: '456 Other Rd' }] },
+    });
+    expect(classifyTriageItem(withEvidence, noBookings, { now: NOW })).toBeNull();
+    // Stringified payload (historical rows) is honored too; unparseable fails closed.
+    expect(classifyTriageItem(item({
+      customer_address_line1: '123 Sample St', customer_zip: '34205',
+      payload: JSON.stringify({ flag: 'x', address_as_heard: '456 Other Rd' }),
+    }), noBookings, { now: NOW })).toBeNull();
+    expect(classifyTriageItem(item({
+      customer_address_line1: '123 Sample St', customer_zip: '34205',
+      payload: 'not-json{',
+    }), noBookings, { now: NOW })).toBeNull();
   });
 
   test('missing_last_name resolves once the customer has a last name', () => {
@@ -77,6 +95,13 @@ describe('age-based dismissals', () => {
       .toEqual({ action: 'dismiss', rule: 'advisory_aged' });
     expect(classifyTriageItem(item({ reason_code: 'caller_not_authorized', created_at: OLD_8D }), noBookings, { now: NOW })).toBeNull();
   });
+
+  test('a BLOCKING-severity row never age-dismisses even for an allowlisted code', () => {
+    expect(classifyTriageItem(
+      item({ reason_code: 'caller_not_authorized', severity: 'blocking', created_at: OLD_31D }),
+      noBookings, { now: NOW },
+    )).toBeNull();
+  });
 });
 
 describe('fail-closed allowlist — owed work is NEVER swept', () => {
@@ -89,10 +114,16 @@ describe('fail-closed allowlist — owed work is NEVER swept', () => {
     'email_bounce_reverify', 'extraction_failed_permanent',
     'v2_extraction_invalid', 'shared_phone_ambiguous', 'out_of_service_area',
     'do_not_contact_requested', 'hoa_common_area_requires_approval',
-    'some_future_unknown_code',
+    'implied_consent_non_ani_recipient', 'some_future_unknown_code',
   ];
   test.each(owedCodes)('%s stays open even when ancient', (code) => {
     expect(classifyTriageItem(item({ reason_code: code, created_at: OLD_31D }), noBookings, { now: NOW })).toBeNull();
+  });
+
+  test('a created booking does NOT clear cancellation/coordination transition requests', () => {
+    const booked = { bookedCallIds: new Set(['call-1']) };
+    expect(classifyTriageItem(item({ reason_code: 'reschedule_or_cancel' }), booked, { now: NOW })).toBeNull();
+    expect(classifyTriageItem(item({ reason_code: 'existing_appointment_coordination' }), booked, { now: NOW })).toBeNull();
   });
 
   test('in_progress (human-claimed) is untouchable regardless of rule match', () => {
