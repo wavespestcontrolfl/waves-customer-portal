@@ -384,6 +384,16 @@ function buildTurfRequestProfile(baseProfile, form) {
     form.landscapeComplexity || profile.landscapeComplexity;
   profile.nearWater = form.nearWater === "YES" ? "YES" : "NO";
   profile.propertyType = form.propertyType || profile.propertyType;
+  // Commercial classification follows the FORM, exactly like the pricing
+  // request — a lookup-classified commercial corrected to residential (or
+  // vice versa) must preview through the same branch it will price through
+  // (commercial changes the hardscape model; pre-push P1 #3098).
+  const formIsCommercial = isCommercialEstimateInput(form);
+  profile.isCommercial = formIsCommercial;
+  profile.commercialSubtype = formIsCommercial ? form.commercialSubtype || null : null;
+  profile.commercialRiskType = formIsCommercial ? form.commercialRiskType || null : null;
+  profile.treeShrubDensity = formIsCommercial ? form.treeShrubDensity || null : null;
+  profile.mosquitoPressure = formIsCommercial ? form.mosquitoPressure || null : null;
   return profile;
 }
 
@@ -2919,6 +2929,11 @@ export default function EstimateToolViewV2({
     form.stories,
     form.bedArea,
     form.propertyType,
+    form.isCommercial,
+    form.commercialSubtype,
+    form.commercialRiskType,
+    form.treeShrubDensity,
+    form.mosquitoPressure,
     form.hasPool,
     form.hasPoolCage,
     form.poolCageSize,
@@ -3856,13 +3871,9 @@ export default function EstimateToolViewV2({
         delete profile.woodTreatmentSqFt;
       }
       if (preslabSqft) profile.slabSqFt = preslabSqft;
-      // pool/cage, storiesSource, densities, nearWater, and propertyType
-      // are set by buildTurfRequestProfile above.
-      profile.isCommercial = formIsCommercial;
-      profile.commercialSubtype = formIsCommercial ? form.commercialSubtype || null : null;
-      profile.commercialRiskType = formIsCommercial ? form.commercialRiskType || null : null;
-      profile.treeShrubDensity = formIsCommercial ? form.treeShrubDensity || null : null;
-      profile.mosquitoPressure = formIsCommercial ? form.mosquitoPressure || null : null;
+      // pool/cage, storiesSource, densities, nearWater, propertyType, and
+      // the form-driven commercial classification are all set by
+      // buildTurfRequestProfile above.
 
       if (!profile.homeSqFt) profile.homeSqFt = 0;
       if (!profile.lotSqFt) profile.lotSqFt = 0;
