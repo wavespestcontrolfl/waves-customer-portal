@@ -775,6 +775,49 @@ router.post('/property-lookup/verify', async (req, res) => {
   }
 });
 
+// Engine-faithful treatable-turf fallback preview for the estimator's
+// stale-imagery path (codex P1 r2 #3098). When the conflict guard discarded
+// the vision areas and Confirmed Sq Ft is blank, the client must display
+// the number /calculate-estimate would actually price — and keep displaying
+// it as the rep edits lot/home/stories/features. Recomputed HERE so the
+// hardscape brackets and turf factors never fork into the client bundle.
+// Pure computation off the request body; no DB, no external calls.
+// (Router-level adminAuthenticate + requireTechOrAdmin already cover this.)
+router.post('/turf-preview', (req, res) => {
+  const body = req.body || {};
+  const boundedNumber = (value, max) => {
+    const n = Number(value);
+    return Number.isFinite(n) && n >= 0 && n <= max ? n : 0;
+  };
+  const enumOr = (value, allowed, fallback) => {
+    const s = String(value || '').toLowerCase();
+    return allowed.includes(s) ? s : fallback;
+  };
+  const rawFeatures = body.features && typeof body.features === 'object' && !Array.isArray(body.features)
+    ? body.features
+    : {};
+  try {
+    const enginePreview = calculatePropertyProfile({
+      lotSqFt: boundedNumber(body.lotSqFt, 50_000_000),
+      homeSqFt: boundedNumber(body.homeSqFt, 5_000_000),
+      stories: Math.max(1, boundedNumber(body.stories, 100) || 1),
+      propertyType: normalizePricingPropertyType(body.propertyType) || 'single_family',
+      features: {
+        pool: rawFeatures.pool === true,
+        poolCage: rawFeatures.poolCage === true,
+        shrubs: enumOr(rawFeatures.shrubs, ['light', 'moderate', 'heavy'], 'moderate'),
+        trees: enumOr(rawFeatures.trees, ['light', 'moderate', 'heavy'], 'moderate'),
+        complexity: enumOr(rawFeatures.complexity, ['simple', 'moderate', 'complex'], 'moderate'),
+        nearWater: rawFeatures.nearWater === true,
+      },
+    });
+    res.json({ turfSf: Math.max(0, Math.round(Number(enginePreview?.lawnSqFt) || 0)) });
+  } catch (err) {
+    logger.warn('[property-lookup] turf-preview failed', { error: err.message });
+    res.status(500).json({ error: 'preview failed' });
+  }
+});
+
 
 // ─────────────────────────────────────────────
 // NORMALIZERS

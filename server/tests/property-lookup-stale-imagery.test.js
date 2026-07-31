@@ -33,6 +33,11 @@ const { detectStaleImageryTurfConflict } = require('../services/property-lookup/
 const { buildEnrichedProfile } = require('../routes/property-lookup-v2');
 const { computeTurfArea, calculatePropertyProfile } = require('../services/pricing-engine/property-calculator');
 
+// Recent build — the detector only sanitizes new-construction
+// contradictions (a bare-land reading against an OLD home is a plausible
+// teardown). Dynamic so the fixture stays "recent" as the clock moves.
+const BUILD_YEAR = new Date().getFullYear() - 1;
+
 // Mirrors the prod incident's county record (synthetic address): trusted
 // county dims (so the county turf prior WOULD seed if the guard didn't also
 // skip it, and so the detector's evidence gate passes) with an
@@ -45,7 +50,7 @@ function newBuildRecord() {
     squareFootage: 2362,
     stories: 2,
     lotSize: 6985,
-    yearBuilt: 2025,
+    yearBuilt: BUILD_YEAR,
     imperviousAreaSf: 0,
     _fieldEvidence: {
       lotSize: { sourceType: 'county' },
@@ -75,7 +80,7 @@ beforeEach(() => jest.clearAllMocks());
 describe('detectStaleImageryTurfConflict', () => {
   test('fires on county-assessed home + explicit vision zeros for turf AND impervious', () => {
     expect(detectStaleImageryTurfConflict(newBuildRecord(), bareDirtAi()))
-      .toEqual({ countySqFt: 2362, yearBuilt: 2025 });
+      .toEqual({ countySqFt: 2362, yearBuilt: BUILD_YEAR });
   });
 
   test('a genuine no-lawn property (structure visible, high impervious) never trips it', () => {
@@ -120,6 +125,17 @@ describe('detectStaleImageryTurfConflict', () => {
     expect(detectStaleImageryTurfConflict(noEvidenceMap, bareDirtAi())).toBeNull();
   });
 
+  test('an OLD assessed home never fires — bare-land vision may be a real teardown', () => {
+    // codex P2 #3098: the roll carries no demolition signal, so only a
+    // recent build proves the imagery-lag direction. Old or unknown
+    // yearBuilt keeps the explicit vision zeros (correct for a teardown).
+    expect(detectStaleImageryTurfConflict({ ...newBuildRecord(), yearBuilt: 1987 }, bareDirtAi())).toBeNull();
+    expect(detectStaleImageryTurfConflict({ ...newBuildRecord(), yearBuilt: null }, bareDirtAi())).toBeNull();
+    const noYear = { ...newBuildRecord() };
+    delete noYear.yearBuilt;
+    expect(detectStaleImageryTurfConflict(noYear, bareDirtAi())).toBeNull();
+  });
+
   test('accepts both _fieldEvidence shapes (merged object and raw single-source array)', () => {
     const arrayShape = {
       ...newBuildRecord(),
@@ -129,7 +145,7 @@ describe('detectStaleImageryTurfConflict', () => {
       },
     };
     expect(detectStaleImageryTurfConflict(arrayShape, bareDirtAi()))
-      .toEqual({ countySqFt: 2362, yearBuilt: 2025 });
+      .toEqual({ countySqFt: 2362, yearBuilt: BUILD_YEAR });
   });
 });
 
@@ -155,7 +171,7 @@ describe('buildEnrichedProfile stale-imagery sanitization', () => {
     const flag = profile.fieldVerifyFlags.find((f) => f.field === 'estimatedTurfSf');
     expect(flag).toBeDefined();
     expect(flag.priority).toBe('HIGH');
-    expect(flag.reason).toMatch(/2,362 sq ft home \(built 2025\)/);
+    expect(flag.reason).toMatch(new RegExp(`2,362 sq ft home \\(built ${BUILD_YEAR}\\)`));
   });
 
   test('the county prior would have seeded without the guard skip (fixture is trusted)', () => {
@@ -269,5 +285,62 @@ describe('pricing parity after sanitization', () => {
     const paved = { ...bareDirtAi(), imperviousSurfacePercent: 85, imperviosSurfacePercent: 85 };
     const profile = buildEnrichedProfile(newBuildRecord(), paved, 27.58, -82.42);
     expect(profile.turfFallbackPreviewSf).toBeUndefined();
+  });
+});
+
+describe('POST /turf-preview (live engine preview for form edits)', () => {
+  // codex P1 r2 #3098: the client re-asks the engine when the rep edits the
+  // dims/features after lookup, so the displayed fallback keeps tracking
+  // what /calculate-estimate prices. Handler invoked off the router stack
+  // (repo has no supertest); it is pure computation, no DB.
+  const router = require('../routes/property-lookup-v2');
+
+  function invoke(body) {
+    const layer = router.stack.find((l) => l.route?.path === '/turf-preview' && l.route.methods.post);
+    const handler = layer.route.stack[layer.route.stack.length - 1].handle;
+    return new Promise((resolve) => {
+      const res = {
+        statusCode: 200,
+        status(code) { this.statusCode = code; return this; },
+        json(payload) { resolve({ status: this.statusCode, payload }); },
+      };
+      handler({ body }, res);
+    });
+  }
+
+  const LIGHT_SIMPLE = { pool: false, poolCage: false, shrubs: 'light', trees: 'light', complexity: 'simple', nearWater: false };
+
+  test('returns the engine number, matching the lookup-time profile preview', async () => {
+    const { status, payload } = await invoke({
+      lotSqFt: 6985, homeSqFt: 2362, stories: 2,
+      propertyType: 'Single Family', features: LIGHT_SIMPLE,
+    });
+    expect(status).toBe(200);
+    const engine = calculatePropertyProfile({
+      lotSqFt: 6985, homeSqFt: 2362, stories: 2,
+      propertyType: 'single_family', features: LIGHT_SIMPLE,
+    });
+    expect(payload.turfSf).toBe(Math.round(engine.lawnSqFt));
+    const profile = buildEnrichedProfile(newBuildRecord(), bareDirtAi(), 27.58, -82.42);
+    expect(payload.turfSf).toBe(profile.turfFallbackPreviewSf);
+  });
+
+  test("tracks edited dims — codex's 10,000 sf lot example prices via the engine", async () => {
+    const { payload } = await invoke({
+      lotSqFt: 10000, homeSqFt: 2362, stories: 2,
+      propertyType: 'Single Family', features: LIGHT_SIMPLE,
+    });
+    const engine = calculatePropertyProfile({
+      lotSqFt: 10000, homeSqFt: 2362, stories: 2,
+      propertyType: 'single_family', features: LIGHT_SIMPLE,
+    });
+    expect(payload.turfSf).toBe(Math.round(engine.lawnSqFt));
+    expect(payload.turfSf).toBeGreaterThan(0);
+  });
+
+  test('junk input degrades to turfSf 0 without throwing', async () => {
+    const { status, payload } = await invoke({ lotSqFt: 'x', stories: -4, features: ['nope'] });
+    expect(status).toBe(200);
+    expect(payload.turfSf).toBe(0);
   });
 });

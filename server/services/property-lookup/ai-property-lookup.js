@@ -1073,6 +1073,10 @@ function detectUnassessedVacantParcel(record) {
   };
 }
 
+// Sanitization is restricted to builds this recent — see the demolition
+// note inside detectStaleImageryTurfConflict.
+const STALE_IMAGERY_NEW_CONSTRUCTION_MAX_AGE_YEARS = 3;
+
 // The inverse of the vacant-parcel window: the county roll assesses a
 // COMPLETED building but the satellite vision pass measured an empty lot —
 // an explicit 0 for BOTH treatable turf and impervious surface. With an
@@ -1110,6 +1114,19 @@ function detectStaleImageryTurfConflict(record, ai) {
   // Belt: a vacant-roll parcel carrying a defaulted dimension is the OTHER
   // window (imagery may be the fresher source there) — never both.
   if (detectUnassessedVacantParcel(record)) return null;
+  // Only a RECENT build proves which side of the contradiction is stale
+  // (codex P2 #3098): against an old assessed home, bare-land vision can be
+  // the CORRECT reading of a demolition/teardown — the roll carries no
+  // demolition signal to tell them apart. Ambiguous (old or unknown
+  // yearBuilt) contradictions keep the explicit vision zeros — the right
+  // answer for a teardown — under the existing explicit-zero rule.
+  const yearBuilt = Number(record.yearBuilt);
+  const currentYear = new Date().getFullYear();
+  if (!Number.isFinite(yearBuilt)
+    || yearBuilt < currentYear - STALE_IMAGERY_NEW_CONSTRUCTION_MAX_AGE_YEARS
+    || yearBuilt > currentYear + 1) {
+    return null;
+  }
   // Both zeros must be EXPLICIT — null/undefined means "not measured" and
   // Number(null) === 0 would false-positive on it.
   const explicitZero = (value) => value === 0 || value === '0';
@@ -1118,7 +1135,7 @@ function detectStaleImageryTurfConflict(record, ai) {
   if (!explicitZero(impervious)) return null;
   return {
     countySqFt,
-    yearBuilt: record.yearBuilt || null,
+    yearBuilt,
   };
 }
 

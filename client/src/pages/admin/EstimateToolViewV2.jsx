@@ -2802,6 +2802,67 @@ export default function EstimateToolViewV2({
     setVerifySaveState("");
   }, [form.address, form.homeSqFt, form.lotSqFt, form.stories]);
 
+  // Live engine preview for the stale-imagery turf fallback (codex P1 r2
+  // #3098). profile.turfFallbackPreviewSf is computed from lookup-time
+  // facts; when the rep edits the dims/features that drive the engine's
+  // legacy fallback, re-ask /turf-preview so the displayed number keeps
+  // tracking what /calculate-estimate will price. Debounced; a sequence
+  // counter drops out-of-order responses. Null while no fresh answer —
+  // the render falls back to the profile's lookup-time value.
+  const [staleImageryPreviewSf, setStaleImageryPreviewSf] = useState(null);
+  const staleImageryPreviewSeq = useRef(0);
+  const turfUnobservable = enrichedProfile?.turfObservation === "unobservable";
+  useEffect(() => {
+    setStaleImageryPreviewSf(null);
+    if (!turfUnobservable) return undefined;
+    const seq = ++staleImageryPreviewSeq.current;
+    const timer = setTimeout(async () => {
+      try {
+        const r = await fetch("/api/admin/estimator/turf-preview", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
+          },
+          body: JSON.stringify({
+            lotSqFt: Number(form.lotSqFt) || 0,
+            homeSqFt: Number(form.homeSqFt) || 0,
+            stories: Number(form.stories) || 1,
+            propertyType: form.propertyType,
+            features: {
+              pool: form.hasPool === "YES",
+              poolCage: form.hasPoolCage === "YES",
+              shrubs: String(form.shrubDensity || "").toLowerCase(),
+              trees: String(form.treeDensity || "").toLowerCase(),
+              complexity: String(form.landscapeComplexity || "").toLowerCase(),
+              nearWater: form.nearWater === "YES",
+            },
+          }),
+        });
+        if (!r.ok) return;
+        const data = await r.json();
+        if (seq !== staleImageryPreviewSeq.current) return;
+        const sf = Number(data?.turfSf);
+        setStaleImageryPreviewSf(Number.isFinite(sf) && sf > 0 ? Math.round(sf) : null);
+      } catch {
+        // Fall back to the lookup-time profile value.
+      }
+    }, 350);
+    return () => clearTimeout(timer);
+  }, [
+    turfUnobservable,
+    form.lotSqFt,
+    form.homeSqFt,
+    form.stories,
+    form.propertyType,
+    form.hasPool,
+    form.hasPoolCage,
+    form.shrubDensity,
+    form.treeDensity,
+    form.landscapeComplexity,
+    form.nearWater,
+  ]);
+
   const saveVerifiedValues = useCallback(async () => {
     const fields = {};
     if (String(form.homeSqFt || "").trim() !== "") fields.squareFootage = Number(form.homeSqFt);
@@ -4402,13 +4463,14 @@ export default function EstimateToolViewV2({
     parseNonNegativeInteger(enrichedProfile?.lotSqFt) ??
     0;
   const lotEstimateTurfSqFt = (() => {
-    // Stale-imagery conflict (turfObservation 'unobservable'): the server
-    // profile carries the number the pricing engine will ACTUALLY use — its
-    // building/hardscape legacy fallback — which differs from the local
-    // 20%/15% heuristic below. Preview the priced number, not a lookalike.
+    // Stale-imagery conflict (turfObservation 'unobservable'): show the
+    // number the pricing engine will ACTUALLY use — its building/hardscape
+    // legacy fallback — not the local 20%/15% heuristic below. Live value
+    // from /turf-preview tracks form edits; the profile's lookup-time
+    // turfFallbackPreviewSf covers the gap until it answers.
     const enginePreview = parseNonNegativeInteger(
-      enrichedProfile?.turfObservation === "unobservable"
-        ? enrichedProfile?.turfFallbackPreviewSf
+      turfUnobservable
+        ? (staleImageryPreviewSf ?? enrichedProfile?.turfFallbackPreviewSf)
         : null,
     );
     if (enginePreview > 0) return enginePreview;
