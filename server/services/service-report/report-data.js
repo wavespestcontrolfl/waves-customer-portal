@@ -2417,6 +2417,8 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     serviceLine,
     serviceType: service.service_type,
     workflowEvents,
+    // Typed specialty reports name the actual service in the completed event.
+    serviceLabel: typedSnapshot ? (linkedServiceName || null) : null,
     customerInteraction: service.customer_interaction || structured.customerInteraction || structured.customer_interaction || null,
     config: visitTimelineConfig,
   });

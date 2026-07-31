@@ -264,6 +264,9 @@ function buildVisitTimeline({
   workflowEvents = [],
   customerInteraction,
   config,
+  // Typed specialty reports pass the linked service name so the completed
+  // event says "your Bed Bug Treatment" instead of the per-line generic.
+  serviceLabel = null,
 } = {}) {
   const resolvedConfig = mergeVisitTimelineConfig(config);
   const normalizedLine = normalizeTimelineServiceLine(serviceLine || service.service_line, serviceType || service.service_type);
@@ -367,7 +370,9 @@ function buildVisitTimeline({
       type: 'service_completed',
       label: 'Service completed',
       customerDescription: completedAt
-        ? (SERVICE_COMPLETED_DESCRIPTIONS[normalizedLine] || SERVICE_COMPLETED_DESCRIPTIONS.default)
+        ? (serviceLabel
+          ? `Your technician completed your ${serviceLabel} and finalized the report.`
+          : (SERVICE_COMPLETED_DESCRIPTIONS[normalizedLine] || SERVICE_COMPLETED_DESCRIPTIONS.default))
         : 'The service was marked complete.',
       occurredAt: backfillDayOnlyCompletion ? null : completedAt,
       source: 'service_report',

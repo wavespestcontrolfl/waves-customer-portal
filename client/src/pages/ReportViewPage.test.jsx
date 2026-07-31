@@ -21,6 +21,7 @@ import {
   smartStatusSummary,
   timelineEventsForDisplay,
   timelineEventsWithReportTiming,
+  visitWorkSummary,
 } from './ReportViewPage.jsx';
 
 describe('ReportViewPage date formatting', () => {
@@ -397,6 +398,65 @@ describe('ReportViewPage visit timeline helpers', () => {
       source: 'service_report',
       customerDescription: 'Your technician completed the pest control service and finalized the report.',
     });
+  });
+
+  it('typed reports name the actual service in the completed event description', () => {
+    const timeline = normalizeVisitTimeline({
+      workflowEvents: [
+        { type: 'arrived_on_site', timestamp: '2026-05-17T18:35:00.000Z' },
+      ],
+      visitTiming: {},
+      timingSource: {
+        visitOutcome: 'completed',
+        serviceLine: 'pest',
+        serviceDisplayName: 'Bed Bug Treatment',
+        typedReport: { type: 'bed_bug' },
+        serviceRecord: {
+          completed_at: '2026-05-17T19:05:00.000Z',
+        },
+      },
+    });
+    expect(timeline.events.find((event) => event.type === 'service_completed').customerDescription)
+      .toBe('Your technician completed your Bed Bug Treatment and finalized the report.');
+  });
+
+  it('visitWorkSummary derives the cell from typed findings when no applications or coverage exist', () => {
+    const data = {
+      typedReport: {
+        findings: [
+          { fieldKey: 'rooms_treated', customerValueLabel: 'Primary bedroom, guest bedroom' },
+          { fieldKey: 'work_completed', customerValueParts: ['Crack & crevice treatment', 'Steam treatment', 'Interceptors installed'] },
+        ],
+      },
+    };
+    expect(visitWorkSummary(data, 'Service completed today.'))
+      .toBe('3 service steps completed · Primary bedroom, guest bedroom');
+    // Long free-text rooms drop out of the cell instead of overflowing it.
+    const longRooms = {
+      typedReport: {
+        findings: [
+          { fieldKey: 'rooms_treated', customerValueLabel: 'Primary bedroom, guest bedroom, den, upstairs hallway and both bathrooms' },
+          { fieldKey: 'work_completed', value: ['Steam treatment'] },
+        ],
+      },
+    };
+    expect(visitWorkSummary(longRooms, 'Service completed today.'))
+      .toBe('1 service step completed');
+    // Legacy snapshots persist chips as one comma-joined string — never
+    // split (labels can contain commas); a countless neutral phrase stands.
+    const legacy = {
+      typedReport: {
+        findings: [
+          { fieldKey: 'rooms_treated', customerValueLabel: 'Primary bedroom' },
+          { fieldKey: 'work_completed', value: 'Crack & crevice treatment, Steam treatment' },
+        ],
+      },
+    };
+    expect(visitWorkSummary(legacy, 'Service completed today.'))
+      .toBe('Service work completed · Primary bedroom');
+    // No typed work recorded → the generic fallback stands.
+    expect(visitWorkSummary({ typedReport: { findings: [] } }, 'Service completed today.'))
+      .toBe('Service completed today.');
   });
 
   it('collapses same-time on-site and service-completed events to the completion event', () => {
