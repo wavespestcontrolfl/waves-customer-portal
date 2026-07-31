@@ -8301,7 +8301,11 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
     if (scheduledServiceId) {
       const svc = await db('scheduled_services')
         .where({ id: scheduledServiceId })
-        .first('id', 'service_id', 'customer_id', 'service_type', 'scheduled_date', 'technician_id')
+        // is_callback feeds the pressure-suppression rule below — without it
+        // in the projection the flag reads undefined and callback visits on
+        // one-time keys would ground differently than /complete scores them
+        // (codex P2 r2).
+        .first('id', 'service_id', 'customer_id', 'service_type', 'scheduled_date', 'technician_id', 'is_callback')
         .catch(() => null);
       if (svc && svc.customer_id) {
         const isAdmin = req.techRole === 'admin';

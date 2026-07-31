@@ -50,7 +50,31 @@ exports.up = async function up(knex) {
     .where({ service_key: UNTYPE_KEY })
     .first();
   if (!row) {
-    console.log(`[bed-bug-untype] ${UNTYPE_KEY}: no profile row — skip (fallback is already untyped)`);
+    // Unlike the pest-family untype, "no row" is NOT a safe skip here: the
+    // resolver would fall back to the default service_report profile whose
+    // followup_policy is 'none', silently dropping the promised 14-day
+    // follow-up verdict/alert/CTA (codex P1 r2). Heal by creating the
+    // untyped row with the catalog's alert policy; down() deletes exactly
+    // the rows this created (the 'created' marker).
+    await knex('service_completion_profiles').insert({
+      service_key: UNTYPE_KEY,
+      service_name_snapshot: 'Bed Bug Treatment',
+      category: 'specialty',
+      billing_type: 'one_time',
+      completion_mode: 'service_report',
+      project_type: null,
+      creates_service_record: true,
+      portal_visibility: 'token_only',
+      portal_attach_policy: 'recurring_customer',
+      followup_policy: 'alert',
+      default_followup_days: 14,
+      delivery_mode: 'auto_send',
+      active: true,
+      notes: withMarker(null, 'created'),
+      created_at: new Date(),
+      updated_at: new Date(),
+    });
+    console.log(`[bed-bug-untype] ${UNTYPE_KEY}: no profile row — CREATED untyped alert-policy profile`);
     return;
   }
   if (row.active === false) {
@@ -85,6 +109,14 @@ exports.down = async function down(knex) {
     .where({ service_key: UNTYPE_KEY })
     .where('notes', 'like', '%[bed_bug_untype_action=%');
   for (const row of rows) {
+    if (/\[bed_bug_untype_action=created\]/.test(String(row.notes || ''))) {
+      // up() created this row from nothing — down() removes exactly it.
+      await knex('service_completion_profiles')
+        .where({ service_key: row.service_key })
+        .del();
+      console.log(`[bed-bug-untype:down] ${row.service_key}: removed migration-created profile`);
+      continue;
+    }
     const match = String(row.notes || '').match(/\[bed_bug_untype_action=untyped:([^\]]+)\]/);
     if (!match) continue;
     await knex('service_completion_profiles')
