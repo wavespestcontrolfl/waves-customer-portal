@@ -1171,6 +1171,14 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
     });
 
     const backfills = {};
+    // Winner values the merge deliberately OVERWROTE (as opposed to
+    // fill-if-empty backfills) — journaled under
+    // repointed_ids.winner_prior_values so the undo can RESTORE them, not
+    // merely null them out. Covers the address-tuple replacement and the
+    // consent-stamp clear below. Pre-upgrade journals lack the key and keep
+    // the old behavior (overwritten values stay lost; restore by hand from
+    // the audit trail).
+    const winnerPriorValues = {};
     for (const field of BACKFILL_FIELDS) {
       if (isEmptyValue(winner[field]) && !isEmptyValue(loser[field])) backfills[field] = loser[field];
     }
@@ -1179,6 +1187,13 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
     // mixed address (dispatch and report fallbacks read these columns
     // together). When the street comes from the loser, the whole tuple does.
     if (backfills.address_line1) {
+      // The tuple REPLACES the winner's partial address wholesale — journal
+      // any non-empty prior value being overwritten (e.g. the winner's
+      // original ZIP) so the undo can put it back. Empty priors need no
+      // record: the generic backfill-clear already vacates those to null.
+      for (const field of ['address_line2', 'city', 'state', 'zip']) {
+        if (!isEmptyValue(winner[field])) winnerPriorValues[field] = winner[field];
+      }
       backfills.address_line2 = loser.address_line2 || null;
       backfills.city = loser.city || null;
       backfills.state = loser.state || null;
@@ -1236,9 +1251,6 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
     ];
     let movedContactSlot = false;
     let movedContactPhone = false;
-    // Winner values the merge deliberately OVERWROTE with null (as opposed
-    // to fill-if-empty backfills) — journaled so the undo can restore them.
-    const winnerPriorValues = {};
     const winnerHadAnyContact = CONTACT_SLOTS.some((slot) => slot.some((f) => !isEmptyValue(winner[f])));
     for (const slot of CONTACT_SLOTS) {
       const winnerSlotEmpty = slot.every((f) => isEmptyValue(winner[f]));
@@ -1647,6 +1659,32 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     if (transferredStripe && winner.stripe_customer_id !== transferredStripe && pmRowsRecorded) {
       refuse("The kept customer's Stripe profile has changed since the merge, and saved payment methods were moved — repointing the cards back would leave them referencing a Stripe profile the restored customer no longer has; revert by hand");
     }
+    // The mirror-image failure: the transferred Stripe id DID stay on the
+    // winner, but the winner saved NEW payment methods after the merge —
+    // rows not in the journaled repointed set, attached (per their
+    // stripe_customer_id linkage) to the profile the undo would hand back
+    // to the loser. Moving the id back would leave those winner-owned cards
+    // referencing a Stripe customer the winner's row no longer has, and
+    // autopay/card-on-file charges would strand. Financially-relevant
+    // restoration can't be exact → refuse whole (409, zero writes). A
+    // non-journaled card with a NULL stripe_customer_id is ambiguous
+    // linkage — fail closed the same way. Nothing here touches Stripe
+    // itself; the fix is to move/detach the new card in Stripe first.
+    if (transferredStripe && winner.stripe_customer_id === transferredStripe) {
+      const journaledPmIds = new Set();
+      for (const key of pmTableKeys) {
+        const ids = recorded.tables[key];
+        if (Array.isArray(ids)) for (const id of ids) journaledPmIds.add(id);
+      }
+      const winnerCards = await trx('payment_methods')
+        .where({ customer_id: winnerId })
+        .select('id', 'stripe_customer_id');
+      const postMergeCards = winnerCards.filter((card) => !journaledPmIds.has(card.id)
+        && (!card.stripe_customer_id || card.stripe_customer_id === transferredStripe));
+      if (postMergeCards.length) {
+        refuse(`The kept customer saved ${postMergeCards.length} new payment method(s) on the transferred Stripe profile after the merge — moving the profile back to the restored customer would strand them; detach or move the new card(s) in Stripe first, then revert`);
+      }
+    }
 
     // Verification pass BEFORE any write: every recorded row must still point
     // at the winner, or it is state that moved on since the merge.
@@ -1725,28 +1763,46 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     }
 
     // The property row link-as-property created from the loser's address
-    // belongs to the restored loser again — remove it from the winner.
-    // Savepoint so an FK reference acquired since the merge degrades to
-    // deactivation instead of poisoning the transaction.
+    // belongs to the restored loser again — take it off the winner. HOW
+    // matters: scheduled_services.property_id references customer_properties
+    // ON DELETE SET NULL (20260709000001), so deleting a row that
+    // appointments point at would silently strip their property link — it
+    // never errors, so an FK-failure fallback can never catch it. Check for
+    // referencing visits FIRST: referenced rows TRANSFER to the restored
+    // loser (the address is theirs and the appointments keep their link);
+    // only an unreferenced row deletes. A savepoint still guards the delete
+    // against RESTRICT references from other tables acquired since the
+    // merge — those degrade to the same transfer.
     if (recorded.linked_property_id) {
+      const propWhere = { id: recorded.linked_property_id, customer_id: winnerId };
+      const transferToLoser = async () => trx('customer_properties')
+        .where(propWhere)
+        .update({ customer_id: loserId, updated_at: trx.fn.now() });
+      const referencingVisit = await trx('scheduled_services')
+        .where({ property_id: recorded.linked_property_id })
+        .first('id');
       let removed = 0;
-      try {
-        await trx.transaction(async (sp) => {
-          removed = await sp('customer_properties')
-            .where({ id: recorded.linked_property_id, customer_id: winnerId })
-            .del();
-        });
-        if (removed) repointedBack['customer_properties.linked_property_removed'] = removed;
-      } catch (e) {
-        const deactivated = await trx('customer_properties')
-          .where({ id: recorded.linked_property_id, customer_id: winnerId })
-          .update({ active: false, is_primary: false, updated_at: trx.fn.now() });
-        if (deactivated) {
-          repointedBack['customer_properties.linked_property_deactivated'] = deactivated;
-          skipped.push({ key: 'customer_properties.linked_property', reason: `deactivated_not_deleted: ${e.message}` });
+      let transferred = 0;
+      if (referencingVisit) {
+        transferred = await transferToLoser();
+        if (transferred) {
+          repointedBack['customer_properties.linked_property_transferred'] = transferred;
+        }
+      } else {
+        try {
+          await trx.transaction(async (sp) => {
+            removed = await sp('customer_properties').where(propWhere).del();
+          });
+          if (removed) repointedBack['customer_properties.linked_property_removed'] = removed;
+        } catch (e) {
+          transferred = await transferToLoser();
+          if (transferred) {
+            repointedBack['customer_properties.linked_property_transferred'] = transferred;
+            skipped.push({ key: 'customer_properties.linked_property', reason: `transferred_not_deleted: ${e.message}` });
+          }
         }
       }
-      if (!removed && !repointedBack['customer_properties.linked_property_deactivated']) {
+      if (!removed && !transferred) {
         skipped.push({ key: 'customer_properties.linked_property', reason: 'row_missing_or_moved' });
       }
     }
@@ -1771,8 +1827,16 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     if (backfills.is_primary_profile === true && winner.is_primary_profile === true) {
       winnerPatch.is_primary_profile = false;
     }
+    // Winner fields the merge deliberately OVERWROTE (address-tuple
+    // replacement, consent-stamp clear): winner_prior_values holds the
+    // pre-merge values, so those fields RESTORE below instead of merely
+    // vacating to null here. Pre-upgrade journals lack the key and keep the
+    // old behavior (clear-to-null / stay-cleared).
+    const priorValues = recorded.winner_prior_values || {};
     for (const [field, value] of Object.entries(backfills)) {
       if (REVERT_BACKFILL_CLEAR_EXCLUDED.has(field)) continue;
+      // Restored (not just vacated) by the prior-values pass below.
+      if (Object.prototype.hasOwnProperty.call(priorValues, field)) continue;
       // Null backfills (e.g. the consent-stamp clear) copied nothing onto
       // the winner — there is nothing to vacate.
       if (value === null || value === undefined) continue;
@@ -1801,17 +1865,20 @@ async function revertMerge({ journalId, performedBy, performedById }) {
         }
       }
     }
-    // Winner fields the merge deliberately NULLED (consent stamps cleared
-    // when loser contacts joined the winner's list): the appended contact
-    // backfills vacated above, so the stamp describes the winner's own list
-    // again — restore each journaled prior value while the current value is
-    // still the merge-written null. Pre-upgrade journals lack
-    // winner_prior_values: the stamp stays cleared (re-attest by hand).
-    const priorValues = recorded.winner_prior_values || {};
+    // Winner fields the merge deliberately OVERWROTE: restore each journaled
+    // prior value while the winner's current value is still the
+    // merge-written one — winner_backfills records what the merge wrote
+    // (null for the consent-stamp clear, the loser's value for the
+    // address-tuple replacement). A field an admin edited since stays put
+    // and is reported.
     for (const [field, prior] of Object.entries(priorValues)) {
       if (prior === null || prior === undefined) continue;
       const current = winner[field];
-      if (current === null || current === undefined || String(current).trim() === '') {
+      const appliedVal = Object.prototype.hasOwnProperty.call(backfills, field) ? backfills[field] : null;
+      const stillMergeWritten = (appliedVal === null || appliedVal === undefined)
+        ? (current === null || current === undefined || String(current).trim() === '')
+        : mergeWrittenValueUnchanged(current, appliedVal);
+      if (stillMergeWritten) {
         winnerPatch[field] = prior;
       } else {
         skipped.push({ key: `customers.${field}`, reason: 'winner_value_changed_since_merge' });

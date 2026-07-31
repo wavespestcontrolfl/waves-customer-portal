@@ -168,6 +168,35 @@ router.get('/merges', async (req, res) => {
       if (typeof v === 'object') return v;
       try { return JSON.parse(v); } catch { return null; }
     };
+    // Post-merge-cards mirror: revertMerge refuses when the transferred
+    // Stripe id still sits on the winner but a NON-JOURNALED payment method
+    // has joined it since the merge. That check needs the winner's CURRENT
+    // cards — fetched here as ONE batched query for the listed page (route
+    // contract: never offer an undo the endpoint would 409). If the lookup
+    // fails, affected rows read non-revertible — fail closed, same as the
+    // revert endpoint's posture on unverifiable financial state.
+    const stripeReturnRows = rows.filter((row) => {
+      if (row.undone_at) return false;
+      const recorded = parse(row.repointed_ids);
+      return Boolean(recorded?.stripe_transferred_id)
+        && row.winner_stripe_customer_id === recorded.stripe_transferred_id;
+    });
+    const pmByWinner = new Map();
+    let pmLookupFailed = false;
+    if (stripeReturnRows.length) {
+      try {
+        const pmRows = await db('payment_methods')
+          .whereIn('customer_id', [...new Set(stripeReturnRows.map((r) => r.winner_customer_id))])
+          .select('id', 'customer_id', 'stripe_customer_id');
+        for (const pm of pmRows) {
+          if (!pmByWinner.has(pm.customer_id)) pmByWinner.set(pm.customer_id, []);
+          pmByWinner.get(pm.customer_id).push(pm);
+        }
+      } catch (pmErr) {
+        pmLookupFailed = true;
+        logger.warn(`[admin-customer-duplicates] payment_methods lookup for revertible flags failed (marking affected merges non-revertible): ${pmErr.message}`);
+      }
+    }
     res.json({
       merges: rows.map((row) => {
         const snapshot = parse(row.loser_snapshot);
@@ -191,6 +220,27 @@ router.get('/merges', async (req, res) => {
           && Boolean(recorded?.tables) && Object.entries(recorded.tables)
             .some(([key, ids]) => key.startsWith('payment_methods.')
               && (Array.isArray(ids) ? ids.length > 0 : true));
+        // The mirror image: transferred id still on the winner, but a card
+        // NOT in the journaled repointed set is attached to it (saved after
+        // the merge; NULL linkage counts — ambiguous fails closed) —
+        // revertMerge refuses, so the row must not offer the undo.
+        let postMergeCardsStrand = false;
+        if (!row.undone_at && Boolean(recorded?.stripe_transferred_id)
+          && row.winner_stripe_customer_id === recorded.stripe_transferred_id) {
+          if (pmLookupFailed) {
+            postMergeCardsStrand = true;
+          } else {
+            const journaledPmIds = new Set();
+            for (const [key, ids] of Object.entries(recorded?.tables || {})) {
+              if (key.startsWith('payment_methods.') && Array.isArray(ids)) {
+                for (const id of ids) journaledPmIds.add(id);
+              }
+            }
+            postMergeCardsStrand = (pmByWinner.get(row.winner_customer_id) || [])
+              .some((pm) => !journaledPmIds.has(pm.id)
+                && (!pm.stripe_customer_id || pm.stripe_customer_id === recorded.stripe_transferred_id));
+          }
+        }
         return {
           journalId: row.id,
           winnerId: row.winner_customer_id,
@@ -215,7 +265,8 @@ router.get('/merges', async (req, res) => {
             && !collisionHandled
             && !pmMovedWithoutFlags
             && !linkedPropertyUnrecorded
-            && !stripeDriftStrandsCards,
+            && !stripeDriftStrandsCards
+            && !postMergeCardsStrand,
           ),
         };
       }),

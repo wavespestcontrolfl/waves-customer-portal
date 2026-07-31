@@ -295,6 +295,52 @@ describe('executeMerge repointed_ids journal record', () => {
     expect(result.backfills.service_contact2_phone).toBe('+15550000042');
   });
 
+  it("journals the winner's partial address values the whole-tuple backfill overwrites", async () => {
+    const winner = {
+      id: WINNER, first_name: 'Winner', last_name: 'Testcase', phone: '+15550000001',
+      // No street, but a stale partial address the tuple REPLACES.
+      address_line1: null, address_line2: null, city: 'Sarasota', state: 'FL', zip: '34236',
+    };
+    const loser = {
+      id: LOSER, first_name: 'Winner', last_name: null, phone: '5550000001',
+      address_line1: '100 Sample St', address_line2: 'Apt 2', city: 'Bradenton', state: 'FL', zip: '34205',
+    };
+    const state = { journal: null };
+    const route = (table, q) => {
+      if (table === 'customers') {
+        if (q.called('forUpdate')) return [winner, loser];
+        if (q.called('update')) return 1;
+        return [];
+      }
+      if (table === 'customer_merge_journal') {
+        state.journal = q.args('insert')[0];
+        return [{ id: 'j1' }];
+      }
+      if (q.called('first')) return null;
+      if (q.called('update')) return 0;
+      return [];
+    };
+    const trx = jest.fn((table) => makeChain(table, (q) => route(table, q)));
+    trx.raw = jest.fn(async () => ({ rows: [] }));
+    trx.transaction = jest.fn(async (fn) => fn(trx));
+    trx.fn = { now: () => 'NOW()' };
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+
+    const result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+
+    // The tuple still replaces wholesale (no mixed addresses)...
+    expect(result.backfills).toMatchObject({
+      address_line1: '100 Sample St', address_line2: 'Apt 2', city: 'Bradenton', state: 'FL', zip: '34205',
+    });
+    // ...and the winner's overwritten NON-EMPTY priors are journaled so the
+    // undo can restore them (empty priors need no record — the generic
+    // backfill-clear vacates those to null).
+    const recorded = JSON.parse(state.journal.repointed_ids);
+    expect(recorded.winner_prior_values).toEqual({
+      city: 'Sarasota', state: 'FL', zip: '34236',
+    });
+  });
+
   it('registers the referral-promoter consolidation in collision_handlers (folded rewards cannot be split back)', async () => {
     const winner = { id: WINNER, first_name: 'Winner', last_name: 'Testcase', phone: '+15550000001' };
     const loser = { id: LOSER, first_name: 'Winner', last_name: null, phone: '5550000001' };
@@ -426,7 +472,8 @@ describe('revertMerge', () => {
   function buildRevertTrx({ journal, winner, loser, tables = {} }) {
     const state = {
       repointedBack: [], winnerPatch: null, loserRestore: null, journalUpdate: null,
-      decremented: null, flagRestores: [], propertyDeleted: null, verified: [],
+      decremented: null, flagRestores: [], propertyDeleted: null, propertyTransferred: null,
+      verified: [],
     };
     const route = (table, q) => {
       if (table === 'customer_merge_journal') {
@@ -445,9 +492,17 @@ describe('revertMerge', () => {
         }
         return [];
       }
-      if (table === 'customer_properties' && q.called('del')) {
-        state.propertyDeleted = q.args('where')[0];
-        return 1;
+      // The linked-property undo probes for referencing visits first
+      // (the FK is ON DELETE SET NULL, so only this probe can catch them).
+      if (table === 'scheduled_services' && q.called('first')) {
+        return (tables.scheduled_services && tables.scheduled_services.referencingVisit) || null;
+      }
+      if (table === 'customer_properties') {
+        if (q.called('del')) { state.propertyDeleted = q.args('where')[0]; return 1; }
+        if (q.called('update')) {
+          state.propertyTransferred = { where: q.args('where')[0], payload: q.args('update')[0] };
+          return 1;
+        }
       }
       const cfg = tables[table];
       if (cfg) {
@@ -465,6 +520,9 @@ describe('revertMerge', () => {
           return 1;
         }
         if (q.called('select')) {
+          // Non-whereIn select = the winner's CURRENT payment methods (the
+          // post-merge-cards refusal probe), not a verification pass.
+          if (!q.called('whereIn')) return cfg.winnerCards || [];
           state.verified.push({ table, forUpdate: q.called('forUpdate') });
           return cfg.stillOnWinner.map((id) => ({ id }));
         }
@@ -735,7 +793,17 @@ describe('revertMerge', () => {
       journal,
       winner: baseWinner(),
       loser: baseLoser(),
-      tables: { payment_methods: { stillOnWinner: ['pm-1', 'pm-2'] } },
+      tables: {
+        payment_methods: {
+          stillOnWinner: ['pm-1', 'pm-2'],
+          // Every current winner card is in the journaled repointed set —
+          // the post-merge-cards refusal must NOT fire (its boundary).
+          winnerCards: [
+            { id: 'pm-1', stripe_customer_id: 'cus_only' },
+            { id: 'pm-2', stripe_customer_id: 'cus_only' },
+          ],
+        },
+      },
     });
     db.transaction.mockImplementation(async (fn) => fn(trx));
     const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
@@ -863,6 +931,125 @@ describe('revertMerge', () => {
     expect(result.skipped).toEqual(expect.arrayContaining([
       expect.objectContaining({ key: 'customers.service_contacts_consent_text_version', reason: 'winner_value_changed_since_merge' }),
     ]));
+  });
+
+  it("restores the winner's overwritten partial address from winner_prior_values; edited fields stay and report", async () => {
+    const journal = baseJournal();
+    journal.winner_backfills = {
+      ...journal.winner_backfills,
+      address_line1: '100 Sample St',
+      address_line2: 'Apt 2',
+      city: 'Bradenton',
+      state: 'FL',
+      zip: '34205',
+    };
+    journal.repointed_ids.winner_prior_values = { city: 'Sarasota', state: 'FL', zip: '34236' };
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: {
+        ...baseWinner(),
+        address_line1: '100 Sample St', // fill-if-empty backfill, unchanged → vacates to null
+        address_line2: 'Apt 2',
+        city: 'Bradenton', // still the merge-written value → prior RESTORED
+        state: 'FL', // merge-written === prior → restored (no-op value)
+        zip: '34240', // admin corrected since the merge → stays, reported
+      },
+      loser: baseLoser(),
+      tables: { leads: { stillOnWinner: ['lead-1', 'lead-2'] }, invoices: { stillOnWinner: ['inv-1'] } },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+    // Tuple fields with a journaled prior RESTORE instead of nulling out —
+    // the pre-r3 undo permanently lost e.g. the winner's original ZIP.
+    expect(state.winnerPatch.city).toBe('Sarasota');
+    expect(state.winnerPatch.state).toBe('FL');
+    // No prior recorded → plain vacate.
+    expect(state.winnerPatch.address_line1).toBe(null);
+    expect(state.winnerPatch.address_line2).toBe(null);
+    // Edited since the merge → untouched, reported.
+    expect(state.winnerPatch.zip).toBeUndefined();
+    expect(result.skipped).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: 'customers.zip', reason: 'winner_value_changed_since_merge' }),
+    ]));
+  });
+
+  it('TRANSFERS the link-as-property row to the restored loser when appointments reference it (SET NULL FK would silently unlink them)', async () => {
+    const journal = baseJournal();
+    journal.evidence = { via: 'admin_link_as_property' };
+    journal.repointed_ids.linked_property_id = 'prop-9';
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: { stillOnWinner: ['inv-1'] },
+        // A later appointment points at the property — deleting would
+        // SET NULL its property_id without ever erroring.
+        scheduled_services: { referencingVisit: { id: 'visit-1' } },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+    // Transferred, never deleted: the appointment keeps its property link
+    // and the address rides back to its owner.
+    expect(state.propertyDeleted).toBe(null);
+    expect(state.propertyTransferred.where).toEqual({ id: 'prop-9', customer_id: WINNER });
+    expect(state.propertyTransferred.payload.customer_id).toBe(LOSER);
+    expect(result.repointedBack['customer_properties.linked_property_transferred']).toBe(1);
+    expect(result.repointedBack['customer_properties.linked_property_removed']).toBeUndefined();
+  });
+
+  it('refuses (409, zero writes) when NEW payment methods joined the transferred Stripe profile after the merge', async () => {
+    // The transferred id still sits on the winner, but a card NOT in the
+    // journaled repointed set is attached to it — moving the profile back
+    // to the loser would strand the winner-owned card. Refuse whole.
+    const journal = baseJournal();
+    journal.repointed_ids.tables = { 'payment_methods.customer_id': ['pm-1'] };
+    journal.repointed_ids.payment_method_flags = { 'pm-1': { is_default: true, autopay_enabled: true } };
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: baseWinner(), // stripe_customer_id 'cus_only' === transferred
+      loser: baseLoser(),
+      tables: {
+        payment_methods: {
+          stillOnWinner: ['pm-1'],
+          winnerCards: [
+            { id: 'pm-1', stripe_customer_id: 'cus_only' }, // journaled — fine
+            { id: 'pm-new', stripe_customer_id: 'cus_only' }, // saved post-merge — refuse
+          ],
+        },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/new payment method.*strand/) });
+    expect(state.repointedBack).toHaveLength(0);
+    expect(state.flagRestores).toHaveLength(0);
+    expect(state.journalUpdate).toBe(null);
+  });
+
+  it('refuses on a post-merge card with NULL stripe linkage too — ambiguous attachment fails closed', async () => {
+    const journal = baseJournal();
+    journal.repointed_ids.tables = { 'payment_methods.customer_id': ['pm-1'] };
+    journal.repointed_ids.payment_method_flags = { 'pm-1': { is_default: false, autopay_enabled: false } };
+    const { trx } = buildRevertTrx({
+      journal,
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        payment_methods: {
+          stillOnWinner: ['pm-1'],
+          winnerCards: [
+            { id: 'pm-1', stripe_customer_id: 'cus_only' },
+            { id: 'pm-null-link', stripe_customer_id: null },
+          ],
+        },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409 });
   });
 
   it('refuses (409) when payment_methods rows were journaled WITHOUT their flag records (billing continuity)', async () => {
