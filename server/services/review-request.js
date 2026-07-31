@@ -1611,8 +1611,61 @@ const ReviewService = {
     // (custom_body) so a provider retry re-sends the operator's copy
     // rather than reverting to the template.
     const smsTemplateId = templateId || (customBody && customBody.trim() ? null : "friendly_ask");
-    const recordedTemplateKey = actualChannel === "email" ? "review_request_email" : smsTemplateId || "custom";
-    const persistedBody = actualChannel === "sms" && customBody && customBody.trim() ? customBody : null;
+    let recordedTemplateKey = actualChannel === "email" ? "review_request_email" : smsTemplateId || "custom";
+    let persistedBody = actualChannel === "sms" && customBody && customBody.trim() ? customBody : null;
+
+    // Personalized ask body (GATE_REVIEW_ASK_PERSONALIZED): CADENCE SMS ask
+    // touches only (sequenceId required — a CSR's one-off send keeps exactly
+    // the template they picked; Codex P1, r1). Operator-provided copy always
+    // wins; private no-link check-ins and email touches keep their templates.
+    // A null draft (gate off, no grounding, model down, failed verification,
+    // or a recipient who isn't the account holder) falls through to the
+    // template.
+    if (actualChannel === "sms" && !persistedBody && !noLinkSend && sequenceId != null) {
+      // Identity guard (Codex P1, r1): the SMS goes to the RESOLVED service
+      // contact. The account's call/SMS history only belongs to the account
+      // holder — when the recipient is someone else (tenant, buyer, realtor),
+      // skip drafting entirely so their message can't carry the account
+      // holder's name or private conversation details. Checked BEFORE retry
+      // reuse: a draft persisted for the account holder must not be re-sent
+      // to a recipient who changed between attempts (Codex P1, r2).
+      const recipientIsAccountHolder = !!(contact.phone && customer.phone
+        && (toE164(contact.phone) || contact.phone) === (toE164(customer.phone) || customer.phone));
+
+      // Retry reuse: a deferred/transiently-failed step re-enters here with no
+      // customBody — reuse the draft already persisted for this exact step so
+      // one touch can never send two different drafts (Codex P2, r1).
+      if (recipientIsAccountHolder) {
+        try {
+          const prior = await db("review_requests")
+            .where({ sequence_id: sequenceId, sequence_step: sequenceStep })
+            .whereNotNull("custom_body")
+            .orderBy("created_at", "desc")
+            .first();
+          if (prior?.custom_body) persistedBody = prior.custom_body;
+        } catch { /* reuse is best-effort; a fresh draft is still verified */ }
+      }
+
+      if (!persistedBody && recipientIsAccountHolder) {
+        const drafted = await require("./review-ask-drafter").draftAskBody({
+          customer,
+          recipientFirstName: firstNameFrom(contact.name) || customer.first_name || "",
+          serviceType,
+          techName,
+          sequenceStep,
+          serviceDate,
+        });
+        if (drafted) persistedBody = drafted;
+      }
+      // Analytics provenance (Codex P1, r1): personalized touches must not be
+      // credited to the control template — the outreach funnel groups by
+      // template_key, so a gated rollout is only measurable with a distinct
+      // variant key. Body resolution is unaffected (custom_body wins first;
+      // _sendOutreachSms renders from the real templateId param).
+      if (persistedBody) {
+        recordedTemplateKey = `${smsTemplateId || "custom"}_personalized`;
+      }
+    }
 
     // A no-link template (resolution_check / satisfaction_confirm) is a PRIVATE
     // check-in, not a review ask — so it must NOT trigger the legacy Day-3
@@ -1657,7 +1710,7 @@ const ReviewService = {
     if (actualChannel === "email") {
       return this._sendOutreachEmail({ request, customer, contact: emailContact, reviewUrl, techName, manageRetryVia });
     }
-    return this._sendOutreachSms({ request, customer, contact, vars, templateId: smsTemplateId, customBody, manageRetryVia });
+    return this._sendOutreachSms({ request, customer, contact, vars, templateId: smsTemplateId, customBody: persistedBody ?? customBody, manageRetryVia });
   },
 
   async _sendOutreachSms({ request, customer, contact, vars, templateId, customBody, manageRetryVia }) {
@@ -2099,6 +2152,10 @@ const ReviewService = {
         locationId: seq.location_id,
         techName: seq.tech_name,
         serviceType: seq.service_type,
+        // serviceDate is NOT passed here: sendOutreachTouch recovers the real
+        // service_date (and technician) from service_record_id, which grounds
+        // both the touch row and the drafter's "completed N days ago" fact —
+        // seq.started_at would shadow that recovery with a timestamp.
         serviceRecordId: seq.service_record_id,
         sequenceId: seq.id,
         sequenceStep: seq.current_step,

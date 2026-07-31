@@ -10,6 +10,10 @@ jest.mock('../config/feature-gates', () => ({
   isEnabled: (g) => !!mockGates[g],
   gates: mockGates,
 }));
+// Personalized-ask drafter (own suite: review-ask-drafter.test.js). Default
+// null = template path, matching the gate-off production posture.
+const mockDraftAskBody = jest.fn(async () => null);
+jest.mock('../services/review-ask-drafter', () => ({ draftAskBody: (...a) => mockDraftAskBody(...a) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: (...a) => mockSendCustomerMessage(...a) }));
 jest.mock('../services/email-template-library', () => ({ sendTemplate: (...a) => mockEmailSendTemplate(...a) }));
@@ -25,7 +29,11 @@ jest.mock('../services/customer-contact', () => ({
   // The SMS resolver mirrors getServiceContact in these fixtures (no
   // service-contact phones are modeled, so gating never diverges).
   getServiceContactSmsRecipient: (c) => ({
-    phone: c.phone !== undefined ? c.phone : '+19410000000',
+    // service_contact_phone models a consented service contact who is NOT the
+    // account holder (recipient-identity guard tests).
+    phone: c.service_contact_phone !== undefined
+      ? c.service_contact_phone
+      : (c.phone !== undefined ? c.phone : '+19410000000'),
     email: c.email !== undefined ? c.email : 'x@y.com',
     name: c.first_name || 'Stan',
   }),
@@ -97,6 +105,7 @@ beforeEach(() => {
   mockEmailSendTemplate.mockClear();
   mockGates.reviewSequences = false;
   mockGates.reviewDirectLink = false;
+  mockDraftAskBody.mockReset().mockResolvedValue(null);
 });
 
 describe('review sequences — cadence engine', () => {
@@ -762,6 +771,118 @@ describe('cadence scheduling + post-service enrollment (2026-07-30 revamp)', () 
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
     expect(out.stopped).toBe(1);
     expect(mock.__state.rows.review_sequences[0].stop_reason).toBe('superseded');
+  });
+
+  test('a personalized draft becomes the touch body (persisted as custom_body, link substituted)', async () => {
+    const draft = 'Hi Stan, Adam here — hope the ants are staying gone after Tuesday. If we earned it: {review_url}. Anything off, just reply here.';
+    mockDraftAskBody.mockResolvedValue(draft);
+    const mock = makeMock({
+      customers: [{ id: 'pd-1', first_name: 'Stan', last_name: 'Q', phone: '+19410000040', nearest_location_id: 'bradenton' }],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.startReviewSequence({ customerId: 'pd-1', serviceType: 'pest control', techName: 'Adam', startedBy: 'admin-1' });
+
+    expect(result.started).toBe(true);
+    expect(mockDraftAskBody).toHaveBeenCalledWith(expect.objectContaining({ serviceType: 'pest control', techName: 'Adam', recipientFirstName: 'Stan' }));
+    const touch = mock.__state.rows.review_requests[0];
+    expect(touch.custom_body).toBe(draft);
+    // Personalized provenance: the outreach funnel groups by template_key, so
+    // a drafted touch must not be credited to the control template.
+    expect(touch.template_key).toBe('friendly_ask_personalized');
+    // The sent SMS is the draft with {review_url} resolved to the tokenized link.
+    const sentBody = mockSendCustomerMessage.mock.calls[0][0].body;
+    expect(sentBody).toContain('hope the ants are staying gone after Tuesday');
+    expect(sentBody).toContain(`https://portal.test/rate/${touch.token}`);
+    expect(sentBody).not.toContain('{review_url}');
+  });
+
+  test('a rejected/failed draft falls back to the standard template (ask still sends)', async () => {
+    mockDraftAskBody.mockResolvedValue(null);
+    const mock = makeMock({
+      customers: [{ id: 'pd-2', first_name: 'Ada', last_name: 'V', phone: '+19410000041', nearest_location_id: 'venice' }],
+    });
+    db.mockImplementation(mock);
+
+    const result = await ReviewService.startReviewSequence({ customerId: 'pd-2', serviceType: 'pest control', techName: 'Adam', startedBy: 'admin-1' });
+
+    expect(result.started).toBe(true);
+    const touch = mock.__state.rows.review_requests[0];
+    expect(touch.custom_body == null).toBe(true);
+    expect(touch.template_key).toBe('friendly_ask');
+    const sentBody = mockSendCustomerMessage.mock.calls[0][0].body;
+    expect(sentBody).toContain('Waves Pest Control'); // friendly_ask template copy
+  });
+
+  test('a one-off send (no sequence) NEVER drafts — the operator template is exactly what sends', async () => {
+    mockDraftAskBody.mockResolvedValue('SHOULD NOT BE USED {review_url}');
+    const mock = makeMock({
+      customers: [{ id: 'oo-1', first_name: 'Ben', last_name: 'Z', phone: '+19410000060', nearest_location_id: 'bradenton' }],
+    });
+    db.mockImplementation(mock);
+
+    const out = await ReviewService.sendOutreachTouch({
+      customer: mock.__state.rows.customers[0],
+      channel: 'sms',
+      templateId: 'friendly_ask',
+      triggeredBy: 'admin',
+    });
+
+    expect(out.ok).toBe(true);
+    expect(mockDraftAskBody).not.toHaveBeenCalled();
+    const touch = mock.__state.rows.review_requests[0];
+    expect(touch.custom_body == null).toBe(true);
+    expect(touch.template_key).toBe('friendly_ask');
+  });
+
+  test('a retried cadence step reuses the previously persisted draft instead of re-drafting', async () => {
+    const priorDraft = 'Hi Stan, hope the ants stayed gone. If we earned it: {review_url}. Anything off, just reply here.';
+    const mock = makeMock({
+      customers: [{ id: 'rt-1', first_name: 'Stan', last_name: 'P', phone: '+19410000061', nearest_location_id: 'bradenton' }],
+      review_sequences: [{
+        id: 'seq-rt', customer_id: 'rt-1', status: 'active', current_step: 0, touches_sent: 0,
+        plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }]),
+        started_at: new Date(Date.now() - 3600000), next_run_at: new Date(Date.now() - 60000),
+      }],
+      // A prior attempt already drafted + persisted for this step (send deferred).
+      review_requests: [{ id: 'rr-rt', sequence_id: 'seq-rt', sequence_step: 0, customer_id: 'rt-1', channel: 'sms', custom_body: priorDraft, status: 'deferred', created_at: new Date(Date.now() - 1800000) }],
+    });
+    db.mockImplementation(mock);
+
+    const out = await ReviewService.processReviewSequences();
+
+    expect(out.sent).toBe(1);
+    expect(mockDraftAskBody).not.toHaveBeenCalled();
+    const retry = mock.__state.rows.review_requests.find((r) => r.id !== 'rr-rt');
+    expect(retry.custom_body).toBe(priorDraft);
+    const sentBody = mockSendCustomerMessage.mock.calls[0][0].body;
+    expect(sentBody).toContain('hope the ants stayed gone');
+  });
+
+  test('a retry does NOT reuse a persisted draft when the recipient is no longer the account holder', async () => {
+    const priorDraft = 'Hi Stan, hope the ants stayed gone. If we earned it: {review_url}. Anything off, just reply here.';
+    const mock = makeMock({
+      // SMS now routes to a service contact whose phone differs from the
+      // account holder's — the account-holder draft must NOT follow them.
+      customers: [{ id: 'rc-1', first_name: 'Stan', last_name: 'P', phone: '+19410000061', service_contact_phone: '+19419999999', nearest_location_id: 'bradenton' }],
+      review_sequences: [{
+        id: 'seq-rc', customer_id: 'rc-1', status: 'active', current_step: 0, touches_sent: 0,
+        plan: JSON.stringify([{ day: 0, channel: 'sms', templateKey: 'friendly_ask' }]),
+        started_at: new Date(Date.now() - 3600000), next_run_at: new Date(Date.now() - 60000),
+      }],
+      review_requests: [{ id: 'rr-rc', sequence_id: 'seq-rc', sequence_step: 0, customer_id: 'rc-1', channel: 'sms', custom_body: priorDraft, status: 'deferred', created_at: new Date(Date.now() - 1800000) }],
+    });
+    db.mockImplementation(mock);
+
+    const out = await ReviewService.processReviewSequences();
+
+    expect(out.sent).toBe(1);
+    expect(mockDraftAskBody).not.toHaveBeenCalled();
+    const retry = mock.__state.rows.review_requests.find((r) => r.id !== 'rr-rc');
+    expect(retry.custom_body == null).toBe(true);
+    const sentBody = mockSendCustomerMessage.mock.calls[0][0].body;
+    expect(sentBody).not.toContain('hope the ants stayed gone');
+    expect(sentBody).toContain('Waves Pest Control'); // friendly_ask template
   });
 
   test('a cadence stops with reason "clicked" once a touch was redirected to Google (direct-link engagement)', async () => {
