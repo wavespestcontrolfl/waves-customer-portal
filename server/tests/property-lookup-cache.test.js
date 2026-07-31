@@ -256,6 +256,9 @@ describe('getCachedLookup', () => {
         stories: 2,
         lotSize: 6985,
         yearBuilt: new Date().getFullYear() - 1,
+        // County-backed record: keeps main's roll-miss short TTL out of this
+        // test's way so it isolates the stale-imagery TTL behavior.
+        _source: 'county',
         _fieldEvidence: { squareFootage: { sourceType: 'county' }, yearBuilt: { sourceType: 'county' } },
       },
       ai_analysis: { estimatedTurfSf: 0, imperviousSurfacePercent: 0, estimatedBedAreaSf: 0 },
