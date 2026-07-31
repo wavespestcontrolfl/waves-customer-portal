@@ -4402,6 +4402,16 @@ export default function EstimateToolViewV2({
     parseNonNegativeInteger(enrichedProfile?.lotSqFt) ??
     0;
   const lotEstimateTurfSqFt = (() => {
+    // Stale-imagery conflict (turfObservation 'unobservable'): the server
+    // profile carries the number the pricing engine will ACTUALLY use — its
+    // building/hardscape legacy fallback — which differs from the local
+    // 20%/15% heuristic below. Preview the priced number, not a lookalike.
+    const enginePreview = parseNonNegativeInteger(
+      enrichedProfile?.turfObservation === "unobservable"
+        ? enrichedProfile?.turfFallbackPreviewSf
+        : null,
+    );
+    if (enginePreview > 0) return enginePreview;
     if (lotSqFtForTurf <= 0) return null;
     const pct = parseNonNegativeNumber(enrichedProfile?.imperviousSurfacePercent) ?? 20;
     const open = Math.round(lotSqFtForTurf * (1 - Math.min(1, pct / 100)));

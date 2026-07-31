@@ -197,7 +197,13 @@ describe('getCachedLookup', () => {
     // expires_at — the read-side short TTL is what actually refreshes them.
     const conflictRow = {
       ...freshRow,
-      property_record: { squareFootage: 2362, stories: 2, lotSize: 6985, yearBuilt: 2025 },
+      property_record: {
+        squareFootage: 2362,
+        stories: 2,
+        lotSize: 6985,
+        yearBuilt: 2025,
+        _fieldEvidence: { squareFootage: { sourceType: 'county' } },
+      },
       ai_analysis: { estimatedTurfSf: 0, imperviousSurfacePercent: 0, estimatedBedAreaSf: 0 },
       expires_at: new Date(Date.now() + 180 * 86400000).toISOString(),
     };
@@ -206,13 +212,13 @@ describe('getCachedLookup', () => {
     mockDbHandler = () => fakeTable({
       row: { ...conflictRow, data_saved_at: new Date(Date.now() - 30 * 86400000).toISOString() },
     });
-    expect(await getCachedLookup('8818 Starry Night Ter')).toBeNull();
+    expect(await getCachedLookup('100 Sample Build Ct')).toBeNull();
 
     // Inside the short TTL → still a hit.
     mockDbHandler = () => fakeTable({
       row: { ...conflictRow, data_saved_at: new Date(Date.now() - 86400000).toISOString() },
     });
-    expect(await getCachedLookup('8818 Starry Night Ter')).toBeTruthy();
+    expect(await getCachedLookup('100 Sample Build Ct')).toBeTruthy();
 
     // A normal completed-property row (impervious measured > 0) at the same
     // age keeps the standard TTL — no false eviction.
@@ -312,10 +318,11 @@ describe('saveLookup', () => {
         stories: 2,
         lotSize: 6985,
         yearBuilt: 2025,
+        _fieldEvidence: { squareFootage: { sourceType: 'county' } },
       },
       aiAnalysis: { estimatedTurfSf: 0, imperviousSurfacePercent: 0, estimatedBedAreaSf: 0 },
     };
-    await saveLookup('8818 Starry Night Ter, Parrish, FL 34219', conflictResult);
+    await saveLookup('100 Sample Build Ct, Parrish, FL 34219', conflictResult);
     await saveLookup('2965 Rock Creek Dr, Port Charlotte, FL 33948', result);
 
     const conflictExpiry = writes[0][1].expires_at.getTime() - Date.now();

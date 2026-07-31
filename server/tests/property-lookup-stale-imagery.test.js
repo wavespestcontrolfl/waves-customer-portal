@@ -1,7 +1,7 @@
 /**
  * Stale/invalid-imagery turf-zero guard.
  *
- * Failure shape (prod, 8818 Starry Night Ter, Parrish 2026-07-30): Google
+ * Failure shape (prod, a 2025-build Parrish parcel, 2026-07-30): Google
  * Static Maps tiles predate a 2025 build, the vision pass honestly measures
  * the bare-dirt lot — explicit 0 turf, 0% impervious, 0 bed area — and those
  * "known zeros" ride into the estimator, where the lot-estimate fallback
@@ -9,14 +9,18 @@
  * treatable turf. 33 of 229 cached lookups carried the same contradiction.
  *
  * The guard (detectStaleImageryTurfConflict + buildEnrichedProfile
- * sanitization) discards the vision AREA fields when the county roll
- * assesses a completed home the vision pass didn't see, skips the county
- * turf prior, and lets the documented lot-based default ladder (20%
- * hardscape / 15% beds → LOW + field-verify) produce the number instead.
- * The codex-P2 rule that an explicit vision 0 on a VISIBLE property is a
- * real measurement (paved / rock / artificial-turf yards) must survive —
- * those read HIGH impervious, which is exactly why the guard requires BOTH
- * zeros.
+ * sanitization) discards the vision AREA fields when COUNTY-EVIDENCED
+ * building records contradict the vision pass, skips the county turf
+ * prior, and lets the engine's documented fallback (the legacy
+ * building/hardscape estimate, LOW + field-verify) produce the number —
+ * exposed to the client as turfFallbackPreviewSf so the previewed number
+ * IS the priced number. The codex-P2 rule that an explicit vision 0 on a
+ * VISIBLE property is a real measurement (paved / rock / artificial-turf
+ * yards) must survive — those read HIGH impervious, which is exactly why
+ * the guard requires BOTH zeros.
+ *
+ * Addresses in fixtures are synthetic (repo policy: no live customer
+ * addresses in code or tests); the dimensions mirror the prod incident.
  */
 
 jest.mock('../services/logger', () => ({
@@ -27,14 +31,15 @@ jest.mock('../services/logger', () => ({
 
 const { detectStaleImageryTurfConflict } = require('../services/property-lookup/ai-property-lookup');
 const { buildEnrichedProfile } = require('../routes/property-lookup-v2');
-const { computeTurfArea } = require('../services/pricing-engine/property-calculator');
+const { computeTurfArea, calculatePropertyProfile } = require('../services/pricing-engine/property-calculator');
 
-// Mirrors the live Starry Night county record: trusted county dims (so the
-// county turf prior WOULD seed if the guard didn't also skip it) and an
+// Mirrors the prod incident's county record (synthetic address): trusted
+// county dims (so the county turf prior WOULD seed if the guard didn't also
+// skip it, and so the detector's evidence gate passes) with an
 // assessed-impervious roll of 0 (extra-features lag on new construction).
-function starryRecord() {
+function newBuildRecord() {
   return {
-    formattedAddress: '8818 Starry Night Ter, Parrish, FL 34219',
+    formattedAddress: '100 Sample Build Ct, Parrish, FL 34219',
     county: 'Manatee',
     propertyType: 'Single Family',
     squareFootage: 2362,
@@ -69,35 +74,68 @@ beforeEach(() => jest.clearAllMocks());
 
 describe('detectStaleImageryTurfConflict', () => {
   test('fires on county-assessed home + explicit vision zeros for turf AND impervious', () => {
-    expect(detectStaleImageryTurfConflict(starryRecord(), bareDirtAi()))
+    expect(detectStaleImageryTurfConflict(newBuildRecord(), bareDirtAi()))
       .toEqual({ countySqFt: 2362, yearBuilt: 2025 });
   });
 
   test('a genuine no-lawn property (structure visible, high impervious) never trips it', () => {
     const paved = { ...bareDirtAi(), imperviousSurfacePercent: 85, imperviosSurfacePercent: 85 };
-    expect(detectStaleImageryTurfConflict(starryRecord(), paved)).toBeNull();
+    expect(detectStaleImageryTurfConflict(newBuildRecord(), paved)).toBeNull();
   });
 
   test('missing/null area fields are "not measured", not explicit zeros', () => {
     const noTurf = bareDirtAi();
     delete noTurf.estimatedTurfSf;
-    expect(detectStaleImageryTurfConflict(starryRecord(), noTurf)).toBeNull();
+    expect(detectStaleImageryTurfConflict(newBuildRecord(), noTurf)).toBeNull();
 
     const nullImpervious = { ...bareDirtAi(), imperviousSurfacePercent: null, imperviosSurfacePercent: null };
-    expect(detectStaleImageryTurfConflict(starryRecord(), nullImpervious)).toBeNull();
+    expect(detectStaleImageryTurfConflict(newBuildRecord(), nullImpervious)).toBeNull();
   });
 
   test('no county-assessed building means no contradiction (vacant/new-parcel window)', () => {
-    const vacant = { ...starryRecord(), squareFootage: 0, yearBuilt: null };
+    const vacant = { ...newBuildRecord(), squareFootage: 0, yearBuilt: null };
     expect(detectStaleImageryTurfConflict(vacant, bareDirtAi())).toBeNull();
     expect(detectStaleImageryTurfConflict(null, bareDirtAi())).toBeNull();
-    expect(detectStaleImageryTurfConflict(starryRecord(), null)).toBeNull();
+    expect(detectStaleImageryTurfConflict(newBuildRecord(), null)).toBeNull();
+  });
+
+  test('listing/AI-sourced square footage is not authoritative — never fires', () => {
+    // A vacant-roll parcel with a stale listing sqft bypasses
+    // detectUnassessedVacantParcel (early return on positive sqft); without
+    // the evidence gate that would discard CORRECT bare-lot vision zeros.
+    const listingSourced = {
+      ...newBuildRecord(),
+      _fieldEvidence: {
+        lotSize: { sourceType: 'county' },
+        squareFootage: { sourceType: 'ai_search' },
+      },
+    };
+    expect(detectStaleImageryTurfConflict(listingSourced, bareDirtAi())).toBeNull();
+
+    const noEvidence = { ...newBuildRecord(), _fieldEvidence: {} };
+    expect(detectStaleImageryTurfConflict(noEvidence, bareDirtAi())).toBeNull();
+
+    const noEvidenceMap = { ...newBuildRecord() };
+    delete noEvidenceMap._fieldEvidence;
+    expect(detectStaleImageryTurfConflict(noEvidenceMap, bareDirtAi())).toBeNull();
+  });
+
+  test('accepts both _fieldEvidence shapes (merged object and raw single-source array)', () => {
+    const arrayShape = {
+      ...newBuildRecord(),
+      _fieldEvidence: {
+        lotSize: [{ sourceType: 'cadastral' }],
+        squareFootage: [{ sourceType: 'cadastral' }],
+      },
+    };
+    expect(detectStaleImageryTurfConflict(arrayShape, bareDirtAi()))
+      .toEqual({ countySqFt: 2362, yearBuilt: 2025 });
   });
 });
 
 describe('buildEnrichedProfile stale-imagery sanitization', () => {
   test('discards the vision area fields, skips the county prior, and stamps provenance', () => {
-    const profile = buildEnrichedProfile(starryRecord(), bareDirtAi(), 27.58, -82.42);
+    const profile = buildEnrichedProfile(newBuildRecord(), bareDirtAi(), 27.58, -82.42);
 
     expect(profile.turfObservation).toBe('unobservable');
     expect(profile.turfReason).toBe('county_structure_vision_bare_land_conflict');
@@ -106,10 +144,13 @@ describe('buildEnrichedProfile stale-imagery sanitization', () => {
     expect(profile.turfSource).toBe('none');
     expect(profile.countyTurfPriorSf).toBeNull();
     // The explicit zeros are GONE, so every consumer's documented defaults
-    // apply (client lot estimate 20%/15%; turfCorrectionFactor 0.80).
+    // apply (turfCorrectionFactor 0.80; engine legacy fallback for turf).
     expect(profile.imperviousSurfacePercent).toBeUndefined();
     expect(profile.estimatedBedAreaSf).toBeUndefined();
     expect(profile.modifiers.turfCorrectionFactor).toBe(0.80);
+    // The engine-faithful preview the client displays instead of its own
+    // 20%/15% heuristic (parity pinned in the describe below).
+    expect(profile.turfFallbackPreviewSf).toBeGreaterThan(0);
 
     const flag = profile.fieldVerifyFlags.find((f) => f.field === 'estimatedTurfSf');
     expect(flag).toBeDefined();
@@ -123,7 +164,7 @@ describe('buildEnrichedProfile stale-imagery sanitization', () => {
     // ceiling. Pins that the fixture actually exercises the skip above.
     const missAi = { ...bareDirtAi(), imperviousSurfacePercent: null, imperviosSurfacePercent: null };
     delete missAi.estimatedTurfSf;
-    const profile = buildEnrichedProfile(starryRecord(), missAi, 27.58, -82.42);
+    const profile = buildEnrichedProfile(newBuildRecord(), missAi, 27.58, -82.42);
     // ceiling = 6,985 − 2,362/2 − 0 assessed impervious = 5,804; prior = 50%.
     expect(profile.countyTurfPriorSf).toBe(2902);
     expect(profile.turfSource).toBe('county_prior');
@@ -137,7 +178,7 @@ describe('buildEnrichedProfile stale-imagery sanitization', () => {
       imperviosSurfacePercent: 85,
       estimatedBedAreaSf: 120,
     };
-    const profile = buildEnrichedProfile(starryRecord(), paved, 27.58, -82.42);
+    const profile = buildEnrichedProfile(newBuildRecord(), paved, 27.58, -82.42);
     expect(profile.estimatedTurfSf).toBe(0);
     expect(profile.turfSource).toBe('vision');
     expect(profile.turfObservation).toBeUndefined();
@@ -162,34 +203,45 @@ describe('buildEnrichedProfile stale-imagery sanitization', () => {
 });
 
 describe('pricing parity after sanitization', () => {
-  // The estimator UI's lot-estimate fallback computes
-  // round(lot × (1 − 20%)) − round(open × 15%) when the profile carries no
-  // impervious/bed figures — the server engine must land on the SAME number.
-  const CLIENT_LOT_ESTIMATE = (() => {
-    const open = Math.round(6985 * 0.8);
-    return open - Math.round(open * 0.15); // 5,588 − 838 = 4,750
-  })();
-
-  function pricingInputFromProfile(profile, extra = {}) {
+  // The number an unconfirmed estimate is actually priced with comes from
+  // calculatePropertyProfile, which always hands computeTurfArea its legacy
+  // building/hardscape fallback — NOT the bare lot ladder (codex P1 #3098).
+  // This input mirrors the /calculate-estimate request path for the
+  // sanitized profile: same dims, no turf/impervious/bed fields.
+  function engineInputFromProfile(profile, extra = {}) {
     return {
       lotSqFt: profile.lotSqFt,
+      homeSqFt: profile.homeSqFt,
+      stories: profile.stories,
+      footprintSqFt: profile.footprint,
+      propertyType: 'single_family',
       estimatedTurfSf: profile.estimatedTurfSf,
       turfSource: profile.turfSource,
       imperviousSurfacePercent: profile.imperviousSurfacePercent,
       imperviosSurfacePercent: profile.imperviosSurfacePercent,
       estimatedBedAreaSf: profile.estimatedBedAreaSf,
+      features: {
+        pool: false,
+        poolCage: false,
+        shrubs: 'light',
+        trees: 'light',
+        complexity: 'simple',
+        nearWater: false,
+      },
       ...extra,
     };
   }
 
-  test('sanitized profile prices at the client lot-estimate default, LOW + field-verify', () => {
-    const profile = buildEnrichedProfile(starryRecord(), bareDirtAi(), 27.58, -82.42);
-    const turf = computeTurfArea(pricingInputFromProfile(profile));
-    expect(turf.turfSf).toBe(CLIENT_LOT_ESTIMATE);
-    expect(turf.turfSf).toBe(4750);
-    expect(turf.turfBasis).toBe('lotFallback');
-    expect(turf.turfConfidence).toBe('LOW');
-    expect(turf.turfFlags).toContain('FIELD_VERIFY_TURF_SQFT');
+  test('turfFallbackPreviewSf IS the number the engine prices on the real path', () => {
+    const profile = buildEnrichedProfile(newBuildRecord(), bareDirtAi(), 27.58, -82.42);
+    expect(profile.turfFallbackPreviewSf).toBeGreaterThan(0);
+    // Sanity: a building/hardscape fallback, not the full lot and not zero.
+    expect(profile.turfFallbackPreviewSf).toBeLessThan(profile.lotSqFt);
+
+    const engine = calculatePropertyProfile(engineInputFromProfile(profile));
+    expect(engine.lawnSqFt).toBe(profile.turfFallbackPreviewSf);
+    // The engine grades this as its legacy fallback: LOW + field-verify.
+    expect(engine.turfEstimated ?? true).toBe(true);
   });
 
   test('REGRESSION — the unsanitized poisoned shape prices the FULL lot as turf', () => {
@@ -208,10 +260,14 @@ describe('pricing parity after sanitization', () => {
   });
 
   test('a measured turf entry out-ranks the guard fallback (override precedence)', () => {
-    const profile = buildEnrichedProfile(starryRecord(), bareDirtAi(), 27.58, -82.42);
-    const turf = computeTurfArea(pricingInputFromProfile(profile, { measuredTurfSf: 5200 }));
-    expect(turf.turfSf).toBe(5200);
-    expect(turf.turfBasis).toBe('measuredTurfSf');
-    expect(turf.turfConfidence).toBe('HIGH');
+    const profile = buildEnrichedProfile(newBuildRecord(), bareDirtAi(), 27.58, -82.42);
+    const engine = calculatePropertyProfile(engineInputFromProfile(profile, { measuredTurfSf: 5200 }));
+    expect(engine.lawnSqFt).toBe(5200);
+  });
+
+  test('no preview on normal profiles — the field only exists when the guard fired', () => {
+    const paved = { ...bareDirtAi(), imperviousSurfacePercent: 85, imperviosSurfacePercent: 85 };
+    const profile = buildEnrichedProfile(newBuildRecord(), paved, 27.58, -82.42);
+    expect(profile.turfFallbackPreviewSf).toBeUndefined();
   });
 });

@@ -32,6 +32,7 @@ const {
 } = require('../services/property-lookup/lookup-cache');
 const { normalizePropertyType: normalizePricingPropertyType } = require('../services/pricing-engine/commercial-helpers');
 const { normalizeRoachType } = require('../services/pricing-engine/service-pricing');
+const { calculatePropertyProfile } = require('../services/pricing-engine/property-calculator');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 
@@ -1354,10 +1355,13 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
     delete ai.estimatedBedAreaPercent;
     // Fires on every profile build for a conflicted address (fresh + cache
     // hit) — greppable in Railway to judge how often the guard runs and,
-    // against later confirmed sq ft, whether the lot-based default is
+    // against later confirmed sq ft, whether the lot-based fallback is
     // generally close enough or the polygon-measurement lane is warranted.
+    // Dimensions + county only: full street addresses never go to the
+    // plain-text logs (codex P1 #3098); the estimate row carries the
+    // address for any follow-up join.
     logger.info('[property-lookup] stale-imagery turf conflict — vision area fields discarded', {
-      address: rc?.formattedAddress || null,
+      county: rc?.county || null,
       lotSqFt: rc?.lotSize || null,
       countySqFt: staleImageryConflict.countySqFt,
       yearBuilt: staleImageryConflict.yearBuilt,
@@ -1755,6 +1759,48 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
       fieldEvidence: !!(rc?._fieldEvidence && Object.keys(rc._fieldEvidence).length),
     }
   };
+
+  // The number the pricing engine will actually use on this profile if the
+  // operator leaves Confirmed Sq Ft blank: calculatePropertyProfile always
+  // supplies its legacy building/hardscape fallback to computeTurfArea, so
+  // the client's own 20%-hardscape/15%-beds lot heuristic would preview a
+  // DIFFERENT number than gets priced (codex P1 #3098). Run the real engine
+  // on the same facts that prefill the estimator form and expose the
+  // result; the client's lot-estimate fallback displays this when the
+  // conflict guard fired. Static by design — post-load form edits re-price
+  // through /calculate-estimate anyway, and the HIGH confirm-before-pricing
+  // flag stands either way. Fail-open: a preview miss leaves the client on
+  // its own heuristic rather than breaking the profile.
+  if (staleImageryConflict) {
+    try {
+      const enginePreview = calculatePropertyProfile({
+        lotSqFt: profile.lotSqFt,
+        homeSqFt: profile.homeSqFt,
+        stories: profile.stories,
+        footprintSqFt: profile.footprint,
+        // Same normalization the estimate request path applies before the
+        // engine sees the type (estimateHardscape keys on the v1 tokens).
+        propertyType: normalizePricingPropertyType(profile.propertyType) || 'single_family',
+        estimatedTurfSf: profile.estimatedTurfSf,
+        turfSource: profile.turfSource,
+        features: {
+          pool: profile.pool === 'YES',
+          poolCage: profile.poolCage === 'YES',
+          shrubs: String(profile.shrubDensity || 'MODERATE').toLowerCase(),
+          trees: String(profile.treeDensity || 'MODERATE').toLowerCase(),
+          complexity: String(profile.landscapeComplexity || 'MODERATE').toLowerCase(),
+          nearWater: profile.nearWater === 'YES',
+        },
+      });
+      const previewSf = Number(enginePreview?.lawnSqFt);
+      profile.turfFallbackPreviewSf = Number.isFinite(previewSf) && previewSf > 0
+        ? Math.round(previewSf)
+        : null;
+    } catch (err) {
+      logger.warn('[property-lookup] stale-imagery turf preview failed', { error: err.message });
+      profile.turfFallbackPreviewSf = null;
+    }
+  }
 
   // Shadow signal comparing the VISION estimate against the deterministic
   // county-facts ceiling (a county-prior seed would compare the ceiling with

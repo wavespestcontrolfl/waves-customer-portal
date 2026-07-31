@@ -1092,6 +1092,21 @@ function detectStaleImageryTurfConflict(record, ai) {
   if (!record || !ai) return null;
   const countySqFt = Number(record.squareFootage);
   if (!Number.isFinite(countySqFt) || countySqFt <= 0) return null;
+  // The building evidence must be AUTHORITATIVE: merged records also carry
+  // listing- and AI-sourced square footage, and a vacant-roll parcel with a
+  // stale listing value would slip past detectUnassessedVacantParcel (it
+  // returns early on any positive squareFootage) — discarding vision zeros
+  // that are the CORRECT reading of a bare lot (codex P1 #3098). Same
+  // trust bar as the route's trustedCountyTurfCeiling (COUNTY_DIM_SOURCES),
+  // accepting both _fieldEvidence shapes: merged `{ sourceType }` and raw
+  // single-source `[items]`.
+  const sqftEvidence = record._fieldEvidence?.squareFootage;
+  const sqftSourceType = Array.isArray(sqftEvidence)
+    ? sqftEvidence[0]?.sourceType
+    : sqftEvidence?.sourceType;
+  if (!['county', 'cadastral', 'verified'].includes(String(sqftSourceType || '').toLowerCase())) {
+    return null;
+  }
   // Belt: a vacant-roll parcel carrying a defaulted dimension is the OTHER
   // window (imagery may be the fresher source there) — never both.
   if (detectUnassessedVacantParcel(record)) return null;
