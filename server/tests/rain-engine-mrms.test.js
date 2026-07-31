@@ -143,6 +143,26 @@ describe('fetchMrmsDailyRain payload handling', () => {
     expect(out.complete).toBe(false);
   });
 
+  test('null and empty-string rows stay gaps, never zeros (codex P2)', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        data: [
+          { date: '2026-07-24', mrms_precip_in: null },
+          { date: '2026-07-25', mrms_precip_in: '' },
+          { date: '2026-07-26', mrms_precip_in: 0 },
+        ],
+      }),
+    });
+    const out = await fetchMrmsDailyRain({ latitude: 27.54, longitude: -82.47, start: '2026-07-24', end: '2026-07-26' });
+    expect(out.days).toEqual([
+      { date: '2026-07-24', inches: null },
+      { date: '2026-07-25', inches: null },
+      { date: '2026-07-26', inches: 0 },
+    ]);
+    expect(out.complete).toBe(false);
+  });
+
   test('non-OK, malformed, and thrown fetches all return null', async () => {
     global.fetch = jest.fn().mockResolvedValue({ ok: false });
     expect(await fetchMrmsDailyRain({ latitude: 27, longitude: -82, start: '2026-07-24', end: '2026-07-26' })).toBeNull();

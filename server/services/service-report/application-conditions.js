@@ -323,18 +323,28 @@ async function fetchServiceWeekWeather({ latitude, longitude, serviceDate } = {}
   const cached = _rainCache.get(key);
   if (cached && Date.now() - cached.at < RAIN_TTL_MS) return cached.value;
 
-  const om = await fetchOpenMeteoServiceWeek({ lat, lon, range, empty });
+  // The two sources are independent — fetch concurrently so a slow pair
+  // costs max(timeouts), not their sum (codex P2 #3096).
+  const mrmsPromise = mode !== 'off'
+    ? require('../mrms-qpe').fetchMrmsDailyRain({ latitude: lat, longitude: lon, start: range.start, end: range.end }).catch(() => null)
+    : Promise.resolve(null);
+  const [om, mrms] = await Promise.all([
+    fetchOpenMeteoServiceWeek({ lat, lon, range, empty }),
+    mrmsPromise,
+  ]);
   let value = om;
   if (mode !== 'off') {
-    const { fetchMrmsDailyRain } = require('../mrms-qpe');
-    const mrms = await fetchMrmsDailyRain({ latitude: lat, longitude: lon, start: range.start, end: range.end }).catch(() => null);
     const merged = mergeMrmsIntoWeek({ om, mrms, todayYmd: etTodayYmd() });
+    // Coordinates are location PII and must not land in persistent logs
+    // (codex P1 #3096) — an opaque hash still lets a week of shadow lines
+    // be grouped per property.
+    const loc = require('crypto').createHash('sha256').update(`${lat.toFixed(4)},${lon.toFixed(4)}`).digest('hex').slice(0, 8);
     if (merged) {
       const delta = Math.round(((merged.rainInches || 0) - (om.rainInches || 0)) * 100) / 100;
-      logger.info(`[rain-engine] mode=${mode} week mrms=${merged.rainInches} om=${om.rainInches ?? 'null'} delta=${delta} source=${merged.rainSource} @${lat.toFixed(3)},${lon.toFixed(3)} end=${range.end}`);
+      logger.info(`[rain-engine] mode=${mode} week mrms=${merged.rainInches} om=${om.rainInches ?? 'null'} delta=${delta} source=${merged.rainSource} loc=${loc} end=${range.end}`);
       if (mode === 'live') value = merged;
     } else if (mode === 'live') {
-      logger.warn(`[rain-engine] mode=live but MRMS unusable for ${range.start}..${range.end} @${lat.toFixed(3)},${lon.toFixed(3)} — Open-Meteo fallback`);
+      logger.warn(`[rain-engine] mode=live but MRMS unusable for ${range.start}..${range.end} loc=${loc} — Open-Meteo fallback`);
     }
   }
   if (value.rainInches != null || value.et0Inches != null) {

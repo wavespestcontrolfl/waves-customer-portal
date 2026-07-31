@@ -50,7 +50,12 @@ async function fetchMrmsDailyRain({ latitude, longitude, start, end } = {}) {
     const byDate = new Map();
     for (const row of rows) {
       if (!row || typeof row.date !== 'string') continue;
-      const n = Number(row.mrms_precip_in);
+      // null/'' is a GAP, not a zero — Number(null) === 0 would stamp a
+      // missing observation as a measured dry day and silently undercount
+      // the week (codex P2 #3096).
+      const raw = row.mrms_precip_in;
+      if (raw == null || raw === '') { byDate.set(row.date, null); continue; }
+      const n = Number(raw);
       byDate.set(row.date, Number.isFinite(n) && n >= 0 ? round2(n) : null);
     }
     // Materialize the exact requested window so a short payload reads as gaps.
