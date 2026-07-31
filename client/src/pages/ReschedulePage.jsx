@@ -176,8 +176,10 @@ const WEATHER_MOVE_LEADS = {
 // exclusion, bed-bug heat/steam, lawn fertilizers). Interior/granular/
 // termite/WDO/inspection/bait still carve out overlaps like "Interior Pest"
 // — same exemption set as the SMS efficacy clause in services/rain-out.js.
+// Mosquito is deliberately NOT listed: those visits can be Bti tablets,
+// stations, or IGR/larval work (protocols.json), not barrier sprays.
 // Widening the allowlist to another service family is an owner call.
-const WHY_MOVE_LIQUID_SPRAY_SERVICE = /\bpest\b|waveguard|mosquito/i;
+const WHY_MOVE_LIQUID_SPRAY_SERVICE = /\bpest\b|waveguard/i;
 const WHY_MOVE_EXEMPT_SERVICE = /interior|granular|termite|wdo|inspection|bait/i;
 
 function showsWhyMove(move, serviceType) {
