@@ -129,6 +129,20 @@ describe('sanitizeRecommendationsAgainstTreatment', () => {
     expect(dropped).toBe(1);
   });
 
+  test('biostimulant and wetting-agent deferrals are caught (r20)', () => {
+    const soilProducts = [
+      { product_name: 'CarbonPro-L', product_category: 'biostimulant' },
+      { product_name: 'Hydretain', product_category: 'wetting agent' },
+    ];
+    const { dropped } = _test.sanitizeRecommendationsAgainstTreatment({
+      recommendations: [
+        { priority: 1, action: 'Hold off on biostimulants until soil temps drop.', reason: 'x', timeframe: 'y' },
+        { priority: 2, action: 'A wetting agent is not needed at this time.', reason: 'x', timeframe: 'y' },
+      ],
+    }, soilProducts);
+    expect(dropped).toBe(2);
+  });
+
   test('legitimate aftercare mentioning the class passes (defer must govern the treatment)', () => {
     const { parsed, dropped } = _test.sanitizeRecommendationsAgainstTreatment({
       recommendations: [

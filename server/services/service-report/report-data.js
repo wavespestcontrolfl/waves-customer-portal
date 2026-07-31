@@ -2203,15 +2203,25 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       }));
       const appliedClasses = treatmentGuard.appliedTreatmentClasses(guardProducts);
       if (appliedClasses.length) {
-        const recs = lawnAssessment.scores.recommendations;
-        if (recs && typeof recs === 'object') {
+        const NEUTRAL_SUMMARY = 'Today’s applications are in place — we’ll track how the lawn responds and adjust at the next visit.';
+        const sanitizeRecsInPlace = (host, key) => {
+          const recs = host?.[key];
+          if (!recs || typeof recs !== 'object') return;
           const { parsed } = treatmentGuard.sanitizeRecommendationsAgainstTreatment(
             JSON.parse(JSON.stringify(recs)), guardProducts,
           );
-          lawnAssessment.scores.recommendations = parsed;
-        }
+          host[key] = parsed;
+        };
+        // BOTH data shapes: scores.* AND the duplicated top-level fields —
+        // reconcileLawnReport reads top-level recommendations.nextVisitFocus
+        // and buildLawnReportV2 reads top-level aiSummary (codex P1 r20).
+        sanitizeRecsInPlace(lawnAssessment.scores, 'recommendations');
+        sanitizeRecsInPlace(lawnAssessment, 'recommendations');
         if (treatmentGuard.contradictsAppliedTreatment(lawnAssessment.scores.aiSummary, appliedClasses)) {
-          lawnAssessment.scores.aiSummary = 'Today’s applications are in place — we’ll track how the lawn responds and adjust at the next visit.';
+          lawnAssessment.scores.aiSummary = NEUTRAL_SUMMARY;
+        }
+        if (treatmentGuard.contradictsAppliedTreatment(lawnAssessment.aiSummary, appliedClasses)) {
+          lawnAssessment.aiSummary = NEUTRAL_SUMMARY;
         }
       }
     } catch (guardErr) {

@@ -180,6 +180,17 @@ const TREATMENT_CLASSES = {
     category: /pre[-\s_]?emergent/i,
     terms: 'pre[-\\s]?emergent\\w*',
   },
+  // Report-visible soil products (codex P1 r20): CarbonPro-L class rows
+  // persist soil_amendment/biostimulant categories; Hydretain-class rows
+  // persist adjuvant/wetting-agent categories.
+  soil_amendment: {
+    category: /soil[\s_-]?amendment|biostimulant|humic/i,
+    terms: 'biostimulant\\w*|soil\\s+amendment\\w*|humic\\s+(?:acid|application)|carbon\\s+(?:application|treatment)',
+  },
+  adjuvant: {
+    category: /adjuvant|wetting[\s_-]?agent|surfactant|moisture[\s_-]?manager/i,
+    terms: 'adjuvant\\w*|wetting\\s+agent\\w*|surfactant\\w*|moisture\\s+manager\\w*',
+  },
 };
 const TREATMENT_CLASS_TERMS = Object.fromEntries(
   Object.entries(TREATMENT_CLASSES).map(([cls, def]) => [cls, def.terms]),

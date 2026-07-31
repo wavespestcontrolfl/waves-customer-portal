@@ -245,26 +245,26 @@ async function processServiceReportDelivery(delivery, knex = db) {
       const status = await markDeliveryFailed(delivery, new Error(`grounding readiness unverified: ${sanitized.error}`), knex);
       return { status, error: sanitized.error };
     }
-    if (sanitized?.changed) {
-      // The copy just changed — an ACTIVE renderer may have loaded the
-      // pre-sanitize data and would write its stale key AFTER a bare
-      // invalidation (write-after-invalidate — codex P1 r19). Fence: while
-      // a render is in flight, defer this delivery via the normal backoff;
-      // once no renderer is active, clear the key so the email attaches a
-      // fresh render (a QUEUED job is safe — it reads post-sanitize data).
-      const activeRender = await knex('service_report_pdf_jobs')
-        .where({ service_record_id: delivery.service_record_id, status: 'rendering' })
-        .first('id')
-        .catch(() => null);
-      if (activeRender) {
-        const status = await markDeliveryFailed(delivery, new Error('deferred: PDF render in flight during copy correction'), knex);
-        return { status, error: 'pdf render in flight' };
-      }
-      await knex('service_records')
-        .where({ id: delivery.service_record_id })
-        .update({ pdf_storage_key: null })
-        .catch(() => {});
+    // A held delivery means copy was UNSETTLED when the PDF first rendered —
+    // and a no-op sanitize on THIS pass proves nothing about that earlier
+    // render (the late grounded write or a prior worker pass may have
+    // already corrected the copy, making today's sanitize a no-op — codex
+    // P1 r20). So for held deliveries, unconditionally: fence on any
+    // in-flight render (defer via backoff; a QUEUED job is safe — it reads
+    // settled data), then clear pdf_storage_key so the email always
+    // attaches a render produced from the settled copy.
+    const activeRender = await knex('service_report_pdf_jobs')
+      .where({ service_record_id: delivery.service_record_id, status: 'rendering' })
+      .first('id')
+      .catch(() => null);
+    if (activeRender) {
+      const status = await markDeliveryFailed(delivery, new Error('deferred: PDF render in flight while finalizing held delivery'), knex);
+      return { status, error: 'pdf render in flight' };
     }
+    await knex('service_records')
+      .where({ id: delivery.service_record_id })
+      .update({ pdf_storage_key: null })
+      .catch(() => {});
   }
 
   try {
