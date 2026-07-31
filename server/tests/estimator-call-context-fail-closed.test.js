@@ -12,6 +12,9 @@
 let mockCallRow = null;
 let mockCustomersFail = false;
 let mockCustomerRows = [];
+// Overrides customers .first() when set (loadGroundedCustomerById); falls
+// back to mockCustomerRows[0] so the buildCallContext tests keep working.
+let mockCustomerFirstRow;
 // Records the customers-table whereRaw/orWhereRaw SQL so the SMS-path
 // contact-slot pin can assert which phone columns the lookup matched.
 let mockCustomerWhereSql = [];
@@ -40,6 +43,7 @@ jest.mock('../models/db', () => {
       if (table === 'call_log') return mockCallRow;
       if (table === 'customers') {
         if (mockCustomersFail) throw new Error('db down');
+        if (mockCustomerFirstRow !== undefined) return mockCustomerFirstRow;
         return mockCustomerRows[0] || null;
       }
       return null;
@@ -76,6 +80,7 @@ beforeEach(() => {
   mockCallRow = null;
   mockCustomersFail = false;
   mockCustomerRows = [];
+  mockCustomerFirstRow = undefined;
   mockCustomerWhereSql = [];
   delete process.env.GATE_ESTIMATOR_SCOPE_GUARDS;
 });
@@ -176,5 +181,97 @@ describe('buildSmsThreadContext sender lookup (GATE_ESTIMATOR_SCOPE_GUARDS)', ()
     mockCustomerRows = [];
     await buildCallContext('call-1');
     expect(mockCustomerWhereSql.join('\n')).not.toContain('service_contact');
+  });
+});
+
+describe('buildSmsThreadContext grounded-customer fallback (GATE_ESTIMATOR_SCOPE_GUARDS)', () => {
+  const SMS_ARGS = {
+    phone: '+19415550123',
+    triggerBody: 'can I get a quote for quarterly pest control at my home please?',
+  };
+  const GROUNDED_ROW = {
+    id: 'cust-77', first_name: 'Pat', last_name: 'Homeowner', phone: '+19415559999',
+    email: null, address_line1: '4021 Coral Bay Loop', city: 'Venice', state: 'FL', zip: '34285',
+    pipeline_stage: 'active_customer', waveguard_tier: 'Silver', member_since: '2025-01-01',
+    lawn_type: null, property_sqft: 1800, lot_sqft: 8000, property_type: 'Single Family',
+    company_name: null, active: true,
+  };
+
+  test('gate ON, no phone match: the triage-grounded customer is loaded by id with a provenance flag', async () => {
+    process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
+    mockCustomerRows = [];
+    mockCustomerFirstRow = GROUNDED_ROW;
+    const context = await buildSmsThreadContext({ ...SMS_ARGS, groundedCustomerId: 'cust-77' });
+    expect(context.error).toBeUndefined();
+    expect(context.customer).toMatchObject({ id: 'cust-77' });
+    expect(context.customerGroundedByAddress).toBe(true);
+    expect(context.isExistingCustomer).toBe(true);
+  });
+
+  test('gate ON: a grounded row failing the real-customer gates is NOT linked', async () => {
+    process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
+    mockCustomerRows = [];
+    mockCustomerFirstRow = { ...GROUNDED_ROW, active: false };
+    let context = await buildSmsThreadContext({ ...SMS_ARGS, groundedCustomerId: 'cust-77' });
+    expect(context.customer).toBeNull();
+    expect(context.customerGroundedByAddress).toBeUndefined();
+
+    mockCustomerFirstRow = { ...GROUNDED_ROW, pipeline_stage: 'new_lead' };
+    context = await buildSmsThreadContext({ ...SMS_ARGS, groundedCustomerId: 'cust-77' });
+    expect(context.customer).toBeNull();
+    expect(context.customerGroundedByAddress).toBeUndefined();
+  });
+
+  test('gate ON: a phone-matched customer always wins over the grounded id', async () => {
+    process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
+    mockCustomerRows = [{ ...GROUNDED_ROW, id: 'cust-1' }];
+    mockCustomerFirstRow = GROUNDED_ROW;
+    const context = await buildSmsThreadContext({ ...SMS_ARGS, groundedCustomerId: 'cust-77' });
+    expect(context.customer).toMatchObject({ id: 'cust-1' });
+    expect(context.customerGroundedByAddress).toBeUndefined();
+  });
+
+  test('gate OFF: groundedCustomerId is inert (byte-identical legacy path)', async () => {
+    mockCustomerRows = [];
+    mockCustomerFirstRow = GROUNDED_ROW;
+    const context = await buildSmsThreadContext({ ...SMS_ARGS, groundedCustomerId: 'cust-77' });
+    expect(context.customer).toBeNull();
+    expect(context.customerGroundedByAddress).toBeUndefined();
+    expect(context.isExistingCustomer).toBe(false);
+  });
+});
+
+describe('buildSmsThreadContext isExistingCustomer requires active (gate on)', () => {
+  const SMS_ARGS = {
+    phone: '+19415550123',
+    triggerBody: 'can I get a quote for quarterly pest control at my home please?',
+  };
+  const ROW = {
+    id: 'cust-1', first_name: 'Former', last_name: 'Customer', phone: '+19415550123',
+    email: null, address_line1: '1 St', city: 'Venice', state: 'FL', zip: '34285',
+    pipeline_stage: 'active_customer', waveguard_tier: 'Silver', member_since: '2025-01-01',
+    lawn_type: null, property_sqft: 1800, lot_sqft: 8000, property_type: 'Single Family',
+    company_name: null,
+  };
+
+  test('gate ON: inactive former customer keeps the profile but is NOT an existing customer', async () => {
+    process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
+    mockCustomerRows = [{ ...ROW, active: false }];
+    const context = await buildSmsThreadContext(SMS_ARGS);
+    expect(context.customer).toMatchObject({ id: 'cust-1' });
+    expect(context.isExistingCustomer).toBe(false);
+  });
+
+  test('gate ON: an active established customer still is', async () => {
+    process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
+    mockCustomerRows = [{ ...ROW, active: true }];
+    const context = await buildSmsThreadContext(SMS_ARGS);
+    expect(context.isExistingCustomer).toBe(true);
+  });
+
+  test('gate OFF: the legacy stage-only predicate is unchanged', async () => {
+    mockCustomerRows = [{ ...ROW, active: false }];
+    const context = await buildSmsThreadContext(SMS_ARGS);
+    expect(context.isExistingCustomer).toBe(true);
   });
 });

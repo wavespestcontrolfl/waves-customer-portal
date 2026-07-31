@@ -379,4 +379,33 @@ describe('scope guards (GATE_ESTIMATOR_SCOPE_GUARDS)', () => {
     const prompt = mockDispatch.mock.calls[0][1].text;
     expect(prompt).not.toContain('SERVICES WAVES OFFERS');
   });
+
+  test('triage groundedCustomerId rides into the draft context build', async () => {
+    mockLoadTriage.mockResolvedValueOnce({
+      lines: ['Message thread names address "4021 Coral…" which matches: existing active customer Pat Homeowner'],
+      matchedExistingCustomer: true,
+      groundedCustomerId: 'cust-77',
+    });
+    mockDispatch.mockResolvedValueOnce({
+      ok: true,
+      json: { quote_request: true, service_offered: true, relates_to_existing_job: false, confidence: 0.9 },
+    });
+    const result = await startSmsThreadDraft({
+      phone: PHONE,
+      triggerBody: 'the coordinator here — can we also get mosquito treatment quoted at 4021 Coral Bay Loop?',
+    });
+    await result.draftPromise;
+    expect(mockBuildSmsThreadContext).toHaveBeenCalledWith(expect.objectContaining({
+      groundedCustomerId: 'cust-77',
+    }));
+  });
+
+  test('gate off: the context build receives NO grounded customer (byte-identical path)', async () => {
+    mockScopeGuardsEnabled.mockReturnValue(false);
+    const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: 'quote for pest control please' });
+    await result.draftPromise;
+    expect(mockBuildSmsThreadContext).toHaveBeenCalledWith(expect.objectContaining({
+      groundedCustomerId: null,
+    }));
+  });
 });

@@ -189,16 +189,40 @@ function extractAddressCandidates(text) {
       if (zipDirect) locality = `, ${zipDirect[1]}`;
     }
     if (!locality) {
-      // No-comma form ("100 Palm Ave Venice FL 34285"): the street run
-      // swallows the city+FL, leaving the anchored matchers at a bare ZIP.
-      // Bind the ZIP (locality-by-ZIP is enough to reject a same-street
-      // row in another city) when the words carry an FL marker, or when
-      // the last street word is a known suffix/directional — never after
-      // swallowed prose ("with a budget of 15000" stays unbound).
+      // No-comma forms: the street run swallows the city and FL marker
+      // ("100 Palm Ave Venice FL [34285]"). When an FL marker is present,
+      // rebuild the CITY from the words between the last street-SUFFIX
+      // token and the marker — pure directionals are NOT boundaries, or
+      // SWFL cities that start with one ("North Port", "North Venice")
+      // would lose their first word. Fallback when no suffix exists: the
+      // single word before FL. A trailing ZIP (never captured into the
+      // street run — the route-number grammar requires a designator) rides
+      // along when present.
       const zipNC = localitySrc.match(/^\s*(\d{5})\b/);
-      if (zipNC) {
+      const flIdx = words.findIndex((w) => /^(?:fl|florida)$/i.test(w));
+      if (flIdx > 0) {
+        const DIRECTIONALS = new Set(['north', 'south', 'east', 'west', 'n', 's', 'e', 'w',
+          'northeast', 'northwest', 'southeast', 'southwest', 'ne', 'nw', 'se', 'sw']);
+        const suffixBoundary = new Set([
+          ...Object.keys(STREET_TOKEN_ALIASES), ...Object.values(STREET_TOKEN_ALIASES),
+        ].filter((t) => !DIRECTIONALS.has(t)));
+        let boundary = -1;
+        for (let i = 0; i < flIdx; i += 1) {
+          if (suffixBoundary.has(String(words[i]).toLowerCase())) boundary = i;
+        }
+        const cityWords = boundary >= 0 ? words.slice(boundary + 1, flIdx) : words.slice(flIdx - 1, flIdx);
+        const city = cityWords.join(' ').trim();
+        if (city) locality = `, ${city}${zipNC ? ` ${zipNC[1]}` : ''}`;
+      }
+      if (!locality && zipNC) {
+        // ZIP-only fallback ("100 Palm Ave 34285", or FL forms where no
+        // city could be rebuilt): bind the ZIP when the words carry an FL
+        // marker or the last street word is a known suffix/directional —
+        // never after swallowed prose ("with a budget of 15000" stays
+        // unbound). Locality-by-ZIP is enough to reject a same-street row
+        // in another city.
         const lastWord = String(words[words.length - 1] || '').toLowerCase();
-        const hasFl = words.some((w) => /^(?:fl|florida)$/i.test(w));
+        const hasFl = flIdx >= 0;
         const suffixes = new Set([
           ...Object.keys(STREET_TOKEN_ALIASES), ...Object.values(STREET_TOKEN_ALIASES),
         ]);
@@ -428,7 +452,11 @@ async function loadTriageInner({ phone, triggerBody, deadline = Date.now() + TRI
       const rows = await bounded(db('scheduled_services')
         .where({ customer_id: customerId, is_recurring: true })
         .whereNotIn('status', TERMINAL_STATUSES)
-        .limit(20))
+        // Wide sanity bound, NOT a display limit: the property filter runs
+        // in JS below, so a tight SQL limit would let another property's
+        // service combos crowd the matched property's coverage out of the
+        // fetch (same crowd-out rule as the visit and address queries).
+        .limit(100))
         .distinct('service_type',
           'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip');
       const scoped = !scope ? rows : rows.filter((r) => {
@@ -507,7 +535,20 @@ async function loadTriageInner({ phone, triggerBody, deadline = Date.now() + TRI
     lines.push(`${e.how}: existing active customer ${name}, ${shownAddress}${coverage}${visitNote}`);
   }
 
-  return { lines, matchedExistingCustomer: entries.length > 0, recentTexts, vetoTexts };
+  // Exactly ONE distinct existing customer across the sender and address
+  // matches: safe to carry into the draft context so an off-file
+  // coordinator's legitimate add-on quote links the estimate instead of
+  // drafting as a prospect (customer_id null). Two or more distinct
+  // customers (shared street prefix, sender ≠ addressed customer) stay
+  // null — the composer must not guess which one the quote belongs to.
+  const distinctIds = new Set(entries.map((e) => e.customer.id));
+  return {
+    lines,
+    matchedExistingCustomer: entries.length > 0,
+    groundedCustomerId: distinctIds.size === 1 ? entries[0].customer.id : null,
+    recentTexts,
+    vetoTexts,
+  };
 }
 
 // Compact "what Waves knows" block for the triage classifier. Fail-open on

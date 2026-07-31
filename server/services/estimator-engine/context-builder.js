@@ -110,6 +110,31 @@ async function loadCustomerByPhone(phone, extraction, { timeoutMs = null, includ
   }
 }
 
+// Address-grounded customer load (SMS scope-guards path only): triage
+// confirmed the thread names exactly one existing customer's property, but
+// the sender's phone is off file. Load that customer BY ID with the same
+// real-customer gates triage applied (not deleted, active === true,
+// established pipeline stage) and the same column set as loadCustomerByPhone
+// so downstream consumers see an identical shape. Fail-open null: the draft
+// proceeds as a prospect, exactly today's behavior.
+async function loadGroundedCustomerById(customerId) {
+  try {
+    const row = await db('customers')
+      .select('id', 'first_name', 'last_name', 'phone', 'email', 'address_line1', 'city', 'state', 'zip',
+        'pipeline_stage', 'waveguard_tier', 'member_since', 'lawn_type', 'property_sqft', 'lot_sqft',
+        'property_type', 'company_name', 'active')
+      .where({ id: customerId })
+      .whereNull('deleted_at')
+      .first();
+    const { CUSTOMER_STAGES } = require('../customer-stages');
+    if (row && row.active === true && CUSTOMER_STAGES.includes(row.pipeline_stage)) return row;
+    return null;
+  } catch (err) {
+    logger.warn(`[estimator-engine] grounded customer load failed: ${err.message}`);
+    return null;
+  }
+}
+
 // Lead for THIS call first (leads created/reused by the processor carry the
 // call's twilio_call_sid); the phone fallback is bounded to leads that
 // existed by ~the time this call processed — a NEWER unrelated lead on a
@@ -417,7 +442,7 @@ async function buildCallContext(callLogId) {
 // error out entirely: unlike a call, there is no independent transcript —
 // the thread history itself cannot be attributed to one profile, and no
 // caller-name extraction exists to disambiguate.
-async function buildSmsThreadContext({ phone, triggerAt = new Date(), triggerBody = '' }) {
+async function buildSmsThreadContext({ phone, triggerAt = new Date(), triggerBody = '', groundedCustomerId = null }) {
   if (!last10(phone)) return { error: 'no_usable_phone' };
   // SMS path only: a service-contact sender (spouse/tenant/manager on the
   // configured contact slots) is an established identity — without the
@@ -427,15 +452,30 @@ async function buildSmsThreadContext({ phone, triggerAt = new Date(), triggerBod
   // cycle) so gate-off behavior stays byte-identical. Call-path
   // loadCustomerByPhone callers are intentionally unchanged.
   const { scopeGuardsEnabled } = require('./scope-guards');
+  const guardsOn = scopeGuardsEnabled();
   const customerMatch = await loadCustomerByPhone(
-    phone, null, scopeGuardsEnabled() ? { includeServiceContacts: true } : {},
+    phone, null, guardsOn ? { includeServiceContacts: true } : {},
   );
   if (customerMatch.ambiguous) return { error: 'ambiguous_phone' };
   // A FAILED lookup is not a no-match: an existing member could be hiding
   // behind the error, and pricing them as a prospect would drop membership
   // discounts and fee waivers. Red out; the bell owns the manual path.
   if (customerMatch.unavailable) return { error: 'customer_lookup_unavailable' };
-  const customer = customerMatch.customer;
+  let customer = customerMatch.customer;
+  // Triage grounding fallback (gate-on only): the sender's phone is off
+  // file but the thread provably named exactly one existing customer's
+  // property — link that customer so the draft carries membership context
+  // and persists customer_id, with a provenance flag so review can see the
+  // link came from the address, not the phone. A phone-matched customer
+  // always wins; gate off, groundedCustomerId never flows here at all.
+  let customerGroundedByAddress = false;
+  if (!customer && groundedCustomerId && guardsOn) {
+    const grounded = await loadGroundedCustomerById(groundedCustomerId);
+    if (grounded) {
+      customer = grounded;
+      customerGroundedByAddress = true;
+    }
+  }
   const before = new Date(triggerAt);
   const smsSince = new Date(before.getTime() - 30 * 86400000);
   const [leadMatch, smsThread, priorEstimates] = await Promise.all([
@@ -475,8 +515,15 @@ async function buildSmsThreadContext({ phone, triggerAt = new Date(), triggerBod
     leadIsForThisCall: false,
     smsThread: [],
     priorEstimates,
+    ...(customerGroundedByAddress ? { customerGroundedByAddress: true } : {}),
+    // Gate on, mirror triage's posture: an inactive former customer (matched
+    // via the contact-slot lookup or otherwise) keeps their profile as
+    // history but must not unlock existing-customer pricing context —
+    // active === true is required, same as the triage grounding gates. The
+    // legacy stage-only predicate is preserved byte-identical gate-off.
     isExistingCustomer: !!(customer
-      && ['active_customer', 'won', 'at_risk'].includes(customer.pipeline_stage)),
+      && ['active_customer', 'won', 'at_risk'].includes(customer.pipeline_stage)
+      && (!guardsOn || customer.active === true)),
   };
 }
 

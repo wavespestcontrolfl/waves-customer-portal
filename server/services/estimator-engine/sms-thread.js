@@ -161,12 +161,16 @@ function smsOrigin(threadKey) {
 }
 
 // The heavy detached phase: context build → shared pipeline. Non-throwing.
-async function runThreadDraft({ phone, digits, triggerBody, origin, dryRun }) {
+// groundedCustomerId (scope guards only, else null): the customer the triage
+// grounding matched by address/sender when it matched exactly one — rides
+// into the context build so an off-file coordinator's quote links the
+// estimate to the customer it is provably about.
+async function runThreadDraft({ phone, digits, triggerBody, origin, dryRun, groundedCustomerId = null }) {
   const result = { phone: `…${digits.slice(-4)}`, lane: null, created: false, skipped: null };
   try {
     const { buildSmsThreadContext } = require('./context-builder');
     const { runDraftPipeline, notify } = require('./index');
-    const context = await buildSmsThreadContext({ phone, triggerBody });
+    const context = await buildSmsThreadContext({ phone, triggerBody, groundedCustomerId });
     if (context.error) {
       result.lane = 'red';
       result.reasons = [context.error];
@@ -303,7 +307,16 @@ async function startSmsThreadDraft({ phone, triggerBody = '', skipIntentGate = f
       }
     }
     result.started = true;
-    result.draftPromise = runThreadDraft({ phone, digits, triggerBody, origin, dryRun })
+    result.draftPromise = runThreadDraft({
+      phone,
+      digits,
+      triggerBody,
+      origin,
+      dryRun,
+      // Gate off ⇒ triage never ran ⇒ null flows and the context build is
+      // byte-identical to today.
+      groundedCustomerId: triage?.groundedCustomerId || null,
+    })
       .catch((err) => {
         logger.error(`[estimator-sms] detached draft failed: ${err.message}`);
         return null;

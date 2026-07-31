@@ -33,7 +33,8 @@ jest.mock('../models/db', () => {
       whereRaw() { return chain; },
       orderBy() { return chain; },
       limit(n) {
-        (mockState.limits = mockState.limits || {})[table] = n;
+        const limits = (mockState.limits = mockState.limits || {});
+        (limits[table] = limits[table] || []).push(n);
         return chain;
       },
       join() { return chain; },
@@ -215,9 +216,20 @@ describe('extractAddressCandidates', () => {
   });
 
   test('binds the ZIP in comma-free locality forms, never after prose', () => {
-    expect(extractAddressCandidates('quote for 100 Palm Ave Venice FL 34285')[0].locality).toBe(', 34285');
+    // With an FL marker the city is rebuilt too (was ZIP-only pre-r10).
+    expect(extractAddressCandidates('quote for 100 Palm Ave Venice FL 34285')[0].locality).toBe(', Venice 34285');
     expect(extractAddressCandidates('quote for 100 Palm Ave 34285')[0].locality).toBe(', 34285');
     expect(extractAddressCandidates('quote for 100 Palm Ave with a budget of 15000')[0].locality).toBe('');
+  });
+
+  test('state-only no-comma localities rebuild the city (multi-word cities included)', () => {
+    expect(extractAddressCandidates('quote for 100 Palm Ave Venice FL')[0].locality).toBe(', Venice');
+    expect(extractAddressCandidates('quote for 100 Palm Ave North Port FL 34287')[0].locality).toBe(', North Port 34287');
+    // Directionals are street tokens, not city boundaries — but a city
+    // STARTING with one keeps its first word.
+    expect(extractAddressCandidates('quote for 100 Palm Ave North Port FL')[0].locality).toBe(', North Port');
+    // No suffix anywhere: fall back to the single word before FL.
+    expect(extractAddressCandidates('we are at 100 Palm Venice FL')[0].locality).toBe(', Venice');
   });
 
   test('captures locality only when a state or ZIP validates it', () => {
@@ -568,8 +580,58 @@ describe('loadThreadTriageContext', () => {
       phone: null,
       triggerBody: 'quote for 100 Palm Ave Apt 20 please',
     });
-    expect(mockState.limits.customers).toBe(25);
-    expect(mockState.limits['customer_properties as cp']).toBe(25);
+    expect(mockState.limits.customers).toContain(25);
+    expect(mockState.limits['customer_properties as cp']).toContain(25);
+  });
+
+  test('the coverage query uses a wide sanity bound (100) so another property\'s combos cannot crowd out the matched property\'s coverage', async () => {
+    mockLoadCustomerByPhone.mockResolvedValue({
+      customer: { id: 'c-1', first_name: 'Taylor', last_name: 'Sample', active: true, pipeline_stage: 'active_customer' },
+      ambiguous: false,
+    });
+    await loadThreadTriageContext({ phone: '+17245550000', triggerBody: 'quote please' });
+    expect(mockState.limits.scheduled_services).toContain(100);
+  });
+
+  test('groundedCustomerId carries exactly-one-distinct-customer matches, else null', async () => {
+    // Address-only single match → that customer's id.
+    mockState.rows.customers = [
+      { id: 'c-2', first_name: 'Pat', last_name: 'Homeowner', address_line1: '4021 Coral Bay Loop' },
+    ];
+    let triage = await loadThreadTriageContext({
+      phone: null,
+      triggerBody: 'need a treatment at 4021 Coral Bay Loop',
+    });
+    expect(triage.groundedCustomerId).toBe('c-2');
+
+    // Sender + address match for the SAME customer is still one distinct id.
+    mockLoadCustomerByPhone.mockResolvedValue({
+      customer: { id: 'c-2', first_name: 'Multi', last_name: 'Property', address_line1: '1 Primary St', active: true, pipeline_stage: 'active_customer' },
+      ambiguous: false,
+    });
+    triage = await loadThreadTriageContext({
+      phone: '+17245550000',
+      triggerBody: 'about 4021 Coral Bay Loop please',
+    });
+    expect(triage.groundedCustomerId).toBe('c-2');
+
+    // Sender ≠ addressed customer → two distinct ids → null (no guessing).
+    mockLoadCustomerByPhone.mockResolvedValue({
+      customer: { id: 'c-1', first_name: 'Taylor', last_name: 'Sample', address_line1: '99 Placeholder Way', active: true, pipeline_stage: 'active_customer' },
+      ambiguous: false,
+    });
+    triage = await loadThreadTriageContext({
+      phone: '+17245550000',
+      triggerBody: 'this is the property manager for 4021 Coral Bay Loop',
+    });
+    expect(triage.matchedExistingCustomer).toBe(true);
+    expect(triage.groundedCustomerId).toBeNull();
+
+    // No matches at all → null.
+    mockLoadCustomerByPhone.mockResolvedValue({ customer: null, ambiguous: false });
+    mockState.rows.customers = [];
+    triage = await loadThreadTriageContext({ phone: '+17245550000', triggerBody: 'quote please' });
+    expect(triage.groundedCustomerId).toBeNull();
   });
 
   test('fails open to null on query errors', async () => {
