@@ -544,3 +544,30 @@ describe('ReschedulePage weather-move banner', () => {
     expect(screen.getByText('Want a different time instead?')).toBeInTheDocument();
   });
 });
+
+describe('ReschedulePage collective anchoring', () => {
+  it('shows the schedule-follows-your-treatment note and drops the pull-forward warning when collectiveAnchor is on', async () => {
+    stubFetch({
+      get: jsonResponse(reschedulablePayload({
+        isRecurring: true, collectiveAnchor: true, reanchorPullForwardDays: 14,
+      })),
+    });
+
+    renderPage({ classic: true });
+
+    expect(await screen.findByText(/your schedule always follows your last treatment/)).toBeInTheDocument();
+    expect(screen.queryByText(/Only this visit will move/)).not.toBeInTheDocument();
+    // Selecting any slot must NOT surface the legacy re-anchor warning —
+    // the steady note already explains the collective behavior.
+    fireEvent.click(await screen.findByRole('button', { name: '1:00 PM' }));
+    expect(screen.queryByText(/moving this far up shifts your whole plan/)).not.toBeInTheDocument();
+  });
+
+  it('keeps the legacy conditional note when collectiveAnchor is absent', async () => {
+    stubFetch({ get: jsonResponse(reschedulablePayload({ isRecurring: true })) });
+
+    renderPage({ classic: true });
+
+    expect(await screen.findByText(/Only this visit will move/)).toBeInTheDocument();
+  });
+});

@@ -95,9 +95,26 @@ function isSeriesVisit(svc) {
   return !!svc?.is_recurring;
 }
 
+// Collective anchoring (owner ruling 2026-07-30, supersedes the 07-13
+// pull-forward-only rule when the gate is on): a recurring series anchors
+// to the LAST TREATMENT — any date move of a series visit shifts every
+// later occurrence by the same delta, both directions, any size. Residual
+// protects ~90 days from actual application and billing is per
+// application, so the interval follows the visit that actually happened:
+// no coverage gaps for the customer, no compressed intervals for Waves.
+// Same-date (time-only) moves have no delta and never touch the series.
+// Dark until Adam flips GATE_COLLECTIVE_SERIES_ANCHOR; kill = unset.
+function collectiveAnchorActive() {
+  return process.env.GATE_COLLECTIVE_SERIES_ANCHOR === 'true';
+}
+
 // True when committing `targetDateStr` for this visit re-anchors the series.
 function shouldReanchor(svc, targetDateStr) {
   if (!isSeriesVisit(svc)) return false;
+  if (collectiveAnchorActive()) {
+    const target = String(targetDateStr || '').slice(0, 10);
+    return !!target && apptDateStr(svc.scheduled_date) !== target;
+  }
   return pullForwardDays(apptDateStr(svc.scheduled_date), targetDateStr) >= REANCHOR_PULLFORWARD_DAYS;
 }
 
@@ -381,6 +398,10 @@ router.get('/:token', async (req, res, next) => {
       // enforces the same rule regardless.
       isRecurring: !!(svc.is_recurring || svc.recurring_parent_id),
       reanchorPullForwardDays: isSeriesVisit(svc) ? REANCHOR_PULLFORWARD_DAYS : null,
+      // Collective anchoring active for this visit: the page swaps the
+      // recurring note to "your later visits shift to match" and drops the
+      // legacy pull-forward warning (every date move re-anchors).
+      collectiveAnchor: isSeriesVisit(svc) && collectiveAnchorActive(),
       // The visit's time already passed without service — the page renders
       // the "we missed each other" rebook framing instead of the standard
       // reschedule copy.
@@ -855,6 +876,7 @@ router._test = {
   REANCHOR_PULLFORWARD_DAYS,
   loadWeatherMove,
   WEATHER_MOVE_MAX_AGE_DAYS,
+  collectiveAnchorActive,
 };
 
 module.exports = router;

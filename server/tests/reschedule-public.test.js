@@ -20,7 +20,7 @@ const emailMigration = require('../models/migrations/20260702000012_reschedule_l
 const {
   eligibility, bookingRange, searchParseOpts, apptDateStr, label12,
   pullForwardDays, shouldReanchor, REANCHOR_PULLFORWARD_DAYS,
-  loadWeatherMove, WEATHER_MOVE_MAX_AGE_DAYS,
+  loadWeatherMove, WEATHER_MOVE_MAX_AGE_DAYS, collectiveAnchorActive,
 } = reschedulePublicRouter._test;
 
 // Fixed "now": 2026-07-02 12:00 ET (16:00 UTC, EDT).
@@ -341,5 +341,29 @@ describe('weatherMove banner context (GATE_RAINOUT_MOVE_BANNER)', () => {
     const move = await loadWeatherMove({ ...SVC, latitude: null, longitude: null }, NOW);
     expect(move).toMatchObject({ fromChance: null, toChance: null });
     expect(getDailyRainOutlook).not.toHaveBeenCalled();
+  });
+});
+
+describe('collective series anchoring (GATE_COLLECTIVE_SERIES_ANCHOR)', () => {
+  afterEach(() => { delete process.env.GATE_COLLECTIVE_SERIES_ANCHOR; });
+
+  test('gate on: ANY date change re-anchors a series visit — both directions, any size', () => {
+    process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+    const rec = { is_recurring: true, scheduled_date: '2026-08-13' };
+    expect(shouldReanchor(rec, '2026-08-14')).toBe(true);  // 1-day push-back
+    expect(shouldReanchor(rec, '2026-08-12')).toBe(true);  // 1-day pull-forward
+    expect(shouldReanchor(rec, '2026-09-13')).toBe(true);  // big push-back
+    expect(shouldReanchor(rec, '2026-08-13')).toBe(false); // time-only move: no delta
+    // Non-recurring and boosters never shift the base plan.
+    expect(shouldReanchor({ is_recurring: false, scheduled_date: '2026-08-13' }, '2026-08-20')).toBe(false);
+    expect(shouldReanchor({ is_recurring: false, recurring_parent_id: 'abc', scheduled_date: '2026-08-13' }, '2026-08-20')).toBe(false);
+  });
+
+  test('gate off: the 07-13 pull-forward threshold behavior is unchanged', () => {
+    const rec = { is_recurring: true, scheduled_date: '2026-08-13' };
+    expect(shouldReanchor(rec, '2026-08-12')).toBe(false);
+    expect(shouldReanchor(rec, '2026-09-13')).toBe(false);
+    expect(shouldReanchor(rec, '2026-07-16')).toBe(true); // 28-day pull still re-anchors
+    expect(collectiveAnchorActive()).toBe(false);
   });
 });

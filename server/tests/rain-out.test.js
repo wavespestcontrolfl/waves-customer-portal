@@ -2,7 +2,14 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/rebooker', () => ({
   reschedule: jest.fn().mockResolvedValue({ success: true }),
+  rescheduleSeries: jest.fn().mockResolvedValue({ rescheduledOccurrences: [] }),
   findRescheduleOptions: jest.fn().mockResolvedValue([]),
+}));
+jest.mock('../services/notification-service', () => ({
+  notifyAdmin: jest.fn().mockResolvedValue({ id: 'notif-1' }),
+}));
+jest.mock('../services/appointment-reminders', () => ({
+  handleReschedule: jest.fn().mockResolvedValue(undefined),
 }));
 jest.mock('../services/sms-template-renderer', () => ({
   renderSmsTemplate: jest.fn().mockResolvedValue('rendered body'),
@@ -707,6 +714,110 @@ describe('rain-out service', () => {
       expect(sendCustomerMessage.mock.calls[0][0].metadata).toMatchObject({
         original_message_type: 'rain_out_moved_v2',
       });
+    });
+  });
+
+  describe('collective series anchoring (GATE_COLLECTIVE_SERIES_ANCHOR)', () => {
+    const NotificationService = require('../services/notification-service');
+    const AppointmentReminders = require('../services/appointment-reminders');
+
+    afterEach(() => { delete process.env.GATE_COLLECTIVE_SERIES_ANCHOR; });
+
+    const RECURRING_SERVICE = { ...SERVICE, is_recurring: true, recurring_parent_id: 'parent-1' };
+
+    function wireRecurring(row = RECURRING_SERVICE) {
+      wireDb({
+        scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...row }) })],
+      });
+    }
+
+    const DAY_MOVE_ARGS = {
+      serviceId: 'svc-1',
+      technicianId: 'tech-1',
+      reasonCode: 'weather_rain',
+      scope: 'job',
+      // SERVICE sits on 2026-06-11 — a +1 day rain push.
+      target: { date: '2026-06-12', window: { start: '13:00', end: '14:00' } },
+      notifyCustomer: false,
+    };
+
+    test('gate on: a day move of a series child shifts the whole series, re-arms siblings silently, parks conflicted ones', async () => {
+      process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+      wireRecurring();
+      SmartRebooker.rescheduleSeries.mockResolvedValueOnce({
+        rescheduledOccurrences: [
+          { id: 'svc-1', date: '2026-06-12', windowStart: '13:00' },
+          { id: 'sib-1', date: '2026-09-12', windowStart: '09:00' },
+          { id: 'sib-2', date: '2026-12-12', windowStart: '09:00', conflicted: true },
+        ],
+      });
+
+      const result = await RainOut.commit(DAY_MOVE_ARGS);
+
+      expect(result.ok).toBe(true);
+      expect(SmartRebooker.rescheduleSeries).toHaveBeenCalledWith(
+        'svc-1', '2026-06-12', { start: '13:00', end: '14:00' }, 'weather_rain', 'tech',
+        {
+          allowLive: true,
+          expectAnchor: { scheduled_date: '2026-06-11', window_start: '09:00' },
+        },
+      );
+      // Series path replaces the single move entirely.
+      expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+      // Siblings re-arm silently; the anchor is left to the calling route.
+      expect(AppointmentReminders.handleReschedule).toHaveBeenCalledTimes(2);
+      expect(AppointmentReminders.handleReschedule).toHaveBeenCalledWith(
+        'sib-1', '2026-09-12T09:00', { sendNotification: false, coverDueWindows: true },
+      );
+      // The kept-tech double-book parked for reassignment.
+      expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+      expect(NotificationService.notifyAdmin.mock.calls[0][0]).toBe('schedule_conflict');
+      expect(NotificationService.notifyAdmin.mock.calls[0][2]).toContain('2026-12-12');
+    });
+
+    test('gate on: an un-shiftable series never fails the rain-out — the visit moves alone and the series parks', async () => {
+      process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+      wireRecurring();
+      SmartRebooker.rescheduleSeries.mockRejectedValueOnce(
+        Object.assign(new Error('That window conflicts'), { statusCode: 409, code: 'SLOT_TAKEN' }),
+      );
+
+      const result = await RainOut.commit(DAY_MOVE_ARGS);
+
+      expect(result.ok).toBe(true);
+      expect(result.results[0].ok).toBe(true);
+      expect(SmartRebooker.reschedule).toHaveBeenCalledWith(
+        'svc-1', '2026-06-12', { start: '13:00', end: '14:00' }, 'weather_rain', 'tech',
+        { allowLive: true, excludeServiceIds: ['svc-1'] },
+      );
+      expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+      expect(NotificationService.notifyAdmin.mock.calls[0][2]).toContain('could not shift');
+    });
+
+    test('same-day pushes have no date delta and never touch the series', async () => {
+      process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+      wireRecurring();
+
+      await RainOut.commit({
+        ...DAY_MOVE_ARGS,
+        target: { date: '2026-06-11', window: { start: '13:00', end: '14:00' } },
+      });
+
+      expect(SmartRebooker.rescheduleSeries).not.toHaveBeenCalled();
+      expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(1);
+    });
+
+    test('gate off, and boosters (is_recurring=false), stay on the single-visit path', async () => {
+      // Gate off + recurring row.
+      wireRecurring();
+      await RainOut.commit(DAY_MOVE_ARGS);
+      expect(SmartRebooker.rescheduleSeries).not.toHaveBeenCalled();
+
+      // Gate on + booster row (shares a parent but is_recurring=false).
+      process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+      wireRecurring({ ...SERVICE, is_recurring: false, recurring_parent_id: 'parent-1' });
+      await RainOut.commit(DAY_MOVE_ARGS);
+      expect(SmartRebooker.rescheduleSeries).not.toHaveBeenCalled();
     });
   });
 

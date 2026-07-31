@@ -681,17 +681,66 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
       newWindow = { start: toHHMM(job.window_start), end: toHHMM(job.window_end) };
     }
 
+    // Collective anchoring (owner ruling 2026-07-30, GATE_COLLECTIVE_SERIES_ANCHOR):
+    // a DAY move of a series child shifts its whole future series by the
+    // same delta, so the customer's next visit lands ~an interval after the
+    // treatment that actually happened. Same-day time pushes have no date
+    // delta and never touch the series; boosters (is_recurring=false) never
+    // shift the base plan. A rain-out must never fail because a future
+    // sibling collides: the atomic series shift is tried first, and when it
+    // can't commit, the visit still moves alone while the un-shifted series
+    // parks as a schedule_conflict admin card (hands-off + exception-based).
+    const jobDateStr = job.scheduled_date
+      ? String(job.scheduled_date instanceof Date ? job.scheduled_date.toISOString() : job.scheduled_date).slice(0, 10)
+      : null;
+    const wantsSeriesShift = process.env.GATE_COLLECTIVE_SERIES_ANCHOR === 'true'
+      && !!job.is_recurring
+      && String(target.date) !== jobDateStr;
+    let shiftedOccurrences = null;
     try {
-      // excludeServiceIds = the CURRENT row only (see the exclusion
-      // rationale above the loop). Every other member's row — old position
-      // or committed new one — stays visible to the rebooker's occupancy
-      // probe: an already-committed position is real occupancy, and hiding
-      // it let another actor re-move a committed member into a later
-      // member's target unseen.
-      await SmartRebooker.reschedule(job.id, target.date, newWindow, reasonCode, initiatedBy, {
-        allowLive: true,
-        excludeServiceIds: [job.id],
-      });
+      if (wantsSeriesShift) {
+        try {
+          const seriesResult = await SmartRebooker.rescheduleSeries(job.id, target.date, newWindow, reasonCode, initiatedBy, {
+            allowLive: true,
+            // Pin the anchor to the state this loop read — a concurrent
+            // move means the delta is stale; fall back to the single path,
+            // which re-checks everything itself.
+            expectAnchor: { scheduled_date: job.scheduled_date, window_start: job.window_start },
+          });
+          shiftedOccurrences = Array.isArray(seriesResult?.rescheduledOccurrences)
+            ? seriesResult.rescheduledOccurrences
+            : null;
+        } catch (err) {
+          logger.warn(`[rain-out] collective series shift failed for ${job.id} (${err.message}) — moving the visit alone and parking the series`);
+        }
+      }
+      if (!shiftedOccurrences) {
+        // excludeServiceIds = the CURRENT row only (see the exclusion
+        // rationale above the loop). Every other member's row — old position
+        // or committed new one — stays visible to the rebooker's occupancy
+        // probe: an already-committed position is real occupancy, and hiding
+        // it let another actor re-move a committed member into a later
+        // member's target unseen.
+        await SmartRebooker.reschedule(job.id, target.date, newWindow, reasonCode, initiatedBy, {
+          allowLive: true,
+          excludeServiceIds: [job.id],
+        });
+        if (wantsSeriesShift) {
+          // The visit moved but the series could not shift atomically —
+          // park it for the office instead of failing the rain-out.
+          try {
+            const NotificationService = require('./notification-service');
+            await NotificationService.notifyAdmin(
+              'schedule_conflict',
+              'Rain-out series shift needs a look',
+              `A rain-out moved a recurring visit to ${target.date} but its future visits could not shift with it (a later occurrence conflicts). The plan's cadence no longer follows the moved visit — adjust from dispatch.`,
+              { metadata: { scheduledServiceId: job.id, customerId: job.customer_id || null, targetDate: target.date, reasonCode } }
+            );
+          } catch (notifyErr) {
+            logger.error(`[rain-out] schedule_conflict notification failed for ${job.id}: ${notifyErr.message}`);
+          }
+        }
+      }
     } catch (err) {
       // One job racing to completed/cancelled must not strand the rest
       // of a bulk rain-out — record and continue. This member did NOT move:
@@ -707,6 +756,46 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
     // a throwing provider/audit wrapper, a failed forecast fetch —
     // must never mark the job failed, or the tech retries and
     // double-reschedules / double-texts an already-moved appointment.
+
+    // Series shift committed: re-arm every shifted SIBLING's reminders
+    // silently (the anchor's re-arm stays with the calling route, and the
+    // anchor's rain-out SMS is the only text — the plan note on the
+    // /reschedule page explains that the schedule follows the visit).
+    // coverDueWindows mirrors the public series path: an already-due 24h
+    // window must not let the cron text a stale reminder mid-shift.
+    if (shiftedOccurrences) {
+      const AppointmentReminders = require('./appointment-reminders');
+      for (const occ of shiftedOccurrences) {
+        if (String(occ.id) === String(job.id)) continue;
+        try {
+          await AppointmentReminders.handleReschedule(
+            occ.id,
+            `${String(occ.date).split('T')[0]}T${toHHMM(occ.windowStart) || newWindow.start}`,
+            { sendNotification: false, coverDueWindows: true }
+          );
+        } catch (err) {
+          logger.error(`[rain-out] series reminder sync failed for ${occ.id}: ${err.message}`);
+        }
+      }
+      // Kept-tech double-books were committed UNASSIGNED by the rebooker —
+      // park them for reassignment, same as the public series path.
+      const conflicted = shiftedOccurrences
+        .filter((occ) => occ.conflicted)
+        .map((occ) => ({ id: occ.id, date: String(occ.date).split('T')[0] }));
+      if (conflicted.length) {
+        try {
+          const NotificationService = require('./notification-service');
+          await NotificationService.notifyAdmin(
+            'schedule_conflict',
+            'Rain-out series shift needs a look',
+            `A rain-out shifted a recurring series; ${conflicted.length} future visit(s) landed on already-booked windows and were left UNASSIGNED (${conflicted.map((c) => c.date).join(', ')}). Reassign from dispatch.`,
+            { metadata: { scheduledServiceId: job.id, conflicts: conflicted, reasonCode } }
+          );
+        } catch (err) {
+          logger.error(`[rain-out] schedule_conflict notification failed for ${job.id}: ${err.message}`);
+        }
+      }
+    }
     const chosen = { date: target.date, window: newWindow };
     let sms = { sent: false, reason: 'not_requested' };
     if (notifyCustomer) {
