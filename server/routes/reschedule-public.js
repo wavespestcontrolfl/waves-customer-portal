@@ -54,7 +54,7 @@ const { noStore } = require('../middleware/no-store');
 router.use(noStore);
 const { etDateString, addETDays, etParts } = require('../utils/datetime-et');
 const { stampedDivergesSql } = require('../services/stamped-address');
-const { getDailyRainOutlook } = require('../services/weather-forecast');
+const { getDailyRainOutlookBounded } = require('../services/weather-forecast');
 
 // Token format: 64-char lowercase hex (matches encode(gen_random_bytes(32), 'hex')).
 const TOKEN_RE = /^[a-f0-9]{64}$/;
@@ -262,9 +262,11 @@ async function loadByToken(token) {
 // the banner disappears rather than describing a stale transition.
 const WEATHER_REASON_CODES = new Set(['weather_rain', 'weather_wind', 'weather_lightning', 'weather_heat']);
 const WEATHER_MOVE_MAX_AGE_DAYS = 14;
-// Same fail-open budget the rain-out SMS uses: the forecast decorates the
-// banner, it never delays the page.
-const WEATHER_FORECAST_TIMEOUT_MS = 1500;
+// Fail-open decoration budget. The BOUNDED lookup (not a raw race) is the
+// right tool for a public page: it shares one in-flight NWS lookup per
+// coordinate and enters a failure cooldown, so concurrent page loads
+// during an NWS outage never herd outbound requests (codex r2 P2).
+const WEATHER_FORECAST_DEADLINE_MS = 1500;
 
 async function loadWeatherMove(svc, now = new Date()) {
   if (process.env.GATE_RAINOUT_MOVE_BANNER !== 'true') return null;
@@ -298,17 +300,14 @@ async function loadWeatherMove(svc, now = new Date()) {
     toChance: null,
   };
   try {
-    const lat = svc.latitude != null ? parseFloat(svc.latitude) : null;
-    const lng = svc.longitude != null ? parseFloat(svc.longitude) : null;
-    if (lat != null && lng != null && Number.isFinite(lat) && Number.isFinite(lng)) {
-      const outlook = await Promise.race([
-        getDailyRainOutlook(lat, lng).catch(() => null),
-        new Promise((resolve) => { setTimeout(resolve, WEATHER_FORECAST_TIMEOUT_MS).unref?.(); }),
-      ]);
-      if (outlook) {
-        move.fromChance = outlook[move.from.date]?.rainChance ?? null;
-        move.toChance = outlook[move.to.date]?.rainChance ?? null;
-      }
+    // Bounded lookup handles null/invalid coordinates itself and returns
+    // null on deadline/failure — banner renders without chips either way.
+    const outlook = await getDailyRainOutlookBounded(svc.latitude, svc.longitude, {
+      deadlineMs: WEATHER_FORECAST_DEADLINE_MS,
+    });
+    if (outlook) {
+      move.fromChance = outlook[move.from.date]?.rainChance ?? null;
+      move.toChance = outlook[move.to.date]?.rainChance ?? null;
     }
   } catch { /* fail-open — banner renders without chips */ }
   return move;
