@@ -1,7 +1,7 @@
-// Dispatch-side "Rain out" sheet — the admin equivalent of the tech app's
-// RainOutSheet (pages/tech/TechHomePage.jsx). Moves this visit (or the rest
-// of the assigned tech's route) off the weather and texts the customer a
-// reply-1-confirm message with a self-serve reschedule link. All logic lives in
+// Dispatch-side "Quick Move Appointment" sheet — the admin equivalent of the
+// tech app's QuickMoveSheet (pages/tech/TechHomePage.jsx). Moves this visit
+// (or the rest of the assigned tech's route) for weather or a schedule delay
+// and texts the customer a self-serve reschedule link. All logic lives in
 // server/services/rain-out.js; this calls the admin endpoints:
 //   GET  /admin/dispatch/:id/rain-out-options
 //   POST /admin/dispatch/:id/rain-out
@@ -16,14 +16,17 @@ import { TIMEZONE } from '../../lib/timezone';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
-// Same four weather reasons the tech sheet offers; rain-out.js maps each to
-// a customer-facing phrase in the SMS ("we moved you off the heavy rain…").
+// Same reasons the tech sheet offers; rain-out.js maps each to a
+// customer-facing lead in the SMS. "Running late" is the one non-weather
+// reason and renders only when the options payload says the server gate
+// (GATE_RAINOUT_RUNNING_LATE) is on — the server rejects it otherwise.
 const RAIN_REASONS = [
   { code: 'weather_rain', label: 'Rain' },
   { code: 'weather_lightning', label: 'Lightning' },
   { code: 'weather_wind', label: 'Wind' },
   { code: 'weather_heat', label: 'Heat' },
 ];
+const RUNNING_LATE_REASON = { code: 'running_late', label: 'Running late' };
 
 // Sentinel selection key for the custom-time option (distinct from the preset
 // keys, which are `${kind}:${date}:${start}`).
@@ -181,7 +184,7 @@ export default function RainOutSheet({ service, onClose, onDone }) {
       }
       onDone?.({ summary, movedCount: data.movedCount, failedCount });
     } catch (err) {
-      setError(err.message || 'Rain out failed');
+      setError(err.message || 'Quick Move failed');
       setBusy(false);
     }
   };
@@ -199,7 +202,7 @@ export default function RainOutSheet({ service, onClose, onDone }) {
     <div
       role="dialog"
       aria-modal="true"
-      aria-label="Weather reschedule"
+      aria-label="Quick Move Appointment"
       onClick={onClose}
       style={{
         position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', zIndex: 110,
@@ -216,7 +219,7 @@ export default function RainOutSheet({ service, onClose, onDone }) {
         }}
       >
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 4 }}>
-          <div style={{ fontSize: 18, fontWeight: 500, color: '#18181B' }}>Weather reschedule</div>
+          <div style={{ fontSize: 18, fontWeight: 500, color: '#18181B' }}>Quick Move Appointment</div>
           <button
             type="button"
             onClick={onClose}
@@ -246,9 +249,9 @@ export default function RainOutSheet({ service, onClose, onDone }) {
 
         {options && (
           <>
-            <div style={sectionLabel}>WEATHER</div>
+            <div style={sectionLabel}>REASON</div>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 18 }}>
-              {RAIN_REASONS.map((r) => (
+              {(options.runningLateEnabled ? [...RAIN_REASONS, RUNNING_LATE_REASON] : RAIN_REASONS).map((r) => (
                 <button key={r.code} type="button" onClick={() => setReason(r.code)} style={chipStyle(reason === r.code)}>
                   {r.label}
                 </button>
@@ -277,7 +280,7 @@ export default function RainOutSheet({ service, onClose, onDone }) {
                   >
                     <span>
                       {opt.display}
-                      {opt.kind === 'same_day' && (
+                      {opt.kind === 'same_day' && reason !== 'running_late' && (
                         <span style={{ color: '#71717A', fontWeight: 400 }}> — storm may pass</span>
                       )}
                     </span>

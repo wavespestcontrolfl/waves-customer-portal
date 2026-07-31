@@ -262,9 +262,9 @@ export default function MobileAppointmentDetailSheet({
   const canCompleteService = ['en_route', 'on_site', 'pending', 'confirmed', 'rescheduled'].includes(
     String(service?.status || '').toLowerCase(),
   );
-  // Rain-out is a same-day "weather is hitting the route now" action — the
-  // server 409s any job dated to a future day, so only surface it on a
-  // movable stop scheduled for today (ET).
+  // Quick Move is a same-day "the route is being hit right now" action
+  // (weather or running late) — the server 409s any job dated to a future
+  // day, so only surface it on a movable stop scheduled for today (ET).
   const etTodayStr = new Date().toLocaleDateString('en-CA', { timeZone: TIMEZONE });
   const jobDateStr = String(service?.scheduledDate || '').split('T')[0];
   const canRainOut = jobDateStr === etTodayStr && canCompleteService;
@@ -792,7 +792,7 @@ export default function MobileAppointmentDetailSheet({
               className="w-full rounded-full bg-white border border-hairline border-zinc-200 text-zinc-900 font-medium u-focus-ring disabled:opacity-50"
               style={{ padding: '14px 20px', fontSize: 16 }}
             >
-              Rain out
+              Quick Move Appointment
             </button>
           )}
           <button
@@ -816,8 +816,9 @@ export default function MobileAppointmentDetailSheet({
         />
       )}
 
-      {/* Rain-out sheet — moves this visit (or the rest of the assigned
-          tech's route) off the weather and texts the customer. On commit
+      {/* Quick Move sheet — moves this visit (or the rest of the assigned
+          tech's route) for weather or a schedule delay and texts the
+          customer. On commit
           the appointment leaves the current view, so refresh the board
           and dismiss this detail sheet. */}
       {showRainOut && service.id && (

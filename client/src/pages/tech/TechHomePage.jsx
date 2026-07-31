@@ -421,7 +421,7 @@ export default function TechHomePage() {
     <div style={{ maxWidth: 480, margin: '0 auto' }}>
       <GeofenceArrivalPrompt
         onStormReview={(payload) => {
-          // Storm-watch nudge → open the Rain Out sheet for that job.
+          // Storm-watch nudge → open the Quick Move sheet for that job.
           // Prefer the live row from today's schedule; fall back to a
           // minimal object (the sheet fetches its options server-side,
           // so only id + display label matter here).
@@ -593,7 +593,7 @@ export default function TechHomePage() {
               if (addr) window.open(`https://maps.google.com/?q=${encodeURIComponent(addr)}`, '_blank');
             }} />
             <ActionBtn label="Protocol" icon="📖" onClick={() => navigate('/tech/protocols')} />
-            <ActionBtn label="Rain Out" icon="⛈️" onClick={() => setRainOutService(nextStop)} />
+            <ActionBtn label="Quick Move" icon="⛈️" onClick={() => setRainOutService(nextStop)} />
             <ActionBtn
               label={enRouteState.pendingId === nextStop.id ? 'Sending…' : 'En Route'}
               icon="🚗"
@@ -1144,18 +1144,21 @@ function StatCard({ label, value, color }) {
   );
 }
 
-// Weather reschedule sheet. Storm rolls in mid-route → the tech picks
-// where this visit (or the rest of today's route) goes. "Later today"
-// options lead because SWFL cells usually pass within a couple hours;
-// day options carry NWS rain % so the tech doesn't reschedule into
-// tomorrow's storms. The server moves the job(s) immediately and texts
-// the customer a reply-1-confirm / reply-2-switch message.
+// Quick Move sheet. Storm rolls in mid-route (or the day runs long) →
+// the tech picks where this visit (or the rest of today's route) goes.
+// "Later today" options lead because SWFL cells usually pass within a
+// couple hours; day options carry NWS rain % so the tech doesn't
+// reschedule into tomorrow's storms. The server moves the job(s)
+// immediately and texts the customer a self-serve reschedule link.
+// "Running late" is the one non-weather reason and renders only when the
+// options payload says GATE_RAINOUT_RUNNING_LATE is on (server enforces).
 const RAIN_REASONS = [
   { code: 'weather_rain', label: 'Rain' },
   { code: 'weather_lightning', label: 'Lightning' },
   { code: 'weather_wind', label: 'Wind' },
   { code: 'weather_heat', label: 'Heat' },
 ];
+const RUNNING_LATE_REASON = { code: 'running_late', label: 'Running late' };
 
 function RainOutSheet({ service, onClose, onDone }) {
   const [options, setOptions] = useState(null);
@@ -1217,7 +1220,7 @@ function RainOutSheet({ service, onClose, onDone }) {
       const failures = data.failedCount ? `, ${data.failedCount} failed — check dispatch` : '';
       onDone(`Moved ${data.movedCount} ${data.movedCount === 1 ? 'stop' : 'stops'} to ${selected.display}${notify ? ', customer texted' : ''}${failures}`);
     } catch (err) {
-      setError(err.message || 'Rain out failed');
+      setError(err.message || 'Quick Move failed');
       setBusy(false);
     }
   };
@@ -1249,7 +1252,7 @@ function RainOutSheet({ service, onClose, onDone }) {
       >
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 4 }}>
           <div style={{ fontSize: 17, fontWeight: 800, color: DARK.text, fontFamily: "'Montserrat', sans-serif" }}>
-            ⛈️ Weather Reschedule
+            ⛈️ Quick Move Appointment
           </div>
           <button type="button" onClick={onClose} aria-label="Close" style={{
             background: 'transparent', border: 'none', color: DARK.muted, fontSize: 24, cursor: 'pointer', padding: '0 6px',
@@ -1275,9 +1278,9 @@ function RainOutSheet({ service, onClose, onDone }) {
 
         {options && (
           <>
-            <div style={{ fontSize: 12, fontWeight: 700, color: DARK.muted, marginBottom: 6 }}>WEATHER</div>
+            <div style={{ fontSize: 12, fontWeight: 700, color: DARK.muted, marginBottom: 6 }}>REASON</div>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 16 }}>
-              {RAIN_REASONS.map((r) => (
+              {(options.runningLateEnabled ? [...RAIN_REASONS, RUNNING_LATE_REASON] : RAIN_REASONS).map((r) => (
                 <button key={r.code} type="button" onClick={() => setReason(r.code)} style={chip(reason === r.code)}>
                   {r.label}
                 </button>
@@ -1306,7 +1309,7 @@ function RainOutSheet({ service, onClose, onDone }) {
                   >
                     <span>
                       {opt.kind === 'same_day' ? '⏱️ ' : '📅 '}{opt.display}
-                      {opt.kind === 'same_day' && (
+                      {opt.kind === 'same_day' && reason !== 'running_late' && (
                         <span style={{ color: DARK.muted, fontSize: 12 }}> — storm may pass</span>
                       )}
                     </span>

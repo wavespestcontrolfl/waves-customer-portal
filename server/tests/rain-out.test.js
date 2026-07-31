@@ -710,6 +710,112 @@ describe('rain-out service', () => {
     });
   });
 
+  describe('running_late (GATE_RAINOUT_RUNNING_LATE)', () => {
+    afterEach(() => {
+      delete process.env.GATE_RAINOUT_RUNNING_LATE;
+      delete process.env.GATE_RAINOUT_MOVE_BANNER;
+    });
+
+    function wireSingle() {
+      wireDb({
+        scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) })],
+      });
+    }
+
+    const COMMIT_ARGS = {
+      serviceId: 'svc-1',
+      technicianId: 'tech-1',
+      reasonCode: 'running_late',
+      scope: 'job',
+      target: { date: '2026-06-11', window: { start: '13:00', end: '14:00' } },
+      notifyCustomer: true,
+    };
+
+    test('gate off: running_late is rejected before any reschedule (fail closed)', async () => {
+      wireSingle();
+
+      const result = await RainOut.commit(COMMIT_ARGS);
+
+      expect(result).toMatchObject({ ok: false, reason: 'bad_reason' });
+      expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+    });
+
+    test('gate on: moves and texts the schedule lead with ZERO weather claims (v2 rung)', async () => {
+      process.env.GATE_RAINOUT_RUNNING_LATE = 'true';
+      wireSingle();
+
+      const result = await RainOut.commit(COMMIT_ARGS);
+
+      expect(result.ok).toBe(true);
+      expect(SmartRebooker.reschedule).toHaveBeenCalledWith(
+        'svc-1', '2026-06-11', { start: '13:00', end: '14:00' }, 'running_late', 'tech',
+        { allowLive: true, excludeServiceIds: ['svc-1'] },
+      );
+      const vars = renderSmsTemplate.mock.calls[0][1];
+      expect(vars.weather_lead).toBe("we're running behind schedule today");
+      // No weather claims anywhere in a running-late text: no forecast link,
+      // no better-day clause, and the NWS decoration fetches never even run.
+      expect(vars.forecast_clause).toBe('');
+      expect(vars.better_day_clause).toBe('');
+      expect(getDailyRainOutlook).not.toHaveBeenCalled();
+      expect(getHourlyRainOutlook).not.toHaveBeenCalled();
+      expect(sendCustomerMessage.mock.calls[0][0].metadata).toMatchObject({
+        original_message_type: 'rain_out_moved_v2',
+        reason_code: 'running_late',
+      });
+    });
+
+    test('gate on + banner gate: the v3 link clause drops the forecast word', async () => {
+      process.env.GATE_RAINOUT_RUNNING_LATE = 'true';
+      process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+      wireSingle();
+
+      await RainOut.commit(COMMIT_ARGS);
+
+      expect(renderSmsTemplate.mock.calls[0][0]).toBe('rain_out_moved_v3');
+      expect(renderSmsTemplate.mock.calls[0][1].link_clause)
+        .toBe(' New time & other options: https://waves.test/r/tok123');
+      expect(getDailyRainOutlook).not.toHaveBeenCalled();
+      expect(getHourlyRainOutlook).not.toHaveBeenCalled();
+    });
+
+    test('gate on, ABSENT v2 row: NO legacy reroute — the legacy grammar is weather-only, so the send stops', async () => {
+      process.env.GATE_RAINOUT_RUNNING_LATE = 'true';
+      wireDb({
+        scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) })],
+        // v2 render nulls and the row is truly gone (rolled-back migration).
+        sms_templates: [chain({ first: jest.fn().mockResolvedValue(undefined) })],
+      });
+      renderSmsTemplate.mockResolvedValueOnce(null);
+
+      const result = await RainOut.commit(COMMIT_ARGS);
+
+      // The move still commits; "{weather_phrase} rolled through your area"
+      // can't state a schedule delay, so the operator sees not-texted
+      // instead of the customer getting a false weather story.
+      expect(result.results[0]).toMatchObject({ ok: true, smsSent: false, smsReason: 'missing_template' });
+      expect(renderSmsTemplate).toHaveBeenCalledTimes(1);
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    test('lead composition is the fixed schedule phrase regardless of day/forecast', () => {
+      const lead = RainOut._test.composeWeatherLead;
+      expect(lead({ reasonCode: 'running_late', isSameDay: true, hour: 9, todayChance: 85 }))
+        .toBe("we're running behind schedule today");
+      expect(lead({ reasonCode: 'running_late', isSameDay: false, hour: 15, todayChance: null }))
+        .toBe("we're running behind schedule today");
+    });
+
+    test('isValidReason: weather codes always, running_late only behind the gate', () => {
+      const { isValidReason } = RainOut._test;
+      expect(isValidReason('weather_rain')).toBe(true);
+      expect(isValidReason('running_late')).toBe(false);
+      process.env.GATE_RAINOUT_RUNNING_LATE = 'true';
+      expect(isValidReason('running_late')).toBe(true);
+      expect(isValidReason('totally_bogus')).toBe(false);
+    });
+  });
+
   describe('commit — route scope', () => {
     const ROUTE_JOBS = [
       { id: 'svc-2', status: 'confirmed', scheduled_date: '2026-06-11', window_start: '11:30', window_end: '13:30', customer_id: 'cust-2', service_type: 'Lawn Care' },
@@ -1049,6 +1155,28 @@ describe('rain-out service', () => {
       expect(options.days[1].window).toEqual({ start: '09:00', end: '10:00' });
       expect(options.remainingRouteCount).toBe(2);
       expect(options.service.hasPhone).toBe(true);
+      // Chip hidden in both sheets while the gate is dark.
+      expect(options.runningLateEnabled).toBe(false);
+    });
+
+    test('runningLateEnabled mirrors GATE_RAINOUT_RUNNING_LATE for the sheets', async () => {
+      process.env.GATE_RAINOUT_RUNNING_LATE = 'true';
+      try {
+        SmartRebooker.findRescheduleOptions.mockResolvedValue([]);
+        wireDb({
+          scheduled_services: [
+            chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) }),
+            chain({ rows: [] }),
+          ],
+        });
+
+        const options = await RainOut.getOptions('svc-1');
+
+        expect(options.ok).toBe(true);
+        expect(options.runningLateEnabled).toBe(true);
+      } finally {
+        delete process.env.GATE_RAINOUT_RUNNING_LATE;
+      }
     });
   });
 });

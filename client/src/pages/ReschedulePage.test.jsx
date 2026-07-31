@@ -559,4 +559,27 @@ describe('ReschedulePage weather-move banner', () => {
     expect(await screen.findByText('Moved for weather')).toBeInTheDocument();
     expect(screen.getByText('Want a different time instead?')).toBeInTheDocument();
   });
+
+  it('running_late moves get the schedule pill and heading — no weather claims, no chips, no explainer', async () => {
+    stubFetch({
+      get: jsonResponse(reschedulablePayload({
+        weatherMove: { ...weatherMove, reasonCode: 'running_late', fromChance: null, toChance: null },
+      })),
+    });
+
+    renderPage();
+
+    expect(await screen.findByText('Schedule update')).toBeInTheDocument();
+    expect(screen.getByText(/Hi Pat — our schedule ran behind today, so we moved your pest control to a new window/)).toBeInTheDocument();
+    expect(screen.queryByText('Moved for weather')).not.toBeInTheDocument();
+    // The was/now story still tells the move.
+    expect(screen.getByText('Was')).toBeInTheDocument();
+    expect(screen.getByText('Now')).toBeInTheDocument();
+    // No weather anywhere: no dry/better claim, no chips, no explainer.
+    expect(screen.queryByText(/dry window|better window/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/% rain/)).not.toBeInTheDocument();
+    expect(screen.queryByText('Why the move?')).not.toBeInTheDocument();
+    // Hero still reframes to the optional-adjustment ask.
+    expect(screen.getByText('Want a different time instead?')).toBeInTheDocument();
+  });
 });

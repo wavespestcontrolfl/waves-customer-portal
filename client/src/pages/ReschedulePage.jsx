@@ -158,7 +158,9 @@ function ReanchorNote() {
 // status pill, heading, then matched Was/Now rows — the design spec is the
 // owner-approved mock from the 2026-07-30 session. Weather chips are the
 // rain blue on BOTH rows (owner call: one weather color, sun icon only
-// signals the dry side).
+// signals the dry side). A running_late move (Quick Move sheet) reuses the
+// same banner with a "Schedule update" pill, a schedule heading, and no
+// chips (the server never fetches chances for it).
 
 const WEATHER_MOVE_BLUE = '#0369A1';
 
@@ -240,6 +242,13 @@ function WeatherMoveRow({ label, date, windowStart, chance, isNow }) {
 }
 
 function weatherMoveHeading({ move, firstName, serviceType }) {
+  const hi = firstName ? `Hi ${firstName} — ` : '';
+  const svc = (serviceType || 'service').toLowerCase();
+  // Running late isn't weather: no "dry/better window" claim, just the
+  // honest schedule story ahead of the was/now rows.
+  if (move.reasonCode === 'running_late') {
+    return `${hi}our schedule ran behind today, so we moved your ${svc} to a new window.`;
+  }
   const lead = WEATHER_MOVE_LEADS[move.reasonCode] || 'weather moved your';
   // "Dry" only when the forecast actually supports it — same ≤40% bar the
   // SMS better-day clause uses; no forecast coverage means no dry claim
@@ -247,10 +256,10 @@ function weatherMoveHeading({ move, firstName, serviceType }) {
   // can't promise one).
   const dry = (move.reasonCode === 'weather_rain' || move.reasonCode === 'weather_lightning')
     && move.toChance != null && Number(move.toChance) <= 40;
-  return `${firstName ? `Hi ${firstName} — ` : ''}${lead} ${(serviceType || 'service').toLowerCase()} to a ${dry ? 'dry' : 'better'} window.`;
+  return `${hi}${lead} ${svc} to a ${dry ? 'dry' : 'better'} window.`;
 }
 
-function WeatherMovePill() {
+function WeatherMovePill({ move }) {
   return (
     <div data-glass="chip" data-glass-pill="" style={{
       display: 'inline-block', fontSize: 12, fontWeight: 700, textTransform: 'uppercase',
@@ -261,7 +270,7 @@ function WeatherMovePill() {
         display: 'inline-block', width: 6, height: 6, borderRadius: '50%',
         background: WEATHER_MOVE_BLUE, marginRight: 8, verticalAlign: 'middle',
       }} />
-      Moved for weather
+      {move?.reasonCode === 'running_late' ? 'Schedule update' : 'Moved for weather'}
     </div>
   );
 }
@@ -275,7 +284,7 @@ function WeatherMoveBanner({ move, firstName, serviceType, hero = false }) {
     <Card style={{ borderTop: `3px solid ${WEATHER_MOVE_BLUE}` }}>
       {hero ? null : (
         <>
-          <WeatherMovePill />
+          <WeatherMovePill move={move} />
           <div data-gt="h3x" style={{ fontSize: 22, fontWeight: 800, fontFamily: FONTS.heading, marginTop: 14, lineHeight: 1.3 }}>
             {weatherMoveHeading({ move, firstName, serviceType })}
           </div>
@@ -1252,7 +1261,7 @@ export default function ReschedulePage() {
                 already confirmed, the page becomes optional adjustment. */}
             {data.weatherMove ? (
               <div className="rsv2-hero" style={{ marginBottom: 12 }}>
-                <WeatherMovePill />
+                <WeatherMovePill move={data.weatherMove} />
                 {/* h2, not h1: the glass type ramp sizes headings by tag, and
                     the owner sized the weather flow one step down (2026-07-30)
                     — both this heading and the "different time?" hero. */}
