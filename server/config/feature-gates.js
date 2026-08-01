@@ -77,6 +77,17 @@ const gates = {
   // non-'true' value; every merge is journaled and hand-reversible.
   customerDedupeAutoMerge: process.env.GATE_CUSTOMER_DEDUPE_AUTO_MERGE === 'true',
 
+  // Red-pair auto-dismiss (customer-dedupe.js red tier). Red is the
+  // detector's own "two different people sharing a phone" verdict —
+  // different last names AND a positively different address — so those
+  // pairs can never be merged and would otherwise park in the review queue
+  // forever. When on, the same nightly cron upserts a "not a duplicate"
+  // dismissal for every currently-red pair (created_by 'auto:red-tier').
+  // An auto-WRITER like the merge gate above, so opt-in in EVERY
+  // environment. Reversible: delete the dismissal row and the pair
+  // re-surfaces in the queue. Kill switch: unset.
+  customerDedupeAutoDismissRed: process.env.GATE_CUSTOMER_DEDUPE_AUTO_DISMISS_RED === 'true',
+
   // Photo-assessment lead magnets (wavespestcontrol.com/lawn-assessment +
   // /pest-identifier). Public, unauthenticated, and every accepted upload is a
   // paid dual-model vision call — explicit opt-in in EVERY environment, and the
@@ -799,6 +810,19 @@ const gates = {
   dataHygieneAutoApply:                 process.env.GATE_DATA_HYGIENE_AUTO_APPLY === 'true',
   // Vault decrypt/reveal is explicit opt-in in every shared environment.
   dataHygieneSensitiveReveal: isProd ? process.env.GATE_DATA_HYGIENE_REVEAL === 'true' : false,
+
+  // Inventory unit alias auto-fix (inventory-unit-review.js). Nightly sweep
+  // that clears the unit-review queue's PURE-ALIAS rows only: an
+  // unsupported unit string whose normalization resolves to exactly one
+  // supported, unambiguous unit at conversion factor 1 ("Gallons" -> gal,
+  // "FL OZ" -> fl_oz). Never touches missing-unit or ambiguous-oz rows —
+  // those stay parked for review. An auto-WRITER (products_catalog +
+  // movement audit rows) so, like dataHygieneAutoApply, it is opt-in in
+  // EVERY environment. Kill switch: unset; every fix leaves a
+  // product_inventory_movements audit row (source
+  // 'inventory_unit_review_autofix') and is hand-reversible from the
+  // unit-review tab.
+  inventoryUnitAutofix: process.env.GATE_INVENTORY_UNIT_AUTOFIX === 'true',
 
   // Weekly incident regression eval — replays the incident corpus
   // (server/fixtures/incident-eval/) through the LIVE fact-check gate and

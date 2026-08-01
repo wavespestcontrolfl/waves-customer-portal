@@ -1243,7 +1243,19 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
       const metadataBaseAmount = Number(paymentIntent.metadata?.base_amount ?? invoiceAmountDue(invoice));
       const metadataCardSurcharge = Number(paymentIntent.metadata?.card_surcharge ?? 0);
       await trx('payments').insert({
-        customer_id: invoice.customer_id,
+        // OWNERSHIP COMES FROM THE LOCKED ROW, never the pre-lock read.
+        // `invoice` was fetched BEFORE this transaction took FOR UPDATE on
+        // it, so any writer that repoints invoices.customer_id — a customer
+        // merge is the live one — can commit while we wait on that lock and
+        // move the invoice to a different customer. Inserting
+        // `invoice.customer_id` then attaches this payment to the PREVIOUS
+        // owner: the invoice sits on one account and the money that settled
+        // it on another, which reconciliation reads as both a missing
+        // payment and an unexplained one. `lockedInvoice` is the post-wait
+        // re-read, so it always names the invoice's CURRENT owner. No extra
+        // lock is needed — settlement must never be blocked into failure by
+        // one, and this ordering does not add any.
+        customer_id: lockedInvoice.customer_id,
         processor: 'stripe',
         stripe_payment_intent_id: piId,
         stripe_charge_id: paymentIntent.latest_charge || null,
@@ -3606,10 +3618,13 @@ async function handlePaymentIntentProcessing(paymentIntent, eventCreated = null,
           metadata: paymentMetadata,
         });
     } else {
-      if (!invoice?.customer_id) return;
+      if (!lockedInvoice?.customer_id) return;
 
       await trx('payments').insert({
-        customer_id: invoice.customer_id,
+        // Post-lock owner, never the pre-lock read — see the succeeded-PI
+        // path above: a merge can repoint this invoice while we wait on its
+        // FOR UPDATE, and `invoice` still names the old owner.
+        customer_id: lockedInvoice.customer_id,
         processor: 'stripe',
         stripe_payment_intent_id: piId,
         payment_date: etDateString(),
@@ -4444,3 +4459,4 @@ module.exports._resolveOrphanSucceededPaymentIntentIfSettled = resolveOrphanSucc
 module.exports._handlePaymentIntentFailed = handlePaymentIntentFailed;
 module.exports._handleAchFailure = handleAchFailure;
 module.exports._armMonthlyAutopayRetryForAsyncFailure = armMonthlyAutopayRetryForAsyncFailure;
+module.exports._handlePaymentIntentSucceeded = handlePaymentIntentSucceeded;

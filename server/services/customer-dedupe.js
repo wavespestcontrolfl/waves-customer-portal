@@ -1275,10 +1275,110 @@ async function runAutoMergeSweep({ performedBy = 'auto:dedupe-cron' } = {}) {
   return results;
 }
 
+
+// ---------------------------------------------------------------------------
+// Red-pair auto-dismiss sweep (cron entry point — caller owns the gate)
+// ---------------------------------------------------------------------------
+//
+// Red tier is the detector's own "two different people sharing a phone"
+// verdict (different last names AND a positively different address) — those
+// pairs can never be merged from the queue, so left alone they park in the
+// owner's review list forever. This sweep records the same "not a duplicate"
+// dismissal an operator would click, attributed 'auto:red-tier'. Dismissal
+// semantics are untouched (display reads them fail-open at :299, the
+// auto-merge sweep fail-closed): a dismissal only hides the pair from the
+// QUEUE — identity-conflict demotion is structural (cluster count) and keeps
+// green shells demoted, and a dismissed pair can never be auto-merged even
+// if the rows later drift toward matching. Reversal = delete the row.
+async function runRedPairAutoDismissSweep({ performedBy = 'auto:red-tier' } = {}) {
+  let groups;
+  try {
+    // Fail-closed like the auto-merge sweep: the upsert itself is idempotent,
+    // but an unreadable dismissals table means adjudication state we cannot
+    // see — an autonomous writer does not act blind to it.
+    groups = await findDuplicateGroups(db, { failClosedOnDismissals: true });
+  } catch (e) {
+    logger.warn(`[customer-dedupe] red-pair auto-dismiss aborted — dismissals unreadable: ${e.message}`);
+    return { dismissed: [], aborted: 'dismissals_unreadable' };
+  }
+  const results = { dismissed: [], skippedStale: 0 };
+  for (const group of groups) {
+    for (const candidate of group.candidates) {
+      if (candidate.tier !== 'red') continue;
+      const [a, b] = pairKey(group.winner.id, candidate.loser.id);
+      try {
+        const outcome = await db.transaction(async (trx) => {
+          // The red verdict came from a findDuplicateGroups read that
+          // finished BEFORE this write — an admin edit in between (name
+          // fix, address correction, retire) can turn the pair non-red, and
+          // a PERMANENT dismissal must never land on it. Re-read both rows
+          // under lock and re-apply the detection red rule at write time:
+          // still-live rows sharing the phone, with different last names AND
+          // a positively different address.
+          const rows = await trx('customers').whereIn('id', [a, b]).forUpdate().select('*');
+          const rowA = rows.find((r) => r.id === a);
+          const rowB = rows.find((r) => r.id === b);
+          const stillRed = Boolean(rowA && rowB
+            && !rowA.deleted_at && !rowB.deleted_at
+            && rowA.active !== false && rowB.active !== false
+            && phone10(rowA.phone) && phone10(rowA.phone) === phone10(rowB.phone)
+            && normName(rowA.last_name) && normName(rowB.last_name)
+            && normName(rowA.last_name) !== normName(rowB.last_name)
+            && ADDRESS_CONFLICTS.has(addressCompat(rowA, rowB).status));
+          if (!stillRed) return 'no_longer_red';
+          // Idempotent by the ordered-pair unique constraint — a re-run or a
+          // race with a manual dismissal is an ignored conflict, never an
+          // error.
+          await trx('customer_duplicate_dismissals')
+            .insert({
+              customer_id_a: a,
+              customer_id_b: b,
+              reason: `auto-dismissed: red tier (${candidate.reasons.join(', ')})`.slice(0, 500),
+              created_by: performedBy,
+            })
+            .onConflict(['customer_id_a', 'customer_id_b'])
+            .ignore();
+          return 'dismissed';
+        });
+        if (outcome === 'dismissed') {
+          results.dismissed.push({ winnerId: group.winner.id, loserId: candidate.loser.id });
+        } else {
+          // Counted in the digest metadata; the pair simply stays queued for
+          // the next sweep to re-classify.
+          results.skippedStale += 1;
+        }
+      } catch (e) {
+        // One bad pair must not stop the sweep; the pair simply stays queued.
+        logger.warn(`[customer-dedupe] red-pair auto-dismiss failed for ${a}/${b}: ${e.message}`);
+      }
+    }
+  }
+
+  // ONE digest bell per sweep, mirroring the merge digest above.
+  if (results.dismissed.length) {
+    try {
+      const n = results.dismissed.length;
+      await require('./notification-service').notifyAdmin(
+        'customer',
+        `${n} duplicate pair${n === 1 ? '' : 's'} auto-dismissed as different people`,
+        'Different last names at a different address on a shared phone — the detector\'s own "two people" verdict, so these pairs can never be merged. Removed from the duplicate review queue; to re-surface one, delete its customer_duplicate_dismissals row.',
+        {
+          link: '/admin/customers/duplicates',
+          metadata: { dismissed: results.dismissed, skippedStale: results.skippedStale },
+        },
+      );
+    } catch (notifyErr) {
+      logger.warn(`[customer-dedupe] red-dismiss digest notify failed (non-blocking): ${notifyErr.message}`);
+    }
+  }
+  return results;
+}
+
 module.exports = {
   findDuplicateGroups,
   executeMerge,
   runAutoMergeSweep,
+  runRedPairAutoDismissSweep,
   // exported for tests
   _test: {
     phone10,
