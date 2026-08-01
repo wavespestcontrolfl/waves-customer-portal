@@ -472,9 +472,11 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
     // An FK-linked record needs no heal — the linkage column stays untouched.
     expect(recUpdate.updatePayload.scheduled_service_id).toBeUndefined();
 
-    // The authoritative minutes travel directly — the recalc must not
-    // depend on any marker having landed (codex P2 round 5).
-    expect(JobCosting.calculateJobCost).toHaveBeenCalledWith('svc-1', undefined, { overrideLaborMinutes: 45 });
+    // NO request-local minutes (codex P2 round 7): the recalc re-derives
+    // from the durable row stamp committed in the same transaction, so
+    // interleaved recalcs from concurrent corrections converge on the
+    // newest committed value instead of the last-finishing request's.
+    expect(JobCosting.calculateJobCost).toHaveBeenCalledWith('svc-1');
     const audit = dbMock.calls.find((c) => c.table === 'activity_log');
     expect(audit.insertPayload.action).toBe('time_on_site_adjusted');
     expect(audit.insertPayload.admin_user_id).toBe('admin-1');
@@ -684,11 +686,11 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
     expect(res.body.recordAmbiguous).toBe(true);
     const ambSvcUpdate = dbMock.calls.find((c) => c.table === 'scheduled_services' && c.updatePayload);
     expect(ambSvcUpdate).toBeTruthy();
-    // The skipped-record shapes are exactly why the row stamp and the direct
-    // override exist — labor must still book the corrected minutes now and
-    // on every later no-opts recalc (codex P2 round 5).
+    // The skipped-record shapes are exactly why the durable row stamp
+    // exists — the no-opts recalc re-derives the corrected labor from it,
+    // now and on every later recalc (codex P2 rounds 5+7).
     expect(ambSvcUpdate.updatePayload.time_on_site_adjusted_minutes).toBe(45);
-    expect(JobCosting.calculateJobCost).toHaveBeenCalledWith('svc-1', undefined, { overrideLaborMinutes: 45 });
+    expect(JobCosting.calculateJobCost).toHaveBeenCalledWith('svc-1');
     expect(dbMock.calls.find((c) => c.table === 'service_records' && c.updatePayload)).toBeUndefined();
   });
 });

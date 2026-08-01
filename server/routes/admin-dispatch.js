@@ -2300,12 +2300,17 @@ router.patch('/:serviceId/time-on-site', requireAdmin, async (req, res, next) =>
 
     try {
       const JobCosting = require('../services/job-costing');
-      // The authoritative minutes travel DIRECTLY (codex P2 #3152 round 5):
-      // when the record leg was skipped there is no structured_notes marker
-      // for the durable re-derivation to find, and this recalc must still
-      // book the corrected labor over an inflated job-linked time entry.
-      // Later no-opts recalcs re-derive from the column stamped above.
-      await JobCosting.calculateJobCost(svc.id, undefined, { overrideLaborMinutes: plan.minutes });
+      // NO request-local minutes here (codex P2 #3152 round 7): concurrent
+      // corrections of the same visit serialize their transactions on the
+      // scheduled_services row lock, but their post-commit recalcs can
+      // interleave — an older request's recalc finishing last would bake ITS
+      // stale minutes into job_costs while the row carries the newer value.
+      // calculateJobCost re-reads the row and derives the override from the
+      // durable time_on_site_adjusted_minutes stamp committed above (round
+      // 5), so whichever recalc runs last converges on the newest committed
+      // correction, and any interleaving self-heals on the next recalc —
+      // no request-local state involved.
+      await JobCosting.calculateJobCost(svc.id);
     } catch (err) {
       logger.warn(`[time-on-site] job costing recalc failed for service ${svc.id}: ${err.message}`);
     }
