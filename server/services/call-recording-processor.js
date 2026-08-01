@@ -5339,6 +5339,32 @@ const CallRecordingProcessor = {
       extraction_model: v2Result?.extraction?.meta?.extraction_model || CALL_EXTRACTION_ROUTE.primary.model,
       extraction_prompt_version: v2PromptVersion,
     };
+    // Model + prompt identifies an extractor COHORT, not an individual pass
+    // (codex round-18 P2): reprocess the same call on the same extractor with
+    // recovery failing this time and the pass-1 card — kept alive by the
+    // open-row onConflict-ignore — would still stamp-match the rewritten row
+    // and forge a 'corrected' verdict for all three audits. So the marker is
+    // reconciled with THIS pass before either filing site runs: a pass that
+    // recovered (re)stamps it, a pass that did NOT strips the stamp and
+    // records when it was superseded. An unstamped card reconstructs nothing,
+    // so the forged verdict is gone in the same write.
+    //
+    // The card itself is left OPEN either way. The office's read-back task is
+    // about the street now on the customer record, which the earlier pass DID
+    // persist — invalidating the audit marker must not silently delete a real
+    // piece of work. Best-effort: a failed reconcile leaves a stamp the
+    // audits may over-trust, which is why the pass stamp is belt-and-braces
+    // rather than the only check.
+    await db('triage_items')
+      .where({ call_log_id: call.id, reason_code: 'address_recovered' })
+      .update({
+        payload: addressRecovery?.recovered
+          ? db.raw('coalesce(payload, \'{}\'::jsonb) || ?::jsonb', [JSON.stringify(recoveryPassStamp)])
+          : db.raw('(coalesce(payload, \'{}\'::jsonb) - \'extraction_model\' - \'extraction_prompt_version\') || ?::jsonb',
+            [JSON.stringify({ recovery_superseded_at: new Date().toISOString() })]),
+        updated_at: new Date(),
+      })
+      .catch((e) => logger.warn(`[call-proc] recovery-marker reconcile failed for ${maskSid(callSid)}: ${e.code || e.name || 'db_error'}`));
 
     // Explicit SMS consent is a property of the CALL, not of the routing mode:
     // the secondary-contact fan-out at the send site requires it even when V2
@@ -5465,13 +5491,9 @@ const CallRecordingProcessor = {
                 severity: 'advisory',
                 extraPayload: {
                   address_as_heard: rawStreetBeforeAdopt,
-                  // AV's normalized form (which is what a confirmed recovery
-                  // IS) keys the street as street_line_1 — reading
-                  // address_line1 wrote `undefined` here, so the card that
-                  // exists to show the office WHAT to read back showed
-                  // nothing. V1-flat fallback kept for shape safety.
-                  address_recovered: addressRecovery.recovered.street_line_1
-                    || addressRecovery.recovered.address_line1 || null,
+                  // V1-flat key — recoverStreetAddress remaps its winner out
+                  // of the AV-normalized shape before returning.
+                  address_recovered: addressRecovery.recovered.address_line1,
                   address_candidates: addressRecovery.candidates || [],
                   recovery_method: addressRecovery.method || null,
                   ...recoveryPassStamp,
@@ -7472,8 +7494,13 @@ const CallRecordingProcessor = {
           // extraction still supplies the stated UNIT, which recovery never
           // re-hears (its Autocomplete input is street-only, and AV's
           // normalized form carries no subpremise at all).
+          // recoverStreetAddress REMAPS its winner to the V1-flat shape
+          // (address_line1/city/state/zip) before returning — it is only
+          // AV-normalized inside confirmPrediction (codex round-18 P2).
+          // Reading street_line_1 off it yielded undefined, which failed the
+          // whole predicate closed and silently un-did the recovery fix.
           const recoveredVerdictInput = (addressRecovery?.recovered && addressRecovery.avResult)
-            ? addressRecovery.recovered
+            ? { street_line_1: addressRecovery.recovered.address_line1, city: addressRecovery.recovered.city }
             : null;
           const v2ValidatedAddress = recoveredVerdictInput || v2StatedAddress;
           const unitKey = (v) => String(v || '').toLowerCase().replace(/[#.,]/g, ' ').replace(/\s+/g, ' ').trim();
@@ -7483,12 +7510,23 @@ const CallRecordingProcessor = {
           // bar. With street+city+zip+unit all matched against BOTH the
           // AV-normalized form and the V2 input, the match is total.
           const cityKey = (v) => String(v || '').toLowerCase().replace(/\s+/g, ' ').trim();
+          // ...but only where the bridge itself demands it (codex round-18
+          // P2). For `validated_accept` Google changed NOTHING, so a city the
+          // caller's record does not share means V2 named a different place →
+          // hold. For `corrected` the difference IS Google's trusted
+          // correction, the shadow path writes the normalized city into
+          // `extracted`, and deriveCallReviewBridge deliberately does not
+          // reject on it — so demanding the ORIGINAL V2 city here would hold
+          // every city correction. The unconditional match against the
+          // verdict's own normalized city below is what keeps this safe:
+          // the booked city always has to be the validated one.
+          const requireStatedCityMatch = String(effectiveAddressValidation?.status || '') === 'validated_accept';
           const avValidatesBookedAddress = !!avNormalized && !!v2ValidatedAddress && !!v2StatedAddress
             && streetCompareKey(String(extracted.address_line1 || '')) === streetCompareKey(String(avNormalized.street_line_1 || ''))
             && String(extracted.zip || '').trim() === String(avNormalized.postal_code || '').trim()
             && cityKey(extracted.city) === cityKey(avNormalized.city)
             && streetCompareKey(String(extracted.address_line1 || '')) === streetCompareKey(String(v2ValidatedAddress.street_line_1 || ''))
-            && cityKey(extracted.city) === cityKey(v2ValidatedAddress.city)
+            && (!requireStatedCityMatch || cityKey(extracted.city) === cityKey(v2ValidatedAddress.city))
             && unitKey(extracted.address_line2) === unitKey(v2StatedAddress.street_line_2);
           const avPositiveForBooking = !!effectiveAddressValidation
             && ['validated_accept', 'corrected'].includes(String(effectiveAddressValidation.status || ''))
