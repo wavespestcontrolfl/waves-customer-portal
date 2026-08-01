@@ -18,7 +18,8 @@ const {
   resolveInventoryUnitAlias,
   runInventoryUnitAutofixSweep,
   _test: {
-    BATCH_CAP, CANDIDATE_PAGE_SIZE, CANONICAL_STORAGE_UNITS, OZ_FAMILY_SQL, isAutofixCandidateUnit,
+    BATCH_CAP, CANDIDATE_PAGE_SIZE, CANONICAL_STORAGE_UNITS, OZ_FAMILY_SQL,
+    UNSUPPORTED_UNIT_SQL, isAutofixCandidateUnit,
   },
 } = require('../services/inventory-unit-review');
 
@@ -360,6 +361,55 @@ describe('runInventoryUnitAutofixSweep', () => {
     expect(rawClauses.some((sql) => sql.includes("nullif(trim(coalesce(inventory_unit, '')), '') is null"))).toBe(true);
     // A bare whereNull('inventory_unit') would under-count whitespace-only
     // units — the blank test must be the trim-aware raw clause instead.
+    expect(sawWhereNull).toBe(false);
+  });
+
+  it('the review route and dashboard-alerts consume the SHARED queue filter — no inline predicate copies left to drift', () => {
+    // No harness drives GET /admin/inventory/unit-review, so the no-drift
+    // guarantee is pinned at the source level: both consumers must call the
+    // shared export, and neither may carry the stale inline predicates
+    // (bare whereNull missing-branch, exact lower(...)='oz') that made the
+    // digest count rows the review page never showed.
+    const fs = require('fs');
+    const path = require('path');
+    for (const rel of ['../routes/admin-inventory.js', '../services/dashboard-alerts.js']) {
+      const src = fs.readFileSync(path.join(__dirname, rel), 'utf8');
+      expect(src).toContain('applyUnitReviewQueueFilter');
+      expect(src).not.toMatch(/lower\(coalesce\(inventory_unit, ''\)\) = 'oz'/);
+      expect(src).not.toMatch(/whereNull\('inventory_unit'\)/);
+    }
+  });
+
+  it('the shared queue filter itself uses the normalized ounce family and the trim-aware blank test', () => {
+    const { applyUnitReviewQueueFilter } = require('../services/inventory-unit-review');
+    const q = makeChain('products_catalog', () => []);
+    applyUnitReviewQueueFilter(q);
+    // Walk the nested where-callbacks like the digest pin does.
+    const rawClauses = [];
+    let sawWhereNull = false;
+    const walk = (calls) => {
+      for (const [name, args] of calls) {
+        if (name === 'whereRaw') rawClauses.push(args[0]);
+        if (name === 'whereNull') sawWhereNull = true;
+        for (const arg of args) {
+          if (typeof arg === 'function') {
+            const inner = { _calls: [] };
+            for (const m of ['where', 'orWhere', 'whereRaw', 'orWhereRaw', 'whereNull', 'orWhereNull', 'whereNotNull', 'orWhereNotNull']) {
+              inner[m] = (...a) => { inner._calls.push([m.replace(/^or/, '').replace(/^W/, 'w'), a]); return inner; };
+            }
+            arg.call(inner);
+            walk(inner._calls);
+          }
+        }
+      }
+    };
+    walk(q._calls);
+    // An 'Ounces' row matches the normalized family; a whitespace-only unit
+    // matches the trim-aware blank branch — the exact rows the old route
+    // predicates missed.
+    expect(rawClauses).toContain(OZ_FAMILY_SQL);
+    expect(rawClauses.some((sql) => sql.includes("nullif(trim(coalesce(inventory_unit, '')), '') is null"))).toBe(true);
+    expect(rawClauses).toContain(UNSUPPORTED_UNIT_SQL);
     expect(sawWhereNull).toBe(false);
   });
 

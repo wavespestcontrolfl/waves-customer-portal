@@ -353,6 +353,43 @@ describe('email template automation executor', () => {
     expect(inserted.exit_reason).toBeFalsy();
   });
 
+  test('a LEAD-backed run keeps its id — customer revalidation never strips non-customer identifiers', async () => {
+    // The payload names only lead_id: the id provably came from a lead key,
+    // so a customer-merge undo cannot affect it. It must take the lock-free
+    // path and be written with its lead id intact — no customers read at
+    // all (a customer lookup for a lead id would "find nothing" and, pre-
+    // r15, strip the id).
+    const insertRunQuery = chain({ returning: [run({ recipient_id: 'lead-9' })] });
+    setDbQueues({
+      'email_template_automations as a': [chain({ result: [automation({ delay_minutes: 60 })] })],
+      email_template_automation_runs: [chain({ first: null }), insertRunQuery],
+      email_template_automation_run_events: [chain({ returning: [{ id: 'event-1' }] })],
+    });
+
+    await AutomationExecutor.processTrigger({
+      triggerEventKey: 'estimate.auto_renewed',
+      triggerEventId: 'estimate_auto_renew:est-1',
+      payload: {
+        estimate_id: 'est-1',
+        lead_id: 'lead-9', // no customer_id anywhere
+        customer_email: 'sam@example.com',
+        first_name: 'Sam',
+        estimate_url: 'https://example.com/estimate/est-1',
+        new_expires_at: '2026-06-01',
+        renewal_count: 1,
+        status: 'sent',
+      },
+      now: new Date('2026-05-18T12:00:00.000Z'),
+    });
+
+    const inserted = insertRunQuery.insert.mock.calls[0][0];
+    expect(inserted.recipient_id).toBe('lead-9');
+    expect(inserted.status).toBe('scheduled'); // never skipped by revalidation
+    // Lock-free path: no advisory lock, no customers read.
+    expect(advisoryLockCalls).toHaveLength(0);
+    expect(opTrace).not.toContain('table:customers');
+  });
+
   test('a recipient whose customer row was retired since the trigger is written UNLINKED (under-lock re-read)', async () => {
     // The payload named cust-1, but the under-lock read finds it
     // soft-deleted (merged away). The run must not be pinned to a retired

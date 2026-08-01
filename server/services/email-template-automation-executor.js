@@ -350,11 +350,30 @@ function recipientFor(triggerEventKey, input = {}, automation = {}) {
     err.status = 400;
     throw err;
   }
-  return {
-    email,
-    type: cleanString(rawRecipient.type || rawRecipient.recipient_type || mapping.recipientType || automation.audience || 'customer'),
-    id: cleanString(rawRecipient.id || rawRecipient.recipient_id || firstDefined(payload, mapping.recipientIdKeys), ''),
-  };
+  const type = cleanString(rawRecipient.type || rawRecipient.recipient_type || mapping.recipientType || automation.audience || 'customer');
+  // WHICH source produced the id decides whether the under-lock customer
+  // revalidation applies (r15): recipientIdKeys can carry BOTH
+  // 'customer_id' and 'lead_id', and the recipient TYPE ('lead') does not
+  // say which one matched — a lead-type recipient legitimately rides a
+  // customers-row id when the lead is linked. Only an id that provably
+  // names a customers row gets revalidated; lead/other identifiers are
+  // untouched by a customer-merge undo and must never be stripped by it.
+  let id = cleanString(rawRecipient.id || rawRecipient.recipient_id, '');
+  let idIsCustomer = null;
+  if (id) {
+    // Explicit typed recipient (admin trigger): trust its declared type.
+    idIsCustomer = type === 'customer';
+  } else {
+    for (const key of mapping.recipientIdKeys || []) {
+      const value = payload?.[key];
+      if (value !== undefined && value !== null && String(value).trim() !== '') {
+        id = cleanString(value, '');
+        idIsCustomer = key === 'customer_id';
+        break;
+      }
+    }
+  }
+  return { email, type, id, idIsCustomer };
 }
 
 function entityFor(triggerEventKey, input = {}) {
@@ -491,9 +510,13 @@ async function createRun({ automation, triggerEventKey, triggerEventId, entityTy
   // to customer-dedupe.js and routes/booking.js — extend ALL in the same
   // commit): pg_advisory_xact_lock(hashtextextended(
   //   'customer-comms:' || <customer id>, 0)) — transaction-scoped.
-  // No recipient id = unlinked run; the undo probe never matches those, so
-  // it keeps the original lock-free path.
-  if (!recipient.id) {
+  // No recipient id = unlinked run, and a NON-customer id (a lead's, or an
+  // explicitly typed non-customer recipient — recipientFor's idIsCustomer)
+  // cannot collide with a customer-merge undo at all: the undo's probes
+  // match customers-row ids only. Both keep the original lock-free path —
+  // and, critically, a lead-backed run must never have its id stripped by
+  // the customer revalidation.
+  if (!recipient.id || recipient.idIsCustomer === false) {
     return createRunUnlocked({
       conn: db, automation, triggerEventKey, triggerEventId, entityType, entityId,
       recipient, payload, context, idempotencyKey, runAfter, status, exitReason, retryPolicy,

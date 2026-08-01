@@ -730,6 +730,8 @@ describe('revertMerge', () => {
     payment_method_consents: ['created_at'],
     // updated_at ONLY (creation stamp is enrolled_at).
     referral_promoters: ['updated_at'],
+    // created_at ONLY — append-only audit rows (20260511000002).
+    customer_contract_events: ['created_at'],
   };
   const assertSelectableColumns = (table, q) => {
     const known = TABLE_TIMESTAMPS[table];
@@ -825,9 +827,14 @@ describe('revertMerge', () => {
       if (table === 'payments' && q.called('whereRaw')) {
         return (tables.payments && tables.payments.invoiceChildren) || [];
       }
-      if (table === 'customer_credit_ledger' && q.called('whereIn')
-        && q.args('whereIn')?.[0] === 'invoice_id') {
-        return (tables.customer_credit_ledger && tables.customer_credit_ledger.invoiceChildren) || [];
+      // Invoice-child probes (credit ledger, payment plans) key on
+      // invoice_id — generic so a new child probe can't dodge the stub.
+      if (q.called('whereIn') && q.args('whereIn')?.[0] === 'invoice_id') {
+        return (tables[table] && tables[table].invoiceChildren) || [];
+      }
+      // Contract-event probe keys on contract_id.
+      if (q.called('whereIn') && q.args('whereIn')?.[0] === 'contract_id') {
+        return (tables[table] && tables[table].fromContracts) || [];
       }
       // Invoices minted BY a journaled visit (real scheduled_service_id FK).
       if (table === 'invoices' && q.called('whereIn')
@@ -1794,6 +1801,98 @@ describe('revertMerge', () => {
     db.transaction.mockImplementation(async (fn) => fn(trx));
     const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
     expect(result.skipped).toHaveLength(0);
+    expect(state.journalUpdate.undone_at).toBeTruthy();
+  });
+
+  it('refuses when a payment PLAN was created against a journaled invoice after the merge (plan creation never touches the invoice)', async () => {
+    // admin-invoices locks but does not UPDATE the invoice when creating a
+    // plan, so neither the invoice-drift check nor payment_plans' own
+    // financial membership sees it — yet the plan governs the invoice's
+    // collection path wherever the invoice lands after the undo.
+    const { trx, state } = buildRevertTrx({
+      journal: baseJournal(),
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: { stillOnWinner: ['inv-1'] },
+        payment_plans: { invoiceChildren: [{ id: 'plan-new', created_at: '2026-07-30T09:00:00Z' }] },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/payment plan\(s\) recorded against this merge's invoices/) });
+    expect(state.repointedBack).toHaveLength(0);
+    expect(state.journalUpdate).toBe(null);
+  });
+
+  it('refuses when a journaled CONTRACT was signed/cancelled after the merge (terminal transitions are activity)', async () => {
+    const journal = baseJournal();
+    journal.repointed_ids.tables['customer_contracts.customer_id'] = ['ct-1'];
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: { stillOnWinner: ['inv-1'] },
+        customer_contracts: {
+          stillOnWinner: ['ct-1'],
+          // Signed after the merge — the terminal transition updates the row
+          // (and the identity-surface probes exclude terminal statuses, so
+          // only this activity check can see it).
+          verifiedRows: [{ id: 'ct-1', updated_at: '2026-07-30T09:00:00Z' }],
+        },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/customer_contracts row\(s\) recorded by this merge were updated after it/) });
+    expect(state.repointedBack).toHaveLength(0);
+    expect(state.journalUpdate).toBe(null);
+  });
+
+  it('refuses on unjournaled contract EVENTS keyed to a journaled contract (the audit trail of a post-merge signing)', async () => {
+    const journal = baseJournal();
+    journal.repointed_ids.tables['customer_contracts.customer_id'] = ['ct-1'];
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: { stillOnWinner: ['inv-1'] },
+        customer_contracts: { stillOnWinner: ['ct-1'] },
+        customer_contract_events: { fromContracts: [{ id: 'ev-new', created_at: '2026-07-30T09:00:00Z' }] },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/contract event\(s\) recorded against this merge's contracts/) });
+    expect(state.journalUpdate).toBe(null);
+  });
+
+  it('a journaled contract with only its own journaled events still reverts', async () => {
+    const journal = baseJournal();
+    journal.repointed_ids.tables['customer_contracts.customer_id'] = ['ct-1'];
+    journal.repointed_ids.tables['customer_contract_events.customer_id'] = ['ev-1'];
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: { stillOnWinner: ['inv-1'] },
+        customer_contracts: { stillOnWinner: ['ct-1'] },
+        customer_contract_events: {
+          stillOnWinner: ['ev-1'],
+          fromContracts: [{ id: 'ev-1', created_at: '2026-07-01T00:00:00Z' }],
+        },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+    expect(result.repointedBack['customer_contracts.customer_id']).toBe(1);
     expect(state.journalUpdate.undone_at).toBeTruthy();
   });
 

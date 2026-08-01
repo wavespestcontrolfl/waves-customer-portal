@@ -1623,12 +1623,16 @@ const REVERT_FINANCIAL_TABLES = new Set([
 const CONSENT_CRITICAL_TABLES = new Set(['recipient_optin']);
 
 // Non-financial tables whose JOURNALED rows are still activity-checked,
-// because completing/accepting one MINTS winner-owned children the undo
-// would otherwise leave behind: a completed visit stamps an invoice for
-// svc.customer_id (admin-dispatch), and an accepted estimate mints a card
-// hold, a deposit, and a booked visit. In both cases the state change is an
-// UPDATE to the journaled row, so its updated_at is the signal.
-const ACTIVITY_CHECKED_TABLES = new Set(['scheduled_services', 'estimates']);
+// because completing/accepting/signing one MINTS winner-owned children the
+// undo would otherwise leave behind: a completed visit stamps an invoice
+// for svc.customer_id (admin-dispatch), an accepted estimate mints a card
+// hold, a deposit, and a booked visit, and a signed/cancelled contract
+// writes customer_contract_events audit rows (contracts-public.js). In all
+// three the state change is an UPDATE to the journaled row, so its
+// updated_at is the signal (each verified to carry updated_at in
+// TABLE_TIMESTAMP_COLUMNS). Terminal-status transitions matter here
+// precisely BECAUSE the identity-surface probes exclude terminal rows.
+const ACTIVITY_CHECKED_TABLES = new Set(['scheduled_services', 'estimates', 'customer_contracts']);
 
 // The undo's email-clear guard probes every surface that delivers to a
 // denormalized copy of the customer email. This table MIRRORS the canonical
@@ -1803,11 +1807,13 @@ const TABLE_TIMESTAMP_COLUMNS = {
   booking_intents: ['created_at', 'updated_at'],
   newsletter_subscribers: ['created_at', 'updated_at'],
   customer_properties: ['created_at', 'updated_at'],
-  // created_at ONLY (20260617120000, 20260401000107, 20260424000014) —
-  // append-only ledgers/authorizations; no in-place update to detect.
+  // created_at ONLY (20260617120000, 20260401000107, 20260424000014,
+  // 20260511000002) — append-only ledgers/authorizations/audit rows; no
+  // in-place update to detect.
   customer_credit_ledger: ['created_at'],
   customer_discounts: ['created_at'],
   payment_method_consents: ['created_at'],
+  customer_contract_events: ['created_at'],
   // updated_at ONLY (20260401000054 — its creation stamp is enrolled_at).
   referral_promoters: ['updated_at'],
   // timestamps(true, true) — 20260723000004.
@@ -2145,6 +2151,13 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     //     metadata jsonb (invoice_id / dispute_invoice_id /
     //     waves_invoice_id), exactly as invoice.js resolves applied money.
     //   customer_credit_ledger — real invoice_id column.
+    //   payment_plans — real invoice_id column (20260530000001). Plan
+    //     creation locks the invoice but does NOT update it, so neither
+    //     the invoice-drift check nor payment_plans' own
+    //     REVERT_FINANCIAL_TABLES membership sees a plan created for a
+    //     journaled invoice after the merge (an unjournaled plan is not in
+    //     the plans set at all) — yet that plan governs the invoice's
+    //     collection path wherever the invoice lands.
     //
     // SERIALIZATION vs concurrent settlement (no extra lock needed): the
     // verification pass above already took FOR UPDATE on every journaled
@@ -2155,10 +2168,12 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     // never its pre-lock copy — inserts the payment against whoever owns
     // the invoice after this undo commits. Settlement is never blocked
     // into failure by a lock we introduce.
-    // (payment_plans and annual_prepay_terms also key on invoices, but they
-    // are themselves REVERT_FINANCIAL_TABLES: an unjournaled plan for the
-    // winner is not repointed and does not follow the invoice, while a
-    // journaled one is already covered by the drift refusal above.)
+    // (annual_prepay_terms also keys on invoices; its journaled rows are
+    // covered by the drift refusal above, and an unjournaled term cannot be
+    // created against a merged-in invoice outside the prepay purchase flow,
+    // which writes billing artifacts the activity gates catch. payment_plans
+    // looked covered the same way in r9 — it was NOT: plan creation touches
+    // nothing the gates watch, hence its probe below.)
     const journaledInvoiceIds = [...journaledIdsFor('invoices')];
     if (journaledInvoiceIds.length) {
       const invoiceChildProbes = [
@@ -2174,6 +2189,11 @@ async function revertMerge({ journalId, performedBy, performedById }) {
           table: 'customer_credit_ledger',
           query: (q) => q.whereIn('invoice_id', journaledInvoiceIds),
           label: 'credit-ledger entr(ies)',
+        },
+        {
+          table: 'payment_plans',
+          query: (q) => q.whereIn('invoice_id', journaledInvoiceIds),
+          label: 'payment plan(s)',
         },
       ];
       for (const probe of invoiceChildProbes) {
@@ -2250,6 +2270,32 @@ async function revertMerge({ journalId, performedBy, performedById }) {
         if (activity) {
           refuse(`${activity} ${probe.label} created from this merge's estimates are outside its journal — moving the estimates back would separate them from what accepting them created; reconcile by hand`);
         }
+      }
+    }
+
+    // Audit rows written by a journaled CONTRACT signed/cancelled since the
+    // merge: contracts-public.js appends customer_contract_events on those
+    // transitions, and the events carry the WINNER's customer_id. Belt to
+    // the activity check above (both are cheap): the updated_at check
+    // catches the contract row's own transition, this catches the appended
+    // audit trail even if a future path writes events without touching the
+    // contract. Linkage verified: customer_contract_events.contract_id
+    // (20260511000002; created_at only — append-only audit rows).
+    const journaledContractIds = [...journaledIdsFor('customer_contracts')];
+    if (journaledContractIds.length) {
+      let contractEventRows = [];
+      try {
+        contractEventRows = await trx('customer_contract_events')
+          .whereIn('contract_id', journaledContractIds)
+          .select(['id', ...activityColumnsFor('customer_contract_events')]);
+      } catch (e) {
+        refuse(`Cannot verify customer_contract_events against the contracts this merge moved (${e.message}) — refusing to revert`);
+      }
+      const contractActivity = countActivityRows(contractEventRows, {
+        journaledIds: journaledIdsFor('customer_contract_events'), mergeAt, table: 'customer_contract_events',
+      });
+      if (contractActivity) {
+        refuse(`${contractActivity} contract event(s) recorded against this merge's contracts are outside its journal — the contract was acted on since the merge; reconcile by hand`);
       }
     }
 

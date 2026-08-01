@@ -2977,20 +2977,13 @@ router.post('/waveguard-forecast/:productId/restock-request', async (req, res, n
 // GET /unit-review — products and forecast rows with inventory unit issues.
 router.get('/unit-review', async (req, res, next) => {
   try {
-    const products = await db('products_catalog')
-      .where(function unitIssue() {
-        this.where(function missingUnit() {
-          this.whereNull('inventory_unit')
-            .where(function hasInventoryValue() {
-              this.whereNotNull('inventory_on_hand').orWhereNotNull('low_stock_threshold');
-            });
-        })
-          .orWhereRaw("lower(coalesce(inventory_unit, '')) = 'oz'")
-          .orWhereRaw(`
-            nullif(trim(coalesce(inventory_unit, '')), '') is not null
-            AND regexp_replace(lower(replace(trim(inventory_unit), ' ', '_')), 's$', '') NOT IN ('fl_oz','floz','gal','gallon','qt','quart','pt','pint','ml','l','liter','oz','ounce','lb','pound','g','gram','kg')
-          `);
-      })
+    // The SHARED queue predicate from inventory-unit-review.js — the same
+    // filter the sweep's digest count and dashboard-alerts run. r15: the
+    // inline copy here used whereNull-only for missing and an exact
+    // lower(...)='oz' for ambiguous, so 'Ounces' and whitespace-only units
+    // were counted by the digest but never shown on this page.
+    const { applyUnitReviewQueueFilter } = require('../services/inventory-unit-review');
+    const products = await applyUnitReviewQueueFilter(db('products_catalog'))
       .select(
         'id',
         'name',

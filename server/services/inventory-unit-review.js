@@ -46,12 +46,13 @@ function clampCap(raw, fallback) {
   return Math.min(parsed, 500);
 }
 
-// The unit-review queue's "unsupported unit" branch — MUST stay in lockstep
-// with dashboard-alerts.js and GET /admin/inventory/unit-review. Used by the
-// sweep only for its "remaining for review" digest count. NOT the sweep's
-// candidate filter: this predicate normalizes spellings before its NOT IN,
-// so the very aliases the autofix exists to fix ('Gallons', 'Liters',
-// 'FL OZ') read as supported and would never be selected.
+// The unit-review queue's "unsupported unit" branch. Since r15 the lockstep
+// with dashboard-alerts.js and GET /admin/inventory/unit-review is
+// STRUCTURAL: all three consume applyUnitReviewQueueFilter below instead of
+// carrying copies. NOT the sweep's candidate filter: this predicate
+// normalizes spellings before its NOT IN, so the very aliases the autofix
+// exists to fix ('Gallons', 'Liters', 'FL OZ') read as supported and would
+// never be selected.
 const UNSUPPORTED_UNIT_SQL = `
   nullif(trim(coalesce(inventory_unit, '')), '') is not null
   AND regexp_replace(lower(replace(trim(inventory_unit), ' ', '_')), 's$', '') NOT IN ('fl_oz','floz','gal','gallon','qt','quart','pt','pint','ml','l','liter','oz','ounce','lb','pound','g','gram','kg')
@@ -65,6 +66,32 @@ const UNSUPPORTED_UNIT_SQL = `
 // never even occupy a slot in the capped batch.
 const CANONICAL_STORAGE_UNITS = ['fl_oz', 'gal', 'qt', 'pt', 'ml', 'l', 'lb', 'g', 'kg'];
 const OZ_FAMILY_SQL = "regexp_replace(lower(replace(trim(inventory_unit), ' ', '_')), 's$', '') IN ('oz','ounce')";
+
+/**
+ * The unit-review QUEUE predicate — ONE definition consumed by the sweep's
+ * digest remaining-count, GET /admin/inventory/unit-review, and
+ * dashboard-alerts, so the notification can never count rows the review
+ * page doesn't show (r15: the route still used a bare whereNull for
+ * missing and an exact lower(...)='oz' for ambiguous, so 'Ounces' and
+ * whitespace-only units counted in the digest but were invisible on the
+ * page). Branches, in queue terms:
+ *   - BLANK unit (SQL NULL or whitespace-only — same trim the resolver
+ *     applies) while the product carries inventory numbers;
+ *   - the AMBIGUOUS ounce family in any spelling/plural (OZ_FAMILY_SQL);
+ *   - any other UNSUPPORTED spelling (UNSUPPORTED_UNIT_SQL).
+ */
+function applyUnitReviewQueueFilter(query) {
+  return query.where(function unitIssue() {
+    this.where(function missingUnit() {
+      this.whereRaw("nullif(trim(coalesce(inventory_unit, '')), '') is null")
+        .where(function hasInventoryValue() {
+          this.whereNotNull('inventory_on_hand').orWhereNotNull('low_stock_threshold');
+        });
+    })
+      .orWhereRaw(OZ_FAMILY_SQL)
+      .orWhereRaw(UNSUPPORTED_UNIT_SQL);
+  });
+}
 
 /**
  * Candidate filter for the autofix sweep, applied to a knex query on
@@ -313,27 +340,10 @@ async function runInventoryUnitAutofixSweep({ dbi = db } = {}) {
     try {
       // Remaining-for-review = the FULL unit-review predicate (missing unit,
       // ambiguous oz, still-unsupported), same shape as dashboard-alerts.
-      const remaining = await dbi('products_catalog')
-        .where(function unitIssue() {
-          // BLANK unit — NULL *or* whitespace/empty string. The sweep parks
-          // both (resolveInventoryUnitAlias trims first), so a bare
-          // whereNull would under-count and let the digest claim zero
-          // need review while parked rows sit in the queue.
-          this.where(function missingUnit() {
-            this.whereRaw("nullif(trim(coalesce(inventory_unit, '')), '') is null")
-              .where(function hasInventoryValue() {
-                this.whereNotNull('inventory_on_hand').orWhereNotNull('low_stock_threshold');
-              });
-          })
-            // AMBIGUOUS oz family — the sweep's own normalized predicate
-            // (OZ_FAMILY_SQL: trim + space→underscore + lowercase + depluralize),
-            // so 'Ounces', 'ounce', and ' oz ' count exactly as the sweep
-            // parks them. An exact lower(...)='oz' missed every variant,
-            // and UNSUPPORTED_UNIT_SQL reads normalized 'ounce' as
-            // supported, so those rows were invisible to BOTH branches.
-            .orWhereRaw(OZ_FAMILY_SQL)
-            .orWhereRaw(UNSUPPORTED_UNIT_SQL);
-        })
+      // The SHARED queue predicate (applyUnitReviewQueueFilter) — the same
+      // filter the review route and dashboard-alerts run, so this count can
+      // never disagree with what the page shows.
+      const remaining = await applyUnitReviewQueueFilter(dbi('products_catalog'))
         .count('* as count')
         .first();
       const remainingCount = Number.parseInt(remaining?.count || 0, 10);
@@ -368,9 +378,11 @@ async function runInventoryUnitAutofixSweep({ dbi = db } = {}) {
 
 module.exports = {
   applyInventoryUnitFix,
+  applyUnitReviewQueueFilter,
   resolveInventoryUnitAlias,
   runInventoryUnitAutofixSweep,
   _test: {
+    applyUnitReviewQueueFilter,
     BATCH_CAP,
     CANDIDATE_PAGE_SIZE,
     CANONICAL_UNIT,
