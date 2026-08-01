@@ -49,7 +49,13 @@ const TRIAGE_TIMEOUT_MS = 1200;
 // Look back this far in sms_log when a coordinator splits context across
 // texts (address in one message, the ask in the next).
 const THREAD_WINDOW_HOURS = 48;
+// Prompt display cap — how many labeled texts ride into the classifier.
 const THREAD_WINDOW_LIMIT = 5;
+// Fetch sanity bound, NOT a display limit: the burst partition (veto +
+// grounding) runs in JS after the fetch, and a fetch capped at the display
+// limit would truncate a 6+ message exchange's burst — losing exactly the
+// in-burst text that carries the address or the out-of-scope ask.
+const THREAD_FETCH_LIMIT = 25;
 // The HARD scope veto only trusts the current exchange — texts this recent.
 // A power-washing mention from yesterday must not deterministically kill
 // today's vague-but-valid "can I get that quote?"; stale context is the
@@ -183,9 +189,14 @@ function extractAddressCandidates(text) {
       unitWordRaw = allWords[designatorIdx];
       const straddle = allWords[designatorIdx + 1];
       if (straddle && /^[A-Za-z0-9-]{1,8}$/.test(straddle)) {
-        // Value was captured into the street run too ("Unit B") — the tail
-        // (and therefore localitySrc) starts after it already.
+        // Value was captured into the street run too ("Unit B"). Any
+        // REMAINING captured words after the value ("… Apt B Venice FL")
+        // are locality material the tail no longer carries — rebuild the
+        // locality source from them so the no-comma city/FL/ZIP parse
+        // below still sees the city.
         unitValue = straddle;
+        const remainder = allWords.slice(designatorIdx + 2).join(' ');
+        if (remainder) localitySrc = `${remainder}${afterStreet}`;
       } else {
         const vm = afterStreet.match(/^\s*#?\s*([A-Za-z0-9-]{1,8})\b/);
         if (vm) {
@@ -413,12 +424,15 @@ async function loadTriageInner({ phone, triggerBody, deadline = Date.now() + TRI
         })
         .whereRaw(`created_at >= NOW() - INTERVAL '${THREAD_WINDOW_HOURS} hours'`)
         .orderBy('created_at', 'desc')
-        .limit(THREAD_WINDOW_LIMIT))
+        .limit(THREAD_FETCH_LIMIT))
         .select('message_body', 'created_at', 'direction');
       const isInbound = (t) => String(t.direction || '').toLowerCase() === 'inbound';
       const body = (t) => String(t.message_body || '');
+      // Prompt display cap applies AFTER the fetch; the burst partition
+      // below always sees the full fetched window.
       recentTexts = priorTexts
         .filter((t) => body(t))
+        .slice(0, THREAD_WINDOW_LIMIT)
         .map((t) => `[${isInbound(t) ? 'sender' : 'Waves'}] ${body(t)}`);
       const burstFloor = Date.now() - VETO_BURST_MINUTES * 60 * 1000;
       const inBurst = (t) => t.created_at && new Date(t.created_at).getTime() >= burstFloor;

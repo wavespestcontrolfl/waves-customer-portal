@@ -245,6 +245,19 @@ describe('extractAddressCandidates', () => {
     expect(extractAddressCandidates('quote for 100 Sample Way Venice FL 34285')[0].locality).toBe(', Venice 34285');
   });
 
+  test('LETTERED straddled units keep the comma-free state-only locality', () => {
+    // 'B' is captured into the street run, which used to swallow the
+    // city+FL out of the locality source entirely.
+    const [cand] = extractAddressCandidates('quote for 100 Palm Ave Apt B Venice FL');
+    expect(cand.variants.every((v) => v.endsWith(' Apt B'))).toBe(true);
+    expect(cand.variants).toContain('100 Palm Ave Apt B');
+    expect(cand.locality).toBe(', Venice');
+    const [withZip] = extractAddressCandidates('quote for 100 Palm Ave Apt B Venice FL 34285');
+    expect(withZip.locality).toBe(', Venice 34285');
+    // Prose after a lettered unit still binds nothing.
+    expect(extractAddressCandidates('quote for 100 Palm Ave Apt B please')[0].locality).toBe('');
+  });
+
   test('comma-free localities still bind after an explicit unit (word and hash forms)', () => {
     const [apt] = extractAddressCandidates('quote for 100 Palm Ave Apt 6 Venice FL 34285');
     expect(apt.variants).toContain('100 Palm Ave Apt 6');
@@ -518,6 +531,34 @@ describe('loadThreadTriageContext', () => {
     expect(triage.matchedExistingCustomer).toBe(true);
     expect(triage.lines.join('\n')).toContain('Pat Homeowner');
     expect(triage.recentTexts[0]).toContain('[Waves]');
+  });
+
+  test('a 6+ message burst fully grounds — the display cap never truncates the burst', async () => {
+    const now = Date.now();
+    // Six in-burst texts, the ADDRESS only in the oldest (6th) — a fetch
+    // capped at the 5-text display limit would drop exactly that one.
+    mockState.rows.sms_log = [
+      ...['a', 'b', 'c', 'd', 'e'].map((tag, i) => ({
+        message_body: `filler text ${tag}`,
+        created_at: new Date(now - i * 60 * 1000).toISOString(),
+        direction: 'inbound',
+      })),
+      {
+        message_body: 'coordinator here for 4021 Coral Bay Loop',
+        created_at: new Date(now - 5 * 60 * 1000).toISOString(),
+        direction: 'inbound',
+      },
+    ];
+    mockState.rows.customers = [
+      { id: 'c-2', first_name: 'Pat', last_name: 'Homeowner', address_line1: '4021 Coral Bay Loop' },
+    ];
+    const triage = await loadThreadTriageContext({ phone: '+17245550000', triggerBody: 'quote please' });
+    expect(triage.matchedExistingCustomer).toBe(true);
+    expect(triage.lines.join('\n')).toContain('Pat Homeowner');
+    // The classifier prompt list stays capped…
+    expect(triage.recentTexts).toHaveLength(5);
+    // …and the fetch bound is the sanity bound, not the display limit.
+    expect(mockState.limits.sms_log).toContain(25);
   });
 
   test('an outbound out-of-scope mention never enters vetoTexts', async () => {

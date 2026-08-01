@@ -15,6 +15,12 @@ let mockCustomerRows = [];
 // Overrides customers .first() when set (loadGroundedCustomerById); falls
 // back to mockCustomerRows[0] so the buildCallContext tests keep working.
 let mockCustomerFirstRow;
+// Makes ONLY the customers .first() path throw (grounded reload), leaving
+// the phone-lookup `then` path healthy.
+let mockCustomerFirstFail = false;
+// Rows for the phone-scoped history loads (conflict-suppression pins).
+let mockLeadRow = null;
+let mockEstimateRows = [];
 // Records the customers-table whereRaw/orWhereRaw SQL so the SMS-path
 // contact-slot pin can assert which phone columns the lookup matched.
 let mockCustomerWhereSql = [];
@@ -42,10 +48,11 @@ jest.mock('../models/db', () => {
     async first() {
       if (table === 'call_log') return mockCallRow;
       if (table === 'customers') {
-        if (mockCustomersFail) throw new Error('db down');
+        if (mockCustomersFail || mockCustomerFirstFail) throw new Error('db down');
         if (mockCustomerFirstRow !== undefined) return mockCustomerFirstRow;
         return mockCustomerRows[0] || null;
       }
+      if (table === 'leads') return mockLeadRow;
       return null;
     },
     then(resolve, reject) {
@@ -53,6 +60,7 @@ jest.mock('../models/db', () => {
         return Promise.reject(new Error('db down')).then(resolve, reject);
       }
       if (table === 'customers') return Promise.resolve(mockCustomerRows).then(resolve, reject);
+      if (table === 'estimates') return Promise.resolve(mockEstimateRows).then(resolve, reject);
       return Promise.resolve([]).then(resolve, reject);
     },
     catch() { return this; },
@@ -81,6 +89,9 @@ beforeEach(() => {
   mockCustomersFail = false;
   mockCustomerRows = [];
   mockCustomerFirstRow = undefined;
+  mockCustomerFirstFail = false;
+  mockLeadRow = null;
+  mockEstimateRows = [];
   mockCustomerWhereSql = [];
   delete process.env.GATE_ESTIMATOR_SCOPE_GUARDS;
 });
@@ -329,6 +340,109 @@ describe('buildSmsThreadContext grounded-customer fallback (GATE_ESTIMATOR_SCOPE
     });
     expect(context.customer).toBeNull();
     expect(context.customerGroundedByAddress).toBeUndefined();
+  });
+
+  test('gate ON: a REAL phone-matched customer naming their OWN secondary property gets the scope override', async () => {
+    process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
+    // Phone match IS the grounded customer (same id) — identity from the
+    // phone, but the quoted PROPERTY comes from the scope.
+    mockCustomerRows = [{ ...GROUNDED_ROW, id: 'cust-77' }];
+    const context = await buildSmsThreadContext({
+      ...SMS_ARGS,
+      groundedCustomerId: 'cust-77',
+      groundedScope: { address: '77 Rental Cove', line2: null, city: 'North Port', zip: '34287', isPrimary: false },
+    });
+    expect(context.customer).toMatchObject({
+      id: 'cust-77',
+      address_line1: '77 Rental Cove',
+      city: 'North Port',
+      zip: '34287',
+      property_sqft: null,
+      lot_sqft: null,
+    });
+    // Identity provenance is still the phone — no address-grounding flag.
+    expect(context.customerGroundedByAddress).toBeUndefined();
+    expect(context.customerPhoneAmbiguous).toBe(false);
+    expect(context.isExistingCustomer).toBe(true);
+  });
+
+  test('gate ON: a real phone match with a PRIMARY no-unit scope keeps the profile as-is', async () => {
+    process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
+    mockCustomerRows = [{ ...GROUNDED_ROW, id: 'cust-77' }];
+    const context = await buildSmsThreadContext({
+      ...SMS_ARGS,
+      groundedCustomerId: 'cust-77',
+      groundedScope: { address: '4021 Coral Bay Loop', line2: null, city: 'Venice', zip: '34285', isPrimary: true },
+    });
+    expect(context.customer).toMatchObject({
+      address_line1: '4021 Coral Bay Loop',
+      property_sqft: 1800,
+      lot_sqft: 8000,
+    });
+  });
+
+  test('gate ON: a TRANSIENT grounded-reload error fails CLOSED (customer_lookup_unavailable)', async () => {
+    process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
+    mockCustomerRows = [];
+    mockCustomerFirstFail = true;
+    const context = await buildSmsThreadContext({ ...SMS_ARGS, groundedCustomerId: 'cust-77' });
+    expect(context.error).toBe('customer_lookup_unavailable');
+    expect(context.customer).toBeUndefined();
+  });
+
+  test('gate ON: a genuine grounded no-match still proceeds as a prospect', async () => {
+    process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
+    mockCustomerRows = [];
+    mockCustomerFirstRow = null;
+    const context = await buildSmsThreadContext({ ...SMS_ARGS, groundedCustomerId: 'cust-77' });
+    expect(context.error).toBeUndefined();
+    expect(context.customer).toBeNull();
+  });
+});
+
+describe('buildSmsThreadContext conflict suppresses phone-scoped history', () => {
+  const SMS_ARGS = {
+    phone: '+19415550123',
+    triggerBody: 'can I get a quote for pest control at 900 Other Property Rd please?',
+  };
+  const PHONE_MATCHED = {
+    id: 'cust-1', first_name: 'Sender', last_name: 'Customer', phone: '+19415550123',
+    email: 'a@example.test', address_line1: '1 Primary St', city: 'Venice', state: 'FL', zip: '34285',
+    pipeline_stage: 'active_customer', waveguard_tier: 'Silver', member_since: '2025-01-01',
+    lawn_type: null, property_sqft: 1800, lot_sqft: 8000, property_type: 'Single Family',
+    company_name: null, active: true,
+  };
+  const LEAD = { id: 'lead-1', first_name: 'Sender', phone: '+19415550123', address: '1 Primary St', twilio_call_sid: null };
+  const ESTIMATES = [{ id: 'est-1', status: 'sent', monthly_total: 60 }];
+
+  test('gate ON + conflict: no lead, no prior estimates (A\'s history must not shape B\'s draft)', async () => {
+    process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
+    mockCustomerRows = [PHONE_MATCHED];
+    mockLeadRow = LEAD;
+    mockEstimateRows = ESTIMATES;
+    const context = await buildSmsThreadContext({ ...SMS_ARGS, groundedConflict: true });
+    expect(context.customerPhoneAmbiguous).toBe(true);
+    expect(context.lead).toBeNull();
+    expect(context.priorEstimates).toEqual([]);
+  });
+
+  test('gate ON, no conflict: lead and prior estimates load as usual', async () => {
+    process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
+    mockCustomerRows = [PHONE_MATCHED];
+    mockLeadRow = LEAD;
+    mockEstimateRows = ESTIMATES;
+    const context = await buildSmsThreadContext({ ...SMS_ARGS, groundedConflict: false });
+    expect(context.lead).toMatchObject({ id: 'lead-1' });
+    expect(context.priorEstimates).toEqual(ESTIMATES);
+  });
+
+  test('gate OFF: the conflict flag never suppresses history (byte-identical)', async () => {
+    mockCustomerRows = [PHONE_MATCHED];
+    mockLeadRow = LEAD;
+    mockEstimateRows = ESTIMATES;
+    const context = await buildSmsThreadContext({ ...SMS_ARGS, groundedConflict: true });
+    expect(context.lead).toMatchObject({ id: 'lead-1' });
+    expect(context.priorEstimates).toEqual(ESTIMATES);
   });
 });
 

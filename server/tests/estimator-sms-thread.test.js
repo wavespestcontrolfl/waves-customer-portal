@@ -400,6 +400,50 @@ describe('scope guards (GATE_ESTIMATOR_SCOPE_GUARDS)', () => {
     expect(mockRunDraftPipeline).not.toHaveBeenCalled();
   });
 
+  test('resume honors explicit veto booleans even when quote_request is false', async () => {
+    // A compliant "this is just for Friday's visit" answer is exactly
+    // quote_request:false + relates_to_existing_job:true — the
+    // confident-gated primary branch would wave it through as method 'ai'.
+    mockLoadTriage.mockResolvedValueOnce({ lines: [], matchedExistingCustomer: true });
+    mockDispatch.mockResolvedValueOnce({
+      ok: true,
+      json: { quote_request: false, service_offered: true, relates_to_existing_job: true, confidence: 0.9 },
+    });
+    let result = await startSmsThreadDraft({
+      phone: PHONE,
+      triggerBody: 'this is just for Friday\'s visit',
+      skipIntentGate: true,
+      skipCooldown: true,
+    });
+    expect(result.skipped).toBe('no_quote_intent_ai_existing_job');
+    expect(mockNotify).not.toHaveBeenCalled();
+
+    mockLoadTriage.mockResolvedValueOnce({ lines: [], matchedExistingCustomer: false });
+    mockDispatch.mockResolvedValueOnce({
+      ok: true,
+      json: { quote_request: false, service_offered: false, relates_to_existing_job: false, confidence: 0.9 },
+    });
+    result = await startSmsThreadDraft({
+      phone: PHONE,
+      triggerBody: 'just the driveway cleaning',
+      skipIntentGate: true,
+      skipCooldown: true,
+    });
+    expect(result.skipped).toBe('no_quote_intent_ai_out_of_scope');
+    expect(mockNotify).not.toHaveBeenCalled();
+  });
+
+  test('primary path semantics unchanged: unconfident vetoes stay method ai', async () => {
+    mockLoadTriage.mockResolvedValueOnce({ lines: [], matchedExistingCustomer: true });
+    mockDispatch.mockResolvedValueOnce({
+      ok: true,
+      json: { quote_request: false, service_offered: true, relates_to_existing_job: true, confidence: 0.9 },
+    });
+    const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: 'quote for pest control please' });
+    expect(result.skipped).toBe('no_quote_intent_ai');
+    expect(mockNotify).not.toHaveBeenCalled();
+  });
+
   test('classifier trouble on a resume fails OPEN (quote already owed)', async () => {
     // Asymmetry vs the primary path is deliberate: there, ai_failed is
     // fail-closed; on a resume the intent is established, so the draft

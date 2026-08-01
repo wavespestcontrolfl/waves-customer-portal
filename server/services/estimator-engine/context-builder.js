@@ -115,8 +115,12 @@ async function loadCustomerByPhone(phone, extraction, { timeoutMs = null, includ
 // the sender's phone is off file. Load that customer BY ID with the same
 // real-customer gates triage applied (not deleted, active === true,
 // established pipeline stage) and the same column set as loadCustomerByPhone
-// so downstream consumers see an identical shape. Fail-open null: the draft
-// proceeds as a prospect, exactly today's behavior.
+// so downstream consumers see an identical shape. Returns null on a genuine
+// no-match / gate failure (draft proceeds as a prospect); a QUERY error
+// returns { unavailable: true } — same contract as loadCustomerByPhone. A
+// transient DB error is NOT a no-match: the grounded customer's membership
+// could be hiding behind it, so callers must be able to fail closed instead
+// of silently drafting a prospect with the wrong (or absent) customer.
 async function loadGroundedCustomerById(customerId) {
   try {
     const row = await db('customers')
@@ -131,7 +135,7 @@ async function loadGroundedCustomerById(customerId) {
     return null;
   } catch (err) {
     logger.warn(`[estimator-engine] grounded customer load failed: ${err.message}`);
-    return null;
+    return { unavailable: true };
   }
 }
 
@@ -480,36 +484,47 @@ async function buildSmsThreadContext({
   // grounds; gate off, groundedCustomerId never flows here at all.
   const { CUSTOMER_STAGES } = require('../customer-stages');
   const isRealCustomer = (c) => !!c && c.active === true && CUSTOMER_STAGES.includes(c.pipeline_stage);
+  // The triage match carries WHICH property the thread is about. When it
+  // is not the primary profile address, or names a unit, keeping the
+  // profile's address would price the WRONG parcel (Apt 6 quoting as
+  // Apt 1; the rental quoting as the primary home) — and the later
+  // address-compare treats explicit-unit vs unitless as conservatively
+  // equal, so no re-gather would catch it. Override the address with the
+  // matched property's stamp and NULL the profile measurements:
+  // property_sqft/lot_sqft describe the primary parcel, and nulling forces
+  // the property-facts lookup to gather the quoted property instead. A
+  // primary-scope match without a unit keeps the profile as-is.
+  const applyGroundedScope = (profile) => {
+    if (!groundedScope || !(groundedScope.isPrimary === false || groundedScope.line2)) return profile;
+    return {
+      ...profile,
+      address_line1: groundedScope.address || profile.address_line1,
+      address_line2: groundedScope.line2 || null,
+      city: groundedScope.city || null,
+      zip: groundedScope.zip || null,
+      property_sqft: null,
+      lot_sqft: null,
+    };
+  };
   let customerGroundedByAddress = false;
   if (guardsOn && groundedCustomerId && !groundedConflict && !isRealCustomer(customer)) {
     const grounded = await loadGroundedCustomerById(groundedCustomerId);
+    // Fail CLOSED on a transient reload error, exactly like the phone
+    // lookup above — the grounded customer's membership could be hiding
+    // behind the error; the red bell owns the manual path.
+    if (grounded?.unavailable) return { error: 'customer_lookup_unavailable' };
     if (grounded) {
-      customer = grounded;
+      customer = applyGroundedScope(grounded);
       customerGroundedByAddress = true;
-      // The triage match carries WHICH property the thread is about. When
-      // it is not the primary profile address, or names a unit, keeping
-      // the loaded profile's address would price the WRONG parcel (Apt 6
-      // quoting as Apt 1; the rental quoting as the primary home) — and
-      // the later address-compare treats explicit-unit vs unitless as
-      // conservatively equal, so no re-gather would catch it. Override the
-      // address with the matched property's stamp and NULL the profile
-      // measurements: property_sqft/lot_sqft describe the primary parcel,
-      // and nulling forces the property-facts lookup to gather the quoted
-      // property instead. A primary-scope match without a unit keeps the
-      // profile as-is. Provenance (customerGroundedByAddress) rides along
-      // either way.
-      if (groundedScope && (groundedScope.isPrimary === false || groundedScope.line2)) {
-        customer = {
-          ...grounded,
-          address_line1: groundedScope.address || grounded.address_line1,
-          address_line2: groundedScope.line2 || null,
-          city: groundedScope.city || null,
-          zip: groundedScope.zip || null,
-          property_sqft: null,
-          lot_sqft: null,
-        };
-      }
     }
+  } else if (guardsOn && !groundedConflict && customer && customer.id === groundedCustomerId) {
+    // A REAL phone-matched customer texting about their OWN secondary
+    // property/unit (triage matched the same customer by address): the
+    // identity needs no grounding, but the quoted PROPERTY still does —
+    // without the override their primary profile's address and
+    // measurements would price the wrong parcel. Different-customer cases
+    // are the conflict path below, never this branch.
+    customer = applyGroundedScope(customer);
   }
   // Distinct-customer conflict (gate-on): the sender's phone matches
   // customer A but triage confirmed the text names a DIFFERENT customer's
@@ -524,9 +539,17 @@ async function buildSmsThreadContext({
   const smsSince = new Date(before.getTime() - 30 * 86400000);
   const [leadMatch, smsThread, priorEstimates] = await Promise.all([
     // call=null: skips the sid + reused-lead branches; pure phone fallback.
-    loadLeadForCall(null, phone, { phoneFallback: true }),
+    // On a distinct-customer CONFLICT the phone-scoped history is customer
+    // A's, and the draft is about customer B's property — the lead could
+    // supply A's address via addressFromContext and the prior estimates
+    // would show the composer A's full history. Suppress both, same
+    // posture as the name-only profile downgrade above; the thread itself
+    // stays (it IS the conversation being answered).
+    phoneCustomerConflicted
+      ? Promise.resolve({ lead: null, forThisCall: false })
+      : loadLeadForCall(null, phone, { phoneFallback: true }),
     loadSmsThread(phone, { limit: 40, before, since: smsSince }),
-    loadPriorEstimates(phone),
+    phoneCustomerConflicted ? Promise.resolve([]) : loadPriorEstimates(phone),
   ]);
   // The webhook records the TRIGGERING inbound message to sms_log after the
   // handlers run, so the thread read here can miss exactly the text that

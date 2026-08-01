@@ -120,6 +120,21 @@ Return ONLY JSON: {"quote_request":true|false,"confidence":0.0-1.0}`;
     if (!response.ok || !response.json) return { quoteRequest: false, method: 'ai_failed' };
     const j = response.json;
     const confident = j.quote_request === true && Number(j.confidence || 0) >= 0.6;
+    if (grounded && !hintGate) {
+      // Resume scope check (hintGate off): honor the EXPLICIT veto
+      // booleans regardless of quote_request/confidence — a compliant
+      // "this is just for Friday's visit" answer is exactly
+      // quote_request:false + relates_to_existing_job:true, which the
+      // confident-gated branch below would wave through as method 'ai'.
+      // Missing/malformed booleans are NOT a veto here (the resume caller
+      // fails open on classifier trouble by design).
+      if (j.service_offered === false) {
+        return { quoteRequest: false, method: 'ai_out_of_scope', confidence: j.confidence };
+      }
+      if (j.relates_to_existing_job === true) {
+        return { quoteRequest: false, method: 'ai_existing_job', confidence: j.confidence };
+      }
+    }
     if (grounded && confident) {
       // Grounded vetoes are the point of the context: an in-confidence
       // "quote" for a service Waves doesn't offer, or for an existing
