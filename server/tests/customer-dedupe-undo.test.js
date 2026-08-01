@@ -699,6 +699,53 @@ describe('revertMerge', () => {
   const LOSER = 'bbbbbbbb-0000-0000-0000-000000000002';
   const JOURNAL = 'cccccccc-0000-0000-0000-000000000001';
 
+  // Which TIMESTAMP columns each table actually has, transcribed from the
+  // migrations. Selecting one a table lacks raises undefined_column in
+  // Postgres even when no rows match — the r9 regression (an unconditional
+  // updated_at select on customer_credit_ledger) 409'd every invoice-bearing
+  // merge. The stub below raises the same error, so a wrong select FAILS THE
+  // SUITE instead of silently turning into a refusal.
+  const TABLE_TIMESTAMPS = {
+    invoices: ['created_at', 'updated_at'],
+    payments: ['created_at', 'updated_at'],
+    payment_methods: ['created_at', 'updated_at'],
+    payment_plans: ['created_at', 'updated_at'],
+    annual_prepay_terms: ['created_at', 'updated_at'],
+    estimate_deposits: ['created_at', 'updated_at'],
+    estimate_card_holds: ['created_at', 'updated_at'],
+    scheduled_services: ['created_at', 'updated_at'],
+    leads: ['created_at', 'updated_at'],
+    estimates: ['created_at', 'updated_at'],
+    automation_enrollments: ['created_at', 'updated_at'],
+    email_template_automation_runs: ['created_at', 'updated_at'],
+    notification_prefs: ['created_at', 'updated_at'],
+    customer_contracts: ['created_at', 'updated_at'],
+    booking_intents: ['created_at', 'updated_at'],
+    newsletter_subscribers: ['created_at', 'updated_at'],
+    customer_properties: ['created_at', 'updated_at'],
+    customer_refresh_tokens: ['created_at', 'updated_at'],
+    // created_at ONLY — the regression class.
+    customer_credit_ledger: ['created_at'],
+    customer_discounts: ['created_at'],
+    payment_method_consents: ['created_at'],
+    // updated_at ONLY (creation stamp is enrolled_at).
+    referral_promoters: ['updated_at'],
+  };
+  const assertSelectableColumns = (table, q) => {
+    const known = TABLE_TIMESTAMPS[table];
+    if (!known) return;
+    const selected = (q._calls || [])
+      .filter(([name]) => name === 'select')
+      .flatMap(([, args]) => args.flat());
+    for (const col of selected) {
+      if ((col === 'created_at' || col === 'updated_at') && !known.includes(col)) {
+        const err = new Error(`column "${col}" does not exist`);
+        err.code = '42703';
+        throw err;
+      }
+    }
+  };
+
   function buildRevertTrx({ journal, winner, loser, tables = {}, loserEmailConflict = false }) {
     const state = {
       repointedBack: [], winnerPatch: null, loserRestore: null, journalUpdate: null,
@@ -706,6 +753,9 @@ describe('revertMerge', () => {
       verified: [], rawCalls: [],
     };
     const route = (table, q) => {
+      // Fails the suite on any select of a timestamp column the real table
+      // does not have (the r9 regression class).
+      if (q.called('select')) assertSelectableColumns(table, q);
       if (table === 'customer_merge_journal') {
         if (q.called('update')) { state.journalUpdate = q.args('update')[0]; return 1; }
         if (q.called('first')) return journal;
@@ -755,6 +805,11 @@ describe('revertMerge', () => {
       if (table === 'customer_credit_ledger' && q.called('whereIn')
         && q.args('whereIn')?.[0] === 'invoice_id') {
         return (tables.customer_credit_ledger && tables.customer_credit_ledger.invoiceChildren) || [];
+      }
+      // Invoices minted BY a journaled visit (real scheduled_service_id FK).
+      if (table === 'invoices' && q.called('whereIn')
+        && q.args('whereIn')?.[0] === 'scheduled_service_id') {
+        return (tables.invoices && tables.invoices.mintedFromVisits) || [];
       }
       // Email-bound artifact probes — every EMAIL_BOUND_SURFACES table (the
       // fanout-registry mirror). Status filters may use whereIn — still a
@@ -1557,6 +1612,120 @@ describe('revertMerge', () => {
     expect(result.skipped).toEqual(expect.arrayContaining([
       expect.objectContaining({ key: 'customers.referred_by_customer_id', reason: 'winner_value_changed_since_merge' }),
     ]));
+  });
+
+  it('REGRESSION: probes select only timestamp columns the table actually has (credit ledger has no updated_at)', async () => {
+    // r9 selected updated_at from customer_credit_ledger unconditionally.
+    // Postgres raises undefined_column even with zero matching rows, the
+    // probe's catch turned it into a 409, and EVERY invoice-bearing merge
+    // became non-revertible. The stub raises the same error, so this
+    // reverts cleanly only while each probe respects the per-table map.
+    const journal = baseJournal();
+    journal.repointed_ids.tables['customer_credit_ledger.customer_id'] = ['led-1'];
+    journal.repointed_ids.tables['customer_discounts.customer_id'] = ['disc-1'];
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: { stillOnWinner: ['inv-1'] },
+        // Directly journaled rows on both created_at-only financial tables:
+        // the generic verifier had the same defect.
+        customer_credit_ledger: { stillOnWinner: ['led-1'], ledgerSums: { [WINNER]: 0, [LOSER]: 0 } },
+        customer_discounts: { stillOnWinner: ['disc-1'] },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+    expect(result.repointedBack['customer_credit_ledger.customer_id']).toBe(1);
+    expect(result.repointedBack['customer_discounts.customer_id']).toBe(1);
+    expect(state.journalUpdate.undone_at).toBeTruthy();
+  });
+
+  it('refuses when a journaled VISIT minted an invoice after the merge (completion billing)', async () => {
+    const journal = baseJournal();
+    journal.repointed_ids.tables['scheduled_services.customer_id'] = ['visit-1'];
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: {
+          stillOnWinner: ['inv-1'],
+          // Billed from the moved visit AFTER the merge, unjournaled:
+          // invoices.scheduled_service_id is a real column (20260420000002).
+          mintedFromVisits: [{ id: 'inv-minted', created_at: '2026-07-30T09:00:00Z' }],
+        },
+        scheduled_services: { stillOnWinner: ['visit-1'] },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/invoice\(s\) billed from this merge's appointments/) });
+    expect(state.repointedBack).toHaveLength(0);
+    expect(state.journalUpdate).toBe(null);
+  });
+
+  it('refuses when a JOURNALED VISIT itself was updated since the merge (completion is an update)', async () => {
+    const journal = baseJournal();
+    journal.repointed_ids.tables['scheduled_services.customer_id'] = ['visit-1'];
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: { stillOnWinner: ['inv-1'] },
+        scheduled_services: {
+          stillOnWinner: ['visit-1'],
+          verifiedRows: [{ id: 'visit-1', updated_at: '2026-07-30T09:00:00Z' }],
+        },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/scheduled_services row\(s\) recorded by this merge were updated after it/) });
+    expect(state.journalUpdate).toBe(null);
+  });
+
+  it('refuses clearing an inherited NAME backfill when name-bearing surfaces show activity (email untouched)', async () => {
+    const journal = baseJournal();
+    // The winner kept its OWN email — only the name was inherited, so the
+    // email guard never fires and the name surfaces need their own pass.
+    journal.winner_backfills = { first_name: 'Loser', last_name: 'Testcase' };
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: { ...baseWinner(), first_name: 'Loser', last_name: 'Testcase', email: 'winner.own@example.com' },
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: { stillOnWinner: ['inv-1'] },
+        // A queued template send whose stored payload renders the greeting
+        // from the inherited name (customer-contact-fanout's registry).
+        email_template_automation_runs: { emailArtifacts: [{ id: 'run-new' }] },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/queued template send\(s\).*addressed to the merged-in name/) });
+    expect(state.journalUpdate).toBe(null);
+  });
+
+  it('clears an inherited name normally when the name surfaces are quiet', async () => {
+    const journal = baseJournal();
+    journal.winner_backfills = { first_name: 'Loser' };
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: { ...baseWinner(), first_name: 'Loser', email: 'winner.own@example.com' },
+      loser: baseLoser(),
+      tables: { leads: { stillOnWinner: ['lead-1', 'lead-2'] }, invoices: { stillOnWinner: ['inv-1'] } },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+    expect(state.winnerPatch.first_name).toBe(null);
+    expect(result.skipped).toHaveLength(0);
   });
 
   it('refuses when a JOURNALED email-bound row was UPDATED since the merge (activity on state about to move back)', async () => {

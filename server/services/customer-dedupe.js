@@ -1622,6 +1622,13 @@ const REVERT_FINANCIAL_TABLES = new Set([
 // financial set. Add future composite-PK consent tables here.
 const CONSENT_CRITICAL_TABLES = new Set(['recipient_optin']);
 
+// Non-financial tables whose JOURNALED rows are still activity-checked: a
+// completed visit MINTS billing (admin-dispatch stamps an invoice for
+// svc.customer_id), so a journaled scheduled_services row touched since the
+// merge must refuse just like a financial row — otherwise the visit moves
+// back while the invoice it minted stays with the kept customer.
+const ACTIVITY_CHECKED_TABLES = new Set(['scheduled_services']);
+
 // The undo's email-clear guard probes every surface that delivers to a
 // denormalized copy of the customer email. This table MIRRORS the canonical
 // registry in server/services/customer-email-fanout.js (:108-244 — leads,
@@ -1641,6 +1648,7 @@ const EMAIL_BOUND_SURFACES = [
     active: (q) => q.whereNull('deleted_at')
       .where((w) => w.whereNull('status').orWhereNotIn('status', ['won', 'lost', 'disqualified', 'duplicate', 'unresponsive'])),
     label: 'open lead(s)',
+    carriesName: true,
   },
   {
     table: 'estimates',
@@ -1649,6 +1657,7 @@ const EMAIL_BOUND_SURFACES = [
     active: (q) => q.whereIn('status', ['draft', 'scheduled', 'sending', 'sent', 'viewed', 'send_failed'])
       .whereNull('archived_at'),
     label: 'open estimate(s)',
+    carriesName: true,
   },
   {
     table: 'automation_enrollments',
@@ -1656,6 +1665,7 @@ const EMAIL_BOUND_SURFACES = [
     linkColumn: 'customer_id',
     active: (q) => q.where({ status: 'active' }),
     label: 'active automation enrollment(s)',
+    carriesName: true,
   },
   {
     table: 'email_template_automation_runs',
@@ -1664,6 +1674,7 @@ const EMAIL_BOUND_SURFACES = [
     linkValue: (id) => String(id),
     active: (q) => q.whereIn('status', ['queued', 'scheduled', 'retry_scheduled']),
     label: 'queued template send(s)',
+    carriesName: true,
   },
   {
     table: 'referral_promoters',
@@ -1671,6 +1682,7 @@ const EMAIL_BOUND_SURFACES = [
     linkColumn: 'customer_id',
     active: (q) => q,
     label: 'referral promoter row(s)',
+    carriesName: true,
   },
   {
     table: 'notification_prefs',
@@ -1678,6 +1690,7 @@ const EMAIL_BOUND_SURFACES = [
     linkColumn: 'customer_id',
     active: (q) => q,
     label: 'billing email preference(s)',
+    carriesName: false,
   },
   {
     table: 'customer_contracts',
@@ -1685,6 +1698,7 @@ const EMAIL_BOUND_SURFACES = [
     linkColumn: 'customer_id',
     active: (q) => q.whereNotIn('status', ['signed', 'cancelled', 'voided']),
     label: 'open contract(s)',
+    carriesName: true,
   },
   {
     table: 'booking_intents',
@@ -1694,6 +1708,7 @@ const EMAIL_BOUND_SURFACES = [
       .whereRaw('suppressed IS NOT TRUE')
       .whereNull('converted_at'),
     label: 'pending booking follow-up(s)',
+    carriesName: true,
   },
   {
     table: 'newsletter_subscribers',
@@ -1706,6 +1721,7 @@ const EMAIL_BOUND_SURFACES = [
     // Unsubscribed rows have no future deliveries and stay out.
     active: (q) => q.whereIn('status', ['active', 'pending']),
     label: 'active/pending newsletter subscription(s)',
+    carriesName: true,
   },
 ];
 
@@ -1749,7 +1765,68 @@ function parseJsonb(value) {
 //     transaction stamps share the merge's transaction timestamp, so
 //     strictly-greater means someone touched it afterwards).
 // ---------------------------------------------------------------------------
-function countActivityRows(rows, { keyColumn = 'id', journaledIds, mergeAt, sinceOnly = false }) {
+// Which timestamp columns each probed table ACTUALLY has — verified column
+// by column against each table's migration. Selecting a column a table does
+// not have raises undefined_column even when no rows match, and the probe
+// catches convert that into a 409, so a wrong entry here silently makes a
+// whole class of merges non-revertible (exactly the r9 regression:
+// customer_credit_ledger has only created_at, so an unconditional
+// updated_at select 409'd EVERY invoice-bearing merge).
+//
+// SEMANTICS when a column is absent:
+//   no updated_at  — in-place updates are undetectable on that table, so
+//                    presence-outside-the-journal is the only activity
+//                    signal there (the default mode already does this).
+//   no created_at  — age is unknowable, so sinceOnly cannot exempt
+//                    pre-merge rows; countActivityRows falls back to
+//                    counting presence (fail closed, never fail open).
+//
+// ANY table added to a probe list MUST get an entry here (verified against
+// its migration, not assumed) — the fallback is deliberately minimal.
+const TABLE_TIMESTAMP_COLUMNS = {
+  // knex timestamps(true, true) or an explicit created/updated pair.
+  invoices: ['created_at', 'updated_at'],
+  payments: ['created_at', 'updated_at'],
+  payment_methods: ['created_at', 'updated_at'],
+  payment_plans: ['created_at', 'updated_at'],
+  annual_prepay_terms: ['created_at', 'updated_at'],
+  estimate_deposits: ['created_at', 'updated_at'],
+  estimate_card_holds: ['created_at', 'updated_at'],
+  scheduled_services: ['created_at', 'updated_at'],
+  leads: ['created_at', 'updated_at'],
+  estimates: ['created_at', 'updated_at'],
+  automation_enrollments: ['created_at', 'updated_at'],
+  email_template_automation_runs: ['created_at', 'updated_at'],
+  notification_prefs: ['created_at', 'updated_at'],
+  customer_contracts: ['created_at', 'updated_at'],
+  booking_intents: ['created_at', 'updated_at'],
+  newsletter_subscribers: ['created_at', 'updated_at'],
+  customer_properties: ['created_at', 'updated_at'],
+  // created_at ONLY (20260617120000, 20260401000107, 20260424000014) —
+  // append-only ledgers/authorizations; no in-place update to detect.
+  customer_credit_ledger: ['created_at'],
+  customer_discounts: ['created_at'],
+  payment_method_consents: ['created_at'],
+  // updated_at ONLY (20260401000054 — its creation stamp is enrolled_at).
+  referral_promoters: ['updated_at'],
+};
+
+function activityColumnsFor(table) {
+  return TABLE_TIMESTAMP_COLUMNS[table] || [];
+}
+
+function countActivityRows(rows, {
+  keyColumn = 'id', journaledIds, mergeAt, sinceOnly = false, table = null,
+}) {
+  // sinceOnly needs created_at to exempt pre-merge rows; without it every
+  // matching row counts (fail closed).
+  if (sinceOnly && table && !activityColumnsFor(table).includes('created_at')) {
+    sinceOnly = false;
+  }
+  return countActivityRowsInner(rows, { keyColumn, journaledIds, mergeAt, sinceOnly });
+}
+
+function countActivityRowsInner(rows, { keyColumn = 'id', journaledIds, mergeAt, sinceOnly = false }) {
   const after = (v) => Boolean(mergeAt && v && new Date(v).getTime() > new Date(mergeAt).getTime());
   let n = 0;
   for (const row of rows) {
@@ -1846,6 +1923,37 @@ async function revertMerge({ journalId, performedBy, performedById }) {
         }
       }
       return set;
+    };
+    // ONE identity-surface probe for both the email and the name guards:
+    // winner-linked rows on each surface (optionally narrowed to a specific
+    // email), counted through the activity gate. Deliberately NO created_at
+    // cut (untouched-merges contract): soft-pointer writers UPDATE old rows
+    // in place — capture-intent re-captures an existing booking intent with
+    // post-merge contact data while its created_at stays pre-merge — so any
+    // matching row outside the journal is activity regardless of age, and a
+    // JOURNALED row whose updated_at moved past the merge is too. Selects
+    // only the timestamp columns each table actually has.
+    const probeIdentitySurfaces = async ({ surfaces, emailLower, what }) => {
+      const blockers = [];
+      for (const probe of surfaces) {
+        let rows = [];
+        try {
+          let query = trx(probe.table)
+            .where(probe.linkColumn, probe.linkValue ? probe.linkValue(winnerId) : winnerId)
+            .select(['id', ...activityColumnsFor(probe.table)]);
+          if (emailLower) query = query.whereRaw(`lower(${probe.emailColumn}) = ?`, [emailLower]);
+          query = probe.active(query);
+          rows = await query;
+        } catch (e) {
+          if (e && e.statusCode === 409) throw e;
+          refuse(`Cannot verify ${probe.table} for ${what} (${e.message}) — refusing to revert`);
+        }
+        const found = countActivityRows(rows, {
+          journaledIds: journaledIdsFor(probe.table), mergeAt, table: probe.table,
+        });
+        if (found) blockers.push(`${found} ${probe.label}`);
+      }
+      return blockers;
     };
     // payment_methods rows moved without their original default/autopay
     // flags journaled: restoring ownership but not the flags could leave
@@ -1962,10 +2070,16 @@ async function revertMerge({ journalId, performedBy, performedById }) {
         // touch depends on (untouched-merges contract).
         let verifyQuery = trx(table).whereIn(pkColumn, ids).where(column, winnerId);
         if (isFinancial) verifyQuery = verifyQuery.forUpdate();
-        const verified = await verifyQuery.select(isFinancial ? [pkColumn, 'updated_at'] : [pkColumn]);
-        if (isFinancial) {
+        // Activity-checked tables read their REAL timestamp columns only
+        // (TABLE_TIMESTAMP_COLUMNS) — selecting one a table lacks would
+        // 409 the whole undo.
+        const activityChecked = isFinancial || ACTIVITY_CHECKED_TABLES.has(table);
+        const verified = await verifyQuery.select(
+          activityChecked ? [pkColumn, ...activityColumnsFor(table)] : [pkColumn],
+        );
+        if (activityChecked) {
           const touched = countActivityRows(verified, {
-            keyColumn: pkColumn, journaledIds: new Set(ids), mergeAt,
+            keyColumn: pkColumn, journaledIds: new Set(ids), mergeAt, table,
           });
           if (touched) {
             refuse(`${touched} ${table} row(s) recorded by this merge were updated after it — the undo reverts only untouched merges; reconcile them by hand`);
@@ -2025,16 +2139,43 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       for (const probe of invoiceChildProbes) {
         let rows = [];
         try {
-          rows = await probe.query(trx(probe.table)).select('id', 'updated_at');
+          rows = await probe.query(trx(probe.table))
+            .select(['id', ...activityColumnsFor(probe.table)]);
         } catch (e) {
           refuse(`Cannot verify ${probe.table} against the invoices this merge moved (${e.message}) — refusing to revert`);
         }
         const activity = countActivityRows(rows, {
-          journaledIds: journaledIdsFor(probe.table), mergeAt,
+          journaledIds: journaledIdsFor(probe.table), mergeAt, table: probe.table,
         });
         if (activity) {
           refuse(`${activity} ${probe.label} recorded against this merge's invoices are outside its journal — undoing would separate the invoice from the money that settled it; reconcile by hand`);
         }
+      }
+    }
+
+    // Billing MINTED by a journaled visit since the merge: a completed
+    // scheduled_services row stamps an invoice for svc.customer_id
+    // (admin-dispatch), so moving the visit back would leave the invoice it
+    // minted on the kept customer. invoices.scheduled_service_id is a real
+    // column (20260420000002) — no metadata indirection here, unlike the
+    // payments case above. Any unjournaled invoice keyed to a journaled
+    // visit refuses. (Its own payments ride that invoice, so refusing on
+    // the invoice covers them.)
+    const journaledVisitIdsAll = [...journaledIdsFor('scheduled_services')];
+    if (journaledVisitIdsAll.length) {
+      let mintedRows = [];
+      try {
+        mintedRows = await trx('invoices')
+          .whereIn('scheduled_service_id', journaledVisitIdsAll)
+          .select(['id', ...activityColumnsFor('invoices')]);
+      } catch (e) {
+        refuse(`Cannot verify invoices minted by this merge's visits (${e.message}) — refusing to revert`);
+      }
+      const minted = countActivityRows(mintedRows, {
+        journaledIds: journaledIdsFor('invoices'), mergeAt, table: 'invoices',
+      });
+      if (minted) {
+        refuse(`${minted} invoice(s) billed from this merge's appointments are outside its journal — moving the visits back would separate them from the billing they minted; reconcile by hand`);
       }
     }
 
@@ -2050,12 +2191,12 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       try {
         consentRows = await trx('payment_method_consents')
           .whereIn('payment_method_id', pmReturnIds)
-          .select('id');
+          .select(['id', ...activityColumnsFor('payment_method_consents')]);
       } catch (e) {
         refuse(`Cannot verify payment_method_consents for the returned card(s) (${e.message}) — refusing to revert`);
       }
       const consentActivity = countActivityRows(consentRows, {
-        journaledIds: journaledIdsFor('payment_method_consents'), mergeAt,
+        journaledIds: journaledIdsFor('payment_method_consents'), mergeAt, table: 'payment_method_consents',
       });
       if (consentActivity) {
         refuse(`${consentActivity} payment-method consent record(s) tied to the returned card(s) are outside this merge's journal — post-merge authorizations cannot be split back; revert by hand`);
@@ -2267,30 +2408,34 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       // it releases with this undo's commit/rollback.
       await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`customer-comms:${winnerId}`]);
       const emailLower = String(backfills.email).trim().toLowerCase();
-      const emailBlockers = [];
-      for (const probe of EMAIL_BOUND_SURFACES) {
-        let rows = [];
-        try {
-          let query = trx(probe.table)
-            .where(probe.linkColumn, probe.linkValue ? probe.linkValue(winnerId) : winnerId)
-            .whereRaw(`lower(${probe.emailColumn}) = ?`, [emailLower])
-            .select('id', 'updated_at');
-          query = probe.active(query);
-          // Deliberately NO created_at cut (untouched-merges contract):
-          // soft-pointer writers UPDATE old rows in place (capture-intent
-          // re-captures an existing booking intent with post-merge contact
-          // data while its created_at stays pre-merge), so any matching
-          // row outside the journal is activity regardless of age — and a
-          // JOURNALED row whose updated_at moved past the merge is too.
-          rows = await query;
-        } catch (e) {
-          refuse(`Cannot verify ${probe.table} for artifacts bound to the merged-in email (${e.message}) — refusing to revert`);
-        }
-        const found = countActivityRows(rows, { journaledIds: journaledIdsFor(probe.table), mergeAt });
-        if (found) emailBlockers.push(`${found} ${probe.label}`);
-      }
+      const emailBlockers = await probeIdentitySurfaces({
+        surfaces: EMAIL_BOUND_SURFACES,
+        emailLower,
+        what: 'artifacts bound to the merged-in email',
+      });
       if (emailBlockers.length) {
         refuse(`The kept customer has ${emailBlockers.join(', ')} that still deliver to the merged-in email outside this merge's journal — the undo reverts only untouched merges; resolve or re-address them first, then revert`);
+      }
+    }
+    // Inherited NAME backfills clear under the same contract: denormalized
+    // artifacts render the name from their OWN stored copy (queued template
+    // runs render greetings from their payload — customer-contact-fanout is
+    // the canonical registry of name-bearing surfaces), so a winner-owned
+    // row outside the journal can be carrying the inherited name. The email
+    // guard above never fires here (the winner kept its own email), so the
+    // name-carrying surfaces get their own pass — no email filter: any
+    // unjournaled or since-updated row on those surfaces is activity.
+    const clearingInheritedName = ['first_name', 'last_name']
+      .some((f) => Object.prototype.hasOwnProperty.call(winnerPatch, f) && winnerPatch[f] === null);
+    if (clearingInheritedName) {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`customer-comms:${winnerId}`]);
+      const nameBlockers = await probeIdentitySurfaces({
+        surfaces: EMAIL_BOUND_SURFACES.filter((s) => s.carriesName),
+        emailLower: null,
+        what: 'artifacts carrying the merged-in name',
+      });
+      if (nameBlockers.length) {
+        refuse(`The kept customer has ${nameBlockers.join(', ')} outside this merge's journal that can be addressed to the merged-in name — the undo reverts only untouched merges; resolve them first, then revert`);
       }
     }
     // Inherited billing identity (billing_mode / per_application_fee /
@@ -2309,12 +2454,12 @@ async function revertMerge({ journalId, performedBy, performedById }) {
         try {
           rows = await trx(table)
             .where({ customer_id: winnerId })
-            .select('id', 'created_at', 'updated_at');
+            .select(['id', ...activityColumnsFor(table)]);
         } catch (e) {
           refuse(`Cannot verify ${table} for billing activity since the merge (${e.message}) — refusing to revert`);
         }
         const activity = countActivityRows(rows, {
-          journaledIds: journaledIdsFor(table), mergeAt, sinceOnly: true,
+          journaledIds: journaledIdsFor(table), mergeAt, sinceOnly: true, table,
         });
         if (activity) {
           refuse(`${activity} ${table} row(s) were created or updated since the merge while the kept customer carried the merged-in billing identity — clearing it now would orphan how they were billed; reconcile billing first, then revert`);
