@@ -139,6 +139,29 @@ function slotReanchors(data, slotDate) {
   return pullForwardDaysBetween(data?.current?.date, slotDate) >= threshold;
 }
 
+// The recurring-plan note under the hero. Collective anchoring (server gate
+// GATE_COLLECTIVE_SERIES_ANCHOR via payload.collectiveAnchor — owner ruling
+// 2026-07-30): every date move shifts the series, so one steady sentence
+// replaces the legacy conditional pull-forward warning.
+function recurringNoteCopy(data, selectedSlot) {
+  if (data?.collectiveAnchor) {
+    // A same-date selection is a time-only move — the server's
+    // shouldReanchor never shifts the series for it, so the note must not
+    // promise a shift the commit won't perform (codex P1).
+    if (selectedSlot && String(selectedSlot.date) === String(data?.current?.date || '')) {
+      return "Only this visit will move — a same-day time change doesn't shift the rest of your plan.";
+    }
+    // "Re-anchors around the new date", not "shifts by the same amount":
+    // month-based patterns re-derive the ordinal/weekday from the new
+    // anchor (first-Thursday → first-Sunday), so sibling deltas differ from
+    // the anchor's (codex P1) — the promise must describe re-anchoring.
+    return 'This visit is part of your regular plan — moving it to a different day re-anchors your later visits around the new date, so your schedule always follows your last treatment.';
+  }
+  return selectedSlot && slotReanchors(data, selectedSlot.date)
+    ? 'This time is far enough ahead of your current date that your following visits will shift to match it — your regular schedule follows the new date.'
+    : 'Only this visit will move — the rest of your regular service schedule stays the same.';
+}
+
 function ReanchorNote() {
   return (
     <div data-glass="soft" style={{
@@ -1222,11 +1245,23 @@ export default function ReschedulePage() {
           start_time: selectedSlot.start_time,
           end_time: selectedSlot.end_time,
           technician_id: selectedSlot.technician_id || null,
+          // Scope pin: the series behavior this page DISCLOSED, and the
+          // anchor date that promise was framed against. A gate flip or a
+          // dispatch race between render and commit 409s (SCOPE_CHANGED)
+          // instead of silently doing something the customer wasn't told.
+          disclosed_collective: !!data?.collectiveAnchor,
+          disclosed_current_date: data?.current?.date || null,
         }),
       });
       const body = await res.json().catch(() => ({}));
       if (res.ok && body.success) {
         setResult(body);
+        return;
+      }
+      if (body.code === 'SCOPE_CHANGED') {
+        setSelectedSlot(null);
+        await load();
+        setSubmitError('The scheduling details for your plan just updated — here is the latest.');
         return;
       }
       if (body.code === 'SLOT_TAKEN') {
@@ -1336,9 +1371,7 @@ export default function ReschedulePage() {
                   marginTop: 14, background: S.soft, border: `1px solid ${S.softBorder}`,
                   borderRadius: 8, padding: '10px 12px', fontSize: 14, color: S.body, lineHeight: 1.5,
                 }}>
-                  {selectedSlot && slotReanchors(data, selectedSlot.date)
-                    ? 'This time is far enough ahead of your current date that your following visits will shift to match it — your regular schedule follows the new date.'
-                    : 'Only this visit will move — the rest of your regular service schedule stays the same.'}
+                  {recurringNoteCopy(data, selectedSlot)}
                 </div>
               ) : null}
             </div>
@@ -1387,7 +1420,7 @@ export default function ReschedulePage() {
                 onConfirm={confirm}
                 submitting={submitting}
                 submitError={submitError}
-                reanchorNote={!!(selectedSlot && slotReanchors(data, selectedSlot.date))}
+                reanchorNote={!!(!data.collectiveAnchor && selectedSlot && slotReanchors(data, selectedSlot.date))}
               />
             )}
             <Card data-glass="soft" style={{ background: S.page }}>
@@ -1440,9 +1473,7 @@ export default function ReschedulePage() {
             marginTop: 12, background: S.soft, border: `1px solid ${S.softBorder}`,
             borderRadius: 8, padding: '10px 12px', fontSize: 14, color: S.body, lineHeight: 1.5,
           }}>
-            {selectedSlot && slotReanchors(data, selectedSlot.date)
-              ? 'This time is far enough ahead of your current date that your following visits will shift to match it — your regular schedule follows the new date.'
-              : 'Only this visit will move — the rest of your regular service schedule stays the same.'}
+            {recurringNoteCopy(data, selectedSlot)}
           </div>
         ) : null}
       </Card>
@@ -1497,7 +1528,7 @@ export default function ReschedulePage() {
             {days.map((day) => (
               <DayGroup key={day.date} day={day} selectedSlot={selectedSlot} onSelect={setSelectedSlot} />
             ))}
-            {selectedSlot && slotReanchors(data, selectedSlot.date) ? (
+            {!data.collectiveAnchor && selectedSlot && slotReanchors(data, selectedSlot.date) ? (
               <div style={{ marginBottom: 10 }}><ReanchorNote /></div>
             ) : null}
             <button

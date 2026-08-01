@@ -142,6 +142,7 @@ describe('invoice-prepay helpers', () => {
           coverage_service_type: 'Quarterly Pest Control',
         },
         528,
+        { today: '2026-01-01' },
       );
       expect(visits.map((v) => v.date)).toEqual([
         '2026-06-20', '2026-09-20', '2026-12-20', '2027-03-20',
@@ -160,6 +161,7 @@ describe('invoice-prepay helpers', () => {
           coverage_service_type: 'Quarterly Pest Control',
         },
         528,
+        { today: '2026-01-01' },
       );
       expect(visits.map((v) => v.date)).toEqual(['2026-06-20', '2026-09-20']);
       // Each share = total / sold count (528 / 4 = 132), matching the prepaid_amount

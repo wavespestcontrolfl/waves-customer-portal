@@ -3961,6 +3961,13 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
   const [termEnd, setTermEnd] = useState(addMonthsInput(initialStart, 12));
   const [dueDate, setDueDate] = useState(todayDateInput());
   const [note, setNote] = useState("");
+  // First visit already promised to the customer (e.g. booked on the phone).
+  // Optional: left blank, coverage generates from the term start as before.
+  // Filled in, it anchors the generated visits and gives visit 1 a real
+  // arrival time instead of landing windowless — and, because visits are only
+  // generated when the invoice is PAID, it survives a mint-to-payment lag.
+  const [firstVisitDate, setFirstVisitDate] = useState("");
+  const [firstVisitWindowStart, setFirstVisitWindowStart] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [amountTouched, setAmountTouched] = useState(false);
@@ -3989,6 +3996,17 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
     ? total / count
     : 0;
   const activeTermEnd = dateInputValue(activeTerm?.termEnd);
+  // Mirrors the server's window check — the endpoint 400s on an out-of-window
+  // first visit, so catch it before the operator submits.
+  const firstVisitDateError = firstVisitDate && termStart && termEnd
+    && (firstVisitDate < termStart || firstVisitDate > termEnd)
+    ? `First visit must fall between ${termStart} and ${termEnd}`
+    : "";
+  // Appointment windows start on the hour — the server rejects :15/:30, so
+  // catch it here instead of round-tripping a 400.
+  const firstVisitTimeError = firstVisitWindowStart && !/^\d{1,2}:00$/.test(firstVisitWindowStart)
+    ? "Arrival times start on the hour"
+    : "";
   const submitDisabled = saving
     || !(Number(amount) > 0)
     || !serviceType.trim()
@@ -3996,7 +4014,10 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
     || !termStart
     || !termEnd
     || termEnd <= termStart
-    || !dueDate;
+    || !dueDate
+    || !!firstVisitDateError
+    || !!firstVisitTimeError
+    || (!!firstVisitWindowStart && !firstVisitDate);
   // Commercial invoices add county tax to this pre-tax line item (residential is
   // tax-free), so label the field as pre-tax and preview the tax-inclusive total
   // the customer will actually be billed — mirrors the record-collected modal.
@@ -4074,6 +4095,8 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
           termStart,
           termEnd,
           dueDate,
+          ...(firstVisitDate ? { firstVisitDate } : {}),
+          ...(firstVisitDate && firstVisitWindowStart ? { firstVisitWindowStart } : {}),
           note: note.trim() || undefined,
           // Only apply when the banner actually RENDERED (preview loaded, not
           // payer-billed): a slow/failed preview must not silently subtract a
@@ -4118,6 +4141,8 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
           termStart,
           termEnd,
           dueDate,
+          ...(firstVisitDate ? { firstVisitDate } : {}),
+          ...(firstVisitDate && firstVisitWindowStart ? { firstVisitWindowStart } : {}),
           note: note.trim() || undefined,
           // Same visible-banner gate + estimate echo as the send path — never
           // apply a credit the operator didn't see.
@@ -4297,6 +4322,40 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
               onChange={(e) => setDueDate(e.target.value)}
               className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             />
+          </label>
+          <label className="block">
+            <div className="u-label text-ink-secondary mb-1">First visit (optional)</div>
+            <input
+              type="date"
+              value={firstVisitDate}
+              onChange={(e) => {
+                const next = e.target.value;
+                setFirstVisitDate(next);
+                // The time input disables without a date; a retained time would
+                // keep submitDisabled true with no way to clear it.
+                if (!next) setFirstVisitWindowStart("");
+              }}
+              min={termStart || undefined}
+              max={termEnd || undefined}
+              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+            />
+            <div className="text-11 text-ink-secondary mt-1">
+              {firstVisitDateError || "Date you already promised the customer. Blank starts coverage at the term start."}
+            </div>
+          </label>
+          <label className="block">
+            <div className="u-label text-ink-secondary mb-1">First visit time</div>
+            <input
+              type="time"
+              step={3600}
+              value={firstVisitWindowStart}
+              onChange={(e) => setFirstVisitWindowStart(e.target.value)}
+              disabled={!firstVisitDate}
+              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring disabled:bg-zinc-100 disabled:text-zinc-400"
+            />
+            <div className="text-11 text-ink-secondary mt-1">
+              {firstVisitTimeError || "Arrival time for visit 1, on the hour. Needs a first-visit date."}
+            </div>
           </label>
           <label className="block sm:col-span-2">
             <div className="u-label text-ink-secondary mb-1">Invoice note</div>
@@ -4576,6 +4635,86 @@ export default function Customer360ProfileV2({
       .then((r) => setPayers(Array.isArray(r?.payers) ? r.payers : []))
       .catch(() => setPayers([]));
   }, []);
+
+  // Clearing a billing pause. billing-cron sets service_paused_at when
+  // autopay's 3-retry ladder exhausts and then skips that customer forever;
+  // nothing in the product could clear it before this, so the only remedy
+  // was editing the row by hand.
+  const [resumingBilling, setResumingBilling] = useState(false);
+  const [resumeBillingErr, setResumeBillingErr] = useState("");
+  const [resumeBillingNote, setResumeBillingNote] = useState("");
+  const resumeSeqRef = useRef(0);
+
+  // These three are shared component state, so switching customers has to
+  // clear them: an in-flight resume for A whose response is discarded (see
+  // stillViewing below) would otherwise leave B's Resume button stuck
+  // disabled forever, and A's error/note reading as B's.
+  useEffect(() => {
+    setResumingBilling(false);
+    setResumeBillingErr("");
+    setResumeBillingNote("");
+  }, [customerId]);
+
+  const resumeBilling = async () => {
+    // Everything below writes shared component state, so pin THIS attempt:
+    // an admin who starts a resume for A and switches to B must not see A's
+    // outcome on B. A customerId check alone is not enough — going A → B → A
+    // and clicking again would let the first, still-in-flight response land
+    // on the second attempt's result. The sequence number makes each click
+    // the only writer of its own outcome.
+    resumeSeqRef.current += 1;
+    const seq = resumeSeqRef.current;
+    const forCustomerId = customerId;
+    const stillViewing = () =>
+      resumeSeqRef.current === seq
+      && String(customerIdRef.current) === String(forCustomerId);
+
+    setResumingBilling(true);
+    setResumeBillingErr("");
+    setResumeBillingNote("");
+    // Tracked separately from the try/catch because the profile reload below
+    // must not be able to report itself as a failed resume: the money-moving
+    // half already succeeded, and telling an admin otherwise invites a second
+    // click on an action they believe did not happen.
+    let resumeLanded = false;
+    try {
+      const result = await adminFetch(
+        `/admin/customers/${forCustomerId}/resume-service`,
+        { method: "POST" },
+      );
+      if (!stillViewing()) return;
+      // The server deliberately refuses when the pause moved between its read
+      // and its write (billing-cron re-paused, or another admin got there
+      // first). Treating that as success would show a cleared banner that
+      // reappears on the next load with no explanation.
+      if (result?.resumed === false) {
+        setResumeBillingErr(
+          "The pause was not cleared — it changed while you were looking at it. Reloading the current state.",
+        );
+      } else {
+        resumeLanded = true;
+      }
+    } catch (err) {
+      if (!stillViewing()) return;
+      setResumeBillingErr(err.message || "Could not clear the billing pause");
+      setResumingBilling(false);
+      return;
+    }
+
+    try {
+      await reloadCustomer();
+    } catch {
+      if (stillViewing()) {
+        setResumeBillingNote(
+          resumeLanded
+            ? "The billing pause was cleared. Refreshing this profile failed — reload the page to see the current state."
+            : "Refreshing this profile failed — reload the page to see the current state.",
+        );
+      }
+    } finally {
+      if (stillViewing()) setResumingBilling(false);
+    }
+  };
 
   const savePayer = async (payerId) => {
     setPayerSaving(true);
@@ -5715,6 +5854,57 @@ export default function Customer360ProfileV2({
                 <div>
                   {" "}
                   <SectionTitle>Billing Summary</SectionTitle>{" "}
+                  {c.servicePausedAt && (
+                    <div
+                      role="alert"
+                      className="mb-3 rounded border border-hairline p-2.5"
+                    >
+                      <div className="text-12 font-medium text-alert-fg">
+                        {/* servicePausedOn is the ET calendar date; the raw
+                            servicePausedAt timestamp would render in the
+                            browser's timezone and land on the wrong day. */}
+                        Billing paused since{" "}
+                        {fmtDate(c.servicePausedOn || c.servicePausedAt)}
+                      </div>
+                      <div className="text-12 text-ink-secondary mt-0.5">
+                        Monthly dues are not being collected
+                        {c.servicePauseReason === "autopay_final_failure"
+                          ? " — autopay failed three times"
+                          : ""}
+                        . Visits are unaffected. Clearing the pause removes
+                        this block only — other billing guards (autopay
+                        state, plan type, prepaid coverage) still apply — and
+                        the paused months are never back-billed.
+                      </div>
+                      {isAdmin && (
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          className="mt-2"
+                          onClick={resumeBilling}
+                          disabled={resumingBilling}
+                        >
+                          {resumingBilling ? "Clearing…" : "Clear billing pause"}
+                        </Button>
+                      )}
+                      {resumeBillingErr && (
+                        <div className="text-12 text-alert-fg mt-1">
+                          {resumeBillingErr}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {/* Outside the banner: the pause is cleared by now, so the
+                      banner is gone, but dues still will not run and that is
+                      the whole reason someone clicked. */}
+                  {resumeBillingNote && (
+                    <div
+                      role="status"
+                      className="mb-3 rounded border border-hairline p-2.5 text-12 text-ink-secondary"
+                    >
+                      {resumeBillingNote}
+                    </div>
+                  )}
                   <div className="grid grid-cols-2 gap-2 mb-3">
                     {" "}
                     <StatCardV2

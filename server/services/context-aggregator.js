@@ -140,6 +140,371 @@ function customerSafeVisitNotes(notes) {
   } catch { return null; }
 }
 
+// How each resolved lane may be described to the customer (codex #3128 r8).
+//
+// Every lane gets its OWN truthful sentence. A blanket "not monthly, quote per
+// application" was wrong for annual prepay — that plan is already paid for the
+// year, so a per-application price is not what they owe either. And note
+// per_visit's copy: the lane is an internal billing mechanism (invoice on
+// completion), NOT customer wording — recurring work is always described "per
+// application", never "per visit".
+//
+// `short` is the CUSTOMER-SAFE name, and the only form that may be serialized
+// into buildSummary — which IS the managed agent's context snapshot
+// (managed-assistant.js stores ctx.summary verbatim). Echoing the raw mode
+// there put the forbidden word "per visit" into authoritative grounding
+// (codex #3128 r9).
+const BILLING_LANE_COPY = {
+  monthly_membership: {
+    monthlyBilled: true,
+    short: 'monthly membership',
+    copy: 'MONTHLY MEMBERSHIP — dues are charged monthly, so this customer\'s monthly rate IS their price. State it plainly.',
+  },
+  annual_prepay: {
+    monthlyBilled: false,
+    short: 'annual prepay (paid for the year)',
+    copy: 'ANNUAL PREPAY — already paid up front for the year. Never describe a monthly charge, and never quote a per-application price as something they owe.',
+  },
+  per_application: {
+    monthlyBilled: false,
+    short: 'per application',
+    copy: 'PER APPLICATION — quote the per-application price and the number of applications a year.',
+  },
+  per_visit: {
+    monthlyBilled: false,
+    // NOT "per visit" — the mode name is an internal billing mechanism
+    // (invoice on completion); the customer-facing unit is the application.
+    short: 'per application',
+    copy: 'PER APPLICATION (invoiced after each service) — quote the per-application price; never say "per visit" to a customer.',
+  },
+  one_time: {
+    monthlyBilled: false,
+    short: 'one-time job',
+    copy: 'ONE-TIME — a single job with no recurring billing relationship.',
+  },
+};
+
+// An EXPLICIT monthly_membership row with no positive rate is UNPRICED, not
+// free (codex #3141 r1): the dues cron only selects monthly_rate > 0
+// (billing-cron.js) and chargeMonthly refuses a non-positive rate outright,
+// so NO monthly charge can run for that row — asserting "dues are charged
+// monthly" describes a charge that does not exist, and the amount line that
+// would have qualified it is omitted precisely because there is no amount.
+// The INFERRED lane cannot reach this state: resolveBillingLane requires a
+// positive rate before it will infer membership at all.
+const UNPRICED_MEMBERSHIP_COPY = {
+  monthlyBilled: false,
+  short: 'monthly membership, no rate set',
+  copy: 'MONTHLY MEMBERSHIP BUT UNPRICED — no dues amount is set on this account, so nothing is charged monthly. Never state a monthly amount; give the plan and cadence and let the office confirm their price.',
+};
+
+// "Already paid up front for the year" is a claim about COVERAGE, not about
+// the lane (codex #3141 r4). A customer keeps billing_mode 'annual_prepay'
+// after a term expires naturally — the renewal flow owns collection from
+// there — so the unconditional copy told the assistant an expired or
+// renewal-pending customer was paid up, contradicting the very invoice facts
+// sitting below it in the same block. Coverage is resolved against the same
+// authority the billing cron suppresses on, and anything unconfirmed fails
+// closed to the no-claim wording.
+const ANNUAL_PREPAY_COPY_BY_COVERAGE = {
+  covered: BILLING_LANE_COPY.annual_prepay,
+  not_covered: {
+    monthlyBilled: false,
+    short: 'annual prepay, coverage not current',
+    copy: 'ANNUAL PREPAY, COVERAGE NOT CURRENT — the prepaid year is not active right now (it ended, or a renewal invoice is still open). Never say they are paid up for the year and never state a monthly amount; give the plan and cadence, use the invoice facts for anything owed, and let the office confirm.',
+  },
+  unknown: {
+    monthlyBilled: false,
+    short: 'annual prepay, coverage unconfirmed',
+    copy: 'ANNUAL PREPAY, COVERAGE UNCONFIRMED — this account is on the annual plan, but whether the prepaid year is currently active could not be confirmed. Never say they are paid up for the year and never state a monthly amount; let the office confirm.',
+  },
+};
+
+// The billing lane as a customer-facing FACT (codex #3128 r6, r8).
+//
+// r6 carried only the EXPLICIT lane and reported an inferred one as "not
+// stated". That was too narrow (codex r8): resolveBillingLane's inference is
+// the SAME rule the dues cron bills by (MONTHLY_LANE_SQL), so a NULL-mode
+// account with a real tier and a positive rate genuinely IS charged monthly —
+// refusing to quote it withheld a true price. Provenance still travels with
+// the fact, since the two are not equally certain.
+//
+// Fail-closed: an unresolvable lane reads as "not stated", never as monthly.
+function resolveBillingLaneFacts(customer, annualCoverage = 'unknown') {
+  try {
+    const { resolveBillingLane } = require('./billing-lane');
+    const { mode, source } = resolveBillingLane(customer);
+    const explicit = source === 'explicit';
+    // An unpriced explicit membership is NOT a monthly-billed account — see
+    // UNPRICED_MEMBERSHIP_COPY (codex #3141 r1).
+    const unpricedMembership = mode === 'monthly_membership'
+      && !(Number(customer?.monthly_rate || 0) > 0);
+    let laneCopy;
+    if (unpricedMembership) laneCopy = UNPRICED_MEMBERSHIP_COPY;
+    // Annual prepay's paid-up-for-the-year claim depends on live coverage,
+    // which the caller resolves; unsupplied means unconfirmed, never paid up.
+    else if (mode === 'annual_prepay') {
+      laneCopy = ANNUAL_PREPAY_COPY_BY_COVERAGE[annualCoverage] || ANNUAL_PREPAY_COPY_BY_COVERAGE.unknown;
+    } else laneCopy = BILLING_LANE_COPY[mode];
+    if (!laneCopy) {
+      return {
+        resolvedMode: mode || null,
+        mode: null,
+        explicit,
+        monthlyBilled: false,
+        monthlyDues: null,
+        label: 'not stated on the account — never state a monthly amount; give the plan and cadence and let the office confirm',
+      };
+    }
+    const provenance = explicit
+      ? 'owner-set'
+      : 'not explicitly set — inferred by the same rule billing itself uses';
+    return {
+      resolvedMode: mode,
+      mode,
+      explicit,
+      monthlyBilled: laneCopy.monthlyBilled,
+      // Customer-safe short form for the managed-agent context snapshot.
+      shortLabel: laneCopy.short,
+      label: `${laneCopy.copy} (${provenance})`,
+      annualCoverage: mode === 'annual_prepay' ? annualCoverage : null,
+      // The AMOUNT is never derived here: what a monthly member is actually
+      // charged depends on the payment method the charge will run against
+      // (credit-card surcharge), which needs a query. getContextForCustomer
+      // fills this in; a sync caller fails closed to no amount at all.
+      monthlyDues: null,
+    };
+  } catch {
+    return {
+      resolvedMode: null,
+      mode: null,
+      explicit: false,
+      monthlyBilled: false,
+      monthlyDues: null,
+      label: 'unavailable right now — never state a monthly amount',
+    };
+  }
+}
+
+// Is a monthly dues charge actually COLLECTING on this account right now?
+//
+// Active autopay is not proof that one is (codex #3141 r2). The monthly cron
+// suppresses several populations before it ever reaches chargeMonthly, and
+// customerOnAutopay sees none of them: service_paused_at is filtered out of
+// the cron's own SELECT (billing-cron.js:121-125), a paused autopay is logged
+// skipped_paused and passed over, and annual-prepay coverage (GUARD 4) or an
+// open annual-prepay commitment (GUARD 5) both suppress the dues too.
+//
+// Every non-'active' answer is a REASON, not a silence: a paused autopay is
+// not the same claim as "the office bills these", and neither is an unknown.
+// Fail-closed — anything we cannot confirm resolves to 'unknown'.
+// Is the prepaid year actually current? Same authority the billing cron
+// suppresses on (codex #3141 r4) — a naturally expired term keeps
+// billing_mode 'annual_prepay' while the renewal flow owns collection, so the
+// lane alone cannot support "already paid for the year". Fail-closed: any
+// error is 'unknown', which does not make the claim either.
+async function resolveAnnualCoverageState(customer) {
+  try {
+    const AnnualPrepayRenewals = require('./annual-prepay-renewals');
+    const covered = await AnnualPrepayRenewals.getActivelyCoveredCustomerIds();
+    return covered?.has(String(customer.id)) ? 'covered' : 'not_covered';
+  } catch {
+    return 'unknown';
+  }
+}
+
+// Could the ENROLLMENT POINTER still collect on its own? customerOnAutopay
+// requires a default row, but stripe.charge honors a valid enabled
+// autopay_payment_method_id before it ever looks for one (stripe.js:1690-1737)
+// — so in the supported legacy state where the pointer is chargeable and no
+// default row remains, the cron really does charge an account the predicate
+// calls inactive (codex #3141 r5). Unreadable counts as "cannot rule it out".
+async function pointerCouldStillCollect(customer) {
+  if (!customer?.autopay_payment_method_id) return false;
+  try {
+    const row = await db('payment_methods')
+      .where({
+        id: customer.autopay_payment_method_id,
+        customer_id: customer.id,
+        processor: 'stripe',
+        autopay_enabled: true,
+      })
+      .whereNotNull('stripe_payment_method_id')
+      .first('id');
+    return !!row;
+  } catch {
+    return true;
+  }
+}
+
+async function resolveDuesCollectionState(customer, autopayState, opts = {}) {
+  // Eligibility itself was unreadable — never speak to collection at all.
+  if (!autopayState) return 'unknown';
+  // The cron's SELECT is the first gate, and it filters on more than the
+  // pause columns (codex #3141 r3): `active: true` and `deleted_at IS NULL`
+  // are part of the same WHERE, and getContextForCustomer can resolve a row
+  // that fails either one. None of these customers is ever loaded, so none of
+  // them is charged.
+  //
+  // `active` is NULLABLE and the cron matches `active = true`, so anything
+  // that is not literally true is outside the billed population — a legacy
+  // import with a NULL there is never charged (codex #3141 r4). Testing for
+  // === false let exactly those rows publish a charge.
+  if (customer?.active !== true || customer?.deleted_at) return 'account_inactive';
+  if (customer?.service_paused_at) return 'service_paused';
+  if (autopayState.paused) return 'autopay_paused';
+  if (autopayState.on !== true) {
+    // "Not auto-collecting" is a claim too, and it is wrong for a legacy
+    // pointer-only account the cron still charges (codex #3141 r5). When a
+    // pointer could collect on its own, claim NEITHER: no charge total is
+    // published, and the copy says the collection state is unconfirmed
+    // rather than asserting nothing collects.
+    const pointerChargeable = opts.pointerChargeable !== undefined
+      ? opts.pointerChargeable
+      : await pointerCouldStillCollect(customer);
+    return pointerChargeable ? 'unknown' : 'autopay_off';
+  }
+  try {
+    const AnnualPrepayRenewals = require('./annual-prepay-renewals');
+    const id = String(customer.id);
+    const [covered, pending] = await Promise.all([
+      AnnualPrepayRenewals.getActivelyCoveredCustomerIds(),
+      AnnualPrepayRenewals.getPaymentPendingCustomerIds(),
+    ]);
+    if (covered?.has(id)) return 'annual_prepay_covered';
+    if (pending?.has(id)) return 'annual_prepay_pending';
+  } catch {
+    return 'unknown';
+  }
+  return 'active';
+}
+
+// The customer-visible monthly dues FACT, derived through the SAME pricing
+// authority the charge itself runs through (codex #3141 r1).
+//
+// Serializing monthly_rate raw understated every confirmed-credit autopay
+// account: chargeMonthly hands that base to stripe.charge, where
+// computeChargeAmount adds the credit-card surcharge — so "$98.50 is what
+// you're charged" was false against both the PaymentIntent and the payment
+// row it writes.
+//
+// Two amounts, two different claims. `base` is the plan price (the dues
+// themselves) and is always true when a positive rate exists. `total` is what
+// actually collects, and it is published only when BOTH halves are certain:
+// that a charge is collecting at all (see resolveDuesCollectionState), and
+// that every method which could collect it prices the same.
+//
+// That second rule is why `methods` is a LIST and not the one row this used to
+// resolve (codex #3141 r2): stripe.charge honors customers.autopay_payment_
+// method_id first and only falls back to the default+enabled lookup
+// (stripe.js:1690-1737), so pricing the default row could publish one total
+// while the pointer method was charged another. Rather than re-deriving that
+// selection here — a second copy of a money rule, free to drift — every
+// candidate the charge path could pick is priced, and the total is published
+// only when they AGREE. Then it is right whichever one collection selects,
+// and a genuinely ambiguous account withholds instead of guessing.
+//
+// Pure (the caller supplies the already-fetched rows) so all of it is
+// unit-testable without a database.
+function resolveMonthlyDuesFact({ monthlyRate, collection, methods }) {
+  const base = Number(monthlyRate || 0);
+  if (!(base > 0)) return null;
+  const withheld = (basis) => ({ base, surcharge: 0, total: null, surcharged: false, basis });
+  // Not collecting (or not confirmably collecting) — the dues are still the
+  // plan price and still quotable; what must not be claimed is a charge.
+  const state = collection || 'unknown';
+  if (state !== 'active') return withheld(state);
+  if (!Array.isArray(methods) || methods.length === 0) return withheld('method_unknown');
+  try {
+    const { computeChargeAmount, isCardMethodType } = require('./stripe-pricing');
+    const quotes = methods.map((m) => {
+      const funding = m?.card_funding || null;
+      // A card whose funding has never been resolved is genuinely uncertain:
+      // stripe.charge backfills it from Stripe at charge time and surcharges
+      // if it comes back 'credit'.
+      if (isCardMethodType(m?.method_type) && !funding) return null;
+      return computeChargeAmount(base, m?.method_type, { funding });
+    });
+    if (quotes.some((q) => !q)) return withheld('unknown_funding');
+    if (new Set(quotes.map((q) => q.totalCents)).size > 1) return withheld('method_ambiguous');
+    const quote = quotes[0];
+    return {
+      base: quote.baseCents / 100,
+      surcharge: quote.surchargeCents / 100,
+      total: quote.totalCents / 100,
+      surcharged: quote.surchargeCents > 0,
+      basis: quote.surchargeCents > 0 ? 'credit_card_surcharge' : 'no_surcharge',
+    };
+  } catch {
+    // Pricing authority unreadable — never guess a total.
+    return withheld('unknown_funding');
+  }
+}
+
+// The one-phrase form of a dues fact that is NOT publishing a charge total,
+// for the managed-agent context snapshot (codex #3141 r3). The snapshot is
+// all that agent gets — it never sees the shadow drafter's facts block — so
+// serializing "$98.50/mo dues" while dropping the reason no charge is
+// collecting let it answer a current-charge question from a rate alone.
+const DUES_NO_COLLECTION_SHORT = {
+  // The exact surcharge-inclusive total is deliberately NOT in this snapshot
+  // (codex #3141 r4). managed-assistant.js sends the snapshot once, at session
+  // creation, and the session lives ~30 minutes — long enough for the customer
+  // to switch between an ACH/debit and a credit method, at which point a
+  // frozen total is simply the wrong number. The dues (the plan price) are far
+  // more stable and stay; the exact charge belongs to the shadow drafter's
+  // facts block, which is rebuilt for every single message.
+  credit_card_surcharge: 'card fee applies at charge — state dues only',
+  autopay_paused: 'autopay paused, not collecting',
+  autopay_off: 'autopay off, not auto-collecting',
+  service_paused: 'billing paused, not collecting',
+  account_inactive: 'account not active, not collecting',
+  annual_prepay_covered: 'annual prepay active, not collecting',
+  annual_prepay_pending: 'annual prepay invoice open, not collecting',
+  unknown_funding: 'charge total unconfirmed',
+  method_ambiguous: 'charge total unconfirmed',
+  method_unknown: 'charge total unconfirmed',
+};
+
+// The monthly-dues amounts THIS context actually published, in cents.
+//
+// One definition, because there are two amount guards and they had already
+// drifted (codex #3141 r3): the drafter authorizes figures at draft time, and
+// the scheduler re-authorizes them against a freshly built context at fire
+// time, so a reviewed dues reply that sat in the queue was retired as a stale
+// amount. Both now ask this.
+//
+// Exactly what the facts state and nothing more: the dues base whenever a
+// monthly lane published dues, and the total plus the fee it breaks out only
+// when the surcharge was actually resolved and published.
+function authorizedDuesCents(context) {
+  const lane = context?.customer?.billingLane;
+  const dues = lane?.monthlyBilled ? lane.monthlyDues : null;
+  if (!dues) return [];
+  const cents = (v) => Math.round(Number(v) * 100);
+  const out = [cents(dues.base)];
+  if (dues.surcharged && dues.total != null) out.push(cents(dues.total), cents(dues.surcharge));
+  return out.filter((v) => Number.isFinite(v));
+}
+
+// Every saved method the charge path could collect these dues from: the
+// enrollment pointer stripe.charge honors first, plus the default+enabled
+// rows it falls back to. Deliberately UNFILTERED beyond "could be charged at
+// all" — an extra row only ever makes the fact more conservative, while
+// re-implementing the charge path's eligibility predicate here could drop the
+// very row collection picks and turn a real charge into "nothing collects".
+async function fetchDuesChargeCandidates(customer) {
+  const rows = await db('payment_methods')
+    .where({ customer_id: customer.id, processor: 'stripe', autopay_enabled: true })
+    .whereNotNull('stripe_payment_method_id')
+    .where(function pointerOrDefault() {
+      this.where('is_default', true);
+      if (customer.autopay_payment_method_id) this.orWhere('id', customer.autopay_payment_method_id);
+    })
+    .select('id', 'method_type', 'card_funding', 'is_default');
+  return rows;
+}
+
 class ContextAggregator {
   async getFullCustomerContext(phone) {
     const clean = (phone || '').replace(/\D/g, '');
@@ -280,6 +645,19 @@ class ContextAggregator {
     // the balance.
     const openInvoice = ownInvoices.find((inv) => invoiceAmountDue(inv) > 0) || null;
     const hasPayerBilledOpen = invoiceRows.some((inv) => inv.payer_id && VISIBLE_INVOICE_STATUSES.has(String(inv.status)));
+    // The BILLING LANE, resolved once and carried as an explicit FACT. The
+    // per-application copy rule lets a monthly amount be spoken only when the
+    // account says the lane is monthly membership — but nothing produced that
+    // fact, so every genuine monthly member fell into the office-confirmation
+    // fallback (codex #3128 r6). Feeds buildSummary (the managed-agent
+    // snapshot) and the shadow drafter's BILLING block.
+    let billingLane = resolveBillingLaneFacts(customer);
+    // The annual lane's paid-up claim needs live coverage, so it is resolved
+    // and the fact rebuilt with it (codex #3141 r4). Only that lane pays for
+    // the lookup.
+    if (billingLane.mode === 'annual_prepay') {
+      billingLane = resolveBillingLaneFacts(customer, await resolveAnnualCoverageState(customer));
+    }
     // Canonical autopay state (Codex r1): the raw autopay_enabled flag lies
     // when the default method is missing/expired/unhealthy, and a stale
     // autopay_paused_until must not read as paused — customerOnAutopay +
@@ -293,12 +671,14 @@ class ContextAggregator {
       // next_charge_date is only real for the monthly-membership lane
       // (Codex r9, customer-autopay canon): per-application / prepay /
       // one-time accounts can carry a stale date the cron will never act on
-      // — advertising it would promise a charge that isn't coming.
-      let monthlyLane = false;
-      try {
-        const { resolveBillingLane } = require('./billing-lane');
-        monthlyLane = resolveBillingLane(customer).mode === 'monthly_membership';
-      } catch { monthlyLane = false; }
+      // — advertising it would promise a charge that isn't coming. The
+      // RESOLVED lane (explicit or inferred) is the right test here: the 8AM
+      // cron bills the inferred lane too (billing-lane MONTHLY_LANE_SQL).
+      // monthlyBilled, not resolvedMode: an UNPRICED membership is filtered
+      // out by the cron's monthly_rate > 0 and never charged either, so its
+      // next_charge_date is the same empty promise (codex #3141 r1; mirrors
+      // customer-autopay's `!hasMonthlyRate → null`).
+      const monthlyLane = billingLane.monthlyBilled;
       autopayState = {
         on: paused ? false : await customerOnAutopay(customer),
         paused,
@@ -307,6 +687,26 @@ class ContextAggregator {
       };
     } catch (err) {
       logger.warn(`[context] autopay eligibility failed for customer ${customer.id}: ${err.message}`);
+    }
+
+    // The dues AMOUNT the monthly lane authorizes, priced through the charge
+    // path's own authority rather than the raw rate (codex #3141 r1). Only
+    // the monthly lane pays for these queries — for every other lane the
+    // stored rate is an artifact nobody is charged, so there is nothing to
+    // price. Every failure here resolves to a withheld total, never a guess:
+    // an eligibility failure above already leaves autopayState null, which
+    // reads as an unconfirmed collection state.
+    if (billingLane.monthlyBilled) {
+      const collection = await resolveDuesCollectionState(customer, autopayState);
+      let methods = null;
+      if (collection === 'active') {
+        try { methods = await fetchDuesChargeCandidates(customer); } catch { methods = null; }
+      }
+      billingLane.monthlyDues = resolveMonthlyDuesFact({
+        monthlyRate: customer.monthly_rate,
+        collection,
+        methods,
+      });
     }
 
     // Build flags
@@ -322,7 +722,7 @@ class ContextAggregator {
     // renders into ACCOUNT FLAGS, which is verifier-approved grounding.
     if (pendingEstimate) flags.push({ type: 'pending_estimate', severity: 'info', detail: `${pendingEstimate.waveguard_tier || 'estimate'} pending (priced per application)` });
 
-    const summary = this.buildSummary(customer, flags, lastService, upcomingServices, balance);
+    const summary = this.buildSummary(customer, flags, lastService, upcomingServices, balance, billingLane);
 
     return {
       known: true,
@@ -333,6 +733,9 @@ class ContextAggregator {
         tier: customer.waveguard_tier, monthlyRate: parseFloat(customer.monthly_rate || 0),
         pipelineStage: customer.pipeline_stage, leadScore: customer.lead_score,
         customerSince: customer.customer_since,
+        // The lane that decides whether monthlyRate above may ever be spoken
+        // as this customer's price (codex #3128 r6).
+        billingLane,
       },
       smsHistory: smsHistory.map(m => ({ direction: m.direction, body: m.message_body, date: m.created_at, type: m.message_type })),
       // technician_notes is INTERNAL (owner ruling 2026-07-16: access codes,
@@ -600,12 +1003,43 @@ class ContextAggregator {
     return `${h}:${m[2]} ${ampm}`;
   }
 
-  buildSummary(c, flags, lastSvc, upcoming, balance) {
+  buildSummary(c, flags, lastSvc, upcoming, balance, billingLane) {
     // No rate amount here (Codex r3 + the per-application display rule):
     // monthly_rate is an internal figure, not customer billing copy — with
     // amount-bearing drafts now sendable, "($X/mo)" in the summary would let
     // a per-application customer be quoted a monthly price.
     let s = `${c.first_name} ${c.last_name} | ${c.waveguard_tier || 'No tier'} | ${c.pipeline_stage}`;
+    // …but the LANE itself must travel, or a genuine monthly member can never
+    // be told their real price (codex #3128 r6). This summary IS the managed
+    // agent's context snapshot, so the fact has to live here to reach it.
+    // Recomputed when absent so a direct buildSummary caller still fails
+    // closed to "not stated" rather than dropping the fact entirely.
+    const lane = billingLane || resolveBillingLaneFacts(c);
+    // shortLabel, never the raw mode (codex #3128 r9): this string IS the
+    // managed agent's context snapshot, and `per_visit` spelled out would put
+    // the one unit the house voice forbids into authoritative grounding.
+    s += ` | Billing lane: ${lane.shortLabel
+      ? `${lane.shortLabel}${lane.explicit ? '' : ' (inferred)'}`
+      : 'not stated — no monthly amount'}`;
+    // The monthly lane is the one case where a plan price may be spoken, so
+    // the amount has to travel WITH it — the house voice forbids computing or
+    // inventing figures, so "state it plainly" without the number just
+    // produces a deferral (codex #3128 r9). The amount comes from the priced
+    // dues fact, NEVER from c.monthly_rate: the raw rate is the base, and a
+    // confirmed-credit card on file is charged that base plus the surcharge
+    // (codex #3141 r1). No priced fact (sync caller, unpriced row) = no
+    // amount in the snapshot at all.
+    const dues = lane.monthlyBilled ? lane.monthlyDues : null;
+    if (dues) {
+      // The dues amount travels; the exact charge total does NOT (see
+      // DUES_NO_COLLECTION_SHORT — this string outlives the account state it
+      // describes). The REASON travels with the amount, or this snapshot says
+      // "monthly membership, $98.50" about an account nothing is collecting
+      // from (codex #3141 r3).
+      const why = DUES_NO_COLLECTION_SHORT[dues.basis]
+        || (dues.basis === 'no_surcharge' ? null : 'collection state unconfirmed');
+      s += ` ($${dues.base.toFixed(2)}/mo dues${why ? ` — ${why}` : ''})`;
+    }
     if (lastSvc) s += ` | Last: ${lastSvc.service_type} ${new Date(lastSvc.service_date).toLocaleDateString('en-US', { timeZone: 'America/New_York' })}`;
     if (upcoming.length) s += ` | Next: ${upcoming[0].service_type} ${new Date(upcoming[0].scheduled_date).toLocaleDateString('en-US', { timeZone: 'America/New_York' })}`;
     if (balance > 0) s += ` | ⚠️ $${balance.toFixed(2)} overdue`;
@@ -627,3 +1061,8 @@ module.exports.UPCOMING_SERVICE_STATUSES = UPCOMING_SERVICE_STATUSES;
 module.exports.redactAccessCodes = redactAccessCodes;
 module.exports.lawnOverall = lawnOverall;
 module.exports.customerSafeVisitNotes = customerSafeVisitNotes;
+module.exports.resolveBillingLaneFacts = resolveBillingLaneFacts;
+module.exports.resolveMonthlyDuesFact = resolveMonthlyDuesFact;
+module.exports.resolveDuesCollectionState = resolveDuesCollectionState;
+module.exports.authorizedDuesCents = authorizedDuesCents;
+module.exports.resolveAnnualCoverageState = resolveAnnualCoverageState;

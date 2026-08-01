@@ -307,6 +307,10 @@ async function draftOneBackfill(inbound, customer) {
     inboundMessage: inbound.message_body,
     intent,
     schedulingIntent: hasSchedulingIntent(inbound.message_body),
+    // Replay traffic must not ride the live lane's dispatch-metrics label —
+    // backfill successes would keep smsShadow:<provider> looking healthy
+    // after the live path stops.
+    metricsLane: 'backfill',
   });
   if (!parsed) {
     logger.warn(`[shadow-backfill] unparseable draft (inbound ${String(inbound.id).slice(0, 8)}); skipping`);

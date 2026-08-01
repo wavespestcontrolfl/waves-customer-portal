@@ -47,7 +47,12 @@ const INVOICE = {
   invoice_number: 'WPC-2026-0001',
   payer_id: null,
 };
-const CREATED_PLAN = { id: 'plan-1', total_balance: '100.00' };
+// The under-lock re-read returns a DIFFERENT owner than the pre-transaction
+// read: a customer merge/undo can repoint invoices.customer_id while this
+// request waits on the invoice row lock, and the plan must be attributed
+// from the row it actually locked (r16) — never the stale snapshot.
+const LOCKED_INVOICE = { ...INVOICE, customer_id: 'cust-2-post-repoint' };
+const CREATED_PLAN = { id: 'plan-1', total_balance: '100.00', customer_id: 'cust-2-post-repoint' };
 
 function makeRecorder(overrides = {}) {
   const qb = {};
@@ -85,7 +90,7 @@ describe('POST /:id/payment-plan stops dunning inside the plan transaction', () 
   beforeEach(() => {
     jest.clearAllMocks();
 
-    trxInvoices = makeRecorder({ first: jest.fn(async () => ({ ...INVOICE })) });
+    trxInvoices = makeRecorder({ first: jest.fn(async () => ({ ...LOCKED_INVOICE })) });
     trxPlans = makeRecorder({
       insert: jest.fn(() => ({ returning: jest.fn(async () => [CREATED_PLAN]) })),
     });
@@ -137,6 +142,52 @@ describe('POST /:id/payment-plan stops dunning inside the plan transaction', () 
           stopped_by_admin_id: 'admin-1',
         }),
       );
+    });
+  });
+
+  test('the plan is attributed from the LOCKED invoice row, not the pre-transaction read (merge/undo repoint race)', async () => {
+    const email = require('../services/payment-lifecycle-email');
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/invoices/inv-1/payment-plan`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          paymentFrequency: 'monthly',
+          paymentAmount: 25,
+          nextPaymentDate: '2026-08-01',
+        }),
+      });
+      expect(res.status).toBe(201);
+      // The invoice row was locked, and the insert carried the LOCKED row's
+      // owner — a plan pinned to the stale pre-transaction customer would
+      // govern the invoice's collection path under the wrong customer.
+      expect(trxInvoices.forUpdate).toHaveBeenCalled();
+      expect(trxPlans.insert).toHaveBeenCalledWith(expect.objectContaining({
+        customer_id: 'cust-2-post-repoint',
+        invoice_id: 'inv-1',
+      }));
+      // Post-commit attribution rides the created plan row too.
+      expect(email.sendPaymentPlanConfirmed).toHaveBeenCalledWith(expect.objectContaining({
+        customerId: 'cust-2-post-repoint',
+        idempotencyKey: 'payment.plan_confirmed:plan-1:cust-2-post-repoint',
+      }));
+    });
+  });
+
+  test('a vanished invoice at lock time is a 409, not a plan attributed from a stale snapshot', async () => {
+    trxInvoices.first.mockResolvedValue(null);
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/invoices/inv-1/payment-plan`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          paymentFrequency: 'monthly',
+          paymentAmount: 25,
+          nextPaymentDate: '2026-08-01',
+        }),
+      });
+      expect(res.status).toBe(409);
+      expect(trxPlans.insert).not.toHaveBeenCalled();
     });
   });
 

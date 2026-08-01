@@ -187,11 +187,13 @@ describe('ServiceSection', () => {
     expect(screen.queryByText(/applications per year included/)).not.toBeInTheDocument();
   });
 
-  it('keeps the combined /mo total on a bundle section with a single itemized service (no per-application headline)', () => {
+  it('shows no combined /mo total and no per-application headline on a bundle section with a single itemized service', () => {
     // Synthetic unsplittable bundle (pest + lawn) whose legacy snapshot
-    // itemizes only the pest slice as a treatment row. The card must lead with
-    // the combined recurring total ($130.00/mo), NOT the lone pest per-application
-    // price ($94.00) — accept/billing charges the bundle total.
+    // itemizes only the pest slice as a treatment row. Two wrong headlines
+    // exist here: the lone pest per-application price ($94.00) understates
+    // the plan, and the combined "$130.00/mo" is a plan total the estimate
+    // surface must not carry ("per month" audit 2026-08-01). The card leads
+    // with the billing unit; the itemized rows carry the real prices.
     render(
       <ServiceSection
         section={{
@@ -224,11 +226,12 @@ describe('ServiceSection', () => {
       />,
     );
 
-    // Combined cadence total leads with a standalone "/mo" suffix. Were the
-    // bundle wrongly treated per-application, the headline would be the lone
-    // pest price ("/ application" suffix) instead of the combined "/mo" total.
-    expect(screen.getByText('$130.00')).toBeInTheDocument();
-    expect(screen.getByText('/mo')).toBeInTheDocument();
+    // Headline names the billing unit; neither wrong headline appears. The
+    // itemized pest row still shows its own per-application price.
+    expect(screen.getByText('Priced per application')).toBeInTheDocument();
+    expect(screen.queryByText('$130.00')).not.toBeInTheDocument();
+    expect(screen.queryByText('/mo')).not.toBeInTheDocument();
+    expect(screen.getByText('$94.00')).toBeInTheDocument();
   });
 
   it('shows the selected quote-required frequency reason', () => {
@@ -818,7 +821,12 @@ describe('PlanTotalSummary — plan-level referral credit + net', () => {
     const { container } = render(<PlanTotalSummary combined={combined} preCreditMonthly={84.08} />);
     const text = container.textContent;
     expect(text).toContain('Referral Credit');
-    expect(text).toMatch(/[−-]\$2\.08/); // fmtMoneySigned uses a Unicode minus
+    // No single cadence on this multi-service selection → the credit cannot be
+    // expressed per application, so NO bare figure renders (a unit-less "-$2.08"
+    // beside per-application prices reads as a per-application reduction —
+    // codex #3128 r1). The label + plan-pricing wording carry the message.
+    expect(text).not.toMatch(/[−-]\$2\.08/);
+    expect(text).toContain('Applied to your plan pricing');
     expect(text).toContain('Applied to your plan when you book.');
     expect(text).not.toContain('Plan subtotal');
     expect(text).not.toContain('Your price');
@@ -843,7 +851,8 @@ describe('PlanTotalSummary — plan-level referral credit + net', () => {
       <PlanTotalSummary combined={combined} selectedFrequency={{ key: 'alt', monthly: 110, annual: 1320 }} preCreditMonthly={112.08} />,
     );
     const text = container.textContent;
-    expect(text).toMatch(/[−-]\$2\.08/);
+    expect(text).not.toMatch(/[−-]\$2\.08/); // unit-less figure suppressed
+    expect(text).toContain('Applied to your plan pricing');
     expect(text).not.toContain('$112.08');
     expect(text).not.toContain('$110.00');
     expect(text).not.toContain('$1,320.00 / year');
@@ -856,8 +865,9 @@ describe('PlanTotalSummary — plan-level referral credit + net', () => {
     const text = render(
       <PlanTotalSummary combined={combined} selectedFrequency={{ key: 'alt', monthly: 83.50, annual: 1002 }} preCreditMonthly={84.08} />,
     ).container.textContent;
-    expect(text).toMatch(/[−-]\$0\.58/);
+    expect(text).not.toMatch(/[−-]\$0\.58/); // unit-less figure suppressed
     expect(text).not.toMatch(/[−-]\$2\.08/);
+    expect(text).toContain('Applied to your plan pricing');
     expect(text).not.toContain('$83.50');
   });
 
@@ -871,7 +881,7 @@ describe('PlanTotalSummary — plan-level referral credit + net', () => {
     const ranged = { ...combined, lowConfidenceRangePct: 0.2 };
     const text = render(<PlanTotalSummary combined={ranged} preCreditMonthly={84.08} />).container.textContent;
     expect(text).toContain('Referral Credit'); // credit stays visible…
-    expect(text).toMatch(/[−-]\$2\.08/);
+    expect(text).toContain('Applied to your plan pricing');
     expect(text).not.toContain('Your price'); // …but no exact subtotal/net
     expect(text).not.toContain('Plan subtotal');
     // Same when the range rides on the selected frequency.
@@ -889,8 +899,27 @@ describe('PlanTotalSummary — plan-level referral credit + net', () => {
     const text = render(
       <PlanTotalSummary combined={ranged} selectedFrequency={{ key: 'alt', monthly: 111.50, lowConfidenceRangePct: 0.2 }} preCreditMonthly={112.08} />,
     ).container.textContent;
-    expect(text).toMatch(/[−-]\$0\.58/);
+    expect(text).not.toMatch(/[−-]\$0\.58/); // unit-less figure suppressed
     expect(text).not.toMatch(/[−-]\$2\.08/);
+    expect(text).toContain('Applied to your plan pricing');
+  });
+
+  it('never derives a per-application credit from the primary cadence (codex #3128 r4)', () => {
+    // This card renders only for MULTI-service plans, and combinedFrequency
+    // inherits the PRIMARY service's billedPerApplication/visitsPerYear —
+    // dividing the whole-plan credit by that one cadence would assert a
+    // figure that is not the discount applied to any application's charge.
+    // Even a flag-carrying selection therefore stays label-only.
+    const text = render(
+      <PlanTotalSummary
+        combined={combined}
+        selectedFrequency={{ key: 'alt', monthly: 110, annual: 1320, billedPerApplication: true, visitsPerYear: 6 }}
+        preCreditMonthly={112.08}
+      />,
+    ).container.textContent;
+    expect(text).not.toMatch(/[−-]\$4\.16/);
+    expect(text).not.toContain('/ application');
+    expect(text).toContain('Applied to your plan pricing');
   });
 
   it('suppresses for a quote-required selection (page hides exact dollars)', () => {
@@ -911,7 +940,7 @@ describe('PlanTotalSummary — plan-level referral credit + net', () => {
     };
     const text = render(<PlanTotalSummary combined={comped} preCreditMonthly={84.08} />).container.textContent;
     expect(text).toContain('Referral Credit');
-    expect(text).toMatch(/[−-]\$84\.08/);
+    expect(text).toContain('Applied to your plan pricing'); // no unit-less figure
     expect(text).not.toContain('Plan subtotal');
     expect(text).not.toContain('Your price');
   });
@@ -942,7 +971,7 @@ describe('PlanTotalSummary — plan-level referral credit + net', () => {
     const ranged = { ...combined, lowConfidenceRangePct: 0.2 };
     const text = render(<PlanTotalSummary combined={ranged} />).container.textContent;
     expect(text).toContain('Referral Credit');
-    expect(text).toMatch(/[−-]\$2\.08/);
+    expect(text).toContain('Applied to your plan pricing'); // no unit-less figure
     expect(text).not.toContain('Plan subtotal');
   });
 
@@ -972,7 +1001,7 @@ describe('PlanTotalSummary — plan-level referral credit + net', () => {
       />,
     ).container.textContent;
     expect(text).toContain('Referral Credit');
-    expect(text).toMatch(/[−-]\$2\.08/);
+    expect(text).toContain('Applied to your plan pricing'); // no unit-less figure
     expect(text).not.toContain('Plan subtotal');
     expect(text).not.toContain('$110.00');
   });
@@ -990,7 +1019,7 @@ describe('PlanTotalSummary — plan-level referral credit + net', () => {
         preCreditMonthly={112.08}
       />,
     ).container.textContent;
-    expect(text).toMatch(/[−-]\$2\.08/);
+    expect(text).toContain('Applied to your plan pricing'); // no unit-less figure
     expect(text).toContain('Discount');
     expect(text).not.toContain('Plan subtotal');
     expect(text).not.toContain('$110.00');
@@ -1007,7 +1036,7 @@ describe('PlanTotalSummary — plan-level referral credit + net', () => {
       />,
     ).container.textContent;
     expect(text).toContain('Referral Credit');
-    expect(text).toMatch(/[−-]\$2\.08/);
+    expect(text).toContain('Applied to your plan pricing'); // no unit-less figure
     expect(text).not.toContain('$110.00');
   });
 
@@ -1036,7 +1065,7 @@ describe('PlanTotalSummary — plan-level referral credit + net', () => {
       />,
     ).container.textContent;
     expect(text).toContain('Referral Credit');
-    expect(text).toMatch(/[−-]\$2\.08/);
+    expect(text).toContain('Applied to your plan pricing'); // no unit-less figure
     expect(text).not.toContain('Plan subtotal');
   });
 
@@ -1070,7 +1099,7 @@ describe('PlanTotalSummary — plan-level referral credit + net', () => {
       />,
     ).container.textContent;
     expect(text).toContain('Referral Credit');
-    expect(text).toMatch(/[−-]\$84\.08/);
+    expect(text).toContain('Applied to your plan pricing'); // no unit-less figure
     expect(text).not.toContain('Your price');
   });
 
@@ -1086,7 +1115,7 @@ describe('PlanTotalSummary — plan-level referral credit + net', () => {
       />,
     ).container.textContent;
     expect(text).toContain('Referral Credit');
-    expect(text).toMatch(/[−-]\$84\.08/);
+    expect(text).toContain('Applied to your plan pricing'); // no unit-less figure
     expect(text).not.toContain('Your price');
   });
 });

@@ -1200,8 +1200,13 @@ class GscOpportunityMiner {
                -- the row with feedback recorded here, and the morning miner
                -- runs BEFORE the engine — dropping the marker would turn the
                -- intended single feedback-informed redraft into repeated
-               -- blind first attempts. jsonb_exists(), not the ? operator
-               -- (knex reads ? as a binding placeholder).
+               -- blind first attempts. jsonb_exists(), not the question-mark
+               -- operator — and this comment must never contain that literal
+               -- character either: knex counts binding placeholders across
+               -- the WHOLE raw string, SQL comments included, so a stray one
+               -- here breaks every daily mine with a binding-count error
+               -- (shipped 07-30, caught 07-31: "Expected 13 bindings, saw
+               -- 15" — the two extras were in this very comment).
                signal_metadata = CASE
                  WHEN jsonb_exists(COALESCE(opportunity_queue.signal_metadata, '{}'::jsonb), 'gate_retry')
                  THEN EXCLUDED.signal_metadata

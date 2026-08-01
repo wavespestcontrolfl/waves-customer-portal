@@ -173,9 +173,40 @@ describe('buildPricingBundle lane enforcement', () => {
     expect(collectFlags(bundle).length).toBeGreaterThan(0);
   });
 
-  test('lane lookup failure on a linked estimate fails to the monthly disclosure (strip)', async () => {
+  // REVERSED ("per month" audit 2026-08-01, codex #3128 r10). This used to
+  // strip on a lookup error, reasoning that the monthly note is a disclosure
+  // and suppressing it would hide a description of a real charge. The flags
+  // are not a note: PriceCard reads their ABSENCE as permission to render
+  // "Billed $X/mo", so stripping showed a monthly spread to a per-application
+  // plan — the exact defect this sweep exists to remove, and on the failure
+  // path specifically. It now fails CLOSED, which also makes the error case
+  // agree with "linked but customer row missing" directly above: an unknown
+  // lane converts like a new signup, per application.
+  test('lane lookup failure on a linked estimate fails CLOSED to per application', async () => {
     mockDbState.customer = new Error('connection refused');
     const bundle = await buildPricingBundle(lawnEstimateRow({ customerId: 'cust-1' }));
+    expect(collectFlags(bundle).length).toBeGreaterThan(0);
+  });
+
+  // Pre-push audit P1: the bundle's flags and the cta.monthlyBilled beside it
+  // are read by the SAME page, so a request must resolve the lane once. A
+  // caller-supplied verdict is authoritative and must not trigger a second
+  // lookup that could answer differently.
+  test('a caller-supplied verdict is used verbatim and costs no extra lookup', async () => {
+    mockDbState.customer = { id: 'cust-1', pipeline_stage: 'active_customer', monthly_rate: 95, billing_mode: 'per_application' };
+    // The row says per-application, but the caller already resolved "monthly"
+    // for this request — the bundle must agree with the caller, not re-derive.
+    const stripped = await buildPricingBundle(lawnEstimateRow({ customerId: 'cust-1' }), { monthlyBilled: true });
+    expect(collectFlags(stripped)).toEqual([]);
+    // And the converse, against a row that WOULD strip on its own.
+    mockDbState.customer = { id: 'cust-1', pipeline_stage: 'active_customer', monthly_rate: 95, billing_mode: 'monthly_membership' };
+    const flagged = await buildPricingBundle(lawnEstimateRow({ customerId: 'cust-1' }), { monthlyBilled: false });
+    expect(collectFlags(flagged).length).toBeGreaterThan(0);
+  });
+
+  test('a lookup failure cannot desync the bundle from a caller that already resolved', async () => {
+    mockDbState.customer = new Error('connection refused');
+    const bundle = await buildPricingBundle(lawnEstimateRow({ customerId: 'cust-1' }), { monthlyBilled: true });
     expect(collectFlags(bundle)).toEqual([]);
   });
 

@@ -32,6 +32,7 @@
  *   GATE_CALL_REPLAY_EVAL=true  (weekly reviewed-call extraction replay eval)
  *   GATE_ADS_BUDGET_LIVE_PUSH=true (capacity cron pushes budget changes to Google Ads)
  *   GATE_BOOKING_FUNNEL_CANARY=true (alert when /book funnel entries see zero conversions)
+ *   GATE_LLM_DISPATCH_METRICS=true (log dispatcher outcomes + daily exception digest email)
  *   GATE_AUTO_WAVEGUARD_TIER=true (auto-stamp/lapse WaveGuard tier from upcoming recurring coverage)
  *
  * In development, most gates are OPEN by default so you can test locally.
@@ -76,6 +77,17 @@ const gates = {
   // non-'true' value; every merge is journaled and hand-reversible.
   customerDedupeAutoMerge: process.env.GATE_CUSTOMER_DEDUPE_AUTO_MERGE === 'true',
 
+  // Red-pair auto-dismiss (customer-dedupe.js red tier). Red is the
+  // detector's own "two different people sharing a phone" verdict —
+  // different last names AND a positively different address — so those
+  // pairs can never be merged and would otherwise park in the review queue
+  // forever. When on, the same nightly cron upserts a "not a duplicate"
+  // dismissal for every currently-red pair (created_by 'auto:red-tier').
+  // An auto-WRITER like the merge gate above, so opt-in in EVERY
+  // environment. Reversible: delete the dismissal row and the pair
+  // re-surfaces in the queue. Kill switch: unset.
+  customerDedupeAutoDismissRed: process.env.GATE_CUSTOMER_DEDUPE_AUTO_DISMISS_RED === 'true',
+
   // Photo-assessment lead magnets (wavespestcontrol.com/lawn-assessment +
   // /pest-identifier). Public, unauthenticated, and every accepted upload is a
   // paid dual-model vision call — explicit opt-in in EVERY environment, and the
@@ -100,6 +112,15 @@ const gates = {
   // ADAM_PHONE; dev/test must not fire it by accident). Kill switch: unset —
   // the scheduler tick no-ops and nothing else changes.
   bookingFunnelCanary: process.env.GATE_BOOKING_FUNNEL_CANARY === 'true',
+
+  // LLM dispatch observability (2026-07-31): every dispatchWithFallback chain
+  // logs one llm_dispatch_log row, and a daily cron emails ONLY exceptions
+  // (all-providers-failed, fallback-rate spike, policy gone silent) to the
+  // company inbox. Opt-in in EVERY environment (dev/test must not email or
+  // write metrics rows by accident). Kill switch: unset — recording and the
+  // digest email no-op instantly; the daily retention prune keeps running so
+  // existing rows still age out.
+  llmDispatchMetrics: process.env.GATE_LLM_DISPATCH_METRICS === 'true',
 
   // Hybrid knowledge retrieval (lane A2): vector+FTS+RRF search behind the
   // IB's search_field_intelligence, plus the nightly knowledge-index sync
@@ -789,6 +810,19 @@ const gates = {
   dataHygieneAutoApply:                 process.env.GATE_DATA_HYGIENE_AUTO_APPLY === 'true',
   // Vault decrypt/reveal is explicit opt-in in every shared environment.
   dataHygieneSensitiveReveal: isProd ? process.env.GATE_DATA_HYGIENE_REVEAL === 'true' : false,
+
+  // Inventory unit alias auto-fix (inventory-unit-review.js). Nightly sweep
+  // that clears the unit-review queue's PURE-ALIAS rows only: an
+  // unsupported unit string whose normalization resolves to exactly one
+  // supported, unambiguous unit at conversion factor 1 ("Gallons" -> gal,
+  // "FL OZ" -> fl_oz). Never touches missing-unit or ambiguous-oz rows —
+  // those stay parked for review. An auto-WRITER (products_catalog +
+  // movement audit rows) so, like dataHygieneAutoApply, it is opt-in in
+  // EVERY environment. Kill switch: unset; every fix leaves a
+  // product_inventory_movements audit row (source
+  // 'inventory_unit_review_autofix') and is hand-reversible from the
+  // unit-review tab.
+  inventoryUnitAutofix: process.env.GATE_INVENTORY_UNIT_AUTOFIX === 'true',
 
   // Weekly incident regression eval — replays the incident corpus
   // (server/fixtures/incident-eval/) through the LIVE fact-check gate and

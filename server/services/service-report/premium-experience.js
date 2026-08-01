@@ -1,6 +1,14 @@
 const crypto = require('crypto');
 const db = require('../../models/db');
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
+const { detectServiceLine } = require('./service-line-configs');
+
+// Legacy service_records rows can have a null service_line while
+// service_type still identifies a lawn visit — defaulting them to 'pest'
+// would keep pest-only copy on permanent lawn report links (codex P2 r17).
+function resolveServiceLine(record = {}) {
+  return record.service_line || detectServiceLine(record.service_type) || 'pest';
+}
 
 const PROMPT_VERSION = 'service_report_premium_experience_v1';
 
@@ -150,7 +158,7 @@ function applicationMethod(product = {}, serviceLine = 'pest') {
 }
 
 function normalizeApplication(product = {}, record = {}) {
-  const method = applicationMethod(product, record.service_line || 'pest');
+  const method = applicationMethod(product, resolveServiceLine(record));
   return {
     id: product.id,
     productName: cleanText(product.product_name) || 'Product application',
@@ -254,12 +262,14 @@ function buildAiSummaryPersonalityContext({
   primaryMove,
   findings = [],
   applications = [],
+  serviceLine = 'pest',
   now = new Date(),
 } = {}) {
   const inputHash = sha256(stableStringify({
     aiSummary,
     pressureTrend,
     primaryMove,
+    serviceLine,
     findings: findings.map((finding) => ({
       id: finding.id,
       title: finding.title,
@@ -276,12 +286,18 @@ function buildAiSummaryPersonalityContext({
 
   const mainFinding = [...findings].sort(compareFindingPriority)[0];
   const pressureLine = pressureTrend?.customerSummary || 'Service is complete.';
+  // Dedupe methods (mirrors applicationSummary in ai-summary.js) — two products
+  // sharing broadcast_spray must not read "broadcast spray and broadcast spray".
+  const treatedMethods = [...new Set(applications.map((app) => app.methodLabel.toLowerCase()).filter(Boolean))];
   const treatedLine = applications.length
-    ? `We completed ${applications.map((app) => app.methodLabel.toLowerCase()).filter(Boolean).slice(0, 2).join(' and ')} for this visit.`
+    ? `We completed ${treatedMethods.slice(0, 2).join(' and ')} for this visit.`
     : 'We documented today’s service and recommendations.';
+  const punctuated = (text) => (/[.!?]$/.test(text.trim()) ? text.trim() : `${text.trim()}.`);
   const findingLine = mainFinding
-    ? `${mainFinding.title}${mainFinding.detail ? `. ${mainFinding.detail}` : ''}`
-    : 'No material pest activity was documented today.';
+    ? punctuated(`${mainFinding.title}${mainFinding.detail ? `. ${mainFinding.detail}` : ''}`)
+    : (serviceLine === 'lawn'
+      ? 'Routine lawn care was completed today.'
+      : 'No material pest activity was documented today.');
   const moveLine = primaryMove?.title || 'Keep an eye on the areas documented in this report.';
 
   const variants = {
@@ -301,7 +317,9 @@ function buildAiSummaryPersonalityContext({
         : 'Today’s service is wrapped.',
       body: `${findingLine} ${treatedLine}`,
       bullets: [
-        sourceBacked('Lower pressure is better.', ['pressure_trend']),
+        // "Lower pressure is better" is pest-pressure framing — meaningless on
+        // lawn reports, which have no pressure gauge.
+        serviceLine === 'lawn' ? null : sourceBacked('Lower pressure is better.', ['pressure_trend']),
         primaryMove ? sourceBacked(moveLine, primaryMove.sourceKeys) : null,
       ].filter(Boolean),
     },
@@ -603,7 +621,10 @@ function buildWeatherCallContext({ record } = {}) {
     body = 'A breezy window was recorded during the service and noted with today’s record.';
   } else if ((!Number.isFinite(rain) || rain <= 0.1) && (!Number.isFinite(wind) || wind <= 10)) {
     headline = 'Good treatment window.';
-    body = 'Low rainfall and moderate wind supported exterior application.';
+    // Window-explicit: this card reads the 24-hour capture, and on lawn
+    // reports it sits beside a WEEKLY rain figure — bare "low rainfall"
+    // would contradict a wet week (codex P2 #3093 r7).
+    body = 'Low rainfall in the 24 hours before the visit and moderate wind supported exterior application.';
   }
   return {
     headline,
@@ -669,6 +690,7 @@ async function buildPremiumExperienceContext({
     primaryMove,
     findings: rows.findings,
     applications: rows.applications,
+    serviceLine: resolveServiceLine(record),
     now,
   });
   const propertyDefenseStatus = buildPropertyDefenseStatusContext({
@@ -744,6 +766,7 @@ module.exports = {
         primaryMove,
         findings: normalizedFindings,
         applications: normalizedApplications,
+        serviceLine: resolveServiceLine(record),
         now,
       }),
       primaryMove,

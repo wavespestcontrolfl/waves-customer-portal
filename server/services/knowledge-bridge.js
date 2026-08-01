@@ -146,6 +146,405 @@ function wikiIlikeQuery(term, trustedOnly, limit) {
 // KNOWLEDGE BRIDGE SERVICE
 // ══════════════════════════════════════════════════════════════
 
+// Per-assessment chain of in-flight recommendation runs — see
+// generateAssessmentRecommendations for why runs must be serialized.
+const _recommendationRuns = new Map();
+
+// In-flight generation fence (codex P1 r28+r29): a held email delivery must
+// not treat its sanitize as final while ANY generation can still write
+// different grounded copy afterwards. `_generationRuns` is a REGISTRY —
+// { runId: leaseExpiresAtISO } — so concurrent runs across pods each hold
+// their own entry and a finishing run removes only its own. The lease is
+// short but RENEWED on a heartbeat for as long as the provider chain runs,
+// so a 10-minute dispatch + fallback keeps the fence live, while a crashed
+// process's entry simply expires and can never strand the email.
+const GENERATION_LEASE_MS = 5 * 60 * 1000;
+const GENERATION_LEASE_RENEW_MS = 90 * 1000;
+// Shape contract for a freshly generated recommendation payload (codex P1
+// r37). Scalar fields must be strings when present; recommendations must be
+// an array of plain objects whose documented fields are strings/numbers.
+function recommendationPayloadShapeValid(raw) {
+  const optionalString = (v) => v === undefined || v === null || typeof v === 'string';
+  if (!optionalString(raw.summary) || !optionalString(raw.customerTip) || !optionalString(raw.nextVisitFocus)) return false;
+  if (raw.recommendations !== undefined && raw.recommendations !== null) {
+    if (!Array.isArray(raw.recommendations)) return false;
+    for (const rec of raw.recommendations) {
+      if (!rec || typeof rec !== 'object' || Array.isArray(rec)) return false;
+      if (!optionalString(rec.action) || !optionalString(rec.reason) || !optionalString(rec.timeframe)) return false;
+      if (rec.priority !== undefined && rec.priority !== null
+        && typeof rec.priority !== 'number' && typeof rec.priority !== 'string') return false;
+    }
+  }
+  return true;
+}
+
+function parseStoredRecommendations(value) {
+  try {
+    const parsed = typeof value === 'string' ? JSON.parse(value) : value;
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch { return null; }
+}
+function activeGenerationRuns(stored) {
+  const runs = stored && typeof stored._generationRuns === 'object' && stored._generationRuns
+    ? stored._generationRuns : {};
+  const now = Date.now();
+  const live = {};
+  for (const [id, until] of Object.entries(runs)) {
+    const ts = Date.parse(until);
+    if (Number.isFinite(ts) && ts > now) live[id] = until;
+  }
+  return live;
+}
+function generationInFlight(stored) {
+  return Object.keys(activeGenerationRuns(stored)).length > 0;
+}
+// Locked read-modify-write of the run registry. `mutate(liveRuns)` returns
+// the registry to persist; everything else in the payload is preserved.
+const SEND_SEAL_MS = 2 * 60 * 1000;
+
+// Atomically seal the current copy for an imminent send (codex P1 r39):
+// under the same advisory lock generators register through, verify no
+// active run + the version the caller settled on, then persist a short
+// seal. Generation registration refuses while the seal is unexpired, so no
+// generation can START between the pre-send check and the dispatch.
+async function sealForSend(assessmentId, expectedVersion, computeVersion) {
+  return db.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`lawn_rec_${assessmentId}`]);
+    const row = await trx('lawn_assessments').where({ id: assessmentId }).first('recommendations', 'ai_summary', 'updated_at');
+    if (!row) return false;
+    const stored = parseStoredRecommendations(row.recommendations) || {};
+    if (generationInFlight(stored)) return false;
+    if (computeVersion(row) !== expectedVersion) return false;
+    stored._sendSealUntil = new Date(Date.now() + SEND_SEAL_MS).toISOString();
+    // updated_at participates in the caller's version — do NOT touch it here.
+    await trx('lawn_assessments').where({ id: assessmentId })
+      .update({ recommendations: JSON.stringify(stored) });
+    return true;
+  });
+}
+
+// The seal must outlive a slow dispatch (codex P1 r40): SendGrid's own
+// timeout equals the base TTL, so the sender renews the seal on a heartbeat
+// while sends are in flight and releases it when they settle.
+async function renewSendSeal(assessmentId) {
+  return db.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`lawn_rec_${assessmentId}`]);
+    const row = await trx('lawn_assessments').where({ id: assessmentId }).first('recommendations');
+    const stored = parseStoredRecommendations(row?.recommendations);
+    if (!stored || !stored._sendSealUntil) return false;
+    stored._sendSealUntil = new Date(Date.now() + SEND_SEAL_MS).toISOString();
+    await trx('lawn_assessments').where({ id: assessmentId })
+      .update({ recommendations: JSON.stringify(stored) });
+    return true;
+  });
+}
+
+async function releaseSendSeal(assessmentId) {
+  return db.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`lawn_rec_${assessmentId}`]);
+    const row = await trx('lawn_assessments').where({ id: assessmentId }).first('recommendations');
+    const stored = parseStoredRecommendations(row?.recommendations);
+    if (!stored || stored._sendSealUntil === undefined) return false;
+    delete stored._sendSealUntil;
+    await trx('lawn_assessments').where({ id: assessmentId })
+      .update({ recommendations: JSON.stringify(stored) });
+    return true;
+  });
+}
+
+function sendSealActive(stored) {
+  const t = Date.parse(stored?._sendSealUntil);
+  return Number.isFinite(t) && t > Date.now();
+}
+
+async function updateGenerationRuns(assessmentId, mutate, { respectSendSeal = false } = {}) {
+  return db.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`lawn_rec_${assessmentId}`]);
+    const row = await trx('lawn_assessments').where({ id: assessmentId }).first('recommendations');
+    const stored = parseStoredRecommendations(row?.recommendations) || {};
+    if (respectSendSeal && sendSealActive(stored)) {
+      throw new Error('send seal active — an attachment is being dispatched from the settled copy');
+    }
+    const next = mutate(activeGenerationRuns(stored));
+    if (next && Object.keys(next).length) stored._generationRuns = next;
+    else delete stored._generationRuns;
+    // Legacy scalar marker from the r28 shape — drop it on any touch.
+    delete stored._generationInFlightUntil;
+    delete stored._generationRunId;
+    await trx('lawn_assessments').where({ id: assessmentId })
+      .update({ recommendations: JSON.stringify(stored), updated_at: new Date() });
+    return true;
+  });
+}
+
+// Persist-time guard (codex P1 #3093 r5): the applied-today prompt rule is
+// an instruction, not a guarantee. Text that advises against/defers a product
+// class the technician ALREADY applied on the visit must never be stored —
+// that's the exact AI-vs-technician contradiction this lane exists to kill.
+// EVERY customer-visible applied class is guarded (codex P1 r19 — "hold off
+// on fertilizer" is as much a contradiction as the fungicide case). Each
+// entry pairs a product_category matcher with the customer-facing synonyms
+// the model writes ("active disease treatment", not "fungicide" — r6),
+// stored as pattern SOURCES so the governed builder can compose them.
+const TREATMENT_CLASSES = {
+  fungicide: {
+    category: /fungicid/i,
+    terms: 'fungicid\\w*|fung(?:us|al)\\s+(?:treatment|application|control|spray)|disease\\s+(?:treatment|application|control|spray)',
+  },
+  herbicide: {
+    category: /herbicid/i,
+    // Pre-emergent wording lives here TOO: Prodiamine-class rows persist
+    // product_category 'herbicide' in this repo's catalog (codex P1 r22),
+    // so "hold off on pre-emergent" must match the herbicide class.
+    terms: 'herbicid\\w*|weed\\s+(?:treatment|control|application|killer|spray)|pre[-\\s]?emergent\\w*',
+  },
+  insecticide: {
+    category: /insecticid/i,
+    terms: 'insecticid\\w*|insect\\s+(?:treatment|control|application|spray)|(?:grub|chinch\\s*bug|webworm)\\s+(?:treatment|control|application)',
+  },
+  fertilizer: {
+    category: /fertiliz|micronutrient/i,
+    terms: 'fertiliz\\w*|fertilization|\\bfeeding\\b|micronutrient\\s+(?:application|blend|treatment)',
+  },
+  pre_emergent: {
+    category: /pre[-\s_]?emergent/i,
+    terms: 'pre[-\\s]?emergent\\w*',
+  },
+  // Report-visible soil products (codex P1 r20): CarbonPro-L class rows
+  // persist soil_amendment/biostimulant categories; Hydretain-class rows
+  // persist adjuvant/wetting-agent categories.
+  // Primo Maxx-class rows persist product_category 'pgr' (codex P1 r23).
+  pgr: {
+    category: /\bpgr\b|growth[\s_-]?regulator/i,
+    terms: '\\bpgr\\b|(?:plant\\s+)?growth\\s+regulator\\w*|growth\\s+regulation',
+  },
+  soil_amendment: {
+    category: /soil[\s_-]?amendment|biostimulant|humic/i,
+    terms: 'biostimulant\\w*|soil\\s+amendment\\w*|humic\\s+(?:acid|application)|carbon\\s+(?:application|treatment)',
+  },
+  adjuvant: {
+    category: /adjuvant|wetting[\s_-]?agent|surfactant|moisture[\s_-]?manager/i,
+    terms: 'adjuvant\\w*|wetting\\s+agent\\w*|surfactant\\w*|moisture\\s+manager\\w*',
+  },
+};
+const TREATMENT_CLASS_TERMS = Object.fromEntries(
+  Object.entries(TREATMENT_CLASSES).map(([cls, def]) => [cls, def.terms]),
+);
+
+// Defer-language must GOVERN the treatment decision itself — bare
+// co-occurrence deleted legitimate aftercare like "avoid watering after the
+// herbicide application" and "wait until today's fungicide has dried"
+// (codex P2 r8). Each pattern binds the defer verb/negation directly to the
+// class term (or the class term to a not-needed clause).
+const _governedCache = new Map();
+// Build the governed patterns for ANY term source — class synonyms, an
+// applied product's name variants, or the generic fallback for
+// unresolved-category rows (codex P1 r26).
+function governedRegexForTerms(termSource) {
+  if (_governedCache.has(termSource)) return _governedCache.get(termSource);
+  const CLASS = `(?:${termSource})`;
+  const re = new RegExp([
+    // Strong defer verbs take the class through a small gap: "hold off on
+    // any herbicide", "do not apply fungicide", "skip the fungicide".
+    `\\b(?:defer|hold\\s+off\\s+on|skip|withhold|postpone|do\\s+not\\s+(?:apply|make|use)|don['’]t\\s+(?:apply|make|use))\\s+(?:[\\w'’-]+\\s+){0,2}${CLASS}`,
+    // 'avoid'/'no' must bind to the treatment ITSELF (articles/quantifiers
+    // only) — a free two-word gap deleted legitimate aftercare like "Avoid
+    // watering after herbicide application" (codex P2 r22).
+    `\\bavoid\\s+(?:apply(?:ing)?\\s+)?(?:an?\\s+|another\\s+|more\\s+|any\\s+)?${CLASS}`,
+    `\\bno\\s+(?:additional\\s+|new\\s+|further\\s+|more\\s+)?${CLASS}`,
+    // "before making a fungicide application"
+    `\\bbefore\\s+(?:making|applying)\\s+(?:an?\\s+)?(?:[\\w'’-]+\\s+){0,2}${CLASS}`,
+    // active wait/delay-to-apply forms — "wait to apply fungicide until
+    // disease is confirmed" (codex P1 r13). Bound to the apply verb so
+    // "wait until today's fungicide has dried" still passes.
+    `\\b(?:wait\\s+to|hold\\s+off\\s+on|delay|postpone|refrain\\s+from)\\s+(?:apply(?:ing)?|mak(?:e|ing)|us(?:e|ing))\\s+(?:an?\\s+)?(?:[\\w'’-]+\\s+){0,2}${CLASS}`,
+    // "<class> ... is not needed/warranted/required" — the gap may not
+    // contain another subject, so "Fungicide was applied today, so extra
+    // irrigation is not needed" stays (codex P2 r31).
+    `${CLASS}(?:(?!\\b(?:irrigation|watering|water|mow\\w*|fertiliz\\w*|seed\\w*|aerat\\w*)\\b)[^.!?]){0,50}\\bnot\\s+(?:currently\\s+)?(?:needed|necessary|required|warranted|supported|recommended)\\b`,
+    // passive deferrals — modal, past-tense, and progressive forms: "should
+    // be deferred", "was deferred", "is being postponed" (codex P1 r10+r11)
+    `${CLASS}[^.!?]{0,60}\\b(?:should|could|can|may|will|must|would|shall)\\s+(?:be\\s+)?(?:deferred|delayed|postponed|skipped|avoided|withheld|held\\s+off)\\b`,
+    `${CLASS}[^.!?]{0,60}\\b(?:is|are|was|were|has\\s+been|have\\s+been|being)\\s+(?:being\\s+)?(?:deferred|delayed|postponed|skipped|withheld|held\\s+off)\\b`,
+    // contracted / adverbial negations — "fungicide isn't necessary",
+    // "a fungicide is never warranted right now" (codex P1 r11)
+    `${CLASS}(?:(?!\\b(?:irrigation|watering|water|mow\\w*|fertiliz\\w*|seed\\w*|aerat\\w*)\\b)[^.!?]){0,50}\\b(?:isn['’]t|aren['’]t|wasn['’]t|weren['’]t|never|no\\s+longer)\\s+(?:currently\\s+)?(?:needed|necessary|required|warranted|supported|recommended)\\b`,
+    // modal negations — "fungicide should not be applied until disease is
+    // confirmed", "shouldn't be used" (codex P1 r19)
+    `${CLASS}(?:(?!\\b(?:irrigation|watering|water|mow\\w*|fertiliz\\w*|seed\\w*|aerat\\w*)\\b)[^.!?]){0,50}\\b(?:should|must|can|could|may|will|would|shall)\\s+not\\s+(?:be\\s+)?(?:applied|used|made|needed|necessary)\\b`,
+    `${CLASS}[^.!?]{0,60}\\b(?:shouldn['’]t|mustn['’]t|can['’]t|cannot|won['’]t|wouldn['’]t)\\s+(?:be\\s+)?(?:applied|used|made|needed|necessary)\\b`,
+    // "no <class> is needed", "confirm no fungicide is needed"
+    `\\b(?:confirm|verify)\\s+(?:that\\s+)?no\\s+(?:[\\w'’-]+\\s+){0,2}${CLASS}`,
+    // "do not currently support active disease treatment"
+    `\\bnot\\s+(?:currently\\s+)?(?:support|warrant|recommend)\\w*[^.!?]{0,40}${CLASS}`,
+  ].join('|'), 'i');
+  _governedCache.set(termSource, re);
+  return re;
+}
+
+// Name variants for an applied product — the model defers by NAME too
+// ("Hold off on Celsius WG", "Do not apply more Artavia" — codex P1 r26):
+// full name, name without parentheticals, the distinctive first token, and
+// parenthesized aliases ("(Azoxy)").
+function productNameTermSource(name) {
+  const clean = String(name || '').trim();
+  if (!clean) return null;
+  const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const variants = new Set([esc(clean)]);
+  const base = clean.replace(/\(([^)]*)\)/g, ' ').replace(/\s+/g, ' ').trim();
+  if (base && base !== clean) variants.add(esc(base));
+  const first = base.split(/\s+/)[0] || '';
+  if (/^[A-Za-z][\w-]{4,}$/.test(first)) variants.add(esc(first));
+  // Catalog acronyms the model naturally shortens to — "QP MSM 60DF Turf
+  // Herbicide" becomes "MSM" (codex P1 r32). Pure-alpha uppercase tokens of
+  // 3+ chars only: 'QP'/'SC'/'WG' are too generic, '60DF' carries digits.
+  for (const token of base.split(/\s+/)) {
+    if (/^[A-Z]{3,}$/.test(token)) variants.add(esc(token));
+  }
+  // Distinctive MARKETED tokens inside manufacturer-prefixed names —
+  // "LESCO Stonewall 4FL Prodiamine 40.7% Pre-Emergent Liquid Herbicide"
+  // shortens naturally to "Stonewall" (codex P1 r33). 4+ alpha chars, minus
+  // the generic descriptors that would collide with ordinary lawn copy.
+  for (const token of base.split(/\s+/)) {
+    const word = token.replace(/[^A-Za-z-]/g, '');
+    if (!/^[A-Za-z][A-Za-z-]{3,}$/.test(word)) continue;
+    if (GENERIC_NAME_TOKENS.has(word.toLowerCase())) continue;
+    variants.add(esc(word));
+  }
+  for (const m of clean.matchAll(/\(([^)]+)\)/g)) {
+    const alias = m[1].trim();
+    if (/^[A-Za-z][\w-]{3,}$/.test(alias)) variants.add(esc(alias));
+  }
+  // Token boundaries on EVERY variant (codex P2 r41): an unbounded 'Drive'
+  // (from "Drive XLR8 ...") matched the start of "driveway", so "Avoid
+  // driveway runoff" satisfied the avoid-<product> pattern. \b bounds each
+  // alias as a whole word inside the composed alternation.
+  return [...variants].map((v) => `\\b(?:${v})\\b`).join('|');
+}
+
+// Words that appear in catalog names but are far too generic to guard as a
+// product identity — "Hold off on liquid feeding" must not match a product
+// merely named "... Liquid ...".
+const GENERIC_NAME_TOKENS = new Set([
+  'liquid', 'granular', 'turf', 'lawn', 'grass', 'professional', 'premium', 'select',
+  'ultra', 'plus', 'formula', 'brand', 'blend', 'spray', 'concentrate', 'control',
+  'herbicide', 'fungicide', 'insecticide', 'fertilizer', 'micronutrient', 'weed',
+  'pre-emergent', 'emergent', 'ornamental', 'with', 'and', 'for',
+  // Ordinary recommendation vocabulary (codex P2 r40): "Heritage Action
+  // Fungicide" must not turn "No action is needed from you" into a
+  // product-deferral match. Class terms and the remaining aliases still
+  // guard these products.
+  'action', 'active', 'advance', 'advanced', 'care', 'complete', 'cover',
+  'double', 'triple', 'extra', 'garden', 'general', 'green', 'growth',
+  'healthy', 'home', 'natural', 'power', 'prime', 'protect', 'protection',
+  'quick', 'rapid', 'root', 'season', 'seasonal', 'super', 'total', 'yard',
+  // Common modifiers (codex P2 r42): "LESCO High Manganese Combo" must not
+  // turn "Avoid high-nitrogen fertilizer" into a product match.
+  'high', 'heavy', 'light', 'slow', 'fast', 'strong', 'pure', 'rich',
+  'combo', 'spring', 'summer', 'fall', 'winter', 'early', 'late',
+]);
+
+// Generic fallback terms for applied rows whose category is genuinely
+// unresolved (admin-inventory stores null categories as supported input) —
+// class-phrased deferrals can't be matched for them, so generic
+// treatment-deferral wording is governed instead of skipping the row
+// entirely (codex P1 r26).
+const GENERIC_TREATMENT_TERMS = '(?:today[\'’]s\\s+)?(?:treatment|application)s?\\b';
+
+function contradictsAppliedTreatment(text, appliedClasses) {
+  const t = String(text || '');
+  if (!t || !appliedClasses.length) return false;
+  return appliedClasses.some((cls) => TREATMENT_CLASS_TERMS[cls] && governedRegexForTerms(TREATMENT_CLASS_TERMS[cls]).test(t));
+}
+
+// Products-aware contradiction check: class synonyms + applied product
+// names + (for unresolved-category rows) generic treatment terms.
+function contradictsAppliedProducts(text, appliedProducts) {
+  const t = String(text || '');
+  const rows = Array.isArray(appliedProducts) ? appliedProducts : [];
+  if (!t || !rows.length) return false;
+  if (contradictsAppliedTreatment(t, appliedTreatmentClasses(rows))) return true;
+  for (const row of rows) {
+    const nameSource = productNameTermSource(row.product_name);
+    if (nameSource && governedRegexForTerms(nameSource).test(t)) return true;
+  }
+  // Generic deferrals ("No additional treatment is warranted") contradict
+  // ANY applied product — not just unresolved-category rows (codex P1 r27):
+  // something WAS applied, so governed generic-treatment wording is checked
+  // whenever any application exists.
+  if (governedRegexForTerms(GENERIC_TREATMENT_TERMS).test(t)) return true;
+  return false;
+}
+
+// Strip contradicting content from a parsed recommendations payload.
+// Violating recommendation items are dropped; violating scalar fields fall
+// back to neutral monitoring copy (nextVisitFocus) or are removed so the
+// previously stored value stands (summary/customerTip).
+function appliedTreatmentClasses(appliedProducts) {
+  const rows = appliedProducts || [];
+  const keys = Object.keys(TREATMENT_CLASSES);
+  // A row whose category maps to NO governed class — blank, or an arbitrary
+  // string like 'Uncategorized' that admin-inventory accepts — could BE any
+  // class, and class-phrased copy ("Hold off on fungicide") is covered by
+  // neither the product name nor the generic terms (codex P1 r30+r31).
+  // Conservatively treat unrecognized categories as every governed class.
+  const unrecognized = rows.some((p) => {
+    const cat = String(p.product_category || '').trim();
+    return !cat || !keys.some((cls) => TREATMENT_CLASSES[cls].category.test(cat));
+  });
+  if (unrecognized) return keys;
+  return keys.filter((cls) => rows.some((p) => TREATMENT_CLASSES[cls].category.test(String(p.product_category || ''))));
+}
+
+// Applied-product rows with categories recovered from the catalog: legacy
+// service_products rows can carry a null product_category while product_id
+// still identifies a catalog fungicide/herbicide — the classifier must see
+// the real class or the guard never fires for those visits (codex P2 r18;
+// mirrors attachApprovedReportProductFacts in report-data).
+async function loadAppliedProductsWithCategories(serviceRecordId, knexOrTrx) {
+  const rows = await knexOrTrx('service_products')
+    .where({ service_record_id: serviceRecordId })
+    .select('product_name', 'product_category', 'product_id');
+  const missingIds = [...new Set(rows.filter((r) => !r.product_category && r.product_id).map((r) => String(r.product_id)))];
+  if (!missingIds.length) return rows;
+  // A transient catalog failure must PROPAGATE (codex P1 r21): swallowing it
+  // returns unenriched rows, the classifier misses the applied class, and
+  // both generation and sanitation report success while blind to today's
+  // treatments. Throwing routes the generation run to null/unverified and
+  // the sanitize transaction to its { error } result.
+  const catalogRows = await knexOrTrx('products_catalog').whereIn('id', missingIds).select('id', 'category');
+  const categoryById = new Map(catalogRows.map((c) => [String(c.id), c.category]));
+  return rows.map((r) => ((r.product_category || !r.product_id)
+    ? r
+    : { ...r, product_category: categoryById.get(String(r.product_id)) || r.product_category }));
+}
+
+function sanitizeRecommendationsAgainstTreatment(parsed, appliedProducts) {
+  const rows = Array.isArray(appliedProducts) ? appliedProducts : [];
+  const appliedClasses = appliedTreatmentClasses(rows);
+  // Products-aware: any applied row (even class-less) participates via its
+  // NAME and, for unresolved categories, the generic treatment terms
+  // (codex P1 r26) — so the gate is "any applied products", not "any class".
+  if (!rows.length || !parsed || typeof parsed !== 'object') return { parsed, dropped: 0, appliedClasses };
+  const bad = (text) => contradictsAppliedProducts(text, rows);
+  let dropped = 0;
+  if (Array.isArray(parsed.recommendations)) {
+    parsed.recommendations = parsed.recommendations.filter((rec) => {
+      const hit = bad(`${rec?.action || ''} ${rec?.reason || ''}`);
+      if (hit) dropped += 1;
+      return !hit;
+    });
+  }
+  for (const key of ['summary', 'customerTip']) {
+    if (bad(parsed[key])) { delete parsed[key]; dropped += 1; }
+  }
+  if (bad(parsed.nextVisitFocus)) {
+    parsed.nextVisitFocus = 'Recheck the areas treated today and confirm how the lawn is responding to the applications.';
+    dropped += 1;
+  }
+  return { parsed, dropped, appliedClasses };
+}
+
 const KnowledgeBridge = {
 
   // ────────────────────────────────────────────────────────────
@@ -451,28 +850,160 @@ const KnowledgeBridge = {
   // ────────────────────────────────────────────────────────────
   // generateAssessmentRecommendations — AI-powered recommendations
   // Uses both Claudeopedia protocols + wiki outcome data
-  // Called after lawn assessment is confirmed
+  // Called after lawn assessment is confirmed, and again after service
+  // completion persists the visit's products (grounded regen).
   // ────────────────────────────────────────────────────────────
+  // Deterministic (no-LLM) sanitization of the STORED recommendations
+  // against the visit's applied products — the fallback when the grounded
+  // regeneration fails fast: the confirm-time copy stays customer-visible
+  // (portal + queued PDF) and must not keep a treatment contradiction just
+  // because the replacement generation errored (codex P1 #3093 r13). Same
+  // advisory lock as generation so it can never interleave with a run.
+  async sanitizeStoredRecommendations(assessmentId) {
+    if (!assessmentId) return { changed: false, dropped: 0 };
+    return db.transaction(async (trx) => {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`lawn_rec_${assessmentId}`]);
+      const assessment = await trx('lawn_assessments').where({ id: assessmentId }).first();
+      // An unlinked assessment is UNVERIFIED, not a clean no-op (codex P1
+      // r22): without service_record_id the applied products were never
+      // checked, so callers gating unrecallable sends must keep waiting/
+      // retrying rather than treating this as sanitized.
+      if (!assessment) return { changed: false, dropped: 0, error: 'assessment not found' };
+      if (!assessment.service_record_id) return { changed: false, dropped: 0, error: 'assessment not linked to a service record' };
+      const storedForGates = parseStoredRecommendations(assessment.recommendations);
+      // A live send seal means an attachment is being dispatched from THIS
+      // copy right now (issue #3135 r2). The sanitizer takes the same advisory
+      // lock generators do, but a lock is not a seal check — rewriting
+      // ai_summary/recommendations mid-dispatch recreates exactly the
+      // permanent-report/email divergence the seal exists to prevent. This
+      // path is reachable whenever a caller treats a sealed no-op write as a
+      // generation failure and falls back to sanitizing. Report it as
+      // unverified so gating callers defer instead of treating it as clean.
+      if (sendSealActive(storedForGates)) {
+        return { changed: false, dropped: 0, error: 'send seal active — an attachment is being dispatched from the settled copy' };
+      }
+      // A generation that can still write AFTER this sanitize means the
+      // result is not final — unverified, so held sends keep deferring
+      // (codex P1 r28).
+      if (generationInFlight(storedForGates)) {
+        return { changed: false, dropped: 0, error: 'recommendation generation in flight' };
+      }
+      const appliedProducts = await loadAppliedProductsWithCategories(assessment.service_record_id, trx);
+      let stored;
+      try {
+        stored = typeof assessment.recommendations === 'string'
+          ? JSON.parse(assessment.recommendations)
+          : (assessment.recommendations || null);
+      } catch { stored = null; }
+      // ai_summary is persisted independently of the recommendations payload
+      // — a missing/unparseable payload must not skip the summary check
+      // (codex P1 r17).
+      const summaryContradicts = contradictsAppliedProducts(assessment.ai_summary, appliedProducts);
+      let parsed = stored && typeof stored === 'object' ? stored : null;
+      let dropped = 0;
+      if (parsed) {
+        ({ parsed, dropped } = sanitizeRecommendationsAgainstTreatment(parsed, appliedProducts));
+      }
+      // SANITATION-FINAL marker (codex P1 r35): when the applied set was
+      // authoritatively read and the stored copy is reconciled, that copy is
+      // FINAL — a resumed completion must not re-run the nondeterministic
+      // LLM and overwrite a report whose attachment already went out.
+      // Persisted on BOTH the clean-return and changed paths.
+      if (!dropped && !summaryContradicts) {
+        const already = parsed && parsed._sanitizationFinal === true;
+        if (!already) {
+          const marked = { ...(parsed || {}), _sanitizationFinal: true };
+          await trx('lawn_assessments').where({ id: assessmentId })
+            .update({ recommendations: JSON.stringify(marked), updated_at: new Date() });
+        }
+        return { changed: false, dropped: 0 };
+      }
+      const update = { updated_at: new Date() };
+      if (summaryContradicts) {
+        update.ai_summary = 'Today’s applications are in place — we’ll track how the lawn responds and adjust at the next visit.';
+        if (parsed) parsed.summary = update.ai_summary;
+      }
+      if (parsed) {
+        parsed._sanitizationFinal = true;
+        update.recommendations = JSON.stringify(parsed);
+      } else {
+        update.recommendations = JSON.stringify({ _sanitizationFinal: true });
+      }
+      await trx('lawn_assessments').where({ id: assessmentId }).update(update);
+      logger.warn(`[knowledge-bridge] stored recommendations sanitized for assessment ${assessmentId} (${dropped} field(s) dropped${summaryContradicts ? ', summary neutralized' : ''})`);
+      return { changed: true, dropped };
+    }).catch((err) => {
+      logger.error(`[knowledge-bridge] sanitizeStoredRecommendations failed: ${err.message}`);
+      // error (not a clean no-op): callers gating unrecallable sends must
+      // treat this as NOT-verified and defer (codex P1 r17).
+      return { changed: false, dropped: 0, error: err.message };
+    });
+  },
+
   async generateAssessmentRecommendations(assessmentId) {
+    // Serialize runs per assessment: the confirm-time run can still be in
+    // flight when the post-completion grounded regen starts, and both write
+    // lawn_assessments.recommendations unconditionally — unserialized, the
+    // stale ungrounded result could land last (codex P1 #3093 r2). The
+    // in-process chain orders same-instance callers; the Postgres advisory
+    // lock inside the inner run orders callers ACROSS instances (rolling
+    // deploys briefly run two — codex P1 r8; in-process maps alone are
+    // documented as insufficient in this repo). Callers that need a bounded
+    // wait race this promise themselves — the run always completes and
+    // writes, so a late grounded correction still heals the stored copy.
+    const prev = _recommendationRuns.get(assessmentId) || Promise.resolve();
+    const run = prev.catch(() => {}).then(() => this._generateAssessmentRecommendationsInner(assessmentId));
+    _recommendationRuns.set(assessmentId, run);
+    run.finally(() => {
+      if (_recommendationRuns.get(assessmentId) === run) _recommendationRuns.delete(assessmentId);
+    }).catch(() => {});
+    return run;
+  },
+
+  async _generateAssessmentRecommendationsInner(assessmentId) {
+    // Static context (customer, grass, Claudeopedia/wiki entries) is read
+    // BEFORE the transaction on the normal pool — inside the lock every
+    // query must go through trx, because pooled reads while holding the
+    // transaction's connection are nested pool acquisition and can exhaust
+    // the pool under bursts (codex P1 r11). These reads don't need lock
+    // freshness; the assessment + product rows are re-read inside the lock.
+    // Register THIS run in the durable fence BEFORE any context reads
+    // (codex P1 r38): a held-delivery worker checking the fence during the
+    // context-loading window must see the run, or it can send an attachment
+    // the about-to-register generator then overwrites. Registration failure
+    // fails the run — generating outside the fence is never allowed.
+    const runId = `${process.pid}-${Date.now()}-${Math.round(Math.random() * 1e9)}`;
+    const liftFence = () => updateGenerationRuns(assessmentId, (runs) => {
+      const next = { ...runs };
+      delete next[runId];
+      return next;
+    }).catch((clearErr) => logger.warn(`[knowledge-bridge] generation fence clear failed for ${assessmentId}: ${clearErr.message}`));
     try {
-      const assessment = await db('lawn_assessments').where({ id: assessmentId }).first();
-      if (!assessment) return null;
-
-      const customer = await db('customers').where({ id: assessment.customer_id }).first();
-
+      await updateGenerationRuns(assessmentId, (runs) => ({
+        ...runs,
+        [runId]: new Date(Date.now() + GENERATION_LEASE_MS).toISOString(),
+      }), { respectSendSeal: true });
+    } catch (regErr) {
+      logger.warn(`[knowledge-bridge] generation fence registration failed for ${assessmentId} — failing run: ${regErr.message}`);
+      return null;
+    }
+    let context;
+    try {
+      const preAssessment = await db('lawn_assessments').where({ id: assessmentId }).first();
+      if (!preAssessment) { await liftFence(); return null; }
+      const customer = await db('customers').where({ id: preAssessment.customer_id }).first();
       // Grass context lives on customer_turf_profiles, not customers.
       // track_key is the protocol track id (e.g. 'st_augustine'); it may be
       // null when the customer has no turf profile yet.
-      const grassContext = await loadCustomerGrassContext(assessment.customer_id);
+      const grassContext = await loadCustomerGrassContext(preAssessment.customer_id);
       const grassType = grassContext.grassTypeLabel || 'St. Augustine';
       const grassTrack = grassContext.trackKey || null;
-
-      // Pull relevant Claudeopedia entries (protocols, product info)
+      // Pull relevant Claudeopedia entries (protocols, product info).
+      // Wiki-sync MIRRORS inherit the wiki's review gate (customer-visible
+      // recs); merely-linked curated articles stay visible.
       const protocolEntries = await db('knowledge_base')
         .whereIn('category', ['protocol', 'product', 'lawn_care', 'seasonal'])
         .where({ status: 'active' })
-        // Wiki-sync MIRRORS inherit the wiki's review gate (customer-visible
-        // recs); merely-linked curated articles stay visible.
         .whereNot(function untrustedWikiMirror() {
           this.where('source', 'wiki-sync').whereIn(
             'wiki_entry_id',
@@ -486,10 +1017,8 @@ const KnowledgeBridge = {
         })
         .select('title', 'content', 'category')
         .limit(10);
-
-      // Pull relevant wiki outcome data (what's actually worked)
-      // Trusted pages only — these feed customer-visible recommendations,
-      // so red pages awaiting review are excluded (exception-based gate).
+      // Trusted wiki outcome pages only — these feed customer-visible
+      // recommendations (exception-based gate).
       const outcomeEntries = await db('knowledge_entries')
         .whereIn('review_status', TRUSTED_STATUSES)
         .where(function () {
@@ -502,6 +1031,76 @@ const KnowledgeBridge = {
         })
         .select('title', 'summary', 'data_point_count', 'confidence')
         .limit(5);
+      context = { customer, grassType, grassTrack, protocolEntries, outcomeEntries };
+    } catch (ctxErr) {
+      logger.error(`[knowledge-bridge] recommendation context load failed: ${ctxErr.message}`);
+      await liftFence();
+      return null;
+    }
+    // Cross-process safety WITHOUT holding a connection across the LLM call
+    // (codex P1 r8+r27): the advisory lock brackets only short DB read/write
+    // transactions — a 10-minute provider wait must never occupy the
+    // 20-connection pool. Ordering is enforced by GROUNDED-WRITE PRECEDENCE
+    // in the write phase instead of lock order: an ungrounded (confirm-time)
+    // result can never overwrite a grounded (completion-time) one, so
+    // interleavings across instances are harmless.
+    const phaseA = await db.transaction(async (trx) => {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`lawn_rec_${assessmentId}`]);
+      const assessment = await trx('lawn_assessments').where({ id: assessmentId }).first();
+      if (!assessment) return null;
+      let appliedProducts = [];
+      // "Verified" = we authoritatively read the visit's application set,
+      // even when that set is legitimately EMPTY (a completed lawn visit may
+      // record no products). Grounding must represent a successful read, not
+      // a non-empty list (codex P1 r33).
+      const applicationsVerified = !!assessment.service_record_id;
+      if (applicationsVerified) {
+        appliedProducts = await loadAppliedProductsWithCategories(assessment.service_record_id, trx);
+      }
+      // Refresh THIS run's lease under the lock (registered pre-context,
+      // codex P1 r38) — other pods' active runs keep their own entries.
+      const stored = parseStoredRecommendations(assessment.recommendations) || {};
+      const runs = activeGenerationRuns(stored);
+      runs[runId] = new Date(Date.now() + GENERATION_LEASE_MS).toISOString();
+      stored._generationRuns = runs;
+      delete stored._generationInFlightUntil;
+      delete stored._generationRunId;
+      await trx('lawn_assessments').where({ id: assessmentId })
+        .update({ recommendations: JSON.stringify(stored), updated_at: new Date() });
+      return { assessment, appliedProducts, applicationsVerified };
+    }).catch((err) => {
+      // A transient read/enrichment failure FAILS the run as ungrounded —
+      // proceeding blind to today's treatments would release every gate
+      // (codex P1 r19/r21).
+      logger.warn(`[knowledge-bridge] recommendation read phase failed for ${assessmentId}: ${err.message}`);
+      return undefined;
+    });
+    if (!phaseA) { await liftFence(); return null; }
+    // Renew this run's lease while the provider chain runs — the fence must
+    // outlast a 10-minute dispatch plus fallback (codex P1 r29).
+    const heartbeat = setInterval(() => {
+      void updateGenerationRuns(assessmentId, (runs) => ({
+        ...runs,
+        [runId]: new Date(Date.now() + GENERATION_LEASE_MS).toISOString(),
+      })).catch((renewErr) => logger.warn(`[knowledge-bridge] generation lease renew failed for ${assessmentId}: ${renewErr.message}`));
+    }, GENERATION_LEASE_RENEW_MS);
+    heartbeat.unref?.();
+    let result = null;
+    try {
+      result = await this._generateAssessmentRecommendationsUnlocked(assessmentId, phaseA, context, runId)
+        .catch((err) => { logger.error(`[knowledge-bridge] recommendation generation failed: ${err.message}`); return null; });
+    } finally {
+      clearInterval(heartbeat);
+    }
+    // Failure after Phase A must LIFT this run's entry (Phase B removes it
+    // on success) — concurrent runs' entries are preserved.
+    if (!result) await liftFence();
+    return result;
+  },
+
+  async _generateAssessmentRecommendationsUnlocked(assessmentId, { assessment, appliedProducts, applicationsVerified }, context, runId) {
+    try {
+      const { customer, grassType, grassTrack, protocolEntries, outcomeEntries } = context;
 
       // Build scores context
       const scores = {
@@ -519,6 +1118,9 @@ const KnowledgeBridge = {
         season: assessment.season,
       };
 
+      // appliedProducts came from the locked Phase A read — the visit's
+      // ACTUAL applications (product rows only; raw technician notes are NOT
+      // parser-approved copy and must not feed customer-facing prompts).
       const month = new Date().getMonth() + 1;
       const monthName = ['January','February','March','April','May','June','July','August','September','October','November','December'][month - 1];
 
@@ -535,10 +1137,14 @@ Current Scores (all 0-100, higher = healthier):
 - Weed Suppression: ${scores.weed_suppression}%
 - Color Health: ${scores.color_health}%${scores.stress_damage != null ? `
 - Stress / Damage (TECH-CONFIRMED, consolidates disease, thatch, insect, drought & mechanical): ${scores.stress_damage}%
-  ↳ Fungus Control ${scores.fungus_control}% and Thatch Level ${scores.thatch_level}% are the AI's raw sub-reads only. When the tech-confirmed Stress/Damage is healthy, do NOT recommend fungicide/dethatch treatments those raw sub-reads might otherwise imply; when it is low but fungus/thatch look fine, the damage is drought/mechanical/insect — recommend accordingly.` : `
+  ↳ Fungus Control ${scores.fungus_control}% and Thatch Level ${scores.thatch_level}% are the AI's raw sub-reads only. When the tech-confirmed Stress/Damage is healthy, do NOT recommend NEW fungicide/dethatch treatments those raw sub-reads might otherwise imply (but never contradict an application that already happened today — see the applied-today rule below); when it is low but fungus/thatch look fine, the damage is drought/mechanical/insect — recommend accordingly.` : `
 - Fungus Control: ${scores.fungus_control}%
 - Thatch Level: ${scores.thatch_level}%`}
 - Observations: ${scores.observations || 'None'}
+${appliedProducts.length ? `
+Applied TODAY on this visit (already done — authoritative):
+${appliedProducts.map((p) => `- ${p.product_name}${p.product_category ? ` (${p.product_category})` : ''}`).join('\n')}
+HARD RULE: these applications have already been made. Never recommend against, question, or defer a product class applied today (no "before making a fungicide application" when a fungicide was applied) — frame follow-up as monitoring the lawn's response to today's treatment.` : ''}
 
 Protocol References (from Claudeopedia):
 ${protocolEntries.map(e => `[${e.category}] ${e.title}: ${(e.content || '').substring(0, 300)}`).join('\n')}
@@ -560,16 +1166,105 @@ Return a JSON object with:
       if (!result) return null;
 
       try {
-        const parsed = JSON.parse(result.replace(/```json|```/g, '').trim());
+        const raw = JSON.parse(result.replace(/```json|```/g, '').trim());
+        // A provider can return valid JSON of the WRONG shape (string,
+        // array, number). The sanitizer passes non-objects through and the
+        // grounded flag / neutralized summary cannot be represented on them,
+        // so the completion handler would mark a garbage result grounded
+        // (codex P1 r32). Treat a non-plain-object as a failed run.
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+          logger.warn(`[knowledge-bridge] recommendation payload for ${assessmentId} was not a JSON object — failing run as ungrounded`);
+          return null;
+        }
+        // Nested shapes too (codex P1 r37): an object-valued summary /
+        // customerTip stringifies to "[object Object]" in the completion
+        // SMS, and string entries in recommendations bypass the sanitizer's
+        // per-field guards — none of that may release the artifact gates as
+        // "grounded". Documented scalar fields must be strings (or absent)
+        // and recommendations an array of plain objects with string fields.
+        if (!recommendationPayloadShapeValid(raw)) {
+          logger.warn(`[knowledge-bridge] recommendation payload for ${assessmentId} had malformed nested fields — failing run as ungrounded`);
+          return null;
+        }
 
-        // Save to assessment
-        await db('lawn_assessments').where({ id: assessmentId }).update({
-          ai_summary: parsed.summary,
-          recommendations: JSON.stringify(parsed),
-          updated_at: new Date(),
+        // Model output advising against a product class applied today must
+        // never persist (codex P1 r5) — the prompt rule is not a guarantee.
+        const { parsed, dropped } = sanitizeRecommendationsAgainstTreatment(raw, appliedProducts);
+        if (dropped) {
+          logger.warn(`[knowledge-bridge] dropped ${dropped} treatment-contradicting field(s) from recommendations for assessment ${assessmentId}`);
+        }
+
+        // Phase B — SHORT locked write with grounded precedence: an
+        // ungrounded (no-applied-products) result must never overwrite a
+        // grounded one, regardless of which instance's LLM call finished
+        // last (codex P1 r8+r27). The stale-summary check runs against the
+        // FRESH row inside the lock.
+        // Grounded = the application set was authoritatively read (empty
+        // counts); an unlinked assessment is not (codex P1 r33).
+        const iAmGrounded = !!applicationsVerified;
+        return await db.transaction(async (trx) => {
+          await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`lawn_rec_${assessmentId}`]);
+          const fresh = await trx('lawn_assessments').where({ id: assessmentId }).first();
+          if (!fresh) return null;
+          const existing = parseStoredRecommendations(fresh.recommendations);
+          // Sanitation-final copy has the same precedence as grounded
+          // (codex P1 r39): it was reconciled against the authoritative
+          // application set, and a late ungrounded confirm-time result
+          // must not replace it after the lease expired.
+          const existingGrounded = !!(existing && (existing._groundedInApplications || existing._sanitizationFinal));
+          // Runs still active besides this one keep the fence up on the
+          // payload this write produces (codex P1 r29).
+          const remainingRuns = activeGenerationRuns(existing);
+          delete remainingRuns[runId];
+          // The send seal OUTRANKS grounding (issue #3135). Only new-run
+          // registration consulted the seal, so a run whose lease expired
+          // mid-flight could still land here while a dispatch is reading this
+          // exact copy — and an emailed attachment is unrecallable. Discard
+          // this result rather than defer it: deferring only moves the
+          // divergence later, leaving the permanent report disagreeing with
+          // what the customer was already mailed. The fence entry still
+          // clears, and updated_at is deliberately NOT bumped because it
+          // participates in the sealing caller's version.
+          if (sendSealActive(existing)) {
+            logger.warn(`[knowledge-bridge] recommendation write for ${assessmentId} discarded — send seal active (an attachment is dispatching from the settled copy)`);
+            const kept = { ...(existing || {}) };
+            if (Object.keys(remainingRuns).length) kept._generationRuns = remainingRuns;
+            else delete kept._generationRuns;
+            delete kept._generationInFlightUntil;
+            delete kept._generationRunId;
+            await trx('lawn_assessments').where({ id: assessmentId })
+              .update({ recommendations: JSON.stringify(kept) });
+            return null;
+          }
+          if (existingGrounded && !iAmGrounded) {
+            logger.info(`[knowledge-bridge] ungrounded recommendation result for ${assessmentId} discarded — grounded copy already stored`);
+            const kept = { ...existing };
+            if (Object.keys(remainingRuns).length) kept._generationRuns = remainingRuns;
+            else delete kept._generationRuns;
+            delete kept._generationInFlightUntil;
+            delete kept._generationRunId;
+            await trx('lawn_assessments').where({ id: assessmentId })
+              .update({ recommendations: JSON.stringify(kept), updated_at: new Date() });
+            return null;
+          }
+          // When the replacement summary was stripped, "keep the stored one"
+          // is only safe if the STORED one doesn't contradict today's
+          // treatment (codex P1 r7) — checked against the fresh row.
+          if (!parsed.summary && contradictsAppliedProducts(fresh.ai_summary, appliedProducts)) {
+            parsed.summary = 'Today’s applications are in place — we’ll track how the lawn responds and adjust at the next visit.';
+          }
+          parsed._groundedInApplications = iAmGrounded;
+          if (Object.keys(remainingRuns).length) parsed._generationRuns = remainingRuns;
+          await trx('lawn_assessments').where({ id: assessmentId }).update({
+            ...(parsed.summary ? { ai_summary: parsed.summary } : {}),
+            recommendations: JSON.stringify(parsed),
+            updated_at: new Date(),
+          });
+          return parsed;
+        }).catch((writeErr) => {
+          logger.error(`[knowledge-bridge] recommendation write phase failed for ${assessmentId}: ${writeErr.message}`);
+          return null;
         });
-
-        return parsed;
       } catch (parseErr) {
         logger.error(`[knowledge-bridge] Failed to parse recommendations: ${parseErr.message}`);
         return null;
@@ -752,3 +1447,30 @@ Return a JSON object with:
 };
 
 module.exports = KnowledgeBridge;
+module.exports._test = { sanitizeRecommendationsAgainstTreatment, contradictsAppliedTreatment, contradictsAppliedProducts, appliedTreatmentClasses, generationInFlight, activeGenerationRuns, recommendationPayloadShapeValid, sendSealActive };
+// Pure render-time guard surface (no DB, no LLM) — consumed by report-data
+// as the last line of defense for instantly opened report links.
+module.exports.sealRecommendationsForSend = sealForSend;
+module.exports.renewRecommendationSendSeal = renewSendSeal;
+module.exports.releaseRecommendationSendSeal = releaseSendSeal;
+module.exports.treatmentGuard = {
+  sanitizeRecommendationsAgainstTreatment,
+  contradictsAppliedTreatment,
+  contradictsAppliedProducts,
+  appliedTreatmentClasses,
+  // Durable fence read for render paths (codex P1 r30) — no lock needed, a
+  // stale-true only costs one extra fresh render.
+  async isGenerationInFlight(assessmentId, knex = db) {
+    if (!assessmentId) return false;
+    try {
+      const row = await knex('lawn_assessments').where({ id: assessmentId }).first('recommendations');
+      return generationInFlight(parseStoredRecommendations(row?.recommendations));
+    } catch (err) {
+      // FAIL CLOSED (codex P1 r32): a transient read failure must not read
+      // as "nothing generating" — that would let a render clear the
+      // correction marker while a generator is still able to write.
+      logger.warn(`[knowledge-bridge] generation-fence read failed for ${assessmentId} — assuming in flight: ${err.message}`);
+      return true;
+    }
+  },
+};

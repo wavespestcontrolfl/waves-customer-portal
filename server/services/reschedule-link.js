@@ -30,7 +30,7 @@ const { portalUrl } = require('../utils/portal-url');
 const { shortenOrPassthrough } = require('./short-url');
 
 function smsLineFor(url) {
-  return url ? `Need a different time? Reschedule online: ${url}\n\n` : '';
+  return url ? `Reschedule here: ${url}\n\n` : '';
 }
 
 async function buildRescheduleLink(scheduledServiceId, { customerId = null } = {}) {

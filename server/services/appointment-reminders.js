@@ -17,10 +17,11 @@ const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { readCachedLineType, cacheLineType } = require('./messaging/validators/line-type');
 const { getAppointmentContacts, isServiceContactRole, firstNameFrom, PREFS_UNAVAILABLE } = require('./customer-contact');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
-const { TZ, parseETDateTime, formatETDay, formatETDate, formatETTime, etDateString, addETDays } = require('../utils/datetime-et');
+const { TZ, parseETDateTime, formatETDay, formatETDate, formatETTime, etDateString, addETDays, etParts } = require('../utils/datetime-et');
 const AppointmentEmail = require('./appointment-email');
 const NotificationService = require('./notification-service');
 const { buildRescheduleLink } = require('./reschedule-link');
+const { buildAppointmentLink } = require('./appointment-link');
 
 // Service states for which a reminder must never fire. A reminder row can be
 // armed (cancelled=false) while its underlying scheduled_service moved into one
@@ -379,6 +380,55 @@ async function renderTemplate(templateKey, vars, context = {}) {
   return null;
 }
 
+// Appointment-page copy ladder (GATE_APPOINTMENT_PAGE). The _v2 rows are
+// the short link-first bodies that point at /appointment/:token — the same
+// gate that makes that page reachable, so copy and destination can never
+// go live apart. Semantics mirror the rain-out v3 ladder:
+//   - gate off            -> render the original row, unchanged;
+//   - _v2 renders         -> use it;
+//   - _v2 row ABSENT      -> rolled-back migration, fall back to the
+//                            original so the customer still gets a text;
+//   - _v2 row DISABLED    -> that is the ops kill switch: return null so
+//                            the send stops rather than silently reverting
+//                            to long copy the operator just turned off.
+// v2Vars is a lazy async FACTORY, not an object: building the v2 vars mints
+// a never-expiring appointment short link, so it must run only when the v2
+// body will actually render — gate on AND the row present and active. An
+// eager build minted an unreachable short_codes row on every legacy send
+// and every email-only delivery (codex r2).
+async function renderAppointmentPageTemplate(baseKey, v2VarsFactory, legacyVars, context = {}) {
+  if (process.env.GATE_APPOINTMENT_PAGE === 'true') {
+    const v2Key = `${baseKey}_v2`;
+    // Fail-soft like renderTemplate: a transient DB error here must not
+    // escape — the confirmation path would mark the reminder sent without
+    // delivering, and the call-booking path would skip its card-request
+    // funnel. Unknowable v2 state = stop this send (same direction as the
+    // kill switch: never guess between v2 and legacy copy).
+    let row;
+    try {
+      row = await db('sms_templates').where({ template_key: v2Key }).first('id', 'is_active');
+    } catch (err) {
+      logger.warn(`[appt-remind] ${v2Key} state lookup failed (${err.message}) - skipping send rather than guessing`);
+      return null;
+    }
+    if (row) {
+      if (row.is_active === false) {
+        logger.warn(`[appt-remind] ${v2Key} disabled - skipping send rather than reverting to legacy copy`);
+        return null;
+      }
+      const body = await renderTemplate(v2Key, await v2VarsFactory(), context);
+      if (body) return body;
+      // Active row that failed to render (audited upstream) keeps the same
+      // stop-don't-revert semantics as the kill switch.
+      logger.warn(`[appt-remind] ${v2Key} did not render - skipping send rather than reverting to legacy copy`);
+      return null;
+    }
+    // Row absent = rolled-back migration; fall back so the customer still
+    // gets a text.
+  }
+  return renderTemplate(baseKey, legacyVars, context);
+}
+
 async function renderRequiredTemplate(templateKey, vars, context = {}) {
   try {
     if (typeof smsTemplatesRouter.getTemplate === 'function') {
@@ -396,6 +446,49 @@ async function renderRequiredTemplate(templateKey, vars, context = {}) {
 const formatDay = formatETDay;
 const formatDate = formatETDate;
 const formatTime = formatETTime;
+
+// The customer-facing arrival phrase ("between 8:00 AM and 10:00 AM") for the
+// {window} placeholder in the 72h/24h reminders. Delegates to
+// spokenArrivalWindow so this and TwilioService.sendServiceReminder cannot
+// drift — getTemplate suppresses the whole SMS on an unresolved placeholder,
+// so every reminder sender must supply {window} the same way.
+// Pure ET clock math (never wall-clock arithmetic on the Date), so a DST
+// boundary can't stretch or shrink the quoted window.
+function formatArrivalWindow(apptTime) {
+  const { spokenArrivalWindow, UNKNOWN_ARRIVAL_WINDOW } = require('../utils/sms-time-format');
+  try {
+    const { hour, minute } = etParts(apptTime);
+    return spokenArrivalWindow(`${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`);
+  } catch {
+    return UNKNOWN_ARRIVAL_WINDOW;
+  }
+}
+
+// The {window} value for appointment_confirmation_v2. All THREE confirmation
+// senders (this file, call-recording-processor, estimate-public) resolve it
+// here so they cannot drift the way {time} did: estimate acceptance was
+// passing an arrival RANGE into {time} while the other two passed an exact
+// start, so the same placeholder meant two different things (codex r9).
+// window_start off the booked row is the canonical source — the call
+// pipeline's EXTRACTED preferred time can differ from what was actually
+// booked, and the row exists at render time on every path (codex r4/r5).
+// Fail-soft by construction: spokenArrivalWindow returns the UNKNOWN phrase
+// rather than null, so a missing or unreadable window degrades the sentence
+// instead of leaving {window} unresolved — an unresolved placeholder makes
+// getTemplate suppress the ENTIRE message.
+async function confirmationArrivalWindow({ scheduledServiceId = null, windowStart = null } = {}) {
+  const { spokenArrivalWindow, UNKNOWN_ARRIVAL_WINDOW } = require('../utils/sms-time-format');
+  try {
+    let start = windowStart;
+    if (!start && scheduledServiceId) {
+      const row = await db('scheduled_services').where({ id: scheduledServiceId }).first('window_start');
+      start = row?.window_start || null;
+    }
+    return spokenArrivalWindow(String(start || '').slice(0, 5));
+  } catch {
+    return UNKNOWN_ARRIVAL_WINDOW;
+  }
+}
 
 // Admin-disambiguation parentheticals only — frequency words ("Monthly",
 // "Bi-Monthly", "Semiannual"), interval phrases ("Every 6 Weeks"), and
@@ -855,7 +948,6 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
       // Self-serve reschedule deep link — one mint shared by the SMS clause
       // and the email CTA. Best-effort: a null link renders clean copy.
       const reschedule = await buildRescheduleLink(scheduledServiceId, { customerId });
-
       // Honor the customer's channel preference (sms | email | both). The
       // 'sms' default is unchanged: SMS first, email fallback on failure.
       const sent = await deliverAppointmentNotice({
@@ -868,8 +960,27 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
         rescheduleUrl: reschedule.url,
         smsAttempt: () => safeSendAppointment(customer, prefs.raw, async (contact) => {
           const firstName = firstNameFrom(contact.name) || customer.first_name || 'there';
-          return renderTemplate(
+          return renderAppointmentPageTemplate(
             'appointment_confirmation',
+            async () => {
+              // Confirm-first label ONLY when there is something to confirm:
+              // a self-booked visit is inserted already confirmed
+              // (routes/booking.js), and asking that customer to "view and
+              // confirm" points at a page with no Confirm button.
+              const svcRow = await db('scheduled_services')
+                .where({ id: scheduledServiceId })
+                .first('status', 'customer_confirmed');
+              const alreadyConfirmed = String(svcRow?.status || '').toLowerCase() === 'confirmed'
+                || !!svcRow?.customer_confirmed;
+              const appointmentLink = await buildAppointmentLink(scheduledServiceId, {
+                customerId,
+                label: alreadyConfirmed ? 'Everything about your visit' : 'View and confirm your appointment',
+              });
+              // {window}, not {time} — the v2 body quotes the 2-hour arrival
+              // promise, and every sender resolves it through the one helper.
+              const window = await confirmationArrivalWindow({ scheduledServiceId });
+              return { first_name: firstName, service_type: serviceLabel, date, time, day, window, appointment_line: appointmentLink.line };
+            },
             { first_name: firstName, service_type: serviceLabel, date, time, day, reschedule_line: reschedule.line },
             { workflow: 'appointment_confirmation', entity_type: 'scheduled_service', entity_id: scheduledServiceId },
           );
@@ -1594,7 +1705,7 @@ const AppointmentReminders = {
                 const firstName = firstNameFrom(contact.name) || customer?.first_name || 'there';
                 return renderTemplate(
                   'reminder_72h',
-                  { first_name: firstName, service_type: serviceLabel, day, date, time, reschedule_line: reschedule.line, card_hold_policy_line: cardHoldPolicyLine72 },
+                  { first_name: firstName, service_type: serviceLabel, day, date, time, window: formatArrivalWindow(apptTime), reschedule_line: reschedule.line, card_hold_policy_line: cardHoldPolicyLine72 },
                   { workflow: 'appointment_reminder_72h', entity_type: 'scheduled_service', entity_id: r.scheduled_service_id },
                 );
               }, 'reminder_72h', 'appointment_reminder_72h', { scheduled_service_id: r.scheduled_service_id }),
@@ -1682,9 +1793,19 @@ const AppointmentReminders = {
               rescheduleUrl: reschedule.url,
               smsAttempt: () => safeSendAppointment(customer, prefs.raw, async (contact) => {
                 const firstName = firstNameFrom(contact.name) || customer?.first_name || 'there';
-                return renderTemplate(
+                return renderAppointmentPageTemplate(
                   'reminder_24h',
-                  { first_name: firstName, service_type: serviceLabel, time, reschedule_line: reschedule.line, card_hold_policy_line: cardHoldPolicyLine24 },
+                  // v2: the page carries the detail — body keeps the arrival
+                  // window + fee disclosure and hands off to the link.
+                  // BOTH var sets carry {window} AND {time}: getTemplate
+                  // suppresses the whole SMS on an unresolved placeholder,
+                  // and this render must survive either body shape (v2 or
+                  // legacy) plus an admin edit that reintroduces {time}.
+                  async () => {
+                    const appointment24 = await buildAppointmentLink(r.scheduled_service_id, { customerId: r.customer_id });
+                    return { first_name: firstName, service_type: serviceLabel, time, window: formatArrivalWindow(apptTime), appointment_line: appointment24.line, card_hold_policy_line: cardHoldPolicyLine24 };
+                  },
+                  { first_name: firstName, service_type: serviceLabel, time, window: formatArrivalWindow(apptTime), reschedule_line: reschedule.line, card_hold_policy_line: cardHoldPolicyLine24 },
                   { workflow: 'appointment_reminder_24h', entity_type: 'scheduled_service', entity_id: r.scheduled_service_id },
                 );
               }, 'appointment_reminder', 'appointment_reminder_24h', { scheduled_service_id: r.scheduled_service_id }),
@@ -2400,5 +2521,13 @@ AppointmentReminders._test = {
 
 // Exposed for unit tests (e.g. the shared line-type cache consolidation).
 AppointmentReminders._internals = { isLandline };
+
+// Shared with the OTHER booking-confirmation senders (estimate acceptance,
+// call pipeline) so gate-on means link-first copy everywhere, not only for
+// this service's own confirmation path.
+AppointmentReminders.renderAppointmentPageTemplate = renderAppointmentPageTemplate;
+// Exported for the other two confirmation senders (call-recording-processor,
+// estimate-public) so all three quote the arrival window identically.
+AppointmentReminders.confirmationArrivalWindow = confirmationArrivalWindow;
 
 module.exports = AppointmentReminders;

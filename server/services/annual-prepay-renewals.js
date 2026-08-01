@@ -115,6 +115,84 @@ function addDaysYmd(value, days) {
   return etDateString(addETDays(parseETDateTime(`${ymd}T12:00`), Number(days || 0)));
 }
 
+// Arrival-time helpers for the operator-promised first-visit window. Accepts
+// 'HH:MM' or a Postgres 'HH:MM:SS' time and normalizes to 'HH:MM'; anything
+// unparseable returns null so the visit falls back to the windowless default.
+// Appointment windows START ON THE HOUR (owner rule, AGENTS.md) — an :15/:30
+// start is rejected here rather than relying on the input's `step`, so the API
+// and the UI can't disagree. window_end is duration-driven and may legitimately
+// land off-hour.
+function normalizeWindowStart(value) {
+  const match = /^(\d{1,2}):(\d{2})/.exec(String(value == null ? '' : value).trim());
+  if (!match) return null;
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  if (hours < 0 || hours > 23 || minutes !== 0) return null;
+  return `${String(hours).padStart(2, '0')}:00`;
+}
+
+// Current Eastern wall-clock time as 'HH:MM' — used to refuse a promised
+// arrival hour that has already elapsed on the payment day.
+function etNowHHMM(date = new Date()) {
+  return new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false,
+  }).format(date);
+}
+
+// window_end must stay DURATION-driven (AGENTS.md), so a start whose job block
+// would cross midnight is rejected rather than clamped into a short visit.
+function addMinutesHHMM(value, minutes) {
+  const start = normalizeWindowStart(value);
+  if (!start) return null;
+  const [hours, mins] = start.split(':').map(Number);
+  const total = hours * 60 + mins + Number(minutes || 0);
+  if (total >= 24 * 60) return null;
+  return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+}
+
+// Conflict guard for a promised first-visit window. Delegates to the canonical
+// occupancy module (AGENTS.md booking-conflict rule + occupancy ordering
+// contract) rather than hand-rolling a predicate: findConflictingVisits is
+// tech-blind — which matters because coverage visits are seeded
+// technician-NULL and tech-scoped WHEREs can't see them — and it already
+// handles live estimate holds and the nullable window_end.
+//
+// `adoptableFor` narrowly ignores the ONE row this coverage would adopt: the
+// same customer's visit of the same coverage service type at that hour, which
+// the exact-date matcher in ensureCoverageRowsForTerm takes over rather than
+// duplicating. The exemption mirrors coverageRowsForTerm's eligibility exactly
+// — a rescheduled/skipped/no-show row is NOT adoptable there, so it must count
+// as occupancy here or the timed insert could overlap it. Every other row —
+// including the same customer's OTHER services, which still can't be performed
+// simultaneously — counts as occupancy. `excludeServiceIds` skips a specific
+// row (the adopted visit itself, when retiming it in place).
+async function findVisitWindowConflict(conn, {
+  scheduledDate, windowStart, durationMinutes = 60, adoptableFor = null, excludeServiceIds = [],
+} = {}) {
+  const date = dateOnly(scheduledDate);
+  const start = normalizeWindowStart(windowStart);
+  const end = addMinutesHHMM(start, durationMinutes);
+  if (!date || !start || !end) return null;
+  const { findConflictingVisits } = require('./scheduling/occupancy');
+  const rows = await findConflictingVisits({
+    db: conn,
+    date,
+    windowStart: start,
+    windowEnd: end,
+    excludeServiceIds,
+  });
+  if (!rows || !rows.length) return null;
+  const customerId = adoptableFor?.customerId || null;
+  const serviceType = adoptableFor?.coverageServiceType || null;
+  if (!customerId || !serviceType) return rows[0];
+  const blocking = rows.filter((row) => !(
+    String(row.customer_id) === String(customerId)
+    && serviceMatchesCoverage(row, serviceType)
+    && !COVERAGE_EXCLUDED_STATUSES.has(String(row.status || '').toLowerCase())
+  ));
+  return blocking.length ? blocking[0] : null;
+}
+
 function daysUntil(fromYmd, toYmd) {
   const from = parseYmd(fromYmd);
   const to = parseYmd(toYmd);
@@ -247,18 +325,57 @@ function splitCoverageAmount(totalDollars, visitCount) {
   ));
 }
 
-function coverageScheduleDates(termStart, visitCount, cadence, termEnd = null) {
+// Anchor the generated coverage series. term_start is the day the prepay
+// invoice was MINTED, but visits are generated when it is PAID — so a
+// mint-to-payment lag used to back-date the first visit (2026-07 regression:
+// an annual prepay paid two days after mint seeded visit 1 of 4 in the past,
+// and a past-dated visit is also silently dropped by the reminder sender).
+// `firstVisitDate` (an operator-promised first service date)
+// wins when present; either way the anchor moves forward to `notBefore`
+// (today) as far as the term window allows.
+// The date the customer is actually expecting the first visit: the operator's
+// promise when one was captured, otherwise the term start (legacy behavior).
+// Payment reminders and the coverage anchor must agree on this or the unpaid
+// reminder names a date the schedule will never use.
+function effectiveFirstVisitDate(term) {
+  return dateOnly(term?.first_visit_date) || dateOnly(term?.term_start);
+}
+
+function coverageSeriesAnchor(termStart, { firstVisitDate = null, notBefore = null } = {}) {
+  const normalizedStart = dateOnly(termStart);
+  if (!normalizedStart) return null;
+  const promised = dateOnly(firstVisitDate);
+  const floor = dateOnly(notBefore);
+  // A promise still in the future is honored exactly — it was validated
+  // against the term window at mint time and the customer was told this date.
+  // A promise that has ALREADY PASSED when payment lands cannot be kept
+  // (seeding it would recreate the past-dated visit this function exists to
+  // prevent) and falls through to the floor.
+  if (promised && promised > normalizedStart && (!floor || promised >= floor)) return promised;
+  let anchor = promised || normalizedStart;
+  // The floor is INVIOLABLE: a visit dated before the payment day can never be
+  // serviced, is skipped by the reminder sender, and reopens the regression
+  // this change fixes. When the term window can't absorb the shift the series
+  // TRUNCATES at term_end instead (coverageScheduleDates' cutoff) and the
+  // seeder logs the shortfall for operator action — a surfaced short schedule
+  // beats a silent unserviceable one.
+  if (floor && anchor < floor) anchor = floor;
+  return anchor < normalizedStart ? normalizedStart : anchor;
+}
+
+function coverageScheduleDates(termStart, visitCount, cadence, termEnd = null, options = {}) {
   const normalizedStart = dateOnly(termStart);
   const count = normalizeCoverageVisitCount(visitCount);
   if (!normalizedStart || !count) return [];
   const schedule = coverageCadenceSchedule(cadence) || coverageCadenceSchedule(inferCoverageCadence({ coverage_visit_count: count }));
   if (!schedule) return [];
+  const anchor = coverageSeriesAnchor(normalizedStart, options) || normalizedStart;
   const normalizedEnd = termEnd ? dateOnly(termEnd) : null;
   const dates = [];
   for (let index = 0; index < count; index++) {
     const date = schedule.unit === 'days'
-      ? addDaysYmd(normalizedStart, index * schedule.value)
-      : addMonthsSameDay(normalizedStart, index * schedule.value);
+      ? addDaysYmd(anchor, index * schedule.value)
+      : addMonthsSameDay(anchor, index * schedule.value);
     if (!date) return [];
     if (normalizedEnd && date > normalizedEnd) break;
     dates.push(date);
@@ -306,20 +423,59 @@ async function coverageRowsForTerm(term, conn = db, { includeTerminalStatuses = 
   return matching.filter((row) => selectedIds.has(row.id));
 }
 
-async function ensureCoverageRowsForTerm(term, conn = db) {
+// A promise made on the phone must never change silently: whenever seeding
+// drops a promised arrival window or moves a promised date, park a durable
+// admin notification (dedupe-keyed per term+reason) alongside the log line so
+// the operator resolves it with the customer. Best-effort — a notification
+// failure never blocks payment activation.
+async function fileCoverageException(term, reason, body) {
+  try {
+    // notifyAdmin does not interpret dedupeKey — enforce it here (same
+    // pattern as appointment-reminders): one open alert per term+reason per
+    // 7 days, so a re-run refresh can't stack duplicates of the same problem.
+    const dedupeKey = `annual-prepay-first-visit:${term?.id}:${reason}`;
+    const existing = await db('notifications')
+      .where({ recipient_type: 'admin' })
+      .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
+      .where('created_at', '>=', db.raw("now() - interval '7 days'"))
+      .first('id')
+      .catch(() => null);
+    if (existing) return;
+    const NotificationService = require('./notification-service');
+    await NotificationService.notifyAdmin(
+      'alert',
+      'Annual prepay: promised first visit needs attention',
+      body,
+      {
+        link: term?.customer_id ? `/admin/customers/${term.customer_id}` : '/admin/dispatch',
+        metadata: {
+          dedupeKey,
+          customer_id: term?.customer_id || null,
+          annual_prepay_term_id: term?.id || null,
+          reason,
+        },
+      },
+    );
+  } catch (err) {
+    logger.warn(`[annual-prepay] coverage exception notification failed for term ${term?.id}: ${err.message}`);
+  }
+}
+
+async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString(), nowHHMM = etNowHHMM() } = {}) {
   const coverageServiceType = normalizeCoverageServiceType(term?.coverage_service_type);
   const coverageVisitCount = normalizeCoverageVisitCount(term?.coverage_visit_count);
   const coverageCadence = inferCoverageCadence(term);
   const termStart = dateOnly(term?.term_start);
   const termEnd = dateOnly(term?.term_end);
-  const targetDates = coverageScheduleDates(termStart, coverageVisitCount, coverageCadence, termEnd);
-  if (!term?.customer_id || !coverageServiceType || !coverageVisitCount || !termStart || !termEnd || !targetDates.length) {
+  // Cheap not-configured guard FIRST: the slide below runs async queries, and
+  // a term with no coverage config (renewal notices, legacy terms) must
+  // return before touching the database at all.
+  if (!term?.customer_id || !coverageServiceType || !coverageVisitCount || !termStart || !termEnd) {
     return { createdCount: 0, targetDates: [], reason: 'coverage_not_configured' };
   }
-
   const cols = await scheduledServiceColumns();
   if (!cols.scheduled_date || !cols.service_type) {
-    return { createdCount: 0, targetDates, reason: 'scheduled_columns_missing' };
+    return { createdCount: 0, targetDates: [], reason: 'scheduled_columns_missing' };
   }
 
   // Only count visits that can actually be stamped prepaid downstream:
@@ -328,7 +484,82 @@ async function ensureCoverageRowsForTerm(term, conn = db) {
   // visit must NOT consume one of the sold coverageVisitCount slots or suppress
   // its generated replacement — otherwise the paid term ends up with fewer
   // covered visits than the admin sold.
-  const existingRows = await coverageRowsForTerm({ ...term, term_start: termStart, term_end: termEnd }, conn);
+  let existingRows = await coverageRowsForTerm({ ...term, term_start: termStart, term_end: termEnd }, conn);
+
+  // The floor and window-slide below apply ONCE, at first activation. This
+  // function also runs on every schedule-edit refresh of an ACTIVE term, and
+  // an always-on today-floor would compound: each later refresh would see a
+  // new positive lag and extend term_end again, indefinitely postponing
+  // renewal while billing stays suppressed. "Already activated" = ANY row was
+  // ever linked to this term (the first activation links its rows via the
+  // seed inserts and attachScheduledServices immediately after) — from then
+  // on this function is a pure gap-filler on the stored window. Checked with
+  // a dedicated any-status query, NOT the eligible coverage set: cancelling
+  // every linked visit must not make a later refresh look like a first
+  // activation and reopen the compounding slide.
+  const alreadyActivated = !!cols.annual_prepay_term_id
+    && !!(await conn('scheduled_services').where({ annual_prepay_term_id: term.id }).first('id'));
+
+  // Seeding runs at PAYMENT time, so the past-date floor is today: a term paid
+  // days after it was minted must not generate a visit that already happened.
+  //
+  // When the floor shifts the anchor, the coverage WINDOW slides with it: the
+  // customer paid for coverageVisitCount visits, and a fixed term_end would
+  // truncate the tail (out-of-window visits are never linked or stamped
+  // prepaid — the customer would pay full price for fewer visits). A late
+  // payer's year of coverage genuinely starts at their first real visit, so
+  // term_end extends by the same lag. Only floor/promise SHIFTS slide the end;
+  // a deliberately short custom term (unshifted anchor) still truncates as
+  // designed.
+  const anchorOptions = {
+    firstVisitDate: term?.first_visit_date || null,
+    notBefore: alreadyActivated ? null : today,
+  };
+  const mintAnchor = coverageSeriesAnchor(termStart, { firstVisitDate: term?.first_visit_date || null }) || termStart;
+  const paidAnchor = coverageSeriesAnchor(termStart, anchorOptions) || termStart;
+  const anchorLagDays = daysUntil(mintAnchor, paidAnchor);
+  let effectiveTermEnd = termEnd;
+  // The slide only happens where it can also be PERSISTED — an in-memory-only
+  // extension would seed visits the stored window doesn't cover.
+  if (!alreadyActivated && anchorLagDays != null && anchorLagDays > 0 && (await annualPrepayColumns(conn)).term_end) {
+    effectiveTermEnd = addDaysYmd(termEnd, anchorLagDays);
+    // Never slide into a successor term: a long-pending invoice can be paid
+    // after the customer already bought the NEXT year, and overlapping paid
+    // windows would let both terms claim the same visits. Cap at the day
+    // before the earliest later term; the resulting shortfall (if any) files
+    // the coverage-shortfall exception below for operator reconciliation.
+    try {
+      // ANY later term caps the slide — status-shape filtering here has
+      // already missed the decided-lapse form (status 'cancelled' +
+      // renewal_decision 'cancel' still counts as paid coverage in
+      // coveredTermsAsOf), and capping on a genuinely dead successor merely
+      // under-extends, which the shortfall exception below surfaces. Being
+      // conservative can't create overlapping paid coverage; being clever can.
+      const successor = await conn('annual_prepay_terms')
+        .where({ customer_id: term.customer_id })
+        .whereNot({ id: term.id })
+        .where('term_start', '>', termEnd)
+        .orderBy('term_start', 'asc')
+        .first('term_start');
+      if (successor && dateOnly(successor.term_start) <= effectiveTermEnd) {
+        effectiveTermEnd = addDaysYmd(dateOnly(successor.term_start), -1);
+        logger.warn(`[annual-prepay] term ${term.id} window slide capped at ${effectiveTermEnd} — successor term starts ${dateOnly(successor.term_start)}`);
+      }
+    } catch (err) {
+      // Fail SAFE: without certainty about successors, don't extend at all.
+      logger.warn(`[annual-prepay] term ${term.id} successor check failed (${err.message}) — coverage window not extended`);
+      effectiveTermEnd = termEnd;
+    }
+  }
+  const targetDates = coverageScheduleDates(termStart, coverageVisitCount, coverageCadence, effectiveTermEnd, anchorOptions);
+  if (!targetDates.length) {
+    return { createdCount: 0, targetDates: [], reason: 'coverage_not_configured' };
+  }
+  // A slid window can newly cover rows between the old and new end — refetch
+  // so tolerance matching sees them instead of seeding alongside.
+  if (effectiveTermEnd !== termEnd) {
+    existingRows = await coverageRowsForTerm({ ...term, term_start: termStart, term_end: effectiveTermEnd }, conn);
+  }
 
   // Existing in-window matching visits (e.g. the customer's pre-existing route)
   // already satisfy coverage even when they don't land on the exact generated
@@ -339,20 +570,35 @@ async function ensureCoverageRowsForTerm(term, conn = db) {
   // visit sitting midway between two cadence dates would suppress both and leave
   // the paid coverage short. The remaining-count cap stops over-seeding when the
   // customer already has at least the sold number of in-window matching visits.
-  const availableExistingDates = existingRows.map((row) => dateOnly(row.scheduled_date)).filter(Boolean);
+  const availableExisting = existingRows.filter((row) => dateOnly(row.scheduled_date));
   const cadenceMonths = coverageCadenceMonths(coverageCadence);
   const cadenceIntervalDays = cadenceMonths ? cadenceMonths * 30 : (coverageCadenceDays(coverageCadence) || 30);
   const slotToleranceDays = Math.max(7, Math.floor(cadenceIntervalDays / 2));
   const remainingToSeed = Math.max(0, coverageVisitCount - existingRows.length);
+  // The first target carries an operator PROMISE when first_visit_date made it
+  // the anchor: only an existing visit on exactly that date may satisfy it (the
+  // call-booked visit the promise refers to). Half-cadence tolerance would let
+  // an unrelated route visit weeks away suppress the promised date entirely —
+  // the customer would be told nothing and nobody would come on the day they
+  // were quoted.
+  const promisedTarget = dateOnly(term?.first_visit_date) === targetDates[0] ? targetDates[0] : null;
+  // The row that satisfied the promised target, if any — it may still need the
+  // promised arrival time applied (an adopted call-booked visit can be
+  // windowless or sitting at a different hour than the operator quoted).
+  let adoptedPromisedRow = null;
   const datesToSeed = [];
   for (const scheduledDate of targetDates) {
     if (datesToSeed.length >= remainingToSeed) break;
-    const matchIndex = availableExistingDates.findIndex((existingDate) => {
+    const exactOnly = scheduledDate === promisedTarget;
+    const matchIndex = availableExisting.findIndex((row) => {
+      const existingDate = dateOnly(row.scheduled_date);
+      if (exactOnly) return existingDate === scheduledDate;
       const diff = daysUntil(existingDate, scheduledDate);
       return diff != null && Math.abs(diff) <= slotToleranceDays;
     });
     if (matchIndex !== -1) {
-      availableExistingDates.splice(matchIndex, 1);
+      const [matched] = availableExisting.splice(matchIndex, 1);
+      if (exactOnly) adoptedPromisedRow = matched;
       continue;
     }
     datesToSeed.push(scheduledDate);
@@ -382,7 +628,59 @@ async function ensureCoverageRowsForTerm(term, conn = db) {
     }
   }
 
-  for (const scheduledDate of datesToSeed) {
+  // An operator-promised arrival time for the FIRST visit (e.g. "Saturday at
+  // 8"). Only the first generated date gets it — the later placeholders stay
+  // windowless on purpose, so dispatch still routes them freely. window_end is
+  // the job block (baseDuration), NOT the customer-facing promise: the 2-hour
+  // arrival window is derived from window_start at display time.
+  let firstVisitWindowStart = normalizeWindowStart(term?.first_visit_window_start);
+  // A start so late its job block would cross midnight can't produce a
+  // duration-driven window_end — drop it rather than store a half-length visit.
+  if (firstVisitWindowStart && !addMinutesHHMM(firstVisitWindowStart, baseDuration)) {
+    logger.warn(`[annual-prepay] term ${term.id} first-visit window ${firstVisitWindowStart} leaves no room for a ${baseDuration}-minute visit — seeding without a window`);
+    firstVisitWindowStart = null;
+  }
+  const firstTargetDate = targetDates[0] || null;
+  // Payment landing on the promised DATE but after the promised HOUR must not
+  // create a window that is already over — it can't be serviced or reminded.
+  // The visit still seeds today, windowless, for the operator to retime.
+  if (firstVisitWindowStart && firstTargetDate === today && firstVisitWindowStart <= nowHHMM) {
+    logger.warn(`[annual-prepay] term ${term.id} promised window ${firstVisitWindowStart} on ${firstTargetDate} has already passed (now ${nowHHMM} ET) — seeding today's visit without a window`);
+    await fileCoverageException(term, 'window_elapsed',
+      `Payment arrived after the promised ${firstVisitWindowStart} arrival time today (${firstTargetDate}). The visit is on the schedule without a time — pick a new time with the customer.`);
+    firstVisitWindowStart = null;
+  }
+
+  // Persist the slid coverage window BEFORE seeding, so the seeded tail is
+  // in-window for every downstream consumer (attachScheduledServices,
+  // applyPrepaidCoverageForTerm, renewal notices — which correctly move out by
+  // the same lag). The in-memory term is mutated too: refreshTermSnapshot
+  // passes this same object to the attach/stamp steps that follow.
+  if (effectiveTermEnd !== termEnd) {
+    await conn('annual_prepay_terms')
+      .where({ id: term.id })
+      .update({ term_end: effectiveTermEnd, updated_at: new Date() });
+    term.term_end = effectiveTermEnd;
+    logger.warn(`[annual-prepay] term ${term.id} paid ${anchorLagDays} day(s) after its anchor — coverage window slid to ${effectiveTermEnd} so all ${coverageVisitCount} sold visits stay in-window`);
+  }
+  // With the window sliding on shift, a shortfall can only mean a deliberately
+  // short custom term — pre-existing behavior, surfaced for the operator.
+  if (targetDates.length < coverageVisitCount) {
+    logger.warn(`[annual-prepay] term ${term.id} only ${targetDates.length} of ${coverageVisitCount} sold visits fit between ${firstTargetDate} and ${dateOnly(term.term_end)} — term needs extending or the remaining visits need manual scheduling`);
+    await fileCoverageException(term, 'coverage_shortfall',
+      `Only ${targetDates.length} of ${coverageVisitCount} paid visits fit inside the coverage window (through ${dateOnly(term.term_end)}). Extend the term or schedule the remaining visit(s) manually.`);
+  }
+  // The operator promised a date that had already passed by the time payment
+  // landed. The series moved forward instead of seeding a visit that can't be
+  // serviced, but somebody has to tell the customer the new date.
+  const promisedFirstVisit = dateOnly(term?.first_visit_date);
+  if (promisedFirstVisit && firstTargetDate && promisedFirstVisit < today && firstTargetDate !== promisedFirstVisit) {
+    logger.warn(`[annual-prepay] term ${term.id} promised first visit ${promisedFirstVisit} had already passed at payment (${today}) — coverage starts ${firstTargetDate} instead; customer needs the new date`);
+    await fileCoverageException(term, 'date_passed',
+      `The promised first visit (${promisedFirstVisit}) had already passed when payment arrived. Coverage now starts ${firstTargetDate} — confirm the new date with the customer.`);
+  }
+
+  const buildInsert = (scheduledDate, windowStart) => {
     const insertData = {
       customer_id: term.customer_id,
       scheduled_date: scheduledDate,
@@ -402,18 +700,217 @@ async function ensureCoverageRowsForTerm(term, conn = db) {
       }
     }
     if (cols.time_window) insertData.time_window = null;
-    if (cols.window_start) insertData.window_start = null;
-    if (cols.window_end) insertData.window_end = null;
+    if (cols.window_start) insertData.window_start = windowStart;
+    if (cols.window_end) insertData.window_end = windowStart ? addMinutesHHMM(windowStart, baseDuration) : null;
     if (cols.technician_id) insertData.technician_id = null;
     if (cols.customer_notes) insertData.customer_notes = null;
     if (cols.estimated_price && seededVisitPrice != null) insertData.estimated_price = seededVisitPrice;
     if (cols.create_invoice_on_complete) insertData.create_invoice_on_complete = true;
+    return insertData;
+  };
 
-    const [created] = await conn('scheduled_services').insert(insertData).returning('*');
+  // The promise was captured when the invoice was minted; the board may have
+  // moved since. The date lock, the conflict read and the timed INSERT must all
+  // sit in ONE transaction (occupancy ordering contract) — pg_advisory_xact_lock
+  // is transaction-scoped, so checking on a bare connection would release the
+  // lock before the insert and let a concurrent booking slip in between. This
+  // path is reached from Stripe activation with the root connection, so open a
+  // transaction when `conn` isn't already one.
+  const seedTimedFirstVisit = async (trx, scheduledDate) => {
+    let windowStart = firstVisitWindowStart;
+    let concurrentAdoptable = null;
+    try {
+      // SAVEPOINT: Postgres aborts the whole transaction on any statement
+      // error, so catching a failed lock/conflict query on `trx` directly would
+      // leave it poisoned and take the surrounding payment activation with it.
+      // A nested transaction rolls back just this probe. The advisory lock is
+      // held by the OUTER transaction once the savepoint commits, so it still
+      // covers the insert below.
+      await trx.transaction(async (sp) => {
+        // TRY-lock, not a blocking acquire: activation already holds
+        // invoice/term row locks here, so reaching rung 1 late and WAITING
+        // could deadlock against a booking that holds the date lock and wants
+        // those rows (AGENTS.md occupancy ordering). Failing to get the lock
+        // degrades to a windowless seed — never an overlap, never a deadlock.
+        const { tryAcquireOccupancyLock } = require('./scheduling/occupancy');
+        if (!(await tryAcquireOccupancyLock(sp, scheduledDate))) {
+          throw new Error('occupancy date lock unavailable');
+        }
+        // datesToSeed was computed BEFORE this lock. A concurrent booking or
+        // payment sync can have committed an adoptable visit on this exact
+        // date in the gap — the conflict filter below would exempt it as
+        // adoptable and an unconditional insert would then DUPLICATE it.
+        // Re-check under the lock and adopt instead of inserting.
+        const sameDay = await sp('scheduled_services')
+          .where({ customer_id: term.customer_id, scheduled_date: scheduledDate })
+          .whereNotIn('status', Array.from(COVERAGE_EXCLUDED_STATUSES))
+          .select('*');
+        concurrentAdoptable = (sameDay || []).find((row) => serviceMatchesCoverage(row, coverageServiceType)) || null;
+        if (concurrentAdoptable) return;
+        const conflict = await findVisitWindowConflict(sp, {
+          scheduledDate,
+          windowStart,
+          durationMinutes: baseDuration,
+          adoptableFor: { customerId: term.customer_id, coverageServiceType },
+        });
+        if (conflict) {
+          logger.warn(`[annual-prepay] term ${term.id} first-visit window ${windowStart} on ${scheduledDate} collides with visit ${conflict.id} — seeding without a window`);
+          windowStart = null;
+        }
+      });
+    } catch (err) {
+      // Fail CLOSED: an unverifiable window must not become an overlapping
+      // timed promise. The visit still seeds on the right date, windowless.
+      logger.warn(`[annual-prepay] term ${term.id} first-visit conflict check failed (${err.message}) — seeding without a window`);
+      windowStart = null;
+      // The savepoint died before its adoption recheck ran (e.g. the date
+      // lock was held by a concurrent booking — which may be creating exactly
+      // the visit we would duplicate). Best-effort unlocked recheck before
+      // inserting; a holder that commits after this read can still slip
+      // through, but a windowless duplicate beats a skipped visit and the
+      // next refresh's tolerance matcher surfaces it.
+      try {
+        const sameDay = await trx('scheduled_services')
+          .where({ customer_id: term.customer_id, scheduled_date: scheduledDate })
+          .whereNotIn('status', Array.from(COVERAGE_EXCLUDED_STATUSES))
+          .select('*');
+        concurrentAdoptable = (sameDay || []).find((row) => serviceMatchesCoverage(row, coverageServiceType)) || null;
+      } catch (recheckErr) {
+        logger.warn(`[annual-prepay] term ${term.id} post-failure adoption recheck failed (${recheckErr.message})`);
+      }
+    }
+    if (concurrentAdoptable) {
+      logger.warn(`[annual-prepay] term ${term.id} found concurrently-created visit ${concurrentAdoptable.id} on ${scheduledDate} under the occupancy lock — adopting it instead of inserting a duplicate`);
+      return null;
+    }
+    if (!windowStart && firstVisitWindowStart) {
+      await fileCoverageException(term, 'window_conflict',
+        `The promised ${firstVisitWindowStart} arrival on ${scheduledDate} now overlaps another job. The visit is on the schedule without a time — re-slot it with the customer.`);
+    }
+    const [row] = await trx('scheduled_services').insert(buildInsert(scheduledDate, windowStart)).returning('*');
+    return row;
+  };
+
+  // An adopted promised-date visit satisfied the slot by DATE alone — it can be
+  // windowless or sitting at a different hour than the operator quoted. Retime
+  // it in place (same lock + conflict shape as the timed insert, the row itself
+  // excluded from its own conflict check) so the promise reaches the board.
+  // Window only — status/technician stay untouched, and no notification path
+  // runs off this direct update.
+  // Retiming works with the adopted row's OWN duration — a 90-minute visit
+  // retimed to 08:00 must block until 09:30, and window_end must reflect it,
+  // or the occupancy predicate would let another job start at 09:00.
+  const adoptedDuration = Number(adoptedPromisedRow?.estimated_duration_minutes) > 0
+    ? Number(adoptedPromisedRow.estimated_duration_minutes)
+    : baseDuration;
+  const retimeAdoptedRow = async (trx) => {
+    const row = adoptedPromisedRow;
+    let windowStart = firstVisitWindowStart;
+    let staleAdoption = false;
+    try {
+      await trx.transaction(async (sp) => {
+        // Same late-rung-1 posture as the timed seed: try, never wait.
+        const { tryAcquireOccupancyLock } = require('./scheduling/occupancy');
+        if (!(await tryAcquireOccupancyLock(sp, promisedTarget))) {
+          throw new Error('occupancy date lock unavailable');
+        }
+        // adoptedPromisedRow is a PRE-lock snapshot. A concurrent reschedule
+        // or completion can have moved or closed the row since — updating by
+        // id would then stamp the promised time onto a different date (never
+        // conflict-checked) or rewrite completed history. Re-read under the
+        // lock and abort unless it is still the visit we matched.
+        const fresh = await sp('scheduled_services').where({ id: row.id }).first();
+        if (!fresh
+          || dateOnly(fresh.scheduled_date) !== promisedTarget
+          || PREPAID_UPDATE_EXCLUDED_STATUSES.has(String(fresh.status || '').toLowerCase())
+          || !serviceMatchesCoverage(fresh, coverageServiceType)) {
+          staleAdoption = true;
+          return;
+        }
+        const conflict = await findVisitWindowConflict(sp, {
+          scheduledDate: promisedTarget,
+          windowStart,
+          durationMinutes: adoptedDuration,
+          excludeServiceIds: [row.id],
+        });
+        if (conflict) {
+          logger.warn(`[annual-prepay] term ${term.id} promised window ${windowStart} on ${promisedTarget} collides with visit ${conflict.id} — leaving adopted visit ${row.id} untimed`);
+          windowStart = null;
+        }
+      });
+    } catch (err) {
+      logger.warn(`[annual-prepay] term ${term.id} adopted-visit window check failed (${err.message}) — leaving visit ${row.id} as-is`);
+      windowStart = null;
+    }
+    if (staleAdoption) {
+      logger.warn(`[annual-prepay] term ${term.id} adopted visit ${row.id} changed under the lock (moved/closed) — leaving it untouched`);
+      await fileCoverageException(term, 'adopted_visit_moved',
+        `The visit matching the promised first service on ${promisedTarget} was moved or completed while payment landed. Confirm the schedule with the customer.`);
+      return;
+    }
+    if (!windowStart) {
+      await fileCoverageException(term, 'adopted_window_conflict',
+        `The promised ${firstVisitWindowStart} arrival on ${promisedTarget} could not be applied to the existing visit (it overlaps another job). Re-slot it with the customer.`);
+      return;
+    }
+    const updates = { updated_at: new Date() };
+    if (cols.window_start) updates.window_start = windowStart;
+    if (cols.window_end) updates.window_end = addMinutesHHMM(windowStart, adoptedDuration);
+    // Stale display fields would keep the dispatch board showing the OLD time
+    // while occupancy and reminders use the new one — clear them so every
+    // surface recomputes from window_start.
+    if (cols.time_window) updates.time_window = null;
+    if (cols.window_display) updates.window_display = null;
+    await trx('scheduled_services').where({ id: row.id }).update(updates);
+  };
+  // Skip when the adopted visit is already completed (or otherwise terminal):
+  // annual prepay collected at the completion appointment can adopt the
+  // just-serviced row, and rewriting its window would corrupt the recorded
+  // history of a job that already happened. Also skip when the promised start
+  // leaves no room for the row's own duration before midnight.
+  const adoptedRetimeable = adoptedPromisedRow
+    && !PREPAID_UPDATE_EXCLUDED_STATUSES.has(String(adoptedPromisedRow.status || '').toLowerCase())
+    && !!addMinutesHHMM(firstVisitWindowStart, adoptedDuration);
+  if (adoptedRetimeable && firstVisitWindowStart
+    && normalizeWindowStart(adoptedPromisedRow.window_start) !== firstVisitWindowStart) {
+    if (conn.isTransaction) await retimeAdoptedRow(conn);
+    else await conn.transaction((trx) => retimeAdoptedRow(trx));
+  }
+
+  for (const scheduledDate of datesToSeed) {
+    const wantsWindow = !!firstVisitWindowStart && scheduledDate === firstTargetDate;
+    let created;
+    if (wantsWindow) {
+      created = conn.isTransaction
+        ? await seedTimedFirstVisit(conn, scheduledDate)
+        : await conn.transaction((trx) => seedTimedFirstVisit(trx, scheduledDate));
+    } else {
+      [created] = await conn('scheduled_services').insert(buildInsert(scheduledDate, null)).returning('*');
+    }
     if (!created) continue;
     createdRows.push(created);
     if (!createdParentId) {
       createdParentId = created.id;
+    }
+  }
+
+  // Persist the anchor the seeder ACTUALLY used whenever it differs from what
+  // the term fields imply. Every later render of the paid invoice / pay page
+  // recomputes the schedule from the term WITHOUT the payment-day floor (a
+  // settled document must not drift with the calendar), so a late payment that
+  // shifted the series would otherwise display dates that were never created.
+  // Best-effort: a failed stamp only affects display, never the schedule.
+  if (firstTargetDate && (createdRows.length || adoptedPromisedRow)
+    && firstTargetDate !== effectiveFirstVisitDate(term)) {
+    try {
+      const termCols = await annualPrepayColumns(conn);
+      if (termCols.first_visit_date) {
+        await conn('annual_prepay_terms')
+          .where({ id: term.id })
+          .update({ first_visit_date: firstTargetDate, updated_at: new Date() });
+      }
+    } catch (err) {
+      logger.warn(`[annual-prepay] term ${term.id} effective first-visit stamp failed (${err.message}) — paid-invoice dates may not match the seeded schedule`);
     }
   }
 
@@ -449,6 +946,7 @@ async function ensureCoverageRowsForTerm(term, conn = db) {
     targetDates,
     existingCount: existingRows.length,
     createdRows,
+    effectiveTermEnd,
   };
 }
 
@@ -1211,17 +1709,31 @@ async function refreshTermSnapshot(termOrId, conn = db) {
   const coverageServiceType = normalizeCoverageServiceType(term.coverage_service_type);
   const coverageVisitCount = normalizeCoverageVisitCount(term.coverage_visit_count);
   const coverageCadence = inferCoverageCadence(term);
+  // A late payment can SLIDE the coverage window (ensureCoverageRowsForTerm
+  // persists the new term_end and reports it back). Every downstream step in
+  // this same activation — attach, prepaid stamping, covered-row selection,
+  // last-service snapshot — must use the slid end, or the tail visits seeded
+  // beyond the original end would never be linked or stamped prepaid and
+  // completion would invoice the customer again for visits they prepaid.
+  let windowEnd = termEnd;
   if (ACTIVE_STATUSES.includes(term.status)) {
-    await ensureCoverageRowsForTerm({ ...term, term_start: termStart, term_end: termEnd, coverage_cadence: coverageCadence }, conn);
-    await attachScheduledServices({ ...term, term_start: termStart, term_end: termEnd }, conn);
-    await applyPrepaidCoverageForTerm({ ...term, term_start: termStart, term_end: termEnd }, conn);
+    const ensured = await ensureCoverageRowsForTerm({ ...term, term_start: termStart, term_end: termEnd, coverage_cadence: coverageCadence }, conn);
+    if (ensured?.effectiveTermEnd) windowEnd = ensured.effectiveTermEnd;
+    await attachScheduledServices({ ...term, term_start: termStart, term_end: windowEnd }, conn);
+    await applyPrepaidCoverageForTerm({ ...term, term_start: termStart, term_end: windowEnd }, conn);
+    // Callers sync customers.waveguard_renewal_date from the PRE-slide end
+    // (or their own normalizedEnd), so renewal workflows would fire while
+    // coverage is still running — re-sync from the slid end here.
+    if (windowEnd !== termEnd) {
+      await syncCustomerRenewalDate(term.customer_id, windowEnd, conn);
+    }
   }
   const coveredRows = coverageServiceType && coverageVisitCount
-    ? await coverageRowsForTerm({ ...term, term_start: termStart, term_end: termEnd }, conn)
+    ? await coverageRowsForTerm({ ...term, term_start: termStart, term_end: windowEnd }, conn)
     : [];
   const lastService = coveredRows.length
     ? coveredRows[coveredRows.length - 1]
-    : await findLastScheduledServiceForTerm(term.customer_id, termStart, termEnd, conn);
+    : await findLastScheduledServiceForTerm(term.customer_id, termStart, windowEnd, conn);
 
   const updates = {
     last_scheduled_service_id: lastService?.id || null,
@@ -2075,6 +2587,8 @@ async function createTermForAnnualPrepay({
   coverageServiceType = undefined,
   coverageVisitCount = undefined,
   coverageCadence = undefined,
+  firstVisitDate = undefined,
+  firstVisitWindowStart = undefined,
   conn = db,
 } = {}) {
   if (!(await annualPrepayTableExists())) return null;
@@ -2096,6 +2610,20 @@ async function createTermForAnnualPrepay({
   const normalizedCoverageCadence = coverageCadence === undefined
     ? undefined
     : normalizeCoverageCadence(coverageCadence);
+  // First-visit intent: the date/time already promised to the customer. Only
+  // meaningful inside the coverage window — an out-of-window date would anchor
+  // the series outside the term it belongs to, so it is dropped rather than
+  // honored.
+  const normalizedFirstVisitDate = firstVisitDate === undefined
+    ? undefined
+    : (() => {
+      const value = dateOnly(firstVisitDate);
+      if (!value) return null;
+      return value >= normalizedStart && value <= normalizedEnd ? value : null;
+    })();
+  const normalizedFirstVisitWindowStart = firstVisitWindowStart === undefined
+    ? undefined
+    : normalizeWindowStart(firstVisitWindowStart);
 
   let existing = null;
   if (sourceEstimateId || prepayInvoiceId) {
@@ -2143,6 +2671,12 @@ async function createTermForAnnualPrepay({
     }
     if (termCols.coverage_cadence && normalizedCoverageCadence !== undefined) {
       updates.coverage_cadence = normalizedCoverageCadence;
+    }
+    if (termCols.first_visit_date && normalizedFirstVisitDate !== undefined) {
+      updates.first_visit_date = normalizedFirstVisitDate;
+    }
+    if (termCols.first_visit_window_start && normalizedFirstVisitWindowStart !== undefined) {
+      updates.first_visit_window_start = normalizedFirstVisitWindowStart;
     }
     await conn('annual_prepay_terms').where({ id: existing.id }).update(updates);
     // When the coverage window is edited (start/end actually supplied), detach
@@ -2294,6 +2828,12 @@ async function createTermForAnnualPrepay({
   }
   if (termCols.coverage_cadence && normalizedCoverageCadence !== undefined) {
     insert.coverage_cadence = normalizedCoverageCadence;
+  }
+  if (termCols.first_visit_date && normalizedFirstVisitDate !== undefined) {
+    insert.first_visit_date = normalizedFirstVisitDate;
+  }
+  if (termCols.first_visit_window_start && normalizedFirstVisitWindowStart !== undefined) {
+    insert.first_visit_window_start = normalizedFirstVisitWindowStart;
   }
 
   const [term] = await conn('annual_prepay_terms').insert(insert).returning('*');
@@ -2818,7 +3358,7 @@ async function sendPaymentPendingReminder(termOrId, daysOut, opts = {}) {
       {
         first_name: customer.first_name || 'there',
         amount_text: amountText,
-        first_visit_date: formatDateLabel(claimedTerm.term_start),
+        first_visit_date: formatDateLabel(effectiveFirstVisitDate(claimedTerm)),
         pay_link: payUrl,
       },
       { workflow: 'annual_prepay_payment_reminder', entity_type: 'annual_prepay_term', entity_id: claimedTerm.id },
@@ -2907,7 +3447,12 @@ async function checkAndSendPaymentReminders({ today = etDateString() } = {}) {
       .where(function paymentClaimAvailable() {
         this.whereNull(claimCol).orWhere(claimCol, '<', new Date(Date.now() - NOTICE_CLAIM_TTL_MS));
       })
-      .where('term_start', target)
+      .where(function firstVisitOn() {
+        // Match the date the customer was actually promised. COALESCE keeps
+        // legacy terms (no first_visit_date) firing off term_start.
+        if (cols.first_visit_date) this.whereRaw('COALESCE(first_visit_date, term_start) = ?', [target]);
+        else this.where('term_start', target);
+      })
       .select('*');
 
     for (const term of terms) {
@@ -3003,6 +3548,12 @@ module.exports = {
   coveredTermsAsOf,
   ANNUAL_PREPAY_PREPAID_METHOD,
   recordDecision,
+  // Root exports (not only _private): the annual-prepay-invoice route
+  // validates the operator's first-visit time with the SAME normalizer that
+  // persists it and the SAME conflict predicate the seeder re-checks with, so
+  // route validation and stored behavior can never drift apart.
+  normalizeWindowStart,
+  findVisitWindowConflict,
   _private: {
     dateOnly,
     addMonthsSameDay,
@@ -3023,6 +3574,10 @@ module.exports = {
     serviceMatchesCoverage,
     splitCoverageAmount,
     coverageScheduleDates,
+    coverageSeriesAnchor,
+    effectiveFirstVisitDate,
+    normalizeWindowStart,
+    addMinutesHHMM,
     normalizeCoverageCadence,
     coverageCadenceMonths,
     coverageCadenceDays,

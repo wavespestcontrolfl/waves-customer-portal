@@ -42,7 +42,7 @@ describe('injection — every long-form prose prompt carries the block', () => {
 
     expect(visit._test.PROMPT_VERSION).toBe('pest_visit_summary_narrative_v2');
     expect(visit._test.SYSTEM_PROMPT).toContain('HUMAN PROSE RULES');
-    expect(lawn._test.PROMPT_VERSION).toBe('lawn_report_v2_narrative_v3');
+    expect(lawn._test.PROMPT_VERSION).toBe('lawn_report_v2_narrative_v4');
     expect(lawn._test.SYSTEM_PROMPT).toContain('HUMAN PROSE RULES');
     expect(rodent._test.PROMPT_VERSION).toBe('typed_report_narrative_v3');
     expect(rodent._test.SYSTEM_PROMPT).toContain('HUMAN PROSE RULES');

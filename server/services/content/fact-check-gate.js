@@ -93,6 +93,7 @@ async function evaluate({ title = '', body = '', city = '', keyword = '', tag = 
   try {
     const policy = FACTCHECK_MODEL_OVERRIDE
       ? {
+        name: 'factCheckOverride',
         primary: { provider: MODELS.PROVIDER.ANTHROPIC, model: FACTCHECK_MODEL_OVERRIDE },
         fallback: MODELS.TEXT_POLICIES.deepAnalysis.fallback,
       }

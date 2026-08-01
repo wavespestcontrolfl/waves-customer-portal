@@ -43,9 +43,11 @@ const scheduleSrc = fs.readFileSync(path.join(__dirname, '../routes/admin-schedu
 const BRANCH_START = dispatchSrc.indexOf(
   "if (toStatus === 'cancelled' && ['following', 'series'].includes(scope)) {",
 );
-const BRANCH_END = dispatchSrc.indexOf(
-  "return res.json({ success: true, cancelledCount: targets.length, scope });",
-);
+// Anchored on the response's distinctive field rather than the full one-line
+// res.json(...) — #3090 reshaped that call to a multi-line spread and this
+// anchor silently went -1, redding the suite for days while the guarded
+// behaviors were intact. `cancelledCount` is unique to this branch's return.
+const BRANCH_END = dispatchSrc.indexOf('cancelledCount: targets.length,');
 
 describe('scoped cancel stops the plan atomically (P0-2)', () => {
   test('the branch bounds resolve (guards below are meaningful)', () => {

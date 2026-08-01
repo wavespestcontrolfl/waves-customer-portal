@@ -799,7 +799,7 @@ export default function ProjectReportViewPage() {
       </div>
       {/* Newsletter signup lives only on the newsletter pages (owner
           2026-07-09, supersedes the 2026-07-08 glass-views ruling). */}
-      <BrandFooter variant={isCertificate ? 'contact' : undefined} />
+      <BrandFooter variant={isCertificate ? 'contact' : undefined} appBadges={false} />
     </div>
   );
 }

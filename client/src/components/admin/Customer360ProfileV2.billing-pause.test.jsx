@@ -1,0 +1,328 @@
+// @vitest-environment jsdom
+/**
+ * Customer 360 — the billing-pause banner and its Resume control.
+ *
+ * billing-cron sets customers.service_paused_at when autopay's 3-retry ladder
+ * exhausts and then skips that customer forever. Before this, the state was
+ * invisible on the customer record and nothing could clear it, so a paused
+ * customer's dues stopped permanently and the fix was a hand-edited row.
+ */
+import React from 'react';
+import '@testing-library/jest-dom/vitest';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import Customer360ProfileV2 from './Customer360ProfileV2';
+
+vi.mock('./StickyActionBar', () => ({ CustomerActionBar: () => null }));
+vi.mock('./AuthenticatedCallAudio', () => ({ default: () => null }));
+vi.mock('./CustomerRequestsPanel', () => ({ default: () => null }));
+vi.mock('./CallBridgeLink', () => ({
+  default: ({ children }) => <span>{children}</span>,
+  callViaBridge: vi.fn(),
+}));
+vi.mock('../../pages/admin/SchedulePage', () => ({
+  ZoneMarkingStep: () => null,
+  StationMarkingStep: () => null,
+}));
+vi.mock('../../hooks/useFeatureFlag', () => ({
+  useFeatureFlagReady: () => ({ enabled: false, ready: true }),
+}));
+
+function response(body, status = 200) {
+  return Promise.resolve(new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  }));
+}
+
+function customerDetail({ servicePausedAt = null, servicePausedOn = null, servicePauseReason = null } = {}) {
+  return {
+    customer: {
+      id: 'customer-a',
+      firstName: 'Avery',
+      lastName: 'Customer',
+      address: { line1: '1 Main St', city: 'Bradenton', state: 'FL', zip: '34205' },
+      active: true,
+      servicePausedAt,
+      // ET calendar date from the server — what the banner renders.
+      servicePausedOn,
+      servicePauseReason,
+    },
+    notificationPrefs: {}, preferences: {}, healthScore: {},
+    invoices: [], cards: [], paymentMethodConsents: [], contracts: [], photos: [],
+    customerDiscounts: [], complianceRecords: [], nutrientLedger: {}, services: [],
+    payments: [], scheduled: [], upcomingScheduled: [], accountProperties: [],
+    annualPrepayTerms: [],
+  };
+}
+
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
+
+beforeEach(() => {
+  localStorage.clear();
+  localStorage.setItem('waves_admin_token', 'test-token');
+  localStorage.setItem('waves_admin_user', JSON.stringify({ role: 'admin' }));
+});
+
+describe('Customer 360 billing-pause banner', () => {
+  it('stays hidden for a customer who is not paused', async () => {
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const path = String(url);
+      if (path.endsWith('/admin/payers')) return response({ payers: [] });
+      if (path.endsWith('/timeline')) return response({ timeline: [] });
+      if (path.endsWith('/admin/customers/customer-a')) return response(customerDetail());
+      return response({});
+    }));
+
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    expect(await screen.findAllByText('Avery Customer')).not.toHaveLength(0);
+
+    expect(screen.queryByText(/Billing paused since/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Clear billing pause/i })).not.toBeInTheDocument();
+  });
+
+  it('shows why dues stopped, that visits are unaffected, and that nothing is back-billed', async () => {
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const path = String(url);
+      if (path.endsWith('/admin/payers')) return response({ payers: [] });
+      if (path.endsWith('/timeline')) return response({ timeline: [] });
+      if (path.endsWith('/admin/customers/customer-a')) {
+        return response(customerDetail({
+          servicePausedAt: '2026-05-02T23:30:00Z', servicePausedOn: '2026-05-02',
+          servicePauseReason: 'autopay_final_failure',
+        }));
+      }
+      return response({});
+    }));
+
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+
+    expect(await screen.findByText(/Billing paused since May 2, 2026/i)).toBeInTheDocument();
+    // The three facts that make this actionable rather than alarming.
+    expect(screen.getByText(/autopay failed three times/i)).toBeInTheDocument();
+    expect(screen.getByText(/Visits are unaffected/i)).toBeInTheDocument();
+    expect(screen.getByText(/never back-billed/i)).toBeInTheDocument();
+    // Must NOT promise collection resumes — other cron guards still apply.
+    expect(screen.getByText(/other billing guards/i)).toBeInTheDocument();
+  });
+
+  it('resumes billing and clears the banner', async () => {
+    let paused = true;
+    const fetchMock = vi.fn((url, options) => {
+      const path = String(url);
+      if (path.endsWith('/admin/payers')) return response({ payers: [] });
+      if (path.endsWith('/timeline')) return response({ timeline: [] });
+      if (path.endsWith('/resume-service')) {
+        expect(options?.method).toBe('POST');
+        paused = false;
+        return response({ success: true, resumed: true });
+      }
+      if (path.endsWith('/admin/customers/customer-a')) {
+        return response(customerDetail(paused
+          ? { servicePausedAt: '2026-05-02T23:30:00Z', servicePausedOn: '2026-05-02', servicePauseReason: 'autopay_final_failure' }
+          : {}));
+      }
+      return response({});
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    await screen.findByText(/Billing paused since May 2, 2026/i);
+
+    fireEvent.click(screen.getByRole('button', { name: /Clear billing pause/i }));
+
+    await waitFor(() => {
+      expect(screen.queryByText(/Billing paused since/i)).not.toBeInTheDocument();
+    });
+    expect(fetchMock.mock.calls.some(
+      ([u, o]) => String(u).endsWith('/admin/customers/customer-a/resume-service') && o?.method === 'POST',
+    )).toBe(true);
+  });
+
+  it('surfaces a compare-and-swap refusal instead of showing a false success', async () => {
+    // The server refuses when the pause moved between its read and its write
+    // (billing-cron re-paused, or another admin got there first). Swallowing
+    // that shows a cleared banner which silently returns on the next load.
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const path = String(url);
+      if (path.endsWith('/admin/payers')) return response({ payers: [] });
+      if (path.endsWith('/timeline')) return response({ timeline: [] });
+      if (path.endsWith('/resume-service')) {
+        return response({ success: true, resumed: false, reason: 'pause_changed' });
+      }
+      if (path.endsWith('/admin/customers/customer-a')) {
+        return response(customerDetail({
+          servicePausedAt: '2026-05-02T23:30:00Z', servicePausedOn: '2026-05-02',
+          servicePauseReason: 'autopay_final_failure',
+        }));
+      }
+      return response({});
+    }));
+
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    await screen.findByText(/Billing paused since May 2, 2026/i);
+
+    fireEvent.click(screen.getByRole('button', { name: /Clear billing pause/i }));
+
+    expect(await screen.findByText(/pause was not cleared/i)).toBeInTheDocument();
+    expect(screen.getByText(/Billing paused since May 2, 2026/i)).toBeInTheDocument();
+  });
+
+
+  it('does not report a successful resume as failed when only the reload breaks', async () => {
+    // The money-moving half already landed. Telling an admin it failed
+    // invites a second click on an action they believe did not happen.
+    let resumed = false;
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const path = String(url);
+      if (path.endsWith('/admin/payers')) return response({ payers: [] });
+      if (path.endsWith('/timeline')) return response({ timeline: [] });
+      if (path.endsWith('/resume-service')) {
+        resumed = true;
+        return response({ success: true, resumed: true });
+      }
+      if (path.endsWith('/admin/customers/customer-a')) {
+        if (resumed) return response({ error: 'Profile unavailable' }, 503);
+        return response(customerDetail({
+          servicePausedAt: '2026-05-02T23:30:00Z', servicePausedOn: '2026-05-02',
+          servicePauseReason: 'autopay_final_failure',
+        }));
+      }
+      return response({});
+    }));
+
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    await screen.findByText(/Billing paused since May 2, 2026/i);
+
+    fireEvent.click(screen.getByRole('button', { name: /Clear billing pause/i }));
+
+    expect(await screen.findByText(/billing pause was cleared\. Refreshing this profile failed/i)).toBeInTheDocument();
+    expect(screen.queryByText(/^Could not clear the billing pause$/i)).not.toBeInTheDocument();
+  });
+
+  it('a superseded attempt on the SAME customer never writes its outcome', async () => {
+    // A -> B -> A, then click again: a customerId check alone would let the
+    // first, still-in-flight response land on the second attempt's result.
+    const gates = [];
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const path = String(url);
+      if (path.endsWith('/admin/payers')) return response({ payers: [] });
+      if (path.endsWith('/timeline')) return response({ timeline: [] });
+      if (path.endsWith('/resume-service')) {
+        let release;
+        const gate = new Promise((r) => { release = r; });
+        gates.push(release);
+        return gate.then(() => response({ error: 'first attempt failed' }, 500));
+      }
+      if (path.endsWith('/admin/customers/customer-a') || path.endsWith('/admin/customers/customer-b')) {
+        return response(customerDetail({
+          servicePausedAt: '2026-05-02T23:30:00Z', servicePausedOn: '2026-05-02',
+          servicePauseReason: 'autopay_final_failure',
+        }));
+      }
+      return response({});
+    }));
+
+    const { rerender } = render(
+      <Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />,
+    );
+    await screen.findByText(/Billing paused since May 2, 2026/i);
+    fireEvent.click(screen.getByRole('button', { name: /Clear billing pause/i }));
+
+    // Navigating away and back re-enables the button (the customer-switch
+    // reset), so a second attempt can start while the first is still in
+    // flight — this is the only way to get two live attempts for one
+    // customer, and it is exactly the reported path.
+    rerender(<Customer360ProfileV2 customerId="customer-b" onClose={vi.fn()} />);
+    rerender(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    await screen.findByText(/Billing paused since May 2, 2026/i);
+    fireEvent.click(await screen.findByRole('button', { name: /Clear billing pause/i }));
+
+    gates[0]();
+    await new Promise((r) => setTimeout(r, 20));
+
+    // The superseded attempt's failure must not surface as the live result.
+    expect(screen.queryByText(/first attempt failed/i)).not.toBeInTheDocument();
+  });
+
+  it('never writes one customer\'s resume outcome onto another\'s record', async () => {
+    // Start a resume for A, switch to B before it settles.
+    let releaseResume;
+    const resumeGate = new Promise((resolve) => { releaseResume = resolve; });
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const path = String(url);
+      if (path.endsWith('/admin/payers')) return response({ payers: [] });
+      if (path.endsWith('/timeline')) return response({ timeline: [] });
+      if (path.endsWith('/resume-service')) {
+        return resumeGate.then(() => response({ error: 'Customer A blew up' }, 500));
+      }
+      if (path.endsWith('/admin/customers/customer-b')) {
+        return response({
+          ...customerDetail({
+            servicePausedAt: '2026-06-01T12:00:00Z', servicePausedOn: '2026-06-01',
+            servicePauseReason: 'autopay_final_failure',
+          }),
+          customer: {
+            ...customerDetail().customer,
+            id: 'customer-b',
+            firstName: 'Blair',
+            servicePausedAt: '2026-06-01T12:00:00Z',
+            servicePausedOn: '2026-06-01',
+            servicePauseReason: 'autopay_final_failure',
+          },
+        });
+      }
+      if (path.endsWith('/admin/customers/customer-a') || path.endsWith('/admin/customers/customer-b')) {
+        return response(customerDetail({
+          servicePausedAt: '2026-05-02T23:30:00Z', servicePausedOn: '2026-05-02',
+          servicePauseReason: 'autopay_final_failure',
+        }));
+      }
+      return response({});
+    }));
+
+    const { rerender } = render(
+      <Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />,
+    );
+    await screen.findByText(/Billing paused since May 2, 2026/i);
+    fireEvent.click(screen.getByRole('button', { name: /Clear billing pause/i }));
+
+    rerender(<Customer360ProfileV2 customerId="customer-b" onClose={vi.fn()} />);
+    await screen.findByText(/Billing paused since Jun 1, 2026/i);
+
+    releaseResume();
+    await new Promise((r) => setTimeout(r, 20));
+
+    // B must not inherit A's failure.
+    expect(screen.queryByText(/Customer A blew up/i)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Clear billing pause/i })).not.toBeDisabled();
+  });
+
+  it('surfaces a failed resume instead of pretending it worked', async () => {
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const path = String(url);
+      if (path.endsWith('/admin/payers')) return response({ payers: [] });
+      if (path.endsWith('/timeline')) return response({ timeline: [] });
+      if (path.endsWith('/resume-service')) return response({ error: 'Customer not found' }, 404);
+      if (path.endsWith('/admin/customers/customer-a')) {
+        return response(customerDetail({
+          servicePausedAt: '2026-05-02T23:30:00Z', servicePausedOn: '2026-05-02',
+          servicePauseReason: 'autopay_final_failure',
+        }));
+      }
+      return response({});
+    }));
+
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    await screen.findByText(/Billing paused since May 2, 2026/i);
+
+    fireEvent.click(screen.getByRole('button', { name: /Clear billing pause/i }));
+
+    expect(await screen.findByText(/Customer not found/i)).toBeInTheDocument();
+    // The pause is still real, so the banner must stay.
+    expect(screen.getByText(/Billing paused since May 2, 2026/i)).toBeInTheDocument();
+  });
+});

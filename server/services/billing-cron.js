@@ -74,6 +74,42 @@ async function sendCustomerBillingSms({ customer, body, purpose = 'billing', mes
 const ADMIN_ALERT_PHONE = process.env.ADAM_PHONE || '+19415993489';
 const BILLING_PORTAL_URL = 'https://portal.wavespestcontrol.com/?tab=billing';
 
+/**
+ * Resolve the dollar figure for an autopay SMS.
+ *
+ * All five autopay templates render a literal '$' immediately before
+ * {amount} ("your payment of ${amount}"), so this must return a BARE
+ * "NN.NN" — never a pre-formatted "$12.34", which would send "$$12.34".
+ *
+ * Every call site passed the literal string 'your payment' into that slot,
+ * which sent "your payment of $your payment" to 14 real customers on
+ * 2026-06-01 (13 autopay_charge_failed, 1 autopay_charge_success). The
+ * amount was already in scope at every one of them.
+ *
+ * ONE operand, deliberately — no fallback chain. The only acceptable value
+ * is the authoritative payments-row amount for the EXACT attempt the message
+ * describes: paymentResult.amount for a successful charge,
+ * err.paymentRecord.amount for a declined one, newPayment.amount for a
+ * successful retry. Every plausible fallback misstates it. customer
+ * .monthly_rate and baseAmount are pre-surcharge, so a card customer would
+ * be quoted less than Stripe took; the original payment.amount carries the
+ * OLD tender's gross, so a card-to-ACH switch between retries quotes a
+ * figure Stripe never saw. AGENTS.md requires the displayed amount, the
+ * PaymentIntent and the payments row to agree to the cent, and that rule
+ * does not stop at the screen.
+ *
+ * Returns null when the value is unusable, which callers MUST treat as "do
+ * not send". A text reading "$NaN" is worse than silence, and so is a
+ * confidently wrong dollar figure — a payments row with no amount is a data
+ * problem that deserves the error log the callers' catch already writes.
+ */
+function resolveSmsAmount(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const num = typeof value === 'number' ? value : parseFloat(value);
+  if (!Number.isFinite(num) || num < 0) return null;
+  return num.toFixed(2);
+}
+
 // Render customer billing SMS from the editable template table.
 async function renderTemplate(templateKey, vars, context = {}) {
   try {
@@ -307,8 +343,13 @@ const BillingCron = {
 
         try {
           const receiptLine = receiptUrl ? ` View your receipt: ${receiptUrl}` : '';
+          // What was actually COLLECTED. Not monthly_rate: that is the
+          // pre-surcharge base, so a card customer would get a receipt for
+          // less than we took.
+          const amountText = resolveSmsAmount(paymentResult?.amount);
+          if (!amountText) throw new Error(`no collected amount for customer ${customer.id} (payment ${paymentResult?.id || 'none'})`);
           const body = await renderTemplate('autopay_charge_success',
-            { first_name: customer.first_name, amount: 'your payment', receipt_line: receiptLine },
+            { first_name: customer.first_name, amount: amountText, receipt_line: receiptLine },
             { workflow: 'monthly_billing_success', entity_type: 'customer', entity_id: customer.id },
           );
           await sendCustomerBillingSms({
@@ -462,8 +503,14 @@ const BillingCron = {
 
         // Send failure SMS with actionable card-update link
         try {
+          // The row charge() just inserted for THIS attempt. Not
+          // failedPayment — that query can select an older monthly failure
+          // — and not monthly_rate, which omits the surcharge. Either would
+          // quote a figure the PaymentIntent never carried.
+          const amountText = resolveSmsAmount(err.paymentRecord?.amount);
+          if (!amountText) throw new Error(`no attempt amount for customer ${customer.id} (paymentRecord ${err.paymentRecord?.id || 'missing'})`);
           const body = await renderTemplate('autopay_charge_failed',
-            { first_name: customer.first_name, amount: 'your payment', update_card_url: BILLING_PORTAL_URL },
+            { first_name: customer.first_name, amount: amountText, update_card_url: BILLING_PORTAL_URL },
             { workflow: 'monthly_billing_failure', entity_type: 'customer', entity_id: customer.id },
           );
           await sendCustomerBillingSms({
@@ -1101,8 +1148,20 @@ const BillingCron = {
           // and the correct Waves callback number. (Previous copy had the
           // wrong area code — 239 instead of 941.)
           try {
+            // THIS attempt's gross, not the original obligation's.
+            // charge() recomputes the total for the customer's CURRENT
+            // tender and attaches the row it inserted as err.paymentRecord,
+            // so a customer who moved from card to ACH between attempts is
+            // quoted what we actually just tried to take. payment.amount
+            // would still carry the old surcharged gross and disagree with
+            // Stripe to the cent. No fallback: every other value in scope
+            // can misstate the current attempt, and the amount-agreement
+            // rule makes a wrong figure worse than no text (the catch below
+            // logs it).
+            const amountText = resolveSmsAmount(err.paymentRecord?.amount);
+            if (!amountText) throw new Error(`no attempt amount for retry of payment ${payment.id} (paymentRecord ${err.paymentRecord?.id || 'missing'})`);
             const body = await renderTemplate('autopay_retry_final_failed',
-              { first_name: customer.first_name, amount: 'your payment', update_card_url: BILLING_PORTAL_URL },
+              { first_name: customer.first_name, amount: amountText, update_card_url: BILLING_PORTAL_URL },
               { workflow: 'autopay_retry_final_failed', entity_type: 'payment', entity_id: payment.id },
             );
             await sendCustomerBillingSms({
@@ -1193,8 +1252,12 @@ const BillingCron = {
 
           // Send retry SMS with update-card link
           try {
+            // Same rule as the final-failure site above: this attempt's
+            // recomputed gross, never the original obligation's.
+            const amountText = resolveSmsAmount(err.paymentRecord?.amount);
+            if (!amountText) throw new Error(`no attempt amount for retry of payment ${payment.id} (paymentRecord ${err.paymentRecord?.id || 'missing'})`);
             const body = await renderTemplate('autopay_retry_failed',
-              { first_name: customer.first_name, amount: 'your payment', update_card_url: BILLING_PORTAL_URL },
+              { first_name: customer.first_name, amount: amountText, update_card_url: BILLING_PORTAL_URL },
               { workflow: 'autopay_retry_failed', entity_type: 'payment', entity_id: payment.id },
             );
             await sendCustomerBillingSms({
@@ -1318,8 +1381,13 @@ const BillingCron = {
       } catch (e) { /* ignore */ }
       try {
         const receiptLine = retryReceiptUrl ? ` View your receipt: ${retryReceiptUrl}` : '';
+        // The row the successful retry wrote. Not baseAmount: that is the
+        // pre-surcharge base this attempt was computed FROM, not what the
+        // customer was charged.
+        const amountText = resolveSmsAmount(newPayment?.amount);
+        if (!amountText) throw new Error(`no collected amount for retry of payment ${payment.id} (newPayment ${newPayment?.id || 'missing'})`);
         const body = await renderTemplate('autopay_retry_success',
-          { first_name: customer.first_name, amount: 'your payment', receipt_line: receiptLine },
+          { first_name: customer.first_name, amount: amountText, receipt_line: receiptLine },
           { workflow: 'autopay_retry_success', entity_type: 'payment', entity_id: payment.id },
         );
         await sendCustomerBillingSms({
@@ -1346,3 +1414,4 @@ module.exports = BillingCron;
 // Exposed for the stripe-webhook async-bounce arming path, which mirrors the
 // synchronous catch's first-rung cadence (RETRY_DELAYS_DAYS[0]) exactly.
 module.exports.RETRY_DELAYS_DAYS = RETRY_DELAYS_DAYS;
+module.exports.resolveSmsAmount = resolveSmsAmount;

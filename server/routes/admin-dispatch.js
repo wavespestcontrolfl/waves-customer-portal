@@ -5608,9 +5608,79 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       record.structured_notes = photoNotes;
     }
 
+    // Grounded-recommendation regen state — the artifact/SMS blocks below
+    // key on these. `Grounded` is true ONLY on a settled run with a truthy
+    // result: a quick provider/parse failure must not be mistaken for a
+    // grounded success (codex P1 r12).
+    let lawnRecRegenPromise = null;
+    let lawnRecRegenAttempted = false;
+    let lawnRecRegenGrounded = false;
+    let lawnRecRegenTimedOut = false;
+    // Resolves true once customer-safe copy is durable: grounded write OR
+    // deterministic sanitize after failure. Gates unrecallable artifacts
+    // (report email) queued later in this handler.
+    let lawnRecFinalCopyPromise = null;
+    // True once the durable lawn-PDF correction marker is persisted; when a
+    // correction is needed but the marker cannot be written, the PDF render
+    // queue is suppressed (codex P1 r31).
+    let lawnPdfCorrectionNeeded = false;
+    let lawnPdfCorrectionMarked = false;
+    // DURABLE correction marker (codex P1 r30/r31/r34): the in-process
+    // recovery callback dies with the process, and customers without report
+    // email have no worker path that forces a fresh render, so
+    // structured_notes.lawnPdfCorrectionPending makes EVERY render path
+    // render fresh until a post-settlement render clears it. It must be
+    // durable before any artifact is produced — retry, and if it still
+    // fails the PDF enqueue is suppressed. Atomic jsonb_set so a concurrent
+    // structured_notes write is never clobbered. Called from the regen path
+    // AND from the setup-failure catch (r34).
+    const markLawnPdfCorrectionNeeded = async () => {
+      lawnPdfCorrectionNeeded = true;
+      for (let attempt = 0; attempt < 3 && !lawnPdfCorrectionMarked; attempt += 1) {
+        try {
+          await db('service_records').where({ id: record.id }).update({
+            structured_notes: db.raw(
+              "jsonb_set(COALESCE(structured_notes::jsonb, '{}'::jsonb), '{lawnPdfCorrectionPending}', 'true'::jsonb, true)",
+            ),
+          });
+          lawnPdfCorrectionMarked = true;
+          record.structured_notes = { ...parseJsonObject(record.structured_notes), lawnPdfCorrectionPending: true };
+        } catch (markErr) {
+          logger.warn(`[dispatch] lawn PDF correction marker write failed for ${record.id} (attempt ${attempt + 1}): ${markErr.message}`);
+          await new Promise((resolve) => { setTimeout(resolve, 2000 * (attempt + 1)).unref?.(); });
+        }
+      }
+      if (!lawnPdfCorrectionMarked) {
+        logger.error(`[dispatch] lawn PDF correction marker UNWRITABLE for ${record.id} — suppressing the PDF render queue so no stale artifact is stored`);
+      }
+    };
     const completedLawnAssessmentId =
       linkedLawnAssessmentId || parseJsonObject(record.structured_notes).lawnAssessmentId || null;
     if (!isIncompleteVisit && completedLawnAssessmentId) {
+      // FAIL CLOSED (codex P1 r21): the safety gate arms BEFORE any fallible
+      // setup — a transient failure in the assessment lookup/relink below
+      // must leave the MMS/SMS-tip/email gates CLOSED (not-grounded), not
+      // silently open because `attempted` was never set. The catch installs
+      // a sanitize-based finalCopy chain so held artifacts still settle.
+      const KnowledgeBridgeGate = require('../services/knowledge-bridge');
+      const lawnRecSanitizeWithRetry = async (tries = 4) => {
+        for (let attempt = 0; attempt < tries; attempt += 1) {
+          // A setup failure BEFORE the backlink write leaves the assessment
+          // unlinked and sanitation rejects it forever (codex P1 r40) —
+          // restore the known link first (idempotent, only-if-null).
+          await db('lawn_assessments')
+            .where({ id: completedLawnAssessmentId })
+            .whereNull('service_record_id')
+            .update({ service_record_id: record.id })
+            .catch((linkErr) => logger.warn(`[dispatch] assessment backlink recovery failed for ${completedLawnAssessmentId}: ${linkErr.message}`));
+          const res = await KnowledgeBridgeGate.sanitizeStoredRecommendations(completedLawnAssessmentId)
+            .catch((e) => ({ changed: false, error: e.message }));
+          if (!res.error) return res;
+          await new Promise((resolve) => { setTimeout(resolve, 15000 * (attempt + 1)).unref?.(); });
+        }
+        return { changed: false, error: 'sanitize retries exhausted' };
+      };
+      lawnRecRegenAttempted = true;
       try {
         const completedAssessment = await db('lawn_assessments')
           .where({
@@ -5635,8 +5705,110 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         const wiki = require('../services/agronomic-wiki');
         const outcome = await wiki.linkTreatmentOutcome(record.id);
         await attachLawnAssessmentOutcomePhotoRefs(outcome, completedLawnAssessmentId);
+        // Recommendations were generated at confirm time, BEFORE the
+        // service_records/service_products rows existed, so the applied-today
+        // grounding in generateAssessmentRecommendations never fired (codex
+        // P1 #3093). Now that the visit's applications are persisted and the
+        // assessment is back-linked, regenerate and wait — the PDF job and
+        // MMS preview later in this handler read ai_summary/recommendations
+        // and must not bake the stale confirm-time output (r3/r5). The wait
+        // is BOUNDED so a stalled provider can't hang the tech's completion
+        // response (r6), and the run always completes + writes: on a timeout
+        // the grounded correction still becomes durable and the PDF-queue
+        // block re-renders the artifact when it lands (r8) — no permanent
+        // stale copy on either path.
+        const KnowledgeBridge = KnowledgeBridgeGate;
+        // RESUME SAFETY (codex P1 r32): a crashed-then-resumed completion can
+        // find grounded copy already stored — and its PDF/email may already
+        // have reached the customer. A second LLM run would produce
+        // different recommendations and overwrite the permanent report while
+        // the sent delivery is deduped, so treat existing grounded copy as
+        // final and skip regeneration entirely.
+        let alreadyGrounded = false;
+        try {
+          const priorRow = await db('lawn_assessments').where({ id: completedAssessment.id }).first('recommendations');
+          const prior = typeof priorRow?.recommendations === 'string'
+            ? JSON.parse(priorRow.recommendations) : (priorRow?.recommendations || null);
+          // Sanitation-final copy counts as final too (codex P1 r35): the
+          // deterministic pass ran against an authoritative application
+          // read, and its result may already be in a customer's hands.
+          // But a LIVE generation lease in _generationRuns means another
+          // run (e.g. admin regeneration) can still overwrite the stored
+          // copy — the shortcut must not release the artifact gates while
+          // that is possible (codex P1 r38).
+          const priorRuns = (prior && typeof prior === 'object' && !Array.isArray(prior)
+            && prior._generationRuns && typeof prior._generationRuns === 'object') ? prior._generationRuns : {};
+          const liveLease = Object.values(priorRuns).some((exp) => {
+            const t = Date.parse(exp);
+            return Number.isFinite(t) && t > Date.now();
+          });
+          alreadyGrounded = !!(prior && typeof prior === 'object' && !Array.isArray(prior)
+            && (prior._groundedInApplications || prior._sanitizationFinal)
+            && !liveLease);
+        } catch { alreadyGrounded = false; }
+        if (alreadyGrounded) {
+          lawnRecRegenGrounded = true;
+          lawnRecFinalCopyPromise = Promise.resolve({ verified: true, changed: false });
+          logger.info(`[dispatch] grounded recommendations already stored for assessment ${completedAssessment.id} — skipping regeneration (resume-safe)`);
+          throw { __skipLawnRegen: true };
+        }
+        lawnRecRegenPromise = KnowledgeBridge.generateAssessmentRecommendations(completedAssessment.id)
+          .catch((recErr) => { logger.warn(`[dispatch] post-completion recommendation regen failed (non-blocking): ${recErr.message}`); return null; });
+        // LIVE grounded flag (codex P2 r15): the promise updates it whenever
+        // it settles — a run that lands grounded just after the race must
+        // not stay suppressed at the later MMS/SMS checks. Attached before
+        // the race so a fast settle updates the flag before the await
+        // returns.
+        void lawnRecRegenPromise.then((result) => { lawnRecRegenGrounded = !!result; })
+          .catch((flagErr) => logger.error(`[dispatch] regen grounded-flag updater failed: ${flagErr.message}`));
+        // Final-copy settlement with VERIFIED semantics (codex P1 r18): the
+        // sanitizer reports transient DB errors as { error } without
+        // rejecting, so the chain retries with backoff and resolves
+        // { verified, changed } — consumers must not treat an errored
+        // sanitize as a clean no-op.
+        lawnRecFinalCopyPromise = lawnRecRegenPromise.then(async (result) => {
+          if (result) return { verified: true, changed: true };
+          const sanitized = await lawnRecSanitizeWithRetry();
+          if (sanitized.error) {
+            logger.error(`[dispatch] stored-copy sanitize UNVERIFIED for assessment ${completedAssessment.id}: ${sanitized.error} — held email stays gated by the worker`);
+          }
+          return { verified: !sanitized.error, changed: !!sanitized.changed };
+        });
+        const regenOutcome = await Promise.race([
+          lawnRecRegenPromise.then(() => ({ settled: true })),
+          new Promise((resolve) => { setTimeout(() => resolve({ settled: false }), 60000).unref?.(); }),
+        ]);
+        lawnRecRegenTimedOut = !regenOutcome.settled;
+        if (lawnRecRegenTimedOut || !lawnRecRegenGrounded) {
+          await markLawnPdfCorrectionNeeded();
+        }
+        if (lawnRecRegenTimedOut) {
+          logger.warn('[dispatch] lawn recommendation regen still running after 60s — completion continues; PDF re-queues when the grounded write lands');
+        } else if (!lawnRecRegenGrounded) {
+          // A fast failure leaves the confirm-time copy stored and customer-
+          // visible — the finalCopy chain above is already running the
+          // retrying deterministic sanitize (codex P1 r13+r18); recommendation-
+          // derived customer output stays suppressed meanwhile.
+          logger.warn('[dispatch] lawn recommendation regen failed — retrying sanitize runs in the finalCopy chain; recommendation-derived customer output suppressed');
+        }
       } catch (err) {
+        if (err && err.__skipLawnRegen) {
+          // Not an error: grounded copy already stored (resume-safe skip).
+        } else {
         logger.error(`[dispatch] Lawn assessment service_record link failed (non-blocking): ${err.message}`);
+        // Setup failed before (or during) regen creation: keep the gates
+        // closed and install a sanitize-based settlement chain so the held
+        // email / recovery render still converge on safe copy (codex P1 r21).
+        if (!lawnRecFinalCopyPromise) {
+          lawnRecFinalCopyPromise = lawnRecSanitizeWithRetry().then((res) => ({ verified: !res.error, changed: !!res.changed }));
+          void lawnRecFinalCopyPromise.catch((chainErr) => logger.error(`[dispatch] fallback sanitize chain failed: ${chainErr.message}`));
+        }
+        // Setup failure leaves confirm-time copy live while sanitation
+        // retries — the same durable-marker-or-suppress path must run here
+        // before the PDF block, or a restart strands a stale PDF for
+        // customers with no email fallback (codex P1 r34).
+        await markLawnPdfCorrectionNeeded();
+        }
       }
     }
 
@@ -6285,7 +6457,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // JWT, and the public report routes 404 suppressed reports for
     // non-staff. Staff review the shadow via the HTML report; the PDF only
     // feeds customer sends, which are suppressed anyway.
-    if (serviceReportV1Delivery && reportToken && typedDeliveryMode === 'auto_send') {
+    if (serviceReportV1Delivery && reportToken && typedDeliveryMode === 'auto_send'
+      && !(lawnPdfCorrectionNeeded && !lawnPdfCorrectionMarked)) {
       await enqueuePdfRenderJob({
         serviceRecordId: record.id,
         payload: {
@@ -6295,6 +6468,56 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       }).catch((err) => {
         logger.warn(`[dispatch] service report PDF render queue failed for ${record.id}: ${err.message}`);
       });
+      // A grounded-recommendation regen that outlived its bounded wait still
+      // writes when it lands — re-render the PDF then, so the queued artifact
+      // doesn't permanently carry the stale confirm-time copy (codex P1 r8).
+      if (lawnRecRegenAttempted && !lawnRecRegenGrounded && lawnRecFinalCopyPromise) {
+        // Deliberately detached recovery chain — explicit void + logged
+        // catch per repo detachment style (codex P1 r19).
+        void lawnRecFinalCopyPromise.then(async (finalCopy) => {
+          // Recovery render for EVERY not-grounded-at-wait outcome (fast
+          // fail, late grounded, late fail — codex P1 r14+r18): the
+          // finalCopy chain has already run the grounded write or the
+          // retrying sanitize. Unverified (sanitize kept erroring) → no
+          // re-render; render-time guards protect the web report and the
+          // held email stays gated by the worker. Verified with no change →
+          // nothing to correct.
+          if (!finalCopy?.verified || !finalCopy?.changed) {
+            if (finalCopy && !finalCopy.verified) {
+              logger.warn(`[dispatch] recovery render skipped for ${record.id} — final copy unverified`);
+            }
+            return;
+          }
+          try {
+            // Copy changed after the first render may have stored a stale
+            // PDF — clear the storage key so the next render is forced
+            // fresh instead of served from the object match (codex P1 r18).
+            await db('service_records').where({ id: record.id })
+              .update({ pdf_storage_key: null })
+              .catch((invErr) => logger.warn(`[dispatch] pdf key invalidation failed for ${record.id}: ${invErr.message}`));
+            // enqueuePdfRenderJob dedupes against an ACTIVE job — a render
+            // already in flight may have loaded pre-write data, so a deduped
+            // 'rendering' result is NOT the correction; retry until the
+            // active job settles and a fresh render actually queues (codex
+            // P1 r11). A deduped 'queued' job hasn't started yet and will
+            // read post-write data — that IS the correction.
+            for (let attempt = 0; attempt < 12; attempt += 1) {
+              const res = await enqueuePdfRenderJob({
+                serviceRecordId: record.id,
+                payload: { source: 'grounded_regen_late', token: reportToken },
+              });
+              if (res.queued || res.job?.status === 'queued') {
+                logger.info(`[dispatch] PDF re-queued for ${record.id} after late grounded recommendation write (attempt ${attempt + 1})`);
+                return;
+              }
+              await new Promise((resolve) => { setTimeout(resolve, 15000).unref?.(); });
+            }
+            logger.warn(`[dispatch] late PDF re-queue gave up for ${record.id} — active render never settled`);
+          } catch (requeueErr) {
+            logger.warn(`[dispatch] late PDF re-queue failed for ${record.id}: ${requeueErr.message}`);
+          }
+        }).catch((recoveryErr) => logger.error(`[dispatch] PDF recovery chain failed for ${record.id}: ${recoveryErr.message}`));
+      }
     }
     // Best-effort: queue the "Your Visit, in Motion" recap render for pest visits
     // (flag-gated via PEST_RECAP). The pipeline self-skips non-eligible visits and a
@@ -6345,7 +6568,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         'SERVICE_REPORT_MMS_PREVIEW_ENABLED',
         false,
       );
-      if (mmsPreviewEnabled && reportToken) {
+      // A grounded-recommendation regen still pending past its bounded wait
+      // means this preview could bake the stale confirm-time copy into an
+      // image TEXTED to the customer — unrecallable, unlike the PDF (which
+      // re-queues) and the web report (which heals). Omit the image on that
+      // rare path; the SMS still links to the live report (codex P1 r10).
+      if (mmsPreviewEnabled && reportToken && lawnRecRegenAttempted && !lawnRecRegenGrounded) {
+        logger.warn(`[dispatch] MMS preview omitted for ${record.id} — grounded recommendation regen ${lawnRecRegenTimedOut ? 'still pending' : 'failed'}; SMS sends without an image`);
+      } else if (mmsPreviewEnabled && reportToken) {
         serviceReportPreviewAsset = await buildAndStoreSmsPreviewImage({
           recordId: record.id,
           token: reportToken,
@@ -7813,6 +8043,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           try {
             const LawnIntel = require('../services/lawn-intelligence');
             const scoreParts = await LawnIntel.buildCompletionScoreBlock(completedLawnAssessmentId);
+            // The tip is recommendation-derived: unless the grounded regen
+            // SUCCEEDED, it may be the stale confirm-time text that
+            // contradicts today's applications — an SMS is unrecallable, so
+            // suppress the tip and send the score alone (codex P1 r12). The
+            // score line is tech-confirmed assessment data, not
+            // recommendation output.
+            if (scoreParts && lawnRecRegenAttempted && !lawnRecRegenGrounded) {
+              scoreParts.tipLine = '';
+            }
             if (scoreParts?.scoreLine) {
               const folded = foldLawnScoreIntoCompletionSms(sentSmsBody, scoreParts, { maxSegments: 2 });
               if (folded.folded) {
@@ -8043,17 +8282,59 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       const emailAlreadyHandled = ['queued', 'sending', 'sent', 'skipped'].includes(latestNotes.serviceReportV1EmailStatus);
       if (!emailAlreadyHandled) {
         try {
+          // The email worker rebuilds and ATTACHES the current PDF at send
+          // time — an emailed attachment is unrecallable. While grounded
+          // copy is still pending, the job is enqueued DURABLY with a
+          // 20-minute hold (survives a process restart, unlike a promise
+          // callback — codex P1 r15+r16); the settlement callback below
+          // pulls next_attempt_at forward the moment copy settles, so the
+          // hold only fully elapses if the process died — and by then the
+          // locked late write/sanitize has landed anyway.
+          // Hold on timeout even if the regen landed grounded MEANWHILE
+          // (codex P1 r22): the initial PDF may have started rendering the
+          // stale copy during the timed-out window, and only the held path's
+          // worker fence + key invalidation guarantees the email attaches a
+          // post-settlement render.
+          const emailHoldMs = lawnRecRegenAttempted && (lawnRecRegenTimedOut || !lawnRecRegenGrounded)
+            ? 20 * 60 * 1000 : 0;
           const queued = await enqueueServiceReportV1EmailDelivery({
             serviceRecordId: record.id,
             customerId: svc.customer_id,
             token: reportToken,
             reportUrl,
             pdfUrl: reportToken ? `${portalUrl}/api/reports/${reportToken}` : null,
+            delayMs: emailHoldMs,
             payload: {
               scheduled_service_id: svc.id,
-              source: 'dispatch_complete',
+              source: emailHoldMs ? 'dispatch_complete_held_for_grounding' : 'dispatch_complete',
+              // The delivery worker enforces grounding readiness itself for
+              // held jobs (elapsed time is not proof the settlement ran —
+              // codex P1 r17).
+              // The assessment identity rides on EVERY lawn-report delivery,
+              // not just held ones (issue #3135). When regeneration settles
+              // inside the hold window the job is enqueued normally, and
+              // without this the worker had no assessment to fence — that
+              // delivery dispatched with no version check and no send seal.
+              // awaiting_grounding stays hold-only: it means "sanitize before
+              // sending", which is a held-path obligation.
+              ...(completedLawnAssessmentId ? { lawn_assessment_id: completedLawnAssessmentId } : {}),
+              ...(emailHoldMs ? { awaiting_grounding: true } : {}),
             },
           });
+          if (emailHoldMs && queued.delivery?.id && lawnRecFinalCopyPromise) {
+            const heldDeliveryId = queued.delivery.id;
+            logger.info(`[dispatch] report email held ${Math.round(emailHoldMs / 60000)}m for ${record.id} pending grounded copy`);
+            void lawnRecFinalCopyPromise.then(async (finalCopy) => {
+              // Pull forward only on VERIFIED settlement (codex P1 r18) —
+              // unverified keeps the full hold, and the worker's own
+              // sanitize gate still protects the send.
+              if (!finalCopy?.verified) return;
+              await db('service_report_deliveries')
+                .where({ id: heldDeliveryId, status: 'queued' })
+                .update({ next_attempt_at: new Date(), updated_at: new Date() })
+                .catch((pullErr) => logger.warn(`[dispatch] held email pull-forward failed for ${record.id}: ${pullErr.message}`));
+            }).catch((chainErr) => logger.error(`[dispatch] held email pull-forward chain failed for ${record.id}: ${chainErr.message}`));
+          }
           const queuedNotes = {
             ...latestNotes,
             serviceReportV1EmailStatus: queued.delivery?.status || (queued.skipped ? 'skipped' : 'queued'),

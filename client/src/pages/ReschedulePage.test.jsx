@@ -607,3 +607,74 @@ describe('ReschedulePage weather-move banner', () => {
     }
   });
 });
+
+describe('ReschedulePage collective anchoring', () => {
+  it('shows the schedule-follows-your-treatment note and drops the pull-forward warning when collectiveAnchor is on', async () => {
+    stubFetch({
+      get: jsonResponse(reschedulablePayload({
+        isRecurring: true, collectiveAnchor: true, reanchorPullForwardDays: 14,
+      })),
+    });
+
+    renderPage({ classic: true });
+
+    expect(await screen.findByText(/your schedule always follows your last treatment/)).toBeInTheDocument();
+    expect(screen.queryByText(/Only this visit will move/)).not.toBeInTheDocument();
+    // Selecting any slot must NOT surface the legacy re-anchor warning —
+    // the steady note already explains the collective behavior.
+    fireEvent.click(await screen.findByRole('button', { name: '1:00 PM' }));
+    expect(screen.queryByText(/moving this far up shifts your whole plan/)).not.toBeInTheDocument();
+  });
+
+  it('a same-date selection keeps the single-visit wording — no false shift promise (codex P1)', async () => {
+    stubFetch({
+      get: jsonResponse(reschedulablePayload({
+        isRecurring: true, collectiveAnchor: true, reanchorPullForwardDays: 14,
+        availability: {
+          days: [{
+            date: '2026-07-10', // SAME date as current — a time-only move
+            fullDate: 'Friday, July 10',
+            nearby: false,
+            slots: [{ start_time: '13:00', end_time: '14:00', start_label: '1:00 PM', end_label: '2:00 PM', technician_id: 'tech-1' }],
+          }],
+        },
+      })),
+    });
+
+    renderPage({ classic: true });
+
+    expect(await screen.findByText(/your schedule always follows your last treatment/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '1:00 PM' }));
+    expect(screen.getByText(/a same-day time change doesn't shift the rest of your plan/)).toBeInTheDocument();
+    expect(screen.queryByText(/your schedule always follows your last treatment/)).not.toBeInTheDocument();
+  });
+
+  it('the commit POST discloses the collective scope the page rendered under (codex P1)', async () => {
+    const fetchMock = stubFetch({
+      get: jsonResponse(reschedulablePayload({ isRecurring: true, collectiveAnchor: true })),
+      post: jsonResponse({
+        success: true, originalDate: '2026-07-10', newDate: '2026-07-12',
+        window: { start: '13:00', end: '14:00' }, startLabel: '1:00 PM', endLabel: '2:00 PM',
+      }),
+    });
+
+    renderPage({ classic: true });
+
+    fireEvent.click(await screen.findByRole('button', { name: '1:00 PM' }));
+    fireEvent.click(screen.getByRole('button', { name: /Move to Sunday, July 12/ }));
+
+    await waitFor(() => expect(screen.getByText("You're all set")).toBeInTheDocument());
+    const postCall = fetchMock.mock.calls.find(([, opts]) => opts?.method === 'POST');
+    const posted = JSON.parse(postCall[1].body);
+    expect(posted.disclosed_collective).toBe(true);
+    expect(posted.disclosed_current_date).toBe('2026-07-10');
+  });
+
+  it('keeps the legacy conditional note when collectiveAnchor is absent', async () => {
+    stubFetch({ get: jsonResponse(reschedulablePayload({ isRecurring: true })) });
+
+    renderPage({ classic: true });
+
+    expect(await screen.findByText(/Only this visit will move/)).toBeInTheDocument();
+  });
+});

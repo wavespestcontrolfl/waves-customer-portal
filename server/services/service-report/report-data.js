@@ -208,7 +208,13 @@ async function attachApprovedReportProductFacts(knex, products = []) {
         'approved_for_service_report',
       );
   } catch {
-    return products;
+    // Signal the failure instead of silently returning bare rows (codex P2
+    // r41): a legacy row with product_id but null product_category loses
+    // its class identity when this lookup fails, and downstream honesty
+    // passes would treat the visit as "no corrective products applied".
+    const marked = products.slice();
+    marked.catalogEnrichmentFailed = true;
+    return marked;
   }
   const catalogById = new Map(catalogRows.map((row) => [String(row.id), row]));
   return products.map((product) => {
@@ -306,6 +312,12 @@ function buildLawnWaterContext({ assessment = {}, turfProfile = null, propertyPr
     fawnSnapshot.rainfall_last_7d,
     fawnSnapshot.precipitation_7d,
   );
+  // Which provider actually supplied the weekly figure — the customer-facing
+  // Source row must credit the real one (codex P2 #3093 r6: a FAWN fallback
+  // week was labeled Open-Meteo).
+  const rainfall7dProvider = completionRainfall7dInches != null
+    ? 'open_meteo'
+    : (rainfallInches7d != null ? 'fawn' : null);
   const dailyInputs = [irrigationInchesPerDay, rainfallInchesToday].filter((value) => value != null);
   const weeklyInputs = [irrigationInchesPerWeek, rainfallInches7d].filter((value) => value != null);
 
@@ -347,6 +359,7 @@ function buildLawnWaterContext({ assessment = {}, turfProfile = null, propertyPr
     rainfallSource: rainfallInches7d == null && rainfallInchesToday != null
       ? 'fawn_daily_observation'
       : (rainfallInches7d != null ? 'fawn_7_day_observation' : null),
+    rainfall7dProvider,
     // Per-day rainfall over the trailing 7 days at the client's lat/lng (same
     // Open-Meteo source as rainfallInches7d), raw as [{ date, inches }]. The
     // report's 7-day chart renders from this so it matches the weekly total and
@@ -1806,8 +1819,17 @@ async function lawnPhotoUrl(photo) {
   }
 }
 
-async function loadLinkedLawnAssessment(service, knex = db) {
+// failClosed (issue #3135): the RENDER path treats an unreadable assessment as
+// "no assessment" and degrades the card, which is right for a page. A caller
+// that fences a SEND cannot do that — swallowing a transient error there would
+// dispatch an unfenced attachment, indistinguishable from a genuine non-lawn
+// record. Those callers opt in and get the error propagated instead.
+async function loadLinkedLawnAssessment(service, knex = db, { failClosed = false } = {}) {
   if (!service?.customer_id) return null;
+  const swallow = (err) => {
+    if (failClosed) throw err;
+    return null;
+  };
 
   const baseCriteria = { customer_id: service.customer_id, confirmed_by_tech: true };
   const byRecord = service.id
@@ -1816,7 +1838,7 @@ async function loadLinkedLawnAssessment(service, knex = db) {
       .orderBy('confirmed_at', 'desc')
       .orderBy('created_at', 'desc')
       .first()
-      .catch(() => null)
+      .catch(swallow)
     : null;
   if (byRecord) return byRecord;
 
@@ -1827,7 +1849,7 @@ async function loadLinkedLawnAssessment(service, knex = db) {
       .orderBy('confirmed_at', 'desc')
       .orderBy('created_at', 'desc')
       .first()
-      .catch(() => null)
+      .catch(swallow)
     : null;
   if (byService) return byService;
 
@@ -2138,8 +2160,12 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   const scheduledServicePromise = service.scheduled_service_id
     ? knex('scheduled_services').where({ id: service.scheduled_service_id }).first().catch(() => null)
     : Promise.resolve(null);
+  // The render-time treatment guard must know when this load FAILED versus
+  // legitimately returned no rows — an outage-empty product list would let
+  // stale recommendation copy publish unreconciled (codex P1 r25).
+  let productsLoadFailed = false;
   const [rawProducts, geometryRow, dbZones, dbFindings, photos, scheduledService, approvedVisualMoments, stationRows, stationCheckRows] = await Promise.all([
-    knex('service_products').where({ service_record_id: service.id }).orderBy('created_at').catch(() => []),
+    knex('service_products').where({ service_record_id: service.id }).orderBy('created_at').catch(() => { productsLoadFailed = true; return []; }),
     knex('property_geometries').where({ customer_id: service.customer_id }).orderBy('version', 'desc').first().catch(() => null),
     knex('property_zones').where({ customer_id: service.customer_id, is_active: true }).orderBy('letter').catch(() => []),
     knex('service_findings').where({ service_record_id: service.id }).orderBy('created_at').catch(() => []),
@@ -2155,6 +2181,15 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     knex('termite_station_checks').where({ service_record_id: service.id }).catch(() => []),
   ]);
   const products = await attachApprovedReportProductFacts(knex, rawProducts);
+  // A failed catalog enrichment degrades class identity the same way a
+  // failed base load does (codex P2 r41): rows with product_id but null
+  // product_category can no longer be recognized as fungicide/herbicide,
+  // so honesty passes must treat the product picture as UNKNOWN, not "no
+  // corrective products applied".
+  if (products.catalogEnrichmentFailed
+    && rawProducts.some((p) => p.product_id && !String(p.product_category || '').trim())) {
+    productsLoadFailed = true;
+  }
 
   const areaLabels = locationAreaLabels([
     ...parseJsonArray(service.areas_serviced),
@@ -2216,6 +2251,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     }
   }
 
+
   for (const observation of protocol.observations) {
     if (findings.some((finding) => finding.title.toLowerCase() === observation.toLowerCase())) continue;
     findings.push({
@@ -2230,6 +2266,116 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   }
 
   const lawnAssessment = await buildLawnAssessmentReportData(service, serviceLine, knex);
+  // Render-time treatment reconciliation (codex P1 r19): the completion SMS
+  // links this report immediately — a customer can open it BEFORE the
+  // grounded regen or stored-copy sanitize lands, and nothing shown can be
+  // retracted. Reconcile recommendation-derived copy against today's
+  // applications in-memory as the last line of defense (pure, no DB/LLM);
+  // storage is healed separately by the completion pipeline.
+  // Guard outcome, consulted again after the narrative overlay (codex P1 r28).
+  let lawnTreatmentGuard = null;
+  if (serviceLine === 'lawn' && lawnAssessment?.scores) {
+    try {
+      const { treatmentGuard } = require('../knowledge-bridge');
+      const guardProducts = products.map((p) => ({
+        product_name: p.product_name,
+        product_id: p.product_id || null,
+        product_category: p.product_category || p.approved_report_product_facts?.category || null,
+      }));
+      // FAIL CLOSED on unverifiable categories (codex P1 r24):
+      // attachApprovedReportProductFacts fail-softs to unenriched rows on a
+      // catalog outage, which would make this guard silently skip. Verify
+      // independently: rows still missing a category but carrying a
+      // product_id get one direct catalog lookup — an ERROR there means the
+      // applied classes are UNKNOWN, and recommendation-derived copy is
+      // suppressed outright rather than trusted.
+      let categoriesVerified = !productsLoadFailed;
+      const unresolvedIds = [...new Set(guardProducts.filter((p) => !p.product_category && p.product_id).map((p) => String(p.product_id)))];
+      if (unresolvedIds.length) {
+        try {
+          const catRows = await knex('products_catalog').whereIn('id', unresolvedIds).select('id', 'category');
+          const catById = new Map(catRows.map((c) => [String(c.id), c.category]));
+          for (const gp of guardProducts) {
+            if (!gp.product_category && gp.product_id) gp.product_category = catById.get(String(gp.product_id)) || null;
+          }
+        } catch {
+          categoriesVerified = false;
+        }
+      }
+      lawnTreatmentGuard = { verified: categoriesVerified, guardProducts, treatmentGuard };
+      if (!categoriesVerified) {
+        const NEUTRAL_SUMMARY = 'Today’s applications are in place — we’ll track how the lawn responds and adjust at the next visit.';
+        const NEUTRAL_RECS = {
+          summary: NEUTRAL_SUMMARY,
+          recommendations: [],
+          nextVisitFocus: 'Recheck the areas treated today and confirm how the lawn is responding to the applications.',
+          customerTip: '',
+        };
+        if (lawnAssessment.scores.recommendations) lawnAssessment.scores.recommendations = { ...NEUTRAL_RECS };
+        if (lawnAssessment.recommendations) lawnAssessment.recommendations = { ...NEUTRAL_RECS };
+        lawnAssessment.scores.aiSummary = NEUTRAL_SUMMARY;
+        lawnAssessment.aiSummary = NEUTRAL_SUMMARY;
+        if (lawnAssessment.snapshot && typeof lawnAssessment.snapshot === 'object') {
+          lawnAssessment.snapshot.summary = NEUTRAL_SUMMARY;
+          if (Array.isArray(lawnAssessment.snapshot.findings)) lawnAssessment.snapshot.findings = [];
+          if (Array.isArray(lawnAssessment.snapshot.nextWatchItems)) lawnAssessment.snapshot.nextWatchItems = [];
+        }
+        if (Array.isArray(lawnAssessment.recommendationCards)) lawnAssessment.recommendationCards = [];
+        if (lawnAssessment.customerSummary) lawnAssessment.customerSummary = NEUTRAL_SUMMARY;
+        console.warn('[report-data] product categories unverifiable (catalog lookup failed) — recommendation-derived copy suppressed for this render');
+      } else if (guardProducts.length) {
+        // Products-aware (codex P1 r26): name-phrased deferrals ("Hold off
+        // on Celsius WG") and unresolved-category rows are checked too.
+        const NEUTRAL_SUMMARY = 'Today’s applications are in place — we’ll track how the lawn responds and adjust at the next visit.';
+        const sanitizeRecsInPlace = (host, key) => {
+          const recs = host?.[key];
+          if (!recs || typeof recs !== 'object') return;
+          const { parsed } = treatmentGuard.sanitizeRecommendationsAgainstTreatment(
+            JSON.parse(JSON.stringify(recs)), guardProducts,
+          );
+          host[key] = parsed;
+        };
+        // BOTH data shapes: scores.* AND the duplicated top-level fields —
+        // reconcileLawnReport reads top-level recommendations.nextVisitFocus
+        // and buildLawnReportV2 reads top-level aiSummary (codex P1 r20).
+        sanitizeRecsInPlace(lawnAssessment.scores, 'recommendations');
+        sanitizeRecsInPlace(lawnAssessment, 'recommendations');
+        if (treatmentGuard.contradictsAppliedProducts(lawnAssessment.scores.aiSummary, guardProducts)) {
+          lawnAssessment.scores.aiSummary = NEUTRAL_SUMMARY;
+        }
+        if (treatmentGuard.contradictsAppliedProducts(lawnAssessment.aiSummary, guardProducts)) {
+          lawnAssessment.aiSummary = NEUTRAL_SUMMARY;
+        }
+        // Legacy snapshot + recommendation cards feed the public report
+        // assistant (/api/reports/:token/ask) directly — reconcile those
+        // customer-facing shapes too (codex P1 r23).
+        const contradicts = (text) => treatmentGuard.contradictsAppliedProducts(text, guardProducts);
+        const snap = lawnAssessment.snapshot;
+        if (snap && typeof snap === 'object') {
+          if (contradicts(snap.summary)) snap.summary = NEUTRAL_SUMMARY;
+          if (Array.isArray(snap.findings)) {
+            snap.findings = snap.findings.filter((f) => !contradicts(`${f?.customerCopy || ''} ${f?.title || ''}`));
+          }
+          if (Array.isArray(snap.nextWatchItems)) {
+            snap.nextWatchItems = snap.nextWatchItems.filter((item) => !contradicts(item));
+          }
+        }
+        if (Array.isArray(lawnAssessment.recommendationCards)) {
+          lawnAssessment.recommendationCards = lawnAssessment.recommendationCards.filter(
+            (card) => !contradicts(`${card?.title || ''} ${card?.customerCopy || ''} ${card?.reason || ''}`),
+          );
+        }
+        // customerSummary was COPIED from snapshot.summary before this guard
+        // ran — reconcile the copy too (heading, dynamic hero, and the
+        // report assistant all render it — codex P1 r27).
+        if (contradicts(lawnAssessment.customerSummary)) {
+          lawnAssessment.customerSummary = NEUTRAL_SUMMARY;
+        }
+      }
+    } catch (guardErr) {
+      console.warn(`[report-data] render-time treatment reconciliation skipped: ${guardErr.message}`);
+    }
+  }
   // Mowing height-of-cut — surfaced at the top level (not inside lawnAssessment)
   // so it shows on lawn reports even when there's no vision assessment. Null when
   // not a lawn visit or no reading was captured. The trend is capped at THIS
@@ -2266,12 +2412,43 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // Typed reports carry their real findings in the snapshot (rendered by
   // TypedFindingsCard) — the legacy no-activity fallback would contradict
   // e.g. an active cockroach visit's snapshot.
-  if (!typedSnapshot && !findings.length && !hasLawnAssessmentSignal && shouldAddNoActivityFinding({ service, structured, protocol, interiorOnlyLane })) {
+  if (!typedSnapshot && !findings.length && !hasLawnAssessmentSignal
+    && !(serviceLine === 'lawn' && productsLoadFailed)
+    && shouldAddNoActivityFinding({ service, structured, protocol, interiorOnlyLane })) {
     findings.push({
       id: `no-activity-${service.id}`,
       zoneId: null,
       ...buildNoActivityFinding(serviceLine),
     });
+  }
+
+  // LAWN honesty pass (owner report audit 2026-07-30), mirroring the pest pass
+  // above but keyed on treatment evidence: a "No lawn issues observed" row
+  // (persisted at closeout OR the render-time fallback just above) must not
+  // sit on the same page as a visit that applied corrective product classes
+  // (fungicide/herbicide) — routine lawn visits are fertilizer + preventive
+  // insecticide only. Product rows are the ONLY trigger: keyword-matching the
+  // raw technician notes would fire on negated statements ("no weeds or
+  // disease observed") and derive customer copy from unparsed prose (codex
+  // P1 #3093). The softened wording claims nothing beyond the record: no
+  // structured corrective finding was logged.
+  if (serviceLine === 'lawn' && findings.some((f) => f.category === 'no_activity')) {
+    // Enriched rows, not rawProducts: legacy rows with a null
+    // product_category recover it from the catalog via
+    // attachApprovedReportProductFacts (codex P2 r17).
+    // An outage-empty application set is NOT proof the visit applied
+    // nothing — the absolute "no lawn issues" claim must soften on that
+    // path too (codex P1 r30).
+    const correctiveApplied = productsLoadFailed || products.some((p) =>
+      /fungicide|herbicide/i.test(String(p.product_category || p.approved_report_product_facts?.category || '')));
+    if (correctiveApplied) {
+      for (const finding of findings) {
+        if (finding.category === 'no_activity') {
+          finding.title = 'No corrective findings logged this visit';
+          finding.detail = 'See your technician’s visit summary for what was applied and observed today; no separate corrective finding was logged.';
+        }
+      }
+    }
   }
 
   // Pest Pressure is computed by the pest-pressure orchestrator on report
@@ -2931,11 +3108,50 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       }
 
       if (reportV2 && process.env.LAWN_REPORT_V2_NARRATIVE === 'true') {
-        reportV2 = await applyLawnReportNarrative(reportV2, {
-          grassLabel: grassLabelFor(lawnAssessment?.turfProfile?.grassType),
-          observations: lawnAssessment?.observations || '',
-          customerConcern: structuredCustomerConcern(structured),
-        }).catch(() => reportV2);
+        // The overlay rewrites customer-facing prose and validates only
+        // banned-copy + rain-window rules — it can reintroduce advice that
+        // contradicts today's applications (codex P1 r28). Skip it entirely
+        // when treatment data is unverifiable, and reconcile its output
+        // against the guard otherwise, restoring the deterministic string
+        // for any field it contradicted.
+        if (lawnTreatmentGuard && !lawnTreatmentGuard.verified) {
+          console.warn('[report-data] lawn narrative overlay skipped — treatment data unverifiable');
+        } else {
+          const preOverlay = JSON.parse(JSON.stringify(reportV2));
+          reportV2 = await applyLawnReportNarrative(reportV2, {
+            grassLabel: grassLabelFor(lawnAssessment?.turfProfile?.grassType),
+            observations: lawnAssessment?.observations || '',
+            customerConcern: structuredCustomerConcern(structured),
+          }).catch(() => reportV2);
+          if (lawnTreatmentGuard?.guardProducts?.length) {
+            const { treatmentGuard: tg, guardProducts: gp } = lawnTreatmentGuard;
+            const bad = (text) => tg.contradictsAppliedProducts(text, gp);
+            const restore = (host, prev, key) => {
+              if (host && prev && typeof host[key] === 'string' && bad(host[key])) host[key] = prev[key];
+            };
+            restore(reportV2.snapshot, preOverlay.snapshot, 'statusHeadline');
+            restore(reportV2.snapshot, preOverlay.snapshot, 'mainWatch');
+            restore(reportV2.snapshot, preOverlay.snapshot, 'customerAction');
+            restore(reportV2.snapshot, preOverlay.snapshot, 'rootCause');
+            restore(reportV2.snapshot, preOverlay.snapshot, 'wavesNext');
+            restore(reportV2.snapshot, preOverlay.snapshot, 'treatmentSummary');
+            restore(reportV2.water, preOverlay.water, 'explanation');
+            restore(reportV2.mowing, preOverlay.mowing, 'recommendation');
+            restore(reportV2.treatment, preOverlay.treatment, 'summary');
+            restore(reportV2, preOverlay, 'todaysResult');
+            restore(reportV2, preOverlay, 'smsSummary');
+            (reportV2.diagnosis || []).forEach((d, i) => {
+              const prev = preOverlay.diagnosis?.[i];
+              restore(d, prev, 'explanation');
+              restore(d, prev, 'customerExplanation');
+            });
+            (reportV2.insights || []).forEach((ins, i) => {
+              const prev = preOverlay.insights?.[i];
+              ['headline', 'whatWeSaw', 'whyItMatters', 'wavesAction', 'customerAction', 'nextVisitPlan'].forEach((k) => restore(ins, prev, k));
+            });
+            if (reportV2.followUp && preOverlay.followUp) restore(reportV2.followUp, preOverlay.followUp, 'reason');
+          }
+        }
       }
     } catch {
       // Best-effort + additive: a V2 build hiccup must never break the report.

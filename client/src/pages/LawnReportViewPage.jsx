@@ -67,7 +67,7 @@ function Page({ children }) {
       {/* div, not <main> — WavesShell supplies the main landmark. */}
       <div style={{ flex: 1, width: '100%', maxWidth: 792, margin: '0 auto', padding: '20px 16px 48px' }}>{children}</div>
       {/* Newsletter signup lives only on the newsletter pages (owner 2026-07-09). */}
-      <BrandFooter variant="light" />
+      <BrandFooter variant="light" appBadges={false} />
     </div>
   );
 }
@@ -179,6 +179,30 @@ function QuoteRequestForm({ token, firstName }) {
       ) : null}
     </form>
   );
+}
+
+
+// Per-application figure for a stored pricing tier ("per month" audit
+// 2026-08-01 + codex #3128 r1): explicit visit count first, then the
+// snapshot's own sanitized per_visit amount, then a cadence stated in the
+// tier label (legacy snapshots like "Quarterly Pest Control" carry monthly 39
+// / annual 468 and nothing else). Returns null only when no trustworthy
+// per-application figure exists — those tiers name the billing unit with no
+// dollar figure rather than reviving the flat-monthly framing.
+function tierPerApplication(tier = {}) {
+  const annual = Number(tier.annual ?? (Number(tier.monthly) > 0 ? Number(tier.monthly) * 12 : 0));
+  const visits = Number(tier.visits);
+  if (visits > 0 && annual > 0) return annual / visits;
+  const perVisit = Number(tier.per_visit);
+  if (perVisit > 0) return perVisit;
+  const label = String(tier.label || '');
+  const labelVisits = /bi-?monthly|every 2 months/i.test(label) ? 6
+    : /every 6 weeks/i.test(label) ? 9
+    : /quarterly/i.test(label) ? 4
+    : /monthly/i.test(label) ? 12
+    : null;
+  if (labelVisits && annual > 0) return annual / labelVisits;
+  return null;
 }
 
 export default function LawnReportViewPage() {
@@ -317,9 +341,9 @@ export default function LawnReportViewPage() {
                       fallback, never a /yr total, always two decimals. */}
                   {tier.monthly != null ? (
                     <div style={{ fontFamily: FONTS.heading, fontWeight: 800, fontSize: 18, color: TEXT }}>
-                      {Number(tier.visits) > 0 && Number(tier.annual ?? tier.monthly * 12) > 0
-                        ? <>${fmtCents(Number(tier.annual ?? tier.monthly * 12) / Number(tier.visits))}<span style={{ fontSize: 14, fontWeight: 600, color: MUTED }}> / application</span></>
-                        : <>${fmtCents(tier.monthly)}<span style={{ fontSize: 14, fontWeight: 600, color: MUTED }}>/mo</span></>}
+                      {tierPerApplication(tier) != null
+                        ? <>${fmtCents(tierPerApplication(tier))}<span style={{ fontSize: 14, fontWeight: 600, color: MUTED }}> / application</span></>
+                        : <span style={{ fontSize: 14, fontWeight: 600, color: MUTED }}>Priced per application</span>}
                     </div>
                   ) : null}
                 </div>
