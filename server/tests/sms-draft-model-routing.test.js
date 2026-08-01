@@ -114,6 +114,9 @@ describe('generateDraftOnce', () => {
 
     expect(dispatchWithFallback).toHaveBeenCalledWith(
       {
+        // Dispatch-metrics identity: live drafting carries no lane suffix, so
+        // replay/backfill/sealed traffic can't dilute this lane's stats.
+        name: `smsShadow:${MODELS.ROUTES.smsDraftDefault.provider}`,
         primary: MODELS.ROUTES.smsDraftDefault,
         // Claude-primary route → the cross-provider (OpenAI Sol) backup
         fallback: MODELS.TEXT_POLICIES.highStakes.fallback,
@@ -133,6 +136,7 @@ describe('generateDraftOnce', () => {
 
     expect(dispatchWithFallback).toHaveBeenCalledWith(
       {
+        name: `smsShadow:${MODELS.ROUTES.smsDraftSaveSale.provider}`,
         primary: MODELS.ROUTES.smsDraftSaveSale,
         fallback: MODELS.TEXT_POLICIES.highStakes.fallback,
       },
