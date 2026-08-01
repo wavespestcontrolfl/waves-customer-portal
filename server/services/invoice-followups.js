@@ -7,6 +7,19 @@
  * instant payment succeeds — no "thanks for paying" + "you owe us" crossing.
  *
  * See server/config/invoice-followups.js for step timing + copy.
+ *
+ * EVERY UPDATE IN THIS FILE MUST STAMP `updated_at` (r19 P1). `timestamps(true,
+ * true)` only defaults the column at INSERT — Knex does not maintain it and
+ * migration 20260414000032 installs no trigger, so an unstamped UPDATE leaves
+ * the pre-merge timestamp in place. customer-dedupe.js now treats
+ * invoice_followup_sequences as a REVERT_FINANCIAL_TABLES row and reads
+ * updated_at as its "touched since the merge" signal, so a missed stamp lets a
+ * merge-undo repoint a sequence that has already dunned. A blanket BEFORE
+ * UPDATE trigger was considered and REJECTED: it would also fire on
+ * revertMerge's financial reverse repoint, which is deliberately bare (a bump
+ * there makes the GET /merges invoice-activity mirror read the undo itself as
+ * activity on other journals sharing the row). Explicit stamps — the repo's
+ * convention in ~314 other call sites — keep the writer and the undo distinct.
  */
 
 const db = require('../models/db');
@@ -250,40 +263,77 @@ function anchorTo10amNY(anchorDate, daysAfter, hour) {
  * Call this from the invoice-send flow.
  */
 async function scheduleForInvoice(invoiceId) {
-  const invoice = await db('invoices').where({ id: invoiceId }).first();
-  if (!invoice) return null;
-  if (!isSchedulableInvoice(invoice)) return null;
+  // Cheap unlocked pre-checks: a missing / non-schedulable / payer-billed
+  // invoice never arms a sequence, and none of those verdicts can be flipped
+  // by a merge-undo (undo moves ownership, not status or payer). Re-verified
+  // under the lock below, so a status change racing this read is caught there.
+  const preview = await db('invoices').where({ id: invoiceId }).first();
+  if (!preview) return null;
+  if (!isSchedulableInvoice(preview)) return null;
   // Third-party Bill-To: the follow-up/dunning sequence emails and texts the
   // homeowner with the pay link, but a payer-billed invoice's AR rolls to the
   // payer's AP inbox — never chase the homeowner for it. Phase 1 has no payer
   // dunning sequence, so we simply don't arm follow-ups for payer invoices.
-  if (invoice.payer_id) return null;
+  if (preview.payer_id) return null;
 
-  const customer = await db('customers').where({ id: invoice.customer_id }).first();
-  const onAutopay = await customerOnAutopay(customer);
+  // OWNERSHIP IS DERIVED UNDER THE INVOICE LOCK (r19 P1).
+  //
+  // customer_id used to be captured from the pre-lock read above and then
+  // carried through several awaits into the INSERT. A merge-undo that locked
+  // the invoice in between (customer-dedupe.js revertMerge takes FOR UPDATE on
+  // every journaled invoice in its verification pass) would see no sequence in
+  // its child probe, repoint the invoice back to the restored loser, and
+  // commit — after which this insert resumed and created a WINNER-owned
+  // sequence for a loser-owned invoice. The FK is on invoice_id, so nothing
+  // rejected it, and the next cron touch would dun the wrong customer with the
+  // invoice's bearer /pay/:token.
+  //
+  // The invoice row is the serialization point the whole invoice family already
+  // shares (revertMerge's verification pass, fireStep's claim, InvoiceService.
+  // update, stripe-webhook's succeeded-PI handler). Taking it here and deriving
+  // customer_id from the POST-lock row is the same settlement-ownership pattern
+  // those callers document: either we commit first and the undo's probe sees
+  // this sequence (and refuses), or we block and arm against whoever owns the
+  // invoice after the undo commits. Never a pre-lock copy.
+  //
+  // Everything under the lock is DB work on this connection (customerOnAutopay
+  // takes the trx), so the lock is never held across external I/O.
+  return db.transaction(async (trx) => {
+    const invoice = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
+    if (!invoice) return null;
+    // Re-verify post-lock: an edit or payment that committed while we waited
+    // can have made this invoice non-schedulable or payer-billed.
+    if (!isSchedulableInvoice(invoice)) return null;
+    if (invoice.payer_id) return null;
 
-  // Anchor the cadence to when the invoice went out. Falls back through
-  // sent_at → sms_sent_at → created_at so edge cases (manual-only, email-only,
-  // or older rows without sent_at populated) still get scheduled correctly.
-  const anchorAt = invoice.sent_at || invoice.sms_sent_at || invoice.created_at;
-  const nextAt = computeNextTouchAt(anchorAt, 0);
+    // Existing-row check moved under the lock too: it and the INSERT must be
+    // one atomic decision, or two concurrent arms race the unique(invoice_id).
+    const existing = await trx('invoice_followup_sequences').where({ invoice_id: invoiceId }).first();
+    if (existing) {
+      // Don't clobber admin-controlled state; just make sure we're aligned.
+      if (existing.status === 'stopped' || existing.status === 'completed') return existing;
+      return existing;
+    }
 
-  const existing = await db('invoice_followup_sequences').where({ invoice_id: invoiceId }).first();
-  if (existing) {
-    // Don't clobber admin-controlled state; just make sure we're aligned.
-    if (existing.status === 'stopped' || existing.status === 'completed') return existing;
-    return existing;
-  }
+    const customer = await trx('customers').where({ id: invoice.customer_id }).first();
+    const onAutopay = await customerOnAutopay(customer, { db: trx });
 
-  const [row] = await db('invoice_followup_sequences').insert({
-    invoice_id: invoiceId,
-    customer_id: invoice.customer_id,
-    status: onAutopay ? 'autopay_hold' : 'active',
-    step_index: 0,
-    next_touch_at: onAutopay ? null : nextAt,
-    is_autopay_held: !!onAutopay,
-  }).returning('*');
-  return row;
+    // Anchor the cadence to when the invoice went out. Falls back through
+    // sent_at → sms_sent_at → created_at so edge cases (manual-only, email-only,
+    // or older rows without sent_at populated) still get scheduled correctly.
+    const anchorAt = invoice.sent_at || invoice.sms_sent_at || invoice.created_at;
+    const nextAt = computeNextTouchAt(anchorAt, 0);
+
+    const [row] = await trx('invoice_followup_sequences').insert({
+      invoice_id: invoiceId,
+      customer_id: invoice.customer_id,
+      status: onAutopay ? 'autopay_hold' : 'active',
+      step_index: 0,
+      next_touch_at: onAutopay ? null : nextAt,
+      is_autopay_held: !!onAutopay,
+    }).returning('*');
+    return row;
+  });
 }
 
 /**
@@ -356,6 +406,7 @@ async function fireStep(row) {
   // in-flight reminder.
   const claimStamp = new Date();
   let claimedSeq = null;
+  let claimedInvoice = null;
   try {
     // Claim inside a transaction that locks the INVOICE row first.
     // InvoiceService.update locks the same row before re-checking the claim,
@@ -386,6 +437,34 @@ async function fireStep(row) {
       ) {
         return;
       }
+      // OWNERSHIP REVALIDATION UNDER THE LOCK (r19 P1 — customer-facing leak).
+      //
+      // `row` is a batch snapshot from runPending's join (or sendNextTouchNow's).
+      // A merge-undo that committed between that SELECT and this lock repoints
+      // BOTH the invoice and its sequence to the restored loser — but nothing
+      // above re-read customer_id, so fireTouch would load `row.customer_id`
+      // (the pre-undo winner), render this invoice's bearer /pay/:token, and
+      // text/email the restored customer's bill to a DIFFERENT customer. The
+      // revalidation below is a superset of the r17 gate: that one stopped the
+      // undo when a sequence had moved, this one stops the *worker* when it
+      // didn't get the memo.
+      //
+      // Refuse rather than re-target: an ownership flip means the state this
+      // batch row was built from is gone, and re-deriving a send from half-
+      // refreshed fields is how the original bug happened. Skipping leaves the
+      // sequence active and due, so the next cron pass re-selects it fresh.
+      // Sequence and invoice must also agree with EACH OTHER — a split between
+      // them is exactly the state the undo's child probe refuses to create, so
+      // seeing it here means something else diverged: fail closed.
+      if (
+        String(liveSeq.customer_id) !== String(row.customer_id) ||
+        String(lockedInvoice.customer_id) !== String(row.customer_id)
+      ) {
+        logger.warn(
+          `[invoice-followups] ownership changed under the lock for sequence ${row.id} (invoice ${row.invoice_id}) — skipping this touch; the next run re-selects it fresh`,
+        );
+        return;
+      }
       const claimed = await trx('invoice_followup_sequences')
         .where({ id: row.id })
         .where(function () {
@@ -393,8 +472,16 @@ async function fireStep(row) {
             'touch_claimed_at', '<', new Date(claimStamp.getTime() - TOUCH_CLAIM_TTL_MS),
           );
         })
-        .update({ touch_claimed_at: claimStamp });
-      if (claimed) claimedSeq = liveSeq;
+        // The claim stamps updated_at too: "a worker is mid-send on this
+        // sequence" is precisely the activity a merge-undo must refuse on, and
+        // it is the backstop for the ownership gate above — a claim taken
+        // before the undo's verification pass makes the undo refuse instead of
+        // repointing a sequence out from under an in-flight touch.
+        .update({ touch_claimed_at: claimStamp, updated_at: trx.fn.now() });
+      if (claimed) {
+        claimedSeq = liveSeq;
+        claimedInvoice = lockedInvoice;
+      }
     });
   } catch (err) {
     logger.error(`[invoice-followups] touch claim failed for invoice ${row.invoice_id}: ${err.message}`);
@@ -404,13 +491,25 @@ async function fireStep(row) {
     logger.info(`[invoice-followups] sequence ${row.id} in flight or changed after batch select; skipping touch`);
     return;
   }
+  // Hand fireTouch POST-LOCK state, not the batch snapshot (r19 P1). The
+  // ownership gate above proved customer_id has not moved; these are the
+  // remaining send-driving fields the lock proves fresher than the batch
+  // select. invoice_payer_id especially: fireTouch's Bill-To guard reads it to
+  // decide whether sending would leak the payer's bearer link, and a payer
+  // assigned since the batch SELECT would otherwise be invisible to it.
   row.anchor_at = claimedSeq.anchor_at;
+  row.customer_id = claimedSeq.customer_id;
+  row.invoice_payer_id = claimedInvoice.payer_id ?? null;
+  row.invoice_status = claimedInvoice.status;
+  row.token = claimedInvoice.token;
   try {
     await fireTouch(row);
   } finally {
     await db('invoice_followup_sequences')
       .where({ id: row.id, touch_claimed_at: claimStamp })
-      .update({ touch_claimed_at: null })
+      // Stamped as well, so a send that THREW before reaching any status write
+      // still leaves the row looking touched to the undo's activity gate.
+      .update({ touch_claimed_at: null, updated_at: db.fn.now() })
       .catch((err) => logger.warn(
         `[invoice-followups] could not clear touch claim for ${row.invoice_id}: ${err.message}`,
       ));
@@ -421,6 +520,7 @@ async function fireTouch(row) {
   const step = config.steps[row.step_index];
   if (!step) {
     await db('invoice_followup_sequences').where({ id: row.id }).update({
+      updated_at: db.fn.now(),
       status: 'completed',
       next_touch_at: null,
     });
@@ -440,6 +540,7 @@ async function fireTouch(row) {
   }
   if (payerId) {
     await db('invoice_followup_sequences').where({ id: row.id }).update({
+      updated_at: db.fn.now(),
       status: 'paused',
       next_touch_at: null,
     });
@@ -455,6 +556,7 @@ async function fireTouch(row) {
   // active would fire a stale touch if the customer is later restored.
   if (customer?.deleted_at) {
     await db('invoice_followup_sequences').where({ id: row.id }).update({
+      updated_at: db.fn.now(),
       status: 'paused',
       next_touch_at: null,
     });
@@ -575,6 +677,7 @@ async function fireTouch(row) {
 
   if (!smsSent && !emailResult.ok) {
     await db('invoice_followup_sequences').where({ id: row.id }).update({
+      updated_at: db.fn.now(),
       status: 'paused',
       paused_reason: smsSkipReason || emailResult.reason || emailResult.error || 'no_channel_delivered',
       next_touch_at: null,
@@ -601,6 +704,7 @@ async function fireTouch(row) {
   const nextAt = computeNextTouchAt(anchorAt, nextIndex);
 
   await db('invoice_followup_sequences').where({ id: row.id }).update({
+    updated_at: db.fn.now(),
     touches_sent: row.touches_sent + 1,
     step_index: nextIndex,
     last_touch_at: new Date(),
@@ -639,6 +743,7 @@ async function stopOnPayment(invoiceId) {
   const sentAReminder = seq.touches_sent > 0;
 
   await db('invoice_followup_sequences').where({ id: seq.id }).update({
+    updated_at: db.fn.now(),
     status: 'completed',
     next_touch_at: null,
   });
@@ -698,6 +803,7 @@ async function releaseFromAutopayHold(invoiceId) {
   if (!invoice || isTerminalInvoice(invoice)) return;
 
   await db('invoice_followup_sequences').where({ id: seq.id }).update({
+    updated_at: db.fn.now(),
     status: 'active',
     is_autopay_held: false,
     // A shifted anchor (delivered-invoice due-date edit while held) wins so
@@ -722,6 +828,7 @@ async function handleAutopayFailure(customerId) {
       await releaseFromAutopayHold(row.invoice_id);
     } else {
       await db('invoice_followup_sequences').where({ id: row.id }).update({
+        updated_at: db.fn.now(),
         autopay_failures_observed: nextCount,
       });
     }
@@ -733,6 +840,7 @@ async function handleAutopayFailure(customerId) {
  */
 async function pauseSequence(invoiceId, { reason, until, adminId } = {}) {
   await db('invoice_followup_sequences').where({ invoice_id: invoiceId }).update({
+    updated_at: db.fn.now(),
     status: 'paused',
     paused_reason: reason || null,
     paused_until: until || null,
@@ -747,6 +855,7 @@ async function resumeSequence(invoiceId) {
   const invoice = await db('invoices').where({ id: invoiceId }).first();
   if (!invoice || isTerminalInvoice(invoice)) return;
   await db('invoice_followup_sequences').where({ id: seq.id }).update({
+    updated_at: db.fn.now(),
     status: 'active',
     paused_reason: null,
     paused_until: null,
@@ -796,7 +905,8 @@ async function rescheduleForInvoiceEdit(invoiceId, { previousDueDate, newDueDate
   if (seq.status === 'active') {
     patch.next_touch_at = computeNextTouchAt(shiftedAnchor, seq.step_index);
   }
-  await dbc('invoice_followup_sequences').where({ id: seq.id }).update(patch);
+  await dbc('invoice_followup_sequences').where({ id: seq.id })
+    .update({ ...patch, updated_at: dbc.fn.now() });
 }
 
 /**
@@ -819,6 +929,7 @@ function shiftAnchorNYCalendarDays(anchorDate, days) {
 
 async function stopSequence(invoiceId, { reason, adminId } = {}) {
   await db('invoice_followup_sequences').where({ invoice_id: invoiceId }).update({
+    updated_at: db.fn.now(),
     status: 'stopped',
     stopped_reason: reason || null,
     stopped_by_admin_id: adminId || null,
@@ -839,6 +950,7 @@ async function sendNextTouchNow(invoiceId) {
 
   // Temporarily set next_touch_at in the past + status active, then fire
   await db('invoice_followup_sequences').where({ id: seq.id }).update({
+    updated_at: db.fn.now(),
     status: 'active',
     next_touch_at: new Date(Date.now() - 1000),
   });

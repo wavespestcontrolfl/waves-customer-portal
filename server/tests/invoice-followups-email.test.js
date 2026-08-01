@@ -122,6 +122,10 @@ describe('invoice follow-up email sidecar', () => {
     // fireStep claims inside a transaction that locks the invoice row —
     // pass-through so the queued table chains serve it.
     db.transaction = jest.fn(async (fn) => fn(db));
+    // Every sequence UPDATE stamps updated_at via knex's `.fn.now()` (the
+    // merge-undo activity gate reads that column), so the stub connection
+    // needs the same surface the real knex instance exposes.
+    db.fn = { now: jest.fn(() => 'CURRENT_TIMESTAMP') };
   });
 
   afterEach(() => {
@@ -147,7 +151,7 @@ describe('invoice follow-up email sidecar', () => {
       // fireStep now claims the sequence (touch_claimed_at) before sending
       // and clears it after — the cadence advance is the middle entry.
       invoice_followup_sequences: [
-        chain({ first: { id: 'seq-1', status: 'active', step_index: 0, next_touch_at: '2026-05-26T13:00:00.000Z', anchor_at: null } }), // post-lock revalidation
+        chain({ first: { id: 'seq-1', customer_id: 'cust-1', status: 'active', step_index: 0, next_touch_at: '2026-05-26T13:00:00.000Z', anchor_at: null } }), // post-lock revalidation (customer_id is NOT NULL in schema — fireStep's ownership gate reads it)
         chain({ result: 1 }), // touch claim
         sequenceUpdate, // cadence advance
         chain({ result: 1 }), // claim clear
@@ -211,6 +215,71 @@ describe('invoice follow-up email sidecar', () => {
     expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
   });
 
+  test('refuses the touch when a merge-undo repointed the sequence under the claim lock (r19)', async () => {
+    // The batch row is a pre-undo snapshot. A merge-undo that committed
+    // between runPending's SELECT and fireStep's FOR UPDATE repoints both the
+    // invoice and its sequence to the restored loser — sending from the stale
+    // row.customer_id would mail the restored customer's invoice, and its
+    // bearer /pay/:token, to the WINNER. The post-lock ownership gate drops
+    // the touch; the sequence stays active and due for the next run.
+    setDbQueues({
+      'invoice_followup_sequences as s': [chain({ result: [followupRow()] })],
+      invoices: [chain({ first: invoice({ customer_id: 'cust-restored' }) })], // repointed under the lock
+      invoice_followup_sequences: [
+        chain({ first: { id: 'seq-1', customer_id: 'cust-restored', status: 'active', step_index: 0, next_touch_at: '2026-05-26T13:00:00.000Z', anchor_at: null } }),
+      ],
+    });
+
+    await InvoiceFollowUps.runPending();
+
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  test('refuses the touch when only the INVOICE moved — sequence/invoice split fails closed (r19)', async () => {
+    setDbQueues({
+      'invoice_followup_sequences as s': [chain({ result: [followupRow()] })],
+      invoices: [chain({ first: invoice({ customer_id: 'cust-restored' }) })],
+      invoice_followup_sequences: [
+        chain({ first: { id: 'seq-1', customer_id: 'cust-1', status: 'active', step_index: 0, next_touch_at: '2026-05-26T13:00:00.000Z', anchor_at: null } }),
+      ],
+    });
+
+    await InvoiceFollowUps.runPending();
+
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  test('arms a new sequence from the LOCKED invoice owner, not the pre-lock read (r19)', async () => {
+    // scheduleForInvoice used to capture customer_id from an unlocked read and
+    // carry it through several awaits into the INSERT. If a merge-undo held
+    // the invoice lock across that window, the insert landed a winner-owned
+    // sequence on a loser-owned invoice. Ownership now comes from the row read
+    // under FOR UPDATE.
+    const sequenceInsert = chain({ returning: [{ id: 'seq-new' }] });
+    setDbQueues({
+      invoices: [
+        chain({ first: invoice({ created_at: '2026-05-20T12:00:00.000Z' }) }), // unlocked preview (pre-undo owner)
+        // post-lock truth: a merge-undo repointed the invoice while we waited
+        chain({ first: invoice({ customer_id: 'cust-restored', created_at: '2026-05-20T12:00:00.000Z' }) }),
+      ],
+      invoice_followup_sequences: [
+        chain({ first: undefined }), // no existing sequence
+        sequenceInsert,
+      ],
+      customers: [chain({ first: customer({ id: 'cust-restored' }) })],
+      payment_methods: [chain({ first: undefined })],
+    });
+
+    await InvoiceFollowUps.scheduleForInvoice('inv-1');
+
+    expect(sequenceInsert.insert).toHaveBeenCalledWith(expect.objectContaining({
+      invoice_id: 'inv-1',
+      customer_id: 'cust-restored',
+    }));
+  });
+
   test('cron excludes every non-sendable invoice status', async () => {
     const pendingQuery = chain({ result: [] });
     setDbQueues({
@@ -266,7 +335,7 @@ describe('invoice follow-up email sidecar', () => {
       customer_interactions: [emailInteraction, finalInteraction],
       // Claim → cadence advance → claim clear (see the sidecar test above).
       invoice_followup_sequences: [
-        chain({ first: { id: 'seq-1', status: 'active', step_index: 0, next_touch_at: '2026-05-26T13:00:00.000Z', anchor_at: null } }), // post-lock revalidation
+        chain({ first: { id: 'seq-1', customer_id: 'cust-1', status: 'active', step_index: 0, next_touch_at: '2026-05-26T13:00:00.000Z', anchor_at: null } }), // post-lock revalidation (customer_id is NOT NULL in schema — fireStep's ownership gate reads it)
         chain({ result: 1 }), // touch claim
         sequenceUpdate, // cadence advance
         chain({ result: 1 }), // claim clear

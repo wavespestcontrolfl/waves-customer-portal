@@ -94,6 +94,9 @@ describe('invoice-followups micro-deposit diversion', () => {
     // fireStep claims inside a transaction that locks the invoice row —
     // pass-through so the queued table chains serve it.
     db.transaction = jest.fn(async (fn) => fn(db));
+    // Sequence UPDATEs stamp updated_at via knex's .fn.now() (the merge-undo
+    // activity signal), so the stub connection needs that surface too.
+    db.fn = { now: jest.fn(() => 'CURRENT_TIMESTAMP') };
   });
   afterEach(() => jest.useRealTimers());
 
@@ -103,12 +106,12 @@ describe('invoice-followups micro-deposit diversion', () => {
       customers: [chain({ first: customer })],
       // Claim-txn row lock read + credit re-read.
       invoices: [
-        chain({ first: { id: 'inv-1', status: 'viewed' } }),
+        chain({ first: { id: 'inv-1', customer_id: 'cust-1', status: 'viewed', token: 'token-1' } }),
         chain({ first: { total: '129.00', credit_applied: null, status: 'viewed', title: 'Quarterly Pest Control', token: 'token-1', due_date: '2026-05-10', invoice_number: 'WPC-2026-1042' } }),
       ],
       // Post-lock revalidation → claim → cadence advance → claim clear.
       invoice_followup_sequences: [
-        chain({ first: { id: 'seq-1', status: 'active', step_index: 0, next_touch_at: '2026-05-26T13:00:00.000Z', anchor_at: null } }),
+        chain({ first: { id: 'seq-1', customer_id: 'cust-1', status: 'active', step_index: 0, next_touch_at: '2026-05-26T13:00:00.000Z', anchor_at: null } }),
         chain({ updateResult: 1 }),
         chain({ updateResult: 1 }),
         chain({ updateResult: 1 }),
@@ -146,14 +149,14 @@ describe('invoice-followups micro-deposit diversion', () => {
       'invoice_followup_sequences as s': [chain({ result: [row] })],
       customers: [chain({ first: customer })],
       invoices: [
-        chain({ first: { id: 'inv-1', status: 'viewed' } }), // claim-txn row lock read
+        chain({ first: { id: 'inv-1', customer_id: 'cust-1', status: 'viewed', token: 'token-1' } }), // claim-txn row lock read
         chain({ first: { total: '129.00', credit_applied: null, status: 'viewed', title: 'Quarterly Pest Control', token: 'token-1', due_date: '2026-05-10', invoice_number: 'WPC-2026-1042' } }), // credit re-read
         chain({ first: { id: 'inv-1', status: 'viewed', title: 'Quarterly Pest Control', total: '129.00', credit_applied: null, due_date: '2026-05-10', service_date: '2026-05-01', invoice_number: 'WPC-2026-1042' } }), // sendFollowupEmail re-read
       ],
       notification_prefs: [chain({ first: {} })],
       // Post-lock revalidation → claim → cadence advance → claim clear.
       invoice_followup_sequences: [
-        chain({ first: { id: 'seq-1', status: 'active', step_index: 0, next_touch_at: '2026-05-26T13:00:00.000Z', anchor_at: null } }),
+        chain({ first: { id: 'seq-1', customer_id: 'cust-1', status: 'active', step_index: 0, next_touch_at: '2026-05-26T13:00:00.000Z', anchor_at: null } }),
         chain({ updateResult: 1 }),
         chain({ updateResult: 1 }),
         chain({ updateResult: 1 }),
