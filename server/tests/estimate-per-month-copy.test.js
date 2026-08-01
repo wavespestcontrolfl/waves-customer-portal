@@ -169,3 +169,33 @@ describe('monthly-billing display identity fails closed on a lookup failure', ()
     await expect(estimateRendersMonthlyBilling({ id: 'est-unlinked' })).resolves.toBe(false);
   });
 });
+
+// The monthly-lane exception has to be reachable end to end (codex #3128 r9):
+// the lane fact says "state it plainly", the house voice forbids computing or
+// inventing figures — so if the amount is not IN the facts, the exception
+// produces a deferral and nothing else.
+describe('the monthly-lane exception carries its amount and agrees across surfaces', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const drafter = fs.readFileSync(path.join(__dirname, '../services/sms-shadow-drafter.js'), 'utf8');
+  const agent = fs.readFileSync(path.join(__dirname, '../services/ai-assistant/managed-agent-config.js'), 'utf8');
+
+  test('the drafter emits the rate ONLY for the monthly lane', () => {
+    expect(drafter).toContain('lane?.monthlyBilled && Number(context.customer?.monthlyRate) > 0');
+    expect(drafter).toContain('Monthly plan rate:');
+  });
+
+  test('no surface still restricts the exception to an EXPLICIT lane', () => {
+    // r8 made the resolved lane authoritative (an inferred monthly member is
+    // billed monthly by the same rule the dues cron uses). The house voice and
+    // BOTH tool descriptions have to agree, or the model is told to withhold a
+    // real price that the fact just authorized.
+    expect(agent).not.toMatch(/explicit monthly-membership/);
+    const toolDescriptions = agent.match(/description: `[^`]*monthly rate[^`]*`/g) || [];
+    expect(toolDescriptions.length).toBe(2);
+    for (const desc of toolDescriptions) {
+      expect(desc).toMatch(/Billing lane/);
+      expect(desc).toMatch(/owner-set or inferred/);
+    }
+  });
+});

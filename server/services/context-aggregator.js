@@ -148,25 +148,38 @@ function customerSafeVisitNotes(notes) {
 // per_visit's copy: the lane is an internal billing mechanism (invoice on
 // completion), NOT customer wording — recurring work is always described "per
 // application", never "per visit".
+//
+// `short` is the CUSTOMER-SAFE name, and the only form that may be serialized
+// into buildSummary — which IS the managed agent's context snapshot
+// (managed-assistant.js stores ctx.summary verbatim). Echoing the raw mode
+// there put the forbidden word "per visit" into authoritative grounding
+// (codex #3128 r9).
 const BILLING_LANE_COPY = {
   monthly_membership: {
     monthlyBilled: true,
+    short: 'monthly membership',
     copy: 'MONTHLY MEMBERSHIP — dues are charged monthly, so this customer\'s monthly rate IS their price. State it plainly.',
   },
   annual_prepay: {
     monthlyBilled: false,
+    short: 'annual prepay (paid for the year)',
     copy: 'ANNUAL PREPAY — already paid up front for the year. Never describe a monthly charge, and never quote a per-application price as something they owe.',
   },
   per_application: {
     monthlyBilled: false,
+    short: 'per application',
     copy: 'PER APPLICATION — quote the per-application price and the number of applications a year.',
   },
   per_visit: {
     monthlyBilled: false,
+    // NOT "per visit" — the mode name is an internal billing mechanism
+    // (invoice on completion); the customer-facing unit is the application.
+    short: 'per application',
     copy: 'PER APPLICATION (invoiced after each service) — quote the per-application price; never say "per visit" to a customer.',
   },
   one_time: {
     monthlyBilled: false,
+    short: 'one-time job',
     copy: 'ONE-TIME — a single job with no recurring billing relationship.',
   },
 };
@@ -204,6 +217,8 @@ function resolveBillingLaneFacts(customer) {
       mode,
       explicit,
       monthlyBilled: laneCopy.monthlyBilled,
+      // Customer-safe short form for the managed-agent context snapshot.
+      shortLabel: laneCopy.short,
       label: `${laneCopy.copy} (${provenance})`,
     };
   } catch {
@@ -697,9 +712,19 @@ class ContextAggregator {
     // Recomputed when absent so a direct buildSummary caller still fails
     // closed to "not stated" rather than dropping the fact entirely.
     const lane = billingLane || resolveBillingLaneFacts(c);
-    s += ` | Billing lane: ${lane.mode
-      ? `${lane.mode.replace(/_/g, ' ')}${lane.explicit ? '' : ' (inferred)'}`
+    // shortLabel, never the raw mode (codex #3128 r9): this string IS the
+    // managed agent's context snapshot, and `per_visit` spelled out would put
+    // the one unit the house voice forbids into authoritative grounding.
+    s += ` | Billing lane: ${lane.shortLabel
+      ? `${lane.shortLabel}${lane.explicit ? '' : ' (inferred)'}`
       : 'not stated — no monthly amount'}`;
+    // The monthly lane is the one case where a plan price may be spoken, so
+    // the amount has to travel WITH it — the house voice forbids computing or
+    // inventing figures, so "state it plainly" without the number just
+    // produces a deferral (codex #3128 r9).
+    if (lane.monthlyBilled && Number(c.monthly_rate) > 0) {
+      s += ` ($${Number(c.monthly_rate).toFixed(2)}/mo dues)`;
+    }
     if (lastSvc) s += ` | Last: ${lastSvc.service_type} ${new Date(lastSvc.service_date).toLocaleDateString('en-US', { timeZone: 'America/New_York' })}`;
     if (upcoming.length) s += ` | Next: ${upcoming[0].service_type} ${new Date(upcoming[0].scheduled_date).toLocaleDateString('en-US', { timeZone: 'America/New_York' })}`;
     if (balance > 0) s += ` | ⚠️ $${balance.toFixed(2)} overdue`;

@@ -89,7 +89,7 @@ RULES:
     {
       type: 'custom',
       name: 'lookup_customer',
-      description: `Look up a customer by phone number or name. Returns account details including name, address, WaveGuard tier, monthly rate, outstanding balance, member-since date, and pipeline stage. NOTE: 'monthly rate' is a stored internal figure, NOT what most customers are charged — recurring plans bill per application; only an explicit monthly-membership billing lane is charged monthly. Never repeat it to a customer as their price unless the facts state that lane. The lane is supplied as the "Billing lane" fact in the account context, not by this tool. Use this first when you need any customer information. If the customer is already identified via context, you can skip this.`,
+      description: `Look up a customer by phone number or name. Returns account details including name, address, WaveGuard tier, monthly rate, outstanding balance, member-since date, and pipeline stage. NOTE: 'monthly rate' is a stored internal figure, NOT what most customers are charged — recurring plans bill per application, and only a monthly-membership billing lane is charged monthly. Never repeat it to a customer as their price unless the "Billing lane" fact in the account context reads monthly membership; when it does, that rate IS their price. The lane is supplied by that fact (owner-set or inferred — both are authoritative), not by this tool. Use this first when you need any customer information. If the customer is already identified via context, you can skip this.`,
       input_schema: {
         type: 'object',
         properties: {
@@ -126,7 +126,7 @@ RULES:
     {
       type: 'custom',
       name: 'get_billing_info',
-      description: `Get billing info: WaveGuard tier, monthly rate, outstanding balance, last 5 payments, and payment methods on file. 'monthly rate' is internal — only an explicit monthly-membership billing lane is charged monthly; never quote it to a customer as their price unless the facts state that lane. The lane is supplied as the "Billing lane" fact in the account context, not by this tool. Use when they ask about their bill, payments, balance, or card.`,
+      description: `Get billing info: WaveGuard tier, monthly rate, outstanding balance, last 5 payments, and payment methods on file. 'monthly rate' is internal — only a monthly-membership billing lane is charged monthly; never quote it to a customer as their price unless the "Billing lane" fact in the account context reads monthly membership, in which case that rate IS their price. The lane is supplied by that fact (owner-set or inferred — both are authoritative), not by this tool. Use when they ask about their bill, payments, balance, or card.`,
       input_schema: {
         type: 'object',
         properties: { customer_id: { type: 'string', description: 'Waves customer UUID' } },
