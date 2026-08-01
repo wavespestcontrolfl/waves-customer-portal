@@ -378,6 +378,77 @@ describe('per-application synthesis (owner rule 2026-07-31: residential bills pe
       .buildings[0].lineItems[0].frequency).toBe('per_application');
   });
 
+  // Codex #3120 r4/r6: buildPricingBundleInner refuses to fast-path a snapshot
+  // with a retired cadence or below-floor lawn price and rebuilds it. Its fast
+  // path REQUIRES pricingBundleMatchesEstimateTotals, so such a snapshot is by
+  // construction one whose totals still EQUAL the frozen columns — the rebuild
+  // then moves the price while annual_total stays put. Modelling that shape is
+  // the part the first attempt got wrong.
+  describe('a policy-invalid snapshot the page has rebuilt', () => {
+    // Frozen columns agree with the retired 4x/yr below-floor snapshot...
+    const staleSnapshotFrequency = {
+      key: 'quarterly', label: 'Quarterly', serviceCategory: 'lawn_care',
+      monthly: 20, annual: 240, perTreatment: 60, visitsPerYear: 4, billedPerApplication: true,
+    };
+    // ...and the live rebuild clamps to the program floor at a new cadence.
+    const rebuiltFrequency = {
+      key: 'standard', label: 'Bi-monthly', serviceCategory: 'lawn_care',
+      monthly: 45, annual: 540, perTreatment: 90, visitsPerYear: 6, billedPerApplication: true,
+    };
+    const outstanding = {
+      service_interest: 'Lawn Care',
+      monthly_total: 20,
+      annual_total: 240,            // frozen to the REJECTED snapshot
+      estimate_data: { sendSnapshot: { pricingBundle: { frequencies: [staleSnapshotFrequency] } } },
+    };
+    const livePricing = {
+      bundle: { frequencies: [rebuiltFrequency] },
+      defaultCandidate: rebuiltFrequency,
+    };
+
+    it('quotes the rebuilt plan, not the retired one the frozen totals still match', () => {
+      const out = perApplicationRecurringLines(outstanding, outstanding.estimate_data, livePricing);
+      expect(out).toHaveLength(1);
+      expect(out[0].unitPrice).toBe(90);
+      expect(out[0].visitsPerYear).toBe(6);
+    });
+
+    it('does not suppress recurring pricing just because the stale columns match nothing', () => {
+      const p = normalizeProposal(outstanding, { recurringMode: 'per_application', livePricing });
+      expect(p.buildings[0].lineItems.map((i) => i.frequency)).toContain('per_application');
+      expect(computeProposalTotals(p).annualRecurring).toBe(540);
+    });
+
+    // Without the live authority this is the pre-fix document: the retired
+    // cadence the page will not sell.
+    it('quotes the retired snapshot when no live pricing is supplied', () => {
+      const out = perApplicationRecurringLines(outstanding, outstanding.estimate_data);
+      expect(out[0].unitPrice).toBe(60);
+    });
+
+    // The reconcile guard survives the anchor swap: a default candidate whose
+    // own rows do not add up to its own annual is still rejected.
+    it('still rejects a default candidate that does not add up to its own annual', () => {
+      const incoherent = { ...rebuiltFrequency, annual: 700 };
+      expect(perApplicationRecurringLines(outstanding, outstanding.estimate_data, {
+        bundle: { frequencies: [incoherent] },
+        defaultCandidate: incoherent,
+      })).toBeNull();
+    });
+
+    // The common case must not change: when the live bundle still agrees with
+    // the stored columns, selection runs exactly as before and the default
+    // candidate is never consulted.
+    it('prefers the stored-total match over the default candidate when both exist', () => {
+      const matching = { ...staleSnapshotFrequency };
+      const out = perApplicationRecurringLines(outstanding, outstanding.estimate_data, {
+        bundle: { frequencies: [matching, rebuiltFrequency] },
+        defaultCandidate: rebuiltFrequency,
+      });
+      expect(out[0].unitPrice).toBe(60);
+    });
+  });
+
   it('leaves an authored commercial proposal untouched under the opt-in', () => {
     const authored = {
       customer_name: 'Siesta Sands HOA',

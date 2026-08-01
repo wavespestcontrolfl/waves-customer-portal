@@ -122,23 +122,83 @@ async function estimateSoldAsAnnualPrepay(estimate) {
   }
 }
 
+// WHICH pricing is authoritative for this document (codex #3120 r4 + r6).
+//
+// Acceptance freezes the price: both accept flows stamp price_locked_at and
+// pricing_authority 'LOCKED' in the same atomic update that writes
+// monthly_total / annual_total / accepted_frequency_key, and /:token/pdf stays
+// downloadable on the accepted terminal view. A locked estimate's document
+// must therefore describe the plan the customer ACCEPTED — re-pricing it under
+// today's policy would rewrite history on a permanent record — so its
+// authority is the frozen send snapshot plus those frozen totals, which are
+// mutually consistent. Same predicate the file already uses elsewhere for
+// "this row is committed" (estimate-public.js:7151).
+function estimateIsPriceLocked(estimate) {
+  return estimate?.status === 'accepted' || !!estimate?.price_locked_at;
+}
+
+// An OUTSTANDING quote is the opposite case: the page rebuilds a snapshot that
+// violates lawn program policy (retired cadence, below-floor price), carries a
+// stale termite row, or is missing a required setup fee, so the frozen copy can
+// describe a plan no link can still sell. Those estimates get the live bundle.
+//
+// The default candidate rides along because the frozen annual_total is NOT a
+// usable anchor here: the route's snapshot fast path REQUIRES the totals to
+// match, so a policy-invalid snapshot is by construction one whose totals equal
+// annual_total — the rebuild then moves the price while the column stays put,
+// and nothing reconciles. Resolved through the route's own
+// defaultFrequencyFromList so this document cannot name a different default
+// cadence than acceptance would price (codex #3120 r6).
+//
+// Null for a locked estimate, and null on any failure — both land on the
+// snapshot, which is exactly how this document rendered before the r4 work.
+async function resolveLivePricing(estimate) {
+  if (estimateIsPriceLocked(estimate)) return null;
+  try {
+    const { buildPricingBundle, defaultFrequencyFromList } = require('../routes/estimate-public');
+    if (typeof buildPricingBundle !== 'function') return null;
+    const bundle = await buildPricingBundle(estimate);
+    if (!bundle || typeof bundle !== 'object') return null;
+    const sellable = (Array.isArray(bundle.frequencies) ? bundle.frequencies : [])
+      .filter((entry) => entry && entry.quoteRequired !== true);
+    const defaultCandidate = typeof defaultFrequencyFromList === 'function'
+      ? defaultFrequencyFromList(sellable)
+      : null;
+    return { bundle, defaultCandidate: defaultCandidate || null };
+  } catch (err) {
+    logger.warn(`[estimate-proposal-billing] live pricing failed for estimate ${estimate?.id}: ${err.message}`);
+    return null;
+  }
+}
+
 /**
  * Per-application copy requires BOTH lookups to answer conclusively — any
  * unknown keeps the legacy document, which is always safe to render.
  *
- * @returns {Promise<{ billsPerApplication: boolean }>}
+ * The live rebuild runs ONLY for a confirmed per-application lane on an
+ * unlocked estimate: it is the one expensive call here, and every other case
+ * renders from frozen pricing exactly as it did before.
+ *
+ * @returns {Promise<{ billsPerApplication: boolean,
+ *   livePricing: { bundle: object, defaultCandidate: object|null }|null }>}
  */
 async function resolveProposalBillingContext(estimate) {
   const [perApplication, prepaid] = await Promise.all([
     estimateBillsPerApplication(estimate),
     estimateSoldAsAnnualPrepay(estimate),
   ]);
-  return { billsPerApplication: perApplication === true && prepaid === false };
+  const billsPerApplication = perApplication === true && prepaid === false;
+  return {
+    billsPerApplication,
+    livePricing: billsPerApplication ? await resolveLivePricing(estimate) : null,
+  };
 }
 
 module.exports = {
   estimateBillsPerApplication,
+  estimateIsPriceLocked,
   estimateSoldAsAnnualPrepay,
+  resolveLivePricing,
   resolveProposalBillingContext,
 };
 // Test-only: lets suites exercise the pre-migration branch after a true probe

@@ -139,8 +139,14 @@ function sectionKeyForRow(row = {}, candidate = {}) {
 // the plan can't be described this way with confidence: no bundle, a row with
 // an unprovable cadence, or lines that don't reconcile. Failing to the old
 // document beats asserting a billing cadence the customer isn't on.
-function perApplicationRecurringLines(estimate = {}, estimateData = {}) {
-  const bundle = estimateData?.sendSnapshot?.pricingBundle;
+// The PRICING AUTHORITY is the caller's to pick (estimate-proposal-billing.js
+// resolves it): a price-LOCKED estimate passes no livePricing and is described
+// from its frozen send snapshot, because that is the plan the customer
+// accepted; an outstanding quote passes the live bundle, because the page
+// rebuilds a policy-invalid snapshot and would otherwise be selling a plan this
+// document still quotes (codex #3120 r4).
+function perApplicationRecurringLines(estimate = {}, estimateData = {}, livePricing = null) {
+  const bundle = livePricing?.bundle || estimateData?.sendSnapshot?.pricingBundle;
   if (!bundle || typeof bundle !== 'object') return null;
 
   const frequencies = (Array.isArray(bundle.frequencies) ? bundle.frequencies : [])
@@ -166,15 +172,30 @@ function perApplicationRecurringLines(estimate = {}, estimateData = {}) {
     ...all.filter((c) => !matchesAnnual(c) && matchesMonthly(c)),
     ...all.filter((c) => !matchesAnnual(c) && !matchesMonthly(c) && matchesKey(c)),
   ];
+  // The plan-level manual credit lives on the BUNDLE (withManualDiscount)
+  // and on top-level frequencies; buildServiceCadenceCombos omits it from
+  // combo entries, whose annual is nonetheless net of it (codex #3120 r2).
+  const bundleCredit = num(bundle.manualDiscount?.recurringAmount ?? bundle.manualDiscount?.amount);
   for (const candidate of ordered) {
-    const lines = perApplicationLinesForCandidate(candidate, estimate, {
-      annualTotal,
-      // The plan-level manual credit lives on the BUNDLE (withManualDiscount)
-      // and on top-level frequencies; buildServiceCadenceCombos omits it from
-      // combo entries, whose annual is nonetheless net of it (codex #3120 r2).
-      bundleCredit: num(bundle.manualDiscount?.recurringAmount ?? bundle.manualDiscount?.amount),
-    });
+    const lines = perApplicationLinesForCandidate(candidate, estimate, { annualTotal, bundleCredit });
     if (lines) return lines;
+  }
+  // Nothing reconciled to the stored columns. On an OUTSTANDING estimate that
+  // is the expected outcome of the case this fix exists for: the route rebuilt
+  // a policy-invalid snapshot, so the live prices legitimately disagree with a
+  // frozen annual_total nothing updates. Quote the cadence the page defaults to
+  // and reconcile against ITS OWN annual — the guard still proves the derived
+  // lines add up to the plan being sold, it just stops anchoring on a number
+  // that no longer describes anything (codex #3120 r6).
+  //
+  // Unreachable for a locked estimate: that path passes no livePricing, so a
+  // frozen plan can never be re-quoted at today's prices.
+  const fallback = livePricing?.defaultCandidate;
+  if (fallback) {
+    const liveAnnual = num(fallback.annual);
+    if (liveAnnual > 0) {
+      return perApplicationLinesForCandidate(fallback, estimate, { annualTotal: liveAnnual, bundleCredit });
+    }
   }
   return null;
 }
@@ -262,10 +283,10 @@ function perApplicationLinesForCandidate(candidate, estimate, { annualTotal, bun
 // Build a single-building fallback proposal from the engine line items /
 // estimate fields so ANY estimate can still produce a PDF even before the
 // operator has authored an explicit multi-building proposal.
-function synthesizeFallbackProposal(estimate = {}, estimateData = {}, { recurringMode = 'legacy' } = {}) {
+function synthesizeFallbackProposal(estimate = {}, estimateData = {}, { recurringMode = 'legacy', livePricing = null } = {}) {
   const perApplicationMode = recurringMode === 'per_application';
   const lineItems = perApplicationMode
-    ? [...(perApplicationRecurringLines(estimate, estimateData) || [])]
+    ? [...(perApplicationRecurringLines(estimate, estimateData, livePricing) || [])]
     : [];
   const havePerApplicationRecurring = lineItems.length > 0;
   // A per-application plan whose lines could not be derived (no snapshot, or a
@@ -360,13 +381,13 @@ function isCommercialProposalData(estimateData) {
  * @returns {{ enabled, synthesized, title, preparedFor, propertyAddress,
  *   taxRate, taxLabel, terms, buildings: Array }}
  */
-function normalizeProposal(estimate = {}, { recurringMode = 'legacy' } = {}) {
+function normalizeProposal(estimate = {}, { recurringMode = 'legacy', livePricing = null } = {}) {
   const estimateData = parseEstimateData(estimate.estimate_data ?? estimate.estimateData);
   const stored = estimateData.proposal;
 
   const base = stored && Array.isArray(stored.buildings) && stored.buildings.length
     ? stored
-    : synthesizeFallbackProposal(estimate, estimateData, { recurringMode });
+    : synthesizeFallbackProposal(estimate, estimateData, { recurringMode, livePricing });
 
   const buildings = (Array.isArray(base.buildings) ? base.buildings : []).map(normalizeBuilding);
 

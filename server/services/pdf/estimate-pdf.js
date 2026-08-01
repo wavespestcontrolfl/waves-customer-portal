@@ -332,12 +332,16 @@ function termsBlock(ctx, proposal, totals, y) {
 /**
  * @param {object} estimate
  * @param {object} res  stream sink
- * @param {{ billsPerApplication?: boolean }} [billing]
+ * @param {{ billsPerApplication?: boolean, livePricing?: object|null }} [billing]
  *   Resolved by services/estimate-proposal-billing.js — the LIVE billing lane,
- *   because persisted snapshot flags freeze at send time (codex #3120 r2).
- *   Defaults false, which renders exactly as this document did before the
- *   per-application work: a caller that cannot establish the lane must never
- *   have a billing cadence invented for it.
+ *   because persisted snapshot flags freeze at send time (codex #3120 r2), and
+ *   the pricing authority: livePricing is present only for an OUTSTANDING
+ *   quote, whose plan the page may have rebuilt out from under the frozen
+ *   snapshot; a price-locked estimate passes none and is described from the
+ *   pricing it was accepted at (codex #3120 r4 + r6). Both default to absent,
+ *   which renders exactly as this document did before the per-application
+ *   work: a caller that cannot establish the lane must never have a billing
+ *   cadence invented for it.
  */
 function generateEstimateProposalPDF(estimate, res, billing = {}) {
   // recurringMode is set ONLY here — the PDF is a rendering surface, so these
@@ -345,7 +349,7 @@ function generateEstimateProposalPDF(estimate, res, billing = {}) {
   // (see normalizeProposal). Anything but a confirmed per-application lane
   // (monthly member, annual prepay, unknown) keeps the legacy rendering.
   const recurringMode = billing?.billsPerApplication === true ? 'per_application' : 'legacy';
-  const proposal = normalizeProposal(estimate, { recurringMode });
+  const proposal = normalizeProposal(estimate, { recurringMode, livePricing: billing?.livePricing || null });
   const totals = computeProposalTotals(proposal);
 
   const doc = new PDFDocument({ size: 'LETTER', margin: 40 });
