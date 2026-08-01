@@ -5550,6 +5550,35 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // queue is suppressed (codex P1 r31).
     let lawnPdfCorrectionNeeded = false;
     let lawnPdfCorrectionMarked = false;
+    // DURABLE correction marker (codex P1 r30/r31/r34): the in-process
+    // recovery callback dies with the process, and customers without report
+    // email have no worker path that forces a fresh render, so
+    // structured_notes.lawnPdfCorrectionPending makes EVERY render path
+    // render fresh until a post-settlement render clears it. It must be
+    // durable before any artifact is produced — retry, and if it still
+    // fails the PDF enqueue is suppressed. Atomic jsonb_set so a concurrent
+    // structured_notes write is never clobbered. Called from the regen path
+    // AND from the setup-failure catch (r34).
+    const markLawnPdfCorrectionNeeded = async () => {
+      lawnPdfCorrectionNeeded = true;
+      for (let attempt = 0; attempt < 3 && !lawnPdfCorrectionMarked; attempt += 1) {
+        try {
+          await db('service_records').where({ id: record.id }).update({
+            structured_notes: db.raw(
+              "jsonb_set(COALESCE(structured_notes::jsonb, '{}'::jsonb), '{lawnPdfCorrectionPending}', 'true'::jsonb, true)",
+            ),
+          });
+          lawnPdfCorrectionMarked = true;
+          record.structured_notes = { ...parseJsonObject(record.structured_notes), lawnPdfCorrectionPending: true };
+        } catch (markErr) {
+          logger.warn(`[dispatch] lawn PDF correction marker write failed for ${record.id} (attempt ${attempt + 1}): ${markErr.message}`);
+          await new Promise((resolve) => { setTimeout(resolve, 2000 * (attempt + 1)).unref?.(); });
+        }
+      }
+      if (!lawnPdfCorrectionMarked) {
+        logger.error(`[dispatch] lawn PDF correction marker UNWRITABLE for ${record.id} — suppressing the PDF render queue so no stale artifact is stored`);
+      }
+    };
     const completedLawnAssessmentId =
       linkedLawnAssessmentId || parseJsonObject(record.structured_notes).lawnAssessmentId || null;
     if (!isIncompleteVisit && completedLawnAssessmentId) {
@@ -5653,35 +5682,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         ]);
         lawnRecRegenTimedOut = !regenOutcome.settled;
         if (lawnRecRegenTimedOut || !lawnRecRegenGrounded) {
-          lawnPdfCorrectionNeeded = true;
-          // DURABLE correction marker (codex P1 r30): the in-process
-          // recovery callback dies with the process, and customers without
-          // report email have no worker path that forces a fresh render.
-          // structured_notes.lawnPdfCorrectionPending makes every render
-          // path (incl. the public report route on another box) render
-          // fresh until a post-settlement render clears it.
-          // The marker must be DURABLE before any artifact is produced
-          // (codex P1 r31): retry, and if it still fails, suppress the PDF
-          // enqueue entirely rather than queue a render that could store
-          // stale copy with nothing left to correct it. Atomic jsonb_set so
-          // a concurrent structured_notes write is never clobbered.
-          for (let attempt = 0; attempt < 3 && !lawnPdfCorrectionMarked; attempt += 1) {
-            try {
-              await db('service_records').where({ id: record.id }).update({
-                structured_notes: db.raw(
-                  "jsonb_set(COALESCE(structured_notes::jsonb, '{}'::jsonb), '{lawnPdfCorrectionPending}', 'true'::jsonb, true)",
-                ),
-              });
-              lawnPdfCorrectionMarked = true;
-              record.structured_notes = { ...parseJsonObject(record.structured_notes), lawnPdfCorrectionPending: true };
-            } catch (markErr) {
-              logger.warn(`[dispatch] lawn PDF correction marker write failed for ${record.id} (attempt ${attempt + 1}): ${markErr.message}`);
-              await new Promise((resolve) => { setTimeout(resolve, 2000 * (attempt + 1)).unref?.(); });
-            }
-          }
-          if (!lawnPdfCorrectionMarked) {
-            logger.error(`[dispatch] lawn PDF correction marker UNWRITABLE for ${record.id} — suppressing the PDF render queue so no stale artifact is stored`);
-          }
+          await markLawnPdfCorrectionNeeded();
         }
         if (lawnRecRegenTimedOut) {
           logger.warn('[dispatch] lawn recommendation regen still running after 60s — completion continues; PDF re-queues when the grounded write lands');
@@ -5704,6 +5705,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           lawnRecFinalCopyPromise = lawnRecSanitizeWithRetry().then((res) => ({ verified: !res.error, changed: !!res.changed }));
           void lawnRecFinalCopyPromise.catch((chainErr) => logger.error(`[dispatch] fallback sanitize chain failed: ${chainErr.message}`));
         }
+        // Setup failure leaves confirm-time copy live while sanitation
+        // retries — the same durable-marker-or-suppress path must run here
+        // before the PDF block, or a restart strands a stale PDF for
+        // customers with no email fallback (codex P1 r34).
+        await markLawnPdfCorrectionNeeded();
         }
       }
     }
