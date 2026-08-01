@@ -2226,7 +2226,6 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
           categoriesVerified = false;
         }
       }
-      const appliedClasses = treatmentGuard.appliedTreatmentClasses(guardProducts);
       if (!categoriesVerified) {
         const NEUTRAL_SUMMARY = 'Today’s applications are in place — we’ll track how the lawn responds and adjust at the next visit.';
         const NEUTRAL_RECS = {
@@ -2246,7 +2245,9 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
         }
         if (Array.isArray(lawnAssessment.recommendationCards)) lawnAssessment.recommendationCards = [];
         console.warn('[report-data] product categories unverifiable (catalog lookup failed) — recommendation-derived copy suppressed for this render');
-      } else if (appliedClasses.length) {
+      } else if (guardProducts.length) {
+        // Products-aware (codex P1 r26): name-phrased deferrals ("Hold off
+        // on Celsius WG") and unresolved-category rows are checked too.
         const NEUTRAL_SUMMARY = 'Today’s applications are in place — we’ll track how the lawn responds and adjust at the next visit.';
         const sanitizeRecsInPlace = (host, key) => {
           const recs = host?.[key];
@@ -2261,16 +2262,16 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
         // and buildLawnReportV2 reads top-level aiSummary (codex P1 r20).
         sanitizeRecsInPlace(lawnAssessment.scores, 'recommendations');
         sanitizeRecsInPlace(lawnAssessment, 'recommendations');
-        if (treatmentGuard.contradictsAppliedTreatment(lawnAssessment.scores.aiSummary, appliedClasses)) {
+        if (treatmentGuard.contradictsAppliedProducts(lawnAssessment.scores.aiSummary, guardProducts)) {
           lawnAssessment.scores.aiSummary = NEUTRAL_SUMMARY;
         }
-        if (treatmentGuard.contradictsAppliedTreatment(lawnAssessment.aiSummary, appliedClasses)) {
+        if (treatmentGuard.contradictsAppliedProducts(lawnAssessment.aiSummary, guardProducts)) {
           lawnAssessment.aiSummary = NEUTRAL_SUMMARY;
         }
         // Legacy snapshot + recommendation cards feed the public report
         // assistant (/api/reports/:token/ask) directly — reconcile those
         // customer-facing shapes too (codex P1 r23).
-        const contradicts = (text) => treatmentGuard.contradictsAppliedTreatment(text, appliedClasses);
+        const contradicts = (text) => treatmentGuard.contradictsAppliedProducts(text, guardProducts);
         const snap = lawnAssessment.snapshot;
         if (snap && typeof snap === 'object') {
           if (contradicts(snap.summary)) snap.summary = NEUTRAL_SUMMARY;

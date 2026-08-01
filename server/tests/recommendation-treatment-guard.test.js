@@ -168,6 +168,27 @@ describe('sanitizeRecommendationsAgainstTreatment', () => {
     expect(dropped).toBe(1);
   });
 
+  test('name-phrased deferrals are caught (r26)', () => {
+    const cases = [
+      'Hold off on Celsius WG until temperatures drop.',
+      'Do not apply more Artavia this month.',
+      'Skip the Azoxy next visit.',
+    ];
+    for (const badText of cases) {
+      const { dropped } = _test.sanitizeRecommendationsAgainstTreatment({
+        recommendations: [{ priority: 1, action: badText, reason: 'x', timeframe: 'y' }],
+      }, APPLIED.concat([{ product_name: 'Artavia 2 SC (Azoxy)', product_category: 'Fungicide' }]));
+      expect(dropped).toBe(1);
+    }
+  });
+
+  test('unresolved-category rows are guarded via generic treatment terms (r26)', () => {
+    const { dropped } = _test.sanitizeRecommendationsAgainstTreatment({
+      recommendations: [{ priority: 1, action: 'Hold off on today’s treatment until the lawn recovers.', reason: 'x', timeframe: 'y' }],
+    }, [{ product_name: 'Mystery Blend', product_category: null }]);
+    expect(dropped).toBe(1);
+  });
+
   test('legitimate aftercare mentioning the class passes (defer must govern the treatment)', () => {
     const { parsed, dropped } = _test.sanitizeRecommendationsAgainstTreatment({
       recommendations: [

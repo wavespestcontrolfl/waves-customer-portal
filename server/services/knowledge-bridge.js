@@ -210,9 +210,12 @@ const TREATMENT_CLASS_TERMS = Object.fromEntries(
 // (codex P2 r8). Each pattern binds the defer verb/negation directly to the
 // class term (or the class term to a not-needed clause).
 const _governedCache = new Map();
-function governedContradictionRegex(cls) {
-  if (_governedCache.has(cls)) return _governedCache.get(cls);
-  const CLASS = `(?:${TREATMENT_CLASS_TERMS[cls]})`;
+// Build the governed patterns for ANY term source — class synonyms, an
+// applied product's name variants, or the generic fallback for
+// unresolved-category rows (codex P1 r26).
+function governedRegexForTerms(termSource) {
+  if (_governedCache.has(termSource)) return _governedCache.get(termSource);
+  const CLASS = `(?:${termSource})`;
   const re = new RegExp([
     // Strong defer verbs take the class through a small gap: "hold off on
     // any herbicide", "do not apply fungicide", "skip the fungicide".
@@ -246,14 +249,57 @@ function governedContradictionRegex(cls) {
     // "do not currently support active disease treatment"
     `\\bnot\\s+(?:currently\\s+)?(?:support|warrant|recommend)\\w*[^.!?]{0,40}${CLASS}`,
   ].join('|'), 'i');
-  _governedCache.set(cls, re);
+  _governedCache.set(termSource, re);
   return re;
 }
+
+// Name variants for an applied product — the model defers by NAME too
+// ("Hold off on Celsius WG", "Do not apply more Artavia" — codex P1 r26):
+// full name, name without parentheticals, the distinctive first token, and
+// parenthesized aliases ("(Azoxy)").
+function productNameTermSource(name) {
+  const clean = String(name || '').trim();
+  if (!clean) return null;
+  const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const variants = new Set([esc(clean)]);
+  const base = clean.replace(/\(([^)]*)\)/g, ' ').replace(/\s+/g, ' ').trim();
+  if (base && base !== clean) variants.add(esc(base));
+  const first = base.split(/\s+/)[0] || '';
+  if (/^[A-Za-z][\w-]{4,}$/.test(first)) variants.add(esc(first));
+  for (const m of clean.matchAll(/\(([^)]+)\)/g)) {
+    const alias = m[1].trim();
+    if (/^[A-Za-z][\w-]{3,}$/.test(alias)) variants.add(esc(alias));
+  }
+  return [...variants].join('|');
+}
+
+// Generic fallback terms for applied rows whose category is genuinely
+// unresolved (admin-inventory stores null categories as supported input) —
+// class-phrased deferrals can't be matched for them, so generic
+// treatment-deferral wording is governed instead of skipping the row
+// entirely (codex P1 r26).
+const GENERIC_TREATMENT_TERMS = '(?:today[\'’]s\\s+)?(?:treatment|application)s?\\b';
 
 function contradictsAppliedTreatment(text, appliedClasses) {
   const t = String(text || '');
   if (!t || !appliedClasses.length) return false;
-  return appliedClasses.some((cls) => TREATMENT_CLASS_TERMS[cls] && governedContradictionRegex(cls).test(t));
+  return appliedClasses.some((cls) => TREATMENT_CLASS_TERMS[cls] && governedRegexForTerms(TREATMENT_CLASS_TERMS[cls]).test(t));
+}
+
+// Products-aware contradiction check: class synonyms + applied product
+// names + (for unresolved-category rows) generic treatment terms.
+function contradictsAppliedProducts(text, appliedProducts) {
+  const t = String(text || '');
+  const rows = Array.isArray(appliedProducts) ? appliedProducts : [];
+  if (!t || !rows.length) return false;
+  if (contradictsAppliedTreatment(t, appliedTreatmentClasses(rows))) return true;
+  for (const row of rows) {
+    const nameSource = productNameTermSource(row.product_name);
+    if (nameSource && governedRegexForTerms(nameSource).test(t)) return true;
+  }
+  const hasUnresolvedCategory = rows.some((row) => !row.product_category);
+  if (hasUnresolvedCategory && governedRegexForTerms(GENERIC_TREATMENT_TERMS).test(t)) return true;
+  return false;
 }
 
 // Strip contradicting content from a parsed recommendations payload.
@@ -289,21 +335,25 @@ async function loadAppliedProductsWithCategories(serviceRecordId, knexOrTrx) {
 }
 
 function sanitizeRecommendationsAgainstTreatment(parsed, appliedProducts) {
-  const appliedClasses = appliedTreatmentClasses(appliedProducts);
-  if (!appliedClasses.length || !parsed || typeof parsed !== 'object') return { parsed, dropped: 0, appliedClasses };
+  const rows = Array.isArray(appliedProducts) ? appliedProducts : [];
+  const appliedClasses = appliedTreatmentClasses(rows);
+  // Products-aware: any applied row (even class-less) participates via its
+  // NAME and, for unresolved categories, the generic treatment terms
+  // (codex P1 r26) — so the gate is "any applied products", not "any class".
+  if (!rows.length || !parsed || typeof parsed !== 'object') return { parsed, dropped: 0, appliedClasses };
+  const bad = (text) => contradictsAppliedProducts(text, rows);
   let dropped = 0;
   if (Array.isArray(parsed.recommendations)) {
-    const kept = parsed.recommendations.filter((rec) => {
-      const bad = contradictsAppliedTreatment(`${rec?.action || ''} ${rec?.reason || ''}`, appliedClasses);
-      if (bad) dropped += 1;
-      return !bad;
+    parsed.recommendations = parsed.recommendations.filter((rec) => {
+      const hit = bad(`${rec?.action || ''} ${rec?.reason || ''}`);
+      if (hit) dropped += 1;
+      return !hit;
     });
-    parsed.recommendations = kept;
   }
   for (const key of ['summary', 'customerTip']) {
-    if (contradictsAppliedTreatment(parsed[key], appliedClasses)) { delete parsed[key]; dropped += 1; }
+    if (bad(parsed[key])) { delete parsed[key]; dropped += 1; }
   }
-  if (contradictsAppliedTreatment(parsed.nextVisitFocus, appliedClasses)) {
+  if (bad(parsed.nextVisitFocus)) {
     parsed.nextVisitFocus = 'Recheck the areas treated today and confirm how the lawn is responding to the applications.';
     dropped += 1;
   }
@@ -646,7 +696,7 @@ const KnowledgeBridge = {
       // — a missing/unparseable payload must not skip the summary check
       // (codex P1 r17).
       const appliedClasses = appliedTreatmentClasses(appliedProducts);
-      const summaryContradicts = contradictsAppliedTreatment(assessment.ai_summary, appliedClasses);
+      const summaryContradicts = contradictsAppliedProducts(assessment.ai_summary, appliedProducts);
       let parsed = stored && typeof stored === 'object' ? stored : null;
       let dropped = 0;
       if (parsed) {
@@ -873,7 +923,7 @@ Return a JSON object with:
         // treatment too — the confirm-time summary is exactly the text the
         // grounded regen exists to replace (codex P1 r7). Contradicting
         // stored copy gets a neutral deterministic summary instead.
-        if (!parsed.summary && contradictsAppliedTreatment(assessment.ai_summary, appliedClasses)) {
+        if (!parsed.summary && contradictsAppliedProducts(assessment.ai_summary, appliedProducts)) {
           parsed.summary = 'Today’s applications are in place — we’ll track how the lawn responds and adjust at the next visit.';
         }
 
@@ -1071,7 +1121,7 @@ Return a JSON object with:
 };
 
 module.exports = KnowledgeBridge;
-module.exports._test = { sanitizeRecommendationsAgainstTreatment, contradictsAppliedTreatment, appliedTreatmentClasses };
+module.exports._test = { sanitizeRecommendationsAgainstTreatment, contradictsAppliedTreatment, contradictsAppliedProducts, appliedTreatmentClasses };
 // Pure render-time guard surface (no DB, no LLM) — consumed by report-data
 // as the last line of defense for instantly opened report links.
-module.exports.treatmentGuard = { sanitizeRecommendationsAgainstTreatment, contradictsAppliedTreatment, appliedTreatmentClasses };
+module.exports.treatmentGuard = { sanitizeRecommendationsAgainstTreatment, contradictsAppliedTreatment, contradictsAppliedProducts, appliedTreatmentClasses };
