@@ -3711,7 +3711,7 @@ function renderMembershipBlockHtml(membership) {
           <span class="wg-row-val">
             ${s.discountPct > 0 ? `${s.discountPct}% member discount` : 'Member pricing'}${Number(s.perApplicationSavings) > 0
               ? ` &middot; save ${money(s.perApplicationSavings)} per application`
-              : (Number(s.monthlySavings) > 0 ? ` &middot; save ${money(s.monthlySavings)}/mo` : '')}
+              : ''}
           </span>
         </div>`).join('')}
     </div>` : '';

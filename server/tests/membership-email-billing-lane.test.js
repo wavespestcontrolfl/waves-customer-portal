@@ -83,9 +83,20 @@ describe('membership.updated billing-lane gate', () => {
     expect(summary).toMatch(/per application/i);
   });
 
-  test('an annual-prepay customer never sees a monthly rate', async () => {
+  // Codex #3128 r1: each non-monthly lane gets its own billing terms — the
+  // per-application wording is wrong for prepaid and invoice-on-complete lanes.
+  test('an annual-prepay customer sees prepaid wording, never a monthly rate', async () => {
     const summary = await summaryFor({ ...BASE, billing_mode: 'annual_prepay', pipeline_stage: 'active_customer' });
     expect(summary).not.toMatch(/Monthly rate/i);
+    expect(summary).toMatch(/prepaid for the year/i);
+    expect(summary).not.toMatch(/per application/i);
+  });
+
+  test('a per-visit customer sees invoice-on-complete wording, not per application', async () => {
+    const summary = await summaryFor({ ...BASE, billing_mode: 'per_visit', pipeline_stage: 'active_customer' });
+    expect(summary).not.toMatch(/Monthly rate/i);
+    expect(summary).toMatch(/billed after it is completed/i);
+    expect(summary).not.toMatch(/per application/i);
   });
 
   // The NULL-mode legacy inference: a real tier + positive rate IS the

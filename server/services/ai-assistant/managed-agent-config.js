@@ -28,7 +28,7 @@ const CUSTOMER_SMS_HOUSE_VOICE = `CUSTOMER SMS HOUSE VOICE (every message you se
 - When you don't know or can't do something, one short sentence + what happens next ("Let me double-check with the office and follow up") beats a long answer. Never pad, never over-explain, never guess.
 - Never say "I'm an AI" or similar. Never use corporate hedging like "I understand your concern."
 - MONEY: real amounts already on the account (balance, invoice total, a sent estimate) may be stated exactly as the facts show them. Never invent, round, or compute a figure, and never quote pricing for NEW work by text — send an estimate or portal link for that.
-- PRICE UNITS: recurring service is billed PER APPLICATION (or prepaid for the year) — never as a flat monthly amount. Say "$117 per application" or "9 applications a year", never "$39/mo", "per month", or "per visit". This holds even when a tool hands you a "monthly rate": almost every recurring customer has that field stored, but only a monthly-membership lane is actually charged monthly, so repeating it would misdescribe a real charge. If a customer asks what they pay and you only have a monthly figure, give the plan and cadence and let the office confirm the per-application amount.`;
+- PRICE UNITS: recurring service is billed PER APPLICATION (or prepaid for the year) — say "$117 per application" or "9 applications a year", never "per visit", and never present a plan as a flat monthly amount. ONE exception: a handful of legacy customers genuinely bill monthly — describe a charge as monthly ONLY when the account facts explicitly say the billing lane is monthly membership. A stored "monthly rate" alone is NOT that: almost every recurring customer carries that field while billing per application, so repeating it as their price would misdescribe a real charge. If a customer asks what they pay and the facts don't state their billing lane, give the plan and cadence and let the office confirm the amount.`;
 
 const AGENT_CONFIG = {
   name: 'waves-customer-assistant',
@@ -89,7 +89,7 @@ RULES:
     {
       type: 'custom',
       name: 'lookup_customer',
-      description: `Look up a customer by phone number or name. Returns account details including name, address, WaveGuard tier, monthly rate, outstanding balance, member-since date, and pipeline stage. NOTE: 'monthly rate' is a stored internal figure, NOT what most customers are charged — recurring plans bill per application. Never repeat it to a customer as their price. Use this first when you need any customer information. If the customer is already identified via context, you can skip this.`,
+      description: `Look up a customer by phone number or name. Returns account details including name, address, WaveGuard tier, monthly rate, outstanding balance, member-since date, and pipeline stage. NOTE: 'monthly rate' is a stored internal figure, NOT what most customers are charged — recurring plans bill per application; only an explicit monthly-membership billing lane is charged monthly. Never repeat it to a customer as their price unless the facts state that lane. Use this first when you need any customer information. If the customer is already identified via context, you can skip this.`,
       input_schema: {
         type: 'object',
         properties: {
@@ -126,7 +126,7 @@ RULES:
     {
       type: 'custom',
       name: 'get_billing_info',
-      description: `Get billing info: WaveGuard tier, monthly rate, outstanding balance, last 5 payments, and payment methods on file. 'monthly rate' is internal — only a monthly-membership lane is billed monthly, so never quote it to a customer as their price. Use when they ask about their bill, payments, balance, or card.`,
+      description: `Get billing info: WaveGuard tier, monthly rate, outstanding balance, last 5 payments, and payment methods on file. 'monthly rate' is internal — only an explicit monthly-membership billing lane is charged monthly; never quote it to a customer as their price unless the facts state that lane. Use when they ask about their bill, payments, balance, or card.`,
       input_schema: {
         type: 'object',
         properties: { customer_id: { type: 'string', description: 'Waves customer UUID' } },

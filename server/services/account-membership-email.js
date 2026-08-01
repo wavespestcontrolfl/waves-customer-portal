@@ -542,14 +542,20 @@ async function sendMembershipUpdated({
     // monthly-membership lane is actually BILLED monthly — 157 of 159
     // per-application customers carry a rate they are never charged (audit
     // 2026-08-01). Gate the customer-facing line on the resolved lane, the
-    // same way card-enrollment-email.js does, so a per-application customer
-    // is never told their "monthly rate" changed.
+    // same way card-enrollment-email.js does, and describe each non-monthly
+    // lane in its own billing terms (codex #3128 r1: "billed per
+    // application" is wrong for prepaid and per-visit customers too).
     const { resolveBillingLane } = require('./billing-lane');
-    const billsMonthly = resolveBillingLane({ ...customer, ...after }).mode === 'monthly_membership';
-    if (billsMonthly) {
+    const lane = resolveBillingLane({ ...customer, ...after }).mode;
+    if (lane === 'monthly_membership') {
       changes.push(`Monthly rate: ${money(before.monthly_rate)} to ${money(after.monthly_rate)}`);
-    } else {
+    } else if (lane === 'annual_prepay') {
+      changes.push('Your plan pricing was updated. Your plan is prepaid for the year, so nothing changes about how you pay.');
+    } else if (lane === 'per_application') {
       changes.push('Your plan pricing was updated — you are billed per application, and each visit is charged after it is completed.');
+    } else {
+      // per_visit / one_time: invoice-on-complete lanes.
+      changes.push('Your plan pricing was updated — each service is billed after it is completed.');
     }
   }
   const summary = changes.join('; ') || 'Your membership details were updated.';

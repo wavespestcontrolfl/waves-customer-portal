@@ -2076,21 +2076,35 @@ export function PlanTotalSummary({ combined, selectedFrequency = null, preCredit
   const row = { display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'baseline' };
   const num = { fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' };
   const per = (label) => <span style={{ color: ESTIMATE_MUTED, fontSize: 14, fontWeight: 500 }}> {label}</span>;
-  const creditBox = (amount) => (
-    <div style={{
-      ...row,
-      padding: '12px 14px',
-      borderRadius: 10,
-      border: `1px solid ${W.greenLight}`,
-      background: W.successWash,
-      color: W.green,
-      fontWeight: 800,
-      fontSize: 16,
-    }}>
-      <span>{creditLabel}</span>
-      <strong style={num}>{fmtMoneySigned(-amount)}</strong>
-    </div>
-  );
+  // The derived credit is a MONTHLY slice (subtotal − net below), but the plan
+  // bills per application — a bare "-$X" beside per-application prices reads
+  // as a per-application or one-time reduction (codex #3128 r1). Re-express it
+  // per application when the selected cadence makes that unambiguous
+  // (billedPerApplication + a visit count); otherwise name the credit without
+  // a figure rather than show a number in no stated unit.
+  const creditBox = (amount) => {
+    const creditVisits = Number(selectedFrequency?.visitsPerYear);
+    const creditPerApplication = selectedFrequency?.billedPerApplication === true && creditVisits > 0
+      ? round2((Number(amount) * 12) / creditVisits)
+      : null;
+    return (
+      <div style={{
+        ...row,
+        padding: '12px 14px',
+        borderRadius: 10,
+        border: `1px solid ${W.greenLight}`,
+        background: W.successWash,
+        color: W.green,
+        fontWeight: 800,
+        fontSize: 16,
+      }}>
+        <span>{creditLabel}</span>
+        {creditPerApplication != null && creditPerApplication > 0
+          ? <strong style={num}>{fmtMoneySigned(-creditPerApplication)}{per('/ application')}</strong>
+          : <span style={{ fontWeight: 600, fontSize: 14 }}>Applied to your plan pricing</span>}
+      </div>
+    );
+  };
 
   // Credit = the ACTUAL reduction for the SELECTED cadence: the sum of the
   // pre-credit per-service cards minus the net the accept payload charges.

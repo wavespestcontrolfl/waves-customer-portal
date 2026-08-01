@@ -233,7 +233,10 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
     : 0;
   const savings = rawSavings >= SAVINGS_ROUNDING_NOISE ? rawSavings : 0;
   // True daily rate: annual cost / 365 (monthly * 12 / 365).
-  const dayPrice = quoteRequired || monthly == null ? null : Math.round((Number(monthly) * 12 / 365) * 100) / 100;
+  // No day-rate on a suppressed-total (bundle) card: it derives from the
+  // hidden combined monthly, so it would re-expose the plan total in a
+  // different unit (codex #3128 r1).
+  const dayPrice = quoteRequired || suppressCombinedTotal || monthly == null ? null : Math.round((Number(monthly) * 12 / 365) * 100) / 100;
   // Applications-per-year count — only when unambiguous. Feeds the anchor
   // math below; the count itself renders only in the per-row sub-label
   // (owner 2026-07-23: no "N applications per year included" headline line).
