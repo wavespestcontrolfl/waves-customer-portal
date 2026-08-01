@@ -290,8 +290,17 @@ async function captureReplyExampleForMessage(outboundMessage, options = {}) {
       customerId,
     });
 
-    const agentDraft = canonicalizeOutboundText(metadata.agentDraft || metadata.suggestedReply || '');
-    const outboundBody = canonicalizeOutboundText(outboundMessage.body);
+    // MMS captions are delivered verbatim (both send paths skip GSM
+    // normalization for authorized media sends), so canonicalizing here
+    // would make the training row misrepresent what the customer received
+    // and could mislabel a punctuation-only human edit as unedited. Media
+    // messages keep the whitespace-only fold on both comparison operands.
+    const outboundMedia = parseJson(outboundMessage.media, outboundMessage.media);
+    const normalizeOutbound = Array.isArray(outboundMedia) && outboundMedia.length > 0
+      ? normalizeText
+      : canonicalizeOutboundText;
+    const agentDraft = normalizeOutbound(metadata.agentDraft || metadata.suggestedReply || '');
+    const outboundBody = normalizeOutbound(outboundMessage.body);
     const payload = {
       channel: outboundMessage.channel,
       conversation_id: outboundMessage.conversation_id,

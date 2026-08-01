@@ -48,7 +48,7 @@ const { checkContactCompliance } = require('./compliance-contact-checks');
 const { countSegments } = require('./segment-counter');
 const { normalizeGsmPunctuation } = require('./gsm-normalize');
 const { persistAudit } = require('./audit');
-const { sendViaTwilio } = require('./providers/twilio-sms');
+const { sendViaTwilio, mediaUrlsAllowed } = require('./providers/twilio-sms');
 const { isEnabled } = require('../../config/feature-gates');
 
 const DEFAULT_PROVIDER_RETRY_DELAY_MS = 5 * 60 * 1000;
@@ -156,9 +156,14 @@ async function sendCustomerMessage(input) {
   // internal bodies that DO continue to Twilio are normalized at that
   // boundary instead, after the redirect check. Media sends (MMS) are also
   // exempt: MMS is not segment-encoded, so rewriting a human-authored
-  // caption buys nothing.
+  // caption buys nothing. The exemption uses the provider's OWN
+  // authorization predicate — unauthorized media URLs are dropped by the
+  // provider and the message goes out as plain SMS, so it must be
+  // normalized here or the audit row's body/segment metadata would
+  // disagree with what was delivered.
   const sendHasMedia = Array.isArray(sendInput.metadata?.mediaUrls)
-    && sendInput.metadata.mediaUrls.length > 0;
+    && sendInput.metadata.mediaUrls.length > 0
+    && mediaUrlsAllowed(sendInput);
   if (sendInput.channel === 'sms' && typeof sendInput.body === 'string'
     && ['customer', 'lead'].includes(sendInput.audience) && !sendHasMedia) {
     sendInput.body = normalizeGsmPunctuation(sendInput.body);

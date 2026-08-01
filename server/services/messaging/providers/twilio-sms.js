@@ -214,6 +214,10 @@ function mapPurposeToMessageType(purpose) {
 module.exports = {
   sendViaTwilio,
   mapPurposeToMessageType,
+  // Shared with sendCustomerMessage so the wrapper's MMS-vs-SMS decision
+  // (GSM normalization exemption) uses the SAME predicate that decides
+  // whether media URLs actually reach Twilio.
+  mediaUrlsAllowed,
   _internals: {
     formatProviderError,
     classifyProviderFailure,

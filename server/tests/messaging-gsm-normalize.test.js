@@ -37,6 +37,11 @@ jest.mock('../services/messaging/audit', () => ({
 }));
 jest.mock('../services/messaging/providers/twilio-sms', () => ({
   sendViaTwilio: jest.fn(async () => ({ sent: true, providerMessageId: 'SM-test' })),
+  // Mirror of the real predicate — the wrapper's MMS exemption calls it.
+  mediaUrlsAllowed: (input) => {
+    const metadata = input.metadata || {};
+    return metadata.allowMediaUrls === true || !!metadata.adminUserId;
+  },
 }));
 
 const { normalizeGsmPunctuation } = require('../services/messaging/gsm-normalize');
@@ -147,6 +152,16 @@ describe('sendCustomerMessage GSM normalization wiring', () => {
     });
     expect(result.sent).toBe(true);
     expect(sendViaTwilio.mock.calls[0][0].body).toBe(caption);
+  });
+
+  test('UNAUTHORIZED media urls still normalize (provider drops them; message goes as SMS)', async () => {
+    const result = await sendCustomerMessage({
+      ...BASE_INPUT,
+      body: 'We’ll see you — soon',
+      metadata: { mediaUrls: ['https://example.com/photo.jpg'] },
+    });
+    expect(result.sent).toBe(true);
+    expect(sendViaTwilio.mock.calls[0][0].body).toBe("We'll see you - soon");
   });
 
   test('internal audience body passes through unnormalized (bell/push keeps bullets)', async () => {
