@@ -904,9 +904,12 @@ describe('PlanTotalSummary — plan-level referral credit + net', () => {
     expect(text).toContain('Applied to your plan pricing');
   });
 
-  it('expresses the credit per application when the selected cadence is unambiguous', () => {
-    // Single-cadence plan (billedPerApplication + visit count): the $2.08/mo
-    // slice re-expresses as its per-application equivalent — $2.08 × 12 ÷ 6.
+  it('never derives a per-application credit from the primary cadence (codex #3128 r4)', () => {
+    // This card renders only for MULTI-service plans, and combinedFrequency
+    // inherits the PRIMARY service's billedPerApplication/visitsPerYear —
+    // dividing the whole-plan credit by that one cadence would assert a
+    // figure that is not the discount applied to any application's charge.
+    // Even a flag-carrying selection therefore stays label-only.
     const text = render(
       <PlanTotalSummary
         combined={combined}
@@ -914,9 +917,9 @@ describe('PlanTotalSummary — plan-level referral credit + net', () => {
         preCreditMonthly={112.08}
       />,
     ).container.textContent;
-    expect(text).toMatch(/[−-]\$4\.16/);
-    expect(text).toContain('/ application');
-    expect(text).not.toContain('Applied to your plan pricing');
+    expect(text).not.toMatch(/[−-]\$4\.16/);
+    expect(text).not.toContain('/ application');
+    expect(text).toContain('Applied to your plan pricing');
   });
 
   it('suppresses for a quote-required selection (page hides exact dollars)', () => {

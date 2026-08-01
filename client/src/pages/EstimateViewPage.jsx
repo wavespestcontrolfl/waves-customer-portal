@@ -2076,35 +2076,29 @@ export function PlanTotalSummary({ combined, selectedFrequency = null, preCredit
   const row = { display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'baseline' };
   const num = { fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' };
   const per = (label) => <span style={{ color: ESTIMATE_MUTED, fontSize: 14, fontWeight: 500 }}> {label}</span>;
-  // The derived credit is a MONTHLY slice (subtotal − net below), but the plan
-  // bills per application — a bare "-$X" beside per-application prices reads
-  // as a per-application or one-time reduction (codex #3128 r1). Re-express it
-  // per application when the selected cadence makes that unambiguous
-  // (billedPerApplication + a visit count); otherwise name the credit without
-  // a figure rather than show a number in no stated unit.
-  const creditBox = (amount) => {
-    const creditVisits = Number(selectedFrequency?.visitsPerYear);
-    const creditPerApplication = selectedFrequency?.billedPerApplication === true && creditVisits > 0
-      ? round2((Number(amount) * 12) / creditVisits)
-      : null;
-    return (
-      <div style={{
-        ...row,
-        padding: '12px 14px',
-        borderRadius: 10,
-        border: `1px solid ${W.greenLight}`,
-        background: W.successWash,
-        color: W.green,
-        fontWeight: 800,
-        fontSize: 16,
-      }}>
-        <span>{creditLabel}</span>
-        {creditPerApplication != null && creditPerApplication > 0
-          ? <strong style={num}>{fmtMoneySigned(-creditPerApplication)}{per('/ application')}</strong>
-          : <span style={{ fontWeight: 600, fontSize: 14 }}>Applied to your plan pricing</span>}
-      </div>
-    );
-  };
+  // The derived credit is a MONTHLY slice (subtotal − net below) of a
+  // WHOLE-PLAN discount, and this card renders only for multi-service plans
+  // (services.length > 1 at the call site) whose combinedFrequency inherits
+  // the PRIMARY service's cadence — dividing the plan credit by one service's
+  // visit count would assert a per-application figure that is not the
+  // discount applied to any application's charge (codex #3128 r4, retiring
+  // the r1 numeric path). The credit therefore always renders label-only; the
+  // dollar effect is already visible in each service card's discounted price.
+  const creditBox = () => (
+    <div style={{
+      ...row,
+      padding: '12px 14px',
+      borderRadius: 10,
+      border: `1px solid ${W.greenLight}`,
+      background: W.successWash,
+      color: W.green,
+      fontWeight: 800,
+      fontSize: 16,
+    }}>
+      <span>{creditLabel}</span>
+      <span style={{ fontWeight: 600, fontSize: 14 }}>Applied to your plan pricing</span>
+    </div>
+  );
 
   // Credit = the ACTUAL reduction for the SELECTED cadence: the sum of the
   // pre-credit per-service cards minus the net the accept payload charges.
@@ -3370,6 +3364,7 @@ function SectionOneTimeBlock({ contribution, variant = 'trailing' }) {
 export function ServiceSection({
   section,
   servicesLength = 1,
+  commercialProposal = false,
   selectedFrequencyKey,
   selectedAddOns = new Set(),
   onFrequencyChange,
@@ -3525,7 +3520,11 @@ export function ServiceSection({
             // is a plan total the estimate surface must not carry ("per
             // month" audit 2026-08-01) — its headline now names the billing
             // unit and the itemized rows carry the per-application prices.
-            suppressCombinedTotal={section.key === 'bundle'}
+            // Commercial proposals are the documented exemption (approval is
+            // explicitly monthly and rows may carry no application count), so
+            // their bundle keeps the price — mirroring the SSR
+            // commercialManualAccept fork (codex #3128 r4).
+            suppressCombinedTotal={section.key === 'bundle' && !commercialProposal}
             wording={priceWording}
             glassSetupBullet={glassSetupBulletEligible}
             // showSavings only governs the struck-through pre-discount anchor
@@ -5137,6 +5136,7 @@ function EstimateViewPageInner() {
                 key={section.key}
                 section={section}
                 servicesLength={services.length}
+                commercialProposal={isCommercialProposal}
                 glassSetupBulletEligible={setupFees.some((fee) => fee?.waivedWithPrepay === true)}
                 ctaSlotMeta={glassContent ? selectedSlotMeta : null}
                 selectedFrequencyKey={selected[section.key]}
