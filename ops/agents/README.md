@@ -28,6 +28,7 @@ invoked by a human or an agent session, on purpose, from the repo root.
 | `retention-purge.js` | MUTATES (dry-run default) | Dismisses all `pending_approval` retention outreach drafts (`status` → `rejected`), audit-tagged and reversible. |
 | `railway-var-cleanup.sh` | MUTATES (dry-run default) | Deletes named Railway service variables one at a time, with confirmation of what exists first. |
 | `completion-lane-coverage.js` | READ-ONLY | B0 catalog coverage audit: classifies every active service into a completion lane via `server/config/completion-lane-registry.js` and exits 1 on defects (generic fall-throughs, unlisted stragglers, no-decision keys). |
+| `billing-lane-census.js` | READ-ONLY | Counts live customers by `customers.billing_mode`, plus the cohort still matching `customerPreservesMonthlyMembership` (who see monthly billing disclosure on estimates instead of per-application) and any pre-fix termite estimates still reachable. Counts only, no PII. |
 | `mcp-stdio.js` | READ-ONLY | stdio ↔ HTTP bridge for the portal's `/api/mcp` MCP knowledge server, so stdio-transport MCP clients (e.g. `claude mcp add`) can use the read-only knowledge tools. Needs `MCP_SERVICE_TOKEN`; endpoint stays gated behind `GATE_MCP_READ_TOOLS`. |
 
 ## Prod read-only access recipe
@@ -55,6 +56,9 @@ what was asked; never dump full tables or the variable store.
 ```sh
 # Read-only: grab one live token per public page type
 railway run --service Postgres node ops/agents/pull-page-tokens.js
+
+# Read-only: who is still on monthly billing, and is the monthly display path dead yet
+railway run --service Postgres node ops/agents/billing-lane-census.js
 
 # Dry-run (default), then real run, of the retention draft purge
 railway run --service Postgres node ops/agents/retention-purge.js
