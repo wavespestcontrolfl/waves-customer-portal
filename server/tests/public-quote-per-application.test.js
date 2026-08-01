@@ -525,7 +525,9 @@ describe('derivePerApplicationBreakdown', () => {
     // aside, one cent per line per visit at worst).
     const annual = Number(estimate.summary.recurringAnnualAfterDiscount);
     const summed = lines.reduce((acc, l) => acc + l.per_application * l.visits_per_year, 0);
-    const tolerance = lines.reduce((acc, l) => acc + l.visits_per_year, 0);
+    // One CENT of rounding per application at worst (codex #3124 r2: the
+    // visit count alone allowed a whole dollar per application).
+    const tolerance = lines.reduce((acc, l) => acc + l.visits_per_year, 0) / 100;
     expect(Math.abs(summed - annual)).toBeLessThanOrEqual(tolerance);
   });
 
@@ -595,6 +597,21 @@ describe('derivePerApplicationBreakdown', () => {
     expect(lines[0].visits_per_year).toBe(6);
     // ...and the single-service helper now answers for it too.
     expect(derivePerApplication(estimate)).toEqual({ amount: 90, visitsPerYear: 6 });
+  });
+
+  // Palm-injection rows carry appsPerYear + perVisit and no name — the real
+  // engine shape (codex #3124 r2); an unrecognized cadence field dropped both
+  // palm-only quotes and every bundle containing palm.
+  test('derives palm injection from appsPerYear and labels it', () => {
+    const estimate = {
+      lineItems: [{ service: 'palm_injection', monthly: 166.67, perVisit: 500, appsPerYear: 4, annual: 2000 }],
+    };
+    const lines = derivePerApplicationBreakdown(estimate);
+    expect(lines).toHaveLength(1);
+    expect(lines[0].label).toBe('Palm Tree Injections');
+    expect(lines[0].per_application).toBe(500); // 2000 / 4
+    expect(lines[0].visits_per_year).toBe(4);
+    expect(derivePerApplication(estimate)).toEqual({ amount: 500, visitsPerYear: 4 });
   });
 
   test('one-time-only and empty estimates return null', () => {

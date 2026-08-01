@@ -186,13 +186,16 @@ function perApplicationForLine(line) {
   // Cadence first: it is the one field every recurring shape carries.
   // Mosquito lines expose visits, lawn lines a numeric frequency, pest lines
   // visitsPerYear with a STRING frequency (codex 2642 r1/r3).
+  // Palm-injection lines expose the cadence as appsPerYear (codex #3124 r2).
   const visits = Number(line.visitsPerYear) > 0
     ? Number(line.visitsPerYear)
     : Number(line.visits) > 0
       ? Number(line.visits)
-      : Number(line.frequency) > 0
-        ? Number(line.frequency)
-        : null;
+      : Number(line.appsPerYear) > 0
+        ? Number(line.appsPerYear)
+        : Number(line.frequency) > 0
+          ? Number(line.frequency)
+          : null;
   if (!visits) return null;
   // Exact cents (codex 2642 r1: whole-dollar rounding drifted the headline
   // from the monthly/annual math), preferring the DISCOUNTED annual over the
@@ -230,6 +233,7 @@ const RECURRING_LINE_LABELS = {
   mosquito: 'Mosquito & No-See-Um Control',
   tree_shrub: 'Tree & Shrub Care',
   rodent_bait: 'Rodent Bait Stations',
+  palm_injection: 'Palm Tree Injections',
   foam_recurring: 'Recurring Foam Treatment',
   termite_bait: 'Termite Bait Monitoring',
   termite_station_rental: 'Termite Station Monitoring',
