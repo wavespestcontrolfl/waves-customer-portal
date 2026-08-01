@@ -481,7 +481,10 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
             {perAppNet != null && manualDiscountPerApplication > 0
               ? <>{fmtMoneySigned(-manualDiscountPerApplication)} / {perApplicationNoun}</>
               : suppressCombinedTotal
-                ? fmtMoneySigned(-manualDiscountInterval)
+                // Bundle card: the interval slice has no honest unit here — a
+                // bare figure reads as per-application or one-time (codex
+                // #3128 r2, same rule as PlanTotalSummary).
+                ? <span style={{ fontWeight: 600, fontSize: 13 }}>Applied to your plan pricing</span>
                 : <>{fmtMoneySigned(-manualDiscountInterval)}{periodLabel}</>}
           </strong>
         </div>

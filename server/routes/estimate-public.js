@@ -4592,14 +4592,10 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
       ${recurringChoiceTreatmentHtml || `<div class="service-price-list" data-mode-only="recurring">${servicePriceCardsHtml}</div>`}
     ` : `
       <div class="big-price" data-mode-only="recurring">
-        ${savingsPerMo > 0 ? `<span class="anchor" id="anchor-display">${fmtMoney(recurringDisplayBase)} / ${escapeHtml(recurringPricePeriodWord)}</span>` : ''}
-        <span class="num" id="monthly-display">${fmtMoney(recurringDisplayTotal)}</span>
-        <span class="per">${escapeHtml(recurringPricePeriodWord)}</span>
+        <span class="num" style="font-size:34px">Priced per application</span>
         <span class="tier-lbl">${commercialManualAccept ? 'Commercial' : `WaveGuard ${escapeHtml(tier)}`}</span>
       </div>
-      ${savingsPerMo > 0 && !commercialManualAccept ? `<div class="save-row" data-mode-only="recurring" data-aggregate-save-row><span class="save-pill">You save <span id="savings-display">${fmtMoney(recurringDisplaySavings)}</span> / ${escapeHtml(recurringPricePeriodWord)} with WaveGuard ${escapeHtml(tier)}</span></div>` : ''}
-      ${manualDiscountHtml}
-      <div class="day-price" data-mode-only="recurring">${hasOnlyLawnCareServices ? `That\u2019s just ${fmtMoney(dayPrice)}/day to stop lawn pests before they turn green grass brown.` : `That\u2019s just ${fmtMoney(dayPrice)}/day for ${escapeHtml(pageCopy.aggregateDayLabel)}.`}</div>
+      ${manualDiscount && recurringDisplayManualDiscount > 0 ? `<div class="manual-discount-row" data-mode-only="recurring"><span>${escapeHtml(manualDiscount.label || 'Discount')}</span><strong>Applied to your plan pricing</strong></div>` : ''}
       ${supplementalServiceSummaryHtml}
     `));
 
@@ -4790,14 +4786,14 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     const on = prefs[key] !== false;
     // Per-row "if you toggle this off, you save …" label
     let savingsLabel = '';
+    // The add-on IS priced per visit (SERVICE_PREFS[].perVisit) — quote the
+    // per-application amount, mirroring shapePreferenceAddOns in the React
+    // payload; the cadence-priced spread ("$40/quarter", "$10/mo") described
+    // a charge shape the plan doesn't bill (codex #3128 r2).
     if (pestRecurring && hasPestOneTime) {
-      const rec = (cfg.perVisit * pestRecurring.visitsPerYear) / 12;
-      const freqKey = frequencyKeyFromVisitsPerYear(pestRecurring.visitsPerYear);
-      savingsLabel = `Save ${fmtMoney(intervalPriceFromMonthly(rec, freqKey))}${pricePeriodLabelForFrequencyKey(freqKey)} + ${fmtMoney(cfg.oneTime)} on one-time`;
+      savingsLabel = `Save ${fmtMoney(cfg.perVisit)} per application + ${fmtMoney(cfg.oneTime)} on one-time`;
     } else if (pestRecurring) {
-      const rec = (cfg.perVisit * pestRecurring.visitsPerYear) / 12;
-      const freqKey = frequencyKeyFromVisitsPerYear(pestRecurring.visitsPerYear);
-      savingsLabel = `Save ${fmtMoney(intervalPriceFromMonthly(rec, freqKey))}${pricePeriodLabelForFrequencyKey(freqKey)}`;
+      savingsLabel = `Save ${fmtMoney(cfg.perVisit)} per application`;
     } else if (hasPestOneTime) {
       savingsLabel = `Save ${fmtMoney(cfg.oneTime)}`;
     }

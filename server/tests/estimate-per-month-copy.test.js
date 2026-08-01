@@ -50,3 +50,22 @@ describe('accept-notification customer copy has no plan price', () => {
     expect(src).toMatch(/adminPlanLabel[\s\S]{0,200}monthlyText/);
   });
 });
+
+describe('legacy SSR renderer mirrors the per-application rules (codex #3128 r2)', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const src = fs.readFileSync(path.join(__dirname, '../routes/estimate-public.js'), 'utf8');
+
+  test('the uncovered-total hero names the billing unit instead of a combined cadence total', () => {
+    expect(src).toContain('Priced per application');
+    // The old fallback interpolated the combined total + period word into the
+    // hero — that exact shape must not return.
+    expect(src).not.toMatch(/id="monthly-display">\$\{fmtMoney\(recurringDisplayTotal\)\}/);
+  });
+
+  test('preference rows quote the per-application amount, not a cadence spread', () => {
+    const renderPrefRow = src.slice(src.indexOf('function renderPrefRow'), src.indexOf('function renderPrefRow') + 1400);
+    expect(renderPrefRow).toContain('per application');
+    expect(renderPrefRow).not.toContain('intervalPriceFromMonthly');
+  });
+});

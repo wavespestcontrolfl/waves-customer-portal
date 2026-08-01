@@ -533,6 +533,9 @@ async function sendMembershipUpdated({
 } = {}) {
   const customer = await loadCustomer(customerId);
   if (!customer) return { ok: false, skipped: true, reason: 'customer_not_found' };
+  // Resolved once for both the summary line and the template's rate rows.
+  const { resolveBillingLane } = require('./billing-lane');
+  const billingLane = resolveBillingLane({ ...customer, ...after }).mode;
   const changes = [];
   if (before.waveguard_tier !== undefined && after.waveguard_tier !== undefined && before.waveguard_tier !== after.waveguard_tier) {
     changes.push(`Tier: ${before.waveguard_tier || 'None'} to ${after.waveguard_tier || 'None'}`);
@@ -545,13 +548,11 @@ async function sendMembershipUpdated({
     // same way card-enrollment-email.js does, and describe each non-monthly
     // lane in its own billing terms (codex #3128 r1: "billed per
     // application" is wrong for prepaid and per-visit customers too).
-    const { resolveBillingLane } = require('./billing-lane');
-    const lane = resolveBillingLane({ ...customer, ...after }).mode;
-    if (lane === 'monthly_membership') {
+    if (billingLane === 'monthly_membership') {
       changes.push(`Monthly rate: ${money(before.monthly_rate)} to ${money(after.monthly_rate)}`);
-    } else if (lane === 'annual_prepay') {
+    } else if (billingLane === 'annual_prepay') {
       changes.push('Your plan pricing was updated. Your plan is prepaid for the year, so nothing changes about how you pay.');
-    } else if (lane === 'per_application') {
+    } else if (billingLane === 'per_application') {
       changes.push('Your plan pricing was updated — you are billed per application, and each visit is charged after it is completed.');
     } else {
       // per_visit / one_time: invoice-on-complete lanes.
@@ -573,8 +574,14 @@ async function sendMembershipUpdated({
       membership_change_summary: summary,
       old_membership_tier: clean(before.waveguard_tier),
       new_membership_tier: clean(after.waveguard_tier),
-      old_monthly_rate: money(before.monthly_rate),
-      new_monthly_rate: money(after.monthly_rate),
+      // The template's "Previous rate"/"New rate" detail rows render from
+      // these; the details renderer drops empty-valued rows, so blanking them
+      // outside the monthly lane suppresses the rows entirely — a
+      // per-application/prepaid/per-visit customer must not see
+      // monthly-derived figures the summary above just avoided (codex #3128
+      // r2).
+      old_monthly_rate: billingLane === 'monthly_membership' ? money(before.monthly_rate) : '',
+      new_monthly_rate: billingLane === 'monthly_membership' ? money(after.monthly_rate) : '',
     },
     idempotencyKey: idempotencyKey || `membership.updated:${customerId}:${stableEventKey(effectiveDate)}:${hashValue({ before, after })}`,
     categories: ['membership_updated'],

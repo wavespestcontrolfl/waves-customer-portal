@@ -81,6 +81,17 @@ describe('membership.updated billing-lane gate', () => {
     const summary = await summaryFor({ ...BASE, billing_mode: 'per_application', pipeline_stage: 'active_customer' });
     expect(summary).not.toMatch(/Monthly rate/i);
     expect(summary).toMatch(/per application/i);
+    // Codex #3128 r2: the template's "Previous rate"/"New rate" detail rows
+    // render from these fields and the renderer drops empty-valued rows —
+    // they must be blank outside the monthly lane.
+    expect(sentTemplates[0].payload.old_monthly_rate).toBe('');
+    expect(sentTemplates[0].payload.new_monthly_rate).toBe('');
+  });
+
+  test('a monthly member keeps the rate detail rows populated', async () => {
+    await summaryFor({ ...BASE, billing_mode: 'monthly_membership', pipeline_stage: 'active_customer' });
+    expect(sentTemplates[0].payload.old_monthly_rate).not.toBe('');
+    expect(sentTemplates[0].payload.new_monthly_rate).not.toBe('');
   });
 
   // Codex #3128 r1: each non-monthly lane gets its own billing terms — the
