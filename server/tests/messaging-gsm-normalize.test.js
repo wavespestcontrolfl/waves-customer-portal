@@ -59,7 +59,7 @@ describe('normalizeGsmPunctuation', () => {
   });
 
   test('flips a UCS-2 body back to GSM-7 with fewer segments', () => {
-    const curly = 'Hello Sue! Your service is tomorrow. Your arrival window starts at 3:00 PM, and we’ll text you a tracking link when your technician is on the way.';
+    const curly = 'Hello there! Your service is tomorrow. Your arrival window starts at 3:00 PM, and we’ll text you a tracking link when your technician is on the way.';
     expect(countSegments(curly).encoding).toBe('UCS_2');
     const fixed = normalizeGsmPunctuation(curly);
     const meta = countSegments(fixed);
@@ -71,6 +71,12 @@ describe('normalizeGsmPunctuation', () => {
     expect(normalizeGsmPunctuation('ok \u{1F44D}')).toBe('ok \u{1F44D}');
     expect(normalizeGsmPunctuation('José & Muñoz')).toBe('José & Muñoz');
     expect(normalizeGsmPunctuation("plain 'text' - fine...")).toBe("plain 'text' - fine...");
+  });
+
+  test('preserves ZWJ/ZWNJ join controls (joined emoji must not split)', () => {
+    const joined = '\u{1F469}‍\u{1F4BB}'; // woman + ZWJ + laptop = one glyph
+    expect(normalizeGsmPunctuation(joined)).toBe(joined);
+    expect(normalizeGsmPunctuation('a‌b')).toBe('a‌b');
   });
 
   test('is idempotent and passes through non-string input', () => {

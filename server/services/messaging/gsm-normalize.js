@@ -5,8 +5,9 @@
  * ellipsis) forces the ENTIRE SMS body into UCS-2 encoding: 67 chars per
  * concatenated segment instead of 153. The identical text silently costs
  * 2x the segments, and long concatenated messages have failed to reach
- * handsets that still ACK delivery (2026-07 Sue Helgren: multi-segment
- * reminders "delivered" but never seen; single-segment texts arrived).
+ * handsets that still ACK delivery (2026-07 incident: a customer's
+ * multi-segment reminders were "delivered" but never seen, while every
+ * single-segment text arrived).
  *
  * This module maps typographic punctuation to its plain GSM-7 equivalent.
  * It is deliberately conservative: only characters with an exact plain
@@ -48,10 +49,12 @@ const REPLACEMENTS = Object.fromEntries([
   // Bullets / ellipsis
   ['•', '-'], // bullet (list marker)
   ['…', '...'], // horizontal ellipsis
-  // Invisible characters that add UCS-2 cost with zero visible content
+  // Invisible characters that add UCS-2 cost with zero visible content.
+  // Deliberately NOT stripped: ZWJ (U+200D) and ZWNJ (U+200C) — they are
+  // join controls inside emoji sequences and complex scripts, so removing
+  // them changes rendered content (a joined emoji splits into two), and
+  // internal-briefing SMS legitimately carries emoji.
   ['​', ''], // zero-width space
-  ['‌', ''], // zero-width non-joiner
-  ['‍', ''], // zero-width joiner
   ['⁠', ''], // word joiner
   ['﻿', ''], // BOM / zero-width no-break space
   ['­', ''], // soft hyphen

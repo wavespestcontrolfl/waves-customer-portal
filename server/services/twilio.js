@@ -4,6 +4,7 @@ const db = require("../models/db");
 const logger = require("./logger");
 const smsTemplatesRouter = require("../routes/admin-sms-templates");
 const { shortenOrPassthrough } = require("./short-url");
+const { normalizeGsmPunctuation } = require("./messaging/gsm-normalize");
 const { formatTechnicianForCustomer } = require("../utils/technician-name");
 const { publicPortalUrl } = require("../utils/portal-url");
 
@@ -318,6 +319,12 @@ const TwilioService = {
    * options: { customerId, customerLocationId, fromNumber, messageType, adminUserId }
    */
   async sendSMS(to, body, options = {}) {
+    // GSM-7 normalization at the true Twilio boundary: legacy callers reach
+    // sendSMS directly without going through sendCustomerMessage, and one
+    // typographic character (curly quote, em dash) flips the whole body to
+    // UCS-2 — 67 chars/segment instead of 153. Idempotent, so bodies already
+    // normalized upstream pass through unchanged.
+    body = normalizeGsmPunctuation(body);
     let attemptedFrom = options.fromNumber || null;
     try {
       const internalRedirect = await redirectInternalAdminSmsToNotification(to, body, options);

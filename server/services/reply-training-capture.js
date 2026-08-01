@@ -1,5 +1,6 @@
 const db = require('../models/db');
 const logger = require('./logger');
+const { normalizeGsmPunctuation } = require('./messaging/gsm-normalize');
 
 const TRAINING_TABLE = 'reply_training_examples';
 const CONTEXT_MESSAGE_LIMIT = 20;
@@ -23,7 +24,12 @@ function parseJson(value, fallback = {}) {
 }
 
 function normalizeText(value) {
-  return String(value || '').replace(/\s+/g, ' ').trim();
+  // GSM punctuation normalization keeps the agent_draft_edited comparison
+  // honest: the send path normalizes the delivered body (curly quotes →
+  // straight, em dash → hyphen), so an operator who sends an AI draft
+  // UNCHANGED would otherwise byte-differ from what actually sent and be
+  // falsely captured as a human edit, contaminating the training corpus.
+  return normalizeGsmPunctuation(String(value || '')).replace(/\s+/g, ' ').trim();
 }
 
 function classifyScenario({ inboundBody = '', outboundBody = '', metadata = {} } = {}) {
