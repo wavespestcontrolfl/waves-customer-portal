@@ -116,8 +116,10 @@ const RAIN_WINDOW_PHRASES = new RegExp([
   '\\bsince\\s+we\\s+(?:last\\s+)?(?:visited|serviced|were|came|stopped)\\b',
   '\\bthis\\s+(?:service\\s+)?cycle\\b',
   '\\bbetween\\s+(?:visits|services|appointments)\\b',
-  // single-day / sub-weekly framings
-  '\\brain(?:fall)?\\s+(?:today|yesterday|overnight)\\b',
+  // single-day / sub-weekly framings — verb-first AND day-first orders
+  // ("rain yesterday", "yesterday's rain" — codex P2 r27)
+  '\\brain(?:fall)?\\s+(?:today|yesterday|overnight|last\\s+night)\\b',
+  "\\b(?:today|yesterday|last\\s+night|overnight)[\u2019']s\\s+rain(?:fall)?\\b",
   '\\b(?:last|past)\\s+(?:\\d+|one|two|three|four|five|six|couple\\s+of|few)\\s+(?:day|days|hour|hours|hrs)\\b',
   '\\b(?:over|in|during)\\s+the\\s+(?:last|past)\\s+(?:day|\\d+\\s*hours)\\b',
 ].join('|'), 'i');

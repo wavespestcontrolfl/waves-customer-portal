@@ -297,8 +297,11 @@ function contradictsAppliedProducts(text, appliedProducts) {
     const nameSource = productNameTermSource(row.product_name);
     if (nameSource && governedRegexForTerms(nameSource).test(t)) return true;
   }
-  const hasUnresolvedCategory = rows.some((row) => !row.product_category);
-  if (hasUnresolvedCategory && governedRegexForTerms(GENERIC_TREATMENT_TERMS).test(t)) return true;
+  // Generic deferrals ("No additional treatment is warranted") contradict
+  // ANY applied product — not just unresolved-category rows (codex P1 r27):
+  // something WAS applied, so governed generic-treatment wording is checked
+  // whenever any application exists.
+  if (governedRegexForTerms(GENERIC_TREATMENT_TERMS).test(t)) return true;
   return false;
 }
 
@@ -796,32 +799,35 @@ const KnowledgeBridge = {
       logger.error(`[knowledge-bridge] recommendation context load failed: ${ctxErr.message}`);
       return null;
     }
-    // Cross-process serialization (codex P1 r8): the xact-scoped advisory
-    // lock orders confirm-time and completion-time runs even when they land
-    // on different instances during a rolling deploy — lock-acquisition
-    // order is run order, so the later (grounded) caller always writes
-    // last. The lock spans the LLM call by design: holding ONE pool
-    // connection (no nested acquisition) for a rare per-closeout run is the
-    // price of a globally ordered write.
-    return db.transaction(async (trx) => {
+    // Cross-process safety WITHOUT holding a connection across the LLM call
+    // (codex P1 r8+r27): the advisory lock brackets only short DB read/write
+    // transactions — a 10-minute provider wait must never occupy the
+    // 20-connection pool. Ordering is enforced by GROUNDED-WRITE PRECEDENCE
+    // in the write phase instead of lock order: an ungrounded (confirm-time)
+    // result can never overwrite a grounded (completion-time) one, so
+    // interleavings across instances are harmless.
+    const phaseA = await db.transaction(async (trx) => {
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`lawn_rec_${assessmentId}`]);
-      return this._generateAssessmentRecommendationsLocked(assessmentId, trx, context);
-    }).catch((err) => {
-      logger.error(`[knowledge-bridge] generateAssessmentRecommendations transaction failed: ${err.message}`);
-      return null;
-    });
-  },
-
-  async _generateAssessmentRecommendationsLocked(assessmentId, trx, context) {
-    try {
-      // Re-read INSIDE the lock so a run queued behind another sees its
-      // write. All in-lock queries go through trx — issuing pooled `db`
-      // reads while holding the transaction's connection is nested pool
-      // acquisition and can exhaust the pool under bursts (codex P1 r11);
-      // the static context (customer/grass/knowledge) was gathered BEFORE
-      // the transaction for the same reason.
       const assessment = await trx('lawn_assessments').where({ id: assessmentId }).first();
       if (!assessment) return null;
+      let appliedProducts = [];
+      if (assessment.service_record_id) {
+        appliedProducts = await loadAppliedProductsWithCategories(assessment.service_record_id, trx);
+      }
+      return { assessment, appliedProducts };
+    }).catch((err) => {
+      // A transient read/enrichment failure FAILS the run as ungrounded —
+      // proceeding blind to today's treatments would release every gate
+      // (codex P1 r19/r21).
+      logger.warn(`[knowledge-bridge] recommendation read phase failed for ${assessmentId}: ${err.message}`);
+      return undefined;
+    });
+    if (!phaseA) return null;
+    return this._generateAssessmentRecommendationsUnlocked(assessmentId, phaseA, context);
+  },
+
+  async _generateAssessmentRecommendationsUnlocked(assessmentId, { assessment, appliedProducts }, context) {
+    try {
       const { customer, grassType, grassTrack, protocolEntries, outcomeEntries } = context;
 
       // Build scores context
@@ -840,30 +846,9 @@ const KnowledgeBridge = {
         season: assessment.season,
       };
 
-      // Today's treatment context — what was ACTUALLY applied on the linked
-      // visit. The recommendations must never advise against or defer a
-      // product class the technician already applied today (owner audit
-      // 2026-07-30: "field observations do not currently support active
-      // disease treatment" rendered on the same report as that day's
-      // fungicide application). Product rows only — raw technician notes are
-      // NOT parser-approved copy and must not feed customer-facing prompts
-      // (report egress rule). Fail-soft: missing link/tables just mean no
-      // treatment block in the prompt.
-      let appliedProducts = [];
-      if (assessment.service_record_id) {
-        try {
-          appliedProducts = await loadAppliedProductsWithCategories(assessment.service_record_id, trx);
-        } catch (treatmentErr) {
-          // A transient products-load failure must FAIL the run, not proceed
-          // ungrounded: a truthy result here would release the PDF/MMS/SMS/
-          // email gates while neither the prompt nor the persist-time guard
-          // ever saw today's treatments (codex P1 r19). Returning null routes
-          // the caller to the deterministic-sanitize/retry path.
-          logger.warn(`[knowledge-bridge] treatment context unavailable for assessment ${assessmentId} — failing run as ungrounded: ${treatmentErr.message}`);
-          return null;
-        }
-      }
-
+      // appliedProducts came from the locked Phase A read — the visit's
+      // ACTUAL applications (product rows only; raw technician notes are NOT
+      // parser-approved copy and must not feed customer-facing prompts).
       const month = new Date().getMonth() + 1;
       const monthName = ['January','February','March','April','May','June','July','August','September','October','November','December'][month - 1];
 
@@ -918,27 +903,43 @@ Return a JSON object with:
           logger.warn(`[knowledge-bridge] dropped ${dropped} treatment-contradicting field(s) from recommendations for assessment ${assessmentId}`);
         }
 
-        // When the replacement summary was stripped, "keep the stored one"
-        // is only safe if the STORED one doesn't contradict today's
-        // treatment too — the confirm-time summary is exactly the text the
-        // grounded regen exists to replace (codex P1 r7). Contradicting
-        // stored copy gets a neutral deterministic summary instead.
-        if (!parsed.summary && contradictsAppliedProducts(assessment.ai_summary, appliedProducts)) {
-          parsed.summary = 'Today’s applications are in place — we’ll track how the lawn responds and adjust at the next visit.';
-        }
-
-        // Save to assessment (summary may have been stripped by the guard —
-        // keep the previously stored ai_summary in that case). Always write,
-        // even when a bounded caller has already moved on: the grounded
-        // correction must become durable (codex P1 r8) — the caller is
-        // responsible for refreshing any artifacts it built meanwhile.
-        await trx('lawn_assessments').where({ id: assessmentId }).update({
-          ...(parsed.summary ? { ai_summary: parsed.summary } : {}),
-          recommendations: JSON.stringify(parsed),
-          updated_at: new Date(),
+        // Phase B — SHORT locked write with grounded precedence: an
+        // ungrounded (no-applied-products) result must never overwrite a
+        // grounded one, regardless of which instance's LLM call finished
+        // last (codex P1 r8+r27). The stale-summary check runs against the
+        // FRESH row inside the lock.
+        const iAmGrounded = appliedProducts.length > 0;
+        return await db.transaction(async (trx) => {
+          await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`lawn_rec_${assessmentId}`]);
+          const fresh = await trx('lawn_assessments').where({ id: assessmentId }).first();
+          if (!fresh) return null;
+          let existingGrounded = false;
+          try {
+            const existing = typeof fresh.recommendations === 'string'
+              ? JSON.parse(fresh.recommendations) : fresh.recommendations;
+            existingGrounded = !!(existing && existing._groundedInApplications);
+          } catch { existingGrounded = false; }
+          if (existingGrounded && !iAmGrounded) {
+            logger.info(`[knowledge-bridge] ungrounded recommendation result for ${assessmentId} discarded — grounded copy already stored`);
+            return null;
+          }
+          // When the replacement summary was stripped, "keep the stored one"
+          // is only safe if the STORED one doesn't contradict today's
+          // treatment (codex P1 r7) — checked against the fresh row.
+          if (!parsed.summary && contradictsAppliedProducts(fresh.ai_summary, appliedProducts)) {
+            parsed.summary = 'Today’s applications are in place — we’ll track how the lawn responds and adjust at the next visit.';
+          }
+          parsed._groundedInApplications = iAmGrounded;
+          await trx('lawn_assessments').where({ id: assessmentId }).update({
+            ...(parsed.summary ? { ai_summary: parsed.summary } : {}),
+            recommendations: JSON.stringify(parsed),
+            updated_at: new Date(),
+          });
+          return parsed;
+        }).catch((writeErr) => {
+          logger.error(`[knowledge-bridge] recommendation write phase failed for ${assessmentId}: ${writeErr.message}`);
+          return null;
         });
-
-        return parsed;
       } catch (parseErr) {
         logger.error(`[knowledge-bridge] Failed to parse recommendations: ${parseErr.message}`);
         return null;

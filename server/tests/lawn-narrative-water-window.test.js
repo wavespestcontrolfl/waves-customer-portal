@@ -20,6 +20,7 @@ describe('safeWaterText — rain window enforcement', () => {
     'Rainfall over the past day has been heavy.',
     'Since we last visited, about 2 inches of rain fell.',
     'We measured 2 inches over the past three days.',
+    'Yesterday’s rain brought 4.23 inches; the weekly total is above target.',
     'Rain since our previous service has been steady.',
   ])('window-violating copy falls back: %s', (bad) => {
     expect(_test.safeWaterText(bad, FALLBACK)).toBe(FALLBACK);

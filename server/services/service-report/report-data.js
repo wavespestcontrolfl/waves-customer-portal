@@ -2244,6 +2244,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
           if (Array.isArray(lawnAssessment.snapshot.nextWatchItems)) lawnAssessment.snapshot.nextWatchItems = [];
         }
         if (Array.isArray(lawnAssessment.recommendationCards)) lawnAssessment.recommendationCards = [];
+        if (lawnAssessment.customerSummary) lawnAssessment.customerSummary = NEUTRAL_SUMMARY;
         console.warn('[report-data] product categories unverifiable (catalog lookup failed) — recommendation-derived copy suppressed for this render');
       } else if (guardProducts.length) {
         // Products-aware (codex P1 r26): name-phrased deferrals ("Hold off
@@ -2286,6 +2287,12 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
           lawnAssessment.recommendationCards = lawnAssessment.recommendationCards.filter(
             (card) => !contradicts(`${card?.title || ''} ${card?.customerCopy || ''} ${card?.reason || ''}`),
           );
+        }
+        // customerSummary was COPIED from snapshot.summary before this guard
+        // ran — reconcile the copy too (heading, dynamic hero, and the
+        // report assistant all render it — codex P1 r27).
+        if (contradicts(lawnAssessment.customerSummary)) {
+          lawnAssessment.customerSummary = NEUTRAL_SUMMARY;
         }
       }
     } catch (guardErr) {
