@@ -3,9 +3,17 @@
 > **Status 2026-08-01:** Owner approved the A + C route (§2). The Option C
 > enforcement rails are BUILT (dark behind `GATE_APPT_CARD_NO_SHOW_FEE` and
 > `GATE_APPT_CARD_COMPLETION_CHARGE`) — see the appointment-card enforcement
-> rails entry in AGENTS.md. The deposit build (Option B) is shelved. Fee
-> sizing stays an owner pricing decision (flat config, admin-tunable);
-> research summary in §2b.
+> rails entry in AGENTS.md. The deposit build (Option B) is shelved.
+>
+> **Owner ruling (Adam, 2026-08-01, this session):** fee = **$75 flat, one
+> amount for BOTH no-show and late-cancel** (no 50%/100% split — single
+> number, simple promise, rescheduling stays free). Deposit confirmed
+> dead for one-time appointments — the $75 auto-charged fee replaces its
+> economics without the prepay friction; revisit only on post-launch
+> ghosting data or for the WDO/real-estate pay-at-scheduling lane.
+> Implementation: retune `pricing_config.estimate_card_hold` from $49 →
+> $75 in the admin pricing panel (DB-authoritative, shared with the
+> estimate card-hold lane; frozen terms protect already-agreed $49 fees).
 
 **Ask (Adam, 2026-08-01):** for speculative one-time appointments (example: a fly
 inspection that may or may not turn into paid work), require a deposit — ~$75 or a
