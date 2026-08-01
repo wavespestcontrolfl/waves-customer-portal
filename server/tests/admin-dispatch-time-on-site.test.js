@@ -330,8 +330,9 @@ describe('live override composed with buildCompletionLifecycleUpdates', () => {
     );
     // Trusted path: finite opts.completedAt wins, wall clock only as the
     // fallback — so the live override's adjusted instant is not discarded.
-    // Untrusted (backfill) branch byte-identical to its prior contract.
-    expect(trackerSource).toMatch(/const completedAtStamp = opts\.untrustedLifecycleSpan\s*\n\s*\? finiteDate\(opts\.completedAt\)\s*\n\s*: \(finiteDate\(opts\.completedAt\) \|\| now\);/);
+    // Both branches sit behind the round-15 transition stamp fence: when a
+    // newer correction owns completed_at, neither stamps anything.
+    expect(trackerSource).toMatch(/const completedAtStamp = !transitionStampMatches\s*\n\s*\? null[\s\S]{0,120}: \(opts\.untrustedLifecycleSpan\s*\n\s*\? finiteDate\(opts\.completedAt\)\s*\n\s*: \(finiteDate\(opts\.completedAt\) \|\| now\)\);/);
   });
 
   test('the live sanitizer and the backfill sanitizer are the same 1..720 rule', () => {
@@ -363,7 +364,7 @@ describe('route wiring contracts', () => {
   });
 
   test('the adjusted marker freezes into structured_notes beside the backfill marker', () => {
-    expect(source).toMatch(/\.\.\.\(liveAdjustedTimeOnSite \? \{ timeOnSiteAdjusted: true \} : \{\}\),/);
+    expect(source).toMatch(/\.\.\.\(liveAdjustedTimeOnSite \|\| correctionPreservedMidFlight \? \{ timeOnSiteAdjusted: true \} : \{\}\),/);
   });
 
   test('PATCH /:serviceId/time-on-site is registered with requireAdmin in its chain', () => {
@@ -583,7 +584,23 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
   });
 
   test('the finalization takes the row lock at transaction start — corrections and finalizations are strictly ordered (codex P2 round 14)', () => {
-    expect(source).toMatch(/await db\.transaction\(async \(trx\) => \{\s*\n(?:\s*\/\/[^\n]*\n)*\s*await trx\('scheduled_services'\)\.where\(\{ id: svc\.id \}\)\.forUpdate\(\)\.first\(\);\s*\n\s*const completionEndedAt = new Date\(\);\s*\n\s*completionWallClockAt = completionEndedAt;/);
+    expect(source).toMatch(/await db\.transaction\(async \(trx\) => \{\s*\n(?:\s*\/\/[^\n]*\n)*\s*const lockedSvcRow = await trx\('scheduled_services'\)\.where\(\{ id: svc\.id \}\)\.forUpdate\(\)\.first\(\);/);
+  });
+
+  test('the finalization reconciles with the LOCKED row and preserves a mid-flight correction (codex P2 round 15)', () => {
+    // Lifecycle state adopts the locked row (a correction committing
+    // between the handler's svc load and the lock already moved these
+    // fields), and its stamped minutes outrank a plain stale-timer elapsed
+    // in this request — explicit adjusted/backfill values keep authority.
+    expect(source).toMatch(/for \(const field of \[\s*\n\s*'actual_end_time', 'check_out_time', 'completed_at',\s*\n\s*'service_time_minutes', 'actual_duration_minutes',\s*\n\s*'time_on_site_adjusted_minutes',\s*\n\s*\]\) \{\s*\n\s*if \(field in lockedSvcRow\) svc\[field\] = lockedSvcRow\[field\];/);
+    expect(source).toMatch(/if \(!isBackfillCompletion && !liveAdjustedTimeOnSite\s*\n\s*&& Number\.isFinite\(stampedMinutes\) && stampedMinutes > 0\s*\n\s*&& typeof effectiveTimeOnSite !== 'number'\) \{\s*\n\s*effectiveTimeOnSite = stampedMinutes;\s*\n\s*correctionPreservedMidFlight = true;/);
+    // The reconcile block sits between the lock and the wall-clock capture.
+    const lockAt = source.indexOf("const lockedSvcRow = await trx('scheduled_services')");
+    const preserveAt = source.indexOf('correctionPreservedMidFlight = true;');
+    const wallClockAt = source.indexOf('completionWallClockAt = completionEndedAt;');
+    expect(lockAt).toBeGreaterThan(-1);
+    expect(preserveAt).toBeGreaterThan(lockAt);
+    expect(wallClockAt).toBeGreaterThan(preserveAt);
   });
 
   test('the already-complete rewrite is conditional on the correction stamp too (codex P2 round 14)', () => {

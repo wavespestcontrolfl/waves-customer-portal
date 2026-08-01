@@ -2516,8 +2516,9 @@ describe('completion route wiring (source contracts)', () => {
     const trackerSource = fs.readFileSync(path.join(__dirname, '../services/track-transitions.js'), 'utf8');
     // Trusted path honors a caller-supplied finite instant (live admin
     // override, codex P2 #3152 round 11) and keeps the wall clock for every
-    // caller that passes none; the untrusted branch is byte-identical.
-    expect(trackerSource).toMatch(/const completedAtStamp = opts\.untrustedLifecycleSpan\s*\n\s*\? finiteDate\(opts\.completedAt\)\s*\n\s*: \(finiteDate\(opts\.completedAt\) \|\| now\);/);
+    // caller that passes none; both branches sit behind the round-15
+    // transition stamp fence (a newer correction's completed_at stands).
+    expect(trackerSource).toMatch(/const completedAtStamp = !transitionStampMatches\s*\n\s*\? null[\s\S]{0,120}: \(opts\.untrustedLifecycleSpan\s*\n\s*\? finiteDate\(opts\.completedAt\)\s*\n\s*: \(finiteDate\(opts\.completedAt\) \|\| now\)\);/);
     expect(trackerSource).toMatch(/\.\.\.\(completedAtStamp \? \{ completed_at: completedAtStamp \} : \{\}\),/);
   });
 

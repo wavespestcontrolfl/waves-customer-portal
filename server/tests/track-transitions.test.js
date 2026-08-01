@@ -665,6 +665,47 @@ describe('track-transitions lifecycle side effects', () => {
     }));
   });
 
+  test('the first transition leaves completed_at alone when a newer correction owns it (codex P2 #3152 round 15)', async () => {
+    // Completion trx committed, track_state still on_property, and a
+    // correction landed in between: the row's stamp (60) no longer matches
+    // this caller's expectation (null — a plain timer completion), so the
+    // transition must not stamp `now` over the correction's completed_at.
+    jest.useFakeTimers().setSystemTime(new Date('2026-07-19T16:00:00.000Z'));
+    const svc = {
+      id: 'job-f15',
+      technician_id: 'tech-f15',
+      track_state: 'on_property',
+      actual_start_time: new Date('2026-07-19T12:00:00.000Z'),
+      actual_end_time: new Date('2026-07-19T13:00:00.000Z'),
+      completed_at: new Date('2026-07-19T13:00:00.000Z'),
+      time_on_site_adjusted_minutes: 60,
+    };
+    const update = query(1);
+    db
+      .mockReturnValueOnce(query(svc))
+      .mockReturnValueOnce(update);
+
+    const result = await trackTransitions.markComplete('job-f15', { expectedAdjustedMinutes: null });
+
+    expect(result.ok).toBe(true);
+    const payload = update.update.mock.calls[0][0];
+    expect(payload).not.toHaveProperty('completed_at');
+    expect(payload.track_state).toBe('complete');
+
+    // Matching expectation (the correction's own follow-up) still stamps.
+    const svcMatch = { ...svc, id: 'job-f15b' };
+    const update2 = query(1);
+    db
+      .mockReturnValueOnce(query(svcMatch))
+      .mockReturnValueOnce(update2);
+    const result2 = await trackTransitions.markComplete('job-f15b', {
+      expectedAdjustedMinutes: 60,
+      completedAt: new Date('2026-07-19T13:00:00.000Z'),
+    });
+    expect(result2.ok).toBe(true);
+    expect(update2.update.mock.calls[0][0].completed_at).toEqual(new Date('2026-07-19T13:00:00.000Z'));
+  });
+
   test('already-complete + a supplied finite instant still moves completed_at (codex P2 #3152 round 12)', async () => {
     // The status-route-first shape: the visit was marked completed earlier
     // (tracker stamped the wall clock), then the completion flow finalizes

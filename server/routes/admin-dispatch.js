@@ -4854,7 +4854,35 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // a correction slipping between the two missed the fresh record
           // and was then overwritten. Locking up front makes finalization
           // and correction strictly ordered whichever starts first.
-          await trx('scheduled_services').where({ id: svc.id }).forUpdate().first();
+          const lockedSvcRow = await trx('scheduled_services').where({ id: svc.id }).forUpdate().first();
+          // Reconcile with anything that committed between the handler's svc
+          // load and this lock (codex P2 #3152 round 15): a time-on-site
+          // correction in that window already moved the duration columns,
+          // end stamps, and the durable stamp — building the finalization
+          // from the stale snapshot would silently overwrite it. Lifecycle
+          // state adopts the locked row (start fields are write-once and
+          // cannot have moved), and a correction stamped mid-flight outranks
+          // a plain stale-timer elapsed in THIS request — the timer being
+          // wrong is the exact failure the correction fixed. An explicit
+          // adjusted or backfill value in this request is the newer operator
+          // statement and keeps its authority.
+          let correctionPreservedMidFlight = false;
+          if (lockedSvcRow) {
+            for (const field of [
+              'actual_end_time', 'check_out_time', 'completed_at',
+              'service_time_minutes', 'actual_duration_minutes',
+              'time_on_site_adjusted_minutes',
+            ]) {
+              if (field in lockedSvcRow) svc[field] = lockedSvcRow[field];
+            }
+            const stampedMinutes = Number(lockedSvcRow.time_on_site_adjusted_minutes);
+            if (!isBackfillCompletion && !liveAdjustedTimeOnSite
+              && Number.isFinite(stampedMinutes) && stampedMinutes > 0
+              && typeof effectiveTimeOnSite !== 'number') {
+              effectiveTimeOnSite = stampedMinutes;
+              correctionPreservedMidFlight = true;
+            }
+          }
           const completionEndedAt = new Date();
           completionWallClockAt = completionEndedAt;
           // Backfill: the service happened on its scheduled day — stamp the
@@ -4942,9 +4970,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // the body flag, and the quiet/backdate posture must survive it.
             ...(isBackfillCompletion ? { backfill: true } : {}),
             // Durable audit marker: this duration is an admin-typed override
-            // of the running timer, not the timer itself. No reader keys off
-            // it — the corrected end stamps/duration columns already agree.
-            ...(liveAdjustedTimeOnSite ? { timeOnSiteAdjusted: true } : {}),
+            // of the running timer, not the timer itself (or a mid-flight
+            // correction this finalization preserved — codex round 15). No
+            // reader keys off it — the corrected end stamps/duration columns
+            // already agree.
+            ...(liveAdjustedTimeOnSite || correctionPreservedMidFlight ? { timeOnSiteAdjusted: true } : {}),
             // REQUIRED-mint posture frozen at commit (Codex P0, fix round
             // 8): derived from the LIVE billing profile above — the profile
             // the operator saw — and stamped in the SAME transaction as the

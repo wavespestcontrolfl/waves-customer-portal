@@ -697,9 +697,22 @@ async function markComplete(serviceId, opts = {}) {
   // so date-window readers that prefer completed_at attribute the visit to
   // the corrected day — codex P2 #3152 round 11), else the wall clock, as
   // always for every caller that passes none.
-  const completedAtStamp = opts.untrustedLifecycleSpan
-    ? finiteDate(opts.completedAt)
-    : (finiteDate(opts.completedAt) || now);
+  //
+  // The correction-stamp fence applies on THIS branch too (codex P2 #3152
+  // round 15): a correction can land between the completion transaction's
+  // commit and this first tracker transition — its completed_at is already
+  // on the row, and stamping `now` (or this caller's stale instant) over it
+  // would split completed_at from the corrected end fields. When the caller
+  // states which correction its instant belongs to and the row's durable
+  // stamp disagrees, completed_at is left exactly as the row carries it.
+  const normStamp = (v) => (v == null ? null : Number(v));
+  const transitionStampMatches = opts.expectedAdjustedMinutes === undefined
+    || normStamp(svc.time_on_site_adjusted_minutes) === normStamp(opts.expectedAdjustedMinutes);
+  const completedAtStamp = !transitionStampMatches
+    ? null // a newer correction owns completed_at — the row's value stands
+    : (opts.untrustedLifecycleSpan
+      ? finiteDate(opts.completedAt)
+      : (finiteDate(opts.completedAt) || now));
   const updated = await db('scheduled_services')
     .where({ id: serviceId })
     .whereIn('track_state', ['scheduled', 'en_route', 'on_property'])
