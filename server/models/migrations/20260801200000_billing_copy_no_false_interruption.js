@@ -79,8 +79,37 @@ exports.up = async function up(knex) {
     else skipped.push(templateKey);
   }
 
-  console.log(`[billing-copy] rewrote ${updated}; skipped ${skipped.length}${skipped.length ? ` (edited since audit or missing): ${skipped.join(', ')}` : ''}`);
+  // Rewriting the base row alone is not enough: getTemplate resolves
+  // `SmsTemplateVariants.selectVariant(templateKey)` and sends
+  // `variant?.body || t.body` (admin-sms-templates.js:412), so a live A/B
+  // variant outranks everything above and would keep sending the claim.
+  // Prod carries zero variants today, so this is forward cover for one
+  // created in /admin against the pre-fix copy — same predicate guard, so a
+  // variant whose body was written independently is left alone.
+  const variantsUpdated = await rewriteVariants(knex);
+
+  console.log(`[billing-copy] rewrote ${updated} template(s) + ${variantsUpdated} variant(s); skipped ${skipped.length}${skipped.length ? ` (edited since audit or missing): ${skipped.join(', ')}` : ''}`);
 };
+
+// Guarded body swap over sms_template_variants, in whichever direction the
+// caller needs. Returns the row count changed.
+async function rewriteVariants(knex, reverse = false) {
+  if (!(await knex.schema.hasTable('sms_template_variants'))) return 0;
+  const cols = await knex('sms_template_variants').columnInfo();
+  if (!cols.body) return 0;
+
+  let changed = 0;
+  for (const [templateKey, expected, next] of REWRITES) {
+    const from = reverse ? next : expected;
+    const to = reverse ? expected : next;
+    const patch = { body: to };
+    if (cols.updated_at) patch.updated_at = new Date();
+    changed += await knex('sms_template_variants')
+      .where({ template_key: templateKey, body: from })
+      .update(patch);
+  }
+  return changed;
+}
 
 exports.down = async function down(knex) {
   if (!(await knex.schema.hasTable('sms_templates'))) return;
@@ -96,6 +125,8 @@ exports.down = async function down(knex) {
       .where({ template_key: templateKey, body: next })
       .update(patch);
   }
+
+  await rewriteVariants(knex, true);
 };
 
 module.exports.REWRITES = REWRITES;

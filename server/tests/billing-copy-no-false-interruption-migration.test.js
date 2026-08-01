@@ -15,10 +15,11 @@ function placeholders(body) {
   return (String(body).match(/\{[a-z_]+\}/g) || []).sort();
 }
 
-function buildKnex({ rows = [] } = {}) {
+function buildKnex({ rows = [], variants = [], hasVariantsTable = true } = {}) {
   const state = { updates: [] };
   const knex = jest.fn((table) => {
-    expect(table).toBe('sms_templates');
+    expect(['sms_templates', 'sms_template_variants']).toContain(table);
+    const target = table === 'sms_template_variants' ? variants : rows;
     const query = {
       columnInfo: jest.fn(async () => ({ body: {}, updated_at: {}, template_key: {} })),
       where: jest.fn((criteria) => {
@@ -29,18 +30,18 @@ function buildKnex({ rows = [] } = {}) {
         // Mirror a real UPDATE ... WHERE template_key = ? AND body = ?:
         // zero rows matched when the stored body no longer equals the one
         // the migration audited.
-        const matched = rows.filter(
+        const matched = target.filter(
           (r) => r.template_key === query.__where.template_key && r.body === query.__where.body,
         );
-        state.updates.push({ where: query.__where, patch, matched: matched.length });
+        state.updates.push({ table, where: query.__where, patch, matched: matched.length });
         matched.forEach((r) => { r.body = patch.body; });
         return matched.length;
       }),
     };
     return query;
   });
-  knex.schema = { hasTable: jest.fn(async () => true) };
-  return { knex, state, rows };
+  knex.schema = { hasTable: jest.fn(async (t) => (t === 'sms_template_variants' ? hasVariantsTable : true)) };
+  return { knex, state, rows, variants };
 }
 
 describe('billing copy — no false service-interruption claim', () => {
@@ -83,6 +84,32 @@ describe('billing copy — no false service-interruption claim', () => {
     expect(rows[0].body).toBe(handEdited);
     expect(rows[0].body).not.toBe(next);
     expect(state.updates.find((u) => u.where.template_key === templateKey).matched).toBe(0);
+  });
+
+  test('up() rewrites an A/B variant carrying the claim — getTemplate prefers it over the base row', async () => {
+    const [templateKey, expected, next] = migration.REWRITES[0];
+    const variants = [
+      { template_key: templateKey, variant_key: 'b', body: expected },
+      { template_key: templateKey, variant_key: 'c', body: 'independently written variant copy' },
+    ];
+    const { knex } = buildKnex({ rows: [], variants });
+
+    await migration.up(knex);
+
+    // admin-sms-templates.js getTemplate sends `variant?.body || t.body`, so
+    // a stale variant would keep the claim live no matter what the base row
+    // says.
+    expect(variants[0].body).toBe(next);
+    // ...but only the ones matching the audited body.
+    expect(variants[1].body).toBe('independently written variant copy');
+  });
+
+  test('up() tolerates a database with no variants table', async () => {
+    const rows = migration.REWRITES.map(([template_key, expected]) => ({ template_key, body: expected }));
+    const { knex } = buildKnex({ rows, hasVariantsTable: false });
+
+    await expect(migration.up(knex)).resolves.not.toThrow();
+    expect(rows[0].body).toBe(migration.REWRITES[0][2]);
   });
 
   test('down() restores the original body, and only for rows this migration wrote', async () => {

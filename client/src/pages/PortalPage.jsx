@@ -4635,8 +4635,12 @@ function BillingTab({ customer }) {
       // reads service_paused_at to block a visit). No retry promise either —
       // billing-cron only retries rows it armed with next_retry_at, which
       // happens solely in the MONTHLY dues failure path, so a per-visit or
-      // Auto Pay-off customer seeing this banner is never retried.
-      detail: 'Your last payment could not be processed. Adding a working card is the fastest way to clear the balance.',
+      // Auto Pay-off customer seeing this banner is never retried. And a
+      // saved card never settles an EXISTING invoice — so this points at Pay
+      // now for the balance, exactly like the Auto Pay-off banner below.
+      detail: primaryOpenInvoice
+        ? `Your last payment could not be processed. Pay your open ${openInvoices.length === 1 ? 'invoice' : 'invoices'} with the Pay now ${openInvoices.length === 1 ? 'button' : 'buttons'} above; updating your card covers future charges.`
+        : 'Your last payment could not be processed. Update your card so future charges go through.',
     },
     expired: {
       bg: `${B.red}10`, border: `${B.red}33`, icon: 'warning',
