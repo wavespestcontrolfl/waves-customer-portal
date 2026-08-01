@@ -2857,6 +2857,18 @@ async function backfillCustomerFromAppointmentContact(customerId, customer = {},
   if (Object.keys(updates).length === 0) return customer;
   updates.updated_at = new Date();
   await db('customers').where({ id: customerId }).update(updates);
+  // A call-captured email bypasses propagateCustomerEmailChange (this write
+  // is empty→value, so no open sends target an old address) — but any open
+  // customer_email_missing / read-back card is answered by it (codex
+  // round-9 P2). Resolve those here; failure never affects the backfill.
+  if (updates.email) {
+    try {
+      const { resolveOpenEmailReviewCards } = require('./customer-email-fanout');
+      await resolveOpenEmailReviewCards({ customerId, email: updates.email, source: 'call-captured email (appointment backfill)' });
+    } catch (e) {
+      logger.warn(`[call-proc] email review-card resolution failed after backfill for customer ${customerId}: ${e.message}`);
+    }
+  }
   return { ...customer, ...updates };
 }
 
@@ -5941,6 +5953,17 @@ const CallRecordingProcessor = {
         }
         if (Object.keys(updates).length > 0) {
           await db('customers').where({ id: customerId }).update(updates);
+          // Same card-resolution contract as the appointment backfill above
+          // (codex round-9 P2): a call-captured email answers any open
+          // email review card for this customer's calls.
+          if (updates.email) {
+            try {
+              const { resolveOpenEmailReviewCards } = require('./customer-email-fanout');
+              await resolveOpenEmailReviewCards({ customerId, email: updates.email, source: 'call-captured email (phone-match update)' });
+            } catch (e) {
+              logger.warn(`[call-proc] email review-card resolution failed after phone-match update for customer ${customerId}: ${e.message}`);
+            }
+          }
         }
       } else if (sharedPhoneAmbiguity.candidates) {
         // Shared phone, no deterministic tiebreak: minting ANOTHER customer
