@@ -251,7 +251,10 @@ async function runThreadDraft({
  * `skipIntentGate` is for callers that already established quote intent
  * (the lead-intake state machine, where the customer picked a service).
  */
-async function startSmsThreadDraft({ phone, triggerBody = '', skipIntentGate = false, skipCooldown = false, dryRun = false }) {
+async function startSmsThreadDraft({
+  phone, triggerBody = '', skipIntentGate = false, skipCooldown = false, dryRun = false,
+  scopeCheckOnly = false,
+}) {
   const digits = last10(phone);
   const result = { phone: digits ? `…${digits.slice(-4)}` : null, started: false, skipped: null };
   try {
@@ -263,6 +266,30 @@ async function startSmsThreadDraft({ phone, triggerBody = '', skipIntentGate = f
       result.skipped = 'no_usable_phone';
       return result;
     }
+    // Scope guards run for EVERY entry path — including clarify-reply
+    // resumes (skipIntentGate), which bypass only the redundant
+    // quote-intent classifier. A customer answering a clarify question
+    // with "power washing" must not mint an owed-quote bell just because
+    // quote intent was established earlier in the flow.
+    const {
+      scopeGuardsEnabled, deterministicOutOfScope, loadThreadTriageContext,
+    } = require('./scope-guards');
+    const guarded = scopeGuardsEnabled();
+    // ORDERING: the cheap trigger-only veto runs BEFORE the cooldown. A
+    // terminal scope decision must be reported terminally even inside the
+    // cooldown window — 'cooldown' reads as operational to lead-intake,
+    // whose shell fallback would then draft the out-of-scope work anyway.
+    // Only the trigger-body veto runs here (zero DB); the burst veto needs
+    // the triage fetch and stays after the cooldown return.
+    if (guarded && deterministicOutOfScope(triggerBody)) {
+      result.skipped = 'out_of_scope_service';
+      // TERMINAL: a scope decision, not an operational failure. Callers
+      // that fall back on a failed handoff (lead-intake's shell path) must
+      // NOT create an estimate and alert the owner for work Waves does not
+      // do — see engineDraftHandoff in services/lead-intake.js.
+      result.terminal = true;
+      return result;
+    }
     // DB-backed per-phone cooldown BEFORE any paid call: the durable
     // owed-quote bell doubles as the claim record, so a sender repeating
     // quote-flavored texts can't burn unlimited FAST/DEEP runs — draft-time
@@ -272,7 +299,7 @@ async function startSmsThreadDraft({ phone, triggerBody = '', skipIntentGate = f
     // owed on this phone.
     // skipCooldown: a clarify-reply resume carries NEW information the
     // customer just supplied — the anti-repeat cooldown must not eat it.
-    if (!dryRun && !skipCooldown) {
+    if (!dryRun && !skipCooldown && !scopeCheckOnly) {
       const SMS_DRAFT_COOLDOWN_MS = 10 * 60 * 1000;
       const db = require('../../models/db');
       const recentRun = await db('notifications')
@@ -284,26 +311,6 @@ async function startSmsThreadDraft({ phone, triggerBody = '', skipIntentGate = f
         return result;
       }
     }
-    // Scope guards run for EVERY entry path — including clarify-reply
-    // resumes (skipIntentGate), which bypass only the redundant
-    // quote-intent classifier. A customer answering a clarify question
-    // with "power washing" must not mint an owed-quote bell just because
-    // quote intent was established earlier in the flow.
-    const {
-      scopeGuardsEnabled, deterministicOutOfScope, loadThreadTriageContext,
-    } = require('./scope-guards');
-    const guarded = scopeGuardsEnabled();
-    // Deterministic backstop before any model call: a text naming only an
-    // out-of-scope home service ("power washing service") is not a lead.
-    if (guarded && deterministicOutOfScope(triggerBody)) {
-      result.skipped = 'out_of_scope_service';
-      // TERMINAL: a scope decision, not an operational failure. Callers
-      // that fall back on a failed handoff (lead-intake's shell path) must
-      // NOT create an estimate and alert the owner for work Waves does not
-      // do — see engineDraftHandoff in services/lead-intake.js.
-      result.terminal = true;
-      return result;
-    }
     // Grounding for the classifier (fail-open → ungrounded prompt).
     const triage = guarded ? await loadThreadTriageContext({ phone, triggerBody }) : null;
     // Second deterministic pass over the CURRENT exchange only: "Do you
@@ -313,17 +320,23 @@ async function startSmsThreadDraft({ phone, triggerBody = '', skipIntentGate = f
     // conversation can't hard-kill a new valid request; the grounded
     // classifier still sees the full recent thread and judges stale
     // context itself.
-    // The LATEST message wins when it is a correction. "Do you do power
-    // washing?" → "Actually, quote me for quarterly service instead" is an
-    // in-scope request, but 'quarterly'/'service' are not IN_SCOPE_RE nouns,
-    // so joining the burst hard-vetoed it. When the trigger itself carries
-    // no out-of-scope phrase AND reads as a correction, hand the judgment
-    // to the grounded classifier instead. A bare follow-up ("how much?")
-    // after an out-of-scope ask still vetoes — it is the same request.
-    if (guarded && (triage?.vetoTexts || []).length
-      && !deterministicOutOfScope(triggerBody)
-      && CORRECTION_RE.test(String(triggerBody || ''))) {
-      logger.info('[estimator-sms] burst veto skipped — trigger reads as a correction');
+    // A CORRECTION anywhere after the last out-of-scope mention wins.
+    // "Do you do power washing?" → "Actually, quarterly service instead"
+    // → "How much?" — the correction may be the trigger OR an earlier
+    // burst message (one that failed the quote-hint prefilter and was
+    // never processed on its own). The burst is newest-first, so messages
+    // NEWER than the newest out-of-scope mention are the slice before it;
+    // any of them reading as a correction hands the judgment to the
+    // grounded classifier (which sees the full labeled thread). A bare
+    // follow-up with no correction anywhere still vetoes — same request.
+    const correctedSinceOos = (() => {
+      if (!guarded || !(triage?.vetoTexts || []).length) return false;
+      const vetoSeq = [String(triggerBody || ''), ...triage.vetoTexts];
+      const newestOosIdx = vetoSeq.findIndex((t) => deterministicOutOfScope(t));
+      return newestOosIdx > 0 && vetoSeq.slice(0, newestOosIdx).some((t) => CORRECTION_RE.test(t));
+    })();
+    if (guarded && (triage?.vetoTexts || []).length && correctedSinceOos) {
+      logger.info('[estimator-sms] burst veto skipped — a correction follows the out-of-scope mention');
     } else if (guarded && (triage?.vetoTexts || []).length
       && deterministicOutOfScope([triggerBody, ...triage.vetoTexts].join('\n'))) {
       result.skipped = 'out_of_scope_service_thread';
@@ -357,6 +370,13 @@ async function startSmsThreadDraft({ phone, triggerBody = '', skipIntentGate = f
         result.terminal = true;
         return result;
       }
+    }
+    // scopeCheckOnly (lead-intake's open-shell branch): every scope veto
+    // above has had its chance — the caller only needed the terminal
+    // decision, not a bell or draft. The legacy shell patch may proceed.
+    if (scopeCheckOnly) {
+      result.skipped = 'scope_check_only';
+      return result;
     }
     const origin = smsOrigin(`sms:${digits}`);
     if (!dryRun) {

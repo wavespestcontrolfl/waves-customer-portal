@@ -18,6 +18,10 @@
 let mockCustomerUpdates;
 let mockEstimateInserts;
 let mockSmsSends;
+// An open unpriced intake shell for the customer, when set — the branch
+// that used to bypass the scope guards entirely.
+let mockShellRow;
+let mockEstimateUpdates;
 
 jest.mock('../models/db', () => {
   const db = (table) => {
@@ -34,9 +38,13 @@ jest.mock('../models/db', () => {
       orderBy() { return chain; },
       limit() { return chain; },
       returning() { return chain; },
-      async first() { return null; },
+      async first() {
+        if (table === 'estimates') return mockShellRow;
+        return null;
+      },
       async update(patch) {
         if (table === 'customers') mockCustomerUpdates.push(patch);
+        if (table === 'estimates') mockEstimateUpdates.push(patch);
         return 1;
       },
       insert(row) {
@@ -98,6 +106,8 @@ beforeEach(() => {
   mockCustomerUpdates = [];
   mockEstimateInserts = [];
   mockSmsSends = [];
+  mockShellRow = null;
+  mockEstimateUpdates = [];
   mockClassify.mockResolvedValue({ interest: 'pest', method: 'regex' });
 });
 
@@ -140,6 +150,40 @@ describe('operational failure', () => {
 
     expect(result).toEqual({ handled: true, next: 'estimate_drafted' });
     expect(mockEstimateInserts.length).toBeGreaterThan(0);
+  });
+});
+
+describe('open-shell branch still runs the scope check', () => {
+  const SHELL = { id: 'shell-est-1', address: '', customer_phone: '+19415550123', customer_email: null };
+
+  test('shell + terminal veto ⇒ no patch, no stamp, no owner alert', async () => {
+    mockShellRow = SHELL;
+    mockStartSmsThreadDraft.mockResolvedValue({ started: false, skipped: 'out_of_scope_service', terminal: true });
+
+    const result = await handleIntakeReply(CUSTOMER(), 'power wash my yard');
+
+    // The engine was consulted in scope-check-only mode (no bell/draft).
+    expect(mockStartSmsThreadDraft).toHaveBeenCalledWith(expect.objectContaining({ scopeCheckOnly: true }));
+    expect(result.handled).toBe(true);
+    expect(mockEstimateUpdates).toHaveLength(0);
+    expect(mockEstimateInserts).toHaveLength(0);
+    expect(mockSmsSends).toHaveLength(0);
+    expect(mockCustomerUpdates.some((p) => p.lead_intake_status === 'estimate_drafted')).toBe(false);
+  });
+
+  test('shell + in-scope reply ⇒ the legacy shell patch proceeds', async () => {
+    mockShellRow = SHELL;
+    mockStartSmsThreadDraft.mockResolvedValue({ started: false, skipped: 'scope_check_only' });
+
+    const result = await handleIntakeReply(CUSTOMER(), 'quarterly pest control please');
+
+    expect(result).toEqual({ handled: true, next: 'estimate_drafted' });
+    // The shell was PATCHED (not a new insert), the owner told, the state
+    // advanced — exactly the pre-existing shell behavior.
+    expect(mockEstimateUpdates.length).toBeGreaterThan(0);
+    expect(mockEstimateInserts).toHaveLength(0);
+    expect(mockSmsSends.length).toBeGreaterThan(0);
+    expect(mockCustomerUpdates.some((p) => p.lead_intake_status === 'estimate_drafted')).toBe(true);
   });
 });
 

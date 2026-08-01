@@ -93,8 +93,17 @@ const OUT_OF_SCOPE_RE = new RegExp(
     'electrical\\s*(?:work|repair)',
     'handyman\\s+(?:service|work|job)s?',
     'drywall\\s+(?:repair|work|patch\\w*|install\\w*|job|quote)',
-    'solar\\s*panel', 'seal\\s*coat\\w*',
-    'christmas\\s*light', 'remodel\\w*',
+    // Solar/lights/remodel need request context like every other trade —
+    // "Gulf Coast Remodeling" or "Sunshine Solar Panels LLC" introducing
+    // themselves while asking for OUR service must never trip the veto.
+    'solar\\s*panel\\w*\\s+(?:install\\w*|clean\\w*|repair\\w*|service|quote|estimate)',
+    '(?:need|want|looking\\s+for|get|hire|install\\w*)\\s+(?:new\\s+)?solar\\s*panels?\\b',
+    'seal\\s*coat\\w*',
+    'christmas\\s*light\\w*\\s+(?:install\\w*|hang\\w*|removal|remove\\w*|take\\s*down|service|quote|estimate)',
+    '(?:hang|install\\w*|put\\s+up|take\\s+down)\\s+(?:(?:my|the|our)\\s+)?christmas\\s*lights?\\b',
+    'remodel\\w*\\s+(?:quote|estimate|job|work|project|service)s?\\b',
+    '(?:need|want|looking\\s+for|hire|get|planning)\\s+(?:a\\s+)?(?:remodel\\b|renovation\\b)',
+    'remodel\\s+(?:my|the|our)\\b',
   ].join('|'),
   'i',
 );
@@ -114,6 +123,22 @@ const IN_SCOPE_RE = new RegExp(
   + '|spray\\w*|treat\\w*|infest\\w*|yard)\\b',
   'i',
 );
+
+// Postgres regex patterns that match a stated unit VALUE as a real unit
+// token — shared by the SQL discriminator; pure so tests can pin the
+// semantics directly. \m/\M are Postgres word boundaries (≈ JS \b for
+// alphanumerics), which is what keeps '6' from matching '16', '26', or the
+// house number in '600 Palm Ave'.
+const UNIT_DESIGNATOR_ALT = '(?:apt|apartment|unit|suite|ste|lot|spc|space|bldg|building|floor)';
+function unitTokenPatterns(unitValue) {
+  const v = String(unitValue).replace(/[.*+?^${}()|[\]\\-]/g, '\\$&');
+  return {
+    // Whole-column match: optional designator/# then exactly the value.
+    line2Pattern: `^\\s*(?:${UNIT_DESIGNATOR_ALT}\\.?\\s*#?\\s*|#\\s*)?${v}\\M\\s*$`,
+    // In line1 the value counts only right after a designator or '#'.
+    line1Pattern: `(?:\\m${UNIT_DESIGNATOR_ALT}\\.?\\s*#?\\s*|#\\s*)${v}\\M`,
+  };
+}
 
 // Deterministic pre-LLM veto: the text asks for an out-of-scope home
 // service and mentions nothing in Waves' domain. Cheap, zero-latency, and
@@ -276,7 +301,13 @@ function extractAddressCandidates(text) {
         // utils/address-normalizer.
         let pos = boundaries.length - 1;
         while (pos > 0 && CITY_PREFIX_TOKENS.has(String(words[boundaries[pos]]).toLowerCase())) pos -= 1;
-        const boundary = boundaries.length ? boundaries[pos] : -1;
+        let boundary = boundaries.length ? boundaries[pos] : -1;
+        // A NUMERIC token right after the suffix is the route number, part
+        // of the STREET ("123 State Road 64 Bradenton FL") — advance the
+        // boundary past it or the city reconstructs as "64 Bradenton".
+        while (boundary >= 0 && boundary + 1 < flIdx && /^\d+$/.test(String(words[boundary + 1]))) {
+          boundary += 1;
+        }
         const cityWords = boundary >= 0 ? words.slice(boundary + 1, flIdx) : words.slice(flIdx - 1, flIdx);
         const city = cityWords.join(' ').trim();
         if (city) locality = `, ${city}${zipNC ? ` ${zipNC[1]}` : ''}`;
@@ -490,7 +521,28 @@ async function loadTriageInner({ phone, triggerBody, deadline = Date.now() + TRI
   // exactly ONE distinct address, so there is nothing to guess between.
   const triggerCandidates = extractAddressCandidates(String(triggerBody || ''));
   const burstCandidates = extractAddressCandidates(burstTexts.join('\n'));
-  const burstKeys = new Set(burstCandidates.map((c) => `${c.num} ${c.firstWord} ${c.unit || ''}`.toLowerCase()));
+  // Uniqueness is judged on the COMPLETE normalized street, not house
+  // number + first word — '100 Palm Ave' and '100 Palm St' are different
+  // properties and must count as two (⇒ no grounding), never collapse to
+  // one arbitrary pick. The key: alias-normalized street tokens cut after
+  // the last street suffix (+ trailing route number), so prose swallowed
+  // into the capture ("… Loop Friday" vs "… Loop Monday") doesn't split
+  // the SAME address into two keys. Over-splitting is the safe direction —
+  // it only withholds the implicit-reference fallback.
+  const candidateStreetKey = (c) => {
+    const last = c.variants[c.variants.length - 1] || `${c.num} ${c.firstWord}`;
+    const tokens = last.toLowerCase().split(/\s+/).map((t) => STREET_TOKEN_ALIASES[t] || t);
+    let cut = tokens.length;
+    for (let i = tokens.length - 1; i > 0; i -= 1) {
+      if (ALL_STREET_SUFFIXES.has(tokens[i])) {
+        cut = i + 1;
+        break;
+      }
+    }
+    if (cut < tokens.length && /^\d+$/.test(tokens[cut])) cut += 1;
+    return `${tokens.slice(0, cut).join(' ')}|${c.unit || ''}|${c.locality || ''}`.toLowerCase();
+  };
+  const burstKeys = new Set(burstCandidates.map(candidateStreetKey));
   let groundingCandidates = [];
   if (triggerCandidates.length) groundingCandidates = triggerCandidates;
   else if (burstKeys.size === 1) groundingCandidates = burstCandidates.slice(0, 1);
@@ -515,12 +567,18 @@ async function loadTriageInner({ phone, triggerBody, deadline = Date.now() + TRI
   // excluding them here is what frees the cap for the row that can.
   const discriminate = (qb, cand, cols) => {
     if (cand.unitValue) {
-      const v = String(cand.unitValue);
+      // TOKEN matching, never substrings: a bare ILIKE '%6' sweeps in
+      // 'Apt 16'/'Apt 26', and matching line1 as a substring lets the
+      // HOUSE NUMBER of '600 Palm Ave' satisfy 'Unit 6'.
+      //  - line2 holds only the unit expression → anchored designator-
+      //    tolerant equality ('6', 'Apt 6', '#6', 'Apt #6' forms);
+      //  - line1 holds the street too → the value counts only as a token
+      //    directly after a designator/#, never as street text.
+      // \m/\M are Postgres regex word boundaries.
+      const { line2Pattern, line1Pattern } = unitTokenPatterns(cand.unitValue);
       qb.where(function unitMatch() {
-        this.whereRaw(`coalesce(${cols.line2}, '') ILIKE ?`, [`%${v}`])
-          .orWhereRaw(`coalesce(${cols.line2}, '') ILIKE ?`, [`% ${v} %`])
-          .orWhereRaw(`coalesce(${cols.line1}, '') ILIKE ?`, [`%${v}`])
-          .orWhereRaw(`coalesce(${cols.line1}, '') ILIKE ?`, [`% ${v} %`]);
+        this.whereRaw(`coalesce(${cols.line2}, '') ~* ?`, [line2Pattern])
+          .orWhereRaw(`coalesce(${cols.line1}, '') ~* ?`, [line1Pattern]);
       });
     }
     const loc = localityOf(cand);
@@ -658,6 +716,11 @@ async function loadTriageInner({ phone, triggerBody, deadline = Date.now() + TRI
             return sameStreetAddress(
               stampFull(r.service_address_line1, r.service_address_line2, r.service_address_city, r.service_address_zip),
               scopeFull,
+              // A UNIT scope must prove the unit — in default conservative
+              // mode a unitless legacy recurring row matches any unit,
+              // telling the classifier Apt 6 is covered by a building-level
+              // row. Same rule as candidateMatchesRow.
+              scope.line2 ? { requireExactUnit: true } : undefined,
             );
           } catch (err) {
             return false;
@@ -801,6 +864,6 @@ module.exports = {
   extractAddressCandidates,
   loadThreadTriageContext,
   _private: {
-    OUT_OF_SCOPE_RE, IN_SCOPE_RE, candidateMatchesRow, loadTriageInner, TRIAGE_TIMEOUT_MS, prefixVariants,
+    OUT_OF_SCOPE_RE, IN_SCOPE_RE, candidateMatchesRow, loadTriageInner, TRIAGE_TIMEOUT_MS, prefixVariants, unitTokenPatterns,
   },
 };

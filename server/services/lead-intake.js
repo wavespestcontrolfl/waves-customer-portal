@@ -213,7 +213,13 @@ async function notifyAdam(customer, interest, estimate) {
 //    "power wash my yard" still produces an estimate and an owner alert.
 //    Anything else (gate off, cooldown, bell failure, exception) is
 //    operational and keeps the fallback so a lead is never lost.
-async function engineDraftHandoff(customer, body, reason) {
+// scopeCheckOnly: with an open shell present the engine must not draft
+// (the duplicate guard would block it), but the SCOPE GUARDS still get
+// their say — otherwise 'power wash my yard' with an open form shell
+// patches the shell, stamps estimate_drafted, and alerts the owner.
+// The engine runs only its veto ladder (no bell, no draft) and reports
+// terminal refusals; anything else lets the legacy shell path proceed.
+async function engineDraftHandoff(customer, body, reason, { scopeCheckOnly = false } = {}) {
   try {
     const { smsThreadDraftsEnabled, startSmsThreadDraft } = require('./estimator-engine/sms-thread');
     if (!smsThreadDraftsEnabled()) return { drafted: false, terminal: false };
@@ -221,12 +227,14 @@ async function engineDraftHandoff(customer, body, reason) {
       phone: customer.phone,
       triggerBody: body,
       skipIntentGate: true,
+      ...(scopeCheckOnly ? { scopeCheckOnly: true } : {}),
     });
     if (!started?.started) {
       if (started?.terminal) {
         logger.info(`[lead-intake] engine handoff refused as out-of-scope (${started.skipped}) — no shell fallback`);
         return { drafted: false, terminal: true };
       }
+      if (scopeCheckOnly) return { drafted: false, terminal: false };
       logger.warn(`[lead-intake] engine handoff not started (${started?.skipped || 'unknown'}) — falling back to shell`);
       return { drafted: false, terminal: false };
     }
@@ -310,9 +318,10 @@ async function handleIntakeReply(customer, body) {
         })
         .orderBy('created_at', 'desc')
         .first();
-      const handoff = existingShell
-        ? { drafted: false, terminal: false }
-        : await engineDraftHandoff(customer, body, `service selected (${cls.interest})`);
+      const handoff = await engineDraftHandoff(
+        customer, body, `service selected (${cls.interest})`,
+        existingShell ? { scopeCheckOnly: true } : {},
+      );
       if (handoff.drafted) return { handled: true, next: 'estimate_drafted' };
       // Scope-refused: handled, but nothing was drafted and nothing is
       // owed. The state stays put (an 'estimate_drafted' stamp would be a
@@ -397,9 +406,10 @@ async function handleIntakeReply(customer, body) {
       })
       .orderBy('created_at', 'desc')
       .first();
-    const handoff = existingShell
-      ? { drafted: false, terminal: false }
-      : await engineDraftHandoff(customer, body, `address captured (${interest})`);
+    const handoff = await engineDraftHandoff(
+      customer, body, `address captured (${interest})`,
+      existingShell ? { scopeCheckOnly: true } : {},
+    );
     if (handoff.drafted) return { handled: true, next: 'estimate_drafted' };
     // Scope-refused — same contract as the awaiting_service branch above:
     // handled, no estimate, no owner alert, state unchanged.

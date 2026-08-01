@@ -309,6 +309,48 @@ describe('scope guards (GATE_ESTIMATOR_SCOPE_GUARDS)', () => {
     expect(mockNotify).not.toHaveBeenCalled();
   });
 
+  test('an out-of-scope trigger inside the cooldown window is still TERMINAL', async () => {
+    // The cooldown used to return first, reporting operational 'cooldown' —
+    // and lead-intake's fallback drafted the out-of-scope work anyway.
+    mockRecentBell = { id: 'bell-1' };
+    mockDeterministicOutOfScope.mockReturnValueOnce(true);
+    const result = await startSmsThreadDraft({
+      phone: PHONE,
+      triggerBody: 'power washing service please',
+    });
+    expect(result.skipped).toBe('out_of_scope_service');
+    expect(result.terminal).toBe(true);
+    expect(mockNotify).not.toHaveBeenCalled();
+  });
+
+  test('an in-scope trigger inside the cooldown window still reports cooldown', async () => {
+    mockRecentBell = { id: 'bell-1' };
+    const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: 'quote for pest control please' });
+    expect(result.skipped).toBe('cooldown');
+    expect(result.terminal).toBeUndefined();
+  });
+
+  test('a correction ANYWHERE after the out-of-scope mention escapes the veto (burst memory)', async () => {
+    // 'power washing?' → 'Actually quarterly instead' (never processed —
+    // fails the quote-hint prefilter) → 'How much?' — the shorthand joins
+    // the burst, but the correction between them hands the judgment to the
+    // grounded classifier.
+    mockLoadTriage.mockResolvedValueOnce({
+      lines: [],
+      matchedExistingCustomer: false,
+      recentTexts: ['Actually, quarterly instead', 'Do you do power washing?'],
+      vetoTexts: ['Actually, quarterly instead', 'Do you do power washing?'],
+    });
+    mockDeterministicOutOfScope.mockImplementation((text) => /power wash/i.test(text));
+    mockDispatch.mockResolvedValueOnce({
+      ok: true,
+      json: { quote_request: true, service_offered: true, relates_to_existing_job: false, confidence: 0.9 },
+    });
+    const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: 'How much?' });
+    expect(result.started).toBe(true);
+    expect(mockDispatch).toHaveBeenCalled();
+  });
+
   test('a CORRECTION escapes the burst veto and reaches the grounded classifier', async () => {
     // "Do you do power washing?" → "Actually, quote me for quarterly
     // service instead" — in scope, but 'quarterly'/'service' are not

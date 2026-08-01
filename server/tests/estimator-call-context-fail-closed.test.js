@@ -754,6 +754,32 @@ describe('buildSmsThreadContext distinct-customer conflict (GATE_ESTIMATOR_SCOPE
   });
 });
 
+describe('grounded existing customers route through the call path\'s canonical review mechanism', () => {
+  // AGENTS.md says "existing customers are blocked from engine drafting";
+  // the code's ACTUAL canonical mechanism — on the CALL path and everywhere
+  // else — is classifyLane's forced YELLOW ('existing active customer —
+  // upsell pricing deserves a look before send', draft-builder.js) plus
+  // membership-context pricing, per the r5 ruling that an existing
+  // customer's add-on "must bell and draft in the existing-customer review
+  // lane". This pin locks the SMS grounded path onto that SAME mechanism:
+  // an existing-customer draft can never classify green, so it always
+  // parks for review with the customer linked.
+  test('classifyLane forces yellow with the upsell reason for a grounded existing customer', () => {
+    const { classifyLane } = jest.requireActual('../services/estimator-engine/draft-builder');
+    const outcome = classifyLane({
+      intent: { decision: 'draft', services: { pest: {} }, address: '77 Rental Cove, North Port' },
+      propertyFacts: {},
+      engineResult: { lineItems: [{ service: 'pest', monthly: 60, monthlyAfterDiscount: 60 }] },
+      totals: { monthly: 60, annual: 0, oneTime: 0 },
+      comps: null,
+      calibration: [],
+      context: { isExistingCustomer: true, customerGroundedByAddress: true, extractionSource: 'none' },
+    });
+    expect(outcome.lane).toBe('yellow');
+    expect(outcome.reasons.join('\n')).toContain('existing active customer');
+  });
+});
+
 describe('buildSmsThreadContext isExistingCustomer requires active (gate on)', () => {
   const SMS_ARGS = {
     phone: '+19415550123',

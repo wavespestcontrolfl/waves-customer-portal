@@ -190,6 +190,19 @@ describe('deterministicOutOfScope', () => {
     expect(deterministicOutOfScope('roof leak, can you help')).toBe(true);
   });
 
+  test('solar/christmas-lights/remodel org names never trip the veto; requests still do', () => {
+    expect(deterministicOutOfScope('This is Gulf Coast Remodeling; can I get a service quote?')).toBe(false);
+    expect(deterministicOutOfScope('Sunshine Solar Panels LLC here — quote for our warehouse please')).toBe(false);
+    expect(deterministicOutOfScope('Christmas Lights Bros, following up on a quote')).toBe(false);
+    // …while actual requests still veto.
+    expect(deterministicOutOfScope('remodeling quote for the kitchen')).toBe(true);
+    expect(deterministicOutOfScope('we are planning a remodel, can you help')).toBe(true);
+    expect(deterministicOutOfScope('solar panel installation quote please')).toBe(true);
+    expect(deterministicOutOfScope('need new solar panels on the roof')).toBe(true);
+    expect(deterministicOutOfScope('christmas light installation for the house')).toBe(true);
+    expect(deterministicOutOfScope('can you hang our christmas lights')).toBe(true);
+  });
+
   test('does not fire on plain quote chatter', () => {
     expect(deterministicOutOfScope('how much do you charge?')).toBe(false);
     expect(deterministicOutOfScope('')).toBe(false);
@@ -252,6 +265,39 @@ describe('extractAddressCandidates', () => {
     expect(extractAddressCandidates('quote for 100 Sample Plaza Venice FL')[0].locality).toBe(', Venice');
     expect(extractAddressCandidates('quote for 100 Sample Ridge Venice FL 34285')[0].locality).toBe(', Venice 34285');
     expect(extractAddressCandidates('service at 100 Sample Causeway Venice FL')[0].locality).toBe(', Venice');
+  });
+
+  test('numbered routes keep their route number in the STREET, not the city', () => {
+    // The last suffix boundary is 'Road'; without the numeric advance the
+    // city reconstructed as '64 Bradenton'.
+    expect(extractAddressCandidates('quote for 123 State Road 64 Bradenton FL 34208')[0].locality)
+      .toBe(', Bradenton 34208');
+    expect(extractAddressCandidates('service at 123 US 41 Venice FL')[0].locality).toBe(', Venice');
+  });
+
+  test('unit token patterns match units, never house numbers or superstring units', () => {
+    const { _private } = require('../services/estimator-engine/scope-guards');
+    const { line1Pattern, line2Pattern } = _private.unitTokenPatterns('6');
+    // \m/\M are Postgres word boundaries — equivalent to JS \b for these
+    // alphanumeric values.
+    const js = (p) => new RegExp(p.replace(/\\[mM]/g, '\\b'), 'i');
+    const l1 = js(line1Pattern);
+    const l2 = js(line2Pattern);
+    // line2: designator-tolerant exact value.
+    expect(l2.test('6')).toBe(true);
+    expect(l2.test('Apt 6')).toBe(true);
+    expect(l2.test('#6')).toBe(true);
+    expect(l2.test('Apt #6')).toBe(true);
+    expect(l2.test('Apt 16')).toBe(false);
+    expect(l2.test('Apt 26')).toBe(false);
+    expect(l2.test('16')).toBe(false);
+    // line1: the value counts ONLY after a designator/#, never as street
+    // text — the house number of 600 Palm Ave must not satisfy Unit 6.
+    expect(l1.test('600 Palm Ave Apt 6')).toBe(true);
+    expect(l1.test('600 Palm Ave #6')).toBe(true);
+    expect(l1.test('600 Palm Ave')).toBe(false);
+    expect(l1.test('600 Palm Ave Apt 16')).toBe(false);
+    expect(l1.test('6 Palm Ave')).toBe(false);
   });
 
   test('CITY-PREFIX tokens are not consumed as the street boundary', () => {
@@ -937,6 +983,59 @@ describe('loadThreadTriageContext', () => {
     });
     expect(triage.matchedExistingCustomer).toBe(false);
     expect(triage.groundedCustomerId).toBeNull();
+  });
+
+  test('burst uniqueness keys on the FULL street — Ave vs St never collapse to one', async () => {
+    mockState.rows.sms_log = [
+      { message_body: 'visit at 100 Palm Ave Friday', created_at: new Date().toISOString(), direction: 'outbound' },
+      { message_body: 'also 100 Palm St Monday', created_at: new Date().toISOString(), direction: 'outbound' },
+    ];
+    mockState.rows.customers = [
+      { id: 'c-2', first_name: 'Pat', last_name: 'Homeowner', address_line1: '100 Palm Ave' },
+    ];
+    let triage = await loadThreadTriageContext({
+      phone: '+17245550000',
+      triggerBody: 'can you add flea treatment at the same place?',
+    });
+    expect(triage.matchedExistingCustomer).toBe(false);
+    expect(triage.groundedCustomerId).toBeNull();
+
+    // The SAME address twice (different prose tails) is one key and grounds.
+    mockState.rows.sms_log = [
+      { message_body: 'visit at 100 Palm Ave Friday', created_at: new Date().toISOString(), direction: 'outbound' },
+      { message_body: 'reminder about 100 Palm Ave Monday', created_at: new Date().toISOString(), direction: 'outbound' },
+    ];
+    triage = await loadThreadTriageContext({
+      phone: '+17245550000',
+      triggerBody: 'can you add flea treatment at the same place?',
+    });
+    expect(triage.groundedCustomerId).toBe('c-2');
+  });
+
+  test('a UNIT scope only counts recurring coverage stamped with that unit', async () => {
+    mockState.rows.customers = [
+      { id: 'c-2', first_name: 'Apt', last_name: 'Six', address_line1: '100 Palm Ave', address_line2: 'Apt 6', city: 'Venice' },
+    ];
+    // Unitless legacy stamp: conservative equality would call Apt 6 covered
+    // by the building-level row.
+    mockState.rows['scheduled_services:distinct'] = [
+      { service_type: 'Quarterly Pest Control Service', service_address_line1: '100 Palm Ave' },
+    ];
+    let triage = await loadThreadTriageContext({
+      phone: null,
+      triggerBody: 'quote for 100 Palm Ave Apt 6 please',
+    });
+    expect(triage.lines.join('\n')).not.toContain('recurring services on file');
+
+    // A stamp carrying the SAME unit is coverage.
+    mockState.rows['scheduled_services:distinct'] = [
+      { service_type: 'Quarterly Pest Control Service', service_address_line1: '100 Palm Ave', service_address_line2: 'Apt 6' },
+    ];
+    triage = await loadThreadTriageContext({
+      phone: null,
+      triggerBody: 'quote for 100 Palm Ave Apt 6 please',
+    });
+    expect(triage.lines.join('\n')).toContain('recurring services on file: Quarterly Pest Control Service');
   });
 
   test('a trigger with NO address resolves an implicit reference from a single burst address', async () => {
