@@ -206,6 +206,49 @@ describe('irrigation setup email template seeds', () => {
       expect(rendered.html).toContain('Watering schedule on file');
     });
 
+    test.each([
+      ['turf', { turfIrrigationInchesPerWeek: 1 }],
+      ['assessment', { assessmentIrrigationInchesPerWeek: 1 }],
+    ])('a tech "none" type discards a contradictory %s reading rather than inventing a balance', (_src, reading) => {
+      // The tech says this property does not irrigate; adding the reading
+      // would tell the customer their lawn got water it never received.
+      const decision = buildWeeklyEmailDecision({
+        ...BASE,
+        irrigationInchesPerWeek: null,
+        turfIrrigationType: 'none',
+        ...reading,
+      });
+      expect(decision.templateKey).toBe(TEMPLATE_SETUP_SYSTEM);
+      expect(decision.payload.total_inches).toBeUndefined();
+      expect(decision.payload.schedule_inches).toBeUndefined();
+    });
+
+    test('a "none" type does NOT discard the customer\'s own portal entry', () => {
+      // If they typed a number, they water — whatever the type column says.
+      const decision = buildWeeklyEmailDecision({
+        ...BASE,
+        irrigationSystem: true,
+        irrigationInchesPerWeek: 1,
+        turfIrrigationType: 'none',
+        rainfallInches7d: 2.1,
+        forecastRainInches: 0.5,
+      });
+      expect(decision.templateKey).toBe(TEMPLATE_CUT_BACK);
+      expect(decision.payload.irrigation_inches).toBe('1');
+    });
+
+    test('every variant offers a route the portal can actually serve', () => {
+      // The weekly-inches field only exists under the portal's Irrigation
+      // toggle, so no template may ask a question that form cannot answer.
+      for (const key of [TEMPLATE_SETUP_SCHEDULE, TEMPLATE_SETUP_SYSTEM, TEMPLATE_CONFIRM_SCHEDULE]) {
+        const { template, version } = seedRows(key);
+        const html = JSON.stringify(version.blocks);
+        expect(html).not.toMatch(/Do you water with a sprinkler system, or by hand\?/);
+        // Anything the portal form can't express falls back to a reply.
+        if (key !== TEMPLATE_SETUP_SCHEDULE) expect(html).toMatch(/reply to this email/i);
+      }
+    });
+
     test('a newer zeroed assessment is NOT overridden by an older positive one', () => {
       // The query selects the LATEST non-null reading and passes zero through;
       // zero reads as a missing profile, so they get a setup email rather than
@@ -290,7 +333,7 @@ describe('irrigation setup email template seeds', () => {
 
   test.each([
     [TEMPLATE_SETUP_SCHEDULE, { irrigationSystem: true, irrigationInchesPerWeek: null }, 'ADD MY WATERING SCHEDULE'],
-    [TEMPLATE_SETUP_SYSTEM, { irrigationSystem: null, irrigationInchesPerWeek: null }, 'TELL US HOW YOU WATER'],
+    [TEMPLATE_SETUP_SYSTEM, { irrigationSystem: null, irrigationInchesPerWeek: null }, 'ADD MY WATERING SCHEDULE'],
   ])('%s renders from the sender payload with no unresolved placeholders', (key, profile, cta) => {
     const decision = buildWeeklyEmailDecision({ ...BASE, ...profile });
     const { template, version } = seedRows(key);

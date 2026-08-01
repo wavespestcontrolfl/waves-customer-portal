@@ -84,15 +84,19 @@ const TEMPLATES = [
     required: REQUIRED,
     subject: 'Here\'s what fell on your lawn last week, {{first_name}}',
     preview: 'About {{rain_last_week}}" of rain near your home — here\'s how that compares to what your lawn needs.',
-    ctaLabel: 'TELL US HOW YOU WATER',
+    ctaLabel: 'ADD MY WATERING SCHEDULE',
     ctaUrlVariable: 'customer_portal_url',
     blocks: [
       { type: 'heading', content: 'Your weekly lawn water check-in, {{first_name}}' },
       { type: 'paragraph', content: OPENING_PARAGRAPH },
       RAIN_DETAILS_BLOCK,
-      { type: 'callout', content: 'Do you water with a sprinkler system, or by hand? Tell us in the portal — once we know how you water and roughly how much, we can tell you each week whether to ease back, add a little, or leave it alone.' },
+      // The portal only exposes the weekly-inches field under the Irrigation
+      // toggle (PortalPage.jsx), so the ask names that flow exactly and
+      // offers a reply for anyone it doesn't fit — asking "sprinkler or by
+      // hand?" pointed at a form with no way to answer (codex #3138 r2 P1).
+      { type: 'callout', content: 'We don\'t have your watering amount yet. Open Irrigation in your portal and add how much you water each week — once we have it, we can tell you every week whether to ease back, add a little, or leave things alone. Water by hand or have an unusual setup? Just reply to this email and tell us, and we\'ll get it set up for you.' },
       { type: 'paragraph', content: '{{forecast_line}}' },
-      { type: 'cta', label: 'TELL US HOW YOU WATER', url_variable: 'customer_portal_url' },
+      { type: 'cta', label: 'ADD MY WATERING SCHEDULE', url_variable: 'customer_portal_url' },
       FOOTER_NOTE_BLOCK,
       { type: 'signature', content: '— The Waves Team' },
     ],
@@ -125,7 +129,10 @@ const TEMPLATES = [
       // Method-neutral: no zones, no run times, nothing that assumes a
       // sprinkler system. Works for a hand-watered lawn and an in-ground
       // system alike.
-      { type: 'callout', content: 'That watering schedule came from our records rather than from you, so it may be out of date. If it looks right, you\'re all set — we\'ll keep checking the numbers every week. If it\'s changed, or if you water by hand, update it in your portal and these check-ins will match how you actually water.' },
+      // Method-neutral AND portal-honest: the portal's weekly-inches field
+      // lives under the Irrigation toggle, so anyone whose setup doesn't fit
+      // that form is pointed at a reply instead of a dead end (codex r2 P1).
+      { type: 'callout', content: 'That schedule came from our records rather than from you, so it may be out of date. If it looks right, you\'re all set — we\'ll keep checking the numbers every week. If it\'s changed, update it under Irrigation in your portal, or just reply to this email and tell us how you water.' },
       { type: 'paragraph', content: '{{forecast_line}}' },
       { type: 'cta', label: 'CONFIRM MY WATERING SCHEDULE', url_variable: 'customer_portal_url' },
       FOOTER_NOTE_BLOCK,

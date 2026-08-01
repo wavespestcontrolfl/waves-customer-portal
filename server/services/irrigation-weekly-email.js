@@ -205,9 +205,17 @@ function buildWeeklyEmailDecision({
   // tech-recorded turf-profile reading, then the latest assessment. The two
   // surfaces must agree — a customer whose report shows 1" must never get an
   // email claiming we have no schedule for them (codex #3138 r1 P2).
+  const turfType = String(turfIrrigationType || '').trim().toLowerCase();
   const prefsInches = numberOrNull(irrigationInchesPerWeek);
-  const turfInches = numberOrNull(turfIrrigationInchesPerWeek);
-  const assessmentInches = numberOrNull(assessmentIrrigationInchesPerWeek);
+  // A technician recording irrigation_type 'none' is saying this property
+  // does not irrigate. Any tech-sourced inches alongside that are
+  // contradictory, and adding them to the balance would tell the customer
+  // their lawn received water it never got (codex #3138 r2 P1). The
+  // customer's OWN portal entry still stands — if they typed a number, they
+  // water, whatever the type column says.
+  const techReadingsUsable = turfType !== 'none';
+  const turfInches = techReadingsUsable ? numberOrNull(turfIrrigationInchesPerWeek) : null;
+  const assessmentInches = techReadingsUsable ? numberOrNull(assessmentIrrigationInchesPerWeek) : null;
   const effectiveInches = prefsInches != null ? prefsInches
     : (turfInches != null ? turfInches : assessmentInches);
   // …and the same suppression semantics: the portal toggle only zeroes a
@@ -245,7 +253,6 @@ function buildWeeklyEmailDecision({
     // An explicit 'none'/'manual' is knowledge that there is no system to ask
     // a run time about, even if the toggle still says true. The toggle is
     // consulted only when no type was recorded.
-    const turfType = String(turfIrrigationType || '').trim().toLowerCase();
     const hasSystem = turfType
       ? (turfType === 'in_ground' || turfType === 'mixed')
       : irrigationSystem === true;
