@@ -2864,7 +2864,13 @@ async function backfillCustomerFromAppointmentContact(customerId, customer = {},
   if (updates.email) {
     try {
       const { resolveOpenEmailReviewCards } = require('./customer-email-fanout');
-      await resolveOpenEmailReviewCards({ customerId, email: updates.email, source: 'call-captured email (appointment backfill)' });
+      await resolveOpenEmailReviewCards({
+        customerId, email: updates.email,
+        source: 'call-captured email (appointment backfill)',
+        // ONLY the missing-email card: this capture is itself unverified, so
+        // it must not settle the read-back cards filed for it (round-10 P2).
+        reasonCodes: ['customer_email_missing'],
+      });
     } catch (e) {
       logger.warn(`[call-proc] email review-card resolution failed after backfill for customer ${customerId}: ${e.message}`);
     }
@@ -5959,7 +5965,11 @@ const CallRecordingProcessor = {
           if (updates.email) {
             try {
               const { resolveOpenEmailReviewCards } = require('./customer-email-fanout');
-              await resolveOpenEmailReviewCards({ customerId, email: updates.email, source: 'call-captured email (phone-match update)' });
+              await resolveOpenEmailReviewCards({
+                customerId, email: updates.email,
+                source: 'call-captured email (phone-match update)',
+                reasonCodes: ['customer_email_missing'],
+              });
             } catch (e) {
               logger.warn(`[call-proc] email review-card resolution failed after phone-match update for customer ${customerId}: ${e.message}`);
             }
@@ -7568,8 +7578,17 @@ const CallRecordingProcessor = {
             // no email used to stop at missing_required_customer_fields and
             // now gets this far. Guarding here covers enforce, shadow and
             // legacy alike, at the single place window_start is derived.
-            if (scheduledDate && windowStart && !/^\d{2}:00(:00)?$/.test(windowStart)) {
-              logger.warn(`[call-proc] Confirmed start ${windowStart} is not on the hour; holding booking for the office to place on an hour boundary`);
+            // Seconds are checked on the ORIGINAL value, not the formatted
+            // one (codex round-10 P1): windowStart came through an Intl
+            // format that omits seconds, so "T09:00:30" reduces to "09:00"
+            // and would pass the minutes regex — booking a silently rounded
+            // start. A free-text preferred_date_time ("tomorrow at 2 pm")
+            // has no T-seconds group and is unaffected.
+            const rawStartSeconds = String(extracted.preferred_date_time || '').match(/T\d{2}:\d{2}:(\d{2})/);
+            const offHourStart = (windowStart && !/^\d{2}:00(:00)?$/.test(windowStart))
+              || (rawStartSeconds && rawStartSeconds[1] !== '00');
+            if (scheduledDate && windowStart && offHourStart) {
+              logger.warn(`[call-proc] Confirmed start ${windowStart} is not on the hour (or carries seconds); holding booking for the office to place on an hour boundary`);
               appointmentResult = {
                 service: serviceType,
                 dateTime: extracted.preferred_date_time,

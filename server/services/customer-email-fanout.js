@@ -103,13 +103,21 @@ function emailKey(value) {
  * call kept an open customer_email_missing card forever.
  *
  * Same validity gate as the fanout: an invalid `email` resolves nothing.
+ * `reasonCodes` narrows WHICH cards settle (always intersected with
+ * EMAIL_REVIEW_REASON_CODES): the call path passes ['customer_email_missing']
+ * only — a call-captured email is unverified BY DESIGN, so it must never
+ * settle the email_unverified / email_invalid read-back cards the bridge
+ * files for that very capture (codex round-10 P2). An OPERATOR-asserted
+ * email (the fanout) settles all three.
  * Returns the number of cards resolved; never throws on a no-op.
  */
-async function resolveOpenEmailReviewCards({ customerId, email, source = 'customer edit' }, conn = db) {
+async function resolveOpenEmailReviewCards({ customerId, email, source = 'customer edit', reasonCodes = EMAIL_REVIEW_REASON_CODES }, conn = db) {
   if (!customerId || !cleanValidEmailOrNull(email)) return 0;
+  const codes = reasonCodes.filter((c) => EMAIL_REVIEW_REASON_CODES.includes(c));
+  if (!codes.length) return 0;
   const now = new Date();
   const openItems = await conn('triage_items')
-    .whereIn('reason_code', EMAIL_REVIEW_REASON_CODES)
+    .whereIn('reason_code', codes)
     .whereIn('status', OPEN_REVIEW_STATES)
     .whereIn('call_log_id', conn('call_log').select('id').where({ customer_id: customerId }))
     .select('id', 'call_log_id');

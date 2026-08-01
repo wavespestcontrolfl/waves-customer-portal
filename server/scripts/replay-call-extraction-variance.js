@@ -614,12 +614,16 @@ function contactPhoneForCall(call) {
   return String(call.direction || '').startsWith('outbound') ? call.to_phone : call.from_phone;
 }
 
-function routeForV2(extraction, contactPhone, helpers) {
+function routeForV2(extraction, contactPhone, helpers, addressValidation = null) {
   if (!extraction) return { allowed: false, reason: 'no_extraction', flags: [] };
-  const modelFlags = helpers.suppressAddressFlagsForAV(extraction.triage_flags || [], null);
-  const deterministicFlags = helpers.computeDeterministicTriageFlags(extraction, { contactPhone });
+  // The stored AV verdict rides along (codex round-10 P1): since the central
+  // address-trust gate (2026-08-01), canAutoRoute without a verdict returns
+  // address_not_validated for every call — replaying without it would score
+  // zero auto-routes and the variance comparison would be meaningless.
+  const modelFlags = helpers.suppressAddressFlagsForAV(extraction.triage_flags || [], addressValidation);
+  const deterministicFlags = helpers.computeDeterministicTriageFlags(extraction, { contactPhone, addressValidation });
   const flags = helpers.mergeTriageFlags(modelFlags, deterministicFlags);
-  const route = helpers.canAutoRoute(extraction, { contactPhone });
+  const route = helpers.canAutoRoute(extraction, { contactPhone, addressValidation });
   return {
     allowed: !!route.allowed,
     reason: route.allowed ? 'allowed' : (route.reason || 'blocked'),
@@ -798,6 +802,7 @@ async function loadCandidateCalls(db, options) {
     'transcription',
     'ai_extraction',
     'ai_extraction_enriched',
+    'ai_address_validation',
     'v2_extraction_status',
     'ai_extraction_model',
     'ai_extraction_prompt_version',
@@ -866,7 +871,8 @@ async function replayCall(call, context) {
   const priorV2 = parseJson(call.ai_extraction_enriched, null);
   const priorV2Valid = priorV2 && helpers.isV2Extraction(priorV2);
   const priorV2Flat = priorV2Valid ? helpers.flatView(priorV2) : null;
-  const priorV2Route = priorV2Valid ? routeForV2(priorV2, contactPhone, helpers) : null;
+  const storedAv = parseJson(call.ai_address_validation, null);
+  const priorV2Route = priorV2Valid ? routeForV2(priorV2, contactPhone, helpers, storedAv) : null;
   const scheduled = await findLegacyScheduledService(db, call, scheduledColumns);
 
   let transcriptForExtraction = call.transcription;
@@ -924,7 +930,7 @@ async function replayCall(call, context) {
   const currentExtraction = current.status === 'valid' ? current.extraction : null;
   const currentFlat = currentExtraction ? helpers.flatView(currentExtraction) : null;
   const currentRoute = currentExtraction
-    ? routeForV2(currentExtraction, contactPhone, helpers)
+    ? routeForV2(currentExtraction, contactPhone, helpers, storedAv)
     : { allowed: false, reason: current.status, flags: [] };
 
   const legacyFieldVariances = currentFlat ? compareFlatFields(legacyFlat, currentFlat, includeValues) : [];

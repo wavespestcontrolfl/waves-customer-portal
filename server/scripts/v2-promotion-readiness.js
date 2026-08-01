@@ -102,7 +102,7 @@ async function main() {
   const allRouteRows = await baseQuery()
     .whereIn('ai_extraction_model', CURRENT_ROUTE_MODELS)
     .whereIn('ai_extraction_prompt_version', [...new Set([CURRENT_PROMPT_VERSION, LIVE_PROMPT_VERSION])])
-    .select('id', 'twilio_call_sid', 'ai_extraction_enriched', 'ai_extraction_validation_errors', 'v2_extraction_status', 'created_at', 'from_phone', 'to_phone', 'direction', 'ai_extraction_model');
+    .select('id', 'twilio_call_sid', 'ai_extraction_enriched', 'ai_extraction_validation_errors', 'v2_extraction_status', 'created_at', 'from_phone', 'to_phone', 'direction', 'ai_extraction_model', 'ai_address_validation');
 
   // Cohort boundary: rows are attributed by MODEL, so after a route change
   // a previous primary's rows could masquerade as current-route executions
@@ -208,9 +208,14 @@ async function main() {
     if (isPrimaryRow) validCount++;
 
     // Match production: pass the call's contact phone (ANI) so the
-    // caller_phone_missing gate behaves the same as the live routing path.
+    // caller_phone_missing gate behaves the same as the live routing path,
+    // AND the stored AV verdict — since the central address-trust gate
+    // (2026-08-01) every call without a verdict returns address_not_validated,
+    // so omitting it makes the audit report zero production-equivalent
+    // auto-routes and the readiness comparison meaningless (codex round-10 P1
+    // on PR #3119).
     const contactPhone = String(r.direction || '').startsWith('outbound') ? r.to_phone : r.from_phone;
-    const routing = canAutoRoute(v2, { contactPhone });
+    const routing = canAutoRoute(v2, { contactPhone, addressValidation: parseJson(r.ai_address_validation) });
     const v2WouldCreate = routing.allowed;
     const v1DidCreate = v1CreatedSid.has(r.twilio_call_sid);
 

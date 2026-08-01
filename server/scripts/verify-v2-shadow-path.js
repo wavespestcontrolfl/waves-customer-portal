@@ -30,7 +30,7 @@ async function main() {
       .where('processing_status', 'processed')
       .orderBy('created_at', 'desc')
       .limit(N)
-      .select('id', 'transcription', 'from_phone', 'to_phone', 'direction', 'created_at');
+      .select('id', 'transcription', 'from_phone', 'to_phone', 'direction', 'created_at', 'ai_address_validation');
     await db.destroy();
     fs.writeFileSync(process.env.DUMP_TO, JSON.stringify(rows));
     console.log(`Dumped ${rows.length} real transcripts to ${process.env.DUMP_TO}`);
@@ -60,8 +60,12 @@ async function main() {
     if (res.status === 'valid') {
       valid++;
       const e = res.extraction;
-      const flags = mergeTriageFlags(e.triage_flags, computeDeterministicTriageFlags(e, { contactPhone }));
-      const route = canAutoRoute(e, { contactPhone });
+      // Stored AV verdict rides along (codex round-10 P1): without it the
+      // central address-trust gate (2026-08-01) reports address_not_validated
+      // for every call and this verifier exercises none of the approved path.
+      const storedAv = (() => { try { return typeof r.ai_address_validation === 'string' ? JSON.parse(r.ai_address_validation) : (r.ai_address_validation || null); } catch { return null; } })();
+      const flags = mergeTriageFlags(e.triage_flags, computeDeterministicTriageFlags(e, { contactPhone, addressValidation: storedAv }));
+      const route = canAutoRoute(e, { contactPhone, addressValidation: storedAv });
       // No customer PII (names/addresses) in logs — non-PII signals only.
       const hasName = !!(e.caller.first_name || e.caller.last_name);
       console.log(`[${i + 1}] ${r.id}  status=valid (${ms}ms)`);
