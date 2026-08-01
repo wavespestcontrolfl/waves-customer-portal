@@ -2165,21 +2165,26 @@ router.patch('/:serviceId/note', async (req, res, next) => {
 //    stamps, and pdf_storage_key → NULL so the cached report PDF re-renders
 //    with the corrected figure (its cache signature does not vary on
 //    duration).
-// Post-commit: job costing recalc (labor books from the corrected value)
-// and an activity_log audit entry — both best-effort, never failing the
-// edit. Known scope-outs: time_entries are not edited (a job-tied clock
-// entry still wins calcLaborCost priority 1), and estimate-actuals only
-// re-reconciles rows inside its 7-day nightly rescan window.
+// Post-commit: job costing recalc (labor books from the corrected value —
+// the durable structured_notes.timeOnSiteAdjusted marker re-derives an
+// overrideLaborMinutes that outranks even a job-tied time entry, here and
+// on every later no-opts recalculation; see calculateJobCost) and an
+// activity_log audit entry — both best-effort, never failing the edit.
+// Known scope-out: estimate-actuals only re-reconciles rows inside its
+// 7-day nightly rescan window.
 router.patch('/:serviceId/time-on-site', requireAdmin, async (req, res, next) => {
   try {
     const svc = await db('scheduled_services').where({ id: req.params.serviceId }).first();
     if (!svc) return res.status(404).json({ error: 'Service not found' });
 
+    // Lookup failures PROPAGATE (codex P2 #3152): .first() already returns
+    // undefined for a genuinely missing legacy row, so a thrown error here is
+    // a real DB failure — a 500 the admin retries, never a 200 that silently
+    // skipped the report-side correction.
     const record = await db('service_records')
       .where({ scheduled_service_id: svc.id })
       .orderBy('id', 'desc')
-      .first()
-      .catch(() => null);
+      .first();
     const structuredNotes = parseJsonObject(record?.structured_notes);
 
     const plan = timeOnSiteEditPlan({ minutes: req.body?.minutes, service: svc, structuredNotes });
@@ -2209,14 +2214,24 @@ router.patch('/:serviceId/time-on-site', requireAdmin, async (req, res, next) =>
       if (record) {
         const recordCols = await trx('service_records').columnInfo().catch(() => ({}));
         const recordUpdate = {
-          structured_notes: serializeJsonb({
-            ...structuredNotes,
-            timeOnSite: plan.minutes,
-            timeOnSiteAdjusted: true,
-            timeOnSitePrior: 'timeOnSitePrior' in structuredNotes
-              ? structuredNotes.timeOnSitePrior
-              : (structuredNotes.timeOnSite ?? null),
-          }),
+          // ATOMIC key merge (codex P1 #3152, same clobber class as
+          // pdf-queue.js clearLawnPdfCorrectionMarker): a whole-column
+          // read-modify-write races the completion flow's post-commit
+          // structured_notes writers (SMS status, photo notes) — either side
+          // could erase the other's keys. This single statement merges ONLY
+          // the correction keys against the column's CURRENT value, and
+          // captures timeOnSitePrior from that same value — first edit only
+          // (`-> 'timeOnSitePrior' IS NOT NULL` detects the key even when it
+          // holds JSON null, which is exactly what a no-prior first edit
+          // writes).
+          structured_notes: trx.raw(
+            `(COALESCE(structured_notes::jsonb, '{}'::jsonb) || ?::jsonb)
+             || (CASE WHEN COALESCE(structured_notes::jsonb, '{}'::jsonb) -> 'timeOnSitePrior' IS NOT NULL
+                  THEN '{}'::jsonb
+                  ELSE jsonb_build_object('timeOnSitePrior', COALESCE(structured_notes::jsonb -> 'timeOnSite', 'null'::jsonb))
+                END)`,
+            [JSON.stringify({ timeOnSite: plan.minutes, timeOnSiteAdjusted: true })],
+          ),
         };
         if (plan.newEnd) {
           for (const field of BACKFILL_RECORD_END_FIELDS) {

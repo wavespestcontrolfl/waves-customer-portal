@@ -28,6 +28,9 @@ jest.mock('../services/service-report/pdf-storage', () => ({
   getHealthyStoredReportPdf: mockGetHealthyStoredReportPdf,
   putReportPdf: mockPutReportPdf,
   reportPdfStorageKey: mockReportPdfStorageKey,
+  // Real behavior: '' for every record without the timeOnSiteAdjusted marker
+  // (see admin-dispatch-time-on-site.test.js for the component's own tests).
+  timeOnSiteAdjustedPdfSignature: () => '',
 }));
 jest.mock('../services/pest-pressure/store', () => ({
   loadActiveConfig: mockLoadActiveConfig,

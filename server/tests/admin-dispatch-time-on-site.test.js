@@ -66,8 +66,15 @@ const {
 } = require('../routes/admin-dispatch')._test;
 const { buildCompletionLifecycleUpdates } = require('../utils/service-duration-capture');
 const JobCosting = require('../services/job-costing');
+// The REAL labor calculator (the module is jest.mocked above for the route's
+// post-commit recalc) — override semantics are tested against the actual code.
+const { calcLaborCost: realCalcLaborCost } = jest.requireActual('../services/job-costing');
+const { timeOnSiteAdjustedPdfSignature } = require('../services/service-report/pdf-storage');
 
 const source = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+const costingSource = fs.readFileSync(path.join(__dirname, '../services/job-costing.js'), 'utf8');
+const pdfQueueSource = fs.readFileSync(path.join(__dirname, '../services/service-report/pdf-queue.js'), 'utf8');
+const reportsPublicSource = fs.readFileSync(path.join(__dirname, '../routes/reports-public.js'), 'utf8');
 
 // ---------------------------------------------------------------------------
 // Pure helpers
@@ -306,7 +313,7 @@ describe('route wiring contracts', () => {
 // Behavioral: the PATCH handler against a scripted knex mock
 // ---------------------------------------------------------------------------
 
-function makeRecordingDb({ svc, record, recordCols }) {
+function makeRecordingDb({ svc, record, recordCols, recordLookupError = null }) {
   const calls = [];
   const chainFor = (table) => {
     const op = { table };
@@ -316,20 +323,23 @@ function makeRecordingDb({ svc, record, recordCols }) {
       orderBy(col, dir) { op.orderBy = [col, dir]; return chain; },
       async first() {
         if (table === 'scheduled_services') return svc;
-        if (table === 'service_records') return record;
+        if (table === 'service_records') {
+          if (recordLookupError) throw recordLookupError;
+          return record;
+        }
         return null;
       },
       async update(payload) { op.updatePayload = payload; return 1; },
       async insert(payload) { op.insertPayload = payload; return [1]; },
       async columnInfo() { return recordCols; },
     };
-    // The record fetch tacks .catch() onto .first()'s promise via the route's
-    // inline chain — expose catch on the chain too for the query-level guard.
     chain.catch = () => chain;
     return chain;
   };
+  const trxFn = (table) => chainFor(table);
+  trxFn.raw = (sql, bindings) => ({ __raw: true, sql, bindings });
   const dbMock = (table) => chainFor(table);
-  dbMock.transaction = async (fn) => fn((table) => chainFor(table));
+  dbMock.transaction = async (fn) => fn(trxFn);
   dbMock.calls = calls;
   return dbMock;
 }
@@ -403,11 +413,20 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
     expect(recUpdate.updatePayload.pdf_storage_key).toBeNull();
     expect(recUpdate.updatePayload.ended_at).toEqual(expectedEnd);
     expect(recUpdate.updatePayload.completed_at).toEqual(expectedEnd);
-    const notes = JSON.parse(recUpdate.updatePayload.structured_notes);
-    expect(notes.timeOnSite).toBe(45);
-    expect(notes.timeOnSiteAdjusted).toBe(true);
-    expect(notes.timeOnSitePrior).toBe('2:19:05'); // first pre-edit value preserved
-    expect(notes.visitOutcome).toBe('completed'); // merge, not replace
+    // ATOMIC merge (codex P1 #3152): structured_notes is a single-statement
+    // jsonb expression — only the correction keys travel, so a concurrent
+    // full-column writer's keys (completionSmsStatus, photo notes) can never
+    // be erased by this edit. The expression's semantics (sibling-key
+    // preservation, first-edit-only timeOnSitePrior capture incl. the
+    // JSON-null prior, NULL column) were executed and verified against a
+    // real PostgreSQL 16 instance during development.
+    const notesRaw = recUpdate.updatePayload.structured_notes;
+    expect(notesRaw.__raw).toBe(true);
+    expect(notesRaw.sql).toMatch(/\|\| \?::jsonb/);
+    expect(notesRaw.sql).toMatch(/COALESCE\(structured_notes::jsonb, '\{\}'::jsonb\)/);
+    expect(notesRaw.sql).toMatch(/CASE WHEN [\s\S]*-> 'timeOnSitePrior' IS NOT NULL\s*\n\s*THEN '\{\}'::jsonb/);
+    expect(notesRaw.sql).toMatch(/jsonb_build_object\('timeOnSitePrior', COALESCE\(structured_notes::jsonb -> 'timeOnSite', 'null'::jsonb\)\)/);
+    expect(notesRaw.bindings).toEqual([JSON.stringify({ timeOnSite: 45, timeOnSiteAdjusted: true })]);
 
     expect(JobCosting.calculateJobCost).toHaveBeenCalledWith('svc-1');
     const audit = dbMock.calls.find((c) => c.table === 'activity_log');
@@ -421,7 +440,7 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
     });
   });
 
-  test('a repeat edit never overwrites timeOnSitePrior — the original stays the audit baseline', async () => {
+  test('a repeat edit sends only the correction keys — prior preservation lives in the SQL CASE, not JS state', async () => {
     const editedOnce = {
       id: 'rec-1',
       structured_notes: JSON.stringify({
@@ -437,9 +456,34 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
       (err) => { throw err; },
     );
     const recUpdate = dbMock.calls.find((c) => c.table === 'service_records' && c.updatePayload);
-    const notes = JSON.parse(recUpdate.updatePayload.structured_notes);
-    expect(notes.timeOnSite).toBe(50);
-    expect(notes.timeOnSitePrior).toBe('2:19:05');
+    const notesRaw = recUpdate.updatePayload.structured_notes;
+    // The patch bindings never carry timeOnSitePrior — the CASE guard writes
+    // it from the column's own pre-update value on the first edit only, so a
+    // repeat edit cannot overwrite the original baseline (verified against
+    // real PostgreSQL 16, including the JSON-null-prior shape).
+    expect(notesRaw.bindings).toEqual([JSON.stringify({ timeOnSite: 50, timeOnSiteAdjusted: true })]);
+    expect(notesRaw.sql).toMatch(/-> 'timeOnSitePrior' IS NOT NULL/);
+  });
+
+  test('a service_records lookup FAILURE propagates — never a 200 that silently skipped the report correction (codex P2)', async () => {
+    const dbMock = makeRecordingDb({
+      svc: COMPLETED_SVC,
+      record: null,
+      recordCols: RECORD_COLS,
+      recordLookupError: new Error('statement timeout'),
+    });
+    mockDbCurrent = dbMock;
+    const res = makeRes();
+    let nextErr = null;
+    await patchHandler()(
+      { params: { serviceId: 'svc-1' }, body: { minutes: 45 }, technicianId: 'admin-1', techRole: 'admin' },
+      res,
+      (err) => { nextErr = err; },
+    );
+    expect(nextErr?.message).toBe('statement timeout');
+    expect(res.body).toBeNull(); // no success response
+    expect(dbMock.calls.find((c) => c.updatePayload)).toBeUndefined(); // nothing written
+    expect(JobCosting.calculateJobCost).not.toHaveBeenCalled();
   });
 
   test('backfilled no-start row: durations + notes only, no timestamps fabricated', async () => {
@@ -466,9 +510,12 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
     expect(svcUpdate.updatePayload.completed_at).toBeUndefined();
     const recUpdate = dbMock.calls.find((c) => c.table === 'service_records' && c.updatePayload);
     expect(recUpdate.updatePayload.ended_at).toBeUndefined();
-    const notes = JSON.parse(recUpdate.updatePayload.structured_notes);
-    expect(notes.backfill).toBe(true); // durable marker survives the merge
-    expect(notes.timeOnSite).toBe(45);
+    // Merge patch carries ONLY the correction keys — the durable backfill
+    // marker is untouched by construction (jsonb || merges keys, never
+    // replaces the object).
+    const notesRaw = recUpdate.updatePayload.structured_notes;
+    expect(notesRaw.__raw).toBe(true);
+    expect(notesRaw.bindings).toEqual([JSON.stringify({ timeOnSite: 45, timeOnSiteAdjusted: true })]);
   });
 
   test('open row → 409; junk minutes → 400; unknown service → 404', async () => {
@@ -512,5 +559,111 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
     expect(res.body.recordUpdated).toBe(false);
     expect(dbMock.calls.find((c) => c.table === 'scheduled_services' && c.updatePayload)).toBeTruthy();
     expect(dbMock.calls.find((c) => c.table === 'service_records' && c.updatePayload)).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Job costing: the corrected duration is authoritative labor (codex P1 #3152)
+// ---------------------------------------------------------------------------
+
+function makeTimeEntriesDb(jobEntryMinutes) {
+  // Scripted db for the REAL calcLaborCost: first query is the direct
+  // job-entries lookup, second (if reached) the clock-in-window fallback.
+  const chain = (rows) => {
+    const c = {
+      where: () => c,
+      whereNot: () => c,
+      whereBetween: () => c,
+      select: async () => rows,
+    };
+    return c;
+  };
+  let call = 0;
+  return () => chain(call++ === 0 ? jobEntryMinutes.map((m) => ({ duration_minutes: m })) : []);
+}
+
+describe('calcLaborCost — overrideLaborMinutes outranks the linked job time entry', () => {
+  const RATE = 35;
+
+  test('a job-tied entry with the inflated span loses to the operator correction', async () => {
+    // The forgotten-closeout shape: entry says 139 min (forgotten clock-out),
+    // the admin corrected the visit to 45.
+    const { laborMinutes, laborCost } = await realCalcLaborCost(
+      makeTimeEntriesDb([139]), 'svc-1', 'tech-1', null, null, RATE,
+      { overrideLaborMinutes: 45 },
+    );
+    expect(laborMinutes).toBe(45);
+    expect(laborCost).toBe(Math.round((45 / 60) * RATE * 100) / 100);
+  });
+
+  test('without the override the entry still wins — unadjusted visits are unchanged', async () => {
+    const { laborMinutes } = await realCalcLaborCost(
+      makeTimeEntriesDb([139]), 'svc-1', 'tech-1', null, null, RATE, {},
+    );
+    expect(laborMinutes).toBe(139);
+  });
+
+  test('explicitLaborMinutes (backfill) deliberately stays WEAKER than a job entry', async () => {
+    const { laborMinutes } = await realCalcLaborCost(
+      makeTimeEntriesDb([139]), 'svc-1', 'tech-1', null, null, RATE,
+      { untrustedLifecycleSpan: true, explicitLaborMinutes: 45 },
+    );
+    expect(laborMinutes).toBe(139);
+  });
+
+  test('junk override values are ignored, never zero out labor', async () => {
+    for (const junk of [0, -5, NaN, null, undefined, 'abc']) {
+      const { laborMinutes } = await realCalcLaborCost(
+        makeTimeEntriesDb([139]), 'svc-1', 'tech-1', null, null, RATE,
+        { overrideLaborMinutes: junk },
+      );
+      expect(laborMinutes).toBe(139);
+    }
+  });
+});
+
+describe('job costing durable re-derivation from the timeOnSiteAdjusted marker', () => {
+  // Every LATER recalculation (admin-job-costs recalc, expense CRUD, billing
+  // recovery) calls calculateJobCost with no opts — the marker must re-derive
+  // the override there or the first no-opts recalc resurrects the inflated
+  // entry span. Same durable-policy shape as the backfill marker above it.
+  test('calculateJobCost re-derives overrideLaborMinutes from the persisted marker + corrected column', () => {
+    expect(costingSource).toMatch(/if \(recordNotes\.timeOnSiteAdjusted === true && overrideLaborMinutes == null\) \{\s*\n\s*const correctedMinutes = Number\(svc\.service_time_minutes\);\s*\n\s*if \(Number\.isFinite\(correctedMinutes\) && correctedMinutes > 0\) \{\s*\n\s*overrideLaborMinutes = correctedMinutes;/);
+    expect(costingSource).toMatch(/\{ untrustedLifecycleSpan, explicitLaborMinutes, overrideLaborMinutes \},/);
+    // The override is checked BEFORE the direct job-entries lookup.
+    const overrideAt = costingSource.indexOf('const override = Number(overrideLaborMinutes);');
+    const entriesAt = costingSource.indexOf("await db('time_entries')");
+    expect(overrideAt).toBeGreaterThan(-1);
+    expect(entriesAt).toBeGreaterThan(overrideAt);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PDF cache fence: the corrected duration keys the storage key (codex P2 #3152)
+// ---------------------------------------------------------------------------
+
+describe('timeOnSiteAdjustedPdfSignature — stale in-flight renders cannot republish the old duration', () => {
+  test('adjusted records key on the corrected value; unadjusted records keep their keys (no fleet cache bust)', () => {
+    expect(timeOnSiteAdjustedPdfSignature({
+      structured_notes: JSON.stringify({ timeOnSiteAdjusted: true, timeOnSite: 45 }),
+    })).toBe('-tos45');
+    expect(timeOnSiteAdjustedPdfSignature({
+      structured_notes: { timeOnSiteAdjusted: true, timeOnSite: 50 },
+    })).toBe('-tos50');
+    // Unadjusted / absent / junk shapes all contribute nothing.
+    expect(timeOnSiteAdjustedPdfSignature({
+      structured_notes: JSON.stringify({ timeOnSite: '2:19:05' }),
+    })).toBe('');
+    expect(timeOnSiteAdjustedPdfSignature({ structured_notes: null })).toBe('');
+    expect(timeOnSiteAdjustedPdfSignature({})).toBe('');
+    expect(timeOnSiteAdjustedPdfSignature({ structured_notes: 'not json{' })).toBe('');
+  });
+
+  test('every storage-key composition site carries the component — write and expected sides in both modules', () => {
+    // A missing site desynchronizes written vs expected keys: adjusted
+    // records would either serve stale PDFs (the race this fences) or
+    // re-render on every view (a silent cost). Two sites per module.
+    expect((pdfQueueSource.match(/timeOnSiteAdjustedPdfSignature\(service\)/g) || []).length).toBe(2);
+    expect((reportsPublicSource.match(/timeOnSiteAdjustedPdfSignature\(service\)/g) || []).length).toBe(2);
   });
 });

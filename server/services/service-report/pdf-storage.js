@@ -7,6 +7,7 @@ const {
 const config = require('../../config');
 const db = require('../../models/db');
 const logger = require('../logger');
+const { minutesFromElapsed } = require('../../utils/duration-minutes');
 
 const FALLBACK_PDF_MARKER = 'Browser PDF rendering was unavailable';
 const MIN_EXPECTED_REPORT_BYTES = 50000;
@@ -49,6 +50,29 @@ function reportPdfStorageKey(serviceRecordId, { visibilitySignature = '' } = {})
   // edit, or the next view/email keeps serving the stale cached PDF.
   const sigPart = visibilitySignature ? `-pp${visibilitySignature}` : '';
   return `reports/${serviceRecordId}/report-${SERVICE_REPORT_PDF_STORAGE_VERSION}${sigPart}.pdf`;
+}
+
+// Time-on-site correction key component (codex P2 #3152): nulling
+// pdf_storage_key alone is not a durable invalidation — a render already in
+// flight with the pre-correction record stores its output and writes the
+// deterministic key back, and with no duration in the key that stale PDF
+// reads as current forever. Folding the corrected value into the key fences
+// it: the stale renderer computed its key from the OLD record, so its
+// write-back no longer matches the expected key and the next view
+// re-renders. Empty for every unadjusted record — no fleet-wide cache bust;
+// only corrected records get a new key, one per corrected value. Must ride
+// in EVERY composition site that builds the storage-key signature
+// (pdf-queue renderAndStore + getOrRender, reports-public expected + store).
+function timeOnSiteAdjustedPdfSignature(service) {
+  try {
+    const notes = typeof service?.structured_notes === 'string'
+      ? JSON.parse(service.structured_notes)
+      : (service?.structured_notes || {});
+    if (notes?.timeOnSiteAdjusted !== true) return '';
+    return `-tos${minutesFromElapsed(notes.timeOnSite) || 0}`;
+  } catch {
+    return '';
+  }
 }
 
 // Drop the cached-PDF hint for a service record so the next render rebuilds it
@@ -159,4 +183,5 @@ module.exports = {
   reportPdfBufferHasFallbackMarker,
   reportPdfStorageKey,
   storedReportPdfLooksBroken,
+  timeOnSiteAdjustedPdfSignature,
 };
