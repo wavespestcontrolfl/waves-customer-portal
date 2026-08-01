@@ -797,6 +797,10 @@ describe('revertMerge', () => {
         }
         return (tables.scheduled_services && tables.scheduled_services.billingRows) || [];
       }
+      // recipient_optin activity probe (whereIn on customer_id).
+      if (table === 'recipient_optin' && q.called('select')) {
+        return (tables.recipient_optin && tables.recipient_optin.rows) || [];
+      }
       // Consent rows tied to returned cards (whereIn is on
       // payment_method_id, not id — still a probe).
       if (table === 'payment_method_consents' && q.called('select')) {
@@ -1696,6 +1700,90 @@ describe('revertMerge', () => {
     expect(state.journalUpdate).toBe(null);
   });
 
+  it('refuses when the transferred Stripe profile was CHARGED since the merge (no new card involved)', async () => {
+    // A loser-only profile transferred to a card-less winner can still be
+    // invoiced and paid on that profile — no payment_methods row is ever
+    // written, so the new-card guard sees nothing while the profile
+    // accumulates the KEPT customer's transaction history.
+    const journal = baseJournal(); // stripe_transferred_id 'cus_only', still on winner
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: {
+          stillOnWinner: ['inv-1'],
+          // inv-1 is journaled (the loser's, moving back); inv-charged was
+          // raised on the kept customer after the merge.
+          probeRows: [{ id: 'inv-1' }, { id: 'inv-charged', created_at: '2026-07-30T09:00:00Z' }],
+        },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/while it held the transferred Stripe profile/) });
+    expect(state.repointedBack).toHaveLength(0);
+    expect(state.journalUpdate).toBe(null);
+  });
+
+  it("a transferred profile with only PRE-MERGE winner billing still reverts (sinceOnly)", async () => {
+    const journal = baseJournal();
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: {
+          stillOnWinner: ['inv-1'],
+          probeRows: [{ id: 'inv-own', created_at: '2026-07-01T00:00:00Z' }],
+        },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+    expect(result.stripeMovedBack).toBe(true);
+    expect(state.journalUpdate.undone_at).toBeTruthy();
+  });
+
+  it('refuses when a NEW recipient_optin row appeared since the merge (a missing row reads as "allowed to text")', async () => {
+    const { trx, state } = buildRevertTrx({
+      journal: baseJournal(),
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: { stillOnWinner: ['inv-1'] },
+        // Composite PK (customer_id, phone_key) — never journalable
+        // per-row, so time is the only signal. Created after the merge.
+        recipient_optin: { rows: [{ customer_id: WINNER, created_at: '2026-07-30T09:00:00Z' }] },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/recipient opt-in record\(s\) were created or updated since the merge/) });
+    expect(state.repointedBack).toHaveLength(0);
+    expect(state.journalUpdate).toBe(null);
+  });
+
+  it("the winner's own PRE-MERGE opt-in rows do not block the undo", async () => {
+    const { trx, state } = buildRevertTrx({
+      journal: baseJournal(),
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: { stillOnWinner: ['inv-1'] },
+        recipient_optin: { rows: [{ customer_id: WINNER, created_at: '2026-07-01T00:00:00Z' }] },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+    expect(result.skipped).toHaveLength(0);
+    expect(state.journalUpdate.undone_at).toBeTruthy();
+  });
+
   it('refuses when a journaled ESTIMATE was accepted after the merge (its updated_at moved)', async () => {
     const journal = baseJournal();
     journal.repointed_ids.tables['estimates.customer_id'] = ['est-1'];
@@ -1871,7 +1959,12 @@ describe('revertMerge', () => {
 
   it('refuses billing-identity clears when winner billing artifacts were created/updated since the merge (activity gate)', async () => {
     const journal = baseJournal();
-    journal.winner_backfills = { ...journal.winner_backfills, billing_mode: 'per_application', per_application_fee: '65.00' };
+    // No transferred Stripe profile here — this pins the BILLING-IDENTITY
+    // gate specifically, isolated from the r12 charged-profile refusal
+    // (which would otherwise fire first on the same probe rows).
+    journal.repointed_ids.stripe_transferred_id = null;
+    journal.repointed_ids.stripe_derived_from = null;
+    journal.winner_backfills = { billing_mode: 'per_application', per_application_fee: '65.00' };
     const { trx, state } = buildRevertTrx({
       journal,
       winner: { ...baseWinner(), billing_mode: 'per_application', per_application_fee: '65.00' },

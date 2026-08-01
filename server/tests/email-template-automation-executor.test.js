@@ -133,6 +133,9 @@ describe('email template automation executor', () => {
 
     setDbQueues({
       'email_template_automations as a': [chain({ result: [automation({ suppression_group_key: 'service_operational' })] })],
+      // The under-lock recipient re-read (r12): a live, non-retired row
+      // keeps the payload's attribution.
+      customers: [chain({ first: { id: 'cust-1', deleted_at: null } })],
       email_template_automation_runs: [
         existingRunQuery,
         insertRunQuery,
@@ -188,6 +191,13 @@ describe('email template automation executor', () => {
     expect(opTrace[0]).toBe('lock');
     expect(opTrace.indexOf('lock'))
       .toBeLessThan(opTrace.indexOf('table:email_template_automation_runs'));
+    // ORDERING (r12): the recipient's customer row is READ under the lock,
+    // and that read precedes the insert — the attribution the row is
+    // written with therefore comes from inside the lock, not from the
+    // payload snapshot the trigger was built from.
+    expect(opTrace.indexOf('lock')).toBeLessThan(opTrace.indexOf('table:customers'));
+    expect(opTrace.indexOf('table:customers'))
+      .toBeLessThan(opTrace.indexOf('table:email_template_automation_runs'));
     expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
       templateKey: 'estimate.extension_notice',
       versionId: 'version-1',
@@ -202,6 +212,45 @@ describe('email template automation executor', () => {
     expect(sentRunQuery.update).toHaveBeenCalledWith(expect.objectContaining({
       status: 'sent',
       email_message_id: 'message-1',
+    }));
+  });
+
+  test('a recipient whose customer row was retired since the trigger is written UNLINKED (under-lock re-read)', async () => {
+    // The payload named cust-1, but the under-lock read finds it
+    // soft-deleted (merged away). The run must not be pinned to a retired
+    // row — the value written comes from the read, not the payload.
+    const queuedRun = run({ recipient_id: null });
+    const existingRunQuery = chain({ first: null });
+    const insertRunQuery = chain({ returning: [queuedRun] });
+    setDbQueues({
+      'email_template_automations as a': [chain({ result: [automation({ delay_minutes: 60 })] })],
+      customers: [chain({ first: { id: 'cust-1', deleted_at: '2026-07-30T04:40:00Z' } })],
+      email_template_automation_runs: [existingRunQuery, insertRunQuery],
+      email_template_automation_run_events: [chain({ returning: [{ id: 'event-1' }] })],
+    });
+
+    await AutomationExecutor.processTrigger({
+      triggerEventKey: 'estimate.auto_renewed',
+      triggerEventId: 'estimate_auto_renew:est-1',
+      payload: {
+        estimate_id: 'est-1',
+        customer_id: 'cust-1',
+        customer_email: 'sam@example.com',
+        first_name: 'Sam',
+        estimate_url: 'https://example.com/estimate/est-1',
+        new_expires_at: '2026-06-01',
+        renewal_count: 1,
+        status: 'sent',
+      },
+      now: new Date('2026-05-18T12:00:00.000Z'),
+    });
+
+    // Locked on the payload's id (it is the lock KEY)...
+    expect(advisoryLockCalls.some(([, bindings]) => bindings[0] === 'customer-comms:cust-1')).toBe(true);
+    // ...but attributed from the under-lock read: retired → unlinked.
+    expect(insertRunQuery.insert).toHaveBeenCalledWith(expect.objectContaining({
+      recipient_id: null,
+      recipient_email: 'sam@example.com', // delivery semantics untouched
     }));
   });
 

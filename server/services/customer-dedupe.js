@@ -1810,6 +1810,8 @@ const TABLE_TIMESTAMP_COLUMNS = {
   payment_method_consents: ['created_at'],
   // updated_at ONLY (20260401000054 — its creation stamp is enrolled_at).
   referral_promoters: ['updated_at'],
+  // timestamps(true, true) — 20260723000004.
+  recipient_optin: ['created_at', 'updated_at'],
 };
 
 function activityColumnsFor(table) {
@@ -2030,6 +2032,33 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       if (postMergeCards.length) {
         refuse(`The kept customer saved ${postMergeCards.length} new payment method(s) on the transferred Stripe profile after the merge — moving the profile back to the restored customer would strand them; detach or move the new card(s) in Stripe first, then revert`);
       }
+      // A transferred profile can also be CHARGED without any card ever
+      // being saved (an invoice created and paid on it), so the card guard
+      // above sees nothing while the profile accumulates the KEPT
+      // customer's transaction history — handing it back to the restored
+      // customer would hand over that history. invoices/payments carry no
+      // stripe_customer_id column (only stripe_payment_intent_id —
+      // 20260401000101), so the profile cannot be joined to directly;
+      // the sound proxy is winner-owned billing ACTIVITY since the merge
+      // while a transferred profile is in play. The winner's own pre-merge
+      // billing is exempt (sinceOnly) and journaled rows are the loser's,
+      // moving back with the undo.
+      for (const table of ['invoices', 'payments']) {
+        let rows = [];
+        try {
+          rows = await trx(table)
+            .where({ customer_id: winnerId })
+            .select(['id', ...activityColumnsFor(table)]);
+        } catch (e) {
+          refuse(`Cannot verify ${table} against the transferred Stripe profile (${e.message}) — refusing to revert`);
+        }
+        const charged = countActivityRows(rows, {
+          journaledIds: journaledIdsFor(table), mergeAt, sinceOnly: true, table,
+        });
+        if (charged) {
+          refuse(`${charged} ${table} row(s) were created or updated on the kept customer since the merge while it held the transferred Stripe profile — moving the profile back would hand its transaction history to the restored customer; reconcile in Stripe first, then revert`);
+        }
+      }
     }
 
     // Verification pass BEFORE any write: every recorded row must still point
@@ -2211,6 +2240,34 @@ async function revertMerge({ journalId, performedBy, performedById }) {
         if (activity) {
           refuse(`${activity} ${probe.label} created from this merge's estimates are outside its journal — moving the estimates back would separate them from what accepting them created; reconcile by hand`);
         }
+      }
+    }
+
+    // NEW comms-consent rows created since the merge: the count-only guard
+    // above only inspects what the ORIGINAL journal recorded, so an opt-in
+    // the WINNER created afterwards (for a service contact inherited from
+    // the loser) is invisible to it. That row stays on the winner through
+    // the undo, and recipient-optin.js treats the restored loser's MISSING
+    // row as grandfathered/allowed — appointment SMS to that contact would
+    // resume without its confirmation. Probe BOTH customers for rows
+    // created or updated since the merge (the winner's own pre-merge rows
+    // are legitimately its own and stay put) and refuse.
+    {
+      let optinRows = [];
+      try {
+        optinRows = await trx('recipient_optin')
+          .whereIn('customer_id', [winnerId, loserId])
+          .select(['customer_id', ...activityColumnsFor('recipient_optin')]);
+      } catch (e) {
+        refuse(`Cannot verify recipient_optin (comms consent) since the merge (${e.message}) — refusing to revert`);
+      }
+      // Composite PK (customer_id, phone_key) — no id column, so these can
+      // never be journaled per-row; time is the only usable signal.
+      const newOptins = countActivityRows(optinRows, {
+        keyColumn: 'customer_id', journaledIds: new Set(), mergeAt, sinceOnly: true, table: 'recipient_optin',
+      });
+      if (newOptins) {
+        refuse(`${newOptins} recipient opt-in record(s) were created or updated since the merge — splitting the accounts would leave the restored customer with no consent row, which reads as "allowed to text"; reconcile consent by hand`);
       }
     }
 

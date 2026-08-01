@@ -398,14 +398,51 @@ async function logRunEvent(runId, eventType, message, metadata = {}) {
   }
 }
 
+/**
+ * Re-resolve the recipient's ATTRIBUTION under the comms advisory lock.
+ *
+ * recipientFor() is a pure payload-derived function (no DB access), so
+ * re-deriving it under the lock would return the same values — it cannot
+ * detect that the payload's customer id went stale. The authoritative check
+ * is a real READ of the customer row, performed strictly INSIDE the lock:
+ * only then is it guaranteed to reflect a completed customer-merge undo
+ * rather than the pre-undo world the trigger payload was built from.
+ *
+ * Delivery semantics are deliberately untouched — recipient_email stays the
+ * payload's address (automations legitimately mail an address that differs
+ * from customers.email: a tenant's estimate under a landlord's record).
+ * Only the ATTRIBUTION is corrected: a recipient id whose customer row is
+ * gone or merged-away is dropped to unlinked rather than pinning the run to
+ * a retired row. Best-effort: an unreadable customers table keeps the
+ * payload's id (today's behavior) — the LOCK, not this read, is what closes
+ * the race; this read only refines who the row is attributed to.
+ */
+async function resolveRecipientUnderLock(conn, recipient) {
+  if (!recipient.id) return recipient;
+  try {
+    const row = await conn('customers')
+      .where({ id: recipient.id })
+      .first('id', 'deleted_at');
+    if (!row || row.deleted_at) {
+      return { ...recipient, id: '' };
+    }
+  } catch {
+    // Unreadable → keep the payload attribution (unchanged behavior).
+  }
+  return recipient;
+}
+
 async function createRun({ automation, triggerEventKey, triggerEventId, entityType, entityId, recipient, payload, context, idempotencyKey, runAfter, status, exitReason, retryPolicy }) {
-  // LOCK ORDER: the advisory lock is taken FIRST, before the idempotency
-  // read and before any recipient state is resolved. Reading first and
-  // locking second is the race this exists to close: with the undo holding
+  // LOCK ORDER: the advisory lock is the transaction's FIRST statement —
+  // before the idempotency read, before the recipient's customer row is
+  // read, and before the insert. Resolving recipient state first and
+  // locking second is the race this exists to close: with an undo holding
   // the lock, a writer that had ALREADY read the pre-undo recipient state
   // would wait, then insert that stale winner-owned row AFTER the undo
-  // committed — a row the undo's probe could never have seen. Everything
-  // this function reads or writes therefore happens under the lock.
+  // committed — a row the undo's probe could never have seen. The
+  // recipient id arriving here is only a LOCK KEY (payload-derived, pure);
+  // the value the insert is attributed to comes from
+  // resolveRecipientUnderLock's read, which happens under the lock.
   //
   // Serializes against an in-flight customer-merge UNDO probing this
   // recipient's queued sends (customer-dedupe.js revertMerge, email guard):
@@ -426,9 +463,10 @@ async function createRun({ automation, triggerEventKey, triggerEventId, entityTy
   }
   return db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`customer-comms:${recipient.id}`]);
+    const lockedRecipient = await resolveRecipientUnderLock(trx, recipient);
     return createRunUnlocked({
       conn: trx, automation, triggerEventKey, triggerEventId, entityType, entityId,
-      recipient, payload, context, idempotencyKey, runAfter, status, exitReason, retryPolicy,
+      recipient: lockedRecipient, payload, context, idempotencyKey, runAfter, status, exitReason, retryPolicy,
     });
   });
 }
