@@ -154,7 +154,19 @@ async function resolveOpenEmailReviewCards({ customerId, email, source = 'custom
   return conn.isTransaction ? resolveCards(conn) : conn.transaction(resolveCards);
 }
 
-async function propagateCustomerEmailChange({ before, after, source = 'customer edit' }, conn = db) {
+/**
+ * `reviewReasonCodes` narrows which review cards the fanout settles, exactly
+ * as in resolveOpenEmailReviewCards. The CALL path passes
+ * ['customer_email_missing'] when it REPLACES a garbled stored email with a
+ * call capture: the retargeting (leads, estimates, newsletter tokens, open
+ * sends) must run because an old address really is out there, but the capture
+ * is still unverified BY DESIGN, so it must not settle the email_unverified /
+ * email_invalid read-back cards filed for that very capture (round-10 P2).
+ * An OPERATOR-asserted edit keeps the default and settles all three.
+ */
+async function propagateCustomerEmailChange({
+  before, after, source = 'customer edit', reviewReasonCodes = EMAIL_REVIEW_REASON_CODES,
+}, conn = db) {
   const counts = { leads: 0, estimates: 0, newsletter: 0, newsletterDeliveries: 0, automations: 0, templateRuns: 0, promoters: 0, billingPrefs: 0, contracts: 0, bookingIntents: 0, reviewCards: 0 };
   let pendingConfirmation = null;
   const customerId = (after && after.id) || (before && before.id);
@@ -384,7 +396,9 @@ async function propagateCustomerEmailChange({ before, after, source = 'customer 
   // keep call_log.review_status in sync (mirrors transitionCore in
   // routes/admin-triage.js). Scoped to email reason codes only: address or
   // booking reviews on the same call are untouched.
-  counts.reviewCards += await resolveOpenEmailReviewCards({ customerId, email: newEmail, source }, conn);
+  counts.reviewCards += await resolveOpenEmailReviewCards({
+    customerId, email: newEmail, source, reasonCodes: reviewReasonCodes,
+  }, conn);
 
   if (Object.values(counts).some(Boolean)) {
     // Counts only — never the email values (PII stays out of logs).

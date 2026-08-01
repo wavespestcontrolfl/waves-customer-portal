@@ -1098,6 +1098,36 @@ function summarizeKnownCaller(customer) {
 // exact match (customer-properties), so this guard can't disagree with the
 // stamp downstream. Returns the (possibly demoted) routing result; never
 // mutates.
+/**
+ * The EXACT fail-open routing context production hands canAutoRoute for a
+ * call. Exported so the three offline routing audits MIRROR production rather
+ * than approximating it (local pre-push audit P1; round-13 residual): a
+ * hand-rolled "linked customer with an address" test also granted the lane to
+ * OUTBOUND calls and to dormant/lost/duplicate accounts, whose stale on-file
+ * data must never clear a blocker — both directions of error land on the
+ * permissive side of a promotion gate.
+ *
+ * The caller must still run demoteFailOpenOnV1AddressConflict on the result,
+ * exactly as the live path does — the two are one contract.
+ */
+function buildFailOpenRoutingContext({
+  call = {}, customer = null, contactPhone = null, failOpenEnabled = false,
+} = {}) {
+  const knownCaller = customer ? summarizeKnownCaller(customer) : null;
+  return {
+    knownCaller,
+    options: {
+      // Fail-open is INBOUND-only: an outbound callback is our own dial, not
+      // a customer volunteering their identity by calling the office.
+      failOpen: !!failOpenEnabled && !isOutboundCall(call),
+      callerAni: contactPhone,
+      knownCustomer: (knownCaller && knownCaller.isExistingCustomer)
+        ? { hasAddress: knownCaller.hasAddress }
+        : null,
+    },
+  };
+}
+
 function demoteFailOpenOnV1AddressConflict(routingResult, extracted, knownCaller) {
   if (!routingResult?.allowed
     || !(routingResult.failedOpenFlags || []).some((f) => FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS.has(f))) {
@@ -2865,22 +2895,34 @@ async function backfillCustomerFromAppointmentContact(customerId, customer = {},
   if (Object.keys(updates).length === 0) return customer;
   updates.updated_at = new Date();
   await db('customers').where({ id: customerId }).update(updates);
-  // A call-captured email bypasses propagateCustomerEmailChange (this write
-  // is empty→value, so no open sends target an old address) — but any open
-  // customer_email_missing / read-back card is answered by it (codex
-  // round-9 P2). Resolve those here; failure never affects the backfill.
+  // An empty→value email write has no old address to retarget, so the
+  // lightweight path (resolve the cards only) is right. REPLACING a garbled
+  // stored email is a different write: copies of that old address really are
+  // out there — leads, estimates, newsletter tokens, open sends — and
+  // AGENTS.md requires every email change to fan out. Skipping it left those
+  // bound to an address the customer cannot receive (local pre-push audit
+  // P1, and round-13 residual #1). Either way the read-back cards filed for
+  // THIS capture must not settle: the capture is unverified by design, so
+  // only customer_email_missing resolves (round-9 + round-10 P2).
   if (updates.email) {
     try {
-      const { resolveOpenEmailReviewCards } = require('./customer-email-fanout');
-      await resolveOpenEmailReviewCards({
-        customerId, email: updates.email,
-        source: 'call-captured email (appointment backfill)',
-        // ONLY the missing-email card: this capture is itself unverified, so
-        // it must not settle the read-back cards filed for it (round-10 P2).
-        reasonCodes: ['customer_email_missing'],
-      });
+      const fanout = require('./customer-email-fanout');
+      if (storedEmailInvalid) {
+        await fanout.propagateCustomerEmailChange({
+          before: customer,
+          after: { id: customerId, email: updates.email },
+          source: 'call-captured email replacing a garbled address (appointment backfill)',
+          reviewReasonCodes: ['customer_email_missing'],
+        });
+      } else {
+        await fanout.resolveOpenEmailReviewCards({
+          customerId, email: updates.email,
+          source: 'call-captured email (appointment backfill)',
+          reasonCodes: ['customer_email_missing'],
+        });
+      }
     } catch (e) {
-      logger.warn(`[call-proc] email review-card resolution failed after backfill for customer ${customerId}: ${e.message}`);
+      logger.warn(`[call-proc] email fanout/review-card resolution failed after backfill for customer ${customerId}: ${e.message}`);
     }
   }
   return { ...customer, ...updates };
@@ -6018,19 +6060,31 @@ const CallRecordingProcessor = {
         }
         if (Object.keys(updates).length > 0) {
           await db('customers').where({ id: customerId }).update(updates);
-          // Same card-resolution contract as the appointment backfill above
-          // (codex round-9 P2): a call-captured email answers any open
-          // email review card for this customer's calls.
+          // Same contract as the appointment backfill above: a REPLACEMENT of
+          // a garbled stored email must fan out (copies of the old address
+          // exist), an empty→value write only settles the missing-email card,
+          // and neither settles the read-back cards filed for this unverified
+          // capture (round-9 + round-10 P2; fanout gap from the local
+          // pre-push audit P1).
           if (updates.email) {
             try {
-              const { resolveOpenEmailReviewCards } = require('./customer-email-fanout');
-              await resolveOpenEmailReviewCards({
-                customerId, email: updates.email,
-                source: 'call-captured email (phone-match update)',
-                reasonCodes: ['customer_email_missing'],
-              });
+              const fanout = require('./customer-email-fanout');
+              if (existingEmailInvalid) {
+                await fanout.propagateCustomerEmailChange({
+                  before: existing,
+                  after: { id: customerId, email: updates.email },
+                  source: 'call-captured email replacing a garbled address (phone-match update)',
+                  reviewReasonCodes: ['customer_email_missing'],
+                });
+              } else {
+                await fanout.resolveOpenEmailReviewCards({
+                  customerId, email: updates.email,
+                  source: 'call-captured email (phone-match update)',
+                  reasonCodes: ['customer_email_missing'],
+                });
+              }
             } catch (e) {
-              logger.warn(`[call-proc] email review-card resolution failed after phone-match update for customer ${customerId}: ${e.message}`);
+              logger.warn(`[call-proc] email fanout/review-card resolution failed after phone-match update for customer ${customerId}: ${e.message}`);
             }
           }
         }
@@ -9666,6 +9720,7 @@ CallRecordingProcessor._test = {
   persistCallSecondaryContact,
   resolveCallBookingPropertyLinkage,
   demoteFailOpenOnV1AddressConflict,
+  buildFailOpenRoutingContext,
   sameFirstName,
   firstNameVariants,
   v2IsoToEtWallClock,
@@ -9685,5 +9740,14 @@ CallRecordingProcessor.quarantineCardRecording = quarantineCardRecording;
 CallRecordingProcessor.scrubStructuredTranscript = scrubStructuredTranscript;
 CallRecordingProcessor.withPanStamps = withPanStamps;
 CallRecordingProcessor.updateUnifiedVoiceMessage = updateUnifiedVoiceMessage;
+
+// Routing contract shared with the OFFLINE AUDITS (NOT test-only): the
+// promotion-readiness gate, the replay variance report and the shadow
+// verifier must build the fail-open context and apply the V1-conflict
+// demotion exactly as the live path does, or their verdicts drift from
+// production — which is how a promotion gate goes permissive without anyone
+// changing the gate. Deliberately on the module surface, not `_test`.
+CallRecordingProcessor.buildFailOpenRoutingContext = buildFailOpenRoutingContext;
+CallRecordingProcessor.demoteFailOpenOnV1AddressConflict = demoteFailOpenOnV1AddressConflict;
 
 module.exports = CallRecordingProcessor;

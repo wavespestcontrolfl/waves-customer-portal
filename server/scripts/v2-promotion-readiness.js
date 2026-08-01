@@ -23,6 +23,11 @@ const {
   canAutoRoute, computeDeterministicTriageFlags, mergeTriageFlags, isInServiceAreaCounty,
   dispatchesToOnFileAddress,
 } = require('../services/call-triage-flags');
+// Production's own fail-open context builder + V1-conflict demotion, so this
+// audit cannot drift from the live contract (local pre-push audit P1).
+const {
+  buildFailOpenRoutingContext, demoteFailOpenOnV1AddressConflict,
+} = require('../services/call-recording-processor');
 const { checkTcpaConsent } = require('../services/call-routing-gates');
 const { isV2Extraction } = require('../utils/extraction-compat');
 const { PROMPT_HASH } = require('../services/prompts/call-extraction-v1');
@@ -105,7 +110,9 @@ async function main() {
   const allRouteRows = await baseQuery()
     .whereIn('ai_extraction_model', CURRENT_ROUTE_MODELS)
     .whereIn('ai_extraction_prompt_version', [...new Set([CURRENT_PROMPT_VERSION, LIVE_PROMPT_VERSION])])
-    .select('id', 'twilio_call_sid', 'ai_extraction_enriched', 'ai_extraction_validation_errors', 'v2_extraction_status', 'created_at', 'from_phone', 'to_phone', 'direction', 'ai_extraction_model', 'ai_extraction_prompt_version', 'ai_address_validation', 'customer_id');
+    // ai_extraction (the V1 legacy flat record) feeds demoteFailOpenOnV1AddressConflict,
+    // exactly as the live path passes `extracted` to it.
+    .select('id', 'twilio_call_sid', 'ai_extraction', 'ai_extraction_enriched', 'ai_extraction_validation_errors', 'v2_extraction_status', 'created_at', 'from_phone', 'to_phone', 'direction', 'ai_extraction_model', 'ai_extraction_prompt_version', 'ai_address_validation', 'customer_id');
 
   // Cohort boundary: rows are attributed by MODEL, so after a route change
   // a previous primary's rows could masquerade as current-route executions
@@ -182,13 +189,20 @@ async function main() {
   // established customers with failOpen + callerAni + knownCustomer
   // { hasAddress } (call-recording-processor ~5356), letting a caller who
   // did not restate their on-file address auto-route. Auditing without that
-  // context scores those production auto-creates as blocked. Mirror the same
-  // env gate production reads; hasAddress from the linked customer row.
+  // context scores those production auto-creates as blocked.
+  //
+  // Built by production's OWN helper now, not a local approximation: the
+  // hand-rolled version also granted the lane to outbound calls and to
+  // dormant/lost accounts whose stale address must never clear a blocker,
+  // both of which make this gate permissive. Full customer rows, because
+  // summarizeKnownCaller reads the pipeline stage and every address
+  // component.
   const auditFailOpen = process.env.GATE_CALL_FAIL_OPEN_BOOKING === 'true';
   const linkedCustomerIds = [...new Set(boundedRouteRows.map((r) => r.customer_id).filter(Boolean))];
-  const customersWithAddress = new Set(linkedCustomerIds.length
-    ? (await db('customers').whereIn('id', linkedCustomerIds).whereNotNull('address_line1').where('address_line1', '!=', '').select('id')).map((c) => c.id)
-    : []);
+  const customerById = new Map((linkedCustomerIds.length
+    ? await db('customers').whereIn('id', linkedCustomerIds)
+      .select('id', 'pipeline_stage', 'address_line1', 'address_line2', 'city', 'state', 'zip')
+    : []).map((c) => [c.id, c]));
 
   // The GATE scores the PRIMARY leg alone — pooling both legs would let a
   // healthy primary mask a small failing fallback cohort, or pass a route
@@ -275,16 +289,22 @@ async function main() {
     const effectiveAv = recoveredCallIds.has(r.id)
       ? { status: 'corrected', inServiceArea: true, county: storedAv?.county || null, normalized: storedAv?.normalized || null, reconstructed_from: 'address_recovered' }
       : storedAv;
-    const knownCustomer = (r.customer_id && customersWithAddress.has(r.customer_id))
-      ? { hasAddress: true }
-      : (r.customer_id ? {} : null);
-    const routing = canAutoRoute(v2, {
+    const { knownCaller, options: failOpenOptions } = buildFailOpenRoutingContext({
+      call: r,
+      customer: r.customer_id ? customerById.get(r.customer_id) || null : null,
+      contactPhone,
+      failOpenEnabled: auditFailOpen,
+    });
+    const knownCustomer = failOpenOptions.knownCustomer;
+    let routing = canAutoRoute(v2, {
       contactPhone,
       addressValidation: effectiveAv,
-      failOpen: auditFailOpen,
-      callerAni: contactPhone,
-      knownCustomer,
+      ...failOpenOptions,
     });
+    // The live path never stops at canAutoRoute: a fail-open allow whose V1
+    // address conflicts with the on-file one is a NEW address and is demoted
+    // back to review. Auditing without it counts those as auto-routes.
+    routing = demoteFailOpenOnV1AddressConflict(routing, parseJson(r.ai_extraction) || {}, knownCaller);
     const v2WouldCreate = routing.allowed;
     const v1DidCreate = v1CreatedSid.has(r.twilio_call_sid);
 

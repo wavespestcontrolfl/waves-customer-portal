@@ -638,7 +638,7 @@ function avVerdictForExtraction(storedAv, verdictExtraction, candidateExtraction
   return key(a) === key(b) ? storedAv : null;
 }
 
-function routeForV2(extraction, contactPhone, helpers, addressValidation = null, failOpenContext = {}) {
+function routeForV2(extraction, contactPhone, helpers, addressValidation = null, failOpenContext = {}, conflictCheck = null) {
   if (!extraction) return { allowed: false, reason: 'no_extraction', flags: [] };
   // The stored AV verdict rides along (codex round-10 P1): since the central
   // address-trust gate (2026-08-01), canAutoRoute without a verdict returns
@@ -655,7 +655,13 @@ function routeForV2(extraction, contactPhone, helpers, addressValidation = null,
   const modelFlags = helpers.suppressAddressFlagsForAV(extraction.triage_flags || [], addressValidation);
   const deterministicFlags = helpers.computeDeterministicTriageFlags(extraction, { contactPhone, addressValidation });
   const flags = helpers.mergeTriageFlags(modelFlags, deterministicFlags);
-  const route = helpers.canAutoRoute(extraction, { contactPhone, addressValidation, ...failOpenContext });
+  let route = helpers.canAutoRoute(extraction, { contactPhone, addressValidation, ...failOpenContext });
+  // The live path never stops at canAutoRoute: a fail-open allow whose V1
+  // address conflicts with the on-file one is a NEW address and is demoted
+  // back to review. Replaying without it over-counts auto-routes.
+  if (conflictCheck) {
+    route = conflictCheck.demote(route, conflictCheck.extractedV1, conflictCheck.knownCaller);
+  }
   return {
     allowed: !!route.allowed,
     reason: route.allowed ? 'allowed' : (route.reason || 'blocked'),
@@ -934,21 +940,24 @@ async function replayCall(call, context) {
   // same env gate, the caller ANI, and whether the linked customer has a
   // verified on-file address (codex round-21 P2). Read-only; a lookup failure
   // degrades to no context, which is the pre-existing (stricter) behavior.
-  const auditFailOpen = process.env.GATE_CALL_FAIL_OPEN_BOOKING === 'true';
+  // Production's own builder, not an approximation: fail-open is inbound-only
+  // and the on-file lane is limited to actively-served pipeline stages, so a
+  // local "has an address" test over-granted it (local pre-push audit P1).
   const linkedCustomer = call.customer_id
     ? await db('customers').where({ id: call.customer_id })
-      .whereNotNull('address_line1').where('address_line1', '!=', '')
-      .first('id')
+      .first('id', 'pipeline_stage', 'address_line1', 'address_line2', 'city', 'state', 'zip')
       .catch(() => null)
     : null;
-  const failOpenContext = {
-    failOpen: auditFailOpen,
-    callerAni: contactPhone,
-    knownCustomer: call.customer_id ? (linkedCustomer ? { hasAddress: true } : {}) : null,
-  };
+  const { knownCaller, options: failOpenContext } = CRP.buildFailOpenRoutingContext({
+    call,
+    customer: linkedCustomer,
+    contactPhone,
+    failOpenEnabled: process.env.GATE_CALL_FAIL_OPEN_BOOKING === 'true',
+  });
   // The verdict was computed for the persisted (prior) extraction — it always
   // applies to priorV2 by construction.
-  const priorV2Route = priorV2Valid ? routeForV2(priorV2, contactPhone, helpers, storedAv, failOpenContext) : null;
+  const conflictCheck = { demote: CRP.demoteFailOpenOnV1AddressConflict, extractedV1: legacyFlat, knownCaller };
+  const priorV2Route = priorV2Valid ? routeForV2(priorV2, contactPhone, helpers, storedAv, failOpenContext, conflictCheck) : null;
   const scheduled = await findLegacyScheduledService(db, call, scheduledColumns);
 
   let transcriptForExtraction = call.transcription;
@@ -1008,7 +1017,7 @@ async function replayCall(call, context) {
   const currentRoute = currentExtraction
     ? routeForV2(currentExtraction, contactPhone, helpers,
       avVerdictForExtraction(storedAv, priorV2Valid ? priorV2 : null, currentExtraction, helpers),
-      failOpenContext)
+      failOpenContext, conflictCheck)
     : { allowed: false, reason: current.status, flags: [] };
 
   const legacyFieldVariances = currentFlat ? compareFlatFields(legacyFlat, currentFlat, includeValues) : [];
