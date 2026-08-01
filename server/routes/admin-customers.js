@@ -2328,6 +2328,12 @@ router.get('/:id', async (req, res, next) => {
         property: { type: c.property_type, lawnType: c.lawn_type, sqft: c.property_sqft, lotSqft: c.lot_sqft, palmCount: c.palm_count },
         tier: c.waveguard_tier, monthlyRate: parseFloat(c.monthly_rate || 0),
         billingMode: c.billing_mode || null,
+        // Billing pause. Set when autopay's 3-retry ladder exhausts
+        // (billing-cron); until now nothing in the product ever showed it on
+        // the customer record or cleared it, so a paused customer's dues
+        // stopped permanently and the only fix was editing the row by hand.
+        servicePausedAt: c.service_paused_at || null,
+        servicePauseReason: c.service_pause_reason || null,
         memberSince: c.member_since, active: c.active,
         pipelineStage: c.pipeline_stage, leadScore: c.lead_score,
         leadSource: c.lead_source, leadSourceDetail: c.lead_source_detail,
@@ -3027,6 +3033,67 @@ router.put('/:id/stage', requireAdmin, async (req, res, next) => {
     }
 
     res.json({ success: true });
+  } catch (err) { next(err); }
+});
+
+/**
+ * POST /api/admin/customers/:id/resume-service — clear a billing pause.
+ *
+ * billing-cron sets customers.service_paused_at + service_pause_reason when
+ * autopay's 3-retry ladder exhausts, and the monthly cron then skips that
+ * customer (.whereNull('service_paused_at')). Migration 20260418000002
+ * described an admin action to unset it — that action was never built, so
+ * the pause was permanent: dues stopped for good even after the customer
+ * paid and fixed their card, and the only remedy was a hand-edited row.
+ *
+ * Resuming does NOT bill arrears. processMonthlyBilling charges only on the
+ * customer's billing_day (isBillingDayMatch) and skips anyone already
+ * charged for the current month key, so a customer paused for three months
+ * is charged exactly once, on their next billing day. The unpaid obligation
+ * from the original failure stays where it is — dunning owns that, not this.
+ *
+ * Deliberately manual: no automatic resume-on-payment. Whether a payment
+ * should silently restart recurring billing is an owner policy call, not a
+ * default this endpoint gets to make.
+ */
+router.post('/:id/resume-service', requireAdmin, async (req, res, next) => {
+  try {
+    const customer = await db('customers').where({ id: req.params.id }).whereNull('deleted_at').first();
+    if (!customer) return res.status(404).json({ error: 'Customer not found' });
+
+    // Idempotent: clicking twice, or racing another admin, is a no-op rather
+    // than a spurious audit entry.
+    if (!customer.service_paused_at) {
+      return res.json({ success: true, resumed: false, reason: 'not_paused', servicePausedAt: null });
+    }
+
+    const pausedAt = customer.service_paused_at;
+    const pauseReason = customer.service_pause_reason || null;
+
+    // Guard on the pause still being present so two concurrent clicks
+    // produce one audit row, not two.
+    const cleared = await db('customers')
+      .where({ id: req.params.id })
+      .whereNotNull('service_paused_at')
+      .update({ service_paused_at: null, service_pause_reason: null });
+    if (!cleared) {
+      return res.json({ success: true, resumed: false, reason: 'not_paused', servicePausedAt: null });
+    }
+
+    const pausedSince = new Date(pausedAt).toISOString().slice(0, 10);
+    await db('customer_interactions').insert({
+      customer_id: req.params.id,
+      interaction_type: 'note',
+      subject: 'Billing resumed',
+      body: `Billing pause cleared (paused ${pausedSince}${pauseReason ? `, reason: ${pauseReason}` : ''}). `
+        + 'Monthly dues resume on the next billing day; no back-billing for the paused months.'
+        + (req.body?.notes ? `\n\n${req.body.notes}` : ''),
+      admin_user_id: req.technicianId,
+    }).catch((err) => logger.warn(`[customers] resume-service audit note failed for ${req.params.id}: ${err.message}`));
+
+    logger.info(`[customers] Billing resumed for customer ${req.params.id} (was paused ${pausedSince}, reason ${pauseReason || 'none'})`);
+
+    res.json({ success: true, resumed: true, pausedSince, pauseReason, servicePausedAt: null });
   } catch (err) { next(err); }
 });
 

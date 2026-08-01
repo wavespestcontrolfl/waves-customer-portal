@@ -4636,6 +4636,28 @@ export default function Customer360ProfileV2({
       .catch(() => setPayers([]));
   }, []);
 
+  // Clearing a billing pause. billing-cron sets service_paused_at when
+  // autopay's 3-retry ladder exhausts and then skips that customer forever;
+  // nothing in the product could clear it before this, so the only remedy
+  // was editing the row by hand.
+  const [resumingBilling, setResumingBilling] = useState(false);
+  const [resumeBillingErr, setResumeBillingErr] = useState("");
+
+  const resumeBilling = async () => {
+    setResumingBilling(true);
+    setResumeBillingErr("");
+    try {
+      await adminFetch(`/admin/customers/${customerId}/resume-service`, {
+        method: "POST",
+      });
+      await reloadCustomer();
+    } catch (err) {
+      setResumeBillingErr(err.message || "Resume failed");
+    } finally {
+      setResumingBilling(false);
+    }
+  };
+
   const savePayer = async (payerId) => {
     setPayerSaving(true);
     setProfileActionErr("");
@@ -5774,6 +5796,41 @@ export default function Customer360ProfileV2({
                 <div>
                   {" "}
                   <SectionTitle>Billing Summary</SectionTitle>{" "}
+                  {c.servicePausedAt && (
+                    <div
+                      role="alert"
+                      className="mb-3 rounded border border-hairline p-2.5"
+                    >
+                      <div className="text-12 font-medium text-alert-fg">
+                        Billing paused since {fmtDate(c.servicePausedAt)}
+                      </div>
+                      <div className="text-12 text-ink-secondary mt-0.5">
+                        Monthly dues are not being collected
+                        {c.servicePauseReason === "autopay_final_failure"
+                          ? " — autopay failed three times"
+                          : ""}
+                        . Visits are unaffected. Resuming collects on the next
+                        billing day only; the paused months are not
+                        back-billed.
+                      </div>
+                      {isAdmin && (
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          className="mt-2"
+                          onClick={resumeBilling}
+                          disabled={resumingBilling}
+                        >
+                          {resumingBilling ? "Resuming…" : "Resume billing"}
+                        </Button>
+                      )}
+                      {resumeBillingErr && (
+                        <div className="text-12 text-alert-fg mt-1">
+                          {resumeBillingErr}
+                        </div>
+                      )}
+                    </div>
+                  )}
                   <div className="grid grid-cols-2 gap-2 mb-3">
                     {" "}
                     <StatCardV2
