@@ -1173,6 +1173,13 @@ module.exports = {
   cardHoldReminderNote,
   isWithinCancelWindow,
   settleNoShowFee,
+  // Shared with the appointment-card-request fee rail, which mirrors this
+  // rail's postures and must never drift from it: the fee-window guards and
+  // the canonical fee-receipt sender (one receipt/channel policy for every
+  // no-show fee, whichever rail charged it).
+  CARD_HOLD_POST_START_GRACE_MS,
+  NO_SHOW_FEE_MAX_AGE_MS,
+  sendNoShowFeeReceipt,
   _private: {
     cardHoldIntentMatchesEstimate,
     holdGeneration,

@@ -2213,16 +2213,34 @@ describe('completion route wiring (source contracts)', () => {
     expect(source).toMatch(/invoice\.payer_id && !payerInvoiceAlreadyDelivered && !isBackfillCompletion/);
   });
 
-  test('backfill + saved payment method never auto-charges (per-application rail gated off)', () => {
-    // The per-application saved-card/ACH rail — and with it the receipt
-    // enqueue and combined-receipt arming that only happen inside it — runs
-    // exclusively for non-backfill completions. Invoice minting is untouched
+  test('backfill + saved payment method never auto-charges (completion rail gated off)', () => {
+    // The completion saved-card/ACH rail (per-application AND the
+    // appointment-card one-time lane) — and with it the receipt enqueue and
+    // combined-receipt arming that only happen inside it — runs exclusively
+    // for non-backfill completions. Invoice minting is untouched
     // (shouldInvoice runs earlier), so a backfill invoice still mints, open
     // and uncharged, for operator collection.
-    expect(source).toMatch(/if \(!isBackfillCompletion\n\s*&& perApplicationBilling && visitPerformed && invoice\?\.id && !alreadyPaid && !invoice\.payer_id/);
+    expect(source).toMatch(/if \(!isBackfillCompletion\n\s*&& \(perApplicationBilling \|\| apptCardOneTimeCharge\) && visitPerformed && invoice\?\.id && !alreadyPaid && !invoice\.payer_id/);
     // autoChargedReceiptPending starts false and is only ever set inside the
     // gated rail — no charge, no combined receipt claim.
     expect(source).toMatch(/let autoChargedReceiptPending = false;/);
+  });
+
+  test('appointment-card one-time lane: gated, hold-lane-exclusive, capped at the stamped price only', () => {
+    // Fail-closed gate read + completed/satisfied row + no hold row.
+    expect(source).toMatch(/isEnabled\('apptCardCompletionCharge'\)/);
+    expect(source).toMatch(/\.whereIn\('status', \['completed', 'satisfied'\]\)/);
+    expect(source).toMatch(/apptCardOneTimeCharge = !!laneRow && !holdRow;/);
+    // One-time visits only, never the other explicit billing lanes.
+    expect(source).toMatch(/!perApplicationBilling && !annualPrepayBilling && !explicitMembershipLane\n\s*&& svc\.is_recurring !== true/);
+    // The per-application acceptance-fee fallback and the setup-fee
+    // allowances never widen this lane's cap.
+    expect(source).toMatch(/: \(perApplicationBilling && svc\.cust_per_application_fee != null/);
+    expect(source).toMatch(/if \(perApplicationBilling && !acceptMintedInvoice\) \{/);
+    expect(source).toMatch(/if \(perApplicationBilling && \(acceptMintedInvoice \|\| planChoiceSetupFeeSelected\)\) \{/);
+    // Autopay-ledger entries name the actual lane.
+    expect(source).toMatch(/const completionChargeSource = perApplicationBilling \? 'per_application_completion' : 'appointment_card_completion';/);
+    expect(source).not.toMatch(/details: \{ source: 'per_application_completion'/);
   });
 
   test('backfill mints the digital card quietly — card.issued email suppressed', () => {
@@ -2563,8 +2581,13 @@ describe('completion route wiring (source contracts)', () => {
     const postCommitGates = [
       // account-credit auto-apply
       'if (!isBackfillCompletion\n      && invoice?.id && !alreadyPaid && !invoice.payer_id',
-      // per-application saved-card / ACH auto-charge
-      'if (!isBackfillCompletion\n      && perApplicationBilling && visitPerformed',
+      // completion saved-card / ACH auto-charge (per-application OR the
+      // appointment-card one-time lane — one shared rail, one backfill gate)
+      'if (!isBackfillCompletion\n      && (perApplicationBilling || apptCardOneTimeCharge) && visitPerformed',
+      // appointment-card one-time lane derivation (read-only, but its
+      // backfill-skip log reads isBackfillCompletion so it must sit after
+      // the re-derivation too)
+      'let apptCardOneTimeCharge = false;',
       // card-hold charge
       '} else if (isBackfillCompletion) {',
       // digital-business-card issued email

@@ -2078,10 +2078,22 @@ router.patch('/:serviceId/note', async (req, res, next) => {
 // and whether cancelling RIGHT NOW would charge the late-cancel fee. The
 // cancel UIs call this before the status flip so they only ask the
 // business-initiated-waive question when a fee would actually fire.
+// Covers BOTH fee lanes — the estimate card hold and the appointment-card
+// (/secure) rail — merged so the client confirm prompts work unchanged;
+// the lanes are mutually exclusive per visit (the appointment rail skips
+// any visit with a hold row).
 router.get('/:serviceId/card-hold', async (req, res, next) => {
   try {
     const CardHolds = require('../services/estimate-card-holds');
-    res.json(await CardHolds.cardHoldCancelPreview(req.params.serviceId));
+    const holdPreview = await CardHolds.cardHoldCancelPreview(req.params.serviceId);
+    if (holdPreview.held) return res.json(holdPreview);
+    const ApptCardRequests = require('../services/appointment-card-request');
+    const apptPreview = await ApptCardRequests.appointmentCardCancelPreview(req.params.serviceId);
+    res.json({
+      held: apptPreview.secured === true,
+      feeApplies: apptPreview.feeApplies === true,
+      ...(apptPreview.feeAmount != null ? { feeAmount: apptPreview.feeAmount } : {}),
+    });
   } catch (err) { next(err); }
 });
 
@@ -2310,12 +2322,22 @@ router.put('/:serviceId/status', async (req, res, next) => {
       // ONE_TIME_CARD_HOLD; best-effort — never blocks the committed cancels.
       try {
         const CardHolds = require('../services/estimate-card-holds');
+        const ApptCardRequests = require('../services/appointment-card-request');
         const waiveFee = req.techRole === 'admin' && req.body?.waiveCardHoldFee === true;
         for (const target of targets) {
-          await CardHolds.handleCardHoldCancellation({
+          const holdResult = await CardHolds.handleCardHoldCancellation({
             scheduledServiceId: target.id,
             waiveFee,
           });
+          // Appointment-card fee rail fallback: visits with no hold row may
+          // still carry the /secure lane's agreed fee (mutually exclusive
+          // lanes — the rail itself re-checks). Same waive flag.
+          if (holdResult?.reason === 'no_hold') {
+            await ApptCardRequests.handleAppointmentCardCancellation({
+              scheduledServiceId: target.id,
+              waiveFee,
+            });
+          }
         }
       } catch (e) { logger.error(`[admin-dispatch] series cancellation card-hold handling failed: ${e.message}`); }
 
@@ -2575,10 +2597,20 @@ router.put('/:serviceId/status', async (req, res, next) => {
       // hold exists. Best-effort — never block the committed status change.
       try {
         const CardHolds = require('../services/estimate-card-holds');
-        await CardHolds.handleCardHoldCancellation({
+        const waiveFee = req.techRole === 'admin' && req.body?.waiveCardHoldFee === true;
+        const holdResult = await CardHolds.handleCardHoldCancellation({
           scheduledServiceId: svc.id,
-          waiveFee: req.techRole === 'admin' && req.body?.waiveCardHoldFee === true,
+          waiveFee,
         });
+        // Appointment-card fee rail fallback for visits with no hold row
+        // (mutually exclusive lanes — the rail re-checks). Same waive flag.
+        if (holdResult?.reason === 'no_hold') {
+          const ApptCardRequests = require('../services/appointment-card-request');
+          await ApptCardRequests.handleAppointmentCardCancellation({
+            scheduledServiceId: svc.id,
+            waiveFee,
+          });
+        }
       } catch (e) { logger.error(`[admin-dispatch] cancel card-hold handling failed: ${e.message}`); }
 
       try {
@@ -2642,6 +2674,17 @@ router.put('/:serviceId/status', async (req, res, next) => {
         const feeResult = await CardHolds.chargeNoShowFee({ scheduledServiceId: svc.id, reason: 'no_show' });
         if (feeResult?.charged === true) noShowFeeOutcome = 'charged';
         else if (feeResult?.reason === 'charge_review') noShowFeeOutcome = 'review';
+        // Appointment-card fee rail fallback: visits secured via /secure
+        // carry the disclosed fee on appointment_card_requests instead of a
+        // hold row (mutually exclusive lanes — the rail re-checks). Runs
+        // only when the hold rail saw nothing chargeable for lane reasons
+        // (no hold, or the hold flag itself is off).
+        else if (['no_hold', 'feature_disabled'].includes(feeResult?.reason)) {
+          const ApptCardRequests = require('../services/appointment-card-request');
+          const apptFeeResult = await ApptCardRequests.chargeAppointmentNoShowFee({ scheduledServiceId: svc.id, reason: 'no_show' });
+          if (apptFeeResult?.charged === true) noShowFeeOutcome = 'charged';
+          else if (apptFeeResult?.reason === 'charge_review') noShowFeeOutcome = 'review';
+        }
       } catch (e) { logger.error(`[admin-dispatch] no-show card-hold fee charge failed: ${e.message}`); }
 
       // Notify the customer we missed them and invite a reschedule.
@@ -7209,18 +7252,52 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // actually delivers, the completion SMS goes report-only.
     let autoChargedReceiptPending = false;
     let paymentFailedSmsContext = null;
+    // Appointment-card one-time completion lane (owner-approved 2026-08-01,
+    // GATE_APPT_CARD_COMPLETION_CHARGE): the /secure lane's invite promises
+    // "your card is only charged after service is completed" — for a
+    // ONE-TIME visit whose card came through that lane (a completed or
+    // satisfied appointment_card_requests row: page consent or auto-secure
+    // under the same v10 enrollment consent), the completion invoice
+    // auto-charges through the SAME rail as per-application billing, capped
+    // at the visit's stamped estimated_price. Explicit membership /
+    // annual-prepay / per-application lanes are excluded (they have their
+    // own billing), as is any visit with an estimate_card_holds row (the
+    // hold rail owns estimate-flow one-time bookings). Every failure mode
+    // fails toward NOT auto-charging — the pay-link flow is the unchanged
+    // fallback.
+    let apptCardOneTimeCharge = false;
+    if (!perApplicationBilling && !annualPrepayBilling && !explicitMembershipLane
+      && svc.is_recurring !== true
+      && visitPerformed && invoice?.id && !alreadyPaid && !invoice.payer_id
+      && customerAutopayActive) {
+      try {
+        if (require('../config/feature-gates').isEnabled('apptCardCompletionCharge')) {
+          const laneRow = await db('appointment_card_requests')
+            .where({ scheduled_service_id: svc.id })
+            .whereIn('status', ['completed', 'satisfied'])
+            .first('id');
+          const holdRow = laneRow ? await db('estimate_card_holds')
+            .where({ scheduled_service_id: svc.id })
+            .first('id') : null;
+          apptCardOneTimeCharge = !!laneRow && !holdRow;
+        }
+      } catch (e) {
+        logger.warn(`[dispatch] appointment-card completion-lane check failed for visit ${svc.id} — no auto-charge: ${e.message}`);
+      }
+    }
     // Backfill closeouts never move money automatically: the visit is days
     // old and an off-session charge (plus the receipt/decline texts it can
     // spawn) would hit the customer with zero fresh context. Skipping the
     // whole rail leaves the exact no-chargeable-method posture — invoice
     // open and collectible, autoChargedReceiptPending/paymentFailedSmsContext
     // untouched — for explicit operator collection.
-    if (isBackfillCompletion && perApplicationBilling && visitPerformed && invoice?.id && !alreadyPaid
+    if (isBackfillCompletion && (perApplicationBilling || apptCardOneTimeCharge) && visitPerformed && invoice?.id && !alreadyPaid
       && customerAutopayActive) {
-      logger.info(`[dispatch] backfill completion: per-application auto-charge skipped for visit ${svc.id} — invoice ${invoice.id} left open for operator collection`);
+      logger.info(`[dispatch] backfill completion: completion auto-charge skipped for visit ${svc.id} — invoice ${invoice.id} left open for operator collection`);
     }
+    const completionChargeSource = perApplicationBilling ? 'per_application_completion' : 'appointment_card_completion';
     if (!isBackfillCompletion
-      && perApplicationBilling && visitPerformed && invoice?.id && !alreadyPaid && !invoice.payer_id
+      && (perApplicationBilling || apptCardOneTimeCharge) && visitPerformed && invoice?.id && !alreadyPaid && !invoice.payer_id
       && !['paid', 'prepaid', 'void', 'processing'].includes(String(invoice.status || '').toLowerCase())
       && customerAutopayActive) {
       // Above-quote guardrail (card-on-file spec §3.6, owner default = HARD
@@ -7232,9 +7309,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // pre-tax SUBTOTAL is the comparator. An over-quote invoice routes to
       // office review and the customer keeps the normal pay-link flow —
       // never an unauthorized amount off-session.
+      // The appointment-card lane caps STRICTLY at the visit's stamped
+      // price — the per-application acceptance-fee fallback and the
+      // setup-fee allowances below are per-application concepts and never
+      // widen this lane's cap.
       const acceptedPerVisit = svc.estimated_price != null && Number(svc.estimated_price) > 0
         ? Number(svc.estimated_price)
-        : (svc.cust_per_application_fee != null && Number(svc.cust_per_application_fee) > 0
+        : (perApplicationBilling && svc.cust_per_application_fee != null && Number(svc.cust_per_application_fee) > 0
           ? Number(svc.cust_per_application_fee) : null);
       const invoiceSubtotal = invoice.subtotal != null ? Number(invoice.subtotal) : Number(invoice.total || 0);
       // Manual-discount accepts gross the service line up and bring it back
@@ -7261,7 +7342,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // reuses an already-minted invoice still gets the allowance). Lookup
       // failure fails toward office review, like everything else here.
       let planChoiceSetupFeeSelected = false;
-      if (!acceptMintedInvoice) {
+      if (perApplicationBilling && !acceptMintedInvoice) {
         try {
           // The selection row lives on WHICHEVER series visit the card
           // link was sent for (parent or child — Codex #2980 r2), so the
@@ -7285,7 +7366,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         if (Number.isFinite(sharedFee) && sharedFee > 0) WAVEGUARD_SETUP_FEE_ALLOWANCE = sharedFee;
       } catch (e) { /* keep the conservative literal */ }
       let setupFeeAllowance = 0;
-      if (acceptMintedInvoice || planChoiceSetupFeeSelected) {
+      if (perApplicationBilling && (acceptMintedInvoice || planChoiceSetupFeeSelected)) {
         try {
           const rawLines = invoice.line_items;
           const lines = typeof rawLines === 'string' ? JSON.parse(rawLines) : (rawLines || []);
@@ -7308,7 +7389,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // No accepted amount to cap against (multi-service plan with no
         // row price or customer fee) — never auto-charge uncapped
         // (Codex #2680): route to office review, keep the pay-link flow.
-        logger.warn(`[dispatch] per-application auto-charge skipped for visit ${svc.id}: no accepted per-visit amount on file to cap against — routed to office review`);
+        logger.warn(`[dispatch] completion auto-charge (${completionChargeSource}) skipped for visit ${svc.id}: no accepted per-visit amount on file to cap against — routed to office review`);
         try {
           await require('../services/notification-service').notifyAdmin(
             'billing',
@@ -7318,7 +7399,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           );
         } catch (e) { logger.warn(`[dispatch] uncapped-charge review alert failed: ${e.message}`); }
       } else if (netInvoiceSubtotal > capCeiling + 0.005) {
-        logger.warn(`[dispatch] per-application auto-charge skipped for visit ${svc.id}: invoice subtotal $${netInvoiceSubtotal} (net of discounts) exceeds accepted per-visit $${acceptedPerVisit} — routed to office review`);
+        logger.warn(`[dispatch] completion auto-charge (${completionChargeSource}) skipped for visit ${svc.id}: invoice subtotal $${netInvoiceSubtotal} (net of discounts) exceeds accepted per-visit $${acceptedPerVisit} — routed to office review`);
         try {
           await require('../services/notification-service').notifyAdmin(
             'billing',
@@ -7369,7 +7450,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               && !invoice.receipt_sent_at;
             try {
               await require('../services/autopay-log').logAutopay(svc.customer_id, 'charge_success', {
-                details: { source: 'per_application_completion', invoice_id: invoice.id, scheduled_service_id: svc.id },
+                details: { source: completionChargeSource, invoice_id: invoice.id, scheduled_service_id: svc.id },
               });
             } catch (e) { /* log-only */ }
           } else if (freshStatus === 'processing') {
@@ -7382,7 +7463,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             payUrl = null;
             try {
               await require('../services/autopay-log').logAutopay(svc.customer_id, 'charge_success', {
-                details: { source: 'per_application_completion', invoice_id: invoice.id, scheduled_service_id: svc.id, ach_processing: true },
+                details: { source: completionChargeSource, invoice_id: invoice.id, scheduled_service_id: svc.id, ach_processing: true },
               });
             } catch (e) { /* log-only */ }
           }
@@ -7438,9 +7519,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           } catch (parkErr) {
             logger.error(`[dispatch] failed to park orphaned invoice ${invoice?.id} as processing: ${parkErr.message}`);
           }
-          logger.error(`[dispatch] per-application autopay charge fenced alternate collection for invoice ${invoice?.id} (${chargeErr.code}, PI ${chargeErr.stripePaymentIntentId || 'unknown'}, reconciliation=${reconciliationRequired}, fallbackSuppressed=${fallbackPolicy.suppressFallback})`);
+          logger.error(`[dispatch] completion autopay charge (${completionChargeSource}) fenced alternate collection for invoice ${invoice?.id} (${chargeErr.code}, PI ${chargeErr.stripePaymentIntentId || 'unknown'}, reconciliation=${reconciliationRequired}, fallbackSuppressed=${fallbackPolicy.suppressFallback})`);
         } else {
-          logger.warn(`[dispatch] per-application autopay charge failed for invoice ${invoice?.id} (falls back to pay link): ${chargeErr.message}`);
+          logger.warn(`[dispatch] completion autopay charge (${completionChargeSource}) failed for invoice ${invoice?.id} (falls back to pay link): ${chargeErr.message}`);
           // Arm the decline notice ONLY off the charge service's structured
           // decline facts — a real processor decline on the confirm. Guard
           // errors ("Invoice already paid", active-PI races), config and DB
@@ -7454,7 +7535,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         }
         try {
           await require('../services/autopay-log').logAutopay(svc.customer_id, 'charge_failed', {
-            details: { source: 'per_application_completion', invoice_id: invoice?.id, scheduled_service_id: svc.id, orphaned: chargeErr.code === 'STRIPE_CHARGED_DB_FAILED', collection_suppressed: fallbackPolicy.suppressFallback, collection_fenced: suppressAlternateCollection, reconciliation_required: reconciliationRequired, error: String(chargeErr.message || '').slice(0, 300) },
+            details: { source: completionChargeSource, invoice_id: invoice?.id, scheduled_service_id: svc.id, orphaned: chargeErr.code === 'STRIPE_CHARGED_DB_FAILED', collection_suppressed: fallbackPolicy.suppressFallback, collection_fenced: suppressAlternateCollection, reconciliation_required: reconciliationRequired, error: String(chargeErr.message || '').slice(0, 300) },
           });
         } catch (e) { /* log-only */ }
       } // end try/catch — paired with the above-quote guard's else

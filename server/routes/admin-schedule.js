@@ -4410,10 +4410,20 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
             // Best-effort.
             try {
               const CardHolds = require('../services/estimate-card-holds');
-              await CardHolds.handleCardHoldCancellation({
+              const waiveFee = payload?.waiveCardHoldFee === true;
+              const holdResult = await CardHolds.handleCardHoldCancellation({
                 scheduledServiceId: id,
-                waiveFee: payload?.waiveCardHoldFee === true,
+                waiveFee,
               });
+              // Appointment-card fee rail fallback for visits with no hold
+              // row (mutually exclusive lanes — the rail re-checks).
+              if (holdResult?.reason === 'no_hold') {
+                const ApptCardRequests = require('../services/appointment-card-request');
+                await ApptCardRequests.handleAppointmentCardCancellation({
+                  scheduledServiceId: id,
+                  waiveFee,
+                });
+              }
             } catch (e) { logger.error(`[admin-schedule] bulk-cancel card-hold handling failed: ${e.message}`); }
             break;
           }
@@ -7165,10 +7175,20 @@ router.put('/:id/status', async (req, res, next) => {
       // block the committed cancel.
       try {
         const CardHolds = require('../services/estimate-card-holds');
-        await CardHolds.handleCardHoldCancellation({
+        const waiveFee = req.techRole === 'admin' && req.body?.waiveCardHoldFee === true;
+        const holdResult = await CardHolds.handleCardHoldCancellation({
           scheduledServiceId: svc.id,
-          waiveFee: req.techRole === 'admin' && req.body?.waiveCardHoldFee === true,
+          waiveFee,
         });
+        // Appointment-card fee rail fallback for visits with no hold row
+        // (mutually exclusive lanes — the rail re-checks). Same waive flag.
+        if (holdResult?.reason === 'no_hold') {
+          const ApptCardRequests = require('../services/appointment-card-request');
+          await ApptCardRequests.handleAppointmentCardCancellation({
+            scheduledServiceId: svc.id,
+            waiveFee,
+          });
+        }
       } catch (e) { logger.error(`[admin-schedule] cancel card-hold handling failed: ${e.message}`); }
     }
 

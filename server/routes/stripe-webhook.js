@@ -291,6 +291,29 @@ async function recordCardHoldNoShowFeePayment(paymentIntent) {
   }
 }
 
+// Sibling of recordCardHoldNoShowFeePayment for fees charged by the
+// appointment-card-request rail (visits secured via /secure with no
+// estimate card hold). Same contract: settle as a paid refundable fee
+// invoice, orphan-record when the customer pointer is missing, throw so
+// Stripe retries on settlement failure.
+async function recordAppointmentCardNoShowFeePayment(paymentIntent) {
+  const piId = paymentIntent.id;
+  const amount = (paymentIntent.amount_received || paymentIntent.amount || 0) / 100;
+  const customerId = paymentIntent.metadata?.waves_customer_id || null;
+  if (!customerId) {
+    logger.warn(`[stripe-webhook] appointment-card no-show fee PI ${piId} missing waves_customer_id — recording orphan`);
+    await recordOrphanSucceededPaymentIntent(paymentIntent, amount, 'appointment_card_no_show_fee_no_customer');
+    return;
+  }
+  try {
+    const ApptCardRequests = require('../services/appointment-card-request');
+    await ApptCardRequests.settleAppointmentNoShowFee(paymentIntent);
+  } catch (err) {
+    logger.error(`[stripe-webhook] failed to settle appointment-card no-show fee ${piId}: ${err.message}`);
+    throw err;
+  }
+}
+
 async function recordOrphanSucceededPaymentIntent(paymentIntent, amount, reason) {
   const latestCharge = paymentIntent.latest_charge;
   const stripeChargeId = typeof latestCharge === 'string'
@@ -903,6 +926,14 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
   // invoice/tender logic (and the orphan-charge fallback).
   if (paymentIntent.metadata?.purpose === 'card_hold_no_show_fee') {
     await recordCardHoldNoShowFeePayment(paymentIntent);
+    return;
+  }
+
+  // Appointment-card-lane no-show / late-cancel fees — the sibling rail for
+  // visits secured via /secure (appointment_card_requests). Same settlement
+  // contract, own purpose string so ledger metadata names the actual lane.
+  if (paymentIntent.metadata?.purpose === 'appointment_card_no_show_fee') {
+    await recordAppointmentCardNoShowFeePayment(paymentIntent);
     return;
   }
 

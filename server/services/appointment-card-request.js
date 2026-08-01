@@ -991,6 +991,27 @@ async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, set
       }
     }
 
+    // Frozen fee terms (fee rail, owner-approved 2026-08-01): the /secure
+    // page rendered cancelFeeNote from live config — freeze exactly those
+    // terms onto the row at the consent moment, so a later config change
+    // never moves an agreed fee (card-hold frozen-terms discipline). Only
+    // COMPLETED rows are stamped: a `satisfied` row was auto-secured from a
+    // saved card and never saw the disclosure, so it must never carry (or be
+    // charged) a fee. Fee configured off (cancelFeeText null) → no stamp →
+    // the rail skips this visit.
+    const frozenFeeTerms = {};
+    try {
+      const { cardHoldNoShowFee, cardHoldCancelWindowHours } = require('./estimate-card-holds');
+      const feeAmount = Number(cardHoldNoShowFee());
+      if (feeAmount > 0) {
+        frozenFeeTerms.no_show_fee_amount = feeAmount;
+        frozenFeeTerms.cancel_window_hours = Number(cardHoldCancelWindowHours()) > 0
+          ? Number(cardHoldCancelWindowHours()) : 24;
+        frozenFeeTerms.fee_agreed_at = new Date();
+      }
+    } catch (err) {
+      logger.warn(`[appt-card-request] fee-term freeze unavailable for request ${request.id} — completing without fee terms: ${err.message}`);
+    }
     await db('appointment_card_requests')
       .where({ id: request.id, status: 'completing' })
       .update({
@@ -1000,6 +1021,7 @@ async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, set
         payment_method_id: saved?.id || null,
         completed_at: new Date(),
         updated_at: new Date(),
+        ...frozenFeeTerms,
       });
     logger.info(`[appt-card-request] capture completed for visit ${request.scheduled_service_id} (request ${request.id})`);
     return { ok: true };
@@ -1150,6 +1172,347 @@ async function loadSecureCardPageData(token) {
   };
 }
 
+// ── No-show / late-cancel fee rail (owner-approved 2026-08-01) ────────────
+// The lane's SMS + /secure page disclose a late-cancel/no-show fee, but until
+// this rail the only charge path lived on estimate_card_holds — office/AI-
+// booked visits secured HERE had a disclosed fee nothing could collect.
+// Mirrors the card-hold rail's postures exactly (staleness guards, claim
+// mechanics, ambiguous-outcome parking, face-value surcharge-exempt charge,
+// paid-refundable-invoice settlement) with the appointment_card_requests row
+// as the anchor. Dark behind GATE_APPT_CARD_NO_SHOW_FEE.
+//
+// Eligibility is deliberately narrow (fail toward not charging):
+//   - status='completed' ONLY — the customer went through the /secure page,
+//     which rendered the fee disclosure; `satisfied` rows never saw it.
+//   - frozen terms present (no_show_fee_amount > 0, stamped at consent) —
+//     rows completed before the fee-terms migration are never charged.
+//   - fee_status IS NULL — one fee event per visit, ever.
+//   - NO estimate_card_holds row for the visit (any status): the hold rail
+//     owns estimate-flow bookings; two rails must never both see one visit.
+
+function isApptCardFeeRailEnabled() {
+  try {
+    return require('../config/feature-gates').isEnabled('apptCardNoShowFee');
+  } catch (err) {
+    logger.warn(`[appt-card-request] fee-rail gate read failed — treating as off: ${err.message}`);
+    return false;
+  }
+}
+
+async function feeEligibleRequestForVisit(scheduledServiceId) {
+  const request = await db('appointment_card_requests')
+    .where({ scheduled_service_id: scheduledServiceId })
+    .first();
+  if (!request) return { request: null, reason: 'no_card_request' };
+  if (request.status !== 'completed') return { request: null, reason: 'not_completed' };
+  if (!(Number(request.no_show_fee_amount) > 0)) return { request: null, reason: 'no_agreed_fee' };
+  if (!request.stripe_payment_method_id || !request.customer_id) return { request: null, reason: 'no_charge_target' };
+  if (request.fee_status) return { request: null, reason: `fee_${request.fee_status}` };
+  const hold = await db('estimate_card_holds')
+    .where({ scheduled_service_id: scheduledServiceId })
+    .first('id')
+    .catch(() => null);
+  if (hold) return { request: null, reason: 'card_hold_lane' };
+  return { request };
+}
+
+// Same window formula as the card-hold rail, with fee_agreed_at (the consent
+// moment) as the booking-age anchor: the free-cancel period a late securer
+// gets is exactly the time they've had the agreement. Missing/skewed
+// fee_agreed_at keeps the full frozen window (never wider than disclosed
+// except through the booking-age rule itself).
+function isWithinApptCancelWindow({ request, serviceStart, now = new Date() }) {
+  const windowHours = Number(request?.cancel_window_hours) > 0 ? Number(request.cancel_window_hours) : 24;
+  const start = serviceStart instanceof Date ? serviceStart : new Date(serviceStart);
+  if (Number.isNaN(start.getTime())) return false;
+  let windowMs = windowHours * 3600000;
+  const agreedAt = request?.fee_agreed_at ? new Date(request.fee_agreed_at) : null;
+  if (agreedAt && !Number.isNaN(agreedAt.getTime())) {
+    const msSinceAgreed = now.getTime() - agreedAt.getTime();
+    if (msSinceAgreed >= 0) windowMs = Math.min(windowMs, msSinceAgreed);
+  }
+  const { CARD_HOLD_POST_START_GRACE_MS } = require('./estimate-card-holds');
+  const msUntilStart = start.getTime() - now.getTime();
+  return msUntilStart > -CARD_HOLD_POST_START_GRACE_MS && msUntilStart <= windowMs;
+}
+
+async function chargeAppointmentNoShowFee({ scheduledServiceId, reason = 'no_show', serviceStart = null, now = new Date() }) {
+  if (!isApptCardFeeRailEnabled()) return { charged: false, reason: 'feature_disabled' };
+  const { request, reason: skipReason } = await feeEligibleRequestForVisit(scheduledServiceId);
+  if (!request) return { charged: false, reason: skipReason };
+  const feeAmount = Number(request.no_show_fee_amount);
+
+  // Staleness guard — identical posture to the card-hold rail: the fee is
+  // for a FRESH missed visit; cleanup of ancient rows must never bill.
+  const { NO_SHOW_FEE_MAX_AGE_MS } = require('./estimate-card-holds');
+  let start = serviceStart;
+  if (!start) {
+    try {
+      const { scheduledServiceApptTime } = require('./appointment-reminders');
+      start = await scheduledServiceApptTime(scheduledServiceId);
+    } catch (err) {
+      logger.warn(`[appt-card-request] appt-time resolution for no-show fee failed — not charging: ${err.message}`);
+    }
+  }
+  const startDate = start instanceof Date ? start : (start ? new Date(start) : null);
+  const startMs = startDate && !Number.isNaN(startDate.getTime()) ? startDate.getTime() : null;
+  if (startMs == null || now.getTime() - startMs > NO_SHOW_FEE_MAX_AGE_MS) {
+    const staleReason = startMs == null ? 'no_show_start_unresolved' : 'no_show_stale_start';
+    logger.warn(`[appt-card-request] no-show fee refused (${staleReason}) for visit ${scheduledServiceId}`);
+    try {
+      await require('./notification-service').notifyAdmin(
+        'billing',
+        'No-show fee not charged',
+        startMs == null
+          ? 'A visit was marked no-show but its scheduled time could not be resolved — the saved-card fee was NOT charged. Bill manually if the fee applies.'
+          : `A visit was marked no-show more than ${Math.round(NO_SHOW_FEE_MAX_AGE_MS / 3600000)} hours after its scheduled time — the saved-card fee was NOT charged. Bill manually if the fee applies.`,
+        {
+          link: request.customer_id ? `/admin/customers/${request.customer_id}` : '/admin/dispatch',
+          metadata: { scheduledServiceId, reason: staleReason },
+        },
+      );
+    } catch (e) { logger.warn(`[appt-card-request] stale no-show alert failed: ${e.message}`); }
+    return { charged: false, reason: staleReason };
+  }
+
+  // Atomic charge claim: NULL -> 'charging'. One fee event per visit, ever.
+  const claimed = await db('appointment_card_requests')
+    .where({ id: request.id })
+    .whereNull('fee_status')
+    .update({ fee_status: 'charging', updated_at: new Date() });
+  if (claimed !== 1) return { charged: false, reason: 'fee_claim_lost' };
+
+  // Charge FIRST (separately from the row write) so a post-charge DB failure
+  // is never confused with a pre-charge failure. Attach self-heal is
+  // idempotent — the completion tail normally attached the PM already.
+  const StripeService = require('./stripe');
+  let paymentIntent;
+  try {
+    const { attachCardHoldPaymentMethod } = require('./estimate-card-holds');
+    await attachCardHoldPaymentMethod({ customerId: request.customer_id, paymentMethodId: request.stripe_payment_method_id });
+    paymentIntent = await StripeService.chargeSavedPaymentMethodOffSession({
+      customerId: request.customer_id,
+      paymentMethodId: request.stripe_payment_method_id,
+      amountDollars: feeAmount,
+      description: 'Waves one-time visit — no-show / late-cancellation fee',
+      metadata: {
+        purpose: 'appointment_card_no_show_fee',
+        request_id: String(request.id),
+        scheduled_service_id: String(scheduledServiceId),
+        reason,
+      },
+      idempotencyKey: `appt_card_no_show_${request.id}`,
+    });
+  } catch (err) {
+    // Same triage as the card-hold rail: a DEFINITE pre-charge failure
+    // reopens the claim (safe to retry); an AMBIGUOUS connection/API error
+    // may have charged — park charge_review so a >24h retry can never mint
+    // a SECOND fee once Stripe's idempotency cache expires.
+    const errType = err.type || err.raw?.type || null;
+    const piIdFromErr = err.payment_intent?.id || err.raw?.payment_intent?.id || null;
+    const ambiguous = !piIdFromErr && ['StripeConnectionError', 'StripeAPIError'].includes(errType);
+    if (ambiguous) {
+      await db('appointment_card_requests').where({ id: request.id, fee_status: 'charging' })
+        .update({ fee_status: 'charge_review', updated_at: new Date() }).catch(() => {});
+      logger.error(`[appt-card-request] no-show fee charge AMBIGUOUS (possible charge) — parked charge_review for visit ${scheduledServiceId}: ${err.message}`);
+      return { charged: false, reason: 'charge_review', error: err.message };
+    }
+    await db('appointment_card_requests').where({ id: request.id, fee_status: 'charging' })
+      .update({ fee_status: null, updated_at: new Date() }).catch(() => {});
+    logger.error(`[appt-card-request] no-show fee charge FAILED (no charge) for visit ${scheduledServiceId}: ${err.message}`);
+    return { charged: false, reason: 'charge_failed', error: err.message };
+  }
+
+  // PI succeeded. A DB-write failure must NOT reopen the claim (Stripe's
+  // idempotency cache expires ~24h — a retry would double-charge): park
+  // charge_review keeping the PI pointer.
+  try {
+    await db('appointment_card_requests').where({ id: request.id }).update({
+      fee_status: 'charged',
+      no_show_payment_intent_id: paymentIntent?.id || null,
+      fee_charged_amount: feeAmount,
+      fee_charged_at: new Date(),
+      updated_at: new Date(),
+    });
+  } catch (writeErr) {
+    await db('appointment_card_requests').where({ id: request.id, fee_status: 'charging' })
+      .update({
+        fee_status: 'charge_review',
+        no_show_payment_intent_id: paymentIntent?.id || null,
+        fee_charged_amount: feeAmount,
+        fee_charged_at: new Date(),
+        updated_at: new Date(),
+      }).catch(() => {});
+    logger.error(`[appt-card-request] no-show fee CHARGED but DB write failed — parked charge_review (NOT retryable) for visit ${scheduledServiceId} (PI ${paymentIntent?.id})`);
+    return { charged: true, amount: feeAmount, reason: 'charge_review_write_failed' };
+  }
+  logger.info(`[appt-card-request] no-show fee charged for visit ${scheduledServiceId} ($${feeAmount}, ${reason})`);
+  return { charged: true, amount: feeAmount };
+}
+
+// Cancel-path entry, run by the same call sites as the card-hold handler
+// (which supersedes — callers try the hold rail first, and this rail's own
+// eligibility skips any visit with a hold row). waiveFee is the business-
+// initiated escape hatch: WE cancelled, so the fee event closes 'waived'
+// and can never fire later.
+async function handleAppointmentCardCancellation({ scheduledServiceId, serviceStart = null, now = new Date(), waiveFee = false }) {
+  const { request, reason: skipReason } = await feeEligibleRequestForVisit(scheduledServiceId);
+  if (!request) return { handled: false, released: true, reason: skipReason };
+  if (waiveFee) {
+    const waived = await db('appointment_card_requests').where({ id: request.id }).whereNull('fee_status')
+      .update({ fee_status: 'waived', updated_at: new Date() });
+    if (waived !== 1) {
+      // A concurrent charge claimed the row between the eligibility read and
+      // this waive — fail closed (offboarding gates its deposit refund on a
+      // clean release, mirroring the card-hold lost-race posture).
+      logger.warn(`[appt-card-request] fee waive lost a race for visit ${scheduledServiceId} — review before proceeding`);
+      return { handled: false, released: false, reason: 'waive_race_lost' };
+    }
+    logger.info(`[appt-card-request] fee waived (business-initiated cancel) for visit ${scheduledServiceId}`);
+    return { handled: true, released: true, reason: 'admin_waive' };
+  }
+  let start = serviceStart;
+  if (!start) {
+    try {
+      const { scheduledServiceApptTime } = require('./appointment-reminders');
+      start = await scheduledServiceApptTime(scheduledServiceId);
+    } catch (err) {
+      logger.warn(`[appt-card-request] appt-time resolution for cancel failed — no fee: ${err.message}`);
+    }
+  }
+  if (start && isApptCardFeeRailEnabled() && isWithinApptCancelWindow({ request, serviceStart: start, now })) {
+    return chargeAppointmentNoShowFee({ scheduledServiceId, reason: 'late_cancel', serviceStart: start, now });
+  }
+  const startDate = start instanceof Date ? start : (start ? new Date(start) : null);
+  const startPassed = startDate && !Number.isNaN(startDate.getTime()) && startDate.getTime() <= now.getTime();
+  return { handled: true, released: true, reason: startPassed ? 'cancel_past_start' : 'cancel_outside_window' };
+}
+
+// Read-only preview for the admin cancel UIs — merged into the existing
+// GET /admin/dispatch/:serviceId/card-hold response so the client confirm
+// prompts cover both lanes unchanged.
+async function appointmentCardCancelPreview(scheduledServiceId, now = new Date()) {
+  const { request } = await feeEligibleRequestForVisit(scheduledServiceId);
+  if (!request) return { secured: false, feeApplies: false };
+  let start = null;
+  try {
+    const { scheduledServiceApptTime } = require('./appointment-reminders');
+    start = await scheduledServiceApptTime(scheduledServiceId);
+  } catch (err) {
+    logger.warn(`[appt-card-request] appt-time resolution for cancel preview failed: ${err.message}`);
+  }
+  const feeApplies = isApptCardFeeRailEnabled() && !!start && isWithinApptCancelWindow({ request, serviceStart: start, now });
+  return { secured: true, feeApplies, feeAmount: Number(request.no_show_fee_amount) };
+}
+
+// Settlement: turn the bare off-session fee charge into a paid, refundable
+// fee invoice + payments row + canonical receipt — contract-for-contract
+// with the card-hold settleNoShowFee (advisory-lock serialized, in-lock
+// replay check, face value, taxRate 0, self-pay). Driven from the
+// appointment_card_no_show_fee webhook; idempotent on the PI.
+async function settleAppointmentNoShowFee(paymentIntent) {
+  const piId = paymentIntent?.id;
+  const customerId = paymentIntent?.metadata?.waves_customer_id || null;
+  if (!piId || !customerId) return { settled: false, reason: 'missing_pi_or_customer' };
+
+  // Pre-settlement refund guard — FAIL CLOSED on a retrieve error (throw so
+  // Stripe retries): settling gross would book already-refunded money.
+  const StripeService = require('./stripe');
+  let preRefundedCents = 0;
+  try {
+    const live = await StripeService.retrievePaymentIntent(piId, { expand: ['latest_charge'] });
+    const ch = live?.latest_charge;
+    if (ch && typeof ch === 'object') {
+      const chargedCents = Math.round(Number(ch.amount || 0));
+      preRefundedCents = Math.max(0, Math.round(Number(ch.amount_refunded || 0)));
+      if (ch.refunded === true || (chargedCents > 0 && preRefundedCents >= chargedCents)) {
+        logger.warn(`[appt-card-request] no-show fee fully refunded before settlement — skipping (${piId})`);
+        return { settled: false, reason: 'refunded_pre_settlement' };
+      }
+    }
+  } catch (err) {
+    logger.error(`[appt-card-request] pre-settlement refund check failed — deferring to Stripe retry (${piId}): ${err.message}`);
+    throw err;
+  }
+
+  const amount = Math.round(Number(paymentIntent.amount_received || paymentIntent.amount || 0)) / 100;
+  const reason = paymentIntent.metadata?.reason || 'no_show';
+  const requestId = paymentIntent.metadata?.request_id || null;
+  const scheduledServiceId = paymentIntent.metadata?.scheduled_service_id || null;
+  const feeLabel = reason === 'late_cancel' ? 'Late-cancellation fee' : 'No-show fee';
+
+  const InvoiceService = require('./invoice');
+  const description = `One-time visit — ${feeLabel.toLowerCase()}`;
+  const result = await db.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`appointment_card_no_show_fee:${piId}`]);
+    const existing = await trx('payments').where({ stripe_payment_intent_id: piId }).first('id');
+    if (existing) return { replay: true };
+
+    // Face value, NO tax: the fee must equal the amount disclosed + charged.
+    const inv = await InvoiceService.create({
+      database: trx,
+      customerId,
+      title: description,
+      lineItems: [{ description: `${feeLabel} — one-time visit`, quantity: 1, unit_price: amount, amount }],
+      taxRate: 0,
+      dueDate: etDateString(),
+      skipAccrual: true,
+    });
+    // SELF-PAY: charged to the homeowner's saved card — never route the fee
+    // invoice/receipt to a third-party payer.
+    await trx('invoices').where({ id: inv.id }).update({
+      status: 'paid',
+      paid_at: trx.fn.now(),
+      stripe_payment_intent_id: piId,
+      stripe_charge_id: paymentIntent.latest_charge || null,
+      payer_id: null,
+      payer_snapshot: null,
+      updated_at: trx.fn.now(),
+    });
+    await trx('payments').insert({
+      customer_id: customerId,
+      processor: 'stripe',
+      stripe_payment_intent_id: piId,
+      stripe_charge_id: paymentIntent.latest_charge || null,
+      payment_date: etDateString(),
+      amount,
+      refund_amount: preRefundedCents > 0 ? preRefundedCents / 100 : 0,
+      refund_status: preRefundedCents > 0 ? 'partial' : null,
+      status: 'paid',
+      description,
+      metadata: JSON.stringify({
+        purpose: 'appointment_card_no_show_fee',
+        invoice_id: inv.id,
+        request_id: requestId,
+        scheduled_service_id: scheduledServiceId,
+        reason,
+      }),
+    });
+    return { invoice: inv };
+  });
+  const { sendNoShowFeeReceipt } = require('./estimate-card-holds');
+  if (result.replay) {
+    try {
+      const inv = await db('invoices').where({ stripe_payment_intent_id: piId })
+        .whereNot('status', 'void').orderBy('created_at', 'desc').first('id', 'token', 'receipt_sent_at');
+      if (inv?.id && !inv.receipt_sent_at) {
+        await sendNoShowFeeReceipt({ invoice: inv, customerId, amount, feeLabel, reason });
+      }
+    } catch (err) {
+      logger.warn(`[appt-card-request] replay receipt recovery failed (non-fatal): ${err.message}`);
+    }
+    return { settled: false, replay: true };
+  }
+  const invoice = result.invoice;
+  logger.info(`[appt-card-request] no-show fee settled as paid invoice ${invoice.id} (customer ${customerId}, ${reason})`);
+  try {
+    await sendNoShowFeeReceipt({ invoice, customerId, amount, feeLabel, reason });
+  } catch (err) {
+    logger.warn(`[appt-card-request] no-show fee receipt/notify failed (non-fatal): ${err.message}`);
+  }
+  return { settled: true, invoiceId: invoice.id };
+}
+
 module.exports = {
   requestCardForAppointment,
   isAppointmentCardRequestEnabled,
@@ -1157,6 +1520,11 @@ module.exports = {
   loadSecureCardPageData,
   completeSecureCardCapture,
   completeSecureCardCaptureFromWebhook,
+  chargeAppointmentNoShowFee,
+  handleAppointmentCardCancellation,
+  appointmentCardCancelPreview,
+  settleAppointmentNoShowFee,
+  isWithinApptCancelWindow,
   _test: {
     dateLineFor,
     resolveExemption,

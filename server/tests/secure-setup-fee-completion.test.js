@@ -61,7 +61,10 @@ describe('setup-fee claim → mint → restore lifecycle (admin-dispatch)', () =
     // the allowance searches the whole series.
     expect(dispatchSource).toMatch(/planChoiceSetupFeeSelected = !!\(await db\('appointment_card_requests'\)\s*\n\s*\.whereIn\('scheduled_service_id', db\('scheduled_services'\)\.select\('id'\)/);
     expect(dispatchSource).toMatch(/\.where\(\{ selected_plan: 'per_application' \}\)/);
-    expect(dispatchSource).toMatch(/if \(acceptMintedInvoice \|\| planChoiceSetupFeeSelected\) \{/);
+    // The allowance is a per-application concept — the appointment-card
+    // one-time completion lane (2026-08-01) shares the rail but must never
+    // widen its cap with a setup-fee allowance.
+    expect(dispatchSource).toMatch(/if \(perApplicationBilling && \(acceptMintedInvoice \|\| planChoiceSetupFeeSelected\)\) \{/);
     // The bound itself is untouched: min(line, 99), line detected by text.
     expect(dispatchSource).toMatch(/setupFeeAllowance = Math\.min\(lineAmt, WAVEGUARD_SETUP_FEE_ALLOWANCE\);/);
   });

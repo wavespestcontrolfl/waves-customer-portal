@@ -366,6 +366,16 @@ async function cancelVisitForOffboarding(visit, { actorId }) {
   if (!holdClear) {
     throw new Error('card hold could not be released — resolve it on the customer\'s billing tab');
   }
+  // Appointment-card fee lane (mutually exclusive with holds — the rail
+  // re-checks): the offboarding cancel is business-initiated, so the agreed
+  // fee waives; a lost waive race gates the refund exactly like a hold.
+  if (holdOutcome?.reason === 'no_hold') {
+    const ApptCardRequests = require('./appointment-card-request');
+    const apptOutcome = await ApptCardRequests.handleAppointmentCardCancellation({ scheduledServiceId: visit.id, waiveFee: true });
+    if (!(apptOutcome && apptOutcome.released === true)) {
+      throw new Error('appointment-card fee could not be waived — resolve it on the customer\'s billing tab');
+    }
+  }
   return { unresolvedInvoices };
 }
 

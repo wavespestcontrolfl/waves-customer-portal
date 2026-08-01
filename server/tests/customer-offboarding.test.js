@@ -42,6 +42,12 @@ const mockCardHold = jest.fn(async () => ({ handled: false, reason: 'no_hold' })
 jest.mock('../services/estimate-card-holds', () => ({
   handleCardHoldCancellation: (...args) => mockCardHold(...args),
 }));
+// Appointment-card fee lane (mutually exclusive with holds): default = no
+// fee lane on the visit, released clean.
+const mockApptCardCancel = jest.fn(async () => ({ handled: false, released: true, reason: 'no_card_request' }));
+jest.mock('../services/appointment-card-request', () => ({
+  handleAppointmentCardCancellation: (...args) => mockApptCardCancel(...args),
+}));
 
 const mockTrackCancel = jest.fn(async () => ({ ok: true }));
 jest.mock('../services/track-transitions', () => ({
@@ -474,6 +480,28 @@ describe('cancelSignupAndRefundDeposit — order and side effects', () => {
     const result = await CustomerOffboarding.cancelSignupAndRefundDeposit('cust-1');
     expect(result.visitFailures).toEqual([{ id: 'v-1', reason: expect.stringMatching(/card hold/) }]);
     expect(mockRefundUnconsumed).not.toHaveBeenCalled();
+  });
+
+  it('an unwaived appointment-card fee fails the visit and gates the refund', async () => {
+    // No hold on the visit → the appointment-card fee lane is consulted; a
+    // lost waive race (fee_status flipped to charging concurrently) must
+    // gate exactly like an unreleased hold.
+    mockApptCardCancel.mockResolvedValueOnce({ handled: false, released: false, reason: 'waive_race_lost' });
+    setDbQueues(executeQueues());
+
+    const result = await CustomerOffboarding.cancelSignupAndRefundDeposit('cust-1');
+    expect(result.visitFailures).toEqual([{ id: 'v-1', reason: expect.stringMatching(/appointment-card fee/) }]);
+    expect(mockRefundUnconsumed).not.toHaveBeenCalled();
+  });
+
+  it('the appointment-card fee lane is skipped when a hold row owns the visit', async () => {
+    mockCardHold.mockResolvedValue({ released: true }); // waived hold release
+    setDbQueues(executeQueues());
+
+    const result = await CustomerOffboarding.cancelSignupAndRefundDeposit('cust-1');
+    expect(result.visitsCancelled).toBe(2);
+    expect(mockApptCardCancel).not.toHaveBeenCalled();
+    mockCardHold.mockResolvedValue({ handled: false, reason: 'no_hold' });
   });
 
   it('a leftover open invoice from a PRIOR partial run gates the refund on retry', async () => {

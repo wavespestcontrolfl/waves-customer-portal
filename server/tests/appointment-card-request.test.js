@@ -679,6 +679,22 @@ describe('completeSecureCardCapture — save → consent → enroll → complete
     });
   });
 
+  test('completion freezes the disclosed fee terms onto the row (fee rail consent record)', async () => {
+    // The /secure page rendered cancelFeeNote from live config; the fee the
+    // rail may later charge is EXACTLY the frozen one — config changes never
+    // move an agreed fee. (satisfied rows never pass through this write and
+    // therefore never carry terms — pinned in appointment-card-fees.test.js.)
+    const res = await completeSecureCardCapture({ token: REQUEST.token, setupIntentId: 'seti_1' });
+    expect(res).toEqual({ ok: true });
+    const completedPatch = touches('appointment_card_requests')
+      .flatMap((t) => t.chain.calls.filter(([op]) => op === 'update'))
+      .map(([, patch]) => patch)
+      .find((p) => p.status === 'completed');
+    expect(Number(completedPatch.no_show_fee_amount)).toBeGreaterThan(0);
+    expect(Number(completedPatch.cancel_window_hours)).toBeGreaterThan(0);
+    expect(completedPatch.fee_agreed_at).toBeInstanceOf(Date);
+  });
+
   test('lost completion claim (webhook overlap) → no side effects, retryable', async () => {
     mockTableHandlers.appointment_card_requests.update = (chain, patch) => (patch.status === 'completing' ? 0 : 1);
     const res = await completeSecureCardCapture({ token: REQUEST.token, setupIntentId: 'seti_1' });

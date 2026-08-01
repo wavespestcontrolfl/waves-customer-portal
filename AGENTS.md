@@ -1072,7 +1072,41 @@ violations at the severity noted.
   plan-value-guarded so a selection switch cannot cross a capture
   mid-flight. Treat the token, the verification
   gates, the selection/mint transaction, and the claim mechanics as
-  security-critical).
+  security-critical.
+  **Appointment-card enforcement rails (2026-08-01, both dark, fail-closed
+  `feature-gates.js` money gates):** the lane's completion tail freezes the
+  disclosed no-show fee terms onto the request row (`no_show_fee_amount` /
+  `cancel_window_hours` / `fee_agreed_at` — COMPLETED rows only; a
+  `satisfied` auto-secured row never saw the disclosure and is NEVER
+  fee-charged; rows completed before the fee-terms migration stay
+  unchargeable). (1) `GATE_APPT_CARD_NO_SHOW_FEE` —
+  `chargeAppointmentNoShowFee` / `handleAppointmentCardCancellation` in
+  `appointment-card-request.js` mirror the card-hold fee rail
+  posture-for-posture (staleness guards + shared exported constants,
+  `fee_status` NULL→charging atomic claim, ambiguous-outcome parking to
+  `charge_review`, face-value surcharge-exempt
+  `chargeSavedPaymentMethodOffSession`, PI purpose
+  `appointment_card_no_show_fee`, webhook-settled as a paid refundable
+  taxRate-0 self-pay invoice via `settleAppointmentNoShowFee` + the shared
+  `sendNoShowFeeReceipt`). Runs ONLY as the no-hold fallback at the
+  existing card-hold call sites (dispatch no_show/cancel, schedule bulk/V2
+  cancel, cancellation-processor, offboarding waive — which gates the
+  deposit refund on a clean waive) — an `estimate_card_holds` row of ANY
+  status makes the rail skip (`card_hold_lane`): the two fee lanes are
+  mutually exclusive per visit. The `GET /:serviceId/card-hold` cancel
+  preview merges both lanes so the client waive prompts work unchanged.
+  (2) `GATE_APPT_CARD_COMPLETION_CHARGE` — the dispatch completion
+  auto-charge guard widens from `perApplicationBilling` to
+  `(perApplicationBilling || apptCardOneTimeCharge)`: a ONE-TIME visit
+  (`is_recurring !== true`, not per-app/prepay/membership lane, no hold
+  row) with a completed-or-satisfied `appointment_card_requests` row and
+  active Auto Pay auto-charges its completion invoice through the same
+  rail, hard-capped at the visit's stamped `estimated_price` ONLY (no
+  acceptance-fee fallback, no setup-fee allowance — those stay
+  per-application concepts), autopay-log source
+  `appointment_card_completion`. Source contracts pin the guard strings —
+  `admin-dispatch-backfill-completion.test.js` and
+  `appointment-card-fees.test.js` must move with any change here.)
   `/api/mcp` (POST; machine-to-machine JSON-RPC — a minimal read-only MCP
   server exposing the knowledge index (hybrid search, catalog service +
   static protocol lookups, corpus stats) to MCP clients such as Claude Code

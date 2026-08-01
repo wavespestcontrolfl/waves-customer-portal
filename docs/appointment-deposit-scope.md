@@ -1,4 +1,11 @@
-# One-Time Appointment Deposits — Scoping Doc (DRAFT — pending owner decisions)
+# One-Time Appointment Deposits — Scoping Doc
+
+> **Status 2026-08-01:** Owner approved the A + C route (§2). The Option C
+> enforcement rails are BUILT (dark behind `GATE_APPT_CARD_NO_SHOW_FEE` and
+> `GATE_APPT_CARD_COMPLETION_CHARGE`) — see the appointment-card enforcement
+> rails entry in AGENTS.md. The deposit build (Option B) is shelved. Fee
+> sizing stays an owner pricing decision (flat config, admin-tunable);
+> research summary in §2b.
 
 **Ask (Adam, 2026-08-01):** for speculative one-time appointments (example: a fly
 inspection that may or may not turn into paid work), require a deposit — ~$75 or a
