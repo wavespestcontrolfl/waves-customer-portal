@@ -239,8 +239,20 @@ async function processServiceReportDelivery(delivery, knex = db) {
   // #3093 r17).
   const heldPayload = (delivery.payload && typeof delivery.payload === 'object') ? delivery.payload : {};
   let lawnFenceCheck = null;
+  let lawnSealRenewTimer = null;
+  let releaseLawnSeal = null;
   if (heldPayload.awaiting_grounding && heldPayload.lawn_assessment_id) {
     const KnowledgeBridge = require('../knowledge-bridge');
+    // Backlink recovery (codex P1 r40): a completion that crashed before
+    // writing service_record_id leaves the assessment unlinked, and
+    // sanitation rejects unlinked assessments forever. The held payload
+    // records exactly which record this assessment belongs to — restore
+    // the link (idempotent, only-if-null) before sanitizing.
+    await knex('lawn_assessments')
+      .where({ id: heldPayload.lawn_assessment_id })
+      .whereNull('service_record_id')
+      .update({ service_record_id: delivery.service_record_id })
+      .catch((linkErr) => logger.warn(`[delivery-queue] assessment backlink recovery failed for ${heldPayload.lawn_assessment_id}: ${linkErr.message}`));
     const sanitized = await KnowledgeBridge.sanitizeStoredRecommendations(heldPayload.lawn_assessment_id);
     if (sanitized?.error) {
       const status = await markDeliveryFailed(delivery, new Error(`grounding readiness unverified: ${sanitized.error}`), knex);
@@ -267,10 +279,26 @@ async function processServiceReportDelivery(delivery, knex = db) {
     const versionOf = (row) => (row ? JSON.stringify([row.recommendations, row.ai_summary, row.updated_at]) : null);
     lawnFenceCheck = async () => {
       try {
-        return await KnowledgeBridge.sealRecommendationsForSend(assessmentId, versionAtCheck, versionOf);
+        const sealed = await KnowledgeBridge.sealRecommendationsForSend(assessmentId, versionAtCheck, versionOf);
+        if (sealed) {
+          // The base TTL equals SendGrid's own request timeout, so a slow
+          // dispatch could outlive a fixed seal (codex P1 r40) — renew on a
+          // heartbeat until the send settles; the worker releases it below.
+          lawnSealRenewTimer = setInterval(() => {
+            void KnowledgeBridge.renewRecommendationSendSeal(assessmentId)
+              .catch((renewErr) => logger.warn(`[delivery-queue] send-seal renew failed for ${assessmentId}: ${renewErr.message}`));
+          }, 45000);
+          lawnSealRenewTimer.unref?.();
+        }
+        return sealed;
       } catch {
         return false; // unreadable fence state = defer, never send blind
       }
+    };
+    releaseLawnSeal = async () => {
+      if (lawnSealRenewTimer) { clearInterval(lawnSealRenewTimer); lawnSealRenewTimer = null; }
+      await KnowledgeBridge.releaseRecommendationSendSeal(assessmentId)
+        .catch((relErr) => logger.warn(`[delivery-queue] send-seal release failed for ${assessmentId} (expires by TTL): ${relErr.message}`));
     };
   }
 
@@ -301,6 +329,8 @@ async function processServiceReportDelivery(delivery, knex = db) {
   } catch (err) {
     const status = await markDeliveryFailed(delivery, err, knex);
     return { status, error: err.message };
+  } finally {
+    if (releaseLawnSeal) await releaseLawnSeal();
   }
 }
 

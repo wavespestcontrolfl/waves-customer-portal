@@ -223,6 +223,35 @@ async function sealForSend(assessmentId, expectedVersion, computeVersion) {
   });
 }
 
+// The seal must outlive a slow dispatch (codex P1 r40): SendGrid's own
+// timeout equals the base TTL, so the sender renews the seal on a heartbeat
+// while sends are in flight and releases it when they settle.
+async function renewSendSeal(assessmentId) {
+  return db.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`lawn_rec_${assessmentId}`]);
+    const row = await trx('lawn_assessments').where({ id: assessmentId }).first('recommendations');
+    const stored = parseStoredRecommendations(row?.recommendations);
+    if (!stored || !stored._sendSealUntil) return false;
+    stored._sendSealUntil = new Date(Date.now() + SEND_SEAL_MS).toISOString();
+    await trx('lawn_assessments').where({ id: assessmentId })
+      .update({ recommendations: JSON.stringify(stored) });
+    return true;
+  });
+}
+
+async function releaseSendSeal(assessmentId) {
+  return db.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`lawn_rec_${assessmentId}`]);
+    const row = await trx('lawn_assessments').where({ id: assessmentId }).first('recommendations');
+    const stored = parseStoredRecommendations(row?.recommendations);
+    if (!stored || stored._sendSealUntil === undefined) return false;
+    delete stored._sendSealUntil;
+    await trx('lawn_assessments').where({ id: assessmentId })
+      .update({ recommendations: JSON.stringify(stored) });
+    return true;
+  });
+}
+
 function sendSealActive(stored) {
   const t = Date.parse(stored?._sendSealUntil);
   return Number.isFinite(t) && t > Date.now();
@@ -397,6 +426,14 @@ const GENERIC_NAME_TOKENS = new Set([
   'ultra', 'plus', 'formula', 'brand', 'blend', 'spray', 'concentrate', 'control',
   'herbicide', 'fungicide', 'insecticide', 'fertilizer', 'micronutrient', 'weed',
   'pre-emergent', 'emergent', 'ornamental', 'with', 'and', 'for',
+  // Ordinary recommendation vocabulary (codex P2 r40): "Heritage Action
+  // Fungicide" must not turn "No action is needed from you" into a
+  // product-deferral match. Class terms and the remaining aliases still
+  // guard these products.
+  'action', 'active', 'advance', 'advanced', 'care', 'complete', 'cover',
+  'double', 'triple', 'extra', 'garden', 'general', 'green', 'growth',
+  'healthy', 'home', 'natural', 'power', 'prime', 'protect', 'protection',
+  'quick', 'rapid', 'root', 'season', 'seasonal', 'super', 'total', 'yard',
 ]);
 
 // Generic fallback terms for applied rows whose category is genuinely
@@ -1374,6 +1411,8 @@ module.exports._test = { sanitizeRecommendationsAgainstTreatment, contradictsApp
 // Pure render-time guard surface (no DB, no LLM) — consumed by report-data
 // as the last line of defense for instantly opened report links.
 module.exports.sealRecommendationsForSend = sealForSend;
+module.exports.renewRecommendationSendSeal = renewSendSeal;
+module.exports.releaseRecommendationSendSeal = releaseSendSeal;
 module.exports.treatmentGuard = {
   sanitizeRecommendationsAgainstTreatment,
   contradictsAppliedTreatment,

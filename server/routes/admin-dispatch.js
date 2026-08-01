@@ -5590,6 +5590,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       const KnowledgeBridgeGate = require('../services/knowledge-bridge');
       const lawnRecSanitizeWithRetry = async (tries = 4) => {
         for (let attempt = 0; attempt < tries; attempt += 1) {
+          // A setup failure BEFORE the backlink write leaves the assessment
+          // unlinked and sanitation rejects it forever (codex P1 r40) —
+          // restore the known link first (idempotent, only-if-null).
+          await db('lawn_assessments')
+            .where({ id: completedLawnAssessmentId })
+            .whereNull('service_record_id')
+            .update({ service_record_id: record.id })
+            .catch((linkErr) => logger.warn(`[dispatch] assessment backlink recovery failed for ${completedLawnAssessmentId}: ${linkErr.message}`));
           const res = await KnowledgeBridgeGate.sanitizeStoredRecommendations(completedLawnAssessmentId)
             .catch((e) => ({ changed: false, error: e.message }));
           if (!res.error) return res;

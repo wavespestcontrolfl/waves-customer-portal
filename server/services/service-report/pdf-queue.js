@@ -296,27 +296,45 @@ async function getOrRenderServiceReportPdf(recordId, { token, req, knex = db, fo
   // once the copy can no longer change (no generation in flight).
   if (correctionPending && !rendered.storageFailed && fenceReadOk) {
     try {
-      const { treatmentGuard } = require('../knowledge-bridge');
-      const stillGenerating = lawnAssessmentId
-        ? await treatmentGuard.isGenerationInFlight(lawnAssessmentId, knex)
-        : false;
-      // Throws on a read error → the catch retains the marker.
-      const recVersionAfter = lawnAssessmentId ? await lawnRecommendationVersion(lawnAssessmentId, knex) : null;
-      const copyStableAcrossRender = recVersionBefore === recVersionAfter;
-      // The copy must also be SETTLED — grounded or sanitation-final
-      // (codex P1 r39): between grounded-generation failure and a sanitize
-      // retry there is no live lease, so "stable and not generating" can
-      // hold while the copy is still awaiting correction. No assessment at
-      // all (non-lawn record with a stray marker) counts as settled.
-      let copySettled = true;
-      if (lawnAssessmentId) {
-        const freshRow = await knex('lawn_assessments').where({ id: lawnAssessmentId }).first('recommendations');
-        let payload = freshRow?.recommendations;
-        if (typeof payload === 'string') { try { payload = JSON.parse(payload); } catch { payload = null; } }
-        copySettled = !!(payload && typeof payload === 'object' && !Array.isArray(payload)
-          && (payload._groundedInApplications || payload._sanitizationFinal));
+      if (!lawnAssessmentId) {
+        // No linked assessment (stray marker on a non-lawn record) —
+        // nothing can generate, clear directly.
+        await clearLawnPdfCorrectionMarker(recordId, knex);
+      } else {
+        // The entire check-and-clear runs under the SAME advisory lock
+        // generation registration takes (codex P1 r40): a run registering
+        // between the reads and the marker deletion was a TOCTOU that left
+        // a permanently stale PDF. Inside the lock nothing can register,
+        // so the observed state holds through the clear.
+        await knex.transaction(async (trx) => {
+          await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`lawn_rec_${lawnAssessmentId}`]);
+          const freshRow = await trx('lawn_assessments').where({ id: lawnAssessmentId }).first('recommendations', 'ai_summary', 'updated_at');
+          const recVersionAfter = freshRow ? crypto.createHash('sha1')
+            .update(`${typeof freshRow.recommendations === 'string' ? freshRow.recommendations : JSON.stringify(freshRow.recommendations || '')}|${freshRow.ai_summary || ''}|${freshRow.updated_at ? new Date(freshRow.updated_at).toISOString() : ''}`)
+            .digest('hex') : null;
+          const copyStableAcrossRender = recVersionBefore === recVersionAfter;
+          let payload = freshRow?.recommendations;
+          if (typeof payload === 'string') { try { payload = JSON.parse(payload); } catch { payload = null; } }
+          const isObj = payload && typeof payload === 'object' && !Array.isArray(payload);
+          // Live lease check from the row we hold under the lock — a
+          // separate query would read outside the fence.
+          const runs = (isObj && payload._generationRuns && typeof payload._generationRuns === 'object') ? payload._generationRuns : {};
+          const stillGenerating = Object.values(runs).some((exp) => {
+            const t = Date.parse(exp);
+            return Number.isFinite(t) && t > Date.now();
+          });
+          // The copy must also be SETTLED — grounded or sanitation-final
+          // (codex P1 r39): between grounded-generation failure and a
+          // sanitize retry there is no live lease, so "stable and not
+          // generating" can hold while the copy still awaits correction.
+          const copySettled = !!(isObj && (payload._groundedInApplications || payload._sanitizationFinal));
+          if (!stillGenerating && copyStableAcrossRender && copySettled) {
+            await trx('service_records').where({ id: recordId }).update({
+              structured_notes: trx.raw("(COALESCE(structured_notes::jsonb, '{}'::jsonb) - ?)", ['lawnPdfCorrectionPending']),
+            });
+          }
+        });
       }
-      if (!stillGenerating && copyStableAcrossRender && copySettled) await clearLawnPdfCorrectionMarker(recordId, knex);
     } catch (clearErr) {
       logger.warn(`[pdf-queue] correction-marker clear skipped for ${recordId} — retained: ${clearErr.message}`);
     }
