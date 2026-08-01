@@ -638,16 +638,24 @@ function avVerdictForExtraction(storedAv, verdictExtraction, candidateExtraction
   return key(a) === key(b) ? storedAv : null;
 }
 
-function routeForV2(extraction, contactPhone, helpers, addressValidation = null) {
+function routeForV2(extraction, contactPhone, helpers, addressValidation = null, failOpenContext = {}) {
   if (!extraction) return { allowed: false, reason: 'no_extraction', flags: [] };
   // The stored AV verdict rides along (codex round-10 P1): since the central
   // address-trust gate (2026-08-01), canAutoRoute without a verdict returns
   // address_not_validated for every call — replaying without it would score
   // zero auto-routes and the variance comparison would be meaningless.
+  //
+  // So does the fail-open context (codex round-21 P2, mirroring the readiness
+  // script's round-12 fix): production passes failOpen + callerAni +
+  // knownCustomer, and an established customer who confirms a visit WITHOUT
+  // restating their on-file address normally has a `not_attempted` verdict.
+  // Production dispatches to the verified on-file address; replaying without
+  // the context scores those as address_not_validated and the variance output
+  // reports a divergence that does not exist.
   const modelFlags = helpers.suppressAddressFlagsForAV(extraction.triage_flags || [], addressValidation);
   const deterministicFlags = helpers.computeDeterministicTriageFlags(extraction, { contactPhone, addressValidation });
   const flags = helpers.mergeTriageFlags(modelFlags, deterministicFlags);
-  const route = helpers.canAutoRoute(extraction, { contactPhone, addressValidation });
+  const route = helpers.canAutoRoute(extraction, { contactPhone, addressValidation, ...failOpenContext });
   return {
     allowed: !!route.allowed,
     reason: route.allowed ? 'allowed' : (route.reason || 'blocked'),
@@ -833,6 +841,8 @@ async function loadCandidateCalls(db, options) {
     'transcription_provider',
     'transcription_model',
     'recording_url',
+    // Feeds the on-file fail-open context the live gate receives (round-21 P2).
+    'customer_id',
   ];
   const selected = optionalColumns
     .filter((col) => callColumns[col])
@@ -920,9 +930,25 @@ async function replayCall(call, context) {
   const storedAv = (recoveredCard && storedAvRaw)
     ? { status: 'corrected', inServiceArea: true, county: storedAvRaw.county || null, normalized: storedAvRaw.normalized || null, reconstructed_from: 'address_recovered' }
     : storedAvRaw;
+  // The live routing options production would have used for THIS call: the
+  // same env gate, the caller ANI, and whether the linked customer has a
+  // verified on-file address (codex round-21 P2). Read-only; a lookup failure
+  // degrades to no context, which is the pre-existing (stricter) behavior.
+  const auditFailOpen = process.env.GATE_CALL_FAIL_OPEN_BOOKING === 'true';
+  const linkedCustomer = call.customer_id
+    ? await db('customers').where({ id: call.customer_id })
+      .whereNotNull('address_line1').where('address_line1', '!=', '')
+      .first('id')
+      .catch(() => null)
+    : null;
+  const failOpenContext = {
+    failOpen: auditFailOpen,
+    callerAni: contactPhone,
+    knownCustomer: call.customer_id ? (linkedCustomer ? { hasAddress: true } : {}) : null,
+  };
   // The verdict was computed for the persisted (prior) extraction — it always
   // applies to priorV2 by construction.
-  const priorV2Route = priorV2Valid ? routeForV2(priorV2, contactPhone, helpers, storedAv) : null;
+  const priorV2Route = priorV2Valid ? routeForV2(priorV2, contactPhone, helpers, storedAv, failOpenContext) : null;
   const scheduled = await findLegacyScheduledService(db, call, scheduledColumns);
 
   let transcriptForExtraction = call.transcription;
@@ -981,7 +1007,8 @@ async function replayCall(call, context) {
   const currentFlat = currentExtraction ? helpers.flatView(currentExtraction) : null;
   const currentRoute = currentExtraction
     ? routeForV2(currentExtraction, contactPhone, helpers,
-      avVerdictForExtraction(storedAv, priorV2Valid ? priorV2 : null, currentExtraction, helpers))
+      avVerdictForExtraction(storedAv, priorV2Valid ? priorV2 : null, currentExtraction, helpers),
+      failOpenContext)
     : { allowed: false, reason: current.status, flags: [] };
 
   const legacyFieldVariances = currentFlat ? compareFlatFields(legacyFlat, currentFlat, includeValues) : [];

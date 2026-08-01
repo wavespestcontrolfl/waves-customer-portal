@@ -30,7 +30,15 @@ async function main() {
       .where('processing_status', 'processed')
       .orderBy('created_at', 'desc')
       .limit(N)
-      .select('id', 'transcription', 'from_phone', 'to_phone', 'direction', 'created_at', 'ai_address_validation', 'ai_extraction_enriched',
+      .select('id', 'transcription', 'from_phone', 'to_phone', 'direction', 'created_at', 'ai_address_validation', 'ai_extraction_enriched', 'customer_id',
+        // Whether production's on-file fail-open lane was available for this
+        // call (codex round-21 P2). An established customer who confirms
+        // without restating their address normally has a `not_attempted`
+        // verdict — production dispatches to the address verified when it was
+        // saved, so a verifier without this context reports
+        // address_not_validated for a call production auto-created.
+        db.raw("exists(select 1 from customers c where c.id = call_log.customer_id"
+          + " and c.address_line1 is not null and c.address_line1 <> '') as known_customer_has_address"),
         // Scoped to the CURRENT extraction pass (codex final-round P2) — a
         // card left from an earlier pass must not vouch for a reprocess where
         // recovery failed. NULL on either side yields NULL (not true), so an
@@ -88,7 +96,16 @@ async function main() {
         && addrKey(priorEnriched.property?.service_address) === addrKey(e.property?.service_address))
         ? effectiveAv : null;
       const flags = mergeTriageFlags(e.triage_flags, computeDeterministicTriageFlags(e, { contactPhone, addressValidation: storedAv }));
-      const route = canAutoRoute(e, { contactPhone, addressValidation: storedAv });
+      // Mirror the live routing options, not a subset (codex round-21 P2) —
+      // same env gate production reads, the caller ANI, and the linked
+      // customer's on-file-address context carried in on the dump.
+      const route = canAutoRoute(e, {
+        contactPhone,
+        addressValidation: storedAv,
+        failOpen: process.env.GATE_CALL_FAIL_OPEN_BOOKING === 'true',
+        callerAni: contactPhone,
+        knownCustomer: r.customer_id ? (r.known_customer_has_address ? { hasAddress: true } : {}) : null,
+      });
       // No customer PII (names/addresses) in logs — non-PII signals only.
       const hasName = !!(e.caller.first_name || e.caller.last_name);
       console.log(`[${i + 1}] ${r.id}  status=valid (${ms}ms)`);
