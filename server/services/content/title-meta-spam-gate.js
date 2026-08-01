@@ -217,10 +217,15 @@ const HOSTNAME_DOT_RE = /(\w)\.(?=(?:[\w-]+\.)*(?:com|net|org|io|co|us|biz|info)
 function metaSentences(text) {
   const t = String(text || '').trim();
   if (!t) return [];
+  // Dotted initialisms ("U.S.") are not boundaries either (Codex r13) —
+  // the pair regex is applied twice so longer runs ("U.S.A.") fully mask.
+  const INITIALISM_RE = /\b([A-Za-z])\.([A-Za-z])\./g;
   const masked = t
     .replace(ABBREV_DOT_RE, (m) => m.replace('.', '\u0001'))
     .replace(DECIMAL_DOT_RE, '$1\u0001$2')
-    .replace(HOSTNAME_DOT_RE, '$1\u0001');
+    .replace(HOSTNAME_DOT_RE, '$1\u0001')
+    .replace(INITIALISM_RE, '$1\u0001$2\u0001')
+    .replace(INITIALISM_RE, '$1\u0001$2\u0001');
   return masked.split(/[.!?]+/).map((s) => s.replace(/\u0001/g, '.').trim()).filter(Boolean);
 }
 function lastSentence(text) {
@@ -257,8 +262,11 @@ function lastSentence(text) {
 //   4. brand-as-subject offering ("Waves offers quarterly plans")
 //   5. direct price assertion on a service/estimate noun
 //      ("a treatment estimate costs $99") — "damage costs $2,000" stays a
-//      stat because "damage" is not a sales noun (Codex r10)
-const TRANSACTIONAL_SENTENCE_RE = /\b(ask|call|text|contact|request|get|book|schedule)\b[^!?]{0,40}?\b(quote|estimate|pricing|price|deal|offer|discount)s?\b|\b(quote|estimate|pricing|price|deal|offer|discount)s?\b[^!?]{0,30}?\b(today|now)\b|\b(starts?\s+at|starting\s+at|as\s+low\s+as|for\s+(?:just|only))\s+\$\d|\b(waves|we)\s+(offers?|provides?|sells?)\b|\b(quote|estimate|pricing|price|deal|offer|discount|plan|service|treatment)s?\b[^!?]{0,40}?\bavailable\s+from\s+(waves|us)\b|\b(quote|estimate|pricing|price|plan|service|treatment)s?\b[^!?]{0,30}?\b(?:costs?|runs?|is|starts?)\s+(?:about\s+|around\s+|only\s+|just\s+|from\s+|between\s+)?\$\d/i;
+//      stat because "damage" is not a sales noun (Codex r10), and
+//      aggregate statistics stay stats two ways (Codex r13): "estimate OF
+//      <thing>" is a measurement not an offer, and $N billion/million
+//      amounts are never service prices
+const TRANSACTIONAL_SENTENCE_RE = /\b(ask|call|text|contact|request|get|book|schedule)\b[^!?]{0,40}?\b(quote|estimate|pricing|price|deal|offer|discount)s?\b|\b(quote|estimate|pricing|price|deal|offer|discount)s?\b[^!?]{0,30}?\b(today|now)\b|\b(starts?\s+at|starting\s+at|as\s+low\s+as|for\s+(?:just|only))\s+\$\d[\d,.]*(?![\d,.])(?!\s*(?:billion|million|trillion)\b)|\b(waves|we)\s+(offers?|provides?|sells?)\b|\b(quote|estimate|pricing|price|deal|offer|discount|plan|service|treatment)s?\b[^!?]{0,40}?\bavailable\s+from\s+(waves|us)\b|\b(quote|estimate|pricing|price|plan|service|treatment)s?\b(?!\s+of\b)[^!?]{0,30}?\b(?:costs?|runs?|is|starts?)\s+(?:about\s+|around\s+|only\s+|just\s+|from\s+|between\s+)?\$\d[\d,.]*(?![\d,.])(?!\s*(?:billion|million|trillion)\b)/i;
 // EVERY sentence is scanned for the sales shapes — a pitch followed by an
 // informational closer ("Learn more about saving big with Waves. This guide
 // explains…") is still sales copy (Codex r5). There is deliberately NO bare

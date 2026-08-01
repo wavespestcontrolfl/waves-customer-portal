@@ -1069,6 +1069,17 @@ describe('soft CTA final sentence must BE a CTA (round-5 hardening)', () => {
     }
   });
 
+  test('aggregate damage statistics are NOT price assertions (r13: "estimate of termite damage is $5 billion")', () => {
+    const r = checkBlogMetaContract({ meta_description: 'The national estimate of termite damage is $5 billion each year across the US. This guide covers the warning signs homeowners see first.' });
+    expect(r.ok).toBe(true);
+  });
+
+  test('dotted initialisms do not fragment transactional sentences (r13: "Contact the U.S. team for pricing")', () => {
+    const r = checkBlogMetaContract({ meta_description: `${LEAD}Contact the U.S. team for pricing on quarterly pest service.` });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('blog_meta_sales_copy');
+  });
+
   test('ordinary verb "deal" in a CTA is NOT sales copy (r12: "how homeowners deal with ants")', () => {
     const r = checkBlogMetaContract({ meta_description: `${LEAD}Learn more about how homeowners deal with ants.` });
     expect(r.ok).toBe(true);
