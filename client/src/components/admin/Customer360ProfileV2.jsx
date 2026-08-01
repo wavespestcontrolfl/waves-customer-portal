@@ -4642,19 +4642,55 @@ export default function Customer360ProfileV2({
   // was editing the row by hand.
   const [resumingBilling, setResumingBilling] = useState(false);
   const [resumeBillingErr, setResumeBillingErr] = useState("");
+  const [resumeBillingNote, setResumeBillingNote] = useState("");
+
+  // These three are shared component state, so switching customers has to
+  // clear them: an in-flight resume for A whose response is discarded (see
+  // stillViewing below) would otherwise leave B's Resume button stuck
+  // disabled forever, and A's error/note reading as B's.
+  useEffect(() => {
+    setResumingBilling(false);
+    setResumeBillingErr("");
+    setResumeBillingNote("");
+  }, [customerId]);
 
   const resumeBilling = async () => {
+    // Everything below writes shared component state, so pin the customer
+    // this click belongs to: an admin who starts a resume for A and switches
+    // to B before it settles must not see A's outcome on B's record.
+    const forCustomerId = customerId;
+    const stillViewing = () =>
+      String(customerIdRef.current) === String(forCustomerId);
+
     setResumingBilling(true);
     setResumeBillingErr("");
+    setResumeBillingNote("");
     try {
-      await adminFetch(`/admin/customers/${customerId}/resume-service`, {
-        method: "POST",
-      });
+      const result = await adminFetch(
+        `/admin/customers/${forCustomerId}/resume-service`,
+        { method: "POST" },
+      );
+      if (!stillViewing()) return;
+      // The server deliberately refuses when the pause moved between its read
+      // and its write (billing-cron re-paused, or another admin got there
+      // first). Treating that as success would show a cleared banner that
+      // reappears on the next load with no explanation.
+      if (result?.resumed === false) {
+        setResumeBillingErr(
+          "Billing was not resumed — the pause changed while you were looking at it. Reloading the current state.",
+        );
+      } else if (Array.isArray(result?.blockers) && result.blockers.length) {
+        // Pause cleared, but a different cron guard still stops dues.
+        setResumeBillingNote(
+          `Pause cleared, but dues still will not run: ${result.blockers.join(", ").replace(/_/g, " ")}.`,
+        );
+      }
       await reloadCustomer();
     } catch (err) {
+      if (!stillViewing()) return;
       setResumeBillingErr(err.message || "Resume failed");
     } finally {
-      setResumingBilling(false);
+      if (stillViewing()) setResumingBilling(false);
     }
   };
 
@@ -5833,6 +5869,17 @@ export default function Customer360ProfileV2({
                           {resumeBillingErr}
                         </div>
                       )}
+                    </div>
+                  )}
+                  {/* Outside the banner: the pause is cleared by now, so the
+                      banner is gone, but dues still will not run and that is
+                      the whole reason someone clicked. */}
+                  {resumeBillingNote && (
+                    <div
+                      role="status"
+                      className="mb-3 rounded border border-hairline p-2.5 text-12 text-ink-secondary"
+                    >
+                      {resumeBillingNote}
                     </div>
                   )}
                   <div className="grid grid-cols-2 gap-2 mb-3">

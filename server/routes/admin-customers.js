@@ -18,6 +18,12 @@ const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/sh
 const { publicPortalUrl } = require('../utils/portal-url');
 const { documentRequiresSignature } = require('../services/contracts');
 const CustomerCredit = require('../services/customer-credit');
+// The monthly cron's own pause predicate — reused, not restated, so the
+// resume endpoint's "will dues actually run now?" answer cannot drift from
+// what processMonthlyBilling does.
+const { isPaused: isAutopayPaused } = require('../services/autopay-eligibility');
+// Lockstep with billing-cron GUARD 3b: lanes this cron never bills.
+const NON_MONTHLY_BILLING_MODES = ['per_application', 'annual_prepay', 'per_visit', 'one_time'];
 const {
   normalizeContactName,
   normalizeContactPhone,
@@ -126,6 +132,12 @@ const TECH_360_STRIPPED_CUSTOMER_FIELDS = [
   'pipelineStage', 'leadScore', 'leadSource', 'leadSourceDetail',
   'landingPageUrl', 'lastContactDate', 'nextFollowUp', 'followUpNotes',
   'crmNotes', 'referralCode', 'hasLeftGoogleReview', 'reviewMarkedAt',
+  // Billing pause: a failed-autopay state and its reason. Same class as
+  // monthlyRate/billingMode — office-only. A technician opening Customer 360
+  // for a visit they're assigned must not see "autopay failed three times"
+  // (and the Resume control is admin-gated in the client anyway, so the
+  // fields would only render an alert they cannot act on).
+  'servicePausedAt', 'servicePausedOn', 'servicePauseReason',
 ];
 
 function techSafe360Payload(payload) {
@@ -3125,9 +3137,23 @@ router.post('/:id/resume-service', requireAdmin, async (req, res, next) => {
       return res.json({ success: true, resumed: false, reason: 'pause_changed' });
     }
 
-    logger.info(`[customers] Billing resumed for customer ${req.params.id} (was paused ${pausedSince}, reason ${pauseReason || 'none'})`);
+    // Clearing the pause is necessary but not always sufficient: the monthly
+    // cron has its own guards, and every one of them ALSO stops dues. Saying
+    // "resumed" while removing the only warning on the record would leave a
+    // customer silently unbilled for a different reason. Reuse the cron's
+    // predicates (isPaused, the billing-mode list) rather than restating
+    // them, so this can't drift from what actually runs.
+    const blockers = [];
+    if (customer.active !== true) blockers.push('customer_inactive');
+    if (!(Number(customer.monthly_rate) > 0)) blockers.push('no_monthly_rate');
+    if (customer.autopay_enabled === false) blockers.push('autopay_disabled');
+    if (isAutopayPaused(customer)) blockers.push('autopay_paused_until');
+    if (NON_MONTHLY_BILLING_MODES.includes(customer.billing_mode)) blockers.push(`billing_mode_${customer.billing_mode}`);
 
-    res.json({ success: true, resumed: true, pausedSince, pauseReason, servicePausedAt: null });
+    logger.info(`[customers] Billing resumed for customer ${req.params.id} (was paused ${pausedSince}, reason ${pauseReason || 'none'})`
+      + (blockers.length ? ` — dues still blocked by: ${blockers.join(', ')}` : ''));
+
+    res.json({ success: true, resumed: true, pausedSince, pauseReason, servicePausedAt: null, blockers });
   } catch (err) { next(err); }
 });
 

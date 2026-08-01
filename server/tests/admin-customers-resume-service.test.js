@@ -245,6 +245,67 @@ describe('POST /admin/customers/:id/resume-service', () => {
     expect(mockState.auditEvents[0].metadata.paused_since).toBe('2026-05-02');
   });
 
+  test('reports the OTHER cron guards that still stop dues after the pause clears', async () => {
+    // Clearing the pause is necessary, not sufficient: processMonthlyBilling
+    // has its own guards, and each one also means no dues. Claiming "resumed"
+    // while removing the only warning would leave a customer silently
+    // unbilled for a different reason.
+    mockState.customer = {
+      ...PAUSED,
+      active: false,
+      monthly_rate: '0',
+      autopay_enabled: false,
+      autopay_paused_until: '2099-01-01',
+      billing_mode: 'per_visit',
+    };
+
+    const res = await resumeService('cust-1');
+
+    expect(res.body.resumed).toBe(true);
+    expect(res.body.blockers).toEqual(expect.arrayContaining([
+      'customer_inactive',
+      'no_monthly_rate',
+      'autopay_disabled',
+      'autopay_paused_until',
+      'billing_mode_per_visit',
+    ]));
+  });
+
+  test('reports no blockers for a customer the cron will actually bill', async () => {
+    mockState.customer = {
+      ...PAUSED,
+      active: true,
+      monthly_rate: '55.00',
+      autopay_enabled: true,
+      autopay_paused_until: null,
+      billing_mode: 'monthly_membership',
+    };
+
+    const res = await resumeService('cust-1');
+
+    expect(res.body).toMatchObject({ resumed: true, blockers: [] });
+  });
+
+  test('billing-pause fields never reach a technician payload', async () => {
+    // Same class as monthlyRate/billingMode. A tech opening Customer 360 for
+    // an assigned visit must not see "autopay failed three times".
+    const { techSafe360Payload } = adminCustomersRoute._private;
+    const stripped = techSafe360Payload({
+      customer: {
+        id: 'cust-1',
+        firstName: 'Avery',
+        servicePausedAt: '2026-05-02T12:00:00Z',
+        servicePausedOn: '2026-05-02',
+        servicePauseReason: 'autopay_final_failure',
+      },
+    });
+    expect(stripped.customer.servicePausedAt).toBeUndefined();
+    expect(stripped.customer.servicePausedOn).toBeUndefined();
+    expect(stripped.customer.servicePauseReason).toBeUndefined();
+    // Non-financial fields still survive — this is a denylist, not a wipe.
+    expect(stripped.customer.firstName).toBe('Avery');
+  });
+
   test('404s an unknown customer', async () => {
     mockState.customer = null;
     const res = await resumeService('nope');
