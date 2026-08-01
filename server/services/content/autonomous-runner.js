@@ -3312,7 +3312,17 @@ async function finalize(run, t0, patch, { persist = true } = {}) {
       // process — without this it existed only in memory (Codex r1 P2).
       content_guardrails_result: JSON.stringify({
         ...(run.content_guardrails_result || {}),
-        ...(run.internal_route_repairs?.length ? { internal_route_repairs: run.internal_route_repairs } : {}),
+        // ALIASED pairs are constants from INVENTED_ROUTE_ALIASES and safe to
+        // record. An UNLINKED `from` is a writer-invented path that can carry
+        // PII, and autonomous_runs is a LONG-LIVED store — withholding it
+        // from logs but persisting it here would just move the leak
+        // (Codex r6). Unlinked repairs keep their count only.
+        ...(run.internal_route_repairs?.length ? {
+          internal_route_repairs: run.internal_route_repairs
+            .filter((r) => r.to)
+            .map((r) => ({ from: r.from, to: r.to, action: r.action })),
+          internal_route_unlinked_count: run.internal_route_repairs.filter((r) => !r.to).length,
+        } : {}),
       }),
       comparison_table_result: JSON.stringify(run.comparison_table_result || {}),
       seo_completion_gate_result: JSON.stringify(run.seo_completion_gate_result || {}),

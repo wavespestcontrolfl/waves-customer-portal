@@ -2495,6 +2495,9 @@ describe('deterministic repair of invented internal routes (owner ruling 2026-08
       '[services](/pest-control/?customer=Alice-Smith)',
       '[services](/pest-control/?email=a@b.com)',
       '[services](/pest-control/?phone=941-555-1234)',
+      '[services](/pest-control/?utm_campaign=Alice-Smith)',
+      '[services](/pest-control/#Alice-Smith)',
+      '[services](/pest-control/?utm_source=a@b.com)',
     ]) {
       expect(repairInventedInternalRoutes(body).body).toBe(body);
     }

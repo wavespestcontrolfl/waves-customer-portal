@@ -1495,13 +1495,27 @@ const MD_INTERNAL_LINK_RE = /(!)?\[((?:[^[\]\n\\]|\\.|\[[^\]\n]*\]|\n(?![ \t]*\n
 // nothing that could be customer data: known tracking params, or a plain
 // word anchor. Everything else parks.
 const SAFE_TRACKING_PARAMS = new Set(['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content', 'ref', 'source', 'campaign', 'gclid', 'fbclid']);
-const SAFE_ROUTE_SUFFIX_RE = /^(?:#[A-Za-z][\w-]*)$|^\?(?:[A-Za-z_][\w-]*=[A-Za-z0-9._-]*)(?:&[A-Za-z_][\w-]*=[A-Za-z0-9._-]*)*$/;
+// VALUES matter as much as keys: "?utm_campaign=Alice-Smith" and
+// "#Alice-Smith" both carry a customer name through an allowlisted key
+// (Codex r6). Values and anchors must be LOWERCASE token text and bounded in
+// length — names, emails and handles essentially always break one of those —
+// and anything else leaves the link for the gate to park.
+const SAFE_SUFFIX_VALUE_RE = /^[a-z0-9._-]{0,40}$/;
+const SAFE_SUFFIX_ANCHOR_RE = /^[a-z][a-z0-9-]{0,39}$/;
 
 function isSafeRouteSuffix(suffix) {
   const v = String(suffix || '');
-  if (!SAFE_ROUTE_SUFFIX_RE.test(v)) return false;
-  if (v.startsWith('#')) return true;
-  return v.slice(1).split('&').every((pair) => SAFE_TRACKING_PARAMS.has(pair.split('=')[0].toLowerCase()));
+  if (v.startsWith('#')) return SAFE_SUFFIX_ANCHOR_RE.test(v.slice(1));
+  if (!v.startsWith('?')) return false;
+  const pairs = v.slice(1).split('&');
+  if (!pairs.length) return false;
+  return pairs.every((pair) => {
+    const eq = pair.indexOf('=');
+    if (eq === -1) return false;
+    const key = pair.slice(0, eq).toLowerCase();
+    const val = pair.slice(eq + 1);
+    return SAFE_TRACKING_PARAMS.has(key) && SAFE_SUFFIX_VALUE_RE.test(val);
+  });
 }
 
 function repairInventedInternalRoutes(body, allowedInternalLinks = [], options = {}) {
