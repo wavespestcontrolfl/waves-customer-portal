@@ -105,6 +105,10 @@ describe("allowedTargetLinesForServiceType", () => {
     expect(allowedTargetLinesForServiceType("Lawn + Tree & Shrub")).toEqual(
       new Set(["lawn", "tree_shrub"]),
     );
+    // Pest-primary combined names classify pest but keep the termite line.
+    expect(
+      allowedTargetLinesForServiceType("Quarterly Pest + Termite Bait Station"),
+    ).toEqual(new Set(["pest", "termite"]));
   });
 
   it("mirrors the classifier's exclusions", () => {
@@ -195,12 +199,21 @@ describe("filterLabelTargetsForLine", () => {
   });
 
   it("keeps WDO targets on a termite visit, including carpenter ants", () => {
+    const termidor = [
+      "Subterranean termites",
+      "Formosan termites",
+      "Carpenter ants",
+    ];
+    expect(
+      filterLabelTargetsForLine(termidor, lines("Termite Treatment")),
+    ).toEqual(termidor);
+    // A pest-primary combined visit keeps its termite targets too.
     expect(
       filterLabelTargetsForLine(
-        ["Subterranean termites", "Formosan termites", "Carpenter ants"],
-        lines("Termite Treatment"),
+        termidor,
+        lines("Quarterly Pest + Termite Bait Station"),
       ),
-    ).toEqual(["Subterranean termites", "Formosan termites", "Carpenter ants"]);
+    ).toEqual(termidor);
   });
 
   it("keeps turf insects on lawn — mole crickets are not household crickets", () => {

@@ -15714,6 +15714,19 @@ export function allowedTargetLinesForServiceType(rawServiceType) {
     lines.add("lawn");
   }
   if (s.includes("mosquito")) lines.add("mosquito");
+  // Termite tokens mirror the classifier's aliases — a pest-primary combined
+  // name ("Quarterly Pest + Termite Bait Station") classifies pest but must
+  // keep its termite targets (codex P1 r2).
+  if (
+    s.includes("termite") ||
+    s.includes("wdo") ||
+    s.includes("bora") ||
+    s.includes("trelona") ||
+    s.includes("termidor") ||
+    /\badvance\b/.test(s)
+  ) {
+    lines.add("termite");
+  }
   if (/\bpest\b/.test(s)) lines.add("pest");
   return lines;
 }
