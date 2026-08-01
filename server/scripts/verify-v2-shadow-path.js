@@ -31,7 +31,13 @@ async function main() {
       .orderBy('created_at', 'desc')
       .limit(N)
       .select('id', 'transcription', 'from_phone', 'to_phone', 'direction', 'created_at', 'ai_address_validation', 'ai_extraction_enriched',
-        db.raw("exists(select 1 from triage_items ti where ti.call_log_id = call_log.id and ti.reason_code = 'address_recovered') as has_address_recovered"));
+        // Scoped to the CURRENT extraction pass (codex final-round P2) — a
+        // card left from an earlier pass must not vouch for a reprocess where
+        // recovery failed. NULL on either side yields NULL (not true), so an
+        // unstamped pre-2026-08-01 card reconstructs nothing: fail-closed.
+        db.raw("exists(select 1 from triage_items ti where ti.call_log_id = call_log.id and ti.reason_code = 'address_recovered'"
+          + " and ti.payload->>'extraction_model' = call_log.ai_extraction_model"
+          + " and ti.payload->>'extraction_prompt_version' = call_log.ai_extraction_prompt_version) as has_address_recovered"));
     await db.destroy();
     fs.writeFileSync(process.env.DUMP_TO, JSON.stringify(rows));
     console.log(`Dumped ${rows.length} real transcripts to ${process.env.DUMP_TO}`);

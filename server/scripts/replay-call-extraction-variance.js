@@ -903,10 +903,20 @@ async function replayCall(call, context) {
   // confirming exactly ONE real in-area premise, and it REPERSISTED the
   // recovered address into the enriched extraction, so 'corrected' against
   // the persisted address is the faithful production input.
-  const recoveredCard = await db('triage_items')
+  // The card must speak for the CURRENT pass (codex final-round P2): a call
+  // recovered once and later reprocessed WITHOUT a successful recovery keeps
+  // the old card, and a bare existence check would let it vouch for the newer
+  // unverified verdict. Match the pass stamp the processor writes against the
+  // row's own provenance; an unstamped (pre-2026-08-01) card reconstructs
+  // nothing, which is the fail-closed direction.
+  const recoveredCardRow = await db('triage_items')
     .where({ call_log_id: call.id, reason_code: 'address_recovered' })
-    .first('id')
+    .first('id', 'payload')
     .catch(() => null);
+  const recoveredCardPayload = parseJson(recoveredCardRow?.payload, null) || {};
+  const recoveredCard = !!recoveredCardPayload.extraction_model
+    && recoveredCardPayload.extraction_model === call.ai_extraction_model
+    && recoveredCardPayload.extraction_prompt_version === call.ai_extraction_prompt_version;
   const storedAv = (recoveredCard && storedAvRaw)
     ? { status: 'corrected', inServiceArea: true, county: storedAvRaw.county || null, normalized: storedAvRaw.normalized || null, reconstructed_from: 'address_recovered' }
     : storedAvRaw;
