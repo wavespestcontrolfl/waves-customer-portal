@@ -20,7 +20,8 @@ const emailMigration = require('../models/migrations/20260702000012_reschedule_l
 const {
   eligibility, bookingRange, searchParseOpts, apptDateStr, label12,
   pullForwardDays, shouldReanchor, REANCHOR_PULLFORWARD_DAYS,
-  loadWeatherMove, WEATHER_MOVE_MAX_AGE_DAYS,
+  loadWeatherMove, WEATHER_MOVE_MAX_AGE_DAYS, collectiveAnchorActive,
+  seriesScopeMismatch,
 } = reschedulePublicRouter._test;
 
 // Fixed "now": 2026-07-02 12:00 ET (16:00 UTC, EDT).
@@ -320,6 +321,18 @@ describe('weatherMove banner context (GATE_RAINOUT_MOVE_BANNER)', () => {
     expect(await loadWeatherMove(SVC, NOW)).toBeNull();
   });
 
+  test('a series rain-out (reason weather_rain_series) still banners with the normalized reason (codex P2)', async () => {
+    process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+    wireLog({ ...LOG, reason_code: 'weather_rain_series' });
+    getDailyRainOutlookBounded.mockResolvedValueOnce({
+      '2026-07-03': { rainChance: 80 },
+      '2026-07-04': { rainChance: 15 },
+    });
+
+    const move = await loadWeatherMove(SVC, NOW);
+    expect(move).toMatchObject({ reasonCode: 'weather_rain', fromChance: 80, toChance: 15 });
+  });
+
   test('a customer-initiated move keeping the weather reason is the customer\'s pick, not a banner (codex r3)', async () => {
     process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
     // reschedule-sms reply flow logs customer_sms with the original
@@ -377,5 +390,51 @@ describe('weatherMove banner context (GATE_RAINOUT_MOVE_BANNER)', () => {
       });
     }
     expect(getDailyRainOutlookBounded).not.toHaveBeenCalled();
+  });
+});
+
+describe('collective series anchoring (GATE_COLLECTIVE_SERIES_ANCHOR)', () => {
+  afterEach(() => { delete process.env.GATE_COLLECTIVE_SERIES_ANCHOR; });
+
+  test('GET→POST scope pin: gate flips, missing disclosure, and anchor-date races all reject (codex P1 r1+r2)', () => {
+    const series = { is_recurring: true, scheduled_date: '2026-08-13' };
+    const ok = { disclosed_collective: true, disclosed_current_date: '2026-08-13' };
+    process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+    expect(seriesScopeMismatch(series, ok)).toBe(false);
+    // Disclosed legacy while the gate is collective → mismatch.
+    expect(seriesScopeMismatch(series, { ...ok, disclosed_collective: false })).toBe(true);
+    // FAIL CLOSED: a pre-deploy page omits the disclosure entirely.
+    expect(seriesScopeMismatch(series, {})).toBe(true);
+    expect(seriesScopeMismatch(series, undefined)).toBe(true);
+    // Anchor date moved since the render (dispatch race) → mismatch, both
+    // when the disclosed date is stale and when it is absent.
+    expect(seriesScopeMismatch(series, { ...ok, disclosed_current_date: '2026-08-12' })).toBe(true);
+    expect(seriesScopeMismatch(series, { disclosed_collective: true })).toBe(true);
+    // Gate now off: a collective disclosure mismatches; legacy matches.
+    delete process.env.GATE_COLLECTIVE_SERIES_ANCHOR;
+    expect(seriesScopeMismatch(series, ok)).toBe(true);
+    expect(seriesScopeMismatch(series, { ...ok, disclosed_collective: false })).toBe(false);
+    // Non-series visits never pin.
+    expect(seriesScopeMismatch({ is_recurring: false }, {})).toBe(false);
+  });
+
+  test('gate on: ANY date change re-anchors a series visit — both directions, any size', () => {
+    process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+    const rec = { is_recurring: true, scheduled_date: '2026-08-13' };
+    expect(shouldReanchor(rec, '2026-08-14')).toBe(true);  // 1-day push-back
+    expect(shouldReanchor(rec, '2026-08-12')).toBe(true);  // 1-day pull-forward
+    expect(shouldReanchor(rec, '2026-09-13')).toBe(true);  // big push-back
+    expect(shouldReanchor(rec, '2026-08-13')).toBe(false); // time-only move: no delta
+    // Non-recurring and boosters never shift the base plan.
+    expect(shouldReanchor({ is_recurring: false, scheduled_date: '2026-08-13' }, '2026-08-20')).toBe(false);
+    expect(shouldReanchor({ is_recurring: false, recurring_parent_id: 'abc', scheduled_date: '2026-08-13' }, '2026-08-20')).toBe(false);
+  });
+
+  test('gate off: the 07-13 pull-forward threshold behavior is unchanged', () => {
+    const rec = { is_recurring: true, scheduled_date: '2026-08-13' };
+    expect(shouldReanchor(rec, '2026-08-12')).toBe(false);
+    expect(shouldReanchor(rec, '2026-09-13')).toBe(false);
+    expect(shouldReanchor(rec, '2026-07-16')).toBe(true); // 28-day pull still re-anchors
+    expect(collectiveAnchorActive()).toBe(false);
   });
 });

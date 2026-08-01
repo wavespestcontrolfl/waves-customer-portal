@@ -95,10 +95,50 @@ function isSeriesVisit(svc) {
   return !!svc?.is_recurring;
 }
 
+// Collective anchoring (owner ruling 2026-07-30, supersedes the 07-13
+// pull-forward-only rule when the gate is on): a recurring series anchors
+// to the LAST TREATMENT — any date move of a series visit shifts every
+// later occurrence by the same delta, both directions, any size. Residual
+// protects ~90 days from actual application and billing is per
+// application, so the interval follows the visit that actually happened:
+// no coverage gaps for the customer, no compressed intervals for Waves.
+// Same-date (time-only) moves have no delta and never touch the series.
+// Dark until Adam flips GATE_COLLECTIVE_SERIES_ANCHOR; kill = unset.
+function collectiveAnchorActive() {
+  return process.env.GATE_COLLECTIVE_SERIES_ANCHOR === 'true';
+}
+
 // True when committing `targetDateStr` for this visit re-anchors the series.
 function shouldReanchor(svc, targetDateStr) {
   if (!isSeriesVisit(svc)) return false;
+  if (collectiveAnchorActive()) {
+    const target = String(targetDateStr || '').slice(0, 10);
+    return !!target && apptDateStr(svc.scheduled_date) !== target;
+  }
   return pullForwardDays(apptDateStr(svc.scheduled_date), targetDateStr) >= REANCHOR_PULLFORWARD_DAYS;
+}
+
+// GET→POST scope pin (codex P1, hardened r2): the page disclosed whether a
+// date move shifts the whole series (payload.collectiveAnchor) AND against
+// which current date that promise was framed. A series commit is rejected
+// (409 SCOPE_CHANGED → the page reloads and re-discloses) when:
+//   - the disclosure is ABSENT — fail closed: a pre-deploy page left open
+//     across the gate flip omits the field, and honoring its commit could
+//     shift a series the page promised was a single move;
+//   - the disclosed mode no longer matches the gate (flip in either
+//     direction between render and commit);
+//   - the anchor DATE moved since the render (dispatch race) — the
+//     date-vs-time-only scope decision was framed against the rendered
+//     date, so a moved anchor invalidates it both ways.
+// Non-series visits never pin: scope disclosure only exists for series.
+function seriesScopeMismatch(svc, body) {
+  if (!isSeriesVisit(svc)) return false;
+  const disclosed = body?.disclosed_collective;
+  if (typeof disclosed !== 'boolean') return true;
+  if (disclosed !== collectiveAnchorActive()) return true;
+  const disclosedDate = String(body?.disclosed_current_date || '').slice(0, 10);
+  if (!disclosedDate || disclosedDate !== apptDateStr(svc.scheduled_date)) return true;
+  return false;
 }
 
 router.use(rateLimit({
@@ -269,7 +309,11 @@ async function loadWeatherMove(svc, now = new Date()) {
     .where({ scheduled_service_id: svc.id })
     .orderBy('created_at', 'desc')
     .first('reason_code', 'initiated_by', 'original_date', 'original_window', 'new_date', 'new_window', 'created_at');
-  if (!log || !WEATHER_REASON_CODES.has(log.reason_code)) return null;
+  // Series rain-outs log '<reason>_series' (rescheduleSeries) — normalize so
+  // a collective-anchor rain-out still banners (codex P2). The payload keeps
+  // the unsuffixed code the client's copy map speaks.
+  const reasonCode = String(log?.reason_code || '').replace(/_series$/, '');
+  if (!log || !WEATHER_REASON_CODES.has(reasonCode)) return null;
   if (!WEATHER_MOVE_INITIATORS.has(log.initiated_by)) return null;
   const ageMs = now - new Date(log.created_at);
   if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs > WEATHER_MOVE_MAX_AGE_DAYS * 86400000) return null;
@@ -280,7 +324,7 @@ async function loadWeatherMove(svc, now = new Date()) {
   if (loggedStart && hhmm(svc.window_start) && loggedStart !== hhmm(svc.window_start)) return null;
 
   const move = {
-    reasonCode: log.reason_code,
+    reasonCode,
     from: {
       date: apptDateStr(log.original_date),
       windowStart: hhmm(String(log.original_window || '').split('-')[0] || null),
@@ -299,7 +343,7 @@ async function loadWeatherMove(svc, now = new Date()) {
   // decisions run on wind speed and temperature (reschedule-rules.js), and
   // "0% rain" beside a wind-out obscures the move instead of explaining it
   // (codex r4 P2). Non-rain reasons render the banner without chips.
-  if (log.reason_code === 'weather_rain' || log.reason_code === 'weather_lightning') {
+  if (reasonCode === 'weather_rain' || reasonCode === 'weather_lightning') {
     try {
       // Bounded lookup handles null/invalid coordinates itself and returns
       // null on deadline/failure — banner renders without chips either way.
@@ -399,6 +443,10 @@ router.get('/:token', async (req, res, next) => {
       // enforces the same rule regardless.
       isRecurring: !!(svc.is_recurring || svc.recurring_parent_id),
       reanchorPullForwardDays: isSeriesVisit(svc) ? REANCHOR_PULLFORWARD_DAYS : null,
+      // Collective anchoring active for this visit: the page swaps the
+      // recurring note to "your later visits shift to match" and drops the
+      // legacy pull-forward warning (every date move re-anchors).
+      collectiveAnchor: isSeriesVisit(svc) && collectiveAnchorActive(),
       // The visit's time already passed without service — the page renders
       // the "we missed each other" rebook framing instead of the standard
       // reschedule copy.
@@ -610,6 +658,14 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     }
 
     const newWindow = { start: slot.start_time, end: slot.end_time };
+    // Series-scope consent pin — see seriesScopeMismatch. Mismatch means the
+    // page's disclosure no longer matches what this commit would do.
+    if (seriesScopeMismatch(svc, req.body)) {
+      return res.status(409).json({
+        error: 'The scheduling details for your plan just updated — please review the latest options.',
+        code: 'SCOPE_CHANGED',
+      });
+    }
     // Big pull-forward on a recurring visit re-anchors the whole series
     // (owner ruling 2026-07-13): the customer getting service ~a month early
     // should have every later visit follow, not sit a double interval out.
@@ -873,6 +929,8 @@ router._test = {
   REANCHOR_PULLFORWARD_DAYS,
   loadWeatherMove,
   WEATHER_MOVE_MAX_AGE_DAYS,
+  collectiveAnchorActive,
+  seriesScopeMismatch,
 };
 
 module.exports = router;
