@@ -380,6 +380,29 @@ describe('extractAddressCandidates', () => {
     expect(withUnit.variants).toContain('100 Space Coast Parkway Apt 6');
   });
 
+  test('trailing-period tokens normalize at the tokenizer (N., Apt., Ste.)', () => {
+    // 'Apt.' used to fail the designator cut entirely — no unit captured,
+    // exact-unit guard bypassed.
+    const [apt] = extractAddressCandidates('quote for 100 Palm Ave Apt. 6 please');
+    expect(apt.variants.every((v) => v.endsWith(' Apt 6'))).toBe(true);
+    expect(apt.variants).toContain('100 Palm Ave Apt 6');
+    const [ste] = extractAddressCandidates('service at 200 Trade Ctr Blvd Ste. 12');
+    expect(ste.variants.every((v) => v.endsWith(' Ste 12'))).toBe(true);
+    // 'N.' now expands through the directional aliases like bare 'N'.
+    const [dir] = extractAddressCandidates('quote for 100 N. Palm Ave please');
+    expect(dir.firstWord).toBe('N');
+    const { _private } = require('../services/estimator-engine/scope-guards');
+    expect(_private.prefixVariants(dir.num, dir.firstWord)).toEqual(expect.arrayContaining(['100 N%', '100 north%']));
+  });
+
+  test('measurement-shaped numbers never consume the candidate cap', () => {
+    // '2 bedrooms', '3 bathrooms', '1500 sqft' each burned one of the three
+    // slots and the REAL address was lost.
+    const cands = extractAddressCandidates('2 bedrooms, 3 bathrooms, 1500 sqft, service at 100 Palm Ave');
+    expect(cands).toHaveLength(1);
+    expect(cands[0].variants).toContain('100 Palm Ave');
+  });
+
   test('captures explicit units onto every variant (word and hash forms)', () => {
     const [cand] = extractAddressCandidates('quote for 100 Palm Ave Apt 6 please');
     expect(cand.variants.every((v) => v.endsWith(' Apt 6'))).toBe(true);
@@ -1006,6 +1029,80 @@ describe('loadThreadTriageContext', () => {
       { message_body: 'reminder about 100 Palm Ave Monday', created_at: new Date().toISOString(), direction: 'outbound' },
     ];
     triage = await loadThreadTriageContext({
+      phone: '+17245550000',
+      triggerBody: 'can you add flea treatment at the same place?',
+    });
+    expect(triage.groundedCustomerId).toBe('c-2');
+  });
+
+  test('punctuated directionals still ground against the stored long form', async () => {
+    mockState.rows.customers = [
+      { id: 'c-7', first_name: 'Dir', last_name: 'Ectional', address_line1: '100 North Palm Avenue', city: 'Bradenton' },
+    ];
+    const triage = await loadThreadTriageContext({
+      phone: null,
+      triggerBody: 'quote for 100 N. Palm Ave please',
+    });
+    expect(triage.matchedExistingCustomer).toBe(true);
+    expect(triage.lines.join('\n')).toContain('100 North Palm Avenue');
+  });
+
+  test('a punctuated unit (Apt. 6) still enforces the exact-unit guard', async () => {
+    mockState.rows.customers = [
+      { id: 'c-2', first_name: 'Building', last_name: 'Level', address_line1: '100 Palm Ave', address_line2: null, city: 'Venice' },
+    ];
+    let triage = await loadThreadTriageContext({
+      phone: null,
+      triggerBody: 'quote for 100 Palm Ave Apt. 6 please',
+    });
+    expect(triage.matchedExistingCustomer).toBe(false);
+
+    mockState.rows.customers = [
+      { id: 'c-2', first_name: 'Apt', last_name: 'Six', address_line1: '100 Palm Ave', address_line2: 'Apt 6', city: 'Venice' },
+    ];
+    triage = await loadThreadTriageContext({
+      phone: null,
+      triggerBody: 'quote for 100 Palm Ave Apt. 6 please',
+    });
+    expect(triage.matchedExistingCustomer).toBe(true);
+  });
+
+  test('a UNIT scope only counts booked visits stamped with that unit', async () => {
+    mockState.rows.customers = [
+      { id: 'c-2', first_name: 'Apt', last_name: 'Six', address_line1: '100 Palm Ave', address_line2: 'Apt 6', city: 'Venice' },
+    ];
+    // Unitless legacy visit stamp — must NOT read as Apt 6's booked work.
+    mockState.rows.scheduled_services = [
+      { service_type: 'Quarterly Pest Control Service', scheduled_date: '2026-08-05', status: 'pending', service_address_line1: '100 Palm Ave' },
+    ];
+    let triage = await loadThreadTriageContext({
+      phone: null,
+      triggerBody: 'quote for 100 Palm Ave Apt 6 please',
+    });
+    expect(triage.lines.join('\n')).not.toContain('booked:');
+
+    // A stamp carrying the SAME unit is booked work.
+    mockState.rows.scheduled_services = [
+      { service_type: 'Quarterly Pest Control Service', scheduled_date: '2026-08-05', status: 'pending', service_address_line1: '100 Palm Ave', service_address_line2: 'Apt 6' },
+    ];
+    triage = await loadThreadTriageContext({
+      phone: null,
+      triggerBody: 'quote for 100 Palm Ave Apt 6 please',
+    });
+    expect(triage.lines.join('\n')).toContain('booked: Quarterly Pest Control Service 2026-08-05 (pending)');
+  });
+
+  test('notation variants of ONE address merge for the implicit-reference fallback', async () => {
+    // 'Ave, Venice FL 34285' and 'Avenue' are the same property — the raw
+    // string keys used to count them as two and withhold grounding.
+    mockState.rows.sms_log = [
+      { message_body: 'Waves: your visit is booked at 100 Palm Ave, Venice FL 34285', created_at: new Date().toISOString(), direction: 'outbound' },
+      { message_body: 'confirming 100 Palm Avenue works', created_at: new Date().toISOString(), direction: 'inbound' },
+    ];
+    mockState.rows.customers = [
+      { id: 'c-2', first_name: 'Pat', last_name: 'Homeowner', address_line1: '100 Palm Ave', city: 'Venice', zip: '34285' },
+    ];
+    const triage = await loadThreadTriageContext({
       phone: '+17245550000',
       triggerBody: 'can you add flea treatment at the same place?',
     });

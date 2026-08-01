@@ -186,17 +186,36 @@ function extractAddressCandidates(text) {
   // ("100 Palm Ave and 200 Oak St") or prose numbers are never swallowed
   // into the street run, and the bare-number-pair guard below ("4 30
   // tomorrow") keeps its job on the FIRST word.
-  const re = /\b(\d{1,6})\s+([A-Za-z0-9][A-Za-z0-9'.-]*(?:\s+(?:[A-Za-z][A-Za-z0-9'.-]*|(?<=\s(?:us|sr|cr|rte|rt|route|hwy|highway|road|rd)\s+)\d{1,4}\b)){0,6})/gi;
+  // Separators are single-line ([^\S\r\n], never \s): grounding text joins
+  // separate MESSAGES with newlines, and a \s separator let a message-final
+  // number and the NEXT message's first word fuse into a phantom candidate
+  // ("… 34285\nconfirming …" → '34285 confirming').
+  const re = /\b(\d{1,6})[^\S\r\n]+([A-Za-z0-9][A-Za-z0-9'.-]*(?:[^\S\r\n]+(?:[A-Za-z][A-Za-z0-9'.-]*|(?<=\s(?:us|sr|cr|rte|rt|route|hwy|highway|road|rd)\s+)\d{1,4}\b)){0,6})/gi;
   let m;
   // Structural designators (lot/space/bldg/floor) come from the canonical
   // set in utils/address-normalizer.js — bare 'fl' is deliberately OMITTED
   // here (it collides with the FL state marker; 'floor' spelled out works).
   const UNIT_WORD_RE = /^(?:apt|apartment|unit|suite|ste|lot|spc|space|bldg|building|floor|#)$/i;
   while (out.length < 3 && (m = re.exec(src)) !== null) {
-    const allWords = m[2].split(/\s+/);
-    // Skip obvious non-addresses: "24 hours", "30 minutes", "2 pm", and
-    // bare number-pairs ("4 30") — numbered streets carry a suffix ("5th").
-    if (/^(?:hours?|hrs?|minutes?|mins?|days?|weeks?|months?|years?|am|pm)$/i.test(allWords[0])) continue;
+    // TOKENIZER-level punctuation normalization: trailing periods come off
+    // every captured word ('N.' → 'N', 'Apt.' → 'Apt', 'Ste.' → 'Ste') so
+    // every downstream consumer — prefixVariants alias expansion, the
+    // UNIT_WORD_RE designator cut, unit capture, the SQL prefixes built
+    // from firstWord — sees canonical tokens. Un-normalized, '100 N. Palm'
+    // never fetched the row stored as '100 North Palm Avenue', and
+    // 'Apt. 6' carried no unit at all, bypassing the exact-unit guard.
+    // (Interior periods — decimals — are untouched.)
+    const allWords = m[2].split(/\s+/).map((w) => w.replace(/\.+$/, ''));
+    // Skip obvious non-addresses: durations ("24 hours", "2 pm"),
+    // MEASUREMENT phrases ("2 bedrooms, 3 bathrooms, 1500 sqft" — each of
+    // those consumed one of the three candidate slots and could push the
+    // REAL address out entirely), and bare number-pairs ("4 30") — numbered
+    // streets carry a suffix ("5th"). Skipped matches never count against
+    // the 3-candidate emission cap, so a measurement-heavy message still
+    // reaches the address further along. Rare streets that BEGIN with one
+    // of these nouns ("100 Story Rd") lose extraction — the conservative
+    // direction (no grounding ⇒ the standing bell, never a wrong link).
+    if (/^(?:hours?|hrs?|minutes?|mins?|days?|weeks?|months?|years?|am|pm|beds?|bedrooms?|baths?|bathrooms?|sqft|sq|square|ft|feet|foot|stories|story|floors?|acres?|cars?|garages?|people|persons?|guests?|kids?|dogs?|cats?|pets?|rooms?)$/i.test(allWords[0])) continue;
     if (/^\d+$/.test(allWords[0])) continue;
     // The street-word run may have swallowed a unit designator ("100 Palm
     // Ave Apt 6" → words [Palm, Ave, Apt]) — cut the street at the FIRST
@@ -521,31 +540,49 @@ async function loadTriageInner({ phone, triggerBody, deadline = Date.now() + TRI
   // exactly ONE distinct address, so there is nothing to guess between.
   const triggerCandidates = extractAddressCandidates(String(triggerBody || ''));
   const burstCandidates = extractAddressCandidates(burstTexts.join('\n'));
-  // Uniqueness is judged on the COMPLETE normalized street, not house
-  // number + first word — '100 Palm Ave' and '100 Palm St' are different
-  // properties and must count as two (⇒ no grounding), never collapse to
-  // one arbitrary pick. The key: alias-normalized street tokens cut after
-  // the last street suffix (+ trailing route number), so prose swallowed
-  // into the capture ("… Loop Friday" vs "… Loop Monday") doesn't split
-  // the SAME address into two keys. Over-splitting is the safe direction —
-  // it only withholds the implicit-reference fallback.
-  const candidateStreetKey = (c) => {
+  // Uniqueness is judged by NORMALIZED EQUIVALENCE, not raw strings —
+  // 'Waves: 100 Palm Ave, Venice FL 34285' and the reply's '100 Palm
+  // Avenue' are ONE property (sameStreetAddress semantics: alias-equal
+  // streets; equal-or-missing locality and unit are compatible), while
+  // '100 Palm Ave' vs '100 Palm St' — or genuinely conflicting cities —
+  // stay two (⇒ no grounding, never an arbitrary pick). The street is cut
+  // after its last suffix (+ route number) so prose swallowed into the
+  // capture ("… Loop Friday" vs "… Loop Monday") doesn't split the same
+  // address. When notation variants merge, the RICHER candidate (the one
+  // carrying a unit/locality) survives — it gates confirmation better.
+  const candidateAddrString = (c) => {
     const last = c.variants[c.variants.length - 1] || `${c.num} ${c.firstWord}`;
-    const tokens = last.toLowerCase().split(/\s+/).map((t) => STREET_TOKEN_ALIASES[t] || t);
+    const tokens = last.toLowerCase().split(/\s+/);
     let cut = tokens.length;
     for (let i = tokens.length - 1; i > 0; i -= 1) {
-      if (ALL_STREET_SUFFIXES.has(tokens[i])) {
+      if (ALL_STREET_SUFFIXES.has(STREET_TOKEN_ALIASES[tokens[i]] || tokens[i])) {
         cut = i + 1;
         break;
       }
     }
     if (cut < tokens.length && /^\d+$/.test(tokens[cut])) cut += 1;
-    return `${tokens.slice(0, cut).join(' ')}|${c.unit || ''}|${c.locality || ''}`.toLowerCase();
+    // variants already carry the unit suffix on every entry; the cut
+    // dropped it, so re-attach the explicit unit before the locality.
+    return `${tokens.slice(0, cut).join(' ')}${c.unit ? ` ${c.unit}` : ''}${c.locality || ''}`;
   };
-  const burstKeys = new Set(burstCandidates.map(candidateStreetKey));
+  const distinctBurst = [];
+  for (const c of burstCandidates) {
+    const addr = candidateAddrString(c);
+    const matchIdx = distinctBurst.findIndex((u) => {
+      try {
+        return sameStreetAddress(candidateAddrString(u), addr);
+      } catch (err) {
+        return false;
+      }
+    });
+    if (matchIdx === -1) distinctBurst.push(c);
+    else if ((c.unit && !distinctBurst[matchIdx].unit) || (c.locality && !distinctBurst[matchIdx].locality)) {
+      distinctBurst[matchIdx] = c;
+    }
+  }
   let groundingCandidates = [];
   if (triggerCandidates.length) groundingCandidates = triggerCandidates;
-  else if (burstKeys.size === 1) groundingCandidates = burstCandidates.slice(0, 1);
+  else if (distinctBurst.length === 1) groundingCandidates = distinctBurst;
 
   // Fetch bound. The discriminating predicates below run SQL-side so the
   // named unit/locality cannot fall outside the slice, and one extra row is
@@ -757,10 +794,13 @@ async function loadTriageInner({ phone, triggerBody, deadline = Date.now() + TRI
         .whereIn('status', ['pending', 'confirmed', 'en_route', 'on_site'])
         .whereRaw("scheduled_date >= (NOW() AT TIME ZONE 'America/New_York')::date - INTERVAL '30 days'")
         .orderBy('scheduled_date', 'asc')
-        // Wide sanity bound, NOT a display limit: the address-scope filter
-        // runs in JS below, and a tight SQL limit would let property A's
-        // visits crowd the matched property's visit out of the fetch.
-        .limit(25))
+        // Wide sanity bound, NOT a display limit — same rule as the
+        // coverage query: the stamp discrimination needs normalization
+        // (suffix/directional aliases) that SQL cannot express, so the
+        // filter runs in JS below, and a tight SQL limit would let a
+        // busy multi-property customer's other-parcel visits crowd the
+        // matched property's visit out of the fetch.
+        .limit(100))
         .select('service_type', 'scheduled_date', 'status',
           'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip');
       const scopeFull = e.scope
@@ -772,6 +812,10 @@ async function loadTriageInner({ phone, triggerBody, deadline = Date.now() + TRI
             return sameStreetAddress(
               stampFull(v.service_address_line1, v.service_address_line2, v.service_address_city, v.service_address_zip),
               scopeFull,
+              // A UNIT scope must prove the unit — a unitless legacy visit
+              // stamp must not read as Apt 6's booked work (same rule as
+              // candidateMatchesRow and recurringCoverage).
+              e.scope.line2 ? { requireExactUnit: true } : undefined,
             );
           } catch (err) {
             return false;
