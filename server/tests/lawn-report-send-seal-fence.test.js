@@ -94,8 +94,9 @@ describe('#3135 — every lawn-report delivery is fenced, not just held ones', (
 
     const opts = sendServiceReportV1Email.mock.calls[0][1];
     expect(typeof opts.verifyBeforeSend).toBe('function');
-    // Held-path obligations must NOT leak onto the normal path.
-    expect(opts.forceFreshPdf).toBe(false);
+    // Sanitize stays a HELD-path obligation — it must not leak onto the normal
+    // path. (forceFreshPdf is now expected on any fenced delivery; see the r3
+    // cached-object test.)
     expect(KnowledgeBridge.sanitizeStoredRecommendations).not.toHaveBeenCalled();
 
     await opts.verifyBeforeSend();
@@ -222,6 +223,49 @@ describe('#3135 r1/r2 — fence target resolution', () => {
     expect(out.status).not.toBe('sent');
     expect(out.error).toMatch(/send seal active/);
     expect(sendServiceReportV1Email).not.toHaveBeenCalled();
+  });
+
+  test('r3: the fence refuses when the RENDER used a different assessment', async () => {
+    // The renderer resolves the assessment independently of the worker, and the
+    // backlink is non-unique — a row confirmed in between becomes the render's
+    // pick. Sealing the worker's older row would prove nothing about what was
+    // attached, so the send defers.
+    sendServiceReportV1Email.mockImplementationOnce(async (_id, opts) => {
+      const safe = await opts.verifyBeforeSend({ renderedAssessmentId: 'assess-OTHER' });
+      return safe ? { ok: true, messageId: 'msg-1' } : { ok: false, error: 'deferring', retryable: true };
+    });
+    const knex = makeKnex();
+    const delivery = { ...DELIVERY, payload: { source: 'dispatch_complete' } };
+
+    const out = await processServiceReportDelivery(delivery, knex);
+
+    expect(out.status).not.toBe('sent');
+    expect(KnowledgeBridge.sealRecommendationsForSend).not.toHaveBeenCalled();
+  });
+
+  test('r3: the fence proceeds when the render used the SAME assessment', async () => {
+    sendServiceReportV1Email.mockImplementationOnce(async (_id, opts) => {
+      const safe = await opts.verifyBeforeSend({ renderedAssessmentId: 'assess-canonical' });
+      return safe ? { ok: true, messageId: 'msg-1' } : { ok: false, error: 'deferring', retryable: true };
+    });
+    const knex = makeKnex();
+    const delivery = { ...DELIVERY, payload: { source: 'dispatch_complete' } };
+
+    const out = await processServiceReportDelivery(delivery, knex);
+
+    expect(out.status).toBe('sent');
+    expect(KnowledgeBridge.sealRecommendationsForSend).toHaveBeenCalledWith(
+      'assess-canonical', expect.any(String), expect.any(Function),
+    );
+  });
+
+  test('r3: a fenced delivery forces a fresh PDF so no cached object is attached', async () => {
+    const knex = makeKnex();
+    const delivery = { ...DELIVERY, payload: { source: 'dispatch_complete' } };
+
+    await processServiceReportDelivery(delivery, knex);
+
+    expect(sendServiceReportV1Email.mock.calls[0][1].forceFreshPdf).toBe(true);
   });
 
   test('r2: a lookup ERROR fails closed — deferred, never dispatched unfenced', async () => {

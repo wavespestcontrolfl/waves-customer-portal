@@ -482,7 +482,16 @@ async function sendServiceReportV1Email(recordId, { token, reportUrl, pdfUrl, fo
   // generation/version state HERE — after the render, before dispatch — and
   // a false result aborts retryably instead of emailing divergent copy.
   if (typeof verifyBeforeSend === 'function') {
-    const stillSafe = await verifyBeforeSend();
+    // Report WHICH assessment this render actually used (codex P1 #3135 r3).
+    // The worker resolves the assessment before the render and the builder
+    // resolves it again during the render; because the record backlink is
+    // explicitly non-unique, a row confirmed or relinked in between can become
+    // the renderer's selection while the worker sealed the previous one. The
+    // fence can only be trusted if it seals the copy the customer is actually
+    // about to receive, so the render's own answer is passed back to it.
+    const stillSafe = await verifyBeforeSend({
+      renderedAssessmentId: data?.lawnAssessment?.assessmentId || null,
+    });
     if (!stillSafe) {
       return { ok: false, error: 'Report copy changed during render — deferring send', retryable: true };
     }

@@ -315,8 +315,18 @@ async function processServiceReportDelivery(delivery, knex = db) {
     // registration refuses while it is unexpired, so nothing can start
     // between this check and the dispatch.
     const versionOf = (row) => (row ? JSON.stringify([row.recommendations, row.ai_summary, row.updated_at]) : null);
-    lawnFenceCheck = async () => {
+    lawnFenceCheck = async ({ renderedAssessmentId = null } = {}) => {
       try {
+        // The render is authoritative about which assessment the customer is
+        // about to receive (codex P1 #3135 r3). If it used a DIFFERENT row than
+        // the one whose version was pinned before the render, there is no proof
+        // that row held still while it rendered — defer and let the retry fence
+        // the now-current assessment. A null id means the render produced no
+        // lawn assessment at all, so there is nothing to diverge from.
+        if (renderedAssessmentId && String(renderedAssessmentId) !== String(assessmentId)) {
+          logger.warn(`[delivery-queue] rendered assessment ${renderedAssessmentId} differs from fenced ${assessmentId} for record ${delivery.service_record_id} — deferring send`);
+          return false;
+        }
         const sealed = await KnowledgeBridge.sealRecommendationsForSend(assessmentId, versionAtCheck, versionOf);
         if (sealed) {
           // The base TTL equals SendGrid's own request timeout, so a slow
@@ -351,7 +361,13 @@ async function processServiceReportDelivery(delivery, knex = db) {
       token: delivery.report_token,
       reportUrl: delivery.report_url,
       pdfUrl: delivery.pdf_url,
-      forceFreshPdf: heldForGrounding,
+      // Any FENCED delivery forces a fresh render, not just held ones (codex
+      // P1 #3135 r3): a stored PDF carries no assessment or recommendation
+      // version, so a cached object rendered from an older copy would sail
+      // past the version check — the fence proves the stored copy didn't move
+      // during THIS render, not that the cached object came from it. Cost is
+      // one render per lawn delivery, which the held path already paid.
+      forceFreshPdf: heldForGrounding || !!fencedAssessmentId,
       verifyBeforeSend: lawnFenceCheck,
     });
     if (result.ok) {
