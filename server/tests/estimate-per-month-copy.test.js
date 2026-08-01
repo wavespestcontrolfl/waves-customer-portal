@@ -86,13 +86,21 @@ describe('legacy SSR renderer mirrors the per-application rules (codex #3128 r2)
     // $X/mo total on a per-application plan.
     expect(src).toMatch(/async function estimateRendersMonthlyBilling/);
     expect(src).toContain('const monthlyBilledEstimate = await estimateRendersMonthlyBilling(estimate);');
-    expect(src).toContain('monthlyBilled: await estimateRendersMonthlyBilling(estimate),');
+    // ONE resolution per request, reused (pre-push audit P1). The bundle's
+    // flags and the cta flag beside them are read by the same page, so a
+    // second lookup could hand it two different answers about one plan.
+    expect(src).toContain('monthlyBilled: monthlyBilledEstimate,');
+    expect(src).toContain('buildPricingBundle(estimate, { monthlyBilled: monthlyBilledEstimate })');
+    // Exactly two resolve sites — the SSR handler and the /data handler — plus
+    // the fallback inside buildPricingBundle for callers that pass nothing.
+    const resolveSites = src.match(/await estimateRendersMonthlyBilling\(estimate\)/g) || [];
+    expect(resolveSites).toHaveLength(3);
     // ...and the pricing bundle too (codex #3128 r10). The flags are not a
     // disclosure note: PriceCard reads their ABSENCE as permission to render
     // "Billed $X/mo", so a fail-OPEN strip re-opened the monthly spread on the
     // React path. EVERY display caller goes through the fail-closed resolver;
     // the raw predicate has exactly one caller, inside it.
-    expect(src).toContain('return (await estimateRendersMonthlyBilling(estimate))');
+    expect(src).toMatch(/\? await estimateRendersMonthlyBilling\(estimate\)\s*\n\s*: monthlyBilled === true;/);
     const rawCallers = src.match(/await estimateCustomerPreservesMonthlyBilling\([^)]*\)/g) || [];
     expect(rawCallers).toEqual(['await estimateCustomerPreservesMonthlyBilling(estimate)']);
     // No knob to set wrongly later.

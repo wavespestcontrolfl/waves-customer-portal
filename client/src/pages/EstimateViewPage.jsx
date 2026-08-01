@@ -1073,10 +1073,14 @@ function MembershipCard({ membership }) {
   if (membership.tierDiscountPct != null && !(Number(membership.tierDiscountPct) > 0)) return null;
   const existing = (Array.isArray(membership.existingServices) ? membership.existingServices : [])
     .filter((s) => Number(s.extraDiscountPct) > 0);
+  // monthlySavings is deliberately NOT an admission criterion (pre-push audit
+  // P1, "per month" sweep 2026-08-01) — mirrors the SSR filter. The row prints
+  // a discount percentage or a per-application saving and nothing else, so a
+  // row admitted on monthlySavings ALONE renders a bare "Member pricing" with
+  // no figure, which is the no-benefit card this gate exists to suppress.
   const added = (Array.isArray(membership.newServices) ? membership.newServices : [])
     .filter((s) => Number(s.discountPct) > 0
-      || Number(s.perApplicationSavings) > 0
-      || Number(s.monthlySavings) > 0);
+      || Number(s.perApplicationSavings) > 0);
   if (!membership.upgrade && existing.length === 0 && added.length === 0) return null;
   const hello = membership.firstName ? `Welcome back, ${membership.firstName}` : 'Welcome back';
 

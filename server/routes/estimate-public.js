@@ -3664,10 +3664,14 @@ function renderMembershipBlockHtml(membership) {
   // this gate exists to suppress.
   const existing = (Array.isArray(membership.existingServices) ? membership.existingServices : [])
     .filter((s) => Number(s.extraDiscountPct) > 0);
+  // monthlySavings is deliberately NOT an admission criterion (pre-push audit
+  // P1, "per month" sweep 2026-08-01). The row can only ever print a discount
+  // percentage or a per-application saving, so a row admitted on monthlySavings
+  // ALONE renders a bare "Member pricing" with no figure — precisely the
+  // no-benefit card the comment above says this gate exists to suppress.
   const added = (Array.isArray(membership.newServices) ? membership.newServices : [])
     .filter((s) => Number(s.discountPct) > 0
-      || Number(s.perApplicationSavings) > 0
-      || Number(s.monthlySavings) > 0);
+      || Number(s.perApplicationSavings) > 0);
   // Nothing to say (e.g. a re-quote of a service the member already has) —
   // skip rather than render a header-and-badge-only card.
   if (!membership.upgrade && existing.length === 0 && added.length === 0) return '';
@@ -7500,9 +7504,14 @@ async function handleEstimateView(req, res, next) {
     }
 
     const linkedAppointment = await findLinkedUpcomingAppointment(estimate, estData);
+    // Resolved ONCE for this request and handed to every consumer below (the
+    // bundle's flags, the hero fork) — a second lookup could answer
+    // differently and put contradictory billing units on the same page
+    // (pre-push audit P1).
+    const monthlyBilledEstimate = await estimateRendersMonthlyBilling(estimate);
     let pricingBundleForView = null;
     try {
-      pricingBundleForView = await buildPricingBundle(estimate);
+      pricingBundleForView = await buildPricingBundle(estimate, { monthlyBilled: monthlyBilledEstimate });
     } catch (e) {
       logger.warn(`[estimate-view] pricing bundle quote guard skipped: ${e.message}`);
     }
@@ -7571,12 +7580,6 @@ async function handleEstimateView(req, res, next) {
 
     // Does accepting this estimate bill MONTHLY? (codex #3128 r6) The
     // per-application hero is the residential default, but a current monthly
-    // member keeps monthly membership billing at accept — the exact audience
-    // buildPricingBundle strips every billedPerApplication flag for — so
-    // labelling their plan "Priced per application" misstates a real charge.
-    // Async, so resolve here and pass into the (sync) renderPage.
-    const monthlyBilledEstimate = await estimateRendersMonthlyBilling(estimate);
-
     // Display-only: fill contact gaps from the linked customer/lead so the
     // hero always lists email/phone/address when Waves has them on file.
     const contact = await resolveEstimateContactFields(estimate);
@@ -17203,7 +17206,12 @@ function addMissingBilledPerApplicationFlags(bundle) {
   return out;
 }
 
-async function buildPricingBundle(estimate) {
+// `monthlyBilled` lets a caller that ALREADY resolved the verdict hand it in,
+// so one request cannot resolve it twice and get two answers (pre-push audit
+// P1): the flags in this bundle and the cta.monthlyBilled beside it are read
+// by the same page, and a lookup that succeeds for one call and fails for the
+// other would tell it two contradictory things about the same plan.
+async function buildPricingBundle(estimate, { monthlyBilled = null } = {}) {
   const bundle = await buildPricingBundleInner(estimate);
   if (!bundle || typeof bundle !== 'object') return bundle;
   // The SAME fail-closed resolver the hero and /data cta use (codex #3128
@@ -17212,7 +17220,10 @@ async function buildPricingBundle(estimate) {
   // permission to render "Billed $X/mo", so stripping them on a customers
   // lookup error re-opened the exact monthly spread r7 set out to close — on
   // the React path, for a per-application plan.
-  return (await estimateRendersMonthlyBilling(estimate))
+  const billsMonthly = monthlyBilled === null
+    ? await estimateRendersMonthlyBilling(estimate)
+    : monthlyBilled === true;
+  return billsMonthly
     ? stripBilledPerApplicationDeep(bundle)
     : addMissingBilledPerApplicationFlags(bundle);
 }
@@ -18241,7 +18252,11 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       estimateDataForIntelligence = {};
     }
 
-    const pricingBundle = await buildPricingBundle(estimate);
+    // ONE resolution for this request — the bundle's flags and the
+    // cta.monthlyBilled below are read by the same page, so resolving twice
+    // risks handing it two different answers (pre-push audit P1).
+    const monthlyBilledEstimate = await estimateRendersMonthlyBilling(estimate);
+    const pricingBundle = await buildPricingBundle(estimate, { monthlyBilled: monthlyBilledEstimate });
     const defaultServiceMode = defaultServiceModeForEstimate(estimateDataForIntelligence, estimate);
     const quoteRequirement = resolveEstimateQuoteRequirement(pricingBundle);
     const trenchingReviewBeforeBooking = !quoteRequirement.quoteRequired
@@ -18556,9 +18571,10 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         // The non-commercial monthly identity (codex #3128 r6): a current
         // monthly member's accept preserves membership billing, so their
         // bundle's combined total is the real charge and must not be replaced
-        // by a per-application headline. Same resolver the SSR hero uses, so
-        // the two surfaces can't disagree.
-        monthlyBilled: await estimateRendersMonthlyBilling(estimate),
+        // by a per-application headline. The SAME resolution the bundle above
+        // used — not a second lookup — so the flags and this flag cannot
+        // disagree within one response.
+        monthlyBilled: monthlyBilledEstimate,
         proposalPdfEmailed: estimateDataForIntelligence?.proposalDelivery?.pdfEmailed === true,
       },
       meta: {

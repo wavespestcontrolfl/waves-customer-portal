@@ -188,6 +188,28 @@ describe('buildPricingBundle lane enforcement', () => {
     expect(collectFlags(bundle).length).toBeGreaterThan(0);
   });
 
+  // Pre-push audit P1: the bundle's flags and the cta.monthlyBilled beside it
+  // are read by the SAME page, so a request must resolve the lane once. A
+  // caller-supplied verdict is authoritative and must not trigger a second
+  // lookup that could answer differently.
+  test('a caller-supplied verdict is used verbatim and costs no extra lookup', async () => {
+    mockDbState.customer = { id: 'cust-1', pipeline_stage: 'active_customer', monthly_rate: 95, billing_mode: 'per_application' };
+    // The row says per-application, but the caller already resolved "monthly"
+    // for this request — the bundle must agree with the caller, not re-derive.
+    const stripped = await buildPricingBundle(lawnEstimateRow({ customerId: 'cust-1' }), { monthlyBilled: true });
+    expect(collectFlags(stripped)).toEqual([]);
+    // And the converse, against a row that WOULD strip on its own.
+    mockDbState.customer = { id: 'cust-1', pipeline_stage: 'active_customer', monthly_rate: 95, billing_mode: 'monthly_membership' };
+    const flagged = await buildPricingBundle(lawnEstimateRow({ customerId: 'cust-1' }), { monthlyBilled: false });
+    expect(collectFlags(flagged).length).toBeGreaterThan(0);
+  });
+
+  test('a lookup failure cannot desync the bundle from a caller that already resolved', async () => {
+    mockDbState.customer = new Error('connection refused');
+    const bundle = await buildPricingBundle(lawnEstimateRow({ customerId: 'cust-1' }), { monthlyBilled: true });
+    expect(collectFlags(bundle)).toEqual([]);
+  });
+
   test('pre-migration database (no billing_mode column): every flag stripped even for leads — accepts bill the legacy monthly cron (codex r3)', async () => {
     mockDbState.billingModeColumnExists = false;
     const bundle = await buildPricingBundle(lawnEstimateRow());
