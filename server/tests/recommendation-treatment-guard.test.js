@@ -242,6 +242,17 @@ describe('sanitizeRecommendationsAgainstTreatment', () => {
     expect(dropped).toBe(0);
   });
 
+  test('malformed nested payload shapes never count as grounded (r37)', () => {
+    const v = _test.recommendationPayloadShapeValid;
+    expect(v({ summary: 'ok', recommendations: [{ action: 'a', reason: 'b', timeframe: 'c', priority: 1 }], customerTip: 't' })).toBe(true);
+    expect(v({})).toBe(true);
+    expect(v({ summary: { nested: true } })).toBe(false);
+    expect(v({ customerTip: ['arr'] })).toBe(false);
+    expect(v({ recommendations: ['just a string'] })).toBe(false);
+    expect(v({ recommendations: [{ action: { deep: 1 } }] })).toBe(false);
+    expect(v({ recommendations: 'not-an-array' })).toBe(false);
+  });
+
   test('legitimate aftercare mentioning the class passes (defer must govern the treatment)', () => {
     const { parsed, dropped } = _test.sanitizeRecommendationsAgainstTreatment({
       recommendations: [

@@ -160,6 +160,24 @@ const _recommendationRuns = new Map();
 // process's entry simply expires and can never strand the email.
 const GENERATION_LEASE_MS = 5 * 60 * 1000;
 const GENERATION_LEASE_RENEW_MS = 90 * 1000;
+// Shape contract for a freshly generated recommendation payload (codex P1
+// r37). Scalar fields must be strings when present; recommendations must be
+// an array of plain objects whose documented fields are strings/numbers.
+function recommendationPayloadShapeValid(raw) {
+  const optionalString = (v) => v === undefined || v === null || typeof v === 'string';
+  if (!optionalString(raw.summary) || !optionalString(raw.customerTip)) return false;
+  if (raw.recommendations !== undefined && raw.recommendations !== null) {
+    if (!Array.isArray(raw.recommendations)) return false;
+    for (const rec of raw.recommendations) {
+      if (!rec || typeof rec !== 'object' || Array.isArray(rec)) return false;
+      if (!optionalString(rec.action) || !optionalString(rec.reason) || !optionalString(rec.timeframe)) return false;
+      if (rec.priority !== undefined && rec.priority !== null
+        && typeof rec.priority !== 'number' && typeof rec.priority !== 'string') return false;
+    }
+  }
+  return true;
+}
+
 function parseStoredRecommendations(value) {
   try {
     const parsed = typeof value === 'string' ? JSON.parse(value) : value;
@@ -1056,6 +1074,16 @@ Return a JSON object with:
           logger.warn(`[knowledge-bridge] recommendation payload for ${assessmentId} was not a JSON object — failing run as ungrounded`);
           return null;
         }
+        // Nested shapes too (codex P1 r37): an object-valued summary /
+        // customerTip stringifies to "[object Object]" in the completion
+        // SMS, and string entries in recommendations bypass the sanitizer's
+        // per-field guards — none of that may release the artifact gates as
+        // "grounded". Documented scalar fields must be strings (or absent)
+        // and recommendations an array of plain objects with string fields.
+        if (!recommendationPayloadShapeValid(raw)) {
+          logger.warn(`[knowledge-bridge] recommendation payload for ${assessmentId} had malformed nested fields — failing run as ungrounded`);
+          return null;
+        }
 
         // Model output advising against a product class applied today must
         // never persist (codex P1 r5) — the prompt rule is not a guarantee.
@@ -1293,7 +1321,7 @@ Return a JSON object with:
 };
 
 module.exports = KnowledgeBridge;
-module.exports._test = { sanitizeRecommendationsAgainstTreatment, contradictsAppliedTreatment, contradictsAppliedProducts, appliedTreatmentClasses, generationInFlight, activeGenerationRuns };
+module.exports._test = { sanitizeRecommendationsAgainstTreatment, contradictsAppliedTreatment, contradictsAppliedProducts, appliedTreatmentClasses, generationInFlight, activeGenerationRuns, recommendationPayloadShapeValid };
 // Pure render-time guard surface (no DB, no LLM) — consumed by report-data
 // as the last line of defense for instantly opened report links.
 module.exports.treatmentGuard = {
