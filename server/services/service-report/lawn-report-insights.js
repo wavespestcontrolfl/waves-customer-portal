@@ -29,7 +29,7 @@ function catByKey(categories, key) {
  * @param {string} input.customerConcern
  * @returns {Array} prioritized LawnInsightCard[]
  */
-function buildLawnInsightCards({ categories = [], water = {}, mowing = null, grassLabel = 'lawn', customerConcern = '', treatmentKinds = [] } = {}) {
+function buildLawnInsightCards({ categories = [], water = {}, mowing = null, grassLabel = 'lawn', customerConcern = '', treatmentKinds = [], waterInRequired = false } = {}) {
   const cards = [];
   const has = (kind) => Array.isArray(treatmentKinds) && treatmentKinds.includes(kind);
 
@@ -48,7 +48,9 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
       wavesAction: has('fungicide')
         ? 'Applied a fungicide and adjusted today’s plan toward drying things out.'
         : 'Documented the moisture and adjusted today’s plan toward drying things out.',
-      customerAction: 'Ease back on irrigation by one cycle and let us know if it stays soggy.',
+      customerAction: waterInRequired
+        ? 'Water in today’s application as directed, then ease back on irrigation by one cycle.'
+        : 'Ease back on irrigation by one cycle and let us know if it stays soggy.',
       nextVisitPlan: 'Recheck moisture and fungus signs next visit to confirm the drier schedule is working.',
       confidenceNote: null,
     });
@@ -98,7 +100,11 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
       // for profiles without one it invented guidance and contradicted the
       // add-your-schedule CTA (codex P2 r23).
       customerAction: damp
-        ? 'Let the damp areas dry out between waterings, and ease back an irrigation cycle if they stay soggy.'
+        // A label-required watering-in must not collide with ease-back
+        // advice — name the exception instead (codex P1 r32).
+        ? (waterInRequired
+          ? 'Water in today’s application as directed first, then let the damp areas dry out between waterings.'
+          : 'Let the damp areas dry out between waterings, and ease back an irrigation cycle if they stay soggy.')
         : (water && water.scheduleOnFile
           ? 'Keep your current watering schedule unless we flag a change.'
           : 'We’ll keep watching moisture balance at upcoming visits.'),

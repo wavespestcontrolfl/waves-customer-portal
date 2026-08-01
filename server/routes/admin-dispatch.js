@@ -5606,6 +5606,25 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // block re-renders the artifact when it lands (r8) — no permanent
         // stale copy on either path.
         const KnowledgeBridge = KnowledgeBridgeGate;
+        // RESUME SAFETY (codex P1 r32): a crashed-then-resumed completion can
+        // find grounded copy already stored — and its PDF/email may already
+        // have reached the customer. A second LLM run would produce
+        // different recommendations and overwrite the permanent report while
+        // the sent delivery is deduped, so treat existing grounded copy as
+        // final and skip regeneration entirely.
+        let alreadyGrounded = false;
+        try {
+          const priorRow = await db('lawn_assessments').where({ id: completedAssessment.id }).first('recommendations');
+          const prior = typeof priorRow?.recommendations === 'string'
+            ? JSON.parse(priorRow.recommendations) : (priorRow?.recommendations || null);
+          alreadyGrounded = !!(prior && typeof prior === 'object' && !Array.isArray(prior) && prior._groundedInApplications);
+        } catch { alreadyGrounded = false; }
+        if (alreadyGrounded) {
+          lawnRecRegenGrounded = true;
+          lawnRecFinalCopyPromise = Promise.resolve({ verified: true, changed: false });
+          logger.info(`[dispatch] grounded recommendations already stored for assessment ${completedAssessment.id} — skipping regeneration (resume-safe)`);
+          throw { __skipLawnRegen: true };
+        }
         lawnRecRegenPromise = KnowledgeBridge.generateAssessmentRecommendations(completedAssessment.id)
           .catch((recErr) => { logger.warn(`[dispatch] post-completion recommendation regen failed (non-blocking): ${recErr.message}`); return null; });
         // LIVE grounded flag (codex P2 r15): the promise updates it whenever
@@ -5674,6 +5693,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           logger.warn('[dispatch] lawn recommendation regen failed — retrying sanitize runs in the finalCopy chain; recommendation-derived customer output suppressed');
         }
       } catch (err) {
+        if (err && err.__skipLawnRegen) {
+          // Not an error: grounded copy already stored (resume-safe skip).
+        } else {
         logger.error(`[dispatch] Lawn assessment service_record link failed (non-blocking): ${err.message}`);
         // Setup failed before (or during) regen creation: keep the gates
         // closed and install a sanitize-based settlement chain so the held
@@ -5681,6 +5703,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         if (!lawnRecFinalCopyPromise) {
           lawnRecFinalCopyPromise = lawnRecSanitizeWithRetry().then((res) => ({ verified: !res.error, changed: !!res.changed }));
           void lawnRecFinalCopyPromise.catch((chainErr) => logger.error(`[dispatch] fallback sanitize chain failed: ${chainErr.message}`));
+        }
         }
       }
     }

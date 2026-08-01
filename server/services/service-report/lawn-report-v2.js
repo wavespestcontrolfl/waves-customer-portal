@@ -542,6 +542,9 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   const mowing = mapMowing(mowingHeight, grassLabel);
   const treatment = buildTreatment({ applications, actions });
 
+  // Aftercare is computed early enough for the insight builder to reconcile
+  // its damp-area advice with a label-required watering-in (codex P1 r32).
+  const aftercare = buildAftercare(applications);
   const insights = buildLawnInsightCards({
     categories,
     water: water ? {
@@ -555,6 +558,7 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
     grassLabel,
     customerConcern,
     treatmentKinds: treatment ? treatment.kinds : [],
+    waterInRequired: aftercare.waterInRequired === true,
   });
 
   // Field photos for the horizontal strip (best photo first), plus ONE consolidated
@@ -641,7 +645,6 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
       { label: beforeAfter.after.label, url: beforeAfter.after.url, score: beforeAfter.after.score },
     ]
     : null;
-  const aftercare = buildAftercare(applications);
   // Reconcile watering-in with the water story: when the weekly total is already
   // above target the report tells the customer to EASE BACK on irrigation, and a
   // bare "give the lawn a normal watering" instruction two cards later reads like a

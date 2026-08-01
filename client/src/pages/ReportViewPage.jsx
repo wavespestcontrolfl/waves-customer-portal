@@ -1978,8 +1978,16 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
           conditions={data.conditions || {}}
           weatherCall={data.dynamicContext?.premiumExperience?.weatherCall}
           live={mode === 'live'}
-          weeklyRainIn={data.serviceLine === 'lawn' ? (data.reportV2?.water?.rainInches ?? null) : null}
-          weeklyRainSource={{ open_meteo: 'Open-Meteo', fawn: 'FAWN', area: 'local area rain records' }[data.reportV2?.water?.rainProvider] || null}
+          weeklyRainIn={data.serviceLine === 'lawn'
+            // Legacy lawn payloads (no reportV2) still carry the weekly
+            // total on the water context — the all-lawn weekly-rain
+            // invariant must hold on those permanent links too (codex P2
+            // r32).
+            ? (data.reportV2?.water?.rainInches ?? data.lawnAssessment?.waterContext?.rainfallInches7d ?? null)
+            : null}
+          weeklyRainSource={{ open_meteo: 'Open-Meteo', fawn: 'FAWN', area: 'local area rain records' }[
+            data.reportV2?.water?.rainProvider || data.lawnAssessment?.waterContext?.rainfall7dProvider
+          ] || null}
         />
       </div>
     </section>

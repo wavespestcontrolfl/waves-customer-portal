@@ -317,6 +317,12 @@ function productNameTermSource(name) {
   if (base && base !== clean) variants.add(esc(base));
   const first = base.split(/\s+/)[0] || '';
   if (/^[A-Za-z][\w-]{4,}$/.test(first)) variants.add(esc(first));
+  // Catalog acronyms the model naturally shortens to — "QP MSM 60DF Turf
+  // Herbicide" becomes "MSM" (codex P1 r32). Pure-alpha uppercase tokens of
+  // 3+ chars only: 'QP'/'SC'/'WG' are too generic, '60DF' carries digits.
+  for (const token of base.split(/\s+/)) {
+    if (/^[A-Z]{3,}$/.test(token)) variants.add(esc(token));
+  }
   for (const m of clean.matchAll(/\(([^)]+)\)/g)) {
     const alias = m[1].trim();
     if (/^[A-Za-z][\w-]{3,}$/.test(alias)) variants.add(esc(alias));
@@ -998,6 +1004,15 @@ Return a JSON object with:
 
       try {
         const raw = JSON.parse(result.replace(/```json|```/g, '').trim());
+        // A provider can return valid JSON of the WRONG shape (string,
+        // array, number). The sanitizer passes non-objects through and the
+        // grounded flag / neutralized summary cannot be represented on them,
+        // so the completion handler would mark a garbage result grounded
+        // (codex P1 r32). Treat a non-plain-object as a failed run.
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+          logger.warn(`[knowledge-bridge] recommendation payload for ${assessmentId} was not a JSON object — failing run as ungrounded`);
+          return null;
+        }
 
         // Model output advising against a product class applied today must
         // never persist (codex P1 r5) — the prompt rule is not a guarantee.
@@ -1245,7 +1260,15 @@ module.exports.treatmentGuard = {
   // stale-true only costs one extra fresh render.
   async isGenerationInFlight(assessmentId, knex = db) {
     if (!assessmentId) return false;
-    const row = await knex('lawn_assessments').where({ id: assessmentId }).first('recommendations').catch(() => null);
-    return generationInFlight(parseStoredRecommendations(row?.recommendations));
+    try {
+      const row = await knex('lawn_assessments').where({ id: assessmentId }).first('recommendations');
+      return generationInFlight(parseStoredRecommendations(row?.recommendations));
+    } catch (err) {
+      // FAIL CLOSED (codex P1 r32): a transient read failure must not read
+      // as "nothing generating" — that would let a render clear the
+      // correction marker while a generator is still able to write.
+      logger.warn(`[knowledge-bridge] generation-fence read failed for ${assessmentId} — assuming in flight: ${err.message}`);
+      return true;
+    }
   },
 };

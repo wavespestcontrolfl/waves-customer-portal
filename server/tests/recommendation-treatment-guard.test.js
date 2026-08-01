@@ -213,6 +213,21 @@ describe('sanitizeRecommendationsAgainstTreatment', () => {
     expect(parsed.recommendations).toHaveLength(1);
   });
 
+  test('catalog acronyms are guarded (r32)', () => {
+    const { dropped } = _test.sanitizeRecommendationsAgainstTreatment({
+      recommendations: [{ priority: 1, action: 'Hold off on MSM until the turf recovers.', reason: 'x', timeframe: 'y' }],
+    }, [{ product_name: 'QP MSM 60DF Turf Herbicide', product_category: 'herbicide' }]);
+    expect(dropped).toBe(1);
+  });
+
+  test('non-object JSON payloads never count as grounded (r32)', () => {
+    for (const bad of ['just a string', [1, 2, 3], 42]) {
+      const { parsed, dropped } = _test.sanitizeRecommendationsAgainstTreatment(bad, APPLIED);
+      expect(dropped).toBe(0);
+      expect(parsed).toBe(bad);
+    }
+  });
+
   test('legitimate aftercare mentioning the class passes (defer must govern the treatment)', () => {
     const { parsed, dropped } = _test.sanitizeRecommendationsAgainstTreatment({
       recommendations: [
