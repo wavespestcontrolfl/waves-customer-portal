@@ -2199,10 +2199,50 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       const { treatmentGuard } = require('../knowledge-bridge');
       const guardProducts = products.map((p) => ({
         product_name: p.product_name,
+        product_id: p.product_id || null,
         product_category: p.product_category || p.approved_report_product_facts?.category || null,
       }));
+      // FAIL CLOSED on unverifiable categories (codex P1 r24):
+      // attachApprovedReportProductFacts fail-softs to unenriched rows on a
+      // catalog outage, which would make this guard silently skip. Verify
+      // independently: rows still missing a category but carrying a
+      // product_id get one direct catalog lookup — an ERROR there means the
+      // applied classes are UNKNOWN, and recommendation-derived copy is
+      // suppressed outright rather than trusted.
+      let categoriesVerified = true;
+      const unresolvedIds = [...new Set(guardProducts.filter((p) => !p.product_category && p.product_id).map((p) => String(p.product_id)))];
+      if (unresolvedIds.length) {
+        try {
+          const catRows = await knex('products_catalog').whereIn('id', unresolvedIds).select('id', 'category');
+          const catById = new Map(catRows.map((c) => [String(c.id), c.category]));
+          for (const gp of guardProducts) {
+            if (!gp.product_category && gp.product_id) gp.product_category = catById.get(String(gp.product_id)) || null;
+          }
+        } catch {
+          categoriesVerified = false;
+        }
+      }
       const appliedClasses = treatmentGuard.appliedTreatmentClasses(guardProducts);
-      if (appliedClasses.length) {
+      if (!categoriesVerified) {
+        const NEUTRAL_SUMMARY = 'Today’s applications are in place — we’ll track how the lawn responds and adjust at the next visit.';
+        const NEUTRAL_RECS = {
+          summary: NEUTRAL_SUMMARY,
+          recommendations: [],
+          nextVisitFocus: 'Recheck the areas treated today and confirm how the lawn is responding to the applications.',
+          customerTip: '',
+        };
+        if (lawnAssessment.scores.recommendations) lawnAssessment.scores.recommendations = { ...NEUTRAL_RECS };
+        if (lawnAssessment.recommendations) lawnAssessment.recommendations = { ...NEUTRAL_RECS };
+        lawnAssessment.scores.aiSummary = NEUTRAL_SUMMARY;
+        lawnAssessment.aiSummary = NEUTRAL_SUMMARY;
+        if (lawnAssessment.snapshot && typeof lawnAssessment.snapshot === 'object') {
+          lawnAssessment.snapshot.summary = NEUTRAL_SUMMARY;
+          if (Array.isArray(lawnAssessment.snapshot.findings)) lawnAssessment.snapshot.findings = [];
+          if (Array.isArray(lawnAssessment.snapshot.nextWatchItems)) lawnAssessment.snapshot.nextWatchItems = [];
+        }
+        if (Array.isArray(lawnAssessment.recommendationCards)) lawnAssessment.recommendationCards = [];
+        console.warn('[report-data] product categories unverifiable (catalog lookup failed) — recommendation-derived copy suppressed for this render');
+      } else if (appliedClasses.length) {
         const NEUTRAL_SUMMARY = 'Today’s applications are in place — we’ll track how the lawn responds and adjust at the next visit.';
         const sanitizeRecsInPlace = (host, key) => {
           const recs = host?.[key];
