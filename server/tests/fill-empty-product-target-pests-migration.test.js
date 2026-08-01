@@ -102,6 +102,17 @@ describe('fill empty product target_pests migration', () => {
     expect(banol.some((t) => /yellow tuft/i.test(t))).toBe(false);
   });
 
+  test('keeps chamberbitter off the products that cannot control it', () => {
+    // Chamberbitter needs Celsius or atrazine; a 2,4-D/MCPP/dicamba three-way
+    // does not control it. A target chip is a statement that the application
+    // treated that pest, so an unsupported one is an efficacy claim.
+    const threeWay = FILLS.filter(([n]) => /Three-Way/i.test(n));
+    expect(threeWay).toHaveLength(1);
+    threeWay.forEach(([, targets]) =>
+      expect(targets.some((t) => /chamberbitter/i.test(t))).toBe(false),
+    );
+  });
+
   test('no product is filled twice and no list is empty', () => {
     const names = FILLS.map(([n]) => n);
     expect(new Set(names).size).toBe(names.length);

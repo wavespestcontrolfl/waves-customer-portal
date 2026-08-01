@@ -85,7 +85,11 @@ const FILLS = [
     ['Purple nutsedge', 'Yellow nutsedge', 'Green kyllinga', 'Rice flatsedge']],
   // Broadleaf.
   ['Blindside Herbicide', ['Dollarweed', 'Doveweed', 'Virginia buttonweed', 'Yellow nutsedge']],
-  ['LESCO Three-Way Selective Herbicide', ['Dollarweed', 'Clover', 'Spurge', 'Chamberbitter']],
+  // Standard 2,4-D + MCPP + dicamba weed table. Chamberbitter is deliberately
+  // NOT here: a three-way does not control it (that is why Celsius and
+  // atrazine carry it), and these chips become the report's record of what was
+  // treated, so listing it would be an efficacy claim the label cannot support.
+  ['LESCO Three-Way Selective Herbicide', ['Dollarweed', 'Clover', 'Spurge', 'Chickweed']],
   ['Atrazine 4L', ['Annual bluegrass (Poa annua)', 'Dollarweed', 'Lawn burweed']],
   ['Manor', ['Dollarweed', 'Virginia buttonweed', 'Bahiagrass']],
   ['QP MSM 60DF Turf Herbicide', ['Dollarweed', 'Virginia buttonweed', 'Bahiagrass']],
