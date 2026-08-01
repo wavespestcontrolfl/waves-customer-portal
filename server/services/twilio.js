@@ -706,7 +706,10 @@ const TwilioService = {
     // email preference means there is nothing to send.
     if (channel === "sms" && !smsAllowed) return;
 
-    const etaLine = etaMinutes ? `ETA: ~${etaMinutes} minutes.\n` : "";
+    // No tilde: `~` is a GSM-7 EXTENSION character that costs TWO slots
+    // instead of one, and it is the only extension char anywhere in the
+    // template set. "about" reads better in a text anyway.
+    const etaLine = etaMinutes ? `ETA: about ${etaMinutes} minutes.\n` : "";
     const { getAppointmentContacts, isServiceContactRole, firstNameFrom } = require("./customer-contact");
     // Recipient double opt-in hold (gated) — same filter as the
     // appointment-reminder fanout: unconfirmed third-party recipients

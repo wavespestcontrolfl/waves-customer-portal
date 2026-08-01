@@ -118,3 +118,26 @@ describe('spokenArrivalWindow ({window} placeholder)', () => {
       .toBe("Your service is tomorrow, at a time we'll confirm.");
   });
 });
+
+describe('rendered-output whitespace hygiene', () => {
+  // Optional clause variables carry their own trailing "\n\n" so copy can
+  // follow them. The house-voice sweep removed the footers that used to
+  // follow, which left several templates ending in blank lines — billable
+  // whitespace Twilio counts toward the segment budget.
+  const tidy = (s) => s.replace(/\n{3,}/g, '\n\n').trim();
+
+  test('a clause-terminated body loses its dangling blank lines', () => {
+    const raw = 'Hello Jennifer! Adam is on the way.\n\nTrack live: https://x.co/a\n\n';
+    expect(tidy(raw)).toBe('Hello Jennifer! Adam is on the way.\n\nTrack live: https://x.co/a');
+  });
+
+  test('an empty middle clause does not leave a double gap', () => {
+    const raw = 'Line one.\n\n\n\nLine two.';
+    expect(tidy(raw)).toBe('Line one.\n\nLine two.');
+  });
+
+  test('intentional single blank lines survive', () => {
+    const raw = 'Para one.\n\nPara two.';
+    expect(tidy(raw)).toBe(raw);
+  });
+});

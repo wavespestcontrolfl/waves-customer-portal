@@ -405,7 +405,14 @@ router.getTemplate = async function(templateKey, vars = {}, context = {}) {
       });
       return null;
     }
-    return body;
+    // Whitespace tidy-up. Optional clause variables (reschedule_line,
+    // track_clause, reentry_line, card_hold_policy_line...) carry their own
+    // trailing "\n\n" so they read correctly when copy follows them. When
+    // such a clause is last — or resolves to '' between two blank lines —
+    // that leaves the message ending in blank lines or containing a gap.
+    // Twilio counts every one of those toward the segment budget, so this is
+    // billable whitespace as well as sloppy output.
+    return body.replace(/\n{3,}/g, '\n\n').trim();
   } catch (err) {
     auditSmsTemplateIssue(templateKey, 'render_error', err.message || 'template render failed', context);
     return null;
