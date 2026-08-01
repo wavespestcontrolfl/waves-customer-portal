@@ -634,6 +634,23 @@ async function markComplete(serviceId, opts = {}) {
     return { ok: false, reason: 'future_scheduled_date' };
   }
   if (svc.track_state === 'complete') {
+    // A supplied finite instant is honored on the already-complete path too
+    // (codex P2 #3152 round 12): a visit completed earlier through the
+    // status route and finalized later with a live time correction takes
+    // this early return — completed_at must still move to the corrected end
+    // or date-window readers keep the late-closeout day. Idempotent on
+    // retries: the supplied instant is deterministic (start + typed
+    // minutes, or the backdated service-day instant), so a re-run writes
+    // the same value or nothing. Callers that pass none are unchanged.
+    const suppliedCompletedAt = finiteDate(opts.completedAt);
+    if (suppliedCompletedAt
+      && (!svc.completed_at || new Date(svc.completed_at).getTime() !== suppliedCompletedAt.getTime())) {
+      await db('scheduled_services').where({ id: serviceId }).update({
+        completed_at: suppliedCompletedAt,
+        updated_at: new Date(),
+      });
+      svc.completed_at = suppliedCompletedAt;
+    }
     emitCustomerTrackRefresh(svc, 'complete', svc.completed_at || new Date());
     return { ok: true, state: 'complete', completedAt: svc.completed_at };
   }

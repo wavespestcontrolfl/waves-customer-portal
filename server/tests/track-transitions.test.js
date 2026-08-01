@@ -659,6 +659,43 @@ describe('track-transitions lifecycle side effects', () => {
       updated_at: completedAt,
     }));
   });
+
+  test('already-complete + a supplied finite instant still moves completed_at (codex P2 #3152 round 12)', async () => {
+    // The status-route-first shape: the visit was marked completed earlier
+    // (tracker stamped the wall clock), then the completion flow finalizes
+    // it with a live time correction — the corrected end must land even
+    // though the early return skips the transition update.
+    const staleCompletedAt = new Date('2026-05-15T14:30:00.000Z');
+    const correctedAt = new Date('2026-05-15T12:45:00.000Z');
+    const emit = jest.fn();
+    const to = jest.fn(() => ({ emit }));
+    getIo.mockReturnValue({ to });
+    const update = query(1);
+    db
+      .mockReturnValueOnce(query({
+        id: 'job-6',
+        customer_id: 'cust-6',
+        technician_id: 'tech-6',
+        track_state: 'complete',
+        completed_at: staleCompletedAt,
+      }))
+      .mockReturnValueOnce(update);
+
+    const result = await trackTransitions.markComplete('job-6', { completedAt: correctedAt });
+
+    expect(result).toEqual({ ok: true, state: 'complete', completedAt: correctedAt });
+    expect(update.update.mock.calls[0][0].completed_at).toEqual(correctedAt);
+    // Same supplied instant on a retry → no second write (idempotent).
+    db.mockReturnValueOnce(query({
+      id: 'job-6',
+      customer_id: 'cust-6',
+      technician_id: 'tech-6',
+      track_state: 'complete',
+      completed_at: correctedAt,
+    }));
+    const retry = await trackTransitions.markComplete('job-6', { completedAt: correctedAt });
+    expect(retry).toEqual({ ok: true, state: 'complete', completedAt: correctedAt });
+  });
 });
 
 describe('future-scheduled-date stale-attempt guard', () => {
