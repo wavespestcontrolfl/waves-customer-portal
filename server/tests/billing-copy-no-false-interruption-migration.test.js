@@ -104,6 +104,30 @@ describe('billing copy — no false service-interruption claim', () => {
     expect(variants[1].body).toBe('independently written variant copy');
   });
 
+  test('up() also catches a variant still on the PRE-house-voice body', async () => {
+    // 20260801000001_sms_house_voice_sweep rewrote sms_templates only, so a
+    // variant created before it never got that copy — it would miss an
+    // exact-match on the current body while still outranking the base row.
+    const [templateKey, , next] = migration.REWRITES[0];
+    const legacy = migration.LEGACY_VARIANT_BODIES[templateKey][0];
+    const variants = [{ template_key: templateKey, variant_key: 'legacy', body: legacy }];
+    const { knex } = buildKnex({ rows: [], variants });
+
+    await migration.up(knex);
+
+    expect(variants[0].body).toBe(next);
+  });
+
+  test('every legacy variant body maps to a key this migration rewrites, and carries the claim', () => {
+    const keys = new Set(migration.REWRITES.map(([k]) => k));
+    for (const [key, bodies] of Object.entries(migration.LEGACY_VARIANT_BODIES)) {
+      expect(keys).toContain(key);
+      // A legacy body that does NOT carry the claim would be silently
+      // overwriting copy that was already fine.
+      bodies.forEach((body) => expect(`${key}: ${body}`).toMatch(FALSE_CONSEQUENCE));
+    }
+  });
+
   test('up() tolerates a database with no variants table', async () => {
     const rows = migration.REWRITES.map(([template_key, expected]) => ({ template_key, body: expected }));
     const { knex } = buildKnex({ rows, hasVariantsTable: false });

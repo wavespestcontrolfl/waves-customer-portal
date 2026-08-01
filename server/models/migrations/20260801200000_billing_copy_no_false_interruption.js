@@ -17,7 +17,8 @@
  * might believe it — and the pause it announces stops only their dues, never
  * their visits.
  *
- * Neither is true. Nothing in the platform withholds service for a balance:
+ * None of them are true. Nothing in the platform withholds service for a
+ * balance:
  * the visit is scheduled, dispatched and performed regardless, and a new
  * invoice stacks on the old one. The only thing an exhausted autopay ladder
  * does is set customers.service_paused_at, which stops the DUES CRON and
@@ -95,6 +96,36 @@ exports.up = async function up(knex) {
   console.log(`[billing-copy] rewrote ${updated} template(s) + ${variantsUpdated} variant(s); skipped ${skipped.length}${skipped.length ? ` (edited since audit or missing): ${skipped.join(', ')}` : ''}`);
 };
 
+// The PREVIOUS generation of each body, snapshotted from
+// 20260801000001_sms_house_voice_sweep's REWRITES. That sweep rewrote
+// sms_templates only — it never touched sms_template_variants — so a variant
+// created before it still carries the older copy, would not match the
+// `expected` predicate above, and would go on outranking the corrected base
+// row at send time. Snapshotted rather than require()d from that migration:
+// a migration has to stay a frozen picture of what it ran against.
+//
+// This covers one generation back. Anything older than the house-voice sweep
+// is not swept here; prod carries zero variants of any age (verified
+// read-only 2026-08-01), so the exposure is a variant created in /admin
+// between that sweep and this migration.
+const LEGACY_VARIANT_BODIES = {
+  balance_reminder_gentle: [
+    "Hello {first_name}! Waves here. We're scheduled to see you on {service_date}.\n\nOur records show an outstanding balance. To avoid any service interruption, please take care of it before your appointment: {pay_url}\n\nQuestions or requests? Reply here.",
+  ],
+  payment_method_expiry: [
+    "Hello {first_name}! Your {card_brand} card ending in {last_four} expires {exp_date}. Update your payment method to avoid service interruption: portal.wavespestcontrol.com\n\nQuestions or requests? Reply here.",
+  ],
+  balance_reminder_firm: [
+    "Hello {first_name}! Quick reminder from Waves: your {service_type} is {service_timing} and there is an outstanding balance.\n\nPlease take care of it so we can keep you on schedule: {pay_url}\n\nQuestions or requests? Reply here.",
+  ],
+  balance_reminder_urgent: [
+    "Hello {first_name}! Your Waves service is {service_timing} and your account has an outstanding balance.\n\nPay now to keep your appointment: {pay_url}\n\nAlready paid? Reply here and we will check it.",
+  ],
+  autopay_retry_final_failed: [
+    "Hello {first_name}! After several attempts we still could not process your payment of ${amount}. Please update your card to keep service active: {update_card_url}\n\nQuestions or requests? Reply here.",
+  ],
+};
+
 // Guarded body swap over sms_template_variants, in whichever direction the
 // caller needs. Returns the row count changed.
 async function rewriteVariants(knex, reverse = false) {
@@ -104,13 +135,20 @@ async function rewriteVariants(knex, reverse = false) {
 
   let changed = 0;
   for (const [templateKey, expected, next] of REWRITES) {
-    const from = reverse ? next : expected;
+    // Rollback restores ONE body — the house-voice generation. A legacy
+    // variant that up() corrected comes back as `expected` rather than its
+    // pre-house-voice original, which is deliberate: `expected` is what the
+    // base row carries after a rollback, so the variant stays consistent
+    // with it instead of resurrecting copy two generations old.
+    const froms = reverse ? [next] : [expected, ...(LEGACY_VARIANT_BODIES[templateKey] || [])];
     const to = reverse ? expected : next;
-    const patch = { body: to };
-    if (cols.updated_at) patch.updated_at = new Date();
-    changed += await knex('sms_template_variants')
-      .where({ template_key: templateKey, body: from })
-      .update(patch);
+    for (const from of froms) {
+      const patch = { body: to };
+      if (cols.updated_at) patch.updated_at = new Date();
+      changed += await knex('sms_template_variants')
+        .where({ template_key: templateKey, body: from })
+        .update(patch);
+    }
   }
   return changed;
 }
@@ -134,3 +172,4 @@ exports.down = async function down(knex) {
 };
 
 module.exports.REWRITES = REWRITES;
+module.exports.LEGACY_VARIANT_BODIES = LEGACY_VARIANT_BODIES;
