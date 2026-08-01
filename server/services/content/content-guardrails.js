@@ -108,7 +108,10 @@ function* eachTag(text) {
 
 // An element whose CONTENT a reader may never see. Conservative by design:
 // what cannot be proven visible must not supply attribution.
-const HIDDEN_TAGS = new Set(['template', 'script', 'style', 'noscript']);
+// NATIVELY hidden containers render nothing without any hidden/style/class
+// attribute: a <dialog> is closed unless it carries `open`, and <datalist>
+// content is never prose (Codex).
+const HIDDEN_TAGS = new Set(['template', 'script', 'style', 'noscript', 'datalist']);
 
 // Visibility is decided by what can be PROVEN from the source, and anything
 // unprovable counts as hidden. Chasing literal forms lost three rounds in a
@@ -118,9 +121,28 @@ const HIDDEN_TAGS = new Set(['template', 'script', 'style', 'noscript']);
 // an EXPRESSION is treated as hidden outright, no evaluation attempted
 // (Codex r9 P0 ×3). The cost is only a lost EXEMPTION — the price is still
 // flagged, which is the safe direction.
+// DEFINITELY not rendered — used by the VETO, which must err toward KEEPING
+// text. The broad "any styling is unprovable" rule below is right for
+// ATTRIBUTION (excluding text costs an exemption) but backwards here:
+// erasing styled copy would delete a first-party marker and GRANT the
+// exemption. Only certainties qualify (Codex).
+function opensDefinitelyHidden(tag) {
+  if (HIDDEN_TAGS.has(tag.name)) return true;
+  const a = tag.attrs || '';
+  if (tag.name === 'dialog' && !/(?:^|\s)open(?=[\s=>/]|$)/i.test(a)) return true;
+  if (/(?:^|\s)hidden(?=[\s=>/]|$)/i.test(a)) return true;
+  const ariaM = /aria-hidden\s*=\s*(\{[^}]*\}|"[^"]*"|'[^']*'|[^\s>]+)/i.exec(a);
+  if (ariaM) {
+    const v = ariaM[1].replace(/^[{"']|["'}]$/g, '').trim().toLowerCase();
+    if (v !== 'false') return true;
+  }
+  return /style\s*=\s*(?:["'`{])[^"'`]*(?:display\s*:\s*none|visibility\s*:\s*hidden)/i.test(a);
+}
+
 function opensHiddenContent(tag) {
   if (HIDDEN_TAGS.has(tag.name)) return true;
   const a = tag.attrs || '';
+  if (tag.name === 'dialog' && !/(?:^|\s)open(?=[\s=>/]|$)/i.test(a)) return true;
   if (/(?:^|\s)hidden(?=[\s=>/]|$)/i.test(a)) return true;
   // aria-hidden in ANY form except a literal false.
   const ariaM = /aria-hidden\s*=\s*(\{[^}]*\}|"[^"]*"|'[^']*'|[^\s>]+)/i.exec(a);
@@ -292,7 +314,10 @@ function isMarkdownTableRow(text, index) {
 const TABLE_TAGS = new Set(['table', 'thead', 'tbody', 'tfoot', 'tr', 'td', 'th', 'comparisontable']);
 function isInsideTableMarkup(text, index) {
   let depth = 0;
-  for (const tag of eachTag(String(text || ''))) {
+  // Comment-blanked: a comment containing "</td></tr></table>" is not a set
+  // of real closures, and counting it dropped the depth to zero while the
+  // browser kept the price inside the table (Codex).
+  for (const tag of eachTag(blankComments(String(text || '')))) {
     // Inside a table tag's OWN span — the props of a self-closing
     // <ComparisonTable … /> hold its cells, so an amount there is in a table
     // even though no element is open around it (Codex).
@@ -586,8 +611,72 @@ function stripTags(text) {
   return out + str.slice(cursor);
 }
 
+// Delete (never blank) the spans a reader never sees: hidden element
+// content and MDX expression containers. Used only for IDENTITY decisions,
+// where introducing a word boundary would itself be the bug.
+function removeNonRendered(text) {
+  // Comments FIRST: an MDX comment is an expression container, so the
+  // expression pass below would otherwise unwrap "{/*x*/}" to "/*x*/" and
+  // splice that between the letters it was hiding (Codex).
+  let out = String(text || '').replace(COMMENT_SPAN_RE, '');
+  // Hidden elements, innermost-safe: repeat until stable.
+  for (let pass = 0; pass < 4; pass += 1) {
+    const tags = [...eachTag(blankComments(out))];
+    let cut = null;
+    for (let t = 0; t < tags.length && !cut; t += 1) {
+      const tag = tags[t];
+      if (tag.isClose || tag.selfClosing || !opensDefinitelyHidden(tag)) continue;
+      let depth = 1;
+      for (let u = t + 1; u < tags.length; u += 1) {
+        const other = tags[u];
+        if (other.name !== tag.name || other.selfClosing) continue;
+        if (other.isClose) { depth -= 1; if (depth === 0) { cut = [tag.start, other.end]; break; } }
+        else depth += 1;
+      }
+      if (!cut) cut = [tag.start, out.length - 1];
+    }
+    if (!cut) break;
+    out = out.slice(0, cut[0]) + out.slice(cut[1] + 1);
+  }
+  // Balanced MDX expressions.
+  for (let i = 0; i < out.length; i += 1) {
+    if (out[i] !== '{') continue;
+    let depth = 0;
+    let j = i;
+    for (; j < out.length; j += 1) {
+      const ch = out[j];
+      if (ch === '"' || ch === "'" || ch === '`') {
+        const q = ch; j += 1;
+        while (j < out.length && out[j] !== q) j += out[j] === '\\' ? 2 : 1;
+        continue;
+      }
+      if (ch === '{') depth += 1;
+      else if (ch === '}') { depth -= 1; if (depth === 0) break; }
+    }
+    if (j >= out.length) break;
+    // An expression that RENDERS must keep its value: `O{"ur"} service`
+    // displays as "Our service", so deleting it would erase the marker and
+    // GRANT the exemption. Only provably-empty values are dropped; anything
+    // unreadable keeps its inner text, which errs toward blocking (Codex).
+    const inner = out.slice(i + 1, j).trim();
+    const lit = /^(?:"([^"]*)"|'([^']*)'|`([^`$]*)`)$/.exec(inner);
+    let replacement;
+    if (lit) replacement = lit[1] ?? lit[2] ?? lit[3] ?? '';
+    else if (/^(?:null|undefined|false|''|""|``)$/.test(inner)) replacement = '';
+    else replacement = inner;
+    out = out.slice(0, i) + replacement + out.slice(j + 1);
+    i += replacement.length - 1;
+  }
+  return out;
+}
+
 function cellIdentity(v) {
-  return decodeEntitiesForScan(unescapeStr(String(v ?? '')))
+  // Hidden DESCENDANTS and MDX expressions render nothing, so they must be
+  // REMOVED (not blanked) before the veto — "O<span hidden>x</span>ur" and
+  // "O{null}ur" both display as "Our", and leaving the inner text or the
+  // expression in place split the marker into "Oxur" (Codex).
+  const seed = removeNonRendered(String(v ?? ''));
+  return decodeEntitiesForScan(unescapeStr(seed))
     .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
     .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
     // Reference, collapsed and shortcut links render as their label too:

@@ -2313,6 +2313,8 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
       // HTML/JSX tables carry no pipes but are still tables.
       '<table><tr><td>Orkin charges a $199 cancellation fee.</td></tr></table>',
       '<td>Orkin charges a $199 cancellation fee.</td>',
+      // A comment full of closing tags is not a set of real closures.
+      '<table><tr><td><!-- </td></tr></table> -->Other companies charge $89 per visit</td></tr></table>',
     ]) {
       expect(findHardcodedPrice(body, OP)).not.toBeNull();
     }
@@ -2333,6 +2335,19 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
     // one is still a marker.
     expect(findHardcodedPrice('O[ur][brand] service differs; Orkin charges $89 per application.\n\n[brand]: /about/', OP)).not.toBeNull();
     expect(findHardcodedPrice('O[ur] service differs; Orkin charges $89 per application.', OP)).not.toBeNull();
+    // Hidden descendants and MDX expressions render nothing, so they cannot
+    // split the marker either.
+    expect(findHardcodedPrice('Orkin charges $89—the amount is O<span hidden>x</span>ur local quarterly rate per visit.', OP)).not.toBeNull();
+    expect(findHardcodedPrice('Orkin charges $89—the amount is O{null}ur local quarterly rate per visit.', OP)).not.toBeNull();
+    // …but STYLED first-party copy must NOT be erased from the veto. The
+    // "any styling is unprovable" rule is right for attribution (excluding
+    // costs an exemption) and backwards here (erasing would GRANT one).
+    expect(findHardcodedPrice('<span class="lead">Our</span> service differs; Orkin charges $89 per visit.', OP)).not.toBeNull();
+    expect(findHardcodedPrice('O<span style="color:red">u</span>r service differs; Orkin charges $89 per visit.', OP)).not.toBeNull();
+    // An expression that RENDERS keeps its value; only provably-empty ones
+    // are dropped, and anything unreadable keeps its inner text.
+    expect(findHardcodedPrice('O{"ur"} service differs; Orkin charges $89 per visit.', OP)).not.toBeNull();
+    expect(findHardcodedPrice('O{x || "ur"} service differs; Orkin charges $89 per visit.', OP)).not.toBeNull();
     // Mined drafts get no exemption at all.
     expect(findHardcodedPrice('Orkin charges a $199 cancellation fee.', {})).not.toBeNull();
   });
@@ -2422,6 +2437,9 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
       '<span hidden>Orkin charges a</span> $89 per visit',
       '<span aria-hidden="true">Orkin charges a</span> $89 per visit',
       '<template>Orkin charges a</template> $89 per visit',
+      // Natively hidden containers need no hidden/style/class attribute.
+      '<dialog>Other companies charge</dialog> $89 per visit for local quarterly service.',
+      '<datalist>Other companies charge</datalist> $89 per visit for local quarterly service.',
       '{show && "Orkin charges a"} $89 per visit',
       '<span hidden><span>x</span>Orkin charges a</span> $89 per visit',
       '<span style="display:none">Orkin charges a</span> $89 per visit',
@@ -2442,6 +2460,8 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
     // Visible attribution is untouched, including an explicit aria-hidden=false.
     expect(findHardcodedPrice('<span>Orkin charges a</span> $199 cancellation fee.', OP)).toBeNull();
     expect(findHardcodedPrice('<span aria-hidden="false">Orkin charges a</span> $199 cancellation fee.', OP)).toBeNull();
+    // An OPEN dialog is visible.
+    expect(findHardcodedPrice('<dialog open>Orkin charges a</dialog> $199 cancellation fee.', OP)).toBeNull();
   });
 
   test('a link DESTINATION never supplies attribution (r9 P0)', () => {
