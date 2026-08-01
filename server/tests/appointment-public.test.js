@@ -238,3 +238,13 @@ describe('confirm race verdict (codex r6)', () => {
     expect(confirmRaceVerdict(null)).toBe('changed');
   });
 });
+
+describe('pre-update idempotency uses the same verdict (codex r7)', () => {
+  test('a system-confirmed row (rebooker) is CHANGED even before the update attempt', () => {
+    // SmartRebooker can commit between the page GET and the confirm POST,
+    // stamping the NEW slot confirmed without customer_confirmed. The
+    // early-return branch must not bless the client's stale slot.
+    expect(confirmRaceVerdict({ status: 'confirmed', customer_confirmed: false })).toBe('changed');
+    expect(confirmRaceVerdict({ status: 'confirmed', customer_confirmed: true })).toBe('idempotent_success');
+  });
+});

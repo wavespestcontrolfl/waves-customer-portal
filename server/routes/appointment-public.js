@@ -217,8 +217,12 @@ async function sameTechAsLastVisit(svc) {
       .whereNot('id', svc.id)
       .orderBy([
         { column: 'scheduled_date', order: 'desc' },
-        { column: 'updated_at', order: 'desc' },
+        // The visit's own time beats updated_at: notes and other edits
+        // touch updated_at after completion (admin-dispatch note endpoint),
+        // so a later EDIT must not make an earlier visit look like the
+        // most recent one.
         { column: 'window_start', order: 'desc' },
+        { column: 'updated_at', order: 'desc' },
       ])
       .first('technician_id');
     return !!last?.technician_id && String(last.technician_id) === String(svc.technician_id);
@@ -418,9 +422,20 @@ router.post('/:token/confirm', confirmLimiter, async (req, res, next) => {
         code: 'NOT_CONFIRMABLE',
       });
     }
-    // Idempotent: a second tap (or a double-submit) is a success, not an error.
+    // Idempotent: a second tap (or a double-submit) is a success — but only
+    // when the CUSTOMER's confirm won. Same verdict as the post-update race
+    // path: SmartRebooker can commit a reschedule between the page GET and
+    // this POST, stamping the NEW slot 'confirmed' without
+    // customer_confirmed; returning success there would mark the client's
+    // stale date/window as confirmed instead of reloading the move.
     if (String(svc.status).toLowerCase() === 'confirmed') {
-      return res.json({ success: true, confirmed: true });
+      if (confirmRaceVerdict(svc) === 'idempotent_success') {
+        return res.json({ success: true, confirmed: true });
+      }
+      return res.status(409).json({
+        error: 'This appointment just changed — please refresh.',
+        code: 'CHANGED',
+      });
     }
 
     // A call-created follow-up / outbound-review booking is dispatch-owned
