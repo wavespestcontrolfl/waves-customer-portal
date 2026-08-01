@@ -345,11 +345,10 @@ describe('per-application synthesis (owner rule 2026-07-31: residential bills pe
     expect(lines({ ...lawnEstimate, annual_total: 600 })).toBeNull();
   });
 
-  it('returns null with no bundle so the legacy monthly fallback still renders a number', () => {
+  it('returns null with no bundle (the legacy document still renders a number)', () => {
     const bare = { monthly_total: 120, annual_total: 1440, estimate_data: {} };
     expect(perApplicationRecurringLines(bare, bare.estimate_data)).toBeNull();
-    expect(normalizeProposal(bare, { recurringMode: 'per_application' })
-      .buildings[0].lineItems[0].frequency).toBe('monthly');
+    expect(normalizeProposal(bare).buildings[0].lineItems[0].frequency).toBe('monthly');
   });
 
   it('skips quote-required cadences', () => {
@@ -393,5 +392,31 @@ describe('per-application synthesis (owner rule 2026-07-31: residential bills pe
     expect(p.enabled).toBe(true);
     expect(p.buildings[0].lineItems[0].frequency).toBe('monthly');
     expect(computeProposalTotals(p).monthlyEquivalent).toBe(350);
+  });
+});
+
+// Pre-push r5: a per-application plan whose lines cannot be derived must not
+// revert to the monthly copy the rule forbids for this lane.
+describe('per-application mode with no derivable lines', () => {
+  const bare = {
+    customer_name: 'T',
+    address: '1 Oak',
+    monthly_total: 120,
+    annual_total: 1440,
+    onetime_total: 150,
+    estimate_data: { lineItems: [{ name: 'Initial cleanup', oneTimePrice: 150 }] },
+  };
+
+  it('prints no recurring pricing rather than a monthly line', () => {
+    const p = normalizeProposal(bare, { recurringMode: 'per_application' });
+    const freqs = p.buildings[0].lineItems.map((i) => i.frequency);
+    expect(freqs).not.toContain('monthly');
+    expect(freqs).toEqual(['one_time']);
+    expect(computeProposalTotals(p).annualRecurring).toBe(0);
+  });
+
+  it('still renders the legacy monthly line for a legacy-mode document', () => {
+    const p = normalizeProposal(bare, { recurringMode: 'legacy' });
+    expect(p.buildings[0].lineItems.map((i) => i.frequency)).toContain('monthly');
   });
 });

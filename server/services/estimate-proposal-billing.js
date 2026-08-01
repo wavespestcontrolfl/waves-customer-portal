@@ -56,7 +56,6 @@ async function estimateBillsPerApplication(estimate) {
     // per-application (the converter preserves membership only for a customer
     // that already holds one).
     if (!customer) return true;
-    if (customer.billing_mode === 'annual_prepay') return false;
     return !customerPreservesMonthlyMembership(customer);
   } catch (err) {
     // Unknown lane with a customer present: keep the legacy description.
@@ -68,14 +67,41 @@ async function estimateBillsPerApplication(estimate) {
   }
 }
 
+// Was THIS estimate sold as an annual prepay? Keyed on the term's
+// source_estimate_id (UNIQUE, migration 20260514000001) — a per-ESTIMATE fact,
+// unlike the customer's current lane, which does not carry over: a prepay
+// customer accepting a new standard estimate is stamped per_application by the
+// converter (pre-push r5).
+//
+// Deliberately status-blind. The only thing this decides is "render the legacy
+// document instead of per-application copy", so being wrong about a refunded
+// or lapsed term costs a less-improved PDF, never a misstated charge — which
+// is why it does NOT re-derive coveredTermsAsOf's semantics (codex r4, r5).
+async function estimateSoldAsAnnualPrepay(estimate) {
+  if (!estimate?.id) return false;
+  try {
+    if (!(await db.schema.hasTable('annual_prepay_terms'))) return false;
+    const term = await db('annual_prepay_terms').where({ source_estimate_id: estimate.id }).first();
+    return !!term;
+  } catch (err) {
+    logger.warn(`[estimate-proposal-billing] prepay lookup failed for estimate ${estimate?.id}: ${err.message}`);
+    return false;
+  }
+}
+
 /**
  * @returns {Promise<{ billsPerApplication: boolean }>}
  */
 async function resolveProposalBillingContext(estimate) {
-  return { billsPerApplication: await estimateBillsPerApplication(estimate) };
+  const [perApplication, prepaid] = await Promise.all([
+    estimateBillsPerApplication(estimate),
+    estimateSoldAsAnnualPrepay(estimate),
+  ]);
+  return { billsPerApplication: perApplication && !prepaid };
 }
 
 module.exports = {
   estimateBillsPerApplication,
+  estimateSoldAsAnnualPrepay,
   resolveProposalBillingContext,
 };

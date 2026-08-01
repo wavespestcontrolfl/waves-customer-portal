@@ -14,6 +14,7 @@ jest.mock('../routes/estimate-public', () => ({ matchAcceptCustomerByPhone: mock
 
 const {
   estimateBillsPerApplication,
+  estimateSoldAsAnnualPrepay,
   resolveProposalBillingContext,
 } = require('../services/estimate-proposal-billing');
 
@@ -82,10 +83,28 @@ describe('estimateBillsPerApplication', () => {
 // Annual prepay is deliberately NOT re-derived here: coverage semantics belong
 // to annual-prepay-renewals.js. Reading the LANE is enough — a prepaid plan
 // simply keeps the legacy rendering (codex #3120 r4 + pre-push r5).
-describe('annual prepay lane', () => {
-  it('is NOT per-application, so the document stays as it was', async () => {
-    stubTables({ customer: { pipeline_stage: 'active_customer', monthly_rate: 45, billing_mode: 'annual_prepay' } });
-    expect(await estimateBillsPerApplication({ id: 'e1', customer_id: 'c1' })).toBe(false);
+describe('annual prepay is a per-ESTIMATE fact, not the customer lane', () => {
+  const perAppCustomer = { pipeline_stage: 'active_customer', monthly_rate: 45, billing_mode: 'per_application' };
+
+  it('an estimate sold as prepay keeps the legacy document', async () => {
+    stubTables({ customer: perAppCustomer, prepayTerm: { id: 't1', status: 'active' } });
+    expect(await estimateSoldAsAnnualPrepay({ id: 'e1' })).toBe(true);
+    expect(await resolveProposalBillingContext({ id: 'e1', customer_id: 'c1' }))
+      .toEqual({ billsPerApplication: false });
+  });
+
+  // Pre-push r5: the customer's CURRENT lane does not carry over — a prepay
+  // customer accepting a new standard estimate is stamped per_application.
+  it('a prepay CUSTOMER with no term on this estimate still gets per-application copy', async () => {
+    stubTables({ customer: { ...perAppCustomer, billing_mode: 'annual_prepay' }, prepayTerm: undefined });
+    expect(await resolveProposalBillingContext({ id: 'e1', customer_id: 'c1' }))
+      .toEqual({ billsPerApplication: true });
+  });
+
+  it('is status-blind — a refunded term still just means "leave the document alone"', async () => {
+    stubTables({ customer: perAppCustomer, prepayTerm: { id: 't1', status: 'refunded' } });
+    expect(await resolveProposalBillingContext({ id: 'e1', customer_id: 'c1' }))
+      .toEqual({ billsPerApplication: false });
   });
 });
 

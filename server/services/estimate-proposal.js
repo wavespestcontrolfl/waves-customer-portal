@@ -263,10 +263,17 @@ function perApplicationLinesForCandidate(candidate, estimate, { annualTotal, bun
 // estimate fields so ANY estimate can still produce a PDF even before the
 // operator has authored an explicit multi-building proposal.
 function synthesizeFallbackProposal(estimate = {}, estimateData = {}, { recurringMode = 'legacy' } = {}) {
-  const lineItems = recurringMode === 'per_application'
+  const perApplicationMode = recurringMode === 'per_application';
+  const lineItems = perApplicationMode
     ? [...(perApplicationRecurringLines(estimate, estimateData) || [])]
     : [];
   const havePerApplicationRecurring = lineItems.length > 0;
+  // A per-application plan whose lines could not be derived (no snapshot, or a
+  // reconcile failure) prints NO recurring pricing rather than reverting to
+  // the monthly copy the rule forbids for this lane (pre-push r5). One-time
+  // work and the rest of the document are unaffected; the customer's price is
+  // on the estimate page and in the plan's own paperwork.
+  const suppressRecurringPricing = perApplicationMode && !havePerApplicationRecurring;
   const engineLines = Array.isArray(estimateData?.sendSnapshot?.pricingBundle?.lineItems)
     ? estimateData.sendSnapshot.pricingBundle.lineItems
     : Array.isArray(estimateData?.lineItems)
@@ -278,7 +285,7 @@ function synthesizeFallbackProposal(estimate = {}, estimateData = {}, { recurrin
     const oneTime = num(line.oneTimePrice ?? line.onetime_price ?? line.oneTime);
     if (monthly > 0) {
       // The per-application lines already cover the recurring side.
-      if (havePerApplicationRecurring) continue;
+      if (havePerApplicationRecurring || suppressRecurringPricing) continue;
       lineItems.push(normalizeLineItem({
         description: line.displayName || line.name || line.service || 'Recurring service',
         unitPrice: monthly,
@@ -297,7 +304,7 @@ function synthesizeFallbackProposal(estimate = {}, estimateData = {}, { recurrin
 
   // Last-ditch: fill whichever side is still missing from the stored totals
   // so the PDF still shows a number rather than an empty table.
-  if (!lineItems.some((item) => item.frequency !== 'one_time')) {
+  if (!suppressRecurringPricing && !lineItems.some((item) => item.frequency !== 'one_time')) {
     const monthly = num(estimate.monthly_total);
     if (monthly > 0) {
       lineItems.push(normalizeLineItem({ description: 'Recurring service plan', unitPrice: monthly, frequency: 'monthly' }));
