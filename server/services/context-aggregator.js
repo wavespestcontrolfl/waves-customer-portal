@@ -140,98 +140,6 @@ function customerSafeVisitNotes(notes) {
   } catch { return null; }
 }
 
-// How each resolved lane may be described to the customer (codex #3128 r8).
-//
-// Every lane gets its OWN truthful sentence. A blanket "not monthly, quote per
-// application" was wrong for annual prepay — that plan is already paid for the
-// year, so a per-application price is not what they owe either. And note
-// per_visit's copy: the lane is an internal billing mechanism (invoice on
-// completion), NOT customer wording — recurring work is always described "per
-// application", never "per visit".
-//
-// `short` is the CUSTOMER-SAFE name, and the only form that may be serialized
-// into buildSummary — which IS the managed agent's context snapshot
-// (managed-assistant.js stores ctx.summary verbatim). Echoing the raw mode
-// there put the forbidden word "per visit" into authoritative grounding
-// (codex #3128 r9).
-const BILLING_LANE_COPY = {
-  monthly_membership: {
-    monthlyBilled: true,
-    short: 'monthly membership',
-    copy: 'MONTHLY MEMBERSHIP — dues are charged monthly, so this customer\'s monthly rate IS their price. State it plainly.',
-  },
-  annual_prepay: {
-    monthlyBilled: false,
-    short: 'annual prepay (paid for the year)',
-    copy: 'ANNUAL PREPAY — already paid up front for the year. Never describe a monthly charge, and never quote a per-application price as something they owe.',
-  },
-  per_application: {
-    monthlyBilled: false,
-    short: 'per application',
-    copy: 'PER APPLICATION — quote the per-application price and the number of applications a year.',
-  },
-  per_visit: {
-    monthlyBilled: false,
-    // NOT "per visit" — the mode name is an internal billing mechanism
-    // (invoice on completion); the customer-facing unit is the application.
-    short: 'per application',
-    copy: 'PER APPLICATION (invoiced after each service) — quote the per-application price; never say "per visit" to a customer.',
-  },
-  one_time: {
-    monthlyBilled: false,
-    short: 'one-time job',
-    copy: 'ONE-TIME — a single job with no recurring billing relationship.',
-  },
-};
-
-// The billing lane as a customer-facing FACT (codex #3128 r6, r8).
-//
-// r6 carried only the EXPLICIT lane and reported an inferred one as "not
-// stated". That was too narrow (codex r8): resolveBillingLane's inference is
-// the SAME rule the dues cron bills by (MONTHLY_LANE_SQL), so a NULL-mode
-// account with a real tier and a positive rate genuinely IS charged monthly —
-// refusing to quote it withheld a true price. Provenance still travels with
-// the fact, since the two are not equally certain.
-//
-// Fail-closed: an unresolvable lane reads as "not stated", never as monthly.
-function resolveBillingLaneFacts(customer) {
-  try {
-    const { resolveBillingLane } = require('./billing-lane');
-    const { mode, source } = resolveBillingLane(customer);
-    const explicit = source === 'explicit';
-    const laneCopy = BILLING_LANE_COPY[mode];
-    if (!laneCopy) {
-      return {
-        resolvedMode: mode || null,
-        mode: null,
-        explicit,
-        monthlyBilled: false,
-        label: 'not stated on the account — never state a monthly amount; give the plan and cadence and let the office confirm',
-      };
-    }
-    const provenance = explicit
-      ? 'owner-set'
-      : 'not explicitly set — inferred by the same rule billing itself uses';
-    return {
-      resolvedMode: mode,
-      mode,
-      explicit,
-      monthlyBilled: laneCopy.monthlyBilled,
-      // Customer-safe short form for the managed-agent context snapshot.
-      shortLabel: laneCopy.short,
-      label: `${laneCopy.copy} (${provenance})`,
-    };
-  } catch {
-    return {
-      resolvedMode: null,
-      mode: null,
-      explicit: false,
-      monthlyBilled: false,
-      label: 'unavailable right now — never state a monthly amount',
-    };
-  }
-}
-
 class ContextAggregator {
   async getFullCustomerContext(phone) {
     const clean = (phone || '').replace(/\D/g, '');
@@ -372,13 +280,6 @@ class ContextAggregator {
     // the balance.
     const openInvoice = ownInvoices.find((inv) => invoiceAmountDue(inv) > 0) || null;
     const hasPayerBilledOpen = invoiceRows.some((inv) => inv.payer_id && VISIBLE_INVOICE_STATUSES.has(String(inv.status)));
-    // The BILLING LANE, resolved once and carried as an explicit FACT. The
-    // per-application copy rule lets a monthly amount be spoken only when the
-    // account says the lane is monthly membership — but nothing produced that
-    // fact, so every genuine monthly member fell into the office-confirmation
-    // fallback (codex #3128 r6). Feeds buildSummary (the managed-agent
-    // snapshot) and the shadow drafter's BILLING block.
-    const billingLane = resolveBillingLaneFacts(customer);
     // Canonical autopay state (Codex r1): the raw autopay_enabled flag lies
     // when the default method is missing/expired/unhealthy, and a stale
     // autopay_paused_until must not read as paused — customerOnAutopay +
@@ -392,10 +293,12 @@ class ContextAggregator {
       // next_charge_date is only real for the monthly-membership lane
       // (Codex r9, customer-autopay canon): per-application / prepay /
       // one-time accounts can carry a stale date the cron will never act on
-      // — advertising it would promise a charge that isn't coming. The
-      // RESOLVED mode (explicit or inferred) is the right test here: the 8AM
-      // cron bills the inferred lane too (billing-lane MONTHLY_LANE_SQL).
-      const monthlyLane = billingLane.resolvedMode === 'monthly_membership';
+      // — advertising it would promise a charge that isn't coming.
+      let monthlyLane = false;
+      try {
+        const { resolveBillingLane } = require('./billing-lane');
+        monthlyLane = resolveBillingLane(customer).mode === 'monthly_membership';
+      } catch { monthlyLane = false; }
       autopayState = {
         on: paused ? false : await customerOnAutopay(customer),
         paused,
@@ -419,7 +322,7 @@ class ContextAggregator {
     // renders into ACCOUNT FLAGS, which is verifier-approved grounding.
     if (pendingEstimate) flags.push({ type: 'pending_estimate', severity: 'info', detail: `${pendingEstimate.waveguard_tier || 'estimate'} pending (priced per application)` });
 
-    const summary = this.buildSummary(customer, flags, lastService, upcomingServices, balance, billingLane);
+    const summary = this.buildSummary(customer, flags, lastService, upcomingServices, balance);
 
     return {
       known: true,
@@ -430,9 +333,6 @@ class ContextAggregator {
         tier: customer.waveguard_tier, monthlyRate: parseFloat(customer.monthly_rate || 0),
         pipelineStage: customer.pipeline_stage, leadScore: customer.lead_score,
         customerSince: customer.customer_since,
-        // The lane that decides whether monthlyRate above may ever be spoken
-        // as this customer's price (codex #3128 r6).
-        billingLane,
       },
       smsHistory: smsHistory.map(m => ({ direction: m.direction, body: m.message_body, date: m.created_at, type: m.message_type })),
       // technician_notes is INTERNAL (owner ruling 2026-07-16: access codes,
@@ -700,31 +600,12 @@ class ContextAggregator {
     return `${h}:${m[2]} ${ampm}`;
   }
 
-  buildSummary(c, flags, lastSvc, upcoming, balance, billingLane) {
+  buildSummary(c, flags, lastSvc, upcoming, balance) {
     // No rate amount here (Codex r3 + the per-application display rule):
     // monthly_rate is an internal figure, not customer billing copy — with
     // amount-bearing drafts now sendable, "($X/mo)" in the summary would let
     // a per-application customer be quoted a monthly price.
     let s = `${c.first_name} ${c.last_name} | ${c.waveguard_tier || 'No tier'} | ${c.pipeline_stage}`;
-    // …but the LANE itself must travel, or a genuine monthly member can never
-    // be told their real price (codex #3128 r6). This summary IS the managed
-    // agent's context snapshot, so the fact has to live here to reach it.
-    // Recomputed when absent so a direct buildSummary caller still fails
-    // closed to "not stated" rather than dropping the fact entirely.
-    const lane = billingLane || resolveBillingLaneFacts(c);
-    // shortLabel, never the raw mode (codex #3128 r9): this string IS the
-    // managed agent's context snapshot, and `per_visit` spelled out would put
-    // the one unit the house voice forbids into authoritative grounding.
-    s += ` | Billing lane: ${lane.shortLabel
-      ? `${lane.shortLabel}${lane.explicit ? '' : ' (inferred)'}`
-      : 'not stated — no monthly amount'}`;
-    // The monthly lane is the one case where a plan price may be spoken, so
-    // the amount has to travel WITH it — the house voice forbids computing or
-    // inventing figures, so "state it plainly" without the number just
-    // produces a deferral (codex #3128 r9).
-    if (lane.monthlyBilled && Number(c.monthly_rate) > 0) {
-      s += ` ($${Number(c.monthly_rate).toFixed(2)}/mo dues)`;
-    }
     if (lastSvc) s += ` | Last: ${lastSvc.service_type} ${new Date(lastSvc.service_date).toLocaleDateString('en-US', { timeZone: 'America/New_York' })}`;
     if (upcoming.length) s += ` | Next: ${upcoming[0].service_type} ${new Date(upcoming[0].scheduled_date).toLocaleDateString('en-US', { timeZone: 'America/New_York' })}`;
     if (balance > 0) s += ` | ⚠️ $${balance.toFixed(2)} overdue`;

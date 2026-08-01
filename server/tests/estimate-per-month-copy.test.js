@@ -85,15 +85,18 @@ describe('legacy SSR renderer mirrors the per-application rules (codex #3128 r2)
     // right for a disclosure note and wrong here — it would print a combined
     // $X/mo total on a per-application plan.
     expect(src).toMatch(/async function estimateRendersMonthlyBilling/);
-    expect(src).toMatch(/estimateCustomerPreservesMonthlyBilling\(estimate, \{ unresolvedVerdict: false \}\)/);
     expect(src).toContain('const monthlyBilledEstimate = await estimateRendersMonthlyBilling(estimate);');
     expect(src).toContain('monthlyBilled: await estimateRendersMonthlyBilling(estimate),');
-    // No other display caller may reach for the fail-OPEN predicate directly.
-    const displayCallers = src.match(/await estimateCustomerPreservesMonthlyBilling\([^)]*\)/g) || [];
-    expect(displayCallers).toEqual([
-      'await estimateCustomerPreservesMonthlyBilling(estimate, { unresolvedVerdict: false })',
-      'await estimateCustomerPreservesMonthlyBilling(estimate)', // buildPricingBundle: fail-open by design
-    ]);
+    // ...and the pricing bundle too (codex #3128 r10). The flags are not a
+    // disclosure note: PriceCard reads their ABSENCE as permission to render
+    // "Billed $X/mo", so a fail-OPEN strip re-opened the monthly spread on the
+    // React path. EVERY display caller goes through the fail-closed resolver;
+    // the raw predicate has exactly one caller, inside it.
+    expect(src).toContain('return (await estimateRendersMonthlyBilling(estimate))');
+    const rawCallers = src.match(/await estimateCustomerPreservesMonthlyBilling\([^)]*\)/g) || [];
+    expect(rawCallers).toEqual(['await estimateCustomerPreservesMonthlyBilling(estimate)']);
+    // No knob to set wrongly later.
+    expect(src).not.toMatch(/unresolvedVerdict/);
   });
 
   test('reconciled service cards still win over the monthly hero', () => {
@@ -167,35 +170,5 @@ describe('monthly-billing display identity fails closed on a lookup failure', ()
   test('an estimate with no customer signal at all renders per application', async () => {
     const { estimateRendersMonthlyBilling } = loadRouteWithBrokenCustomerLookup();
     await expect(estimateRendersMonthlyBilling({ id: 'est-unlinked' })).resolves.toBe(false);
-  });
-});
-
-// The monthly-lane exception has to be reachable end to end (codex #3128 r9):
-// the lane fact says "state it plainly", the house voice forbids computing or
-// inventing figures — so if the amount is not IN the facts, the exception
-// produces a deferral and nothing else.
-describe('the monthly-lane exception carries its amount and agrees across surfaces', () => {
-  const fs = require('fs');
-  const path = require('path');
-  const drafter = fs.readFileSync(path.join(__dirname, '../services/sms-shadow-drafter.js'), 'utf8');
-  const agent = fs.readFileSync(path.join(__dirname, '../services/ai-assistant/managed-agent-config.js'), 'utf8');
-
-  test('the drafter emits the rate ONLY for the monthly lane', () => {
-    expect(drafter).toContain('lane?.monthlyBilled && Number(context.customer?.monthlyRate) > 0');
-    expect(drafter).toContain('Monthly plan rate:');
-  });
-
-  test('no surface still restricts the exception to an EXPLICIT lane', () => {
-    // r8 made the resolved lane authoritative (an inferred monthly member is
-    // billed monthly by the same rule the dues cron uses). The house voice and
-    // BOTH tool descriptions have to agree, or the model is told to withhold a
-    // real price that the fact just authorized.
-    expect(agent).not.toMatch(/explicit monthly-membership/);
-    const toolDescriptions = agent.match(/description: `[^`]*monthly rate[^`]*`/g) || [];
-    expect(toolDescriptions.length).toBe(2);
-    for (const desc of toolDescriptions) {
-      expect(desc).toMatch(/Billing lane/);
-      expect(desc).toMatch(/owner-set or inferred/);
-    }
   });
 });

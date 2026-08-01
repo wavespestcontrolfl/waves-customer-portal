@@ -17065,14 +17065,14 @@ function stripInternalMarginFieldsDeep(value, depth = 0) {
 // get every flag stripped, everyone else gets missing flags ADDED on the
 // tier-plan surfaces, so pre-flag send snapshots (sent before this change)
 // serve the same disclosure as fresh builds.
-// `unresolvedVerdict` is the answer when the lookup can't be completed, and
-// the two callers need OPPOSITE ones (codex #3128 r7). For flag stripping,
-// unresolved must stay `true`: wrongly suppressing the monthly note hides a
-// description of a real charge, while wrongly keeping it merely over-discloses
-// for one transient failure window. For DISPLAY classification the same `true`
-// is the dangerous direction — it would print a combined $X/mo total on a
-// per-application plan — so estimateRendersMonthlyBilling passes `false`.
-async function estimateCustomerPreservesMonthlyBilling(estimate, { unresolvedVerdict = true } = {}) {
+// Fails CLOSED — an unresolvable lane answers "not monthly" (codex #3128
+// r7/r10). r7 made this a parameter on the theory that flag stripping wanted
+// the opposite default, because suppressing a monthly note hides a description
+// of a real charge. r10 showed that framing was wrong: the flags are not a
+// note, and their ABSENCE is what makes PriceCard render "Billed $X/mo". Both
+// callers are display, both want the same answer, and a knob with one correct
+// setting is just a way to pick the wrong one later.
+async function estimateCustomerPreservesMonthlyBilling(estimate) {
   if (!estimate?.customer_id && !estimate?.customer_phone) return false;
   try {
     let customer = null;
@@ -17091,7 +17091,7 @@ async function estimateCustomerPreservesMonthlyBilling(estimate, { unresolvedVer
     return BillingCadence.customerPreservesMonthlyMembership(customer);
   } catch (e) {
     logger.warn(`[estimate-public] billing-lane lookup failed for estimate ${estimate?.id}: ${e.message}`);
-    return unresolvedVerdict;
+    return false;
   }
 }
 
@@ -17112,7 +17112,7 @@ async function estimateCustomerPreservesMonthlyBilling(estimate, { unresolvedVer
 async function estimateRendersMonthlyBilling(estimate) {
   try {
     if (!(await perApplicationBillingColumnsExist())) return true;
-    return await estimateCustomerPreservesMonthlyBilling(estimate, { unresolvedVerdict: false });
+    return await estimateCustomerPreservesMonthlyBilling(estimate);
   } catch (e) {
     logger.warn(`[estimate-public] monthly-billing display identity unresolved for estimate ${estimate?.id}: ${e.message}`);
     return false;
@@ -17206,10 +17206,13 @@ function addMissingBilledPerApplicationFlags(bundle) {
 async function buildPricingBundle(estimate) {
   const bundle = await buildPricingBundleInner(estimate);
   if (!bundle || typeof bundle !== 'object') return bundle;
-  if (!(await perApplicationBillingColumnsExist())) {
-    return stripBilledPerApplicationDeep(bundle);
-  }
-  return (await estimateCustomerPreservesMonthlyBilling(estimate))
+  // The SAME fail-closed resolver the hero and /data cta use (codex #3128
+  // r10). This was the last caller reading the fail-OPEN predicate, and the
+  // flags are not merely a disclosure note: PriceCard treats their ABSENCE as
+  // permission to render "Billed $X/mo", so stripping them on a customers
+  // lookup error re-opened the exact monthly spread r7 set out to close — on
+  // the React path, for a per-application plan.
+  return (await estimateRendersMonthlyBilling(estimate))
     ? stripBilledPerApplicationDeep(bundle)
     : addMissingBilledPerApplicationFlags(bundle);
 }

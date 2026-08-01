@@ -318,28 +318,9 @@ function buildFactsBlock(context) {
   // Invoice grounding unavailable (Codex r11): render a VISIBLE unknown —
   // "Balance: Current" from a failed query is a fabrication vector, and the
   // prompt's defer rules key off absence being explicit.
-  // The billing LANE leads the block: it governs how every amount below may
-  // be spoken. The house voice permits a monthly price only when the facts
-  // state the lane, and nothing stated it — so genuine monthly members were
-  // deferred to the office instead of getting their real rate (codex #3128
-  // r6). Absent (a caller that predates the aggregator field) reads as "not
-  // stated", the fail-closed answer.
-  const lane = context.customer?.billingLane;
-  const billingLines = [
-    `- Billing lane: ${lane?.label || 'not stated on the account — never state a monthly amount; give the plan and cadence and let the office confirm'}`,
-  ];
-  // The monthly lane is the ONE case where a plan price may be spoken — so the
-  // amount has to be IN the facts. The house voice forbids computing or
-  // inventing figures, so a lane that says "state it plainly" without the
-  // number produced a deferral anyway, and the exception stayed unreachable
-  // (codex #3128 r9). Emitted ONLY for the monthly lane: for every other lane
-  // this figure is the stored artifact nobody is charged.
-  if (lane?.monthlyBilled && Number(context.customer?.monthlyRate) > 0) {
-    billingLines.push(`- Monthly plan rate: $${Number(context.customer.monthlyRate).toFixed(2)} — the dues this account is actually charged; this IS their price when they ask`);
-  }
-  billingLines.push(...(context.billing?.unavailable
+  const billingLines = context.billing?.unavailable
     ? ["- Billing records are unavailable right now — defer any balance, invoice, or amount question and say you'll confirm"]
-    : [`- Balance: ${balance}`]));
+    : [`- Balance: ${balance}`];
   const billingKnown = !context.billing?.unavailable;
   const autopay = billingKnown ? context.billing?.autopay : null;
   if (autopay) {
