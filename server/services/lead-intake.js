@@ -219,7 +219,7 @@ async function notifyAdam(customer, interest, estimate) {
 // patches the shell, stamps estimate_drafted, and alerts the owner.
 // The engine runs only its veto ladder (no bell, no draft) and reports
 // terminal refusals; anything else lets the legacy shell path proceed.
-async function engineDraftHandoff(customer, body, reason, { scopeCheckOnly = false } = {}) {
+async function engineDraftHandoff(customer, body, reason, { scopeCheckOnly = false, precomputedTriage } = {}) {
   try {
     const { smsThreadDraftsEnabled, startSmsThreadDraft } = require('./estimator-engine/sms-thread');
     if (!smsThreadDraftsEnabled()) return { drafted: false, terminal: false };
@@ -228,15 +228,20 @@ async function engineDraftHandoff(customer, body, reason, { scopeCheckOnly = fal
       triggerBody: body,
       skipIntentGate: true,
       ...(scopeCheckOnly ? { scopeCheckOnly: true } : {}),
+      // Threads the pre-check's triage into the real run so the awaited
+      // veto/triage/classifier ladder executes exactly ONCE per reply —
+      // the Twilio webhook awaits this handler, and a doubled ladder
+      // doubled its latency.
+      ...(precomputedTriage !== undefined ? { precomputedTriage } : {}),
     });
     if (scopeCheckOnly) {
       // Scope verdict only — NEVER a draft or a status stamp, whatever the
-      // engine returned.
+      // engine returned. The triage rides back for reuse.
       if (started?.terminal) {
         logger.info(`[lead-intake] scope check refused as out-of-scope (${started.skipped})`);
-        return { drafted: false, terminal: true };
+        return { drafted: false, terminal: true, triage: started?.triage };
       }
-      return { drafted: false, terminal: false };
+      return { drafted: false, terminal: false, triage: started?.triage };
     }
     if (!started?.started) {
       if (started?.terminal) {
@@ -339,10 +344,15 @@ async function handleIntakeReply(customer, body) {
         })
         .orderBy('created_at', 'desc')
         .first();
-      const handoff = await engineDraftHandoff(
-        customer, body, `service selected (${cls.interest})`,
-        existingShell ? { scopeCheckOnly: true } : {},
-      );
+      // The scope verdict already rendered in the pre-check above — the
+      // shell branch needs nothing further, and the full handoff reuses
+      // the pre-check's triage so the ladder never runs twice.
+      const handoff = existingShell
+        ? { drafted: false, terminal: false }
+        : await engineDraftHandoff(
+          customer, body, `service selected (${cls.interest})`,
+          { precomputedTriage: scopePreCheck.triage },
+        );
       if (handoff.drafted) return { handled: true, next: 'estimate_drafted' };
       // Scope-refused: handled, but nothing was drafted and nothing is
       // owed. The state stays put (an 'estimate_drafted' stamp would be a
@@ -392,6 +402,15 @@ async function handleIntakeReply(customer, body) {
       return { handled: false };
     }
 
+    // TERMINAL SCOPE CHECK before ANY persist — same before-writes
+    // contract as the awaiting_service branch: '100 Palm Ave — actually
+    // looking for power washing' must not write address_line1 and stamp
+    // the clarify answered on its way to a refusal.
+    const scopePreCheck = await engineDraftHandoff(
+      customer, body, 'scope pre-check (awaiting_address)', { scopeCheckOnly: true },
+    );
+    if (scopePreCheck.terminal) return { handled: true, next: status };
+
     const address = body.trim();
     await db('customers').where({ id: customer.id }).update({
       address_line1: address,
@@ -427,10 +446,14 @@ async function handleIntakeReply(customer, body) {
       })
       .orderBy('created_at', 'desc')
       .first();
-    const handoff = await engineDraftHandoff(
-      customer, body, `address captured (${interest})`,
-      existingShell ? { scopeCheckOnly: true } : {},
-    );
+    // Verdict already rendered in the pre-check above; the full handoff
+    // reuses its triage so the ladder never runs twice.
+    const handoff = existingShell
+      ? { drafted: false, terminal: false }
+      : await engineDraftHandoff(
+        customer, body, `address captured (${interest})`,
+        { precomputedTriage: scopePreCheck.triage },
+      );
     if (handoff.drafted) return { handled: true, next: 'estimate_drafted' };
     // Scope-refused — same contract as the awaiting_service branch above:
     // handled, no estimate, no owner alert, state unchanged.

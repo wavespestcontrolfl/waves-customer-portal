@@ -636,6 +636,20 @@ function resolveDraftCustomerPhone(intent, context) {
     || null;
 }
 
+// Which phone numbers the duplicate guard must consult, in order: the
+// draft's own phone always; the ADDRESS-GROUNDED customer's phone when it
+// differs by last-10 (their open estimates are otherwise invisible to a
+// sender-phone check). Pure so the rule is directly pinnable.
+function dedupePhonesForContext(customerPhone, context) {
+  const last10 = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+  const phones = customerPhone ? [customerPhone] : [];
+  const groundedPhone = context?.customerGroundedByAddress ? context?.customer?.phone : null;
+  if (groundedPhone && last10(groundedPhone).length === 10 && last10(groundedPhone) !== last10(customerPhone)) {
+    phones.push(groundedPhone);
+  }
+  return phones;
+}
+
 // Engine tier keys are lowercase; customers.waveguard_tier's CHECK allows
 // only the title-case labels.
 const WAVEGUARD_TIER_LABELS = { bronze: 'Bronze', silver: 'Silver', gold: 'Gold', platinum: 'Platinum' };
@@ -721,8 +735,19 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
     // address is this a different quote; an unknown address on either side
     // keeps the conservative block.
     const openEstimates = await listOpenEstimatesByPhone(customerPhone, { database: trx });
-    if (openEstimates.length) {
-      const conflicting = conflictingOpenEstimate(openEstimates, intent.address);
+    // ADDRESS-GROUNDED drafts link a CUSTOMER whose own number is not the
+    // sender's — that customer's open estimates live under THEIR phone and
+    // are invisible to the sender-phone check, letting duplicate drafts
+    // through. Consult both numbers (context.phone keeps its meaning
+    // everywhere else: transcripts and SMS threading still key on the
+    // sender); the address bypass applies across the union.
+    const phonesToCheck = dedupePhonesForContext(customerPhone, context);
+    const groundedEstimates = phonesToCheck.length > 1
+      ? await listOpenEstimatesByPhone(phonesToCheck[1], { database: trx })
+      : [];
+    const allOpen = [...openEstimates, ...groundedEstimates];
+    if (allOpen.length) {
+      const conflicting = conflictingOpenEstimate(allOpen, intent.address);
       if (conflicting) return { duplicateBlock: automatedDuplicateBlock(conflicting) };
       logger.info('[estimator-engine] duplicate guard bypassed — all open estimates are for different properties');
     }
@@ -852,5 +877,5 @@ module.exports = {
   isCommercialRelationshipRed,
   conflictingOpenEstimate,
   resolveDraftCustomerPhone,
-  _private: { buildDraftNotes, lineRequiresReview, verifyEvidenceQuotes, conflictingOpenEstimate, compsSearchTerm, SERVICE_COMPS_ALIASES, lookupFeatureModifiers, resolveDraftCustomerPhone },
+  _private: { buildDraftNotes, lineRequiresReview, verifyEvidenceQuotes, conflictingOpenEstimate, compsSearchTerm, SERVICE_COMPS_ALIASES, lookupFeatureModifiers, resolveDraftCustomerPhone, dedupePhonesForContext },
 };

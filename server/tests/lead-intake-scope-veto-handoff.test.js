@@ -189,6 +189,64 @@ describe('address-LESS replies get the scope check BEFORE anything records', () 
   });
 });
 
+describe('single-pass ladder: the pre-check verdict threads into the real run', () => {
+  test('in-scope + address: one scopeCheckOnly call, then one full call reusing its triage', async () => {
+    const SENTINEL = { lines: [], matchedExistingCustomer: false, sentinel: true };
+    mockStartSmsThreadDraft.mockImplementation(async (args) => (args.scopeCheckOnly
+      ? { started: false, skipped: 'scope_check_only', triage: SENTINEL }
+      : { started: true, draftPromise: Promise.resolve({}) }));
+
+    const result = await handleIntakeReply(CUSTOMER(), 'quarterly pest control please');
+
+    expect(result).toEqual({ handled: true, next: 'estimate_drafted' });
+    expect(mockStartSmsThreadDraft).toHaveBeenCalledTimes(2);
+    expect(mockStartSmsThreadDraft.mock.calls[0][0]).toEqual(expect.objectContaining({ scopeCheckOnly: true }));
+    const second = mockStartSmsThreadDraft.mock.calls[1][0];
+    expect(second.scopeCheckOnly).toBeUndefined();
+    // The pre-check's triage rides into the real run — startSmsThreadDraft
+    // skips its whole veto/triage/classifier ladder on a precomputedTriage
+    // (pinned in the sms-thread suite), so the ladder ran exactly ONCE.
+    expect(second.precomputedTriage).toBe(SENTINEL);
+  });
+});
+
+describe('awaiting_address replies get the scope check BEFORE any persist', () => {
+  const ADDR_CUSTOMER = () => ({
+    id: 'cust-1',
+    phone: '+19415550123',
+    address_line1: '',
+    lead_service_interest: 'pest',
+    lead_intake_status: 'awaiting_address',
+  });
+  const BODY = '100 Palm Ave — actually looking for power washing';
+
+  test('terminal veto ⇒ no address write, no clarify stamp, no estimate, no alert', async () => {
+    mockStartSmsThreadDraft.mockResolvedValue({ started: false, skipped: 'out_of_scope_service', terminal: true });
+
+    const result = await handleIntakeReply(ADDR_CUSTOMER(), BODY);
+
+    expect(result).toEqual({ handled: true, next: 'awaiting_address' });
+    expect(mockCustomerUpdates.some((p) => 'address_line1' in p)).toBe(false);
+    expect(mockCustomerUpdates).toHaveLength(0);
+    expect(mockEstimateInserts).toHaveLength(0);
+    expect(mockEstimateUpdates).toHaveLength(0);
+    expect(mockSmsSends).toHaveLength(0);
+  });
+
+  test('in-scope address reply still persists and drafts', async () => {
+    const SENTINEL = { lines: [], matchedExistingCustomer: false };
+    mockStartSmsThreadDraft.mockImplementation(async (args) => (args.scopeCheckOnly
+      ? { started: false, skipped: 'scope_check_only', triage: SENTINEL }
+      : { started: true, draftPromise: Promise.resolve({}) }));
+
+    const result = await handleIntakeReply(ADDR_CUSTOMER(), '100 Palm Ave, Venice FL 34285');
+
+    expect(result).toEqual({ handled: true, next: 'estimate_drafted' });
+    expect(mockCustomerUpdates.some((p) => p.address_line1 === '100 Palm Ave, Venice FL 34285')).toBe(true);
+    expect(mockStartSmsThreadDraft.mock.calls[1][0].precomputedTriage).toBe(SENTINEL);
+  });
+});
+
 describe('open-shell branch still runs the scope check', () => {
   const SHELL = { id: 'shell-est-1', address: '', customer_phone: '+19415550123', customer_email: null };
 

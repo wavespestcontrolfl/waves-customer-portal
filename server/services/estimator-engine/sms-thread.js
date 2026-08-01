@@ -257,7 +257,7 @@ async function runThreadDraft({
  */
 async function startSmsThreadDraft({
   phone, triggerBody = '', skipIntentGate = false, skipCooldown = false, dryRun = false,
-  scopeCheckOnly = false,
+  scopeCheckOnly = false, precomputedTriage,
 }) {
   const digits = last10(phone);
   const result = { phone: digits ? `…${digits.slice(-4)}` : null, started: false, skipped: null };
@@ -276,16 +276,29 @@ async function startSmsThreadDraft({
     // with "power washing" must not mint an owed-quote bell just because
     // quote intent was established earlier in the flow.
     const {
-      scopeGuardsEnabled, deterministicOutOfScope, loadThreadTriageContext,
+      scopeGuardsEnabled, deterministicOutOfScope, outOfScopeIsIncidental, loadThreadTriageContext,
     } = require('./scope-guards');
     const guarded = scopeGuardsEnabled();
+    // precomputedTriage (lead-intake): a scopeCheckOnly pre-check already
+    // ran the FULL veto ladder on THIS EXACT body and returned its triage
+    // (result.triage). Re-running the ladder would double the awaited
+    // webhook latency (triage 1.2s + classifier 3.5s, twice) for identical
+    // verdicts — so a prechecked call reuses the triage and skips the
+    // scope vetoes wholesale. Only callers that just ran the pre-check may
+    // pass this.
+    const prechecked = precomputedTriage !== undefined;
     // ORDERING: the cheap trigger-only veto runs BEFORE the cooldown. A
     // terminal scope decision must be reported terminally even inside the
     // cooldown window — 'cooldown' reads as operational to lead-intake,
     // whose shell fallback would then draft the out-of-scope work anyway.
     // Only the trigger-body veto runs here (zero DB); the burst veto needs
     // the triage fetch and stays after the cooldown return.
-    if (guarded && deterministicOutOfScope(triggerBody)) {
+    // The veto defers for INCIDENTAL mentions ("I just had the house
+    // pressure washed; how much do you charge for quarterly service?") —
+    // the grounded classifier, which knows the catalog, is the precise
+    // gate for those.
+    if (guarded && !prechecked
+      && deterministicOutOfScope(triggerBody) && !outOfScopeIsIncidental(triggerBody)) {
       result.skipped = 'out_of_scope_service';
       // TERMINAL: a scope decision, not an operational failure. Callers
       // that fall back on a failed handoff (lead-intake's shell path) must
@@ -315,8 +328,12 @@ async function startSmsThreadDraft({
         return result;
       }
     }
-    // Grounding for the classifier (fail-open → ungrounded prompt).
-    const triage = guarded ? await loadThreadTriageContext({ phone, triggerBody }) : null;
+    // Grounding for the classifier (fail-open → ungrounded prompt); a
+    // prechecked call reuses the pre-check's triage (may be null — that IS
+    // the pre-check's fail-open outcome, reused as-is).
+    const triage = guarded
+      ? (prechecked ? precomputedTriage : await loadThreadTriageContext({ phone, triggerBody }))
+      : null;
     // Second deterministic pass over the CURRENT exchange only: "Do you
     // do power washing?" followed minutes later by "How much?" — the ask
     // and the service live in different texts. vetoTexts is burst-scoped
@@ -341,8 +358,9 @@ async function startSmsThreadDraft({
     })();
     if (guarded && (triage?.vetoTexts || []).length && correctedSinceOos) {
       logger.info('[estimator-sms] burst veto skipped — a correction follows the out-of-scope mention');
-    } else if (guarded && (triage?.vetoTexts || []).length
-      && deterministicOutOfScope([triggerBody, ...triage.vetoTexts].join('\n'))) {
+    } else if (guarded && !prechecked && (triage?.vetoTexts || []).length
+      && deterministicOutOfScope([triggerBody, ...triage.vetoTexts].join('\n'))
+      && !outOfScopeIsIncidental([triggerBody, ...triage.vetoTexts].join('\n'))) {
       result.skipped = 'out_of_scope_service_thread';
       result.terminal = true;
       return result;
@@ -353,7 +371,7 @@ async function startSmsThreadDraft({
         result.skipped = `no_quote_intent_${signal.method}`;
         return result;
       }
-    } else if (guarded && triage) {
+    } else if (guarded && triage && !prechecked) {
       // Clarify resumes established quote intent earlier, but the reply
       // itself can name out-of-scope work in MIXED vocabulary ("power wash
       // my yard") that defeats the deterministic veto above ('yard' is
@@ -380,6 +398,9 @@ async function startSmsThreadDraft({
     // decision, not a bell or draft. The legacy shell patch may proceed.
     if (scopeCheckOnly) {
       result.skipped = 'scope_check_only';
+      // The triage rides back so the caller can thread it into the real
+      // run (precomputedTriage) instead of paying the ladder twice.
+      result.triage = triage;
       return result;
     }
     const origin = smsOrigin(`sms:${digits}`);

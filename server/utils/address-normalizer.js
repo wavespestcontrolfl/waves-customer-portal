@@ -329,6 +329,17 @@ const UNIT_DESIGNATOR_CANONICAL = {
 // their full shape so "Bldg 2 Apt 4" never collides with "Apt 4".
 function unitLineValueKey(normalizedUnitLine) {
   const tokens = String(normalizedUnitLine || '').toLowerCase().split(' ').filter(Boolean)
+    // '#6' / '# 6' are the HASH spelling of the dwelling designator —
+    // normalizeUnitLine already reads '#6' as 'Unit 6', but this key
+    // function also receives RAW split units (address-compare feeds
+    // splitStreetLineUnit output directly), and an unexpanded '#6' keyed
+    // as '#6' while 'Apt 6' keyed as '6' — the exact-unit compare then
+    // rejected the RIGHT row.
+    .flatMap((token) => {
+      if (token === '#') return ['unit'];
+      if (token.startsWith('#')) return ['unit', token.slice(1)];
+      return [token];
+    })
     .map((token) => UNIT_DESIGNATOR_CANONICAL[token] || token);
   return tokens.length === 2 && tokens[0] === 'unit' ? tokens[1] : tokens.join(' ');
 }

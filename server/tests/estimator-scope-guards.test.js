@@ -203,6 +203,22 @@ describe('deterministicOutOfScope', () => {
     expect(deterministicOutOfScope('can you hang our christmas lights')).toBe(true);
   });
 
+  test('an INCIDENTAL trade mention defers to the classifier; the request itself stays terminal', () => {
+    const { outOfScopeIsIncidental } = require('../services/estimator-engine/scope-guards');
+    // The exact r25 message: quote phrasing aimed at quarterly service,
+    // pressure washing only mentioned as recent history.
+    const incidental = 'I just had the house pressure washed; how much do you charge for quarterly service?';
+    expect(deterministicOutOfScope(incidental)).toBe(true);
+    expect(outOfScopeIsIncidental(incidental)).toBe(true);
+    // The trade phrase as the request keeps the hard veto.
+    expect(outOfScopeIsIncidental('power washing service?')).toBe(false);
+    expect(outOfScopeIsIncidental('how much for power washing?')).toBe(false);
+    expect(outOfScopeIsIncidental('power washing service, how much?')).toBe(false);
+    expect(outOfScopeIsIncidental('I would like to know if you available for power washing service')).toBe(false);
+    // Non-vetoed texts are never "incidental".
+    expect(outOfScopeIsIncidental('how much for quarterly pest control')).toBe(false);
+  });
+
   test('does not fire on plain quote chatter', () => {
     expect(deterministicOutOfScope('how much do you charge?')).toBe(false);
     expect(deterministicOutOfScope('')).toBe(false);
@@ -298,6 +314,47 @@ describe('extractAddressCandidates', () => {
     expect(l1.test('600 Palm Ave')).toBe(false);
     expect(l1.test('600 Palm Ave Apt 16')).toBe(false);
     expect(l1.test('6 Palm Ave')).toBe(false);
+  });
+
+  test('comma-led MULTI-WORD cities bind fully (lazy group reaches the anchor)', () => {
+    // The old all-optional tail let the lazy city stop at 'North' and the
+    // branch then rejected — losing ALL locality.
+    expect(extractAddressCandidates('quote for 100 Palm Ave, North Port FL 34287')[0].locality)
+      .toBe(', North Port 34287');
+    expect(extractAddressCandidates('quote for 100 Palm Ave, North Port FL')[0].locality).toBe(', North Port');
+    expect(extractAddressCandidates('quote for 100 Palm Ave, North Port 34287')[0].locality)
+      .toBe(', North Port 34287');
+    // Single-word forms unchanged.
+    expect(extractAddressCandidates('quote for 100 Palm Ave, Venice FL 34285 please')[0].locality)
+      .toBe(', Venice 34285');
+    // Comma prose still binds nothing.
+    expect(extractAddressCandidates('quote for 100 Palm Ave, please')[0].locality).toBe('');
+  });
+
+  test('hash-form stored units match their canonical spellings (exact-unit)', async () => {
+    // unitLineValueKey used to key '#6' as '#6' while 'Apt 6' keyed as
+    // '6' — the exact-unit compare rejected the RIGHT row.
+    mockState.rows.customers = [
+      { id: 'c-2', first_name: 'Hash', last_name: 'Row', address_line1: '100 Palm Ave', address_line2: '#6', city: 'Venice' },
+    ];
+    let triage = await loadThreadTriageContext({
+      phone: null,
+      triggerBody: 'quote for 100 Palm Ave #6 please',
+    });
+    expect(triage.matchedExistingCustomer).toBe(true);
+
+    triage = await loadThreadTriageContext({
+      phone: null,
+      triggerBody: 'quote for 100 Palm Ave Apt 6 please',
+    });
+    expect(triage.matchedExistingCustomer).toBe(true);
+
+    // Different units still reject.
+    triage = await loadThreadTriageContext({
+      phone: null,
+      triggerBody: 'quote for 100 Palm Ave Apt 7 please',
+    });
+    expect(triage.matchedExistingCustomer).toBe(false);
   });
 
   test('CITY-PREFIX tokens are not consumed as the street boundary', () => {
@@ -1391,6 +1448,31 @@ describe('loadThreadTriageContext', () => {
       triggerBody: 'can you add flea treatment at the same place?',
     });
     expect(triage.groundedCustomerId).toBeNull();
+  });
+
+  test('a matched + UNMATCHED named pair red-lanes instead of grounding the match', async () => {
+    // The request explicitly spans two properties — silently grounding
+    // (and membership-pricing) the one that matched would answer half the
+    // request with the wrong confidence. A human splits it.
+    mockState.rows.customers = [
+      { id: 'c-2', first_name: 'Pat', last_name: 'Homeowner', address_line1: '100 Palm Ave', city: 'Venice' },
+    ];
+    const triage = await loadThreadTriageContext({
+      phone: null,
+      triggerBody: 'quotes for 100 Palm Ave and 200 Oak St please',
+    });
+    expect(triage.matchedExistingCustomer).toBe(true);
+    expect(triage.groundedMultiScope).toBe(true);
+
+    // Two unmatched addresses from a pure prospect keep today's path —
+    // nothing links, nothing prices off a profile.
+    mockState.rows.customers = [];
+    const prospect = await loadThreadTriageContext({
+      phone: null,
+      triggerBody: 'quotes for 100 Palm Ave and 200 Oak St please',
+    });
+    expect(prospect.matchedExistingCustomer).toBe(false);
+    expect(prospect.groundedMultiScope).toBe(false);
   });
 
   test('two UNITS of the same customer stay distinct entries and drop groundedScope', async () => {

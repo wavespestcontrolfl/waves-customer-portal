@@ -55,10 +55,12 @@ jest.mock('../services/estimator-engine/context-builder', () => ({
 // every pre-existing test in this file.
 const mockScopeGuardsEnabled = jest.fn(() => false);
 const mockDeterministicOutOfScope = jest.fn(() => false);
+const mockOutOfScopeIncidental = jest.fn(() => false);
 const mockLoadTriage = jest.fn(async () => null);
 jest.mock('../services/estimator-engine/scope-guards', () => ({
   scopeGuardsEnabled: () => mockScopeGuardsEnabled(),
   deterministicOutOfScope: (...args) => mockDeterministicOutOfScope(...args),
+  outOfScopeIsIncidental: (...args) => mockOutOfScopeIncidental(...args),
   loadThreadTriageContext: (...args) => mockLoadTriage(...args),
 }));
 
@@ -75,6 +77,12 @@ beforeEach(() => {
   mockRecentBell = null;
   process.env.GATE_ESTIMATOR_SMS_DRAFTS = 'true';
   mockEngineEnabled.mockReturnValue(true);
+  // Re-pin defaults every test — mockReturnValue survives clearAllMocks
+  // and would otherwise leak between tests.
+  mockDeterministicOutOfScope.mockReturnValue(false);
+  mockOutOfScopeIncidental.mockReturnValue(false);
+  mockDeterministicOutOfScope.mockImplementation(() => false);
+  mockOutOfScopeIncidental.mockImplementation(() => false);
   mockDispatch.mockResolvedValue({ ok: true, json: { quote_request: true, confidence: 0.9 } });
   mockBuildSmsThreadContext.mockResolvedValue({ call: null, transcript: 'x'.repeat(60), phone: PHONE });
   mockRunDraftPipeline.mockImplementation(async ({ result }) => ({ ...result, lane: 'yellow', created: true }));
@@ -307,6 +315,57 @@ describe('scope guards (GATE_ESTIMATOR_SCOPE_GUARDS)', () => {
     expect(result.skipped).toBe('out_of_scope_service_thread');
     expect(mockDispatch).not.toHaveBeenCalled();
     expect(mockNotify).not.toHaveBeenCalled();
+  });
+
+  test('an INCIDENTAL trade mention defers to the grounded classifier (no hard veto)', async () => {
+    // 'I just had the house pressure washed; how much do you charge for
+    // quarterly service?' — deterministic veto matches, incidental check
+    // hands the judgment to the classifier, which approves the quote.
+    mockDeterministicOutOfScope.mockReturnValue(true);
+    mockOutOfScopeIncidental.mockReturnValue(true);
+    mockLoadTriage.mockResolvedValueOnce({ lines: [], matchedExistingCustomer: false });
+    mockDispatch.mockResolvedValueOnce({
+      ok: true,
+      json: { quote_request: true, service_offered: true, relates_to_existing_job: false, confidence: 0.9 },
+    });
+    const result = await startSmsThreadDraft({
+      phone: PHONE,
+      triggerBody: 'I just had the house pressure washed; how much do you charge for quarterly service?',
+    });
+    expect(result.started).toBe(true);
+    expect(mockDispatch).toHaveBeenCalled();
+    expect(mockNotify).toHaveBeenCalledTimes(1);
+  });
+
+  test('precomputedTriage skips the whole ladder — triage and classifier run zero times', async () => {
+    // lead-intake's pre-check already ran the ladder on this exact body;
+    // the real run must not double the awaited webhook latency.
+    const triage = { lines: [], matchedExistingCustomer: false, groundedCustomerId: null };
+    const result = await startSmsThreadDraft({
+      phone: PHONE,
+      triggerBody: 'quote for pest control please',
+      skipIntentGate: true,
+      skipCooldown: true,
+      precomputedTriage: triage,
+    });
+    expect(result.started).toBe(true);
+    expect(mockLoadTriage).not.toHaveBeenCalled();
+    expect(mockDispatch).not.toHaveBeenCalled();
+    expect(mockDeterministicOutOfScope).not.toHaveBeenCalled();
+    expect(mockNotify).toHaveBeenCalledTimes(1);
+  });
+
+  test('scopeCheckOnly returns its triage for reuse', async () => {
+    const triage = { lines: [], matchedExistingCustomer: false };
+    mockLoadTriage.mockResolvedValueOnce(triage);
+    const result = await startSmsThreadDraft({
+      phone: PHONE,
+      triggerBody: 'quote for pest control please',
+      skipIntentGate: true,
+      scopeCheckOnly: true,
+    });
+    expect(result.skipped).toBe('scope_check_only');
+    expect(result.triage).toBe(triage);
   });
 
   test('an out-of-scope trigger inside the cooldown window is still TERMINAL', async () => {

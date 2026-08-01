@@ -798,6 +798,34 @@ describe('buildSmsThreadContext distinct-customer conflict (GATE_ESTIMATOR_SCOPE
   });
 });
 
+describe('grounded drafts consult the CUSTOMER\'s open estimates too (dedupe phones)', () => {
+  const { dedupePhonesForContext } = jest.requireActual('../services/estimator-engine/draft-builder')._private;
+
+  test('address-grounded context with a different customer phone → both numbers checked', () => {
+    const phones = dedupePhonesForContext('+19415550123', {
+      customerGroundedByAddress: true,
+      customer: { phone: '+19415559999' },
+    });
+    expect(phones).toEqual(['+19415550123', '+19415559999']);
+  });
+
+  test('same last-10, missing, or non-grounded customer phones stay single', () => {
+    expect(dedupePhonesForContext('+19415550123', {
+      customerGroundedByAddress: true,
+      customer: { phone: '941-555-0123' },
+    })).toEqual(['+19415550123']);
+    expect(dedupePhonesForContext('+19415550123', {
+      customerGroundedByAddress: true,
+      customer: { phone: null },
+    })).toEqual(['+19415550123']);
+    // Phone-matched (non-grounded) customers: their history IS the
+    // sender's — one number, exactly today's behavior.
+    expect(dedupePhonesForContext('+19415550123', {
+      customer: { phone: '+19415559999' },
+    })).toEqual(['+19415550123']);
+  });
+});
+
 describe('grounded existing customers route through the call path\'s canonical review mechanism', () => {
   // AGENTS.md says "existing customers are blocked from engine drafting";
   // the code's ACTUAL canonical mechanism — on the CALL path and everywhere

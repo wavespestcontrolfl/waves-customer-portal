@@ -163,6 +163,38 @@ function deterministicOutOfScope(text) {
   return OUT_OF_SCOPE_RE.test(t) && !IN_SCOPE_RE.test(t);
 }
 
+// The deterministic veto is TERMINAL to callers, so it may only fire when
+// the out-of-scope phrase IS the request. An INCIDENTAL mention — "I just
+// had the house pressure washed; how much do you charge for quarterly
+// service?" — must defer to the grounded classifier (which knows the
+// catalog) instead of hard-rejecting a valid quote. Conservative rule: the
+// text must carry quote-request phrasing ANYWHERE plus service-like
+// content that sits AWAY from every out-of-scope span — i.e. the request
+// has an object other than the trade phrase. "power washing service?"
+// alone, "how much for power washing?", and "power washing service, how
+// much?" all keep the hard veto (their only service-like content is the
+// trade phrase itself or adjacent to it).
+const QUOTE_REQUEST_TOKEN_RE = /\b(?:how\s+much|quote|price|pricing|cost|charge|estimate|rate)\w*/gi;
+const SERVICEISH_RE = /\b(?:service|treatment|plan|program|maintenance|visit|quarterly|monthly|annual)\w*/gi;
+const INCIDENTAL_SPAN_PAD = 12;
+function outOfScopeIsIncidental(text) {
+  const t = String(text || '');
+  if (!deterministicOutOfScope(t)) return false;
+  const spans = [];
+  const oos = new RegExp(OUT_OF_SCOPE_RE.source, 'gi');
+  let m;
+  while ((m = oos.exec(t)) !== null) spans.push([m.index, m.index + m[0].length]);
+  if (!new RegExp(QUOTE_REQUEST_TOKEN_RE.source, 'i').test(t)) return false;
+  const svc = new RegExp(SERVICEISH_RE.source, 'gi');
+  while ((m = svc.exec(t)) !== null) {
+    const idx = m.index;
+    const end = idx + m[0].length;
+    const nearSpan = spans.some(([a, b]) => end >= a - INCIDENTAL_SPAN_PAD && idx <= b + INCIDENTAL_SPAN_PAD);
+    if (!nearSpan) return true;
+  }
+  return false;
+}
+
 // One shared "is this a street suffix/directional token" vocabulary for
 // every no-comma locality decision (city boundary AND bare-ZIP binding).
 // The suffix half is the CANONICAL comma-free boundary set from
@@ -346,14 +378,26 @@ function extractAddressCandidates(text) {
     // when it directly follows the street. Comma prose ("100 Palm Ave,
     // please") and unrelated numbers ("budget of 15000") must not become a
     // fake locality that rejects the real customer row.
-    const locM = localitySrc.match(/^\s*,\s*([A-Za-z][A-Za-z .'-]{2,28}?)\s*,?\s*(\bFL\b|\bFlorida\b)?\s*(\d{5})?\b/i);
+    // Comma-led city with a REQUIRED state-or-ZIP anchor. The anchor being
+    // required in each alternative is what lets the lazy city group consume
+    // MULTI-WORD cities: with every tail group optional (the old form), the
+    // lazy group stopped at the first word boundary ('North' out of
+    // 'North Port FL 34287'), the validation condition then failed, and ALL
+    // locality was lost.
+    const locCityState = localitySrc.match(/^\s*,\s*([A-Za-z][A-Za-z .'-]{1,28}?)\s*,?\s+(?:FL|Florida)\b\s*(\d{5})?\b/i);
+    const locCityZip = locCityState
+      ? null
+      : localitySrc.match(/^\s*,\s*([A-Za-z][A-Za-z .'-]{1,28}?)\s*,?\s+(\d{5})\b/);
     let locality = '';
     // How much of localitySrc the bound locality expression consumed —
     // feeds the scan-past advance below.
     let localityLen = 0;
-    if (locM && (locM[2] || locM[3])) {
-      locality = `, ${locM[1].trim()}${locM[3] ? ` ${locM[3]}` : ''}`;
-      localityLen = locM[0].length;
+    if (locCityState) {
+      locality = `, ${locCityState[1].trim()}${locCityState[2] ? ` ${locCityState[2]}` : ''}`;
+      localityLen = locCityState[0].length;
+    } else if (locCityZip) {
+      locality = `, ${locCityZip[1].trim()} ${locCityZip[2]}`;
+      localityLen = locCityZip[0].length;
     } else {
       // Bare-ZIP form requires the comma ("…, 34285") — with street runs up
       // to seven words, a zip-like number after uncomma'd prose ("with a
@@ -1009,7 +1053,27 @@ async function loadTriageInner({ phone, triggerBody, deadline = Date.now() + TRI
   // price the PRIMARY parcel, silently picking one of the properties the
   // sender actually named. That needs a human, not a guessed parcel: the
   // signal rides out and red-lanes the context build.
-  const groundedMultiScope = scopedEntries.length > 1;
+  // EXPLICITLY NAMED trigger addresses count toward ambiguity even when
+  // only one of them matched: 'quotes for 100 Palm Ave and 200 Oak St'
+  // must not silently ground (and membership-price) Palm's customer while
+  // the request plainly spans two properties — a human splits it. Scoped
+  // to grounded outcomes: two unmatched addresses from a pure prospect
+  // keep today's draft path, since nothing links and nothing prices off a
+  // profile.
+  const distinctNamed = [];
+  for (const c of triggerCandidates) {
+    const addr = candidateAddrString(c);
+    const dup = distinctNamed.some((u) => {
+      try {
+        return sameStreetAddress(u, addr);
+      } catch (err) {
+        return false;
+      }
+    });
+    if (!dup) distinctNamed.push(addr);
+  }
+  const groundedMultiScope = scopedEntries.length > 1
+    || (distinctNamed.length >= 2 && entries.length > 0);
   return {
     lines,
     matchedExistingCustomer: entries.length > 0,
@@ -1055,6 +1119,7 @@ async function loadThreadTriageContext({ phone, triggerBody }) {
 module.exports = {
   scopeGuardsEnabled,
   deterministicOutOfScope,
+  outOfScopeIsIncidental,
   extractAddressCandidates,
   // The current-exchange window. Exported so the context build scopes an
   // ADDRESS-GROUNDED transcript to the same exchange triage grounded from.
