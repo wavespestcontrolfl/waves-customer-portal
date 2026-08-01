@@ -7,7 +7,8 @@
  * banned boilerplate defeats the point of the sweep.
  */
 
-const { REWRITES } = require('../models/migrations/20260801000001_sms_house_voice_sweep');
+const { REWRITES, LEGACY_REFERRAL_REWRITES } = require('../models/migrations/20260801000001_sms_house_voice_sweep');
+const { spokenArrivalWindow, UNKNOWN_ARRIVAL_WINDOW } = require('../utils/sms-time-format');
 
 const placeholders = (body) => new Set(
   [...String(body).matchAll(/\{([a-z0-9_]+)\}/gi)].map((m) => m[1])
@@ -81,5 +82,39 @@ describe('sms house-voice sweep', () => {
   test('no duplicate template keys', () => {
     const keys = REWRITES.map(([k]) => k);
     expect(keys).toHaveLength(new Set(keys).size);
+  });
+
+  test('legacy referral overrides are rewritten and clean', () => {
+    // referral_engine prefers these columns and never consults sms_templates,
+    // so rewriting the base rows alone would leave the live copy untouched.
+    expect(LEGACY_REFERRAL_REWRITES.map(([c]) => c)).toEqual(['invite_sms_template', 'reward_sms_template']);
+    for (const [column, expected, next] of LEGACY_REFERRAL_REWRITES) {
+      expect({ column, bangs: (next.match(/!/g) || []).length <= 1 }).toEqual({ column, bangs: true });
+      expect({ column, hype: /great news|we'd love/i.test(next) }).toEqual({ column, hype: false });
+      // placeholders preserved
+      const ph = (s) => new Set([...s.matchAll(/\{(\w+)\}/g)].map((m) => m[1]));
+      expect([...ph(expected)].filter((p) => !ph(next).has(p))).toEqual([]);
+    }
+  });
+});
+
+describe('spokenArrivalWindow ({window} placeholder)', () => {
+  test('renders the 2-hour range with the preposition inside the value', () => {
+    expect(spokenArrivalWindow('08:00')).toBe('between 8:00 AM and 10:00 AM');
+    expect(spokenArrivalWindow('15:00:00')).toBe('between 3:00 PM and 5:00 PM');
+  });
+
+  test('wraps midnight without producing a negative range', () => {
+    expect(spokenArrivalWindow('23:00')).toBe('between 11:00 PM and 1:00 AM');
+  });
+
+  test('falls back to a grammatical phrase when the window is unusable', () => {
+    // The reminders read "...is tomorrow, {window}." so the fallback has to
+    // read correctly in that slot, not just be non-empty.
+    for (const bad of [null, undefined, '', 'garbage', '99:99']) {
+      expect(spokenArrivalWindow(bad)).toBe(UNKNOWN_ARRIVAL_WINDOW);
+    }
+    expect(`Your service is tomorrow, ${UNKNOWN_ARRIVAL_WINDOW}.`)
+      .toBe("Your service is tomorrow, at a time we'll confirm.");
   });
 });

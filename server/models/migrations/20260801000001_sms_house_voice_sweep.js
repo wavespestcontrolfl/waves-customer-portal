@@ -63,10 +63,10 @@ const REWRITES = [
   // the same helper dispatch/estimates/reschedule already use).
   ['reminder_24h',
     "Hello {first_name}! Your {service_type} with Waves is tomorrow. Your arrival window starts at {time}, and we'll text you a tracking link when your technician is on the way.{card_hold_policy_line}\n\nQuestions or need to reschedule? Reply here.",
-    "Hello {first_name}! Your {service_type} is tomorrow between {window}. We'll text you a tracking link when your tech is on the way.{card_hold_policy_line}"],
+    "Hello {first_name}! Your {service_type} is tomorrow, {window}. We'll text you a tracking link when your tech is on the way.{card_hold_policy_line}"],
   ['reminder_72h',
     "Hello {first_name}! Reminder: your {service_type} with Waves is scheduled for {day} at {time}. Your technician will arrive within a two-hour window of the start time.\n\n{reschedule_line}Questions? Reply here.\n\nReply STOP to opt out.{card_hold_policy_line}",
-    "Hello {first_name}! Your {service_type} is this {day} between {window}.\n\n{reschedule_line}{card_hold_policy_line}"],
+    "Hello {first_name}! Your {service_type} is this {day}, {window}.\n\n{reschedule_line}{card_hold_policy_line}"],
   ['tech_arrived',
     "Hello {first_name}! {tech_name} has arrived at your property for your scheduled service.\n\nQuestions or requests? Reply to this message.",
     "Hello {first_name}! {tech_name} has arrived for your service."],
@@ -329,8 +329,8 @@ const REWRITES = [
 // range). Their `variables` column must follow or the admin editor's
 // placeholder list goes stale.
 const VARIABLE_UPDATES = {
-  reminder_24h: ['first_name', 'service_type', 'window', 'reschedule_line', 'card_hold_policy_line'],
-  reminder_72h: ['first_name', 'service_type', 'day', 'window', 'reschedule_line', 'card_hold_policy_line'],
+  reminder_24h: ['first_name', 'service_type', 'time', 'window', 'reschedule_line', 'card_hold_policy_line'],
+  reminder_72h: ['first_name', 'service_type', 'day', 'date', 'time', 'window', 'reschedule_line', 'card_hold_policy_line'],
 };
 
 exports.up = async function up(knex) {
@@ -341,31 +341,91 @@ exports.up = async function up(knex) {
   let updated = 0;
   const skipped = [];
   for (const [templateKey, expected, next] of REWRITES) {
-    const row = await knex('sms_templates').where({ template_key: templateKey }).first();
-    if (!row) { skipped.push(`${templateKey} (missing)`); continue; }
-    // Admin-edit guard: only rewrite copy this sweep actually reviewed.
-    if (row.body !== expected) { skipped.push(`${templateKey} (edited since audit)`); continue; }
-
     const patch = { body: next };
     if (cols.updated_at) patch.updated_at = new Date();
     if (cols.variables && VARIABLE_UPDATES[templateKey]) {
       patch.variables = JSON.stringify(VARIABLE_UPDATES[templateKey]);
     }
-    await knex('sms_templates').where({ template_key: templateKey }).update(patch);
-    updated += 1;
+    // Admin-edit guard, enforced IN the UPDATE predicate rather than by a
+    // separate SELECT: 86 sequential rewrites during a live deploy leave a
+    // wide window for an operator to save an edit between a read and its
+    // write, and a key-only UPDATE would silently overwrite the newer copy.
+    // Zero rows matched = edited (or missing) = skipped.
+    const matched = await knex('sms_templates')
+      .where({ template_key: templateKey, body: expected })
+      .update(patch);
+    if (matched) updated += 1;
+    else skipped.push(templateKey);
+  }
+
+  // The referral engine prefers referral_program_settings.*_sms_template when
+  // those columns are non-null and never consults sms_templates, so rewriting
+  // the base rows alone leaves the live referral copy untouched.
+  const legacyReferral = [
+    ['invite_sms_template',
+      "Hi {referee_name}! Your neighbor {referrer_name} thinks you'd love Waves Pest Control. You'll both save when you sign up: {referral_link}",
+      "Hi {referee_name}! Your neighbor {referrer_name} recommended Waves Pest Control. You'll both save when you sign up: {referral_link}"],
+    ['reward_sms_template',
+      "Great news, {referrer_name}! Your referral {referee_name} signed up. You earned {reward_amount} in credit!",
+      "{referrer_name}, your referral {referee_name} signed up and you earned {reward_amount} in credit."],
+  ];
+  if (await knex.schema.hasTable('referral_program_settings')) {
+    const refCols = await knex('referral_program_settings').columnInfo();
+    for (const [column, expected, next] of legacyReferral) {
+      if (!refCols[column]) continue;
+      const matched = await knex('referral_program_settings')
+        .where({ [column]: expected })
+        .update({ [column]: next });
+      if (matched) updated += 1;
+      else skipped.push(`referral_program_settings.${column}`);
+    }
   }
 
   // eslint-disable-next-line no-console
-  console.log(`[house-voice-sweep] rewrote ${updated} templates; skipped ${skipped.length}${skipped.length ? `: ${skipped.join(', ')}` : ''}`);
+  console.log(`[house-voice-sweep] rewrote ${updated}; skipped ${skipped.length}${skipped.length ? ` (edited since audit or missing): ${skipped.join(', ')}` : ''}`);
+};
+
+exports.LEGACY_REFERRAL_REWRITES = [
+  ['invite_sms_template',
+    "Hi {referee_name}! Your neighbor {referrer_name} thinks you'd love Waves Pest Control. You'll both save when you sign up: {referral_link}",
+    "Hi {referee_name}! Your neighbor {referrer_name} recommended Waves Pest Control. You'll both save when you sign up: {referral_link}"],
+  ['reward_sms_template',
+    "Great news, {referrer_name}! Your referral {referee_name} signed up. You earned {reward_amount} in credit!",
+    "{referrer_name}, your referral {referee_name} signed up and you earned {reward_amount} in credit."],
+];
+
+// The variables each reminder carried BEFORE this migration. down() must
+// restore these alongside the bodies: the admin template validator builds its
+// allowlist from this column, so a body back on {time} with an allowlist still
+// listing only {window} makes every later edit to that reminder fail
+// validation with "unknown placeholder: time".
+const VARIABLE_ROLLBACK = {
+  reminder_24h: ['first_name', 'service_type', 'time', 'reschedule_line', 'card_hold_policy_line'],
+  reminder_72h: ['first_name', 'service_type', 'day', 'time', 'reschedule_line', 'card_hold_policy_line'],
 };
 
 exports.down = async function down(knex) {
-  if (!(await knex.schema.hasTable('sms_templates'))) return;
-  for (const [templateKey, expected, next] of REWRITES) {
-    const row = await knex('sms_templates').where({ template_key: templateKey }).first();
-    // Only restore rows still carrying exactly what this migration wrote.
-    if (row && row.body === next) {
-      await knex('sms_templates').where({ template_key: templateKey }).update({ body: expected });
+  if (await knex.schema.hasTable('sms_templates')) {
+    const cols = await knex('sms_templates').columnInfo();
+    for (const [templateKey, expected, next] of REWRITES) {
+      const patch = { body: expected };
+      if (cols.updated_at) patch.updated_at = new Date();
+      if (cols.variables && VARIABLE_ROLLBACK[templateKey]) {
+        patch.variables = JSON.stringify(VARIABLE_ROLLBACK[templateKey]);
+      }
+      // Same predicate-guard as up(): only revert rows still carrying exactly
+      // what this migration wrote, so a later hand edit survives a rollback.
+      await knex('sms_templates')
+        .where({ template_key: templateKey, body: next })
+        .update(patch);
+    }
+  }
+
+  if (await knex.schema.hasTable('referral_program_settings')) {
+    const refCols = await knex('referral_program_settings').columnInfo();
+    for (const [column, expected, next] of exports.LEGACY_REFERRAL_REWRITES) {
+      if (!refCols[column]) continue;
+      await knex('referral_program_settings').where({ [column]: next }).update({ [column]: expected });
     }
   }
 };

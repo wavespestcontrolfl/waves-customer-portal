@@ -546,6 +546,11 @@ describe("TwilioService.sendServiceReminder", () => {
         first_name: "Sam",
         service_type: "Pest Control",
         time: "8:00 AM",
+        // The 2-hour arrival range the reminder copy now states outright
+        // ("...is tomorrow, {window}."). Same unresolved-placeholder contract
+        // as the clause vars below: this sender must pass it or getTemplate
+        // returns null and the reminder is silently skipped.
+        window: "between 8:00 AM and 10:00 AM",
         // No reschedule token resolvable under this mock — the clause var is
         // still passed (empty) so the template renders with clean copy
         // instead of an unresolved {reschedule_line} suppressing the SMS.

@@ -627,6 +627,11 @@ const TwilioService = {
     const time = service.window_start
       ? formatTime(service.window_start)
       : "a time to be confirmed";
+    // reminder_24h renders {window} (the 2-hour arrival range), and
+    // getTemplate suppresses the entire SMS on an unresolved placeholder —
+    // this sender must supply it exactly like AppointmentReminders does.
+    const { spokenArrivalWindow } = require("../utils/sms-time-format");
+    const arrivalWindow = spokenArrivalWindow(service.window_start);
 
     // Self-serve reschedule deep link clause — reminder_24h renders with
     // {reschedule_line}, and getTemplate suppresses the whole SMS on an
@@ -645,6 +650,7 @@ const TwilioService = {
             first_name: customer.first_name || "",
             service_type: service.service_type || "service",
             time,
+            window: arrivalWindow,
             reschedule_line: reschedule.line,
             card_hold_policy_line: cardHoldPolicyLine,
           }, { workflow: "twilio_reminder_24h", entity_type: "scheduled_service", entity_id: scheduledServiceId })

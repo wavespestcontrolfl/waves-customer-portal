@@ -17,7 +17,7 @@ const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { readCachedLineType, cacheLineType } = require('./messaging/validators/line-type');
 const { getAppointmentContacts, isServiceContactRole, firstNameFrom, PREFS_UNAVAILABLE } = require('./customer-contact');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
-const { TZ, parseETDateTime, formatETDay, formatETDate, formatETTime, etDateString, addETDays } = require('../utils/datetime-et');
+const { TZ, parseETDateTime, formatETDay, formatETDate, formatETTime, etDateString, addETDays, etParts } = require('../utils/datetime-et');
 const AppointmentEmail = require('./appointment-email');
 const NotificationService = require('./notification-service');
 const { buildRescheduleLink } = require('./reschedule-link');
@@ -397,26 +397,20 @@ const formatDay = formatETDay;
 const formatDate = formatETDate;
 const formatTime = formatETTime;
 
-// The customer-facing arrival range ("8:00 AM and 10:00 AM") for the {window}
-// placeholder in the 72h/24h reminders. Built from the SAME arrivalWindowRange
-// helper dispatch, estimates, reschedule, and rain-out already use, so the
-// "always 2 hours from the window start" rule stays in exactly one place.
+// The customer-facing arrival phrase ("between 8:00 AM and 10:00 AM") for the
+// {window} placeholder in the 72h/24h reminders. Delegates to
+// spokenArrivalWindow so this and TwilioService.sendServiceReminder cannot
+// drift — getTemplate suppresses the whole SMS on an unresolved placeholder,
+// so every reminder sender must supply {window} the same way.
 // Pure ET clock math (never wall-clock arithmetic on the Date), so a DST
-// boundary can't stretch or shrink the quoted window. Falls back to the plain
-// start time if the range can't be derived, which still renders sane copy.
+// boundary can't stretch or shrink the quoted window.
 function formatArrivalWindow(apptTime) {
-  const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
-  const { etParts } = require('../utils/datetime-et');
+  const { spokenArrivalWindow, UNKNOWN_ARRIVAL_WINDOW } = require('../utils/sms-time-format');
   try {
     const { hour, minute } = etParts(apptTime);
-    const hhmm = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
-    const range = arrivalWindowRange(hhmm);
-    if (!range) return formatTime(apptTime);
-    // '8:00 AM - 10:00 AM' -> '8:00 AM and 10:00 AM' (the copy reads
-    // "between {window}", which is how a person says it out loud).
-    return formatSmsTimeRange(range).replace(' - ', ' and ');
+    return spokenArrivalWindow(`${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`);
   } catch {
-    return formatTime(apptTime);
+    return UNKNOWN_ARRIVAL_WINDOW;
   }
 }
 
