@@ -427,4 +427,43 @@ describe('annual prepay rendering (codex #3120 r2: prepaid visits are covered by
   it('defaults to the legacy monthly rendering when no mode is given', () => {
     expect(normalizeProposal(prepayEstimate).buildings[0].lineItems[0].frequency).toBe('monthly');
   });
+
+  // Codex #3120 r3: resolveAnnualPrepayInvoiceTotal can discount the base
+  // annual (floor-aware), so the CHARGED amount — not annual_total — is what
+  // the customer paid and what the document must show.
+  it('quotes the charged prepay total, not the undiscounted base annual', () => {
+    const p = normalizeProposal(prepayEstimate, {
+      recurringMode: 'annual_prepay',
+      annualPrepayTotal: 513,
+    });
+    const [line] = p.buildings[0].lineItems;
+    expect(line.unitPrice).toBe(513);
+    expect(computeProposalTotals(p).annualRecurring).toBe(513);
+  });
+
+  it('scales a multi-service prepay plan onto the charged total', () => {
+    const est = {
+      ...prepayEstimate,
+      annual_total: 1288,
+      monthly_total: null,
+      estimate_data: { sendSnapshot: { pricingBundle: { serviceCadenceCombos: [{
+        key: 'pest_quarterly|lawn_enhanced',
+        annual: 1288,
+        perServiceTreatments: [
+          { service: 'pest_control', label: 'Pest Control', displayPrice: 112, visitsPerYear: 4 },
+          { service: 'lawn_care', label: 'Lawn Care Program', displayPrice: 140, visitsPerYear: 6 },
+        ],
+      }] } } },
+    };
+    const p = normalizeProposal(est, { recurringMode: 'annual_prepay', annualPrepayTotal: 1223.60 });
+    const items = p.buildings[0].lineItems;
+    expect(items).toHaveLength(2);
+    expect(items.every((i) => i.frequency === 'annual')).toBe(true);
+    expect(computeProposalTotals(p).annualRecurring).toBeCloseTo(1223.60, 1);
+  });
+
+  it('falls back to the derived annual when no charged total is known', () => {
+    const p = normalizeProposal(prepayEstimate, { recurringMode: 'annual_prepay' });
+    expect(p.buildings[0].lineItems[0].unitPrice).toBe(540);
+  });
 });

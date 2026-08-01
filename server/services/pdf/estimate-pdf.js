@@ -242,6 +242,11 @@ function buildingBlock(ctx, building, y, taxRate) {
   return y;
 }
 
+function quotesPerApplication(proposal) {
+  return (proposal.buildings || []).some((building) => (building.lineItems || [])
+    .some((item) => item.frequency === 'per_application'));
+}
+
 function totalsBlock(ctx, totals, y) {
   const { doc } = ctx;
   // Combined plan totals ("$X/mo" / "$X/yr") are prohibited on customer-facing
@@ -345,7 +350,10 @@ function generateEstimateProposalPDF(estimate, res, billing = {}) {
   const recurringMode = annualPrepay
     ? 'annual_prepay'
     : (billsPerApplication ? 'per_application' : 'legacy');
-  const proposal = normalizeProposal(estimate, { recurringMode });
+  const proposal = normalizeProposal(estimate, {
+    recurringMode,
+    annualPrepayTotal: billing?.annualPrepayTotal,
+  });
   const totals = computeProposalTotals(proposal);
 
   const doc = new PDFDocument({ size: 'LETTER', margin: 40 });
@@ -361,12 +369,13 @@ function generateEstimateProposalPDF(estimate, res, billing = {}) {
     title: proposal.title,
     taxLabel: proposal.taxLabel,
     showMonthlyEquivalent: proposal.enabled === true,
-    // Authored (commercial) proposals and prepay surfaces are the documented
-    // exemptions from the no-combined-plan-totals rule; a synthesized
-    // per-application estimate is the customer's own estimate PDF and is not.
-    // An annual prepay IS an annual transaction — suppressing its roll-up
-    // would hide the amount the customer actually paid.
-    suppressPlanTotals: proposal.enabled !== true && !annualPrepay,
+    // Keyed off what the document ACTUALLY quotes, not what was requested: the
+    // no-combined-plan-totals rule targets per-application plans, and its
+    // exemptions (commercial proposals, prepay) plus true monthly-billed
+    // legacy plans all keep their roll-up. A per-application derivation that
+    // fell back to monthly lines therefore keeps its totals too, exactly as
+    // this document rendered before (codex #3120 r3).
+    suppressPlanTotals: proposal.enabled !== true && quotesPerApplication(proposal),
     tagline: 'Thank you for considering Waves Pest Control',
   };
 

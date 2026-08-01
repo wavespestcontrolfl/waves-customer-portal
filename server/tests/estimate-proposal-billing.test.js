@@ -7,10 +7,14 @@ const mockDb = jest.fn();
 mockDb.schema = { hasTable: jest.fn() };
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error: jest.fn() }));
+// An unlinked estimate links at accept through the SAME phone matcher, so an
+// existing monthly member can sit behind one (codex #3120 r3).
+const mockMatchByPhone = jest.fn();
+jest.mock('../routes/estimate-public', () => ({ matchAcceptCustomerByPhone: mockMatchByPhone }));
 
 const {
   estimateBillsPerApplication,
-  estimateHasAnnualPrepayTerm,
+  estimateAnnualPrepayTerm,
   resolveProposalBillingContext,
 } = require('../services/estimate-proposal-billing');
 
@@ -28,12 +32,24 @@ function stubTables({ customer, prepayTerm, customersThrow = false }) {
   mockDb.schema.hasTable.mockResolvedValue(true);
 }
 
-beforeEach(() => { jest.clearAllMocks(); });
+beforeEach(() => {
+  jest.clearAllMocks();
+  mockMatchByPhone.mockResolvedValue({ match: null });
+});
 
 describe('estimateBillsPerApplication', () => {
-  it('is true for an unlinked estimate — an unmatched accept converts per-application', async () => {
+  it('is true for an unlinked estimate the phone matcher cannot resolve', async () => {
     stubTables({});
     expect(await estimateBillsPerApplication({ id: 'e1' })).toBe(true);
+  });
+
+  it('is FALSE for an unlinked estimate whose phone matches a monthly member', async () => {
+    stubTables({});
+    mockMatchByPhone.mockResolvedValue({
+      match: { pipeline_stage: 'active_customer', monthly_rate: 45, billing_mode: null },
+    });
+    expect(await estimateBillsPerApplication({ id: 'e1', customer_phone: '+19415551234' })).toBe(false);
+    expect(mockMatchByPhone).toHaveBeenCalled();
   });
 
   it('is FALSE for a customer who preserves monthly membership', async () => {
@@ -59,22 +75,22 @@ describe('estimateBillsPerApplication', () => {
   });
 });
 
-describe('estimateHasAnnualPrepayTerm', () => {
-  it('is true for a live term on this estimate', async () => {
-    stubTables({ prepayTerm: { id: 't1', status: 'active' } });
-    expect(await estimateHasAnnualPrepayTerm({ id: 'e1' })).toBe(true);
+describe('estimateAnnualPrepayTerm', () => {
+  it('returns the CHARGED prepay amount, which may be discounted below annual_total', async () => {
+    stubTables({ prepayTerm: { id: 't1', status: 'active', prepay_amount: '513.00' } });
+    expect(await estimateAnnualPrepayTerm({ id: 'e1' })).toEqual({ prepayAmount: 513 });
   });
 
-  it('is false for a cancelled term', async () => {
-    stubTables({ prepayTerm: { id: 't1', status: 'cancelled' } });
-    expect(await estimateHasAnnualPrepayTerm({ id: 'e1' })).toBe(false);
+  it('is null for a cancelled term', async () => {
+    stubTables({ prepayTerm: { id: 't1', status: 'cancelled', prepay_amount: '513.00' } });
+    expect(await estimateAnnualPrepayTerm({ id: 'e1' })).toBeNull();
   });
 
-  it('is false with no term and on a database without the table', async () => {
+  it('is null with no term and on a database without the table', async () => {
     stubTables({ prepayTerm: undefined });
-    expect(await estimateHasAnnualPrepayTerm({ id: 'e1' })).toBe(false);
+    expect(await estimateAnnualPrepayTerm({ id: 'e1' })).toBeNull();
     mockDb.schema.hasTable.mockResolvedValue(false);
-    expect(await estimateHasAnnualPrepayTerm({ id: 'e1' })).toBe(false);
+    expect(await estimateAnnualPrepayTerm({ id: 'e1' })).toBeNull();
   });
 });
 
@@ -82,9 +98,9 @@ describe('resolveProposalBillingContext', () => {
   it('reports both facts together', async () => {
     stubTables({
       customer: { pipeline_stage: 'active_customer', monthly_rate: 0, billing_mode: 'per_application' },
-      prepayTerm: { status: 'active' },
+      prepayTerm: { status: 'active', prepay_amount: '513.00' },
     });
     expect(await resolveProposalBillingContext({ id: 'e1', customer_id: 'c1' }))
-      .toEqual({ billsPerApplication: true, annualPrepay: true });
+      .toEqual({ billsPerApplication: true, annualPrepay: true, annualPrepayTotal: 513 });
   });
 });

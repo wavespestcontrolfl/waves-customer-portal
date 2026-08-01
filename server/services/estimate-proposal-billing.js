@@ -33,28 +33,52 @@ const { customerPreservesMonthlyMembership } = require('./billing-cadence');
 // the plan is being sold as an annual prepay and the document should say so.
 const NON_COVERING_PREPAY_STATUSES = new Set(['cancelled', 'canceled', 'lapsed', 'superseded']);
 
-async function estimateHasAnnualPrepayTerm(estimate) {
-  if (!estimate?.id) return false;
+/**
+ * The prepay term for this estimate, or null. `prepay_amount` is the total the
+ * customer was actually charged, which resolveAnnualPrepayInvoiceTotal may
+ * have discounted below the estimate's annual_total — so the document must
+ * quote it rather than the base annual price (codex #3120 r3).
+ *
+ * @returns {Promise<{ prepayAmount: number }|null>}
+ */
+async function estimateAnnualPrepayTerm(estimate) {
+  if (!estimate?.id) return null;
   try {
-    if (!(await db.schema.hasTable('annual_prepay_terms'))) return false;
+    if (!(await db.schema.hasTable('annual_prepay_terms'))) return null;
     // source_estimate_id is UNIQUE (migration 20260514000001) — one row at most.
     const term = await db('annual_prepay_terms')
       .where({ source_estimate_id: estimate.id })
       .first();
-    return !!term && !NON_COVERING_PREPAY_STATUSES.has(String(term.status || '').toLowerCase());
+    if (!term || NON_COVERING_PREPAY_STATUSES.has(String(term.status || '').toLowerCase())) return null;
+    return { prepayAmount: Math.max(0, Number(term.prepay_amount) || 0) };
   } catch (err) {
     logger.warn(`[estimate-proposal-billing] prepay lookup failed for estimate ${estimate?.id}: ${err.message}`);
-    return false;
+    return null;
   }
 }
 
+// An estimate with no customer_id still links at accept through the SAME
+// phone matcher the accept path uses, so an existing monthly member can be on
+// the other end of an unlinked estimate. Mirrors
+// estimateCustomerPreservesMonthlyBilling in estimate-public.js by calling
+// the one shared implementation — a second matcher here would drift, and
+// ambiguous matches must resolve exactly like accept (no link). Required
+// lazily: the route module is heavy and pulls this file in itself.
+async function matchUnlinkedCustomer(estimate) {
+  const { matchAcceptCustomerByPhone } = require('../routes/estimate-public');
+  if (typeof matchAcceptCustomerByPhone !== 'function') return null;
+  const { match } = await matchAcceptCustomerByPhone(estimate);
+  return match || null;
+}
+
 async function estimateBillsPerApplication(estimate) {
-  // No linked customer: acceptance links by phone or creates one, and either
-  // way an unmatched accept converts per-application (the converter only
-  // preserves membership for a customer that already holds one).
-  if (!estimate?.customer_id) return true;
   try {
-    const customer = await db('customers').where({ id: estimate.customer_id }).first();
+    const customer = estimate?.customer_id
+      ? await db('customers').where({ id: estimate.customer_id }).first()
+      : await matchUnlinkedCustomer(estimate || {});
+    // No customer on either path: an unmatched accept converts
+    // per-application (the converter preserves membership only for a customer
+    // that already holds one).
     if (!customer) return true;
     return !customerPreservesMonthlyMembership(customer);
   } catch (err) {
@@ -68,19 +92,24 @@ async function estimateBillsPerApplication(estimate) {
 }
 
 /**
- * @returns {Promise<{ billsPerApplication: boolean, annualPrepay: boolean }>}
+ * @returns {Promise<{ billsPerApplication: boolean, annualPrepay: boolean,
+ *   annualPrepayTotal: number }>}
  */
 async function resolveProposalBillingContext(estimate) {
-  const [billsPerApplication, annualPrepay] = await Promise.all([
+  const [billsPerApplication, prepayTerm] = await Promise.all([
     estimateBillsPerApplication(estimate),
-    estimateHasAnnualPrepayTerm(estimate),
+    estimateAnnualPrepayTerm(estimate),
   ]);
-  return { billsPerApplication, annualPrepay };
+  return {
+    billsPerApplication,
+    annualPrepay: !!prepayTerm,
+    annualPrepayTotal: prepayTerm?.prepayAmount || 0,
+  };
 }
 
 module.exports = {
   NON_COVERING_PREPAY_STATUSES,
+  estimateAnnualPrepayTerm,
   estimateBillsPerApplication,
-  estimateHasAnnualPrepayTerm,
   resolveProposalBillingContext,
 };

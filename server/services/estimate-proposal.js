@@ -259,18 +259,24 @@ function perApplicationLinesForCandidate(candidate, estimate, { annualTotal, bun
 // Build a single-building fallback proposal from the engine line items /
 // estimate fields so ANY estimate can still produce a PDF even before the
 // operator has authored an explicit multi-building proposal.
-function synthesizeFallbackProposal(estimate = {}, estimateData = {}, { recurringMode = 'legacy' } = {}) {
+function synthesizeFallbackProposal(estimate = {}, estimateData = {}, { recurringMode = 'legacy', annualPrepayTotal = 0 } = {}) {
   const derived = recurringMode === 'legacy'
     ? null
     : perApplicationRecurringLines(estimate, estimateData);
-  // An annual prepay covers the year in ONE payment: the same derivation
-  // names the plan and its visit count, but each line is quoted as the annual
-  // amount actually paid rather than a per-application charge that never
-  // happens (codex #3120 r2).
+  // An annual prepay covers the year in ONE payment: the same derivation names
+  // the plan and its visit count, but each line is quoted as the annual amount
+  // actually PAID — resolveAnnualPrepayInvoiceTotal can discount the plan's
+  // base annual (floor-aware), so the charged total is authoritative over
+  // annual_total and the lines are scaled onto it (codex #3120 r2, r3).
+  const derivedAnnual = roundMoney((derived || []).reduce((acc, line) => acc + annualizedAmount(line), 0));
+  const prepayTarget = num(annualPrepayTotal);
+  const prepayScale = recurringMode === 'annual_prepay' && prepayTarget > 0 && derivedAnnual > 0
+    ? prepayTarget / derivedAnnual
+    : 1;
   const lineItems = (derived || []).map((line) => (recurringMode === 'annual_prepay'
     ? normalizeLineItem({
       description: line.description,
-      unitPrice: annualizedAmount(line),
+      unitPrice: roundMoney(annualizedAmount(line) * prepayScale),
       frequency: 'annual',
       taxable: line.taxable,
     })
@@ -349,7 +355,8 @@ function isCommercialProposalData(estimateData) {
  * Falls back to a synthesized single-building proposal when none is authored.
  *
  * @param {object} estimate
- * @param {{ recurringMode?: 'legacy'|'per_application'|'annual_prepay' }} [options]
+ * @param {{ recurringMode?: 'legacy'|'per_application'|'annual_prepay',
+ *   annualPrepayTotal?: number }} [options]
  *   How a SYNTHESIZED proposal quotes its recurring lines. Defaults to
  *   'legacy' (the flat-monthly engine lines this has always produced).
  *   **Rendering-only**: the richer modes are opt-in from the PDF path and
@@ -362,13 +369,13 @@ function isCommercialProposalData(estimateData) {
  * @returns {{ enabled, synthesized, title, preparedFor, propertyAddress,
  *   taxRate, taxLabel, terms, buildings: Array }}
  */
-function normalizeProposal(estimate = {}, { recurringMode = 'legacy' } = {}) {
+function normalizeProposal(estimate = {}, { recurringMode = 'legacy', annualPrepayTotal = 0 } = {}) {
   const estimateData = parseEstimateData(estimate.estimate_data ?? estimate.estimateData);
   const stored = estimateData.proposal;
 
   const base = stored && Array.isArray(stored.buildings) && stored.buildings.length
     ? stored
-    : synthesizeFallbackProposal(estimate, estimateData, { recurringMode });
+    : synthesizeFallbackProposal(estimate, estimateData, { recurringMode, annualPrepayTotal });
 
   const buildings = (Array.isArray(base.buildings) ? base.buildings : []).map(normalizeBuilding);
 
