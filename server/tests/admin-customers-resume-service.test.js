@@ -267,8 +267,46 @@ describe('POST /admin/customers/:id/resume-service', () => {
       'no_monthly_rate',
       'autopay_disabled',
       'autopay_paused_until',
-      'billing_mode_per_visit',
+      'billing_lane_per_visit',
     ]));
+  });
+
+  test('an UNCLASSIFIED customer is reported too — NULL billing_mode infers per_visit', async () => {
+    // The cron resolves the lane (GUARD 3c) rather than reading billing_mode
+    // directly, so a NULL-mode row with no real tier is skipped exactly like
+    // an explicit per_visit one. Checking only explicit modes would hand this
+    // customer blockers: [] and remove their only warning.
+    mockState.customer = {
+      ...PAUSED,
+      active: true,
+      monthly_rate: '55.00',
+      autopay_enabled: true,
+      autopay_paused_until: null,
+      billing_mode: null,
+      waveguard_tier: null,
+    };
+
+    const res = await resumeService('cust-1');
+
+    expect(res.body.resumed).toBe(true);
+    expect(res.body.blockers).toContain('billing_lane_per_visit');
+  });
+
+  test('a NULL-mode customer with a real tier and rate resolves monthly — no blocker', async () => {
+    // The other side of the inference: this row IS the cron's customer.
+    mockState.customer = {
+      ...PAUSED,
+      active: true,
+      monthly_rate: '55.00',
+      autopay_enabled: true,
+      autopay_paused_until: null,
+      billing_mode: null,
+      waveguard_tier: 'Silver',
+    };
+
+    const res = await resumeService('cust-1');
+
+    expect(res.body).toMatchObject({ resumed: true, blockers: [] });
   });
 
   test('reports no blockers for a customer the cron will actually bill', async () => {

@@ -18,12 +18,13 @@ const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/sh
 const { publicPortalUrl } = require('../utils/portal-url');
 const { documentRequiresSignature } = require('../services/contracts');
 const CustomerCredit = require('../services/customer-credit');
-// The monthly cron's own pause predicate — reused, not restated, so the
-// resume endpoint's "will dues actually run now?" answer cannot drift from
-// what processMonthlyBilling does.
+// The monthly cron's own predicates — reused, not restated, so the resume
+// endpoint's "will dues actually run now?" answer cannot drift from what
+// processMonthlyBilling does. resolveBillingLane is the single billing-lane
+// authority (billing-cron GUARD 3c): it also covers NULL billing_mode rows,
+// which infer to per_visit and are skipped just like an explicit one.
 const { isPaused: isAutopayPaused } = require('../services/autopay-eligibility');
-// Lockstep with billing-cron GUARD 3b: lanes this cron never bills.
-const NON_MONTHLY_BILLING_MODES = ['per_application', 'annual_prepay', 'per_visit', 'one_time'];
+const { resolveBillingLane } = require('../services/billing-lane');
 const {
   normalizeContactName,
   normalizeContactPhone,
@@ -3148,7 +3149,12 @@ router.post('/:id/resume-service', requireAdmin, async (req, res, next) => {
     if (!(Number(customer.monthly_rate) > 0)) blockers.push('no_monthly_rate');
     if (customer.autopay_enabled === false) blockers.push('autopay_disabled');
     if (isAutopayPaused(customer)) blockers.push('autopay_paused_until');
-    if (NON_MONTHLY_BILLING_MODES.includes(customer.billing_mode)) blockers.push(`billing_mode_${customer.billing_mode}`);
+    // Not a check against a list of explicit modes: an unclassified customer
+    // (NULL billing_mode, no real tier or no rate) INFERS to per_visit and the
+    // cron skips them exactly the same way. Checking only explicit modes would
+    // hand those rows blockers: [] and remove their only warning.
+    const lane = resolveBillingLane(customer);
+    if (lane.mode !== 'monthly_membership') blockers.push(`billing_lane_${lane.mode}`);
 
     logger.info(`[customers] Billing resumed for customer ${req.params.id} (was paused ${pausedSince}, reason ${pauseReason || 'none'})`
       + (blockers.length ? ` — dues still blocked by: ${blockers.join(', ')}` : ''));
