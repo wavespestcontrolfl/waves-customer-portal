@@ -56,6 +56,7 @@ const CATALOG_TARGETS = [
   "Bahiagrass", "Lawn burweed", "Palm bud rot (Phytophthora)",
   "Lethal bronzing (palm) — preventive", "Lethal yellowing (palm) — preventive",
   "Pythium blight", "Pythium damping-off", "Pythium root rot", "Wood-decay fungi",
+  "Yellow tuft (downy mildew)",
 ];
 
 describe("defaultApplicationMethod", () => {
@@ -292,12 +293,16 @@ describe("labelTargetLines", () => {
       "Lethal bronzing (palm) — preventive",
       "Lethal yellowing (palm) — preventive",
       "Fusarium wilt (palm)",
-      "Downy mildew",
     ].forEach((t) => expect(labelTargetLines(t)).toEqual(["tree_shrub"]));
     // Turf oomycetes keep their own wording and stay on the lawn line.
     expect(labelTargetLines("Pythium blight")).toEqual(["lawn"]);
     expect(labelTargetLines("Pythium damping-off")).toEqual(["lawn"]);
     expect(labelTargetLines("Pythium root rot")).toEqual(["lawn"]);
+    // Yellow tuft is a TURF disease that the Subdue Maxx turf directions spell
+    // "Yellow tuft (downy mildew)". A generic downy-mildew ornamental rule
+    // would steal it off lawn visits, so there isn't one.
+    expect(labelTargetLines("Yellow tuft (downy mildew)")).toEqual(["lawn"]);
+    expect(labelTargetLines("Yellow tuft")).toEqual(["lawn"]);
     // A palm visit gets the palm disease; a lawn visit gets none of it.
     expect(
       filterLabelTargetsForLine(

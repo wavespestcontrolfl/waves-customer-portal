@@ -55,16 +55,15 @@ describe('fill empty product target_pests migration', () => {
     });
   });
 
-  test('down() reverts only rows still holding exactly what up() wrote', async () => {
+  test('down() touches nothing at all', async () => {
+    // Reverting by value is unsafe: matching the list does not prove this
+    // migration wrote it. up() only fills EMPTY fields, so a row that already
+    // held that exact list was SKIPPED by up() — and a value-matching down()
+    // would then erase a curated list this migration never owned. Nothing here
+    // is destructive, so the correct reversal is to do nothing.
     const { knex, calls } = mockKnex();
     await migration.down(knex);
-    expect(calls).toHaveLength(FILLS.length);
-    calls.forEach((c, i) => {
-      const [name, targets] = FILLS[i];
-      expect(c.name).toBe(name);
-      expect(c.match).toBe(JSON.stringify(targets));
-      expect(c.wrote).toBeNull();
-    });
+    expect(calls).toEqual([]);
   });
 
   test('never introduces a target that nothing controls', () => {

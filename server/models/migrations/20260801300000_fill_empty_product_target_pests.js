@@ -127,15 +127,17 @@ exports.up = async function up(knex) {
   }
 };
 
-exports.down = async function down(knex) {
-  if (!(await knex.schema.hasTable('products_catalog'))) return;
-
-  // Revert only rows still holding exactly what up() wrote — an edit since
-  // then is someone's deliberate work and is left alone.
-  for (const [name, targets] of FILLS) {
-    await knex('products_catalog')
-      .whereRaw('LOWER(name) = LOWER(?)', [name])
-      .whereRaw('target_pests = ?::jsonb', [JSON.stringify(targets)])
-      .update({ target_pests: null, updated_at: new Date() });
-  }
-};
+// Deliberately a no-op.
+//
+// The obvious down() — clear every row whose target_pests equals what up()
+// wrote — is unsafe, because matching the value does not prove this migration
+// authored it. up() only writes into EMPTY fields, so in any environment where
+// a row already held that exact list (curated by hand, or seeded by an earlier
+// migration), up() skipped it and yet that down() would happily erase it.
+// Exact-value equality is not provenance.
+//
+// Nothing here is destructive to begin with — it only ever fills a field that
+// was empty — so there is no state to restore, and the correct reversal is to
+// do nothing rather than risk deleting somebody's curated list. To undo a
+// specific fill, clear that product's Targets in the admin catalog UI.
+exports.down = async function down() {};

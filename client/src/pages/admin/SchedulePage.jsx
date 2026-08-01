@@ -15640,7 +15640,7 @@ export const ALL_TARGET_LINES = ["pest", "lawn", "tree_shrub", "termite", "mosqu
 // substring-loose because catalog target_pests values are free text pulled
 // from labels ("Southern Chinch Bugs", "sod webworm", "chinch bug (southern)").
 const LAWN_ONLY_TARGET_RE =
-  /chinch|sod webworm|armyworm|white grub|\bgrubs?\b|mole cricket|billbug|spittlebug|nematode|crabgrass|goosegrass|torpedograss|bahiagrass|foxtail|kyllinga|dollarweed|doveweed|chamberbitter|chickweed|burweed|pusley|buttonweed|spurge|clover|nutsedge|\bsedge\b|flatsedge|broadleaf weed|\bweeds?\b|poa annua|bluegrass|brown patch|large patch|dollar spot|leaf spot|anthracnose|summer patch|take-?all|fairy ring|pythium|turf/i;
+  /chinch|sod webworm|armyworm|white grub|\bgrubs?\b|mole cricket|billbug|spittlebug|nematode|crabgrass|goosegrass|torpedograss|bahiagrass|foxtail|kyllinga|dollarweed|doveweed|chamberbitter|chickweed|burweed|pusley|buttonweed|spurge|clover|nutsedge|\bsedge\b|flatsedge|broadleaf weed|\bweeds?\b|poa annua|bluegrass|brown patch|large patch|dollar spot|leaf spot|anthracnose|summer patch|take-?all|fairy ring|pythium|yellow tuft|turf/i;
 
 // Ornamental-only targets (tree & shrub / palm work): sap feeders, mites,
 // borers, and foliar issues. Checked BEFORE the structural set so "Spider
@@ -15660,8 +15660,12 @@ const NO_CONTROL_TARGET_RE = /ganoderma|thielaviopsis/i;
 // as turf. Palm disease tokens carry an explicit "(palm)" marker so the intent
 // is legible in the catalog as well as here; turf oomycetes keep their own
 // "Pythium ..." wording and stay on the lawn line.
+// NOTE: no bare "downy mildew" here. Yellow tuft — a St. Augustine turf
+// disease — is written "Yellow tuft (downy mildew)" on the Subdue Maxx turf
+// directions, so a generic downy-mildew rule would steal a turf target and
+// drop it from lawn visits. The turf form is claimed by the lawn pattern below.
 const ORNAMENTAL_DISEASE_RE =
-  /fungal leaf spot|\(palm\)|palm leaf spot|palm bud rot|lethal bronzing|lethal yellowing|fusarium wilt|downy mildew/i;
+  /fungal leaf spot|\(palm\)|palm leaf spot|palm bud rot|lethal bronzing|lethal yellowing|fusarium wilt/i;
 
 // Nutrition goals, not pests: what a feeding is meant to correct or stimulate.
 // Fertilizer-family products get applied on turf AND on palms/ornamentals, so
