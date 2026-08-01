@@ -50,6 +50,7 @@ function flatView(extraction) {
 
     appointment_confirmed: sched.status === 'confirmed',
     preferred_date_time: sched.confirmed_start_at || null,
+    agent_committed_booking: sched.agent_committed_booking === true,
     follow_up_visit_mentioned: sched.follow_up_mentioned === true,
     follow_up_date_time: sched.follow_up_start_at || null,
 

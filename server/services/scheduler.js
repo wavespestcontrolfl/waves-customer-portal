@@ -2630,16 +2630,18 @@ function initScheduledJobs() {
         logger.warn(`[email-digest] nudge collection failed: ${e.message}`);
       }
 
-      await db('notifications').insert({
-        recipient_type: 'admin',
-        category: 'email_digest',
-        title: 'Morning Email Digest',
-        body: `${emails.length} emails overnight. ${parts.join(', ')}.${nudgeLines} Check /admin/email for details.`,
-        icon: '\uD83D\uDCE7',
-        link: '/admin/email',
-        metadata: JSON.stringify({ severity: (parseInt(unread?.c || 0) > 10 || nudgeLines || quarantineIssues > 0) ? 'high' : 'low' }),
-        created_at: new Date(),
-      }).catch(() => {});
+      // Through NotificationService (not a raw insert) so the admin bell
+      // policy chokepoint covers the digest; notifyAdmin never throws.
+      await require('./notification-service').notifyAdmin(
+        'email_digest',
+        'Morning Email Digest',
+        `${emails.length} emails overnight. ${parts.join(', ')}.${nudgeLines} Check /admin/email for details.`,
+        {
+          icon: '\uD83D\uDCE7',
+          link: '/admin/email',
+          metadata: { severity: (parseInt(unread?.c || 0) > 10 || nudgeLines || quarantineIssues > 0) ? 'high' : 'low' },
+        },
+      );
 
       logger.info(`[email-digest] Morning digest: ${emails.length} emails, ${leads} leads, ${spam} spam`);
     } catch (err) {
@@ -3881,7 +3883,7 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // EVERY 30 MIN — Multi-touch review cadence driver (Day 0/3/7 SMS+email).
+  // EVERY 30 MIN — Multi-touch review cadence driver (Day 0/3/4 SMS+email).
   // Advances operator-started review_sequences whose next_run_at has passed,
   // auto-stopping on review/opt-out. Dark behind GATE_REVIEW_SEQUENCES so a
   // preview/dev env with live creds can't text/email real customers.
@@ -4464,6 +4466,25 @@ function initScheduledJobs() {
       }
     } catch (err) {
       logger.error(`Call-log relink tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // NIGHTLY 3:20 AM — Triage dead-letter drain. Auto-resolves provably-moot
+  // open triage cards and auto-dismisses aged informational flags so the
+  // triage inbox stays an exception queue instead of a landfill (~1,800
+  // open vs 32 resolved when built). Owed-work cards never touched. Dark
+  // behind GATE_TRIAGE_AUTO_RESOLVE. See server/services/triage-auto-resolve.js.
+  // =========================================================================
+  cron.schedule('20 3 * * *', async () => {
+    try {
+      const { runTriageAutoResolve } = require('./triage-auto-resolve');
+      const result = await runTriageAutoResolve();
+      if (!result.skipped && result.applied > 0) {
+        logger.info(`[triage-sweep] applied=${result.applied} deferred=${result.deferred} rules=${JSON.stringify(result.counts)}`);
+      }
+    } catch (err) {
+      logger.error(`Triage auto-resolve tick failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

@@ -157,10 +157,13 @@ describe("review state under a backdated quiet closeout (Codex P2, PR #2897 fix 
     expect(
       completionReviewSuppressionReason({ customerConcernInteraction: true }),
     ).toBe("customer_concern");
-    expect(completionReviewSuppressionReason({ willInvoice: true })).toBe("invoice_created");
+    // Coverage fix (2026-07-30): an invoiced completion is no longer a
+    // client-side suppression — the server owns the invoice rule (unpaid
+    // blocks at completion, the paid-invoice webhook queues the ask).
+    expect(completionReviewSuppressionReason({ willInvoice: true })).toBe(null);
     expect(completionWillReview({ requestReview: true })).toBe(true);
     expect(completionWillReview({ requestReview: false })).toBe(false);
-    expect(completionWillReview({ requestReview: true, willInvoice: true })).toBe(false);
+    expect(completionWillReview({ requestReview: true, willInvoice: true })).toBe(true);
     expect(completionWillReview({ oneTimeRecapOnly: true, requestReview: false })).toBe(true);
   });
 

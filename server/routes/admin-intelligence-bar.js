@@ -473,6 +473,15 @@ function operatorAdjustmentCardLine(adj) {
 }
 
 function confirmationDisplayParams(toolName, params, preview) {
+  if (toolName === 'move_stops_to_day') {
+    // The card must always disclose whether committing texts the customers —
+    // including the default-silent case where the model omitted the optional
+    // notify_customers property entirely.
+    return {
+      ...params,
+      notify_customers: params?.notify_customers === true,
+    };
+  }
   if (toolName === 'create_pending_estimate') {
     const adjustmentLine = operatorAdjustmentCardLine(preview?.operator_price_adjustment || null);
     // Without an adjustment the raw-params card stays (legacy behavior);

@@ -713,13 +713,13 @@ const ContentScheduler = {
             status: 'compliance_rejected',
           });
           try {
-            await db('notifications').insert({
-              recipient_type: 'admin',
-              category: 'social_compliance_rejected',
-              title: 'Scheduled social post rejected by compliance judge',
-              body: `"${String(social.title || '').slice(0, 120)}" was not published: ${[...new Set(reasons)].join('; ').slice(0, 400)}. Edit the copy and reschedule from Social Studio.`,
-              created_at: new Date(),
-            });
+            // Through NotificationService (not a raw insert) so the
+            // GATE_ADMIN_BELL_POLICY chokepoint covers this category.
+            await require('./notification-service').notifyAdmin(
+              'social_compliance_rejected',
+              'Scheduled social post rejected by compliance judge',
+              `"${String(social.title || '').slice(0, 120)}" was not published: ${[...new Set(reasons)].join('; ').slice(0, 400)}. Edit the copy and reschedule from Social Studio.`,
+            );
           } catch (err) {
             logger.error(`[content-scheduler] compliance-rejection notification failed: ${err.message}`);
           }

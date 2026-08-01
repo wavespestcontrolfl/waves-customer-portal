@@ -4622,6 +4622,10 @@ function BillingTab({ customer }) {
           : autopayState === 'disabled'
             ? 'disabled'
             : 'unknown';
+  // Open-invoice pay CTAs (GATE_PORTAL_PAY_NOW): hoisted above bannerConfig so
+  // the Auto Pay-off banner can point at the Pay now button when one renders.
+  const openInvoices = Array.isArray(balance?.openInvoices) ? balance.openInvoices : [];
+  const primaryOpenInvoice = openInvoices[0] || null;
   const bannerConfig = {
     failed: {
       bg: `${B.red}10`, border: `${B.red}33`, icon: 'warning',
@@ -4684,7 +4688,9 @@ function BillingTab({ customer }) {
       badge: 'Auto Pay off', titleColor: B.glassNavy, subtitleColor: B.grayDark,
       title: 'Auto Pay is off',
       detail: balance?.currentBalance > 0
-        ? `Balance due: ${money(balance.currentBalance)}. Add or enable Auto Pay below to run future charges automatically.`
+        ? (primaryOpenInvoice
+          ? `Balance due: ${money(balance.currentBalance)} — pay your open ${openInvoices.length === 1 ? 'invoice' : 'invoices'} with the Pay now ${openInvoices.length === 1 ? 'button' : 'buttons'} above. Auto Pay covers future charges automatically once enabled; it does not pay existing balances.`
+          : `Balance due: ${money(balance.currentBalance)}. Add or enable Auto Pay below to run future charges automatically.`)
         : 'Charges will not run automatically unless you enable Auto Pay below.',
     },
     unknown: {
@@ -4769,8 +4775,6 @@ function BillingTab({ customer }) {
   // while the gate is on). Each entry carries the invoice's existing
   // tokenized /pay URL — the same checkout the SMS/email links open — so
   // "Pay now" here is a link, not a new payment path.
-  const openInvoices = Array.isArray(balance?.openInvoices) ? balance.openInvoices : [];
-  const primaryOpenInvoice = openInvoices[0] || null;
   const payNowButtonStyle = {
     display: 'inline-flex',
     alignItems: 'center',

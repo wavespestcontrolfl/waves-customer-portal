@@ -535,15 +535,18 @@ async function flagLeadNeedsReview(email, classification, reason) {
   });
 
   try {
-    await db('notifications').insert({
-      recipient_type: 'admin',
-      category: 'email_alert',
-      title: `Possible lead needs review: ${email.from_name || email.from_address}`,
-      body: classification.summary || email.subject,
-      icon: '\uD83D\uDCE7',
-      link: '/admin/email',
-      metadata: JSON.stringify({ emailId: email.id, reason }),
-    });
+    // Through NotificationService so the admin bell policy chokepoint
+    // covers this bell (was a raw insert).
+    await require('../notification-service').notifyAdmin(
+      'email_alert',
+      `Possible lead needs review: ${email.from_name || email.from_address}`,
+      classification.summary || email.subject,
+      {
+        icon: '\uD83D\uDCE7',
+        link: '/admin/email',
+        metadata: { emailId: email.id, reason },
+      },
+    );
   } catch (e) { /* non-critical */ }
 
   // Ids only in logs — sender addresses and subjects are PII (subjects can
@@ -660,19 +663,22 @@ async function handleLeadInquiry(email, classification) {
       }
       if (followUpDraft?.created) {
         try {
-          await db('notifications').insert({
-            recipient_type: 'admin',
-            category: 'new_lead',
-            title: `Email follow-up completed a quote request — draft estimate ready`,
-            body: classification.summary || email.subject,
-            icon: '📧',
-            link: '/admin/estimates',
-            metadata: JSON.stringify({
-              emailId: email.id,
-              leadId: existingLead.id,
-              estimateId: followUpDraft.estimateId,
-            }),
-          });
+          // Through NotificationService so the admin bell policy chokepoint
+          // covers this bell (was a raw insert).
+          await require('../notification-service').notifyAdmin(
+            'new_lead',
+            `Email follow-up completed a quote request — draft estimate ready`,
+            classification.summary || email.subject,
+            {
+              icon: '📧',
+              link: '/admin/estimates',
+              metadata: {
+                emailId: email.id,
+                leadId: existingLead.id,
+                estimateId: followUpDraft.estimateId,
+              },
+            },
+          );
         } catch (e) { /* non-critical */ }
       }
     }
@@ -792,25 +798,27 @@ async function handleLeadInquiry(email, classification) {
   }
   const drafted = emailDraft?.created === true;
 
-  // Notification
+  // Notification — through NotificationService so the admin bell policy
+  // chokepoint covers this bell (was a raw insert).
   try {
-    await db('notifications').insert({
-      recipient_type: 'admin',
-      category: 'new_lead',
-      title: drafted
+    await require('../notification-service').notifyAdmin(
+      'new_lead',
+      drafted
         ? `New lead from email: ${firstName} ${lastName} — draft estimate ready`
         : `New lead from email: ${firstName} ${lastName}`,
-      body: drafted
+      drafted
         ? `${classification.summary || email.subject} Draft estimate created — review and send.`
         : (classification.summary || email.subject),
-      icon: '\uD83D\uDCE7',
-      link: drafted ? '/admin/estimates' : '/admin/email',
-      metadata: JSON.stringify({
-        emailId: email.id,
-        leadId: lead.id,
-        ...(drafted ? { estimateId: emailDraft.estimateId } : {}),
-      }),
-    });
+      {
+        icon: '\uD83D\uDCE7',
+        link: drafted ? '/admin/estimates' : '/admin/email',
+        metadata: {
+          emailId: email.id,
+          leadId: lead.id,
+          ...(drafted ? { estimateId: emailDraft.estimateId } : {}),
+        },
+      },
+    );
   } catch (e) { /* non-critical */ }
 
   logger.info(`[email-actions] Lead created: ${lead.id} — ${extracted.service_interest || 'general'}`);
@@ -1107,15 +1115,18 @@ async function handleComplaint(email, classification) {
 
   // Urgent notification
   try {
-    await db('notifications').insert({
-      recipient_type: 'admin',
-      category: 'email_alert',
-      title: `Complaint from ${email.from_name || email.from_address}`,
-      body: classification.summary || email.subject,
-      icon: '\u26A0\uFE0F',
-      link: '/admin/email',
-      metadata: JSON.stringify({ emailId: email.id, customerId: customer?.id }),
-    });
+    // Through NotificationService so the admin bell policy chokepoint
+    // covers this bell (was a raw insert).
+    await require('../notification-service').notifyAdmin(
+      'email_alert',
+      `Complaint from ${email.from_name || email.from_address}`,
+      classification.summary || email.subject,
+      {
+        icon: '\u26A0\uFE0F',
+        link: '/admin/email',
+        metadata: { emailId: email.id, customerId: customer?.id },
+      },
+    );
   } catch (e) { /* non-critical */ }
 
   logger.warn(`[email-actions] COMPLAINT received (email ${email.id})`);

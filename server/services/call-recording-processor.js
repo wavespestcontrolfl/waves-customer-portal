@@ -26,6 +26,7 @@ const { subscribeOrResubscribe, EMAIL_RE } = require('./newsletter-subscribers')
 const { sendConfirmationEmail } = require('./newsletter-confirm');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { isLikelyE164 } = require('../utils/phone');
+const { lockTriageCall } = require('../utils/triage-locks');
 const { resolveLocation } = require('../config/locations');
 const { parseETDateTime, formatETDate, formatETTime, etDateString, etParts } = require('../utils/datetime-et');
 const { promoteCustomerOnBooking } = require('./customer-stages');
@@ -87,7 +88,7 @@ const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsF
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
 const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
-const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, buildTriageItem } = require('./call-routing-gates');
+const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, buildTriageItem, V2_DECISION_VERSION } = require('./call-routing-gates');
 // Zero-triage layers (2026-07-10) — all dark-gated in feature-gates.js.
 const { isEnabled } = require('../config/feature-gates');
 const { decideDisposition } = require('./call-disposition');
@@ -4725,10 +4726,18 @@ const CallRecordingProcessor = {
       // filed for this call — clearing review_status alone doesn't remove them
       // (the inbox lists from triage_items.status), so they'd stay actionable.
       try {
-        const dismissed = await db('triage_items')
-          .where({ call_log_id: call.id })
-          .whereIn('status', ['open', 'in_progress'])
-          .update({ status: 'dismissed', resolution_note: 'Transcript rejected as an implausible hallucination.', resolved_at: new Date(), updated_at: new Date() });
+        // Shared per-call lock contract (utils/triage-locks.js) with the
+        // nightly sweep / admin-triage / email-fanout writers — an unordered
+        // bulk card update outside the protocol can deadlock against their
+        // sibling pre-locks, and an aborted statement here would leave stale
+        // open cards under an already-cleared review_status.
+        const dismissed = await db.transaction(async (trx) => {
+          await lockTriageCall(trx, call.id);
+          return trx('triage_items')
+            .where({ call_log_id: call.id })
+            .whereIn('status', ['open', 'in_progress'])
+            .update({ status: 'dismissed', resolution_note: 'Transcript rejected as an implausible hallucination.', resolved_at: new Date(), updated_at: new Date() });
+        });
         if (dismissed > 0) logger.info(`[call-proc] Dismissed ${dismissed} stale triage card(s) for ${maskSid(callSid)} after transcript rejection`);
       } catch (trErr) {
         logger.warn(`[call-proc] stale-triage dismissal skipped for ${maskSid(callSid)}: ${trErr.message}`);
@@ -5318,6 +5327,16 @@ const CallRecordingProcessor = {
           let routingResult = canAutoRoute(v2Extraction, {
             contactPhone, addressValidation,
             failOpen: failOpenBooking, callerAni: contactPhone, knownCustomer: knownCustomerForFailOpen,
+            agentCommitFailOpen: isEnabled('callAgentCommitBooking') && !isOutboundCall(call),
+            // Grounds the agent-commitment evidence quote against the labeled
+            // source transcript — evidence objects are untrusted model output.
+            transcript: transcription,
+            // Speaker labels are LLM-inferred today — the demotion stays dark
+            // until this companion gate flips (see feature-gates.js).
+            transcriptLabelsTrusted: isEnabled('callAgentCommitTrustedLabels'),
+            // Slot binding needs the call time: a spoken weekday only names a
+            // unique date within the 7 days after the call.
+            callStartedAt: call.created_at,
           });
           // Address fail-open is only safe when the on-file address really is
           // the booking address — V1-captured address evidence that conflicts
@@ -5464,6 +5483,22 @@ const CallRecordingProcessor = {
             for (const flag of triageReasons.slice(0, 10)) {
               const triageItem = buildTriageItem({ callLogId: call.id, flag, extraction: v2Extraction });
               await db('triage_items').insert(triageItem).onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
+            }
+            // Demoted flags survive a block by ANOTHER gate (codex round-4
+            // P2): an agent-committed call held on e.g. address_unverified
+            // must still surface the "confirm the account holder" advisory —
+            // the demotion removed caller_not_authorized from the blocking
+            // set, so without this loop it would appear on no card at all.
+            // Mirrors the allowed branch's fail-open advisory loop; onConflict
+            // dedups against any same-reason row.
+            for (const f of (routingResult.failedOpenFlags || []).slice(0, 10)) {
+              try {
+                await db('triage_items')
+                  .insert(buildTriageItem({ callLogId: call.id, flag: f, extraction: v2Extraction, severity: 'advisory' }))
+                  .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
+              } catch (fe) {
+                logger.warn(`[call-proc-v2] blocked-branch fail-open advisory insert failed for ${maskSid(callSid)} (${f}): ${fe.message}`);
+              }
             }
             v2RoutingBlocked = true;
             v2CanonicalWriteBlocked = hasCanonicalWriteBlock(finalFlags);
@@ -6592,6 +6627,10 @@ const CallRecordingProcessor = {
                 {
                   link: `/admin/leads?lead=${leadId}`,
                   metadata: { leadId, phone, callSid: call.twilio_call_sid },
+                  // These ARE new leads — category 'lead' is default-denied
+                  // under GATE_ADMIN_BELL_POLICY, but an unattributed call
+                  // lead must ring like every other new lead.
+                  bell: true,
                 },
               );
             } catch (notifyErr) {
@@ -8668,7 +8707,10 @@ const CallRecordingProcessor = {
       }
       try {
         await db('route_decisions')
-          .where({ call_log_id: call.id, decision_version: 'v2-1.0.0', mode: 'enforce' })
+          // Same-run outcome update: targets the row THIS process wrote
+          // moments ago, so the CURRENT version only (a reprocess writes —
+          // and updates — its own fresh v2-1.1.0 row).
+          .where({ call_log_id: call.id, decision_version: V2_DECISION_VERSION, mode: 'enforce' })
           .update({
             final_action_taken: bookedServiceId ? 'auto_route' : 'auto_route_skipped',
             ...(bookedServiceId ? { created_scheduled_service_id: bookedServiceId } : {}),
@@ -8835,6 +8877,10 @@ const CallRecordingProcessor = {
           failOpen: isEnabled('callFailOpenBooking') && !isOutboundCall(call),
           callerAni: contactPhone,
           knownCustomer: (knownCaller && knownCaller.isExistingCustomer) ? { hasAddress: knownCaller.hasAddress } : null,
+          agentCommitFailOpen: isEnabled('callAgentCommitBooking') && !isOutboundCall(call),
+          transcript: transcription,
+          transcriptLabelsTrusted: isEnabled('callAgentCommitTrustedLabels'),
+          callStartedAt: call.created_at,
         });
         // Mirror the enforce path's V1 address-conflict demotion — the saved
         // shadow decision must hold exactly where enforce would hold, or
@@ -8859,7 +8905,7 @@ const CallRecordingProcessor = {
       }
 
       const validationPayload = {
-        validator: 'v2-1.0.0',
+        validator: V2_DECISION_VERSION,
         mode: validationMode,
         extraction_status: v2Result.status || null,
         routing: routingResult ? {

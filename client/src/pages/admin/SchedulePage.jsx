@@ -172,6 +172,21 @@ const AREAS_BY_SERVICE = {
     "Fence line",
     "Trash area",
   ],
+  // Bed bug is an interior treatment — yard/fence chips read wrong on its
+  // closeout (owner 2026-07-31, untype lane). Vocabulary carries over the
+  // retired typed form's treatment surfaces. Labels never contain commas
+  // (the per-product area field comma-joins selections).
+  bed_bug: [
+    "Primary bedroom",
+    "Guest bedroom",
+    "Living room",
+    "Mattress & box spring",
+    "Bed frame & headboard",
+    "Baseboards",
+    "Furniture & upholstery",
+    "Closets",
+    "Adjacent rooms",
+  ],
   lawn: [
     "Front yard",
     "Back yard",
@@ -588,7 +603,6 @@ export function completionReviewSuppressionReason({
   backfillQuietCloseout = false,
   visitOutcome = "completed",
   customerConcernInteraction = false,
-  willInvoice = false,
 } = {}) {
   if (isIncompleteVisit) return "incomplete";
   if (backfillQuietCloseout) return "backfill";
@@ -596,20 +610,22 @@ export function completionReviewSuppressionReason({
   if (visitOutcome === "customer_concern" || customerConcernInteraction) {
     return "customer_concern";
   }
-  return willInvoice ? "invoice_created" : null;
+  // NOTE (coverage fix, 2026-07-30): an invoiced completion is deliberately
+  // NOT a client-side suppression anymore. The server owns the invoice rule —
+  // a completion-time ask is blocked only while the invoice is UNPAID
+  // (admin-dispatch effectiveRequestReview), and the paid-invoice webhook
+  // queues the ask when payment lands. The old blanket willInvoice=false here
+  // posted requestReview=false, which killed the ask on BOTH sides — including
+  // completions paid on the spot — and drove review coverage to near zero.
+  return null;
 }
 
 export function completionWillReview({
   oneTimeRecapOnly = false,
   requestReview = true,
-  willInvoice = false,
   reviewSuppressionReason = null,
 } = {}) {
-  return (
-    (oneTimeRecapOnly || !!requestReview) &&
-    !willInvoice &&
-    !reviewSuppressionReason
-  );
+  return (oneTimeRecapOnly || !!requestReview) && !reviewSuppressionReason;
 }
 
 function completionDraftKey(serviceId) {
@@ -4982,7 +4998,70 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
 
   const notifyCustomer = notificationType === "sms";
 
+  // window_end is the visit's SCHEDULING block — it must carry the visit's
+  // own duration, never a flat 2-hour span (that inflates occupancy and
+  // blocks real slots). The 2-hour arrival range is customer-facing copy
+  // only. Duration: the service's estimate, else the original window span,
+  // else 60 minutes.
+  const durationMinutes = (() => {
+    // Stored window span FIRST — the feeds fabricate defaults for
+    // null-duration rows (Day: ||60, Month: ||30), so metadata can lie
+    // while the persisted span cannot. Metadata (estimatedDuration on
+    // day/week payloads, duration on month payloads) is the fallback for
+    // windowless rows, then 60.
+    const [ws, we] = [service.windowStart, service.windowEnd];
+    if (ws && we) {
+      const [h1, m1] = String(ws).split(":").map(Number);
+      const [h2, m2] = String(we).split(":").map(Number);
+      const span = h2 * 60 + (m2 || 0) - (h1 * 60 + (m1 || 0));
+      if (span > 0) return span;
+    }
+    const d = parseInt(service.estimatedDuration ?? service.duration, 10);
+    if (Number.isInteger(d) && d > 0) return d;
+    return 60;
+  })();
+
+  const windowFor = (startHHMM) => {
+    const [h, m] = String(startHHMM).split(":").map(Number);
+    if (Number.isNaN(h)) return null;
+    const endTotal = h * 60 + (m || 0) + durationMinutes;
+    // A start whose full duration crosses midnight would truncate the
+    // visit's occupancy block and let another booking land inside time the
+    // job still needs — reject instead of clamping.
+    if (endTotal > 23 * 60 + 59) return null;
+    const end = `${String(Math.floor(endTotal / 60)).padStart(2, "0")}:${String(endTotal % 60).padStart(2, "0")}`;
+    const start = `${String(h).padStart(2, "0")}:${String(m || 0).padStart(2, "0")}`;
+    return {
+      start,
+      end,
+      display: `${formatTimeDisplay(start)} - ${formatTimeDisplay(end)}`,
+    };
+  };
+
+  const currentDateOnly = service.scheduledDate
+    ? String(service.scheduledDate).split("T")[0]
+    : "";
+  const currentStart = service.windowStart
+    ? String(service.windowStart).slice(0, 5)
+    : "";
+
   const handleReschedule = async (opt) => {
+    // Suggested starts are morning slots, but stay consistent with the
+    // manual path: never submit a midnight-truncated block.
+    const suggestedBlock = windowFor(opt.suggestedWindow?.start);
+    if (!suggestedBlock) {
+      alert(
+        "That start time would run past midnight for this visit's duration — pick another slot.",
+      );
+      return;
+    }
+    // Same no-op guard as the manual path: a suggestion can equal the
+    // current slot (the visit excludes itself from conflict checks), and
+    // submitting it would log a reschedule and text an unchanged customer.
+    if (opt.date === currentDateOnly && suggestedBlock.start === currentStart) {
+      alert("The appointment is already scheduled at that date and time.");
+      return;
+    }
     setSending(true);
     try {
       const result = await adminFetch(
@@ -4991,7 +5070,12 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
           method: "POST",
           body: JSON.stringify({
             newDate: opt.date,
-            newWindow: opt.suggestedWindow,
+            // Re-derive the block from the visit's own duration — the
+            // suggested window's 2-3h span is arrival copy, not occupancy.
+            newWindow: suggestedBlock,
+            // Server re-derives window_end from the CURRENT row, so a stale
+            // board snapshot can't shrink or expand the visit's block.
+            deriveWindowFromCurrentVisit: true,
             reasonCode: reason,
             reasonText: notes,
             notifyCustomer,
@@ -5007,20 +5091,30 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
       onClose();
     } catch (e) {
       console.error(e);
+      alert(
+        `Reschedule failed: ${e.message || "the slot may have just been taken — pick another"}`,
+      );
     }
     setSending(false);
   };
 
   const handleManualReschedule = async () => {
     if (!manualDate) return;
+    // No-op guard: submitting the visit's existing slot would log a
+    // reschedule and (with Text selected) tell the customer their
+    // appointment moved when nothing changed.
+    if (manualDate === currentDateOnly && manualTime === currentStart) {
+      alert("The appointment is already scheduled at that date and time.");
+      return;
+    }
+    const window = windowFor(manualTime);
+    if (!window) {
+      alert(
+        "That start time would run past midnight for this visit's duration — pick an earlier hour.",
+      );
+      return;
+    }
     setSending(true);
-    const [h, m] = manualTime.split(":");
-    const endH = String(Math.min(23, parseInt(h) + 2)).padStart(2, "0");
-    const window = {
-      start: manualTime,
-      end: `${endH}:${m}`,
-      display: `${formatTimeDisplay(manualTime)} - ${formatTimeDisplay(`${endH}:${m}`)}`,
-    };
     try {
       const result = await adminFetch(
         `/admin/dispatch/${service.id}/reschedule`,
@@ -5029,6 +5123,9 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
           body: JSON.stringify({
             newDate: manualDate,
             newWindow: window,
+            // Server re-derives window_end from the CURRENT row, so a stale
+            // board snapshot can't shrink or expand the visit's block.
+            deriveWindowFromCurrentVisit: true,
             reasonCode: reason,
             reasonText: notes,
             notifyCustomer,
@@ -5044,6 +5141,9 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
       onClose();
     } catch (e) {
       console.error(e);
+      alert(
+        `Reschedule failed: ${e.message || "the slot may have just been taken — pick another"}`,
+      );
     }
     setSending(false);
   };
@@ -5239,7 +5339,11 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
                     {opt.displayDate}
                   </div>{" "}
                   <div style={{ fontSize: 12, color: D.muted }}>
-                    {opt.suggestedWindow?.display} · {opt.currentLoad} jobs ·{" "}
+                    {/* Show the block Select actually books (duration-derived),
+                        not the server's wider 2-3h span. */}
+                    {windowFor(opt.suggestedWindow?.start)?.display ||
+                      opt.suggestedWindow?.display}{" "}
+                    · {opt.currentLoad} jobs ·{" "}
                     {opt.sameAreaServices} same area
                   </div>{" "}
                 </div>{" "}
@@ -5310,12 +5414,25 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
                 <div style={{ fontSize: 11, color: D.muted, marginBottom: 4 }}>
                   Start Time
                 </div>{" "}
-                <input
-                  type="time"
+                {/* Appointment windows ALWAYS start on the hour (owner
+                    directive) — an hour select instead of a free time input
+                    so an off-hour start can't be submitted. */}
+                <select
                   value={manualTime}
                   onChange={(e) => setManualTime(e.target.value)}
                   style={inputSt}
-                />{" "}
+                >
+                  {Array.from({ length: 13 }, (_, i) => {
+                    const h = i + 6;
+                    const value = `${String(h).padStart(2, "0")}:00`;
+                    const label = `${h % 12 || 12}:00 ${h >= 12 ? "PM" : "AM"}`;
+                    return (
+                      <option key={value} value={value}>
+                        {label}
+                      </option>
+                    );
+                  })}
+                </select>{" "}
               </div>{" "}
               <div style={{ display: "flex", alignItems: "flex-end" }}>
                 {" "}
@@ -6769,7 +6886,7 @@ function normalizeApplicationMethod(value = "") {
   return normalized;
 }
 
-export function defaultApplicationMethod(product = {}, serviceType = "") {
+export function defaultApplicationMethod(product = {}, serviceType = "", { interiorLane = false } = {}) {
   const category = String(product.category || product.product_category || "").toLowerCase();
   const explicit = product.application_method || product.method;
   if (explicit) return normalizeApplicationMethod(explicit);
@@ -6789,6 +6906,13 @@ export function defaultApplicationMethod(product = {}, serviceType = "") {
   if (serviceLine === "lawn") return category.includes("herb") ? "spot_treatment" : "broadcast_spray";
   if (serviceLine === "palm" || serviceLine === "tree_shrub") return "foliar_spray";
   if (serviceLine === "termite" || serviceLine === "rodent") return "station_check";
+  // Bed bug is an interior treatment: the pest perimeter_spray fallback
+  // recorded interior work as exterior AND demanded perimeter footage the
+  // (hidden) zone tracer would have prefilled, blocking a routine closeout
+  // — default methodless products to an interior spot application instead
+  // (codex P1 on the bed-bug untype). interiorLane comes from the STABLE
+  // profile key; the name regex is the fallback for callers without it.
+  if (interiorLane || /\bbed\s*bugs?\b/i.test(String(serviceType || ""))) return "spot_treatment";
   return "perimeter_spray";
 }
 
@@ -8829,6 +8953,14 @@ export function CompletionPanel({
   })();
   const canApproveOfficeExceptions = currentAdminUser?.role === "admin";
   const serviceCategory = detectServiceCategory(service.serviceType);
+  // Bed bug closeouts get interior-specific treated-area chips, skip the
+  // satellite spray-trace (a perimeter trace has no meaning for an interior
+  // treatment), and hide the no-invoice recap — owner 2026-07-31, bed-bug
+  // untype lane. The STABLE profile key is authoritative (display labels
+  // are admin-editable); the name regex is only a fallback for rows whose
+  // profile did not resolve (codex P2 r8).
+  const isBedBugVisit = service.completionProfile?.serviceKey === "bed_bug_treatment"
+    || /\bbed\s*bugs?\b/.test(String(service.serviceType || "").toLowerCase());
   const serviceLineForCloseout = serviceLineFromType(serviceTypeForArea);
   // Tree & shrub / palm visits swap the Targets picker suggestions to the
   // ornamental pest list (see targetPickerConfig).
@@ -8928,7 +9060,9 @@ export function CompletionPanel({
   // "Follow-up recommended") were dropped everywhere (owner 2026-07-30):
   // they aren't areas and don't belong in the treated-areas list.
   const areaOptions = [
-    ...(AREAS_BY_SERVICE[serviceCategory] || AREAS_BY_SERVICE.pest),
+    ...(isBedBugVisit
+      ? AREAS_BY_SERVICE.bed_bug
+      : (AREAS_BY_SERVICE[serviceCategory] || AREAS_BY_SERVICE.pest)),
   ];
   const onSiteEntry = (service.statusLog || []).find(
     (e) => e.status === "on_site",
@@ -9014,12 +9148,10 @@ export function CompletionPanel({
     visitOutcome,
     customerConcernInteraction:
       isCustomerConcernInteraction(customerInteraction),
-    willInvoice,
   });
   const willReview = completionWillReview({
     oneTimeRecapOnly,
     requestReview,
-    willInvoice,
     reviewSuppressionReason,
   });
   const effectiveSendSms =
@@ -9727,9 +9859,21 @@ export function CompletionPanel({
     setNotes(savedDraft.notes || "");
     setSelectedProducts(
       Array.isArray(savedDraft.selectedProducts)
-        ? savedDraft.selectedProducts.map((product) =>
-            normalizeProductArea(product, serviceTypeForArea),
-          )
+        ? savedDraft.selectedProducts.map((product) => {
+            const normalized = normalizeProductArea(product, serviceTypeForArea);
+            // Bed bug: a pre-migration draft carries the old inferred
+            // perimeter default — reclassify it to the interior default so
+            // a restored draft can't demand perimeter footage or record
+            // interior work as exterior (codex P2 r10).
+            if (
+              isBedBugVisit &&
+              effectiveApplicationMethod(normalized.applicationMethod) ===
+                "perimeter_spray"
+            ) {
+              return { ...normalized, applicationMethod: "spot_treatment" };
+            }
+            return normalized;
+          })
         : [],
     );
     setSendSms(savedDraft.sendSms !== false);
@@ -9742,7 +9886,11 @@ export function CompletionPanel({
     );
     setReviewTiming(savedDraft.reviewTiming || "120");
     setReviewCustomAt(savedDraft.reviewCustomAt || "");
-    setOneTimeRecapOnly(!!savedDraft.oneTimeRecapOnly);
+    // Bed bug hides the recap-only control (typed-era billing parity) — a
+    // pre-migration draft must not restore the flag into invisible state
+    // where the server's recap_only_not_allowed 409 becomes unclearable
+    // (codex P2 r9).
+    setOneTimeRecapOnly(isBedBugVisit ? false : !!savedDraft.oneTimeRecapOnly);
     // Quiet/loud choice + typed minutes come back exactly as saved; a legacy
     // draft without the fields falls back to the panel default. Consumers all
     // gate on backfillEligible, so this stays inert if the visit is somehow
@@ -9869,23 +10017,48 @@ export function CompletionPanel({
         : {};
     if (typedFindingsSchema?.fields) {
       pruneRestoredFindingsValues(restoredFindings, typedFindingsSchema.fields);
+      setFindingsValues(restoredFindings);
+      setTypedActivityScore(
+        Number.isInteger(savedDraft.typedActivityScore)
+          ? savedDraft.typedActivityScore
+          : null,
+      );
+      setTypedActivityTouched(!!savedDraft.typedActivityTouched);
+      const restoredChips = Array.isArray(savedDraft.typedNextStepChips)
+        ? savedDraft.typedNextStepChips
+        : [];
+      setTypedNextStepChips(
+        typedFindingsSchema?.nextStepChips
+          ? restoredChips.filter((chip) => typedFindingsSchema.nextStepChips.includes(chip))
+          : restoredChips,
+      );
+      setTypedRecommendations(savedDraft.typedRecommendations || "");
+    } else {
+      // The profile untyped since this draft was saved (bed_bug,
+      // 20260731400000): the typed controls no longer render and the submit
+      // path would silently drop EVERY retired typed field as invisible
+      // state — findings values, activity score, next-step chips, and the
+      // typed recommendation all count (codex P2 r1 + r4). Discard them
+      // LOUDLY so the tech re-enters what still matters; generic fields
+      // (notes, products, rating…) still restore normally.
+      const draftHadTypedEntries =
+        Object.values(restoredFindings).some((v) =>
+          Array.isArray(v) ? v.length > 0 : String(v ?? "").trim() !== "",
+        )
+        || Number.isInteger(savedDraft.typedActivityScore)
+        || (Array.isArray(savedDraft.typedNextStepChips) && savedDraft.typedNextStepChips.length > 0)
+        || String(savedDraft.typedRecommendations || "").trim() !== "";
+      if (draftHadTypedEntries) {
+        alert(
+          "This service now completes with the standard form. The typed findings saved in this draft (rooms, evidence, treatment, activity, next steps…) can't be restored — re-enter anything still needed in the notes or observations.",
+        );
+      }
+      setFindingsValues({});
+      setTypedActivityScore(null);
+      setTypedActivityTouched(false);
+      setTypedNextStepChips([]);
+      setTypedRecommendations("");
     }
-    setFindingsValues(restoredFindings);
-    setTypedActivityScore(
-      Number.isInteger(savedDraft.typedActivityScore)
-        ? savedDraft.typedActivityScore
-        : null,
-    );
-    setTypedActivityTouched(!!savedDraft.typedActivityTouched);
-    const restoredChips = Array.isArray(savedDraft.typedNextStepChips)
-      ? savedDraft.typedNextStepChips
-      : [];
-    setTypedNextStepChips(
-      typedFindingsSchema?.nextStepChips
-        ? restoredChips.filter((chip) => typedFindingsSchema.nextStepChips.includes(chip))
-        : restoredChips,
-    );
-    setTypedRecommendations(savedDraft.typedRecommendations || "");
     // Companion draft state — the same type-aware pruning per companion
     // schema; saved types the profile no longer declares are dropped, and
     // chips are filtered to the schema's current allowlist.
@@ -10373,7 +10546,7 @@ export function CompletionPanel({
     // the response is about to write (built from the pre-draft snapshot).
     if (generating) return;
     if (selectedProducts.find((p) => p.productId === product.id)) return;
-    const applicationMethod = defaultApplicationMethod(product, serviceTypeForArea);
+    const applicationMethod = defaultApplicationMethod(product, serviceTypeForArea, { interiorLane: isBedBugVisit });
     const areaRequirement = requiredApplicationArea(
       applicationMethod,
       serviceTypeForArea,
@@ -11752,21 +11925,23 @@ export function CompletionPanel({
                   textAlign: "center",
                 }}
               >
-                {completionResult?.completionSmsStatus === "sent"
-                  ? "SMS + report sent"
-                  : completionResult?.completionSmsStatus === "blocked"
-                    ? `Report saved. SMS blocked${completionResult?.completionSmsError ? `: ${completionResult.completionSmsError}` : ""}`
-                    : completionResult?.completionSmsStatus === "failed"
-                      ? `Report saved. SMS failed${completionResult?.completionSmsError ? `: ${completionResult.completionSmsError}` : ""}`
-                      : effectiveSendSms
-                        ? "Report saved"
-                        : "Report saved"}{" "}
+                {completionResult?.typedDeliveryMode === "disabled"
+                  ? "Completion recorded"
+                  : completionResult?.typedDeliveryMode === "internal_only"
+                    ? "Report stored internally"
+                    : completionResult?.completionSmsStatus === "sent"
+                      ? "SMS + report sent"
+                      : completionResult?.completionSmsStatus === "blocked"
+                        ? `Report saved. SMS blocked${completionResult?.completionSmsError ? `: ${completionResult.completionSmsError}` : ""}`
+                        : completionResult?.completionSmsStatus === "failed"
+                          ? `Report saved. SMS failed${completionResult?.completionSmsError ? `: ${completionResult.completionSmsError}` : ""}`
+                          : "Report saved"}{" "}
                 for {service.customerName}
               </div>{" "}
               {/* completionAdvisories are deliberately NOT rendered here —
                   the success screen stays minimal (owner 2026-07-29); they
                   are recorded server-side and surface in Customer 360. */}
-              {completionResult?.typedDeliveryMode === "internal_only" && (
+              {["internal_only", "disabled"].includes(completionResult?.typedDeliveryMode) && (
                 <div
                   style={{
                     fontFamily: font,
@@ -11776,8 +11951,9 @@ export function CompletionPanel({
                     textAlign: "center",
                   }}
                 >
-                  Report stored — customer delivery is off for this service
-                  type.
+                  {completionResult.typedDeliveryMode === "internal_only"
+                    ? "Report stored — customer delivery is off for this service type."
+                    : "Customer delivery is off for this service — no report or SMS was sent."}
                 </div>
               )}
               {recapEligible && (
@@ -12465,7 +12641,11 @@ export function CompletionPanel({
                 Lawn Assessment block above, which flow into the report gallery,
                 so this redundant second upload is hidden. Combined visits keep
                 it (companions have their own completion-photo gates). */}
-            {!quickComplete && (
+            {/* Interior-only treatments (bed bug) skip the tracer: it is a
+                SATELLITE perimeter tool, and an exterior spray outline on an
+                interior treatment's report would be wrong. Photos carry the
+                visual story; a room-level interior marker is its own lane. */}
+            {!quickComplete && !isBedBugVisit && (
               <Field label="Treatment zone map">
                 <button
                   type="button"
@@ -13248,6 +13428,10 @@ export function CompletionPanel({
                   {payerBanner}
                 </div>
               )}{" "}
+              {/* Bed bug never offers the no-invoice recap: a performed
+                  treatment must mint its invoice (typed-era parity; the
+                  server 409s this too — codex P1 r7). */}
+              {!isBedBugVisit && (
               <label
                 style={{
                   display: "flex",
@@ -13275,7 +13459,8 @@ export function CompletionPanel({
                 <span style={{ fontFamily: font, fontSize: 15, color: M.ink }}>
                   One-time recap + review only (no invoice)
                 </span>{" "}
-              </label>{" "}
+              </label>
+              )}{" "}
               {backfillEligible && (
                 <label
                   style={{
@@ -13669,16 +13854,20 @@ export function CompletionPanel({
               Service Completed!
             </div>{" "}
             <div style={{ fontSize: 14, color: D.muted, marginTop: 8 }}>
-              {!effectiveSendSms
-                ? "Report saved"
-                : completionResult?.completionSmsStatus === "blocked"
-                  ? `Report saved. SMS blocked${completionResult?.completionSmsError ? `: ${completionResult.completionSmsError}` : ""}`
-                  : completionResult?.completionSmsStatus === "failed"
-                    ? `Report saved. SMS failed${completionResult?.completionSmsError ? `: ${completionResult.completionSmsError}` : ""}`
-                    : "SMS + Report sent"}{" "}
+              {completionResult?.typedDeliveryMode === "disabled"
+                ? "Completion recorded"
+                : completionResult?.typedDeliveryMode === "internal_only"
+                  ? "Report stored internally"
+                  : !effectiveSendSms
+                    ? "Report saved"
+                    : completionResult?.completionSmsStatus === "blocked"
+                      ? `Report saved. SMS blocked${completionResult?.completionSmsError ? `: ${completionResult.completionSmsError}` : ""}`
+                      : completionResult?.completionSmsStatus === "failed"
+                        ? `Report saved. SMS failed${completionResult?.completionSmsError ? `: ${completionResult.completionSmsError}` : ""}`
+                        : "SMS + Report sent"}{" "}
               for {service.customerName}
             </div>{" "}
-            {completionResult?.typedDeliveryMode === "internal_only" && (
+            {["internal_only", "disabled"].includes(completionResult?.typedDeliveryMode) && (
               <div
                 style={{
                   fontSize: 13,
@@ -13687,7 +13876,9 @@ export function CompletionPanel({
                   textAlign: "center",
                 }}
               >
-                Report stored — customer delivery is off for this service type.
+                {completionResult.typedDeliveryMode === "internal_only"
+                  ? "Report stored — customer delivery is off for this service type."
+                  : "Customer delivery is off for this service — no report or SMS was sent."}
               </div>
             )}
             {recapEligible && !completionResult?.followupSuggestion?.required && (
@@ -15103,6 +15294,9 @@ export function CompletionPanel({
               {payerBanner}
             </div>
           )}{" "}
+          {/* Bed bug never offers the no-invoice recap (typed-era parity;
+              server 409s this too — codex P1 r7). */}
+          {!isBedBugVisit && (
           <label
             style={{
               ...checkboxRow,
@@ -15118,7 +15312,8 @@ export function CompletionPanel({
               onChange={(e) => handleOneTimeRecapOnlyChange(e.target.checked)}
             />{" "}
             <span>One-time recap + review only (no invoice)</span>{" "}
-          </label>{" "}
+          </label>
+          )}{" "}
           {backfillEligible && (
             <label
               style={{

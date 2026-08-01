@@ -7,6 +7,7 @@ const NotificationService = require('../services/notification-service');
 const PushService = require('../services/push-notifications');
 const { computeDashboardAlerts, toNotifications } = require('../services/dashboard-alerts');
 const { COUNT_ESCALATION_COOLDOWN_MS } = require('../services/dashboard-alerts-cron');
+const { isBellPolicyEnabled } = require('../services/notification-bell-policy');
 
 router.use(adminAuthenticate);
 
@@ -166,7 +167,9 @@ router.get('/', async (req, res, next) => {
     const limit = Math.min(parseInt(req.query.limit) || 50, 100);
     const offset = (page - 1) * limit;
     const persisted = await NotificationService.getAdminNotifications(limit, offset);
-    const liveCtx = page === 1
+    // Bell policy on: computed dashboard aggregates stay on the dashboard
+    // banner (/admin/dashboard/alerts) but no longer merge into the bell.
+    const liveCtx = page === 1 && !isBellPolicyEnabled()
       ? await liveAlertNotifications(req.technicianId)
       : { live: [], liveKeys: new Set() };
     const dedupedPersisted = persisted.filter((n) => !isLiveDuplicate(n, liveCtx.liveKeys));
@@ -214,7 +217,11 @@ router.get('/issues', requireAdmin, async (req, res, next) => {
 // badge doesn't double-count.
 router.get('/unread-count', async (req, res, next) => {
   try {
-    const liveCtx = await liveAlertNotifications(req.technicianId);
+    // Bell policy on: live overlay excluded from the badge too (dismissal
+    // endpoints below stay functional — they no-op when nothing is live).
+    const liveCtx = isBellPolicyEnabled()
+      ? { live: [], liveKeys: new Set() }
+      : await liveAlertNotifications(req.technicianId);
     let persistedCount = await NotificationService.getAdminUnreadCount();
     if (liveCtx.liveKeys.size > 0) {
       try {

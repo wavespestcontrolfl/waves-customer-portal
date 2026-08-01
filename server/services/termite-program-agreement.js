@@ -649,8 +649,15 @@ async function retireSamePropertyOpenAgreements(customerId, estimate) {
 // in this flow is a required handoff, so ring twice before conceding and
 // leave an error-level trail when both attempts miss.
 async function ringAdminBell(NotificationService, args, context) {
-  let bell = await NotificationService.notifyAdmin(...args);
-  if (!bell) bell = await NotificationService.notifyAdmin(...args);
+  // bell: true — every bell in this flow is a required handoff on an
+  // accepted termite estimate (sign-and-return, unresolved billing, parked
+  // accept). Under GATE_ADMIN_BELL_POLICY a suppression returns a truthy
+  // sentinel this wrapper would count as delivered, so tag the emission
+  // instead of letting the category default decide.
+  const [category, title, body, opts = {}] = args;
+  const ring = () => NotificationService.notifyAdmin(category, title, body, { ...opts, bell: true });
+  let bell = await ring();
+  if (!bell) bell = await ring();
   if (!bell) logger.error(`[termite-agreement] admin bell failed twice — ${context}`);
   return !!bell;
 }
@@ -672,7 +679,8 @@ async function ringAdminBellDeduped(NotificationService, { lockKey, titleLike, m
         if (exists === true) return true;
         if (exists === 'error') return 'error';
         const [category, title, body, opts = {}] = args;
-        const bell = await NotificationService.notifyAdmin(category, title, body, { ...opts, connection: trx });
+        // bell: true — same required-handoff posture as ringAdminBell above.
+        const bell = await NotificationService.notifyAdmin(category, title, body, { ...opts, connection: trx, bell: true });
         return bell ? true : 'insert_failed';
       });
     } catch (err) {

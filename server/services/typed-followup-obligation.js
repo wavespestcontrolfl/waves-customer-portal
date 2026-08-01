@@ -171,13 +171,21 @@ async function typedFollowupObligationForCompletedSource({ scheduledService, kne
   // committed snapshot + live profile — the best available approximation.
   const { resolveCompletionProfileForScheduledService } = require('./service-completion-profiles');
   const profile = await resolveCompletionProfileForScheduledService(scheduledService, knex).catch(() => null);
-  if (!profile?.findingsType) return null;
+  if (!profile) return null;
   const snapshot = parseJsonObjectSafe(record.service_data).typedReportSnapshot;
-  if (!snapshot || String(snapshot.type || '') !== String(profile.findingsType)) return null;
+  // A now-untyped alert-policy profile (bed_bug post-20260731400000) still
+  // owes pre-freeze TYPED completions their obligation — the pointer was
+  // cleared, not the record: derive through the snapshot's own type
+  // (codex P1 r1). Untyped completions never reach here without a frozen
+  // verdict (freezing ships with the untype), so no snapshot → no verdict.
+  const findingsType = profile.findingsType
+    || (profile.followupPolicy === 'alert' ? (snapshot?.type || null) : null);
+  if (!findingsType) return null;
+  if (!snapshot || String(snapshot.type || '') !== String(findingsType)) return null;
   const suggestion = typedFollowupVerdict({
     scheduledService,
     profile,
-    findingsType: profile.findingsType,
+    findingsType,
     values: snapshot.values || {},
   });
   return { suggestion, profile, serviceRecordId: record.id };

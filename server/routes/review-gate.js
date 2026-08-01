@@ -38,6 +38,154 @@ function categorizeScore(score) {
   return 'detractor';
 }
 
+// Direct-link redirects are cheap and unauthenticated — cap per IP so the
+// token space can't be probed at volume. Over-limit requests are REDIRECTED
+// to the rate page rather than 429'd (Codex P2, r1): customers behind a
+// shared carrier/NAT IP — or following a batch a scanner just burned through
+// — must still land somewhere that works. The redirect handler does no DB
+// work, so the probing protection (no token-existence oracle) holds.
+const directLinkLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req, res) => res.redirect(302, `/rate/${encodeURIComponent(String(req.params?.token || ''))}`),
+});
+const { isBotUserAgent } = require('../utils/bot-ua');
+
+// GET /api/rate/:token/go — tracked redirect straight to the Google review
+// form (GATE_REVIEW_DIRECT_LINK rollout; the SMS/email {review_url} resolves
+// here via a /l/ short link). Stamps the open + click on the review_requests
+// row, stops the customer's active cadence (they acted — no Day-3/4 chasers),
+// bells the owner so an unmatched review can be manually attributed, and 302s
+// to the location's GBP review URL. Every failure path degrades to the /rate
+// page, which already renders not-found/expired states.
+router.get('/:token/go', directLinkLimiter, async (req, res) => {
+  const token = String(req.params.token || '');
+  const ratePageFallback = `/rate/${encodeURIComponent(token)}`;
+  try {
+    // Kill switch must govern ALREADY-DELIVERED links too (Codex P1, r2):
+    // with the gate off, /go behaves as a plain alias of the rate page — no
+    // click stamping, no cadence stop, no Google redirect — so unsetting
+    // GATE_REVIEW_DIRECT_LINK rolls the whole direct flow back even for
+    // links sitting in old texts.
+    const { isEnabled } = require('../config/feature-gates');
+    if (!isEnabled('reviewDirectLink')) return res.redirect(302, ratePageFallback);
+    if (!/^[a-f0-9]{64}$/.test(token)) return res.redirect(302, ratePageFallback);
+    const request = await db('review_requests').where({ token }).first();
+    if (!request) return res.redirect(302, ratePageFallback);
+    if (request.expires_at && new Date(request.expires_at) < new Date()) {
+      return res.redirect(302, ratePageFallback);
+    }
+
+    const customer = await db('customers').where({ id: request.customer_id }).first();
+    const loc = resolveReviewLocation(request, customer);
+    if (!loc || !loc.googleReviewUrl) return res.redirect(302, ratePageFallback);
+
+    // Scanner/preview fetches (iMessage unfurlers, carrier link scanners,
+    // Slack/WhatsApp previews) follow SMS links without a human tap. Issue
+    // the 302 so the link keeps working, but record NOTHING — a scanned
+    // Day-0 link must not stamp a click, stop the cadence, or bell the
+    // owner (Codex P1, r1; same contract as public-shortlinks.js).
+    if (isBotUserAgent(req.headers['user-agent'])) {
+      return res.redirect(302, loc.googleReviewUrl);
+    }
+
+    // The route contract: a customer only reaches Google AFTER the click is
+    // recorded and their cadence is stopped. If any required write fails
+    // (transient Postgres outage), fall back to the rate page instead of
+    // proceeding — otherwise the still-active sequence would keep chasing a
+    // customer who already reached the review form (Codex P2, r3).
+    // Ordering (Codex P2, r4): the base stamp (SQL-side counter, no stale
+    // read) and the cadence stop both land BEFORE the first-click claim, and
+    // the claim itself is a conditional UPDATE ... WHERE redirected_at IS
+    // NULL — so overlapping requests can't double-notify or lose an
+    // open_count increment, and a stamp-ok/stop-failed request leaves the
+    // claim unconsumed for the retry to notify on.
+    try {
+      const updates = {
+        open_count: db.raw('COALESCE(open_count, 0) + 1'),
+        google_review_clicked: true,
+        redirected_to_google: true,
+        google_location: loc.id,
+      };
+      if (!request.opened_at) {
+        updates.opened_at = new Date();
+        if (request.status === 'sent') updates.status = 'opened';
+      }
+      await db('review_requests').where({ id: request.id }).update(updates);
+    } catch (err) {
+      logger.warn(`[review-gate] direct-link click stamp failed — rate-page fallback: ${err.message}`);
+      return res.redirect(302, ratePageFallback);
+    }
+
+    // They acted on the ask — stop the cadence so no further touches chase
+    // a customer who already visited the review form. A one-off/legacy link
+    // has no sequence_id, but the CUSTOMER may still have an active cadence
+    // (older unexpired link clicked mid-cadence) — stop that one too
+    // (Codex P2, r1).
+    try {
+      const ReviewService = require('../services/review-request');
+      if (request.sequence_id) {
+        await ReviewService.stopReviewSequence(request.sequence_id, 'clicked');
+      } else {
+        const activeSeq = await db('review_sequences')
+          .where({ customer_id: request.customer_id, status: 'active' })
+          .first();
+        if (activeSeq) await ReviewService.stopReviewSequence(activeSeq.id, 'clicked');
+      }
+    } catch (err) {
+      logger.warn(`[review-gate] cadence stop on click failed — rate-page fallback: ${err.message}`);
+      return res.redirect(302, ratePageFallback);
+    }
+
+    // Atomic first-click claim: only the request that flips redirected_at
+    // from NULL owns the owner notification.
+    let firstClick = false;
+    try {
+      const claimed = await db('review_requests')
+        .where({ id: request.id })
+        .whereNull('redirected_at')
+        .update({ redirected_at: new Date() });
+      firstClick = claimed > 0;
+    } catch (err) {
+      logger.warn(`[review-gate] first-click claim failed — rate-page fallback: ${err.message}`);
+      return res.redirect(302, ratePageFallback);
+    }
+
+    // Owner bell (first click only): Google won't tell us who reviewed, so
+    // Adam checks the GBP and flips "Left Google review" on the profile when
+    // it lands. Best-effort — never blocks the redirect.
+    if (firstClick && customer) {
+      try {
+        const NotificationService = require('../services/notification-service');
+        const name = `${customer.first_name || ''} ${customer.last_name || ''}`.trim() || 'A customer';
+        await NotificationService.notifyAdmin(
+          'review',
+          'Review link clicked',
+          `${name} clicked through to the ${loc.name} Google review form. If their review shows up (any reviewer name), mark "Left Google review" on their profile so review asks stop.`,
+          {
+            link: `/admin/customers?customerId=${customer.id}`,
+            metadata: {
+              reviewRequestId: request.id,
+              customerId: customer.id,
+              locationId: loc.id,
+              sequenceId: request.sequence_id || null,
+            },
+          },
+        );
+      } catch (err) {
+        logger.warn(`[review-gate] click notification failed: ${err.message}`);
+      }
+    }
+
+    return res.redirect(302, loc.googleReviewUrl);
+  } catch (err) {
+    logger.error(`[review-gate] direct-link redirect failed: ${err.message}`);
+    return res.redirect(302, ratePageFallback);
+  }
+});
+
 // GET /api/rate/:token — public page data for the review funnel
 router.get('/:token', async (req, res, next) => {
   try {

@@ -888,18 +888,9 @@ function treeShrubPhotoUploadRequiredError(uploadResult, minimum = TREE_SHRUB_MI
   return err;
 }
 
-function formatRescheduleTemplateVars(svc) {
-  const dateOnly = serviceDateOnly(svc?.scheduled_date);
-  const start = svc?.window_start || '08:00';
-  const apptTime = parseETDateTime(`${dateOnly}T${start}`);
-  return {
-    first_name: svc?.first_name || 'there',
-    service_type: svc?.service_type || 'service',
-    day: formatETDay(apptTime),
-    date: formatETDate(apptTime),
-    time: formatETTime(apptTime),
-  };
-}
+// formatRescheduleTemplateVars was removed with the inline single-reschedule
+// send — that path now routes through admin-schedule's
+// sendRescheduleNoticeForVisit (recipient routing + arrival-window copy).
 
 async function actualProductBlackoutBlocks(svc, submittedProducts = []) {
   const productIds = [...new Set((submittedProducts || []).map((p) => p.productId).filter(Boolean))];
@@ -3291,6 +3282,22 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           },
         };
       }
+      // Untyped ALERT-policy lanes (bed_bug post-20260731400000) keep their
+      // typed-era billing parity: a performed infestation treatment must
+      // mint its invoice, so the no-invoice recap bypass stays closed —
+      // keyed on the profile's follow-up semantics, not findings type
+      // (codex P1 r7). The untyped pest one-time family (followup 'none')
+      // keeps its recap-only option unchanged.
+      if (!typedFindingsType && oneTimeRecapOnly && !isIncompleteVisit
+        && completionProfile?.followupPolicy === 'alert') {
+        return {
+          status: 409,
+          body: {
+            error: 'This service bills per treatment — the no-invoice recap is not available for it.',
+            code: 'recap_only_not_allowed',
+          },
+        };
+      }
       if (typedFindingsType && !isIncompleteVisit && structuredFindings == null) {
         return {
           status: 422,
@@ -3511,6 +3518,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       completionMode: completionProfile?.completionMode,
       profileDeliveryMode: completionProfile?.deliveryMode,
       specialtyDeliveryDisabled: process.env.SPECIALTY_REPORT_DELIVERY_DISABLED === 'true',
+      profileCategory: completionProfile?.category,
     });
     let typedDeliveryMode = deliveryPosture.typedDeliveryMode;
     let suppressTypedCustomerComms = deliveryPosture.suppressCustomerComms;
@@ -4290,6 +4298,30 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         findingsType: typedFindingsType,
         values: typedFindings.values || {},
       });
+    } else if (
+      // UNTYPED completions on an alert-policy profile (bed_bug_treatment
+      // after the 20260731400000 untype) owe the same profile-declared
+      // follow-up — deriving only for typed forms silently dropped the
+      // obligation, the exact bug the typed lane fixed. The verdict chain
+      // reduces to the pure profile suggestion (no typed values to apply
+      // overrides against), and the alert keeps source 'typed_completion'
+      // so the (type, job_id) dedupe index still covers it.
+      !typedFindingsType
+      && completionProfile?.followupPolicy === 'alert'
+      && !isIncompleteVisit
+      // No treatment happened on declined/inspection-only visits — the
+      // profile promise anchors to a PERFORMED first treatment, so a false
+      // obligation must not park or mint the included $0 CTA (codex P2 r3;
+      // same performed-visit definition the billing path uses).
+      && visitPerformed
+      && claim.action === 'proceed'
+    ) {
+      followupSuggestion = typedFollowupVerdict({
+        scheduledService: svc,
+        profile: completionProfile,
+        findingsType: null,
+        values: {},
+      });
     }
 
     let record;
@@ -4530,7 +4562,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // retroactively expose reports that were never sent. Frozen for
             // typed completions AND internal-only consultations (typedDeliveryMode
             // 'disabled') so the no-customer-artifact posture survives resume.
-            ...((typedFindingsType || isInternalOnlyCompletion) ? { typedReportDelivery: typedDeliveryMode } : {}),
+            // Every non-auto_send posture FREEZES, regardless of findings
+            // type — an untyped specialty profile under a delivery kill
+            // switch (bed_bug post-untype) must persist its suppression or
+            // downstream gates (report metadata, resolution sync, pressure
+            // history, crash-resume re-derivation) read the absent field as
+            // auto_send and can mint/send anyway (codex P1 r4).
+            ...((typedFindingsType || isInternalOnlyCompletion || typedDeliveryMode !== 'auto_send') ? { typedReportDelivery: typedDeliveryMode } : {}),
             // Companion delivery postures frozen alongside (same rule):
             // graduation flips on the profile never retro-publish stored
             // companion sections.
@@ -4743,8 +4781,16 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // transaction rolls back only the savepoint and the completion
             // proceeds with chip/action scope.
             let tracedExteriorZone = false;
+            // Interior-only treatments (bed bug, post-20260731400000): a
+            // trace saved before the tracer was hidden for this lane is
+            // stale EXTERIOR evidence — it must not resurrect the exterior
+            // dry-down timer on an interior visit (codex P2 r6). The stable
+            // profile key is authoritative; the label regex is the fallback
+            // for unresolved profiles (codex P2 r8).
+            const interiorOnlyVisit = completionProfile?.serviceKey === 'bed_bug_treatment'
+              || /\bbed\s*bugs?\b/i.test(String(svc.service_type || ''));
             try {
-              tracedExteriorZone = await trx.transaction(async (sp) => !!(await sp('treatment_zone_maps')
+              tracedExteriorZone = interiorOnlyVisit ? false : await trx.transaction(async (sp) => !!(await sp('treatment_zone_maps')
                 .where({ scheduled_service_id: svc.id })
                 .first()));
             } catch (traceErr) {
@@ -4967,6 +5013,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           && serviceFindingsAvailable
           && !typedFindingsType
           && !isInternalOnlyCompletion
+          // Infestation-class untyped closeouts (alert-policy profiles —
+          // bed_bug post-20260731400000) never INFER "no activity" from
+          // blank optional fields: the visit exists because activity was
+          // found, and a contradictory zero would print on the customer
+          // report. Only an explicit 0 rating states it (codex P2 r1).
+          && !(completionProfile?.followupPolicy === 'alert'
+            && (activityScore ?? clientPestRating) == null)
           && shouldInsertNoActivityFinding({
             visitOutcome,
             observations: reportObservations,
@@ -6166,7 +6219,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             'billing',
             'Visit covered by membership dues — stamped price not billed',
             `A completed recurring visit for a monthly-membership customer carried a $${Number(svc.estimated_price).toFixed(2)} per-visit price${svc.create_invoice_on_complete ? " and the series' create-invoice default" : ''}. Membership dues cover plan visits, so NO invoice was cut. If this series is actually a separately billable add-on, bill this visit manually and KEEP its per-visit price — every visit in the series will complete uninvoiced the same way, so bill each manually or roll the add-on into the customer's monthly rate.`,
-            { link: `/admin/customers/${svc.customer_id}`, metadata: { scheduledServiceId: svc.id, customerId: svc.customer_id, dedupeKey }, connection: trx },
+            // bell: false — billing FYI, not a money failure; silenced under
+            // GATE_ADMIN_BELL_POLICY even though category 'billing' rings.
+            { link: `/admin/customers/${svc.customer_id}`, bell: false, metadata: { scheduledServiceId: svc.id, customerId: svc.customer_id, dedupeKey }, connection: trx },
           );
         });
       } catch (e) { logger.warn(`[dispatch] dues-covered review alert failed: ${e.message}`); }
@@ -7315,6 +7370,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       }
     }
 
+    const reviewCadenceEnabled = require('../config/feature-gates').isEnabled('reviewSequences');
     const shouldBundleReview =
       effectiveSendCompletionSms &&
       !completionSmsAlreadyHandled &&
@@ -7322,7 +7378,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       effectiveRequestReview &&
       svc.cust_phone &&
       !serviceReportV1Delivery &&
-      (completionReviewDelayMinutes === undefined || completionReviewDelayMinutes === 0);
+      (completionReviewDelayMinutes === undefined || completionReviewDelayMinutes === 0) &&
+      // Cadence mode owns the ask: the review link is its own Day-0 message at
+      // the smart send window, never bundled into the completion/receipt SMS
+      // (bundling would also dodge the sequence's cap/cooldown bookkeeping).
+      !reviewCadenceEnabled;
 
     let bundledReviewUrl = null;
     let bundledReviewRequestId = null;
@@ -7595,7 +7655,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               // (codex P1 #3007 r13).
               applications: (typeof products !== 'undefined' && Array.isArray(products)) ? products : [],
               tracedExteriorZone: await require('../services/service-report/reentry')
-                .resolveTracedExteriorZone({ scheduled_service_id: record.scheduled_service_id || svc.id }),
+                .resolveTracedExteriorZone({
+                  scheduled_service_id: record.scheduled_service_id || svc.id,
+                  service_type: svc.service_type,
+                  interior_only_lane: completionProfile?.serviceKey === 'bed_bug_treatment',
+                }),
             },
             service: svc,
             reportUrl,
@@ -8019,16 +8083,26 @@ router.post('/:serviceId/complete', async (req, res, next) => {
 
     // Only schedule the delayed follow-up message when the review wasn't
     // already bundled into the completion SMS above.
-    if (effectiveRequestReview && svc.cust_phone && !bundledReviewUrl) {
+    // Legacy mode is SMS-only, so no phone = no ask. Cadence mode has its own
+    // channel resolver with an SMS→email fallback (sendOutreachTouch), so an
+    // email-only customer must still reach enrollment (Codex P2, r1) — the
+    // resolver stops the sequence with no_contact/opted_out when neither
+    // channel is available.
+    if (effectiveRequestReview && (svc.cust_phone || reviewCadenceEnabled) && !bundledReviewUrl) {
       try {
         const ReviewService = require('../services/review-request');
-        await ReviewService.create({
+        await ReviewService.enrollPostService({
           customerId: svc.customer_id,
           serviceRecordId: record.id,
+          serviceType: svc.service_type || null,
+          techName: svc.tech_name || null,
+          completedAt: new Date(),
           triggeredBy: 'auto',
-          delayMinutes: completionReviewDelayMinutes === undefined
-            ? 120
-            : completionReviewDelayMinutes,
+          // Only an operator-SELECTED timing travels as an explicit delay —
+          // it wins in both modes (Codex P2, r2). Untouched selector =
+          // undefined = legacy 120-min default / cadence smart window.
+          delayMinutes: completionReviewDelayMinutes,
+          legacyDelayMinutes: 120,
         });
       } catch (e) { logger.error(`[dispatch] Review request schedule failed: ${e.message}`); }
     }
@@ -8146,7 +8220,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // resumed response still carries the CTA, and best-effort re-park to
     // cover completions committed before the in-trx park deployed (the
     // dedup + live-child guards make this a no-op everywhere else).
-    if (resumingCommittedCompletion && typedFindingsType && !isIncompleteVisit && !followupSuggestion) {
+    // Untyped alert-policy profiles (bed_bug_treatment post-untype) resume
+    // through the same lane: their completion froze typedFollowupVerdict
+    // into structured_notes, and the frozen-verdict read below is
+    // form-independent. NO profile condition here — a profile deactivated,
+    // repointed, or policy-cleared between the commit and a crash retry
+    // must not hide the persisted promise from the resumed response; the
+    // obligation helper reads the frozen verdict first and returns null
+    // cheaply for lanes that never froze one (codex P2 r6).
+    if (resumingCommittedCompletion && !isIncompleteVisit && !followupSuggestion) {
       try {
         const obligation = await typedFollowupObligationForCompletedSource({
           scheduledService: { ...svc, status: 'completed' },
@@ -8326,7 +8408,17 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         typedFindingsType,
         typedDeliveryMode,
         followupSuggestion,
-      } : {}),
+      } : {
+        // Untyped alert-policy completions (bed_bug post-20260731400000)
+        // parked the same obligation — the panel needs the suggestion to
+        // render its Book-follow-up CTA (codex P1 r1).
+        ...(followupSuggestion ? { followupSuggestion } : {}),
+        // A suppressed untyped delivery posture must reach the panel too:
+        // the success overlays disclose internal-only/disabled delivery
+        // from typedDeliveryMode, else they claim "SMS + Report sent" on a
+        // completion the server suppressed (codex P2 r8).
+        ...(typedDeliveryMode !== 'auto_send' ? { typedDeliveryMode } : {}),
+      }),
     };
     // Refresh the stored response with the final invoice info — this is an
     // UPDATE of an already-succeeded row (set above immediately after the
@@ -8559,12 +8651,6 @@ router.post('/:serviceId/schedule-followup', async (req, res, next) => {
     if (!svc) return res.status(404).json({ error: 'Service not found' });
 
     const profile = await resolveCompletionProfileForScheduledService(svc).catch(() => null);
-    if (!profile?.findingsType) {
-      return res.status(409).json({
-        error: 'Follow-up booking from completion is only available for typed specialty services.',
-        code: 'followup_not_typed',
-      });
-    }
 
     // This is the server-side gate for the completion CTA, not a generic
     // booking API — the source visit must be completed and its persisted
@@ -8588,7 +8674,40 @@ router.post('/:serviceId/schedule-followup', async (req, res, next) => {
       .first()
       .catch(() => null);
     const snapshot = parseJsonObject(sourceRecord?.service_data)?.typedReportSnapshot;
-    if (!snapshot || String(snapshot.type || '') !== String(profile.findingsType)) {
+    const preAuthFrozenVerdict = parseJsonObject(sourceRecord?.structured_notes)?.typedFollowupVerdict;
+    const frozenVerdictPresent = !!(preAuthFrozenVerdict && typeof preAuthFrozenVerdict.required === 'boolean');
+    // Untyped alert-policy profiles (bed_bug post-20260731400000) book from
+    // the FROZEN verdict their completion persisted; the typed-snapshot
+    // gates below stay authoritative for typed profiles (codex P1 r1).
+    // A frozen verdict ALSO authorizes the lane by itself: ops deactivating,
+    // repointing, or clearing the alert policy after the completion must not
+    // reject the promise the completion already made — the frozen-promise
+    // contract below applies to this gate too (codex P2 r4).
+    const untypedAlertProfile = !profile?.findingsType
+      && (profile?.followupPolicy === 'alert' || frozenVerdictPresent);
+    if (!profile?.findingsType && !untypedAlertProfile) {
+      return res.status(409).json({
+        error: 'Follow-up booking from completion is only available for typed specialty services.',
+        code: 'followup_not_typed',
+      });
+    }
+    if (untypedAlertProfile) {
+      // Untyped completions always freeze their verdict; a legacy TYPED
+      // completion on the now-untyped profile still carries its snapshot.
+      // Neither present → the visit never earned the CTA — same "can't mint
+      // an included $0 follow-up" guarantee as the typed gate.
+      if (!frozenVerdictPresent && !snapshot) {
+        return res.status(409).json({
+          error: 'This visit was not completed through the follow-up flow.',
+          code: 'followup_no_typed_completion',
+        });
+      }
+    } else if (!frozenVerdictPresent && (!snapshot || String(snapshot.type || '') !== String(profile.findingsType))) {
+      // A frozen verdict bypasses the snapshot gate in BOTH directions: an
+      // untyped completion followed by a rollback/repoint that restores the
+      // typed pointer has a frozen promise but no snapshot — the mutable
+      // profile must not reject it (codex P2 r5). Without a frozen verdict
+      // the typed gate stays exactly as before.
       return res.status(409).json({
         error: 'This visit was not completed through the typed report flow.',
         code: 'followup_no_typed_completion',
@@ -8603,13 +8722,17 @@ router.post('/:serviceId/schedule-followup', async (req, res, next) => {
     // cockroach_control exemption, two-treatment visit-2 stop, German
     // "No"/window selection, palmetto "Yes" upgrade) — a stale or crafted
     // POST still can't mint an included $0 follow-up the verdict withheld.
-    const frozenCtaVerdict = parseJsonObject(sourceRecord?.structured_notes)?.typedFollowupVerdict;
+    const frozenCtaVerdict = preAuthFrozenVerdict;
     const suggestion = (frozenCtaVerdict && typeof frozenCtaVerdict.required === 'boolean')
       ? frozenCtaVerdict
       : typedFollowupVerdict({
         scheduledService: svc,
-        profile,
-        findingsType: profile.findingsType,
+        profile: profile || {},
+        // Pre-freeze legacy records on a now-untyped profile re-derive
+        // through their own snapshot's type — the pointer was cleared, not
+        // the record (codex P1 r1). The snapshot-presence gate above makes
+        // this reachable only with a snapshot in the untyped case.
+        findingsType: profile?.findingsType || snapshot?.type || null,
         values: snapshot?.values || {},
       });
     if (!suggestion?.required) {
@@ -8713,7 +8836,11 @@ router.post('/:serviceId/schedule-followup', async (req, res, next) => {
       }
       throw err;
     }
-    logger.info(`[dispatch] follow-up ${appointment.id} booked from ${svc.id} (${profile.findingsType}) for ${date}`);
+    // profile can be null on the frozen-verdict lane (transient resolver
+    // failure) — a post-insert throw here would 500 AFTER the booking
+    // committed and permanently skip reminder registration on the retry
+    // (codex P2 r6).
+    logger.info(`[dispatch] follow-up ${appointment.id} booked from ${svc.id} (${profile?.findingsType || 'untyped'}) for ${date}`);
     await resolveOpenFollowupAlerts();
     // Without this the visit never enters appointment_reminders, so the
     // 72h/24h reminder cron can't see it (the cron reads only that table).
@@ -9515,63 +9642,62 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
       }
       rescheduleOptions.technicianId = newTechId;
     }
-    const result = await SmartRebooker.reschedule(req.params.serviceId, newDate, newWindow, reasonCode || 'admin', 'admin', rescheduleOptions);
-    await syncRescheduleReminder(req.params.serviceId, newDate, newWindow, { willNotify: notifyCustomer !== false });
-    // Snapshot the just-synced reminder state BEFORE the SMS, so the no-send
-    // re-arm below can't stomp a newer reschedule that lands during the send.
-    const reminderGuards = await captureReminderGuards(req.params.serviceId);
+    // Callers with a possibly-stale board snapshot (the RescheduleModal)
+    // opt in to server-side block derivation: window_end is rebuilt from
+    // the CURRENT row's own span/duration at the submitted start, so a
+    // concurrent duration edit can't be overwritten with a stale block.
+    let effectiveWindow = newWindow;
+    if (req.body.deriveWindowFromCurrentVisit === true && newWindow?.start) {
+      const row = await db('scheduled_services')
+        .where({ id: req.params.serviceId })
+        .first('window_start', 'window_end', 'estimated_duration_minutes');
+      if (row) {
+        const dur = (() => {
+          if (row.window_start && row.window_end) {
+            const [h1, m1] = String(row.window_start).split(':').map(Number);
+            const [h2, m2] = String(row.window_end).split(':').map(Number);
+            const span = (h2 * 60 + (m2 || 0)) - (h1 * 60 + (m1 || 0));
+            if (span > 0) return span;
+          }
+          const d = parseInt(row.estimated_duration_minutes, 10);
+          if (Number.isInteger(d) && d > 0) return d;
+          return 60;
+        })();
+        const [sh, sm] = String(effectiveWindow.start).split(':').map(Number);
+        const endTotal = sh * 60 + (sm || 0) + dur;
+        if (endTotal > 23 * 60 + 59) {
+          return res.status(409).json({
+            error: "That start time would run past midnight for this visit's duration — pick an earlier hour",
+            code: 'WINDOW_CROSSES_MIDNIGHT',
+          });
+        }
+        const end = `${String(Math.floor(endTotal / 60)).padStart(2, '0')}:${String(endTotal % 60).padStart(2, '0')}`;
+        effectiveWindow = { ...effectiveWindow, end };
+      }
+    }
+    const result = await SmartRebooker.reschedule(req.params.serviceId, newDate, effectiveWindow, reasonCode || 'admin', 'admin', rescheduleOptions);
+    await syncRescheduleReminder(req.params.serviceId, newDate, effectiveWindow, { willNotify: notifyCustomer !== false });
     try {
       await emitDispatchJobUpdate({ jobId: req.params.serviceId, actorId: req.technicianId });
     } catch (err) {
       logger.error(`[dispatch] reschedule board broadcast failed for ${req.params.serviceId}: ${err.message}`);
     }
     if (notifyCustomer !== false) {
-      const svc = await db('scheduled_services')
-        .where('scheduled_services.id', req.params.serviceId)
-        .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
-        .select('scheduled_services.*', 'customers.first_name', 'customers.phone', 'customers.id as customer_id')
-        .first();
-      let notificationSent = false;
-      let notificationError = null;
-      if (!svc?.phone) {
-        notificationError = 'Customer phone unavailable';
-      } else {
-        try {
-          const vars = formatRescheduleTemplateVars(svc);
-          const body = await renderRequiredTemplate('appointment_rescheduled', vars, {
-            workflow: 'dispatch_reschedule',
-            entity_type: 'scheduled_service',
-            entity_id: req.params.serviceId,
-          });
-          const msg = await sendCustomerMessage({
-            to: svc.phone,
-            body,
-            channel: 'sms',
-            audience: 'customer',
-            purpose: 'appointment',
-            customerId: svc.customer_id,
-            identityTrustLevel: 'phone_matches_customer',
-            metadata: { original_message_type: 'reschedule_confirmation', reasonText },
-          });
-          notificationSent = !(msg?.blocked || msg?.sent === false);
-          if (!notificationSent) notificationError = msg?.code || msg?.reason || 'blocked';
-          if (notificationSent) {
-            await markRescheduleReminderNotified(req.params.serviceId);
-          }
-        } catch (err) {
-          notificationError = err.message;
-          logger.warn(`[dispatch] Reschedule committed for ${req.params.serviceId}, but SMS notification failed: ${err.message}`);
-        }
-      }
-      if (!notificationSent) {
-        // Fallback scope for a failed guard snapshot: the visit's NEW time,
-        // recomputed exactly as syncRescheduleReminder stamped it above.
-        await rearmRescheduleReminderWindows(reminderGuards, [{
-          scheduledServiceId: req.params.serviceId,
-          appointmentTime: parseETDateTime(rescheduleReminderTime(newDate, newWindow)),
-        }]);
-      }
-      return res.json({ ...result, notificationSent, notificationError });
+      // Shared notice path (recipient routing incl. appointment_notify_primary
+      // and service contacts, arrival-window copy, terminal/slot recheck at
+      // the provider handoff, guarded reminder close/re-arm) — replaces this
+      // route's former inline send, which texted customers.phone directly and
+      // closed reminder windows unguarded. syncRescheduleReminder(willNotify)
+      // above satisfies the helper's cover contract. Lazy require both ways —
+      // admin-schedule lazily requires this module too; neither runs at load.
+      const { sendRescheduleNoticeForVisit } = require('./admin-schedule');
+      const win = parseRescheduleWindow(effectiveWindow);
+      const notice = await sendRescheduleNoticeForVisit(
+        req.params.serviceId,
+        String(newDate).split('T')[0],
+        win.start,
+      );
+      return res.json({ ...result, notificationSent: notice.sent, notificationError: notice.error });
     }
     res.json(result);
   } catch (err) {

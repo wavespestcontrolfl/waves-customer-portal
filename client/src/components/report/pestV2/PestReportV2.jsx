@@ -112,8 +112,13 @@ function TrendArrow({ trend }) {
 }
 
 // ── Hero: protection status first ───────────────────────────────────────────────
-export function PestStatusHero({ status, statusSummary, supportingMetric, aiSummary, token = null, mode = 'live', tracedMap = null }) {
+export function PestStatusHero({ status, statusSummary, supportingMetric, aiSummary, token = null, mode = 'live', tracedMap = null, pressureTrendSlot = null }) {
   const tracedLive = mode === 'live';
+  // The embedded trend chart is built from the page's ORIGINAL payload — a
+  // successful rating submit recalculates the score, so the chart's current
+  // point goes stale the moment the metric refreshes. Hide it then (same
+  // rule as PestPressureCard's post-rating fallback).
+  const [trendStale, setTrendStale] = useState(false);
   // The rating POST returns a recalculated pestPressure (possibly turning an
   // insufficient reading into a real score) — hold the displayed metric in
   // state so a successful submit can refresh it without a full reload (the
@@ -127,6 +132,7 @@ export function PestStatusHero({ status, statusSummary, supportingMetric, aiSumm
     if (!pestPressure) return;
     const score = pestPressure.displayScore ?? pestPressure.score;
     if (score == null) return;
+    setTrendStale(true);
     setMetric((prev) => ({
       ...(prev || { kind: 'pressure', caption: 'Pest pressure', rating: null, submittedRating: null }),
       kind: 'pressure',
@@ -154,21 +160,33 @@ export function PestStatusHero({ status, statusSummary, supportingMetric, aiSumm
       {metric && (metric.score != null || metric.label)
         ? <SupportingMetric metric={metric} />
         : null}
+      {/* Cross-visit pressure trend rides inside the hero (owner 2026-07-30:
+          status + reading + trend + narrative + map = ONE block; the
+          standalone trend card below is suppressed when this fills). Hidden
+          after a rating submit — the chart's current point is pre-recalc. */}
+      {pressureTrendSlot && !trendStale ? (
+        <div style={{ marginTop: 12 }}>{pressureTrendSlot}</div>
+      ) : null}
       <PestPressureRating
         metric={supportingMetric}
         token={token}
         live={mode === 'live'}
         onRefreshed={refreshFromPestPressure}
+        onSettled={() => setTrendStale(true)}
       />
       {aiSummary?.body ? (
         <p style={{ fontSize: 14, color: MUTED, lineHeight: 1.5, margin: '12px 0 0' }}>{aiSummary.body}</p>
       ) : null}
       {/* Where we sprayed — the tech-traced application, combined into the
           status card so status + narrative + map read as one story
-          (owner 2026-07-21). */}
+          (owner 2026-07-21; short intro line owner 2026-07-30). */}
       {tracedMap ? (
         <div style={{ marginTop: 14 }}>
           <div data-gt="eyebrow" style={eyebrow}>Where we sprayed</div>
+          <p style={{ fontSize: 14, color: MUTED, lineHeight: 1.5, margin: '6px 0 10px' }}>
+            A replay of today&rsquo;s application — the blue band traces the treatment
+            your technician applied on-site.
+          </p>
           <TracedTreatmentZoneMap traced={tracedMap} live={tracedLive} />
         </div>
       ) : null}
@@ -196,7 +214,7 @@ function SupportingMetric({ metric }) {
 
 // One-shot customer calibration (replaces the suppressed legacy PestPressureCard
 // picker). Posts to the same token route; live mode only; hides once submitted.
-function PestPressureRating({ metric, token, live, onRefreshed }) {
+function PestPressureRating({ metric, token, live, onRefreshed, onSettled }) {
   const [submitted, setSubmitted] = useState(Boolean(metric && metric.submittedRating != null));
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
@@ -227,6 +245,11 @@ function PestPressureRating({ metric, token, live, onRefreshed }) {
       // not a dead picker.
       if (res.ok || res.status === 409) {
         setSubmitted(true);
+        // Accepted OR duplicate (another tab/device won the one-shot): a
+        // rating exists server-side either way, so the page's original
+        // trend chart is pre-recalc and must hide (codex P2 #3100) —
+        // notify BEFORE the body parse so the 409's empty body can't skip it.
+        if (onSettled) onSettled();
         // The route recalculates the score with the new signal and returns
         // the updated pestPressure — surface it (legacy card parity).
         if (res.ok && onRefreshed) {
