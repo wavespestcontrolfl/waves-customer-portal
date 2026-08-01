@@ -861,6 +861,61 @@ describe('canAutoRoute unknown-relationship demotion (owner ruling 2026-07-31)',
     expect(r.allowed).toBe(true);
   });
 
+  test('CENTRAL address gate: no positive AV verdict → no auto-route (codex round-4 P1)', () => {
+    // With AV disabled/not_attempted the deterministic flags raise nothing for
+    // a populated address, so the contract has to be stated directly:
+    // AGENTS.md "auto-create only when ... the address validates".
+    for (const av of [undefined, { status: 'not_attempted' }, { status: 'api_unavailable' },
+      { status: 'validated_accept', inServiceArea: false }]) {
+      const r = canAutoRoute(extraction([]), av ? { addressValidation: av } : {});
+      expect(r.allowed).toBe(false);
+      expect(r.reason).toBe('address_not_validated');
+    }
+  });
+
+  test('CENTRAL address gate closes the advisory-flag paths too', () => {
+    for (const flag of ['prior_complaint_unresolved', 'competing_quotes_active', 'brand_new_model_flag']) {
+      const r = canAutoRoute(extraction([flag]), { addressValidation: { status: 'not_attempted' } });
+      expect(r.allowed).toBe(false);
+      expect(r.reason).toBe('address_not_validated');
+    }
+  });
+
+  test('a known customer dispatching to their on-file address satisfies the address gate', () => {
+    // Barbara lane: no new address stated, so the booking goes to the stored
+    // (already verified) address — AV has nothing on THIS call to validate.
+    const ex = extraction(['missing_service_address'], 0.9);
+    ex.property = { service_address: {} };
+    const r = canAutoRoute(ex, { failOpen: true, callerAni: '+19414651056', knownCustomer: { hasAddress: true } });
+    expect(r.allowed).toBe(true);
+  });
+
+  test('address_not_validated files in the address-review lane', () => {
+    const item = buildTriageItem({
+      callLogId: 'c1',
+      flag: 'address_not_validated',
+      extraction: { meta: { call_summary: 'confirmed slot, address never validated' } },
+    });
+    expect(item.category).toBe('address_review');
+  });
+
+  test('a foreign offset that normalizes to an on-the-hour ET start is ALLOWED (codex round-4 P2)', () => {
+    // 19:30+05:30 == 10:00 ET. The ET wall clock is what the booking writes,
+    // so judging raw minutes parked valid hourly appointments.
+    const ex = extraction([]);
+    ex.scheduling.confirmed_start_at = '2026-07-11T19:30:00+05:30';
+    const r = canAutoRoute(ex, { addressValidation: AV_OK });
+    expect(r.allowed).toBe(true);
+  });
+
+  test('nonzero SECONDS are still rejected (the ET wall clock carries none)', () => {
+    const ex = extraction([]);
+    ex.scheduling.confirmed_start_at = '2026-07-11T09:00:30-04:00';
+    const r = canAutoRoute(ex, { addressValidation: AV_OK });
+    expect(r.allowed).toBe(false);
+    expect(r.reason).toBe('off_hour_start');
+  });
+
   test('a demoted flag still rides a scheduling-blocked return so its advisory card files (codex P2)', () => {
     // Guarded on confirmedWithStart, the demotion no longer runs for an
     // unconfirmed call — the flag stays in appointmentBlockingFlags and the

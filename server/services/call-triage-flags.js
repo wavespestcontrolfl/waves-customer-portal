@@ -832,11 +832,20 @@ function hasAgentCommittedEvidence(extraction, transcript, callStartedAt) {
  * booking writes, so it is the one that must be exact).
  */
 function confirmedStartOnTheHour(confirmedStartAt) {
-  const raw = String(confirmedStartAt || '').match(/T\d{2}:(\d{2})(?::(\d{2}))?/);
+  // Minutes come from the canonical ET wall clock, NOT the raw string (codex
+  // round-4 P2): a foreign offset like "2026-07-11T19:30:00+05:30" carries
+  // raw :30 but converts to 10:00 ET, and the ET wall clock is what the
+  // booking writes. Judging raw minutes parked valid hourly appointments.
+  //
+  // Seconds still come from the raw string, because
+  // etWallClockOfConfirmedStart returns YYYY-MM-DDTHH:MM only — it has no
+  // seconds to inspect. A schema-valid "T10:00:30" would otherwise copy a
+  // :30-second start into window_start unchanged (the earlier round-4 P1
+  // this guard was originally written for). Absent seconds count as zero.
+  const rawSeconds = String(confirmedStartAt || '').match(/T\d{2}:\d{2}:(\d{2})/);
+  if (rawSeconds && rawSeconds[1] !== '00') return false;
   const wall = etWallClockOfConfirmedStart(confirmedStartAt);
-  return !!raw && raw[1] === '00'
-    && (!raw[2] || raw[2] === '00')
-    && !!wall && wall.slice(14, 16) === '00';
+  return !!wall && wall.slice(14, 16) === '00';
 }
 
 // NO address-flag demotion lives here, deliberately (codex round-2 P1,
@@ -896,10 +905,19 @@ function canAutoRoute(extraction, opts = {}) {
   }
   const confirmedWithStart = extraction.scheduling?.status === 'confirmed'
     && !!extraction.scheduling?.confirmed_start_at;
+  // Hoisted: the auto-route exit below also needs to know whether this booking
+  // would dispatch to the customer's on-file (already Google-verified) address
+  // rather than one stated on this call.
+  const knownCustomerHasAddress = !!(opts.knownCustomer && opts.knownCustomer.hasAddress);
+  const sa = extraction.property?.service_address || {};
+  const newAddressGiven = [
+    'street_line_1', 'line1', 'street', 'street_line_2', 'line2', 'unit', 'apt',
+    'city', 'locality', 'postal_code', 'zip', 'zip_code',
+    'subdivision_or_community', 'raw_text',
+  ].some((k) => String(sa[k] || '').trim());
   if (opts.failOpen && confirmedWithStart) {
     const aniPresent = String(opts.callerAni || '').replace(/\D/g, '').length >= 10;
     const knownCustomer = !!opts.knownCustomer;
-    const knownCustomerHasAddress = !!(opts.knownCustomer && opts.knownCustomer.hasAddress);
     // Address fail-open applies ONLY when the caller did NOT give a new service
     // address on this call — i.e. we're using their on-file, Google-verified
     // address (Barbara's case: she didn't restate it). If they DID provide an
@@ -919,12 +937,6 @@ function canAutoRoute(extraction, opts = {}) {
     // A spoken community/subdivision ("the Lakewood Ranch property") is
     // location evidence too — without street/city/ZIP it can't be verified,
     // so it must hold for review, not fall back to the on-file primary.
-    const sa = extraction.property?.service_address || {};
-    const newAddressGiven = [
-      'street_line_1', 'line1', 'street', 'street_line_2', 'line2', 'unit', 'apt',
-      'city', 'locality', 'postal_code', 'zip', 'zip_code',
-      'subdivision_or_community', 'raw_text',
-    ].some((k) => String(sa[k] || '').trim());
     appointmentBlockingFlags = appointmentBlockingFlags.filter((f) => {
       if (f === 'caller_phone_missing' && aniPresent) { failedOpenFlags.push(f); return false; }
       if (f === 'name_email_mismatch') { failedOpenFlags.push(f); return false; }
@@ -1075,6 +1087,38 @@ function canAutoRoute(extraction, opts = {}) {
 
   if (extraction.consent?.do_not_contact_request === true) {
     return { allowed: false, reason: 'do_not_contact', failedOpenFlags: failedOpenFlags.length ? failedOpenFlags : undefined };
+  }
+
+  // CENTRAL address-trust gate (codex round-4 P1). AGENTS.md: auto-create
+  // only when confidence ≥ threshold AND **the address validates** AND the
+  // service maps AND no HOA/commercial flag — else triage.
+  //
+  // That contract was previously enforced only incidentally. When AV is
+  // disabled or returns not_attempted, computeDeterministicTriageFlags
+  // raises NO address flag for a populated, high-confidence address, so
+  // whatever else happened to be blocking (caller_not_authorized,
+  // prior_complaint_unresolved, competing_quotes_active) was the only thing
+  // standing between an unvalidated address and an auto-dispatch. This PR
+  // turns those advisory, so the contract now has to be stated directly.
+  //
+  // Two ways to satisfy it, both meaning "we know where the tech is going":
+  //   1. Google positively validated THIS call's address, in service area.
+  //   2. The booking dispatches to the customer's on-file address — a known
+  //      customer who stated no new address on this call (the established
+  //      fail-open recovery; that address was verified when it was saved).
+  //
+  // Consequence worth stating plainly: with ADDRESS_VALIDATION_ENABLED unset,
+  // nothing auto-routes — calls park instead of booking blind. The flag is on
+  // in production, and failing closed here is the documented posture.
+  const dispatchesToOnFileAddress = !!(opts.failOpen && knownCustomerHasAddress && !newAddressGiven);
+  if (!avPositivelyValidated && !dispatchesToOnFileAddress) {
+    return {
+      allowed: false,
+      reason: 'address_not_validated',
+      avStatus: opts.addressValidation?.status || null,
+      flags: finalFlags,
+      failedOpenFlags: failedOpenFlags.length ? failedOpenFlags : undefined,
+    };
   }
 
   // CENTRAL on-the-hour gate (codex round-3 P1). window_start is ALWAYS

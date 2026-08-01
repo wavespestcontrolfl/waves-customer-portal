@@ -135,6 +135,10 @@ function buildTriageItem({
     // (owner rule), so the office places it on an hour boundary rather than
     // the pipeline silently rounding a time the caller was told.
     off_hour_start: 'time_ambiguous',
+    // Auto-route needs a positively validated address (or a dispatch to the
+    // customer's verified on-file one). Nothing to fix on the time — the
+    // office confirms WHERE the visit goes.
+    address_not_validated: 'address_review',
     cancellation_request: 'time_ambiguous',
     after_hours_emergency: 'time_ambiguous',
     existing_appointment_coordination: 'time_ambiguous',
