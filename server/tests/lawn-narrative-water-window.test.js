@@ -60,6 +60,19 @@ describe('safeWaterText — rain window enforcement', () => {
   });
 });
 
+describe('r41 — named-weekday allocations are rejected', () => {
+  const { safeWaterText } = require('../services/service-report/lawn-report-narrative')._test;
+  const FALLBACK = 'DETERMINISTIC';
+
+  test('weekday-first fabricated daily measurement falls back', () => {
+    expect(safeWaterText("Monday brought 4.23 inches of rain, keeping this week's water total on target.", FALLBACK)).toBe(FALLBACK);
+  });
+
+  test('rain-first weekday allocation falls back', () => {
+    expect(safeWaterText('Heavy rain on Tuesday pushed the weekly total above target.', FALLBACK)).toBe(FALLBACK);
+  });
+});
+
 describe('r36 — weekly phrase must qualify the rain claim', () => {
   const { safeWaterText } = require('../services/service-report/lawn-report-narrative')._test;
   const FALLBACK = 'DETERMINISTIC';

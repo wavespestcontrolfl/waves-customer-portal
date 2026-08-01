@@ -253,6 +253,18 @@ describe('sanitizeRecommendationsAgainstTreatment', () => {
     expect(v({ recommendations: 'not-an-array' })).toBe(false);
   });
 
+  test('aliases are word-bounded — "Avoid driveway runoff" survives Drive XLR8 (r41)', () => {
+    const applied = [{ product_name: 'Drive XLR8 Post Emergent Liquid Herbicide', product_category: 'herbicide' }];
+    const ok = _test.sanitizeRecommendationsAgainstTreatment({
+      recommendations: [{ priority: 1, action: 'Avoid driveway runoff when watering in.', reason: 'x', timeframe: 'y' }],
+    }, applied);
+    expect(ok.dropped).toBe(0);
+    const bad = _test.sanitizeRecommendationsAgainstTreatment({
+      recommendations: [{ priority: 1, action: 'Avoid Drive until the turf recovers.', reason: 'x', timeframe: 'y' }],
+    }, applied);
+    expect(bad.dropped).toBe(1);
+  });
+
   test('legitimate aftercare mentioning the class passes (defer must govern the treatment)', () => {
     const { parsed, dropped } = _test.sanitizeRecommendationsAgainstTreatment({
       recommendations: [

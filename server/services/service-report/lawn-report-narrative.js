@@ -119,6 +119,11 @@ const RAIN_WINDOW_PHRASES = new RegExp([
   // single-day / sub-weekly framings — verb-first AND day-first orders
   // ("rain yesterday", "yesterday's rain" — codex P2 r27)
   '\\brain(?:fall)?\\s+(?:today|yesterday|overnight|last\\s+night)\\b',
+  // named-weekday allocations — "Monday brought 4.23 inches of rain"
+  // fabricates a daily measurement from the weekly total (codex P2 r41)
+  // gap admits decimals ("4.23") but still stops at sentence enders
+  '\\b(?:mon|tues|wednes|thurs|fri|satur|sun)day\\b(?:\\d\\.\\d|[^.!?]){0,30}\\b(?:rain(?:fall)?|inch(?:es)?|precipitation)\\b',
+  '\\b(?:rain(?:fall)?|inch(?:es)?|precipitation)\\b(?:\\d\\.\\d|[^.!?]){0,30}\\b(?:on\\s+)?(?:mon|tues|wednes|thurs|fri|satur|sun)day\\b',
   // amount-first day framing — "4.23 inches yesterday" (codex P2 r36)
   '\\binch(?:es)?\\b[^.!?]{0,25}\\b(?:today|yesterday|overnight|last\\s+night)\\b',
   '\\b(?:today|yesterday|overnight|last\\s+night)\\b[^.!?]{0,25}\\binch(?:es)?\\b',

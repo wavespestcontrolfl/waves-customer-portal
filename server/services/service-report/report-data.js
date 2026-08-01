@@ -208,7 +208,13 @@ async function attachApprovedReportProductFacts(knex, products = []) {
         'approved_for_service_report',
       );
   } catch {
-    return products;
+    // Signal the failure instead of silently returning bare rows (codex P2
+    // r41): a legacy row with product_id but null product_category loses
+    // its class identity when this lookup fails, and downstream honesty
+    // passes would treat the visit as "no corrective products applied".
+    const marked = products.slice();
+    marked.catalogEnrichmentFailed = true;
+    return marked;
   }
   const catalogById = new Map(catalogRows.map((row) => [String(row.id), row]));
   return products.map((product) => {
@@ -2116,6 +2122,15 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     knex('termite_station_checks').where({ service_record_id: service.id }).catch(() => []),
   ]);
   const products = await attachApprovedReportProductFacts(knex, rawProducts);
+  // A failed catalog enrichment degrades class identity the same way a
+  // failed base load does (codex P2 r41): rows with product_id but null
+  // product_category can no longer be recognized as fungicide/herbicide,
+  // so honesty passes must treat the product picture as UNKNOWN, not "no
+  // corrective products applied".
+  if (products.catalogEnrichmentFailed
+    && rawProducts.some((p) => p.product_id && !String(p.product_category || '').trim())) {
+    productsLoadFailed = true;
+  }
 
   const areaLabels = locationAreaLabels([
     ...parseJsonArray(service.areas_serviced),

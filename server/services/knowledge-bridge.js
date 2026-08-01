@@ -415,7 +415,11 @@ function productNameTermSource(name) {
     const alias = m[1].trim();
     if (/^[A-Za-z][\w-]{3,}$/.test(alias)) variants.add(esc(alias));
   }
-  return [...variants].join('|');
+  // Token boundaries on EVERY variant (codex P2 r41): an unbounded 'Drive'
+  // (from "Drive XLR8 ...") matched the start of "driveway", so "Avoid
+  // driveway runoff" satisfied the avoid-<product> pattern. \b bounds each
+  // alias as a whole word inside the composed alternation.
+  return [...variants].map((v) => `\\b(?:${v})\\b`).join('|');
 }
 
 // Words that appear in catalog names but are far too generic to guard as a
