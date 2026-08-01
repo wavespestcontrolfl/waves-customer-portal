@@ -1304,6 +1304,27 @@ function hubHostSet() {
   return hosts;
 }
 
+// The canonical HUB origin, and a hub-only host test. hubHostSet above
+// deliberately includes every SPOKE so absolute spoke URLs get policed as
+// internal routes — but an alias TARGET is verified against the hub's
+// ALLOWED_INTERNAL_LINKS, so re-emitting a spoke origin would publish a dead
+// spoke link. Aliased absolute links therefore always land on the hub, which
+// is also what the spoke contract wants for a handoff (pre-push Codex r3).
+function hubOrigin() {
+  try {
+    return new URL(process.env.ASTRO_HUB_ORIGIN || 'https://www.wavespestcontrol.com').origin;
+  } catch { return 'https://www.wavespestcontrol.com'; }
+}
+function isHubHost(hostname) {
+  const h = String(hostname || '').toLowerCase();
+  const hubs = new Set(['wavespestcontrol.com', 'www.wavespestcontrol.com']);
+  try {
+    const bare = new URL(hubOrigin()).hostname.toLowerCase().replace(/^www\./, '');
+    hubs.add(bare); hubs.add(`www.${bare}`);
+  } catch { /* defaults above */ }
+  return hubs.has(h);
+}
+
 // Every internal-route candidate in the text, normalized. Shared by the
 // gate and by the refresh grandfathering pass over the prior live body.
 function collectInternalDestinations(text) {
@@ -1519,10 +1540,15 @@ function repairInventedInternalRoutes(body, allowedInternalLinks = [], options =
       // readers to a page that does not exist there — the spoke contract
       // requires hub handoffs to keep the full URL
       // (spoke-seed-seeder.js:406-407, Codex r3).
+      // A SPOKE origin is never preserved: the alias target is a hub page, so
+      // re-emitting the spoke host would publish a dead spoke link. Spoke
+      // absolutes are re-pointed at the hub (pre-push Codex r3).
       let origin = '';
       try {
         const u = new URL(dest);
-        if (hubHosts.has(u.hostname.toLowerCase())) origin = u.origin;
+        if (hubHosts.has(u.hostname.toLowerCase())) {
+          origin = isHubHost(u.hostname) ? u.origin : hubOrigin();
+        }
       } catch { /* relative destination — no origin to preserve */ }
       return `[${anchorText}](${open}${origin}${alias}${close}${titlePart})`;
     }

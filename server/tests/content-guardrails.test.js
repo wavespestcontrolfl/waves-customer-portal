@@ -2357,6 +2357,10 @@ describe('deterministic repair of invented internal routes (owner ruling 2026-08
     expect(r.repairs[0]).toMatchObject({ from: '/pest-control/', to: '/pest-control-services/', action: 'aliased' });
     // Relative destinations stay relative.
     expect(repairInventedInternalRoutes('[services](/pest-control/)').body).toBe('[services](/pest-control-services/)');
+    // A SPOKE origin is NOT preserved — the alias target only exists on the
+    // hub, so keeping the spoke host would publish a dead link.
+    const spoke = repairInventedInternalRoutes('[services](https://sarasotafllawncare.com/pest-control/)');
+    expect(spoke.body).toBe('[services](https://www.wavespestcontrol.com/pest-control-services/)');
   });
 
   test('every alias target is a real allowlisted route (module-load contract)', () => {
