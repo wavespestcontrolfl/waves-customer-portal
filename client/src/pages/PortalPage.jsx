@@ -7906,7 +7906,7 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
                 >
                   {options.map((option) => (
                     <option key={option.id} value={option.id}>
-                      {option.label}{option.perVisit ? ` - ${money(option.perVisit)}/application` : option.serviceKey === 'waveguard_tier' ? '' : option.monthly ? ` - ${money(option.monthly)}/mo` : ` - ${money(option.oneTime || option.dueAtStart)}`}
+                      {option.label}{option.perVisit ? ` - ${money(option.perVisit)}/application` : option.serviceKey === 'waveguard_tier' ? '' : option.monthly ? ' - priced per application' : ` - ${money(option.oneTime || option.dueAtStart)}`}
                     </option>
                   ))}
                 </select>
@@ -7928,7 +7928,7 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
                     </div>
                     <div style={{ textAlign: compact ? 'left' : 'right' }}>
                       <div style={{ fontSize: 24, color: B.glassNavy, fontWeight: 850, lineHeight: 1 }}>
-                        {selected.perVisit ? `${money(selected.perVisit)}/application` : selected.serviceKey === 'waveguard_tier' ? 'Member per-visit pricing' : selected.monthly ? `${money(selected.monthly)}/mo` : money(selected.oneTime || selected.dueAtStart)}
+                        {selected.perVisit ? `${money(selected.perVisit)}/application` : selected.serviceKey === 'waveguard_tier' ? 'Member per-visit pricing' : selected.monthly ? 'Priced per application' : money(selected.oneTime || selected.dueAtStart)}
                       </div>
                       <div style={{ marginTop: 4, color: '#475569', fontSize: 12 }}>
                         {selected.confidence ? `${selected.confidence} confidence` : 'pricing estimate'}
@@ -8288,7 +8288,7 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
                     >
                       {options.map(option => (
                         <option key={option.id} value={option.id}>
-                          {option.label}{option.perVisit ? ` - ${money(option.perVisit)}/application` : option.serviceKey === 'waveguard_tier' ? '' : option.monthly ? ` - ${money(option.monthly)}/mo` : ` - ${money(option.oneTime || option.dueAtStart)}`}
+                          {option.label}{option.perVisit ? ` - ${money(option.perVisit)}/application` : option.serviceKey === 'waveguard_tier' ? '' : option.monthly ? ' - priced per application' : ` - ${money(option.oneTime || option.dueAtStart)}`}
                         </option>
                       ))}
                     </select>
@@ -8303,7 +8303,7 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
                         </div>
                         <div style={{ textAlign: compact ? 'left' : 'right' }}>
                           <div style={{ fontSize: 24, color: B.glassNavy, fontWeight: 850, lineHeight: 1 }}>
-                            {selected.perVisit ? `${money(selected.perVisit)}/application` : selected.serviceKey === 'waveguard_tier' ? 'Member per-visit pricing' : selected.monthly ? `${money(selected.monthly)}/mo` : money(selected.oneTime || selected.dueAtStart)}
+                            {selected.perVisit ? `${money(selected.perVisit)}/application` : selected.serviceKey === 'waveguard_tier' ? 'Member per-visit pricing' : selected.monthly ? 'Priced per application' : money(selected.oneTime || selected.dueAtStart)}
                           </div>
                           <div style={{ marginTop: 4, color: PORTAL_SHELL.muted, fontSize: 12 }}>
                             {selected.confidence ? `${selected.confidence} confidence` : 'pricing estimate'}

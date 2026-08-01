@@ -187,11 +187,13 @@ describe('ServiceSection', () => {
     expect(screen.queryByText(/applications per year included/)).not.toBeInTheDocument();
   });
 
-  it('keeps the combined /mo total on a bundle section with a single itemized service (no per-application headline)', () => {
+  it('shows no combined /mo total and no per-application headline on a bundle section with a single itemized service', () => {
     // Synthetic unsplittable bundle (pest + lawn) whose legacy snapshot
-    // itemizes only the pest slice as a treatment row. The card must lead with
-    // the combined recurring total ($130.00/mo), NOT the lone pest per-application
-    // price ($94.00) — accept/billing charges the bundle total.
+    // itemizes only the pest slice as a treatment row. Two wrong headlines
+    // exist here: the lone pest per-application price ($94.00) understates
+    // the plan, and the combined "$130.00/mo" is a plan total the estimate
+    // surface must not carry ("per month" audit 2026-08-01). The card leads
+    // with the billing unit; the itemized rows carry the real prices.
     render(
       <ServiceSection
         section={{
@@ -224,11 +226,12 @@ describe('ServiceSection', () => {
       />,
     );
 
-    // Combined cadence total leads with a standalone "/mo" suffix. Were the
-    // bundle wrongly treated per-application, the headline would be the lone
-    // pest price ("/ application" suffix) instead of the combined "/mo" total.
-    expect(screen.getByText('$130.00')).toBeInTheDocument();
-    expect(screen.getByText('/mo')).toBeInTheDocument();
+    // Headline names the billing unit; neither wrong headline appears. The
+    // itemized pest row still shows its own per-application price.
+    expect(screen.getByText('Priced per application')).toBeInTheDocument();
+    expect(screen.queryByText('$130.00')).not.toBeInTheDocument();
+    expect(screen.queryByText('/mo')).not.toBeInTheDocument();
+    expect(screen.getByText('$94.00')).toBeInTheDocument();
   });
 
   it('shows the selected quote-required frequency reason', () => {

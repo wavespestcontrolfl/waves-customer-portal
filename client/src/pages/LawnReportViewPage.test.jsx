@@ -68,3 +68,36 @@ describe('LawnReportViewPage', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(/add your name/i);
   });
 });
+
+// "Per month" audit 2026-08-01: a tier with a monthly figure but no visit
+// count used to fall back to "$45/mo" — a flat monthly framing for a plan
+// billed per application. The fallback now names the billing unit instead.
+describe('pricing tier fallbacks', () => {
+  it('renders per-application pricing when visits are derivable', async () => {
+    const report = {
+      ...REPORT,
+      pricing: { service_label: 'Your lawn program', tiers: [
+        { label: 'Standard', monthly: 45, annual: 540, visits: 6, recommended: true },
+      ] },
+    };
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ success: true, report }) })));
+    renderAt();
+    expect(await screen.findByText(/\$90\.00/)).toBeInTheDocument();
+    expect(screen.getByText(/\/ application/)).toBeInTheDocument();
+    expect(screen.queryByText(/\/mo\b/)).not.toBeInTheDocument();
+  });
+
+  it('never shows a monthly amount when the visit count is missing', async () => {
+    const report = {
+      ...REPORT,
+      pricing: { service_label: 'Your lawn program', tiers: [
+        { label: 'Standard', monthly: 45 },
+      ] },
+    };
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ success: true, report }) })));
+    renderAt();
+    expect(await screen.findByText('Priced per application')).toBeInTheDocument();
+    expect(screen.queryByText(/\$45/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/\/mo\b/)).not.toBeInTheDocument();
+  });
+});

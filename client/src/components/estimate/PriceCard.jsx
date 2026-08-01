@@ -198,7 +198,14 @@ export function perApplicationNetForFrequency(frequency) {
   return pt > 0 && Number.isFinite(visits) && visits > 0 ? round2(pt) : null;
 }
 
-export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_WORDING, showSavings = true, glassSetupBullet = false, preferPerApplicationPrice = false, perApplicationNoun = 'application', showTierBadge = true }) {
+// suppressCombinedTotal — the multi-service bundle card's escape from the
+// no-combined-plan-totals rule ("per month" audit 2026-08-01): a legacy
+// bundle can itemize only ONE member service as a treatment row, so a
+// per-application HEADLINE would understate the plan — but the combined
+// "$X/mo" it showed instead was a plan total the estimate surface must not
+// carry. With the flag the headline names the billing unit and the itemized
+// rows below carry the actual per-application prices.
+export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_WORDING, showSavings = true, glassSetupBullet = false, preferPerApplicationPrice = false, perApplicationNoun = 'application', showTierBadge = true, suppressCombinedTotal = false }) {
   if (!frequency) return null;
 
   // Glass copy pack (PR B): tier display + pest inclusion swaps
@@ -360,7 +367,7 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
             {fmtMoney(perAppAnchor)} / {perApplicationNoun}
           </span>
         ) : null}
-        {perAppNet == null && showSavings && savings > 0 && !showLowConfidenceRange ? (
+        {perAppNet == null && showSavings && savings > 0 && !showLowConfidenceRange && !suppressCombinedTotal ? (
           <span style={{
             fontSize: 15,
             color: '#64748B',
@@ -374,7 +381,7 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
         <span style={{
           // Promoted 26->40 (design audit 2026-07-06): the price is the
           // decision number — SSR renders it 62-84px; 26px lost to headings.
-          fontSize: quoteRequired ? 24 : showLowConfidenceRange ? 34 : PRICE_FONT,
+          fontSize: quoteRequired || suppressCombinedTotal ? 24 : showLowConfidenceRange ? 34 : PRICE_FONT,
           fontWeight: 600,
           color: W.blueDeeper,
           lineHeight: 1,
@@ -382,11 +389,13 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
         }}>
         {quoteRequired
           ? 'Quote required'
+          : suppressCombinedTotal
+          ? 'Priced per application'
           : showLowConfidenceRange
           ? `${fmtMoney(rangeLow)}–${fmtMoney(rangeHigh)}`
           : fmtMoney(perAppNet != null ? perAppNet : cadencePrice)}
         </span>
-        {!quoteRequired ? (
+        {!quoteRequired && !suppressCombinedTotal ? (
           <span style={{ fontSize: 14, fontWeight: 500, color: CUSTOMER_SURFACE.muted, whiteSpace: 'nowrap' }}>
             {perAppNet != null ? `/ ${perApplicationNoun}` : periodLabel}
           </span>
@@ -460,7 +469,18 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
           lineHeight: 1.35,
         }}>
           <span>{manualDiscount.label || 'Discount'}</span>
-          <strong style={{ whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>{fmtMoneySigned(-manualDiscountInterval)}{periodLabel}</strong>
+          {/* Denominate the promo in the same unit as the headline it reduces
+              ("per month" audit 2026-08-01): per application on per-app cards;
+              the interval label only where the charge genuinely follows the
+              cadence (legacy monthly cards); bare dollars on the bundle card,
+              whose combined cadence total is suppressed. */}
+          <strong style={{ whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
+            {perAppNet != null && manualDiscountPerApplication > 0
+              ? <>{fmtMoneySigned(-manualDiscountPerApplication)} / {perApplicationNoun}</>
+              : suppressCombinedTotal
+                ? fmtMoneySigned(-manualDiscountInterval)
+                : <>{fmtMoneySigned(-manualDiscountInterval)}{periodLabel}</>}
+          </strong>
         </div>
       ) : null}
 

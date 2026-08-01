@@ -319,7 +319,7 @@ export default function LawnReportViewPage() {
                     <div style={{ fontFamily: FONTS.heading, fontWeight: 800, fontSize: 18, color: TEXT }}>
                       {Number(tier.visits) > 0 && Number(tier.annual ?? tier.monthly * 12) > 0
                         ? <>${fmtCents(Number(tier.annual ?? tier.monthly * 12) / Number(tier.visits))}<span style={{ fontSize: 14, fontWeight: 600, color: MUTED }}> / application</span></>
-                        : <>${fmtCents(tier.monthly)}<span style={{ fontSize: 14, fontWeight: 600, color: MUTED }}>/mo</span></>}
+                        : <span style={{ fontSize: 14, fontWeight: 600, color: MUTED }}>Priced per application</span>}
                     </div>
                   ) : null}
                 </div>

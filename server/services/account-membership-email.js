@@ -82,6 +82,13 @@ async function loadCustomer(customerId) {
       'profile_label',
       'waveguard_tier',
       'monthly_rate',
+      // resolveBillingLane inputs (sendMembershipUpdated gates its
+      // "Monthly rate" line on the resolved lane): without billing_mode the
+      // resolver falls to NULL-mode inference, and a per-application customer
+      // with a lingering tier+rate would be told their monthly rate changed —
+      // the exact audience the gate exists for.
+      'billing_mode',
+      'pipeline_stage',
       'member_since',
       'active',
       'service_paused_at',
@@ -531,7 +538,19 @@ async function sendMembershipUpdated({
     changes.push(`Tier: ${before.waveguard_tier || 'None'} to ${after.waveguard_tier || 'None'}`);
   }
   if (before.monthly_rate !== undefined && after.monthly_rate !== undefined && Number(before.monthly_rate || 0) !== Number(after.monthly_rate || 0)) {
-    changes.push(`Monthly rate: ${money(before.monthly_rate)} to ${money(after.monthly_rate)}`);
+    // monthly_rate is stored for almost every recurring customer, but only a
+    // monthly-membership lane is actually BILLED monthly — 157 of 159
+    // per-application customers carry a rate they are never charged (audit
+    // 2026-08-01). Gate the customer-facing line on the resolved lane, the
+    // same way card-enrollment-email.js does, so a per-application customer
+    // is never told their "monthly rate" changed.
+    const { resolveBillingLane } = require('./billing-lane');
+    const billsMonthly = resolveBillingLane({ ...customer, ...after }).mode === 'monthly_membership';
+    if (billsMonthly) {
+      changes.push(`Monthly rate: ${money(before.monthly_rate)} to ${money(after.monthly_rate)}`);
+    } else {
+      changes.push('Your plan pricing was updated — you are billed per application, and each visit is charged after it is completed.');
+    }
   }
   const summary = changes.join('; ') || 'Your membership details were updated.';
   return sendTemplate({

@@ -13008,8 +13008,15 @@ function buildAcceptNotificationPayload({
   // Admin copy still reflects that the invoice was sent.
   const { monthlyText, proposedNote } = acceptedMonthlyDisplay(monthlyTotal, proposedMonthlyTotal);
   if (payerBilled) {
-    const planLabel = treatAsOneTime ? serviceLabel : `${waveguardTier} WaveGuard ${monthlyText}`;
-    const adminPlanLabel = treatAsOneTime ? serviceLabel : `${planLabel}${proposedNote}`;
+    // ADMIN copy keeps the monthly figure (internal shorthand for the plan
+    // size); the CUSTOMER copy must not — a recurring plan is billed per
+    // application, and every other residential branch below already says just
+    // "Your {tier} WaveGuard plan is approved". This branch was missed when
+    // the others were scrubbed (audit 2026-08-01).
+    const planLabel = treatAsOneTime ? serviceLabel : `${waveguardTier} WaveGuard plan`;
+    const adminPlanLabel = treatAsOneTime
+      ? serviceLabel
+      : `${waveguardTier} WaveGuard ${monthlyText}${proposedNote}`;
     // Mirror the non-payer invoice-mode paths: only claim the invoice reached the
     // billing contact when delivery actually succeeded. A payer with no usable AP
     // email fails sendViaSMSAndEmail (invoiceLinkDelivered=false) — surface that
@@ -13176,14 +13183,17 @@ function readV1Shape(estData) {
 
 function shapePreferenceAddOns(prefs, pestTier) {
   if (!pestTier) return [];
-  const visitsPerYear = Number(pestTier.apps || pestTier.v || 4) || 4;
   return SERVICE_PREF_KEYS.map((key) => {
     const cfg = SERVICE_PREFS[key];
-    const monthlySavings = Math.round(((cfg.perVisit * visitsPerYear) / 12) * 100) / 100;
+    // The add-on IS priced per visit (SERVICE_PREFS[].perVisit), so quote it
+    // that way. Spreading it across twelve months described a monthly charge
+    // the customer never sees — the plan bills per application (audit
+    // 2026-08-01).
+    const perApplicationSavings = Math.round(Number(cfg.perVisit) * 100) / 100;
     return {
       key,
       label: cfg.label,
-      detail: `${cfg.offDesc} Save $${monthlySavings.toFixed(monthlySavings % 1 ? 2 : 0)}/mo if removed.`,
+      detail: `${cfg.offDesc} Save $${perApplicationSavings.toFixed(perApplicationSavings % 1 ? 2 : 0)} per application if removed.`,
       preChecked: prefs[key] !== false,
     };
   });
@@ -18550,6 +18560,7 @@ async function handleEstimateAsk(req, res, next) {
 }
 
 module.exports = router;
+module.exports.shapePreferenceAddOns = shapePreferenceAddOns;
 module.exports.handleEstimateAsk = handleEstimateAsk;
 module.exports.handleEstimateView = handleEstimateView;
 module.exports.verifyEstimateAskToken = verifyEstimateAskToken;

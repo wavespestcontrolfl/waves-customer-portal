@@ -1445,7 +1445,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           ? `$${Number(emailPerApp.amount).toFixed(2)}/application`
           : emailMultiRecurring
             ? 'Priced per application — full breakdown inside'
-            : `$${monthly.toFixed(2)}/mo`;
+            // Last resort: a single recurring line whose per-application price
+            // could not be derived. Recurring work is never described as a
+            // flat monthly charge (audit 2026-08-01) — defer to the estimate
+            // rather than invent a cadence.
+            : 'Priced per application — full breakdown inside';
     const nextStepSummary = quoteRequired
       ? 'A Waves team member will review the property details and follow up with the right quote.'
       : commercialDetected

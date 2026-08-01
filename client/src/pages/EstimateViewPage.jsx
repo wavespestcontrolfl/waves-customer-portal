@@ -1157,7 +1157,7 @@ function MembershipCard({ membership }) {
                 {s.discountPct > 0 ? `${s.discountPct}% member discount` : 'Member pricing'}
                 {Number(s.perApplicationSavings) > 0
                   ? ` · save ${money(s.perApplicationSavings)} per application`
-                  : (Number(s.monthlySavings) > 0 ? ` · save ${money(s.monthlySavings)}/mo` : '')}
+                  : ''}
               </span>
             </div>
           ))}
@@ -2088,7 +2088,7 @@ export function PlanTotalSummary({ combined, selectedFrequency = null, preCredit
       fontSize: 16,
     }}>
       <span>{creditLabel}</span>
-      <strong style={num}>{fmtMoneySigned(-amount)}<span style={{ fontWeight: 600 }}> /mo</span></strong>
+      <strong style={num}>{fmtMoneySigned(-amount)}</strong>
     </div>
   );
 
@@ -3507,6 +3507,11 @@ export function ServiceSection({
             // cadence total accept/billing charges, so the bundle card keeps
             // its combined /mo total.
             preferPerApplicationPrice={section.key !== 'bundle'}
+            // The bundle card used to keep its combined /mo total here; that
+            // is a plan total the estimate surface must not carry ("per
+            // month" audit 2026-08-01) — its headline now names the billing
+            // unit and the itemized rows carry the per-application prices.
+            suppressCombinedTotal={section.key === 'bundle'}
             wording={priceWording}
             glassSetupBullet={glassSetupBulletEligible}
             // showSavings only governs the struck-through pre-discount anchor
