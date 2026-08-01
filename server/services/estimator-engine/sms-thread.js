@@ -55,6 +55,12 @@ const QUOTE_HINT_RE = new RegExp(
   'i',
 );
 
+// Markers that the sender is REPLACING the previous ask rather than
+// continuing it. Deliberately narrow — an explicit correction word plus a
+// trigger body that itself names nothing out of scope; the grounded
+// classifier still makes the actual call.
+const CORRECTION_RE = /\b(?:actually|instead|never\s*mind|nevermind|scratch\s+that|forget\s+(?:that|it)|different\s+question|change\s+of\s+plans)\b/i;
+
 /**
  * FAST-tier confirm: is this inbound text (in the context of a thread with
  * a pest-control company) actually requesting a quote/pricing for service?
@@ -187,14 +193,20 @@ function smsOrigin(threadKey) {
 async function runThreadDraft({
   phone, digits, triggerBody, origin, dryRun,
   groundedCustomerId = null, groundedConflict = false, groundedScope = null,
-  groundedMultiScope = false,
+  groundedMultiScope = false, groundedOvercap = false,
 }) {
   const result = { phone: `…${digits.slice(-4)}`, lane: null, created: false, skipped: null };
   try {
     const { buildSmsThreadContext } = require('./context-builder');
     const { runDraftPipeline, notify } = require('./index');
     const context = await buildSmsThreadContext({
-      phone, triggerBody, groundedCustomerId, groundedConflict, groundedScope, groundedMultiScope,
+      phone,
+      triggerBody,
+      groundedCustomerId,
+      groundedConflict,
+      groundedScope,
+      groundedMultiScope,
+      groundedOvercap,
     });
     if (context.error) {
       result.lane = 'red';
@@ -285,6 +297,11 @@ async function startSmsThreadDraft({ phone, triggerBody = '', skipIntentGate = f
     // out-of-scope home service ("power washing service") is not a lead.
     if (guarded && deterministicOutOfScope(triggerBody)) {
       result.skipped = 'out_of_scope_service';
+      // TERMINAL: a scope decision, not an operational failure. Callers
+      // that fall back on a failed handoff (lead-intake's shell path) must
+      // NOT create an estimate and alert the owner for work Waves does not
+      // do — see engineDraftHandoff in services/lead-intake.js.
+      result.terminal = true;
       return result;
     }
     // Grounding for the classifier (fail-open → ungrounded prompt).
@@ -296,9 +313,21 @@ async function startSmsThreadDraft({ phone, triggerBody = '', skipIntentGate = f
     // conversation can't hard-kill a new valid request; the grounded
     // classifier still sees the full recent thread and judges stale
     // context itself.
+    // The LATEST message wins when it is a correction. "Do you do power
+    // washing?" → "Actually, quote me for quarterly service instead" is an
+    // in-scope request, but 'quarterly'/'service' are not IN_SCOPE_RE nouns,
+    // so joining the burst hard-vetoed it. When the trigger itself carries
+    // no out-of-scope phrase AND reads as a correction, hand the judgment
+    // to the grounded classifier instead. A bare follow-up ("how much?")
+    // after an out-of-scope ask still vetoes — it is the same request.
     if (guarded && (triage?.vetoTexts || []).length
+      && !deterministicOutOfScope(triggerBody)
+      && CORRECTION_RE.test(String(triggerBody || ''))) {
+      logger.info('[estimator-sms] burst veto skipped — trigger reads as a correction');
+    } else if (guarded && (triage?.vetoTexts || []).length
       && deterministicOutOfScope([triggerBody, ...triage.vetoTexts].join('\n'))) {
       result.skipped = 'out_of_scope_service_thread';
+      result.terminal = true;
       return result;
     }
     if (!skipIntentGate) {
@@ -322,6 +351,10 @@ async function startSmsThreadDraft({ phone, triggerBody = '', skipIntentGate = f
       const signal = await threadQuoteSignal(triggerBody, triage, { hintGate: false });
       if (signal.method === 'ai_out_of_scope' || signal.method === 'ai_existing_job') {
         result.skipped = `no_quote_intent_${signal.method}`;
+        // Terminal for the same reason as the deterministic vetoes: the
+        // grounded classifier decided this is not quotable work, so a
+        // caller's legacy fallback must not draft it anyway.
+        result.terminal = true;
         return result;
       }
     }
@@ -361,6 +394,7 @@ async function startSmsThreadDraft({ phone, triggerBody = '', skipIntentGate = f
       groundedConflict: triage?.groundedConflict === true,
       groundedScope: triage?.groundedScope || null,
       groundedMultiScope: triage?.groundedMultiScope === true,
+      groundedOvercap: triage?.groundedOvercap === true,
     })
       .catch((err) => {
         logger.error(`[estimator-sms] detached draft failed: ${err.message}`);

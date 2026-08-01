@@ -131,7 +131,7 @@ function deterministicOutOfScope(text) {
 // how the two earlier copies drifted. STREET_TOKEN_ALIASES adds the
 // compare-time directionals (n/north, se/southeast, …) the normalizer's
 // split set deliberately omits.
-const { STREET_SPLIT_SUFFIXES } = require('../../utils/address-normalizer');
+const { STREET_SPLIT_SUFFIXES, CITY_PREFIX_TOKENS } = require('../../utils/address-normalizer');
 
 const ALL_STREET_SUFFIXES = new Set([
   ...STREET_SPLIT_SUFFIXES,
@@ -263,10 +263,20 @@ function extractAddressCandidates(text) {
         const DIRECTIONALS = new Set(['north', 'south', 'east', 'west', 'n', 's', 'e', 'w',
           'northeast', 'northwest', 'southeast', 'southwest', 'ne', 'nw', 'se', 'sw']);
         const suffixBoundary = new Set([...ALL_STREET_SUFFIXES].filter((t) => !DIRECTIONALS.has(t)));
-        let boundary = -1;
+        const boundaries = [];
         for (let i = 0; i < flIdx; i += 1) {
-          if (suffixBoundary.has(String(words[i]).toLowerCase())) boundary = i;
+          if (suffixBoundary.has(String(words[i]).toLowerCase())) boundaries.push(i);
         }
+        // Walk back off boundaries that are really CITY PREFIXES — "St
+        // James City", "Lake Wales", "Key Largo" all start with a
+        // suffix-shaped token, and taking the LAST one as the boundary
+        // reconstructs "James City" and then rejects the stored row. Same
+        // protection (and same stop-at-first rule, so the street keeps at
+        // least its own suffix) as splitStreetAndCity in
+        // utils/address-normalizer.
+        let pos = boundaries.length - 1;
+        while (pos > 0 && CITY_PREFIX_TOKENS.has(String(words[boundaries[pos]]).toLowerCase())) pos -= 1;
+        const boundary = boundaries.length ? boundaries[pos] : -1;
         const cityWords = boundary >= 0 ? words.slice(boundary + 1, flIdx) : words.slice(flIdx - 1, flIdx);
         const city = cityWords.join(' ').trim();
         if (city) locality = `, ${city}${zipNC ? ` ${zipNC[1]}` : ''}`;
@@ -304,6 +314,10 @@ function extractAddressCandidates(text) {
       num: m[1],
       firstWord: words[0],
       locality,
+      // The EXPLICIT unit the sender stated, surfaced so confirmation can
+      // demand exact agreement and the DB query can discriminate on it.
+      unit: unitValue ? `${unitWord} ${unitValue}` : null,
+      unitValue: unitValue || null,
       variants: words.map((_, i) => `${m[1]} ${words.slice(0, i + 1).join(' ')}${unitSuffix}`),
     });
   }
@@ -338,9 +352,18 @@ function candidateMatchesRow(candidate, row) {
   const line1 = [row.address_line1, row.address_line2].filter(Boolean).join(' ');
   const rowFull = [line1, [row.city, row.zip].filter(Boolean).join(' ')]
     .filter(Boolean).join(', ');
+  // When the sender STATED a unit, grounding must prove that unit. In
+  // sameStreetAddress's default (duplicate-detection) mode a known unit
+  // compares equal to a MISSING one — conservative there, wrong here: the
+  // sole row at "100 Palm Ave" with a null address_line2 would ground an
+  // explicit "100 Palm Ave Apt 6" and price the building instead of the
+  // apartment. requireExactUnit makes known-vs-missing a mismatch.
+  // Unit-less candidates keep the conservative behavior (a stated street
+  // with no unit may legitimately match the row that carries one).
+  const opts = candidate.unitValue ? { requireExactUnit: true } : undefined;
   return candidate.variants.some((v) => {
     try {
-      return sameStreetAddress(`${v}${candidate.locality || ''}`, rowFull);
+      return sameStreetAddress(`${v}${candidate.locality || ''}`, rowFull, opts);
     } catch (err) {
       return false;
     }
@@ -455,21 +478,84 @@ async function loadTriageInner({ phone, triggerBody, deadline = Date.now() + TRI
       logger.warn(`[estimator-scope] triage thread lookup failed: ${err.message}`);
     }
   }
-  const groundingText = [String(triggerBody || ''), ...burstTexts].join('\n');
+  // Grounding is anchored to THIS request. Burst proximity is not property
+  // attribution: if Waves recently texted an off-file manager about
+  // customer A at 100 Palm Ave and the manager then asks for a NEW quote at
+  // unmatched 200 Oak St, importing A's address from the burst would link
+  // the draft (and A's membership) to a request that never mentioned A.
+  // So: when the TRIGGER names any address, those are the only candidates.
+  // Burst/outbound context is used ONLY to resolve an address the trigger
+  // references implicitly ("the same place", "that property") — i.e. when
+  // the trigger names none at all — and then only when the burst names
+  // exactly ONE distinct address, so there is nothing to guess between.
+  const triggerCandidates = extractAddressCandidates(String(triggerBody || ''));
+  const burstCandidates = extractAddressCandidates(burstTexts.join('\n'));
+  const burstKeys = new Set(burstCandidates.map((c) => `${c.num} ${c.firstWord} ${c.unit || ''}`.toLowerCase()));
+  let groundingCandidates = [];
+  if (triggerCandidates.length) groundingCandidates = triggerCandidates;
+  else if (burstKeys.size === 1) groundingCandidates = burstCandidates.slice(0, 1);
 
-  for (const cand of extractAddressCandidates(groundingText)) {
+  // Fetch bound. The discriminating predicates below run SQL-side so the
+  // named unit/locality cannot fall outside the slice, and one extra row is
+  // fetched to DETECT saturation: an over-cap result means "too many
+  // same-street candidates to attribute" — ambiguous, which red-lanes.
+  // It must never read as "no customer" and fall through to a prospect draft.
+  const ADDRESS_ROW_CAP = 25;
+  let groundingOvercap = false;
+  // Locality the sender stated, if any (", Venice 34285" / ", 34285").
+  const localityOf = (cand) => {
+    const m = String(cand.locality || '').match(/^,\s*(.*?)\s*(\d{5})?\s*$/);
+    return { city: (m && m[1]) || '', zip: (m && m[2]) || '' };
+  };
+  // Narrow SQL-side on what the sender actually stated. Both filters are
+  // NULL-TOLERANT in the direction confirmation is tolerant: a row with no
+  // stored locality still compares conservatively equal downstream, so it
+  // must survive the query. A stated UNIT is not tolerant — confirmation
+  // now requires exact unit agreement, so unit-less rows cannot match and
+  // excluding them here is what frees the cap for the row that can.
+  const discriminate = (qb, cand, cols) => {
+    if (cand.unitValue) {
+      const v = String(cand.unitValue);
+      qb.where(function unitMatch() {
+        this.whereRaw(`coalesce(${cols.line2}, '') ILIKE ?`, [`%${v}`])
+          .orWhereRaw(`coalesce(${cols.line2}, '') ILIKE ?`, [`% ${v} %`])
+          .orWhereRaw(`coalesce(${cols.line1}, '') ILIKE ?`, [`%${v}`])
+          .orWhereRaw(`coalesce(${cols.line1}, '') ILIKE ?`, [`% ${v} %`]);
+      });
+    }
+    const loc = localityOf(cand);
+    if (loc.city || loc.zip) {
+      qb.where(function localityMatch() {
+        this.whereRaw(`coalesce(${cols.city}, '') = ''`)
+          .orWhereRaw(`coalesce(${cols.zip}, '') = ''`);
+        if (loc.city) this.orWhereRaw(`${cols.city} ILIKE ?`, [loc.city]);
+        if (loc.zip) this.orWhereRaw(`coalesce(${cols.zip}, '') = ?`, [loc.zip]);
+      });
+    }
+    return qb;
+  };
+
+  for (const cand of groundingCandidates) {
     const label = `Message thread names address "${cand.num} ${cand.firstWord}…" which matches`;
     const prefixes = prefixVariants(cand.num, cand.firstWord);
     assertTime();
-    const rows = await bounded(db('customers')
-      .modify(whereLiveCustomer)
-      .whereRaw('address_line1 ILIKE ANY(?)', [prefixes])
-      // Wide sanity bound, NOT a display limit: confirmation
-      // (candidateMatchesRow) still gates every row. A tight limit lets 5
-      // same-street rows crowd out the named unit's row ("Apt 20" in a
-      // complex) before confirmation ever sees it.
-      .limit(25))
+    const rows = await bounded(discriminate(
+      db('customers')
+        .modify(whereLiveCustomer)
+        .whereRaw('address_line1 ILIKE ANY(?)', [prefixes]),
+      cand,
+      { line1: 'address_line1', line2: 'address_line2', city: 'city', zip: 'zip' },
+    )
+      // Deterministic order so a capped slice is reproducible rather than
+      // whatever the planner returned first.
+      .orderBy('address_line1', 'asc')
+      .orderBy('id', 'asc')
+      .limit(ADDRESS_ROW_CAP + 1))
       .select('id', 'first_name', 'last_name', 'address_line1', 'address_line2', 'city', 'zip');
+    if (rows.length > ADDRESS_ROW_CAP) {
+      groundingOvercap = true;
+      continue;
+    }
     for (const row of rows) {
       if (candidateMatchesRow(cand, row)) {
         const shown = [row.address_line1, row.city].filter(Boolean).join(', ');
@@ -484,20 +570,31 @@ async function loadTriageInner({ phone, triggerBody, deadline = Date.now() + TRI
     // own query: a schema surprise here must not sink the primary path.
     try {
       assertTime();
-      const propRows = await bounded(db('customer_properties as cp')
-        .join('customers as c', 'c.id', 'cp.customer_id')
-        .where('c.active', true)
-        .whereNull('c.deleted_at')
-        .whereIn('c.pipeline_stage', CUSTOMER_STAGES)
-        // Sold/deactivated properties are somebody else's address now — a
-        // new occupant's quote must not ground against the old owner.
-        .where('cp.active', true)
-        .whereRaw('cp.address_line1 ILIKE ANY(?)', [prefixes])
-        // Same wide sanity bound as the customers query above — never a
-        // display limit; confirmation gates.
-        .limit(25))
+      const propRows = await bounded(discriminate(
+        db('customer_properties as cp')
+          .join('customers as c', 'c.id', 'cp.customer_id')
+          .where('c.active', true)
+          .whereNull('c.deleted_at')
+          .whereIn('c.pipeline_stage', CUSTOMER_STAGES)
+          // Sold/deactivated properties are somebody else's address now — a
+          // new occupant's quote must not ground against the old owner.
+          .where('cp.active', true)
+          .whereRaw('cp.address_line1 ILIKE ANY(?)', [prefixes]),
+        cand,
+        {
+          line1: 'cp.address_line1', line2: 'cp.address_line2', city: 'cp.city', zip: 'cp.zip',
+        },
+      )
+        // Same discrimination + saturation detection as the customers query.
+        .orderBy('cp.address_line1', 'asc')
+        .orderBy('cp.id', 'asc')
+        .limit(ADDRESS_ROW_CAP + 1))
         .select('c.id', 'c.first_name', 'c.last_name',
           'cp.address_line1 as address_line1', 'cp.address_line2 as address_line2', 'cp.city', 'cp.zip');
+      if (propRows.length > ADDRESS_ROW_CAP) {
+        groundingOvercap = true;
+        propRows.length = 0;
+      }
       for (const row of propRows) {
         if (candidateMatchesRow(cand, row)) {
           const shown = [row.address_line1, row.city].filter(Boolean).join(', ');
@@ -666,6 +763,11 @@ async function loadTriageInner({ phone, triggerBody, deadline = Date.now() + TRI
     // the context build red-lanes instead of guessing.
     groundedConflict: distinctIds.size > 1,
     groundedMultiScope,
+    // Too many same-street candidates to attribute the request to one of
+    // them. Routed to the same red lane as the other ambiguity signals: an
+    // over-cap fetch must never read as "no customer" and let the request
+    // fall through to an unlinked prospect draft on somebody's property.
+    groundedOvercap: groundingOvercap,
     recentTexts,
     vetoTexts,
   };

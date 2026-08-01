@@ -254,6 +254,20 @@ describe('extractAddressCandidates', () => {
     expect(extractAddressCandidates('service at 100 Sample Causeway Venice FL')[0].locality).toBe(', Venice');
   });
 
+  test('CITY-PREFIX tokens are not consumed as the street boundary', () => {
+    // "St James City", "Lake Wales", "Key Largo" all START with a
+    // suffix-shaped token; taking the LAST suffix as the boundary
+    // reconstructed 'James City' and then rejected the stored row. Mirrors
+    // splitStreetAndCity's protection in utils/address-normalizer.
+    expect(extractAddressCandidates('quote for 100 Main St St James City FL 33956')[0].locality)
+      .toBe(', St James City 33956');
+    expect(extractAddressCandidates('quote for 100 Main St Lake Wales FL')[0].locality).toBe(', Lake Wales');
+    expect(extractAddressCandidates('service at 100 Main St Key Largo FL 33037')[0].locality)
+      .toBe(', Key Largo 33037');
+    // A plain city after a suffix is unaffected.
+    expect(extractAddressCandidates('quote for 100 Main St Venice FL')[0].locality).toBe(', Venice');
+  });
+
   test('boundary-only suffixes also bind a bare trailing ZIP', () => {
     // The bare-ZIP test used to consult the alias table alone, so Loop/Way/
     // Trail forms silently dropped their ZIP.
@@ -744,8 +758,40 @@ describe('loadThreadTriageContext', () => {
       phone: null,
       triggerBody: 'quote for 100 Palm Ave Apt 20 please',
     });
-    expect(mockState.limits.customers).toContain(25);
-    expect(mockState.limits['customer_properties as cp']).toContain(25);
+    // cap + 1: the extra row is the SATURATION probe (see the over-cap pin).
+    expect(mockState.limits.customers).toContain(26);
+    expect(mockState.limits['customer_properties as cp']).toContain(26);
+  });
+
+  test('an over-cap address fetch is AMBIGUOUS, never a silent "no customer"', async () => {
+    // 26 rows come back for a broad same-street prefix: the request cannot
+    // be attributed to one of them. It must red-lane, not fall through to
+    // an unlinked prospect draft on somebody's property.
+    mockState.rows.customers = Array.from({ length: 26 }, (_, i) => ({
+      id: `c-${i}`, first_name: 'Some', last_name: 'Body', address_line1: '100 Palm Ave', address_line2: `Apt ${i}`,
+    }));
+    const triage = await loadThreadTriageContext({
+      phone: null,
+      triggerBody: 'quote for 100 Palm Ave please',
+    });
+    expect(triage.groundedOvercap).toBe(true);
+    expect(triage.matchedExistingCustomer).toBe(false);
+    expect(triage.groundedCustomerId).toBeNull();
+  });
+
+  test('the named unit still grounds when many same-street rows exist (SQL-side discrimination)', async () => {
+    // The unit predicate runs server-side, so the mock stands in for a
+    // filtered result set: the named unit survives the cap.
+    mockState.rows.customers = [
+      { id: 'c-20', first_name: 'Named', last_name: 'Unit', address_line1: '100 Palm Ave', address_line2: 'Apt 20', city: 'Venice' },
+    ];
+    const triage = await loadThreadTriageContext({
+      phone: null,
+      triggerBody: 'quote for 100 Palm Ave Apt 20 please',
+    });
+    expect(triage.matchedExistingCustomer).toBe(true);
+    expect(triage.groundedScope).toMatchObject({ line2: 'Apt 20' });
+    expect(triage.groundedOvercap).toBe(false);
   });
 
   test('the coverage query uses a wide sanity bound (100) so another property\'s combos cannot crowd out the matched property\'s coverage', async () => {
@@ -834,6 +880,92 @@ describe('loadThreadTriageContext', () => {
     triage = await loadThreadTriageContext({ phone: '+17245550000', triggerBody: 'quote please' });
     expect(triage.groundedCustomerId).toBe('c-1');
     expect(triage.groundedScope).toBeNull();
+  });
+
+  test('an EXPLICIT unit never grounds against a unitless row', async () => {
+    // sameStreetAddress's default mode calls known-unit == missing-unit
+    // equal (conservative for duplicate detection, wrong for grounding):
+    // "Apt 6" would have grounded the building-level row and priced it.
+    mockState.rows.customers = [
+      { id: 'c-2', first_name: 'Building', last_name: 'Level', address_line1: '100 Palm Ave', address_line2: null, city: 'Venice' },
+    ];
+    let triage = await loadThreadTriageContext({
+      phone: null,
+      triggerBody: 'quote for 100 Palm Ave Apt 6 please',
+    });
+    expect(triage.matchedExistingCustomer).toBe(false);
+
+    // The SAME unit still grounds.
+    mockState.rows.customers = [
+      { id: 'c-2', first_name: 'Apt', last_name: 'Six', address_line1: '100 Palm Ave', address_line2: 'Apt 6', city: 'Venice' },
+    ];
+    triage = await loadThreadTriageContext({
+      phone: null,
+      triggerBody: 'quote for 100 Palm Ave Apt 6 please',
+    });
+    expect(triage.matchedExistingCustomer).toBe(true);
+
+    // A unit-LESS candidate keeps the conservative behavior.
+    mockState.rows.customers = [
+      { id: 'c-3', first_name: 'Apt', last_name: 'One', address_line1: '100 Palm Ave', address_line2: 'Apt 1', city: 'Venice' },
+    ];
+    triage = await loadThreadTriageContext({
+      phone: null,
+      triggerBody: 'quote for 100 Palm Ave please',
+    });
+    expect(triage.matchedExistingCustomer).toBe(true);
+  });
+
+  test('grounding is anchored to the TRIGGER — burst context never imports an address', async () => {
+    // Waves texted the manager about customer A minutes ago; the manager
+    // now asks about a DIFFERENT, unmatched property. Grounding to A would
+    // link the draft (and A's membership) to a request that never
+    // mentioned A.
+    mockState.rows.sms_log = [
+      {
+        message_body: 'Confirmed: visit at 4021 Coral Bay Loop is booked for Friday',
+        created_at: new Date().toISOString(),
+        direction: 'outbound',
+      },
+    ];
+    mockState.rows.customers = [
+      { id: 'c-2', first_name: 'Pat', last_name: 'Homeowner', address_line1: '4021 Coral Bay Loop' },
+    ];
+    const triage = await loadThreadTriageContext({
+      phone: '+17245550000',
+      triggerBody: 'what would you charge at 200 Oak St?',
+    });
+    expect(triage.matchedExistingCustomer).toBe(false);
+    expect(triage.groundedCustomerId).toBeNull();
+  });
+
+  test('a trigger with NO address resolves an implicit reference from a single burst address', async () => {
+    mockState.rows.sms_log = [
+      {
+        message_body: 'Confirmed: visit at 4021 Coral Bay Loop is booked for Friday',
+        created_at: new Date().toISOString(),
+        direction: 'outbound',
+      },
+    ];
+    mockState.rows.customers = [
+      { id: 'c-2', first_name: 'Pat', last_name: 'Homeowner', address_line1: '4021 Coral Bay Loop' },
+    ];
+    let triage = await loadThreadTriageContext({
+      phone: '+17245550000',
+      triggerBody: 'can you add flea treatment at the same place?',
+    });
+    expect(triage.groundedCustomerId).toBe('c-2');
+
+    // …but TWO distinct burst addresses leave nothing to resolve to.
+    mockState.rows.sms_log = [
+      { message_body: 'visit at 4021 Coral Bay Loop Friday', created_at: new Date().toISOString(), direction: 'outbound' },
+      { message_body: 'and 900 Other Property Rd Monday', created_at: new Date().toISOString(), direction: 'outbound' },
+    ];
+    triage = await loadThreadTriageContext({
+      phone: '+17245550000',
+      triggerBody: 'can you add flea treatment at the same place?',
+    });
+    expect(triage.groundedCustomerId).toBeNull();
   });
 
   test('two UNITS of the same customer stay distinct entries and drop groundedScope', async () => {

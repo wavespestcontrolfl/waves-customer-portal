@@ -720,6 +720,14 @@ describe('buildSmsThreadContext distinct-customer conflict (GATE_ESTIMATOR_SCOPE
     expect(context.customer).toBeUndefined();
   });
 
+  test('gate ON + OVER-CAP address fetch red-lanes (never a silent prospect draft)', async () => {
+    process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
+    mockCustomerRows = [];
+    const context = await buildSmsThreadContext({ ...SMS_ARGS, groundedOvercap: true });
+    expect(context.error).toBe('ambiguous_grounding');
+    expect(context.customer).toBeUndefined();
+  });
+
   test('gate ON, no ambiguity: the phone-matched customer keeps full trust', async () => {
     process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
     mockCustomerRows = [PHONE_MATCHED];
@@ -737,6 +745,10 @@ describe('buildSmsThreadContext distinct-customer conflict (GATE_ESTIMATOR_SCOPE
     expect(context.isExistingCustomer).toBe(true);
 
     context = await buildSmsThreadContext({ ...SMS_ARGS, groundedMultiScope: true });
+    expect(context.error).toBeUndefined();
+    expect(context.isExistingCustomer).toBe(true);
+
+    context = await buildSmsThreadContext({ ...SMS_ARGS, groundedOvercap: true });
     expect(context.error).toBeUndefined();
     expect(context.isExistingCustomer).toBe(true);
   });

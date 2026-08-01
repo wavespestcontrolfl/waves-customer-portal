@@ -499,7 +499,7 @@ async function buildCallContext(callLogId) {
 async function buildSmsThreadContext({
   phone, triggerAt = new Date(), triggerBody = '',
   groundedCustomerId = null, groundedConflict = false, groundedScope = null,
-  groundedMultiScope = false,
+  groundedMultiScope = false, groundedOvercap = false,
 }) {
   if (!last10(phone)) return { error: 'no_usable_phone' };
   // SMS path only: a service-contact sender (spouse/tenant/manager on the
@@ -521,12 +521,14 @@ async function buildSmsThreadContext({
   //    prospect on an existing customer's parcel);
   //  - groundedMultiScope: one customer, but the text named several of
   //    their confirmed properties — linking them would price the primary
-  //    parcel and silently pick one of the properties named.
-  // One unified exit for both: a machine-readable error the caller bells
-  // red on (runThreadDraft red-lanes any context.error and names it in the
-  // bell body), so a human resolves which property/customer is meant.
-  // Gate off, neither signal ever flows and this is unreachable.
-  if (guardsOn && (groundedConflict === true || groundedMultiScope === true)) {
+  //    parcel and silently pick one of the properties named;
+  //  - groundedOvercap: too many same-street rows to attribute the named
+  //    address to one of them (a large condo, a prefix spanning cities).
+  // One unified exit for all three: a machine-readable error the caller
+  // bells red on (runThreadDraft red-lanes any context.error and names it
+  // in the bell body), so a human resolves which property/customer is
+  // meant. Gate off, no signal ever flows and this is unreachable.
+  if (guardsOn && (groundedConflict === true || groundedMultiScope === true || groundedOvercap === true)) {
     return { error: 'ambiguous_grounding' };
   }
   const customerMatch = await loadCustomerByPhone(

@@ -205,28 +205,40 @@ async function notifyAdam(customer, interest, estimate) {
 // the customer leaves the state machine only once a manual-task artifact
 // exists. Any handoff failure falls back to the shell path — the supersede
 // must never lose a lead.
+// Returns { drafted, terminal }:
+//  - drafted: the engine owns this reply; the caller is done.
+//  - terminal: the engine's SCOPE GUARDS refused the request (out-of-scope
+//    work, or coordination on an already-booked job). That is a decision,
+//    NOT an operational failure — the shell fallback must not run, or
+//    "power wash my yard" still produces an estimate and an owner alert.
+//    Anything else (gate off, cooldown, bell failure, exception) is
+//    operational and keeps the fallback so a lead is never lost.
 async function engineDraftHandoff(customer, body, reason) {
   try {
     const { smsThreadDraftsEnabled, startSmsThreadDraft } = require('./estimator-engine/sms-thread');
-    if (!smsThreadDraftsEnabled()) return false;
+    if (!smsThreadDraftsEnabled()) return { drafted: false, terminal: false };
     const started = await startSmsThreadDraft({
       phone: customer.phone,
       triggerBody: body,
       skipIntentGate: true,
     });
     if (!started?.started) {
+      if (started?.terminal) {
+        logger.info(`[lead-intake] engine handoff refused as out-of-scope (${started.skipped}) — no shell fallback`);
+        return { drafted: false, terminal: true };
+      }
       logger.warn(`[lead-intake] engine handoff not started (${started?.skipped || 'unknown'}) — falling back to shell`);
-      return false;
+      return { drafted: false, terminal: false };
     }
     await db('customers').where({ id: customer.id }).update({
       lead_intake_status: 'estimate_drafted',
       updated_at: new Date(),
     });
     logger.info(`[lead-intake] Engine handoff for customer ${customer.id} — ${reason}`);
-    return true;
+    return { drafted: true, terminal: false };
   } catch (e) {
     logger.error(`[lead-intake] engine handoff failed (falling back to shell): ${e.message}`);
-    return false;
+    return { drafted: false, terminal: false };
   }
 }
 
@@ -298,9 +310,14 @@ async function handleIntakeReply(customer, body) {
         })
         .orderBy('created_at', 'desc')
         .first();
-      if (!existingShell && await engineDraftHandoff(customer, body, `service selected (${cls.interest})`)) {
-        return { handled: true, next: 'estimate_drafted' };
-      }
+      const handoff = existingShell
+        ? { drafted: false, terminal: false }
+        : await engineDraftHandoff(customer, body, `service selected (${cls.interest})`);
+      if (handoff.drafted) return { handled: true, next: 'estimate_drafted' };
+      // Scope-refused: handled, but nothing was drafted and nothing is
+      // owed. The state stays put (an 'estimate_drafted' stamp would be a
+      // lie) so a genuine in-scope follow-up still gets the machine.
+      if (handoff.terminal) return { handled: true, next: status };
       const estimate = await createOrUpdateDraftEstimate(customer, cls.interest);
       await db('customers').where({ id: customer.id }).update({
         lead_intake_status: 'estimate_drafted',
@@ -380,9 +397,13 @@ async function handleIntakeReply(customer, body) {
       })
       .orderBy('created_at', 'desc')
       .first();
-    if (!existingShell && await engineDraftHandoff(customer, body, `address captured (${interest})`)) {
-      return { handled: true, next: 'estimate_drafted' };
-    }
+    const handoff = existingShell
+      ? { drafted: false, terminal: false }
+      : await engineDraftHandoff(customer, body, `address captured (${interest})`);
+    if (handoff.drafted) return { handled: true, next: 'estimate_drafted' };
+    // Scope-refused — same contract as the awaiting_service branch above:
+    // handled, no estimate, no owner alert, state unchanged.
+    if (handoff.terminal) return { handled: true, next: status };
 
     const estimate = await createOrUpdateDraftEstimate(customer, interest);
     await db('customers').where({ id: customer.id }).update({

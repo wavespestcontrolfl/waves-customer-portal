@@ -309,6 +309,55 @@ describe('scope guards (GATE_ESTIMATOR_SCOPE_GUARDS)', () => {
     expect(mockNotify).not.toHaveBeenCalled();
   });
 
+  test('a CORRECTION escapes the burst veto and reaches the grounded classifier', async () => {
+    // "Do you do power washing?" → "Actually, quote me for quarterly
+    // service instead" — in scope, but 'quarterly'/'service' are not
+    // IN_SCOPE_RE nouns, so the joined burst hard-vetoed it.
+    mockLoadTriage.mockResolvedValueOnce({
+      lines: [],
+      matchedExistingCustomer: false,
+      recentTexts: ['Do you do power washing?'],
+      vetoTexts: ['Do you do power washing?'],
+    });
+    mockDeterministicOutOfScope.mockImplementation((text) => /power wash/i.test(text));
+    mockDispatch.mockResolvedValueOnce({
+      ok: true,
+      json: { quote_request: true, service_offered: true, relates_to_existing_job: false, confidence: 0.9 },
+    });
+    const result = await startSmsThreadDraft({
+      phone: PHONE,
+      triggerBody: 'Actually, quote me for quarterly service instead',
+    });
+    expect(result.started).toBe(true);
+    expect(mockDispatch).toHaveBeenCalled();
+  });
+
+  test('a bare follow-up after an out-of-scope ask still vetoes (same request)', async () => {
+    mockLoadTriage.mockResolvedValueOnce({
+      lines: [],
+      matchedExistingCustomer: false,
+      recentTexts: ['Do you do power washing?'],
+      vetoTexts: ['Do you do power washing?'],
+    });
+    mockDeterministicOutOfScope.mockImplementation((text) => /power wash/i.test(text));
+    const result = await startSmsThreadDraft({ phone: PHONE, triggerBody: 'how much?' });
+    expect(result.skipped).toBe('out_of_scope_service_thread');
+    expect(result.terminal).toBe(true);
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
+  test('a correction whose OWN text is out of scope still vetoes', async () => {
+    // No mockLoadTriage queue entry: the trigger-body veto fires BEFORE
+    // triage loads, so queuing one would leak into the next test.
+    mockDeterministicOutOfScope.mockImplementation((text) => /power wash|gutter/i.test(text));
+    const result = await startSmsThreadDraft({
+      phone: PHONE,
+      triggerBody: 'Actually, gutter cleaning instead',
+    });
+    expect(result.skipped).toBe('out_of_scope_service');
+    expect(result.terminal).toBe(true);
+  });
+
   test('a STALE out-of-scope mention (outside the burst window) never hard-vetoes', async () => {
     mockLoadTriage.mockResolvedValueOnce({
       lines: [],
@@ -376,6 +425,8 @@ describe('scope guards (GATE_ESTIMATOR_SCOPE_GUARDS)', () => {
       skipCooldown: true,
     });
     expect(result.skipped).toBe('out_of_scope_service');
+    // TERMINAL: lead-intake must not fall back to a shell estimate.
+    expect(result.terminal).toBe(true);
     expect(mockNotify).not.toHaveBeenCalled();
     expect(mockDispatch).not.toHaveBeenCalled();
   });
@@ -395,6 +446,9 @@ describe('scope guards (GATE_ESTIMATOR_SCOPE_GUARDS)', () => {
       skipCooldown: true,
     });
     expect(result.skipped).toBe('no_quote_intent_ai_out_of_scope');
+    // Terminal too: the resume came from lead-intake, whose fallback would
+    // otherwise draft the out-of-scope work anyway.
+    expect(result.terminal).toBe(true);
     expect(mockDispatch).toHaveBeenCalledTimes(1);
     expect(mockNotify).not.toHaveBeenCalled();
     expect(mockRunDraftPipeline).not.toHaveBeenCalled();

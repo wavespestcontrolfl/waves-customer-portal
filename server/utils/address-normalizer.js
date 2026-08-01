@@ -574,5 +574,9 @@ module.exports = {
   // estimator's no-comma locality parser — reuse this set instead of
   // maintaining a parallel hand-written list that drifts.
   STREET_SPLIT_SUFFIXES,
+  // Suffix-shaped tokens that commonly START a city name ("St James City",
+  // "Lake Wales", "Key Largo", "Ridge Manor"). Shared so callers that split
+  // street from city apply the same protection splitStreetAndCity does.
+  CITY_PREFIX_TOKENS,
   UNIT_DESIGNATORS,
 };
