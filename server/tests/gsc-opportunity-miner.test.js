@@ -475,3 +475,37 @@ describe('deriveLinkBoost', () => {
     expect(opp.score_breakdown.factsReady).toBe(15);
   });
 });
+
+describe('persistAll upsert binding integrity (07-31 regression)', () => {
+  // knex counts binding placeholders across the WHOLE raw string — SQL
+  // comments included. A "?" inside the upsert's comment block shipped
+  // 07-30 and broke every daily mine ("Expected 13 bindings, saw 15"),
+  // silently starving the blog queue. Assert the raw SQL's placeholder
+  // count matches the bindings array exactly.
+  test('placeholder count in the upsert SQL matches the bindings array', async () => {
+    const db = require('../models/db');
+    const calls = [];
+    db.raw = jest.fn((sql, bindings) => {
+      calls.push({ sql, bindings });
+      return Promise.resolve({ rowCount: 1 });
+    });
+    const { GscOpportunityMiner } = require('../services/seo/gsc-opportunity-miner');
+    const miner = new GscOpportunityMiner();
+    const persisted = await miner.persistAll([{
+      bucket: 'striking_distance',
+      action_type: 'new_supporting_blog',
+      query: 'test query',
+      page_url: null,
+      service: 'pest',
+      city: 'sarasota',
+      score: 90,
+      score_breakdown: { base: 90 },
+      signal_metadata: { source: 'test' },
+      dedupe_key: 'test:binding:integrity',
+    }]);
+    expect(persisted).toBe(1);
+    expect(calls.length).toBe(1);
+    const placeholders = (calls[0].sql.match(/\?/g) || []).length;
+    expect(placeholders).toBe(calls[0].bindings.length);
+  });
+});
