@@ -874,6 +874,48 @@ describe('annual prepay renewal helpers', () => {
     )).toEqual(['2026-08-05', '2026-11-05', '2027-02-05', '2027-05-05']);
   });
 
+  test('a promised first target adopts only an exact-date visit, never a tolerance match', async () => {
+    const columnQuery = query({
+      columnInfo: {
+        scheduled_date: {},
+        service_type: {},
+        annual_prepay_term_id: {},
+        window_start: {},
+        window_end: {},
+        time_window: {},
+        technician_id: {},
+        estimated_duration_minutes: {},
+        notes: {},
+      },
+    });
+    // An unrelated existing route visit two weeks after the promised date —
+    // inside the half-cadence tolerance that would normally consume the slot.
+    const rowsQuery = query({
+      rows: [
+        { id: 'svc-route', customer_id: 'customer-p', scheduled_date: '2026-08-15', service_type: 'Quarterly Pest Control', status: 'pending' },
+      ],
+    });
+    const seeded = query({ returning: [{ id: 'svc-p1', scheduled_date: '2026-08-01' }] });
+    setDbQueues({ scheduled_services: [columnQuery, rowsQuery, seeded] });
+
+    // 2 sold, 1 existing → 1 to seed. Without the exact-only rule the Aug-15
+    // visit would absorb the Aug-01 promised slot and Nov-01 would seed instead.
+    await expect(_private.ensureCoverageRowsForTerm({
+      id: 'term-p',
+      customer_id: 'customer-p',
+      term_start: '2026-08-01',
+      term_end: '2027-08-01',
+      coverage_service_type: 'Quarterly Pest Control',
+      coverage_visit_count: 2,
+      coverage_cadence: 'quarterly',
+      first_visit_date: '2026-08-01',
+    }, undefined, { today: '2026-07-31' })).resolves.toMatchObject({ createdCount: 1 });
+
+    expect(seeded.insert).toHaveBeenCalledWith(expect.objectContaining({
+      scheduled_date: '2026-08-01',
+    }));
+  });
+
   test('the effective first visit date prefers the promise, falling back to term start', () => {
     expect(_private.effectiveFirstVisitDate({ term_start: '2026-07-30', first_visit_date: '2026-08-01' }))
       .toBe('2026-08-01');

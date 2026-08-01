@@ -4328,7 +4328,13 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
             <input
               type="date"
               value={firstVisitDate}
-              onChange={(e) => setFirstVisitDate(e.target.value)}
+              onChange={(e) => {
+                const next = e.target.value;
+                setFirstVisitDate(next);
+                // The time input disables without a date; a retained time would
+                // keep submitDisabled true with no way to clear it.
+                if (!next) setFirstVisitWindowStart("");
+              }}
               min={termStart || undefined}
               max={termEnd || undefined}
               className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"

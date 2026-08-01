@@ -469,10 +469,19 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
   const cadenceIntervalDays = cadenceMonths ? cadenceMonths * 30 : (coverageCadenceDays(coverageCadence) || 30);
   const slotToleranceDays = Math.max(7, Math.floor(cadenceIntervalDays / 2));
   const remainingToSeed = Math.max(0, coverageVisitCount - existingRows.length);
+  // The first target carries an operator PROMISE when first_visit_date made it
+  // the anchor: only an existing visit on exactly that date may satisfy it (the
+  // call-booked visit the promise refers to). Half-cadence tolerance would let
+  // an unrelated route visit weeks away suppress the promised date entirely —
+  // the customer would be told nothing and nobody would come on the day they
+  // were quoted.
+  const promisedTarget = dateOnly(term?.first_visit_date) === targetDates[0] ? targetDates[0] : null;
   const datesToSeed = [];
   for (const scheduledDate of targetDates) {
     if (datesToSeed.length >= remainingToSeed) break;
+    const exactOnly = scheduledDate === promisedTarget;
     const matchIndex = availableExistingDates.findIndex((existingDate) => {
+      if (exactOnly) return existingDate === scheduledDate;
       const diff = daysUntil(existingDate, scheduledDate);
       return diff != null && Math.abs(diff) <= slotToleranceDays;
     });
