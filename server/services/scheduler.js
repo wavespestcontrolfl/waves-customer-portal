@@ -4153,9 +4153,30 @@ function initScheduledJobs() {
           // onSkip inserts a reschedule_log row unconditionally — with the
           // sweep spanning two days, a service yesterday's pass already
           // flagged must not be re-flagged toward the
-          // 2-noshows-in-90-days outreach trigger.
+          // 2-noshows-in-90-days outreach trigger. Occurrence-aware: a soft
+          // Quick Move no-show recorded an EARLIER slot of this same row
+          // (original_date + original_window = that missed slot) and must
+          // not suppress flagging a genuine later miss — including a rebook
+          // later the SAME day, which only the window distinguishes (codex
+          // r2). NULL slot fields match legacy rows to keep their old
+          // per-row dedup.
+          const missedDateStr = svc.scheduled_date
+            ? String(svc.scheduled_date instanceof Date ? svc.scheduled_date.toISOString() : svc.scheduled_date).slice(0, 10)
+            : null;
+          const missedWindowStr = svc.window_start ? `${svc.window_start}-${svc.window_end}` : null;
           const alreadyFlagged = await db('reschedule_log')
             .where({ scheduled_service_id: svc.id, reason_code: 'customer_noshow' })
+            .where(function occurrenceMatch() {
+              if (!missedDateStr) return; // no slot info — legacy per-row dedup
+              this.whereNull('original_date').orWhere(function currentSlot() {
+                this.where('original_date', missedDateStr);
+                if (missedWindowStr) {
+                  this.andWhere(function sameWindow() {
+                    this.where('original_window', missedWindowStr).orWhereNull('original_window');
+                  });
+                }
+              });
+            })
             .first('id');
           if (alreadyFlagged) continue;
           try {

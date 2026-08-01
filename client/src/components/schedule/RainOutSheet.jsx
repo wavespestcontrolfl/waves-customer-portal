@@ -1,7 +1,7 @@
-// Dispatch-side "Rain out" sheet — the admin equivalent of the tech app's
-// RainOutSheet (pages/tech/TechHomePage.jsx). Moves this visit (or the rest
-// of the assigned tech's route) off the weather and texts the customer a
-// reply-1-confirm message with a self-serve reschedule link. All logic lives in
+// Dispatch-side "Quick Move Appointment" sheet — the admin equivalent of the
+// tech app's QuickMoveSheet (pages/tech/TechHomePage.jsx). Moves this visit
+// (or the rest of the assigned tech's route) for weather or a schedule delay
+// and texts the customer a self-serve reschedule link. All logic lives in
 // server/services/rain-out.js; this calls the admin endpoints:
 //   GET  /admin/dispatch/:id/rain-out-options
 //   POST /admin/dispatch/:id/rain-out
@@ -16,14 +16,31 @@ import { TIMEZONE } from '../../lib/timezone';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
-// Same four weather reasons the tech sheet offers; rain-out.js maps each to
-// a customer-facing phrase in the SMS ("we moved you off the heavy rain…").
+// Same reasons the tech sheet offers; rain-out.js maps each to a
+// customer-facing lead in the SMS. The non-weather reasons render only when
+// the options payload says the server gate (GATE_QUICKMOVE_EXTRA_REASONS)
+// is on — the server rejects the codes otherwise. "No-show" here is the
+// SOFT path (visit rebooked + texted); the terminal Mark-as-no-show action
+// on the detail sheet keeps the fee/notice machinery.
 const RAIN_REASONS = [
   { code: 'weather_rain', label: 'Rain' },
   { code: 'weather_lightning', label: 'Lightning' },
   { code: 'weather_wind', label: 'Wind' },
   { code: 'weather_heat', label: 'Heat' },
 ];
+const EXTRA_REASONS = [
+  { code: 'running_late', label: 'Running late' },
+  { code: 'equipment_issue', label: 'Equipment trouble' },
+  { code: 'tech_emergency', label: 'Emergency' },
+  { code: 'customer_noshow', label: 'No-show' },
+];
+const EXTRA_REASON_CODES = new Set(EXTRA_REASONS.map((r) => r.code));
+
+// Friendly copy for the server's structured rejections.
+const ERROR_COPY = {
+  noshow_route_scope: 'No-show moves apply to this stop only.',
+  target_not_later: 'Running late needs a time after the current window — pick a later slot.',
+};
 
 // Sentinel selection key for the custom-time option (distinct from the preset
 // keys, which are `${kind}:${date}:${start}`).
@@ -108,6 +125,17 @@ export default function RainOutSheet({ service, onClose, onDone }) {
 
   const allOptions = options ? [...(options.sameDay || []), ...(options.days || [])] : [];
   const keyOf = (opt) => `${opt.kind}:${opt.date}:${opt.window.start}`;
+  // "Running behind" can only push a same-day visit LATER — hide same-day
+  // presets that start at/before the current window (the server rejects
+  // them with target_not_later; this keeps them unpickable). Day moves are
+  // unaffected.
+  const currentStartMin = hhmmToMin(options?.service?.window?.start);
+  const optionVisibleFor = (opt, reasonCode) => {
+    if (reasonCode !== 'running_late' || opt.kind !== 'same_day' || currentStartMin == null) return true;
+    const startMin = hhmmToMin(opt.window?.start);
+    return startMin != null && startMin > currentStartMin;
+  };
+  const visibleOptions = allOptions.filter((opt) => optionVisibleFor(opt, reason));
   const isCustom = selectedKey === CUSTOM_KEY;
   const customWindow = isCustom ? hourWindow(customStart) : null;
   // A same-day custom start must be a FUTURE hour. Only the date field carries a
@@ -116,7 +144,12 @@ export default function RainOutSheet({ service, onClose, onDone }) {
   // still shift, stranding the selected visit. Earliest allowed = next top of
   // the hour after now (ET).
   const nowEtMin = hhmmToMin(new Date().toLocaleTimeString('en-GB', { timeZone: TIMEZONE, hour12: false }));
-  const minTodayStartMin = (Math.floor((nowEtMin ?? 0) / 60) + 1) * 60;
+  // Running late raises the same-day floor to the hour AFTER the current
+  // window start (server enforces via target_not_later).
+  const runningLateFloorMin = (reason === 'running_late' && currentStartMin != null)
+    ? (Math.floor(currentStartMin / 60) + 1) * 60
+    : 0;
+  const minTodayStartMin = Math.max((Math.floor((nowEtMin ?? 0) / 60) + 1) * 60, runningLateFloorMin);
   const minTodayStart = minToHHMM(Math.min(minTodayStartMin, 23 * 60));
   const customElapsed = !!(isCustom && customWindow && customDate === todayStr
     && hhmmToMin(customWindow.start) < minTodayStartMin);
@@ -130,8 +163,23 @@ export default function RainOutSheet({ service, onClose, onDone }) {
     : null;
   const selected = isCustom
     ? customOption
-    : (allOptions.find((opt) => keyOf(opt) === selectedKey) || null);
+    : (visibleOptions.find((opt) => keyOf(opt) === selectedKey) || null);
   const routeCount = options?.remainingRouteCount || 0;
+
+  // Reason side effects: no-show is single-stop only (server rejects route
+  // scope), and running late may hide the currently highlighted same-day
+  // preset — reseat the selection on the first still-visible option.
+  const pickReason = (code) => {
+    setReason(code);
+    if (code === 'customer_noshow') setScope('job');
+    if (selectedKey && selectedKey !== CUSTOM_KEY) {
+      const stillVisible = allOptions.some((opt) => keyOf(opt) === selectedKey && optionVisibleFor(opt, code));
+      if (!stillVisible) {
+        const first = allOptions.find((opt) => optionVisibleFor(opt, code));
+        setSelectedKey(first ? keyOf(first) : null);
+      }
+    }
+  };
 
   // Seed the custom date AND start from whatever preset was highlighted (or the
   // first slot) so switching to Custom lands on a sensible hour on the RIGHT
@@ -166,22 +214,38 @@ export default function RainOutSheet({ service, onClose, onDone }) {
         }),
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+      if (!res.ok) throw new Error(ERROR_COPY[data.error] || data.error || `HTTP ${res.status}`);
       const failedCount = data.failedCount || 0;
+      const movedCount = data.movedCount || 0;
+      // "customer texted" must come from what actually HAPPENED, not the
+      // request flag — a disabled template or missing phone moves the visit
+      // without an SMS (smsSent:false on that result row), and telling the
+      // dispatcher it was texted buries the manual follow-up.
+      const texted = (data.results || []).filter((r) => r.ok && r.smsSent).length;
+      const notTexted = notify && texted < movedCount;
+      const notifyClause = !notify ? ''
+        : texted === movedCount ? (movedCount === 1 ? ', customer texted' : ', customers texted')
+          : texted === 0 ? ', customer NOT texted'
+            : `, ${texted}/${movedCount} texted`;
       const summary =
-        `Moved ${data.movedCount} ${data.movedCount === 1 ? 'stop' : 'stops'} to ${selected.display}` +
-        `${notify ? ', customer texted' : ''}`;
-      if (failedCount > 0) {
-        // Partial success (a stop raced to terminal or slot-conflicted). The
-        // server still returns 200 when at least one moved, so keep the sheet
-        // open with the warning instead of silently closing; the parent still
-        // refreshes the board for the stops that did move.
-        setError(`${summary}. ${failedCount} stop${failedCount === 1 ? '' : 's'} could not be moved — review dispatch.`);
+        `Moved ${movedCount} ${movedCount === 1 ? 'stop' : 'stops'} to ${selected.display}${notifyClause}`;
+      if (failedCount > 0 || notTexted) {
+        // Partial success (a stop raced to terminal or slot-conflicted) or a
+        // silent non-send. The server still returns 200 when at least one
+        // moved, so keep the sheet open with the warning instead of silently
+        // closing; the parent still refreshes the board for the moved stops.
+        const failClause = failedCount > 0
+          ? ` ${failedCount} stop${failedCount === 1 ? '' : 's'} could not be moved — review dispatch.`
+          : '';
+        const smsClause = notTexted
+          ? ' Some customers were NOT texted (no phone or template disabled) — follow up manually.'
+          : '';
+        setError(`${summary}.${failClause}${smsClause}`);
         setBusy(false);
       }
-      onDone?.({ summary, movedCount: data.movedCount, failedCount });
+      onDone?.({ summary, movedCount, failedCount, notTexted });
     } catch (err) {
-      setError(err.message || 'Rain out failed');
+      setError(err.message || 'Quick Move failed');
       setBusy(false);
     }
   };
@@ -199,7 +263,7 @@ export default function RainOutSheet({ service, onClose, onDone }) {
     <div
       role="dialog"
       aria-modal="true"
-      aria-label="Weather reschedule"
+      aria-label="Quick Move Appointment"
       onClick={onClose}
       style={{
         position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', zIndex: 110,
@@ -216,7 +280,7 @@ export default function RainOutSheet({ service, onClose, onDone }) {
         }}
       >
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 4 }}>
-          <div style={{ fontSize: 18, fontWeight: 500, color: '#18181B' }}>Weather reschedule</div>
+          <div style={{ fontSize: 18, fontWeight: 500, color: '#18181B' }}>Quick Move Appointment</div>
           <button
             type="button"
             onClick={onClose}
@@ -246,10 +310,10 @@ export default function RainOutSheet({ service, onClose, onDone }) {
 
         {options && (
           <>
-            <div style={sectionLabel}>WEATHER</div>
+            <div style={sectionLabel}>REASON</div>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 18 }}>
-              {RAIN_REASONS.map((r) => (
-                <button key={r.code} type="button" onClick={() => setReason(r.code)} style={chipStyle(reason === r.code)}>
+              {(options.extraReasonsEnabled ? [...RAIN_REASONS, ...EXTRA_REASONS] : RAIN_REASONS).map((r) => (
+                <button key={r.code} type="button" onClick={() => pickReason(r.code)} style={chipStyle(reason === r.code)}>
                   {r.label}
                 </button>
               ))}
@@ -257,10 +321,10 @@ export default function RainOutSheet({ service, onClose, onDone }) {
 
             <div style={sectionLabel}>MOVE TO</div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 18 }}>
-              {allOptions.length === 0 && (
+              {visibleOptions.length === 0 && (
                 <div style={{ fontSize: 13, color: '#71717A' }}>No preset slots — pick a custom time below.</div>
               )}
-              {allOptions.map((opt) => {
+              {visibleOptions.map((opt) => {
                 const key = keyOf(opt);
                 const active = key === selectedKey;
                 return (
@@ -277,7 +341,7 @@ export default function RainOutSheet({ service, onClose, onDone }) {
                   >
                     <span>
                       {opt.display}
-                      {opt.kind === 'same_day' && (
+                      {opt.kind === 'same_day' && !EXTRA_REASON_CODES.has(reason) && (
                         <span style={{ color: '#71717A', fontWeight: 400 }}> — storm may pass</span>
                       )}
                     </span>
@@ -353,11 +417,13 @@ export default function RainOutSheet({ service, onClose, onDone }) {
 
             {customElapsed && (
               <div style={{ fontSize: 12, color: '#B91C1C', marginTop: -8, marginBottom: 18 }}>
-                That hour has already started today — pick {fmtTime(minTodayStart)} or later.
+                {runningLateFloorMin > 0 && hhmmToMin(customWindow?.start) < runningLateFloorMin
+                  ? `Running late needs a time after the current window — pick ${fmtTime(minTodayStart)} or later.`
+                  : `That hour has already started today — pick ${fmtTime(minTodayStart)} or later.`}
               </div>
             )}
 
-            {routeCount > 0 && (
+            {routeCount > 0 && reason !== 'customer_noshow' && (
               <>
                 <div style={sectionLabel}>SCOPE</div>
                 <div style={{ display: 'flex', gap: 8, marginBottom: 18 }}>

@@ -24,8 +24,12 @@ jest.mock('../services/reschedule-link', () => ({
     line: 'Need a different time? Reschedule online: https://waves.test/r/tok123\n\n',
   }),
 }));
+jest.mock('../services/workflows/missed-appointment', () => ({
+  evaluateThreshold: jest.fn().mockResolvedValue(null),
+}));
 
 const db = require('../models/db');
+const MissedAppointment = require('../services/workflows/missed-appointment');
 const SmartRebooker = require('../services/rebooker');
 const { renderSmsTemplate } = require('../services/sms-template-renderer');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
@@ -710,6 +714,188 @@ describe('rain-out service', () => {
     });
   });
 
+  describe('extra reasons (GATE_QUICKMOVE_EXTRA_REASONS)', () => {
+    afterEach(() => {
+      delete process.env.GATE_QUICKMOVE_EXTRA_REASONS;
+      delete process.env.GATE_RAINOUT_MOVE_BANNER;
+    });
+
+    function wireSingle() {
+      wireDb({
+        scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) })],
+      });
+    }
+
+    const COMMIT_ARGS = {
+      serviceId: 'svc-1',
+      technicianId: 'tech-1',
+      reasonCode: 'running_late',
+      scope: 'job',
+      target: { date: '2026-06-11', window: { start: '13:00', end: '14:00' } },
+      notifyCustomer: true,
+    };
+
+    test('gate off: every extra reason is rejected before any reschedule (fail closed)', async () => {
+      for (const reasonCode of ['running_late', 'equipment_issue', 'tech_emergency', 'customer_noshow']) {
+        wireSingle();
+        const result = await RainOut.commit({ ...COMMIT_ARGS, reasonCode });
+        expect(result).toMatchObject({ ok: false, reason: 'bad_reason' });
+      }
+      expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+    });
+
+    test('gate on: moves and texts the schedule lead with ZERO weather claims (v2 rung)', async () => {
+      process.env.GATE_QUICKMOVE_EXTRA_REASONS = 'true';
+      wireSingle();
+
+      const result = await RainOut.commit(COMMIT_ARGS);
+
+      expect(result.ok).toBe(true);
+      expect(SmartRebooker.reschedule).toHaveBeenCalledWith(
+        'svc-1', '2026-06-11', { start: '13:00', end: '14:00' }, 'running_late', 'tech',
+        { allowLive: true, excludeServiceIds: ['svc-1'] },
+      );
+      const vars = renderSmsTemplate.mock.calls[0][1];
+      expect(vars.weather_lead).toBe("we're running behind schedule today");
+      // No weather claims anywhere in a running-late text: no forecast link,
+      // no better-day clause, and the NWS decoration fetches never even run.
+      expect(vars.forecast_clause).toBe('');
+      expect(vars.better_day_clause).toBe('');
+      expect(getDailyRainOutlook).not.toHaveBeenCalled();
+      expect(getHourlyRainOutlook).not.toHaveBeenCalled();
+      expect(sendCustomerMessage.mock.calls[0][0].metadata).toMatchObject({
+        original_message_type: 'rain_out_moved_v2',
+        reason_code: 'running_late',
+      });
+    });
+
+    test('gate on: customer_noshow REJECTS route scope — a no-show is about one customer, never the whole route', async () => {
+      process.env.GATE_QUICKMOVE_EXTRA_REASONS = 'true';
+      wireSingle();
+
+      const result = await RainOut.commit({ ...COMMIT_ARGS, reasonCode: 'customer_noshow', scope: 'route' });
+
+      expect(result).toMatchObject({ ok: false, reason: 'noshow_route_scope' });
+      expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    test('gate on: running_late rejects same-day targets at/before the current window, allows later + day moves', async () => {
+      process.env.GATE_QUICKMOVE_EXTRA_REASONS = 'true';
+
+      // SERVICE sits on 2026-06-11 at 09:00. Earlier same-day → reject.
+      wireSingle();
+      let result = await RainOut.commit({
+        ...COMMIT_ARGS,
+        target: { date: '2026-06-11', window: { start: '08:00', end: '09:00' } },
+      });
+      expect(result).toMatchObject({ ok: false, reason: 'target_not_later' });
+
+      // Equal start is a no-op "move" — reject too.
+      wireSingle();
+      result = await RainOut.commit({
+        ...COMMIT_ARGS,
+        target: { date: '2026-06-11', window: { start: '09:00', end: '10:00' } },
+      });
+      expect(result).toMatchObject({ ok: false, reason: 'target_not_later' });
+      expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+
+      // An earlier clock time on a DIFFERENT day contradicts nothing.
+      wireSingle();
+      result = await RainOut.commit({
+        ...COMMIT_ARGS,
+        target: { date: '2026-06-12', window: { start: '08:00', end: '09:00' } },
+      });
+      expect(result.ok).toBe(true);
+    });
+
+    test('gate on: customer_noshow is the SOFT no-show — rebooker logs the missed-outreach reason and the SMS says we missed you', async () => {
+      process.env.GATE_QUICKMOVE_EXTRA_REASONS = 'true';
+      wireSingle();
+
+      const result = await RainOut.commit({ ...COMMIT_ARGS, reasonCode: 'customer_noshow' });
+
+      expect(result.ok).toBe(true);
+      // reason_code customer_noshow on the reschedule_log row is what feeds
+      // the 2-in-90-days missed-appointment outreach counter.
+      expect(SmartRebooker.reschedule).toHaveBeenCalledWith(
+        'svc-1', '2026-06-11', { start: '13:00', end: '14:00' }, 'customer_noshow', 'tech',
+        { allowLive: true, excludeServiceIds: ['svc-1'] },
+      );
+      expect(renderSmsTemplate.mock.calls[0][1].weather_lead).toBe('we missed you today');
+      expect(sendCustomerMessage.mock.calls[0][0].metadata).toMatchObject({ reason_code: 'customer_noshow' });
+      // The rebooker logged the occurrence; the outreach THRESHOLD must
+      // still run (codex r2) — evaluate-only, never a second onSkip insert.
+      expect(MissedAppointment.evaluateThreshold).toHaveBeenCalledTimes(1);
+      expect(MissedAppointment.evaluateThreshold).toHaveBeenCalledWith('cust-1', 'quick_move_no_show');
+    });
+
+    test('gate on: non-noshow reasons never run the missed-appointment threshold', async () => {
+      process.env.GATE_QUICKMOVE_EXTRA_REASONS = 'true';
+      wireSingle();
+
+      await RainOut.commit(COMMIT_ARGS);
+
+      expect(MissedAppointment.evaluateThreshold).not.toHaveBeenCalled();
+    });
+
+    test('gate on + banner gate: the v3 link clause drops the forecast word', async () => {
+      process.env.GATE_QUICKMOVE_EXTRA_REASONS = 'true';
+      process.env.GATE_RAINOUT_MOVE_BANNER = 'true';
+      wireSingle();
+
+      await RainOut.commit(COMMIT_ARGS);
+
+      expect(renderSmsTemplate.mock.calls[0][0]).toBe('rain_out_moved_v3');
+      expect(renderSmsTemplate.mock.calls[0][1].link_clause)
+        .toBe(' New time & other options: https://waves.test/r/tok123');
+      expect(getDailyRainOutlook).not.toHaveBeenCalled();
+      expect(getHourlyRainOutlook).not.toHaveBeenCalled();
+    });
+
+    test('gate on, ABSENT v2 row: NO legacy reroute — the legacy grammar is weather-only, so the send stops', async () => {
+      process.env.GATE_QUICKMOVE_EXTRA_REASONS = 'true';
+      wireDb({
+        scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) })],
+        // v2 render nulls and the row is truly gone (rolled-back migration).
+        sms_templates: [chain({ first: jest.fn().mockResolvedValue(undefined) })],
+      });
+      renderSmsTemplate.mockResolvedValueOnce(null);
+
+      const result = await RainOut.commit(COMMIT_ARGS);
+
+      // The move still commits; "{weather_phrase} rolled through your area"
+      // can't state a schedule delay, so the operator sees not-texted
+      // instead of the customer getting a false weather story.
+      expect(result.results[0]).toMatchObject({ ok: true, smsSent: false, smsReason: 'missing_template' });
+      expect(renderSmsTemplate).toHaveBeenCalledTimes(1);
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    test('lead composition is the fixed operational phrase regardless of day/forecast', () => {
+      const lead = RainOut._test.composeWeatherLead;
+      expect(lead({ reasonCode: 'running_late', isSameDay: true, hour: 9, todayChance: 85 }))
+        .toBe("we're running behind schedule today");
+      expect(lead({ reasonCode: 'running_late', isSameDay: false, hour: 15, todayChance: null }))
+        .toBe("we're running behind schedule today");
+      expect(lead({ reasonCode: 'equipment_issue', isSameDay: true, hour: 9 }))
+        .toBe('we had equipment trouble today');
+      expect(lead({ reasonCode: 'tech_emergency', isSameDay: false, hour: 9 }))
+        .toBe('an emergency came up on our end');
+      expect(lead({ reasonCode: 'customer_noshow', isSameDay: true, hour: 16 }))
+        .toBe('we missed you today');
+    });
+
+    test('isValidReason: weather codes always, extra reasons only behind the gate', () => {
+      const { isValidReason, EXTRA_REASON_LEADS } = RainOut._test;
+      expect(isValidReason('weather_rain')).toBe(true);
+      for (const code of Object.keys(EXTRA_REASON_LEADS)) expect(isValidReason(code)).toBe(false);
+      process.env.GATE_QUICKMOVE_EXTRA_REASONS = 'true';
+      for (const code of Object.keys(EXTRA_REASON_LEADS)) expect(isValidReason(code)).toBe(true);
+      expect(isValidReason('totally_bogus')).toBe(false);
+    });
+  });
+
   describe('commit — route scope', () => {
     const ROUTE_JOBS = [
       { id: 'svc-2', status: 'confirmed', scheduled_date: '2026-06-11', window_start: '11:30', window_end: '13:30', customer_id: 'cust-2', service_type: 'Lawn Care' },
@@ -1049,6 +1235,28 @@ describe('rain-out service', () => {
       expect(options.days[1].window).toEqual({ start: '09:00', end: '10:00' });
       expect(options.remainingRouteCount).toBe(2);
       expect(options.service.hasPhone).toBe(true);
+      // Chips hidden in both sheets while the gate is dark.
+      expect(options.extraReasonsEnabled).toBe(false);
+    });
+
+    test('extraReasonsEnabled mirrors GATE_QUICKMOVE_EXTRA_REASONS for the sheets', async () => {
+      process.env.GATE_QUICKMOVE_EXTRA_REASONS = 'true';
+      try {
+        SmartRebooker.findRescheduleOptions.mockResolvedValue([]);
+        wireDb({
+          scheduled_services: [
+            chain({ first: jest.fn().mockResolvedValue({ ...SERVICE }) }),
+            chain({ rows: [] }),
+          ],
+        });
+
+        const options = await RainOut.getOptions('svc-1');
+
+        expect(options.ok).toBe(true);
+        expect(options.extraReasonsEnabled).toBe(true);
+      } finally {
+        delete process.env.GATE_QUICKMOVE_EXTRA_REASONS;
+      }
     });
   });
 });
