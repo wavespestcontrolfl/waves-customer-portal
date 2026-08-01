@@ -186,8 +186,11 @@ describe('reschedule-public AI search window', () => {
 
 describe('reschedule-link SMS clause', () => {
   test('renders the embed clause for a URL and empty string for none', () => {
+    // Deliberately terse: this clause is 42 chars of prose in front of a
+    // ~43-char link, and shortening it is what lands the 72h reminder in a
+    // SINGLE segment (159 slots) instead of two.
     expect(smsLineFor('https://portal.wavespestcontrol.com/l/abc12'))
-      .toBe('Need a different time? Reschedule online: https://portal.wavespestcontrol.com/l/abc12\n\n');
+      .toBe('Reschedule here: https://portal.wavespestcontrol.com/l/abc12\n\n');
     expect(smsLineFor(null)).toBe('');
     expect(smsLineFor('')).toBe('');
   });

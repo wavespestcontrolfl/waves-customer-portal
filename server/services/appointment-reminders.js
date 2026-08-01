@@ -17,7 +17,7 @@ const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { readCachedLineType, cacheLineType } = require('./messaging/validators/line-type');
 const { getAppointmentContacts, isServiceContactRole, firstNameFrom, PREFS_UNAVAILABLE } = require('./customer-contact');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
-const { TZ, parseETDateTime, formatETDay, formatETDate, formatETTime, etDateString, addETDays } = require('../utils/datetime-et');
+const { TZ, parseETDateTime, formatETDay, formatETDate, formatETTime, etDateString, addETDays, etParts } = require('../utils/datetime-et');
 const AppointmentEmail = require('./appointment-email');
 const NotificationService = require('./notification-service');
 const { buildRescheduleLink } = require('./reschedule-link');
@@ -396,6 +396,23 @@ async function renderRequiredTemplate(templateKey, vars, context = {}) {
 const formatDay = formatETDay;
 const formatDate = formatETDate;
 const formatTime = formatETTime;
+
+// The customer-facing arrival phrase ("between 8:00 AM and 10:00 AM") for the
+// {window} placeholder in the 72h/24h reminders. Delegates to
+// spokenArrivalWindow so this and TwilioService.sendServiceReminder cannot
+// drift — getTemplate suppresses the whole SMS on an unresolved placeholder,
+// so every reminder sender must supply {window} the same way.
+// Pure ET clock math (never wall-clock arithmetic on the Date), so a DST
+// boundary can't stretch or shrink the quoted window.
+function formatArrivalWindow(apptTime) {
+  const { spokenArrivalWindow, UNKNOWN_ARRIVAL_WINDOW } = require('../utils/sms-time-format');
+  try {
+    const { hour, minute } = etParts(apptTime);
+    return spokenArrivalWindow(`${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`);
+  } catch {
+    return UNKNOWN_ARRIVAL_WINDOW;
+  }
+}
 
 // Admin-disambiguation parentheticals only — frequency words ("Monthly",
 // "Bi-Monthly", "Semiannual"), interval phrases ("Every 6 Weeks"), and
@@ -1594,7 +1611,7 @@ const AppointmentReminders = {
                 const firstName = firstNameFrom(contact.name) || customer?.first_name || 'there';
                 return renderTemplate(
                   'reminder_72h',
-                  { first_name: firstName, service_type: serviceLabel, day, date, time, reschedule_line: reschedule.line, card_hold_policy_line: cardHoldPolicyLine72 },
+                  { first_name: firstName, service_type: serviceLabel, day, date, time, window: formatArrivalWindow(apptTime), reschedule_line: reschedule.line, card_hold_policy_line: cardHoldPolicyLine72 },
                   { workflow: 'appointment_reminder_72h', entity_type: 'scheduled_service', entity_id: r.scheduled_service_id },
                 );
               }, 'reminder_72h', 'appointment_reminder_72h', { scheduled_service_id: r.scheduled_service_id }),
@@ -1684,7 +1701,7 @@ const AppointmentReminders = {
                 const firstName = firstNameFrom(contact.name) || customer?.first_name || 'there';
                 return renderTemplate(
                   'reminder_24h',
-                  { first_name: firstName, service_type: serviceLabel, time, reschedule_line: reschedule.line, card_hold_policy_line: cardHoldPolicyLine24 },
+                  { first_name: firstName, service_type: serviceLabel, time, window: formatArrivalWindow(apptTime), reschedule_line: reschedule.line, card_hold_policy_line: cardHoldPolicyLine24 },
                   { workflow: 'appointment_reminder_24h', entity_type: 'scheduled_service', entity_id: r.scheduled_service_id },
                 );
               }, 'appointment_reminder', 'appointment_reminder_24h', { scheduled_service_id: r.scheduled_service_id }),

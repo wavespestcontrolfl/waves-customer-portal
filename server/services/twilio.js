@@ -627,6 +627,11 @@ const TwilioService = {
     const time = service.window_start
       ? formatTime(service.window_start)
       : "a time to be confirmed";
+    // reminder_24h renders {window} (the 2-hour arrival range), and
+    // getTemplate suppresses the entire SMS on an unresolved placeholder —
+    // this sender must supply it exactly like AppointmentReminders does.
+    const { spokenArrivalWindow } = require("../utils/sms-time-format");
+    const arrivalWindow = spokenArrivalWindow(service.window_start);
 
     // Self-serve reschedule deep link clause — reminder_24h renders with
     // {reschedule_line}, and getTemplate suppresses the whole SMS on an
@@ -645,6 +650,7 @@ const TwilioService = {
             first_name: customer.first_name || "",
             service_type: service.service_type || "service",
             time,
+            window: arrivalWindow,
             reschedule_line: reschedule.line,
             card_hold_policy_line: cardHoldPolicyLine,
           }, { workflow: "twilio_reminder_24h", entity_type: "scheduled_service", entity_id: scheduledServiceId })
@@ -700,7 +706,11 @@ const TwilioService = {
     // email preference means there is nothing to send.
     if (channel === "sms" && !smsAllowed) return;
 
-    const etaLine = etaMinutes ? `ETA: ~${etaMinutes} minutes.\n` : "";
+    // No tilde: `~` is a GSM-7 EXTENSION character costing TWO slots
+    // instead of one, and it was the only extension char anywhere in the
+    // template set. Dropped rather than reworded - the "E" in ETA already
+    // carries the approximation.
+    const etaLine = etaMinutes ? `ETA: ${etaMinutes} minutes.\n` : "";
     const { getAppointmentContacts, isServiceContactRole, firstNameFrom } = require("./customer-contact");
     // Recipient double opt-in hold (gated) — same filter as the
     // appointment-reminder fanout: unconfirmed third-party recipients
