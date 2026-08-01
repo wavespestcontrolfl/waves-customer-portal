@@ -501,6 +501,30 @@ describe('scope guards (GATE_ESTIMATOR_SCOPE_GUARDS)', () => {
       groundedCustomerId: 'cust-77',
       groundedConflict: false,
       groundedScope: expect.objectContaining({ address: '77 Rental Cove', isPrimary: false }),
+      groundedMultiScope: false,
+    }));
+  });
+
+  test('a MULTI-SCOPE ambiguity signal rides into the context build', async () => {
+    mockLoadTriage.mockResolvedValueOnce({
+      lines: ['…Apt 1 matches', '…Apt 6 matches'],
+      matchedExistingCustomer: true,
+      groundedCustomerId: 'cust-77',
+      groundedScope: null,
+      groundedMultiScope: true,
+    });
+    mockDispatch.mockResolvedValueOnce({
+      ok: true,
+      json: { quote_request: true, service_offered: true, relates_to_existing_job: false, confidence: 0.9 },
+    });
+    const result = await startSmsThreadDraft({
+      phone: PHONE,
+      triggerBody: 'quotes for 100 Palm Ave Apt 1, also 100 Palm Ave Apt 6',
+    });
+    await result.draftPromise;
+    expect(mockBuildSmsThreadContext).toHaveBeenCalledWith(expect.objectContaining({
+      groundedMultiScope: true,
+      groundedScope: null,
     }));
   });
 
@@ -534,6 +558,7 @@ describe('scope guards (GATE_ESTIMATOR_SCOPE_GUARDS)', () => {
       groundedCustomerId: null,
       groundedConflict: false,
       groundedScope: null,
+      groundedMultiScope: false,
     }));
   });
 });

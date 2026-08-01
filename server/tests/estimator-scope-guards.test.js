@@ -245,6 +245,15 @@ describe('extractAddressCandidates', () => {
     expect(extractAddressCandidates('quote for 100 Sample Way Venice FL 34285')[0].locality).toBe(', Venice 34285');
   });
 
+  test('the CANONICAL normalizer vocabulary supplies the boundaries (walk, plaza, ridge, …)', () => {
+    // Sourced from utils/address-normalizer's STREET_SPLIT_SUFFIXES, not a
+    // hand-maintained parallel list that drifts.
+    expect(extractAddressCandidates('quote for 100 Sample Walk North Port FL')[0].locality).toBe(', North Port');
+    expect(extractAddressCandidates('quote for 100 Sample Plaza Venice FL')[0].locality).toBe(', Venice');
+    expect(extractAddressCandidates('quote for 100 Sample Ridge Venice FL 34285')[0].locality).toBe(', Venice 34285');
+    expect(extractAddressCandidates('service at 100 Sample Causeway Venice FL')[0].locality).toBe(', Venice');
+  });
+
   test('boundary-only suffixes also bind a bare trailing ZIP', () => {
     // The bare-ZIP test used to consult the alias table alone, so Loop/Way/
     // Trail forms silently dropped their ZIP.
@@ -845,8 +854,11 @@ describe('loadThreadTriageContext', () => {
     // …one distinct customer, so the identity still links…
     expect(triage.groundedCustomerId).toBe('c-2');
     expect(triage.groundedConflict).toBe(false);
-    // …but there is no single property to price.
+    // …but there is no single property to price, and that ambiguity is
+    // SIGNALLED so the context build red-lanes instead of quietly pricing
+    // the primary parcel.
     expect(triage.groundedScope).toBeNull();
+    expect(triage.groundedMultiScope).toBe(true);
   });
 
   test('a single unit still yields exactly one entry and a usable scope', async () => {
@@ -860,6 +872,7 @@ describe('loadThreadTriageContext', () => {
     expect(triage.lines).toHaveLength(1);
     expect(triage.groundedCustomerId).toBe('c-2');
     expect(triage.groundedScope).toMatchObject({ address: '100 Palm Ave', line2: 'Apt 6', isPrimary: true });
+    expect(triage.groundedMultiScope).toBe(false);
   });
 
   test('fails open to null on query errors', async () => {

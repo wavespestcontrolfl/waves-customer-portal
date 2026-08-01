@@ -187,13 +187,14 @@ function smsOrigin(threadKey) {
 async function runThreadDraft({
   phone, digits, triggerBody, origin, dryRun,
   groundedCustomerId = null, groundedConflict = false, groundedScope = null,
+  groundedMultiScope = false,
 }) {
   const result = { phone: `…${digits.slice(-4)}`, lane: null, created: false, skipped: null };
   try {
     const { buildSmsThreadContext } = require('./context-builder');
     const { runDraftPipeline, notify } = require('./index');
     const context = await buildSmsThreadContext({
-      phone, triggerBody, groundedCustomerId, groundedConflict, groundedScope,
+      phone, triggerBody, groundedCustomerId, groundedConflict, groundedScope, groundedMultiScope,
     });
     if (context.error) {
       result.lane = 'red';
@@ -359,6 +360,7 @@ async function startSmsThreadDraft({ phone, triggerBody = '', skipIntentGate = f
       groundedCustomerId: triage?.groundedCustomerId || null,
       groundedConflict: triage?.groundedConflict === true,
       groundedScope: triage?.groundedScope || null,
+      groundedMultiScope: triage?.groundedMultiScope === true,
     })
       .catch((err) => {
         logger.error(`[estimator-sms] detached draft failed: ${err.message}`);

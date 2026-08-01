@@ -569,5 +569,10 @@ module.exports = {
   normalizeState,
   parseRawAddress,
   STREET_SUFFIX_ALIASES,
+  // Canonical comma-free boundary vocabulary (long + short forms). Shared
+  // so callers that must decide "is this token a street suffix?" — e.g. the
+  // estimator's no-comma locality parser — reuse this set instead of
+  // maintaining a parallel hand-written list that drifts.
+  STREET_SPLIT_SUFFIXES,
   UNIT_DESIGNATORS,
 };

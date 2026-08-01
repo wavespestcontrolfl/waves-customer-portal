@@ -255,12 +255,12 @@ describe('buildSmsThreadContext grounded-customer fallback (GATE_ESTIMATOR_SCOPE
     expect(context.isExistingCustomer).toBe(true);
   });
 
-  test('gate ON: a prospect phone match with a groundedConflict never grounds', async () => {
+  test('gate ON: a prospect phone match with a groundedConflict red-lanes instead of grounding', async () => {
     process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
     mockCustomerRows = [{ ...GROUNDED_ROW, id: 'prospect-1', pipeline_stage: 'new_lead' }];
     mockCustomerFirstRow = GROUNDED_ROW;
     const context = await buildSmsThreadContext({ ...SMS_ARGS, groundedCustomerId: 'cust-77', groundedConflict: true });
-    expect(context.customer).toMatchObject({ id: 'prospect-1' });
+    expect(context.error).toBe('ambiguous_grounding');
     expect(context.customerGroundedByAddress).toBeUndefined();
   });
 
@@ -436,12 +436,25 @@ describe('buildSmsThreadContext prospect-shell resolution (contact-slot matches)
     waveguard_tier: 'Silver', member_since: '2025-01-01', lawn_type: null,
     property_sqft: 1800, lot_sqft: 8000, property_type: 'Single Family', company_name: null,
   };
-  // The webhook's first-contact shell: active, but never an established
-  // customer stage.
-  const SHELL = { ...BASE, id: 'shell-1', first_name: 'Fresh', last_name: 'Prospect', pipeline_stage: 'new_lead', active: true };
-  const REAL = { ...BASE, id: 'cust-1', first_name: 'Pat', last_name: 'Member', pipeline_stage: 'active_customer', active: true };
+  // The webhook's first-contact shell, exactly as twilio-webhook.js writes
+  // it: non-customer stage, EMPTY address_line1, created seconds ago.
+  const SHELL = {
+    ...BASE,
+    id: 'shell-1',
+    first_name: 'Unknown',
+    last_name: '',
+    address_line1: '',
+    zip: '',
+    pipeline_stage: 'new_lead',
+    active: true,
+    created_at: new Date().toISOString(),
+  };
+  const REAL = {
+    ...BASE, id: 'cust-1', first_name: 'Pat', last_name: 'Member', pipeline_stage: 'active_customer', active: true,
+    created_at: new Date(Date.now() - 400 * 86400000).toISOString(),
+  };
 
-  test('gate ON: shell + real contact-slot match resolves to the REAL customer, not ambiguous', async () => {
+  test('gate ON: TRUE shell + real contact-slot match resolves to the REAL customer', async () => {
     process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
     mockCustomerRows = [SHELL, REAL];
     const context = await buildSmsThreadContext(SMS_ARGS);
@@ -449,6 +462,32 @@ describe('buildSmsThreadContext prospect-shell resolution (contact-slot matches)
     expect(context.customer).toMatchObject({ id: 'cust-1' });
     expect(context.customerPhoneAmbiguous).toBe(false);
     expect(context.isExistingCustomer).toBe(true);
+  });
+
+  test('gate ON: an established customer + a REAL separate lead stays ambiguous', async () => {
+    // pipeline_stage alone cannot tell the webhook shell from a genuine
+    // lead — resolving here would hand the lead's quote the established
+    // customer's id, saved property, and membership pricing.
+    process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
+    // A real lead: has an address of its own.
+    const REAL_LEAD = { ...SHELL, id: 'lead-cust-1', address_line1: '900 Other Property Rd' };
+    let context = await buildSmsThreadContext(SMS_ARGS);
+    mockCustomerRows = [REAL_LEAD, REAL];
+    context = await buildSmsThreadContext(SMS_ARGS);
+    expect(context.error).toBe('ambiguous_phone');
+
+    // A real lead: address-less but days old, so not this webhook's shell.
+    mockCustomerRows = [
+      { ...SHELL, id: 'lead-cust-2', created_at: new Date(Date.now() - 3 * 86400000).toISOString() },
+      REAL,
+    ];
+    context = await buildSmsThreadContext(SMS_ARGS);
+    expect(context.error).toBe('ambiguous_phone');
+
+    // A row with no created_at at all cannot be proven fresh.
+    mockCustomerRows = [{ ...SHELL, id: 'lead-cust-3', created_at: null }, REAL];
+    context = await buildSmsThreadContext(SMS_ARGS);
+    expect(context.error).toBe('ambiguous_phone');
   });
 
   test('gate ON: TWO real rows remain genuinely ambiguous (red-lane)', async () => {
@@ -496,15 +535,17 @@ describe('buildSmsThreadContext conflict suppresses phone-scoped history', () =>
   const LEAD = { id: 'lead-1', first_name: 'Sender', phone: '+19415550123', address: '1 Primary St', twilio_call_sid: null };
   const ESTIMATES = [{ id: 'est-1', status: 'sent', monthly_total: 60 }];
 
-  test('gate ON + conflict: no lead, no prior estimates (A\'s history must not shape B\'s draft)', async () => {
+  test('gate ON + conflict: red-lanes, so no history (or draft) is built at all', async () => {
+    // Superseded posture: the conflict used to downgrade the profile and
+    // suppress history while still drafting. It now red-lanes outright.
     process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
     mockCustomerRows = [PHONE_MATCHED];
     mockLeadRow = LEAD;
     mockEstimateRows = ESTIMATES;
     const context = await buildSmsThreadContext({ ...SMS_ARGS, groundedConflict: true });
-    expect(context.customerPhoneAmbiguous).toBe(true);
-    expect(context.lead).toBeNull();
-    expect(context.priorEstimates).toEqual([]);
+    expect(context.error).toBe('ambiguous_grounding');
+    expect(context.lead).toBeUndefined();
+    expect(context.priorEstimates).toBeUndefined();
   });
 
   test('gate ON, no conflict: lead and prior estimates load as usual', async () => {
@@ -580,29 +621,55 @@ describe('buildSmsThreadContext distinct-customer conflict (GATE_ESTIMATOR_SCOPE
     company_name: null, active: true,
   };
 
-  test('gate ON + conflict: phone-matched customer downgrades to the ambiguous (name-only) posture', async () => {
+  test('gate ON + sender-vs-address conflict: red-lane, never a guessed link', async () => {
     process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
     mockCustomerRows = [PHONE_MATCHED];
     const context = await buildSmsThreadContext({ ...SMS_ARGS, groundedConflict: true });
-    // The profile stays for the composer's name-only rendering, but the
-    // ambiguity flag blocks customer_id, address, and membership context.
-    expect(context.customer).toMatchObject({ id: 'cust-1' });
-    expect(context.customerPhoneAmbiguous).toBe(true);
-    expect(context.isExistingCustomer).toBe(false);
+    expect(context.error).toBe('ambiguous_grounding');
+    expect(context.customer).toBeUndefined();
   });
 
-  test('gate ON, no conflict: the phone-matched customer keeps full trust', async () => {
+  test('gate ON + ADDRESS-ONLY conflict (no phone customer at all) also red-lanes', async () => {
+    // Two active customers share the named address and the off-file sender
+    // matches neither. The old `&& !!customer` condition left this drafting
+    // as an UNLINKED prospect on an existing customer's property.
+    process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
+    mockCustomerRows = [];
+    const context = await buildSmsThreadContext({ ...SMS_ARGS, groundedConflict: true });
+    expect(context.error).toBe('ambiguous_grounding');
+    expect(context.customer).toBeUndefined();
+  });
+
+  test('gate ON + MULTI-SCOPE (one customer, several named properties) red-lanes', async () => {
+    // groundedScope null was not enough on its own: the customer still
+    // linked and the draft priced the primary parcel.
+    process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
+    mockCustomerRows = [PHONE_MATCHED];
+    const context = await buildSmsThreadContext({
+      ...SMS_ARGS, groundedCustomerId: 'cust-1', groundedScope: null, groundedMultiScope: true,
+    });
+    expect(context.error).toBe('ambiguous_grounding');
+    expect(context.customer).toBeUndefined();
+  });
+
+  test('gate ON, no ambiguity: the phone-matched customer keeps full trust', async () => {
     process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
     mockCustomerRows = [PHONE_MATCHED];
     const context = await buildSmsThreadContext({ ...SMS_ARGS, groundedConflict: false });
+    expect(context.error).toBeUndefined();
     expect(context.customerPhoneAmbiguous).toBe(false);
     expect(context.isExistingCustomer).toBe(true);
   });
 
-  test('gate OFF: the conflict flag is inert (byte-identical legacy path)', async () => {
+  test('gate OFF: neither ambiguity flag is consulted (byte-identical legacy path)', async () => {
     mockCustomerRows = [PHONE_MATCHED];
-    const context = await buildSmsThreadContext({ ...SMS_ARGS, groundedConflict: true });
+    let context = await buildSmsThreadContext({ ...SMS_ARGS, groundedConflict: true });
+    expect(context.error).toBeUndefined();
     expect(context.customerPhoneAmbiguous).toBe(false);
+    expect(context.isExistingCustomer).toBe(true);
+
+    context = await buildSmsThreadContext({ ...SMS_ARGS, groundedMultiScope: true });
+    expect(context.error).toBeUndefined();
     expect(context.isExistingCustomer).toBe(true);
   });
 });

@@ -123,23 +123,20 @@ function deterministicOutOfScope(text) {
   return OUT_OF_SCOPE_RE.test(t) && !IN_SCOPE_RE.test(t);
 }
 
-// Street-suffix tokens with no long/short alias pair, so they never appear
-// in address-compare's STREET_TOKEN_ALIASES — used ONLY as city boundaries
-// when rebuilding a no-comma locality ("100 Sample Loop North Port FL"),
-// never for compare-time normalization.
-const EXTRA_STREET_SUFFIXES = [
-  'loop', 'way', 'trail', 'trl', 'cove', 'cv', 'run', 'pass', 'path',
-  'bend', 'crossing', 'xing', 'glen', 'chase', 'pointe',
-];
-
 // One shared "is this a street suffix/directional token" vocabulary for
-// every no-comma locality decision (city boundary AND bare-ZIP binding) —
-// two sets drifted apart and dropped the ZIP from suffix forms the
-// boundary test already knew about.
+// every no-comma locality decision (city boundary AND bare-ZIP binding).
+// The suffix half is the CANONICAL comma-free boundary set from
+// utils/address-normalizer (walk, point/pt, causeway/cswy, plaza/plz,
+// ridge/rdg, …) — never a hand-maintained parallel list, which is exactly
+// how the two earlier copies drifted. STREET_TOKEN_ALIASES adds the
+// compare-time directionals (n/north, se/southeast, …) the normalizer's
+// split set deliberately omits.
+const { STREET_SPLIT_SUFFIXES } = require('../../utils/address-normalizer');
+
 const ALL_STREET_SUFFIXES = new Set([
+  ...STREET_SPLIT_SUFFIXES,
   ...Object.keys(STREET_TOKEN_ALIASES),
   ...Object.values(STREET_TOKEN_ALIASES),
-  ...EXTRA_STREET_SUFFIXES,
 ]);
 
 // Street-address candidates from free text: a street number followed by up
@@ -652,17 +649,23 @@ async function loadTriageInner({ phone, triggerBody, deadline = Date.now() + TRI
   const groundedScope = groundedCustomerId && scopedEntries.length === 1
     ? scopedEntries[0].scope
     : null;
+  // The text named MORE than one confirmed property (two units of one
+  // customer, a home and a rental). Dropping groundedScope to null is not
+  // enough on its own — the customer would still link and the draft would
+  // price the PRIMARY parcel, silently picking one of the properties the
+  // sender actually named. That needs a human, not a guessed parcel: the
+  // signal rides out and red-lanes the context build.
+  const groundedMultiScope = scopedEntries.length > 1;
   return {
     lines,
     matchedExistingCustomer: entries.length > 0,
     groundedCustomerId,
     groundedScope,
     // MORE than one distinct customer (sender's phone matches A while the
-    // text names B's property): nobody's identity is safe to attach — the
-    // context build downgrades the phone-matched profile to the ambiguous
-    // (name-only, no pricing) posture so A's membership/address can't ride
-    // on B's draft.
+    // text names B's property): nobody's identity is safe to attach, so
+    // the context build red-lanes instead of guessing.
     groundedConflict: distinctIds.size > 1,
+    groundedMultiScope,
     recentTexts,
     vetoTexts,
   };

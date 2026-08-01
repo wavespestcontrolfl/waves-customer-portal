@@ -67,6 +67,12 @@ function pickCustomerMatch(rows, extraction) {
   return { customer: byName[0] || rows[0], ambiguous: true };
 }
 
+// How fresh a row must be to count as the Twilio webhook's first-contact
+// shell. The webhook inserts it seconds before the estimator runs in the
+// same request; the generous window only has to survive queue/retry delay,
+// while staying far short of any real lead's age.
+const WEBHOOK_SHELL_MAX_AGE_MS = 15 * 60 * 1000;
+
 // opts (both consumed by the scope-guards triage; composer callers omit
 // them and keep today's behavior exactly):
 //  - timeoutMs: knex cancel-timeout so the triage deadline bounds the WORK.
@@ -83,7 +89,8 @@ async function loadCustomerByPhone(phone, extraction, { timeoutMs = null, includ
         'pipeline_stage', 'waveguard_tier', 'member_since', 'lawn_type', 'property_sqft', 'lot_sqft',
         // active: consumed by the scope-guards triage (an inactive/former
         // customer texting a NEW quote must read as a prospect there).
-        'property_type', 'company_name', 'active')
+        // created_at: the webhook-shell recency marker below.
+        'property_type', 'company_name', 'active', 'created_at')
       .whereNull('deleted_at')
       .orderBy('created_at', 'desc')
       .limit(5);
@@ -105,17 +112,34 @@ async function loadCustomerByPhone(phone, extraction, { timeoutMs = null, includ
     // and every ungated caller skip this entirely and keep today's
     // behavior byte-for-byte). When an on-file service contact first texts
     // a domain/van tracking number, the Twilio webhook does not recognize
-    // contact-slot phones and mints a NEW active pipeline_stage='new_lead'
-    // primary-phone row. The combined lookup then returns that shell
-    // alongside the real customer's contact-slot match, pickCustomerMatch
-    // calls it ambiguous, and the SMS build red-lanes a perfectly valid
-    // add-on request. When exactly ONE row passes the real-customer gates
-    // and the rest are non-real shells, the answer is not ambiguous — it is
-    // that customer. Two or more real rows remain genuinely ambiguous.
+    // contact-slot phones and mints a NEW primary-phone row. The combined
+    // lookup then returns that shell alongside the real customer's
+    // contact-slot match, pickCustomerMatch calls it ambiguous, and the SMS
+    // build red-lanes a perfectly valid add-on request.
+    //
+    // The shortcut applies ONLY to rows that are provably that webhook
+    // shell (see routes/twilio-webhook.js domain/van tracking branch, which
+    // inserts pipeline_stage 'new_lead' with address_line1 '' and zip ''
+    // moments before this runs). pipeline_stage alone is NOT enough: a
+    // phone can legitimately carry an established customer AND a real
+    // separate lead, and silently handing that lead's quote the
+    // established customer's id, saved property, and membership pricing is
+    // exactly the failure this guard must not create. Anything that is not
+    // a fresh, address-less, non-customer-stage row keeps today's
+    // ambiguity.
     if (includeServiceContacts && rows.length > 1) {
       const { CUSTOMER_STAGES } = require('../customer-stages');
-      const real = rows.filter((r) => r.active === true && CUSTOMER_STAGES.includes(r.pipeline_stage));
-      if (real.length === 1) return { customer: real[0], ambiguous: false };
+      const isReal = (r) => r.active === true && CUSTOMER_STAGES.includes(r.pipeline_stage);
+      const isWebhookShell = (r) => !isReal(r)
+        && !CUSTOMER_STAGES.includes(r.pipeline_stage)
+        && !String(r.address_line1 || '').trim()
+        && !!r.created_at
+        && Date.now() - new Date(r.created_at).getTime() <= WEBHOOK_SHELL_MAX_AGE_MS;
+      const real = rows.filter(isReal);
+      const others = rows.filter((r) => !isReal(r));
+      if (real.length === 1 && others.every(isWebhookShell)) {
+        return { customer: real[0], ambiguous: false };
+      }
     }
     return pickCustomerMatch(rows, extraction);
   } catch (err) {
@@ -466,6 +490,7 @@ async function buildCallContext(callLogId) {
 async function buildSmsThreadContext({
   phone, triggerAt = new Date(), triggerBody = '',
   groundedCustomerId = null, groundedConflict = false, groundedScope = null,
+  groundedMultiScope = false,
 }) {
   if (!last10(phone)) return { error: 'no_usable_phone' };
   // SMS path only: a service-contact sender (spouse/tenant/manager on the
@@ -477,6 +502,24 @@ async function buildSmsThreadContext({
   // loadCustomerByPhone callers are intentionally unchanged.
   const { scopeGuardsEnabled } = require('./scope-guards');
   const guardsOn = scopeGuardsEnabled();
+  // AMBIGUOUS GROUNDING is a red lane, never a guess. Two shapes reach
+  // here, and both mean the thread named more than one candidate answer:
+  //  - groundedConflict: the matches span MORE than one customer (the
+  //    sender's phone is customer A while the text names B's property, or
+  //    an off-file sender names an address that two active customers
+  //    share — the latter has no phone customer at all, so the earlier
+  //    "downgrade the phone profile" posture silently drafted an UNLINKED
+  //    prospect on an existing customer's parcel);
+  //  - groundedMultiScope: one customer, but the text named several of
+  //    their confirmed properties — linking them would price the primary
+  //    parcel and silently pick one of the properties named.
+  // One unified exit for both: a machine-readable error the caller bells
+  // red on (runThreadDraft red-lanes any context.error and names it in the
+  // bell body), so a human resolves which property/customer is meant.
+  // Gate off, neither signal ever flows and this is unreachable.
+  if (guardsOn && (groundedConflict === true || groundedMultiScope === true)) {
+    return { error: 'ambiguous_grounding' };
+  }
   const customerMatch = await loadCustomerByPhone(
     phone, null, guardsOn ? { includeServiceContacts: true } : {},
   );
@@ -540,8 +583,10 @@ async function buildSmsThreadContext({
       lot_sqft: null,
     };
   };
+  // Ambiguous grounding already returned above, so every branch here is
+  // working from a SINGLE candidate customer/property.
   let customerGroundedByAddress = false;
-  if (guardsOn && groundedCustomerId && !groundedConflict && !isRealCustomer(customer)) {
+  if (guardsOn && groundedCustomerId && !isRealCustomer(customer)) {
     const grounded = await loadGroundedCustomerById(groundedCustomerId);
     // Fail CLOSED on a transient reload error, exactly like the phone
     // lookup above — the grounded customer's membership could be hiding
@@ -551,37 +596,24 @@ async function buildSmsThreadContext({
       customer = applyGroundedScope(grounded);
       customerGroundedByAddress = true;
     }
-  } else if (guardsOn && !groundedConflict && customer && customer.id === groundedCustomerId) {
+  } else if (guardsOn && customer && customer.id === groundedCustomerId) {
     // A REAL phone-matched customer texting about their OWN secondary
     // property/unit (triage matched the same customer by address): the
     // identity needs no grounding, but the quoted PROPERTY still does —
     // without the override their primary profile's address and
-    // measurements would price the wrong parcel. Different-customer cases
-    // are the conflict path below, never this branch.
+    // measurements would price the wrong parcel.
     customer = applyGroundedScope(customer);
   }
-  // Distinct-customer conflict (gate-on): the sender's phone matches
-  // customer A but triage confirmed the text names a DIFFERENT customer's
-  // property. A's identity is real, but attaching A's address/membership
-  // pricing to B's draft would quote the wrong parcel with the wrong
-  // discounts — downgrade to the ambiguous-shared-phone posture the
-  // pipeline already honors: customerPhoneAmbiguous=true renders a
-  // name-only profile in the composer and blocks customer_id, address,
-  // and membership context downstream.
-  const phoneCustomerConflicted = guardsOn && groundedConflict === true && !!customer;
-  // Phone-scoped history belongs to whoever OWNS the sending number. It is
-  // only this draft's history when the customer link came from that number.
-  // Two cases where it does not:
-  //  - CONFLICT: the phone matches customer A while the draft is about
-  //    customer B's property; and
-  //  - ADDRESS-GROUNDED: an off-file coordinator texts about customer B —
-  //    no phone match at all, so no conflict flag fires, yet the
-  //    coordinator's own number can still carry a stale lead and prior
-  //    estimates for ANOTHER client, exposing that client's address (via
-  //    addressFromContext) and services to the composer on B's draft.
-  // Suppress the lead and prior estimates in both. The SMS thread stays —
-  // it IS the conversation being answered.
-  const suppressPhoneHistory = phoneCustomerConflicted || customerGroundedByAddress;
+  // Phone-scoped history belongs to whoever OWNS the sending number, so it
+  // is only this draft's history when the customer link came from that
+  // number. On the ADDRESS-GROUNDED path an off-file coordinator texts
+  // about customer B, yet the coordinator's own number can still carry a
+  // stale lead and prior estimates for ANOTHER client — exposing that
+  // client's address (via addressFromContext) and services to the composer
+  // on B's draft. Suppress both; the SMS thread stays, it IS the
+  // conversation being answered. (The distinct-customer conflict that used
+  // to share this suppression now red-lanes before any of this runs.)
+  const suppressPhoneHistory = customerGroundedByAddress;
   const before = new Date(triggerAt);
   const smsSince = new Date(before.getTime() - 30 * 86400000);
   const [leadMatch, smsThread, priorEstimates] = await Promise.all([
@@ -618,7 +650,9 @@ async function buildSmsThreadContext({
     extractionSource: 'none',
     phone,
     customer: customer || null,
-    customerPhoneAmbiguous: phoneCustomerConflicted,
+    // Ambiguous grounding red-lanes above, so anything reaching here has a
+    // single unambiguous candidate.
+    customerPhoneAmbiguous: false,
     lead: leadMatch.lead || null,
     leadIsForThisCall: false,
     smsThread: [],
@@ -628,10 +662,8 @@ async function buildSmsThreadContext({
     // via the contact-slot lookup or otherwise) keeps their profile as
     // history but must not unlock existing-customer pricing context —
     // active === true is required, same as the triage grounding gates. The
-    // legacy stage-only predicate is preserved byte-identical gate-off. A
-    // distinct-customer conflict also never prices as existing.
+    // legacy stage-only predicate is preserved byte-identical gate-off.
     isExistingCustomer: !!(customer
-      && !phoneCustomerConflicted
       && ['active_customer', 'won', 'at_risk'].includes(customer.pipeline_stage)
       && (!guardsOn || customer.active === true)),
   };
