@@ -517,7 +517,13 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
     .toLowerCase()
     .replace(/\b(?:dry|dries|drying)\s+(?:out|down)\b/g, '');
   // DRY-specific signals only — not generic "stress" (heat/insect).
-  const drySignal = /\b(dry|drier|drought|tan|uneven|coverage|wilt)\b/.test(obsText);
+  // "uneven"/"coverage" need MOISTURE context: the repo uses "uneven" for
+  // ordinary color variation and "coverage" for turf density, and a bare
+  // match converted non-moisture observations into customer-facing drought
+  // claims (codex P1 r22).
+  const drySignal = /\b(dry|drier|drought|tan|wilt)\b/.test(obsText)
+    || /\buneven\s+(?:irrigation|water(?:ing)?|sprinkler|moisture)\b/.test(obsText)
+    || /\b(?:sprinkler|irrigation|water)\s+coverage\b/.test(obsText);
   // The Water/Coverage score is derived from fungus/over-water signals and ignores
   // drought — so a dry/uneven photo read must downgrade it regardless of the weekly
   // amount (this is the "95 Strong vs photo says drought" contradiction).

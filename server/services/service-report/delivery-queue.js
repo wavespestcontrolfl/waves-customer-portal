@@ -253,10 +253,18 @@ async function processServiceReportDelivery(delivery, knex = db) {
     // in-flight render (defer via backoff; a QUEUED job is safe — it reads
     // settled data), then clear pdf_storage_key so the email always
     // attaches a render produced from the settled copy.
-    const activeRender = await knex('service_report_pdf_jobs')
-      .where({ service_record_id: delivery.service_record_id, status: 'rendering' })
-      .first('id')
-      .catch(() => null);
+    // A lookup ERROR is not "no active render" — proceeding would let an
+    // unfenced renderer write its stale key after our invalidation (codex
+    // P1 r22). Retryable delivery failure on either outcome.
+    let activeRender;
+    try {
+      activeRender = await knex('service_report_pdf_jobs')
+        .where({ service_record_id: delivery.service_record_id, status: 'rendering' })
+        .first('id');
+    } catch (fenceErr) {
+      const status = await markDeliveryFailed(delivery, new Error(`render-fence lookup failed: ${fenceErr.message}`), knex);
+      return { status, error: fenceErr.message };
+    }
     if (activeRender) {
       const status = await markDeliveryFailed(delivery, new Error('deferred: PDF render in flight while finalizing held delivery'), knex);
       return { status, error: 'pdf render in flight' };

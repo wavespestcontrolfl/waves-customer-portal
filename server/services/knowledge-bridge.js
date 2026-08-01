@@ -166,7 +166,10 @@ const TREATMENT_CLASSES = {
   },
   herbicide: {
     category: /herbicid/i,
-    terms: 'herbicid\\w*|weed\\s+(?:treatment|control|application|killer|spray)',
+    // Pre-emergent wording lives here TOO: Prodiamine-class rows persist
+    // product_category 'herbicide' in this repo's catalog (codex P1 r22),
+    // so "hold off on pre-emergent" must match the herbicide class.
+    terms: 'herbicid\\w*|weed\\s+(?:treatment|control|application|killer|spray)|pre[-\\s]?emergent\\w*',
   },
   insecticide: {
     category: /insecticid/i,
@@ -206,8 +209,14 @@ function governedContradictionRegex(cls) {
   if (_governedCache.has(cls)) return _governedCache.get(cls);
   const CLASS = `(?:${TREATMENT_CLASS_TERMS[cls]})`;
   const re = new RegExp([
-    // "hold off on any herbicide", "do not apply fungicide", "skip the fungicide", "no weed treatment"
-    `\\b(?:defer|hold\\s+off\\s+on|avoid|skip|withhold|do\\s+not\\s+(?:apply|make|use)|don['’]t\\s+(?:apply|make|use)|no|not)\\s+(?:[\\w'’-]+\\s+){0,2}${CLASS}`,
+    // Strong defer verbs take the class through a small gap: "hold off on
+    // any herbicide", "do not apply fungicide", "skip the fungicide".
+    `\\b(?:defer|hold\\s+off\\s+on|skip|withhold|postpone|do\\s+not\\s+(?:apply|make|use)|don['’]t\\s+(?:apply|make|use))\\s+(?:[\\w'’-]+\\s+){0,2}${CLASS}`,
+    // 'avoid'/'no' must bind to the treatment ITSELF (articles/quantifiers
+    // only) — a free two-word gap deleted legitimate aftercare like "Avoid
+    // watering after herbicide application" (codex P2 r22).
+    `\\bavoid\\s+(?:apply(?:ing)?\\s+)?(?:an?\\s+|another\\s+|more\\s+|any\\s+)?${CLASS}`,
+    `\\bno\\s+(?:additional\\s+|new\\s+|further\\s+|more\\s+)?${CLASS}`,
     // "before making a fungicide application"
     `\\bbefore\\s+(?:making|applying)\\s+(?:an?\\s+)?(?:[\\w'’-]+\\s+){0,2}${CLASS}`,
     // active wait/delay-to-apply forms — "wait to apply fungicide until
@@ -615,7 +624,12 @@ const KnowledgeBridge = {
     return db.transaction(async (trx) => {
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`lawn_rec_${assessmentId}`]);
       const assessment = await trx('lawn_assessments').where({ id: assessmentId }).first();
-      if (!assessment || !assessment.service_record_id) return { changed: false, dropped: 0 };
+      // An unlinked assessment is UNVERIFIED, not a clean no-op (codex P1
+      // r22): without service_record_id the applied products were never
+      // checked, so callers gating unrecallable sends must keep waiting/
+      // retrying rather than treating this as sanitized.
+      if (!assessment) return { changed: false, dropped: 0, error: 'assessment not found' };
+      if (!assessment.service_record_id) return { changed: false, dropped: 0, error: 'assessment not linked to a service record' };
       const appliedProducts = await loadAppliedProductsWithCategories(assessment.service_record_id, trx);
       let stored;
       try {

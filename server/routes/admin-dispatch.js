@@ -8115,7 +8115,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // pulls next_attempt_at forward the moment copy settles, so the
           // hold only fully elapses if the process died — and by then the
           // locked late write/sanitize has landed anyway.
-          const emailHoldMs = lawnRecRegenAttempted && !lawnRecRegenGrounded ? 20 * 60 * 1000 : 0;
+          // Hold on timeout even if the regen landed grounded MEANWHILE
+          // (codex P1 r22): the initial PDF may have started rendering the
+          // stale copy during the timed-out window, and only the held path's
+          // worker fence + key invalidation guarantees the email attaches a
+          // post-settlement render.
+          const emailHoldMs = lawnRecRegenAttempted && (lawnRecRegenTimedOut || !lawnRecRegenGrounded)
+            ? 20 * 60 * 1000 : 0;
           const queued = await enqueueServiceReportV1EmailDelivery({
             serviceRecordId: record.id,
             customerId: svc.customer_id,

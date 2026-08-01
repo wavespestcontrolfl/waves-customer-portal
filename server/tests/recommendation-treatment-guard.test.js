@@ -143,6 +143,24 @@ describe('sanitizeRecommendationsAgainstTreatment', () => {
     expect(dropped).toBe(2);
   });
 
+  test('pre-emergent wording matches the herbicide class (r22 — Prodiamine rows persist herbicide)', () => {
+    const { dropped } = _test.sanitizeRecommendationsAgainstTreatment({
+      recommendations: [{ priority: 1, action: 'Hold off on pre-emergent until fall.', reason: 'x', timeframe: 'y' }],
+    }, [{ product_name: 'Prodiamine 65 WDG', product_category: 'herbicide' }]);
+    expect(dropped).toBe(1);
+  });
+
+  test('compact aftercare forms pass (r22 — avoid/no must bind to the treatment)', () => {
+    const { dropped, parsed } = _test.sanitizeRecommendationsAgainstTreatment({
+      recommendations: [
+        { priority: 1, action: 'Avoid watering after herbicide application.', reason: 'Foliar uptake.', timeframe: 'Today' },
+        { priority: 2, action: 'Do not water after the herbicide application for one hour.', reason: 'Foliar uptake.', timeframe: 'Today' },
+      ],
+    }, APPLIED);
+    expect(dropped).toBe(0);
+    expect(parsed.recommendations).toHaveLength(2);
+  });
+
   test('legitimate aftercare mentioning the class passes (defer must govern the treatment)', () => {
     const { parsed, dropped } = _test.sanitizeRecommendationsAgainstTreatment({
       recommendations: [
