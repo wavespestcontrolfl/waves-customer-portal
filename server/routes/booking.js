@@ -2866,33 +2866,29 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
     // instead of falling through to lead transactional consent (which would let an
     // opted-out customer still get the recovery SMS). Best-effort; new prospects
     // simply resolve to null.
-    try {
+    const resolveCustomerId = async () => {
       const { findCustomerByPhone } = require('../services/lead-from-extraction');
       const match = await findCustomerByPhone(phoneDigits);
-      row.customer_id = match && match.id ? match.id : null;
-    } catch (e) {
-      // FAIL CLOSED on a lookup ERROR (vs a clean no-match): leaving customer_id
-      // null would treat an existing OPTED-OUT customer as a lead and bypass their
-      // opt-out on the recovery send. A transient blip → skip this capture.
-      logger.warn(`[booking:capture-intent] customer lookup failed — skipping capture: ${e.message}`);
-      return res.json({ ok: false, skipped: 'lookup_failed' });
-    }
-
+      return (match && match.id) ? match.id : null;
+    };
     // Refresh the existing OPEN intent, keyed by session_id when the client sends
     // one — so a corrected phone (after a mistyped first attempt) updates the SAME
     // row instead of orphaning the wrong number as its own recovery-eligible
     // intent. Fall back to the phone match for older clients with no session id.
-    let open = null;
-    if (sessionId) {
-      open = await db('booking_intents').where({ session_id: sessionId })
-        .whereNull('converted_at').where('suppressed', false)
-        .orderBy('captured_at', 'desc').first('id');
-    }
-    if (!open) {
-      open = await tenMatch(db('booking_intents').whereNull('converted_at').where('suppressed', false))
-        .orderBy('captured_at', 'desc').first('id');
-    }
-    const writeIntent = async (conn) => {
+    const resolveOpenIntent = async (conn) => {
+      let found = null;
+      if (sessionId) {
+        found = await conn('booking_intents').where({ session_id: sessionId })
+          .whereNull('converted_at').where('suppressed', false)
+          .orderBy('captured_at', 'desc').first('id');
+      }
+      if (!found) {
+        found = await tenMatch(conn('booking_intents').whereNull('converted_at').where('suppressed', false))
+          .orderBy('captured_at', 'desc').first('id');
+      }
+      return found;
+    };
+    const writeIntent = async (conn, open) => {
       if (open) {
         // Guard against a stale capture overwriting corrected contact: only apply if
         // this request's client timestamp is >= the stored one (or either is absent).
@@ -2914,14 +2910,47 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
     // email-template-automation-executor.js — extend ALL in the same
     // commit): pg_advisory_xact_lock(hashtextextended(
     //   'customer-comms:' || <customer id>, 0)) — transaction-scoped.
-    // Anonymous captures (no customer match) skip the lock: the undo's
-    // probes only match customer-linked rows.
-    const result = row.customer_id
-      ? await db.transaction(async (trx) => {
-        await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`customer-comms:${row.customer_id}`]);
-        return writeIntent(trx);
-      })
-      : await writeIntent(db);
+    //
+    // LOCK ORDER: the customer id IS the lock key, so it must be resolved
+    // once to pick the key — and then RE-RESOLVED under the lock, because
+    // that first read may predate an undo that holds the lock. Resolving
+    // once and writing after the wait is exactly the race this closes: the
+    // write would land on the pre-undo owner AFTER the undo committed,
+    // where its probe could never see it. The re-resolve under the lock
+    // yields the post-undo owner; if it differs we lock that id too (both
+    // are xact-scoped, and one bounded retry is enough — the second holder
+    // cannot be mid-undo while we hold its predecessor's lock). Anonymous
+    // captures (no customer match) skip the lock: the undo's probes only
+    // match customer-linked rows. Open-intent resolution moved under the
+    // lock with it — it is recipient state too.
+    let result;
+    try {
+      const candidateId = await resolveCustomerId();
+      if (!candidateId) {
+        row.customer_id = null;
+        result = await writeIntent(db, await resolveOpenIntent(db));
+      } else {
+        result = await db.transaction(async (trx) => {
+          const lockKey = async (id) => trx.raw(
+            'SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`customer-comms:${id}`],
+          );
+          await lockKey(candidateId);
+          let ownerId = await resolveCustomerId();
+          if (ownerId && ownerId !== candidateId) {
+            await lockKey(ownerId);
+            ownerId = await resolveCustomerId();
+          }
+          row.customer_id = ownerId;
+          return writeIntent(trx, await resolveOpenIntent(trx));
+        });
+      }
+    } catch (e) {
+      // FAIL CLOSED on a lookup ERROR (vs a clean no-match): leaving customer_id
+      // null would treat an existing OPTED-OUT customer as a lead and bypass their
+      // opt-out on the recovery send. A transient blip → skip this capture.
+      logger.warn(`[booking:capture-intent] customer lookup failed — skipping capture: ${e.message}`);
+      return res.json({ ok: false, skipped: 'lookup_failed' });
+    }
     return res.json(result);
   } catch (err) {
     logger.error(`[booking:capture-intent] failed: ${err.message}`);

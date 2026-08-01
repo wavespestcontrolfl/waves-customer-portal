@@ -260,6 +260,21 @@ router.get('/merges', async (req, res) => {
           && Boolean(recorded?.tables) && Object.entries(recorded.tables)
             .some(([key, ids]) => key.startsWith('payment_methods.')
               && (Array.isArray(ids) ? ids.length > 0 : true));
+        // Winner/both-DERIVED Stripe profile plus journaled loser cards:
+        // revertMerge refuses unconditionally (the returned cards would ride
+        // a profile the restored customer doesn't own). Pure journal data —
+        // no live query — and none of the other guards catch it, so without
+        // this the UI offers an Undo that always 409s. A pre-upgrade journal
+        // (no stripe_derived_from) with returned cards refuses there too.
+        const journaledLoserCards = Boolean(recorded?.tables) && Object.entries(recorded.tables)
+          .some(([key, ids]) => key.startsWith('payment_methods.') && Array.isArray(ids) && ids.length > 0);
+        const derivedFrom = recorded && Object.prototype.hasOwnProperty.call(recorded, 'stripe_derived_from')
+          ? recorded.stripe_derived_from
+          : undefined;
+        const stripeDerivationRefuses = Boolean(recorded?.stripe_transferred_id)
+          && row.winner_stripe_customer_id === recorded.stripe_transferred_id
+          && journaledLoserCards
+          && (derivedFrom === undefined || derivedFrom === 'winner' || derivedFrom === 'both');
         // The mirror image: transferred id still on the winner, but a card
         // NOT in the journaled repointed set is attached to it (saved after
         // the merge; NULL linkage counts — ambiguous fails closed) —
@@ -355,6 +370,7 @@ router.get('/merges', async (req, res) => {
             && !linkedPropertyUnrecorded
             && !countOnlyRefused
             && !stripeDriftStrandsCards
+            && !stripeDerivationRefuses
             && !postMergeCardsStrand
             && !postMergeVisitStrand,
           ),

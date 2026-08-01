@@ -100,12 +100,22 @@ describe('email template automation executor', () => {
   // calls back to db so the per-table queues keep working; raw() captures
   // the lock for the pin below.
   const advisoryLockCalls = [];
+  // Ordered trace of lock acquisitions vs table reads/writes inside
+  // createRun — the lock MUST come first (r11: resolving recipient state
+  // before locking lets a writer that waited on an in-flight undo write its
+  // pre-undo read afterwards, where the probe can never see it).
+  const opTrace = [];
   beforeEach(() => {
     jest.clearAllMocks();
     advisoryLockCalls.length = 0;
+    opTrace.length = 0;
     db.transaction = jest.fn(async (fn) => {
-      const trx = (table) => db(table);
-      trx.raw = jest.fn(async (...args) => { advisoryLockCalls.push(args); return { rows: [] }; });
+      const trx = (table) => { opTrace.push(`table:${table}`); return db(table); };
+      trx.raw = jest.fn(async (...args) => {
+        opTrace.push('lock');
+        advisoryLockCalls.push(args);
+        return { rows: [] };
+      });
       return fn(trx);
     });
   });
@@ -172,6 +182,12 @@ describe('email template automation executor', () => {
     // race an in-flight undo of this customer.
     expect(advisoryLockCalls.some(([sql, bindings]) => String(sql).includes('pg_advisory_xact_lock')
       && Array.isArray(bindings) && bindings[0] === 'customer-comms:cust-1')).toBe(true);
+    // ORDERING (r11): the lock is the FIRST thing the transaction does —
+    // before the idempotency read and before the insert. A writer that
+    // resolved recipient state first would blow past an in-flight undo.
+    expect(opTrace[0]).toBe('lock');
+    expect(opTrace.indexOf('lock'))
+      .toBeLessThan(opTrace.indexOf('table:email_template_automation_runs'));
     expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
       templateKey: 'estimate.extension_notice',
       versionId: 'version-1',

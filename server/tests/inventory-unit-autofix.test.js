@@ -210,7 +210,7 @@ describe('applyInventoryUnitFix (sweep mode)', () => {
 
 describe('runInventoryUnitAutofixSweep', () => {
   function buildSweepDbi({ candidates, products, remaining = 4, pages = null }) {
-    const state = { updates: [], movements: [] };
+    const state = { updates: [], movements: [], chains: [] };
     const route = (table, q) => {
       if (table === 'products_catalog') {
         if (q.called('count')) return { count: remaining };
@@ -231,7 +231,11 @@ describe('runInventoryUnitAutofixSweep', () => {
       }
       return [];
     };
-    const dbi = jest.fn((table) => makeChain(table, (q) => route(table, q)));
+    const dbi = jest.fn((table) => {
+      const chain = makeChain(table, (q) => route(table, q));
+      state.chains.push(chain);
+      return chain;
+    });
     dbi.transaction = jest.fn(async (fn) => fn(dbi));
     return { dbi, state };
   }
@@ -311,6 +315,67 @@ describe('runInventoryUnitAutofixSweep', () => {
 
     expect(result.applied).toBe(BATCH_CAP);
     expect(state.updates).toHaveLength(BATCH_CAP);
+  });
+
+  it("the digest's remaining count uses the sweep's OWN parked predicates (plural/whitespace ounces, blank units)", async () => {
+    isEnabled.mockImplementation((gate) => gate === 'inventoryUnitAutofix');
+    const candidates = [{ id: 'p1', name: 'Talstar P', inventory_unit: 'Gallons' }];
+    const products = {
+      p1: { id: 'p1', name: 'Talstar P', inventory_unit: 'Gallons', inventory_on_hand: '2.5', low_stock_threshold: null },
+    };
+    const { dbi, state } = buildSweepDbi({ candidates, products, remaining: 0 });
+    await runInventoryUnitAutofixSweep({ dbi });
+
+    const countQuery = state.chains.find((c) => c._table === 'products_catalog' && c.called('count'));
+    expect(countQuery).toBeTruthy();
+    // The predicate nests inside where(function unitIssue(){...}) callbacks,
+    // so walk them: run each recorded callback against a recorder that
+    // collects raw clauses and recurses into further callbacks.
+    const rawClauses = [];
+    let sawWhereNull = false;
+    const walk = (calls) => {
+      for (const [name, args] of calls) {
+        if (name === 'whereRaw') rawClauses.push(args[0]);
+        if (name === 'whereNull') sawWhereNull = true;
+        for (const arg of args) {
+          if (typeof arg === 'function') {
+            const inner = { _calls: [] };
+            for (const m of ['where', 'orWhere', 'whereRaw', 'orWhereRaw', 'whereNull', 'orWhereNull', 'whereNotNull', 'orWhereNotNull']) {
+              inner[m] = (...a) => { inner._calls.push([m.replace(/^or/, '').replace(/^W/, 'w'), a]); return inner; };
+            }
+            arg.call(inner);
+            walk(inner._calls);
+          }
+        }
+      }
+    };
+    walk(countQuery._calls);
+    // Ambiguous oz family: the sweep's normalized predicate (trim, space→_,
+    // lowercase, depluralize) — NOT an exact lower(...)='oz', which missed
+    // 'Ounces'/'ounce'/' oz ' while UNSUPPORTED_UNIT_SQL read normalized
+    // 'ounce' as supported, so those parked rows counted nowhere.
+    expect(rawClauses).toContain(OZ_FAMILY_SQL);
+    expect(rawClauses.every((sql) => !/=\s*'oz'/.test(sql) || sql === OZ_FAMILY_SQL)).toBe(true);
+    // Blank unit: whitespace-only counts as missing, like the resolver's trim.
+    expect(rawClauses.some((sql) => sql.includes("nullif(trim(coalesce(inventory_unit, '')), '') is null"))).toBe(true);
+    // A bare whereNull('inventory_unit') would under-count whitespace-only
+    // units — the blank test must be the trim-aware raw clause instead.
+    expect(sawWhereNull).toBe(false);
+  });
+
+  it('every parked variant the sweep refuses is one the remaining-count predicate would catch', () => {
+    // Pins the pairing directly: each of these is parked by the resolver
+    // (returns null) AND matched by a remaining-count branch — the digest
+    // can never report zero need-review while they exist.
+    for (const unit of ['oz', 'OZ', 'Ounces', 'ounce', '  oz  ', 'Oz']) {
+      expect(resolveInventoryUnitAlias(unit)).toBe(null);
+      const squashed = String(unit).trim().replace(/ /g, '_').toLowerCase().replace(/s$/, '');
+      expect(['oz', 'ounce']).toContain(squashed); // the OZ_FAMILY_SQL branch
+    }
+    for (const unit of ['', '   ', null]) {
+      expect(resolveInventoryUnitAlias(unit)).toBe(null);
+      expect(String(unit ?? '').trim()).toBe(''); // the blank-unit branch
+    }
   });
 
   it('goes stale instead of overwriting a row an admin fixed mid-sweep', async () => {

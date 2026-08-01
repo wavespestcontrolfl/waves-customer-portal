@@ -1622,12 +1622,13 @@ const REVERT_FINANCIAL_TABLES = new Set([
 // financial set. Add future composite-PK consent tables here.
 const CONSENT_CRITICAL_TABLES = new Set(['recipient_optin']);
 
-// Non-financial tables whose JOURNALED rows are still activity-checked: a
-// completed visit MINTS billing (admin-dispatch stamps an invoice for
-// svc.customer_id), so a journaled scheduled_services row touched since the
-// merge must refuse just like a financial row — otherwise the visit moves
-// back while the invoice it minted stays with the kept customer.
-const ACTIVITY_CHECKED_TABLES = new Set(['scheduled_services']);
+// Non-financial tables whose JOURNALED rows are still activity-checked,
+// because completing/accepting one MINTS winner-owned children the undo
+// would otherwise leave behind: a completed visit stamps an invoice for
+// svc.customer_id (admin-dispatch), and an accepted estimate mints a card
+// hold, a deposit, and a booked visit. In both cases the state change is an
+// UPDATE to the journaled row, so its updated_at is the signal.
+const ACTIVITY_CHECKED_TABLES = new Set(['scheduled_services', 'estimates']);
 
 // The undo's email-clear guard probes every surface that delivers to a
 // denormalized copy of the customer email. This table MIRRORS the canonical
@@ -2176,6 +2177,40 @@ async function revertMerge({ journalId, performedBy, performedById }) {
       });
       if (minted) {
         refuse(`${minted} invoice(s) billed from this merge's appointments are outside its journal — moving the visits back would separate them from the billing they minted; reconcile by hand`);
+      }
+    }
+
+    // Children MINTED by a journaled ESTIMATE accepted since the merge:
+    // acceptance holds a card, may take a deposit, and books a visit — all
+    // owned by whoever the estimate pointed at (the winner). Moving the
+    // estimate back while they stay put splits the acceptance apart, and no
+    // email/name/billing backfill needs clearing for that to happen, so the
+    // specialized guards never fire. Linkage columns verified against the
+    // migrations: estimate_card_holds.estimate_id (20260624000010),
+    // estimate_deposits.estimate_id (20260612000002),
+    // scheduled_services.source_estimate_id (20260423000001).
+    const journaledEstimateIds = [...journaledIdsFor('estimates')];
+    if (journaledEstimateIds.length) {
+      const estimateChildProbes = [
+        { table: 'estimate_card_holds', column: 'estimate_id', label: 'card hold(s)' },
+        { table: 'estimate_deposits', column: 'estimate_id', label: 'deposit(s)' },
+        { table: 'scheduled_services', column: 'source_estimate_id', label: 'booked appointment(s)' },
+      ];
+      for (const probe of estimateChildProbes) {
+        let rows = [];
+        try {
+          rows = await trx(probe.table)
+            .whereIn(probe.column, journaledEstimateIds)
+            .select(['id', ...activityColumnsFor(probe.table)]);
+        } catch (e) {
+          refuse(`Cannot verify ${probe.table} against the estimates this merge moved (${e.message}) — refusing to revert`);
+        }
+        const activity = countActivityRows(rows, {
+          journaledIds: journaledIdsFor(probe.table), mergeAt, table: probe.table,
+        });
+        if (activity) {
+          refuse(`${activity} ${probe.label} created from this merge's estimates are outside its journal — moving the estimates back would separate them from what accepting them created; reconcile by hand`);
+        }
       }
     }
 

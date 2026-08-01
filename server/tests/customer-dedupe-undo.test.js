@@ -780,6 +780,12 @@ describe('revertMerge', () => {
       // Row-id verification selects are the only ones using whereIn('id',…)
       // — everything else on these tables is a probe.
       const isIdVerification = q.called('whereIn') && q.args('whereIn')?.[0] === 'id';
+      // Children minted by a journaled ESTIMATE (accept → hold/deposit/
+      // booked visit). Checked BEFORE the scheduled_services branch below:
+      // booked visits are matched by source_estimate_id, not customer_id.
+      if (q.called('whereIn') && ['estimate_id', 'source_estimate_id'].includes(q.args('whereIn')?.[0])) {
+        return (tables[table] && tables[table].fromEstimates) || [];
+      }
       // scheduled_services has TWO probes: referencing visits (selects
       // customer_id, FOR UPDATE) and the billing-activity gate (selects
       // created_at/updated_at).
@@ -1690,6 +1696,83 @@ describe('revertMerge', () => {
     expect(state.journalUpdate).toBe(null);
   });
 
+  it('refuses when a journaled ESTIMATE was accepted after the merge (its updated_at moved)', async () => {
+    const journal = baseJournal();
+    journal.repointed_ids.tables['estimates.customer_id'] = ['est-1'];
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: { stillOnWinner: ['inv-1'] },
+        estimates: {
+          stillOnWinner: ['est-1'],
+          verifiedRows: [{ id: 'est-1', updated_at: '2026-07-30T09:00:00Z' }],
+        },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/estimates row\(s\) recorded by this merge were updated after it/) });
+    expect(state.repointedBack).toHaveLength(0);
+    expect(state.journalUpdate).toBe(null);
+  });
+
+  it("refuses on each unjournaled child an accepted estimate mints (card hold, deposit, booked visit)", async () => {
+    // No email/name/billing backfill is being cleared here — only these
+    // probes stand between the undo and a split-apart acceptance.
+    const cases = [
+      ['estimate_card_holds', 'card hold\\(s\\)'],
+      ['estimate_deposits', 'deposit\\(s\\)'],
+      ['scheduled_services', 'booked appointment\\(s\\)'],
+    ];
+    for (const [table, label] of cases) {
+      jest.clearAllMocks();
+      const journal = baseJournal();
+      journal.repointed_ids.tables['estimates.customer_id'] = ['est-1'];
+      const { trx, state } = buildRevertTrx({
+        journal,
+        winner: baseWinner(),
+        loser: baseLoser(),
+        tables: {
+          leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+          invoices: { stillOnWinner: ['inv-1'] },
+          estimates: { stillOnWinner: ['est-1'] },
+          [table]: { fromEstimates: [{ id: `${table}-new`, created_at: '2026-07-30T09:00:00Z' }] },
+        },
+      });
+       
+      db.transaction.mockImplementation(async (fn) => fn(trx));
+      await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+        .rejects.toMatchObject({
+          statusCode: 409,
+          message: expect.stringMatching(new RegExp(`${label} created from this merge's estimates`)),
+        });
+      expect(state.repointedBack).toHaveLength(0);
+      expect(state.journalUpdate).toBe(null);
+    }
+  });
+
+  it('a journaled estimate with no unjournaled children still reverts', async () => {
+    const journal = baseJournal();
+    journal.repointed_ids.tables['estimates.customer_id'] = ['est-1'];
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: { stillOnWinner: ['inv-1'] },
+        estimates: { stillOnWinner: ['est-1'] },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+    expect(result.repointedBack['estimates.customer_id']).toBe(1);
+    expect(state.journalUpdate.undone_at).toBeTruthy();
+  });
+
   it('refuses clearing an inherited NAME backfill when name-bearing surfaces show activity (email untouched)', async () => {
     const journal = baseJournal();
     // The winner kept its OWN email — only the name was inherited, so the
@@ -2337,6 +2420,37 @@ describe('revertMerge', () => {
       listRows = [journalRow({ loser_row_deleted_at: null })];
       const resLiveLoser = await fetch(`${base}/dup/merges`);
       expect((await resLiveLoser.json()).merges[0].revertible).toBe(false);
+
+      // r11: winner/both-DERIVED Stripe profile + journaled loser cards —
+      // revertMerge refuses unconditionally, so the UI must not offer it.
+      // Pure journal data; the winner-pre-merge exemption and the journaled
+      // cards mean no OTHER guard rejects this shape.
+      const derivedRow = (derivedFrom) => journalRow({
+        winner_stripe_customer_id: 'cus_derived',
+        repointed_ids: JSON.stringify({
+          version: 1,
+          tables: {
+            'leads.customer_id': ['lead-1'],
+            'payment_methods.customer_id': ['pm-1'],
+          },
+          stripe_transferred_id: 'cus_derived',
+          ...(derivedFrom === undefined ? {} : { stripe_derived_from: derivedFrom }),
+          payment_method_flags: { 'pm-1': { is_default: false, autopay_enabled: false } },
+          winner_premerge_pm_ids: ['pm-1'],
+          collision_handlers: [],
+        }),
+      });
+      for (const derivedFrom of ['winner', 'both', undefined]) {
+        listRows = [derivedRow(derivedFrom)];
+         
+        const res = await fetch(`${base}/dup/merges`);
+         
+        expect((await res.json()).merges[0].revertible).toBe(false);
+      }
+      // Control: loser-derived with the same shape IS offered.
+      listRows = [derivedRow('loser')];
+      const resLoserDerived = await fetch(`${base}/dup/merges`);
+      expect((await resLoserDerived.json()).merges[0].revertible).toBe(true);
     } finally {
       await new Promise((resolve) => { server.close(resolve); });
     }

@@ -315,13 +315,23 @@ async function runInventoryUnitAutofixSweep({ dbi = db } = {}) {
       // ambiguous oz, still-unsupported), same shape as dashboard-alerts.
       const remaining = await dbi('products_catalog')
         .where(function unitIssue() {
+          // BLANK unit — NULL *or* whitespace/empty string. The sweep parks
+          // both (resolveInventoryUnitAlias trims first), so a bare
+          // whereNull would under-count and let the digest claim zero
+          // need review while parked rows sit in the queue.
           this.where(function missingUnit() {
-            this.whereNull('inventory_unit')
+            this.whereRaw("nullif(trim(coalesce(inventory_unit, '')), '') is null")
               .where(function hasInventoryValue() {
                 this.whereNotNull('inventory_on_hand').orWhereNotNull('low_stock_threshold');
               });
           })
-            .orWhereRaw("lower(coalesce(inventory_unit, '')) = 'oz'")
+            // AMBIGUOUS oz family — the sweep's own normalized predicate
+            // (OZ_FAMILY_SQL: trim + space→underscore + lowercase + depluralize),
+            // so 'Ounces', 'ounce', and ' oz ' count exactly as the sweep
+            // parks them. An exact lower(...)='oz' missed every variant,
+            // and UNSUPPORTED_UNIT_SQL reads normalized 'ounce' as
+            // supported, so those rows were invisible to BOTH branches.
+            .orWhereRaw(OZ_FAMILY_SQL)
             .orWhereRaw(UNSUPPORTED_UNIT_SQL);
         })
         .count('* as count')
