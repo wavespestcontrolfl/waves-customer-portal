@@ -273,6 +273,38 @@ function blankToRenderedText(s) {
   return blankExpressions(blankMarkdownLinkDestinations(blankTags(blankHiddenContent(blankComments(s)))));
 }
 
+// True when the amount sits on a Markdown table row. Deliberately blunt: a
+// pipe anywhere on the line disqualifies the line from the PROSE exemption.
+// Over-matching only costs an exemption (the draft parks); under-matching
+// would publish a first-party price.
+function isMarkdownTableRow(text, index) {
+  const s = String(text || '');
+  const start = s.lastIndexOf('\n', index - 1) + 1;
+  let end = s.indexOf('\n', index);
+  if (end === -1) end = s.length;
+  return s.slice(start, end).includes('|');
+}
+
+// …and the same for HTML/JSX table markup, which carries no pipes:
+// "<table><tr><td>Orkin charges a $199 fee.</td></tr></table>" is a table,
+// and the ruling is that EVERY table price fails closed. Walks the tag
+// stream and reports whether a table element is still open at the amount.
+const TABLE_TAGS = new Set(['table', 'thead', 'tbody', 'tfoot', 'tr', 'td', 'th', 'comparisontable']);
+function isInsideTableMarkup(text, index) {
+  let depth = 0;
+  for (const tag of eachTag(String(text || ''))) {
+    // Inside a table tag's OWN span — the props of a self-closing
+    // <ComparisonTable … /> hold its cells, so an amount there is in a table
+    // even though no element is open around it (Codex).
+    if (TABLE_TAGS.has(tag.name) && index >= tag.start && index <= tag.end) return true;
+    if (tag.start >= index) break;
+    if (!TABLE_TAGS.has(tag.name) || tag.selfClosing) continue;
+    if (tag.isClose) depth = Math.max(0, depth - 1);
+    else depth += 1;
+  }
+  return depth > 0;
+}
+
 /**
  * findHardcodedPrice(text) → the offending price string, or null. Applies the
  * calculator/quote-framing and regulatory-fine exemptions, so callers share
@@ -288,7 +320,6 @@ function findHardcodedPrice(text, { thirdPartyCitations = false } = {}) {
   // exemption (Codex r6/r7). Detection still runs on the original text — a
   // price hidden in markup stays flagged (conservative in both directions).
   const proseText = blankToRenderedText(s);
-  const tableText = blankHiddenContent(blankComments(s));
   const priceRe = new RegExp(PRICE_RE_SRC, 'gi');
   let match;
   while ((match = priceRe.exec(s)) !== null) {
@@ -302,6 +333,17 @@ function findHardcodedPrice(text, { thirdPartyCitations = false } = {}) {
     // A price ATTRIBUTED to a named competitor is reporting, not our price
     // list (owner ruling 2026-08-01) — "cancel your pest control contract"
     // posts have to name the other company's cancellation fee to be useful.
+    //
+    // PROSE ONLY. A table-cell exemption was built and then REMOVED (owner
+    // ruling 2026-08-01, second): deciding ownership inside Markdown/JSX
+    // tables meant re-implementing a renderer here, and ~20 review rounds
+    // each found another construct that could launder a first-party price
+    // through it (entities, emphasis, inline tags, comments, reference
+    // links, hidden/styled/computed-visibility markup, spoofed props,
+    // code-span pipes). A price in a table now fails closed exactly as it
+    // does on main. The cost is small: a named-competitor post routes to
+    // human review anyway while GATE_NAMED_COMPETITOR_COMPARISON is off, so
+    // the table path was buying a parked draft a second look it already got.
     // Scoped to the amount's OWN SENTENCE, not the surrounding window: a
     // competitor named in a neighbouring sentence must never launder our
     // price ("Orkin is expensive. Quarterly pest control is $129.").
@@ -315,9 +357,15 @@ function findHardcodedPrice(text, { thirdPartyCitations = false } = {}) {
     // a boundary at that exact position is skipped by the >= scan
     // ("## Other companies charge\n$89 …" read as one sentence, Codex r4).
     const tokenIndex = match.index + (match[1] ? match[1].length : 0);
+    // PROSE ONLY, enforced here: a pipe on the amount's line means a Markdown
+    // table row, and the prose scanner would otherwise read the cell
+    // boundaries as ordinary spacing and exempt "| Aptive charges a | $199 |"
+    // (Codex). JSX tables already fail closed because blankToRenderedText
+    // blanks the whole <ComparisonTable …> tag out of the attribution text.
     if (thirdPartyCitations
-      && (isThirdPartyPriceCitation(proseText, tokenIndex, s)
-        || isTableAttributedPrice(tableText, proseText, tokenIndex))) continue;
+      && !isMarkdownTableRow(s, tokenIndex)
+      && !isInsideTableMarkup(s, tokenIndex)
+      && isThirdPartyPriceCitation(proseText, tokenIndex, s)) continue;
     return match[0].trim();
   }
   return null;
@@ -505,227 +553,15 @@ function sentenceAround(text, index) {
   return { text: s.slice(start, end), offset: start };
 }
 
-// Sourced competitor fees in TABLES: the B1/B3 briefs mandate a comparison
-// table, where party and amount are separated by cell syntax rather than a
-// prose predicate (Codex r2 P1). Two line shapes, both requiring the third
-// party EARLIER ON THE SAME LINE than the amount:
-//   | Aptive | $199 |                    (markdown row)
-//   values: ["Aptive", "$199"]           (<ComparisonTable> prop row)
-// Same operator-provenance gate as the prose exemption; first-party markers
-// on the line disqualify it (a row about US must not exempt).
-function matchesThirdParty(textPart) {
-  for (const re of [GENERIC_THIRD_PARTY_RE, ...competitorNamePatterns()]) {
-    if (re && re.test(textPart)) return true;
-  }
-  return false;
-}
 
-// A table cell attributes an amount only when it IDENTIFIES the price owner —
-// it must BE the party, not merely mention one. "Better than other companies"
-// is our own comparative copy, and letting a substring match exempt it
-// laundered a Waves price (pre-push Codex P0, r7). Articles, possessives and
-// surrounding punctuation are tolerated; anything else fails closed.
-function identifiesThirdParty(cellText) {
-  const trimmed = String(cellText || '')
-    .replace(/[*_`~]/g, '')
-    .trim()
-    .replace(/^(?:the|a|an)\s+/i, '')
-    .replace(/['’]s$/i, '')
-    .replace(/^[\s\-–—:]+|[\s\-–—:.,;]+$/g, '')
-    .trim();
-  if (!trimmed) return false;
-  for (const re of [GENERIC_THIRD_PARTY_RE, ...competitorNamePatterns()]) {
-    if (!re) continue;
-    const scan = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
-    let m;
-    while ((m = scan.exec(trimmed)) !== null) {
-      if (m.index === 0 && m[0].length === trimmed.length) return true;
-      if (m[0].length === 0) scan.lastIndex += 1;
-    }
-  }
-  return false;
-}
 
-// Index of the `}` closing the object that is already open at `from`, honoring
-// nesting and quoted strings (a brace inside "50% } off" is not a delimiter).
-// -1 = the object never closes, or the enclosing array closes first — either
-// way the row is unparseable and callers must fail closed.
-function objectEndIndex(s, from) {
-  let depth = 0;
-  for (let i = from; i < s.length; i += 1) {
-    const ch = s[i];
-    if (ch === '"' || ch === "'" || ch === '`') {
-      const quote = ch;
-      i += 1;
-      while (i < s.length && s[i] !== quote) i += s[i] === '\\' ? 2 : 1;
-      continue;
-    }
-    if (ch === '{' || ch === '[') depth += 1;
-    else if (ch === ']') { if (depth === 0) return -1; depth -= 1; }
-    else if (ch === '}') { if (depth === 0) return i; depth -= 1; }
-  }
-  return -1;
-}
 
-// Index of the `>` that terminates a JSX OPENING tag begun at `from`,
-// skipping quoted strings and nested braces (so a `>` inside a prop value or
-// expression is not mistaken for the end). -1 = never terminated.
-function openingTagEndIndex(s, from) {
-  let depth = 0;
-  for (let i = from; i < s.length; i += 1) {
-    const ch = s[i];
-    if (ch === '"' || ch === "'" || ch === '`') {
-      const quote = ch;
-      i += 1;
-      while (i < s.length && s[i] !== quote) i += s[i] === '\\' ? 2 : 1;
-      continue;
-    }
-    if (ch === '{') depth += 1;
-    else if (ch === '}') depth -= 1;
-    else if (ch === '>' && depth <= 0) return i;
-  }
-  return -1;
-}
 
-// Index of the `{` that is still open at `until`, scanning forward from
-// `from` so quoted strings are skipped rather than searched backward into.
-// -1 = nothing open there.
-function objectStartIndex(s, from, until) {
-  const open = [];
-  for (let i = Math.max(0, from); i < until; i += 1) {
-    const ch = s[i];
-    // Backticks count: a `{` inside a template literal (including a
-    // `${…}` interpolation) would otherwise stay on the stack and move the
-    // row's start past its own `label:` key (Codex r9 P0).
-    if (ch === '"' || ch === "'" || ch === '`') {
-      const quote = ch;
-      i += 1;
-      while (i < until && s[i] !== quote) i += s[i] === '\\' ? 2 : 1;
-      continue;
-    }
-    if (ch === '{') open.push(i);
-    else if (ch === '}') open.pop();
-  }
-  return open.length ? open[open.length - 1] : -1;
-}
 
-// Cells of one Markdown table line, with offsets. `\|` is an ESCAPED literal
-// pipe inside a cell, not a delimiter — treating it as one shifts every later
-// value onto the wrong column, so "| Plan \| cadence | $89 per visit |" would
-// read our amount as belonging to a third-party column (Codex r6). Rows and
-// HEADERS must share this, or the two disagree on where a column starts.
-function splitTableCells(line) {
-  const s = String(line || '');
-  const cells = [];
-  // A leading pipe opens the first cell AFTER it; without one the first cell
-  // starts at the beginning of the line.
-  let cellStart = /^\s*\|/.test(s) ? s.indexOf('|') + 1 : 0;
-  for (let i = cellStart; i <= s.length; i += 1) {
-    if (s[i] === '\\') { i += 1; continue; }
-    // A pipe inside a CODE SPAN is literal text, not a delimiter — treating
-    // it as one shifted every later cell onto the wrong header (Codex r10).
-    if (s[i] === '`') {
-      const close = s.indexOf('`', i + 1);
-      if (close !== -1) { i = close; continue; }
-    }
-    if (i === s.length || s[i] === '|') {
-      cells.push({ text: s.slice(cellStart, i), start: cellStart, end: i });
-      cellStart = i + 1;
-    }
-  }
-  return cells;
-}
 
-// `structuralText` keeps JSX markup (the ComparisonTable path resolves
-// columns/rows props against it); `renderedText` has tags blanked. A MARKDOWN
-// table's cells are prose, so they must be read rendered — otherwise
-// `| <span title="Aptive">Local service</span> | $89 |` attributes our amount
-// to an invisible attribute (pre-push Codex P0, r7). Both are blanked
-// length-preservingly, so one index is valid in either.
-// Quoted strings in JSX must be read ESCAPE-AWARE, the way
-// comparison-table-gate.js:1149-1160 reads them: a label like
-// `Plan called \"Our service\"` ends at the escaped quote under a naive
-// [^"]* and the first-party marker after it is never seen (Codex r8).
-const QUOTED_STR_SRC = '"((?:[^"\\\\]|\\\\.)*)"|\'((?:[^\'\\\\]|\\\\.)*)\'';
 const unescapeStr = (v) => String(v ?? '').replace(/\\(.)/g, '$1');
 
-// Index of a TOP-LEVEL prop's value within an opening tag's attribute text.
-// A plain regex matched "columns={[" inside ANOTHER prop's string, so a
-// data-* note containing fake columns could outrank the real prop and
-// launder a Waves price (Codex r9 P0). Depth- and quote-aware; a DUPLICATE
-// top-level prop is unreadable by design and returns -1 (fail closed).
-function topLevelPropValueIndex(attrs, propName) {
-  const a = String(attrs || '');
-  const re = new RegExp(`\\b${propName}\\s*=\\s*`, 'g');
-  let depth = 0;
-  let found = -1;
-  for (let i = 0; i < a.length; i += 1) {
-    const ch = a[i];
-    if (ch === '"' || ch === "'" || ch === '`') {
-      const quote = ch;
-      i += 1;
-      while (i < a.length && a[i] !== quote) i += a[i] === '\\' ? 2 : 1;
-      continue;
-    }
-    if (ch === '{' || ch === '[' || ch === '(') { depth += 1; continue; }
-    if (ch === '}' || ch === ']' || ch === ')') { depth -= 1; continue; }
-    if (depth !== 0) continue;
-    re.lastIndex = i;
-    const m = re.exec(a);
-    if (m && m.index === i) {
-      if (found !== -1) return -1; // duplicate top-level prop — fail closed
-      found = i + m[0].length;
-      i = found - 1;
-    }
-  }
-  return found;
-}
 
-// Parse a JS/JSX array literal of STRINGS starting at `openIdx` (the "[").
-// Returns { elements, close } with one entry per POSITION, or null when the
-// array is unreadable or ANY element is not a plain quoted string. Both the
-// row `values` and the `columns` headers go through this: collecting "just
-// the quoted strings" compressed positions, so a null/expression element
-// shifted the amount onto a neighbouring column and exempted a Waves price
-// (Codex r9, two P0s). Quote- and nesting-aware, so a "]" inside a header
-// no longer ends the array early.
-function parseStringArray(text, openIdx) {
-  const s = String(text || '');
-  if (s[openIdx] !== '[') return null;
-  const elements = [];
-  let depth = 0;
-  let start = openIdx + 1;
-  let close = -1;
-  for (let i = openIdx + 1; i < s.length; i += 1) {
-    const ch = s[i];
-    if (ch === '"' || ch === "'" || ch === '`') {
-      const quote = ch;
-      i += 1;
-      while (i < s.length && s[i] !== quote) i += s[i] === '\\' ? 2 : 1;
-      continue;
-    }
-    if (ch === '[' || ch === '{' || ch === '(') { depth += 1; continue; }
-    if (ch === '}' || ch === ')') { depth -= 1; continue; }
-    if (ch === ']') {
-      if (depth === 0) { elements.push({ text: s.slice(start, i), start }); close = i; break; }
-      depth -= 1;
-      continue;
-    }
-    if (ch === ',' && depth === 0) { elements.push({ text: s.slice(start, i), start }); start = i + 1; }
-  }
-  if (close === -1) return null; // unterminated array — fail closed
-  while (elements.length && !elements[elements.length - 1].text.trim()) elements.pop();
-  const wholeStrRe = new RegExp(`^\\s*(?:${QUOTED_STR_SRC})\\s*$`);
-  const out = [];
-  for (const el of elements) {
-    const em = wholeStrRe.exec(el.text);
-    if (!em) return null; // null / numeric / expression cell — fail closed
-    const q = el.text.search(/["'`]/);
-    const abs = el.start + q;
-    out.push({ text: unescapeStr(em[1] ?? em[2]), start: abs, end: abs + el.text.trim().length });
-  }
-  return { elements: out, close };
-}
 
 // What a READER sees in a table cell, for OWNERSHIP decisions only (never
 // for offsets). Three transforms, each a real bypass found in review:
@@ -754,6 +590,13 @@ function cellIdentity(v) {
   return decodeEntitiesForScan(unescapeStr(String(v ?? '')))
     .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
     .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+    // Reference, collapsed and shortcut links render as their label too:
+    // "O[ur][brand] service" displays as "Our service" (Codex). Definitions
+    // are dropped outright; leftover brackets are removed so no boundary is
+    // introduced.
+    .replace(/^[ \t]*\[[^\]\n]+\]:[^\n]*$/gm, '')
+    .replace(/\[([^\]]*)\]\[[^\]]*\]/g, '$1')
+    .replace(/\[([^\]]*)\]/g, '$1')
     // Inline emphasis renders away: "O**ur** quarterly service" reads as
     // "Our quarterly service", and splitting on the asterisks hid the
     // first-party marker (Codex r10). Inline TAGS do the same —
@@ -769,262 +612,7 @@ function cellIdentity(v) {
     // (Codex r10). stripTags removes markup WITHOUT inserting a boundary.
     .replace(/[\s\S]*/, (t) => stripTags(t));
 }
-const cellIsFirstParty = (v) => hasFirstPartyMarker(cellIdentity(v));
-const cellIsThirdParty = (v) => identifiesThirdParty(cellIdentity(v));
 
-// A GFM pipe table may omit the leading/trailing pipe entirely
-// ("Fee | Aptive"), so keying off a leading "|" parked valid sourced tables
-// on optional delimiters (Codex r9). A line is a table row when it carries a
-// pipe AND its contiguous pipe-block contains a --- separator. Header and row
-// must share the SAME leading-pipe convention, or column indexes would be
-// off by one — mixed conventions fail closed.
-const hasLeadingPipe = (line) => /^\s*\|/.test(line);
-// EVERY cell must be a real delimiter (---, :--, --:, :-:). Accepting a row
-// merely because its characters come from the delimiter alphabet let
-// "--- | :" pass, and the block was then treated as a table whose header
-// owned the amount (Codex r10).
-const isSeparatorLine = (line) => {
-  if (!/^[\s|:\-]+$/.test(line) || !line.includes('-')) return false;
-  const cells = splitTableCells(line).map((c) => c.text.trim()).filter((c, i, arr) => !(c === '' && (i === 0 || i === arr.length - 1)));
-  return cells.length > 0 && cells.every((c) => /^:?-+:?$/.test(c));
-};
-function isTableLine(text, lineStart, lineEnd) {
-  const line = text.slice(lineStart, lineEnd);
-  if (!line.includes('|')) return false;
-  // Walk the contiguous block of pipe-bearing lines looking for a separator.
-  let start = lineStart;
-  while (start > 0) {
-    const prevEnd = start - 1;
-    const prevStart = text.lastIndexOf('\n', prevEnd - 1) + 1;
-    const prevLine = text.slice(prevStart, prevEnd);
-    if (!prevLine.includes('|')) break;
-    if (isSeparatorLine(prevLine)) return true;
-    start = prevStart;
-  }
-  let end = lineEnd;
-  while (end < text.length) {
-    const nextStart = end + 1;
-    let nextEnd = text.indexOf('\n', nextStart);
-    if (nextEnd === -1) nextEnd = text.length;
-    const nextLine = text.slice(nextStart, nextEnd);
-    if (!nextLine.includes('|')) break;
-    if (isSeparatorLine(nextLine)) return true;
-    end = nextEnd;
-  }
-  // A single standalone pipe row (no separator anywhere) is still the
-  // long-standing "| Aptive | $199 |" shape — accept it only WITH pipes.
-  return hasLeadingPipe(line);
-}
-
-function isTableAttributedPrice(structuralText, renderedText, amountIndex) {
-  // BOTH branches read the structural text. Blanking tags to spaces would
-  // split a marker across cells ("O<span>u</span>r" → "O u r"), so cell
-  // identity removes tag markup itself — which drops attributes with it, so
-  // an invisible title= still cannot attribute (Codex r7/r10). Hidden
-  // ELEMENT content is already blanked upstream.
-  const s = String(structuralText || '');
-  const lineStart = s.lastIndexOf('\n', amountIndex - 1) + 1;
-  let lineEnd = s.indexOf('\n', amountIndex);
-  if (lineEnd === -1) lineEnd = s.length;
-  const line = s.slice(lineStart, lineEnd);
-  const local = amountIndex - lineStart;
-  // Markdown row: bind the amount to its OWNING cell, never "anywhere
-  // earlier on the row" — "| Other companies | $199 | Local service | $89 |"
-  // must exempt only the $199 (pre-push Codex P0). Attribution comes from
-  // (a) the amount's own cell or the immediately preceding cell, or (b) the
-  // table's header row at the same column index. First-party in the owning
-  // cell/header blocks; parse failure fails closed.
-  if (isTableLine(s, lineStart, lineEnd)) {
-    const cells = splitTableCells(line);
-    const idx = cells.findIndex((c) => local >= c.start && local < c.end);
-    if (idx === -1) return false;
-    const own = cells[idx].text;
-    const prev = idx > 0 ? cells[idx - 1].text : '';
-    if (cellIsFirstParty(own)) return false;
-    // Header-row resolution: walk up contiguous table lines (skipping the
-    // --- separator) to the topmost row; same column index attributes.
-    // The header is the line immediately ABOVE the separator that governs
-    // this row — not the topmost contiguous pipe line. Walking to the top
-    // picked a stray note row as the header, so "Note | Aptive" outranked the
-    // real "Fee | Waves" header and attributed our own column to a
-    // competitor (Codex r10).
-    let header = null;
-    {
-      let cursor = lineStart;
-      let sepStart = -1;
-      while (cursor > 0) {
-        const prevEnd = cursor - 1;
-        const prevStart = s.lastIndexOf('\n', prevEnd - 1) + 1;
-        const prevLine = s.slice(prevStart, prevEnd);
-        if (!prevLine.includes('|')) break;
-        if (isSeparatorLine(prevLine)) { sepStart = prevStart; break; }
-        cursor = prevStart;
-      }
-      if (sepStart > 0) {
-        const hEnd = sepStart - 1;
-        const hStart2 = s.lastIndexOf('\n', hEnd - 1) + 1;
-        const candidate = s.slice(hStart2, hEnd);
-        if (candidate.includes('|') && !isSeparatorLine(candidate)) header = candidate;
-      }
-    }
-    // Mixed leading-pipe conventions would shift column indexes by one.
-    if (header && hasLeadingPipe(header) !== hasLeadingPipe(line)) return false;
-    // EVERY first-party veto runs BEFORE any exemption — the owning column
-    // header AND the row's label cell. "| Our quarterly service | Other
-    // companies | $89 per application |" must not exempt on a neighbouring
-    // cell while its own row label names us (pre-push Codex P0, r7).
-    const ownHeader = header ? splitTableCells(header)[idx]?.text : null;
-    if (ownHeader && cellIsFirstParty(ownHeader)) return false;
-    if (cells.length && cellIsFirstParty(cells[0].text)) return false;
-    // When a HEADER exists it OWNS the column and decides alone. Falling
-    // through to neighbour-adjacency here would let a sibling column attribute
-    // an amount its own header does not (Codex r7/r9).
-    if (ownHeader) return cellIsThirdParty(ownHeader);
-    if (header) return false; // header row present but this column is missing
-    // The current line may BE the header row (a separator sits directly
-    // below it). A header naming a competitor is not an owner for a price
-    // written into that same header, so adjacency there would launder it
-    // (Codex r10). Fail closed.
-    {
-      const nextStart = lineEnd + 1;
-      let nextEnd = s.indexOf('\n', nextStart);
-      if (nextEnd === -1) nextEnd = s.length;
-      if (nextStart < s.length && isSeparatorLine(s.slice(nextStart, nextEnd))) return false;
-    }
-    // No header row: the amount's own cell or the immediately preceding one
-    // attributes it — "| Other companies | $199 | Local service | $89 |"
-    // exempts only the $199 (pre-push Codex P0).
-    if (cellIsFirstParty(prev)) return false;
-    return cellIsThirdParty(own) || cellIsThirdParty(prev);
-  }
-  // ComparisonTable values prop (TEXT-scoped — JSX props span lines). Two
-  // sanctioned shapes:
-  //   a. the competitor is a cell in the SAME row: values:["Aptive","$199"]
-  //   b. the writer contract's real shape (Codex r3): provider names live in
-  //      the columns HEADER — columns={["What you get","Aptive",…]} — and
-  //      each row's values[i] maps to columns[i+1] (columns[0] labels the
-  //      row). The amount's own column header decides attribution.
-  // "These values: [Aptive] show that … is $89" stays prose (amount must be
-  // INSIDE the bracket), and parse failure/misalignment fails closed.
-  // Quoted keys are the valid object-literal form and comparison-table-gate
-  // accepts them, so `{"label":"Early cancel","values":["$199"]}` must be
-  // recognized here too or a compliant sourced table parks purely on
-  // property-key formatting (Codex r7).
-  // The ComparisonTable path reads JSX STRUCTURE, so it works on the
-  // markup-preserving text (tags blanked there would erase columns/rows).
-  const j = String(structuralText || '');
-  const valuesRe = /(?:"values"|'values'|\bvalues\b)\s*[:=]\s*\[/g;
-  let vm;
-  while ((vm = valuesRe.exec(j)) !== null) {
-    const open = vm.index + vm[0].length - 1;
-    const close = j.indexOf(']', open);
-    if (close === -1) continue;
-    if (amountIndex <= open || amountIndex >= close) continue;
-    const parsedValues = parseStringArray(j, open);
-    if (!parsedValues) return false; // unreadable row values — fail closed
-    const cellStrings = parsedValues.elements;
-    const idx = cellStrings.findIndex((c) => amountIndex >= c.start && amountIndex < c.end);
-    if (idx === -1) return false;
-    // The owning ROW's label is part of the row — "label: 'Our quarterly
-    // service'" makes every value in that row first-party regardless of the
-    // column header (Codex r4). Read the WHOLE row object, not just the text
-    // before `values`: comparison-table-gate.js:extractRows parses rows
-    // order-insensitively and tolerates quoted keys, so
-    // `{ values:["$89 per visit"], "label":"Our quarterly service" }` is a
-    // valid row whose label a backward-only scan never sees (Codex r5).
-    // A RAW backward `lastIndexOf('{')` lands inside string literals: a label
-    // carrying the ordinary `{{brandName}}` token would set rowStart to a
-    // brace INSIDE that token, so the slice began after `label:` and the
-    // first-party poison never fired — on the very token that marks us
-    // (Codex r6). objectStartIndex ignores braces inside quotes, anchored at
-    // the enclosing tag so the scan stays inside JSX (where quotes pair) and
-    // never treats an apostrophe in body prose as a string delimiter.
-    // The values array MUST belong to a <ComparisonTable>. A bare prose
-    // "values: [...]" is not a table row, and treating it as one let
-    // adjacency attribute a first-party price outside any component
-    // (Codex r10). No owning component → fail closed.
-    const compStart = j.lastIndexOf('<ComparisonTable', vm.index);
-    if (compStart === -1) return false;
-    const owningTagEnd = openingTagEndIndex(j, compStart);
-    if (owningTagEnd === -1 || vm.index > owningTagEnd) return false;
-    const rowStart = compStart === -1 ? -1 : objectStartIndex(j, compStart, vm.index);
-    if (rowStart !== -1) {
-      const rowEnd = objectEndIndex(j, close + 1);
-      // Undelimited row object — can't prove the label is third-party.
-      if (rowEnd === -1) return false;
-      const rowText = `${j.slice(rowStart, vm.index)} ${j.slice(close + 1, rowEnd)}`;
-      // Backticks are a real label form too, and ANY label we cannot read as
-      // a plain string (a `{expr}`, a template with ${…}) fails closed —
-      // an unreadable label must never count as "not first-party"
-      // (pre-push Codex P0, r6).
-      const labelKeyRe = /["'`]?label["'`]?\s*[:=]\s*/g;
-      let km;
-      while ((km = labelKeyRe.exec(rowText)) !== null) {
-        const rest = rowText.slice(km.index + km[0].length);
-        const strM = new RegExp(`^(?:${QUOTED_STR_SRC}|\`((?:[^\`\\\\$]|\\\\.)*)\`)`).exec(rest);
-        if (!strM) return false; // unsupported label expression
-        const label = unescapeStr(strM[1] ?? strM[2] ?? strM[3]);
-        if (label && cellIsFirstParty(label)) return false;
-      }
-    }
-    const own = cellStrings[idx].text;
-    const prev = idx > 0 ? cellStrings[idx - 1].text : '';
-    // The veto is scoped to the cells that could ATTRIBUTE this amount, not
-    // to every sibling value: a normal side-by-side row legitimately
-    // describes Waves in one column and a competitor's fee in another, and a
-    // seg-wide scan blocked exactly the sourced tables this exists to allow
-    // (Codex r9). The owning header below still vetoes our own column.
-    if (cellIsFirstParty(own)) return false;
-    // Resolve the amount's own COLUMN first, within this <ComparisonTable>.
-    // The nearest PRECEDING tag is not necessarily the OWNING one: after a
-    // self-closed table, prose like `Our quarterly service values: ["$89 per
-    // application"]` would otherwise borrow that component's headers. Only an
-    // occurrence INSIDE the opening tag — where rows/columns live — may
-    // resolve against them (pre-push Codex P0, r6).
-    let header = null;
-    const tagEnd = compStart === -1 ? -1 : openingTagEndIndex(j, compStart);
-    if (compStart !== -1 && tagEnd !== -1 && vm.index <= tagEnd) {
-      // Search the WHOLE opening tag, not just the text before `values`:
-      // JSX prop order is semantically irrelevant and `rows` may precede
-      // `columns`, which parked valid tables on ordering alone (Codex r9).
-      // Read `columns` as a TOP-LEVEL prop of THIS tag — a regex over the raw
-      // tag text matched fake columns inside another prop's string (Codex r9
-      // P0).
-      const openTag = [...eachTag(j.slice(compStart, tagEnd + 1))][0];
-      const attrsStart = openTag ? compStart + openTag.start + `<${openTag.name}`.length : -1;
-      const propAt = openTag ? topLevelPropValueIndex(openTag.attrs, 'columns') : -1;
-      if (propAt !== -1) {
-        // Skip the optional JSX brace to land on the array's "[".
-        let colsOpen = attrsStart + propAt;
-        while (colsOpen < j.length && /[\s{]/.test(j[colsOpen])) colsOpen += 1;
-        const parsedCols = parseStringArray(j, colsOpen);
-        // A non-string or unreadable header array cannot be trusted to align
-        // with the row, and a wrong alignment exempts OUR price through a
-        // neighbouring competitor column (Codex r9 P0) — fail closed.
-        if (!parsedCols) return false;
-        // columns[0] labels the row. A PRESENT but SHORT columns array means
-        // the row has more values than declared columns — the amount has no
-        // declared owner, and falling back to adjacency let a neighbouring
-        // value attribute an unowned price (Codex r10). Fail closed.
-        const declared = parsedCols.elements[idx + 1];
-        if (!declared) return false;
-        header = declared.text;
-      }
-    }
-    // The OWNING COLUMN decides when it exists — vetoing on our column and
-    // attributing on a competitor's — so a neighbouring value can neither
-    // launder nor block an amount its own header already answers for
-    // (Codex r7/r9).
-    if (header) {
-      if (cellIsFirstParty(header)) return false;
-      return cellIsThirdParty(header);
-    }
-    // No resolvable header: fall back to same-row adjacency.
-    if (cellIsFirstParty(prev)) return false;
-    return cellIsThirdParty(own) || cellIsThirdParty(prev);
-  }
-  return false;
-}
 
 // The clause containing `localIndex` within a sentence.
 // A conjunction continues a RANGE only when an explicit range marker
