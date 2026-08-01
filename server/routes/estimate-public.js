@@ -7564,19 +7564,8 @@ async function handleEstimateView(req, res, next) {
     // member keeps monthly membership billing at accept — the exact audience
     // buildPricingBundle strips every billedPerApplication flag for — so
     // labelling their plan "Priced per application" misstates a real charge.
-    // Same two conditions, same order, as buildPricingBundle: no
-    // per-application columns means every accept bills monthly, otherwise the
-    // live lane decides. Async, so resolve here and pass into the (sync)
-    // renderPage. Fail-closed on error: the identity goes UNRESOLVED and the
-    // page keeps today's per-application copy rather than inventing a monthly
-    // amount.
-    let monthlyBilledEstimate = false;
-    try {
-      monthlyBilledEstimate = !(await perApplicationBillingColumnsExist())
-        || await estimateCustomerPreservesMonthlyBilling(estimate);
-    } catch (e) {
-      logger.warn(`[estimate-view] monthly-billing identity unresolved for estimate ${estimate.id}: ${e.message}`);
-    }
+    // Async, so resolve here and pass into the (sync) renderPage.
+    const monthlyBilledEstimate = await estimateRendersMonthlyBilling(estimate);
 
     // Display-only: fill contact gaps from the linked customer/lead so the
     // hero always lists email/phone/address when Waves has them on file.
@@ -17068,7 +17057,14 @@ function stripInternalMarginFieldsDeep(value, depth = 0) {
 // get every flag stripped, everyone else gets missing flags ADDED on the
 // tier-plan surfaces, so pre-flag send snapshots (sent before this change)
 // serve the same disclosure as fresh builds.
-async function estimateCustomerPreservesMonthlyBilling(estimate) {
+// `unresolvedVerdict` is the answer when the lookup can't be completed, and
+// the two callers need OPPOSITE ones (codex #3128 r7). For flag stripping,
+// unresolved must stay `true`: wrongly suppressing the monthly note hides a
+// description of a real charge, while wrongly keeping it merely over-discloses
+// for one transient failure window. For DISPLAY classification the same `true`
+// is the dangerous direction — it would print a combined $X/mo total on a
+// per-application plan — so estimateRendersMonthlyBilling passes `false`.
+async function estimateCustomerPreservesMonthlyBilling(estimate, { unresolvedVerdict = true } = {}) {
   if (!estimate?.customer_id && !estimate?.customer_phone) return false;
   try {
     let customer = null;
@@ -17086,12 +17082,32 @@ async function estimateCustomerPreservesMonthlyBilling(estimate) {
     if (!customer) return false;
     return BillingCadence.customerPreservesMonthlyMembership(customer);
   } catch (e) {
-    // Unknown lane with a customer signal present: keep the monthly
-    // disclosure. Wrongly suppressing it hides a description of a real
-    // charge; wrongly showing it merely over-discloses for one transient
-    // failure window.
     logger.warn(`[estimate-public] billing-lane lookup failed for estimate ${estimate?.id}: ${e.message}`);
-    return true;
+    return unresolvedVerdict;
+  }
+}
+
+// The monthly-billed identity for DISPLAY (the SSR hero fork and its /data
+// mirror) — one resolver, so the two surfaces can't drift.
+//
+// Same two conditions, same order, as buildPricingBundle's flag stripping, but
+// it FAILS CLOSED (codex #3128 r7): the predicate above answers an unresolved
+// lane with "preserves monthly", which is the safe direction for a disclosure
+// note and the unsafe one here — a transient customers-table failure would
+// otherwise classify every linked residential estimate as monthly-billed and
+// print its combined $X/mo total. Unresolved renders per-application, which is
+// what the overwhelming majority of accounts actually bill.
+//
+// The pre-migration branch is NOT a fail-open: without billing_mode /
+// per_application_fee, per-application billing does not exist yet, so every
+// accept genuinely bills monthly (mirrors estimate-converter).
+async function estimateRendersMonthlyBilling(estimate) {
+  try {
+    if (!(await perApplicationBillingColumnsExist())) return true;
+    return await estimateCustomerPreservesMonthlyBilling(estimate, { unresolvedVerdict: false });
+  } catch (e) {
+    logger.warn(`[estimate-public] monthly-billing display identity unresolved for estimate ${estimate?.id}: ${e.message}`);
+    return false;
   }
 }
 
@@ -18529,18 +18545,9 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
         // The non-commercial monthly identity (codex #3128 r6): a current
         // monthly member's accept preserves membership billing, so their
         // bundle's combined total is the real charge and must not be replaced
-        // by a per-application headline. Same two conditions, same order, as
-        // buildPricingBundle's flag stripping; a lookup failure resolves false
-        // and keeps the per-application default.
-        monthlyBilled: await (async () => {
-          try {
-            return !(await perApplicationBillingColumnsExist())
-              || await estimateCustomerPreservesMonthlyBilling(estimate);
-          } catch (e) {
-            logger.warn(`[estimate-data] monthly-billing identity unresolved for estimate ${estimate.id}: ${e.message}`);
-            return false;
-          }
-        })(),
+        // by a per-application headline. Same resolver the SSR hero uses, so
+        // the two surfaces can't disagree.
+        monthlyBilled: await estimateRendersMonthlyBilling(estimate),
         proposalPdfEmailed: estimateDataForIntelligence?.proposalDelivery?.pdfEmailed === true,
       },
       meta: {
@@ -18623,6 +18630,7 @@ module.exports.handleEstimateAsk = handleEstimateAsk;
 module.exports.handleEstimateView = handleEstimateView;
 module.exports.verifyEstimateAskToken = verifyEstimateAskToken;
 module.exports.buildPricingBundle = buildPricingBundle;
+module.exports.estimateRendersMonthlyBilling = estimateRendersMonthlyBilling;
 module.exports.addMissingBilledPerApplicationFlags = addMissingBilledPerApplicationFlags;
 module.exports.stripBilledPerApplicationDeep = stripBilledPerApplicationDeep;
 module.exports._resetPerApplicationColumnsProbeForTests = resetPerApplicationColumnsProbeForTests;

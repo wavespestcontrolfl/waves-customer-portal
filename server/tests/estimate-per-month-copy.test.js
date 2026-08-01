@@ -79,7 +79,21 @@ describe('legacy SSR renderer mirrors the per-application rules (codex #3128 r2)
     // billedPerApplication flags — a divergent source is how the SSR hero and
     // the pricing bundle disagreed in the first place.
     expect(src).toContain('opts.monthlyBilledEstimate === true');
-    expect(src).toMatch(/monthlyBilledEstimate = !\(await perApplicationBillingColumnsExist\(\)\)\s*\|\| await estimateCustomerPreservesMonthlyBilling\(estimate\)/);
+    // ONE resolver for both display surfaces (SSR hero + /data mirror) so they
+    // cannot drift, and it must FAIL CLOSED (codex #3128 r7): the shared
+    // predicate answers an unresolved lane with "preserves monthly", which is
+    // right for a disclosure note and wrong here — it would print a combined
+    // $X/mo total on a per-application plan.
+    expect(src).toMatch(/async function estimateRendersMonthlyBilling/);
+    expect(src).toMatch(/estimateCustomerPreservesMonthlyBilling\(estimate, \{ unresolvedVerdict: false \}\)/);
+    expect(src).toContain('const monthlyBilledEstimate = await estimateRendersMonthlyBilling(estimate);');
+    expect(src).toContain('monthlyBilled: await estimateRendersMonthlyBilling(estimate),');
+    // No other display caller may reach for the fail-OPEN predicate directly.
+    const displayCallers = src.match(/await estimateCustomerPreservesMonthlyBilling\([^)]*\)/g) || [];
+    expect(displayCallers).toEqual([
+      'await estimateCustomerPreservesMonthlyBilling(estimate, { unresolvedVerdict: false })',
+      'await estimateCustomerPreservesMonthlyBilling(estimate)', // buildPricingBundle: fail-open by design
+    ]);
   });
 
   test('the per-application service cards never render for a monthly-billed plan', () => {
@@ -97,5 +111,46 @@ describe('legacy SSR renderer mirrors the per-application rules (codex #3128 r2)
     const renderPrefRow = src.slice(src.indexOf('function renderPrefRow'), src.indexOf('function renderPrefRow') + 1400);
     expect(renderPrefRow).toContain('per application');
     expect(renderPrefRow).not.toContain('intervalPriceFromMonthly');
+  });
+});
+
+// The display identity must FAIL CLOSED (codex #3128 r7). The shared
+// predicate it wraps answers an unresolved lane with "preserves monthly" —
+// correct for a disclosure note, dangerous here, because it would print a
+// combined $X/mo total on a plan that bills per application.
+describe('monthly-billing display identity fails closed on a lookup failure', () => {
+  const loadRouteWithBrokenCustomerLookup = () => {
+    let mod;
+    jest.isolateModules(() => {
+      jest.doMock('../models/db', () => {
+        const failing = () => { throw new Error('customers lookup unavailable'); };
+        const db = jest.fn(() => ({
+          where: failing,
+          whereIn: failing,
+          first: failing,
+          select: failing,
+        }));
+        db.raw = jest.fn();
+        db.fn = { now: jest.fn() };
+        db.schema = { hasColumn: jest.fn().mockResolvedValue(true) };
+        db.transaction = jest.fn();
+        return db;
+      });
+      mod = require('../routes/estimate-public');
+    });
+    return mod;
+  };
+
+  test('a linked estimate whose customer lookup throws renders per application', async () => {
+    const { estimateRendersMonthlyBilling } = loadRouteWithBrokenCustomerLookup();
+    await expect(estimateRendersMonthlyBilling({
+      id: 'est-lookup-fail',
+      customer_id: '00000000-0000-0000-0000-000000000001',
+    })).resolves.toBe(false);
+  });
+
+  test('an estimate with no customer signal at all renders per application', async () => {
+    const { estimateRendersMonthlyBilling } = loadRouteWithBrokenCustomerLookup();
+    await expect(estimateRendersMonthlyBilling({ id: 'est-unlinked' })).resolves.toBe(false);
   });
 });
