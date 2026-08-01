@@ -490,3 +490,79 @@ describe('unitOnMultiUnitParcelForcesSiteQuote — unit address on a multi-unit 
     expect(unitOnMultiUnitParcelForcesSiteQuote({ line1: '204 3rd Street West Unit 408' }, { unitCount: 32 })).toBe(true);
   });
 });
+
+/**
+ * Per-service breakdown (2026-08-01): the public quote widget led with a
+ * combined "$X/mo" headline because a multi-service quote has no single
+ * per-application price. The unit rule applies there exactly as it does on
+ * the estimate page, so the response now carries one entry per recurring
+ * service and the widget quotes each the way it bills.
+ */
+describe('derivePerApplicationBreakdown', () => {
+  const { derivePerApplicationBreakdown } = _internals;
+
+  test('multi-service quote yields one per-application entry per recurring service', () => {
+    const estimate = generateEstimate({
+      ...BASE_PROPERTY,
+      services: {
+        pest: { frequency: 'quarterly' },
+        lawn: { track: 'st_augustine', tier: 'enhanced' },
+      },
+    });
+    // derivePerApplication deliberately refuses this shape...
+    expect(derivePerApplication(estimate)).toBeNull();
+    // ...but every line is individually expressible.
+    const lines = derivePerApplicationBreakdown(estimate);
+    expect(lines).not.toBeNull();
+    expect(lines).toHaveLength(2);
+    for (const line of lines) {
+      expect(typeof line.label).toBe('string');
+      expect(line.label.length).toBeGreaterThan(0);
+      expect(line.per_application).toBeGreaterThan(0);
+      expect(line.visits_per_year).toBeGreaterThan(0);
+    }
+    // The entries reconcile with the engine's recurring annual (cent rounding
+    // aside, one cent per line per visit at worst).
+    const annual = Number(estimate.summary.recurringAnnualAfterDiscount);
+    const summed = lines.reduce((acc, l) => acc + l.per_application * l.visits_per_year, 0);
+    const tolerance = lines.reduce((acc, l) => acc + l.visits_per_year, 0);
+    expect(Math.abs(summed - annual)).toBeLessThanOrEqual(tolerance);
+  });
+
+  test('single-service quote agrees with derivePerApplication', () => {
+    const estimate = generateEstimate({
+      ...BASE_PROPERTY,
+      services: { pest: { frequency: 'quarterly' } },
+    });
+    const single = derivePerApplication(estimate);
+    const lines = derivePerApplicationBreakdown(estimate);
+    expect(lines).toHaveLength(1);
+    expect(lines[0].per_application).toBe(single.amount);
+    expect(lines[0].visits_per_year).toBe(single.visitsPerYear);
+  });
+
+  // All-or-nothing: a partial breakdown would show two of three charged
+  // services and read as the whole plan.
+  test('returns null when ANY recurring line cannot be expressed per application', () => {
+    const estimate = {
+      lineItems: [
+        { service: 'pest', name: 'Pest Control', monthly: 39, perApp: 117, visitsPerYear: 4 },
+        { service: 'mosquito', name: 'Mosquito', monthly: 54 },
+      ],
+    };
+    expect(derivePerApplicationBreakdown(estimate)).toBeNull();
+  });
+
+  test('returns null when a line has no label to show', () => {
+    const estimate = {
+      lineItems: [{ monthly: 39, perApp: 117, visitsPerYear: 4 }],
+    };
+    expect(derivePerApplicationBreakdown(estimate)).toBeNull();
+  });
+
+  test('one-time-only and empty estimates return null', () => {
+    expect(derivePerApplicationBreakdown({ lineItems: [{ service: 'bed_bug', price: 850 }] })).toBeNull();
+    expect(derivePerApplicationBreakdown({ lineItems: [] })).toBeNull();
+    expect(derivePerApplicationBreakdown(null)).toBeNull();
+  });
+});

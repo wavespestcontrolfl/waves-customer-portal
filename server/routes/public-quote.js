@@ -180,10 +180,9 @@ function recurringQuoteLines(estimate) {
   );
 }
 
-function derivePerApplication(estimate) {
-  const recurring = recurringQuoteLines(estimate);
-  if (recurring.length !== 1) return null;
-  const line = recurring[0];
+// One recurring line → the price the customer is actually charged each time
+// we treat, or null when this line can't be expressed that way.
+function perApplicationForLine(line) {
   // Mosquito engine lines expose perVisit/visits, not perApp/visitsPerYear
   // (codex 2642 r3) — accept both shapes.
   const perAppRaw = Number(line.perApp) > 0
@@ -207,6 +206,38 @@ function derivePerApplication(estimate) {
     amount: Math.round(exact * 100) / 100,
     visitsPerYear: visits,
   };
+}
+
+function derivePerApplication(estimate) {
+  const recurring = recurringQuoteLines(estimate);
+  if (recurring.length !== 1) return null;
+  return perApplicationForLine(recurring[0]);
+}
+
+// Per-service per-application breakdown, so a MULTI-service quote can be
+// quoted the way it bills instead of falling back to a combined monthly
+// total — the unit rule applies to the public quote widget exactly as it does
+// to the estimate page (AGENTS.md "Per application price copy").
+//
+// All-or-nothing on purpose: a partial breakdown would let the widget show
+// two of three charged services and read as the whole plan. Callers that get
+// null keep whatever single-service figure derivePerApplication produced.
+function derivePerApplicationBreakdown(estimate) {
+  const recurring = recurringQuoteLines(estimate);
+  if (recurring.length === 0) return null;
+  const lines = [];
+  for (const line of recurring) {
+    const perApp = perApplicationForLine(line);
+    if (!perApp) return null;
+    const label = String(line.name || line.label || line.displayName || line.service || '').trim();
+    if (!label) return null;
+    lines.push({
+      label,
+      per_application: perApp.amount,
+      visits_per_year: perApp.visitsPerYear,
+    });
+  }
+  return lines;
 }
 
 // Which SURFACE converted the visitor (Ask Waves chat vs the classic wizard) —
@@ -1612,6 +1643,13 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       response.per_application = perApplication.amount;
       response.visits_per_year = perApplication.visitsPerYear;
     }
+    // Additive: lets the quote widget quote a multi-service plan per service,
+    // per application, instead of a combined monthly total. Single-service
+    // quotes get a one-entry array that agrees with per_application above.
+    const perApplicationLines = derivePerApplicationBreakdown(estimate);
+    if (perApplicationLines) {
+      response.recurring_lines = perApplicationLines;
+    }
     // Multi-service recurring quotes have no single per-application price;
     // the result page uses this to avoid falling back to the combined
     // monthly total (codex 2642 r3).
@@ -1772,6 +1810,7 @@ module.exports._internals = {
   buildCompactPublicQuoteServiceInterest,
   buildCompactCustomerServiceInterest,
   derivePerApplication,
+  derivePerApplicationBreakdown,
   shouldRefreshWizardDraft,
   resolveRealLotSqFt,
   resolveEntryChannel,
