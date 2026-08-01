@@ -3141,13 +3141,7 @@ router.post('/:id/resume-service', requireAdmin, async (req, res, next) => {
       return res.json({ success: true, resumed: false, reason: 'pause_changed' });
     }
 
-    // Clearing the pause is necessary but not always sufficient: the monthly
-    // cron has its own guards, and every one of them ALSO stops dues. Saying
-    // "resumed" while removing the only warning on the record would leave a
-    // customer silently unbilled for a different reason. Reuse the cron's
-    // predicates (isPaused, the billing-mode list) rather than restating
-    // them, so this can't drift from what actually runs.
-    logger.info(`[customers] Billing resumed for customer ${req.params.id} (was paused ${pausedSince}, reason ${pauseReason || 'none'})`);
+    logger.info(`[customers] Billing pause cleared for customer ${req.params.id} (was paused ${pausedSince}, reason ${pauseReason || 'none'})`);
 
     res.json({ success: true, resumed: true, pausedSince, pauseReason, servicePausedAt: null });
   } catch (err) { next(err); }
