@@ -2239,3 +2239,52 @@ describe('blog meta contract applies to NON-refresh blog publishes (legacy lane)
     expect(r.findings.some((f) => String(f.code).startsWith('META_') || String(f.code).startsWith('BLOG_META'))).toBe(false);
   });
 });
+
+describe('deterministic repair of invented internal routes (owner ruling 2026-08-01)', () => {
+  const { repairInventedInternalRoutes } = guardrails;
+
+  test('near-miss routes alias to the real allowlisted page', () => {
+    const r = repairInventedInternalRoutes('Start with [our services](/pest-control/) today.');
+    expect(r.body).toContain('(/pest-control-services/)');
+    expect(r.repairs).toEqual([{ from: '/pest-control/', to: '/pest-control-services/', action: 'aliased' }]);
+  });
+
+  test('unknown invented routes are unlinked, keeping the anchor text', () => {
+    const r = repairInventedInternalRoutes('Read the [ant guide](/pest-library/ants/) first.');
+    expect(r.body).toBe('Read the ant guide first.');
+    expect(r.repairs[0]).toMatchObject({ from: '/pest-library/ants/', to: null, action: 'unlinked' });
+  });
+
+  test('valid allowlisted and city-service links are untouched', () => {
+    const body = 'See [services](/pest-control-services/) and [Bradenton](/pest-control-bradenton-fl/).';
+    const r = repairInventedInternalRoutes(body);
+    expect(r.body).toBe(body);
+    expect(r.repairs).toEqual([]);
+  });
+
+  test('brief-mandated links are honored as allowances', () => {
+    const body = 'Per the brief, see [this](/lawn-care-bradenton-fl/).';
+    const r = repairInventedInternalRoutes(body, ['https://wavespestcontrol.com/lawn-care-bradenton-fl/']);
+    expect(r.body).toBe(body);
+    expect(r.repairs).toEqual([]);
+  });
+
+  test('a repaired body passes the internal-route gate that would have parked it', () => {
+    const bad = 'Try [our services](/pest-control/) and the [ant guide](/pest-library/ants/).';
+    expect(guardrails.evaluate({ body: bad }, {}).findings
+      .some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
+    const { body } = repairInventedInternalRoutes(bad);
+    expect(guardrails.evaluate({ body }, {}).findings
+      .some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
+  });
+
+  test('every alias target is a real allowlisted route (module-load contract)', () => {
+    const r = repairInventedInternalRoutes('[x](/get-a-quote/) [y](/faq/) [z](/waveguard/)');
+    expect(r.repairs.length).toBe(3);
+    for (const rep of r.repairs) {
+      expect(rep.to).not.toBeNull();
+      expect(guardrails.evaluate({ body: `[a](${rep.to})` }, {}).findings
+        .some((f) => f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(false);
+    }
+  });
+});

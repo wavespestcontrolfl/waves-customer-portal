@@ -625,6 +625,22 @@ class AutonomousRunner {
         await this._pendingReviewClaimOrThrow(queue, opp.id, skipReason, { claimToken });
         return finalized;
       }
+      // Deterministic repair of invented internal routes BEFORE the gate
+      // (owner ruling 2026-08-01). The writer prompt already carries the
+      // allowlist and drafts still park on UNKNOWN_INTERNAL_ROUTE, with the
+      // one redraft re-inventing a different route. Near-miss routes alias to
+      // the real page; anything else is unlinked to plain text — a dead
+      // internal link is strictly worse than the same words unlinked. Repairs
+      // are recorded so a writer that keeps inventing stays visible.
+      const routeRepair = contentGuardrails.repairInventedInternalRoutes(
+        draft.body,
+        brief.internal_links_to_add || [],
+      );
+      if (routeRepair.repairs.length) {
+        draft.body = routeRepair.body;
+        run.internal_route_repairs = routeRepair.repairs;
+        logger.warn(`[autonomous-runner] repaired ${routeRepair.repairs.length} invented internal route(s): ${routeRepair.repairs.map((r) => (r.to ? `${r.from}→${r.to}` : `${r.from}→unlinked`)).join(', ')}`);
+      }
       const guardResult = contentGuardrails.evaluate(draft, guardOptions);
       if (!guardResult.pass) {
         // Publish-time footprint refinement (footprint-claim-classifier): an

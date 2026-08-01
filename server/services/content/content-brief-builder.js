@@ -733,7 +733,12 @@ class ContentBriefBuilder {
         : {},
       gsc_signal: {
         bucket: opportunity.bucket,
-        impressions: opportunity.signal_metadata?.impressions || null,
+        // Fallback covers rows mined BEFORE seasonal_rising started writing
+        // the canonical key — without it those queued rows keep failing
+        // gsc_signal_attached until they are re-mined.
+        impressions: opportunity.signal_metadata?.impressions
+          ?? opportunity.signal_metadata?.impressions_recent_14d
+          ?? null,
         avg_position: opportunity.signal_metadata?.avg_position || null,
         ctr: opportunity.signal_metadata?.ctr || null,
         decay_pct: opportunity.signal_metadata?.decay_pct || null,

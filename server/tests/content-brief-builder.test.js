@@ -557,3 +557,39 @@ describe('buildRetryDirectives — gate-retry feedback for the one autonomous re
     expect(brief.voice_constraints.retry_directives).toBeUndefined();
   });
 });
+
+describe('_composeBrief gsc_signal impressions fallback (seasonal_rising fix 2026-08-01)', () => {
+  // seasonal_rising was the ONE bucket that never wrote the canonical
+  // `impressions` key, so every draft from it hard-failed the quality gate's
+  // gsc_signal_attached check — the evidence existed under
+  // impressions_recent_14d, the gate just couldn't see it. The miner now
+  // writes both; this fallback covers rows queued BEFORE that change.
+  const compose = (signal_metadata) => new ContentBriefBuilder()._composeBrief({
+    opportunity: {
+      id: 'opp-seasonal',
+      page_url: null,
+      query: 'lubber grasshopper florida',
+      city: 'Bradenton',
+      service: 'pest',
+      bucket: 'seasonal_rising',
+      signal_metadata,
+    },
+    signals: { customer_signal: null, serp_profile: null, conversion_feedback: null },
+    decision: { page_type: 'supporting-blog', action_type: 'new_supporting_blog' },
+  });
+
+  test('legacy seasonal_rising rows resolve impressions from the recent window', () => {
+    const brief = compose({ impressions_recent_14d: 240, impressions_prior_14d: 100, growth_pct: 1.4 });
+    expect(brief.gsc_signal.impressions).toBe(240);
+    expect(brief.gsc_signal.bucket).toBe('seasonal_rising');
+  });
+
+  test('the canonical key still wins when present', () => {
+    const brief = compose({ impressions: 300, impressions_recent_14d: 240 });
+    expect(brief.gsc_signal.impressions).toBe(300);
+  });
+
+  test('genuinely absent impressions stay null (gate still fails closed)', () => {
+    expect(compose({}).gsc_signal.impressions).toBeNull();
+  });
+});

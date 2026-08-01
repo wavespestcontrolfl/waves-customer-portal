@@ -1367,6 +1367,97 @@ function isKnownGoodInternalRoute(dest) {
   return Boolean(citySlug && PAGE_CITY_SLUGS.has(citySlug));
 }
 
+// ── deterministic repair of invented internal routes ────────────────
+//
+// The writer prompt already carries the full allowlist and an explicit
+// "NEVER invent any other internal URL" rule, and drafts STILL park on
+// UNKNOWN_INTERNAL_ROUTE — the one feedback-informed redraft re-invents a
+// different plausible route ("/pest-control/", "/pest-library/ants/"). More
+// prompting has been tried; this repairs the draft instead of parking it
+// (owner ruling 2026-08-01).
+//
+// Two moves, both strictly safe:
+//   1. Near-miss ALIAS -> the real page ("/pest-control/" is unambiguously
+//      "/pest-control-services/"). Alias targets are asserted against
+//      ALLOWED_INTERNAL_LINKS at module load, so this map can never point
+//      at a dead route.
+//   2. Anything else -> UNLINK, keeping the anchor text as plain prose. A
+//      dead internal link is strictly worse than the same words unlinked,
+//      so this never degrades a draft.
+// The repair runs BEFORE the gate and returns what it changed; callers log
+// it, so a writer that keeps inventing routes stays visible instead of
+// silently "passing".
+const INVENTED_ROUTE_ALIASES = Object.freeze({
+  '/pest-control/': '/pest-control-services/',
+  '/pest-services/': '/pest-control-services/',
+  '/services/': '/pest-control-services/',
+  '/our-services/': '/pest-control-services/',
+  '/pests/': '/pest-library/',
+  '/pest-guide/': '/pest-library/',
+  '/library/': '/pest-library/',
+  '/areas/': '/service-areas/',
+  '/areas-we-serve/': '/service-areas/',
+  '/locations/': '/service-areas/',
+  '/get-a-quote/': '/pest-control-quote/',
+  '/free-quote/': '/pest-control-quote/',
+  '/memberships/': '/waveguard-memberships/',
+  '/waveguard/': '/waveguard-memberships/',
+  '/guarantee/': '/waves-guarantee/',
+  '/faq/': '/faqs/',
+  '/inspection/': '/pest-inspection/',
+  '/termite-inspections/': '/termite-inspection/',
+  '/deals/': '/pest-control-deals/',
+  '/specials/': '/pest-control-deals/',
+});
+
+// Fail LOUD at module load if an alias target isn't a real allowlisted page:
+// a typo here would ship dead links at scale, which is exactly what this
+// exists to prevent.
+{
+  const allowedAliasTargets = new Set(ALLOWED_INTERNAL_LINKS);
+  const badAliases = Object.entries(INVENTED_ROUTE_ALIASES)
+    .filter(([, target]) => !allowedAliasTargets.has(target))
+    .map(([from, target]) => `${from} -> ${target}`);
+  if (badAliases.length) {
+    throw new Error(`content-guardrails: INVENTED_ROUTE_ALIASES targets missing from ALLOWED_INTERNAL_LINKS: ${badAliases.join(', ')}`);
+  }
+}
+
+// Markdown links only. Bare prose URLs and HTML anchors are left alone —
+// rewriting those needs a real parser, and the gate still catches them.
+const MD_INTERNAL_LINK_RE = /\[([^\]\n]*)\]\((\s*)(\/[^)\s]*)(\s*)\)/g;
+
+function repairInventedInternalRoutes(body, allowedInternalLinks = []) {
+  const text = String(body || '');
+  if (!text) return { body: text, repairs: [] };
+  const allowed = new Set(ALLOWED_INTERNAL_LINKS);
+  for (const link of Array.isArray(allowedInternalLinks) ? allowedInternalLinks : []) {
+    let candidate = String(link || '');
+    try {
+      const u = new URL(candidate);
+      if (hubHostSet().has(u.hostname.toLowerCase())) candidate = u.pathname || '/';
+    } catch { /* relative already */ }
+    const norm = normalizeInternalPath(candidate);
+    if (norm) allowed.add(norm);
+  }
+  const repairs = [];
+  const repaired = text.replace(MD_INTERNAL_LINK_RE, (whole, anchorText, lead, dest, trail) => {
+    const norm = normalizeInternalPath(dest);
+    if (!norm) return whole;
+    if (allowed.has(norm)) return whole;
+    const citySlug = CITY_SERVICE_LINK_RE.exec(norm)?.[1];
+    if (citySlug && PAGE_CITY_SLUGS.has(citySlug)) return whole;
+    const alias = INVENTED_ROUTE_ALIASES[norm];
+    if (alias) {
+      repairs.push({ from: norm, to: alias, action: 'aliased' });
+      return `[${anchorText}](${lead}${alias}${trail})`;
+    }
+    repairs.push({ from: norm, to: null, action: 'unlinked' });
+    return anchorText;
+  });
+  return { body: repaired, repairs };
+}
+
 // exemptRouteCounts: refresh grandfathering, by OCCURRENCE COUNT — a refresh
 // that preserves one legacy /old/ link must not thereby earn a free pass to
 // ADD more links to that dead route; only up to the prior body's count of
@@ -2018,6 +2109,7 @@ module.exports = {
   // single source of truth for the hardcoded-price policy — consumed by
   // seo-completion-gate so the two price P0s can never drift again.
   findHardcodedPrice,
+  repairInventedInternalRoutes,
   // single source of truth for the product-claim + prevention-promise
   // policies — consumed by the writer prompts so instruction and enforcement
   // can never drift (same pattern as FAQ_BLOCKED_SERVICES above).
