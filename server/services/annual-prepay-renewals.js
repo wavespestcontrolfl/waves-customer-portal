@@ -115,6 +115,59 @@ function addDaysYmd(value, days) {
   return etDateString(addETDays(parseETDateTime(`${ymd}T12:00`), Number(days || 0)));
 }
 
+// Arrival-time helpers for the operator-promised first-visit window. Accepts
+// 'HH:MM' or a Postgres 'HH:MM:SS' time and normalizes to 'HH:MM'; anything
+// unparseable returns null so the visit falls back to the windowless default.
+// Appointment windows START ON THE HOUR (owner rule, AGENTS.md) — an :15/:30
+// start is rejected here rather than relying on the input's `step`, so the API
+// and the UI can't disagree. window_end is duration-driven and may legitimately
+// land off-hour.
+function normalizeWindowStart(value) {
+  const match = /^(\d{1,2}):(\d{2})/.exec(String(value == null ? '' : value).trim());
+  if (!match) return null;
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  if (hours < 0 || hours > 23 || minutes !== 0) return null;
+  return `${String(hours).padStart(2, '0')}:00`;
+}
+
+// window_end must stay DURATION-driven (AGENTS.md), so a start whose job block
+// would cross midnight is rejected rather than clamped into a short visit.
+function addMinutesHHMM(value, minutes) {
+  const start = normalizeWindowStart(value);
+  if (!start) return null;
+  const [hours, mins] = start.split(':').map(Number);
+  const total = hours * 60 + mins + Number(minutes || 0);
+  if (total >= 24 * 60) return null;
+  return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+}
+
+// Conflict guard for a promised first-visit window. Delegates to the canonical
+// occupancy module (AGENTS.md booking-conflict rule + occupancy ordering
+// contract) rather than hand-rolling a predicate: findConflictingVisits is
+// tech-blind — which matters because coverage visits are seeded
+// technician-NULL and tech-scoped WHEREs can't see them — and it already
+// handles live estimate holds and the nullable window_end.
+//
+// The customer's OWN rows are excluded: if they already have a visit at that
+// hour it is the visit this coverage adopts (the tolerance matcher in
+// ensureCoverageRowsForTerm), not a double-booking to refuse.
+async function findVisitWindowConflict(conn, { customerId = null, scheduledDate, windowStart, durationMinutes = 60 } = {}) {
+  const date = dateOnly(scheduledDate);
+  const start = normalizeWindowStart(windowStart);
+  const end = addMinutesHHMM(start, durationMinutes);
+  if (!date || !start || !end) return null;
+  const { findConflictingVisits } = require('./scheduling/occupancy');
+  const rows = await findConflictingVisits({
+    db: conn,
+    date,
+    windowStart: start,
+    windowEnd: end,
+    excludeCustomerId: customerId || null,
+  });
+  return rows && rows.length ? rows[0] : null;
+}
+
 function daysUntil(fromYmd, toYmd) {
   const from = parseYmd(fromYmd);
   const to = parseYmd(toYmd);
@@ -247,18 +300,62 @@ function splitCoverageAmount(totalDollars, visitCount) {
   ));
 }
 
-function coverageScheduleDates(termStart, visitCount, cadence, termEnd = null) {
+// Anchor the generated coverage series. term_start is the day the prepay
+// invoice was MINTED, but visits are generated when it is PAID — so a
+// mint-to-payment lag used to back-date the first visit (2026-07 regression:
+// an annual prepay paid two days after mint seeded visit 1 of 4 in the past,
+// and a past-dated visit is also silently dropped by the reminder sender).
+// `firstVisitDate` (an operator-promised first service date)
+// wins when present; either way the anchor moves forward to `notBefore`
+// (today) as far as the term window allows.
+function coverageSeriesAnchor(termStart, visitCount, cadence, termEnd, { firstVisitDate = null, notBefore = null } = {}) {
+  const normalizedStart = dateOnly(termStart);
+  if (!normalizedStart) return null;
+  // An explicitly promised first visit is honored as given. It is validated
+  // against the term window when the invoice is minted, and it must NEVER be
+  // quietly moved — the customer was told this date. (A legacy/edited term
+  // whose promise no longer fits simply truncates at term_end below, the same
+  // way a short custom term already renders fewer visits.)
+  const promised = dateOnly(firstVisitDate);
+  if (promised && promised > normalizedStart) return promised;
+
+  let anchor = promised || normalizedStart;
+  const floor = dateOnly(notBefore);
+  if (floor && anchor < floor) anchor = floor;
+  if (anchor <= normalizedStart) return normalizedStart;
+
+  // The past-date shift must keep the series inside [term_start, term_end]:
+  // everything downstream (coverageRowsForTerm, attachScheduledServices,
+  // applyPrepaidCoverageForTerm) only sees in-window visits, so a tail visit
+  // pushed past term_end would never be linked or stamped prepaid. Shift as far
+  // forward as the window allows and no further — NOT back to term_start, which
+  // would throw away the whole correction for a term paid very late.
+  const normalizedEnd = dateOnly(termEnd);
+  const schedule = coverageCadenceSchedule(cadence) || coverageCadenceSchedule(inferCoverageCadence({ coverage_visit_count: visitCount }));
+  const count = normalizeCoverageVisitCount(visitCount);
+  if (!normalizedEnd || !schedule || !count) return anchor;
+  const span = (count - 1) * schedule.value;
+  const latestAnchor = schedule.unit === 'days'
+    ? addDaysYmd(normalizedEnd, -span)
+    : addMonthsSameDay(normalizedEnd, -span);
+  if (!latestAnchor) return anchor;
+  if (anchor > latestAnchor) anchor = latestAnchor < normalizedStart ? normalizedStart : latestAnchor;
+  return anchor;
+}
+
+function coverageScheduleDates(termStart, visitCount, cadence, termEnd = null, options = {}) {
   const normalizedStart = dateOnly(termStart);
   const count = normalizeCoverageVisitCount(visitCount);
   if (!normalizedStart || !count) return [];
   const schedule = coverageCadenceSchedule(cadence) || coverageCadenceSchedule(inferCoverageCadence({ coverage_visit_count: count }));
   if (!schedule) return [];
+  const anchor = coverageSeriesAnchor(normalizedStart, count, cadence, termEnd, options) || normalizedStart;
   const normalizedEnd = termEnd ? dateOnly(termEnd) : null;
   const dates = [];
   for (let index = 0; index < count; index++) {
     const date = schedule.unit === 'days'
-      ? addDaysYmd(normalizedStart, index * schedule.value)
-      : addMonthsSameDay(normalizedStart, index * schedule.value);
+      ? addDaysYmd(anchor, index * schedule.value)
+      : addMonthsSameDay(anchor, index * schedule.value);
     if (!date) return [];
     if (normalizedEnd && date > normalizedEnd) break;
     dates.push(date);
@@ -306,13 +403,18 @@ async function coverageRowsForTerm(term, conn = db, { includeTerminalStatuses = 
   return matching.filter((row) => selectedIds.has(row.id));
 }
 
-async function ensureCoverageRowsForTerm(term, conn = db) {
+async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString() } = {}) {
   const coverageServiceType = normalizeCoverageServiceType(term?.coverage_service_type);
   const coverageVisitCount = normalizeCoverageVisitCount(term?.coverage_visit_count);
   const coverageCadence = inferCoverageCadence(term);
   const termStart = dateOnly(term?.term_start);
   const termEnd = dateOnly(term?.term_end);
-  const targetDates = coverageScheduleDates(termStart, coverageVisitCount, coverageCadence, termEnd);
+  // Seeding runs at PAYMENT time, so the past-date floor is today: a term paid
+  // days after it was minted must not generate a visit that already happened.
+  const targetDates = coverageScheduleDates(termStart, coverageVisitCount, coverageCadence, termEnd, {
+    firstVisitDate: term?.first_visit_date || null,
+    notBefore: today,
+  });
   if (!term?.customer_id || !coverageServiceType || !coverageVisitCount || !termStart || !termEnd || !targetDates.length) {
     return { createdCount: 0, targetDates: [], reason: 'coverage_not_configured' };
   }
@@ -382,6 +484,60 @@ async function ensureCoverageRowsForTerm(term, conn = db) {
     }
   }
 
+  // An operator-promised arrival time for the FIRST visit (e.g. "Saturday at
+  // 8"). Only the first generated date gets it — the later placeholders stay
+  // windowless on purpose, so dispatch still routes them freely. window_end is
+  // the job block (baseDuration), NOT the customer-facing promise: the 2-hour
+  // arrival window is derived from window_start at display time.
+  let firstVisitWindowStart = normalizeWindowStart(term?.first_visit_window_start);
+  // A start so late its job block would cross midnight can't produce a
+  // duration-driven window_end — drop it rather than store a half-length visit.
+  if (firstVisitWindowStart && !addMinutesHHMM(firstVisitWindowStart, baseDuration)) {
+    logger.warn(`[annual-prepay] term ${term.id} first-visit window ${firstVisitWindowStart} leaves no room for a ${baseDuration}-minute visit — seeding without a window`);
+    firstVisitWindowStart = null;
+  }
+  const firstTargetDate = targetDates[0] || null;
+  // The promise was captured when the invoice was minted; the board may have
+  // moved since. Re-check at seeding time and drop the window (keeping the
+  // date) rather than materializing a timed visit that overlaps another job.
+  if (firstVisitWindowStart && firstTargetDate && datesToSeed.includes(firstTargetDate)) {
+    try {
+      // Rung-1 date lock BEFORE the check, per the occupancy ordering
+      // contract: without it a concurrent booking can pass its own conflict
+      // check and commit an overlapping visit between our read and insert.
+      // pg_advisory_xact_lock is transaction-scoped, so this only serializes
+      // when `conn` is the payment transaction (the path that matters); called
+      // on a bare connection it is a no-op and the check stays best-effort —
+      // which is safe because the failure mode is a dropped window, not an
+      // overlapping booking.
+      const { acquireOccupancyLock } = require('./scheduling/occupancy');
+      await acquireOccupancyLock(conn, firstTargetDate);
+      const conflict = await findVisitWindowConflict(conn, {
+        customerId: term.customer_id,
+        scheduledDate: firstTargetDate,
+        windowStart: firstVisitWindowStart,
+        durationMinutes: baseDuration,
+      });
+      if (conflict) {
+        logger.warn(`[annual-prepay] term ${term.id} first-visit window ${firstVisitWindowStart} on ${firstTargetDate} collides with visit ${conflict.id} — seeding without a window`);
+        firstVisitWindowStart = null;
+      }
+    } catch (err) {
+      // Fail CLOSED: an unverifiable window must not become an overlapping
+      // timed promise. The visit still seeds on the right date, windowless.
+      logger.warn(`[annual-prepay] term ${term.id} first-visit conflict check failed (${err.message}) — seeding without a window`);
+      firstVisitWindowStart = null;
+    }
+  }
+
+  // A term paid so late that the window can't absorb the lag still generates
+  // its earliest visits in the past (shifting further would push a paid visit
+  // outside the term, where it would never be stamped prepaid). Surface it —
+  // those visits need an operator reschedule.
+  if (firstTargetDate && firstTargetDate < today) {
+    logger.warn(`[annual-prepay] term ${term.id} seeded coverage starting ${firstTargetDate}, before today (${today}) — term window too short to absorb the payment lag; visits need rescheduling`);
+  }
+
   for (const scheduledDate of datesToSeed) {
     const insertData = {
       customer_id: term.customer_id,
@@ -391,6 +547,9 @@ async function ensureCoverageRowsForTerm(term, conn = db) {
       notes: `Annual prepaid ${coverageServiceType} coverage`,
       estimated_duration_minutes: baseDuration,
     };
+    const windowStart = (firstVisitWindowStart && scheduledDate === firstTargetDate)
+      ? firstVisitWindowStart
+      : null;
     if (cols.annual_prepay_term_id) insertData.annual_prepay_term_id = term.id;
     if (cols.is_recurring) insertData.is_recurring = true;
     if (cols.recurring_pattern) insertData.recurring_pattern = coverageCadence === 'every_6_weeks' ? 'custom' : coverageCadence;
@@ -402,8 +561,8 @@ async function ensureCoverageRowsForTerm(term, conn = db) {
       }
     }
     if (cols.time_window) insertData.time_window = null;
-    if (cols.window_start) insertData.window_start = null;
-    if (cols.window_end) insertData.window_end = null;
+    if (cols.window_start) insertData.window_start = windowStart;
+    if (cols.window_end) insertData.window_end = windowStart ? addMinutesHHMM(windowStart, baseDuration) : null;
     if (cols.technician_id) insertData.technician_id = null;
     if (cols.customer_notes) insertData.customer_notes = null;
     if (cols.estimated_price && seededVisitPrice != null) insertData.estimated_price = seededVisitPrice;
@@ -2075,6 +2234,8 @@ async function createTermForAnnualPrepay({
   coverageServiceType = undefined,
   coverageVisitCount = undefined,
   coverageCadence = undefined,
+  firstVisitDate = undefined,
+  firstVisitWindowStart = undefined,
   conn = db,
 } = {}) {
   if (!(await annualPrepayTableExists())) return null;
@@ -2096,6 +2257,20 @@ async function createTermForAnnualPrepay({
   const normalizedCoverageCadence = coverageCadence === undefined
     ? undefined
     : normalizeCoverageCadence(coverageCadence);
+  // First-visit intent: the date/time already promised to the customer. Only
+  // meaningful inside the coverage window — an out-of-window date would anchor
+  // the series outside the term it belongs to, so it is dropped rather than
+  // honored.
+  const normalizedFirstVisitDate = firstVisitDate === undefined
+    ? undefined
+    : (() => {
+      const value = dateOnly(firstVisitDate);
+      if (!value) return null;
+      return value >= normalizedStart && value <= normalizedEnd ? value : null;
+    })();
+  const normalizedFirstVisitWindowStart = firstVisitWindowStart === undefined
+    ? undefined
+    : normalizeWindowStart(firstVisitWindowStart);
 
   let existing = null;
   if (sourceEstimateId || prepayInvoiceId) {
@@ -2143,6 +2318,12 @@ async function createTermForAnnualPrepay({
     }
     if (termCols.coverage_cadence && normalizedCoverageCadence !== undefined) {
       updates.coverage_cadence = normalizedCoverageCadence;
+    }
+    if (termCols.first_visit_date && normalizedFirstVisitDate !== undefined) {
+      updates.first_visit_date = normalizedFirstVisitDate;
+    }
+    if (termCols.first_visit_window_start && normalizedFirstVisitWindowStart !== undefined) {
+      updates.first_visit_window_start = normalizedFirstVisitWindowStart;
     }
     await conn('annual_prepay_terms').where({ id: existing.id }).update(updates);
     // When the coverage window is edited (start/end actually supplied), detach
@@ -2294,6 +2475,12 @@ async function createTermForAnnualPrepay({
   }
   if (termCols.coverage_cadence && normalizedCoverageCadence !== undefined) {
     insert.coverage_cadence = normalizedCoverageCadence;
+  }
+  if (termCols.first_visit_date && normalizedFirstVisitDate !== undefined) {
+    insert.first_visit_date = normalizedFirstVisitDate;
+  }
+  if (termCols.first_visit_window_start && normalizedFirstVisitWindowStart !== undefined) {
+    insert.first_visit_window_start = normalizedFirstVisitWindowStart;
   }
 
   const [term] = await conn('annual_prepay_terms').insert(insert).returning('*');
@@ -3003,6 +3190,12 @@ module.exports = {
   coveredTermsAsOf,
   ANNUAL_PREPAY_PREPAID_METHOD,
   recordDecision,
+  // Root exports (not only _private): the annual-prepay-invoice route
+  // validates the operator's first-visit time with the SAME normalizer that
+  // persists it and the SAME conflict predicate the seeder re-checks with, so
+  // route validation and stored behavior can never drift apart.
+  normalizeWindowStart,
+  findVisitWindowConflict,
   _private: {
     dateOnly,
     addMonthsSameDay,
@@ -3023,6 +3216,9 @@ module.exports = {
     serviceMatchesCoverage,
     splitCoverageAmount,
     coverageScheduleDates,
+    coverageSeriesAnchor,
+    normalizeWindowStart,
+    addMinutesHHMM,
     normalizeCoverageCadence,
     coverageCadenceMonths,
     coverageCadenceDays,

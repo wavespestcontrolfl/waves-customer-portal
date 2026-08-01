@@ -138,14 +138,23 @@ function buildPrepayCoverageSummary(prepay) {
 // visit's share of the prepay total. Computed from the term — not a
 // scheduled_services join — so it's correct even before the invoice is paid and
 // coverage rows are seeded. Empty array when coverage isn't configured.
-function buildCoverageVisits(term, prepayAmount) {
+function buildCoverageVisits(term, prepayAmount, { today = null } = {}) {
   const visitCount = term?.coverage_visit_count != null ? Number(term.coverage_visit_count) : null;
   if (!term?.term_start || !Number.isInteger(visitCount) || visitCount <= 0) return [];
   try {
     const { coverageScheduleDates, inferCoverageCadence, splitCoverageAmount } =
       require('./annual-prepay-renewals')._private;
+    const { etDateString } = require('../utils/datetime-et');
     const cadence = term.coverage_cadence || inferCoverageCadence(term);
-    const dates = coverageScheduleDates(term.term_start, visitCount, cadence, term.term_end) || [];
+    // Same inputs the payment-time seeder uses — including the today floor —
+    // so the dates shown on the invoice/pay page are the dates the customer
+    // will actually be given if they pay now. Omitting the floor here would
+    // let a lingering unpaid invoice keep displaying a first visit that
+    // seeding has already moved.
+    const dates = coverageScheduleDates(term.term_start, visitCount, cadence, term.term_end, {
+      firstVisitDate: term.first_visit_date || null,
+      notBefore: today || etDateString(),
+    }) || [];
     // Split by the sold visitCount so each displayed share equals the
     // prepaid_amount actually stamped on the covered scheduled_services
     // (applyPrepaidCoverageForTerm splits the total by coverage_visit_count) and

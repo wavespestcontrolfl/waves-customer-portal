@@ -44,13 +44,20 @@ function query({ first, returning, columnInfo, rows = [] } = {}) {
     'forUpdate',
     'leftJoin',
     'whereRaw',
+    'whereNotNull',
     'orWhereNotNull',
+    'orWhereNull',
+    'orWhereRaw',
+    'orWhereNot',
+    'orWhereIn',
   ].forEach((method) => {
     q[method] = jest.fn(() => q);
   });
   q.modify = jest.fn((fn) => { if (typeof fn === 'function') fn(q); return q; });
   q.where = jest.fn((arg) => {
-    if (typeof arg === 'function') arg.call(q);
+    // Callers use both styles: `function () { this.whereX() }` and
+    // `(q) => q.whereX()` (scheduling/occupancy) — bind AND pass.
+    if (typeof arg === 'function') arg.call(q, q);
     return q;
   });
   q.orWhere = jest.fn(() => q);
@@ -78,6 +85,8 @@ describe('annual prepay renewal helpers', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     db.schema = { hasTable: jest.fn().mockResolvedValue(true) };
+    // scheduling/occupancy acquireOccupancyLock issues a pg advisory lock.
+    db.raw = jest.fn().mockResolvedValue(undefined);
     _private.resetCachesForTests();
   });
 
@@ -324,7 +333,7 @@ describe('annual prepay renewal helpers', () => {
       term_end: '2027-06-15',
       coverage_service_type: 'Quarterly Pest Control',
       coverage_visit_count: 4,
-    })).resolves.toMatchObject({
+    }, undefined, { today: '2026-01-01' })).resolves.toMatchObject({
       createdCount: 4,
       targetDates: ['2026-06-15', '2026-09-15', '2026-12-15', '2027-03-15'],
       existingCount: 0,
@@ -466,13 +475,107 @@ describe('annual prepay renewal helpers', () => {
       term_end: '2027-06-15',
       coverage_service_type: 'Quarterly Pest Control',
       coverage_visit_count: 4,
-    })).resolves.toMatchObject({
+    }, undefined, { today: '2026-01-01' })).resolves.toMatchObject({
       createdCount: 2,
       existingCount: 2,
     });
 
     expect(insert1.insert).toHaveBeenCalledWith(expect.objectContaining({ scheduled_date: '2026-12-15' }));
     expect(insert2.insert).toHaveBeenCalledWith(expect.objectContaining({ scheduled_date: '2027-03-15' }));
+  });
+
+  test('gives ONLY the first seeded visit the promised arrival window', async () => {
+    const columnQuery = query({
+      columnInfo: {
+        scheduled_date: {},
+        service_type: {},
+        annual_prepay_term_id: {},
+        is_recurring: {},
+        recurring_pattern: {},
+        recurring_parent_id: {},
+        recurring_ongoing: {},
+        technician_id: {},
+        window_start: {},
+        window_end: {},
+        time_window: {},
+        estimated_duration_minutes: {},
+        notes: {},
+      },
+    });
+    const rowsQuery = query({ rows: [] });
+    const conflictQuery = query({ rows: [] }); // board is clear at 08:00
+    const first = query({ returning: [{ id: 'svc-w1', scheduled_date: '2026-08-01', window_start: '08:00' }] });
+    const second = query({ returning: [{ id: 'svc-w2', scheduled_date: '2026-11-01' }] });
+    setDbQueues({ scheduled_services: [columnQuery, rowsQuery, conflictQuery, first, second] });
+
+    await expect(_private.ensureCoverageRowsForTerm({
+      id: 'term-w',
+      customer_id: 'customer-w',
+      term_start: '2026-07-30',
+      term_end: '2027-07-30',
+      coverage_service_type: 'Quarterly Pest Control',
+      coverage_visit_count: 2,
+      coverage_cadence: 'quarterly',
+      first_visit_date: '2026-08-01',
+      first_visit_window_start: '08:00',
+    }, undefined, { today: '2026-07-31' })).resolves.toMatchObject({
+      createdCount: 2,
+      targetDates: ['2026-08-01', '2026-11-01'],
+    });
+
+    // window_end is the 60-minute job block; the customer-facing 8:00-10:00
+    // arrival window is derived from window_start at display time.
+    expect(first.insert).toHaveBeenCalledWith(expect.objectContaining({
+      scheduled_date: '2026-08-01',
+      window_start: '08:00',
+      window_end: '09:00',
+    }));
+    // Later placeholders stay windowless so dispatch can still route them.
+    expect(second.insert).toHaveBeenCalledWith(expect.objectContaining({
+      scheduled_date: '2026-11-01',
+      window_start: null,
+      window_end: null,
+    }));
+  });
+
+  test('drops the promised window (keeping the date) when it collides at seeding time', async () => {
+    const columnQuery = query({
+      columnInfo: {
+        scheduled_date: {},
+        service_type: {},
+        annual_prepay_term_id: {},
+        window_start: {},
+        window_end: {},
+        time_window: {},
+        technician_id: {},
+        estimated_duration_minutes: {},
+        notes: {},
+      },
+    });
+    const rowsQuery = query({ rows: [] });
+    // The board moved between minting the invoice and paying it.
+    const conflictQuery = query({ rows: [{ id: 'svc-other', window_start: '08:00', window_end: '09:00' }] });
+    const seeded = query({ returning: [{ id: 'svc-x1', scheduled_date: '2026-08-01' }] });
+    setDbQueues({ scheduled_services: [columnQuery, rowsQuery, conflictQuery, seeded] });
+
+    await expect(_private.ensureCoverageRowsForTerm({
+      id: 'term-x',
+      customer_id: 'customer-x',
+      term_start: '2026-08-01',
+      term_end: '2027-08-01',
+      coverage_service_type: 'Quarterly Pest Control',
+      coverage_visit_count: 1,
+      coverage_cadence: 'annual',
+      first_visit_date: '2026-08-01',
+      first_visit_window_start: '08:00',
+    }, undefined, { today: '2026-07-31' })).resolves.toMatchObject({ createdCount: 1 });
+
+    // Right date, no time — an overlapping timed promise is never materialized.
+    expect(seeded.insert).toHaveBeenCalledWith(expect.objectContaining({
+      scheduled_date: '2026-08-01',
+      window_start: null,
+      window_end: null,
+    }));
   });
 
   test('does not let a cancelled in-window visit consume a sold coverage slot', async () => {
@@ -512,7 +615,7 @@ describe('annual prepay renewal helpers', () => {
       term_end: '2027-06-15',
       coverage_service_type: 'Quarterly Pest Control',
       coverage_visit_count: 4,
-    })).resolves.toMatchObject({
+    }, undefined, { today: '2026-01-01' })).resolves.toMatchObject({
       createdCount: 4,
       existingCount: 0,
     });
@@ -555,7 +658,7 @@ describe('annual prepay renewal helpers', () => {
       term_end: '2026-12-31',
       coverage_service_type: 'Quarterly Pest Control',
       coverage_visit_count: 4,
-    })).resolves.toMatchObject({
+    }, undefined, { today: '2026-01-01' })).resolves.toMatchObject({
       createdCount: 3,
       existingCount: 1,
     });
@@ -606,7 +709,7 @@ describe('annual prepay renewal helpers', () => {
       coverage_service_type: 'Monthly Lawn Care',
       coverage_visit_count: 3,
       coverage_cadence: 'monthly',
-    })).resolves.toMatchObject({
+    }, undefined, { today: '2026-01-01' })).resolves.toMatchObject({
       createdCount: 3,
       targetDates: ['2026-06-15', '2026-07-15', '2026-08-15'],
       existingCount: 0,
@@ -670,7 +773,7 @@ describe('annual prepay renewal helpers', () => {
       coverage_service_type: 'Monthly Lawn Care',
       coverage_visit_count: 3,
       coverage_cadence: 'every_6_weeks',
-    })).resolves.toMatchObject({
+    }, undefined, { today: '2026-01-01' })).resolves.toMatchObject({
       createdCount: 3,
       targetDates: ['2026-06-15', '2026-07-27', '2026-09-07'],
       existingCount: 0,
@@ -717,6 +820,79 @@ describe('annual prepay renewal helpers', () => {
       '2026-02-12',
       '2026-03-26',
     ]);
+  });
+
+  test('never generates a coverage visit before today', () => {
+    // Term minted 2026-07-30, paid 2026-08-01: visit 1 must not land in the
+    // past (2026-07 regression). The series shifts with the anchor so cadence
+    // spacing is preserved.
+    expect(_private.coverageScheduleDates(
+      '2026-07-30',
+      4,
+      'quarterly',
+      '2027-07-30',
+      { notBefore: '2026-08-01' },
+    )).toEqual(['2026-08-01', '2026-11-01', '2027-02-01', '2027-05-01']);
+
+    // Anchor already in the future — untouched.
+    expect(_private.coverageScheduleDates(
+      '2026-07-30',
+      4,
+      'quarterly',
+      '2027-07-30',
+      { notBefore: '2026-07-01' },
+    )).toEqual(['2026-07-30', '2026-10-30', '2027-01-30', '2027-04-30']);
+
+    // No options at all = the pre-existing behavior, byte for byte.
+    expect(_private.coverageScheduleDates('2026-07-30', 4, 'quarterly', '2027-07-30'))
+      .toEqual(['2026-07-30', '2026-10-30', '2027-01-30', '2027-04-30']);
+  });
+
+  test('an operator-promised first visit anchors the coverage series', () => {
+    expect(_private.coverageScheduleDates(
+      '2026-07-30',
+      4,
+      'quarterly',
+      '2027-07-30',
+      { firstVisitDate: '2026-08-01', notBefore: '2026-07-30' },
+    )).toEqual(['2026-08-01', '2026-11-01', '2027-02-01', '2027-05-01']);
+  });
+
+  test('shifts as far forward as the term window allows, never dropping a paid visit', () => {
+    // Paid 5 months late: shifting all the way to today would push visit 4 past
+    // term_end, and out-of-window visits are never linked or stamped prepaid —
+    // the customer would silently lose a visit they paid for. Shift to the
+    // LATEST anchor that still fits (not back to term_start, which would throw
+    // the whole correction away).
+    expect(_private.coverageScheduleDates(
+      '2026-07-30',
+      4,
+      'quarterly',
+      '2027-07-30',
+      { notBefore: '2026-12-30' },
+    )).toEqual(['2026-10-30', '2027-01-30', '2027-04-30', '2027-07-30']);
+  });
+
+  test('normalizes and offsets first-visit arrival times', () => {
+    expect(_private.normalizeWindowStart('08:00')).toBe('08:00');
+    expect(_private.normalizeWindowStart('8:00')).toBe('08:00');
+    expect(_private.normalizeWindowStart('08:00:00')).toBe('08:00');
+    expect(_private.normalizeWindowStart('')).toBeNull();
+    expect(_private.normalizeWindowStart(null)).toBeNull();
+    expect(_private.normalizeWindowStart('nope')).toBeNull();
+    expect(_private.normalizeWindowStart('24:00')).toBeNull();
+    // Appointment windows START ON THE HOUR (owner rule) — enforced in the
+    // normalizer so the API and the UI's `step` can't disagree.
+    expect(_private.normalizeWindowStart('08:30')).toBeNull();
+    expect(_private.normalizeWindowStart('08:15')).toBeNull();
+    expect(_private.normalizeWindowStart('08:60')).toBeNull();
+    // window_end is the 60-minute job block, not the 2-hour customer promise.
+    expect(_private.addMinutesHHMM('08:00', 60)).toBe('09:00');
+    expect(_private.addMinutesHHMM('22:00', 60)).toBe('23:00');
+    // window_end stays duration-driven: a block that would cross midnight is
+    // rejected outright rather than shortened into a partial visit.
+    expect(_private.addMinutesHHMM('23:00', 60)).toBeNull();
+    expect(_private.addMinutesHHMM(null, 60)).toBeNull();
   });
 
   test('calculates whole-day distances from date-only strings', () => {
