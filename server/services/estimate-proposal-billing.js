@@ -77,6 +77,9 @@ async function estimateBillsPerApplication(estimate) {
 // document instead of per-application copy", so being wrong about a refunded
 // or lapsed term costs a less-improved PDF, never a misstated charge — which
 // is why it does NOT re-derive coveredTermsAsOf's semantics (codex r4, r5).
+// Returns null for UNKNOWN (lookup failed) — never false. A transient DB or
+// schema error must not read as "definitely not prepaid" and unlock
+// per-application copy for a plan that may be prepaid (pre-push r6).
 async function estimateSoldAsAnnualPrepay(estimate) {
   if (!estimate?.id) return false;
   try {
@@ -85,11 +88,14 @@ async function estimateSoldAsAnnualPrepay(estimate) {
     return !!term;
   } catch (err) {
     logger.warn(`[estimate-proposal-billing] prepay lookup failed for estimate ${estimate?.id}: ${err.message}`);
-    return false;
+    return null;
   }
 }
 
 /**
+ * Per-application copy requires BOTH lookups to answer conclusively — any
+ * unknown keeps the legacy document, which is always safe to render.
+ *
  * @returns {Promise<{ billsPerApplication: boolean }>}
  */
 async function resolveProposalBillingContext(estimate) {
@@ -97,7 +103,7 @@ async function resolveProposalBillingContext(estimate) {
     estimateBillsPerApplication(estimate),
     estimateSoldAsAnnualPrepay(estimate),
   ]);
-  return { billsPerApplication: perApplication && !prepaid };
+  return { billsPerApplication: perApplication === true && prepaid === false };
 }
 
 module.exports = {

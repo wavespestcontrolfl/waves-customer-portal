@@ -115,3 +115,19 @@ describe('resolveProposalBillingContext', () => {
       .toEqual({ billsPerApplication: true });
   });
 });
+
+// Pre-push r6: an unknown prepay state must not read as "not prepaid".
+describe('fail-closed on an inconclusive lookup', () => {
+  it('keeps the legacy document when the prepay lookup errors', async () => {
+    mockDb.mockImplementation((table) => {
+      if (table === 'customers') {
+        return { where: () => ({ first: async () => ({ pipeline_stage: 'active_customer', monthly_rate: 45, billing_mode: 'per_application' }) }) };
+      }
+      return { where: () => ({ first: async () => { throw new Error('boom'); } }) };
+    });
+    mockDb.schema.hasTable.mockResolvedValue(true);
+    expect(await estimateSoldAsAnnualPrepay({ id: 'e1' })).toBeNull();
+    expect(await resolveProposalBillingContext({ id: 'e1', customer_id: 'c1' }))
+      .toEqual({ billsPerApplication: false });
+  });
+});
