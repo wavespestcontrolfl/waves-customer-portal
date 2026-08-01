@@ -1243,7 +1243,21 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
       const metadataBaseAmount = Number(paymentIntent.metadata?.base_amount ?? invoiceAmountDue(invoice));
       const metadataCardSurcharge = Number(paymentIntent.metadata?.card_surcharge ?? 0);
       await trx('payments').insert({
-        customer_id: invoice.customer_id,
+        // OWNERSHIP COMES FROM THE LOCKED ROW, never the pre-lock read.
+        // `invoice` was fetched BEFORE this transaction took FOR UPDATE on
+        // it, so a customer-merge UNDO (customer-dedupe.js revertMerge —
+        // it verifies and repoints invoices under FOR UPDATE, and probes
+        // for payments against them BEFORE doing so) can commit while we
+        // wait on that lock and move the invoice to the restored customer.
+        // Inserting `invoice.customer_id` then attaches this payment to the
+        // pre-undo owner: a loser-owned paid invoice whose payment belongs
+        // to the winner. `lockedInvoice` is the post-wait re-read, so it
+        // always names the invoice's CURRENT owner. Ordering both ways:
+        // undo-first → we re-read its result here; webhook-first → the undo
+        // blocks on this same row lock and its payment probe then sees this
+        // committed row and refuses. No extra lock is needed (settlement is
+        // never blocked into failure by one).
+        customer_id: lockedInvoice.customer_id,
         processor: 'stripe',
         stripe_payment_intent_id: piId,
         stripe_charge_id: paymentIntent.latest_charge || null,
@@ -3606,10 +3620,13 @@ async function handlePaymentIntentProcessing(paymentIntent, eventCreated = null,
           metadata: paymentMetadata,
         });
     } else {
-      if (!invoice?.customer_id) return;
+      if (!lockedInvoice?.customer_id) return;
 
       await trx('payments').insert({
-        customer_id: invoice.customer_id,
+        // Post-lock owner, never the pre-lock read — see the succeeded-PI
+        // path above: a merge undo can repoint this invoice while we wait
+        // on its FOR UPDATE, and `invoice` still names the old owner.
+        customer_id: lockedInvoice.customer_id,
         processor: 'stripe',
         stripe_payment_intent_id: piId,
         payment_date: etDateString(),
@@ -4444,3 +4461,4 @@ module.exports._resolveOrphanSucceededPaymentIntentIfSettled = resolveOrphanSucc
 module.exports._handlePaymentIntentFailed = handlePaymentIntentFailed;
 module.exports._handleAchFailure = handleAchFailure;
 module.exports._armMonthlyAutopayRetryForAsyncFailure = armMonthlyAutopayRetryForAsyncFailure;
+module.exports._handlePaymentIntentSucceeded = handlePaymentIntentSucceeded;
