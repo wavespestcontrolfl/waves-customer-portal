@@ -8,9 +8,10 @@
 //
 // TRUE only for the lane this PR set out to fix: a plan billed per completed
 // application. Everything else — a preserved monthly membership, an annual
-// prepay, an unknown lane — renders the document exactly as it did before,
-// which is the safe direction: a caller that cannot establish the lane never
-// has a billing cadence invented for it.
+// prepay, a pre-migration database where the lane cannot exist yet, an unknown
+// lane — renders the document exactly as it did before, which is the safe
+// direction: a caller that cannot establish the lane never has a billing
+// cadence invented for it.
 //
 //   Preserved monthly members keep monthly billing when they add a service
 //   (estimate-converter's preservesExistingMembership), so per-application
@@ -47,8 +48,36 @@ async function matchUnlinkedCustomer(estimate) {
   return match || null;
 }
 
+// Pre-migration compatibility (codex #3120 r5) — mirrors the guards in
+// estimate-converter.js and estimate-public.js's buildPricingBundle.
+// billing_mode / per_application_fee ship in migration 20260709000010. On a
+// database that has not run it — an explicitly supported preview /
+// deploy-window state — the converter detects the missing columns and keeps
+// the LEGACY update shape, so EVERY accept bills through the monthly cron and
+// per-application billing does not exist yet. The lane question is therefore
+// moot before the migration: describing per-application charges would misstate
+// a real monthly one, exactly the failure this PR set out to fix, so the
+// answer is legacy for everyone (which is also how the page renders — the
+// route strips the flags off the whole bundle on the same probe).
+//
+// A migrated database never un-migrates, so a true probe is cached forever;
+// while false we re-probe per call — the window is short.
+//
+// A probe ERROR deliberately fails the other way from estimate-public's copy
+// of this helper. That one assumes migrated so its display flag keeps working;
+// here an error can only ever buy per-application copy on a document that is
+// always safe to render the legacy way, so it falls through to the catch below
+// with every other inconclusive lookup.
+let perApplicationColumnsKnownPresent = false;
+async function perApplicationBillingColumnsExist() {
+  if (perApplicationColumnsKnownPresent) return true;
+  perApplicationColumnsKnownPresent = await db.schema.hasColumn('customers', 'billing_mode');
+  return perApplicationColumnsKnownPresent;
+}
+
 async function estimateBillsPerApplication(estimate) {
   try {
+    if (!(await perApplicationBillingColumnsExist())) return false;
     const customer = estimate?.customer_id
       ? await db('customers').where({ id: estimate.customer_id }).first()
       : await matchUnlinkedCustomer(estimate || {});
@@ -58,10 +87,11 @@ async function estimateBillsPerApplication(estimate) {
     if (!customer) return true;
     return !customerPreservesMonthlyMembership(customer);
   } catch (err) {
-    // Unknown lane with a customer present: keep the legacy description.
-    // Wrongly suppressing it hides a real charge; wrongly showing it merely
-    // over-discloses for one failure window. Same fail direction as
-    // estimateCustomerPreservesMonthlyBilling in estimate-public.js.
+    // Unknown lane — a failed customer read, or a schema probe that could not
+    // answer: keep the legacy description. Wrongly suppressing it hides a real
+    // charge; wrongly showing it merely over-discloses for one failure window.
+    // Same fail direction as estimateCustomerPreservesMonthlyBilling in
+    // estimate-public.js.
     logger.warn(`[estimate-proposal-billing] billing-lane lookup failed for estimate ${estimate?.id}: ${err.message}`);
     return false;
   }
@@ -110,4 +140,9 @@ module.exports = {
   estimateBillsPerApplication,
   estimateSoldAsAnnualPrepay,
   resolveProposalBillingContext,
+};
+// Test-only: lets suites exercise the pre-migration branch after a true probe
+// has been cached (mirrors estimate-public.js).
+module.exports._resetPerApplicationColumnsProbeForTests = () => {
+  perApplicationColumnsKnownPresent = false;
 };

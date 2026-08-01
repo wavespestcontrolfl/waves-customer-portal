@@ -4,7 +4,7 @@
  * question the estimate page asks on every render.
  */
 const mockDb = jest.fn();
-mockDb.schema = { hasTable: jest.fn() };
+mockDb.schema = { hasTable: jest.fn(), hasColumn: jest.fn() };
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error: jest.fn() }));
 // An unlinked estimate links at accept through the SAME phone matcher, so an
@@ -16,6 +16,7 @@ const {
   estimateBillsPerApplication,
   estimateSoldAsAnnualPrepay,
   resolveProposalBillingContext,
+  _resetPerApplicationColumnsProbeForTests,
 } = require('../services/estimate-proposal-billing');
 
 // db('customers').where({...}).first() / db('annual_prepay_terms')...
@@ -35,6 +36,10 @@ function stubTables({ customer, prepayTerm, customersThrow = false }) {
 beforeEach(() => {
   jest.clearAllMocks();
   mockMatchByPhone.mockResolvedValue({ match: null });
+  // Default to a migrated database; the pre-migration suite overrides it. The
+  // module caches a true probe, so the cache has to be dropped between tests.
+  _resetPerApplicationColumnsProbeForTests();
+  mockDb.schema.hasColumn.mockResolvedValue(true);
 });
 
 describe('estimateBillsPerApplication', () => {
@@ -72,6 +77,51 @@ describe('estimateBillsPerApplication', () => {
   it('keeps the monthly description when the lane lookup fails', async () => {
     stubTables({ customersThrow: true });
     expect(await estimateBillsPerApplication({ id: 'e1', customer_id: 'c1' })).toBe(false);
+  });
+});
+
+
+// Codex #3120 r5: before migration 20260709000010 the converter keeps the
+// legacy update shape, so every accept bills monthly and there is no
+// per-application lane to describe — the PDF must not advertise one.
+describe('pre-migration database (no customers.billing_mode)', () => {
+  beforeEach(() => {
+    mockDb.schema.hasColumn.mockResolvedValue(false);
+  });
+
+  it('is FALSE for a lead-stage row that would otherwise bill per application', async () => {
+    stubTables({ customer: { pipeline_stage: 'lead', monthly_rate: 45 } });
+    expect(await estimateBillsPerApplication({ id: 'e1', customer_id: 'c1' })).toBe(false);
+  });
+
+  it('is FALSE for an unlinked estimate, and never reaches the phone matcher', async () => {
+    stubTables({});
+    expect(await estimateBillsPerApplication({ id: 'e1', customer_phone: '+19415551234' })).toBe(false);
+    expect(mockMatchByPhone).not.toHaveBeenCalled();
+  });
+
+  it('keeps the legacy document through resolveProposalBillingContext', async () => {
+    stubTables({ customer: { pipeline_stage: 'lead', monthly_rate: 45 } });
+    expect(await resolveProposalBillingContext({ id: 'e1', customer_id: 'c1' }))
+      .toEqual({ billsPerApplication: false });
+  });
+
+  it('keeps the legacy document when the column probe itself errors', async () => {
+    stubTables({ customer: { pipeline_stage: 'lead', monthly_rate: 45 } });
+    mockDb.schema.hasColumn.mockRejectedValue(new Error('boom'));
+    expect(await estimateBillsPerApplication({ id: 'e1', customer_id: 'c1' })).toBe(false);
+  });
+
+  it('re-probes while absent, then caches once the columns land', async () => {
+    stubTables({ customer: { pipeline_stage: 'lead', monthly_rate: 45 } });
+    await estimateBillsPerApplication({ id: 'e1', customer_id: 'c1' });
+    await estimateBillsPerApplication({ id: 'e1', customer_id: 'c1' });
+    expect(mockDb.schema.hasColumn).toHaveBeenCalledTimes(2);
+
+    mockDb.schema.hasColumn.mockResolvedValue(true);
+    expect(await estimateBillsPerApplication({ id: 'e1', customer_id: 'c1' })).toBe(true);
+    await estimateBillsPerApplication({ id: 'e1', customer_id: 'c1' });
+    expect(mockDb.schema.hasColumn).toHaveBeenCalledTimes(3);
   });
 });
 
