@@ -13,9 +13,10 @@ const {
 } = require('../services/service-completion-profiles');
 
 function makeKnex({ rows = [], backedRows = [], hasTable = true, throwOnQuery = false } = {}) {
-  // The helper now runs two distinct() queries — project_required rows
-  // (still-backed types) first, then service_report rows. Discriminate on
-  // the captured where() mode so each query gets its own row set.
+  // The helper now runs two distinct() queries — project-backed rows
+  // (whereIn project_required/special_project) first, then service_report
+  // rows (where completion_mode). Discriminate on which clause captured the
+  // mode so each query gets its own row set.
   const knex = jest.fn(() => {
     let mode = null;
     const chain = {
@@ -23,11 +24,15 @@ function makeKnex({ rows = [], backedRows = [], hasTable = true, throwOnQuery = 
         if (args && args.completion_mode) mode = args.completion_mode;
         return chain;
       }),
+      whereIn: jest.fn((col) => {
+        if (col === 'completion_mode') mode = 'project_backed';
+        return chain;
+      }),
       whereNotNull: jest.fn(() => chain),
       whereNotIn: jest.fn(() => chain),
       distinct: jest.fn(async () => {
         if (throwOnQuery) throw new Error('boom');
-        return mode === 'project_required' ? backedRows : rows;
+        return mode === 'project_backed' ? backedRows : rows;
       }),
     };
     return chain;
@@ -45,9 +50,34 @@ describe('appointmentManagedProjectTypes', () => {
     expect(managed).toEqual(new Set(['cockroach', 'bed_bug']));
   });
 
-  test('pre-cutover (no flipped rows) is an empty set — Projects creation unchanged', async () => {
+  test('pre-cutover (no flipped rows) still carries the code-enforced retired-untyped types', async () => {
+    // bed_bug's pointer was CLEARED by the 20260731400000 untype — the type
+    // must stay appointment-managed by code or /admin/projects re-exposes
+    // the retired project form as a second completion lane (codex P1).
     const managed = await appointmentManagedProjectTypes(makeKnex({ rows: [] }));
-    expect(managed.size).toBe(0);
+    expect(managed).toEqual(new Set(['bed_bug']));
+  });
+
+  test('an ACTIVE special_project bed_bug profile also outranks the code retirement (codex P2 r11)', async () => {
+    // serializeProfile treats special_project as project-backed too — a
+    // drifted special_project row keeps its Projects lane like
+    // project_required does.
+    const managed = await appointmentManagedProjectTypes(makeKnex({
+      rows: [{ project_type: 'cockroach' }],
+      backedRows: [{ project_type: 'bed_bug', completion_mode: 'special_project' }],
+    }));
+    expect(managed).toEqual(new Set(['cockroach']));
+  });
+
+  test('an ACTIVE project_required bed_bug profile outranks the code retirement (drift-skip case)', async () => {
+    // The untype migration loud-skips a drifted/project_required row — the
+    // surviving profile still requires the Projects lane, so the retired
+    // union must not hide it (codex P2 r7).
+    const managed = await appointmentManagedProjectTypes(makeKnex({
+      rows: [{ project_type: 'cockroach' }],
+      backedRows: [{ project_type: 'bed_bug' }],
+    }));
+    expect(managed).toEqual(new Set(['cockroach']));
   });
 
   test('fails open to empty set when the table is missing or the query errors', async () => {
@@ -65,7 +95,7 @@ describe('appointmentManagedProjectTypes', () => {
       backedRows: [{ project_type: 'rodent_trapping' }],
     });
     const managed = await appointmentManagedProjectTypes(knex);
-    expect(managed).toEqual(new Set(['cockroach']));
+    expect(managed).toEqual(new Set(['cockroach', 'bed_bug']));
   });
 
   // Owner directive 2026-07-13 (supersedes 2026-07-04): the flea + rodent
@@ -78,7 +108,7 @@ describe('appointmentManagedProjectTypes', () => {
       rows: [{ project_type: 'flea' }, { project_type: 'rodent_trapping' }, { project_type: 'cockroach' }],
     });
     const managed = await appointmentManagedProjectTypes(knex);
-    expect(managed).toEqual(new Set(['flea', 'rodent_trapping', 'cockroach']));
+    expect(managed).toEqual(new Set(['flea', 'rodent_trapping', 'cockroach', 'bed_bug']));
     expect(PROJECT_CREATION_KEPT_TYPES.size).toBe(0);
   });
 
@@ -115,7 +145,7 @@ describe('appointmentManagedProjectTypes', () => {
       rows: [{ project_type: 'wdo_inspection' }, { project_type: 'cockroach' }],
     });
     const managed = await appointmentManagedProjectTypes(knex);
-    expect(managed).toEqual(new Set(['cockroach']));
+    expect(managed).toEqual(new Set(['cockroach', 'bed_bug']));
     expect(V1_EXCLUDED_PROJECT_TYPES.has('wdo_inspection')).toBe(true);
   });
 });

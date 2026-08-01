@@ -172,6 +172,21 @@ const AREAS_BY_SERVICE = {
     "Fence line",
     "Trash area",
   ],
+  // Bed bug is an interior treatment — yard/fence chips read wrong on its
+  // closeout (owner 2026-07-31, untype lane). Vocabulary carries over the
+  // retired typed form's treatment surfaces. Labels never contain commas
+  // (the per-product area field comma-joins selections).
+  bed_bug: [
+    "Primary bedroom",
+    "Guest bedroom",
+    "Living room",
+    "Mattress & box spring",
+    "Bed frame & headboard",
+    "Baseboards",
+    "Furniture & upholstery",
+    "Closets",
+    "Adjacent rooms",
+  ],
   lawn: [
     "Front yard",
     "Back yard",
@@ -6871,7 +6886,7 @@ function normalizeApplicationMethod(value = "") {
   return normalized;
 }
 
-export function defaultApplicationMethod(product = {}, serviceType = "") {
+export function defaultApplicationMethod(product = {}, serviceType = "", { interiorLane = false } = {}) {
   const category = String(product.category || product.product_category || "").toLowerCase();
   const explicit = product.application_method || product.method;
   if (explicit) return normalizeApplicationMethod(explicit);
@@ -6891,6 +6906,13 @@ export function defaultApplicationMethod(product = {}, serviceType = "") {
   if (serviceLine === "lawn") return category.includes("herb") ? "spot_treatment" : "broadcast_spray";
   if (serviceLine === "palm" || serviceLine === "tree_shrub") return "foliar_spray";
   if (serviceLine === "termite" || serviceLine === "rodent") return "station_check";
+  // Bed bug is an interior treatment: the pest perimeter_spray fallback
+  // recorded interior work as exterior AND demanded perimeter footage the
+  // (hidden) zone tracer would have prefilled, blocking a routine closeout
+  // — default methodless products to an interior spot application instead
+  // (codex P1 on the bed-bug untype). interiorLane comes from the STABLE
+  // profile key; the name regex is the fallback for callers without it.
+  if (interiorLane || /\bbed\s*bugs?\b/i.test(String(serviceType || ""))) return "spot_treatment";
   return "perimeter_spray";
 }
 
@@ -8931,6 +8953,14 @@ export function CompletionPanel({
   })();
   const canApproveOfficeExceptions = currentAdminUser?.role === "admin";
   const serviceCategory = detectServiceCategory(service.serviceType);
+  // Bed bug closeouts get interior-specific treated-area chips, skip the
+  // satellite spray-trace (a perimeter trace has no meaning for an interior
+  // treatment), and hide the no-invoice recap — owner 2026-07-31, bed-bug
+  // untype lane. The STABLE profile key is authoritative (display labels
+  // are admin-editable); the name regex is only a fallback for rows whose
+  // profile did not resolve (codex P2 r8).
+  const isBedBugVisit = service.completionProfile?.serviceKey === "bed_bug_treatment"
+    || /\bbed\s*bugs?\b/.test(String(service.serviceType || "").toLowerCase());
   const serviceLineForCloseout = serviceLineFromType(serviceTypeForArea);
   // Tree & shrub / palm visits swap the Targets picker suggestions to the
   // ornamental pest list (see targetPickerConfig).
@@ -9030,7 +9060,9 @@ export function CompletionPanel({
   // "Follow-up recommended") were dropped everywhere (owner 2026-07-30):
   // they aren't areas and don't belong in the treated-areas list.
   const areaOptions = [
-    ...(AREAS_BY_SERVICE[serviceCategory] || AREAS_BY_SERVICE.pest),
+    ...(isBedBugVisit
+      ? AREAS_BY_SERVICE.bed_bug
+      : (AREAS_BY_SERVICE[serviceCategory] || AREAS_BY_SERVICE.pest)),
   ];
   const onSiteEntry = (service.statusLog || []).find(
     (e) => e.status === "on_site",
@@ -9827,9 +9859,21 @@ export function CompletionPanel({
     setNotes(savedDraft.notes || "");
     setSelectedProducts(
       Array.isArray(savedDraft.selectedProducts)
-        ? savedDraft.selectedProducts.map((product) =>
-            normalizeProductArea(product, serviceTypeForArea),
-          )
+        ? savedDraft.selectedProducts.map((product) => {
+            const normalized = normalizeProductArea(product, serviceTypeForArea);
+            // Bed bug: a pre-migration draft carries the old inferred
+            // perimeter default — reclassify it to the interior default so
+            // a restored draft can't demand perimeter footage or record
+            // interior work as exterior (codex P2 r10).
+            if (
+              isBedBugVisit &&
+              effectiveApplicationMethod(normalized.applicationMethod) ===
+                "perimeter_spray"
+            ) {
+              return { ...normalized, applicationMethod: "spot_treatment" };
+            }
+            return normalized;
+          })
         : [],
     );
     setSendSms(savedDraft.sendSms !== false);
@@ -9842,7 +9886,11 @@ export function CompletionPanel({
     );
     setReviewTiming(savedDraft.reviewTiming || "120");
     setReviewCustomAt(savedDraft.reviewCustomAt || "");
-    setOneTimeRecapOnly(!!savedDraft.oneTimeRecapOnly);
+    // Bed bug hides the recap-only control (typed-era billing parity) — a
+    // pre-migration draft must not restore the flag into invisible state
+    // where the server's recap_only_not_allowed 409 becomes unclearable
+    // (codex P2 r9).
+    setOneTimeRecapOnly(isBedBugVisit ? false : !!savedDraft.oneTimeRecapOnly);
     // Quiet/loud choice + typed minutes come back exactly as saved; a legacy
     // draft without the fields falls back to the panel default. Consumers all
     // gate on backfillEligible, so this stays inert if the visit is somehow
@@ -9969,23 +10017,48 @@ export function CompletionPanel({
         : {};
     if (typedFindingsSchema?.fields) {
       pruneRestoredFindingsValues(restoredFindings, typedFindingsSchema.fields);
+      setFindingsValues(restoredFindings);
+      setTypedActivityScore(
+        Number.isInteger(savedDraft.typedActivityScore)
+          ? savedDraft.typedActivityScore
+          : null,
+      );
+      setTypedActivityTouched(!!savedDraft.typedActivityTouched);
+      const restoredChips = Array.isArray(savedDraft.typedNextStepChips)
+        ? savedDraft.typedNextStepChips
+        : [];
+      setTypedNextStepChips(
+        typedFindingsSchema?.nextStepChips
+          ? restoredChips.filter((chip) => typedFindingsSchema.nextStepChips.includes(chip))
+          : restoredChips,
+      );
+      setTypedRecommendations(savedDraft.typedRecommendations || "");
+    } else {
+      // The profile untyped since this draft was saved (bed_bug,
+      // 20260731400000): the typed controls no longer render and the submit
+      // path would silently drop EVERY retired typed field as invisible
+      // state — findings values, activity score, next-step chips, and the
+      // typed recommendation all count (codex P2 r1 + r4). Discard them
+      // LOUDLY so the tech re-enters what still matters; generic fields
+      // (notes, products, rating…) still restore normally.
+      const draftHadTypedEntries =
+        Object.values(restoredFindings).some((v) =>
+          Array.isArray(v) ? v.length > 0 : String(v ?? "").trim() !== "",
+        )
+        || Number.isInteger(savedDraft.typedActivityScore)
+        || (Array.isArray(savedDraft.typedNextStepChips) && savedDraft.typedNextStepChips.length > 0)
+        || String(savedDraft.typedRecommendations || "").trim() !== "";
+      if (draftHadTypedEntries) {
+        alert(
+          "This service now completes with the standard form. The typed findings saved in this draft (rooms, evidence, treatment, activity, next steps…) can't be restored — re-enter anything still needed in the notes or observations.",
+        );
+      }
+      setFindingsValues({});
+      setTypedActivityScore(null);
+      setTypedActivityTouched(false);
+      setTypedNextStepChips([]);
+      setTypedRecommendations("");
     }
-    setFindingsValues(restoredFindings);
-    setTypedActivityScore(
-      Number.isInteger(savedDraft.typedActivityScore)
-        ? savedDraft.typedActivityScore
-        : null,
-    );
-    setTypedActivityTouched(!!savedDraft.typedActivityTouched);
-    const restoredChips = Array.isArray(savedDraft.typedNextStepChips)
-      ? savedDraft.typedNextStepChips
-      : [];
-    setTypedNextStepChips(
-      typedFindingsSchema?.nextStepChips
-        ? restoredChips.filter((chip) => typedFindingsSchema.nextStepChips.includes(chip))
-        : restoredChips,
-    );
-    setTypedRecommendations(savedDraft.typedRecommendations || "");
     // Companion draft state — the same type-aware pruning per companion
     // schema; saved types the profile no longer declares are dropped, and
     // chips are filtered to the schema's current allowlist.
@@ -10473,7 +10546,7 @@ export function CompletionPanel({
     // the response is about to write (built from the pre-draft snapshot).
     if (generating) return;
     if (selectedProducts.find((p) => p.productId === product.id)) return;
-    const applicationMethod = defaultApplicationMethod(product, serviceTypeForArea);
+    const applicationMethod = defaultApplicationMethod(product, serviceTypeForArea, { interiorLane: isBedBugVisit });
     const areaRequirement = requiredApplicationArea(
       applicationMethod,
       serviceTypeForArea,
@@ -11852,21 +11925,23 @@ export function CompletionPanel({
                   textAlign: "center",
                 }}
               >
-                {completionResult?.completionSmsStatus === "sent"
-                  ? "SMS + report sent"
-                  : completionResult?.completionSmsStatus === "blocked"
-                    ? `Report saved. SMS blocked${completionResult?.completionSmsError ? `: ${completionResult.completionSmsError}` : ""}`
-                    : completionResult?.completionSmsStatus === "failed"
-                      ? `Report saved. SMS failed${completionResult?.completionSmsError ? `: ${completionResult.completionSmsError}` : ""}`
-                      : effectiveSendSms
-                        ? "Report saved"
-                        : "Report saved"}{" "}
+                {completionResult?.typedDeliveryMode === "disabled"
+                  ? "Completion recorded"
+                  : completionResult?.typedDeliveryMode === "internal_only"
+                    ? "Report stored internally"
+                    : completionResult?.completionSmsStatus === "sent"
+                      ? "SMS + report sent"
+                      : completionResult?.completionSmsStatus === "blocked"
+                        ? `Report saved. SMS blocked${completionResult?.completionSmsError ? `: ${completionResult.completionSmsError}` : ""}`
+                        : completionResult?.completionSmsStatus === "failed"
+                          ? `Report saved. SMS failed${completionResult?.completionSmsError ? `: ${completionResult.completionSmsError}` : ""}`
+                          : "Report saved"}{" "}
                 for {service.customerName}
               </div>{" "}
               {/* completionAdvisories are deliberately NOT rendered here —
                   the success screen stays minimal (owner 2026-07-29); they
                   are recorded server-side and surface in Customer 360. */}
-              {completionResult?.typedDeliveryMode === "internal_only" && (
+              {["internal_only", "disabled"].includes(completionResult?.typedDeliveryMode) && (
                 <div
                   style={{
                     fontFamily: font,
@@ -11876,8 +11951,9 @@ export function CompletionPanel({
                     textAlign: "center",
                   }}
                 >
-                  Report stored — customer delivery is off for this service
-                  type.
+                  {completionResult.typedDeliveryMode === "internal_only"
+                    ? "Report stored — customer delivery is off for this service type."
+                    : "Customer delivery is off for this service — no report or SMS was sent."}
                 </div>
               )}
               {recapEligible && (
@@ -12565,7 +12641,11 @@ export function CompletionPanel({
                 Lawn Assessment block above, which flow into the report gallery,
                 so this redundant second upload is hidden. Combined visits keep
                 it (companions have their own completion-photo gates). */}
-            {!quickComplete && (
+            {/* Interior-only treatments (bed bug) skip the tracer: it is a
+                SATELLITE perimeter tool, and an exterior spray outline on an
+                interior treatment's report would be wrong. Photos carry the
+                visual story; a room-level interior marker is its own lane. */}
+            {!quickComplete && !isBedBugVisit && (
               <Field label="Treatment zone map">
                 <button
                   type="button"
@@ -13348,6 +13428,10 @@ export function CompletionPanel({
                   {payerBanner}
                 </div>
               )}{" "}
+              {/* Bed bug never offers the no-invoice recap: a performed
+                  treatment must mint its invoice (typed-era parity; the
+                  server 409s this too — codex P1 r7). */}
+              {!isBedBugVisit && (
               <label
                 style={{
                   display: "flex",
@@ -13375,7 +13459,8 @@ export function CompletionPanel({
                 <span style={{ fontFamily: font, fontSize: 15, color: M.ink }}>
                   One-time recap + review only (no invoice)
                 </span>{" "}
-              </label>{" "}
+              </label>
+              )}{" "}
               {backfillEligible && (
                 <label
                   style={{
@@ -13769,16 +13854,20 @@ export function CompletionPanel({
               Service Completed!
             </div>{" "}
             <div style={{ fontSize: 14, color: D.muted, marginTop: 8 }}>
-              {!effectiveSendSms
-                ? "Report saved"
-                : completionResult?.completionSmsStatus === "blocked"
-                  ? `Report saved. SMS blocked${completionResult?.completionSmsError ? `: ${completionResult.completionSmsError}` : ""}`
-                  : completionResult?.completionSmsStatus === "failed"
-                    ? `Report saved. SMS failed${completionResult?.completionSmsError ? `: ${completionResult.completionSmsError}` : ""}`
-                    : "SMS + Report sent"}{" "}
+              {completionResult?.typedDeliveryMode === "disabled"
+                ? "Completion recorded"
+                : completionResult?.typedDeliveryMode === "internal_only"
+                  ? "Report stored internally"
+                  : !effectiveSendSms
+                    ? "Report saved"
+                    : completionResult?.completionSmsStatus === "blocked"
+                      ? `Report saved. SMS blocked${completionResult?.completionSmsError ? `: ${completionResult.completionSmsError}` : ""}`
+                      : completionResult?.completionSmsStatus === "failed"
+                        ? `Report saved. SMS failed${completionResult?.completionSmsError ? `: ${completionResult.completionSmsError}` : ""}`
+                        : "SMS + Report sent"}{" "}
               for {service.customerName}
             </div>{" "}
-            {completionResult?.typedDeliveryMode === "internal_only" && (
+            {["internal_only", "disabled"].includes(completionResult?.typedDeliveryMode) && (
               <div
                 style={{
                   fontSize: 13,
@@ -13787,7 +13876,9 @@ export function CompletionPanel({
                   textAlign: "center",
                 }}
               >
-                Report stored — customer delivery is off for this service type.
+                {completionResult.typedDeliveryMode === "internal_only"
+                  ? "Report stored — customer delivery is off for this service type."
+                  : "Customer delivery is off for this service — no report or SMS was sent."}
               </div>
             )}
             {recapEligible && !completionResult?.followupSuggestion?.required && (
@@ -15203,6 +15294,9 @@ export function CompletionPanel({
               {payerBanner}
             </div>
           )}{" "}
+          {/* Bed bug never offers the no-invoice recap (typed-era parity;
+              server 409s this too — codex P1 r7). */}
+          {!isBedBugVisit && (
           <label
             style={{
               ...checkboxRow,
@@ -15218,7 +15312,8 @@ export function CompletionPanel({
               onChange={(e) => handleOneTimeRecapOnlyChange(e.target.checked)}
             />{" "}
             <span>One-time recap + review only (no invoice)</span>{" "}
-          </label>{" "}
+          </label>
+          )}{" "}
           {backfillEligible && (
             <label
               style={{

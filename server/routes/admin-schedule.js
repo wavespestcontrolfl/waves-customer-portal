@@ -8383,7 +8383,11 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
     if (scheduledServiceId) {
       const svc = await db('scheduled_services')
         .where({ id: scheduledServiceId })
-        .first('id', 'service_id', 'customer_id', 'service_type', 'scheduled_date', 'technician_id')
+        // is_callback feeds the pressure-suppression rule below — without it
+        // in the projection the flag reads undefined and callback visits on
+        // one-time keys would ground differently than /complete scores them
+        // (codex P2 r2).
+        .first('id', 'service_id', 'customer_id', 'service_type', 'scheduled_date', 'technician_id', 'is_callback')
         .catch(() => null);
       if (svc && svc.customer_id) {
         const isAdmin = req.techRole === 'admin';
@@ -8403,8 +8407,18 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (you c
           // Typed specialty completions (profile.findingsType set) hide Pest
           // Pressure on the real report even though their type can detect to the
           // pest line — suppress the pressure trend in the grounding to match.
+          // One-time-billed untyped profiles (bed_bug post-20260731400000, the
+          // untyped pest family) are suppressed FORM-INDEPENDENTLY, mirroring
+          // the completion path's oneTimePressureExcluded rule: their real
+          // report hides one-time pressure, so the draft prompt must not be
+          // grounded in the customer's unrelated recurring trend (codex P2 r1).
           const completionProfile = await resolveCompletionProfileForScheduledService(svc).catch(() => null);
-          groundingSuppressPressure = Boolean(completionProfile && completionProfile.findingsType);
+          groundingSuppressPressure = Boolean(completionProfile && (
+            completionProfile.findingsType
+            || (String(completionProfile.billingType || '').toLowerCase() === 'one_time'
+              && completionProfile.serviceKey !== 'pest_re_service'
+              && !svc.is_callback)
+          ));
         } else {
           logger.warn('[generate-report] caller not authorized for service grounding', { scheduledServiceId, technicianId: req.technicianId || null });
         }
