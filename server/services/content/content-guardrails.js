@@ -1491,6 +1491,19 @@ const MD_INTERNAL_LINK_RE = /(!)?\[((?:[^[\]\n\\]|\\.|\[[^\]\n]*\]|\n(?![ \t]*\n
  *   unlinks them before evaluate() can grandfather them (Codex r1). Counts
  *   are consumed, so a refresh still cannot ADD occurrences of a dead route.
  */
+// A suffix may ride onto an aliased (allowlisted) route only if it carries
+// nothing that could be customer data: known tracking params, or a plain
+// word anchor. Everything else parks.
+const SAFE_TRACKING_PARAMS = new Set(['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content', 'ref', 'source', 'campaign', 'gclid', 'fbclid']);
+const SAFE_ROUTE_SUFFIX_RE = /^(?:#[A-Za-z][\w-]*)$|^\?(?:[A-Za-z_][\w-]*=[A-Za-z0-9._-]*)(?:&[A-Za-z_][\w-]*=[A-Za-z0-9._-]*)*$/;
+
+function isSafeRouteSuffix(suffix) {
+  const v = String(suffix || '');
+  if (!SAFE_ROUTE_SUFFIX_RE.test(v)) return false;
+  if (v.startsWith('#')) return true;
+  return v.slice(1).split('&').every((pair) => SAFE_TRACKING_PARAMS.has(pair.split('=')[0].toLowerCase()));
+}
+
 function repairInventedInternalRoutes(body, allowedInternalLinks = [], options = {}) {
   // Same external-link posture the GATE will apply to this draft — see the
   // call site below for why a permissive default is unsafe here.
@@ -1581,7 +1594,14 @@ function repairInventedInternalRoutes(body, allowedInternalLinks = [], options =
     // A harmless ?query or #fragment is still a repairable route: the gate
     // strips the suffix when normalizing and parks the draft anyway, so
     // skipping these left them on the redraft/skip path this exists to
-    // eliminate (Codex r5). The suffix is carried onto the alias.
+    // eliminate (Codex r5). The suffix is carried onto the alias — but ONLY
+    // when it is plainly safe. Aliasing rewrites the route into an
+    // ALLOWLISTED one, which flips the internal-route guard from park to
+    // pass, and a refresh runs neither the redaction bundle nor the SEO
+    // gate — so a suffix like "?customer=Alice-Smith" would ride a
+    // customer name into a published draft (Codex r5, AGENTS.md PII rule).
+    // Known-safe tracking params and plain anchors only; anything else
+    // leaves the link untouched for the gate to park.
     const suffixAt = dest.search(/[?#]/);
     const suffix = suffixAt === -1 ? '' : dest.slice(suffixAt);
     // Scanning the WHOLE link misses a URL nested in the query when the
@@ -1591,6 +1611,7 @@ function repairInventedInternalRoutes(body, allowedInternalLinks = [], options =
     // came back clean and the evil suffix rode along onto the alias. Scanning
     // the SUFFIX ON ITS OWN does detect it (pre-push Codex r5 P0).
     if (suffix && externalLinkFinding(suffix, externalLinkOptions)) return whole;
+    if (suffix && !isSafeRouteSuffix(suffix)) return whole;
     const path = toPath(suffixAt === -1 ? dest : dest.slice(0, suffixAt));
     if (path === null) return whole; // absolute URL on someone else's host
     // Resolve dot segments the way the gate does, so "/images/../x/" and the

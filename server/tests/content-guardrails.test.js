@@ -2473,8 +2473,8 @@ describe('deterministic repair of invented internal routes (owner ruling 2026-08
     expect(q.body).toBe('[services](/pest-control-services/?utm_source=blog)');
     const f = repairInventedInternalRoutes('[services](/pest-control/#pricing)');
     expect(f.body).toBe('[services](/pest-control-services/#pricing)');
-    // Unknown routes with a suffix still unlink.
-    expect(repairInventedInternalRoutes('[a](/nope-invented/?x=1)').repairs[0])
+    // Unknown routes with a SAFE suffix still unlink.
+    expect(repairInventedInternalRoutes('[a](/nope-invented/?utm_source=blog)').repairs[0])
       .toMatchObject({ to: null, action: 'unlinked' });
     // A URL NESTED in the suffix must never ride along onto the alias — on an
     // absolute hub destination the whole-link scan misses it.
@@ -2486,6 +2486,21 @@ describe('deterministic repair of invented internal routes (owner ruling 2026-08
       expect(guardrails.evaluate({ body: repairInventedInternalRoutes(body).body }, {}).findings
         .some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK' || f.code === 'UNKNOWN_INTERNAL_ROUTE')).toBe(true);
     }
+  });
+
+  test('a PII-bearing suffix never rides onto an alias (r5 P1)', () => {
+    // Aliasing flips the route guard from park to pass, and a refresh runs
+    // neither the redaction bundle nor the SEO gate.
+    for (const body of [
+      '[services](/pest-control/?customer=Alice-Smith)',
+      '[services](/pest-control/?email=a@b.com)',
+      '[services](/pest-control/?phone=941-555-1234)',
+    ]) {
+      expect(repairInventedInternalRoutes(body).body).toBe(body);
+    }
+    // Known tracking params and plain anchors still ride along.
+    expect(repairInventedInternalRoutes('[x](/pest-control/?utm_source=blog)').body).toContain('/pest-control-services/?utm_source=blog');
+    expect(repairInventedInternalRoutes('[x](/pest-control/#pricing)').body).toContain('/pest-control-services/#pricing');
   });
 
   test('an empty domain list on a refresh is not read as hub-only (r3)', () => {

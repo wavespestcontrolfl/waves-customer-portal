@@ -638,7 +638,11 @@ class AutonomousRunner {
       // body already carried, which the gate grandfathers by count (Codex r1).
       const routeRepair = contentGuardrails.repairInventedInternalRoutes(
         draft.body,
-        brief.internal_links_to_add || [],
+        // The GATE's complete allowance set, not just the brief's list:
+        // _deriveGuardrailOptions also folds in the curated
+        // operator_brief.hub_link, and unlinking that anchor turns compliant
+        // content into a hub_link_present quality failure (Codex r5).
+        guardOptions.allowedInternalLinks || brief.internal_links_to_add || [],
         {
           checkedExistingRoutes: Array.isArray(draft.checked_existing_routes) ? draft.checked_existing_routes : [],
           refreshPriorBody: guardOptions.isRefresh ? guardOptions.priorBody : null,
