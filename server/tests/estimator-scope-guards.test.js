@@ -245,6 +245,16 @@ describe('extractAddressCandidates', () => {
     expect(extractAddressCandidates('quote for 100 Sample Way Venice FL 34285')[0].locality).toBe(', Venice 34285');
   });
 
+  test('boundary-only suffixes also bind a bare trailing ZIP', () => {
+    // The bare-ZIP test used to consult the alias table alone, so Loop/Way/
+    // Trail forms silently dropped their ZIP.
+    expect(extractAddressCandidates('quote for 100 Sample Loop 34287')[0].locality).toBe(', 34287');
+    expect(extractAddressCandidates('service at 100 Sample Way 34285')[0].locality).toBe(', 34285');
+    expect(extractAddressCandidates('quote for 100 Sample Trail 34205')[0].locality).toBe(', 34205');
+    // …and prose still binds nothing.
+    expect(extractAddressCandidates('quote for 100 Sample Loop with a budget of 15000')[0].locality).toBe('');
+  });
+
   test('LETTERED straddled units keep the comma-free state-only locality', () => {
     // 'B' is captured into the street run, which used to swallow the
     // city+FL out of the locality source entirely.
@@ -815,6 +825,41 @@ describe('loadThreadTriageContext', () => {
     triage = await loadThreadTriageContext({ phone: '+17245550000', triggerBody: 'quote please' });
     expect(triage.groundedCustomerId).toBe('c-1');
     expect(triage.groundedScope).toBeNull();
+  });
+
+  test('two UNITS of the same customer stay distinct entries and drop groundedScope', async () => {
+    // address_line1 alone as the dedup key collapsed Apt 1 and Apt 6 into
+    // one arbitrary entry, and the surviving scope priced whichever DB row
+    // landed first.
+    mockState.rows.customers = [
+      { id: 'c-2', first_name: 'Multi', last_name: 'Unit', address_line1: '100 Palm Ave', address_line2: 'Apt 1', city: 'Venice' },
+      { id: 'c-2', first_name: 'Multi', last_name: 'Unit', address_line1: '100 Palm Ave', address_line2: 'Apt 6', city: 'Venice' },
+    ];
+    const triage = await loadThreadTriageContext({
+      phone: null,
+      triggerBody: 'quote for 100 Palm Ave Apt 1, also 100 Palm Ave Apt 6',
+    });
+    // Both properties still ground for the classifier…
+    expect(triage.lines).toHaveLength(2);
+    expect(triage.matchedExistingCustomer).toBe(true);
+    // …one distinct customer, so the identity still links…
+    expect(triage.groundedCustomerId).toBe('c-2');
+    expect(triage.groundedConflict).toBe(false);
+    // …but there is no single property to price.
+    expect(triage.groundedScope).toBeNull();
+  });
+
+  test('a single unit still yields exactly one entry and a usable scope', async () => {
+    mockState.rows.customers = [
+      { id: 'c-2', first_name: 'Multi', last_name: 'Unit', address_line1: '100 Palm Ave', address_line2: 'Apt 6', city: 'Venice' },
+    ];
+    const triage = await loadThreadTriageContext({
+      phone: null,
+      triggerBody: 'quote for 100 Palm Ave Apt 6 please',
+    });
+    expect(triage.lines).toHaveLength(1);
+    expect(triage.groundedCustomerId).toBe('c-2');
+    expect(triage.groundedScope).toMatchObject({ address: '100 Palm Ave', line2: 'Apt 6', isPrimary: true });
   });
 
   test('fails open to null on query errors', async () => {

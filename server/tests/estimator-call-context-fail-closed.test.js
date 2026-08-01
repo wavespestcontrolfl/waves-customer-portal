@@ -426,6 +426,61 @@ describe('buildSmsThreadContext grounded-customer fallback (GATE_ESTIMATOR_SCOPE
   });
 });
 
+describe('buildSmsThreadContext prospect-shell resolution (contact-slot matches)', () => {
+  const SMS_ARGS = {
+    phone: '+19415550123',
+    triggerBody: 'can I get a quote for quarterly pest control at my home please?',
+  };
+  const BASE = {
+    phone: '+19415550123', email: null, address_line1: '1 St', city: 'Venice', state: 'FL', zip: '34285',
+    waveguard_tier: 'Silver', member_since: '2025-01-01', lawn_type: null,
+    property_sqft: 1800, lot_sqft: 8000, property_type: 'Single Family', company_name: null,
+  };
+  // The webhook's first-contact shell: active, but never an established
+  // customer stage.
+  const SHELL = { ...BASE, id: 'shell-1', first_name: 'Fresh', last_name: 'Prospect', pipeline_stage: 'new_lead', active: true };
+  const REAL = { ...BASE, id: 'cust-1', first_name: 'Pat', last_name: 'Member', pipeline_stage: 'active_customer', active: true };
+
+  test('gate ON: shell + real contact-slot match resolves to the REAL customer, not ambiguous', async () => {
+    process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
+    mockCustomerRows = [SHELL, REAL];
+    const context = await buildSmsThreadContext(SMS_ARGS);
+    expect(context.error).toBeUndefined();
+    expect(context.customer).toMatchObject({ id: 'cust-1' });
+    expect(context.customerPhoneAmbiguous).toBe(false);
+    expect(context.isExistingCustomer).toBe(true);
+  });
+
+  test('gate ON: TWO real rows remain genuinely ambiguous (red-lane)', async () => {
+    process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
+    mockCustomerRows = [REAL, { ...REAL, id: 'cust-2', first_name: 'Other', last_name: 'Member' }];
+    const context = await buildSmsThreadContext(SMS_ARGS);
+    expect(context.error).toBe('ambiguous_phone');
+  });
+
+  test('gate ON: shells ONLY (no real row) stay on the normal ambiguous path', async () => {
+    process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
+    mockCustomerRows = [SHELL, { ...SHELL, id: 'shell-2' }];
+    const context = await buildSmsThreadContext(SMS_ARGS);
+    expect(context.error).toBe('ambiguous_phone');
+  });
+
+  test('gate OFF: no contact-slot lookup, so shell resolution never applies', async () => {
+    mockCustomerRows = [SHELL, REAL];
+    const context = await buildSmsThreadContext(SMS_ARGS);
+    expect(context.error).toBe('ambiguous_phone');
+  });
+
+  test('the CALL path never resolves shells (byte-identical)', async () => {
+    process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
+    mockCallRow = CALL();
+    mockCustomerRows = [SHELL, REAL];
+    const context = await buildCallContext('call-1');
+    // buildCallContext keeps pickCustomerMatch's ambiguity verdict.
+    expect(context.customerPhoneAmbiguous).toBe(true);
+  });
+});
+
 describe('buildSmsThreadContext conflict suppresses phone-scoped history', () => {
   const SMS_ARGS = {
     phone: '+19415550123',

@@ -132,6 +132,16 @@ const EXTRA_STREET_SUFFIXES = [
   'bend', 'crossing', 'xing', 'glen', 'chase', 'pointe',
 ];
 
+// One shared "is this a street suffix/directional token" vocabulary for
+// every no-comma locality decision (city boundary AND bare-ZIP binding) —
+// two sets drifted apart and dropped the ZIP from suffix forms the
+// boundary test already knew about.
+const ALL_STREET_SUFFIXES = new Set([
+  ...Object.keys(STREET_TOKEN_ALIASES),
+  ...Object.values(STREET_TOKEN_ALIASES),
+  ...EXTRA_STREET_SUFFIXES,
+]);
+
 // Street-address candidates from free text: a street number followed by up
 // to four street-name words. The trailing words may overshoot into prose
 // ("… 100 Sample Loop before Saturday"), so `variants` lists every prefix
@@ -250,16 +260,12 @@ function extractAddressCandidates(text) {
       const zipNC = localitySrc.match(/^\s*(\d{5})\b/);
       const flIdx = words.findIndex((w) => /^(?:fl|florida)$/i.test(w));
       if (flIdx > 0) {
+        // The shared suffix vocabulary MINUS pure directionals: a city that
+        // starts with one ("North Port", "North Venice") would otherwise
+        // lose its first word to the boundary.
         const DIRECTIONALS = new Set(['north', 'south', 'east', 'west', 'n', 's', 'e', 'w',
           'northeast', 'northwest', 'southeast', 'southwest', 'ne', 'nw', 'se', 'sw']);
-        const suffixBoundary = new Set([
-          ...Object.keys(STREET_TOKEN_ALIASES), ...Object.values(STREET_TOKEN_ALIASES),
-          // Common SWFL suffixes missing from the compare-time alias table
-          // (it only maps long↔short forms; these have no short form). A
-          // missing boundary would make "100 Sample Loop North Port FL"
-          // fall back to the single-word-city path and truncate the city.
-          ...EXTRA_STREET_SUFFIXES,
-        ].filter((t) => !DIRECTIONALS.has(t)));
+        const suffixBoundary = new Set([...ALL_STREET_SUFFIXES].filter((t) => !DIRECTIONALS.has(t)));
         let boundary = -1;
         for (let i = 0; i < flIdx; i += 1) {
           if (suffixBoundary.has(String(words[i]).toLowerCase())) boundary = i;
@@ -291,10 +297,10 @@ function extractAddressCandidates(text) {
         // in another city.
         const lastWord = String(words[words.length - 1] || '').toLowerCase();
         const hasFl = flIdx >= 0;
-        const suffixes = new Set([
-          ...Object.keys(STREET_TOKEN_ALIASES), ...Object.values(STREET_TOKEN_ALIASES),
-        ]);
-        if (hasFl || suffixes.has(lastWord)) locality = `, ${zipNC[1]}`;
+        // Same suffix vocabulary the city-boundary test uses — the
+        // alias table alone omits Loop/Way/Trail/Cove/…, which dropped
+        // the ZIP from "100 Sample Loop 34287".
+        if (hasFl || ALL_STREET_SUFFIXES.has(lastWord)) locality = `, ${zipNC[1]}`;
       }
     }
     out.push({
@@ -367,7 +373,16 @@ async function loadTriageInner({ phone, triggerBody, deadline = Date.now() + TRI
   const entries = [];
   const seenMatches = new Set();
   const addEntry = (customer, how, addressLine, scope = null) => {
-    const matchKey = `${customer.id}|${scope ? scope.address : 'unscoped'}`;
+    // FULL scoped stamp, not address_line1 alone: one customer can hold
+    // several units on the same street line (Apt 1 and Apt 6 of the same
+    // building), and an address-only key collapses them into one arbitrary
+    // entry — the surviving scope would then price whichever DB row landed
+    // first. With the full stamp both units survive as distinct entries,
+    // which correctly drops groundedScope to null (multiple properties =
+    // no single property to price) while both still ground the classifier.
+    const matchKey = scope
+      ? `${customer.id}|${[scope.address, scope.line2, scope.city, scope.zip].map((p) => p || '').join('|')}`
+      : `${customer.id}|unscoped`;
     if (seenMatches.has(matchKey)) return;
     seenMatches.add(matchKey);
     entries.push({ customer, how, addressLine, scope });

@@ -100,6 +100,23 @@ async function loadCustomerByPhone(phone, extraction, { timeoutMs = null, includ
     }
     if (timeoutMs) q = q.timeout(timeoutMs, { cancel: true });
     const rows = await q;
+    // Prospect-shell resolution — includeServiceContacts callers ONLY (the
+    // scope-guards triage and the gate-on SMS context build; the call path
+    // and every ungated caller skip this entirely and keep today's
+    // behavior byte-for-byte). When an on-file service contact first texts
+    // a domain/van tracking number, the Twilio webhook does not recognize
+    // contact-slot phones and mints a NEW active pipeline_stage='new_lead'
+    // primary-phone row. The combined lookup then returns that shell
+    // alongside the real customer's contact-slot match, pickCustomerMatch
+    // calls it ambiguous, and the SMS build red-lanes a perfectly valid
+    // add-on request. When exactly ONE row passes the real-customer gates
+    // and the rest are non-real shells, the answer is not ambiguous — it is
+    // that customer. Two or more real rows remain genuinely ambiguous.
+    if (includeServiceContacts && rows.length > 1) {
+      const { CUSTOMER_STAGES } = require('../customer-stages');
+      const real = rows.filter((r) => r.active === true && CUSTOMER_STAGES.includes(r.pipeline_stage));
+      if (real.length === 1) return { customer: real[0], ambiguous: false };
+    }
     return pickCustomerMatch(rows, extraction);
   } catch (err) {
     logger.warn(`[estimator-engine] customer load failed: ${err.message}`);
