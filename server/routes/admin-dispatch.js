@@ -101,6 +101,7 @@ const {
 } = require('../services/track-transition-alerts');
 const {
   finiteDate,
+  positiveNumber,
   buildOnSiteLifecycleUpdates,
   buildCompletionLifecycleUpdates,
 } = require('../utils/service-duration-capture');
@@ -792,6 +793,105 @@ function backfillCompletionEndInstant(serviceDate, timeOnSite, service = {}) {
     return new Date(realStart.getTime() + explicitMinutes * 60000);
   }
   return toETNoonServiceDate(serviceDate);
+}
+
+// Live time-on-site override (forgotten-closeout fix, same-day leg): the
+// completion panel's timer keeps running when a visit isn't closed out
+// promptly, and a live completion ships that inflated elapsed verbatim into
+// the duration columns. An admin may instead type corrected minutes — the
+// wire contract is TYPE-based on the existing timeOnSite field: a string is
+// the panel's auto-elapsed timer (unchanged behavior), a NUMBER is an
+// operator-typed override (only backfill bodies carry numbers today).
+// ADMIN-ONLY, fail-closed like backfillCompletionPlan: the tech portal never
+// sends numbers, so a numeric value on a technician token is tampering or a
+// client bug — 403, never silently degraded. Out-of-range from an admin is a
+// 400 (unlike backfill's degrade-to-unknown: the admin is live at the panel
+// and can correct the typo; the backlog-closeout must-land argument doesn't
+// apply). Backfill bodies pass through untouched — the backfill sanitizer
+// owns that branch. Pure for testability (_test).
+function liveTimeOnSitePlan({ timeOnSite, role, backfill = false } = {}) {
+  if (backfill === true || typeof timeOnSite !== 'number') {
+    return { adjusted: false, effectiveTimeOnSite: timeOnSite };
+  }
+  if (role !== 'admin') {
+    return {
+      adjusted: false,
+      status: 403,
+      error: {
+        error: 'Adjusting time on site is an office override — admin login required',
+        code: 'time_on_site_admin_only',
+      },
+    };
+  }
+  const minutes = backfillTimeOnSiteMinutes(timeOnSite);
+  if (!minutes) {
+    return {
+      adjusted: false,
+      status: 400,
+      error: {
+        error: `Adjusted time on site must be between 1 and ${BACKFILL_MAX_TIME_ON_SITE_MINUTES} minutes`,
+        code: 'time_on_site_invalid',
+      },
+    };
+  }
+  return { adjusted: true, effectiveTimeOnSite: minutes };
+}
+
+// End instant for an operator-typed duration against a live row: with a real
+// row-backed start, the honest end is start + minutes — stamping it keeps
+// every timestamp-pair reader (report visit-timeline, publicTimingFields,
+// the PDF's Time In/Out, job-costing's span fallback) in agreement with the
+// typed duration, with no read-side changes. Returns null when there is no
+// row-backed start (buildCompletionLifecycleUpdates then back-derives the
+// start from the wall-clock end) or when start + minutes lands in the future
+// (typed minutes exceed the actual elapsed — e.g. a late check-in; a future
+// end stamp would be a lie, so the wall-clock end stays and the explicit
+// duration columns win in every priority-ordered reader). Pure (_test).
+function adjustedCompletionEndInstant(service = {}, minutes, now = new Date()) {
+  const explicitMinutes = backfillTimeOnSiteMinutes(minutes);
+  const realStart = BACKFILL_INFERRED_START_FIELDS
+    .map((field) => finiteDate(service?.[field]))
+    .find(Boolean) || null;
+  const nowInstant = finiteDate(now) || new Date();
+  if (!realStart || !explicitMinutes) return null;
+  const end = new Date(realStart.getTime() + explicitMinutes * 60000);
+  return end.getTime() <= nowInstant.getTime() ? end : null;
+}
+
+// Validation/shape plan for the after-the-fact edit (PATCH /:serviceId/
+// time-on-site): the forgotten-closeout fix's second leg, correcting a row
+// that already completed with an inflated duration. Only completed rows
+// qualify — open rows get their correction at close-out (live override or
+// backfill). newEnd reuses adjustedCompletionEndInstant: end stamps are
+// rewritten only when a real row-backed start exists and start + minutes is
+// not in the future; a backfilled row with stripped stamps (or no start)
+// gets duration columns + structured_notes only — never fabricated
+// timestamps. Pure for testability (_test).
+function timeOnSiteEditPlan({ minutes, service = {}, structuredNotes = {}, now = new Date() } = {}) {
+  const rounded = Math.round(Number(minutes));
+  if (!Number.isFinite(rounded) || rounded < 1 || rounded > BACKFILL_MAX_TIME_ON_SITE_MINUTES) {
+    return {
+      status: 400,
+      error: {
+        error: `Time on site must be between 1 and ${BACKFILL_MAX_TIME_ON_SITE_MINUTES} minutes`,
+        code: 'time_on_site_invalid',
+      },
+    };
+  }
+  if (service.status !== 'completed') {
+    return {
+      status: 409,
+      error: {
+        error: 'Time on site can only be edited on a completed visit — close the visit out first',
+        code: 'service_not_completed',
+      },
+    };
+  }
+  return {
+    minutes: rounded,
+    newEnd: adjustedCompletionEndInstant(service, rounded, now),
+    isBackfillRecord: structuredNotes.backfill === true,
+  };
 }
 
 // Crash-resume freeze (Codex P2 ×2, PR #2897 fix round 5): once the
@@ -2044,6 +2144,123 @@ router.patch('/:serviceId/note', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// PATCH /api/admin/dispatch/:serviceId/time-on-site — after-the-fact
+// correction of a completed visit's recorded duration (forgotten-closeout
+// fix, second leg: the visit already closed out with the inflated timer).
+// ADMIN-ONLY. A pure data correction by design: no status transition, no
+// markComplete, and NO customer communications of any kind — the visit's
+// comms already fired (or were suppressed) at its real completion.
+//
+// What it rewrites (single transaction):
+//  - scheduled_services: both duration families (service_time_minutes +
+//    actual_duration_minutes), and — only when the row carries a real
+//    start AND start + minutes is not in the future — every kept end stamp
+//    (actual_end_time/check_out_time/completed_at) to start + minutes, so
+//    timestamp-pair readers agree with the corrected duration. Rows without
+//    a usable start (incl. backfilled closeouts with stripped stamps) get
+//    duration columns only — never fabricated timestamps.
+//  - service_records (latest row, when present): structured_notes.timeOnSite
+//    (what the report's on-site metric reads), a durable timeOnSiteAdjusted
+//    marker with the first pre-edit value in timeOnSitePrior, the same end
+//    stamps, and pdf_storage_key → NULL so the cached report PDF re-renders
+//    with the corrected figure (its cache signature does not vary on
+//    duration).
+// Post-commit: job costing recalc (labor books from the corrected value)
+// and an activity_log audit entry — both best-effort, never failing the
+// edit. Known scope-outs: time_entries are not edited (a job-tied clock
+// entry still wins calcLaborCost priority 1), and estimate-actuals only
+// re-reconciles rows inside its 7-day nightly rescan window.
+router.patch('/:serviceId/time-on-site', requireAdmin, async (req, res, next) => {
+  try {
+    const svc = await db('scheduled_services').where({ id: req.params.serviceId }).first();
+    if (!svc) return res.status(404).json({ error: 'Service not found' });
+
+    const record = await db('service_records')
+      .where({ scheduled_service_id: svc.id })
+      .orderBy('id', 'desc')
+      .first()
+      .catch(() => null);
+    const structuredNotes = parseJsonObject(record?.structured_notes);
+
+    const plan = timeOnSiteEditPlan({ minutes: req.body?.minutes, service: svc, structuredNotes });
+    if (plan.error) return res.status(plan.status).json(plan.error);
+
+    const previousMinutes = positiveNumber(svc.service_time_minutes)
+      || positiveNumber(svc.actual_duration_minutes)
+      || null;
+
+    let recordUpdated = false;
+    await db.transaction(async (trx) => {
+      const serviceUpdate = {
+        service_time_minutes: plan.minutes,
+        actual_duration_minutes: plan.minutes,
+        updated_at: new Date(),
+      };
+      if (plan.newEnd) {
+        // Both timestamp families together, plus completed_at — same-day
+        // stamps stay on the visit's day, so billing recovery's aging and
+        // pricing-reality-check's month bucketing never shift buckets.
+        serviceUpdate.actual_end_time = plan.newEnd;
+        serviceUpdate.check_out_time = plan.newEnd;
+        serviceUpdate.completed_at = plan.newEnd;
+      }
+      await trx('scheduled_services').where({ id: svc.id }).update(serviceUpdate);
+
+      if (record) {
+        const recordCols = await trx('service_records').columnInfo().catch(() => ({}));
+        const recordUpdate = {
+          structured_notes: serializeJsonb({
+            ...structuredNotes,
+            timeOnSite: plan.minutes,
+            timeOnSiteAdjusted: true,
+            timeOnSitePrior: 'timeOnSitePrior' in structuredNotes
+              ? structuredNotes.timeOnSitePrior
+              : (structuredNotes.timeOnSite ?? null),
+          }),
+        };
+        if (plan.newEnd) {
+          for (const field of BACKFILL_RECORD_END_FIELDS) {
+            if (recordCols[field]) recordUpdate[field] = plan.newEnd;
+          }
+        }
+        if (recordCols.pdf_storage_key) recordUpdate.pdf_storage_key = null;
+        await trx('service_records').where({ id: record.id }).update(recordUpdate);
+        recordUpdated = true;
+      }
+    });
+
+    try {
+      const JobCosting = require('../services/job-costing');
+      await JobCosting.calculateJobCost(svc.id);
+    } catch (err) {
+      logger.warn(`[time-on-site] job costing recalc failed for service ${svc.id}: ${err.message}`);
+    }
+    try {
+      await db('activity_log').insert({
+        admin_user_id: req.technicianId,
+        customer_id: svc.customer_id,
+        action: 'time_on_site_adjusted',
+        description: `Time on site corrected to ${plan.minutes} min (was ${previousMinutes != null ? `${previousMinutes} min` : 'unrecorded'}) for ${svc.service_type || 'service'}`,
+        metadata: JSON.stringify({
+          scheduled_service_id: svc.id,
+          previous_minutes: previousMinutes,
+          new_minutes: plan.minutes,
+          end_stamps_rewritten: !!plan.newEnd,
+        }),
+      });
+    } catch (err) {
+      logger.warn(`[time-on-site] activity_log insert failed for service ${svc.id}: ${err.message}`);
+    }
+
+    res.json({
+      success: true,
+      timeOnSiteMinutes: plan.minutes,
+      endStampsRewritten: !!plan.newEnd,
+      recordUpdated,
+    });
+  } catch (err) { next(err); }
+});
+
 // PUT /api/admin/dispatch/:serviceId/status
 //
 // First call site to migrate to services/job-status.js#transitionJobStatus
@@ -3051,9 +3268,20 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // structured_notes stamp wins (frozenResumeCompletionState below; the
     // hash excludes timeOnSite, so a retry can legally carry the panel's
     // auto-elapsed instead of the committed typed duration).
+    // Live override leg (forgotten-closeout fix): a NUMERIC timeOnSite on a
+    // non-backfill completion is an admin-typed correction of the running
+    // timer — validated fail-closed (403 non-admin, 400 out-of-range) before
+    // anything commits. Strings (the panel's auto-elapsed) pass through
+    // untouched. Runs AFTER backfillPlan so a technician's backfill body
+    // still fails as backfill_admin_only, not time_on_site_admin_only.
+    const livePlan = liveTimeOnSitePlan({ timeOnSite, role: req.techRole, backfill: isBackfillCompletion });
+    if (livePlan.error) {
+      return res.status(livePlan.status).json(livePlan.error);
+    }
+    const liveAdjustedTimeOnSite = livePlan.adjusted;
     let effectiveTimeOnSite = isBackfillCompletion
       ? backfillTimeOnSiteMinutes(timeOnSite)
-      : timeOnSite;
+      : livePlan.effectiveTimeOnSite;
     if (isBackfillCompletion && effectiveTimeOnSite == null && timeOnSite != null && timeOnSite !== '') {
       logger.warn(`[completion] backfill timeOnSite ${JSON.stringify(timeOnSite)} rejected for service ${svc.id} (not a positive duration ≤ ${BACKFILL_MAX_TIME_ON_SITE_MINUTES}min) — recorded as unknown`);
     }
@@ -4478,7 +4706,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           const backfillEndedAt = isBackfillCompletion
             ? backfillCompletionEndInstant(completionServiceDate, effectiveTimeOnSite, svc)
             : null;
-          const completionLifecycleAt = backfillEndedAt || completionEndedAt;
+          // Live admin override: with a real row-backed start, the honest end
+          // is start + typed minutes — stamping it keeps every timestamp-pair
+          // reader in agreement with the typed duration. Null (no start, or
+          // typed minutes exceed the actual elapsed) falls through to the
+          // wall clock and the explicit duration columns win at read time.
+          const adjustedEndedAt = !isBackfillCompletion && liveAdjustedTimeOnSite
+            ? adjustedCompletionEndInstant(svc, effectiveTimeOnSite, completionEndedAt)
+            : null;
+          const completionLifecycleAt = backfillEndedAt || adjustedEndedAt || completionEndedAt;
           const lifecycleUpdates = buildCompletionLifecycleUpdates(svc, completionLifecycleAt, { elapsed: effectiveTimeOnSite });
           // Backfill: never derive a duration from the stale on-row
           // timestamps (a weeks-old check-in against today's checkout), and
@@ -4510,6 +4746,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // Backfill frozen on the record: a crash-resumed retry may lack
             // the body flag, and the quiet/backdate posture must survive it.
             ...(isBackfillCompletion ? { backfill: true } : {}),
+            // Durable audit marker: this duration is an admin-typed override
+            // of the running timer, not the timer itself. No reader keys off
+            // it — the corrected end stamps/duration columns already agree.
+            ...(liveAdjustedTimeOnSite ? { timeOnSiteAdjusted: true } : {}),
             // REQUIRED-mint posture frozen at commit (Codex P0, fix round
             // 8): derived from the LIVE billing profile above — the profile
             // the operator saw — and stamped in the SAME transaction as the
@@ -11138,6 +11378,9 @@ module.exports._test = {
   applyBackfillRecordTimingPolicy,
   backfillCompletionEndInstant,
   backfillTimeOnSiteMinutes,
+  liveTimeOnSitePlan,
+  adjustedCompletionEndInstant,
+  timeOnSiteEditPlan,
   frozenResumeCompletionState,
   BACKFILL_MAX_TIME_ON_SITE_MINUTES,
   BACKFILL_INFERRED_START_FIELDS,

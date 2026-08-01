@@ -545,6 +545,7 @@ export function completionPreferencesNeedDraft({
   backfillCloseout = false,
   backfillCloseoutDefault = false,
   backfillTimeOnSite = "",
+  adjustedTimeOnSite = "",
 } = {}) {
   return sendSms !== true
     || includePayLink !== true
@@ -556,7 +557,10 @@ export function completionPreferencesNeedDraft({
     // is drift from the panel default — either direction — that needs a
     // draft. Typed minutes ride along like any other text field.
     || backfillCloseout !== backfillCloseoutDefault
-    || String(backfillTimeOnSite || "").trim() !== "";
+    || String(backfillTimeOnSite || "").trim() !== ""
+    // The live admin override rides along the same way: losing typed
+    // minutes across a reload silently records the inflated timer instead.
+    || String(adjustedTimeOnSite || "").trim() !== "";
 }
 
 // timeOnSite fragment of the completion POST body. The panel's running
@@ -565,9 +569,22 @@ export function completionPreferencesNeedDraft({
 // as explicit operator input (persisted service duration + job-costing
 // labor). Under a backdated closeout only an operator-TYPED positive number
 // of minutes may travel; blank/invalid omits the key so the duration stays
-// unknown. Non-backfill submits keep today's auto-elapsed exactly.
-export function completionTimeOnSiteBody({ backfill, typedMinutes, elapsed }) {
-  if (!backfill) return { timeOnSite: elapsed };
+// unknown. On a live completion the wire contract is TYPE-based: a NUMBER
+// is an admin-typed override of the running timer (validated 1..720 —
+// out-of-range falls back to the elapsed string so a stray value never
+// ships as operator input; handleSubmit blocks it with an alert first), a
+// string is the auto-elapsed timer, recorded exactly as before.
+export function completionTimeOnSiteBody({ backfill, typedMinutes, elapsed, adjustedMinutes = "" }) {
+  if (!backfill) {
+    const trimmed = String(adjustedMinutes ?? "").trim();
+    if (trimmed !== "") {
+      const minutes = Math.round(Number(trimmed));
+      if (Number.isFinite(minutes) && minutes >= 1 && minutes <= 720) {
+        return { timeOnSite: minutes };
+      }
+    }
+    return { timeOnSite: elapsed };
+  }
   const minutes = Math.round(Number(typedMinutes));
   return Number.isFinite(minutes) && minutes > 0 ? { timeOnSite: minutes } : {};
 }
@@ -589,6 +606,10 @@ export function restoredBackfillChoices(savedDraft, backfillCloseoutDefault = fa
     backfillTimeOnSite:
       typeof savedDraft?.backfillTimeOnSite === "string"
         ? savedDraft.backfillTimeOnSite
+        : "",
+    adjustedTimeOnSite:
+      typeof savedDraft?.adjustedTimeOnSite === "string"
+        ? savedDraft.adjustedTimeOnSite
         : "",
   };
 }
@@ -1027,6 +1048,21 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     })(),
   });
   const [saving, setSaving] = useState(false);
+  // Recorded time on-site for a COMPLETED visit (forgotten-closeout fix,
+  // after-the-fact leg): admin-only correction of an inflated recorded
+  // duration. Deliberately OUTSIDE `form` — it saves through the dedicated
+  // PATCH /admin/dispatch/:id/time-on-site endpoint, never update-details
+  // (whose allowlist stays timing-free). Seeded from whichever recorded
+  // field the payload carries (dispatch rows: serviceTimeMinutes; schedule
+  // rows: actualDuration); the seed doubles as the dirty check so an
+  // untouched field never PATCHes.
+  const timeOnSiteSeed = (() => {
+    const v = service.serviceTimeMinutes ?? service.actualDuration ?? null;
+    return v != null && Number(v) > 0 ? String(Math.round(Number(v))) : "";
+  })();
+  const [timeOnSiteMinutes, setTimeOnSiteMinutes] = useState(timeOnSiteSeed);
+  const isCompletedVisit =
+    String(service.status || "").toLowerCase() === "completed";
   // Immediate reschedule text when this save moves the visit's date or
   // arrival time — admin chooses per save; default matches the drag-and-drop
   // reschedule modal (no text).
@@ -1432,7 +1468,31 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
 
   const handleSave = async ({ takePayment = false } = {}) => {
     setSaving(true);
+    // Time-on-site correction rides the same Save button but its own
+    // endpoint: validate before anything writes so a typo aborts the whole
+    // save rather than landing the update-details half only.
+    const timeOnSiteDirty =
+      isCompletedVisit &&
+      isAdminUser &&
+      String(timeOnSiteMinutes || "").trim() !== "" &&
+      String(timeOnSiteMinutes || "").trim() !== timeOnSiteSeed;
+    if (timeOnSiteDirty) {
+      const minutes = Math.round(Number(String(timeOnSiteMinutes).trim()));
+      if (!Number.isFinite(minutes) || minutes < 1 || minutes > 720) {
+        alert("Time on site must be 1–720 minutes.");
+        setSaving(false);
+        return;
+      }
+    }
     try {
+      if (timeOnSiteDirty) {
+        await adminFetch(`/admin/dispatch/${service.id}/time-on-site`, {
+          method: "PATCH",
+          body: JSON.stringify({
+            minutes: Math.round(Number(String(timeOnSiteMinutes).trim())),
+          }),
+        });
+      }
       // Only manage add-on lines when there are any to send (or any existed
       // originally, so removals persist). Otherwise keep the legacy payload.
       const cleanLines = serviceLines
@@ -2812,6 +2872,30 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                   />{" "}
                 </div>{" "}
               </div>{" "}
+              {isCompletedVisit && isAdminUser && (
+                <div style={{ marginBottom: 14 }}>
+                  {" "}
+                  <label style={labelStyle}>Time on site (minutes)</label>{" "}
+                  <input
+                    type="number"
+                    inputMode="numeric"
+                    min="1"
+                    max="720"
+                    step="1"
+                    value={timeOnSiteMinutes}
+                    onChange={(e) => setTimeOnSiteMinutes(e.target.value)}
+                    placeholder="Not recorded"
+                    className="font-medium"
+                    style={inputStyle}
+                  />{" "}
+                  <div style={{ fontSize: 12, color: D.muted, marginTop: 6 }}>
+                    Recorded duration for this completed visit — correct it
+                    here if the on-site timer wasn&rsquo;t closed out on time.
+                    Saving updates the report and job costing; no customer
+                    messages are sent, and the report PDF regenerates.
+                  </div>{" "}
+                </div>
+              )}{" "}
               {scheduleMoved && (
                 <div style={{ marginBottom: 14 }}>
                   {" "}
@@ -8442,12 +8526,22 @@ export function CompletionPanel({
   // must never inherit it — blank submits no timeOnSite and the duration
   // stays unknown (see completionTimeOnSiteBody).
   const [backfillTimeOnSite, setBackfillTimeOnSite] = useState("");
+  // Admin-typed minutes overriding the running timer on a LIVE completion
+  // (forgotten-closeout fix: the timer kept running, so the auto-elapsed is
+  // inflated). Starts EMPTY — blank records the timer exactly as before.
+  // Admin-only server-side (403 for a tech token), so like backfill the
+  // input never renders for technician users.
+  const [adjustedTimeOnSite, setAdjustedTimeOnSite] = useState("");
   // A backdated quiet closeout suppresses every customer send server-side —
   // the client-side flags must agree, or the success overlay and CTA
   // sub-label claim sends for a completion that texted nobody. Derived here,
   // above the recap/review state, so recap eligibility and the review
   // suppression chain can fold it in.
   const backfillQuietCloseout = backfillEligible && backfillCloseout;
+  // The live override input hides while the backfill checkbox is checked —
+  // that mode has its own minutes input with different blank semantics
+  // (blank = unknown, not "use timer").
+  const liveAdjustEligible = panelIsAdmin && !backfillQuietCloseout;
   const [visitOutcome, setVisitOutcome] = useState("completed");
   const [customerRecap, setCustomerRecap] = useState("");
   const [recapSource, setRecapSource] = useState("template");
@@ -9706,6 +9800,7 @@ export function CompletionPanel({
         backfillCloseout,
         backfillCloseoutDefault,
         backfillTimeOnSite,
+        adjustedTimeOnSite,
       }) ||
       visitOutcome !== "completed";
     if (!hasDraftContent) {
@@ -9739,6 +9834,9 @@ export function CompletionPanel({
         // any panel reload, or the restored submit silently turns LOUD.
         backfillCloseout,
         backfillTimeOnSite,
+        // Live-override minutes are operator input the same way: losing
+        // them across a reload records the inflated timer instead.
+        adjustedTimeOnSite,
         visitOutcome,
         customerRecap,
         recapSource,
@@ -9820,6 +9918,7 @@ export function CompletionPanel({
     oneTimeRecapOnly,
     backfillCloseout,
     backfillTimeOnSite,
+    adjustedTimeOnSite,
     visitOutcome,
     customerRecap,
     recapSource,
@@ -9901,6 +10000,7 @@ export function CompletionPanel({
     );
     setBackfillCloseout(restoredBackfill.backfillCloseout);
     setBackfillTimeOnSite(restoredBackfill.backfillTimeOnSite);
+    setAdjustedTimeOnSite(restoredBackfill.adjustedTimeOnSite);
     setVisitOutcome(savedDraft.visitOutcome || "completed");
     setCustomerRecap(savedDraft.customerRecap || "");
     setRecapSource(savedDraft.recapSource || "draft");
@@ -10863,6 +10963,17 @@ export function CompletionPanel({
       );
       return;
     }
+    // A typo in the live time-on-site override must never silently fall
+    // back to the inflated timer — the whole point of the field is that the
+    // timer is wrong. Block here; completionTimeOnSiteBody's range check is
+    // only the belt-and-suspenders for a stale draft restore.
+    if (liveAdjustEligible && String(adjustedTimeOnSite || "").trim() !== "") {
+      const adjusted = Math.round(Number(adjustedTimeOnSite));
+      if (!Number.isFinite(adjusted) || adjusted < 1 || adjusted > 720) {
+        alert("Adjusted time on site must be 1–720 minutes.");
+        return;
+      }
+    }
     // The server normalizer silently trims each observation/recommendation
     // line to 240 chars and keeps at most 20 entries — reject oversized
     // input here instead of letting the saved report lose text without
@@ -11243,11 +11354,13 @@ export function CompletionPanel({
           ? null
           : selectedReviewScheduledFor,
         // Backfill: never the auto-elapsed (it spans the stale gap) — only
-        // what the operator typed, or nothing. See completionTimeOnSiteBody.
+        // what the operator typed, or nothing. Live: an admin-typed number
+        // overrides the running timer. See completionTimeOnSiteBody.
         ...completionTimeOnSiteBody({
           backfill: backfillEligible && backfillCloseout,
           typedMinutes: backfillTimeOnSite,
           elapsed,
+          adjustedMinutes: liveAdjustEligible ? adjustedTimeOnSite : "",
         }),
         // Single source of truth for the treated areas. The server reads
         // areasServiced (falling back to a legacy areasTreated only if present),
@@ -13556,6 +13669,54 @@ export function CompletionPanel({
                   </span>{" "}
                 </div>
               )}{" "}
+              {liveAdjustEligible && (
+                <div
+                  style={{
+                    padding: "14px 16px",
+                    background: M.card,
+                    border: `0.5px solid ${M.hairline}`,
+                    borderRadius: 12,
+                    marginBottom: 8,
+                  }}
+                >
+                  {" "}
+                  <span
+                    style={{
+                      display: "block",
+                      fontFamily: font,
+                      fontSize: 15,
+                      color: M.ink,
+                      marginBottom: 8,
+                    }}
+                  >
+                    Adjust time on site (minutes)
+                  </span>{" "}
+                  <input
+                    type="number"
+                    inputMode="numeric"
+                    min="1"
+                    max="720"
+                    step="1"
+                    value={adjustedTimeOnSite}
+                    onChange={(e) => setAdjustedTimeOnSite(e.target.value)}
+                    placeholder="Use timer"
+                    style={mInput}
+                  />{" "}
+                  <span
+                    style={{
+                      display: "block",
+                      fontFamily: font,
+                      fontSize: 14,
+                      color: M.ink3,
+                      marginTop: 6,
+                    }}
+                  >
+                    Overrides the running timer ({elapsed}) in the recorded
+                    duration — use it when the visit wasn't closed out on
+                    time. Leave blank to record the timer.
+                  </span>{" "}
+                </div>
+              )}{" "}
               <label
                 style={{
                   display: "flex",
@@ -15372,6 +15533,30 @@ export function CompletionPanel({
               <div style={{ fontSize: 14, color: D.muted }}>
                 The running timer spans the missed days and is not submitted —
                 leave blank to record no duration.
+              </div>{" "}
+            </div>
+          )}{" "}
+          {liveAdjustEligible && (
+            <div style={{ marginBottom: 8 }}>
+              {" "}
+              <div style={{ fontSize: 14, color: D.text, marginBottom: 4 }}>
+                Adjust time on site (minutes)
+              </div>{" "}
+              <input
+                type="number"
+                inputMode="numeric"
+                min="1"
+                max="720"
+                step="1"
+                value={adjustedTimeOnSite}
+                onChange={(e) => setAdjustedTimeOnSite(e.target.value)}
+                placeholder="Use timer"
+                style={{ ...inputStyle, fontSize: 14, marginBottom: 4 }}
+              />{" "}
+              <div style={{ fontSize: 14, color: D.muted }}>
+                Overrides the running timer ({elapsed}) in the recorded
+                duration — use it when the visit wasn't closed out on time.
+                Leave blank to record the timer.
               </div>{" "}
             </div>
           )}{" "}

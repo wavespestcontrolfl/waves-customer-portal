@@ -821,14 +821,15 @@ describe('hashCompletionRequest — flagless backfill resumes reach the re-deriv
     )).toBe(false);
   });
 
-  test('the segment split stays exact: telemetry+key out entirely; backfill always in the MODE segment, timeOnSite only under backfill', () => {
+  test('the segment split stays exact: telemetry+key out entirely; backfill always in the MODE segment, timeOnSite only when typed', () => {
     const attemptsSource = fs.readFileSync(path.join(__dirname, '../services/completion-attempts.js'), 'utf8');
     expect(attemptsSource).toMatch(/const \{ idempotencyKey, timeOnSite, completionTelemetry, backfill, \.\.\.stableBody \} = body \|\| \{\};/);
     // Fix round 13: a NORMAL completion's timeOnSite is the panel's
-    // auto-elapsed timer (ticks every second) — hashing it turned any
-    // transient pre-commit failure into idempotency_key_mismatch on the
-    // next tick. Only a backfill's operator-TYPED minutes bind.
-    expect(attemptsSource).toMatch(/backfill: backfill === true,\s*\n\s*timeOnSite: backfill === true \? \(timeOnSite \?\? null\) : null,/);
+    // auto-elapsed timer STRING (ticks every second) — hashing it turned
+    // any transient pre-commit failure into idempotency_key_mismatch on the
+    // next tick. Operator-TYPED minutes (a NUMBER — backfill's, or the live
+    // admin override's) bind in any mode.
+    expect(attemptsSource).toMatch(/backfill: backfill === true,\s*\n\s*timeOnSite: backfill === true \|\| typeof timeOnSite === 'number' \? \(timeOnSite \?\? null\) : null,/);
     // The resume claim is the ONLY core-segment comparison site; the
     // pending/failed/succeeded sites go through the strict matcher.
     expect(attemptsSource).toMatch(/if \(!resumeHashMatches\(row\.request_hash, requestHash\)\) \{/);
@@ -2310,8 +2311,11 @@ describe('completion route wiring (source contracts)', () => {
     // carries the visit's day. For the unknown-end shape the helper returns
     // null and the wall clock flows in instead, but the duration policy
     // strips those rows' end stamps entirely (behavioral coverage above), so
-    // no wall-clock end instant can reach the row.
-    expect(source).toMatch(/const backfillEndedAt = isBackfillCompletion\s*\n\s*\? backfillCompletionEndInstant\(completionServiceDate, effectiveTimeOnSite, svc\)\s*\n\s*: null;\s*\n\s*const completionLifecycleAt = backfillEndedAt \|\| completionEndedAt;/);
+    // no wall-clock end instant can reach the row. The live admin override's
+    // adjusted instant sits strictly after backfill's in the fallback chain
+    // and is null in every backfill mode (guarded on !isBackfillCompletion).
+    expect(source).toMatch(/const backfillEndedAt = isBackfillCompletion\s*\n\s*\? backfillCompletionEndInstant\(completionServiceDate, effectiveTimeOnSite, svc\)\s*\n\s*: null;/);
+    expect(source).toMatch(/const adjustedEndedAt = !isBackfillCompletion && liveAdjustedTimeOnSite\s*\n\s*\? adjustedCompletionEndInstant\(svc, effectiveTimeOnSite, completionEndedAt\)\s*\n\s*: null;\s*\n\s*const completionLifecycleAt = backfillEndedAt \|\| adjustedEndedAt \|\| completionEndedAt;/);
   });
 
   test('an empty scheduled_services timing update is skipped — the blank-duration checked-in closeout must complete (fix round 4)', () => {
@@ -2388,11 +2392,14 @@ describe('completion route wiring (source contracts)', () => {
 
   test('timeOnSite is sanitized ONCE at intake — every consumer reads the same value or absence', () => {
     // Under backfill the raw body value is replaced by the workday-capped
-    // minutes (or null); non-backfill completions pass through untouched.
-    // `let` (fix round 5): the crash-resume block overwrites it with the
-    // FROZEN structured_notes stamp — the only later assignment (contract
-    // above) — so a retry's auto-elapsed timer can never reach a consumer.
-    expect(source).toMatch(/let effectiveTimeOnSite = isBackfillCompletion\s*\n\s*\? backfillTimeOnSiteMinutes\(timeOnSite\)\s*\n\s*: timeOnSite;/);
+    // minutes (or null); non-backfill completions flow through the live
+    // override plan (a numeric admin-typed value is validated fail-closed
+    // there; a string elapsed passes through untouched — see
+    // admin-dispatch-time-on-site.test.js). `let` (fix round 5): the
+    // crash-resume block overwrites it with the FROZEN structured_notes
+    // stamp — the only later assignment (contract above) — so a retry's
+    // auto-elapsed timer can never reach a consumer.
+    expect(source).toMatch(/let effectiveTimeOnSite = isBackfillCompletion\s*\n\s*\? backfillTimeOnSiteMinutes\(timeOnSite\)\s*\n\s*: livePlan\.effectiveTimeOnSite;/);
     // A rejected value logs a note — the closeout still succeeds (no 400
     // path exists between the sanitation and the log).
     expect(source).toMatch(/if \(isBackfillCompletion && effectiveTimeOnSite == null && timeOnSite != null && timeOnSite !== ''\) \{\s*\n\s*logger\.warn\([\s\S]{0,300}recorded as unknown/);

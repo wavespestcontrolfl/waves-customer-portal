@@ -33,14 +33,15 @@ function isUniqueViolation(err) {
 //    same-key retry after a PRE-commit failure could flip them while
 //    passing the idempotency check. They now hash into the MODE segment,
 //    and the pre-commit comparison sites match on the FULL composite.
-//    `timeOnSite` binds ONLY under backfill (Codex P2, fix round 13): a
-//    backfill's value is the operator's TYPED minutes — stable, and worth
-//    pinning pre-commit — but a NORMAL completion posts the panel's
-//    auto-elapsed timer, ticking every second, so hashing it turned any
-//    transient pre-commit failure into idempotency_key_mismatch on the
-//    very next tick instead of a retry. Normal completions keep the
-//    pre-round-10 exclusion; their duration is recomputed server-side from
-//    lifecycle stamps anyway.
+//    `timeOnSite` binds only when it is an operator statement: under
+//    backfill (Codex P2, fix round 13), and — since the live admin
+//    override — whenever the body carries a NUMBER (typed minutes are
+//    stable and consequential in either mode). A NORMAL completion posts
+//    the panel's auto-elapsed timer as a STRING, ticking every second, so
+//    hashing it turned any transient pre-commit failure into
+//    idempotency_key_mismatch on the very next tick instead of a retry.
+//    String elapsed keeps the pre-round-10 exclusion; its duration is
+//    recomputed server-side from lifecycle stamps anyway.
 //  - POST-commit (a committed service record exists) the frozen
 //    structured_notes are authoritative for both — admin-dispatch re-derives
 //    mode and duration from the record on resume and the body has no vote —
@@ -60,11 +61,12 @@ function completionRequestHashSegments(body) {
     .digest('hex');
   // Normalized so an omitted flag and an explicit false (same intent) hash
   // identically, and undefined/null duration unify; a non-backfill body's
-  // duration is timer noise and never enters the hash (see above).
+  // STRING duration is timer noise and never enters the hash, while a
+  // NUMBER is typed operator minutes and binds in any mode (see above).
   const mode = crypto.createHash('sha256')
     .update(JSON.stringify(sortObjectKeys({
       backfill: backfill === true,
-      timeOnSite: backfill === true ? (timeOnSite ?? null) : null,
+      timeOnSite: backfill === true || typeof timeOnSite === 'number' ? (timeOnSite ?? null) : null,
     })))
     .digest('hex');
   return { core, mode };
