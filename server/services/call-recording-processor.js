@@ -7471,34 +7471,6 @@ const CallRecordingProcessor = {
         skippedReason: 'v2_routing_blocked',
       };
       logger.info(`[call-proc] Appointment blocked by v2 routing gate for ${callSid}`);
-      // The "collect the email" card belongs to the CALL, not to the booking
-      // (codex round-20 P2): this branch short-circuits the whole
-      // customer-validation path, so an email-less caller held for e.g. an
-      // address review got only the address card — and the office completing
-      // that booking by hand was never told the email is missing, which is
-      // exactly the gap the round-7 fix closed on the other branch. Reads the
-      // stored row rather than backfilling: this path must not write to the
-      // customer record, and the validator already merges the call's own
-      // captured email. Card failure never changes the outcome.
-      if (customerId) {
-        try {
-          const blockedCustomer = await db('customers').where({ id: customerId }).first();
-          if (blockedCustomer
-            && validatePhoneCallAppointmentCustomer(blockedCustomer, extracted, contactPhone).advisory?.includes('email')) {
-            await db('triage_items')
-              .insert(buildTriageItem({
-                callLogId: call.id,
-                flag: 'customer_email_missing',
-                extraction: v2ApprovedExtraction || undefined,
-                severity: 'advisory',
-              }))
-              .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
-              .ignore();
-          }
-        } catch (e) {
-          logger.warn(`[call-proc] email-missing advisory insert failed for ${maskSid(callSid)}: ${e.message}`);
-        }
-      }
     } else if (extracted.appointment_confirmed && extracted.preferred_date_time && customerId && hasSpecificTime && canCreateAppointmentFromCall) {
       // Declared OUTSIDE the try so the catch can see whether a schedule row
       // was already inserted when a later confirmation/SMS step threw — the
@@ -9020,6 +8992,43 @@ const CallRecordingProcessor = {
         // approved-but-unbooked audit would read a real booking as skipped
         // and the assessment pre-draft hook below would starve.
         appointmentResult = { error: err.message, ...(scheduledServiceId ? { scheduledServiceId, smsSent: false } : {}) };
+      }
+    }
+
+    // The "collect the email" card belongs to the CALL, not to the booking
+    // (codex round-20 P2, generalized in round-22 P2). EVERY branch above
+    // that ends without a schedule row short-circuits the customer-validation
+    // path — v2 routing blocked, an unsupported service, an unavailable
+    // generic fallback, an outbound call — and in each of them an email-less
+    // caller previously got only the OTHER card, leaving whoever completes
+    // the booking by hand unaware the email is missing. Filing it once here,
+    // after the chain and keyed on "no booking was created", covers all of
+    // them without a third copy of the rule; the creation branch keeps its
+    // own filing because it runs post-backfill, where a secondary-contact
+    // slot email may have satisfied the requirement in the meantime.
+    //
+    // Reads the stored row rather than backfilling: these paths must not
+    // write to the customer record, and the validator already merges the
+    // call's own captured email, so a caller who DID give one gets no card.
+    // The open-row conflict clause makes a second insert a no-op. Card
+    // failure never changes the call outcome.
+    if (customerId && appointmentResult && !appointmentResult.scheduleCreated) {
+      try {
+        const unbookedCustomer = await db('customers').where({ id: customerId }).first();
+        if (unbookedCustomer
+          && validatePhoneCallAppointmentCustomer(unbookedCustomer, extracted, contactPhone).advisory?.includes('email')) {
+          await db('triage_items')
+            .insert(buildTriageItem({
+              callLogId: call.id,
+              flag: 'customer_email_missing',
+              extraction: v2ApprovedExtraction || undefined,
+              severity: 'advisory',
+            }))
+            .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+            .ignore();
+        }
+      } catch (e) {
+        logger.warn(`[call-proc] email-missing advisory insert failed for ${maskSid(callSid)}: ${e.message}`);
       }
     }
 
