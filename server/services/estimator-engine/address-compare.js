@@ -47,6 +47,10 @@ const ROUTE_PAIR_REWRITES = [
   [['us', 'highway'], 'us'], [['us', 'hwy'], 'us'],
 ];
 const ROUTE_SINGLE_REWRITES = { route: 'rt', rte: 'rt' };
+// A parsed "city" consisting of ONLY a directional token is a mis-split
+// post-directional street suffix, never a locality.
+const BARE_DIRECTIONAL_CITY = new Set(['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw',
+  'north', 'south', 'east', 'west', 'northeast', 'northwest', 'southeast', 'southwest']);
 function canonicalizeRouteTokens(tokens) {
   const out = [];
   for (let i = 0; i < tokens.length; i += 1) {
@@ -91,7 +95,17 @@ function sameStreetAddress(a, b, { requireExactUnit = false } = {}) {
     // untouched. Bare trailing unit numbers shift to the conservative
     // no-match direction, which the duplicate guard tolerates.)
     const parsedCity = String(parsed(s).city || '').trim();
-    if (/^\d{1,4}$/.test(parsedCity)) line = `${line} ${parsedCity}`;
+    if (/^\d{1,4}$/.test(parsedCity)) {
+      line = `${line} ${parsedCity}`;
+    } else if (BARE_DIRECTIONAL_CITY.has(parsedCity.toLowerCase())) {
+      // Comma-free POST-DIRECTIONAL streets get the same treatment: the
+      // parser exiles the trailing directional into city ('100 53rd Ave E'
+      // → line1 '100 53rd Ave', city 'E'). A "city" that IS a bare
+      // directional token is that street's suffix — no FL city is named a
+      // lone directional — and leaving it out made '100 53rd Ave E' compare
+      // unequal to its own comma-carrying form.
+      line = `${line} ${parsedCity}`;
+    }
     const split = splitStreetLineUnit(line);
     return {
       street: normSegment(split.street),
@@ -132,10 +146,12 @@ function sameStreetAddress(a, b, { requireExactUnit = false } = {}) {
   // unequal across formats.
   const cityString = (s) => {
     const raw = String(parsed(s).city || '').trim();
-    // A short pure-number "city" is a mis-split route number (see the
-    // street re-attach above), never a locality — comparing it against the
+    // A short pure-number "city" is a mis-split route number, and a bare
+    // directional "city" is a mis-split post-directional (see the street
+    // re-attach above) — never localities; comparing either against the
     // other side's real city would reject the same parcel.
     if (/^\d{1,4}$/.test(raw)) return '';
+    if (BARE_DIRECTIONAL_CITY.has(raw.toLowerCase())) return '';
     return normSegment(raw)
       .split(' ')
       .filter(Boolean)
@@ -147,4 +163,11 @@ function sameStreetAddress(a, b, { requireExactUnit = false } = {}) {
   return true;
 }
 
-module.exports = { sameStreetAddress, addressAddsLocality, STREET_TOKEN_ALIASES };
+module.exports = {
+  sameStreetAddress,
+  addressAddsLocality,
+  STREET_TOKEN_ALIASES,
+  // Shared so street-key builders (scope-guards burst dedup) cut route
+  // spellings identically to how this module compares them.
+  canonicalizeRouteTokens,
+};

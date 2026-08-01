@@ -509,7 +509,7 @@ async function buildSmsThreadContext({
   // Gated behind GATE_ESTIMATOR_SCOPE_GUARDS (lazy require avoids a module
   // cycle) so gate-off behavior stays byte-identical. Call-path
   // loadCustomerByPhone callers are intentionally unchanged.
-  const { scopeGuardsEnabled } = require('./scope-guards');
+  const { scopeGuardsEnabled, VETO_BURST_MINUTES } = require('./scope-guards');
   const guardsOn = scopeGuardsEnabled();
   // AMBIGUOUS GROUNDING is a red lane, never a guess. Two shapes reach
   // here, and both mean the thread named more than one candidate answer:
@@ -642,7 +642,18 @@ async function buildSmsThreadContext({
   // to share this suppression now red-lanes before any of this runs.)
   const suppressPhoneHistory = customerGroundedByAddress;
   const before = new Date(triggerAt);
-  const smsSince = new Date(before.getTime() - 30 * 86400000);
+  // Transcript scope follows the customer-link provenance. A phone-matched
+  // customer's 30-day thread is THEIR OWN history. An ADDRESS-GROUNDED
+  // draft is built off a coordinator's number, and that number's 30-day
+  // thread can carry OTHER clients' conversations — handing it wholesale
+  // to the composer leaks them into customer B's estimate. Grounded
+  // transcripts scope to the CURRENT exchange — the same VETO_BURST_MINUTES
+  // window triage grounded from — and when that burst alone is unreadable
+  // the short-transcript floor below red-errors (no_usable_thread), which
+  // is the wanted outcome: a human reads the thread instead.
+  const smsSince = customerGroundedByAddress
+    ? new Date(before.getTime() - VETO_BURST_MINUTES * 60 * 1000)
+    : new Date(before.getTime() - 30 * 86400000);
   const [leadMatch, smsThread, priorEstimates] = await Promise.all([
     // call=null: skips the sid + reused-lead branches; pure phone fallback.
     suppressPhoneHistory

@@ -28,7 +28,13 @@
 
 const logger = require('../logger');
 const { last10 } = require('../external-phone');
-const { sameStreetAddress, STREET_TOKEN_ALIASES } = require('./address-compare');
+const { sameStreetAddress, STREET_TOKEN_ALIASES, canonicalizeRouteTokens } = require('./address-compare');
+
+// Pure directional tokens — shared by the city-boundary walk (a city may
+// START with one: "North Port") and the variant filter (a street may END
+// with one: "53rd Ave E", where truncating the E changes the street).
+const DIRECTIONAL_TOKENS = new Set(['north', 'south', 'east', 'west', 'n', 's', 'e', 'w',
+  'northeast', 'northwest', 'southeast', 'southwest', 'ne', 'nw', 'se', 'sw']);
 const { CUSTOMER_STAGES, whereLiveCustomer } = require('../customer-stages');
 // Canonical "not live coverage" status set (also excludes completed,
 // no_show, skipped, and the phantom 'rescheduled' rows) — mirroring only
@@ -344,9 +350,7 @@ function extractAddressCandidates(text) {
         // The shared suffix vocabulary MINUS pure directionals: a city that
         // starts with one ("North Port", "North Venice") would otherwise
         // lose its first word to the boundary.
-        const DIRECTIONALS = new Set(['north', 'south', 'east', 'west', 'n', 's', 'e', 'w',
-          'northeast', 'northwest', 'southeast', 'southwest', 'ne', 'nw', 'se', 'sw']);
-        const suffixBoundary = new Set([...ALL_STREET_SUFFIXES].filter((t) => !DIRECTIONALS.has(t)));
+        const suffixBoundary = new Set([...ALL_STREET_SUFFIXES].filter((t) => !DIRECTIONAL_TOKENS.has(t)));
         const boundaries = [];
         for (let i = 0; i < flIdx; i += 1) {
           if (suffixBoundary.has(String(words[i]).toLowerCase())) boundaries.push(i);
@@ -411,7 +415,16 @@ function extractAddressCandidates(text) {
       // demand exact agreement and the DB query can discriminate on it.
       unit: unitValue ? `${unitWord} ${unitValue}` : null,
       unitValue: unitValue || null,
-      variants: words.map((_, i) => `${m[1]} ${words.slice(0, i + 1).join(' ')}${unitSuffix}`),
+      // A prefix variant that TRUNCATES a following directional is dropped:
+      // for '100 53rd Ave E' the shorter '100 53rd Ave' would match the
+      // UNRELATED non-directional street — the full compare correctly
+      // treats the trailing E as significant, and the truncated variant
+      // bypasses exactly that check. Non-directional continuations keep
+      // every prefix (prose overshoot still needs them).
+      variants: words
+        .map((_, i) => i)
+        .filter((i) => i === words.length - 1 || !DIRECTIONAL_TOKENS.has(String(words[i + 1]).toLowerCase()))
+        .map((i) => `${m[1]} ${words.slice(0, i + 1).join(' ')}${unitSuffix}`),
     };
     // Plausibility: a street token (suffix/directional/route designator),
     // or a bound unit/locality. See the cap-semantics note above the loop.
@@ -613,13 +626,25 @@ async function loadTriageInner({ phone, triggerBody, deadline = Date.now() + TRI
   // capture ("… Loop Friday" vs "… Loop Monday") doesn't split the same
   // address. When notation variants merge, the RICHER candidate (the one
   // carrying a unit/locality) survives — it gates confirmation better.
+  // Canonical route designators that terminate a street when a number
+  // follows ('SR 64', 'CR 675', 'US 41', 'Rt 41') — the suffix table alone
+  // can't see them, so '100 SR 64 Bradenton FL' kept its city inside the
+  // street key while '100 State Road 64, Bradenton FL' cut after 64, and
+  // the SAME property double-counted, blocking shorthand grounding.
+  const ROUTE_CUT_TOKENS = new Set(['sr', 'cr', 'us', 'rt', 'hwy']);
   const candidateAddrString = (c) => {
     const last = c.variants[c.variants.length - 1] || `${c.num} ${c.firstWord}`;
-    const tokens = last.toLowerCase().split(/\s+/);
+    // Route spellings canonicalize BEFORE the cut (shared with the street
+    // compare) so both spellings key identically.
+    const tokens = canonicalizeRouteTokens(last.toLowerCase().split(/\s+/));
     let cut = tokens.length;
     for (let i = tokens.length - 1; i > 0; i -= 1) {
       if (ALL_STREET_SUFFIXES.has(STREET_TOKEN_ALIASES[tokens[i]] || tokens[i])) {
         cut = i + 1;
+        break;
+      }
+      if (ROUTE_CUT_TOKENS.has(tokens[i]) && /^\d+$/.test(tokens[i + 1] || '')) {
+        cut = i + 2;
         break;
       }
     }
@@ -983,6 +1008,9 @@ module.exports = {
   scopeGuardsEnabled,
   deterministicOutOfScope,
   extractAddressCandidates,
+  // The current-exchange window. Exported so the context build scopes an
+  // ADDRESS-GROUNDED transcript to the same exchange triage grounded from.
+  VETO_BURST_MINUTES,
   loadThreadTriageContext,
   _private: {
     OUT_OF_SCOPE_RE, IN_SCOPE_RE, candidateMatchesRow, loadTriageInner, TRIAGE_TIMEOUT_MS, prefixVariants, unitTokenPatterns,

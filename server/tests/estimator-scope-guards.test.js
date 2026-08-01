@@ -1140,6 +1140,60 @@ describe('loadThreadTriageContext', () => {
     expect(triage.lines.join('\n')).toContain('booked: Quarterly Pest Control Service 2026-08-05 (pending)');
   });
 
+  test('a POST-DIRECTIONAL street matches only complete variants', async () => {
+    // '100 53rd Ave' (truncating the E) would ground the UNRELATED
+    // non-directional street; the full compare treats the trailing E as
+    // significant and the truncated variant bypassed it.
+    const { extractAddressCandidates: extract } = require('../services/estimator-engine/scope-guards');
+    const [cand] = extract('quote for 100 53rd Ave E please');
+    expect(cand.variants).toContain('100 53rd Ave E');
+    expect(cand.variants).not.toContain('100 53rd Ave');
+
+    mockState.rows.customers = [
+      { id: 'c-8', first_name: 'Other', last_name: 'Street', address_line1: '100 53rd Ave', city: 'Bradenton' },
+    ];
+    let triage = await loadThreadTriageContext({
+      phone: null,
+      triggerBody: 'quote for 100 53rd Ave E please',
+    });
+    expect(triage.matchedExistingCustomer).toBe(false);
+
+    mockState.rows.customers = [
+      { id: 'c-8', first_name: 'East', last_name: 'Street', address_line1: '100 53rd Ave E', city: 'Bradenton' },
+    ];
+    triage = await loadThreadTriageContext({
+      phone: null,
+      triggerBody: 'quote for 100 53rd Ave E please',
+    });
+    expect(triage.matchedExistingCustomer).toBe(true);
+  });
+
+  test('abbreviated and spelled-out routes key identically in the burst', async () => {
+    mockState.rows.sms_log = [
+      { message_body: 'visit at 100 SR 64 Bradenton FL', created_at: new Date().toISOString(), direction: 'outbound' },
+      { message_body: 'that is 100 State Road 64, Bradenton FL', created_at: new Date().toISOString(), direction: 'inbound' },
+    ];
+    mockState.rows.customers = [
+      { id: 'c-2', first_name: 'Route', last_name: 'Stored', address_line1: '100 SR 64', city: 'Bradenton' },
+    ];
+    let triage = await loadThreadTriageContext({
+      phone: '+17245550000',
+      triggerBody: 'can you quote the same place?',
+    });
+    expect(triage.groundedCustomerId).toBe('c-2');
+
+    // Genuinely different routes stay distinct — no grounding.
+    mockState.rows.sms_log = [
+      { message_body: 'about 100 SR 64 please', created_at: new Date().toISOString(), direction: 'inbound' },
+      { message_body: 'also 100 SR 70 please', created_at: new Date().toISOString(), direction: 'inbound' },
+    ];
+    triage = await loadThreadTriageContext({
+      phone: '+17245550000',
+      triggerBody: 'can you quote the same place?',
+    });
+    expect(triage.groundedCustomerId).toBeNull();
+  });
+
   test('a stated FLOOR enforces the exact-unit guard (Fl 2 never grounds Floor 1\'s row)', async () => {
     mockState.rows.customers = [
       { id: 'c-2', first_name: 'Floor', last_name: 'One', address_line1: '100 Palm Ave', address_line2: 'Fl 1', city: 'Venice' },

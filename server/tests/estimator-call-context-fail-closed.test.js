@@ -21,6 +21,8 @@ let mockCustomerFirstFail = false;
 // Rows for the phone-scoped history loads (conflict-suppression pins).
 let mockLeadRow = null;
 let mockEstimateRows = [];
+// created_at '>=' bounds seen by the sms_log transcript query.
+let mockSmsSinceBounds = [];
 // Records the customers-table whereRaw/orWhereRaw SQL so the SMS-path
 // contact-slot pin can assert which phone columns the lookup matched.
 let mockCustomerWhereSql = [];
@@ -28,8 +30,11 @@ let mockCustomerWhereSql = [];
 jest.mock('../models/db', () => {
   const db = (table) => ({
     select() { return this; },
-    where(arg) {
+    where(arg, op, val) {
       if (typeof arg === 'function') arg.call(this);
+      // Records the transcript window's lower bound so the burst-scope
+      // pins can assert WHICH window the grounded path used.
+      if (table === 'sms_log' && arg === 'created_at' && op === '>=') mockSmsSinceBounds.push(val);
       return this;
     },
     whereRaw(sql) {
@@ -92,6 +97,7 @@ beforeEach(() => {
   mockCustomerFirstFail = false;
   mockLeadRow = null;
   mockEstimateRows = [];
+  mockSmsSinceBounds = [];
   mockCustomerWhereSql = [];
   delete process.env.GATE_ESTIMATOR_SCOPE_GUARDS;
 });
@@ -401,6 +407,44 @@ describe('buildSmsThreadContext grounded-customer fallback (GATE_ESTIMATOR_SCOPE
       lawn_type: 'St. Augustine',
     });
     expect(context.customerGroundedByAddress).toBe(true);
+  });
+
+  test('gate ON: an ADDRESS-GROUNDED transcript scopes to the burst window, not 30 days', async () => {
+    // The coordinator's 30-day thread can carry OTHER clients'
+    // conversations — only the current exchange may reach the composer.
+    process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
+    mockCustomerRows = [];
+    mockCustomerFirstRow = GROUNDED_ROW;
+    await buildSmsThreadContext({ ...SMS_ARGS, groundedCustomerId: 'cust-77' });
+    const since = new Date(mockSmsSinceBounds[mockSmsSinceBounds.length - 1]).getTime();
+    const ageMinutes = (Date.now() - since) / 60000;
+    expect(ageMinutes).toBeGreaterThan(85);
+    expect(ageMinutes).toBeLessThan(95);
+  });
+
+  test('a PHONE-MATCHED customer keeps the full 30-day transcript (their own history)', async () => {
+    process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
+    mockCustomerRows = [{ ...GROUNDED_ROW, id: 'cust-77' }];
+    await buildSmsThreadContext(SMS_ARGS);
+    const since = new Date(mockSmsSinceBounds[mockSmsSinceBounds.length - 1]).getTime();
+    const ageDays = (Date.now() - since) / 86400000;
+    expect(ageDays).toBeGreaterThan(29);
+    expect(ageDays).toBeLessThan(31);
+  });
+
+  test('gate ON: a grounded draft whose burst is unreadable red-errors (no_usable_thread)', async () => {
+    // The short-transcript floor still owns the too-thin case: with the
+    // burst window empty and a sub-40-char trigger, no draft is built and
+    // the bell sends a human to the thread.
+    process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
+    mockCustomerRows = [];
+    mockCustomerFirstRow = GROUNDED_ROW;
+    const context = await buildSmsThreadContext({
+      phone: '+19415550123',
+      triggerBody: 'flea add-on?',
+      groundedCustomerId: 'cust-77',
+    });
+    expect(context.error).toBe('no_usable_thread');
   });
 
   test('gate OFF: groundedScope is inert too', async () => {
