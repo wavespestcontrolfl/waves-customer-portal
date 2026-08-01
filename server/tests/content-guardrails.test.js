@@ -2266,6 +2266,54 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
     }
   });
 
+  // Codex r2 regressions.
+  test('sourced price RANGES are one attribution (r2: "from $49 to $99", "between $49 and $99")', () => {
+    for (const body of [
+      'Aptive charges from $49 to $99 per month for comparable plans.',
+      'Aptive charges between $49 and $99 for the same coverage.',
+    ]) {
+      expect(findHardcodedPrice(body, OP)).toBeNull();
+      expect(findHardcodedPrice(body)).not.toBeNull(); // mined: still blocked
+    }
+  });
+
+  test('case-sensitive aliasesCS attribute; lowercase phrase does not (r2)', () => {
+    expect(findHardcodedPrice('Rodent Solutions charges a $199 fee.', OP)).toBeNull();
+    expect(findHardcodedPrice('rodent solutions charges a $199 fee.', OP)).not.toBeNull();
+  });
+
+  test('"US" the country is not "us" the pronoun (r2)', () => {
+    expect(findHardcodedPrice('In the US, Aptive charges a $199 cancellation fee.', OP)).toBeNull();
+    expect(findHardcodedPrice('Aptive charges a $199 cancellation fee in the US.', OP)).toBeNull();
+    expect(findHardcodedPrice('The plan costs us $89 per visit here in Bradenton today.', OP)).not.toBeNull();
+  });
+
+  test('an unanchored conjunction is a new clause, not a range (pre-push P0)', () => {
+    expect(findHardcodedPrice('Orkin charges $199 and $89 is the local quarterly rate.', OP)).not.toBeNull();
+  });
+
+  test('pseudo values: prose is not a table cell (pre-push P0)', () => {
+    expect(findHardcodedPrice('These values: [Aptive] show that local quarterly service is $89 per application.', OP)).not.toBeNull();
+  });
+
+  test('singular first-person markers disqualify even beside a competitor (pre-push P0)', () => {
+    for (const body of [
+      '| Aptive | I charge | $89 |',
+      '| Aptive | my quarterly service | $89 |',
+      'Unlike Aptive, I charge $89 for quarterly service in Bradenton.',
+      'Aptive is pricier than my $99 quarterly plan for local homes.',
+    ]) {
+      expect(findHardcodedPrice(body, OP)).not.toBeNull();
+    }
+  });
+
+  test('comparison-table cells attribute (r2: markdown rows + values props; operator only)', () => {
+    expect(findHardcodedPrice('| Aptive | $199 |', OP)).toBeNull();
+    expect(findHardcodedPrice('values: ["Aptive", "$199"]', OP)).toBeNull();
+    expect(findHardcodedPrice('| Waves | $89 |', OP)).not.toBeNull();
+    expect(findHardcodedPrice('| Aptive | $199 |', {})).not.toBeNull(); // mined: blocked
+  });
+
   test('detection-only brands attribute prices for operator drafts (Codex P1: Aptive/Hawx)', () => {
     for (const body of [
       'Aptive charges a $199 early-cancel fee per ConsumerAffairs.',

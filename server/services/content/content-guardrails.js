@@ -79,7 +79,8 @@ function findHardcodedPrice(text, { thirdPartyCitations = false } = {}) {
     // injected "other companies charge $X" attribution must not publish an
     // arbitrary price — the exemption exists for operator-directed
     // competitor-intercept briefs, so only they get it.
-    if (thirdPartyCitations && isThirdPartyPriceCitation(s, match.index)) continue;
+    if (thirdPartyCitations
+      && (isThirdPartyPriceCitation(s, match.index) || isTableAttributedPrice(s, match.index))) continue;
     return match[0].trim();
   }
   return null;
@@ -108,7 +109,14 @@ function priceFinding(body, opts = {}) {
 // Brand TEMPLATE TOKENS count as first-party: spoke-shared copy never
 // writes "Waves" literally, it writes {{brandName}} (pre-push Codex P0 —
 // "Unlike Orkin, {{brandName}} charges $89" must stay blocked).
-const FIRST_PARTY_MARKER_RE = /\b(we|we're|our|ours|us|waves|waveguard)\b|\{\{\s*(?:brand|site|company)[a-zA-Z]*\s*\}\}/i;
+// "us" is CASE-SENSITIVE lowercase: "US" is the country ("In the US, Aptive
+// charges…") and must not read as first-person (Codex r2 P2). Everything
+// else stays caseless.
+const FIRST_PARTY_CI_RE = /\b(we|we're|our|ours|i|i'm|i've|my|mine|myself|waves|waveguard)\b|\{\{\s*(?:brand|site|company)[a-zA-Z]*\s*\}\}/i;
+const FIRST_PARTY_US_RE = /\bus\b/;
+function hasFirstPartyMarker(sentence) {
+  return FIRST_PARTY_CI_RE.test(sentence) || FIRST_PARTY_US_RE.test(sentence);
+}
 
 // Clause boundaries INSIDE a sentence: punctuation plus contrast/coordination
 // conjunctions. A competitor named in a DIFFERENT clause does not own the
@@ -175,10 +183,14 @@ function attributionBindsToAmount(between) {
   }
   if (i >= tokens.length || !PRICING_VERB_RE.test(tokens[i])) return false;
   i += 1;
-  // Everything remaining must be a determiner/hedge — no second verb, no
-  // second subject.
+  // Everything remaining must be a determiner/hedge or an earlier amount in
+  // a range ("from $49 to $99", "between $49 and $99" — Codex r2 P1) — no
+  // second verb, no second subject.
   for (; i < tokens.length; i += 1) {
-    if (!POST_VERB_MODIFIER_RE.test(tokens[i])) return false;
+    if (POST_VERB_MODIFIER_RE.test(tokens[i])) continue;
+    if (/^\$?[\d,.]+$/.test(tokens[i])) continue;
+    if (/^(?:between|and)$/i.test(tokens[i])) continue;
+    return false;
   }
   return true;
 }
@@ -194,14 +206,28 @@ const POSSESSIVE_PRICE_RE = /^(?:'s|’s)\s+(?:[A-Za-z-]+\s+){0,2}(?:fee|fees|pr
 const BENCHMARK_SUBJECT_RE = /^(?:industry average)$/i;
 const BENCHMARK_COPULA_RE = /^[^.!?]{0,20}?\b(?:is|was|are|were|runs?|comes? to|sits? at|hovers? around)\b[^.!?]{0,15}?$/i;
 
-function competitorNamePattern() {
-  if (competitorNamePattern._re !== undefined) return competitorNamePattern._re;
+function buildNameAlternation(names) {
+  // Longest-first so "Truly Nolen of America" wins over "Truly Nolen".
+  const alts = names
+    .filter(Boolean)
+    .sort((a, b) => b.length - a.length)
+    .map((n) => escapeRegExp(n).replace(/\s+/g, '\\s+'));
+  return alts.length ? `\\b(?:${alts.join('|')})\\b` : null;
+}
+
+function competitorNamePatterns() {
+  if (competitorNamePatterns._res !== undefined) return competitorNamePatterns._res;
   const names = [];
+  const csNames = [];
   try {
     const { COMPETITORS, COMPETITOR_BRAND_SIGNALS } = require('./competitor-facts');
     for (const c of Array.isArray(COMPETITORS) ? COMPETITORS : []) {
       if (c?.name) names.push(String(c.name));
       for (const a of Array.isArray(c?.aliases) ? c.aliases : []) names.push(String(a));
+      // aliasesCS are deliberately CASE-SENSITIVE elsewhere ("Rodent
+      // Solutions" the company vs "rodent solutions" the phrase) — same
+      // sensitivity here (Codex r2 P2).
+      for (const a of Array.isArray(c?.aliasesCS) ? c.aliasesCS : []) csNames.push(String(a));
     }
     // Detection-only brands (Aptive, Hawx, …) attribute prices too — the
     // B1/B3 intercept briefs mandate Aptive's cancellation fee, and the
@@ -209,13 +235,13 @@ function competitorNamePattern() {
     // This pattern only decides who can OWN a dollar figure.
     for (const s of Array.isArray(COMPETITOR_BRAND_SIGNALS) ? COMPETITOR_BRAND_SIGNALS : []) names.push(String(s));
   } catch { /* competitor-facts unavailable — generic framing still applies */ }
-  // Longest-first so "Truly Nolen of America" wins over "Truly Nolen".
-  const alts = names
-    .filter(Boolean)
-    .sort((a, b) => b.length - a.length)
-    .map((n) => escapeRegExp(n).replace(/\s+/g, '\\s+'));
-  competitorNamePattern._re = alts.length ? new RegExp(`\\b(?:${alts.join('|')})\\b`, 'i') : null;
-  return competitorNamePattern._re;
+  const res = [];
+  const ci = buildNameAlternation(names);
+  if (ci) res.push(new RegExp(ci, 'i'));
+  const cs = buildNameAlternation(csNames);
+  if (cs) res.push(new RegExp(cs));
+  competitorNamePatterns._res = res;
+  return res;
 }
 
 // The sentence containing `index`. Boundaries = . ! ? followed by whitespace
@@ -238,7 +264,62 @@ function sentenceAround(text, index) {
   return { text: s.slice(start, end), offset: start };
 }
 
+// Sourced competitor fees in TABLES: the B1/B3 briefs mandate a comparison
+// table, where party and amount are separated by cell syntax rather than a
+// prose predicate (Codex r2 P1). Two line shapes, both requiring the third
+// party EARLIER ON THE SAME LINE than the amount:
+//   | Aptive | $199 |                    (markdown row)
+//   values: ["Aptive", "$199"]           (<ComparisonTable> prop row)
+// Same operator-provenance gate as the prose exemption; first-party markers
+// on the line disqualify it (a row about US must not exempt).
+function isTableAttributedPrice(text, amountIndex) {
+  const s = String(text || '');
+  const lineStart = s.lastIndexOf('\n', amountIndex - 1) + 1;
+  let lineEnd = s.indexOf('\n', amountIndex);
+  if (lineEnd === -1) lineEnd = s.length;
+  const line = s.slice(lineStart, lineEnd);
+  const local = amountIndex - lineStart;
+  if (hasFirstPartyMarker(line)) return false;
+  // Markdown row: the whole line is cells; competitor must sit before the
+  // amount.
+  if (/^\s*\|/.test(line)) {
+    const before = line.slice(0, local);
+    for (const re of [GENERIC_THIRD_PARTY_RE, ...competitorNamePatterns()]) {
+      if (re && re.test(before)) return true;
+    }
+    return false;
+  }
+  // ComparisonTable values prop: BOTH the amount and the competitor must be
+  // INSIDE the bracket segment — "These values: [Aptive] show that … is $89"
+  // is prose, not a cell, and must not exempt (pre-push Codex P0).
+  const valuesRe = /\bvalues\s*[:=]\s*\[/g;
+  let vm;
+  while ((vm = valuesRe.exec(line)) !== null) {
+    const open = vm.index + vm[0].length - 1;
+    const close = line.indexOf(']', open);
+    if (close === -1) continue;
+    if (local <= open || local >= close) continue;
+    const before = line.slice(open + 1, local);
+    for (const re of [GENERIC_THIRD_PARTY_RE, ...competitorNamePatterns()]) {
+      if (re && re.test(before)) return true;
+    }
+  }
+  return false;
+}
+
 // The clause containing `localIndex` within a sentence.
+// A conjunction continues a RANGE only when an explicit range marker
+// anchors it: "between $49 and $99" / "from $49 or $59". A bare
+// "charges $199 and $89 is the local rate" is TWO clauses — the second
+// amount must not inherit the attribution (pre-push Codex P0), so
+// amount-after-conjunction alone is NOT enough.
+const RANGE_ANCHOR_RE = /\b(?:between|from)\s+\$[\d,.]*\s*$/i;
+function isRangeConjunction(s, m) {
+  if (!/^(?:and|or|to)$/i.test(m[0].trim())) return false;
+  if (!/^\s*\$\d/.test(s.slice(m.index + m[0].length))) return false;
+  return RANGE_ANCHOR_RE.test(s.slice(0, m.index));
+}
+
 function clauseAround(sentence, localIndex) {
   const s = String(sentence || '');
   const splitRe = new RegExp(CLAUSE_SPLIT_RE.source, CLAUSE_SPLIT_RE.flags);
@@ -246,11 +327,16 @@ function clauseAround(sentence, localIndex) {
   let m;
   while ((m = splitRe.exec(s)) !== null) {
     if (m.index >= localIndex) break;
+    if (isRangeConjunction(s, m)) continue;
     start = m.index + m[0].length;
   }
   splitRe.lastIndex = localIndex;
-  const endMatch = splitRe.exec(s);
-  const end = endMatch ? endMatch.index : s.length;
+  let end = s.length;
+  while ((m = splitRe.exec(s)) !== null) {
+    if (isRangeConjunction(s, m)) continue;
+    end = m.index;
+    break;
+  }
   return { text: s.slice(start, end), offset: start };
 }
 
@@ -263,12 +349,12 @@ function clauseAround(sentence, localIndex) {
 function isThirdPartyPriceCitation(text, amountIndex) {
   const { text: sentence, offset: sentenceOffset } = sentenceAround(text, amountIndex);
   if (!sentence) return false;
-  if (FIRST_PARTY_MARKER_RE.test(sentence)) return false;
+  if (hasFirstPartyMarker(sentence)) return false;
   const localAmountIndex = amountIndex - sentenceOffset;
   const { text: clause, offset: clauseOffset } = clauseAround(sentence, localAmountIndex);
   if (!clause) return false;
   const clauseAmountIndex = localAmountIndex - clauseOffset;
-  for (const re of [GENERIC_THIRD_PARTY_RE, competitorNamePattern()]) {
+  for (const re of [GENERIC_THIRD_PARTY_RE, ...competitorNamePatterns()]) {
     if (!re) continue;
     const scan = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
     let m;
