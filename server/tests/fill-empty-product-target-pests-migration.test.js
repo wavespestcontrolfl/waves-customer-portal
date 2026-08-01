@@ -75,6 +75,19 @@ describe('fill empty product target_pests migration', () => {
     expect(offenders.map(([name]) => name)).toEqual([]);
   });
 
+  test('keeps ornamental-only root rot off the turf oomycete fills', () => {
+    // The classifier reads ANY "pythium" target as turf, so "Pythium root rot"
+    // on a turf fungicide would put a root-rot claim on a lawn report. These
+    // labels group root rot under their ornamental/nursery directions; the
+    // turf directions are blight and damping-off (pre-push P1).
+    const oomycete = FILLS.filter(([n]) => /Banol|Subdue Maxx/i.test(n));
+    expect(oomycete).toHaveLength(2);
+    oomycete.forEach(([, targets]) => {
+      expect(targets.some((t) => /root rot/i.test(t))).toBe(false);
+      expect(targets).toContain('Pythium blight');
+    });
+  });
+
   test('no product is filled twice and no list is empty', () => {
     const names = FILLS.map(([n]) => n);
     expect(new Set(names).size).toBe(names.length);

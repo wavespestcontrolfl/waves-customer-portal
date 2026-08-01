@@ -55,7 +55,7 @@ const CATALOG_TARGETS = [
   // Added by 20260801300000, which fills the products that carried no targets.
   "Bahiagrass", "Lawn burweed", "Palm bud rot (Phytophthora)",
   "Lethal bronzing (palm) — preventive", "Lethal yellowing (palm) — preventive",
-  "Pythium blight", "Pythium root rot", "Wood-decay fungi",
+  "Pythium blight", "Pythium damping-off", "Pythium root rot", "Wood-decay fungi",
 ];
 
 describe("defaultApplicationMethod", () => {
@@ -296,6 +296,7 @@ describe("labelTargetLines", () => {
     ].forEach((t) => expect(labelTargetLines(t)).toEqual(["tree_shrub"]));
     // Turf oomycetes keep their own wording and stay on the lawn line.
     expect(labelTargetLines("Pythium blight")).toEqual(["lawn"]);
+    expect(labelTargetLines("Pythium damping-off")).toEqual(["lawn"]);
     expect(labelTargetLines("Pythium root rot")).toEqual(["lawn"]);
     // A palm visit gets the palm disease; a lawn visit gets none of it.
     expect(

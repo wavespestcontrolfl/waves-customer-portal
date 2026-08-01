@@ -56,9 +56,15 @@ const FILLS = [
     ['Brown patch / large patch', 'Dollar spot', 'Gray leaf spot']],
   ['Nufarm Cleary 3336F Fungicide', ['Brown patch / large patch', 'Dollar spot', 'Gray leaf spot']],
   // Oomycete-specific — these do NOT control true fungi, so the list stays
-  // Pythium-only rather than inheriting the broad turf-disease set.
-  ['Banol Fungicide', ['Pythium blight', 'Pythium root rot']],
-  ['Subdue Maxx Fungicide', ['Pythium blight', 'Pythium root rot']],
+  // Pythium-only rather than inheriting the broad turf-disease set. And it is
+  // the TURF directions specifically: Syngenta's Subdue Maxx label groups
+  // "Pythium blight / Pythium damping-off / Yellow tuft" under its turf rate
+  // (see the label quote in 20260712100000_catalog_label_rate_backfill.js).
+  // Pythium ROOT ROT is an ornamental/nursery use on these labels, and since
+  // the classifier reads any "pythium" target as turf, listing it here would
+  // have put a root-rot claim on lawn reports (pre-push P1).
+  ['Banol Fungicide', ['Pythium blight', 'Pythium damping-off']],
+  ['Subdue Maxx Fungicide', ['Pythium blight', 'Pythium damping-off']],
 
   // ---- Turf herbicide ------------------------------------------------
   ['Barricade 4FL', ['Crabgrass (pre-emergent)', 'Goosegrass (pre-emergent)', 'Annual bluegrass (Poa annua)']],
