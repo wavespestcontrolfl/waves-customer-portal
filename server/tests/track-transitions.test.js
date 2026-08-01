@@ -26,13 +26,17 @@ const { isEnabled } = require('../config/feature-gates');
 const trackTransitions = require('../services/track-transitions');
 
 function query(result) {
-  return {
+  const q = {
     where: jest.fn().mockReturnThis(),
     whereIn: jest.fn().mockReturnThis(),
     whereNull: jest.fn().mockReturnThis(),
     update: jest.fn().mockResolvedValue(result),
     first: jest.fn().mockResolvedValue(result),
   };
+  // knex .modify(fn) — applies the builder callback (the already-complete
+  // completed_at optimistic guard uses it) and keeps chaining.
+  q.modify = jest.fn((fn) => { fn(q); return q; });
+  return q;
 }
 
 function socketStub() {

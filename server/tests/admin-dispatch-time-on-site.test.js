@@ -105,6 +105,28 @@ describe('liveTimeOnSitePlan — the live-override intake gate', () => {
     }
   });
 
+  test('string-encoded minutes take the SAME gate — a tech cannot smuggle "45" past the type check (codex P1 round 13)', () => {
+    // minutesFromElapsed parses bare numeric strings and "45 min" as
+    // minutes, so every non-timer-format value is operator input and must
+    // be role-gated. Only the panel timer's own shapes pass through.
+    for (const smuggled of ['45', ' 45 ', '45 min', '45m', '45.5', ['45'], { toString: () => '45' }]) {
+      const plan = liveTimeOnSitePlan({ timeOnSite: smuggled, role: 'technician' });
+      expect(plan.adjusted).toBe(false);
+      expect(plan.status).toBe(403);
+      expect(plan.error.code).toBe('time_on_site_admin_only');
+    }
+    // An admin typing the same shapes is legitimate operator input.
+    expect(liveTimeOnSitePlan({ timeOnSite: '45', role: 'admin' }))
+      .toEqual({ adjusted: true, effectiveTimeOnSite: 45 });
+    expect(liveTimeOnSitePlan({ timeOnSite: '45 min', role: 'admin' }))
+      .toEqual({ adjusted: true, effectiveTimeOnSite: 45 });
+    // Genuine timer shapes stay ungated for every role.
+    for (const timer of ['2:19:05', '9:05', '412:07:33']) {
+      expect(liveTimeOnSitePlan({ timeOnSite: timer, role: 'technician' }))
+        .toEqual({ adjusted: false, effectiveTimeOnSite: timer });
+    }
+  });
+
   test('numeric value from an admin → adjusted, sanitized minutes', () => {
     expect(liveTimeOnSitePlan({ timeOnSite: 45, role: 'admin' }))
       .toEqual({ adjusted: true, effectiveTimeOnSite: 45 });
@@ -336,7 +358,16 @@ describe('route wiring contracts', () => {
     expect(block).toMatch(/pdf_storage_key = null|pdf_storage_key: null/);
     expect(block).toMatch(/service_time_minutes: plan\.minutes,\s*\n\s*actual_duration_minutes: plan\.minutes,/);
     // Both timestamp families + completed_at move together, or not at all.
-    expect(block).toMatch(/serviceUpdate\.actual_end_time = plan\.newEnd;\s*\n\s*serviceUpdate\.check_out_time = plan\.newEnd;\s*\n\s*serviceUpdate\.completed_at = plan\.newEnd;/);
+    expect(block).toMatch(/serviceUpdate\.actual_end_time = newEnd;\s*\n\s*serviceUpdate\.check_out_time = newEnd;\s*\n\s*serviceUpdate\.completed_at = newEnd;/);
+    // Record resolution runs under the row lock, before any write (codex
+    // P2 round 13) — an in-flight finalization's fresh record is seen, and
+    // a resolution failure aborts the whole correction.
+    const lockAt = block.indexOf(".forUpdate().first();");
+    const resolveAt = block.indexOf('.resolveServiceRecord(trx, lockedSvc || svc, serviceRecordCols)');
+    const firstWriteAt = block.indexOf("await trx('scheduled_services').where({ id: svc.id }).update(serviceUpdate);");
+    expect(lockAt).toBeGreaterThan(-1);
+    expect(resolveAt).toBeGreaterThan(lockAt);
+    expect(firstWriteAt).toBeGreaterThan(resolveAt);
     for (const forbidden of [
       'sendCustomerMessage',
       'sendCompletionSms',

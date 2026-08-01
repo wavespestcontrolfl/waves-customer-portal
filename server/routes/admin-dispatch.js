@@ -809,8 +809,18 @@ function backfillCompletionEndInstant(serviceDate, timeOnSite, service = {}) {
 // and can correct the typo; the backlog-closeout must-land argument doesn't
 // apply). Backfill bodies pass through untouched — the backfill sanitizer
 // owns that branch. Pure for testability (_test).
+// The ONLY string shapes the completion panel's timer emits (elapsedSince:
+// "M:SS" below an hour, "H:MM:SS" above). Everything else that
+// minutesFromElapsed would parse — bare "45", "45 min", numbery arrays — is
+// operator input wearing a string costume and must take the admin gate
+// (codex P1 #3152 round 13: a technician posting timeOnSite: "45" would
+// otherwise write an arbitrary duration past the admin-only policy).
+const TIMER_ELAPSED_STRING = /^\d+:\d{2}(?::\d{2})?$/;
+
 function liveTimeOnSitePlan({ timeOnSite, role, backfill = false } = {}) {
-  if (backfill === true || typeof timeOnSite !== 'number') {
+  const isEmpty = timeOnSite == null || timeOnSite === '';
+  const isTimerString = typeof timeOnSite === 'string' && TIMER_ELAPSED_STRING.test(timeOnSite.trim());
+  if (backfill === true || isEmpty || isTimerString) {
     return { adjusted: false, effectiveTimeOnSite: timeOnSite };
   }
   if (role !== 'admin') {
@@ -2218,19 +2228,14 @@ router.patch('/:serviceId/time-on-site', requireAdmin, async (req, res, next) =>
     // record update — a partial correction behind a 200. A transient
     // metadata failure must 500 so the admin retries whole.
     const serviceRecordCols = await db('service_records').columnInfo();
-    const { record: resolvedRecord, viaFk: recordViaFk, ambiguous: recordAmbiguous } = await require('../services/job-costing')
-      .resolveServiceRecord(db, svc, serviceRecordCols);
-    const record = recordAmbiguous ? null : resolvedRecord;
-    if (recordAmbiguous) {
-      logger.warn(`[time-on-site] ambiguous legacy service_record match for service ${svc.id} — correcting scheduled_services only`);
-    }
-    const structuredNotes = parseJsonObject(record?.structured_notes);
 
-    const plan = timeOnSiteEditPlan({ minutes: req.body?.minutes, service: svc, structuredNotes });
+    const plan = timeOnSiteEditPlan({ minutes: req.body?.minutes, service: svc });
     if (plan.error) return res.status(plan.status).json(plan.error);
 
     let previousMinutes = null;
     let recordUpdated = false;
+    let recordAmbiguous = false;
+    let newEnd = null;
     await db.transaction(async (trx) => {
       // Prior minutes come from the LOCKED row (codex P2 #3152 round 10):
       // two concurrent corrections serialize on this lock, and each audit
@@ -2240,6 +2245,25 @@ router.patch('/:serviceId/time-on-site', requireAdmin, async (req, res, next) =>
       previousMinutes = positiveNumber(lockedSvc?.service_time_minutes)
         || positiveNumber(lockedSvc?.actual_duration_minutes)
         || null;
+      // Record resolution runs UNDER the same row lock (codex P2 #3152
+      // round 13): the status-route-first flow leaves the visit completed
+      // while a later /complete finalization creates its service_records
+      // row inside a transaction that updates this same scheduled_services
+      // row. Resolving before the lock could permanently miss that fresh
+      // record; blocking here until the finalization commits, then
+      // resolving through the trx, sees whatever record exists once it
+      // settled. Runs BEFORE any write so a resolution failure aborts the
+      // whole correction.
+      const { record: resolvedRecord, viaFk: recordViaFk, ambiguous } = await require('../services/job-costing')
+        .resolveServiceRecord(trx, lockedSvc || svc, serviceRecordCols);
+      recordAmbiguous = ambiguous;
+      const record = ambiguous ? null : resolvedRecord;
+      if (ambiguous) {
+        logger.warn(`[time-on-site] ambiguous legacy service_record match for service ${svc.id} — correcting scheduled_services only`);
+      }
+      // End instant from the LOCKED row too — its start fields are the
+      // settled truth after any in-flight finalization.
+      newEnd = adjustedCompletionEndInstant(lockedSvc || svc, plan.minutes);
       const serviceUpdate = {
         service_time_minutes: plan.minutes,
         actual_duration_minutes: plan.minutes,
@@ -2252,13 +2276,13 @@ router.patch('/:serviceId/time-on-site', requireAdmin, async (req, res, next) =>
         time_on_site_adjusted_minutes: plan.minutes,
         updated_at: new Date(),
       };
-      if (plan.newEnd) {
+      if (newEnd) {
         // Both timestamp families together, plus completed_at — same-day
         // stamps stay on the visit's day, so billing recovery's aging and
         // pricing-reality-check's month bucketing never shift buckets.
-        serviceUpdate.actual_end_time = plan.newEnd;
-        serviceUpdate.check_out_time = plan.newEnd;
-        serviceUpdate.completed_at = plan.newEnd;
+        serviceUpdate.actual_end_time = newEnd;
+        serviceUpdate.check_out_time = newEnd;
+        serviceUpdate.completed_at = newEnd;
       }
       await trx('scheduled_services').where({ id: svc.id }).update(serviceUpdate);
 
@@ -2284,9 +2308,9 @@ router.patch('/:serviceId/time-on-site', requireAdmin, async (req, res, next) =>
             [JSON.stringify({ timeOnSite: plan.minutes, timeOnSiteAdjusted: true })],
           ),
         };
-        if (plan.newEnd) {
+        if (newEnd) {
           for (const field of BACKFILL_RECORD_END_FIELDS) {
-            if (recordCols[field]) recordUpdate[field] = plan.newEnd;
+            if (recordCols[field]) recordUpdate[field] = newEnd;
           }
         }
         if (recordCols.pdf_storage_key) recordUpdate.pdf_storage_key = null;
@@ -2337,7 +2361,7 @@ router.patch('/:serviceId/time-on-site', requireAdmin, async (req, res, next) =>
           scheduled_service_id: svc.id,
           previous_minutes: previousMinutes,
           new_minutes: plan.minutes,
-          end_stamps_rewritten: !!plan.newEnd,
+          end_stamps_rewritten: !!newEnd,
         }),
       });
     } catch (err) {
@@ -2347,7 +2371,7 @@ router.patch('/:serviceId/time-on-site', requireAdmin, async (req, res, next) =>
     res.json({
       success: true,
       timeOnSiteMinutes: plan.minutes,
-      endStampsRewritten: !!plan.newEnd,
+      endStampsRewritten: !!newEnd,
       recordUpdated,
       costingUpdated,
       ...(recordAmbiguous ? { recordAmbiguous: true } : {}),
@@ -6281,6 +6305,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // survive.
         untrustedLifecycleSpan: isBackfillCompletion,
         completedAt: backfillTrackerCompletedAt,
+        // Fences the already-complete rewrite (codex P2 #3152 round 13):
+        // this instant belongs to THIS request's typed minutes (or to no
+        // correction at all) — if a newer time-on-site PATCH landed since,
+        // the row stamp differs and the tracker must not restore ours.
+        expectedAdjustedMinutes: typeof effectiveTimeOnSite === 'number' && !isBackfillCompletion
+          ? effectiveTimeOnSite
+          : null,
       });
       await recordTrackTransitionResultFailure({
         jobId: svc.id,
@@ -8767,6 +8798,10 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // completed_at stamp too.
         untrustedLifecycleSpan: isBackfillCompletion,
         completedAt: backfillTrackerCompletedAt,
+        // Same fence as the first markComplete above (codex round 13).
+        expectedAdjustedMinutes: typeof effectiveTimeOnSite === 'number' && !isBackfillCompletion
+          ? effectiveTimeOnSite
+          : null,
       });
       await recordTrackTransitionResultFailure({
         jobId: svc.id,

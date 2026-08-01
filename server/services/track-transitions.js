@@ -643,13 +643,31 @@ async function markComplete(serviceId, opts = {}) {
     // minutes, or the backdated service-day instant), so a re-run writes
     // the same value or nothing. Callers that pass none are unchanged.
     const suppliedCompletedAt = finiteDate(opts.completedAt);
+    // Fenced against newer corrections (codex P2 #3152 round 13): the
+    // finalization's SECOND tracker refresh can run after an admin saved a
+    // newer duration through the time-on-site PATCH — restoring the older
+    // instant here would split completed_at from the newer end fields. When
+    // the caller states which correction its instant belongs to
+    // (expectedAdjustedMinutes; undefined = legacy caller, no fence), the
+    // rewrite only lands while the row's durable stamp still matches; the
+    // UPDATE is additionally conditional on the completed_at this call
+    // observed, so a move between read and write skips instead of clobbers.
+    const normMinutes = (v) => (v == null ? null : Number(v));
+    const stampMatchesCaller = opts.expectedAdjustedMinutes === undefined
+      || normMinutes(svc.time_on_site_adjusted_minutes) === normMinutes(opts.expectedAdjustedMinutes);
     if (suppliedCompletedAt
+      && stampMatchesCaller
       && (!svc.completed_at || new Date(svc.completed_at).getTime() !== suppliedCompletedAt.getTime())) {
-      await db('scheduled_services').where({ id: serviceId }).update({
-        completed_at: suppliedCompletedAt,
-        updated_at: new Date(),
-      });
-      svc.completed_at = suppliedCompletedAt;
+      const moved = await db('scheduled_services')
+        .where({ id: serviceId })
+        .modify((q) => (svc.completed_at == null
+          ? q.whereNull('completed_at')
+          : q.where('completed_at', svc.completed_at)))
+        .update({
+          completed_at: suppliedCompletedAt,
+          updated_at: new Date(),
+        });
+      if (moved > 0) svc.completed_at = suppliedCompletedAt;
     }
     emitCustomerTrackRefresh(svc, 'complete', svc.completed_at || new Date());
     return { ok: true, state: 'complete', completedAt: svc.completed_at };
