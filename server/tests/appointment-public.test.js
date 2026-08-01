@@ -14,7 +14,7 @@ jest.mock('../services/tech-photo', () => ({
 }));
 
 const appointmentRouter = require('../routes/appointment-public');
-const { pageState, icsEscape, icsFold, STORM_NOTE_MIN_CHANCE } = appointmentRouter._test;
+const { pageState, confirmRaceVerdict, icsEscape, icsFold, STORM_NOTE_MIN_CHANCE } = appointmentRouter._test;
 const { smsLineFor } = require('../services/appointment-link');
 const { TEMPLATES } = require('../models/migrations/20260801000010_appointment_page_sms_templates')._test;
 const { detectEncoding, countSegments } = require('../services/messaging/segment-counter');
@@ -219,5 +219,22 @@ describe('appointment link idempotent minting', () => {
       return api;
     });
     expect(await existingShortUrlFor({ kind: 'appointment', entityType: 'scheduled_services', entityId: 'svc-2' })).toBe(null);
+  });
+});
+
+
+describe('confirm race verdict (codex r6)', () => {
+  test('a duplicate CUSTOMER confirm is the documented double-submit success', () => {
+    // This route, the logged-in route, and self-booking all write the pair.
+    expect(confirmRaceVerdict({ status: 'confirmed', customer_confirmed: true })).toBe('idempotent_success');
+  });
+
+  test('a system write that stamps confirmed WITHOUT customer_confirmed reloads as CHANGED', () => {
+    // SmartRebooker stamps a rescheduled visit's NEW slot 'confirmed'
+    // without customer_confirmed — the customer must see the new slot,
+    // not a stale "confirmed" for the old one.
+    expect(confirmRaceVerdict({ status: 'confirmed', customer_confirmed: false })).toBe('changed');
+    expect(confirmRaceVerdict({ status: 'cancelled', customer_confirmed: false })).toBe('changed');
+    expect(confirmRaceVerdict(null)).toBe('changed');
   });
 });

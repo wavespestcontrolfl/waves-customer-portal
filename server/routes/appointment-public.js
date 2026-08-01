@@ -147,6 +147,20 @@ function pageState(svc, now = new Date()) {
   return { state: 'upcoming' };
 }
 
+// Pure verdict for a confirm whose guarded UPDATE matched zero rows. A row
+// that is confirmed AND customer_confirmed was confirmed by a customer
+// action — this route, the logged-in route, and self-booking all write the
+// pair — so the lost race was a duplicate confirm and the customer's
+// intent already succeeded. A row confirmed WITHOUT customer_confirmed
+// came from a staff/system write (SmartRebooker stamps a rescheduled
+// visit's NEW slot 'confirmed' without it), where the date/window likely
+// changed under the customer — that must surface as CHANGED so the client
+// reloads instead of showing the stale slot as confirmed.
+function confirmRaceVerdict(row) {
+  const confirmed = String(row?.status || '').toLowerCase() === 'confirmed';
+  return confirmed && !!row?.customer_confirmed ? 'idempotent_success' : 'changed';
+}
+
 async function loadByToken(token) {
   return db('scheduled_services as s')
     .where('s.reschedule_token', token)
@@ -465,11 +479,13 @@ router.post('/:token/confirm', confirmLimiter, async (req, res, next) => {
     if (updated === 0) {
       // Losing the guarded update is not automatically an error: two taps
       // racing both pass the early idempotency check, the first commits,
-      // and the second matches zero rows. Re-read — if the visit IS now
-      // confirmed, the customer's intent succeeded and this is the
-      // documented double-submit success, not CHANGED.
-      const now = await db('scheduled_services').where({ id: svc.id }).first('status');
-      if (String(now?.status || '').toLowerCase() === 'confirmed') {
+      // and the second matches zero rows. Re-read and distinguish WHO won
+      // the race (confirmRaceVerdict): a duplicate customer confirm is the
+      // documented double-submit success; anything else — including a
+      // SmartRebooker reschedule that stamps 'confirmed' on a NEW slot —
+      // must reload as CHANGED or the page shows the stale slot.
+      const now = await db('scheduled_services').where({ id: svc.id }).first('status', 'customer_confirmed');
+      if (confirmRaceVerdict(now) === 'idempotent_success') {
         return res.json({ success: true, confirmed: true });
       }
       return res.status(409).json({
@@ -486,6 +502,7 @@ router.post('/:token/confirm', confirmLimiter, async (req, res, next) => {
 
 router._test = {
   pageState,
+  confirmRaceVerdict,
   icsEscape,
   icsFold,
   icsStamp,

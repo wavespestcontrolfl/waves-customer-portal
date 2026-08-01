@@ -399,7 +399,18 @@ async function renderTemplate(templateKey, vars, context = {}) {
 async function renderAppointmentPageTemplate(baseKey, v2VarsFactory, legacyVars, context = {}) {
   if (process.env.GATE_APPOINTMENT_PAGE === 'true') {
     const v2Key = `${baseKey}_v2`;
-    const row = await db('sms_templates').where({ template_key: v2Key }).first('id', 'is_active');
+    // Fail-soft like renderTemplate: a transient DB error here must not
+    // escape — the confirmation path would mark the reminder sent without
+    // delivering, and the call-booking path would skip its card-request
+    // funnel. Unknowable v2 state = stop this send (same direction as the
+    // kill switch: never guess between v2 and legacy copy).
+    let row;
+    try {
+      row = await db('sms_templates').where({ template_key: v2Key }).first('id', 'is_active');
+    } catch (err) {
+      logger.warn(`[appt-remind] ${v2Key} state lookup failed (${err.message}) - skipping send rather than guessing`);
+      return null;
+    }
     if (row) {
       if (row.is_active === false) {
         logger.warn(`[appt-remind] ${v2Key} disabled - skipping send rather than reverting to legacy copy`);
