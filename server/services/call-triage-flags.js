@@ -909,12 +909,7 @@ function canAutoRoute(extraction, opts = {}) {
   // would dispatch to the customer's on-file (already Google-verified) address
   // rather than one stated on this call.
   const knownCustomerHasAddress = !!(opts.knownCustomer && opts.knownCustomer.hasAddress);
-  const sa = extraction.property?.service_address || {};
-  const newAddressGiven = [
-    'street_line_1', 'line1', 'street', 'street_line_2', 'line2', 'unit', 'apt',
-    'city', 'locality', 'postal_code', 'zip', 'zip_code',
-    'subdivision_or_community', 'raw_text',
-  ].some((k) => String(sa[k] || '').trim());
+  const newAddressGiven = statesNewAddress(extraction);
   if (opts.failOpen && confirmedWithStart) {
     const aniPresent = String(opts.callerAni || '').replace(/\D/g, '').length >= 10;
     const knownCustomer = !!opts.knownCustomer;
@@ -1110,8 +1105,8 @@ function canAutoRoute(extraction, opts = {}) {
   // Consequence worth stating plainly: with ADDRESS_VALIDATION_ENABLED unset,
   // nothing auto-routes — calls park instead of booking blind. The flag is on
   // in production, and failing closed here is the documented posture.
-  const dispatchesToOnFileAddress = !!(opts.failOpen && knownCustomerHasAddress && !newAddressGiven);
-  if (!avPositivelyValidated && !dispatchesToOnFileAddress) {
+  const dispatchesToOnFile = dispatchesToOnFileAddress(extraction, opts);
+  if (!avPositivelyValidated && !dispatchesToOnFile) {
     return {
       allowed: false,
       reason: 'address_not_validated',
@@ -1362,8 +1357,44 @@ function detectRentalSignal({ extracted = {}, callerRelationship = null } = {}) 
   );
 }
 
+// Any field that means "the caller stated a service address on THIS call".
+// One list, because two copies drift.
+const NEW_ADDRESS_FIELDS = [
+  'street_line_1', 'line1', 'street', 'street_line_2', 'line2', 'unit', 'apt',
+  'city', 'locality', 'postal_code', 'zip', 'zip_code',
+  'subdivision_or_community', 'raw_text',
+];
+
+/** Did the caller state a service address on this call at all? */
+function statesNewAddress(extraction) {
+  const sa = extraction?.property?.service_address || {};
+  return NEW_ADDRESS_FIELDS.some((k) => String(sa[k] || '').trim());
+}
+
+/**
+ * Would this booking dispatch to the customer's ON-FILE (already Google-
+ * verified) address rather than one stated on this call? That is the only
+ * shape the address fail-open covers: a known customer who did not restate
+ * their address. If they DID state one and it could not be validated, the
+ * fail-open must not apply.
+ *
+ * EXPORTED and shared with the offline audits on purpose (codex round-19 P1):
+ * the promotion-readiness backstop exempts these routes from the phantom
+ * criterion, and a hand-copied "has an address on file" test silently
+ * exempted low-confidence NEW-address routes too — hiding exactly the
+ * auto-routes that criterion exists to catch. One predicate, both callers,
+ * no drift.
+ */
+function dispatchesToOnFileAddress(extraction, opts = {}) {
+  return !!(opts.failOpen
+    && opts.knownCustomer && opts.knownCustomer.hasAddress
+    && !statesNewAddress(extraction));
+}
+
 module.exports = {
   computeDeterministicTriageFlags,
+  statesNewAddress,
+  dispatchesToOnFileAddress,
   mergeTriageFlags,
   suppressAddressFlagsForAV,
   deriveCallReviewBridge,

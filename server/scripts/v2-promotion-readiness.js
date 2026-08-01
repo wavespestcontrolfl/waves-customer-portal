@@ -19,7 +19,10 @@
  */
 
 require('dotenv').config({ path: require('path').join(__dirname, '..', '..', '.env') });
-const { canAutoRoute, computeDeterministicTriageFlags, mergeTriageFlags, isInServiceAreaCounty } = require('../services/call-triage-flags');
+const {
+  canAutoRoute, computeDeterministicTriageFlags, mergeTriageFlags, isInServiceAreaCounty,
+  dispatchesToOnFileAddress,
+} = require('../services/call-triage-flags');
 const { checkTcpaConsent } = require('../services/call-routing-gates');
 const { isV2Extraction } = require('../utils/extraction-compat');
 const { PROMPT_HASH } = require('../services/prompts/call-extraction-v1');
@@ -322,7 +325,14 @@ async function main() {
         && ['validated_accept', 'corrected'].includes(String(effectiveAv.status || ''))
         && effectiveAv.inServiceArea === true;
       const dispatchStreet = addr.street_line_1 || (avPositive ? effectiveAv.normalized?.street_line_1 : null);
-      const onFileDispatch = auditFailOpen && knownCustomer?.hasAddress === true;
+      // The SHARED predicate, not a local "has an address on file" test
+      // (codex round-19 P1): production's exemption also requires that the
+      // caller did NOT state an address on this call. Testing only for a
+      // customer address on file moved low-confidence and street-less
+      // NEW-address routes into the non-gating bucket too — hiding exactly
+      // the auto-routes criterion 5 exists to catch, and letting a promotion
+      // pass on them.
+      const onFileDispatch = dispatchesToOnFileAddress(v2, { failOpen: auditFailOpen, knownCustomer });
       const outOfArea = !avPositive && addr.county && !isInServiceAreaCounty(addr.county);
       const lowConfidence = typeof conf.overall === 'number' && conf.overall < 0.7;
       if (!dispatchStreet || lowConfidence || outOfArea) {
