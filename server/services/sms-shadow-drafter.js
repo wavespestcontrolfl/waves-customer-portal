@@ -633,7 +633,7 @@ function draftRouteFor({ intentName, inboundMessage } = {}) {
  * one that actually produced the draft, persisted on the row for the judge),
  * or null when both paths are unusable.
  */
-async function generateDraftOnce(client, system, userContent, route = MODELS.ROUTES.smsDraftDefault, { pinned = false } = {}) {
+async function generateDraftOnce(client, system, userContent, route = MODELS.ROUTES.smsDraftDefault, { pinned = false, metricsLane } = {}) {
   try {
     const { dispatchWithFallback } = require('./llm/call');
     // pinned = single-provider leg for the sealed exam: a cross-provider
@@ -643,11 +643,15 @@ async function generateDraftOnce(client, system, userContent, route = MODELS.ROU
     const fallback = pinned ? null : (route.provider === MODELS.PROVIDER.ANTHROPIC
       ? MODELS.TEXT_POLICIES.highStakes.fallback
       : MODELS.TEXT_POLICIES.fastStructured.fallback);
+    // name: per-provider shadow lanes are deliberately distinct policies, and
+    // replay workloads get their own suffix — backfill/sealed-exam traffic
+    // sharing the live label would keep the live lane looking non-silent (or
+    // dilute a live fallback spike), and a pinned exam's single-leg miss
+    // would read as a false "both providers failed" in the dispatch digest.
+    const lane = metricsLane || (pinned ? 'sealed' : 'live');
+    const laneSuffix = lane === 'live' ? '' : `:${lane}`;
     const routed = await dispatchWithFallback(
-      // name: per-provider shadow lanes are deliberately distinct policies —
-      // without it, dispatch metrics would label them by their (shared)
-      // resolved routes and merge their stats.
-      { name: `smsShadow:${route.provider}`, primary: route, ...(fallback ? { fallback } : {}) },
+      { name: `smsShadow:${route.provider}${laneSuffix}`, primary: route, ...(fallback ? { fallback } : {}) },
       { system, text: userContent, jsonMode: false, maxTokens: 600, anthropicClient: client },
       { validate: (result) => (parseShadowResponse(result.text || '') ? null : 'unparseable') },
     );
@@ -672,7 +676,7 @@ async function generateDraftOnce(client, system, userContent, route = MODELS.ROU
  * verification miss must never break drafting. Caller supplies the Anthropic
  * client so live + backfill share one implementation.
  */
-async function generateGroundedDraft({ client, context, inboundMessage, intent, schedulingIntent, factsBlock: presetFactsBlock, routeOverride, voiceProfile: presetVoiceProfile }) {
+async function generateGroundedDraft({ client, context, inboundMessage, intent, schedulingIntent, factsBlock: presetFactsBlock, routeOverride, voiceProfile: presetVoiceProfile, metricsLane }) {
   // v9: the owner-approved voice profile joins the system prompt for every
   // generation in the loop (revisions included). voiceProfileVersion rides
   // back in telemetry so cohort readouts can see which profile (if any)
@@ -713,7 +717,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // prompt, and every cohort/exam consumer of this stamp must see that as
   // profile-free.
   const voiceProfileVersion = profileApplied ? (voiceProfile?.version ?? null) : null;
-  const first = await generateDraftOnce(client, system, userContent, route, { pinned });
+  const first = await generateDraftOnce(client, system, userContent, route, { pinned, metricsLane });
   if (!first) return { parsed: null, passes: 1, converged: false, model: null, voiceProfileVersion };
   let { parsed, model } = first;
   // Kill switch / single-pass mode: no verification claim, behave as pre-v3.
@@ -756,7 +760,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
         system,
         `${userContent}\n\n${verifier.buildReviseAddendum(verdict.violations)}`,
         route,
-        { pinned }
+        { pinned, metricsLane }
       );
     } catch (err) {
       // A revise call that times out / rate-limits must NOT drop the whole
