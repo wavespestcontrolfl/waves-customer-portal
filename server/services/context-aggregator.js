@@ -184,6 +184,20 @@ const BILLING_LANE_COPY = {
   },
 };
 
+// An EXPLICIT monthly_membership row with no positive rate is UNPRICED, not
+// free (codex #3141 r1): the dues cron only selects monthly_rate > 0
+// (billing-cron.js) and chargeMonthly refuses a non-positive rate outright,
+// so NO monthly charge can run for that row — asserting "dues are charged
+// monthly" describes a charge that does not exist, and the amount line that
+// would have qualified it is omitted precisely because there is no amount.
+// The INFERRED lane cannot reach this state: resolveBillingLane requires a
+// positive rate before it will infer membership at all.
+const UNPRICED_MEMBERSHIP_COPY = {
+  monthlyBilled: false,
+  short: 'monthly membership, no rate set',
+  copy: 'MONTHLY MEMBERSHIP BUT UNPRICED — no dues amount is set on this account, so nothing is charged monthly. Never state a monthly amount; give the plan and cadence and let the office confirm their price.',
+};
+
 // The billing lane as a customer-facing FACT (codex #3128 r6, r8).
 //
 // r6 carried only the EXPLICIT lane and reported an inferred one as "not
@@ -199,13 +213,18 @@ function resolveBillingLaneFacts(customer) {
     const { resolveBillingLane } = require('./billing-lane');
     const { mode, source } = resolveBillingLane(customer);
     const explicit = source === 'explicit';
-    const laneCopy = BILLING_LANE_COPY[mode];
+    // An unpriced explicit membership is NOT a monthly-billed account — see
+    // UNPRICED_MEMBERSHIP_COPY (codex #3141 r1).
+    const unpricedMembership = mode === 'monthly_membership'
+      && !(Number(customer?.monthly_rate || 0) > 0);
+    const laneCopy = unpricedMembership ? UNPRICED_MEMBERSHIP_COPY : BILLING_LANE_COPY[mode];
     if (!laneCopy) {
       return {
         resolvedMode: mode || null,
         mode: null,
         explicit,
         monthlyBilled: false,
+        monthlyDues: null,
         label: 'not stated on the account — never state a monthly amount; give the plan and cadence and let the office confirm',
       };
     }
@@ -220,6 +239,11 @@ function resolveBillingLaneFacts(customer) {
       // Customer-safe short form for the managed-agent context snapshot.
       shortLabel: laneCopy.short,
       label: `${laneCopy.copy} (${provenance})`,
+      // The AMOUNT is never derived here: what a monthly member is actually
+      // charged depends on the payment method the charge will run against
+      // (credit-card surcharge), which needs a query. getContextForCustomer
+      // fills this in; a sync caller fails closed to no amount at all.
+      monthlyDues: null,
     };
   } catch {
     return {
@@ -227,8 +251,57 @@ function resolveBillingLaneFacts(customer) {
       mode: null,
       explicit: false,
       monthlyBilled: false,
+      monthlyDues: null,
       label: 'unavailable right now — never state a monthly amount',
     };
+  }
+}
+
+// The customer-visible monthly dues FACT, derived through the SAME pricing
+// authority the charge itself runs through (codex #3141 r1).
+//
+// Serializing monthly_rate raw understated every confirmed-credit autopay
+// account: chargeMonthly hands that base to stripe.charge, where
+// computeChargeAmount adds the credit-card surcharge — so "$98.50 is what
+// you're charged" was false against both the PaymentIntent and the payment
+// row it writes.
+//
+// Two amounts, two different claims. `base` is the plan price (the dues
+// themselves) and is always true when a positive rate exists. `total` is what
+// the method on file is actually charged, and is stated ONLY when the funding
+// that decides the surcharge is positively known — stripe.charge backfills an
+// unresolved card_funding from Stripe at charge time and will surcharge if it
+// comes back 'credit', so an unknown funding leaves the total null and the
+// facts tell the assistant to state the dues and no charge total.
+//
+// Pure (the caller supplies the already-resolved autopay method) so the
+// surcharge arithmetic is unit-testable without a database.
+function resolveMonthlyDuesFact({ monthlyRate, autopayOn, method }) {
+  const base = Number(monthlyRate || 0);
+  if (!(base > 0)) return null;
+  // No active autopay = GUARD 1 in billing-cron skips the account entirely,
+  // so nothing auto-charges. The dues are still owed and still quotable; the
+  // office collects them.
+  if (autopayOn !== true || !method) {
+    return { base, surcharge: 0, total: null, surcharged: false, basis: 'no_autopay' };
+  }
+  try {
+    const { computeChargeAmount, isCardMethodType } = require('./stripe-pricing');
+    const funding = method.card_funding || null;
+    if (isCardMethodType(method.method_type) && !funding) {
+      return { base, surcharge: 0, total: null, surcharged: false, basis: 'unknown_funding' };
+    }
+    const quote = computeChargeAmount(base, method.method_type, { funding });
+    return {
+      base: quote.baseCents / 100,
+      surcharge: quote.surchargeCents / 100,
+      total: quote.totalCents / 100,
+      surcharged: quote.surchargeCents > 0,
+      basis: quote.surchargeCents > 0 ? 'credit_card_surcharge' : 'no_surcharge',
+    };
+  } catch {
+    // Pricing authority unreadable — never guess a total.
+    return { base, surcharge: 0, total: null, surcharged: false, basis: 'unknown_funding' };
   }
 }
 
@@ -393,9 +466,13 @@ class ContextAggregator {
       // (Codex r9, customer-autopay canon): per-application / prepay /
       // one-time accounts can carry a stale date the cron will never act on
       // — advertising it would promise a charge that isn't coming. The
-      // RESOLVED mode (explicit or inferred) is the right test here: the 8AM
+      // RESOLVED lane (explicit or inferred) is the right test here: the 8AM
       // cron bills the inferred lane too (billing-lane MONTHLY_LANE_SQL).
-      const monthlyLane = billingLane.resolvedMode === 'monthly_membership';
+      // monthlyBilled, not resolvedMode: an UNPRICED membership is filtered
+      // out by the cron's monthly_rate > 0 and never charged either, so its
+      // next_charge_date is the same empty promise (codex #3141 r1; mirrors
+      // customer-autopay's `!hasMonthlyRate → null`).
+      const monthlyLane = billingLane.monthlyBilled;
       autopayState = {
         on: paused ? false : await customerOnAutopay(customer),
         paused,
@@ -404,6 +481,26 @@ class ContextAggregator {
       };
     } catch (err) {
       logger.warn(`[context] autopay eligibility failed for customer ${customer.id}: ${err.message}`);
+    }
+
+    // The dues AMOUNT the monthly lane authorizes, priced through the charge
+    // path's own authority rather than the raw rate (codex #3141 r1). Only
+    // the monthly lane pays for this query — for every other lane the stored
+    // rate is an artifact nobody is charged, so there is nothing to price.
+    // An eligibility failure above leaves autopayState null, which resolves
+    // to the no-total shape: fail-closed, never a guessed charge.
+    if (billingLane.monthlyBilled) {
+      let autopayMethod = null;
+      try {
+        const { getChargeableAutopayMethod, isChargeableAutopayMethod } = require('./autopay-eligibility');
+        const row = await getChargeableAutopayMethod(customer, db);
+        autopayMethod = isChargeableAutopayMethod(row) ? row : null;
+      } catch { autopayMethod = null; }
+      billingLane.monthlyDues = resolveMonthlyDuesFact({
+        monthlyRate: customer.monthly_rate,
+        autopayOn: autopayState?.on === true,
+        method: autopayMethod,
+      });
     }
 
     // Build flags
@@ -721,9 +818,16 @@ class ContextAggregator {
     // The monthly lane is the one case where a plan price may be spoken, so
     // the amount has to travel WITH it — the house voice forbids computing or
     // inventing figures, so "state it plainly" without the number just
-    // produces a deferral (codex #3128 r9).
-    if (lane.monthlyBilled && Number(c.monthly_rate) > 0) {
-      s += ` ($${Number(c.monthly_rate).toFixed(2)}/mo dues)`;
+    // produces a deferral (codex #3128 r9). The amount comes from the priced
+    // dues fact, NEVER from c.monthly_rate: the raw rate is the base, and a
+    // confirmed-credit card on file is charged that base plus the surcharge
+    // (codex #3141 r1). No priced fact (sync caller, unpriced row) = no
+    // amount in the snapshot at all.
+    const dues = lane.monthlyBilled ? lane.monthlyDues : null;
+    if (dues) {
+      s += dues.surcharged && dues.total != null
+        ? ` ($${dues.base.toFixed(2)}/mo dues; $${dues.total.toFixed(2)} charged to the card on file incl. card fee)`
+        : ` ($${dues.base.toFixed(2)}/mo dues)`;
     }
     if (lastSvc) s += ` | Last: ${lastSvc.service_type} ${new Date(lastSvc.service_date).toLocaleDateString('en-US', { timeZone: 'America/New_York' })}`;
     if (upcoming.length) s += ` | Next: ${upcoming[0].service_type} ${new Date(upcoming[0].scheduled_date).toLocaleDateString('en-US', { timeZone: 'America/New_York' })}`;
@@ -746,3 +850,5 @@ module.exports.UPCOMING_SERVICE_STATUSES = UPCOMING_SERVICE_STATUSES;
 module.exports.redactAccessCodes = redactAccessCodes;
 module.exports.lawnOverall = lawnOverall;
 module.exports.customerSafeVisitNotes = customerSafeVisitNotes;
+module.exports.resolveBillingLaneFacts = resolveBillingLaneFacts;
+module.exports.resolveMonthlyDuesFact = resolveMonthlyDuesFact;

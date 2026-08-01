@@ -43,8 +43,13 @@ async function getChargeableAutopayMethod(customer, knex) {
         autopay_enabled: true,
       })
       .first(
+        // card_funding travels with the row because it is what decides
+        // whether the credit-card surcharge applies to this method — any
+        // caller quoting what the method will actually be charged needs it
+        // (stripe-pricing.computeChargeAmount), and re-querying the same row
+        // for one column is how two callers drift apart.
         'id', 'processor', 'method_type', 'stripe_payment_method_id',
-        'is_default', 'autopay_enabled', 'exp_month', 'exp_year'
+        'is_default', 'autopay_enabled', 'exp_month', 'exp_year', 'card_funding'
       );
   } catch {
     return null;

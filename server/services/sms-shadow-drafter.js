@@ -235,6 +235,27 @@ function formatEtInstant(value) {
   } catch { return String(value || ''); }
 }
 
+// What actually leaves the account each month, next to the dues themselves
+// (codex #3141 r1). The dues are the plan price; the CHARGE can differ,
+// because stripe.charge adds the credit-card surcharge when the method on
+// file is a confirmed credit card. Each branch states only what the
+// aggregator positively resolved — an unknown funding or an eligibility
+// failure says so rather than implying the dues are the charge.
+function monthlyChargeNote(dues) {
+  if (dues.surcharged && dues.total != null) {
+    return `. The credit card on file is charged $${dues.total.toFixed(2)} a month — the $${dues.base.toFixed(2)} dues plus a $${dues.surcharge.toFixed(2)} credit-card fee. Both figures are exact; never add them up yourself`;
+  }
+  if (dues.basis === 'no_surcharge' && dues.total != null) {
+    return '. That exact amount is what charges to the payment method on file each month — no card fee applies to it';
+  }
+  if (dues.basis === 'no_autopay') {
+    return '. Autopay is not active, so nothing auto-charges — the office bills these dues';
+  }
+  // unknown_funding: stripe.charge resolves the card's funding at charge time
+  // and surcharges if it comes back credit, so the total is genuinely unknown.
+  return '. A card fee may be added when it charges, so state the dues and never a charge total';
+}
+
 /**
  * The fact block the drafter may draw from — and the EXACT same block the
  * verifier checks the draft against, so the two agree on what counts as
@@ -334,8 +355,16 @@ function buildFactsBlock(context) {
   // number produced a deferral anyway, and the exception stayed unreachable
   // (codex #3128 r9). Emitted ONLY for the monthly lane: for every other lane
   // this figure is the stored artifact nobody is charged.
-  if (lane?.monthlyBilled && Number(context.customer?.monthlyRate) > 0) {
-    billingLines.push(`- Monthly plan rate: $${Number(context.customer.monthlyRate).toFixed(2)} — the dues this account is actually charged; this IS their price when they ask`);
+  //
+  // The number comes from the priced dues FACT, never from the raw
+  // monthlyRate (codex #3141 r1): the rate is the base, and a confirmed-credit
+  // card on file is charged that base PLUS the surcharge stripe.charge adds —
+  // calling the base "what this account is actually charged" was false against
+  // the PaymentIntent. The dues are always quotable; the charged TOTAL is
+  // stated only when the funding that decides the surcharge is known.
+  const dues = lane?.monthlyBilled ? lane.monthlyDues : null;
+  if (dues) {
+    billingLines.push(`- Monthly dues: $${dues.base.toFixed(2)} per month — the plan price for this membership, and this IS their price when they ask${monthlyChargeNote(dues)}`);
   }
   billingLines.push(...(context.billing?.unavailable
     ? ["- Billing records are unavailable right now — defer any balance, invoice, or amount question and say you'll confirm"]
@@ -957,9 +986,25 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // AUTHORITATIVE billing/estimate VALUES in context, compared numerically
     // (so "$120" matches a $120.00 fact).
     const centsOf = (v) => Math.round(Number(v) * 100);
+    // The monthly-membership dues are an AUTHORITATIVE account amount too
+    // (codex #3141 r1). Without them here the whitelist was built from
+    // balances, invoices and payments only, so the dues figure the facts
+    // block just published read as ungrounded, the draft was held shadow, and
+    // the monthly-lane exception this PR exists to make reachable stayed
+    // unreachable on the suggestion/auto-send path.
+    //
+    // Only what the facts actually STATE is authorized: the dues base always,
+    // and the surcharge-inclusive total only when it was resolved and
+    // published. The unresolved-funding case deliberately authorizes no total
+    // — the facts tell the drafter not to state one.
+    const laneDues = context.customer?.billingLane?.monthlyBilled
+      ? context.customer.billingLane.monthlyDues
+      : null;
     const authorizedCents = new Set([
       context.billing?.outstandingBalance > 0 ? centsOf(context.billing.outstandingBalance) : null,
       context.billing?.openInvoice?.amountDue != null ? centsOf(context.billing.openInvoice.amountDue) : null,
+      laneDues ? centsOf(laneDues.base) : null,
+      laneDues?.surcharged && laneDues.total != null ? centsOf(laneDues.total) : null,
       ...((context.billing?.recentPayments || []).map((p) => (p?.amount != null ? centsOf(p.amount) : null))),
     ].filter((v) => Number.isFinite(v)));
     // Every amount syntax hasPriceQuote recognizes (Codex r7): $-prefixed,
@@ -975,8 +1020,10 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // Spanish forms, and cadence ("45/mo") — if the price grammar fires and
     // we cannot positively match EVERY numeric to an authorized value, the
     // draft stays shadow. An authorized "$120.00" reply extracts and passes;
-    // "fifty dollars" (unverifiable) and "45/mo" (cadence is never an
-    // authorized account amount) both withhold.
+    // "fifty dollars" stays unverifiable and withholds. Cadence follows the
+    // same rule as any other amount now that dues are authorized: "$98.50/mo"
+    // extracts $98.50 and passes for a monthly member, while a bare "45/mo"
+    // carries no currency marker, extracts nothing, and still withholds.
     const priceGrammarFires = suggestMode.hasPriceQuote(parsed.reply);
     const replyHasUngroundedAmount = priceGrammarFires
       ? (replyAmounts.length === 0 || replyAmounts.some((a) => !authorizedCents.has(a)))

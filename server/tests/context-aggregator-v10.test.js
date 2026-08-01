@@ -98,10 +98,17 @@ describe('lawnOverall — canonical scoring mirror', () => {
 // authoritative grounding — codex #3128 r9.
 describe('buildSummary billing-lane fact', () => {
   const ContextAggregator = require('../services/context-aggregator');
-  const summaryFor = (customer) => ContextAggregator.buildSummary(
-    { first_name: 'Pat', last_name: 'Tester', pipeline_stage: 'active_customer', ...customer },
-    [], null, [], 0,
-  );
+  const { resolveBillingLaneFacts, resolveMonthlyDuesFact } = ContextAggregator;
+  // The real production shape: getContextForCustomer resolves the lane, then
+  // prices the dues against the method the charge will actually run on.
+  const summaryFor = (customer, { autopayOn = false, method = null } = {}) => {
+    const c = { first_name: 'Pat', last_name: 'Tester', pipeline_stage: 'active_customer', ...customer };
+    const lane = resolveBillingLaneFacts(c);
+    if (lane.monthlyBilled) {
+      lane.monthlyDues = resolveMonthlyDuesFact({ monthlyRate: c.monthly_rate, autopayOn, method });
+    }
+    return ContextAggregator.buildSummary(c, [], null, [], 0, lane);
+  };
 
   test('an invoice-on-complete customer is described per application, never "per visit"', () => {
     // per_visit is an internal billing mechanism; the house voice forbids the
@@ -117,6 +124,25 @@ describe('buildSummary billing-lane fact', () => {
     const s = summaryFor({ billing_mode: 'monthly_membership', waveguard_tier: 'Gold', monthly_rate: 98.5 });
     expect(s).toContain('Billing lane: monthly membership');
     expect(s).toContain('$98.50/mo dues');
+  });
+
+  test('a member on a credit card carries what the card is actually charged', () => {
+    // stripe.charge adds the credit-card surcharge to the dues, so the base
+    // alone understates the charge on the account (codex #3141 r1).
+    const s = summaryFor(
+      { billing_mode: 'monthly_membership', waveguard_tier: 'Gold', monthly_rate: 98.5 },
+      { autopayOn: true, method: { method_type: 'card', card_funding: 'credit' } },
+    );
+    expect(s).toContain('$98.50/mo dues');
+    expect(s).toContain('$101.35 charged to the card on file');
+  });
+
+  test('an UNPRICED membership carries no amount and is not called monthly-billed', () => {
+    // No rate = the dues cron never selects the row and chargeMonthly refuses
+    // it, so nothing is charged monthly at all.
+    const s = summaryFor({ billing_mode: 'monthly_membership', waveguard_tier: 'Gold', monthly_rate: 0 });
+    expect(s).toContain('no rate set');
+    expect(s).not.toMatch(/dues|\$/);
   });
 
   test('an INFERRED monthly member is marked inferred but still quotable', () => {
@@ -137,5 +163,16 @@ describe('buildSummary billing-lane fact', () => {
     const s = summaryFor({ billing_mode: 'annual_prepay', waveguard_tier: 'Gold', monthly_rate: 90 });
     expect(s).toContain('paid for the year');
     expect(s).not.toMatch(/dues/);
+  });
+
+  test('a direct caller that resolves no lane fact states no amount', () => {
+    // buildSummary's own fallback cannot price dues (no DB), so it must not
+    // reach for the raw rate — no amount is the fail-closed answer.
+    const s = ContextAggregator.buildSummary(
+      { first_name: 'Pat', last_name: 'Tester', pipeline_stage: 'active_customer', billing_mode: 'monthly_membership', waveguard_tier: 'Gold', monthly_rate: 98.5 },
+      [], null, [], 0,
+    );
+    expect(s).toContain('Billing lane: monthly membership');
+    expect(s).not.toContain('98.50');
   });
 });
