@@ -87,7 +87,7 @@ function evaluate(input = {}) {
   if (detectPii(body)) {
     findings.push(finding('P0', 'P0_PII_DETECTED', 'Draft appears to contain customer PII.', 'Remove customer phone numbers, emails, and verbatim customer details before publishing.'));
   }
-  if (detectHardcodedPrice(body)) {
+  if (detectHardcodedPrice(body, brief)) {
     findings.push(finding('P0', 'P0_HARDCODED_PRICE_NOT_APPROVED', 'Draft appears to hardcode unapproved pricing.', 'Use estimate/calculator language and link to the calculator instead of publishing fixed prices.'));
   }
   if (uniquenessResult?.ok === false && hasDuplicateIntentFailure(uniquenessResult)) {
@@ -339,8 +339,12 @@ function detectPii(body = '') {
 // Single-sourced from content-guardrails (comma-grouped amounts, single-digit
 // prices, calculator-framing AND regulatory-fine exemptions) — this gate's
 // previous private copy had drifted on all four.
-function detectHardcodedPrice(body = '') {
-  return findHardcodedPrice(body) !== null;
+function detectHardcodedPrice(body = '', brief = null) {
+  // Operator provenance from the brief's persisted gsc_signal bucket — the
+  // same anti-spoofing key the quality gate trusts. Mined drafts get no
+  // third-party price exemption (fail closed).
+  const thirdPartyCitations = brief?.gsc_signal?.bucket === 'operator_intercept';
+  return findHardcodedPrice(body, { thirdPartyCitations }) !== null;
 }
 
 function hasDuplicateIntentFailure(result = {}) {

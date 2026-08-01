@@ -2249,6 +2249,31 @@ describe('blog meta contract applies to NON-refresh blog publishes (legacy lane)
 
 describe('third-party price citations + citation-grade TLDs (owner ruling 2026-08-01)', () => {
   const { findHardcodedPrice } = guardrails;
+  // Operator provenance unlocks the exemption — the same boundary as the
+  // .gov/.edu citation allowance (Codex P1: mined drafts keep the full hard
+  // block, or an injected attribution publishes arbitrary prices).
+  const OP = { thirdPartyCitations: true };
+
+  test('mined drafts get NO third-party exemption — the P0 price guard holds (Codex P1)', () => {
+    for (const body of [
+      'Orkin charges a $199 cancellation fee when you break the agreement early.',
+      'Other companies charge $25 per month more for the same coverage.',
+      'The industry average is $9,999 per year.',
+      'Aptive charges a $199 early-cancel fee per ConsumerAffairs.',
+    ]) {
+      expect(findHardcodedPrice(body)).not.toBeNull();
+      expect(findHardcodedPrice(body, {})).not.toBeNull();
+    }
+  });
+
+  test('detection-only brands attribute prices for operator drafts (Codex P1: Aptive/Hawx)', () => {
+    for (const body of [
+      'Aptive charges a $199 early-cancel fee per ConsumerAffairs.',
+      'Hawx charges a $149 early-termination fee in most markets.',
+    ]) {
+      expect(findHardcodedPrice(body, OP)).toBeNull();
+    }
+  });
 
   test('a competitor-attributed price is reporting, not a Waves price claim', () => {
     for (const body of [
@@ -2260,7 +2285,7 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
       'Other companies typically charge $25 per month more for the same coverage.',
       'Your previous provider may bill a $99 fee for ending service early.',
     ]) {
-      expect(findHardcodedPrice(body)).toBeNull();
+      expect(findHardcodedPrice(body, OP)).toBeNull();
     }
   });
 
@@ -2323,7 +2348,7 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
 
   test('attribution must PRECEDE the amount (subject position)', () => {
     expect(findHardcodedPrice('The fee is $199 according to nothing in particular.')).not.toBeNull();
-    expect(findHardcodedPrice('Orkin lists a $199 fee.')).toBeNull();
+    expect(findHardcodedPrice('Orkin lists a $199 fee.', OP)).toBeNull();
   });
 
   // Pre-push Codex P0 round 3: naming a party is not owning the price.
@@ -2363,7 +2388,7 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
   });
 
   test('coordination still allows a genuinely attributed amount', () => {
-    expect(findHardcodedPrice('Orkin and Terminix both charge $199 to cancel early.')).toBeNull();
+    expect(findHardcodedPrice('Orkin and Terminix both charge $199 to cancel early.', OP)).toBeNull();
   });
 
   // Pre-push Codex P0 round 5: an intervening predicate must not be crossed.
@@ -2401,8 +2426,8 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
   });
 
   test('possessive price constructions are attributed', () => {
-    expect(findHardcodedPrice("Orkin's cancellation fee is $199 in most contracts.")).toBeNull();
-    expect(findHardcodedPrice('The industry average is $145 per quarterly visit.')).toBeNull();
+    expect(findHardcodedPrice("Orkin's cancellation fee is $199 in most contracts.", OP)).toBeNull();
+    expect(findHardcodedPrice('The industry average is $145 per quarterly visit.', OP)).toBeNull();
   });
 
   test('operator drafts may cite any .gov / .edu (statutes, extension research)', () => {

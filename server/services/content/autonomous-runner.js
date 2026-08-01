@@ -3018,7 +3018,12 @@ class AutonomousRunner {
       domains: guardDomains,
       operatorFaqException,
       requiredSourceUrls: Array.isArray(operatorBrief?.required_sources) ? operatorBrief.required_sources : [],
-      operatorCitations: Array.isArray(operatorBrief?.source_notes) && operatorBrief.source_notes.length > 0,
+      // Operator provenance is the OPERATOR BRIEF itself (it only exists for
+      // operator_intercept rows). The old source_notes-only test missed
+      // briefs that mandate sourcing via verify_notes/required_sources —
+      // the B1 cancellation brief cites the Florida statute through
+      // verify_notes and got no citation allowance (Codex P1, 2026-08-01).
+      operatorCitations: Boolean(operatorBrief),
       allowedInternalLinks,
       isRefresh,
       priorBody,

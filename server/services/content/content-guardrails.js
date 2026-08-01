@@ -56,7 +56,7 @@ const PRICE_RE_SRC = '(^|[\\s("\'“‘])\\$\\s?(?:\\d{1,3}(?:,\\d{3})+|\\d{1,5}
  * ONE price policy. Exported for seo-completion-gate (its previous private
  * copy had drifted: no comma support, no regulatory exemption).
  */
-function findHardcodedPrice(text) {
+function findHardcodedPrice(text, { thirdPartyCitations = false } = {}) {
   const s = String(text || '');
   const priceRe = new RegExp(PRICE_RE_SRC, 'gi');
   let match;
@@ -74,14 +74,19 @@ function findHardcodedPrice(text) {
     // Scoped to the amount's OWN SENTENCE, not the surrounding window: a
     // competitor named in a neighbouring sentence must never launder our
     // price ("Orkin is expensive. Quarterly pest control is $129.").
-    if (isThirdPartyPriceCitation(s, match.index)) continue;
+    // OPERATOR-PROVENANCE ONLY (same boundary as the .gov/.edu citation
+    // allowance): mined drafts compose from untrusted SERP/PAA text, and an
+    // injected "other companies charge $X" attribution must not publish an
+    // arbitrary price — the exemption exists for operator-directed
+    // competitor-intercept briefs, so only they get it.
+    if (thirdPartyCitations && isThirdPartyPriceCitation(s, match.index)) continue;
     return match[0].trim();
   }
   return null;
 }
 
-function priceFinding(body) {
-  const hit = findHardcodedPrice(body);
+function priceFinding(body, opts = {}) {
+  const hit = findHardcodedPrice(body, opts);
   if (!hit) return null;
   return finding('P0', 'HARDCODED_PRICE', `Body contains a hardcoded price ("${hit}") with no calculator/quote framing nearby — link to /pest-control-calculator/ instead.`);
 }
@@ -193,11 +198,16 @@ function competitorNamePattern() {
   if (competitorNamePattern._re !== undefined) return competitorNamePattern._re;
   const names = [];
   try {
-    const { COMPETITORS } = require('./competitor-facts');
+    const { COMPETITORS, COMPETITOR_BRAND_SIGNALS } = require('./competitor-facts');
     for (const c of Array.isArray(COMPETITORS) ? COMPETITORS : []) {
       if (c?.name) names.push(String(c.name));
       for (const a of Array.isArray(c?.aliases) ? c.aliases : []) names.push(String(a));
     }
+    // Detection-only brands (Aptive, Hawx, …) attribute prices too — the
+    // B1/B3 intercept briefs mandate Aptive's cancellation fee, and the
+    // comparison gate separately polices whether NAMING them is authorized.
+    // This pattern only decides who can OWN a dollar figure.
+    for (const s of Array.isArray(COMPETITOR_BRAND_SIGNALS) ? COMPETITOR_BRAND_SIGNALS : []) names.push(String(s));
   } catch { /* competitor-facts unavailable — generic framing still applies */ }
   // Longest-first so "Truly Nolen of America" wins over "Truly Nolen".
   const alts = names
@@ -2152,8 +2162,10 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
   }
 
   const findings = [
-    // Price must cover everything that ships: body AND meta.
-    priceFinding(publishableText),
+    // Price must cover everything that ships: body AND meta. Third-party
+    // price citations are exempt only with operator provenance (the same
+    // flag that unlocks .gov/.edu citations).
+    priceFinding(publishableText, { thirdPartyCitations: operatorCitations }),
     // Outbound links are scanned across body AND meta too — an injected spam
     // URL hiding in a meta description ships exactly like one in the body.
     externalLinkFinding(publishableText, { operatorCitations, requiredSourceUrls }),
