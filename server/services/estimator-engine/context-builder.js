@@ -496,10 +496,27 @@ async function buildSmsThreadContext({
   // primary-scope match without a unit keeps the profile as-is.
   const applyGroundedScope = (profile) => {
     if (!groundedScope || !(groundedScope.isPrimary === false || groundedScope.line2)) return profile;
+    // The unit rides INSIDE address_line1, not only in address_line2: every
+    // downstream consumer builds the address from line1 + city + zip and
+    // ignores line2 — addressFromContext (index.js customerAddress), the
+    // composer profile block (intent-composer buildUserContent), and the
+    // customerSavedAddress comparison that decides whether the profile's
+    // saved measurements may backfill. A line2-only unit leaves all three
+    // holding a UNITLESS street, and sameStreetAddress treats
+    // known-vs-unknown units as conservatively equal — so the composer's
+    // explicit "Apt 6" would match the unitless profile address and skip
+    // the re-gather this override exists to force. line2 is still set (the
+    // schema-correct home for the unit) for any consumer that reads it.
+    const line1 = groundedScope.address || profile.address_line1;
+    const unit = groundedScope.line2 || null;
+    const line1WithUnit = unit && line1
+      && !String(line1).toLowerCase().includes(String(unit).toLowerCase())
+      ? `${line1} ${unit}`
+      : line1;
     return {
       ...profile,
-      address_line1: groundedScope.address || profile.address_line1,
-      address_line2: groundedScope.line2 || null,
+      address_line1: line1WithUnit,
+      address_line2: unit,
       city: groundedScope.city || null,
       zip: groundedScope.zip || null,
       property_sqft: null,
@@ -535,21 +552,28 @@ async function buildSmsThreadContext({
   // name-only profile in the composer and blocks customer_id, address,
   // and membership context downstream.
   const phoneCustomerConflicted = guardsOn && groundedConflict === true && !!customer;
+  // Phone-scoped history belongs to whoever OWNS the sending number. It is
+  // only this draft's history when the customer link came from that number.
+  // Two cases where it does not:
+  //  - CONFLICT: the phone matches customer A while the draft is about
+  //    customer B's property; and
+  //  - ADDRESS-GROUNDED: an off-file coordinator texts about customer B —
+  //    no phone match at all, so no conflict flag fires, yet the
+  //    coordinator's own number can still carry a stale lead and prior
+  //    estimates for ANOTHER client, exposing that client's address (via
+  //    addressFromContext) and services to the composer on B's draft.
+  // Suppress the lead and prior estimates in both. The SMS thread stays —
+  // it IS the conversation being answered.
+  const suppressPhoneHistory = phoneCustomerConflicted || customerGroundedByAddress;
   const before = new Date(triggerAt);
   const smsSince = new Date(before.getTime() - 30 * 86400000);
   const [leadMatch, smsThread, priorEstimates] = await Promise.all([
     // call=null: skips the sid + reused-lead branches; pure phone fallback.
-    // On a distinct-customer CONFLICT the phone-scoped history is customer
-    // A's, and the draft is about customer B's property — the lead could
-    // supply A's address via addressFromContext and the prior estimates
-    // would show the composer A's full history. Suppress both, same
-    // posture as the name-only profile downgrade above; the thread itself
-    // stays (it IS the conversation being answered).
-    phoneCustomerConflicted
+    suppressPhoneHistory
       ? Promise.resolve({ lead: null, forThisCall: false })
       : loadLeadForCall(null, phone, { phoneFallback: true }),
     loadSmsThread(phone, { limit: 40, before, since: smsSince }),
-    phoneCustomerConflicted ? Promise.resolve([]) : loadPriorEstimates(phone),
+    suppressPhoneHistory ? Promise.resolve([]) : loadPriorEstimates(phone),
   ]);
   // The webhook records the TRIGGERING inbound message to sms_log after the
   // handlers run, so the thread read here can miss exactly the text that

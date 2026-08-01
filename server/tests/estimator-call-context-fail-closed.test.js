@@ -296,7 +296,7 @@ describe('buildSmsThreadContext grounded-customer fallback (GATE_ESTIMATOR_SCOPE
     expect(context.isExistingCustomer).toBe(true);
   });
 
-  test('gate ON: a unit-carrying scope attaches the unit and nulls the measurements', async () => {
+  test('gate ON: a unit-carrying scope folds the unit INTO address_line1 (every consumer reads line1)', async () => {
     process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
     mockCustomerRows = [];
     mockCustomerFirstRow = GROUNDED_ROW;
@@ -306,11 +306,37 @@ describe('buildSmsThreadContext grounded-customer fallback (GATE_ESTIMATOR_SCOPE
       groundedScope: { address: '4021 Coral Bay Loop', line2: 'Apt 6', city: 'Venice', zip: '34285', isPrimary: true },
     });
     expect(context.customer).toMatchObject({
-      address_line1: '4021 Coral Bay Loop',
+      // addressFromContext, the composer profile block, and the
+      // saved-address comparison all build from line1 + city + zip and
+      // ignore line2 — the unit must live in line1 or they see a unitless
+      // street.
+      address_line1: '4021 Coral Bay Loop Apt 6',
       address_line2: 'Apt 6',
       property_sqft: null,
       lot_sqft: null,
     });
+
+    // …and the address the downstream comparison actually builds no longer
+    // reads as the same parcel as a DIFFERENT unit on that street. Before
+    // the fold-in it was unitless, so sameStreetAddress compared equal.
+    const { sameStreetAddress } = require('../services/estimator-engine/address-compare');
+    const savedAddress = [context.customer.address_line1, context.customer.city, context.customer.zip]
+      .filter(Boolean).join(', ');
+    expect(savedAddress).toBe('4021 Coral Bay Loop Apt 6, Venice, 34285');
+    expect(sameStreetAddress(savedAddress, '4021 Coral Bay Loop Apt 1, Venice, 34285')).toBe(false);
+    expect(sameStreetAddress(savedAddress, '4021 Coral Bay Loop Apt 6, Venice, 34285')).toBe(true);
+  });
+
+  test('gate ON: a scope address that already carries the unit is not double-suffixed', async () => {
+    process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
+    mockCustomerRows = [];
+    mockCustomerFirstRow = GROUNDED_ROW;
+    const context = await buildSmsThreadContext({
+      ...SMS_ARGS,
+      groundedCustomerId: 'cust-77',
+      groundedScope: { address: '4021 Coral Bay Loop Apt 6', line2: 'Apt 6', city: 'Venice', zip: '34285', isPrimary: true },
+    });
+    expect(context.customer.address_line1).toBe('4021 Coral Bay Loop Apt 6');
   });
 
   test('gate ON: a primary scope without a unit keeps the profile as-is', async () => {
@@ -441,6 +467,46 @@ describe('buildSmsThreadContext conflict suppresses phone-scoped history', () =>
     mockLeadRow = LEAD;
     mockEstimateRows = ESTIMATES;
     const context = await buildSmsThreadContext({ ...SMS_ARGS, groundedConflict: true });
+    expect(context.lead).toMatchObject({ id: 'lead-1' });
+    expect(context.priorEstimates).toEqual(ESTIMATES);
+  });
+
+  test('gate ON + ADDRESS-GROUNDED (off-file coordinator): the sender\'s own stale history is suppressed', async () => {
+    // No phone match at all ⇒ no conflict flag ⇒ the r14 suppression did
+    // not fire, yet the coordinator's number can carry ANOTHER client's
+    // lead and estimates onto customer B's draft.
+    process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
+    mockCustomerRows = [];
+    mockCustomerFirstRow = { ...PHONE_MATCHED, id: 'cust-77' };
+    mockLeadRow = LEAD;
+    mockEstimateRows = ESTIMATES;
+    const context = await buildSmsThreadContext({ ...SMS_ARGS, groundedCustomerId: 'cust-77' });
+    expect(context.customerGroundedByAddress).toBe(true);
+    expect(context.customer).toMatchObject({ id: 'cust-77' });
+    expect(context.lead).toBeNull();
+    expect(context.priorEstimates).toEqual([]);
+    // The thread itself is the conversation being answered — it stays.
+    expect(context.transcript.length).toBeGreaterThan(0);
+  });
+
+  test('gate ON: a REAL phone-matched customer keeps their own phone-scoped history', async () => {
+    process.env.GATE_ESTIMATOR_SCOPE_GUARDS = 'true';
+    mockCustomerRows = [PHONE_MATCHED];
+    mockLeadRow = LEAD;
+    mockEstimateRows = ESTIMATES;
+    const context = await buildSmsThreadContext({ ...SMS_ARGS, groundedCustomerId: 'cust-1' });
+    expect(context.customerGroundedByAddress).toBeUndefined();
+    expect(context.lead).toMatchObject({ id: 'lead-1' });
+    expect(context.priorEstimates).toEqual(ESTIMATES);
+  });
+
+  test('gate OFF: an address-grounded id never suppresses history either', async () => {
+    mockCustomerRows = [];
+    mockCustomerFirstRow = { ...PHONE_MATCHED, id: 'cust-77' };
+    mockLeadRow = LEAD;
+    mockEstimateRows = ESTIMATES;
+    const context = await buildSmsThreadContext({ ...SMS_ARGS, groundedCustomerId: 'cust-77' });
+    expect(context.customerGroundedByAddress).toBeUndefined();
     expect(context.lead).toMatchObject({ id: 'lead-1' });
     expect(context.priorEstimates).toEqual(ESTIMATES);
   });
