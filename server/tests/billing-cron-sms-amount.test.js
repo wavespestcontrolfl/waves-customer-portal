@@ -43,14 +43,16 @@ describe('resolveSmsAmount', () => {
     expect(resolveSmsAmount('0.00')).toBe('0.00');
   });
 
-  test('falls through unusable candidates to the first usable one, in order', () => {
-    // Call-site contract: actual collected/attempted amount first, the
-    // customer's rate only as a floor.
-    expect(resolveSmsAmount(null, '55.00')).toBe('55.00');
-    expect(resolveSmsAmount(undefined, null, 49)).toBe('49.00');
-    expect(resolveSmsAmount('59.40', '55.00')).toBe('59.40');
-    expect(resolveSmsAmount('your payment', '55.00')).toBe('55.00');
-    expect(resolveSmsAmount(null, undefined, '')).toBeNull();
+  test('takes ONE operand — a fallback cannot be smuggled in', () => {
+    // The no-fallback rule is structural on purpose. Every plausible
+    // fallback misstates the amount: monthly_rate and baseAmount are
+    // pre-surcharge, and the original payment.amount carries the old
+    // tender's gross. An extra argument must not rescue an unusable first
+    // one.
+    expect(resolveSmsAmount(null, '55.00')).toBeNull();
+    expect(resolveSmsAmount('your payment', '55.00')).toBeNull();
+    expect(resolveSmsAmount(undefined, 49)).toBeNull();
+    expect(resolveSmsAmount.length).toBe(1);
   });
 });
 
@@ -67,23 +69,32 @@ describe('billing-cron autopay SMS call sites', () => {
     expect(stringLiteralAmounts).toEqual([]);
   });
 
-  test('retry-failure texts quote THIS attempt, never the original obligation', () => {
-    // charge() recomputes the total for the customer's current tender, so a
-    // card-to-ACH switch between attempts makes payment.amount (the original
-    // surcharged gross) disagree with what was just sent to Stripe. The
-    // amount-agreement rule in AGENTS.md makes that a P0, and it is
-    // invisible in review because both values are plausible dollar figures.
-    for (const key of ['autopay_retry_failed', 'autopay_retry_final_failed']) {
+  // The authoritative payments-row amount for the exact attempt each message
+  // describes. Anything else — monthly_rate, baseAmount, the original
+  // payment.amount — is pre-surcharge or belongs to a different attempt, and
+  // is invisible in review because every one of them is a plausible dollar
+  // figure.
+  const REQUIRED_OPERAND = {
+    autopay_charge_success: 'paymentResult?.amount',
+    autopay_charge_failed: 'err.paymentRecord?.amount',
+    autopay_retry_failed: 'err.paymentRecord?.amount',
+    autopay_retry_final_failed: 'err.paymentRecord?.amount',
+    autopay_retry_success: 'newPayment?.amount',
+  };
+
+  test.each(Object.entries(REQUIRED_OPERAND))(
+    '%s quotes the exact attempt it describes, with no fallback',
+    (key, operand) => {
       const idx = src.indexOf(`renderTemplate('${key}'`);
       expect(idx).toBeGreaterThan(-1);
       const preceding = src.slice(Math.max(0, idx - 900), idx);
-      const resolveCall = preceding.slice(preceding.lastIndexOf('resolveSmsAmount('));
-      expect(resolveCall).toContain('err.paymentRecord?.amount');
-      // No fallback may reintroduce the original obligation's gross.
-      expect(resolveCall.slice(0, resolveCall.indexOf(')'))).not.toContain('payment.amount,');
-      expect(resolveCall.slice(0, resolveCall.indexOf(')'))).not.toMatch(/resolveSmsAmount\(\s*payment\.amount/);
-    }
-  });
+      const call = preceding.slice(preceding.lastIndexOf('resolveSmsAmount('));
+      const args = call.slice(call.indexOf('(') + 1, call.indexOf(')'));
+      expect(args.trim()).toBe(operand);
+      // A comma in the argument list IS the fallback bug.
+      expect(args).not.toContain(',');
+    },
+  );
 
   test('every autopay template render resolves its amount first', () => {
     const AMOUNT_TEMPLATES = [

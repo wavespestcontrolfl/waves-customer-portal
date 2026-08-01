@@ -86,23 +86,28 @@ const BILLING_PORTAL_URL = 'https://portal.wavespestcontrol.com/?tab=billing';
  * 2026-06-01 (13 autopay_charge_failed, 1 autopay_charge_success). The
  * amount was already in scope at every one of them.
  *
- * Candidates are tried in order — the ACTUAL collected/attempted amount
- * first, the customer's rate last — because a card payment's gross includes
- * the surcharge, and the payments row is the authority for what really moved
- * (never re-derive it here; that is stripe-pricing's job).
+ * ONE operand, deliberately — no fallback chain. The only acceptable value
+ * is the authoritative payments-row amount for the EXACT attempt the message
+ * describes: paymentResult.amount for a successful charge,
+ * err.paymentRecord.amount for a declined one, newPayment.amount for a
+ * successful retry. Every plausible fallback misstates it. customer
+ * .monthly_rate and baseAmount are pre-surcharge, so a card customer would
+ * be quoted less than Stripe took; the original payment.amount carries the
+ * OLD tender's gross, so a card-to-ACH switch between retries quotes a
+ * figure Stripe never saw. AGENTS.md requires the displayed amount, the
+ * PaymentIntent and the payments row to agree to the cent, and that rule
+ * does not stop at the screen.
  *
- * Returns null when nothing resolves, which callers MUST treat as "do not
- * send": a text reading "$NaN" or "$undefined" is worse than silence, and a
- * null here means a payments row without an amount, which is a data problem
- * worth an error log.
+ * Returns null when the value is unusable, which callers MUST treat as "do
+ * not send". A text reading "$NaN" is worse than silence, and so is a
+ * confidently wrong dollar figure — a payments row with no amount is a data
+ * problem that deserves the error log the callers' catch already writes.
  */
-function resolveSmsAmount(...candidates) {
-  for (const candidate of candidates) {
-    if (candidate === null || candidate === undefined || candidate === '') continue;
-    const value = typeof candidate === 'number' ? candidate : parseFloat(candidate);
-    if (Number.isFinite(value) && value >= 0) return value.toFixed(2);
-  }
-  return null;
+function resolveSmsAmount(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const num = typeof value === 'number' ? value : parseFloat(value);
+  if (!Number.isFinite(num) || num < 0) return null;
+  return num.toFixed(2);
 }
 
 // Render customer billing SMS from the editable template table.
@@ -338,11 +343,11 @@ const BillingCron = {
 
         try {
           const receiptLine = receiptUrl ? ` View your receipt: ${receiptUrl}` : '';
-          // What was actually COLLECTED, not the rate — a card payment's
-          // gross carries the surcharge, and the payments row is the
-          // authority for that.
-          const amountText = resolveSmsAmount(paymentResult?.amount, customer.monthly_rate);
-          if (!amountText) throw new Error(`no resolvable amount for customer ${customer.id} (payment ${paymentResult?.id || 'none'})`);
+          // What was actually COLLECTED. Not monthly_rate: that is the
+          // pre-surcharge base, so a card customer would get a receipt for
+          // less than we took.
+          const amountText = resolveSmsAmount(paymentResult?.amount);
+          if (!amountText) throw new Error(`no collected amount for customer ${customer.id} (payment ${paymentResult?.id || 'none'})`);
           const body = await renderTemplate('autopay_charge_success',
             { first_name: customer.first_name, amount: amountText, receipt_line: receiptLine },
             { workflow: 'monthly_billing_success', entity_type: 'customer', entity_id: customer.id },
@@ -498,10 +503,12 @@ const BillingCron = {
 
         // Send failure SMS with actionable card-update link
         try {
-          // The ATTEMPTED gross (surcharge included) when the failed row
-          // exists; the rate only as a floor.
-          const amountText = resolveSmsAmount(failedPayment?.amount, customer.monthly_rate);
-          if (!amountText) throw new Error(`no resolvable amount for customer ${customer.id} (payment ${failedPayment?.id || 'none'})`);
+          // The row charge() just inserted for THIS attempt. Not
+          // failedPayment — that query can select an older monthly failure
+          // — and not monthly_rate, which omits the surcharge. Either would
+          // quote a figure the PaymentIntent never carried.
+          const amountText = resolveSmsAmount(err.paymentRecord?.amount);
+          if (!amountText) throw new Error(`no attempt amount for customer ${customer.id} (paymentRecord ${err.paymentRecord?.id || 'missing'})`);
           const body = await renderTemplate('autopay_charge_failed',
             { first_name: customer.first_name, amount: amountText, update_card_url: BILLING_PORTAL_URL },
             { workflow: 'monthly_billing_failure', entity_type: 'customer', entity_id: customer.id },
@@ -1374,11 +1381,11 @@ const BillingCron = {
       } catch (e) { /* ignore */ }
       try {
         const receiptLine = retryReceiptUrl ? ` View your receipt: ${retryReceiptUrl}` : '';
-        // Same operand the retry_success autopay_log entry uses: the retry
-        // recomputes the total for the customer's CURRENT tender, so a
-        // card failure retried on ACH collects less than the old gross.
-        const amountText = resolveSmsAmount(newPayment?.amount, baseAmount);
-        if (!amountText) throw new Error(`no resolvable amount for retry of payment ${payment.id}`);
+        // The row the successful retry wrote. Not baseAmount: that is the
+        // pre-surcharge base this attempt was computed FROM, not what the
+        // customer was charged.
+        const amountText = resolveSmsAmount(newPayment?.amount);
+        if (!amountText) throw new Error(`no collected amount for retry of payment ${payment.id} (newPayment ${newPayment?.id || 'missing'})`);
         const body = await renderTemplate('autopay_retry_success',
           { first_name: customer.first_name, amount: amountText, receipt_line: receiptLine },
           { workflow: 'autopay_retry_success', entity_type: 'payment', entity_id: payment.id },
