@@ -16,7 +16,7 @@ jest.mock('../services/tech-photo', () => ({
 const appointmentRouter = require('../routes/appointment-public');
 const {
   pageState, confirmRaceVerdict, icsEscape, icsFold, STORM_NOTE_MIN_CHANCE,
-  ARRIVAL_PROMISE_MINUTES, arrivalWindowLabel,
+  ARRIVAL_PROMISE_MINUTES, arrivalWindowLabel, slotMatchesShown,
 } = appointmentRouter._test;
 const { ARRIVAL_WINDOW_MINUTES, arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
 const { smsLineFor } = require('../services/appointment-link');
@@ -84,6 +84,33 @@ describe('appointment page state', () => {
     for (const bad of [null, '', 'soon', '25:00']) {
       expect(arrivalWindowLabel(bad)).toBeNull();
     }
+  });
+
+  test('confirming is pinned to the slot the customer was shown', () => {
+    const row = { scheduled_date: '2026-08-05', window_start: '09:00:00' };
+    // The slot on screen matches the row: confirmable.
+    expect(slotMatchesShown(row, { date: '2026-08-05', windowStart: '09:00' })).toBe(true);
+    // Tolerates the shapes each side actually carries — a Date column and a
+    // full-precision time against the page's 'YYYY-MM-DD' / 'HH:MM'.
+    expect(slotMatchesShown(
+      { scheduled_date: new Date('2026-08-05T12:00:00Z'), window_start: '09:00:00' },
+      { date: '2026-08-05', windowStart: '09:00:00' },
+    )).toBe(true);
+    // The office bulk reschedule moves date/window but LEAVES the row
+    // pending, so the status guard alone would confirm a slot the customer
+    // never saw. Both halves of the move must be caught.
+    expect(slotMatchesShown(row, { date: '2026-08-06', windowStart: '09:00' })).toBe(false);
+    expect(slotMatchesShown(row, { date: '2026-08-05', windowStart: '13:00' })).toBe(false);
+    // Fails CLOSED: a confirm that can't say which slot it meant is rejected.
+    expect(slotMatchesShown(row, {})).toBe(false);
+    expect(slotMatchesShown(row, undefined)).toBe(false);
+    expect(slotMatchesShown(row, { windowStart: '09:00' })).toBe(false);
+    // A windowless visit is legitimate: null must match null, and must not
+    // match a page that thinks it has a window.
+    const windowless = { scheduled_date: '2026-08-05', window_start: null };
+    expect(slotMatchesShown(windowless, { date: '2026-08-05', windowStart: null })).toBe(true);
+    expect(slotMatchesShown(windowless, { date: '2026-08-05', windowStart: '09:00' })).toBe(false);
+    expect(slotMatchesShown(row, { date: '2026-08-05', windowStart: null })).toBe(false);
   });
 
   test('a windowless visit stays live until the end of its day', () => {
@@ -160,6 +187,20 @@ describe('link-first SMS bodies', () => {
       expect(detectEncoding(rendered).encoding).toBe('GSM_7');
       expect(countSegments(rendered).segmentCount).toBeLessThanOrEqual(2);
     }
+  });
+
+  test('the confirmation quotes the arrival WINDOW, never an exact start time', () => {
+    // {time} meant two different things across the three confirmation
+    // senders — estimate acceptance passed an arrival RANGE into it while
+    // the reminder and call paths passed an exact start, so a 9:00 booking
+    // texted "at 9:00 AM" for a visit promised 9:00-11:00 (codex r9).
+    const confirmation = TEMPLATES.find((t) => t.template_key === 'appointment_confirmation_v2');
+    expect(confirmation.body).toContain('{window}');
+    expect(confirmation.variables).toContain('window');
+    expect(confirmation.body).not.toContain('{time}');
+    expect(confirmation.variables).not.toContain('time');
+    // Specifically the "at <exact time>" phrasing must be gone.
+    expect(confirmation.body).not.toMatch(/\bat \{/);
   });
 
   test('the 24h body still carries the card-hold fee disclosure placeholder', () => {

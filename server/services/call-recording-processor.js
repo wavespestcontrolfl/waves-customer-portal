@@ -8423,16 +8423,21 @@ const CallRecordingProcessor = {
               // The row landed, so the v2 factory can mint the REAL
               // appointment-page link (lazy: only runs when the gate is on
               // and the _v2 row is active). Legacy body unchanged.
-              const { renderAppointmentPageTemplate } = require('./appointment-reminders');
+              const { renderAppointmentPageTemplate, confirmationArrivalWindow } = require('./appointment-reminders');
               smsBody = await renderAppointmentPageTemplate('appointment_confirmation',
                 async () => {
                   const { buildAppointmentLink } = require('./appointment-link');
                   const apptLink = await buildAppointmentLink(scheduledServiceId, { customerId });
+                  // The v2 body quotes the 2-hour arrival window, resolved
+                  // from the BOOKED row — parsedTime is the caller's
+                  // extracted preference and can differ from what landed.
+                  const window = await confirmationArrivalWindow({ scheduledServiceId });
                   return {
                     first_name: firstName,
                     service_type: serviceType,
                     date: parsedDate,
                     time: parsedTime,
+                    window,
                     appointment_line: apptLink.line,
                   };
                 },
@@ -8570,17 +8575,22 @@ const CallRecordingProcessor = {
                         // Same ladder as the primary send; the schedule row
                         // exists by this point, so the factory mints the
                         // same appointment-page link.
-                        const { renderAppointmentPageTemplate: renderApptLadder } = require('./appointment-reminders');
+                        const {
+                          renderAppointmentPageTemplate: renderApptLadder,
+                          confirmationArrivalWindow: contactArrivalWindow,
+                        } = require('./appointment-reminders');
                         const contactFirst = String(contact.name || '').trim().split(/\s+/)[0] || firstName;
                         const contactBody = await renderApptLadder('appointment_confirmation',
                           async () => {
                             const { buildAppointmentLink } = require('./appointment-link');
                             const apptLink = await buildAppointmentLink(scheduledServiceId, { customerId });
+                            const window = await contactArrivalWindow({ scheduledServiceId });
                             return {
                               first_name: contactFirst,
                               service_type: serviceType,
                               date: parsedDate,
                               time: parsedTime,
+                              window,
                               appointment_line: apptLink.line,
                             };
                           },

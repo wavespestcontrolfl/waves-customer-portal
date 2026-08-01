@@ -173,6 +173,22 @@ function pageState(svc, now = new Date()) {
 // visit's NEW slot 'confirmed' without it), where the date/window likely
 // changed under the customer — that must surface as CHANGED so the client
 // reloads instead of showing the stale slot as confirmed.
+// Does the slot the client is looking at still match the row? The office
+// bulk reschedule (admin-schedule.js) moves scheduled_date/window_start
+// while deliberately LEAVING the row pending, so a status-only confirm
+// guard would bless a replacement slot the customer was never shown
+// (codex r9). Fails CLOSED on a missing date: this lane has never shipped
+// (the router 404s while GATE_APPOINTMENT_PAGE is off), so there is no
+// older client to stay compatible with, and a confirm that can't prove
+// which slot it meant is exactly the one to reject. A windowless visit is
+// legitimate, so null window must match null window.
+function slotMatchesShown(svc, shown) {
+  const seenDate = apptDateStr(shown?.date);
+  if (!seenDate) return false;
+  return seenDate === apptDateStr(svc?.scheduled_date)
+    && hhmm(shown?.windowStart) === hhmm(svc?.window_start);
+}
+
 function confirmRaceVerdict(row) {
   const confirmed = String(row?.status || '').toLowerCase() === 'confirmed';
   return confirmed && !!row?.customer_confirmed ? 'idempotent_success' : 'changed';
@@ -188,7 +204,9 @@ async function loadByToken(token) {
       's.window_start', 's.window_end', 's.service_type', 's.is_recurring',
       's.recurring_parent_id', 's.reschedule_token',
       's.source_action', 's.customer_confirmed',
-      'c.first_name as cust_first_name',
+      // c.first_name is deliberately NOT selected — see the payload comment:
+      // this token is shared with whoever the notification reached, so the
+      // account holder's name must not travel with it.
       'c.deleted_at as customer_deleted_at',
       't.name as tech_name',
       't.photo_url as tech_photo_url',
@@ -284,7 +302,11 @@ router.get('/:token', async (req, res, next) => {
       // in_progress only: 'en_route' | 'on_site', so the page can say "on
       // the way" vs "at your property" truthfully.
       phase: phase || null,
-      customerFirstName: svc.cust_first_name || null,
+      // Deliberately NOT the customer's first name. The token is shared with
+      // whoever the visit notification reached — a spouse, tenant or buyer —
+      // so serving the account holder's name both mis-greets them and hands
+      // a third party an identity they were never told. The page greets no
+      // one; the SMS that carried the link already did (codex r9).
       service: { type: await resolveServiceLabel(svc) },
       appointment: {
         date: apptDateStr(svc.scheduled_date),
@@ -440,6 +462,30 @@ router.post('/:token/confirm', confirmLimiter, async (req, res, next) => {
         code: 'NOT_CONFIRMABLE',
       });
     }
+    // The customer confirms the SLOT THEY WERE SHOWN, not merely "whatever
+    // is confirmable on this row". The office bulk reschedule
+    // (admin-schedule.js) moves scheduled_date/window_start while
+    // deliberately LEAVING the row pending, so a status-only guard lets a
+    // page opened before the move confirm a replacement slot the customer
+    // never saw, and the card just flips to Confirmed (codex r9). The
+    // earlier race work keyed on WHO wrote the status; this path never
+    // writes it, so it slipped underneath all of it.
+    //
+    // This runs BEFORE the idempotency branch for the same reason r7 moved
+    // the race verdict there: a second tap on a page showing the OLD slot
+    // must reload the move, not be blessed as a duplicate success.
+    //
+    // Fails CLOSED on a missing field: this lane has never shipped (the
+    // whole router 404s while GATE_APPOINTMENT_PAGE is off), so there is
+    // no older client to stay compatible with, and a confirm that cannot
+    // prove which slot it meant is exactly the one to reject.
+    if (!slotMatchesShown(svc, req.body)) {
+      return res.status(409).json({
+        error: 'This appointment just changed — please refresh.',
+        code: 'CHANGED',
+      });
+    }
+
     // Idempotent: a second tap (or a double-submit) is a success — but only
     // when the CUSTOMER's confirm won. Same verdict as the post-update race
     // path: SmartRebooker can commit a reschedule between the page GET and
@@ -479,8 +525,9 @@ router.post('/:token/confirm', confirmLimiter, async (req, res, next) => {
       });
     }
 
-    // Status-only write, guarded on the status we read so a concurrent
-    // dispatch change (cancel, en_route) is never overwritten. No date,
+    // Status-only write, guarded on the status AND the slot we read, so a
+    // concurrent dispatch change (cancel, en_route) or a bulk move landing
+    // between this read and the update is never overwritten. No date,
     // window, or tech is touched, and nothing is sent to the customer.
     // The status flip and its job_status_history row commit atomically —
     // the history table is the canonical transition audit, so a lost row
@@ -488,7 +535,16 @@ router.post('/:token/confirm', confirmLimiter, async (req, res, next) => {
     let updated = 0;
     await db.transaction(async (trx) => {
       updated = await trx('scheduled_services')
-        .where({ id: svc.id, status: 'pending' })
+        // scheduled_date/window_start come straight off the row we read, so
+        // the predicate closes the read->update gap without re-parsing
+        // client input. knex renders a null as `is null`, which is what a
+        // windowless visit needs.
+        .where({
+          id: svc.id,
+          status: 'pending',
+          scheduled_date: svc.scheduled_date,
+          window_start: svc.window_start,
+        })
         // customer_confirmed + confirmed_at ride along for parity with the
         // logged-in confirm route (routes/schedule.js) and self-booking
         // (routes/booking.js), which write the trio together: the portal's
@@ -542,6 +598,7 @@ router._test = {
   STORM_NOTE_MIN_CHANCE,
   ARRIVAL_PROMISE_MINUTES,
   arrivalWindowLabel,
+  slotMatchesShown,
 };
 
 module.exports = router;

@@ -311,7 +311,18 @@ export default function AppointmentPage() {
     setConfirming(true);
     setConfirmError(null);
     try {
-      const res = await fetch(`${API_BASE}/public/appointment/${token}/confirm`, { method: 'POST' });
+      // Send the slot this page is actually showing. The server confirms
+      // ONLY that slot: an office bulk reschedule can move the visit while
+      // leaving it pending, and without this the tap would silently bless a
+      // replacement slot the customer was never shown.
+      const res = await fetch(`${API_BASE}/public/appointment/${token}/confirm`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          date: data?.appointment?.date ?? null,
+          windowStart: data?.appointment?.windowStart ?? null,
+        }),
+      });
       const body = await res.json().catch(() => ({}));
       if (res.ok && body.success) {
         setData((prev) => (prev ? { ...prev, confirmed: true } : prev));
@@ -390,7 +401,13 @@ export default function AppointmentPage() {
       <Card style={{ borderTop: `3px solid ${WEATHER_BLUE}` }}>
         <StatusPill label={data.confirmed ? 'Confirmed' : (isTomorrow ? 'Tomorrow' : 'Upcoming')} />
         <div data-gt="h3x" style={{ fontSize: 22, fontWeight: 800, fontFamily: FONTS.heading, marginTop: 14, lineHeight: 1.3 }}>
-          {data.customerFirstName ? `Hi ${data.customerFirstName} — ` : ''}your {serviceLabel} is {isTomorrow ? 'tomorrow' : 'booked'}.
+          {/* No greeting by name. The token is per-VISIT, not per-recipient:
+              appointment notifications fan out to a spouse, tenant, buyer or
+              other service contact, each SMS personalized to THAT contact,
+              while this page only ever knew the account holder. Jane would
+              get "Hello Jane" and open a page headed "Hi John" (codex r9).
+              The text carrying the link already greets the right person. */}
+          Your {serviceLabel} is {isTomorrow ? 'tomorrow' : 'booked'}.
         </div>
 
         <div data-glass="soft" style={{

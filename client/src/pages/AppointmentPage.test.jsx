@@ -17,10 +17,13 @@ function jsonResponse(body, status = 200) {
 function upcomingPayload(overrides = {}) {
   return {
     state: 'upcoming',
+    // The server no longer sends this. It stays in the fixture on purpose:
+    // the greeting assertions prove the page ignores it even when present.
     customerFirstName: 'Pat',
     service: { type: 'Quarterly Pest Control' },
     // arrivalWindow is derived SERVER-side by the canonical helper; the page
     // renders it verbatim and must not recompute it from windowStart.
+    // windowStart is still sent so the confirm POST can pin the slot.
     appointment: { date: '2026-08-05', windowStart: '09:00', arrivalWindow: '9:00 AM - 11:00 AM' },
     confirmed: false,
     confirmable: true,
@@ -91,7 +94,10 @@ describe('AppointmentPage upcoming visit', () => {
 
     renderPage();
 
-    expect(await screen.findByText(/Hi Pat — your quarterly pest control is/)).toBeInTheDocument();
+    // No greeting by name: the token is per-visit and reaches spouses,
+    // tenants and buyers, each of whom the SMS greeted by THEIR name.
+    expect(await screen.findByText(/Your quarterly pest control is/)).toBeInTheDocument();
+    expect(screen.queryByText(/Hi Pat/)).not.toBeInTheDocument();
     expect(screen.getByText('Adam is your technician')).toBeInTheDocument();
     expect(screen.getByText('The same technician as your last visit.')).toBeInTheDocument();
     expect(screen.getByText(/live tracking link/)).toBeInTheDocument();
@@ -141,6 +147,9 @@ describe('AppointmentPage upcoming visit', () => {
     expect(screen.getByText('Confirmed')).toBeInTheDocument();
     const posted = fetchMock.mock.calls.find(([, o]) => o?.method === 'POST');
     expect(String(posted[0])).toContain('/confirm');
+    // The POST carries the slot on screen so the server can refuse to
+    // confirm a visit an office bulk reschedule moved underneath it.
+    expect(JSON.parse(posted[1].body)).toEqual({ date: '2026-08-05', windowStart: '09:00' });
   });
 
   it('an already-confirmed visit shows no Confirm CTA', async () => {

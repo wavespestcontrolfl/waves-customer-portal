@@ -464,6 +464,32 @@ function formatArrivalWindow(apptTime) {
   }
 }
 
+// The {window} value for appointment_confirmation_v2. All THREE confirmation
+// senders (this file, call-recording-processor, estimate-public) resolve it
+// here so they cannot drift the way {time} did: estimate acceptance was
+// passing an arrival RANGE into {time} while the other two passed an exact
+// start, so the same placeholder meant two different things (codex r9).
+// window_start off the booked row is the canonical source — the call
+// pipeline's EXTRACTED preferred time can differ from what was actually
+// booked, and the row exists at render time on every path (codex r4/r5).
+// Fail-soft by construction: spokenArrivalWindow returns the UNKNOWN phrase
+// rather than null, so a missing or unreadable window degrades the sentence
+// instead of leaving {window} unresolved — an unresolved placeholder makes
+// getTemplate suppress the ENTIRE message.
+async function confirmationArrivalWindow({ scheduledServiceId = null, windowStart = null } = {}) {
+  const { spokenArrivalWindow, UNKNOWN_ARRIVAL_WINDOW } = require('../utils/sms-time-format');
+  try {
+    let start = windowStart;
+    if (!start && scheduledServiceId) {
+      const row = await db('scheduled_services').where({ id: scheduledServiceId }).first('window_start');
+      start = row?.window_start || null;
+    }
+    return spokenArrivalWindow(String(start || '').slice(0, 5));
+  } catch {
+    return UNKNOWN_ARRIVAL_WINDOW;
+  }
+}
+
 // Admin-disambiguation parentheticals only — frequency words ("Monthly",
 // "Bi-Monthly", "Semiannual"), interval phrases ("Every 6 Weeks"), and
 // term phrases ("10-Year Term"). Parens with semantic customer-facing
@@ -950,7 +976,10 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
                 customerId,
                 label: alreadyConfirmed ? 'Everything about your visit' : 'View and confirm your appointment',
               });
-              return { first_name: firstName, service_type: serviceLabel, date, time, day, appointment_line: appointmentLink.line };
+              // {window}, not {time} — the v2 body quotes the 2-hour arrival
+              // promise, and every sender resolves it through the one helper.
+              const window = await confirmationArrivalWindow({ scheduledServiceId });
+              return { first_name: firstName, service_type: serviceLabel, date, time, day, window, appointment_line: appointmentLink.line };
             },
             { first_name: firstName, service_type: serviceLabel, date, time, day, reschedule_line: reschedule.line },
             { workflow: 'appointment_confirmation', entity_type: 'scheduled_service', entity_id: scheduledServiceId },
@@ -2497,5 +2526,8 @@ AppointmentReminders._internals = { isLandline };
 // call pipeline) so gate-on means link-first copy everywhere, not only for
 // this service's own confirmation path.
 AppointmentReminders.renderAppointmentPageTemplate = renderAppointmentPageTemplate;
+// Exported for the other two confirmation senders (call-recording-processor,
+// estimate-public) so all three quote the arrival window identically.
+AppointmentReminders.confirmationArrivalWindow = confirmationArrivalWindow;
 
 module.exports = AppointmentReminders;

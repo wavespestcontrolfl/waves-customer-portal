@@ -9849,11 +9849,21 @@ router.put('/:token/accept', async (req, res, next) => {
                   const apptLink = confirmedAppointmentRow?.id
                     ? await buildAppointmentLink(confirmedAppointmentRow.id, { customerId: customerId || null })
                     : { url: null, line: '' };
+                  // v2 quotes the window through the shared resolver so this
+                  // sender, the reminder sender and the call pipeline agree.
+                  // This path already holds the row, so pass window_start
+                  // straight in rather than re-reading it.
+                  const { confirmationArrivalWindow } = require('../services/appointment-reminders');
+                  const window = await confirmationArrivalWindow({
+                    windowStart: confirmedAppointmentRow?.window_start || null,
+                    scheduledServiceId: confirmedAppointmentRow?.id || null,
+                  });
                   return {
                     first_name: firstName,
                     service_type: confirmedServiceLabel,
                     date: serviceDate,
                     time: timeWindow,
+                    window,
                     appointment_line: apptLink.line,
                   };
                 },

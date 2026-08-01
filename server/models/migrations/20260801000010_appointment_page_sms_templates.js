@@ -47,8 +47,17 @@ const TEMPLATES = [
     // No {day}: the estimate-acceptance and call-pipeline confirmation
     // senders have only date + time, and an unresolved placeholder
     // suppresses the whole SMS. The date already names the weekday risk-free.
-    body: "Hello {first_name}! Your {service_type} is booked for {date} at {time}.\n\n{appointment_line}Reply STOP to opt out.",
-    variables: ['first_name', 'service_type', 'date', 'time', 'appointment_line'],
+    // {window}, NOT {time}: quoting an exact start ("at 9:00 AM") promises a
+    // precision the 2-hour arrival window doesn't have, and the three
+    // confirmation senders disagreed about what {time} meant — estimate
+    // acceptance passed a RANGE into it while the reminder and call paths
+    // passed an exact time (codex r9). One placeholder, one meaning:
+    // confirmationArrivalWindow() in appointment-reminders.js resolves it
+    // for every sender. Fail-soft: spokenArrivalWindow returns the UNKNOWN
+    // phrase rather than null, so a missing window can never leave the
+    // placeholder unresolved and silently suppress the whole SMS.
+    body: "Hello {first_name}! Your {service_type} is booked for {date}, {window}.\n\n{appointment_line}Reply STOP to opt out.",
+    variables: ['first_name', 'service_type', 'date', 'window', 'appointment_line'],
     sort_order_after: 'appointment_confirmation',
   },
 ];
