@@ -2229,12 +2229,17 @@ router.patch('/:serviceId/time-on-site', requireAdmin, async (req, res, next) =>
     const plan = timeOnSiteEditPlan({ minutes: req.body?.minutes, service: svc, structuredNotes });
     if (plan.error) return res.status(plan.status).json(plan.error);
 
-    const previousMinutes = positiveNumber(svc.service_time_minutes)
-      || positiveNumber(svc.actual_duration_minutes)
-      || null;
-
+    let previousMinutes = null;
     let recordUpdated = false;
     await db.transaction(async (trx) => {
+      // Prior minutes come from the LOCKED row (codex P2 #3152 round 10):
+      // two concurrent corrections serialize on this lock, and each audit
+      // entry must record the value it actually superseded — the first
+      // correction's committed minutes, not a shared pre-lock snapshot.
+      const lockedSvc = await trx('scheduled_services').where({ id: svc.id }).forUpdate().first();
+      previousMinutes = positiveNumber(lockedSvc?.service_time_minutes)
+        || positiveNumber(lockedSvc?.actual_duration_minutes)
+        || null;
       const serviceUpdate = {
         service_time_minutes: plan.minutes,
         actual_duration_minutes: plan.minutes,
@@ -5879,7 +5884,20 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         effectiveTimeOnSite,
         svc,
       )
-      : null;
+      // Live admin override (codex P2 #3152 round 10): the tracker's
+      // completed_at must carry the corrected end too — date-window readers
+      // (pricing-reality-check's lookback COALESCE, billing recovery aging)
+      // prefer completed_at over the corrected end columns, so a correction
+      // crossing an ET day boundary would otherwise stay attributed to the
+      // late-closeout day. A NUMERIC effectiveTimeOnSite is the durable mode
+      // signal (validated at intake on first run, restored from the frozen
+      // structured_notes on a crash-resumed retry); the same pure helper
+      // yields the same start + minutes instant the lifecycle columns carry,
+      // and null (no real start / clamped) falls through to the tracker's
+      // wall clock exactly like a plain live completion.
+      : (typeof effectiveTimeOnSite === 'number'
+        ? adjustedCompletionEndInstant(svc, effectiveTimeOnSite, new Date())
+        : null);
 
     // Gauge-photo OCR cross-check — fire-and-forget now that the reading is
     // durably committed. Runs on BOTH first-run and durable-resume paths. On

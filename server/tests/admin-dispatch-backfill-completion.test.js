@@ -2497,7 +2497,10 @@ describe('completion route wiring (source contracts)', () => {
     // (Round 7's NULL for the unknown-end shape is gone — the helper now
     // returns ET noon of the service day there too, so Billing Recovery's
     // completed_at window can see the visit; instant coverage above.)
-    expect(source).toMatch(/const backfillTrackerCompletedAt = isBackfillCompletion\s*\n\s*\? backfillCompletionEndInstant\(\s*\n\s*serviceDateOnly\(svc\.scheduled_date\),\s*\n\s*effectiveTimeOnSite,\s*\n\s*svc,\s*\n\s*\)\s*\n\s*: null;/);
+    // The else branch carries the LIVE admin override's adjusted instant
+    // (codex P2 #3152 round 10) — null for plain live completions, so the
+    // backfill contract itself is unchanged.
+    expect(source).toMatch(/const backfillTrackerCompletedAt = isBackfillCompletion\s*\n\s*\? backfillCompletionEndInstant\(\s*\n\s*serviceDateOnly\(svc\.scheduled_date\),\s*\n\s*effectiveTimeOnSite,\s*\n\s*svc,\s*\n\s*\)\s*\n(?:\s*\/\/[^\n]*\n)*\s*: \(typeof effectiveTimeOnSite === 'number'\s*\n\s*\? adjustedCompletionEndInstant\(svc, effectiveTimeOnSite, new Date\(\)\)\s*\n\s*: null\);/);
     // Derived AFTER the crash-resume re-derivation (it reads the healed
     // flag AND the frozen duration), BEFORE the first markComplete that
     // consumes it.

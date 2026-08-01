@@ -352,6 +352,7 @@ function makeRecordingDb({ svc, record, recordCols, recordLookupError = null, le
       orderBy(col, dir) { op.orderBy = [col, dir]; return chain; },
       limit(n) { op.limited = n; return chain; },
       count(spec) { op.counted = spec; return chain; },
+      forUpdate() { op.locked = true; return chain; },
       async first() {
         if (table === 'scheduled_services') return op.counted ? { c: 1 } : svc;
         if (table === 'service_records') {
@@ -487,6 +488,21 @@ describe('PATCH /:serviceId/time-on-site — behavioral', () => {
       new_minutes: 45,
       end_stamps_rewritten: true,
     });
+    // The prior minutes were read from the LOCKED row inside the trx
+    // (codex P2 round 10) — concurrent corrections serialize on the lock,
+    // so each audit records the value it actually superseded.
+    const lockedRead = dbMock.calls.find((c) => c.table === 'scheduled_services' && c.locked);
+    expect(lockedRead).toBeTruthy();
+    expect(source).toMatch(/const lockedSvc = await trx\('scheduled_services'\)\.where\(\{ id: svc\.id \}\)\.forUpdate\(\)\.first\(\);\s*\n\s*previousMinutes = positiveNumber\(lockedSvc\?\.service_time_minutes\)/);
+  });
+
+  test('the tracker completed_at carries the adjusted instant for live corrections (codex P2 round 10)', () => {
+    // Date-window readers prefer completed_at over the corrected end
+    // columns — a correction crossing an ET day boundary must not stay
+    // attributed to the late-closeout day. Numeric effectiveTimeOnSite is
+    // the durable mode signal (frozen-restored on resume), so the branch
+    // holds on crash-resumed retries too.
+    expect(source).toMatch(/: \(typeof effectiveTimeOnSite === 'number'\s*\n\s*\? adjustedCompletionEndInstant\(svc, effectiveTimeOnSite, new Date\(\)\)\s*\n\s*: null\);/);
   });
 
   test('a repeat edit sends only the correction keys — prior preservation lives in the SQL CASE, not JS state', async () => {
