@@ -972,7 +972,17 @@ function canAutoRoute(extraction, opts = {}) {
   // backstop has to be satisfied some other way before it lifts.
   const callerRelationship = String(extraction.caller?.relationship_to_property || 'unknown').trim() || 'unknown';
   const explicitlyNonOwner = callerRelationship !== 'owner' && callerRelationship !== 'unknown';
-  if (!explicitlyNonOwner && confirmedWithStart && startOnTheHour && avPositivelyValidated) {
+  // What the guard actually needs is a TRUSTED dispatch address, and the
+  // central address-trust gate below recognises exactly two ways to have one:
+  // a positive AV verdict, or a known customer's on-file address they did not
+  // restate (verified when it was saved). Demanding only the first blocked the
+  // commonest shape of the very call this ruling exists for (codex round-20
+  // P1) — a returning customer says "same place as always", so nothing is
+  // stated, no AV runs, no address flag fires, and caller_not_authorized was
+  // left as the incidental last block. Same predicate as the central gate, so
+  // the two can never disagree about what "trusted" means.
+  const trustedDispatchAddress = avPositivelyValidated || dispatchesToOnFileAddress(extraction, opts);
+  if (!explicitlyNonOwner && confirmedWithStart && startOnTheHour && trustedDispatchAddress) {
     appointmentBlockingFlags = appointmentBlockingFlags.filter((f) => {
       if (f === 'caller_not_authorized') { failedOpenFlags.push(f); return false; }
       return true;
