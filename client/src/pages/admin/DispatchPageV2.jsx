@@ -2845,18 +2845,6 @@ export default function DispatchPageV2({
                 : s,
             );
           }}
-          onNoShow={() => {
-            // Same conditional silence as onCancelled (Codex r11 P2).
-            fetchSchedule(date, { silent: !!continueProjectId });
-            // Same week-cache staleness as onCancelled (Codex r4 P2).
-            setScheduleRefreshKey((k) => k + 1);
-            // Same week-origin snapshot retirement as onCancelled (Codex r5).
-            setContinueProjectService((s) =>
-              s && detailService && String(s.id) === String(detailService.id)
-                ? { ...s, status: "no_show" }
-                : s,
-            );
-          }}
           onRescheduled={async () => {
             // The mobile week list owns its own cached weekData; bump the
             // shared refresh key so it refetches and drops the moved stop.

@@ -1,10 +1,12 @@
 // @vitest-environment jsdom
 /**
- * Terminal-action gating (Codex P1 on #2717): Cancel appointment and Mark
- * as no-show must only render while the visit is still active — the status
- * route reads the CURRENT row as fromStatus, so offering them on a
- * completed/cancelled visit lets one tap flip a finished (possibly
- * compliance) visit terminal in the other direction.
+ * Terminal-action gating (Codex P1 on #2717): Cancel appointment must only
+ * render while the visit is still active — the status route reads the
+ * CURRENT row as fromStatus, so offering it on a completed/cancelled visit
+ * lets one tap flip a finished (possibly compliance) visit terminal in the
+ * other direction. (Mark as no-show was removed 2026-07-31, owner call —
+ * misses go through the Quick Move sheet's soft No-show reason; the
+ * negative assertion stays so the terminal button never quietly returns.)
  */
 import { describe, expect, it, vi } from 'vitest';
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
@@ -42,10 +44,10 @@ function renderSheet(status) {
 }
 
 describe('MobileAppointmentDetailSheet terminal-action gating', () => {
-  it('offers Cancel and No-show while the visit is active', () => {
+  it('offers Cancel while the visit is active — and never the removed terminal no-show', () => {
     renderSheet('confirmed');
     expect(screen.getByText('Cancel appointment')).toBeTruthy();
-    expect(screen.getByText('Mark as no-show')).toBeTruthy();
+    expect(screen.queryByText('Mark as no-show')).toBeNull();
     cleanup();
   });
 

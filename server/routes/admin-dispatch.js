@@ -2664,8 +2664,30 @@ router.put('/:serviceId/status', async (req, res, next) => {
       // alreadyFlagged guard so a visit the nightly job already logged
       // (while it was still pending) isn't double-counted. Best-effort.
       try {
+        // Occurrence-aware dedup: a soft Quick Move no-show logs
+        // customer_noshow for an EARLIER slot of this same row
+        // (original_date + original_window = the slot that was missed), and
+        // that earlier miss must not suppress counting THIS one — including
+        // a rebook LATER THE SAME DAY, which only the window distinguishes
+        // (codex r2). Match only rows recorded for the current slot; NULL
+        // slot fields match legacy rows to preserve their old per-row dedup.
+        const missedDateStr = svc.scheduled_date
+          ? String(svc.scheduled_date instanceof Date ? svc.scheduled_date.toISOString() : svc.scheduled_date).slice(0, 10)
+          : null;
+        const missedWindowStr = svc.window_start ? `${svc.window_start}-${svc.window_end}` : null;
         const alreadyFlagged = await db('reschedule_log')
           .where({ scheduled_service_id: svc.id, reason_code: 'customer_noshow' })
+          .where(function occurrenceMatch() {
+            if (!missedDateStr) return; // no slot info — legacy per-row dedup
+            this.whereNull('original_date').orWhere(function currentSlot() {
+              this.where('original_date', missedDateStr);
+              if (missedWindowStr) {
+                this.andWhere(function sameWindow() {
+                  this.where('original_window', missedWindowStr).orWhereNull('original_window');
+                });
+              }
+            });
+          })
           .first('id');
         if (!alreadyFlagged) {
           const missedAppointment = require('../services/workflows/missed-appointment');
@@ -9404,7 +9426,7 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
 
     if (!result.ok) {
       const code = result.reason === 'not_found' ? 404
-        : (result.reason === 'bad_reason' || result.reason === 'bad_target') ? 400
+        : ['bad_reason', 'bad_target', 'noshow_route_scope', 'target_not_later'].includes(result.reason) ? 400
           : 409;
       return res.status(code).json({ error: result.reason, results: result.results || [] });
     }

@@ -449,3 +449,161 @@ describe('ReschedulePage Waves AI search', () => {
     expect(screen.queryByText('Sunday, July 12')).not.toBeInTheDocument();
   });
 });
+
+describe('ReschedulePage weather-move banner', () => {
+  const weatherMove = {
+    reasonCode: 'weather_rain',
+    from: { date: '2026-07-09', windowStart: '12:00' },
+    to: { date: '2026-07-10', windowStart: '09:00' },
+    fromChance: 80,
+    toChance: 15,
+  };
+
+  it('renders the was/now story, app badges, and why-the-move when the payload carries weatherMove', async () => {
+    stubFetch({ get: jsonResponse(reschedulablePayload({ weatherMove })) });
+
+    renderPage();
+
+    expect(await screen.findByText('Moved for weather')).toBeInTheDocument();
+    expect(screen.getByText(/Hi Pat — rain moved your pest control to a dry window/)).toBeInTheDocument();
+    // Matched Was/Now rows with the day-level rain chances.
+    expect(screen.getByText('Was')).toBeInTheDocument();
+    expect(screen.getByText('Now')).toBeInTheDocument();
+    expect(screen.getByText(/80% rain/)).toBeInTheDocument();
+    expect(screen.getByText(/15% rain/)).toBeInTheDocument();
+    // Arrival windows quote the 2-hour promise from each start.
+    expect(screen.getByText('Arrival 12:00 PM–2:00 PM')).toBeInTheDocument();
+    expect(screen.getByText('Arrival 9:00 AM–11:00 AM')).toBeInTheDocument();
+    // Rain gets the bonding explainer, collapsed by default.
+    expect(screen.getByText('Why the move?')).toBeInTheDocument();
+    expect(screen.getByText(/microencapsulated/)).toBeInTheDocument();
+    // The hero reframes: new time already confirmed, page is optional.
+    expect(screen.getByText('Want a different time instead?')).toBeInTheDocument();
+  });
+
+  it('renders nothing weather-related when the payload has no weatherMove', async () => {
+    stubFetch();
+
+    renderPage();
+
+    await screen.findByText(/Hey Pat/);
+    expect(screen.queryByText('Moved for weather')).not.toBeInTheDocument();
+    expect(screen.queryByText('Why the move?')).not.toBeInTheDocument();
+  });
+
+  it('wind moves skip the rain-bonding explainer and say better window', async () => {
+    stubFetch({
+      get: jsonResponse(reschedulablePayload({
+        weatherMove: { ...weatherMove, reasonCode: 'weather_wind', fromChance: null, toChance: null },
+      })),
+    });
+
+    renderPage();
+
+    expect(await screen.findByText(/wind moved your pest control to a better window/)).toBeInTheDocument();
+    expect(screen.queryByText('Why the move?')).not.toBeInTheDocument();
+    // No forecast coverage → no chips.
+    expect(screen.queryByText(/% rain/)).not.toBeInTheDocument();
+  });
+
+  it('never claims a dry window without forecast support (codex P2)', async () => {
+    stubFetch({
+      get: jsonResponse(reschedulablePayload({
+        weatherMove: { ...weatherMove, toChance: null },
+      })),
+    });
+
+    renderPage();
+
+    expect(await screen.findByText(/rain moved your pest control to a better window/)).toBeInTheDocument();
+    // The heading never says "dry" (the explainer body may still discuss dry
+    // windows generically — that's education, not a forecast claim).
+    expect(screen.queryByText(/moved your pest control to a dry window/)).not.toBeInTheDocument();
+  });
+
+  it('exempt services skip the liquid-bonding explainer even on rain moves (codex P2)', async () => {
+    stubFetch({
+      get: jsonResponse(reschedulablePayload({
+        service: { type: 'Termite Bait Check' },
+        weatherMove,
+      })),
+    });
+
+    renderPage();
+
+    expect(await screen.findByText('Moved for weather')).toBeInTheDocument();
+    expect(screen.queryByText('Why the move?')).not.toBeInTheDocument();
+  });
+
+  it('the capsule claim fails CLOSED — only liquid pest sprays see it (codex r4/r5)', async () => {
+    // Denylist gaps: lawn fertilizers, rodent exclusion, bed-bug heat work.
+    for (const type of ['Lawn Care', 'Rodent Exclusion & Trapping', 'Bed Bug Treatment', 'Mosquito Service', 'Initial Pest Cleanout', 'WaveGuard Initial Setup', 'Rodent Pest Control', 'Waves Pest Control Appointment']) {
+      stubFetch({
+        get: jsonResponse(reschedulablePayload({ service: { type }, weatherMove })),
+      });
+
+      renderPage();
+
+      expect(await screen.findByText('Moved for weather')).toBeInTheDocument();
+      expect(screen.queryByText('Why the move?')).not.toBeInTheDocument();
+      expect(screen.queryByText(/microencapsulated/)).not.toBeInTheDocument();
+      cleanup();
+    }
+  });
+
+  it('shows the banner on the classic layout too', async () => {
+    stubFetch({ get: jsonResponse(reschedulablePayload({ weatherMove })) });
+
+    renderPage({ classic: true });
+
+    expect(await screen.findByText('Moved for weather')).toBeInTheDocument();
+    expect(screen.getByText('Want a different time instead?')).toBeInTheDocument();
+  });
+
+  it('running_late moves get the schedule pill and heading — no weather claims, no chips, no explainer', async () => {
+    stubFetch({
+      get: jsonResponse(reschedulablePayload({
+        weatherMove: { ...weatherMove, reasonCode: 'running_late', fromChance: null, toChance: null },
+      })),
+    });
+
+    renderPage();
+
+    expect(await screen.findByText('Schedule update')).toBeInTheDocument();
+    // Date-neutral: the banner can be read days after the move, so no "today".
+    expect(screen.getByText(/Hi Pat — our schedule ran behind, so we moved your pest control to a new window/)).toBeInTheDocument();
+    expect(screen.queryByText('Moved for weather')).not.toBeInTheDocument();
+    // The was/now story still tells the move.
+    expect(screen.getByText('Was')).toBeInTheDocument();
+    expect(screen.getByText('Now')).toBeInTheDocument();
+    // No weather anywhere: no dry/better claim, no chips, no explainer.
+    expect(screen.queryByText(/dry window|better window/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/% rain/)).not.toBeInTheDocument();
+    expect(screen.queryByText('Why the move?')).not.toBeInTheDocument();
+    // Hero still reframes to the optional-adjustment ask.
+    expect(screen.getByText('Want a different time instead?')).toBeInTheDocument();
+  });
+
+  it('each non-weather reason gets its own operational heading under the schedule pill', async () => {
+    const cases = [
+      ['equipment_issue', /equipment trouble slowed us down, so we moved your pest control to a new window/],
+      ['tech_emergency', /an emergency came up on our end, so we moved your pest control to a new window/],
+      ['customer_noshow', /we missed you, so we moved your pest control to a new window/],
+    ];
+    for (const [reasonCode, heading] of cases) {
+      stubFetch({
+        get: jsonResponse(reschedulablePayload({
+          weatherMove: { ...weatherMove, reasonCode, fromChance: null, toChance: null },
+        })),
+      });
+
+      renderPage();
+
+      expect(await screen.findByText('Schedule update')).toBeInTheDocument();
+      expect(screen.getByText(heading)).toBeInTheDocument();
+      expect(screen.queryByText('Moved for weather')).not.toBeInTheDocument();
+      expect(screen.queryByText('Why the move?')).not.toBeInTheDocument();
+      cleanup();
+    }
+  });
+});
