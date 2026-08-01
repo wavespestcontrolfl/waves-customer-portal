@@ -122,23 +122,97 @@ async function estimateSoldAsAnnualPrepay(estimate) {
   }
 }
 
+// Acceptance freezes the price: both accept flows stamp price_locked_at and
+// pricing_authority 'LOCKED' in the same atomic update that writes
+// monthly_total / annual_total / accepted_frequency_key, and /:token/pdf stays
+// downloadable on the accepted terminal view. A locked estimate's document must
+// describe the plan the customer ACCEPTED, so it is never re-priced under
+// today's policy. Same predicate reconcileFrozenMembershipSnapshot uses for
+// exactly the same reason (estimate-public.js) — this is the line the codebase
+// already draws between "committed" and "still selling".
+function estimateIsPriceLocked(estimate) {
+  return estimate?.status === 'accepted' || !!estimate?.price_locked_at;
+}
+
+// An OUTSTANDING quote is described from the bundle the PAGE is selling, not
+// the frozen send snapshot: buildPricingBundleInner refuses to fast-path a
+// snapshot that violates lawn program policy (retired cadence, below-floor
+// price), carries a stale termite row, or is missing a required setup fee, and
+// rebuilds it — so the frozen copy can describe a plan no link can still sell.
+//
+// Two things have to happen in order, both borrowed rather than reimplemented:
+//
+//   1. reconcileFrozenMembershipSnapshot, because the page runs it BEFORE
+//      building the bundle. A snapshot frozen while the customer was still a
+//      member keeps prior-service artifacts and a member-priced bundle the fast
+//      path would serve; reconciling strips them, reprices, refreshes the row's
+//      totals IN PLACE and invalidates the stale bundle. It self-guards on the
+//      same price-lock predicate, so it can never touch a committed deal.
+//   2. buildPricingBundle, the single function applying every invalidity check
+//      AND the lane strip/backfill. Re-implementing either here would just add
+//      a copy to drift.
+//
+// defaultCandidate rides along because a rebuilt bundle's prices no longer
+// match the frozen columns — see the authority table in estimate-proposal.js.
+// Resolved through the route's own defaultFrequencyFromList so this document
+// cannot name a different default cadence than acceptance would price.
+//
+// Null for a locked estimate and null on any failure: both land on the frozen
+// pricing, which is always safe to render.
+async function resolveLivePricing(estimate) {
+  if (estimateIsPriceLocked(estimate)) return null;
+  try {
+    const {
+      buildPricingBundle,
+      defaultFrequencyFromList,
+      reconcileFrozenMembershipSnapshot,
+    } = require('../routes/estimate-public');
+    if (typeof buildPricingBundle !== 'function') return null;
+    if (typeof reconcileFrozenMembershipSnapshot === 'function') {
+      await reconcileFrozenMembershipSnapshot(estimate);
+    }
+    const bundle = await buildPricingBundle(estimate);
+    if (!bundle || typeof bundle !== 'object') return null;
+    const sellable = (Array.isArray(bundle.frequencies) ? bundle.frequencies : [])
+      .filter((entry) => entry && entry.quoteRequired !== true);
+    const defaultCandidate = typeof defaultFrequencyFromList === 'function'
+      ? defaultFrequencyFromList(sellable)
+      : null;
+    return { bundle, defaultCandidate: defaultCandidate || null };
+  } catch (err) {
+    logger.warn(`[estimate-proposal-billing] live pricing failed for estimate ${estimate?.id}: ${err.message}`);
+    return null;
+  }
+}
+
 /**
  * Per-application copy requires BOTH lookups to answer conclusively — any
  * unknown keeps the legacy document, which is always safe to render.
  *
- * @returns {Promise<{ billsPerApplication: boolean }>}
+ * The live rebuild runs ONLY for a confirmed per-application lane on an
+ * unlocked estimate: it is the one expensive call here, and every other case
+ * renders from frozen pricing exactly as it did before.
+ *
+ * @returns {Promise<{ billsPerApplication: boolean,
+ *   livePricing: { bundle: object, defaultCandidate: object|null }|null }>}
  */
 async function resolveProposalBillingContext(estimate) {
   const [perApplication, prepaid] = await Promise.all([
     estimateBillsPerApplication(estimate),
     estimateSoldAsAnnualPrepay(estimate),
   ]);
-  return { billsPerApplication: perApplication === true && prepaid === false };
+  const billsPerApplication = perApplication === true && prepaid === false;
+  return {
+    billsPerApplication,
+    livePricing: billsPerApplication ? await resolveLivePricing(estimate) : null,
+  };
 }
 
 module.exports = {
   estimateBillsPerApplication,
+  estimateIsPriceLocked,
   estimateSoldAsAnnualPrepay,
+  resolveLivePricing,
   resolveProposalBillingContext,
 };
 // Test-only: lets suites exercise the pre-migration branch after a true probe

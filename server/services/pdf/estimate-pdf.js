@@ -345,7 +345,7 @@ function generateEstimateProposalPDF(estimate, res, billing = {}) {
   // (see normalizeProposal). Anything but a confirmed per-application lane
   // (monthly member, annual prepay, unknown) keeps the legacy rendering.
   const recurringMode = billing?.billsPerApplication === true ? 'per_application' : 'legacy';
-  const proposal = normalizeProposal(estimate, { recurringMode });
+  const proposal = normalizeProposal(estimate, { recurringMode, livePricing: billing?.livePricing || null });
   const totals = computeProposalTotals(proposal);
 
   const doc = new PDFDocument({ size: 'LETTER', margin: 40 });

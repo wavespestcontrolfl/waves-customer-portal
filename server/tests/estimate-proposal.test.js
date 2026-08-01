@@ -420,3 +420,111 @@ describe('per-application mode with no derivable lines', () => {
     expect(p.buildings[0].lineItems.map((i) => i.frequency)).toContain('monthly');
   });
 });
+
+// ── PRICING AUTHORITY (#3120 r4/r6/r7) ──────────────────────────────────────
+// The four states the document can be quoted from, each with its own anchor.
+describe('pricing authority by estimate state', () => {
+  const { perApplicationRecurringLines } = require('../services/estimate-proposal');
+
+  const rebuilt = {
+    key: 'standard', label: 'Bi-monthly', serviceCategory: 'lawn_care',
+    monthly: 45, annual: 540, perTreatment: 90, visitsPerYear: 6, billedPerApplication: true,
+  };
+  // A snapshot the route REJECTS on lawn policy. Its totals still equal the
+  // frozen columns — the fast path requires that — which is exactly why the
+  // stale columns cannot be the reconcile anchor once it is rebuilt.
+  const retiredSnapshot = {
+    key: 'quarterly', label: 'Quarterly', serviceCategory: 'lawn_care',
+    monthly: 20, annual: 240, perTreatment: 60, visitsPerYear: 4, billedPerApplication: true,
+  };
+  const base = {
+    service_interest: 'Lawn Care',
+    monthly_total: 20,
+    annual_total: 240,
+    estimate_data: { sendSnapshot: { pricingBundle: { frequencies: [retiredSnapshot] } } },
+  };
+  const live = { bundle: { frequencies: [rebuilt] }, defaultCandidate: rebuilt };
+
+  it('OUTSTANDING + rebuilt snapshot: quotes the rebuilt plan, not the retired one', () => {
+    const out = perApplicationRecurringLines(base, base.estimate_data, live);
+    expect(out).toHaveLength(1);
+    expect(out[0].unitPrice).toBe(90);
+    expect(out[0].visitsPerYear).toBe(6);
+  });
+
+  it('OUTSTANDING: a stored-total match still beats the default candidate', () => {
+    const out = perApplicationRecurringLines(base, base.estimate_data, {
+      bundle: { frequencies: [retiredSnapshot, rebuilt] },
+      defaultCandidate: rebuilt,
+    });
+    expect(out[0].unitPrice).toBe(60);
+  });
+
+  it('OUTSTANDING: rejects a default candidate that does not add up to its own annual', () => {
+    const incoherent = { ...rebuilt, annual: 700 };
+    expect(perApplicationRecurringLines(base, base.estimate_data, {
+      bundle: { frequencies: [incoherent] }, defaultCandidate: incoherent,
+    })).toBeNull();
+  });
+
+  it('LOCKED + matching snapshot: quotes the frozen snapshot, never today prices', () => {
+    // No livePricing => locked. The snapshot reconciles to the frozen columns.
+    const out = perApplicationRecurringLines(base, base.estimate_data);
+    expect(out[0].unitPrice).toBe(60);
+    expect(out[0].visitsPerYear).toBe(4);
+  });
+
+  // The r7 hole: acceptance priced from a rebuild and discarded the bundle, so
+  // the frozen snapshot describes a plan the accepted totals never matched.
+  describe('LOCKED + stale snapshot', () => {
+    const accepted = {
+      ...base,
+      status: 'accepted',
+      monthly_total: 45,
+      annual_total: 540,          // accepted from the REBUILT plan...
+      estimate_data: {
+        sendSnapshot: { pricingBundle: { frequencies: [retiredSnapshot] } },  // ...snapshot still retired
+        customerSelection: {
+          frequencyKey: 'standard',
+          annualTotal: 540,
+          billingAmount: 90,
+          billingIntervalMonths: 2,
+        },
+      },
+    };
+
+    it('quotes the plan acceptance actually committed to', () => {
+      const out = perApplicationRecurringLines(accepted, accepted.estimate_data);
+      expect(out).toHaveLength(1);
+      expect(out[0].unitPrice).toBe(90);
+      expect(out[0].visitsPerYear).toBe(6);
+      expect(out[0].description).toContain('6 applications/yr');
+    });
+
+    it('does not suppress recurring pricing on the accepted document', () => {
+      const p = normalizeProposal(accepted, { recurringMode: 'per_application' });
+      expect(p.buildings[0].lineItems.map((i) => i.frequency)).toContain('per_application');
+      expect(computeProposalTotals(p).annualRecurring).toBe(540);
+    });
+
+    it('rejects a selection whose charge does not reconcile to its own annual', () => {
+      const bad = { ...accepted.estimate_data,
+        customerSelection: { ...accepted.estimate_data.customerSelection, billingAmount: 75 } };
+      expect(perApplicationRecurringLines(accepted, bad)).toBeNull();
+    });
+
+    it('is never used for an OUTSTANDING estimate — it has accepted nothing', () => {
+      // Same data, but the caller supplied live pricing => not locked.
+      const emptyLive = { bundle: { frequencies: [] }, defaultCandidate: null };
+      expect(perApplicationRecurringLines(accepted, accepted.estimate_data, emptyLive)).toBeNull();
+    });
+
+    it('needs both the charge and the cadence', () => {
+      for (const missing of [{ billingAmount: 0 }, { billingIntervalMonths: 0 }]) {
+        const d = { ...accepted.estimate_data,
+          customerSelection: { ...accepted.estimate_data.customerSelection, ...missing } };
+        expect(perApplicationRecurringLines({ ...accepted, estimate_data: d }, d)).toBeNull();
+      }
+    });
+  });
+});
