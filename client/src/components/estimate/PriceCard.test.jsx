@@ -350,10 +350,26 @@ describe('PriceCard — savings stack (owner 2026-08-01: discounts belong where 
   it('itemizes the tier discount and the custom discount as separate per-application rows', () => {
     render(<PriceCard frequency={lawn()} waveGuardTier="Silver" showTierBadge={false} preferPerApplicationPrice />);
 
-    expect(screen.getByText('WaveGuard Silver')).toBeInTheDocument();
+    expect(screen.getByText('WaveGuard Silver Discount')).toBeInTheDocument();
     expect(screen.getByText('Custom Percentage Discount')).toBeInTheDocument();
     expect(screen.getByText(/[−-]\$11\.00/)).toBeInTheDocument();
     expect(screen.getByText(/[−-]\$4\.83/)).toBeInTheDocument();
+  });
+
+  it.each(['Bronze', 'Silver', 'Gold', 'Platinum'])('names the tier row "WaveGuard %s Discount"', (tier) => {
+    // The tier name alone reads like the plan badge above it — the row has to
+    // say outright that it is a discount, at every tier.
+    render(<PriceCard frequency={lawn()} waveGuardTier={tier} showTierBadge={false} preferPerApplicationPrice />);
+
+    expect(screen.getByText(`WaveGuard ${tier} Discount`)).toBeInTheDocument();
+  });
+
+  it('strips a tier value that already carries the WaveGuard prefix', () => {
+    // Payloads send both "Silver" and "WaveGuard Silver"; neither may produce
+    // "WaveGuard WaveGuard Silver Discount".
+    render(<PriceCard frequency={lawn()} waveGuardTier="WaveGuard Gold" showTierBadge={false} preferPerApplicationPrice />);
+
+    expect(screen.getByText('WaveGuard Gold Discount')).toBeInTheDocument();
   });
 
   it('reconciles: anchor minus every stack row equals the headline price', () => {
@@ -395,7 +411,7 @@ describe('PriceCard — savings stack (owner 2026-08-01: discounts belong where 
       />,
     );
 
-    expect(screen.getByText('WaveGuard Silver')).toBeInTheDocument();
+    expect(screen.getByText('WaveGuard Silver Discount')).toBeInTheDocument();
     expect(screen.getByText(/[−-]\$13\.00/)).toBeInTheDocument();
     expect(screen.queryByText('Custom Percentage Discount')).toBeNull();
   });
@@ -432,7 +448,7 @@ describe('PriceCard — savings stack (owner 2026-08-01: discounts belong where 
       <PriceCard frequency={lawn()} waveGuardTier="Silver" showTierBadge={false} preferPerApplicationPrice showSavings={false} />,
     );
 
-    expect(screen.queryByText('WaveGuard Silver')).toBeNull();
+    expect(screen.queryByText('WaveGuard Silver Discount')).toBeNull();
     // The credit is still visible, in per-application units.
     expect(container.textContent).toMatch(/\$4\.83 \/ application/);
   });

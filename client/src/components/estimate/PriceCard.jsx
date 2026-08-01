@@ -372,7 +372,11 @@ export default function PriceCard({ frequency, waveGuardTier, wording = DEFAULT_
       waveGuardTier && perAppSavings > 0
         ? {
           key: 'waveguard',
-          label: `WaveGuard ${glass ? glassTierDisplay(normalizedTier(waveGuardTier)) : normalizedTier(waveGuardTier)}`,
+          // "WaveGuard Silver Discount", not "WaveGuard Silver" (owner
+          // 2026-08-01): the tier name alone reads like the plan badge it sits
+          // under, so the row has to say outright that this is a discount —
+          // same for Gold, Platinum, and any future tier.
+          label: `WaveGuard ${glass ? glassTierDisplay(normalizedTier(waveGuardTier)) : normalizedTier(waveGuardTier)} Discount`,
           amount: perAppSavings,
         }
         : null,
