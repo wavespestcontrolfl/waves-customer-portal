@@ -315,7 +315,12 @@ async function processServiceReportDelivery(delivery, knex = db) {
     // registration refuses while it is unexpired, so nothing can start
     // between this check and the dispatch.
     const versionOf = (row) => (row ? JSON.stringify([row.recommendations, row.ai_summary, row.updated_at]) : null);
-    lawnFenceCheck = async ({ renderedAssessmentId = null } = {}) => {
+    lawnFenceCheck = async ({
+      renderedAssessmentId = null,
+      attachedAssessmentId = null,
+      attachmentRendered = true,
+      hasAttachment = false,
+    } = {}) => {
       try {
         // The render is authoritative about which assessment the customer is
         // about to receive (codex P1 #3135 r3). If it used a DIFFERENT row than
@@ -326,6 +331,23 @@ async function processServiceReportDelivery(delivery, knex = db) {
         if (renderedAssessmentId && String(renderedAssessmentId) !== String(assessmentId)) {
           logger.warn(`[delivery-queue] rendered assessment ${renderedAssessmentId} differs from fenced ${assessmentId} for record ${delivery.service_record_id} — deferring send`);
           return false;
+        }
+        // The email body and the PDF build report data INDEPENDENTLY (#3143),
+        // so the body agreeing with the fence says nothing about the file the
+        // customer opens. The attachment reports its own provenance; it must
+        // agree too.
+        if (hasAttachment) {
+          if (attachedAssessmentId && String(attachedAssessmentId) !== String(assessmentId)) {
+            logger.warn(`[delivery-queue] ATTACHED assessment ${attachedAssessmentId} differs from fenced ${assessmentId} for record ${delivery.service_record_id} — deferring send`);
+            return false;
+          }
+          // A cached object carries no provenance. Fenced deliveries force a
+          // fresh render, so this should be unreachable — treat it as a broken
+          // invariant and fail closed rather than mail an unverifiable file.
+          if (!attachmentRendered) {
+            logger.warn(`[delivery-queue] attachment for record ${delivery.service_record_id} came from storage with no provenance while fenced — deferring send`);
+            return false;
+          }
         }
         const sealed = await KnowledgeBridge.sealRecommendationsForSend(assessmentId, versionAtCheck, versionOf);
         if (sealed) {

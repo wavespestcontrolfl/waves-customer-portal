@@ -124,10 +124,17 @@ async function renderAndStoreServiceReportPdf(recordId, {
   // can't key a fallback PDF as final (codex P2 r15). '-tn0' matches the
   // lookup sentinel for reports that render no narrative.
   let tnRenderedSignature = '-tn0';
+  // Which lawn assessment this PDF actually contains (issue #3143). The email
+  // body builds its own report data, so the only trustworthy answer about the
+  // ATTACHMENT comes from the data object that was handed to the renderer —
+  // read here, never re-resolved from the DB, so a row confirmed or relinked
+  // after the render can't change what we claim was baked in.
+  let renderedLawnAssessmentId = null;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const renderSignature = visibilitySignature;
     const data = await buildReportV1Data(service, reportToken, knex, { pestPressureConfig });
     tnRenderedSignature = data?.treatmentNarrativeRenderedSignature || '-tn0';
+    renderedLawnAssessmentId = data?.lawnAssessment?.assessmentId || null;
     // Queued PDFs are cached snapshots — live-only schedule fields
     // (nextAppointment, reportV2.snapshot.nextVisit) must never fossilize
     // into them (codex P2 r2: this path bypasses the route helper's strip).
@@ -162,7 +169,7 @@ async function renderAndStoreServiceReportPdf(recordId, {
       visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + tnRenderedSignature,
     });
     await knex('service_records').where({ id: recordId }).update({ pdf_storage_key: key });
-    return { key, pdf, token: reportToken };
+    return { key, pdf, token: reportToken, lawnAssessmentId: renderedLawnAssessmentId };
   } catch (err) {
     if (!allowUnstoredPdf) throw err;
     const storageError = safePdfRenderError(err);
@@ -174,6 +181,7 @@ async function renderAndStoreServiceReportPdf(recordId, {
       storageFailed: true,
       storageError,
       token: reportToken,
+      lawnAssessmentId: renderedLawnAssessmentId,
     };
   }
 }
@@ -283,7 +291,11 @@ async function getOrRenderServiceReportPdf(recordId, { token, req, knex = db, fo
   const stored = (!mustRenderFresh && service?.pdf_storage_key === expectedPdfStorageKey)
     ? await getHealthyStoredReportPdf(service.pdf_storage_key)
     : null;
-  if (stored) return { pdf: stored, key: service.pdf_storage_key, rendered: false };
+  // A cached object carries NO provenance — nothing records which assessment
+  // was baked into it (issue #3143). Report lawnAssessmentId: null rather than
+  // guessing, so a caller fencing a send can tell "this attachment came from a
+  // render I can vouch for" apart from "this came from storage".
+  if (stored) return { pdf: stored, key: service.pdf_storage_key, rendered: false, lawnAssessmentId: null };
 
   const rendered = await renderAndStoreServiceReportPdf(recordId, {
     token,
@@ -346,6 +358,8 @@ async function getOrRenderServiceReportPdf(recordId, { token, req, knex = db, fo
     storageFailed: !!rendered.storageFailed,
     storageError: rendered.storageError || null,
     token: rendered.token,
+    // Provenance of THIS attachment, straight off the rendered data (#3143).
+    lawnAssessmentId: rendered.lawnAssessmentId || null,
   };
 }
 

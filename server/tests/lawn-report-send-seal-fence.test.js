@@ -268,6 +268,81 @@ describe('#3135 r1/r2 — fence target resolution', () => {
     expect(sendServiceReportV1Email.mock.calls[0][1].forceFreshPdf).toBe(true);
   });
 
+  // #3143: the body and the PDF build report data independently, so the body
+  // agreeing with the fence proves nothing about the file the customer opens.
+  test('#3143: the fence refuses when the ATTACHMENT contains a different assessment', async () => {
+    sendServiceReportV1Email.mockImplementationOnce(async (_id, opts) => {
+      const safe = await opts.verifyBeforeSend({
+        renderedAssessmentId: 'assess-canonical', // body agrees…
+        attachedAssessmentId: 'assess-OTHER', // …but the PDF does not
+        attachmentRendered: true,
+        hasAttachment: true,
+      });
+      return safe ? { ok: true, messageId: 'msg-1' } : { ok: false, error: 'deferring', retryable: true };
+    });
+    const knex = makeKnex();
+    const delivery = { ...DELIVERY, payload: { source: 'dispatch_complete' } };
+
+    const out = await processServiceReportDelivery(delivery, knex);
+
+    expect(out.status).not.toBe('sent');
+    expect(KnowledgeBridge.sealRecommendationsForSend).not.toHaveBeenCalled();
+  });
+
+  test('#3143: an unverifiable CACHED attachment fails closed', async () => {
+    sendServiceReportV1Email.mockImplementationOnce(async (_id, opts) => {
+      const safe = await opts.verifyBeforeSend({
+        renderedAssessmentId: 'assess-canonical',
+        attachedAssessmentId: null, // storage carries no provenance
+        attachmentRendered: false,
+        hasAttachment: true,
+      });
+      return safe ? { ok: true, messageId: 'msg-1' } : { ok: false, error: 'deferring', retryable: true };
+    });
+    const knex = makeKnex();
+    const delivery = { ...DELIVERY, payload: { source: 'dispatch_complete' } };
+
+    const out = await processServiceReportDelivery(delivery, knex);
+    expect(out.status).not.toBe('sent');
+  });
+
+  test('#3143: body and attachment both matching proceeds', async () => {
+    sendServiceReportV1Email.mockImplementationOnce(async (_id, opts) => {
+      const safe = await opts.verifyBeforeSend({
+        renderedAssessmentId: 'assess-canonical',
+        attachedAssessmentId: 'assess-canonical',
+        attachmentRendered: true,
+        hasAttachment: true,
+      });
+      return safe ? { ok: true, messageId: 'msg-1' } : { ok: false, error: 'deferring', retryable: true };
+    });
+    const knex = makeKnex();
+    const delivery = { ...DELIVERY, payload: { source: 'dispatch_complete' } };
+
+    const out = await processServiceReportDelivery(delivery, knex);
+    expect(out.status).toBe('sent');
+    expect(KnowledgeBridge.sealRecommendationsForSend).toHaveBeenCalledWith(
+      'assess-canonical', expect.any(String), expect.any(Function),
+    );
+  });
+
+  test('#3143: no attachment at all leaves nothing to diverge — send proceeds', async () => {
+    sendServiceReportV1Email.mockImplementationOnce(async (_id, opts) => {
+      const safe = await opts.verifyBeforeSend({
+        renderedAssessmentId: 'assess-canonical',
+        attachedAssessmentId: null,
+        attachmentRendered: false,
+        hasAttachment: false, // PDF render failed; email goes without one
+      });
+      return safe ? { ok: true, messageId: 'msg-1' } : { ok: false, error: 'deferring', retryable: true };
+    });
+    const knex = makeKnex();
+    const delivery = { ...DELIVERY, payload: { source: 'dispatch_complete' } };
+
+    const out = await processServiceReportDelivery(delivery, knex);
+    expect(out.status).toBe('sent');
+  });
+
   test('r2: a lookup ERROR fails closed — deferred, never dispatched unfenced', async () => {
     loadLinkedLawnAssessment.mockRejectedValue(new Error('connection terminated'));
     const knex = makeKnex();
