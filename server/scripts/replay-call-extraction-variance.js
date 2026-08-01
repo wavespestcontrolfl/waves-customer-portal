@@ -614,6 +614,27 @@ function contactPhoneForCall(call) {
   return String(call.direction || '').startsWith('outbound') ? call.to_phone : call.from_phone;
 }
 
+// The stored AV verdict was computed for the HISTORICAL extraction's address.
+// It transfers to another extraction only when that extraction states the
+// same address (codex round-11 P1) — a re-extraction that changes the street
+// must NOT ride on the old validated_accept, or the replay reports that
+// production would auto-route an address it would actually revalidate.
+// Comparison uses the repo's suffix-insensitive street key + city + zip;
+// an address the verdict doesn't match degrades to null (the pre-AV
+// fallback posture: model/confidence signals + the central gate holding).
+function avVerdictForExtraction(storedAv, verdictExtraction, candidateExtraction, helpers) {
+  if (!storedAv) return null;
+  if (!verdictExtraction || !candidateExtraction) return null;
+  const a = verdictExtraction.property?.service_address || {};
+  const b = candidateExtraction.property?.service_address || {};
+  const key = (sa) => [
+    helpers.streetCompareKey ? helpers.streetCompareKey(sa.street_line_1 || '') : String(sa.street_line_1 || '').toLowerCase(),
+    String(sa.city || '').toLowerCase().trim(),
+    String(sa.postal_code || '').trim(),
+  ].join('|');
+  return key(a) === key(b) ? storedAv : null;
+}
+
 function routeForV2(extraction, contactPhone, helpers, addressValidation = null) {
   if (!extraction) return { allowed: false, reason: 'no_extraction', flags: [] };
   // The stored AV verdict rides along (codex round-10 P1): since the central
@@ -872,6 +893,8 @@ async function replayCall(call, context) {
   const priorV2Valid = priorV2 && helpers.isV2Extraction(priorV2);
   const priorV2Flat = priorV2Valid ? helpers.flatView(priorV2) : null;
   const storedAv = parseJson(call.ai_address_validation, null);
+  // The verdict was computed for the persisted (prior) extraction — it always
+  // applies to priorV2 by construction.
   const priorV2Route = priorV2Valid ? routeForV2(priorV2, contactPhone, helpers, storedAv) : null;
   const scheduled = await findLegacyScheduledService(db, call, scheduledColumns);
 
@@ -930,7 +953,8 @@ async function replayCall(call, context) {
   const currentExtraction = current.status === 'valid' ? current.extraction : null;
   const currentFlat = currentExtraction ? helpers.flatView(currentExtraction) : null;
   const currentRoute = currentExtraction
-    ? routeForV2(currentExtraction, contactPhone, helpers, storedAv)
+    ? routeForV2(currentExtraction, contactPhone, helpers,
+      avVerdictForExtraction(storedAv, priorV2Valid ? priorV2 : null, currentExtraction, helpers))
     : { allowed: false, reason: current.status, flags: [] };
 
   const legacyFieldVariances = currentFlat ? compareFlatFields(legacyFlat, currentFlat, includeValues) : [];

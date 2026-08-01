@@ -137,6 +137,19 @@ async function main() {
     ? allRouteRows.filter((r) => new Date(r.created_at) > cohortSince)
     : allRouteRows;
 
+  // Effective-verdict reconstruction for RECOVERED addresses (codex round-11
+  // P2): the processor deliberately persists the ORIGINAL unresolvable
+  // verdict in ai_address_validation while ROUTING with the recovery's
+  // accepting result — the durable trace of that split is the
+  // address_recovered card. Auditing with the stored verdict alone reports
+  // triage for calls production auto-created, depressing v1↔v2 agreement.
+  // Recovery adopts only when it confirmed exactly ONE real in-area premise,
+  // so 'corrected' + inServiceArea is the faithful reconstruction.
+  const recoveredCallIds = new Set((await db('triage_items')
+    .whereIn('call_log_id', boundedRouteRows.map((r) => r.id))
+    .where({ reason_code: 'address_recovered' })
+    .select('call_log_id')).map((t) => t.call_log_id));
+
   // The GATE scores the PRIMARY leg alone — pooling both legs would let a
   // healthy primary mask a small failing fallback cohort, or pass a route
   // whose fallback has zero assessed rows. The fallback cohort is reported
@@ -215,7 +228,11 @@ async function main() {
     // auto-routes and the readiness comparison meaningless (codex round-10 P1
     // on PR #3119).
     const contactPhone = String(r.direction || '').startsWith('outbound') ? r.to_phone : r.from_phone;
-    const routing = canAutoRoute(v2, { contactPhone, addressValidation: parseJson(r.ai_address_validation) });
+    const storedAv = parseJson(r.ai_address_validation);
+    const effectiveAv = recoveredCallIds.has(r.id)
+      ? { status: 'corrected', inServiceArea: true, county: storedAv?.county || null, normalized: storedAv?.normalized || null, reconstructed_from: 'address_recovered' }
+      : storedAv;
+    const routing = canAutoRoute(v2, { contactPhone, addressValidation: effectiveAv });
     const v2WouldCreate = routing.allowed;
     const v1DidCreate = v1CreatedSid.has(r.twilio_call_sid);
 

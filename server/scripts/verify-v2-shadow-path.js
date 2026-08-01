@@ -9,7 +9,7 @@
 require('dotenv').config({ path: require('path').join(__dirname, '..', '..', '.env') });
 const fs = require('fs');
 const CRP = require('../services/call-recording-processor');
-const { canAutoRoute, computeDeterministicTriageFlags, mergeTriageFlags } = require('../services/call-triage-flags');
+const { canAutoRoute, computeDeterministicTriageFlags, mergeTriageFlags, streetCompareKey } = require('../services/call-triage-flags');
 
 function dbConn() {
   const url = process.env.DATABASE_PUBLIC_URL || process.env.DATABASE_URL;
@@ -30,7 +30,7 @@ async function main() {
       .where('processing_status', 'processed')
       .orderBy('created_at', 'desc')
       .limit(N)
-      .select('id', 'transcription', 'from_phone', 'to_phone', 'direction', 'created_at', 'ai_address_validation');
+      .select('id', 'transcription', 'from_phone', 'to_phone', 'direction', 'created_at', 'ai_address_validation', 'ai_extraction_enriched');
     await db.destroy();
     fs.writeFileSync(process.env.DUMP_TO, JSON.stringify(rows));
     console.log(`Dumped ${rows.length} real transcripts to ${process.env.DUMP_TO}`);
@@ -63,7 +63,17 @@ async function main() {
       // Stored AV verdict rides along (codex round-10 P1): without it the
       // central address-trust gate (2026-08-01) reports address_not_validated
       // for every call and this verifier exercises none of the approved path.
-      const storedAv = (() => { try { return typeof r.ai_address_validation === 'string' ? JSON.parse(r.ai_address_validation) : (r.ai_address_validation || null); } catch { return null; } })();
+      // But the verdict was computed for the HISTORICAL extraction's address —
+      // it transfers to this fresh re-extraction only when the stated address
+      // is unchanged (codex round-11 P1); a changed street degrades to null
+      // rather than riding on a stale validated_accept.
+      const pj = (v) => { try { return typeof v === 'string' ? JSON.parse(v) : (v || null); } catch { return null; } };
+      const rawAv = pj(r.ai_address_validation);
+      const priorEnriched = pj(r.ai_extraction_enriched);
+      const addrKey = (sa) => [streetCompareKey(sa?.street_line_1 || ''), String(sa?.city || '').toLowerCase().trim(), String(sa?.postal_code || '').trim()].join('|');
+      const storedAv = (rawAv && priorEnriched
+        && addrKey(priorEnriched.property?.service_address) === addrKey(e.property?.service_address))
+        ? rawAv : null;
       const flags = mergeTriageFlags(e.triage_flags, computeDeterministicTriageFlags(e, { contactPhone, addressValidation: storedAv }));
       const route = canAutoRoute(e, { contactPhone, addressValidation: storedAv });
       // No customer PII (names/addresses) in logs — non-PII signals only.
