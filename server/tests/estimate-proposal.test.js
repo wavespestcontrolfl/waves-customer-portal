@@ -157,3 +157,148 @@ describe('isCommercialProposalData', () => {
     expect(isCommercialProposalData(JSON.stringify({ proposal: { scaffold: true } }))).toBe(true);
   });
 });
+
+describe('per-application synthesis (owner rule 2026-07-31: residential bills per application or annual prepay, never a flat monthly)', () => {
+  const { perApplicationRecurringLines, annualizedAmount } = require('../services/estimate-proposal');
+
+  // Shaped like the 2026-07-31 customer report: bi-monthly lawn plan,
+  // $540/yr = $90/application × 6, whose PDF previously printed
+  // "Recurring service plan / Monthly / $45.00".
+  const lawnEstimate = {
+    customer_name: 'S. Morgan',
+    address: '1 Oak St',
+    service_interest: 'Lawn Care',
+    monthly_total: 45,
+    annual_total: 540,
+    onetime_total: 0,
+    accepted_frequency_key: 'standard',
+    estimate_data: {
+      sendSnapshot: {
+        pricingBundle: {
+          frequencies: [
+            { key: 'standard', label: 'Bi-monthly', monthly: 45, annual: 540, perTreatment: 90, visitsPerYear: 6 },
+            { key: 'enhanced', label: 'Every 6 weeks', monthly: 65, annual: 780, perTreatment: 86.67, visitsPerYear: 9 },
+          ],
+        },
+      },
+    },
+  };
+
+  it('quotes the accepted cadence per application, not per month', () => {
+    const lines = perApplicationRecurringLines(lawnEstimate, lawnEstimate.estimate_data);
+    expect(lines).toHaveLength(1);
+    expect(lines[0].frequency).toBe('per_application');
+    expect(lines[0].frequencyLabel).toBe('Per application');
+    expect(lines[0].unitPrice).toBe(90);
+    expect(lines[0].visitsPerYear).toBe(6);
+    expect(lines[0].description).toBe('Lawn Care — 6 applications/yr');
+    expect(annualizedAmount(lines[0])).toBe(540);
+  });
+
+  it('flows into the synthesized proposal and annualizes without a monthly line', () => {
+    const p = normalizeProposal(lawnEstimate);
+    expect(p.synthesized).toBe(true);
+    expect(p.buildings[0].lineItems).toHaveLength(1);
+    expect(p.buildings[0].lineItems[0].frequency).toBe('per_application');
+    const totals = computeProposalTotals(p);
+    expect(totals.annualRecurring).toBe(540);
+    expect(totals.firstYearTotal).toBe(540);
+  });
+
+  it('matches by stored totals when no accepted key is stamped (unaccepted estimate)', () => {
+    const unaccepted = { ...lawnEstimate, accepted_frequency_key: null };
+    const lines = perApplicationRecurringLines(unaccepted, unaccepted.estimate_data);
+    expect(lines).toHaveLength(1);
+    expect(lines[0].unitPrice).toBe(90);
+  });
+
+  it('uses per-service treatment rows when the entry is split', () => {
+    const est = {
+      ...lawnEstimate,
+      annual_total: 940,
+      estimate_data: {
+        sendSnapshot: {
+          pricingBundle: {
+            frequencies: [{
+              key: 'standard',
+              annual: 940,
+              perServiceTreatments: [
+                { label: 'Lawn Care Program', displayPrice: 90, visitsPerYear: 6 },
+                { label: 'Perimeter Pest', perTreatment: 100, visitsPerYear: 4 },
+              ],
+            }],
+          },
+        },
+      },
+    };
+    const lines = perApplicationRecurringLines(est, est.estimate_data);
+    expect(lines).toHaveLength(2);
+    expect(lines[0].description).toBe('Lawn Care Program — 6 applications/yr');
+    expect(lines[1].unitPrice).toBe(100);
+  });
+
+  it('keeps genuine flat-monthly rows (termite bait monitoring) labeled monthly', () => {
+    const est = {
+      ...lawnEstimate,
+      annual_total: 780,
+      estimate_data: {
+        sendSnapshot: {
+          pricingBundle: {
+            frequencies: [{
+              key: 'standard',
+              annual: 780,
+              perServiceTreatments: [
+                { label: 'Lawn Care Program', displayPrice: 90, visitsPerYear: 6 },
+                { label: 'Termite Bait Monitoring', monthly: 20 },
+              ],
+            }],
+          },
+        },
+      },
+    };
+    const lines = perApplicationRecurringLines(est, est.estimate_data);
+    expect(lines).toHaveLength(2);
+    expect(lines[1].frequency).toBe('monthly');
+    expect(lines[1].unitPrice).toBe(20);
+  });
+
+  it('returns null when the lines do not reconcile to the stored annual total', () => {
+    const drifted = { ...lawnEstimate, annual_total: 600 };
+    expect(perApplicationRecurringLines(drifted, drifted.estimate_data)).toBeNull();
+  });
+
+  it('returns null with no bundle so the legacy monthly fallback still renders a number', () => {
+    const bare = { monthly_total: 120, annual_total: 1440, estimate_data: {} };
+    expect(perApplicationRecurringLines(bare, bare.estimate_data)).toBeNull();
+    const p = normalizeProposal(bare);
+    expect(p.buildings[0].lineItems[0].frequency).toBe('monthly');
+  });
+
+  it('skips quote-required cadences', () => {
+    const est = {
+      ...lawnEstimate,
+      estimate_data: {
+        sendSnapshot: {
+          pricingBundle: {
+            frequencies: [{ key: 'standard', quoteRequired: true, annual: 540, perTreatment: 90, visitsPerYear: 6 }],
+          },
+        },
+      },
+    };
+    expect(perApplicationRecurringLines(est, est.estimate_data)).toBeNull();
+  });
+
+  it('still carries one-time engine lines alongside per-application recurring lines', () => {
+    const est = {
+      ...lawnEstimate,
+      onetime_total: 150,
+      estimate_data: {
+        ...lawnEstimate.estimate_data,
+        lineItems: [{ name: 'Initial cleanup', oneTimePrice: 150 }],
+      },
+    };
+    const p = normalizeProposal(est);
+    const freqs = p.buildings[0].lineItems.map((i) => i.frequency);
+    expect(freqs).toEqual(['per_application', 'one_time']);
+  });
+});

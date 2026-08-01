@@ -21,7 +21,7 @@ const {
   WAVES_FDACS_LICENSE_NUMBER,
 } = require('../../constants/business');
 const { formatDisplayDate } = require('../../utils/date-only');
-const { normalizeProposal, computeProposalTotals } = require('../estimate-proposal');
+const { normalizeProposal, computeProposalTotals, annualizedAmount } = require('../estimate-proposal');
 
 // Brand palette — identical to invoice-pdf.js.
 const NAVY = '#1B2C5B';
@@ -217,7 +217,7 @@ function buildingBlock(ctx, building, y, taxRate) {
     y += rowH;
 
     if (item.frequency === 'one_time') buildingOneTime += item.amount;
-    else buildingAnnual += item.amount * ({ monthly: 12, bimonthly: 6, quarterly: 4, annual: 1 }[item.frequency] || 0);
+    else buildingAnnual += annualizedAmount(item);
   }
 
   // Building subtotal line
@@ -254,7 +254,13 @@ function totalsBlock(ctx, totals, y) {
   };
 
   if (totals.annualRecurring > 0) {
-    row('Recurring (monthly equivalent)', `${currency(totals.monthlyEquivalent)}/mo`);
+    // The monthly-equivalent line is authored-proposal-only (boards budget
+    // monthly/annually). Residential plans bill per application or annual
+    // prepay — never a flat monthly — so a synthesized estimate PDF quoting
+    // "$X/mo" misstates the charge (customer-reported 2026-07-31).
+    if (ctx.showMonthlyEquivalent) {
+      row('Recurring (monthly equivalent)', `${currency(totals.monthlyEquivalent)}/mo`);
+    }
     row('Recurring (annualized)', `${currency(totals.annualRecurring)}/yr`);
   }
   if (totals.oneTime > 0) row('One-time services', currency(totals.oneTime));
@@ -314,6 +320,7 @@ function generateEstimateProposalPDF(estimate, res) {
     doc,
     title: proposal.title,
     taxLabel: proposal.taxLabel,
+    showMonthlyEquivalent: proposal.enabled === true,
     tagline: 'Thank you for considering Waves Pest Control',
   };
 

@@ -19,7 +19,12 @@
 // $0 and every line renders as non-taxable.
 // ============================================================
 
-const FREQUENCIES = ['monthly', 'quarterly', 'bimonthly', 'annual', 'one_time'];
+// per_application is internal to the synthesized fallback (residential
+// recurring plans bill per completed application, never a flat monthly) —
+// the Commercial Proposal editor keeps its own hardcoded option list and
+// never offers it. A per_application line annualizes by its own
+// visitsPerYear, not a fixed occurrence count.
+const FREQUENCIES = ['monthly', 'quarterly', 'bimonthly', 'annual', 'one_time', 'per_application'];
 
 // Occurrences per year for each recurring cadence. one_time is handled
 // separately (it never contributes to the recurring/annualized totals).
@@ -36,6 +41,7 @@ const FREQUENCY_LABELS = {
   quarterly: 'Quarterly',
   annual: 'Annual',
   one_time: 'One-time',
+  per_application: 'Per application',
 };
 
 function roundMoney(value) {
@@ -68,6 +74,11 @@ function normalizeLineItem(raw = {}) {
   // amount is the price per occurrence (qty × unit price). Annualization is
   // derived from the frequency in computeProposalTotals.
   const amount = roundMoney(quantity * unitPrice);
+  // per_application lines carry their own occurrence count; without one the
+  // line annualizes to $0 (same as any unknown cadence would).
+  const visitsPerYear = frequency === 'per_application'
+    ? Math.max(0, Math.round(num(raw.visitsPerYear ?? raw.visits_per_year, 0)))
+    : 0;
   return {
     description: String(raw.description || raw.name || '').slice(0, 300),
     quantity,
@@ -76,6 +87,7 @@ function normalizeLineItem(raw = {}) {
     frequencyLabel: FREQUENCY_LABELS[frequency],
     taxable: raw.taxable === true,
     amount,
+    ...(visitsPerYear > 0 ? { visitsPerYear } : {}),
   };
 }
 
@@ -98,11 +110,80 @@ function parseEstimateData(estimateData) {
   return typeof estimateData === 'object' ? estimateData : {};
 }
 
+// Recurring lines quoted the way residential plans actually bill — per
+// completed application (owner rule 2026-07-23 / 2026-07-31: billing is
+// per application or annual prepay, never a flat monthly). Sources the
+// send snapshot's pricing bundle (the same payload the estimate page
+// renders): the accepted cadence when one is stamped, else the cadence
+// whose totals match the stored estimate totals. Returns null when no
+// cadence can be matched, a row can't be priced per-application (and isn't
+// a genuine flat-monthly row like termite bait monitoring), or the lines
+// don't annualize back to the stored annual total — callers then fall back
+// to the legacy monthly-line synthesis rather than risk a document whose
+// dollars don't reconcile.
+function perApplicationRecurringLines(estimate = {}, estimateData = {}) {
+  const frequencies = estimateData?.sendSnapshot?.pricingBundle?.frequencies;
+  if (!Array.isArray(frequencies) || frequencies.length === 0) return null;
+  const candidates = frequencies.filter((f) => f && f.quoteRequired !== true);
+  const acceptedKey = String(estimate.accepted_frequency_key || '').trim();
+  const annualTotal = num(estimate.annual_total);
+  const monthlyTotal = num(estimate.monthly_total);
+  const pick = (acceptedKey
+    && candidates.find((f) => f.key === acceptedKey || f.billingFrequencyKey === acceptedKey))
+    || (annualTotal > 0 && candidates.find((f) => Math.abs(num(f.annual) - annualTotal) < 0.01))
+    || (monthlyTotal > 0 && candidates.find((f) => Math.abs(num(f.monthly) - monthlyTotal) < 0.01))
+    || null;
+  if (!pick) return null;
+
+  // Split entries carry per-service treatment rows; rowless single-service
+  // entries carry perTreatment/visitsPerYear on the frequency itself — but
+  // their label is the CADENCE name ("Bi-monthly"), so the service name
+  // comes from the estimate instead.
+  const hasRows = Array.isArray(pick.perServiceTreatments) && pick.perServiceTreatments.length > 0;
+  const rows = hasRows ? pick.perServiceTreatments : [pick];
+  const rowlessName = String(estimate.service_interest || '').trim() || 'Recurring service plan';
+  const lines = [];
+  for (const row of rows) {
+    const visits = Math.round(num(row.visitsPerYear ?? pick.visitsPerYear));
+    const perApplication = num(row.displayPrice ?? row.perTreatment);
+    const monthly = num(row.monthly);
+    const name = hasRows ? (row.label || row.service || 'Recurring service') : rowlessName;
+    if (perApplication > 0 && visits > 0) {
+      lines.push(normalizeLineItem({
+        description: `${name} — ${visits} applications/yr`,
+        unitPrice: perApplication,
+        frequency: 'per_application',
+        visitsPerYear: visits,
+        taxable: false,
+      }));
+    } else if (monthly > 0) {
+      // Flat-monthly rows (termite bait monitoring) genuinely charge a
+      // monthly amount on accept — keep the honest label.
+      lines.push(normalizeLineItem({
+        description: name,
+        unitPrice: monthly,
+        frequency: 'monthly',
+        taxable: false,
+      }));
+    }
+    // Rows with neither a per-application nor a monthly price are
+    // display-only (the estimate page filters them the same way) — skipping
+    // one that actually carried dollars fails the annual reconcile below.
+  }
+  if (lines.length === 0) return null;
+  if (annualTotal > 0) {
+    const sum = roundMoney(lines.reduce((acc, line) => acc + annualizedAmount(line), 0));
+    if (Math.abs(sum - annualTotal) > 0.05) return null;
+  }
+  return lines;
+}
+
 // Build a single-building fallback proposal from the engine line items /
 // estimate fields so ANY estimate can still produce a PDF even before the
 // operator has authored an explicit multi-building proposal.
 function synthesizeFallbackProposal(estimate = {}, estimateData = {}) {
-  const lineItems = [];
+  const lineItems = [...(perApplicationRecurringLines(estimate, estimateData) || [])];
+  const havePerApplicationRecurring = lineItems.length > 0;
   const engineLines = Array.isArray(estimateData?.sendSnapshot?.pricingBundle?.lineItems)
     ? estimateData.sendSnapshot.pricingBundle.lineItems
     : Array.isArray(estimateData?.lineItems)
@@ -113,6 +194,8 @@ function synthesizeFallbackProposal(estimate = {}, estimateData = {}) {
     const monthly = num(line.monthlyPrice ?? line.monthly_price);
     const oneTime = num(line.oneTimePrice ?? line.onetime_price ?? line.oneTime);
     if (monthly > 0) {
+      // The per-application lines already cover the recurring side.
+      if (havePerApplicationRecurring) continue;
       lineItems.push(normalizeLineItem({
         description: line.displayName || line.name || line.service || 'Recurring service',
         unitPrice: monthly,
@@ -129,14 +212,16 @@ function synthesizeFallbackProposal(estimate = {}, estimateData = {}) {
     }
   }
 
-  // Last-ditch: no engine lines available — fall back to the stored totals so
-  // the PDF still shows a number rather than an empty table.
-  if (lineItems.length === 0) {
+  // Last-ditch: fill whichever side is still missing from the stored totals
+  // so the PDF still shows a number rather than an empty table.
+  if (!lineItems.some((item) => item.frequency !== 'one_time')) {
     const monthly = num(estimate.monthly_total);
-    const oneTime = num(estimate.onetime_total);
     if (monthly > 0) {
       lineItems.push(normalizeLineItem({ description: 'Recurring service plan', unitPrice: monthly, frequency: 'monthly' }));
     }
+  }
+  if (!lineItems.some((item) => item.frequency === 'one_time')) {
+    const oneTime = num(estimate.onetime_total);
     if (oneTime > 0) {
       lineItems.push(normalizeLineItem({ description: 'One-time service', unitPrice: oneTime, frequency: 'one_time' }));
     }
@@ -199,7 +284,9 @@ function normalizeProposal(estimate = {}) {
 
 function annualizedAmount(item) {
   if (item.frequency === 'one_time') return 0;
-  const occ = OCCURRENCES_PER_YEAR[item.frequency] || 0;
+  const occ = item.frequency === 'per_application'
+    ? (Number(item.visitsPerYear) || 0)
+    : (OCCURRENCES_PER_YEAR[item.frequency] || 0);
   return roundMoney(item.amount * occ);
 }
 
@@ -259,6 +346,7 @@ module.exports = {
   normalizeLineItem,
   normalizeBuilding,
   normalizeProposal,
+  perApplicationRecurringLines,
   annualizedAmount,
   computeProposalTotals,
   isCommercialProposalData,
