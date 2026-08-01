@@ -397,6 +397,29 @@ const formatDay = formatETDay;
 const formatDate = formatETDate;
 const formatTime = formatETTime;
 
+// The customer-facing arrival range ("8:00 AM and 10:00 AM") for the {window}
+// placeholder in the 72h/24h reminders. Built from the SAME arrivalWindowRange
+// helper dispatch, estimates, reschedule, and rain-out already use, so the
+// "always 2 hours from the window start" rule stays in exactly one place.
+// Pure ET clock math (never wall-clock arithmetic on the Date), so a DST
+// boundary can't stretch or shrink the quoted window. Falls back to the plain
+// start time if the range can't be derived, which still renders sane copy.
+function formatArrivalWindow(apptTime) {
+  const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
+  const { etParts } = require('../utils/datetime-et');
+  try {
+    const { hour, minute } = etParts(apptTime);
+    const hhmm = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+    const range = arrivalWindowRange(hhmm);
+    if (!range) return formatTime(apptTime);
+    // '8:00 AM - 10:00 AM' -> '8:00 AM and 10:00 AM' (the copy reads
+    // "between {window}", which is how a person says it out loud).
+    return formatSmsTimeRange(range).replace(' - ', ' and ');
+  } catch {
+    return formatTime(apptTime);
+  }
+}
+
 // Admin-disambiguation parentheticals only — frequency words ("Monthly",
 // "Bi-Monthly", "Semiannual"), interval phrases ("Every 6 Weeks"), and
 // term phrases ("10-Year Term"). Parens with semantic customer-facing
@@ -1594,7 +1617,7 @@ const AppointmentReminders = {
                 const firstName = firstNameFrom(contact.name) || customer?.first_name || 'there';
                 return renderTemplate(
                   'reminder_72h',
-                  { first_name: firstName, service_type: serviceLabel, day, date, time, reschedule_line: reschedule.line, card_hold_policy_line: cardHoldPolicyLine72 },
+                  { first_name: firstName, service_type: serviceLabel, day, date, time, window: formatArrivalWindow(apptTime), reschedule_line: reschedule.line, card_hold_policy_line: cardHoldPolicyLine72 },
                   { workflow: 'appointment_reminder_72h', entity_type: 'scheduled_service', entity_id: r.scheduled_service_id },
                 );
               }, 'reminder_72h', 'appointment_reminder_72h', { scheduled_service_id: r.scheduled_service_id }),
@@ -1684,7 +1707,7 @@ const AppointmentReminders = {
                 const firstName = firstNameFrom(contact.name) || customer?.first_name || 'there';
                 return renderTemplate(
                   'reminder_24h',
-                  { first_name: firstName, service_type: serviceLabel, time, reschedule_line: reschedule.line, card_hold_policy_line: cardHoldPolicyLine24 },
+                  { first_name: firstName, service_type: serviceLabel, time, window: formatArrivalWindow(apptTime), reschedule_line: reschedule.line, card_hold_policy_line: cardHoldPolicyLine24 },
                   { workflow: 'appointment_reminder_24h', entity_type: 'scheduled_service', entity_id: r.scheduled_service_id },
                 );
               }, 'appointment_reminder', 'appointment_reminder_24h', { scheduled_service_id: r.scheduled_service_id }),
