@@ -264,8 +264,23 @@ describe('live override composed with buildCompletionLifecycleUpdates', () => {
     updates.check_out_time = adjusted;
     expect(updates.actual_end_time).toEqual(new Date('2026-07-19T16:45:00Z'));
     expect(Math.round((updates.actual_end_time - new Date(withEnd.actual_start_time)) / 60000)).toBe(45);
-    // And the route wiring pins the force to the live-adjusted branch only.
-    expect(source).toMatch(/if \(!isBackfillCompletion && adjustedEndedAt\) \{\s*\n\s*lifecycleUpdates\.actual_end_time = adjustedEndedAt;\s*\n\s*lifecycleUpdates\.check_out_time = adjustedEndedAt;\s*\n\s*\}/);
+    // And the route wiring pins the force to the live-adjusted branch only —
+    // which ALSO stamps the durable row column the costing fence and the
+    // no-opts labor override read, even when the end instant was clamped
+    // (codex P2 round 11).
+    expect(source).toMatch(/if \(!isBackfillCompletion && liveAdjustedTimeOnSite\) \{\s*\n\s*if \(adjustedEndedAt\) \{\s*\n\s*lifecycleUpdates\.actual_end_time = adjustedEndedAt;\s*\n\s*lifecycleUpdates\.check_out_time = adjustedEndedAt;\s*\n\s*\}/);
+    expect(source).toMatch(/lifecycleUpdates\.time_on_site_adjusted_minutes = effectiveTimeOnSite;/);
+  });
+
+  test('markComplete honors a caller-supplied trusted instant — the adjusted end reaches completed_at (codex P2 round 11)', () => {
+    const trackerSource = fs.readFileSync(
+      path.join(__dirname, '../services/track-transitions.js'),
+      'utf8',
+    );
+    // Trusted path: finite opts.completedAt wins, wall clock only as the
+    // fallback — so the live override's adjusted instant is not discarded.
+    // Untrusted (backfill) branch byte-identical to its prior contract.
+    expect(trackerSource).toMatch(/const completedAtStamp = opts\.untrustedLifecycleSpan\s*\n\s*\? finiteDate\(opts\.completedAt\)\s*\n\s*: \(finiteDate\(opts\.completedAt\) \|\| now\);/);
   });
 
   test('the live sanitizer and the backfill sanitizer are the same 1..720 rule', () => {

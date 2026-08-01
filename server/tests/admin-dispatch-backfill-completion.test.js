@@ -2513,7 +2513,10 @@ describe('completion route wiring (source contracts)', () => {
     // written only from the caller's instant (finiteDate-validated); absent
     // → the column is omitted, never a wall-clock fallback.
     const trackerSource = fs.readFileSync(path.join(__dirname, '../services/track-transitions.js'), 'utf8');
-    expect(trackerSource).toMatch(/const completedAtStamp = opts\.untrustedLifecycleSpan \? finiteDate\(opts\.completedAt\) : now;/);
+    // Trusted path honors a caller-supplied finite instant (live admin
+    // override, codex P2 #3152 round 11) and keeps the wall clock for every
+    // caller that passes none; the untrusted branch is byte-identical.
+    expect(trackerSource).toMatch(/const completedAtStamp = opts\.untrustedLifecycleSpan\s*\n\s*\? finiteDate\(opts\.completedAt\)\s*\n\s*: \(finiteDate\(opts\.completedAt\) \|\| now\);/);
     expect(trackerSource).toMatch(/\.\.\.\(completedAtStamp \? \{ completed_at: completedAtStamp \} : \{\}\),/);
   });
 

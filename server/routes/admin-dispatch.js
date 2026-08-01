@@ -4826,9 +4826,19 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // onto the adjusted instant; the pair must equal the operator's
           // statement exactly (same posture as backfillCompletionEndInstant's
           // real-start branch).
-          if (!isBackfillCompletion && adjustedEndedAt) {
-            lifecycleUpdates.actual_end_time = adjustedEndedAt;
-            lifecycleUpdates.check_out_time = adjustedEndedAt;
+          if (!isBackfillCompletion && liveAdjustedTimeOnSite) {
+            if (adjustedEndedAt) {
+              lifecycleUpdates.actual_end_time = adjustedEndedAt;
+              lifecycleUpdates.check_out_time = adjustedEndedAt;
+            }
+            // Durable row stamp for live overrides too (codex P2 #3152
+            // round 11): the costing fence and the no-opts labor override
+            // both read scheduled_services.time_on_site_adjusted_minutes —
+            // without it a straddling recalculation sees null → null and
+            // can overwrite the corrected financials. Same stamp the
+            // after-the-fact endpoint writes; stamped even when the end
+            // instant was clamped (the MINUTES are the operator statement).
+            lifecycleUpdates.time_on_site_adjusted_minutes = effectiveTimeOnSite;
           }
           const structuredNotes = {
             visitOutcome,

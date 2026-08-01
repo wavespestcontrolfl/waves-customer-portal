@@ -643,8 +643,14 @@ async function markComplete(serviceId, opts = {}) {
 
   const now = new Date();
   // Untrusted span: caller-supplied backdated instant or nothing (see the
-  // function comment). Normal path: the wall clock, as always.
-  const completedAtStamp = opts.untrustedLifecycleSpan ? finiteDate(opts.completedAt) : now;
+  // function comment). Trusted path: a caller-supplied finite instant is
+  // honored (the live admin time-on-site override passes its corrected end
+  // so date-window readers that prefer completed_at attribute the visit to
+  // the corrected day — codex P2 #3152 round 11), else the wall clock, as
+  // always for every caller that passes none.
+  const completedAtStamp = opts.untrustedLifecycleSpan
+    ? finiteDate(opts.completedAt)
+    : (finiteDate(opts.completedAt) || now);
   const updated = await db('scheduled_services')
     .where({ id: serviceId })
     .whereIn('track_state', ['scheduled', 'en_route', 'on_property'])

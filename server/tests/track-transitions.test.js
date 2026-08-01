@@ -597,10 +597,14 @@ describe('track-transitions lifecycle side effects', () => {
     expect(payload).not.toHaveProperty('completed_at');
   });
 
-  test('markComplete WITHOUT the flag still stamps wall-clock completed_at — a passed completedAt is ignored', async () => {
+  test('markComplete WITHOUT the flag honors an explicit completedAt, wall clock only as fallback', async () => {
     jest.useFakeTimers().setSystemTime(new Date('2026-07-19T16:00:00.000Z'));
-    // Backdating is exclusively an untrusted-span behavior; no live caller
-    // can shift completed_at by accident.
+    // Contract updated for the live admin time-on-site override (codex P2
+    // #3152 round 11): a trusted caller that EXPLICITLY passes a finite
+    // instant gets it stamped (the corrected end must reach completed_at so
+    // date-window readers attribute the visit to the corrected day); every
+    // caller that passes none keeps the wall clock exactly as before, so no
+    // live caller shifts completed_at by accident.
     const svc = {
       id: 'job-nf',
       technician_id: 'tech-nf',
@@ -613,13 +617,23 @@ describe('track-transitions lifecycle side effects', () => {
       .mockReturnValueOnce(update);
 
     const result = await trackTransitions.markComplete('job-nf', {
-      completedAt: new Date('2020-01-01T00:00:00.000Z'),
+      completedAt: new Date('2026-07-19T15:45:00.000Z'),
     });
 
     expect(result.ok).toBe(true);
     const payload = update.update.mock.calls[0][0];
-    expect(payload.completed_at).toEqual(new Date('2026-07-19T16:00:00.000Z'));
-    expect(result.completedAt).toEqual(new Date('2026-07-19T16:00:00.000Z'));
+    expect(payload.completed_at).toEqual(new Date('2026-07-19T15:45:00.000Z'));
+
+    // No completedAt (every pre-existing live caller) → wall clock.
+    const svc2 = { ...svc, id: 'job-nf2' };
+    const update2 = query(1);
+    db
+      .mockReturnValueOnce(query(svc2))
+      .mockReturnValueOnce(update2);
+    const result2 = await trackTransitions.markComplete('job-nf2', {});
+    expect(result2.ok).toBe(true);
+    const payload2 = update2.update.mock.calls[0][0];
+    expect(payload2.completed_at).toEqual(new Date('2026-07-19T16:00:00.000Z'));
   });
 
   test('markComplete re-emits refresh when already complete', async () => {
