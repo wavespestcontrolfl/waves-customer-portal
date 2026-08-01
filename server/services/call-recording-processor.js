@@ -7392,48 +7392,10 @@ const CallRecordingProcessor = {
           // schedule row doesn't exist yet at render time, so the self-serve
           // reschedule link can't be minted — pass an empty clause; the
           // template renders clean without it.
-          // Through the appointment-page ladder so gate-on means the same
-          // v2 copy as every other confirmation sender. The schedule row
-          // doesn't exist yet, so no page link can be minted — the v2 body
-          // renders cleanly with an empty {appointment_line}, same as the
-          // legacy body does with an empty {reschedule_line}.
-          const { renderAppointmentPageTemplate } = require('./appointment-reminders');
-          smsBody = await renderAppointmentPageTemplate('appointment_confirmation',
-            async () => ({
-              first_name: firstName,
-              service_type: serviceType,
-              date: parsedDate,
-              time: parsedTime,
-              appointment_line: '',
-            }),
-            {
-              first_name: firstName,
-              service_type: serviceType,
-              date_time: extracted.preferred_date_time,
-              date: parsedDate,
-              time: parsedTime,
-              reschedule_line: '',
-            }, {
-            workflow: 'call_booking_confirmation',
-            entity_type: 'customer',
-            entity_id: customer.id,
-          });
-
-          // Content-level dedup: even if the concurrent-run guard above
-          // misses (e.g., admin reprocess inside the same minute), don't
-          // fire an identical confirmation that the customer just got.
+          // Rendering is DEFERRED until after the scheduled_services insert:
+          // the row (and its reschedule_token) must exist before a real
+          // appointment-page link can be minted for the v2 body (codex r4).
           let alreadySent = false;
-          try {
-            // Dedupe against the ACTUAL recipient (smsRecipient) — an
-            // implied-consent send redirected to the ANI must be found here
-            // on a reprocess/retry, or the caller gets the same text twice.
-            const existing = await db('sms_log')
-              .where({ to_phone: smsRecipient, message_type: 'confirmation' })
-              .where('message_body', smsBody)
-              .where('created_at', '>', new Date(Date.now() - 10 * 60 * 1000))
-              .first();
-            if (existing) alreadySent = true;
-          } catch { /* sms_log query issue — send anyway */ }
 
           // Create the scheduled_services record FIRST. Previously we sent
           // the SMS first and inserted the schedule row afterward — if the
@@ -8457,6 +8419,52 @@ const CallRecordingProcessor = {
             // booking, and starves the assessment pre-draft hook.
             appointmentResult = { ...(appointmentResult || {}), scheduledServiceId, smsSent: false, smsBlockedReason: 'v2_tcpa_gate' };
           } else if (scheduledServiceId) {
+            if (!scheduleWasReused) {
+              // The row landed, so the v2 factory can mint the REAL
+              // appointment-page link (lazy: only runs when the gate is on
+              // and the _v2 row is active). Legacy body unchanged.
+              const { renderAppointmentPageTemplate } = require('./appointment-reminders');
+              smsBody = await renderAppointmentPageTemplate('appointment_confirmation',
+                async () => {
+                  const { buildAppointmentLink } = require('./appointment-link');
+                  const apptLink = await buildAppointmentLink(scheduledServiceId, { customerId });
+                  return {
+                    first_name: firstName,
+                    service_type: serviceType,
+                    date: parsedDate,
+                    time: parsedTime,
+                    appointment_line: apptLink.line,
+                  };
+                },
+                {
+                  first_name: firstName,
+                  service_type: serviceType,
+                  date_time: extracted.preferred_date_time,
+                  date: parsedDate,
+                  time: parsedTime,
+                  reschedule_line: '',
+                }, {
+                workflow: 'call_booking_confirmation',
+                entity_type: 'customer',
+                entity_id: customer.id,
+              });
+
+              // Content-level dedup: even if the concurrent-run guard
+              // misses (e.g., admin reprocess inside the same minute),
+              // don't fire an identical confirmation the customer just got.
+              // Dedupe against the ACTUAL recipient (smsRecipient) — an
+              // implied-consent send redirected to the ANI must be found
+              // here on a reprocess/retry, or the caller texts twice.
+              try {
+                const existing = await db('sms_log')
+                  .where({ to_phone: smsRecipient, message_type: 'confirmation' })
+                  .where('message_body', smsBody)
+                  .where('created_at', '>', new Date(Date.now() - 10 * 60 * 1000))
+                  .first();
+                if (existing) alreadySent = true;
+              } catch { /* sms_log query issue — send anyway */ }
+            }
+
             if (scheduleWasReused) {
               logger.info(`[call-proc] Skipping appointment SMS for reused scheduled service ${scheduledServiceId}`);
               appointmentResult = {
@@ -8559,18 +8567,23 @@ const CallRecordingProcessor = {
                         // Claim-failed phones fail CLOSED (no row ≠ grandfathered here).
                         && !optinClaimFailedPhones.has(fanLast10(c.phone)));
                       for (const contact of extraContacts) {
-                        // Same ladder as the primary send — see the comment
-                        // there; no schedule row yet, so no page link.
+                        // Same ladder as the primary send; the schedule row
+                        // exists by this point, so the factory mints the
+                        // same appointment-page link.
                         const { renderAppointmentPageTemplate: renderApptLadder } = require('./appointment-reminders');
                         const contactFirst = String(contact.name || '').trim().split(/\s+/)[0] || firstName;
                         const contactBody = await renderApptLadder('appointment_confirmation',
-                          async () => ({
-                            first_name: contactFirst,
-                            service_type: serviceType,
-                            date: parsedDate,
-                            time: parsedTime,
-                            appointment_line: '',
-                          }),
+                          async () => {
+                            const { buildAppointmentLink } = require('./appointment-link');
+                            const apptLink = await buildAppointmentLink(scheduledServiceId, { customerId });
+                            return {
+                              first_name: contactFirst,
+                              service_type: serviceType,
+                              date: parsedDate,
+                              time: parsedTime,
+                              appointment_line: apptLink.line,
+                            };
+                          },
                           {
                             first_name: contactFirst,
                             service_type: serviceType,
