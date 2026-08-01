@@ -92,7 +92,17 @@ describe('content-brief-builder operator-intercept injection', () => {
     expect(op.thesis).toBe(payload.thesis);
     expect(op.slug).toBe(payload.slug);
     expect(op.working_title).toBe(payload.working_title);
-    expect(op.required_sources).toEqual(payload.sources);
+    // Manifest source contract (intercept-brief-seeder.splitBriefSources):
+    // `sources` carries http(s) URLs ONLY — the archive.org snapshot step
+    // consumes them — and any non-URL operator directive seeded there is
+    // DEMOTED to source_notes (warned, never dropped) so it still reaches
+    // the writer verbatim as a binding instruction. B2 seeds one such
+    // directive deliberately, pinning the demotion.
+    const urlSources = payload.sources.filter((s) => /^https?:\/\//i.test(s));
+    const straySources = payload.sources.filter((s) => !/^https?:\/\//i.test(s));
+    expect(straySources.length).toBeGreaterThan(0); // fixture exercises the demotion
+    expect(op.required_sources).toEqual(urlSources);
+    expect(op.source_notes).toEqual(expect.arrayContaining(straySources));
     expect(op.verify_notes).toEqual(payload.verify_notes);
     expect(op.global_rules).toBe(manifest.notes);
     expect(op.secondary_kws).toEqual(payload.secondary_kws);

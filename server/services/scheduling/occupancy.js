@@ -231,6 +231,21 @@ async function acquireOccupancyLock(trx, dateStr) {
   );
 }
 
+// Non-blocking variant for callers that reach rung 1 LATE — e.g. payment
+// activation already holds invoice/term row locks when it decides to seed a
+// timed visit. Waiting there could deadlock against a booking that holds the
+// date lock and wants those rows; trying-and-failing lets the caller degrade
+// (seed windowless, file an exception) instead. Returns true iff the lock was
+// acquired; like the blocking form it is transaction-scoped.
+async function tryAcquireOccupancyLock(trx, dateStr) {
+  const result = await trx.raw(
+    'SELECT pg_try_advisory_xact_lock(hashtext(?), hashtext(?::text)) AS locked',
+    [OCCUPANCY_LOCK_NS, occupancyLockKey(dateStr)],
+  );
+  const row = result?.rows ? result.rows[0] : (Array.isArray(result) ? result[0] : result);
+  return row?.locked === true;
+}
+
 // Acquire the date-wide occupancy lock for MANY dates in one transaction
 // (series reschedules probe/write several target dates). Dedups + sorts so two
 // concurrent multi-date movers always grab a shared pair in the SAME order and
@@ -405,6 +420,7 @@ module.exports = {
   windowsOverlap,
   acquireOccupancyLock,
   acquireOccupancyLocks,
+  tryAcquireOccupancyLock,
   DEFAULT_DURATION_MINUTES,
   DEFAULT_EXCLUDE_STATUSES,
   _internals: { timeToMinutes, normalizeDate, occupancyLockKey },

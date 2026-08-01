@@ -16,17 +16,22 @@ const db = require('../models/db');
 
 const SETUP_FEE_WAIVED_RE = /setup fee waived|setup.*waiv/i;
 
-// coverage_* columns were added after the original annual_prepay_terms table.
-// Detect them once so an environment that has the table but not yet the
-// coverage migration (rolling deploy / preview DB) still loads the base term
-// instead of throwing and dropping the whole annual-prepay payload.
+// coverage_* and first_visit_* columns were added after the original
+// annual_prepay_terms table. Detect them once so an environment that has the
+// table but not yet those migrations (rolling deploy / preview DB) still loads
+// the base term instead of throwing and dropping the whole annual-prepay
+// payload. first_visit_date MUST be in this list — buildCoverageVisits anchors
+// the displayed schedule on it, and an unselected column reads as undefined,
+// silently falling back to term_start.
 let coverageColsCache = null;
 async function annualPrepayCoverageCols() {
   if (coverageColsCache) return coverageColsCache;
   try {
     const cols = await db('annual_prepay_terms').columnInfo();
-    coverageColsCache = ['coverage_service_type', 'coverage_visit_count', 'coverage_cadence']
-      .filter((c) => cols[c]);
+    coverageColsCache = [
+      'coverage_service_type', 'coverage_visit_count', 'coverage_cadence',
+      'first_visit_date', 'first_visit_window_start',
+    ].filter((c) => cols[c]);
   } catch {
     coverageColsCache = [];
   }
@@ -138,14 +143,42 @@ function buildPrepayCoverageSummary(prepay) {
 // visit's share of the prepay total. Computed from the term — not a
 // scheduled_services join — so it's correct even before the invoice is paid and
 // coverage rows are seeded. Empty array when coverage isn't configured.
-function buildCoverageVisits(term, prepayAmount) {
+function buildCoverageVisits(term, prepayAmount, { today = null } = {}) {
+  // A term that has not been paid yet has not seeded any visits, so its
+  // displayed schedule is still a forecast; an active/decided term's visits
+  // are already on the calendar.
+  const paymentPending = String(term?.status || '').toLowerCase() === 'payment_pending';
   const visitCount = term?.coverage_visit_count != null ? Number(term.coverage_visit_count) : null;
   if (!term?.term_start || !Number.isInteger(visitCount) || visitCount <= 0) return [];
   try {
-    const { coverageScheduleDates, inferCoverageCadence, splitCoverageAmount } =
-      require('./annual-prepay-renewals')._private;
+    const {
+      coverageScheduleDates, inferCoverageCadence, splitCoverageAmount,
+      coverageSeriesAnchor, addDaysYmd, daysUntil,
+    } = require('./annual-prepay-renewals')._private;
+    const { etDateString } = require('../utils/datetime-et');
     const cadence = term.coverage_cadence || inferCoverageCadence(term);
-    const dates = coverageScheduleDates(term.term_start, visitCount, cadence, term.term_end) || [];
+    // While payment is PENDING, mirror the payment-time seeder exactly: the
+    // same today floor AND the same slid coverage window, so the customer
+    // previews the schedule payment will actually create. (ensureCoverage-
+    // RowsForTerm extends term_end by the anchor lag so all sold visits fit;
+    // flooring without sliding here would preview a truncated list.) Once the
+    // term is paid the visits exist as scheduled_services rows fixed at their
+    // seeded dates — re-flooring a settled invoice or its PDF would make the
+    // document drift away from the schedule a day at a time, so the floor is
+    // dropped there. The rare successor-term cap is not mirrored (it needs a
+    // DB read); that case files an operator exception at payment time anyway.
+    const anchorOptions = {
+      firstVisitDate: term.first_visit_date || null,
+      notBefore: paymentPending ? (today || etDateString()) : null,
+    };
+    let scheduleEnd = term.term_end;
+    if (paymentPending) {
+      const mintAnchor = coverageSeriesAnchor(term.term_start, { firstVisitDate: term.first_visit_date || null });
+      const paidAnchor = coverageSeriesAnchor(term.term_start, anchorOptions);
+      const lag = mintAnchor && paidAnchor ? daysUntil(mintAnchor, paidAnchor) : null;
+      if (lag != null && lag > 0) scheduleEnd = addDaysYmd(term.term_end, lag);
+    }
+    const dates = coverageScheduleDates(term.term_start, visitCount, cadence, scheduleEnd, anchorOptions) || [];
     // Split by the sold visitCount so each displayed share equals the
     // prepaid_amount actually stamped on the covered scheduled_services
     // (applyPrepaidCoverageForTerm splits the total by coverage_visit_count) and

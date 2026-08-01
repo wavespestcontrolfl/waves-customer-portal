@@ -3961,6 +3961,13 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
   const [termEnd, setTermEnd] = useState(addMonthsInput(initialStart, 12));
   const [dueDate, setDueDate] = useState(todayDateInput());
   const [note, setNote] = useState("");
+  // First visit already promised to the customer (e.g. booked on the phone).
+  // Optional: left blank, coverage generates from the term start as before.
+  // Filled in, it anchors the generated visits and gives visit 1 a real
+  // arrival time instead of landing windowless — and, because visits are only
+  // generated when the invoice is PAID, it survives a mint-to-payment lag.
+  const [firstVisitDate, setFirstVisitDate] = useState("");
+  const [firstVisitWindowStart, setFirstVisitWindowStart] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [amountTouched, setAmountTouched] = useState(false);
@@ -3989,6 +3996,17 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
     ? total / count
     : 0;
   const activeTermEnd = dateInputValue(activeTerm?.termEnd);
+  // Mirrors the server's window check — the endpoint 400s on an out-of-window
+  // first visit, so catch it before the operator submits.
+  const firstVisitDateError = firstVisitDate && termStart && termEnd
+    && (firstVisitDate < termStart || firstVisitDate > termEnd)
+    ? `First visit must fall between ${termStart} and ${termEnd}`
+    : "";
+  // Appointment windows start on the hour — the server rejects :15/:30, so
+  // catch it here instead of round-tripping a 400.
+  const firstVisitTimeError = firstVisitWindowStart && !/^\d{1,2}:00$/.test(firstVisitWindowStart)
+    ? "Arrival times start on the hour"
+    : "";
   const submitDisabled = saving
     || !(Number(amount) > 0)
     || !serviceType.trim()
@@ -3996,7 +4014,10 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
     || !termStart
     || !termEnd
     || termEnd <= termStart
-    || !dueDate;
+    || !dueDate
+    || !!firstVisitDateError
+    || !!firstVisitTimeError
+    || (!!firstVisitWindowStart && !firstVisitDate);
   // Commercial invoices add county tax to this pre-tax line item (residential is
   // tax-free), so label the field as pre-tax and preview the tax-inclusive total
   // the customer will actually be billed — mirrors the record-collected modal.
@@ -4074,6 +4095,8 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
           termStart,
           termEnd,
           dueDate,
+          ...(firstVisitDate ? { firstVisitDate } : {}),
+          ...(firstVisitDate && firstVisitWindowStart ? { firstVisitWindowStart } : {}),
           note: note.trim() || undefined,
           // Only apply when the banner actually RENDERED (preview loaded, not
           // payer-billed): a slow/failed preview must not silently subtract a
@@ -4118,6 +4141,8 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
           termStart,
           termEnd,
           dueDate,
+          ...(firstVisitDate ? { firstVisitDate } : {}),
+          ...(firstVisitDate && firstVisitWindowStart ? { firstVisitWindowStart } : {}),
           note: note.trim() || undefined,
           // Same visible-banner gate + estimate echo as the send path — never
           // apply a credit the operator didn't see.
@@ -4297,6 +4322,40 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
               onChange={(e) => setDueDate(e.target.value)}
               className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
             />
+          </label>
+          <label className="block">
+            <div className="u-label text-ink-secondary mb-1">First visit (optional)</div>
+            <input
+              type="date"
+              value={firstVisitDate}
+              onChange={(e) => {
+                const next = e.target.value;
+                setFirstVisitDate(next);
+                // The time input disables without a date; a retained time would
+                // keep submitDisabled true with no way to clear it.
+                if (!next) setFirstVisitWindowStart("");
+              }}
+              min={termStart || undefined}
+              max={termEnd || undefined}
+              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring"
+            />
+            <div className="text-11 text-ink-secondary mt-1">
+              {firstVisitDateError || "Date you already promised the customer. Blank starts coverage at the term start."}
+            </div>
+          </label>
+          <label className="block">
+            <div className="u-label text-ink-secondary mb-1">First visit time</div>
+            <input
+              type="time"
+              step={3600}
+              value={firstVisitWindowStart}
+              onChange={(e) => setFirstVisitWindowStart(e.target.value)}
+              disabled={!firstVisitDate}
+              className="w-full h-9 px-2.5 text-13 text-zinc-900 bg-white border-hairline border-zinc-300 rounded-sm u-focus-ring disabled:bg-zinc-100 disabled:text-zinc-400"
+            />
+            <div className="text-11 text-ink-secondary mt-1">
+              {firstVisitTimeError || "Arrival time for visit 1, on the hour. Needs a first-visit date."}
+            </div>
           </label>
           <label className="block sm:col-span-2">
             <div className="u-label text-ink-secondary mb-1">Invoice note</div>
