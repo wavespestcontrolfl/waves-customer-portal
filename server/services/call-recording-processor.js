@@ -84,7 +84,7 @@ function callExtractionV2PrimaryEnabled() {
     console.warn('[call-proc] WARNING: enforce mode without ADDRESS_VALIDATION_ENABLED — address_unverifiable is never suppressed, so virtually no call will auto-route.');
   }
 }
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey } = require('./call-triage-flags');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
 const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
@@ -7409,9 +7409,25 @@ const CallRecordingProcessor = {
           // contract, including the known-customer on-file-address lane this
           // site cannot evaluate.
           const enforceModeActive = CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED;
+          // The verdict must validate the address actually being BOOKED
+          // (codex round-13, residual #2 closed pre-merge): AV runs on the
+          // V2 extraction's address, but this legacy/shadow branch books the
+          // V1 `extracted` address. When the two streets disagree,
+          // deriveCallReviewBridge deliberately refuses adoption — so a
+          // positive verdict for V2's street says NOTHING about the V1
+          // street the tech would drive to. Suffix-insensitive street key +
+          // city + zip against AV's normalized form; a missing normalized
+          // form or a mismatch keeps the hold. Enforce mode is untouched
+          // (canAutoRoute owns the contract there, and it books the same
+          // V2 address the verdict was computed for).
+          const avNormalized = effectiveAddressValidation?.normalized || null;
+          const avValidatesBookedAddress = !!avNormalized
+            && streetCompareKey(String(extracted.address_line1 || '')) === streetCompareKey(String(avNormalized.street_line_1 || ''))
+            && String(extracted.zip || '').trim() === String(avNormalized.postal_code || '').trim();
           const avPositiveForBooking = !!effectiveAddressValidation
             && ['validated_accept', 'corrected'].includes(String(effectiveAddressValidation.status || ''))
-            && effectiveAddressValidation.inServiceArea === true;
+            && effectiveAddressValidation.inServiceArea === true
+            && avValidatesBookedAddress;
           const emailAdvisoryHold = !enforceModeActive
             && customerValidation.ok
             && !!customerValidation.advisory?.includes('email')
