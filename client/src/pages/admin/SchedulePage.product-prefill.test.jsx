@@ -13,36 +13,45 @@ import {
   productTargetsNutrition,
 } from "./SchedulePage.jsx";
 
-// Every distinct products_catalog.target_pests value in prod on 2026-08-01.
+// Every distinct products_catalog.target_pests value in prod on 2026-08-01,
+// UNIONED with every value the seed migrations write — a target can be seeded
+// without showing up in the prod snapshot (Talpirid's "Moles" is active on any
+// database built from the repo migrations, but absent from prod's catalog).
 // Classification fails CLOSED — an unclassified target prefills nowhere — so
 // this fixture is the tripwire: add a target the patterns don't recognize and
 // this test fails instead of the prefill quietly going empty in the field.
 const CATALOG_TARGETS = [
-  "Aedes mosquitoes (container breeders)", "American cockroaches",
-  "Annual bluegrass (Poa annua)", "Anthracnose", "Aphids", "Bed bugs",
-  "Big-headed ants", "Billbugs", "Broad mites", "Brown patch",
-  "Brown patch / large patch", "Calcium deficiency", "Carpenter ants",
-  "Caterpillars", "Chamberbitter", "Chickweed", "Chilli thrips", "Clover",
+  "Aedes mosquitoes", "Aedes mosquitoes (container breeders)", "American cockroach",
+  "American cockroaches", "Annual bluegrass (Poa annua)", "annual grassy weeds",
+  "Anthracnose", "ants", "Ants", "Aphids", "Armyworms", "Bed bugs",
+  "Big-headed ants", "Billbugs", "Broad mites", "broadleaf weeds", "Brown patch",
+  "Brown patch / large patch", "Brown-banded cockroach", "Calcium deficiency",
+  "Carpenter ants", "Caterpillars", "centipedes", "Chamberbitter", "Chickweed",
+  "Chilli thrips", "Chinch bugs", "Clover", "cockroaches", "Cockroaches",
   "Color & density", "Crabgrass", "Crabgrass (pre-emergent)", "Crazy ants",
-  "Crickets", "Darkling beetles", "Deep green color", "Dollar spot",
-  "Dollarweed", "Doveweed", "Drain flies", "Drywood termites", "Fairy ring",
-  "Fall armyworms", "Ficus whitefly", "Fire ants", "Fleas", "Formosan termites",
-  "Foxtail", "German cockroaches", "Ghost ants", "Goosegrass",
-  "Goosegrass (pre-emergent)", "Gray leaf spot", "Green kyllinga",
-  "House flies", "House mice", "Iron chlorosis (yellowing turf)", "Kyllinga",
-  "Large patch", "Leafminers", "Leaf spot", "Mealybugs", "Mosquitoes",
-  "mosquito larvae", "Mosquito larvae (standing water)", "Nitrogen green-up",
-  "Norway rats", "Pantry moths & beetles", "Paper wasps", "Pharaoh ants",
-  "Poa annua", "Potassium deficiency", "Potassium root support",
-  "Purple nutsedge", "Rice flatsedge", "Roof rats",
-  "Root strength & stress tolerance", "Rugose spiraling whitefly",
-  "Scale insects", "Scorpions", "Silverfish", "Smokybrown cockroaches",
-  "Soft scale insects", "Southern chinch bugs", "Spider mites", "Spurge",
-  "subterranean termites", "Subterranean termites", "Summer patch",
-  "Take-all root rot", "Tawny mole crickets", "Ticks", "Torpedograss",
-  "Tropical sod webworms", "Twospotted spider mites", "Whiteflies",
-  "White-footed ants", "White grubs", "Widow spiders", "Wolf spiders",
-  "Wood borers", "Wood-boring beetles", "Yellow nutsedge",
+  "Crickets", "Culex mosquitoes", "Darkling beetles", "Deep green color",
+  "Dollar spot", "Dollarweed", "Doveweed", "Drain flies", "drywood termites",
+  "Drywood termites", "Earwigs", "Fairy ring", "Fall armyworms", "Ficus whitefly",
+  "Fire ants", "fleas", "Fleas", "Flies", "Florida pusley", "Formosan termites",
+  "Foxtail", "German cockroach", "German cockroaches", "Ghost ants", "Goosegrass",
+  "Goosegrass (pre-emergent)", "Gray leaf spot", "Green kyllinga", "House flies",
+  "House mice", "Iron chlorosis (yellowing turf)", "Kyllinga", "Large patch",
+  "Leaf spot", "Leafminers", "Mealybugs", "Mole crickets", "moles",
+  "mosquito larvae", "Mosquito larvae", "Mosquito larvae (standing water)",
+  "mosquitoes", "Mosquitoes", "Nitrogen green-up", "Norway rats", "Nuisance ants",
+  "Oriental cockroach", "Pantry moths & beetles", "Paper wasps", "Pharaoh ants",
+  "Poa annua", "Potassium deficiency", "Potassium root support", "Purple nutsedge",
+  "Pythium blight", "Rice flatsedge", "roaches", "Roof rats",
+  "Root strength & stress tolerance", "Rugose spiraling whitefly", "Scale insects",
+  "Scorpions", "silverfish", "Silverfish", "Smokybrown cockroaches", "Sod webworms",
+  "Soft scale insects", "Southern chinch bugs", "Spider mites", "spiders",
+  "Spiders", "Spurge", "subterranean termites", "Subterranean termites",
+  "Summer patch", "Take-all root rot", "Tawny mole crickets", "ticks", "Ticks",
+  "Torpedograss", "Tropical sod webworms", "turf disease",
+  "Twospotted spider mites", "Virginia buttonweed", "Wasps", "White grubs",
+  "White-footed ants", "Whiteflies", "Widow spiders", "Wolf spiders", "Wood borers",
+  "Wood decay fungi", "Wood-boring beetles", "Wood-destroying beetles",
+  "Yellow nutsedge",
 ];
 
 describe("defaultApplicationMethod", () => {
@@ -250,6 +259,18 @@ describe("labelTargetLines", () => {
   it("reads darkling beetles as a structural pest", () => {
     // Elector PSP carries it next to house flies.
     expect(labelTargetLines("Darkling beetles")).toEqual(["pest"]);
+  });
+
+  it("reads moles as a pest target without stealing mole crickets", () => {
+    // Talpirid's only target is "Moles"; failing closed would have left a mole
+    // treatment with nothing prefilled at all (codex P2 r3).
+    expect(labelTargetLines("Moles")).toEqual(["pest"]);
+    expect(filterLabelTargetsForLine(["Moles"], lines("Quarterly Pest Control"))).toEqual([
+      "Moles",
+    ]);
+    // The turf pattern still claims mole crickets first.
+    expect(labelTargetLines("Tawny mole crickets")).toEqual(["lawn"]);
+    expect(labelTargetLines("Mole crickets")).toEqual(["lawn"]);
   });
 });
 

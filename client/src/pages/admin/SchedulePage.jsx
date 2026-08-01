@@ -15640,7 +15640,7 @@ export const ALL_TARGET_LINES = ["pest", "lawn", "tree_shrub", "termite", "mosqu
 // substring-loose because catalog target_pests values are free text pulled
 // from labels ("Southern Chinch Bugs", "sod webworm", "chinch bug (southern)").
 const LAWN_ONLY_TARGET_RE =
-  /chinch|sod webworm|armyworm|white grub|\bgrubs?\b|mole cricket|billbug|spittlebug|nematode|crabgrass|goosegrass|torpedograss|foxtail|kyllinga|dollarweed|doveweed|chamberbitter|chickweed|spurge|clover|nutsedge|\bsedge\b|flatsedge|broadleaf weed|\bweeds?\b|poa annua|bluegrass|brown patch|large patch|dollar spot|leaf spot|anthracnose|summer patch|take-?all|fairy ring|pythium|turf/i;
+  /chinch|sod webworm|armyworm|white grub|\bgrubs?\b|mole cricket|billbug|spittlebug|nematode|crabgrass|goosegrass|torpedograss|foxtail|kyllinga|dollarweed|doveweed|chamberbitter|chickweed|pusley|buttonweed|spurge|clover|nutsedge|\bsedge\b|flatsedge|broadleaf weed|\bweeds?\b|poa annua|bluegrass|brown patch|large patch|dollar spot|leaf spot|anthracnose|summer patch|take-?all|fairy ring|pythium|turf/i;
 
 // Ornamental-only targets (tree & shrub / palm work): sap feeders, mites,
 // borers, and foliar issues. Checked BEFORE the structural set so "Spider
@@ -15668,7 +15668,10 @@ const CATERPILLAR_TARGET_RE = /caterpillar/i;
 
 // Wood-destroying-organism targets: pass on termite/WDO visits, and carpenter
 // ants also read fine on a general pest visit.
-const TERMITE_TARGET_RE = /termite|wood-?boring|wood borer/i;
+// "Wood borers" alone stays ornamental (the pattern above claims it — Tree-Age
+// and Ima-Jet are injection products), but the wood-DESTROYING organisms off a
+// Bora-Care label are WDO work.
+const TERMITE_TARGET_RE = /termite|wood-?boring|wood borer|wood-?destroying|wood decay/i;
 const CARPENTER_ANT_RE = /carpenter ant/i;
 
 const MOSQUITO_TARGET_RE = /mosquito/i;
@@ -15682,9 +15685,11 @@ const FLEA_TICK_TARGET_RE = /\bfleas?\b|\bticks?\b/i;
 
 // Structural/household pests — the general-pest line. Broad on purpose: any
 // ant species, roaches, spiders (mites already claimed above), the usual
-// occasional invaders, stingers, biters, and rodents.
+// occasional invaders, stingers, biters, and vertebrates. `\bmoles?\b` is safe
+// here only because the turf pattern claims "Tawny mole crickets" first, the
+// same way it claims them ahead of the bare `cricket` alternative.
 const STRUCTURAL_ONLY_TARGET_RE =
-  /\bants?\b|roach|spider|silverfish|earwig|centipede|millipede|springtail|booklice|cricket|wasp|mud dauber|yellowjacket|hornet|\bfl(y|ies)\b|flea|tick|bed bug|pantry|darkling beetle|scorpion|\brats?\b|\bmouse\b|\bmice\b|rodent/i;
+  /\bants?\b|roach|spider|silverfish|earwig|centipede|millipede|springtail|booklice|cricket|wasp|mud dauber|yellowjacket|hornet|\bfl(y|ies)\b|flea|tick|bed bug|pantry|darkling beetle|scorpion|\brats?\b|\bmouse\b|\bmice\b|rodent|\bmoles?\b/i;
 
 // Every service line a label target belongs on. Precedence matters: turf
 // before structural ("Tawny mole crickets" is a lawn pest, not a cricket),
@@ -15697,8 +15702,10 @@ const STRUCTURAL_ONLY_TARGET_RE =
 // exists to remove: "Chickweed" is a lawn weed no pattern matched, so a pest
 // visit dropped SpeedZone's three recognized weeds and prefilled Chickweed
 // alone. Failing closed can only ever under-fill, and the picker stays
-// free-text, so the tech can add anything by hand. Every target currently in
-// the catalog classifies — the contract test below fails if a new one doesn't.
+// free-text, so the tech can add anything by hand. Every target the catalog
+// carries AND every target the seed migrations write classifies — the contract
+// test fixture covers both, since a value can be seeded (Talpirid's "Moles")
+// without appearing in the prod catalog snapshot.
 export function labelTargetLines(target) {
   if (/fire ant/i.test(target)) return ["pest", "lawn"];
   if (ORNAMENTAL_LEAF_SPOT_RE.test(target)) return ["tree_shrub"];
