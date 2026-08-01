@@ -391,16 +391,29 @@ async function renderTemplate(templateKey, vars, context = {}) {
 //   - _v2 row DISABLED    -> that is the ops kill switch: return null so
 //                            the send stops rather than silently reverting
 //                            to long copy the operator just turned off.
-async function renderAppointmentPageTemplate(baseKey, v2Vars, legacyVars, context = {}) {
+// v2Vars is a lazy async FACTORY, not an object: building the v2 vars mints
+// a never-expiring appointment short link, so it must run only when the v2
+// body will actually render — gate on AND the row present and active. An
+// eager build minted an unreachable short_codes row on every legacy send
+// and every email-only delivery (codex r2).
+async function renderAppointmentPageTemplate(baseKey, v2VarsFactory, legacyVars, context = {}) {
   if (process.env.GATE_APPOINTMENT_PAGE === 'true') {
     const v2Key = `${baseKey}_v2`;
-    const body = await renderTemplate(v2Key, v2Vars, context);
-    if (body) return body;
-    const row = await db('sms_templates').where({ template_key: v2Key }).first('id');
+    const row = await db('sms_templates').where({ template_key: v2Key }).first('id', 'is_active');
     if (row) {
-      logger.warn(`[appt-remind] ${v2Key} disabled - skipping send rather than reverting to legacy copy`);
+      if (row.is_active === false) {
+        logger.warn(`[appt-remind] ${v2Key} disabled - skipping send rather than reverting to legacy copy`);
+        return null;
+      }
+      const body = await renderTemplate(v2Key, await v2VarsFactory(), context);
+      if (body) return body;
+      // Active row that failed to render (audited upstream) keeps the same
+      // stop-don't-revert semantics as the kill switch.
+      logger.warn(`[appt-remind] ${v2Key} did not render - skipping send rather than reverting to legacy copy`);
       return null;
     }
+    // Row absent = rolled-back migration; fall back so the customer still
+    // gets a text.
   }
   return renderTemplate(baseKey, legacyVars, context);
 }
@@ -898,14 +911,6 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
       // Self-serve reschedule deep link — one mint shared by the SMS clause
       // and the email CTA. Best-effort: a null link renders clean copy.
       const reschedule = await buildRescheduleLink(scheduledServiceId, { customerId });
-      // Appointment-page link for the v2 (link-first) confirmation body;
-      // labelled confirm-first because a fresh booking's primary action
-      // on that page is the Confirm button.
-      const appointmentLink = await buildAppointmentLink(scheduledServiceId, {
-        customerId,
-        label: 'View and confirm your appointment',
-      });
-
       // Honor the customer's channel preference (sms | email | both). The
       // 'sms' default is unchanged: SMS first, email fallback on failure.
       const sent = await deliverAppointmentNotice({
@@ -920,9 +925,22 @@ async function deliverConfirmation(record, { scheduledServiceId, customerId, app
           const firstName = firstNameFrom(contact.name) || customer.first_name || 'there';
           return renderAppointmentPageTemplate(
             'appointment_confirmation',
-            // A fresh booking lands on the page's Confirm button, so this
-            // clause frames the link as confirm-first.
-            { first_name: firstName, service_type: serviceLabel, date, time, day, appointment_line: appointmentLink.line },
+            async () => {
+              // Confirm-first label ONLY when there is something to confirm:
+              // a self-booked visit is inserted already confirmed
+              // (routes/booking.js), and asking that customer to "view and
+              // confirm" points at a page with no Confirm button.
+              const svcRow = await db('scheduled_services')
+                .where({ id: scheduledServiceId })
+                .first('status', 'customer_confirmed');
+              const alreadyConfirmed = String(svcRow?.status || '').toLowerCase() === 'confirmed'
+                || !!svcRow?.customer_confirmed;
+              const appointmentLink = await buildAppointmentLink(scheduledServiceId, {
+                customerId,
+                label: alreadyConfirmed ? 'Everything about your visit' : 'View and confirm your appointment',
+              });
+              return { first_name: firstName, service_type: serviceLabel, date, time, day, appointment_line: appointmentLink.line };
+            },
             { first_name: firstName, service_type: serviceLabel, date, time, day, reschedule_line: reschedule.line },
             { workflow: 'appointment_confirmation', entity_type: 'scheduled_service', entity_id: scheduledServiceId },
           );
@@ -1722,10 +1740,6 @@ const AppointmentReminders = {
             // Self-serve reschedule deep link — one mint shared by the SMS
             // clause and the email CTA. Best-effort: null renders clean copy.
             const reschedule = await buildRescheduleLink(r.scheduled_service_id, { customerId: r.customer_id });
-            // Appointment-page link for the v2 (link-first) body. Built
-            // unconditionally — it is cheap, best-effort, and keeps the
-            // gated branch below free of extra control flow.
-            const appointment24 = await buildAppointmentLink(r.scheduled_service_id, { customerId: r.customer_id });
             // Card-hold fee policy clause — see the 72h twin above.
             const cardHoldPolicyLine24 = await require('./estimate-card-holds')
               .cardHoldReminderLine(r.scheduled_service_id);
@@ -1747,7 +1761,10 @@ const AppointmentReminders = {
                   // suppresses the whole SMS on an unresolved placeholder,
                   // and this render must survive either body shape (v2 or
                   // legacy) plus an admin edit that reintroduces {time}.
-                  { first_name: firstName, service_type: serviceLabel, time, window: formatArrivalWindow(apptTime), appointment_line: appointment24.line, card_hold_policy_line: cardHoldPolicyLine24 },
+                  async () => {
+                    const appointment24 = await buildAppointmentLink(r.scheduled_service_id, { customerId: r.customer_id });
+                    return { first_name: firstName, service_type: serviceLabel, time, window: formatArrivalWindow(apptTime), appointment_line: appointment24.line, card_hold_policy_line: cardHoldPolicyLine24 };
+                  },
                   { first_name: firstName, service_type: serviceLabel, time, window: formatArrivalWindow(apptTime), reschedule_line: reschedule.line, card_hold_policy_line: cardHoldPolicyLine24 },
                   { workflow: 'appointment_reminder_24h', entity_type: 'scheduled_service', entity_id: r.scheduled_service_id },
                 );

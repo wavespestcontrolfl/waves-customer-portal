@@ -137,13 +137,18 @@ function SkeletonCard() {
   );
 }
 
-function MessageCard({ title, body }) {
+function MessageCard({ title, body, action }) {
   return (
     <Card>
       <div data-gt="h3x" style={{ fontSize: 22, fontWeight: 800, fontFamily: FONTS.heading, marginBottom: 8 }}>
         {title}
       </div>
       <div style={{ fontSize: 15, color: S.body, lineHeight: 1.55 }}>{body}</div>
+      {action ? (
+        <a href={action.href} data-glass-accent="" style={{ ...PRIMARY_CTA, marginTop: 16 }}>
+          {action.label}
+        </a>
+      ) : null}
       <ContactRow />
     </Card>
   );
@@ -157,7 +162,10 @@ const STATE_COPY = {
   // in their driveway reads as stale information.
   in_progress: { title: 'Your technician is on the way', body: "This visit is already underway, so it can't be changed online. Need us? Text or call." },
   in_progress_on_site: { title: 'Your technician has arrived', body: "This visit is underway, so it can't be changed online. Need us? Text or call." },
-  past: { title: "This visit's time has passed", body: "If we missed each other, text or call and we'll get you rescheduled right away." },
+  past: { title: "This visit's time has passed", body: "If we missed each other, pick a new time below - or text or call and we'll sort it out." },
+  // Staff are choosing the replacement slot; the old date/window on the row
+  // is stale and deliberately not shown as booked.
+  pending_rebook: { title: "We're finding you a new time", body: "Your reschedule request is in - our office is picking the new slot and we'll text you as soon as it's set." },
   not_available: { title: "We can't show this appointment", body: 'This link may be out of date. Text or call and our team will help.' },
 };
 
@@ -245,7 +253,11 @@ function PlanNote({ plan }) {
             <strong style={{ color: S.text, fontWeight: 600 }}>Part of your regular plan.</strong>{' '}
             {plan.collectiveAnchor
               ? 'If this visit moves to a different day, your later visits re-anchor around the new date — your schedule always follows your last treatment.'
-              : 'Only this visit is affected if it moves — the rest of your schedule stays the same.'}
+              // Neutral on purpose: with the collective gate off, the legacy
+              // reschedule path still re-anchors a recurring series on a big
+              // pull-forward, so "only this visit is affected" would be an
+              // unconditional promise the system doesn't keep (codex).
+              : "If this visit moves, we'll keep the rest of your plan on track."}
           </>
         ) : (
           <>
@@ -372,7 +384,13 @@ export default function AppointmentPage() {
       ? 'in_progress_on_site'
       : data?.state;
     const copy = STATE_COPY[stateKey] || STATE_COPY.not_available;
-    return <Page><MessageCard title={copy.title} body={copy.body} /></Page>;
+    // A missed pending/confirmed visit stays self-service rebookable
+    // (reschedule-public deliberately allows it) - the token in this URL is
+    // the same reschedule token, so the recovery path costs one link.
+    const action = data?.state === 'past'
+      ? { href: `/reschedule/${token}`, label: 'Pick a new time' }
+      : null;
+    return <Page><MessageCard title={copy.title} body={copy.body} action={action} /></Page>;
   }
 
   const appt = data.appointment || {};
@@ -426,7 +444,10 @@ export default function AppointmentPage() {
         <TechBlock tech={data.tech} />
         <PlanNote plan={data.plan} />
 
-        {data.confirmed ? null : (
+        {/* The server's confirmable flag mirrors the POST guard exactly
+            (pending only, not dispatch-owned) — rendering on anything less
+            offers a button that deterministically 409s. */}
+        {!data.confirmable || data.confirmed ? null : (
           <>
             <button
               type="button"

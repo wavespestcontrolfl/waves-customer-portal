@@ -33,11 +33,19 @@ describe('appointment page state', () => {
     expect(pageState({ status: 'skipped', scheduled_date: '2026-08-05' }, NOW).state).toBe('not_available');
   });
 
-  test('future pending/confirmed/rescheduled visits render the full card', () => {
-    for (const status of ['pending', 'confirmed', 'rescheduled']) {
+  test('future pending/confirmed visits render the full card', () => {
+    for (const status of ['pending', 'confirmed']) {
       expect(pageState({ status, scheduled_date: '2026-08-05', window_start: '09:00:00' }, NOW).state)
         .toBe('upcoming');
     }
+  });
+
+  test('a rescheduled row is a pending-rebook marker, never a live booking', () => {
+    // The customer-portal request path keeps the OLD date/window on the row
+    // while staff pick the replacement — rendering it as upcoming (or
+    // serving its calendar file) would present a slot nobody will honor.
+    expect(pageState({ status: 'rescheduled', scheduled_date: '2026-08-05', window_start: '09:00:00' }, NOW))
+      .toEqual({ state: 'pending_rebook' });
   });
 
   test('a visit is past only after the QUOTED 2-hour arrival window, not the job block', () => {

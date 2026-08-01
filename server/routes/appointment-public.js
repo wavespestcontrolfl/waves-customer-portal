@@ -61,8 +61,13 @@ const STORM_NOTE_MIN_CHANCE = 50;
 // can't herd outbound requests.
 const FORECAST_DEADLINE_MS = 1500;
 
-// Statuses this page will render as a live upcoming visit.
-const UPCOMING_STATUSES = new Set(['pending', 'confirmed', 'rescheduled']);
+// Statuses this page will render as a live upcoming visit. 'rescheduled'
+// is deliberately NOT here: the customer-portal request path uses it as a
+// pending-rebook marker that keeps the OLD date/window on the row while
+// staff pick the replacement — presenting that stale slot as a live booked
+// visit (or letting it into the calendar file) would show the customer a
+// time nobody intends to honor.
+const UPCOMING_STATUSES = new Set(['pending', 'confirmed']);
 
 // Dispatch-owned pending bookings (call-created follow-ups / outbound-review
 // rows) stay office-owned until reviewed — the customer must not be able to
@@ -124,6 +129,9 @@ function pageState(svc, now = new Date()) {
   // stale — and reads as wrong to someone looking at the tech in their
   // driveway — once the status is on_site.
   if (status === 'en_route' || status === 'on_site') return { state: 'in_progress', phase: status };
+  // Pending rebook: staff are choosing the replacement slot; the date and
+  // window still on the row are the OLD ones and must not render as booked.
+  if (status === 'rescheduled') return { state: 'pending_rebook' };
   if (!UPCOMING_STATUSES.has(status)) return { state: 'not_available' };
 
   // Past the quoted arrival window with no terminal status = the visit came
@@ -157,6 +165,24 @@ async function loadByToken(token) {
       db.raw(`COALESCE(s.lat, CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.latitude END) as latitude`),
       db.raw(`COALESCE(s.lng, CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.longitude END) as longitude`),
     );
+}
+
+// The customer-facing service label. registerAppointment persists a merged
+// parent-plus-addons label ("Pest Control & Mosquito Control") into
+// appointment_reminders.service_type, and the v2 texts use it — a page
+// reached FROM those texts that names only the raw parent would silently
+// drop scheduled work. Falls back to the raw column when no reminder row
+// exists.
+async function resolveServiceLabel(svc) {
+  try {
+    const rem = await db('appointment_reminders')
+      .where({ scheduled_service_id: svc.id })
+      .orderBy('created_at', 'desc')
+      .first('service_type');
+    return rem?.service_type || svc.service_type || 'service';
+  } catch {
+    return svc.service_type || 'service';
+  }
 }
 
 // "The same technician as your last visit" — a trust line, so it must be
@@ -224,7 +250,7 @@ router.get('/:token', async (req, res, next) => {
       // the way" vs "at your property" truthfully.
       phase: phase || null,
       customerFirstName: svc.cust_first_name || null,
-      service: { type: svc.service_type || 'service' },
+      service: { type: await resolveServiceLabel(svc) },
       appointment: {
         date: apptDateStr(svc.scheduled_date),
         windowStart: hhmm(svc.window_start),
@@ -332,7 +358,7 @@ router.get('/:token/calendar.ics', async (req, res, next) => {
     if (!startAt || Number.isNaN(startAt.getTime())) return res.status(404).json({ error: 'Not found' });
     const endAt = new Date(startAt.getTime() + ARRIVAL_PROMISE_MINUTES * 60000);
 
-    const serviceLabel = svc.service_type || 'Service';
+    const serviceLabel = await resolveServiceLabel(svc);
     const lines = [
       'BEGIN:VCALENDAR',
       'VERSION:2.0',
@@ -416,7 +442,11 @@ router.post('/:token/confirm', confirmLimiter, async (req, res, next) => {
     await db.transaction(async (trx) => {
       updated = await trx('scheduled_services')
         .where({ id: svc.id, status: 'pending' })
-        .update({ status: 'confirmed', updated_at: trx.fn.now() });
+        // customer_confirmed rides along for parity with the logged-in
+        // confirm route (routes/schedule.js): the portal's "Confirm Visit"
+        // button keys on that flag, and leaving it false would keep
+        // offering a confirm whose retry can only 404.
+        .update({ status: 'confirmed', customer_confirmed: true, updated_at: trx.fn.now() });
       if (updated === 0) return;
       await trx('job_status_history').insert({
         job_id: svc.id,

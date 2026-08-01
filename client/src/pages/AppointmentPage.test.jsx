@@ -21,6 +21,7 @@ function upcomingPayload(overrides = {}) {
     service: { type: 'Quarterly Pest Control' },
     appointment: { date: '2026-08-05', windowStart: '09:00' },
     confirmed: false,
+    confirmable: true,
     tech: { firstName: 'Adam', photoUrl: null, sameAsLastVisit: true },
     plan: { isRecurring: true, collectiveAnchor: true },
     weather: { rainChance: 15, stormy: false },
@@ -129,6 +130,17 @@ describe('AppointmentPage upcoming visit', () => {
     renderPage();
 
     expect(await screen.findByText('Confirmed')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Confirm this appointment' })).not.toBeInTheDocument();
+  });
+
+  it('honors the server confirmable flag — no CTA that would deterministically 409', async () => {
+    // Dispatch-owned pending rows return confirmable:false with the visit
+    // still viewable; the button must not render (codex P1).
+    stubFetch({ get: jsonResponse(upcomingPayload({ confirmable: false })) });
+
+    renderPage();
+
+    expect(await screen.findByText(/quarterly pest control/i)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Confirm this appointment' })).not.toBeInTheDocument();
   });
 
