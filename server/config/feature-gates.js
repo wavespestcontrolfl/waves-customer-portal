@@ -32,6 +32,7 @@
  *   GATE_CALL_REPLAY_EVAL=true  (weekly reviewed-call extraction replay eval)
  *   GATE_ADS_BUDGET_LIVE_PUSH=true (capacity cron pushes budget changes to Google Ads)
  *   GATE_BOOKING_FUNNEL_CANARY=true (alert when /book funnel entries see zero conversions)
+ *   GATE_LLM_DISPATCH_METRICS=true (log dispatcher outcomes + daily exception digest email)
  *   GATE_AUTO_WAVEGUARD_TIER=true (auto-stamp/lapse WaveGuard tier from upcoming recurring coverage)
  *
  * In development, most gates are OPEN by default so you can test locally.
@@ -100,6 +101,15 @@ const gates = {
   // ADAM_PHONE; dev/test must not fire it by accident). Kill switch: unset —
   // the scheduler tick no-ops and nothing else changes.
   bookingFunnelCanary: process.env.GATE_BOOKING_FUNNEL_CANARY === 'true',
+
+  // LLM dispatch observability (2026-07-31): every dispatchWithFallback chain
+  // logs one llm_dispatch_log row, and a daily cron emails ONLY exceptions
+  // (all-providers-failed, fallback-rate spike, policy gone silent) to the
+  // company inbox. Opt-in in EVERY environment (dev/test must not email or
+  // write metrics rows by accident). Kill switch: unset — recording and the
+  // digest email no-op instantly; the daily retention prune keeps running so
+  // existing rows still age out.
+  llmDispatchMetrics: process.env.GATE_LLM_DISPATCH_METRICS === 'true',
 
   // Hybrid knowledge retrieval (lane A2): vector+FTS+RRF search behind the
   // IB's search_field_intelligence, plus the nightly knowledge-index sync

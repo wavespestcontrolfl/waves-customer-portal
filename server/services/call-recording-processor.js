@@ -329,6 +329,9 @@ const CALL_EXTRACTION_MODEL_FOR = {
   gemini: GEMINI_EXTRACTION_MODEL,
 };
 const CALL_EXTRACTION_ROUTE = Object.freeze({
+  // Stable dispatch-metrics identity — the resolved routes can coincide with
+  // other lanes' (call-research shares the Sol primary by default).
+  name: 'callExtraction',
   primary: Object.freeze({
     provider: CALL_EXTRACTION_PROVIDER,
     model: CALL_EXTRACTION_MODEL_FOR[CALL_EXTRACTION_PROVIDER] || CALL_EXTRACTION_MODEL_FOR.openai,

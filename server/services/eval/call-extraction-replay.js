@@ -56,7 +56,12 @@ function failureLines(run) {
 
 async function attemptReplay(runReplay, options) {
   try {
-    const run = await runReplay(options);
+    // Replay drives the LIVE v2 extractor over a fixed fixture. Tag its LLM
+    // dispatches as replay traffic so the deliberately-hard fixture cases
+    // can't dilute the live callExtraction lane's fallback/failure rates or
+    // keep it looking active after real call processing stops.
+    const { runAsReplay } = require('../llm-dispatch-metrics');
+    const run = await runAsReplay(() => runReplay(options));
     return {
       status: isFailedRun(run) ? 'fail' : 'pass',
       run,
