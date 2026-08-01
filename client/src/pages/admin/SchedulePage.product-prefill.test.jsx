@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  allowedTargetLinesForServiceType,
   defaultApplicationMethod,
   derivedTotalAmount,
   filterLabelTargetsForLine,
@@ -87,6 +88,39 @@ describe("productControlsTargets", () => {
   });
 });
 
+describe("allowedTargetLinesForServiceType", () => {
+  it("classifies single-line service names", () => {
+    expect(allowedTargetLinesForServiceType("Quarterly Pest Control")).toEqual(
+      new Set(["pest"]),
+    );
+    expect(allowedTargetLinesForServiceType("Lawn Care Program")).toEqual(
+      new Set(["lawn"]),
+    );
+    expect(allowedTargetLinesForServiceType("Tree & Shrub Care")).toEqual(
+      new Set(["tree_shrub"]),
+    );
+  });
+
+  it("keeps BOTH lines for a combined visit's raw name", () => {
+    expect(allowedTargetLinesForServiceType("Lawn + Tree & Shrub")).toEqual(
+      new Set(["lawn", "tree_shrub"]),
+    );
+  });
+
+  it("mirrors the classifier's exclusions", () => {
+    // "Tree Line Mosquito Treatment" is mosquito work, not tree & shrub.
+    expect(
+      allowedTargetLinesForServiceType("Tree Line Mosquito Treatment"),
+    ).toEqual(new Set(["mosquito"]));
+    // "Palmetto" is a roach, never palm work.
+    expect(
+      allowedTargetLinesForServiceType("Palmetto Roach Knockdown"),
+    ).toEqual(new Set(["pest"]));
+  });
+});
+
+const lines = (serviceType) => allowedTargetLinesForServiceType(serviceType);
+
 describe("filterLabelTargetsForLine", () => {
   // Real catalog rows (products_catalog.target_pests, prod 2026-08-01).
   const TALSTAR = [
@@ -106,7 +140,7 @@ describe("filterLabelTargetsForLine", () => {
   ];
 
   it("drops turf targets on a pest visit and caps at the prefill max", () => {
-    expect(filterLabelTargetsForLine(TALSTAR, "pest")).toEqual([
+    expect(filterLabelTargetsForLine(TALSTAR, lines("Quarterly Pest Control"))).toEqual([
       "Ghost ants",
       "Big-headed ants",
       "Fire ants",
@@ -114,25 +148,48 @@ describe("filterLabelTargetsForLine", () => {
   });
 
   it("keeps only lawn-relevant targets on a lawn visit (fire ants are both)", () => {
-    expect(filterLabelTargetsForLine(TALSTAR, "lawn")).toEqual([
+    expect(filterLabelTargetsForLine(TALSTAR, lines("Lawn Care Program"))).toEqual([
       "Fire ants",
       "Southern chinch bugs",
     ]);
   });
 
   it("prefills nothing ornamental-appropriate from a structural label on tree & shrub", () => {
-    expect(filterLabelTargetsForLine(TALSTAR, "tree_shrub")).toEqual([]);
+    expect(filterLabelTargetsForLine(TALSTAR, lines("Tree & Shrub Care"))).toEqual([]);
+  });
+
+  it("keeps a combined visit's targets from BOTH lines", () => {
+    const combined = lines("Lawn + Tree & Shrub");
+    expect(filterLabelTargetsForLine(TALSTAR, combined)).toEqual([
+      "Fire ants",
+      "Southern chinch bugs",
+    ]);
+    expect(
+      filterLabelTargetsForLine(["Spider mites", "Leafminers"], combined),
+    ).toEqual(["Spider mites", "Leafminers"]);
   });
 
   it("keeps ornamental targets on tree & shrub and drops them elsewhere", () => {
     const avid = ["Spider mites", "Leafminers"];
-    expect(filterLabelTargetsForLine(avid, "tree_shrub")).toEqual(avid);
+    expect(filterLabelTargetsForLine(avid, lines("Tree & Shrub Care"))).toEqual(avid);
     // "Spider mites" must classify as ornamental, not as a spider.
-    expect(filterLabelTargetsForLine(avid, "pest")).toEqual([]);
+    expect(filterLabelTargetsForLine(avid, lines("Quarterly Pest Control"))).toEqual([]);
+  });
+
+  it("keeps caterpillars on lawn AND tree & shrub — Conserve SC treats both", () => {
+    const conserve = ["Caterpillars", "Chilli thrips", "Tropical sod webworms"];
+    expect(filterLabelTargetsForLine(conserve, lines("Lawn Care Program"))).toEqual([
+      "Caterpillars",
+      "Tropical sod webworms",
+    ]);
+    expect(filterLabelTargetsForLine(conserve, lines("Tree & Shrub Care"))).toEqual([
+      "Caterpillars",
+      "Chilli thrips",
+    ]);
   });
 
   it("keeps only mosquito targets on a mosquito visit", () => {
-    expect(filterLabelTargetsForLine(BIFEN_IT, "mosquito")).toEqual([
+    expect(filterLabelTargetsForLine(BIFEN_IT, lines("WaveGuard Mosquito"))).toEqual([
       "Mosquitoes",
     ]);
   });
@@ -141,7 +198,7 @@ describe("filterLabelTargetsForLine", () => {
     expect(
       filterLabelTargetsForLine(
         ["Subterranean termites", "Formosan termites", "Carpenter ants"],
-        "termite",
+        lines("Termite Treatment"),
       ),
     ).toEqual(["Subterranean termites", "Formosan termites", "Carpenter ants"]);
   });
@@ -150,7 +207,7 @@ describe("filterLabelTargetsForLine", () => {
     expect(
       filterLabelTargetsForLine(
         ["White grubs", "Tawny mole crickets", "Tropical sod webworms"],
-        "lawn",
+        lines("Lawn Care Program"),
       ),
     ).toEqual(["White grubs", "Tawny mole crickets", "Tropical sod webworms"]);
   });
@@ -162,13 +219,18 @@ describe("filterLabelTargetsForLine", () => {
       "Potassium root support",
       "Iron chlorosis (yellowing turf)",
     ];
-    const kept = filterLabelTargetsForLine(lesco, "lawn");
+    const kept = filterLabelTargetsForLine(lesco, lines("Lawn Care Program"));
     expect(kept).toHaveLength(MAX_LABEL_TARGET_PREFILL);
     expect(kept).toEqual(lesco.slice(0, MAX_LABEL_TARGET_PREFILL));
   });
 
-  it("defaults an unknown category to the pest line", () => {
+  it("defaults a missing/empty line set to the pest line", () => {
     expect(filterLabelTargetsForLine(TALSTAR, undefined)).toEqual([
+      "Ghost ants",
+      "Big-headed ants",
+      "Fire ants",
+    ]);
+    expect(filterLabelTargetsForLine(TALSTAR, new Set())).toEqual([
       "Ghost ants",
       "Big-headed ants",
       "Fire ants",

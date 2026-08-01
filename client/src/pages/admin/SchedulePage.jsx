@@ -10668,20 +10668,24 @@ export function CompletionPanel({
         // control and trims rather than typing from scratch. Editable as before.
         // Protocol-added products (addProduct(action.product)) are serialized
         // without target_pests, so fall back to the loaded catalog row by id.
-        // Only targets belonging to THIS visit's service line prefill, capped
-        // at MAX_LABEL_TARGET_PREFILL (owner 2026-08-01) — a pest visit drops
-        // Talstar's chinch bugs, a lawn visit drops its ants and roaches; the
-        // tech can still add any target by hand. Keyed to the detected service
-        // CATEGORY, not the panel's `isLawn` (which is false for typed lawn
-        // visits — codex P2: a typed lawn treatment must keep its turf
-        // targets).
+        // Only targets belonging to THIS visit's service line(s) prefill,
+        // capped at MAX_LABEL_TARGET_PREFILL (owner 2026-08-01) — a pest
+        // visit drops Talstar's chinch bugs, a lawn visit drops its ants and
+        // roaches; the tech can still add any target by hand. Keyed to the
+        // detected service lines, not the panel's `isLawn` (false for typed
+        // lawn visits — codex P2), and classified from serviceTypeRaw when
+        // present: the day view normalizes "Lawn + Tree & Shrub" to "Tree &
+        // Shrub Care", and a combined visit must keep BOTH lines' targets
+        // (codex P1 r1).
         targets: filterLabelTargetsForLine(
           normalizeLabelTargets(
             product.target_pests
               ?? product.targetPests
               ?? (products || []).find((p) => String(p.id) === String(product.id))?.target_pests,
           ),
-          detectServiceCategory(service.serviceType),
+          allowedTargetLinesForServiceType(
+            service.serviceTypeRaw || service.serviceType,
+          ),
         ),
       },
     ]);
@@ -15640,7 +15644,12 @@ const LAWN_ONLY_TARGET_RE =
 // borers, and foliar issues. Checked BEFORE the structural set so "Spider
 // mites" classifies as ornamental instead of matching the spider pattern.
 const ORNAMENTAL_ONLY_TARGET_RE =
-  /whitefl|spiraling|scale insect|soft scale|mealybug|aphid|thrips|\bmites?\b|leafminer|\bborer|caterpillar|weevil|sooty mold|powdery mildew|fungal leaf spot/i;
+  /whitefl|spiraling|scale insect|soft scale|mealybug|aphid|thrips|\bmites?\b|leafminer|\bborer|weevil|sooty mold|powdery mildew|fungal leaf spot/i;
+
+// Caterpillars feed on both turf (sod webworms, armyworms are caterpillars —
+// Conserve SC is labeled for all three) and ornamentals, so a bare
+// "Caterpillars" target belongs on either line.
+const CATERPILLAR_TARGET_RE = /caterpillar/i;
 
 // Wood-destroying-organism targets: pass on termite/WDO visits, and carpenter
 // ants also read fine on a general pest visit.
@@ -15664,6 +15673,7 @@ const STRUCTURAL_ONLY_TARGET_RE =
 function labelTargetLines(target) {
   if (/fire ant/i.test(target)) return ["pest", "lawn"];
   if (LAWN_ONLY_TARGET_RE.test(target)) return ["lawn"];
+  if (CATERPILLAR_TARGET_RE.test(target)) return ["tree_shrub", "lawn"];
   if (ORNAMENTAL_ONLY_TARGET_RE.test(target)) return ["tree_shrub"];
   if (TERMITE_TARGET_RE.test(target)) return ["termite"];
   if (CARPENTER_ANT_RE.test(target)) return ["termite", "pest"];
@@ -15672,23 +15682,62 @@ function labelTargetLines(target) {
   return null;
 }
 
+// The service lines whose targets may prefill on this visit. The primary line
+// comes from the classifier, but a combined display name carries companion
+// sections whose targets are just as legitimate — "Lawn + Tree & Shrub"
+// classifies lawn yet must keep ornamental prefills (and the day view
+// normalizes that name to "Tree & Shrub Care", so callers pass serviceTypeRaw
+// when present). Companion token rules mirror detectServiceCategory's own
+// exclusions ("Tree Line Mosquito Treatment" adds mosquito, not tree_shrub;
+// "Palmetto" never reads as palm work).
+export function allowedTargetLinesForServiceType(rawServiceType) {
+  const lines = new Set([detectServiceCategory(rawServiceType)]);
+  const s = String(rawServiceType || "").toLowerCase();
+  if (
+    !s.includes("mosquito") &&
+    !s.includes("termite") &&
+    !s.includes("wdo") &&
+    (s.includes("tree") ||
+      s.includes("shrub") ||
+      s.includes("ornamental") ||
+      s.includes("arborjet") ||
+      /\bpalm(s)?\b/.test(s))
+  ) {
+    lines.add("tree_shrub");
+  }
+  if (
+    s.includes("lawn") ||
+    s.includes("turf") ||
+    s.includes("grass") ||
+    s.includes("sod")
+  ) {
+    lines.add("lawn");
+  }
+  if (s.includes("mosquito")) lines.add("mosquito");
+  if (/\bpest\b/.test(s)) lines.add("pest");
+  return lines;
+}
+
 // A prefill is a starting point, not a transcription of the label — cap it at
 // the few most popular targets (catalog arrays are ordered most-common-first)
 // and let the tech add the rest by hand (owner 2026-08-01: "3 at most, and
 // popular SWFL pests").
 export const MAX_LABEL_TARGET_PREFILL = 3;
 
-// Keep only the label targets that belong on the visit's service line
-// (detectServiceCategory: pest | lawn | tree_shrub | mosquito | termite), then
-// cap. Filtering runs in BOTH directions now — a lawn visit drops Talstar's
-// ants/roaches just like a pest visit drops its chinch bugs (owner 2026-08-01:
-// targets must populate for the service at hand).
-export function filterLabelTargetsForLine(targets, serviceCategory) {
-  const line = serviceCategory || "pest";
+// Keep only the label targets that belong on one of the visit's service lines
+// (a Set from allowedTargetLinesForServiceType), then cap. Filtering runs in
+// BOTH directions now — a lawn visit drops Talstar's ants/roaches just like a
+// pest visit drops its chinch bugs (owner 2026-08-01: targets must populate
+// for the service at hand).
+export function filterLabelTargetsForLine(targets, allowedLines) {
+  const allowed =
+    allowedLines instanceof Set && allowedLines.size
+      ? allowedLines
+      : new Set(["pest"]);
   return targets
     .filter((t) => {
       const lines = labelTargetLines(t);
-      return !lines || lines.includes(line);
+      return !lines || lines.some((line) => allowed.has(line));
     })
     .slice(0, MAX_LABEL_TARGET_PREFILL);
 }
