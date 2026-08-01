@@ -244,10 +244,12 @@ async function processServiceReportDelivery(delivery, knex = db) {
   let releaseLawnSeal = null;
 
   let fencedAssessmentId = null;
-  // Whether the fence target came from canonical resolution (vs the held
-  // payload fallback). Only a canonically-resolved target can be re-checked
-  // against the renderer's selection after the render.
-  let fencedFromCanonical = false;
+  // The canonical answer as of BEFORE the render — including null, which is
+  // itself a meaningful answer ("the report page renders no lawn section").
+  // The post-render re-check compares against this, not against the fenced id,
+  // so the held-payload fallback is covered too: null -> a newly confirmed row
+  // is a change, and must defer.
+  let canonicalAtResolve = null;
 
   if (heldForGrounding) {
     const KnowledgeBridge = require('../knowledge-bridge');
@@ -289,7 +291,7 @@ async function processServiceReportDelivery(delivery, knex = db) {
       ? await loadLinkedLawnAssessment(serviceRow, knex, { failClosed: true })
       : null;
     fencedAssessmentId = linked?.id || null;
-    fencedFromCanonical = !!fencedAssessmentId;
+    canonicalAtResolve = fencedAssessmentId;
   } catch (resolveErr) {
     const status = await markDeliveryFailed(delivery, new Error(`lawn fence target unresolvable: ${resolveErr.message}`), knex);
     return { status, error: resolveErr.message };
@@ -353,22 +355,21 @@ async function processServiceReportDelivery(delivery, knex = db) {
         //
         // Fail closed: an unreadable re-check is not a pass.
         //
-        // Only meaningful for a canonically-resolved target. On the held-payload
-        // fallback canonical resolution already returned nothing (the assessment
-        // isn't confirmed yet), so the report page renders no lawn section at
-        // all — there is no selection to drift, and re-checking would defer
-        // every held delivery forever.
-        if (fencedFromCanonical) {
-          const serviceNow = await knex('service_records')
-            .where({ id: delivery.service_record_id })
-            .first('id', 'customer_id', 'scheduled_service_id', 'service_id');
-          const linkedNow = serviceNow
-            ? await loadLinkedLawnAssessment(serviceNow, knex, { failClosed: true })
-            : null;
-          if (String(linkedNow?.id || '') !== String(assessmentId)) {
-            logger.warn(`[delivery-queue] lawn assessment selection changed across render for record ${delivery.service_record_id} (fenced ${assessmentId}, now ${linkedNow?.id || 'none'}) — deferring send`);
-            return false;
-          }
+        // Compared against the PRE-RENDER canonical answer, not the fenced id,
+        // and it runs for EVERY fenced delivery including the held-payload
+        // fallback. null is a real answer there — "the page renders no lawn
+        // section" — so a row becoming confirmed mid-render flips null to an
+        // id, which is exactly the drift that must defer. Exempting the
+        // fallback would have left that race open.
+        const serviceNow = await knex('service_records')
+          .where({ id: delivery.service_record_id })
+          .first('id', 'customer_id', 'scheduled_service_id', 'service_id');
+        const linkedNow = serviceNow
+          ? await loadLinkedLawnAssessment(serviceNow, knex, { failClosed: true })
+          : null;
+        if (String(linkedNow?.id || '') !== String(canonicalAtResolve || '')) {
+          logger.warn(`[delivery-queue] lawn assessment selection changed across render for record ${delivery.service_record_id} (was ${canonicalAtResolve || 'none'}, now ${linkedNow?.id || 'none'}, fenced ${assessmentId}) — deferring send`);
+          return false;
         }
         const sealed = await KnowledgeBridge.sealRecommendationsForSend(assessmentId, versionAtCheck, versionOf);
         if (sealed) {

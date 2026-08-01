@@ -329,10 +329,10 @@ describe('#3135 r1/r2 — fence target resolution', () => {
     expect(loadLinkedLawnAssessment).toHaveBeenCalledTimes(2);
   });
 
-  test('#3143: the held-payload fallback is NOT selection-re-checked', async () => {
-    // Canonical resolution finds nothing (assessment not confirmed), so the
-    // fence falls back to the held id. Re-checking would compare against null
-    // and defer every held delivery forever.
+  test('#3143 r2: the held-payload fallback IS re-checked — null is a real answer', async () => {
+    // Canonical resolution finds nothing pre-render (assessment not confirmed)
+    // and still nothing after, so the answer is UNCHANGED and the send
+    // proceeds on the held fallback id.
     loadLinkedLawnAssessment.mockResolvedValue(null);
     sendServiceReportV1Email.mockImplementationOnce(async (_id, opts) => {
       const safe = await opts.verifyBeforeSend();
@@ -350,8 +350,32 @@ describe('#3135 r1/r2 — fence target resolution', () => {
     expect(KnowledgeBridge.sealRecommendationsForSend).toHaveBeenCalledWith(
       'assess-held', expect.any(String), expect.any(Function),
     );
-    // Only the pre-render resolution ran — no post-render re-check.
-    expect(loadLinkedLawnAssessment).toHaveBeenCalledTimes(1);
+    // Re-checked like any other fenced delivery: resolved before and after.
+    expect(loadLinkedLawnAssessment).toHaveBeenCalledTimes(2);
+  });
+
+  test('#3143 r2: a held delivery DEFERS when a row becomes confirmed mid-render', async () => {
+    // The hole in the previous cut: pre-render null exempted the fallback from
+    // the re-check, so an assessment confirmed while the remote PDF rendered
+    // could become the page's selection while the worker sealed only the held
+    // row. null -> id is a change and must defer.
+    loadLinkedLawnAssessment
+      .mockResolvedValueOnce(null) // pre-render: nothing confirmed yet
+      .mockResolvedValueOnce({ id: 'assess-NEWLY-CONFIRMED' }); // post-render
+    sendServiceReportV1Email.mockImplementationOnce(async (_id, opts) => {
+      const safe = await opts.verifyBeforeSend();
+      return safe ? { ok: true, messageId: 'msg-1' } : { ok: false, error: 'deferring', retryable: true };
+    });
+    const knex = makeKnex();
+    const delivery = {
+      ...DELIVERY,
+      payload: { awaiting_grounding: true, lawn_assessment_id: 'assess-held' },
+    };
+
+    const out = await processServiceReportDelivery(delivery, knex);
+
+    expect(out.status).not.toBe('sent');
+    expect(KnowledgeBridge.sealRecommendationsForSend).not.toHaveBeenCalled();
   });
 
   test('r2: a lookup ERROR fails closed — deferred, never dispatched unfenced', async () => {
