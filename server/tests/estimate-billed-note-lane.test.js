@@ -173,10 +173,19 @@ describe('buildPricingBundle lane enforcement', () => {
     expect(collectFlags(bundle).length).toBeGreaterThan(0);
   });
 
-  test('lane lookup failure on a linked estimate fails to the monthly disclosure (strip)', async () => {
+  // REVERSED ("per month" audit 2026-08-01, codex #3128 r10). This used to
+  // strip on a lookup error, reasoning that the monthly note is a disclosure
+  // and suppressing it would hide a description of a real charge. The flags
+  // are not a note: PriceCard reads their ABSENCE as permission to render
+  // "Billed $X/mo", so stripping showed a monthly spread to a per-application
+  // plan — the exact defect this sweep exists to remove, and on the failure
+  // path specifically. It now fails CLOSED, which also makes the error case
+  // agree with "linked but customer row missing" directly above: an unknown
+  // lane converts like a new signup, per application.
+  test('lane lookup failure on a linked estimate fails CLOSED to per application', async () => {
     mockDbState.customer = new Error('connection refused');
     const bundle = await buildPricingBundle(lawnEstimateRow({ customerId: 'cust-1' }));
-    expect(collectFlags(bundle)).toEqual([]);
+    expect(collectFlags(bundle).length).toBeGreaterThan(0);
   });
 
   test('pre-migration database (no billing_mode column): every flag stripped even for leads — accepts bill the legacy monthly cron (codex r3)', async () => {
