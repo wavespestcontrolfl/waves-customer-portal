@@ -27,7 +27,8 @@ const CUSTOMER_SMS_HOUSE_VOICE = `CUSTOMER SMS HOUSE VOICE (every message you se
 - Never perform enthusiasm or empathy ("I'd be happy to!", "Great question!") — just be helpful.
 - When you don't know or can't do something, one short sentence + what happens next ("Let me double-check with the office and follow up") beats a long answer. Never pad, never over-explain, never guess.
 - Never say "I'm an AI" or similar. Never use corporate hedging like "I understand your concern."
-- MONEY: real amounts already on the account (balance, invoice total, a sent estimate) may be stated exactly as the facts show them. Never invent, round, or compute a figure, and never quote pricing for NEW work by text — send an estimate or portal link for that.`;
+- MONEY: real amounts already on the account (balance, invoice total, a sent estimate) may be stated exactly as the facts show them. Never invent, round, or compute a figure, and never quote pricing for NEW work by text — send an estimate or portal link for that.
+- PRICE UNITS: recurring service is billed PER APPLICATION (or prepaid for the year) — say "$117 per application" or "9 applications a year", never "per visit", and never present a plan as a flat monthly amount. The "Billing lane" fact in the account context is the ONLY authority on how a customer pays, and it states in its own words what you may say. Follow it exactly. A stored "monthly rate" is NOT that authority (almost every recurring customer carries that field while billing per application, so repeating it as their price would misdescribe a real charge), and neither is a WaveGuard tier. Two lanes are exceptions to the per-application default: MONTHLY MEMBERSHIP — a handful of legacy customers genuinely bill monthly, and for them the monthly rate IS the price, so state it plainly rather than deflecting to the office; and ANNUAL PREPAY — already paid for the year, so quote neither a monthly charge nor a per-application amount as something owed. If the lane reads "not stated" or is unavailable, give the plan and cadence and let the office confirm the amount.`;
 
 const AGENT_CONFIG = {
   name: 'waves-customer-assistant',
@@ -88,7 +89,7 @@ RULES:
     {
       type: 'custom',
       name: 'lookup_customer',
-      description: `Look up a customer by phone number or name. Returns account details including name, address, WaveGuard tier, monthly rate, outstanding balance, member-since date, and pipeline stage. Use this first when you need any customer information. If the customer is already identified via context, you can skip this.`,
+      description: `Look up a customer by phone number or name. Returns account details including name, address, WaveGuard tier, monthly rate, outstanding balance, member-since date, and pipeline stage. NOTE: 'monthly rate' is a stored internal figure, NOT what most customers are charged — recurring plans bill per application, and only a monthly-membership billing lane is charged monthly. Never repeat it to a customer as their price unless the "Billing lane" fact in the account context reads monthly membership; when it does, that rate IS their price. The lane is supplied by that fact (owner-set or inferred — both are authoritative), not by this tool. Use this first when you need any customer information. If the customer is already identified via context, you can skip this.`,
       input_schema: {
         type: 'object',
         properties: {
@@ -125,7 +126,7 @@ RULES:
     {
       type: 'custom',
       name: 'get_billing_info',
-      description: `Get billing info: WaveGuard tier, monthly rate, outstanding balance, last 5 payments, and payment methods on file. Use when they ask about their bill, payments, balance, or card.`,
+      description: `Get billing info: WaveGuard tier, monthly rate, outstanding balance, last 5 payments, and payment methods on file. 'monthly rate' is internal — only a monthly-membership billing lane is charged monthly; never quote it to a customer as their price unless the "Billing lane" fact in the account context reads monthly membership, in which case that rate IS their price. The lane is supplied by that fact (owner-set or inferred — both are authoritative), not by this tool. Use when they ask about their bill, payments, balance, or card.`,
       input_schema: {
         type: 'object',
         properties: { customer_id: { type: 'string', description: 'Waves customer UUID' } },
