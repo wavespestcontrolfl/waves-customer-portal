@@ -43,7 +43,7 @@ const {
 function setupDb({ seq, invoice }) {
   const seqUpdate = jest.fn(async () => 1);
   // Every sequence UPDATE stamps updated_at via knex's `.fn.now()` (the
-  // merge-undo activity gate reads that column), so the stub connection needs
+  // ownership-change checks read that column), so the stub connection needs
   // the same surface the real knex instance exposes.
   db.fn = { now: jest.fn(() => 'CURRENT_TIMESTAMP') };
   db.mockImplementation((table) => {
@@ -203,14 +203,14 @@ describe('release paths re-arm from the shifted anchor when one exists', () => {
     expect(patch.next_touch_at.toISOString()).toBe('2026-07-17T14:00:00.000Z');
   });
 
-  it('every sequence mutation stamps updated_at — the merge-undo activity signal (r19)', async () => {
+  it('every sequence mutation stamps updated_at — the touched-since signal', async () => {
     // `timestamps(true, true)` only DEFAULTS updated_at at insert; knex does
-    // not maintain it and 20260414000032 installs no trigger. customer-dedupe
-    // treats invoice_followup_sequences as a financial revert table and reads
-    // updated_at as "touched since the merge" — an unstamped mutation leaves
-    // the pre-merge timestamp and lets an Undo repoint a sequence that has
-    // already dunned. A blanket trigger is NOT the fix: it would also fire on
-    // revertMerge's deliberately-bare financial reverse repoint.
+    // not maintain it and 20260414000032 installs no trigger. So an unstamped
+    // mutation left the value frozen at creation, and any "has this sequence
+    // been touched since <time>?" read — audit, reconciliation, the ownership
+    // checks in fireStep — saw a sequence that had already dunned as pristine.
+    // A blanket trigger is NOT the fix: it would also fire on pure ownership
+    // repoints, which must stay invisible to those checks.
     const cases = [
       ['resumeSequence', () => resumeSequence('inv-1'), { id: 'seq-1', status: 'paused', step_index: 0, anchor_at: null }],
       ['releaseFromAutopayHold', () => releaseFromAutopayHold('inv-1'), { id: 'seq-1', status: 'autopay_hold', step_index: 0, anchor_at: null }],

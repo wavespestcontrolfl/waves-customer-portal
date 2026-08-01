@@ -1,19 +1,19 @@
 /**
- * Settlement ownership vs a concurrent customer-merge UNDO.
+ * Settlement ownership vs a concurrent change of the invoice's owner.
  *
  * payment_intent.succeeded resolves its invoice with a PRE-lock read
  * (findInvoiceForPaymentIntent), then takes FOR UPDATE on that invoice row
- * inside the transaction. A merge undo (customer-dedupe.js revertMerge)
- * verifies and repoints invoices under the SAME row lock, and probes for
- * payments against them BEFORE repointing. So the two are already
- * serialized — but only if settlement reads the invoice's owner from the
- * row it LOCKED, not from the copy it read before waiting.
+ * inside the transaction. A customer merge repoints invoices.customer_id
+ * under that SAME row lock, so the two are already serialized — but only if
+ * settlement reads the invoice's owner from the row it LOCKED, not from the
+ * copy it read before waiting.
  *
- * Codex r13 P1: the insert used `invoice.customer_id` (pre-lock), so an
- * undo that committed while this handler waited produced a loser-owned
- * paid invoice whose payment row still belonged to the winner. Pinned here
- * with a stub whose FOR UPDATE re-read deliberately returns a DIFFERENT
- * owner than the pre-lock read — exactly the post-undo world.
+ * The insert used `invoice.customer_id` (pre-lock), so an ownership change
+ * that committed while this handler waited produced an invoice on one
+ * account whose payment row belonged to another — reconciliation sees both
+ * a missing payment and an unexplained one. Pinned here with a stub whose
+ * FOR UPDATE re-read deliberately returns a DIFFERENT owner than the
+ * pre-lock read.
  *
  * No new lock is introduced: settlement must never be blocked into failure.
  */
@@ -161,19 +161,19 @@ beforeEach(() => {
 });
 
 describe('payment settlement takes ownership from the LOCKED invoice row', () => {
-  test('a merge undo that committed while we waited: the payment follows the invoice to the restored customer', async () => {
+  test('an ownership change that committed while we waited: the payment follows the invoice to its new owner', async () => {
     await handlePaymentIntentSucceeded(succeededPI());
 
     const paymentInsert = mockState.inserts.find((i) => i.table === 'payments');
     expect(paymentInsert).toBeTruthy();
-    // THE PIN: the pre-lock read said WINNER; the row we locked says LOSER.
-    // Using the pre-lock value would leave a loser-owned paid invoice whose
-    // payment belongs to the winner.
+    // THE PIN: the pre-lock read said PRIOR_OWNER; the row we locked says
+    // NEW_OWNER. Using the pre-lock value would leave a paid invoice on one
+    // account whose payment sits on another.
     expect(paymentInsert.payload.customer_id).toBe(LOSER);
     expect(paymentInsert.payload.customer_id).not.toBe(WINNER);
   });
 
-  test('happy path (no undo): locked owner equals the pre-lock owner, behavior unchanged', async () => {
+  test('happy path (no concurrent repoint): locked owner equals the pre-lock owner, behavior unchanged', async () => {
     mockState.lockedInvoice = { ...mockState.lockedInvoice, customer_id: WINNER };
 
     await handlePaymentIntentSucceeded(succeededPI());

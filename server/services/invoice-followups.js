@@ -8,18 +8,20 @@
  *
  * See server/config/invoice-followups.js for step timing + copy.
  *
- * EVERY UPDATE IN THIS FILE MUST STAMP `updated_at` (r19 P1). `timestamps(true,
- * true)` only defaults the column at INSERT — Knex does not maintain it and
- * migration 20260414000032 installs no trigger, so an unstamped UPDATE leaves
- * the pre-merge timestamp in place. customer-dedupe.js now treats
- * invoice_followup_sequences as a REVERT_FINANCIAL_TABLES row and reads
- * updated_at as its "touched since the merge" signal, so a missed stamp lets a
- * merge-undo repoint a sequence that has already dunned. A blanket BEFORE
- * UPDATE trigger was considered and REJECTED: it would also fire on
- * revertMerge's financial reverse repoint, which is deliberately bare (a bump
- * there makes the GET /merges invoice-activity mirror read the undo itself as
- * activity on other journals sharing the row). Explicit stamps — the repo's
- * convention in ~314 other call sites — keep the writer and the undo distinct.
+ * EVERY UPDATE IN THIS FILE MUST STAMP `updated_at`. `timestamps(true, true)`
+ * only defaults the column at INSERT — Knex does not maintain it and migration
+ * 20260414000032 installs no trigger, so before this was fixed an unstamped
+ * UPDATE left the value frozen at creation time. Anything asking "has this
+ * sequence been touched since <time>?" — audit reads, reconciliation, and the
+ * ownership-change checks below — was therefore reading a timestamp that never
+ * moved, even for a sequence that had already dunned several times.
+ *
+ * A blanket BEFORE UPDATE trigger was considered and REJECTED: it would also
+ * fire on pure ownership repoints (a customer merge rewriting customer_id),
+ * which must stay invisible to "was this row touched?" checks — a bump there
+ * would make the repoint itself read as activity. Explicit stamps, the repo's
+ * convention in ~314 other call sites, keep a real mutation and a repoint
+ * distinguishable.
  */
 
 const db = require('../models/db');
@@ -265,7 +267,8 @@ function anchorTo10amNY(anchorDate, daysAfter, hour) {
 async function scheduleForInvoice(invoiceId) {
   // Cheap unlocked pre-checks: a missing / non-schedulable / payer-billed
   // invoice never arms a sequence, and none of those verdicts can be flipped
-  // by a merge-undo (undo moves ownership, not status or payer). Re-verified
+  // by an ownership change (a merge moves customer_id, not status or payer).
+  // Re-verified
   // under the lock below, so a status change racing this read is caught there.
   const preview = await db('invoices').where({ id: invoiceId }).first();
   if (!preview) return null;
@@ -279,22 +282,19 @@ async function scheduleForInvoice(invoiceId) {
   // OWNERSHIP IS DERIVED UNDER THE INVOICE LOCK (r19 P1).
   //
   // customer_id used to be captured from the pre-lock read above and then
-  // carried through several awaits into the INSERT. A merge-undo that locked
-  // the invoice in between (customer-dedupe.js revertMerge takes FOR UPDATE on
-  // every journaled invoice in its verification pass) would see no sequence in
-  // its child probe, repoint the invoice back to the restored loser, and
-  // commit — after which this insert resumed and created a WINNER-owned
-  // sequence for a loser-owned invoice. The FK is on invoice_id, so nothing
-  // rejected it, and the next cron touch would dun the wrong customer with the
-  // invoice's bearer /pay/:token.
+  // carried through several awaits into the INSERT. Any writer that holds the
+  // invoice's lock in between — a customer merge repointing invoices.customer_id
+  // is the live one — commits while we wait, after which this insert resumes and
+  // arms a sequence owned by the PREVIOUS customer for an invoice that has since
+  // moved. The FK is on invoice_id, so nothing rejects it, and the next cron
+  // touch duns the wrong customer with the invoice's bearer /pay/:token.
   //
   // The invoice row is the serialization point the whole invoice family already
-  // shares (revertMerge's verification pass, fireStep's claim, InvoiceService.
-  // update, stripe-webhook's succeeded-PI handler). Taking it here and deriving
-  // customer_id from the POST-lock row is the same settlement-ownership pattern
-  // those callers document: either we commit first and the undo's probe sees
-  // this sequence (and refuses), or we block and arm against whoever owns the
-  // invoice after the undo commits. Never a pre-lock copy.
+  // shares (fireStep's claim, InvoiceService.update, stripe-webhook's
+  // succeeded-PI handler). Taking it here and deriving customer_id from the
+  // POST-lock row is the same settlement-ownership pattern those callers
+  // document: we always arm against whoever owns the invoice once the lock is
+  // ours. Never a pre-lock copy.
   //
   // Everything under the lock is DB work on this connection (customerOnAutopay
   // takes the trx), so the lock is never held across external I/O.
@@ -440,14 +440,11 @@ async function fireStep(row) {
       // OWNERSHIP REVALIDATION UNDER THE LOCK (r19 P1 — customer-facing leak).
       //
       // `row` is a batch snapshot from runPending's join (or sendNextTouchNow's).
-      // A merge-undo that committed between that SELECT and this lock repoints
-      // BOTH the invoice and its sequence to the restored loser — but nothing
-      // above re-read customer_id, so fireTouch would load `row.customer_id`
-      // (the pre-undo winner), render this invoice's bearer /pay/:token, and
-      // text/email the restored customer's bill to a DIFFERENT customer. The
-      // revalidation below is a superset of the r17 gate: that one stopped the
-      // undo when a sequence had moved, this one stops the *worker* when it
-      // didn't get the memo.
+      // An ownership change that committed between that SELECT and this lock
+      // (a customer merge repoints BOTH the invoice and its sequence) leaves
+      // `row.customer_id` naming the previous owner — nothing above re-read it.
+      // fireTouch would then render this invoice's bearer /pay/:token and
+      // text/email one customer's bill to a DIFFERENT customer.
       //
       // Refuse rather than re-target: an ownership flip means the state this
       // batch row was built from is gone, and re-deriving a send from half-
@@ -473,7 +470,8 @@ async function fireStep(row) {
           );
         })
         // The claim stamps updated_at too: "a worker is mid-send on this
-        // sequence" is precisely the activity a merge-undo must refuse on, and
+        // sequence" is precisely the activity an ownership-change check must
+        // see, and
         // it is the backstop for the ownership gate above — a claim taken
         // before the undo's verification pass makes the undo refuse instead of
         // repointing a sequence out from under an in-flight touch.

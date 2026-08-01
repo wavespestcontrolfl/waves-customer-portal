@@ -1245,18 +1245,16 @@ async function handlePaymentIntentSucceeded(paymentIntent, eventCreated = null) 
       await trx('payments').insert({
         // OWNERSHIP COMES FROM THE LOCKED ROW, never the pre-lock read.
         // `invoice` was fetched BEFORE this transaction took FOR UPDATE on
-        // it, so a customer-merge UNDO (customer-dedupe.js revertMerge —
-        // it verifies and repoints invoices under FOR UPDATE, and probes
-        // for payments against them BEFORE doing so) can commit while we
-        // wait on that lock and move the invoice to the restored customer.
-        // Inserting `invoice.customer_id` then attaches this payment to the
-        // pre-undo owner: a loser-owned paid invoice whose payment belongs
-        // to the winner. `lockedInvoice` is the post-wait re-read, so it
-        // always names the invoice's CURRENT owner. Ordering both ways:
-        // undo-first → we re-read its result here; webhook-first → the undo
-        // blocks on this same row lock and its payment probe then sees this
-        // committed row and refuses. No extra lock is needed (settlement is
-        // never blocked into failure by one).
+        // it, so any writer that repoints invoices.customer_id — a customer
+        // merge is the live one — can commit while we wait on that lock and
+        // move the invoice to a different customer. Inserting
+        // `invoice.customer_id` then attaches this payment to the PREVIOUS
+        // owner: the invoice sits on one account and the money that settled
+        // it on another, which reconciliation reads as both a missing
+        // payment and an unexplained one. `lockedInvoice` is the post-wait
+        // re-read, so it always names the invoice's CURRENT owner. No extra
+        // lock is needed — settlement must never be blocked into failure by
+        // one, and this ordering does not add any.
         customer_id: lockedInvoice.customer_id,
         processor: 'stripe',
         stripe_payment_intent_id: piId,
@@ -3624,8 +3622,8 @@ async function handlePaymentIntentProcessing(paymentIntent, eventCreated = null,
 
       await trx('payments').insert({
         // Post-lock owner, never the pre-lock read — see the succeeded-PI
-        // path above: a merge undo can repoint this invoice while we wait
-        // on its FOR UPDATE, and `invoice` still names the old owner.
+        // path above: a merge can repoint this invoice while we wait on its
+        // FOR UPDATE, and `invoice` still names the old owner.
         customer_id: lockedInvoice.customer_id,
         processor: 'stripe',
         stripe_payment_intent_id: piId,
