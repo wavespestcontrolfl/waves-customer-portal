@@ -1033,6 +1033,20 @@ async function updateCustomer(customerId, updates) {
       // concurrent editor still matches the snapshots the winner moved.
       const lockedBefore = await trx('customers').where('id', customerId).forUpdate().first() || before;
       const lockedMerged = { ...lockedBefore, ...clean };
+      // Assigning an email serializes against a customer-merge UNDO
+      // checking whether that address is claimed (customer-dedupe.js
+      // revertMerge — customers.email has NO unique constraint, so only
+      // this shared lock keeps the check honest between its read and its
+      // commit). KEY DERIVATION (must stay byte-identical to
+      // customer-dedupe.js and routes/admin-customers.js — extend ALL in
+      // the same commit): pg_advisory_xact_lock(hashtextextended(
+      //   'customer-email:' || lower(trim(<email>)), 0)).
+      if (clean.email) {
+        await trx.raw(
+          'SELECT pg_advisory_xact_lock(hashtextextended(?, 0))',
+          [`customer-email:${String(clean.email).trim().toLowerCase()}`],
+        );
+      }
       await trx('customers').where('id', customerId).update(clean);
       if (addressSubmitted) {
         await require('../customer-properties').syncPrimaryAddress(lockedMerged, trx);

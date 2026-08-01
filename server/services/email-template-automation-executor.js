@@ -382,10 +382,20 @@ async function loadAutomations(triggerEventKey, automationKey) {
   return query.orderBy('a.delay_minutes', 'asc').orderBy('a.automation_key', 'asc');
 }
 
-async function logRunEvent(runId, eventType, message, metadata = {}) {
+/**
+ * @param conn knex connection OR the caller's transaction. MUST be the
+ *   transaction whenever the parent run row was written in one:
+ *   email_template_automation_run_events.run_id references
+ *   email_template_automation_runs(id) (20260518000002), so logging an
+ *   event for an UNCOMMITTED parent through the global pool deadlocks —
+ *   the pooled connection waits on our transaction's uncommitted row while
+ *   our transaction waits on that connection's insert. Defaults to `db` so
+ *   callers outside a transaction are unchanged.
+ */
+async function logRunEvent(runId, eventType, message, metadata = {}, conn = db) {
   if (!runId) return null;
   try {
-    const [event] = await db('email_template_automation_run_events').insert({
+    const [event] = await conn('email_template_automation_run_events').insert({
       run_id: runId,
       event_type: eventType,
       message: message || null,
@@ -418,18 +428,46 @@ async function logRunEvent(runId, eventType, message, metadata = {}) {
  * the race; this read only refines who the row is attributed to.
  */
 async function resolveRecipientUnderLock(conn, recipient) {
-  if (!recipient.id) return recipient;
+  if (!recipient.id) return { recipient, blockReason: null };
   try {
     const row = await conn('customers')
       .where({ id: recipient.id })
-      .first('id', 'deleted_at');
+      .first('id', 'email', 'deleted_at');
     if (!row || row.deleted_at) {
-      return { ...recipient, id: '' };
+      return { recipient: { ...recipient, id: '' }, blockReason: null };
+    }
+    // The payload's address may legitimately differ from customers.email
+    // (a tenant's estimate under a landlord's record) — that case must keep
+    // sending. What must NOT send is the post-undo shape: the payload
+    // carries an address this customer USED to hold and that a merge undo
+    // has since handed back to the restored customer. The two are told
+    // apart by asking who owns the address NOW: an address belonging to
+    // ANOTHER LIVE CUSTOMER is never a legitimate "different by design"
+    // recipient for this one — it is someone else's registered mailbox.
+    // (True third-party addresses like a tenant's are not customer rows,
+    // so they fall through and still send.)
+    const payloadEmail = String(recipient.email || '').trim().toLowerCase();
+    const liveEmail = String(row.email || '').trim().toLowerCase();
+    if (payloadEmail && payloadEmail !== liveEmail) {
+      const otherOwner = await conn('customers')
+        .whereRaw('lower(email) = ?', [payloadEmail])
+        .whereNot({ id: recipient.id })
+        .where('active', true)
+        .whereNull('deleted_at')
+        .first('id');
+      if (otherOwner) {
+        // Recorded (audit trail) but never sent: a 'skipped' row fails
+        // executeRun's status claim, so no delivery can follow.
+        return {
+          recipient,
+          blockReason: 'recipient address now belongs to a different live customer (stale pre-undo address)',
+        };
+      }
     }
   } catch {
     // Unreadable → keep the payload attribution (unchanged behavior).
   }
-  return recipient;
+  return { recipient, blockReason: null };
 }
 
 async function createRun({ automation, triggerEventKey, triggerEventId, entityType, entityId, recipient, payload, context, idempotencyKey, runAfter, status, exitReason, retryPolicy }) {
@@ -463,10 +501,16 @@ async function createRun({ automation, triggerEventKey, triggerEventId, entityTy
   }
   return db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`customer-comms:${recipient.id}`]);
-    const lockedRecipient = await resolveRecipientUnderLock(trx, recipient);
+    const { recipient: lockedRecipient, blockReason } = await resolveRecipientUnderLock(trx, recipient);
     return createRunUnlocked({
       conn: trx, automation, triggerEventKey, triggerEventId, entityType, entityId,
-      recipient: lockedRecipient, payload, context, idempotencyKey, runAfter, status, exitReason, retryPolicy,
+      recipient: lockedRecipient, payload, context, idempotencyKey, runAfter,
+      // A blocked recipient records the run as SKIPPED rather than queued —
+      // the row stays as an audit trail, and a 'skipped' status fails
+      // executeRun's claim so nothing can deliver to the stale address.
+      status: blockReason ? 'skipped' : status,
+      exitReason: blockReason || exitReason,
+      retryPolicy,
     });
   });
 }
@@ -474,10 +518,12 @@ async function createRun({ automation, triggerEventKey, triggerEventId, entityTy
 async function createRunUnlocked({ conn, automation, triggerEventKey, triggerEventId, entityType, entityId, recipient, payload, context, idempotencyKey, runAfter, status, exitReason, retryPolicy }) {
   const existing = await conn('email_template_automation_runs').where({ idempotency_key: idempotencyKey }).first();
   if (existing) {
+    // conn, never the global pool — see logRunEvent's contract (the parent
+    // run may be uncommitted in THIS transaction; a pooled insert deadlocks).
     await logRunEvent(existing.id, 'deduped', 'Automation trigger replay ignored by idempotency key', {
       trigger_event_key: triggerEventKey,
       trigger_event_id: triggerEventId || null,
-    });
+    }, conn);
     return { run: existing, deduped: true };
   }
 
@@ -512,16 +558,18 @@ async function createRunUnlocked({ conn, automation, triggerEventKey, triggerEve
           trigger_event_key: triggerEventKey,
           trigger_event_id: triggerEventId || null,
           race_recovered: true,
-        });
+        }, conn);
         return { run: replayed, deduped: true };
       }
     }
     throw err;
   }
+  // The parent run row was just inserted through `conn`; when conn is a
+  // transaction this event MUST ride it (FK to an uncommitted parent).
   await logRunEvent(run.id, status === 'skipped' ? 'skipped' : 'queued', exitReason || `Automation run ${status}`, {
     automation_key: automation.automation_key,
     run_after: runAfter,
-  });
+  }, conn);
   return { run, deduped: false };
 }
 

@@ -2785,6 +2785,20 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
           // moved, stranding them.
           const lockedBefore = await trx('customers').where({ id: req.params.id }).forUpdate().first() || before;
           const lockedAfter = { ...lockedBefore, ...updates };
+          // Assigning an email serializes against a customer-merge UNDO
+          // checking whether that address is claimed (customer-dedupe.js
+          // revertMerge — customers.email has NO unique constraint, so only
+          // this shared lock keeps the check honest between its read and
+          // its commit). KEY DERIVATION (must stay byte-identical to
+          // customer-dedupe.js and intelligence-bar/tools.js — extend ALL
+          // in the same commit): pg_advisory_xact_lock(hashtextextended(
+          //   'customer-email:' || lower(trim(<email>)), 0)).
+          if (updates.email) {
+            await trx.raw(
+              'SELECT pg_advisory_xact_lock(hashtextextended(?, 0))',
+              [`customer-email:${String(updates.email).trim().toLowerCase()}`],
+            );
+          }
           await trx('customers').where({ id: req.params.id }).update(updates);
           if (addressChanged) {
             await require('../services/customer-properties').syncPrimaryAddress(lockedAfter, trx);

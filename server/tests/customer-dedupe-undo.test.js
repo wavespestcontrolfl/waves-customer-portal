@@ -770,6 +770,10 @@ describe('revertMerge', () => {
         // so this query — not a 23505 catch — is the guard.
         if (q.called('whereRaw') && q.called('whereNotIn')) {
           state.emailClaimProbe = { where: q.args('whereRaw'), notIn: q.args('whereNotIn') };
+          // The normalized-email lock must already have been taken (r14).
+          state.emailClaimLockedFirst = state.rawCalls.some(([sql, bindings]) =>
+            String(sql).includes('pg_advisory_xact_lock')
+            && Array.isArray(bindings) && String(bindings[0]).startsWith('customer-email:'));
           return emailClaimant;
         }
         if (q.called('decrement')) { state.decremented = q.args('decrement'); return 1; }
@@ -1972,6 +1976,67 @@ describe('revertMerge', () => {
     // The probe excludes BOTH merge participants — the winner holds the
     // address only because this merge backfilled it.
     expect(state.emailClaimProbe.notIn[1]).toEqual([LOSER, WINNER]);
+  });
+
+  it('refuses (409, zero writes) when the winner spent below a cache-only credit the merge moved', async () => {
+    // Legacy/cache-only balance (no ledger rows journaled): the winner has
+    // since spent below it, so the loser cannot be revived WITH its credit.
+    // Reporting a skip used to complete the undo — reviving the customer
+    // without its money while the remainder stayed on the winner.
+    const journal = baseJournal();
+    journal.loser_snapshot.account_credits = 25.5;
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: { ...baseWinner(), account_credits: 10 }, // below the 25.50 moved
+      loser: baseLoser(),
+      tables: { leads: { stillOnWinner: ['lead-1', 'lead-2'] }, invoices: { stillOnWinner: ['inv-1'] } },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/balance has fallen below the credit this merge moved/) });
+    expect(state.loserRestore).toBe(null);
+    expect(state.journalUpdate).toBe(null);
+  });
+
+  it('restores a cache-only credit normally when the winner still holds it', async () => {
+    const journal = baseJournal();
+    journal.loser_snapshot.account_credits = 25.5;
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: { ...baseWinner(), account_credits: 65.5 },
+      loser: baseLoser(),
+      tables: { leads: { stillOnWinner: ['lead-1', 'lead-2'] }, invoices: { stillOnWinner: ['inv-1'] } },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+    expect(result.creditsMovedBack).toBe(25.5);
+    expect(state.loserRestore.account_credits).toBe(25.5);
+    expect(state.decremented).toEqual(['account_credits', 25.5]);
+  });
+
+  it('takes the normalized-email advisory lock BEFORE the claim check (serializes against email writers)', async () => {
+    const { trx, state } = buildRevertTrx({
+      journal: baseJournal(),
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: { leads: { stillOnWinner: ['lead-1', 'lead-2'] }, invoices: { stillOnWinner: ['inv-1'] } },
+      emailClaimant: null,
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+    // customers.email has no unique constraint, so only this shared lock
+    // keeps the claim check honest between its read and the commit. Same
+    // key derivation as the Customer 360 edit and the IB update_customer
+    // tool: 'customer-email:' || lower(trim(email)).
+    const lockCall = state.rawCalls.find(([sql, bindings]) => String(sql).includes('pg_advisory_xact_lock')
+      && Array.isArray(bindings) && String(bindings[0]).startsWith('customer-email:'));
+    expect(lockCall).toBeTruthy();
+    expect(lockCall[1][0]).toBe('customer-email:loser.testcase@example.com');
+    // ORDERING: the lock is taken BEFORE the claim probe runs.
+    const lockIdx = state.rawCalls.indexOf(lockCall);
+    expect(lockIdx).toBeGreaterThanOrEqual(0);
+    expect(state.emailClaimProbe).toBeTruthy();
+    expect(state.emailClaimLockedFirst).toBe(true);
   });
 
   it('restores normally when nobody else claims the email (the claim probe finds no row)', async () => {

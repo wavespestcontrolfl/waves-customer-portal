@@ -17,6 +17,10 @@ function chain({ result = [], first, returning } = {}) {
   [
     'where',
     'whereIn',
+    'whereRaw',
+    'whereNot',
+    'whereNull',
+    'whereNotNull',
     'leftJoin',
     'select',
     'orderBy',
@@ -34,14 +38,26 @@ function chain({ result = [], first, returning } = {}) {
   return q;
 }
 
+// Shared queue source. `db` and a transaction's `trx` both draw from it,
+// but through SEPARATE entry points, so a test can tell which connection a
+// table was touched through (r14: writes inside the locked transaction must
+// use trx, never the global pool — the run_events FK to an uncommitted
+// parent deadlocks otherwise).
+let takeFromQueue = () => { throw new Error('setDbQueues not called'); };
 function setDbQueues(queues) {
   const tableQueues = new Map(Object.entries(queues));
-  db.mockImplementation((table) => {
+  takeFromQueue = (table) => {
     const queue = tableQueues.get(table);
     if (!queue || !queue.length) throw new Error(`Unexpected db table ${table}`);
     return queue.shift();
+  };
+  db.mockImplementation((table) => {
+    globalDbAccesses.push(table);
+    return takeFromQueue(table);
   });
 }
+// Tables accessed through the GLOBAL db connection (not through a trx).
+const globalDbAccesses = [];
 
 function automation(overrides = {}) {
   return {
@@ -109,8 +125,11 @@ describe('email template automation executor', () => {
     jest.clearAllMocks();
     advisoryLockCalls.length = 0;
     opTrace.length = 0;
+    globalDbAccesses.length = 0;
     db.transaction = jest.fn(async (fn) => {
-      const trx = (table) => { opTrace.push(`table:${table}`); return db(table); };
+      // Draws from the same queues as db, but WITHOUT going through the
+      // global connection — so globalDbAccesses stays a true record.
+      const trx = (table) => { opTrace.push(`table:${table}`); return takeFromQueue(table); };
       trx.raw = jest.fn(async (...args) => {
         opTrace.push('lock');
         advisoryLockCalls.push(args);
@@ -213,6 +232,125 @@ describe('email template automation executor', () => {
       status: 'sent',
       email_message_id: 'message-1',
     }));
+  });
+
+  test('no GLOBAL db access happens inside the locked transaction (run events ride the trx — FK deadlock)', async () => {
+    // email_template_automation_run_events.run_id references the parent run
+    // (20260518000002). Logging the event through the global pool while the
+    // parent is still uncommitted in OUR transaction deadlocks: the pooled
+    // connection waits on our row, we wait on it. Every write inside the
+    // transaction must therefore go through trx.
+    const queuedRun = run();
+    const existingRunQuery = chain({ first: null });
+    const insertRunQuery = chain({ returning: [queuedRun] });
+    const eventQuery = chain({ returning: [{ id: 'event-1' }] });
+    setDbQueues({
+      'email_template_automations as a': [chain({ result: [automation({ delay_minutes: 60 })] })],
+      customers: [chain({ first: { id: 'cust-1', email: 'sam@example.com', deleted_at: null } })],
+      email_template_automation_runs: [existingRunQuery, insertRunQuery],
+      email_template_automation_run_events: [eventQuery],
+    });
+
+    await AutomationExecutor.processTrigger({
+      triggerEventKey: 'estimate.auto_renewed',
+      triggerEventId: 'estimate_auto_renew:est-1',
+      payload: {
+        estimate_id: 'est-1',
+        customer_id: 'cust-1',
+        customer_email: 'sam@example.com',
+        first_name: 'Sam',
+        estimate_url: 'https://example.com/estimate/est-1',
+        new_expires_at: '2026-06-01',
+        renewal_count: 1,
+        status: 'sent',
+      },
+      now: new Date('2026-05-18T12:00:00.000Z'),
+    });
+
+    // The run row was inserted, and its 'queued' event was logged...
+    expect(insertRunQuery.insert).toHaveBeenCalled();
+    expect(eventQuery.insert).toHaveBeenCalled();
+    // ...but the event table was NEVER touched through the global db —
+    // only through the transaction (opTrace records trx accesses).
+    expect(globalDbAccesses).not.toContain('email_template_automation_run_events');
+    expect(opTrace).toContain('table:email_template_automation_run_events');
+  });
+
+  test('a stale pre-undo recipient address (now owned by another live customer) is recorded SKIPPED, never queued', async () => {
+    // Post-undo shape: the payload carries the merged-in address, which the
+    // undo has handed back to the restored customer. Sending it would mail
+    // a winner-owned message to the restored loser's mailbox.
+    const insertRunQuery = chain({ returning: [run({ status: 'skipped' })] });
+    setDbQueues({
+      'email_template_automations as a': [chain({ result: [automation()] })],
+      customers: [
+        // The recipient's live email is NO LONGER the payload address...
+        chain({ first: { id: 'cust-1', email: 'winner.new@example.com', deleted_at: null } }),
+        // ...and another LIVE customer now owns it.
+        chain({ first: { id: 'cust-restored' } }),
+      ],
+      email_template_automation_runs: [chain({ first: null }), insertRunQuery],
+      email_template_automation_run_events: [chain({ returning: [{ id: 'event-1' }] })],
+    });
+
+    await AutomationExecutor.processTrigger({
+      triggerEventKey: 'estimate.auto_renewed',
+      triggerEventId: 'estimate_auto_renew:est-1',
+      payload: {
+        estimate_id: 'est-1',
+        customer_id: 'cust-1',
+        customer_email: 'sam@example.com',
+        first_name: 'Sam',
+        estimate_url: 'https://example.com/estimate/est-1',
+        new_expires_at: '2026-06-01',
+        renewal_count: 1,
+        status: 'sent',
+      },
+      now: new Date('2026-05-18T12:00:00.000Z'),
+    });
+
+    const inserted = insertRunQuery.insert.mock.calls[0][0];
+    // Recorded for audit, but SKIPPED — a skipped row fails executeRun's
+    // status claim, so no delivery to the stale address can follow.
+    expect(inserted.status).toBe('skipped');
+    expect(inserted.exit_reason).toMatch(/different live customer/);
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  test('an address that differs BY DESIGN (nobody else owns it) still queues normally', async () => {
+    // Tenant-under-landlord: the estimate mails the tenant, whose address is
+    // not a customer record at all. This must keep working.
+    const insertRunQuery = chain({ returning: [run()] });
+    setDbQueues({
+      'email_template_automations as a': [chain({ result: [automation({ delay_minutes: 60 })] })],
+      customers: [
+        chain({ first: { id: 'cust-1', email: 'landlord@example.com', deleted_at: null } }),
+        chain({ first: null }), // no other live customer owns the tenant address
+      ],
+      email_template_automation_runs: [chain({ first: null }), insertRunQuery],
+      email_template_automation_run_events: [chain({ returning: [{ id: 'event-1' }] })],
+    });
+
+    await AutomationExecutor.processTrigger({
+      triggerEventKey: 'estimate.auto_renewed',
+      triggerEventId: 'estimate_auto_renew:est-1',
+      payload: {
+        estimate_id: 'est-1',
+        customer_id: 'cust-1',
+        customer_email: 'tenant@example.com',
+        first_name: 'Sam',
+        estimate_url: 'https://example.com/estimate/est-1',
+        new_expires_at: '2026-06-01',
+        renewal_count: 1,
+        status: 'sent',
+      },
+      now: new Date('2026-05-18T12:00:00.000Z'),
+    });
+
+    const inserted = insertRunQuery.insert.mock.calls[0][0];
+    expect(inserted.status).toBe('scheduled'); // queued as normal, not skipped
+    expect(inserted.recipient_email).toBe('tenant@example.com');
+    expect(inserted.exit_reason).toBeFalsy();
   });
 
   test('a recipient whose customer row was retired since the trigger is written UNLINKED (under-lock re-read)', async () => {

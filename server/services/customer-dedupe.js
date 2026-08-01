@@ -2658,7 +2658,14 @@ async function revertMerge({ journalId, performedBy, performedById }) {
           creditsMovedBack = movedCredits;
           loserCreditsAfter = movedCredits;
         } else {
-          skipped.push({ key: 'customers.account_credits', reason: 'winner_balance_below_moved_amount' });
+          // Cache-only (legacy) balance the merge moved, and the kept
+          // customer has since spent below it. Reporting a skip here
+          // completed the undo while REVIVING THE CUSTOMER WITHOUT ITS
+          // CREDIT and leaving the remainder on the winner — money split
+          // across two accounts. Money is all-or-nothing (same contract as
+          // the ledger path's negative-balance refusal): REFUSE (409, zero
+          // writes) before anything is restored.
+          refuse("The kept customer's balance has fallen below the credit this merge moved — undoing would restore the customer without it and strand the remainder; reconcile credits by hand");
         }
       }
     }
@@ -2718,10 +2725,30 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     // it, and the winner-side patch above vacates it in this same
     // transaction.
     if (restore.email) {
+      const emailKeyNorm = String(restore.email).trim().toLowerCase();
+      // SERIALIZE the claim: customers.email has no unique constraint, so
+      // nothing stops a third customer from taking the address between the
+      // check below and this transaction's commit. Both sides take a
+      // deterministic advisory xact lock on the NORMALIZED address.
+      // KEY DERIVATION (must stay byte-identical in every file that writes
+      // customers.email — extend ALL in the same commit):
+      //   pg_advisory_xact_lock(hashtextextended(
+      //     'customer-email:' || lower(trim(<email>)), 0))
+      // Transaction-scoped, so it releases on commit/rollback. Locked
+      // writers: the Customer 360 edit (routes/admin-customers.js) and the
+      // Intelligence Bar's update_customer tool
+      // (services/intelligence-bar/tools.js) — the operator-driven paths
+      // that can realistically assign an address while an undo runs.
+      // DELIBERATELY NOT locked: customer CREATION paths (signup, intake,
+      // booking) — locking every insert that carries an email is out of
+      // proportion to the risk, and a brand-new signup claiming exactly the
+      // restored address in that window is vanishingly rare and self-heals
+      // (the undo simply refuses on the next attempt).
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`customer-email:${emailKeyNorm}`]);
       let claimant = null;
       try {
         claimant = await trx('customers')
-          .whereRaw('lower(email) = ?', [String(restore.email).trim().toLowerCase()])
+          .whereRaw('lower(email) = ?', [emailKeyNorm])
           .whereNotIn('id', [loserId, winnerId])
           .where('active', true)
           .whereNull('deleted_at')
