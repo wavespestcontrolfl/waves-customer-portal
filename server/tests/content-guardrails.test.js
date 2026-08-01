@@ -2307,6 +2307,17 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
     }
   });
 
+  test('a first-party ROW LABEL poisons the whole row (r4)', () => {
+    const jsx = '<ComparisonTable columns={["What", "Other companies"]} rows={[{ label: "Our quarterly service", values: ["$89 per visit"] }]} />';
+    expect(findHardcodedPrice(jsx, OP)).not.toBeNull();
+    const md = '| What | Aptive |\n|---|---|\n| Our quarterly service | $89 |';
+    expect(findHardcodedPrice(md, OP)).not.toBeNull();
+  });
+
+  test('a newline consumed by the price match is still a boundary (r4)', () => {
+    expect(findHardcodedPrice('## Other companies charge\n$89 per visit for local quarterly service', OP)).not.toBeNull();
+  });
+
   test('quote-trailing sentence boundaries still split (pre-push P0)', () => {
     expect(findHardcodedPrice('Orkin charges $199.” $89 per application locally.', OP)).not.toBeNull();
   });

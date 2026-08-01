@@ -79,8 +79,13 @@ function findHardcodedPrice(text, { thirdPartyCitations = false } = {}) {
     // injected "other companies charge $X" attribution must not publish an
     // arbitrary price — the exemption exists for operator-directed
     // competitor-intercept briefs, so only they get it.
+    // match.index sits on the captured LEADING character (possibly a
+    // newline/quote) — the token index must point at the amount itself or
+    // a boundary at that exact position is skipped by the >= scan
+    // ("## Other companies charge\n$89 …" read as one sentence, Codex r4).
+    const tokenIndex = match.index + (match[1] ? match[1].length : 0);
     if (thirdPartyCitations
-      && (isThirdPartyPriceCitation(s, match.index) || isTableAttributedPrice(s, match.index))) continue;
+      && (isThirdPartyPriceCitation(s, tokenIndex) || isTableAttributedPrice(s, tokenIndex))) continue;
     return match[0].trim();
   }
   return null;
@@ -324,6 +329,9 @@ function isTableAttributedPrice(text, amountIndex) {
       hStart = prevStart;
     }
     if (!header) return false;
+    // The row's label cell (cells[0]) is part of the row — a first-party
+    // label poisons every value in it (Codex r4).
+    if (cells.length && hasFirstPartyMarker(cells[0].text)) return false;
     const headerCells = header.split('|').slice(1);
     const headerCell = headerCells[idx];
     if (!headerCell || hasFirstPartyMarker(headerCell)) return false;
@@ -359,6 +367,15 @@ function isTableAttributedPrice(text, amountIndex) {
     }
     const idx = cellStrings.findIndex((c) => amountIndex >= c.start && amountIndex < c.end);
     if (idx === -1) return false;
+    // The owning ROW's label is part of the row — "label: 'Our quarterly
+    // service'" makes every value in that row first-party regardless of the
+    // column header (Codex r4). Scan back to the row object's opening brace.
+    const rowStart = s.lastIndexOf('{', vm.index);
+    if (rowStart !== -1) {
+      const labelM = /label\s*[:=]\s*(?:"([^"]*)"|'([^']*)')/.exec(s.slice(rowStart, vm.index));
+      const label = labelM ? (labelM[1] ?? labelM[2]) : null;
+      if (label && hasFirstPartyMarker(label)) return false;
+    }
     // (a) the amount's own cell or the immediately preceding cell.
     const own = cellStrings[idx].text;
     const prev = idx > 0 ? cellStrings[idx - 1].text : '';
