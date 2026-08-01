@@ -29,6 +29,9 @@ const SHARED_VARIABLES = ['first_name', 'customer_portal_url', 'company_phone', 
 // No irrigation_inches / total_inches / difference_inches here by design —
 // those are exactly the numbers we do NOT have for these customers.
 const REQUIRED = ['first_name', 'grass_label', 'rain_last_week', 'target_inches'];
+// The confirm variant DOES have a schedule, so it reports a real balance —
+// but sourced from a technician, never "shared in your portal".
+const REQUIRED_CONFIRM = [...REQUIRED, 'schedule_inches', 'total_inches', 'summary_line'];
 const OPTIONAL = ['forecast_line', 'week_ending'];
 
 const RAIN_DETAILS_BLOCK = {
@@ -94,6 +97,41 @@ const TEMPLATES = [
       { type: 'signature', content: '— The Waves Team' },
     ],
   },
+  {
+    key: 'irrigation.weekly_confirm_schedule',
+    name: 'Irrigation Weekly — Confirm Tech-Recorded Schedule',
+    category: 'lawn',
+    sensitivity: 'account',
+    description: 'Weekly water balance for a customer whose watering schedule was recorded by a technician rather than entered in the portal. Source-neutral: it never credits the portal and never prescribes sprinkler-zone actions, because the reading may belong to a hand-watered lawn. Asks the customer to confirm or correct what is on file.',
+    required: REQUIRED_CONFIRM,
+    subject: 'Your weekly lawn water check-in, {{first_name}}',
+    preview: 'About {{rain_last_week}}" of rain near your home — here\'s how the week added up.',
+    ctaLabel: 'CONFIRM MY WATERING SCHEDULE',
+    ctaUrlVariable: 'customer_portal_url',
+    blocks: [
+      { type: 'heading', content: 'Your weekly lawn water check-in, {{first_name}}' },
+      { type: 'paragraph', content: '{{summary_line}}' },
+      {
+        type: 'details',
+        rows: [
+          { label: 'Rain at your home last week', value: '{{rain_last_week}}"' },
+          // Deliberately "on file" — a technician recorded this, the customer
+          // did not enter it, and the copy must not imply otherwise.
+          { label: 'Watering schedule on file', value: '{{schedule_inches}}" per week' },
+          { label: 'Total water your lawn received', value: '{{total_inches}}"' },
+          { label: 'What your {{grass_label}} needs right now', value: '{{target_inches}}" per week' },
+        ],
+      },
+      // Method-neutral: no zones, no run times, nothing that assumes a
+      // sprinkler system. Works for a hand-watered lawn and an in-ground
+      // system alike.
+      { type: 'callout', content: 'That watering schedule came from our records rather than from you, so it may be out of date. If it looks right, you\'re all set — we\'ll keep checking the numbers every week. If it\'s changed, or if you water by hand, update it in your portal and these check-ins will match how you actually water.' },
+      { type: 'paragraph', content: '{{forecast_line}}' },
+      { type: 'cta', label: 'CONFIRM MY WATERING SCHEDULE', url_variable: 'customer_portal_url' },
+      FOOTER_NOTE_BLOCK,
+      { type: 'signature', content: '— The Waves Team' },
+    ],
+  },
 ];
 
 const PREVIEW_PAYLOAD = {
@@ -101,6 +139,9 @@ const PREVIEW_PAYLOAD = {
   grass_label: 'St. Augustine',
   rain_last_week: '0.6',
   target_inches: '1.25',
+  schedule_inches: '1',
+  total_inches: '1.5',
+  summary_line: 'Between the rain near your home last week (0.6") and the 1"-per-week watering schedule we have on file for you, your lawn got about 1.5" of water — right in line with the 1.25" your St. Augustine needs this time of year.',
   forecast_line: 'Looking ahead: about 1.4" of rain is in the forecast for your area over the next 7 days.',
   week_ending: '2026-08-02',
   customer_portal_url: 'https://portal.wavespestcontrol.com/?tab=property',
@@ -219,4 +260,4 @@ exports.down = async function down(knex) {
 };
 
 exports.TEMPLATES = TEMPLATES;
-exports.__private = { TEMPLATES, templateRow, PREVIEW_PAYLOAD, SHARED_VARIABLES, REQUIRED, OPTIONAL };
+exports.__private = { TEMPLATES, templateRow, PREVIEW_PAYLOAD, SHARED_VARIABLES, REQUIRED, REQUIRED_CONFIRM, OPTIONAL };

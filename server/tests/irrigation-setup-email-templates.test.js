@@ -23,6 +23,7 @@ const {
   buildWeeklyEmailDecision,
   TEMPLATE_SETUP_SCHEDULE,
   TEMPLATE_SETUP_SYSTEM,
+  TEMPLATE_CONFIRM_SCHEDULE,
   TEMPLATE_CUT_BACK,
 } = require('../services/irrigation-weekly-email');
 
@@ -53,10 +54,11 @@ const BASE = {
 };
 
 describe('irrigation setup email template seeds', () => {
-  test('both variants sit on the suppressible service_operational stream', () => {
+  test('all three variants sit on the suppressible service_operational stream', () => {
     expect(seed.__private.TEMPLATES.map((t) => t.key)).toEqual([
       'irrigation.weekly_setup_schedule',
       'irrigation.weekly_setup_system',
+      'irrigation.weekly_confirm_schedule',
     ]);
 
     for (const templateSeed of seed.__private.TEMPLATES) {
@@ -75,11 +77,18 @@ describe('irrigation setup email template seeds', () => {
       expect(required).toEqual(
         expect.arrayContaining(['first_name', 'grass_label', 'rain_last_week', 'target_inches']),
       );
-      // The numbers we do NOT have for these customers must never be required
-      // — requiring one would make the send fail closed at render time.
-      expect(required).not.toContain('irrigation_inches');
-      expect(required).not.toContain('total_inches');
-      expect(required).not.toContain('difference_inches');
+      // The SETUP variants have no schedule, so a balance number must never be
+      // required — requiring one would fail the render closed. The CONFIRM
+      // variant does have a schedule and legitimately reports the balance,
+      // but must never claim the customer supplied it.
+      if (templateSeed.key === 'irrigation.weekly_confirm_schedule') {
+        expect(required).toEqual(expect.arrayContaining(['schedule_inches', 'total_inches', 'summary_line']));
+        expect(required).not.toContain('irrigation_inches');
+      } else {
+        expect(required).not.toContain('irrigation_inches');
+        expect(required).not.toContain('total_inches');
+        expect(required).not.toContain('difference_inches');
+      }
     }
   });
 
@@ -121,7 +130,9 @@ describe('irrigation setup email template seeds', () => {
   // (report-data.js buildLawnWaterContext). Emailing "we have no schedule for
   // you" to someone whose own report displays that number is the bug.
   describe('tech-recorded schedules count as a schedule', () => {
-    test('a turf-profile reading routes to ADVICE, not a setup variant', () => {
+    // r2 P2: a tech-recorded schedule must NOT inherit the advice templates —
+    // they credit the customer portal and prescribe sprinkler-zone actions.
+    test('a turf-profile reading routes to CONFIRM, not advice and not setup', () => {
       const decision = buildWeeklyEmailDecision({
         ...BASE,
         irrigationInchesPerWeek: null,
@@ -129,11 +140,13 @@ describe('irrigation setup email template seeds', () => {
         rainfallInches7d: 2.1,
         forecastRainInches: 0.5,
       });
-      expect(decision.templateKey).toBe(TEMPLATE_CUT_BACK);
-      expect(decision.payload.irrigation_inches).toBe('1');
+      expect(decision.templateKey).toBe(TEMPLATE_CONFIRM_SCHEDULE);
+      expect(decision.reason).toBe('confirm_surplus');
+      expect(decision.payload.schedule_inches).toBe('1');
+      expect(decision.payload.total_inches).toBe('3');
     });
 
-    test('an assessment reading routes to ADVICE when nothing else exists', () => {
+    test('an assessment reading routes to CONFIRM when nothing else exists', () => {
       const decision = buildWeeklyEmailDecision({
         ...BASE,
         irrigationInchesPerWeek: null,
@@ -142,11 +155,11 @@ describe('irrigation setup email template seeds', () => {
         rainfallInches7d: 2.1,
         forecastRainInches: 0.5,
       });
-      expect(decision.templateKey).toBe(TEMPLATE_CUT_BACK);
-      expect(decision.payload.irrigation_inches).toBe('1');
+      expect(decision.templateKey).toBe(TEMPLATE_CONFIRM_SCHEDULE);
+      expect(decision.payload.schedule_inches).toBe('1');
     });
 
-    test('PORTAL ENTRY WINS over a tech reading, matching the report', () => {
+    test('PORTAL ENTRY WINS over a tech reading — value and template both', () => {
       const decision = buildWeeklyEmailDecision({
         ...BASE,
         irrigationInchesPerWeek: 1,
@@ -155,6 +168,7 @@ describe('irrigation setup email template seeds', () => {
         rainfallInches7d: 2.1,
         forecastRainInches: 0.5,
       });
+      expect(decision.templateKey).toBe(TEMPLATE_CUT_BACK);
       expect(decision.payload.irrigation_inches).toBe('1');
     });
 
@@ -169,7 +183,40 @@ describe('irrigation setup email template seeds', () => {
         forecastRainInches: 0.5,
       });
       expect(decision.shouldSend).toBe(true);
-      expect(decision.templateKey).toBe(TEMPLATE_CUT_BACK);
+      expect(decision.templateKey).toBe(TEMPLATE_CONFIRM_SCHEDULE);
+    });
+
+    test('a hand-watering customer never gets sprinkler-zone instructions', () => {
+      const decision = buildWeeklyEmailDecision({
+        ...BASE,
+        irrigationInchesPerWeek: null,
+        turfIrrigationInchesPerWeek: 1,
+        turfIrrigationType: 'manual',
+        rainfallInches7d: 2.1,
+        forecastRainInches: 0.5,
+      });
+      expect(decision.templateKey).toBe(TEMPLATE_CONFIRM_SCHEDULE);
+      const { template, version } = seedRows(TEMPLATE_CONFIRM_SCHEDULE);
+      const rendered = EmailTemplates.renderTemplate({ template, version, payload: decision.payload });
+      expect(rendered.html).not.toMatch(/each zone|per zone/i);
+      expect(rendered.html).not.toContain('irrigation schedule you shared');
+      expect(rendered.html).not.toMatch(PLACEHOLDER_RE);
+      expect(rendered.missingPayload || []).toEqual([]);
+      // It still reports the real balance rather than pretending we know nothing.
+      expect(rendered.html).toContain('Watering schedule on file');
+    });
+
+    test('a newer zeroed assessment is NOT overridden by an older positive one', () => {
+      // The query selects the LATEST non-null reading and passes zero through;
+      // zero reads as a missing profile, so they get a setup email rather than
+      // advice built on a schedule they abandoned.
+      const decision = buildWeeklyEmailDecision({
+        ...BASE,
+        irrigationInchesPerWeek: null,
+        assessmentIrrigationInchesPerWeek: 0,
+      });
+      expect(decision.templateKey).toBe(TEMPLATE_SETUP_SYSTEM);
+      expect(decision.reason).toBe('setup_system');
     });
 
     test('…but it still suppresses a stale prefs-only reading', () => {
@@ -191,6 +238,24 @@ describe('irrigation setup email template seeds', () => {
       const decision = buildWeeklyEmailDecision({
         ...BASE,
         irrigationSystem: null,
+        irrigationInchesPerWeek: null,
+        turfIrrigationType: type,
+      });
+      expect(decision.templateKey).toBe(expected);
+    });
+
+    test.each([
+      // A technician standing on the lawn outranks a toggle the customer may
+      // have set years ago — asking "how long do you run it?" of someone with
+      // no system is the failure being prevented (codex r2 P2).
+      ['none', TEMPLATE_SETUP_SYSTEM],
+      ['manual', TEMPLATE_SETUP_SYSTEM],
+      // …and the reverse: no type recorded falls back to the toggle.
+      [null, TEMPLATE_SETUP_SCHEDULE],
+    ])('portal toggle TRUE + turf type %s → %s', (type, expected) => {
+      const decision = buildWeeklyEmailDecision({
+        ...BASE,
+        irrigationSystem: true,
         irrigationInchesPerWeek: null,
         turfIrrigationType: type,
       });
