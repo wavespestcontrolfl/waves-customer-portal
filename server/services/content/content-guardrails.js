@@ -1542,8 +1542,28 @@ function repairInventedInternalRoutes(body, allowedInternalLinks = [], options =
       exemptLeft.set(norm, (exemptLeft.get(norm) || 0) + 1);
     }
   }
+  // Literal code is CONTENT, not markup: rewriting inside a code span or a
+  // fenced block silently corrupts a documented example (Codex r7).
+  const codeMask = (() => {
+    const ranges = [];
+    // The closing fence may be LONGER than the opener, and indented blocks
+    // are code too. Masking MORE is always safe here — it only means fewer
+    // repairs (Codex r7).
+    const fence = /^[ \t]*((`|~)\2{2,})[^\n]*\n[\s\S]*?^[ \t]*\2{3,}[ \t]*$/gm;
+    let fm;
+    while ((fm = fence.exec(text)) !== null) ranges.push([fm.index, fm.index + fm[0].length]);
+    const indented = /(?:^(?:[ ]{4}|\t)[^\n]*$\n?)+/gm;
+    let im;
+    while ((im = indented.exec(text)) !== null) ranges.push([im.index, im.index + im[0].length]);
+    const span = /(`+)(?:[^`]|(?!\1)`)*\1/g;
+    let sm2;
+    while ((sm2 = span.exec(text)) !== null) ranges.push([sm2.index, sm2.index + sm2[0].length]);
+    return ranges;
+  })();
+  const insideCode = (idx) => codeMask.some(([a, b]) => idx >= a && idx < b);
   const repairs = [];
   const repaired = text.replace(MD_INTERNAL_LINK_RE, (whole, bang, anchorText, open, dest, close, title, offset) => {
+    if (insideCode(offset)) return whole;
     if (bang) return whole; // image embed — never rewrite
     // Mismatched angle delimiters are MALFORMED Markdown. Repairing one would
     // hand evaluate() an allowlisted path and let a link that cannot render
@@ -1651,6 +1671,12 @@ function repairInventedInternalRoutes(body, allowedInternalLinks = [], options =
       if (!isAbsolute && targetsSpoke) origin = hubOrigin();
       return `[${anchorText}](${open}${origin}${alias}${suffix}${close}${titlePart})`;
     }
+    // UNLINKING removes UNKNOWN_INTERNAL_ROUTE, the very finding that would
+    // have parked the draft — and a refresh runs neither the redaction
+    // bundle nor the SEO gate, so "[Alice Smith](/invented/)" would publish
+    // the name as prose. On a refresh we therefore only ALIAS; unknown
+    // routes stay linked and the gate parks them (Codex r7).
+    if (options.refreshPriorBody || options.assumeSpokeWhenUnknown) return whole;
     repairs.push({ from: norm, to: null, action: 'unlinked' });
     return anchorText;
   });

@@ -2327,9 +2327,13 @@ describe('deterministic repair of invented internal routes (owner ruling 2026-08
     // One occurrence preserved…
     const one = repairInventedInternalRoutes('Kept [old](/legacy-page/) link.', [], { refreshPriorBody: prior });
     expect(one.repairs).toEqual([]);
-    // …but a SECOND occurrence is an addition and is still repaired.
+    // …and a SECOND occurrence is an ADDITION. On a refresh the repair no
+    // longer unlinks (r7 — no downstream PII gate there), so it is left for
+    // the internal-route gate to park, which grandfathering by count does.
     const two = repairInventedInternalRoutes('[old](/legacy-page/) and [again](/legacy-page/)', [], { refreshPriorBody: prior });
-    expect(two.repairs.length).toBe(1);
+    expect(two.repairs).toEqual([]);
+    const exempt = new Map([['/legacy-page/', 1]]);
+    expect(guardrails._internals.internalRouteFinding(two.body, [], exempt)).not.toBeNull();
   });
 
   test('service-ambiguous /inspection/ is unlinked, never aliased (r2)', () => {
@@ -2486,6 +2490,33 @@ describe('deterministic repair of invented internal routes (owner ruling 2026-08
     }
     // Plain routes are unaffected.
     expect(repairInventedInternalRoutes('[x](/pest-control/)').body).toBe('[x](/pest-control-services/)');
+  });
+
+  test('a refresh never UNLINKS, only aliases (r7: PII in anchor text)', () => {
+    // Unlinking removes UNKNOWN_INTERNAL_ROUTE — the finding that parks the
+    // draft — and a refresh runs neither the redaction bundle nor the SEO
+    // gate, so the anchor text would publish as prose.
+    const pii = '[Alice Smith](/invented/)';
+    expect(repairInventedInternalRoutes(pii, [], { refreshPriorBody: 'prior' }).body).toBe(pii);
+    // Aliasing still works on a refresh, and a NEW page still unlinks.
+    expect(repairInventedInternalRoutes('[x](/pest-control/)', [], { refreshPriorBody: 'prior' }).body)
+      .toContain('/pest-control-services/');
+    expect(repairInventedInternalRoutes(pii).body).toBe('Alice Smith');
+  });
+
+  test('literal code is never repaired (r7)', () => {
+    for (const body of [
+      'Use `[x](/pest-control/)` in MDX.',
+      '```\n[x](/pest-library/ants/)\n```',
+      '~~~md\n[x](/pest-control/)\n~~~~',
+      '```md\n[x](/pest-control/)\n````',
+      '    [x](/pest-control/)',
+      '\t[x](/pest-control/)',
+    ]) {
+      const r = repairInventedInternalRoutes(body);
+      expect(r.body).toBe(body);
+      expect(r.repairs).toEqual([]);
+    }
   });
 
   test('an empty domain list on a refresh is not read as hub-only (r3)', () => {
