@@ -42,6 +42,22 @@ const SUPPRESSION_GROUP = 'service_operational';
 const TEMPLATE_CUT_BACK = 'irrigation.weekly_cut_back';
 const TEMPLATE_ADD_WATER = 'irrigation.weekly_add_water';
 const TEMPLATE_ON_TRACK = 'irrigation.weekly_on_track';
+// Setup variants — the customer is on a recurring lawn program but we don't
+// have a usable watering schedule, so there is no balance to report. They
+// still get the week's measured rain and the seasonal target; the ask differs
+// by whether they've told us a sprinkler system exists (owner directive
+// 2026-08-01: the weekly email goes to the whole recurring-lawn book, not
+// just the handful who filled in the portal form).
+const TEMPLATE_SETUP_SCHEDULE = 'irrigation.weekly_setup_schedule';
+const TEMPLATE_SETUP_SYSTEM = 'irrigation.weekly_setup_system';
+// Confirm variant — we DO have a usable schedule, but a technician recorded
+// it rather than the customer entering it in the portal. The three advice
+// templates credit "the irrigation schedule you shared in your customer
+// portal" and prescribe sprinkler-specific actions ("trim a few minutes off
+// each zone"); both are false for a tech-recorded reading on a
+// hand-watered lawn (codex #3138 r2 P2). Same balance, source-neutral copy,
+// and it asks the customer to confirm what's on file.
+const TEMPLATE_CONFIRM_SCHEDULE = 'irrigation.weekly_confirm_schedule';
 
 // Sequential per-customer weather fetches; Open-Meteo caching in
 // application-conditions dedupes nearby customers (coords keyed at 2 decimals).
@@ -176,20 +192,95 @@ function buildWeeklyEmailDecision({
   grassType = null,
   weekEnding,
   irrigationInchesPerWeek,
+  turfIrrigationInchesPerWeek = null,
+  assessmentIrrigationInchesPerWeek = null,
+  turfIrrigationType = null,
+  irrigationSystem = null,
   rainfallInches7d = null,
   et0Inches = null,
   forecastRainInches = null,
 } = {}) {
+  // Same fallback chain, same precedence, as the lawn report's
+  // buildLawnWaterContext (report-data.js): PORTAL ENTRY WINS, then a
+  // tech-recorded turf-profile reading, then the latest assessment. The two
+  // surfaces must agree — a customer whose report shows 1" must never get an
+  // email claiming we have no schedule for them (codex #3138 r1 P2).
+  const turfType = String(turfIrrigationType || '').trim().toLowerCase();
+  const prefsInches = numberOrNull(irrigationInchesPerWeek);
+  // A technician recording irrigation_type 'none' is saying this property
+  // does not irrigate. Any tech-sourced inches alongside that are
+  // contradictory, and adding them to the balance would tell the customer
+  // their lawn received water it never got (codex #3138 r2 P1). The
+  // customer's OWN portal entry still stands — if they typed a number, they
+  // water, whatever the type column says.
+  const techReadingsUsable = turfType !== 'none';
+  const turfInches = techReadingsUsable ? numberOrNull(turfIrrigationInchesPerWeek) : null;
+  const assessmentInches = techReadingsUsable ? numberOrNull(assessmentIrrigationInchesPerWeek) : null;
+  const effectiveInches = prefsInches != null ? prefsInches
+    : (turfInches != null ? turfInches : assessmentInches);
+  // …and the same suppression semantics: the portal toggle only zeroes a
+  // value the customer did NOT enter — i.e. when the prefs reading is the
+  // only one there is. A tech-recorded reading is never suppressed by the
+  // customer's toggle.
+  const onlyPrefsReading = turfInches == null && assessmentInches == null && prefsInches != null;
+  // WHERE the schedule came from decides which copy is truthful, so it is
+  // tracked alongside the value itself.
+  const scheduleSource = prefsInches != null ? 'portal'
+    : (turfInches != null ? 'turf' : (assessmentInches != null ? 'assessment' : null));
+
   const advice = buildIrrigationAdvice({
     grassType,
     month: monthFromYmd(weekEnding),
-    irrigationInchesPerWeek,
+    irrigationInchesPerWeek: effectiveInches,
     rainfallInches7d,
     referenceEt0InchesWeek: et0Inches,
-    // Eligibility already required the portal toggle on; a stale-false here
-    // would wrongly zero out the schedule the customer just confirmed.
-    irrigationEnabled: true,
+    irrigationEnabled: irrigationSystem === false && onlyPrefsReading ? false : true,
   });
+
+  // No usable schedule on file — nothing to balance, so this is the setup
+  // variant rather than advice. The rain number is still measured at their
+  // home and the target is still real, so the email carries its weight; the
+  // ask is what changes. Rain must be KNOWN for the same reason the advice
+  // path requires it: the email quotes the week's rainfall, and we never
+  // print a number we don't trust.
+  if (advice.profileMissing) {
+    if (!advice.rainKnown) {
+      return { shouldSend: false, reason: 'rain_unknown', advice };
+    }
+    // "Do we know a sprinkler system exists?" — a technician's recorded
+    // irrigation_type is a FIRST-HAND OBSERVATION and outranks the portal
+    // toggle, which the customer may have set long ago (codex #3138 r2 P2).
+    // An explicit 'none'/'manual' is knowledge that there is no system to ask
+    // a run time about, even if the toggle still says true. The toggle is
+    // consulted only when no type was recorded.
+    const hasSystem = turfType
+      ? (turfType === 'in_ground' || turfType === 'mixed')
+      : irrigationSystem === true;
+    const grassLabelSetup = customerGrassLabel(grassType);
+    const rainSetup = formatInches(rainfallInches7d);
+    const targetSetup = formatInches(advice.recommendedInchesPerWeek);
+    return {
+      shouldSend: true,
+      templateKey: hasSystem ? TEMPLATE_SETUP_SCHEDULE : TEMPLATE_SETUP_SYSTEM,
+      reason: hasSystem ? 'setup_schedule' : 'setup_system',
+      advice,
+      payload: {
+        first_name: String(firstName || '').trim() || 'there',
+        grass_label: grassLabelSetup,
+        week_ending: weekEnding,
+        rain_last_week: rainSetup,
+        target_inches: targetSetup,
+        forecast_line: forecastLine({
+          forecastRainInches,
+          status: advice.status,
+          targetInches: advice.recommendedInchesPerWeek,
+        }),
+        customer_portal_url: buildPortalUrl('/?tab=property'),
+        company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
+        company_email: CONTACT_EMAIL,
+      },
+    };
+  }
 
   // Every eligible customer hears from us weekly — cut back, add water, or
   // "you're good to go" (owner directive 2026-07-02). The ONLY silent case is
@@ -215,7 +306,7 @@ function buildWeeklyEmailDecision({
   const forecast = numberOrNull(forecastRainInches);
   const projectedDifferential = forecast == null
     ? null
-    : (numberOrNull(irrigationInchesPerWeek) + forecast) - advice.recommendedInchesPerWeek;
+    : (effectiveInches + forecast) - advice.recommendedInchesPerWeek;
   let reason = advice.status;
   if (advice.status === 'deficit' && projectedDifferential != null && projectedDifferential > -0.25) {
     reason = 'deficit_rain_forecast';
@@ -230,7 +321,51 @@ function buildWeeklyEmailDecision({
   const differential = Math.abs(numberOrNull(advice.differentialInchesPerWeek) ?? 0);
   const grassLabel = customerGrassLabel(grassType);
   const rain = formatInches(rainfallInches7d);
-  const irrigationFmt = formatInches(irrigationInchesPerWeek);
+
+  // A schedule we were told by a technician, not one the customer entered.
+  // The advice templates would misattribute it and hand a hand-watering
+  // customer sprinkler instructions, so the balance is reported in
+  // source-neutral copy that asks them to confirm it instead (codex r2 P2).
+  if (scheduleSource !== 'portal') {
+    const scheduleFmt = formatInches(effectiveInches);
+    const totalFmt = formatInches(advice.appliedInchesPerWeek);
+    const targetFmt = formatInches(advice.recommendedInchesPerWeek);
+    const diffFmt = formatInches(differential);
+    // Keyed on the measured status only — no forecast rerouting here, since
+    // the neutral copy never prescribes an action for the week ahead.
+    const neutralLead = advice.status === 'surplus'
+      ? `Between the rain near your home last week (${rain}") and the ${scheduleFmt}"-per-week watering schedule we have on file for you, your lawn got about ${totalFmt}" of water — roughly ${diffFmt}" more than the ${targetFmt}" your ${grassLabel} needs this time of year.`
+      : advice.status === 'deficit'
+        ? `Between the rain near your home last week (${rain}") and the ${scheduleFmt}"-per-week watering schedule we have on file for you, your lawn got about ${totalFmt}" of water — roughly ${diffFmt}" short of the ${targetFmt}" your ${grassLabel} needs this time of year.`
+        : `Between the rain near your home last week (${rain}") and the ${scheduleFmt}"-per-week watering schedule we have on file for you, your lawn got about ${totalFmt}" of water — right in line with the ${targetFmt}" your ${grassLabel} needs this time of year.`;
+    return {
+      shouldSend: true,
+      templateKey: TEMPLATE_CONFIRM_SCHEDULE,
+      reason: `confirm_${advice.status}`,
+      advice,
+      payload: {
+        first_name: String(firstName || '').trim() || 'there',
+        grass_label: grassLabel,
+        week_ending: weekEnding,
+        rain_last_week: rain,
+        schedule_inches: scheduleFmt,
+        total_inches: totalFmt,
+        target_inches: targetFmt,
+        summary_line: neutralLead,
+        forecast_line: forecastLine({
+          forecastRainInches,
+          status: advice.status,
+          targetInches: advice.recommendedInchesPerWeek,
+        }),
+        customer_portal_url: buildPortalUrl('/?tab=property'),
+        company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
+        company_email: CONTACT_EMAIL,
+      },
+    };
+  }
+  // The RESOLVED schedule, not the raw prefs column — the copy must quote
+  // the same number the advice was computed from (codex #3138 r1 P2).
+  const irrigationFmt = formatInches(effectiveInches);
   const total = formatInches(advice.appliedInchesPerWeek);
   const target = formatInches(advice.recommendedInchesPerWeek);
 
@@ -276,10 +411,17 @@ function buildWeeklyEmailDecision({
 }
 
 /**
- * RECURRING lawn-care customers with a portal-entered weekly irrigation
- * schedule: real customer (pipeline stage, not the leads-default `active`
- * flag) + irrigation toggle ON + inches entered + an email and coordinates
- * to work with + REQUIRED recurring-lawn-service evidence.
+ * RECURRING lawn-care customers: real customer (pipeline stage, not the
+ * leads-default `active` flag) + an email and coordinates to work with +
+ * REQUIRED recurring-lawn-service evidence.
+ *
+ * The irrigation columns used to be eligibility filters. As of the owner
+ * directive 2026-08-01 they are not: the weekly rainfall number is derived
+ * from the customer's own coordinates and is useful on its own, so the whole
+ * recurring-lawn book hears from us and the irrigation profile only chooses
+ * which of three copy variants they get (advice / tell-us-your-schedule /
+ * do-you-have-a-system). Measured 2026-08-01: filtering on the columns
+ * reached 3 of 23 otherwise-eligible customers.
  *
  * Owner directive 2026-07-09 (refined): the audience is customers on a
  * recurring lawn program — the monthly / every-6-weeks / bi-monthly lawn
@@ -327,7 +469,12 @@ async function findEligibleCustomers({ now = new Date() } = {}) {
     .join(' OR ');
   const nonLivePlaceholders = NON_LIVE_VISIT_STATUSES.map(() => '?').join(', ');
   return db('customers as c')
-    .join('property_preferences as pp', 'pp.customer_id', 'c.id')
+    // LEFT so a recurring-lawn customer who never opened Property Preferences
+    // is still reachable — under the old INNER JOIN a missing prefs row made
+    // them invisible to the sweep entirely (1 live customer, verified
+    // 2026-08-01). Their variant is decided from the columns, which come back
+    // null.
+    .leftJoin('property_preferences as pp', 'pp.customer_id', 'c.id')
     .leftJoin('customer_turf_profiles as tp', function joinActiveProfile() {
       this.on('tp.customer_id', '=', 'c.id').andOnVal('tp.active', '=', true);
     })
@@ -348,9 +495,12 @@ async function findEligibleCustomers({ now = new Date() } = {}) {
     .whereNotNull('c.email')
     .whereNotNull('c.latitude')
     .whereNotNull('c.longitude')
-    .where('pp.irrigation_system', true)
-    .whereNotNull('pp.irrigation_inches_per_week')
-    .where('pp.irrigation_inches_per_week', '>', 0)
+    // NOTE: irrigation_system / irrigation_inches_per_week are deliberately
+    // NOT filters (owner directive 2026-08-01). They select the COPY VARIANT
+    // in buildWeeklyEmailDecision — schedule on file gets advice, everyone
+    // else gets the same measured rainfall plus the matching ask. Gating on
+    // them reached 3 of 23 recurring-lawn customers; the other 20 simply
+    // never opened the portal's Property Preferences form.
     .where(function recurringLawnService() {
       // REQUIRED recurring-lawn evidence — tier / lawn_type / turf profile
       // never qualify a customer on their own (see the doc block above).
@@ -406,6 +556,35 @@ async function findEligibleCustomers({ now = new Date() } = {}) {
       'c.latitude',
       'c.longitude',
       'pp.irrigation_inches_per_week',
+      'pp.irrigation_system',
+      // A schedule can also have been recorded by a tech rather than typed by
+      // the customer (codex #3138 r1 P2). The lawn report already treats
+      // portal → turf profile → assessment as one fallback chain
+      // (report-data.js buildLawnWaterContext); this sweep must agree with it
+      // or we email "we don't have your watering schedule" to someone whose
+      // own report displays that very number.
+      'tp.irrigation_inches_per_week as turf_irrigation_inches_per_week',
+      'tp.irrigation_type as turf_irrigation_type',
+      // LATEST non-null reading, and its value is passed through EVEN IF ZERO
+      // (codex #3138 r2 P2). Filtering `> 0` inside the subquery would drop a
+      // newer "they stopped watering" row and resurrect an older positive
+      // schedule; buildIrrigationAdvice already reads zero as a missing
+      // profile, which correctly routes them to a setup email.
+      // …and only CONFIRMED assessments (codex #3138 r2 P1). `confirmed_by_tech`
+      // defaults false, so an in-progress draft would otherwise drive customer
+      // email. Every other customer-facing read gates on it the same way
+      // (routes/lawn-health.js:191,358). This is a VALIDITY filter, not a value
+      // filter — unconfirmed rows are not readings yet, so removing them before
+      // ORDER BY is correct and does not reintroduce the skipped-newer-zero bug.
+      db.raw(`(
+        SELECT la.irrigation_inches_per_week
+          FROM lawn_assessments la
+         WHERE la.customer_id = c.id
+           AND la.confirmed_by_tech = true
+           AND la.irrigation_inches_per_week IS NOT NULL
+         ORDER BY la.service_date DESC NULLS LAST, la.created_at DESC
+         LIMIT 1
+      ) as assessment_irrigation_inches_per_week`),
       'tp.grass_type',
       'c.lawn_type',
     )
@@ -509,6 +688,10 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
         grassType: resolveGrassType(customer),
         weekEnding,
         irrigationInchesPerWeek: customer.irrigation_inches_per_week,
+        turfIrrigationInchesPerWeek: customer.turf_irrigation_inches_per_week,
+        assessmentIrrigationInchesPerWeek: customer.assessment_irrigation_inches_per_week,
+        turfIrrigationType: customer.turf_irrigation_type,
+        irrigationSystem: customer.irrigation_system,
         rainfallInches7d: weekWeather.rainInches,
         et0Inches: weekWeather.et0Inches,
       };
@@ -620,5 +803,8 @@ module.exports = {
   TEMPLATE_CUT_BACK,
   TEMPLATE_ADD_WATER,
   TEMPLATE_ON_TRACK,
+  TEMPLATE_SETUP_SCHEDULE,
+  TEMPLATE_SETUP_SYSTEM,
+  TEMPLATE_CONFIRM_SCHEDULE,
   _private: { forecastLine, lastCompletedWeekEnding, formatInches, monthFromYmd, resolveGrassType, customerGrassLabel, sanitizeFailureReason },
 };
