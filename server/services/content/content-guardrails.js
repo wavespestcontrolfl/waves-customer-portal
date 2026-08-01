@@ -1556,14 +1556,20 @@ function repairInventedInternalRoutes(body, allowedInternalLinks = [], options =
       || text[offset + whole.length] === '/';
     if (partialMatch) return whole;
     // The repair runs BEFORE evaluate(), so anything it rewrites away is
-    // evidence the gate never sees. A destination carrying a query, fragment
-    // or embedded URL — "/invented/?next=https://evil.example" — currently
-    // raises DISALLOWED_EXTERNAL_LINK; unlinking it to bare text would erase
-    // that P0 and publish the injected backlink. Same for a URL parked in the
-    // link title, which unlinking discards. Only PLAIN paths are repaired
-    // (pre-push Codex r3; same class as the protocol-relative rule above).
-    const afterScheme = dest.replace(/^https?:\/\//i, '');
-    if (/[?#]/.test(dest) || afterScheme.includes('://') || (title && title.includes('://'))) return whole;
+    // evidence the gate never sees: "/invented/?next=https://evil.example"
+    // raises DISALLOWED_EXTERNAL_LINK today, and unlinking it to bare text
+    // would erase that P0 and publish the injected backlink.
+    //
+    // ASK THE REAL GATE rather than approximating it. Hand-rolled string
+    // tests kept missing forms the gate catches — a protocol-relative title
+    // ("//evil.example/path") has no "://", and entity-encoded schemes and
+    // control characters slip a substring check entirely. If
+    // externalLinkFinding reports ANYTHING about this link, leave it whole
+    // (pre-push Codex r3/r4, three rounds of this class).
+    if (externalLinkFinding(whole, { operatorCitations: true })) return whole;
+    // Query/fragment paths are still skipped outright: they are not plain
+    // routes, and the alias map only describes plain ones.
+    if (/[?#]/.test(dest)) return whole;
     const path = toPath(dest);
     if (path === null) return whole; // absolute URL on someone else's host
     // Resolve dot segments the way the gate does, so "/images/../x/" and the

@@ -2437,9 +2437,21 @@ describe('deterministic repair of invented internal routes (owner ruling 2026-08
     expect(r.repairs).toEqual([]);
     expect(guardrails.evaluate({ body: r.body }, {}).findings
       .some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(true);
-    // A URL parked in the link TITLE is preserved too (unlinking drops it).
-    const titled = '[x](/pest-control/ "see https://evil.example")';
-    expect(repairInventedInternalRoutes(titled).body).toBe(titled);
+    // Every form the EXTERNAL-LINK GATE catches must survive the repair —
+    // the repair defers to externalLinkFinding rather than approximating it.
+    for (const body of [
+      '[x](/pest-control/ "see https://evil.example")',
+      '[x](/invented/ "//evil.example/path")',
+      '[x](/invented/?next=//evil.example)',
+    ]) {
+      expect(repairInventedInternalRoutes(body).body).toBe(body);
+      expect(guardrails.evaluate({ body }, {}).findings
+        .some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(true);
+      // …and the P0 still fires on the POST-repair body, which is what the
+      // runner actually hands to evaluate().
+      expect(guardrails.evaluate({ body: repairInventedInternalRoutes(body).body }, {}).findings
+        .some((f) => f.code === 'DISALLOWED_EXTERNAL_LINK')).toBe(true);
+    }
     // A plain path is still repaired.
     expect(repairInventedInternalRoutes('[x](/pest-control/)').body).toBe('[x](/pest-control-services/)');
   });
