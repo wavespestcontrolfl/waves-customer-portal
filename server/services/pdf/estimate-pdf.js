@@ -332,12 +332,10 @@ function termsBlock(ctx, proposal, totals, y) {
 /**
  * @param {object} estimate
  * @param {object} res  stream sink
- * @param {{ billsPerApplication?: boolean, pricingBundle?: object|null }} [billing]
- *   Resolved by services/estimate-proposal-billing.js — the LIVE billing lane
- *   and the LIVE pricing bundle, because persisted snapshot flags freeze at
- *   send time (codex #3120 r2) and a frozen snapshot can describe a plan the
- *   page has since rebuilt and no longer sells (codex #3120 r4). Both default
- *   to absent, which renders exactly as this document did before the
+ * @param {{ billsPerApplication?: boolean }} [billing]
+ *   Resolved by services/estimate-proposal-billing.js — the LIVE billing lane,
+ *   because persisted snapshot flags freeze at send time (codex #3120 r2).
+ *   Defaults false, which renders exactly as this document did before the
  *   per-application work: a caller that cannot establish the lane must never
  *   have a billing cadence invented for it.
  */
@@ -347,7 +345,7 @@ function generateEstimateProposalPDF(estimate, res, billing = {}) {
   // (see normalizeProposal). Anything but a confirmed per-application lane
   // (monthly member, annual prepay, unknown) keeps the legacy rendering.
   const recurringMode = billing?.billsPerApplication === true ? 'per_application' : 'legacy';
-  const proposal = normalizeProposal(estimate, { recurringMode, pricingBundle: billing?.pricingBundle || null });
+  const proposal = normalizeProposal(estimate, { recurringMode });
   const totals = computeProposalTotals(proposal);
 
   const doc = new PDFDocument({ size: 'LETTER', margin: 40 });

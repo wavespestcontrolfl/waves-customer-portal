@@ -10,14 +10,7 @@ jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error
 // An unlinked estimate links at accept through the SAME phone matcher, so an
 // existing monthly member can sit behind one (codex #3120 r3).
 const mockMatchByPhone = jest.fn();
-// The PDF must quote the bundle the PAGE is selling, not the frozen send
-// snapshot, so the context resolves it through the route (codex #3120 r4).
-const mockBuildPricingBundle = jest.fn();
-jest.mock('../routes/estimate-public', () => ({
-  matchAcceptCustomerByPhone: mockMatchByPhone,
-  buildPricingBundle: mockBuildPricingBundle,
-}));
-const LIVE_BUNDLE = { source: 'live_rebuild', frequencies: [{ key: 'standard', perTreatment: 90, visitsPerYear: 6 }] };
+jest.mock('../routes/estimate-public', () => ({ matchAcceptCustomerByPhone: mockMatchByPhone }));
 
 const {
   estimateBillsPerApplication,
@@ -47,7 +40,6 @@ beforeEach(() => {
   // module caches a true probe, so the cache has to be dropped between tests.
   _resetPerApplicationColumnsProbeForTests();
   mockDb.schema.hasColumn.mockResolvedValue(true);
-  mockBuildPricingBundle.mockResolvedValue(LIVE_BUNDLE);
 });
 
 describe('estimateBillsPerApplication', () => {
@@ -111,7 +103,7 @@ describe('pre-migration database (no customers.billing_mode)', () => {
   it('keeps the legacy document through resolveProposalBillingContext', async () => {
     stubTables({ customer: { pipeline_stage: 'lead', monthly_rate: 45 } });
     expect(await resolveProposalBillingContext({ id: 'e1', customer_id: 'c1' }))
-      .toEqual({ billsPerApplication: false, pricingBundle: null });
+      .toEqual({ billsPerApplication: false });
   });
 
   it('keeps the legacy document when the column probe itself errors', async () => {
@@ -148,7 +140,7 @@ describe('annual prepay is a per-ESTIMATE fact, not the customer lane', () => {
     stubTables({ customer: perAppCustomer, prepayTerm: { id: 't1', status: 'active' } });
     expect(await estimateSoldAsAnnualPrepay({ id: 'e1' })).toBe(true);
     expect(await resolveProposalBillingContext({ id: 'e1', customer_id: 'c1' }))
-      .toEqual({ billsPerApplication: false, pricingBundle: null });
+      .toEqual({ billsPerApplication: false });
   });
 
   // Pre-push r5: the customer's CURRENT lane does not carry over — a prepay
@@ -156,49 +148,13 @@ describe('annual prepay is a per-ESTIMATE fact, not the customer lane', () => {
   it('a prepay CUSTOMER with no term on this estimate still gets per-application copy', async () => {
     stubTables({ customer: { ...perAppCustomer, billing_mode: 'annual_prepay' }, prepayTerm: undefined });
     expect(await resolveProposalBillingContext({ id: 'e1', customer_id: 'c1' }))
-      .toEqual({ billsPerApplication: true, pricingBundle: LIVE_BUNDLE });
+      .toEqual({ billsPerApplication: true });
   });
 
   it('is status-blind — a refunded term still just means "leave the document alone"', async () => {
     stubTables({ customer: perAppCustomer, prepayTerm: { id: 't1', status: 'refunded' } });
     expect(await resolveProposalBillingContext({ id: 'e1', customer_id: 'c1' }))
-      .toEqual({ billsPerApplication: false, pricingBundle: null });
-  });
-});
-
-// Codex #3120 r4: buildPricingBundleInner refuses to fast-path a snapshot with
-// a retired cadence or a below-floor lawn price and rebuilds it, so the frozen
-// snapshot can describe a plan no outstanding link can sell. The PDF asks the
-// route for the same bundle the page renders instead of reading the snapshot.
-describe('the live pricing bundle', () => {
-  const perAppCustomer = { pipeline_stage: 'lead', monthly_rate: 45 };
-
-  it('is resolved through the route for a per-application lane', async () => {
-    stubTables({ customer: perAppCustomer });
-    const estimate = { id: 'e1', customer_id: 'c1' };
-    const ctx = await resolveProposalBillingContext(estimate);
-    expect(ctx.pricingBundle).toEqual(LIVE_BUNDLE);
-    expect(mockBuildPricingBundle).toHaveBeenCalledWith(estimate);
-  });
-
-  it('is not rebuilt at all for a legacy lane — that document never quotes one', async () => {
-    stubTables({ customer: { pipeline_stage: 'active_customer', monthly_rate: 45, billing_mode: null } });
-    const ctx = await resolveProposalBillingContext({ id: 'e1', customer_id: 'c1' });
-    expect(ctx).toEqual({ billsPerApplication: false, pricingBundle: null });
-    expect(mockBuildPricingBundle).not.toHaveBeenCalled();
-  });
-
-  it('lands on the legacy document when the rebuild fails', async () => {
-    stubTables({ customer: perAppCustomer });
-    mockBuildPricingBundle.mockRejectedValue(new Error('pricing engine down'));
-    expect(await resolveProposalBillingContext({ id: 'e1', customer_id: 'c1' }))
-      .toEqual({ billsPerApplication: true, pricingBundle: null });
-  });
-
-  it('treats a non-object bundle as unresolved', async () => {
-    stubTables({ customer: perAppCustomer });
-    mockBuildPricingBundle.mockResolvedValue(null);
-    expect((await resolveProposalBillingContext({ id: 'e1', customer_id: 'c1' })).pricingBundle).toBeNull();
+      .toEqual({ billsPerApplication: false });
   });
 });
 
@@ -206,7 +162,7 @@ describe('resolveProposalBillingContext', () => {
   it('reports the lane', async () => {
     stubTables({ customer: { pipeline_stage: 'active_customer', monthly_rate: 0, billing_mode: 'per_application' } });
     expect(await resolveProposalBillingContext({ id: 'e1', customer_id: 'c1' }))
-      .toEqual({ billsPerApplication: true, pricingBundle: LIVE_BUNDLE });
+      .toEqual({ billsPerApplication: true });
   });
 });
 
@@ -222,6 +178,6 @@ describe('fail-closed on an inconclusive lookup', () => {
     mockDb.schema.hasTable.mockResolvedValue(true);
     expect(await estimateSoldAsAnnualPrepay({ id: 'e1' })).toBeNull();
     expect(await resolveProposalBillingContext({ id: 'e1', customer_id: 'c1' }))
-      .toEqual({ billsPerApplication: false, pricingBundle: null });
+      .toEqual({ billsPerApplication: false });
   });
 });
