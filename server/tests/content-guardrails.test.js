@@ -2314,6 +2314,24 @@ describe('third-party price citations + citation-grade TLDs (owner ruling 2026-0
     expect(findHardcodedPrice(md, OP)).not.toBeNull();
   });
 
+  test('a row label AFTER values still poisons the row (r5)', () => {
+    // comparison-table-gate's extractRows is order-insensitive and accepts
+    // quoted keys, so every one of these is a valid row the writer can emit.
+    for (const jsx of [
+      '<ComparisonTable columns={["What","Other companies"]} rows={[{ values: ["$89 per visit"], label: "Our quarterly service" }]} />',
+      '<ComparisonTable columns={["What","Other companies"]} rows={[{ values: ["$89 per visit"], "label": "Our quarterly service" }]} />',
+      '<ComparisonTable columns={["What","Other companies"]} rows={[{ values: ["$89 per visit"], label: \'Waves quarterly service\' }]} />',
+    ]) {
+      expect(findHardcodedPrice(jsx, OP)).not.toBeNull();
+    }
+    // The label poisons only ITS OWN row — a later row's first-party label
+    // must not reach back and block an earlier competitor-column price.
+    const twoRows = '<ComparisonTable columns={["Fee","Aptive"]} rows={[{ values: ["$199"], label: "Early cancel" }, { values: ["None"], label: "Our quarterly service" }]} />';
+    expect(findHardcodedPrice(twoRows, OP)).toBeNull();
+    // Unterminated row object → fail closed.
+    expect(findHardcodedPrice('<ComparisonTable columns={["Fee","Aptive"]} rows={[{ values: ["$199"]', OP)).not.toBeNull();
+  });
+
   test('a newline consumed by the price match is still a boundary (r4)', () => {
     expect(findHardcodedPrice('## Other companies charge\n$89 per visit for local quarterly service', OP)).not.toBeNull();
   });

@@ -288,6 +288,27 @@ function matchesThirdParty(textPart) {
   return false;
 }
 
+// Index of the `}` closing the object that is already open at `from`, honoring
+// nesting and quoted strings (a brace inside "50% } off" is not a delimiter).
+// -1 = the object never closes, or the enclosing array closes first — either
+// way the row is unparseable and callers must fail closed.
+function objectEndIndex(s, from) {
+  let depth = 0;
+  for (let i = from; i < s.length; i += 1) {
+    const ch = s[i];
+    if (ch === '"' || ch === "'") {
+      const quote = ch;
+      i += 1;
+      while (i < s.length && s[i] !== quote) i += s[i] === '\\' ? 2 : 1;
+      continue;
+    }
+    if (ch === '{' || ch === '[') depth += 1;
+    else if (ch === ']') { if (depth === 0) return -1; depth -= 1; }
+    else if (ch === '}') { if (depth === 0) return i; depth -= 1; }
+  }
+  return -1;
+}
+
 function isTableAttributedPrice(text, amountIndex) {
   const s = String(text || '');
   const lineStart = s.lastIndexOf('\n', amountIndex - 1) + 1;
@@ -369,12 +390,23 @@ function isTableAttributedPrice(text, amountIndex) {
     if (idx === -1) return false;
     // The owning ROW's label is part of the row — "label: 'Our quarterly
     // service'" makes every value in that row first-party regardless of the
-    // column header (Codex r4). Scan back to the row object's opening brace.
+    // column header (Codex r4). Read the WHOLE row object, not just the text
+    // before `values`: comparison-table-gate.js:extractRows parses rows
+    // order-insensitively and tolerates quoted keys, so
+    // `{ values:["$89 per visit"], "label":"Our quarterly service" }` is a
+    // valid row whose label a backward-only scan never sees (Codex r5).
     const rowStart = s.lastIndexOf('{', vm.index);
     if (rowStart !== -1) {
-      const labelM = /label\s*[:=]\s*(?:"([^"]*)"|'([^']*)')/.exec(s.slice(rowStart, vm.index));
-      const label = labelM ? (labelM[1] ?? labelM[2]) : null;
-      if (label && hasFirstPartyMarker(label)) return false;
+      const rowEnd = objectEndIndex(s, close + 1);
+      // Undelimited row object — can't prove the label is third-party.
+      if (rowEnd === -1) return false;
+      const rowText = `${s.slice(rowStart, vm.index)} ${s.slice(close + 1, rowEnd)}`;
+      const labelRe = /["']?label["']?\s*[:=]\s*(?:"([^"]*)"|'([^']*)')/g;
+      let lm;
+      while ((lm = labelRe.exec(rowText)) !== null) {
+        const label = lm[1] ?? lm[2];
+        if (label && hasFirstPartyMarker(label)) return false;
+      }
     }
     // (a) the amount's own cell or the immediately preceding cell.
     const own = cellStrings[idx].text;
