@@ -444,6 +444,23 @@ const REPOINT_EXCLUDED_TABLES = new Set(['customer_merge_journal', 'customer_dup
 // endpoint treats count-only tables as not auto-revertible and reports them.
 const REPOINT_ID_CAP = 10000;
 
+// Tables whose PK is not a plain `id` column: the merge-time id capture AND
+// the undo's verification/reverse-repoint select and match by THIS column
+// instead, so their repoints journal REAL key lists and restore exactly
+// (journal keys stay `${table}.${fk_column}`; the PK override is looked up
+// by table name on both sides).
+//   customer_refresh_tokens — PK jti (20260716000000). Without the
+//   override its repoints journaled count-only and the undo skipped them,
+//   leaving the restored loser's sessions winner-assigned so
+//   rotateRefreshSession rejected every refresh. Repointing back BY JTI
+//   restores the pre-merge session state precisely — the rows are
+//   ownership pointers + hashed fingerprints, so no token rotation is
+//   needed or wanted. PRE-UPGRADE journals recorded this table count-only;
+//   those keep the skip-and-report path (sessions are neither financial
+//   nor consent — a stale winner-assigned session merely fails rotation
+//   and forces a re-login).
+const REPOINT_PK_COLUMNS = { customer_refresh_tokens: 'jti' };
+
 // One-row-per-customer preference tables: when both sides have a row, the
 // loser's row can't just be dropped — it may hold opted-OUT notification
 // consent or gate/pet/safety details the winner's row lacks. Boolean
@@ -934,13 +951,15 @@ async function executeMerge({ winnerId, loserId, performedBy, mode = 'manual', e
     // handled without poisoning the outer transaction.
     const fks = await customerFkColumns(trx);
     for (const { table_name: table, column_name: column } of fks) {
-      // Capture the moving row ids BEFORE the update, in an own savepoint: a
-      // table without a plain `id` PK must not poison the outer transaction —
-      // it just journals count-only and stays non-revertible.
+      // Capture the moving row keys BEFORE the update, in an own savepoint:
+      // a table without a plain `id` PK (and no REPOINT_PK_COLUMNS entry)
+      // must not poison the outer transaction — it just journals count-only
+      // and stays non-revertible.
+      const pkColumn = REPOINT_PK_COLUMNS[table] || 'id';
       let rowIds = null;
       try {
         await trx.transaction(async (sp) => {
-          rowIds = (await sp(table).where(column, loserId).select('id')).map((r) => r.id);
+          rowIds = (await sp(table).where(column, loserId).select(pkColumn)).map((r) => r[pkColumn]);
         });
       } catch {
         rowIds = null;
@@ -1556,6 +1575,12 @@ const REVERT_FINANCIAL_TABLES = new Set([
   // all repoint with plain uuid `id` PKs + customer_id, so they verify
   // under FOR UPDATE and refuse on drift exactly like invoices/payments.
   'estimate_deposits', 'estimate_card_holds', 'annual_prepay_terms', 'customer_discounts',
+  // A payment plan is the homeowner-scoped arrangement that pauses an
+  // invoice's collection path (admin-invoices.js) — an unverifiable or
+  // moved-on plan must refuse, never skip, or a winner-owned plan keeps
+  // governing the restored loser's invoice. Plain uuid `id` PK +
+  // customer_id (20260530000001), so the standard machinery applies.
+  'payment_plans',
 ]);
 
 // Comms-CONSENT tables where a MISSING row semantically means "allowed":
@@ -1645,8 +1670,13 @@ const EMAIL_BOUND_SURFACES = [
     table: 'newsletter_subscribers',
     emailColumn: 'email',
     linkColumn: 'customer_id',
-    active: (q) => q.where({ status: 'active' }),
-    label: 'active newsletter subscription(s)',
+    // PENDING counts too (fanout-canonical — customer-email-fanout.js
+    // moves pending rows and re-sends their DOI confirmation): a pending
+    // subscriber's emailed confirmation link is a live bearer token, so
+    // clearing the email out from under it strands a signup mid-opt-in.
+    // Unsubscribed rows have no future deliveries and stay out.
+    active: (q) => q.whereIn('status', ['active', 'pending']),
+    label: 'active/pending newsletter subscription(s)',
   },
 ];
 
@@ -1846,14 +1876,17 @@ async function revertMerge({ journalId, performedBy, performedById }) {
         continue;
       }
       if (!ids.length) continue;
+      // Non-`id` PKs (REPOINT_PK_COLUMNS) verify and repoint by their real
+      // key column — the journal recorded those keys at merge time.
+      const pkColumn = REPOINT_PK_COLUMNS[table] || 'id';
       let stillOnWinner = [];
       try {
         // Financial rows verify under FOR UPDATE so nothing can move them
         // between this check and the reverse repoint below; the repoint's
         // affected-count check is the belt to this suspender.
-        let verifyQuery = trx(table).whereIn('id', ids).where(column, winnerId);
+        let verifyQuery = trx(table).whereIn(pkColumn, ids).where(column, winnerId);
         if (REVERT_FINANCIAL_TABLES.has(table)) verifyQuery = verifyQuery.forUpdate();
-        stillOnWinner = (await verifyQuery.select('id')).map((r) => r.id);
+        stillOnWinner = (await verifyQuery.select(pkColumn)).map((r) => r[pkColumn]);
       } catch (e) {
         if (REVERT_FINANCIAL_TABLES.has(table)) {
           refuse(`Cannot verify ${table} ownership (${e.message}) — refusing to revert`);
@@ -1868,13 +1901,13 @@ async function revertMerge({ journalId, performedBy, performedById }) {
         }
         skipped.push({ key, reason: 'rows_changed_since_merge', count: moved });
       }
-      if (stillOnWinner.length) plans.push({ key, table, column, ids: stillOnWinner });
+      if (stillOnWinner.length) plans.push({ key, table, column, pkColumn, ids: stillOnWinner });
     }
 
     const repointedBack = {};
     for (const plan of plans) {
       const count = await trx(plan.table)
-        .whereIn('id', plan.ids)
+        .whereIn(plan.pkColumn, plan.ids)
         .where(plan.column, winnerId)
         .update({ [plan.column]: loserId });
       // The update must cover EXACTLY the verified rows. On a financial
@@ -2294,6 +2327,8 @@ module.exports = {
   CONSENT_CRITICAL_TABLES,
   // exported for tests
   _test: {
+    EMAIL_BOUND_SURFACES,
+    REPOINT_PK_COLUMNS,
     phone10,
     normalizeStreetKey,
     namesCompatible,

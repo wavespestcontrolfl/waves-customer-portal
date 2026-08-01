@@ -138,8 +138,9 @@ export default function DuplicateCustomersPage() {
       <div className="mb-3 rounded-sm border-hairline border-zinc-200 bg-white px-3 py-2 text-12 text-ink-secondary">
         Groups share a phone number. Merging keeps the highlighted row, repoints all history
         (calls, leads, estimates, invoices) onto it, and retires the duplicate — every merge is
-        journaled and reversible. “Link as property” also saves the duplicate’s address as an
-        additional property on the kept customer.
+        journaled, and eligible ones can be undone from Recent merges below (some merges fold
+        colliding records and are marked Not undoable). “Link as property” also saves the
+        duplicate’s address as an additional property on the kept customer.
       </div>
 
       {error && (
@@ -271,7 +272,7 @@ export default function DuplicateCustomersPage() {
         <div className="mt-4">
           <div className="mb-2 flex items-center gap-2">
             <span className="u-label text-ink-secondary">Recent merges</span>
-            <span className="text-11 text-ink-secondary">last {merges.length} · every merge is journaled and can be undone</span>
+            <span className="text-11 text-ink-secondary">last {merges.length} · journaled · eligible merges can be undone</span>
           </div>
           <Card>
             <CardBody>

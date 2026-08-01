@@ -390,6 +390,44 @@ describe('executeMerge repointed_ids journal record', () => {
     });
   });
 
+  it('journals customer_refresh_tokens repoints BY JTI (PK override — no id column on that table)', async () => {
+    const winner = { id: WINNER, first_name: 'Winner', last_name: 'Testcase', phone: '+15550000001' };
+    const loser = { id: LOSER, first_name: 'Winner', last_name: null, phone: '5550000001' };
+    const state = { journal: null };
+    const route = (table, q) => {
+      if (table === 'customers') {
+        if (q.called('forUpdate')) return [winner, loser];
+        if (q.called('update')) return 1;
+        return [];
+      }
+      if (table === 'customer_merge_journal') {
+        state.journal = q.args('insert')[0];
+        return [{ id: 'j1' }];
+      }
+      if (table === 'customer_refresh_tokens') {
+        if (q.called('update')) return 2;
+        if (q.called('select')) return [{ jti: 'tok-1' }, { jti: 'tok-2' }];
+      }
+      if (q.called('first')) return null;
+      if (q.called('update')) return 0;
+      return [];
+    };
+    const trx = jest.fn((table) => makeChain(table, (q) => route(table, q)));
+    trx.raw = jest.fn(async () => ({
+      rows: [{ table_name: 'customer_refresh_tokens', column_name: 'customer_id' }],
+    }));
+    trx.transaction = jest.fn(async (fn) => fn(trx));
+    trx.fn = { now: () => 'NOW()' };
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+
+    await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+
+    const recorded = JSON.parse(state.journal.repointed_ids);
+    // Real jti key list — before the override this journaled { count: 2 }
+    // and the undo silently left the loser's sessions winner-assigned.
+    expect(recorded.tables['customer_refresh_tokens.customer_id']).toEqual(['tok-1', 'tok-2']);
+  });
+
   it('registers the referral-promoter consolidation in collision_handlers (folded rewards cannot be split back)', async () => {
     const winner = { id: WINNER, first_name: 'Winner', last_name: 'Testcase', phone: '+15550000001' };
     const loser = { id: LOSER, first_name: 'Winner', last_name: null, phone: '5550000001' };
@@ -514,6 +552,20 @@ describe('executeMerge repointed_ids journal record', () => {
 });
 
 // ---------------------------------------------------------------------------
+// EMAIL_BOUND_SURFACES — fanout-registry mirror pins
+// ---------------------------------------------------------------------------
+
+describe('EMAIL_BOUND_SURFACES', () => {
+  it('the newsletter probe counts PENDING subscribers too (fanout-canonical — their DOI link is a live bearer token)', () => {
+    const surface = dedupe._test.EMAIL_BOUND_SURFACES.find((s) => s.table === 'newsletter_subscribers');
+    expect(surface).toBeTruthy();
+    const q = makeChain('newsletter_subscribers', () => []);
+    surface.active(q);
+    expect(q.args('whereIn')).toEqual(['status', ['active', 'pending']]);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // revertMerge
 // ---------------------------------------------------------------------------
 
@@ -585,7 +637,9 @@ describe('revertMerge', () => {
         }
         if (q.called('update')) {
           if (q.called('whereIn')) {
-            state.repointedBack.push({ table, ids: q.args('whereIn')[1], payload: q.args('update')[0] });
+            state.repointedBack.push({
+              table, pk: q.args('whereIn')[0], ids: q.args('whereIn')[1], payload: q.args('update')[0],
+            });
             return cfg.updateCount !== undefined ? cfg.updateCount : q.args('whereIn')[1].length;
           }
           // Non-whereIn update = the per-card flag restore.
@@ -597,7 +651,10 @@ describe('revertMerge', () => {
           // post-merge-cards refusal probe), not a verification pass.
           if (!q.called('whereIn')) return cfg.winnerCards || [];
           state.verified.push({ table, forUpdate: q.called('forUpdate') });
-          return cfg.stillOnWinner.map((id) => ({ id }));
+          // Rows shaped by the verification's key column ('id', or a
+          // REPOINT_PK_COLUMNS override like customer_refresh_tokens.jti).
+          const keyCol = q.args('whereIn')[0];
+          return cfg.stillOnWinner.map((v) => ({ [keyCol]: v }));
         }
       }
       return [];
@@ -1351,6 +1408,71 @@ describe('revertMerge', () => {
     const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
     expect(state.winnerPatch?.crm_notes).toBeUndefined();
     expect(result.skipped).toHaveLength(0);
+  });
+
+  it('refuses (409) when a payment_plans row no longer belongs to the winner — the plan governs an invoice collection path', async () => {
+    const journal = baseJournal();
+    journal.repointed_ids.tables['payment_plans.customer_id'] = ['plan-1'];
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: { stillOnWinner: ['inv-1'] },
+        payment_plans: { stillOnWinner: [] }, // moved on since the merge
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/payment_plans row/) });
+    expect(state.verified).toEqual(expect.arrayContaining([
+      { table: 'payment_plans', forUpdate: true },
+    ]));
+    expect(state.repointedBack).toHaveLength(0);
+    expect(state.journalUpdate).toBe(null);
+  });
+
+  it('repoints customer_refresh_tokens back BY JTI (PK override) — the restored loser keeps its sessions', async () => {
+    const journal = baseJournal();
+    journal.repointed_ids.tables['customer_refresh_tokens.customer_id'] = ['tok-1', 'tok-2'];
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: { stillOnWinner: ['inv-1'] },
+        customer_refresh_tokens: { stillOnWinner: ['tok-1', 'tok-2'] },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+    expect(result.repointedBack['customer_refresh_tokens.customer_id']).toBe(2);
+    const entry = state.repointedBack.find((r) => r.table === 'customer_refresh_tokens');
+    // Verified and repointed by the REAL key column, not a nonexistent id.
+    expect(entry.pk).toBe('jti');
+    expect(entry.ids).toEqual(['tok-1', 'tok-2']);
+    expect(entry.payload.customer_id).toBe(LOSER);
+  });
+
+  it('pre-upgrade count-only customer_refresh_tokens journals keep the skip (sessions are not financial/consent)', async () => {
+    const journal = baseJournal();
+    journal.repointed_ids.tables['customer_refresh_tokens.customer_id'] = { count: 3 };
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: { leads: { stillOnWinner: ['lead-1', 'lead-2'] }, invoices: { stillOnWinner: ['inv-1'] } },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+    // Skipped and reported — a stale winner-assigned session just fails
+    // rotation and forces a re-login; it never blocks the undo.
+    expect(result.skipped).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: 'customer_refresh_tokens.customer_id', reason: 'no_row_ids_recorded' }),
+    ]));
+    expect(state.journalUpdate.undone_at).toBeTruthy();
   });
 
   it('refuses (409) when an estimate_deposits row no longer belongs to the winner — held money is all-or-nothing like invoices', async () => {
