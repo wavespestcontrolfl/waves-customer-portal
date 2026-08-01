@@ -35,7 +35,7 @@ function response(body, status = 200) {
   }));
 }
 
-function customerDetail({ servicePausedAt = null, servicePauseReason = null } = {}) {
+function customerDetail({ servicePausedAt = null, servicePausedOn = null, servicePauseReason = null } = {}) {
   return {
     customer: {
       id: 'customer-a',
@@ -44,6 +44,8 @@ function customerDetail({ servicePausedAt = null, servicePauseReason = null } = 
       address: { line1: '1 Main St', city: 'Bradenton', state: 'FL', zip: '34205' },
       active: true,
       servicePausedAt,
+      // ET calendar date from the server — what the banner renders.
+      servicePausedOn,
       servicePauseReason,
     },
     notificationPrefs: {}, preferences: {}, healthScore: {},
@@ -89,7 +91,7 @@ describe('Customer 360 billing-pause banner', () => {
       if (path.endsWith('/timeline')) return response({ timeline: [] });
       if (path.endsWith('/admin/customers/customer-a')) {
         return response(customerDetail({
-          servicePausedAt: '2026-05-02',
+          servicePausedAt: '2026-05-02T23:30:00Z', servicePausedOn: '2026-05-02',
           servicePauseReason: 'autopay_final_failure',
         }));
       }
@@ -118,7 +120,7 @@ describe('Customer 360 billing-pause banner', () => {
       }
       if (path.endsWith('/admin/customers/customer-a')) {
         return response(customerDetail(paused
-          ? { servicePausedAt: '2026-05-02', servicePauseReason: 'autopay_final_failure' }
+          ? { servicePausedAt: '2026-05-02T23:30:00Z', servicePausedOn: '2026-05-02', servicePauseReason: 'autopay_final_failure' }
           : {}));
       }
       return response({});
@@ -146,7 +148,7 @@ describe('Customer 360 billing-pause banner', () => {
       if (path.endsWith('/resume-service')) return response({ error: 'Customer not found' }, 404);
       if (path.endsWith('/admin/customers/customer-a')) {
         return response(customerDetail({
-          servicePausedAt: '2026-05-02',
+          servicePausedAt: '2026-05-02T23:30:00Z', servicePausedOn: '2026-05-02',
           servicePauseReason: 'autopay_final_failure',
         }));
       }

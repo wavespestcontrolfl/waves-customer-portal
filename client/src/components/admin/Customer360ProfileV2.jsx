@@ -5802,7 +5802,11 @@ export default function Customer360ProfileV2({
                       className="mb-3 rounded border border-hairline p-2.5"
                     >
                       <div className="text-12 font-medium text-alert-fg">
-                        Billing paused since {fmtDate(c.servicePausedAt)}
+                        {/* servicePausedOn is the ET calendar date; the raw
+                            servicePausedAt timestamp would render in the
+                            browser's timezone and land on the wrong day. */}
+                        Billing paused since{" "}
+                        {fmtDate(c.servicePausedOn || c.servicePausedAt)}
                       </div>
                       <div className="text-12 text-ink-secondary mt-0.5">
                         Monthly dues are not being collected

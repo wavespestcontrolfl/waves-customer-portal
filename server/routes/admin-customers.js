@@ -2333,6 +2333,10 @@ router.get('/:id', async (req, res, next) => {
         // the customer record or cleared it, so a paused customer's dues
         // stopped permanently and the only fix was editing the row by hand.
         servicePausedAt: c.service_paused_at || null,
+        // The ET calendar date the pause landed on. The raw timestamp above
+        // renders in the BROWSER's timezone, which puts an evening pause on
+        // the wrong day for anyone west of ET; this is the one the UI shows.
+        servicePausedOn: c.service_paused_at ? etDateString(new Date(c.service_paused_at)) : null,
         servicePauseReason: c.service_pause_reason || null,
         memberSince: c.member_since, active: c.active,
         pipelineStage: c.pipeline_stage, leadScore: c.lead_score,
@@ -3069,27 +3073,57 @@ router.post('/:id/resume-service', requireAdmin, async (req, res, next) => {
 
     const pausedAt = customer.service_paused_at;
     const pauseReason = customer.service_pause_reason || null;
+    // ET, not UTC: toISOString() would file a pause applied at 8pm ET on the
+    // FOLLOWING business day, and this date is what the audit trail and the
+    // UI both read.
+    const pausedSince = etDateString(new Date(pausedAt));
 
-    // Guard on the pause still being present so two concurrent clicks
-    // produce one audit row, not two.
-    const cleared = await db('customers')
-      .where({ id: req.params.id })
-      .whereNotNull('service_paused_at')
-      .update({ service_paused_at: null, service_pause_reason: null });
-    if (!cleared) {
-      return res.json({ success: true, resumed: false, reason: 'not_paused', servicePausedAt: null });
+    // Clear the state and write its audit trail atomically. A money-affecting
+    // admin action that succeeds with no durable record is worse than one
+    // that fails loudly, so a failed insert rolls the resume back rather than
+    // being swallowed.
+    const resumed = await db.transaction(async (trx) => {
+      // Compare-and-swap on THIS pause, not merely "some pause": billing-cron
+      // runs on its own schedule, so between the SELECT above and this UPDATE
+      // the original pause can be cleared and a NEWER failure applied. A
+      // whereNotNull guard would silently wipe that new pause and quietly put
+      // a customer with a dead card back into the billing run.
+      const cleared = await trx('customers')
+        .where({ id: req.params.id, service_paused_at: pausedAt })
+        .whereNull('deleted_at')
+        .update({ service_paused_at: null, service_pause_reason: null });
+      if (!cleared) return false;
+
+      await trx('customer_interactions').insert({
+        customer_id: req.params.id,
+        interaction_type: 'note',
+        subject: 'Billing resumed',
+        body: `Billing pause cleared (paused ${pausedSince}${pauseReason ? `, reason: ${pauseReason}` : ''}). `
+          + 'Monthly dues resume on the next billing day; no back-billing for the paused months.'
+          + (req.body?.notes ? `\n\n${req.body.notes}` : ''),
+        admin_user_id: req.technicianId,
+      });
+
+      await recordAuditEvent({
+        actor_type: 'admin',
+        actor_id: req.technicianId || null,
+        action: 'customer.billing_resumed',
+        resource_type: 'customer',
+        resource_id: req.params.id,
+        metadata: { paused_since: pausedSince, pause_reason: pauseReason },
+        critical: true,
+        trx,
+      });
+
+      return true;
+    });
+
+    if (!resumed) {
+      // Either another admin got there first, or billing-cron re-paused this
+      // customer. Both mean "the pause you saw is gone" — re-read before
+      // acting again.
+      return res.json({ success: true, resumed: false, reason: 'pause_changed' });
     }
-
-    const pausedSince = new Date(pausedAt).toISOString().slice(0, 10);
-    await db('customer_interactions').insert({
-      customer_id: req.params.id,
-      interaction_type: 'note',
-      subject: 'Billing resumed',
-      body: `Billing pause cleared (paused ${pausedSince}${pauseReason ? `, reason: ${pauseReason}` : ''}). `
-        + 'Monthly dues resume on the next billing day; no back-billing for the paused months.'
-        + (req.body?.notes ? `\n\n${req.body.notes}` : ''),
-      admin_user_id: req.technicianId,
-    }).catch((err) => logger.warn(`[customers] resume-service audit note failed for ${req.params.id}: ${err.message}`));
 
     logger.info(`[customers] Billing resumed for customer ${req.params.id} (was paused ${pausedSince}, reason ${pauseReason || 'none'})`);
 
