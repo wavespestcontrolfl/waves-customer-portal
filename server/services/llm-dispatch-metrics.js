@@ -11,6 +11,22 @@
  * llm_dispatch_log, and a daily cron emails ONLY exceptions to the company
  * inbox. Green days send nothing (hands-off + exception-based).
  *
+ * Silence is load-bearing here, so recorder health is proven rather than
+ * assumed. An hourly cron writes a heartbeat row through the same insert path
+ * real recording uses; the digest then asks whether heartbeats exist for the
+ * day it is summarizing. Three things make that necessary:
+ *   - insert failures are swallowed at debug level by design (metrics must
+ *     never cascade into the LLM call they observe), so a dead write path is
+ *     otherwise invisible;
+ *   - traffic volume cannot stand in for health — the SMS canary uses bare
+ *     `dispatch` (writes no row) and every other instrumented job is
+ *     candidate-driven, so a quiet ET day legitimately records nothing;
+ *   - a probe at digest time would only prove the recorder works at 6:25am,
+ *     so a write path broken all day but recovered overnight would pass while
+ *     the entire lost day reported clean.
+ * And because a dead database takes out the digest's own reads, DB failures
+ * are caught and emailed over SMTP rather than throwing silently.
+ *
  * Dark until GATE_LLM_DISPATCH_METRICS=true. Kill switch: unset — recording
  * and the digest both no-op instantly; existing rows just age out.
  */
@@ -33,6 +49,18 @@ const SILENT_MIN_WEEKLY = 10;        // policy had >=10 calls in prior 7 days...
 // failure/fallback exceptions still report. Convention: episodic lanes tag
 // one of these suffixes on their policy name.
 const EPISODIC_LANE_RE = /:(?:sealed|backfill|replay)$/;
+
+// Synthetic policy used only by the write-path probe; inserted and deleted
+// within probeRecorder, and excluded from stats so a failed cleanup can never
+// masquerade as a real policy in the digest.
+const HEARTBEAT_POLICY = '__heartbeat__';
+
+// The hourly cron gives ~24 heartbeats a day. Absence signals (gone_silent)
+// are only trustworthy on a day that was covered nearly end to end: a day the
+// gate was off for part of, or that a deploy interrupted, produces a handful
+// of heartbeats, and "policy X recorded nothing" during a partial window says
+// nothing about whether X stopped running.
+const MIN_DAY_COVERAGE = 20;
 
 // Ambient replay context. Eval harnesses replay fixed fixtures through the
 // SAME live service functions real traffic uses (call extraction, email
@@ -88,33 +116,161 @@ function isEnabled() {
  * hot path: never throws, never blocks, logs at debug on insert failure so a
  * DB blip can't cascade into the LLM call it was only supposed to observe.
  */
+function buildRow(policy, result) {
+  const failures = Array.isArray(result?.failures) ? result.failures : [];
+  return {
+    policy: applyReplayLane(policyLabel(policy)).slice(0, 120),
+    ok: !!result?.ok,
+    provider: result?.ok ? result.provider || null : null,
+    model: result?.ok ? result.model || null : null,
+    fallback_used: !!result?.fallbackUsed,
+    failure_reasons: failures.length
+      ? JSON.stringify(failures.map((f) => ({
+        provider: f.provider,
+        model: f.model,
+        // Reasons are short codes or validator messages — cap length so a
+        // pathological error string can't bloat the row.
+        reason: String(f.reason || '').slice(0, 300),
+      })))
+      : null,
+  };
+}
+
+// The single write path. The heartbeat probe goes through it too, so the
+// probe genuinely exercises what real recording does rather than a lookalike.
+function insertRow(row) {
+  return require('../models/db')('llm_dispatch_log').insert(row);
+}
+
 function recordDispatch(policy, result) {
   if (!isEnabled()) return;
   try {
-    const db = require('../models/db');
-    const failures = Array.isArray(result?.failures) ? result.failures : [];
-    const row = {
-      policy: applyReplayLane(policyLabel(policy)).slice(0, 120),
-      ok: !!result?.ok,
-      provider: result?.ok ? result.provider || null : null,
-      model: result?.ok ? result.model || null : null,
-      fallback_used: !!result?.fallbackUsed,
-      failure_reasons: failures.length
-        ? JSON.stringify(failures.map((f) => ({
-          provider: f.provider,
-          model: f.model,
-          // Reasons are short codes or validator messages — cap length so a
-          // pathological error string can't bloat the row.
-          reason: String(f.reason || '').slice(0, 300),
-        })))
-        : null,
-    };
-    void db('llm_dispatch_log').insert(row).catch((err) => {
+    void insertRow(buildRow(policy, result)).catch((err) => {
       logger.debug(`[llm-dispatch-metrics] insert failed: ${err.message}`);
     });
   } catch (err) {
     logger.debug(`[llm-dispatch-metrics] record skipped: ${err.message}`);
   }
+}
+
+/**
+ * Prove the recorder can actually write, by writing. Business volume can NOT
+ * stand in for this: the 6-hourly SMS canary uses bare `dispatch` (no row),
+ * and every other instrumented job is candidate-driven, so a genuinely quiet
+ * ET day legitimately records zero rows. Inferring breakage from an empty day
+ * would email a recorder-failure alarm every quiet weekend.
+ *
+ * Resolves on success; rejects with the underlying error when the write path
+ * is broken — which is the only sound basis for a not_recording exception.
+ */
+/**
+ * Write one heartbeat row through the SAME insert path recordDispatch uses.
+ * Called hourly by the scheduler while the gate is on, and deliberately NOT
+ * deleted: the rows are the durable evidence that the recorder was alive
+ * DURING a given ET day. A digest-time probe could only prove the recorder
+ * works at 6:25am — a write path that was broken all day but recovered
+ * overnight would pass it, and the whole lost day would report as a healthy
+ * quiet day. Heartbeats are excluded from policy stats and pruned by
+ * retention like any other row.
+ *
+ * Throws on failure so the cron logs it (this is not the hot path).
+ */
+async function recordHeartbeat() {
+  if (!isEnabled()) return { skipped: 'gate_off' };
+  await insertRow(buildRow({ name: HEARTBEAT_POLICY }, { ok: true }));
+  return { ok: true };
+}
+
+/**
+ * Render and send the exception email. Shared by the normal path and the
+ * DB-failure path, which must be able to alert over SMTP precisely when the
+ * database it reports on is unreadable.
+ */
+function emailExceptions(day, exceptions) {
+  const items = exceptions
+    .map((e) => `<li style="margin:0 0 10px 0;"><strong>${e.policy}</strong> — ${e.detail}</li>`)
+    .join('');
+  return require('./email').send({
+    to: DIGEST_TO,
+    subject: `LLM dispatch exceptions — ${day}`,
+    heading: 'AI dispatch exceptions',
+    body: `${exceptions.length === 1 ? 'One exception' : `${exceptions.length} exceptions`} on ${day}:<ul style="padding-left:20px;margin:12px 0;">${items}</ul>Normal traffic is never reported — this email only sends when something degraded, or when nothing was recorded at all.`,
+  });
+}
+
+/**
+ * Send an alert and NEVER let its own failure be silent. `email.send` resolves
+ * `{ ok: false }` instead of rejecting, so a bare `.catch()` would miss an
+ * undelivered alert entirely — the precise way this feature could lose the
+ * message it exists to deliver. Used by the paths that cannot throw onward.
+ */
+async function emailAlert(day, exceptions) {
+  try {
+    const sent = await emailExceptions(day, exceptions);
+    if (!sent?.ok) {
+      logger.error(`[llm-dispatch-metrics] ALERT UNDELIVERED (${sent?.error || 'unknown email error'}): ${exceptions.map((e) => e.detail).join(' | ')}`);
+      return { ok: false };
+    }
+    return { ok: true };
+  } catch (err) {
+    logger.error(`[llm-dispatch-metrics] ALERT UNDELIVERED (${err.message}): ${exceptions.map((e) => e.detail).join(' | ')}`);
+    return { ok: false };
+  }
+}
+
+/**
+ * Alert that the recorder could not even be reached — used when the cron lock
+ * cannot acquire a DB connection, so runLlmDispatchDigest never runs at all.
+ *
+ * `acquireConnection` rejecting proves only that THIS process's pool had no
+ * connection at that instant — a local pool timeout under load, not
+ * necessarily a database outage (codex r7). So before alarming, CONFIRM with
+ * one direct cheap query: if it answers, the DB is fine (and on an overlap
+ * the other instance is running the digest) — log and stand down. Only when
+ * the confirm also fails is "unreachable" earned, and the alert email itself
+ * touches no database.
+ */
+async function alertRecorderUnreachable(reason) {
+  if (!isEnabled()) return { skipped: 'gate_off' };
+  try {
+    const db = require('../models/db');
+    await Promise.race([
+      db.raw('SELECT 1'),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('confirm timeout')), 5000)),
+    ]);
+    logger.warn(`[llm-dispatch-metrics] lock acquisition failed (${reason}) but the DB answers a direct query — local pool blip, not an outage; standing down`);
+    return { skipped: 'db_reachable' };
+  } catch (confirmErr) {
+    logger.error(`[llm-dispatch-metrics] DB unreachable confirmed (${reason}; confirm: ${confirmErr.message})`);
+  }
+  const { etDateString, addETDays } = require('../utils/datetime-et');
+  const day = etDateString(addETDays(new Date(), -1));
+  return emailAlert(day, [{
+    policy: '(recorder)',
+    kind: 'not_recording',
+    detail: `the digest could not run at all — the database was unreachable (${reason}). Recording status for ${day} is UNKNOWN; treat this as an outage, not a quiet day.`,
+  }]);
+}
+
+/**
+ * How many DISTINCT HOURS of a window the recorder proved itself in.
+ *
+ * Counting rows would overstate coverage: the heartbeat cron runs without the
+ * exclusive lock (a duplicate heartbeat is harmless, a skipped one is not), so
+ * multiple replicas — or old and new instances overlapping at :50 during a
+ * deploy — each insert a row for the same hour. Two replicas covering only the
+ * morning would reach 20 rows and make a half-dead day look fully covered.
+ * Hour buckets are the honest unit. (ET offsets are whole hours, so bucketing
+ * in the session's UTC does not change the count over an ET-day window.)
+ */
+async function countHeartbeats(db, start, end) {
+  const row = await db('llm_dispatch_log')
+    .where('created_at', '>=', start)
+    .andWhere('created_at', '<', end)
+    .andWhere('policy', HEARTBEAT_POLICY)
+    .count({ n: db.raw("DISTINCT date_trunc('hour', created_at)") })
+    .first();
+  return Number(row?.n || 0);
 }
 
 /** [startOfDay, startOfNextDay) as real Dates for the ET day N days ago. */
@@ -130,8 +286,27 @@ function etDayWindow(daysAgo) {
  * aggregated per policy: { policy, total, fallbacks, failed } plus the
  * prior-7-day totals { policy, total }.
  */
-function detectExceptions(yesterdayStats, priorWeekStats) {
+function detectExceptions(yesterdayStats, priorWeekStats, recorderIssue = null, absenceJudgeable = true) {
   const exceptions = [];
+
+  // Recording health FIRST — without it, "no email" is ambiguous between
+  // "nothing was wrong" and "nothing was recorded at all". `recorderIssue` is
+  // a COMPLETE sentence composed by the caller and rendered VERBATIM: the
+  // caller is the one that knows whether the evidence says "failed", "gate
+  // was off", or "partial coverage", and an earlier version of this wrapper
+  // prefixed "could not write" onto an UNKNOWN-status message, contradicting
+  // it (codex r7).
+  if (recorderIssue) {
+    exceptions.push({
+      policy: '(recorder)',
+      kind: 'not_recording',
+      detail: recorderIssue,
+    });
+  }
+
+  // Per-policy findings below come from rows that DO exist, so they are real
+  // regardless of the probe — a transient probe failure must never suppress a
+  // genuine provider incident that was already recorded.
   for (const s of yesterdayStats) {
     if (s.failed > 0) {
       exceptions.push({
@@ -148,8 +323,14 @@ function detectExceptions(yesterdayStats, priorWeekStats) {
       });
     }
   }
+  // gone-silent is the ONE check a broken recorder fully explains: it fires on
+  // the ABSENCE of rows, which is exactly what a dead write path produces. So
+  // it — and only it — is skipped when the recorder was down, or every
+  // prior-week policy would report a duplicate symptom of that root cause.
+  // It is likewise skipped when the day has no heartbeat coverage at all
+  // (first deploy / gate previously off), where absence proves nothing.
   const yesterdayByPolicy = new Map(yesterdayStats.map((s) => [s.policy, s]));
-  for (const w of priorWeekStats) {
+  for (const w of (recorderIssue || !absenceJudgeable) ? [] : priorWeekStats) {
     if (EPISODIC_LANE_RE.test(w.policy)) continue; // one-shot lanes go quiet by design
     if (w.total >= SILENT_MIN_WEEKLY && !yesterdayByPolicy.has(w.policy)) {
       exceptions.push({
@@ -166,6 +347,7 @@ async function loadStats(db, start, end) {
   const rows = await db('llm_dispatch_log')
     .where('created_at', '>=', start)
     .andWhere('created_at', '<', end)
+    .whereNot('policy', HEARTBEAT_POLICY)
     .groupBy('policy')
     .select('policy')
     .count({ total: '*' })
@@ -186,37 +368,100 @@ async function loadStats(db, start, end) {
 async function runLlmDispatchDigest() {
   const db = require('../models/db');
 
-  // Retention pruning runs regardless of the gate: turning the kill switch
-  // off must stop recording and emailing, not leave accumulated rows parked
-  // forever past the promised 30-day window (codex r2 P2). On an empty
-  // table this is a cheap indexed no-op DELETE.
-  const cutoff = etDayWindow(RETENTION_DAYS).start;
-  const pruned = await db('llm_dispatch_log').where('created_at', '<', cutoff).del();
-
-  if (!isEnabled()) return { skipped: 'gate_off', pruned };
   const { etDateString, addETDays } = require('../utils/datetime-et');
+  const day = etDateString(addETDays(new Date(), -1));
 
-  const yesterday = etDayWindow(1);
-  const weekBefore = etDayWindow(8);
-  const [yesterdayStats, priorWeekStats] = await Promise.all([
-    loadStats(db, yesterday.start, yesterday.end),
-    loadStats(db, weekBefore.start, yesterday.start),
-  ]);
+  // EVERY table read/write below can throw — a missing table or a dead DB
+  // takes out the retention DELETE and the stats SELECTs before any analysis
+  // runs. The alert must not depend on the thing it is alerting about, so a
+  // DB failure is caught here and emailed over SMTP, then rethrown so
+  // cron-lock job health records the failed run too. Without this, the single
+  // worst case (table gone) produced silence — the exact failure this whole
+  // lane exists to eliminate.
+  let pruned = 0;
+  let pruneError = null;
+  let yesterdayStats;
+  let priorWeekStats;
+  let heartbeats = 0;
+  let priorHeartbeats = 0;
 
-  const exceptions = detectExceptions(yesterdayStats, priorWeekStats);
+  // Retention pruning runs regardless of the gate (codex r2 P2: a kill-switch
+  // flip must not park rows forever) — and FAILS INDEPENDENTLY (codex r7): a
+  // DELETE deadlock or lost DELETE grant says nothing about recorder health,
+  // and must not abort the digest or masquerade as an outage while INSERT and
+  // SELECT still work. Maintenance failure = log and carry on; a genuinely
+  // dead table fails the stats reads below, which DO alert.
+  try {
+    const cutoff = etDayWindow(RETENTION_DAYS).start;
+    pruned = await db('llm_dispatch_log').where('created_at', '<', cutoff).del();
+  } catch (err) {
+    pruneError = err.message || String(err);
+    logger.error(`[llm-dispatch-metrics] retention prune failed (maintenance only — digest continues): ${pruneError}`);
+  }
+
+  if (!isEnabled()) return { skipped: 'gate_off', pruned, ...(pruneError ? { pruneError } : {}) };
+
+  try {
+    const yesterday = etDayWindow(1);
+    const weekBefore = etDayWindow(8);
+    [yesterdayStats, priorWeekStats, heartbeats, priorHeartbeats] = await Promise.all([
+      loadStats(db, yesterday.start, yesterday.end),
+      loadStats(db, weekBefore.start, yesterday.start),
+      countHeartbeats(db, yesterday.start, yesterday.end),
+      countHeartbeats(db, weekBefore.start, yesterday.start),
+    ]);
+  } catch (err) {
+    // Stats reads failing means the day genuinely cannot be analyzed — alert
+    // over SMTP (which does not depend on the DB being reported on), then
+    // rethrow so cron-lock job health records the failed run. The gate check
+    // above already returned, so a dark deployment cannot reach this email.
+    const reason = err.message || String(err);
+    logger.error(`[llm-dispatch-metrics] digest could not read llm_dispatch_log: ${reason}`);
+    await emailAlert(day, [{
+      policy: '(recorder)',
+      kind: 'not_recording',
+      detail: `the digest could not read llm_dispatch_log (${reason}). Recording status for ${day} is UNKNOWN — treat this as an outage until it clears, not as a quiet day.`,
+    }]);
+    throw err;
+  }
+
+  // Recorder health is judged from the DAY BEING SUMMARIZED, via heartbeats
+  // written hourly during it — not from a probe at digest time, which an
+  // overnight recovery would pass while the lost day reported clean.
+  //
+  // But a day with no heartbeats is only an OUTAGE if coverage was actually
+  // running: on first deploy, or after the gate was off, recordHeartbeat
+  // no-opped and the day is simply unjudgeable. priorHeartbeats > 0 is the
+  // evidence that coverage existed.
+  // Every message is deliberately phrased as UNKNOWN rather than "the
+  // recorder broke": low/zero heartbeats are equally consistent with the gate
+  // having been off, and telling those apart would need persisted gate
+  // history for a state only the operator can cause and would recognise.
+  // What the digest owes the reader is the true statement either way: this
+  // day cannot be read as healthy. Statelessness is also why EVERY
+  // low-coverage state emails instead of only logging — an info log was the
+  // old behavior, and it meant a recorder broken from first deploy (or an
+  // outage older than the 7-day lookback) stayed silent FOREVER (codex r7).
+  // The zero/zero notice self-qualifies: it is expected once on enablement
+  // day, and its daily repetition is precisely the outage signal.
+  let recorderIssue = null;
+  if (heartbeats === 0 && priorHeartbeats > 0) {
+    recorderIssue = `no heartbeat rows were recorded during ${day}, though the recorder was writing earlier in the week — either it failed or the feature was disabled for that day. Recording status for ${day} is UNKNOWN; it cannot be read as a healthy quiet day.`;
+  } else if (heartbeats === 0 && priorHeartbeats === 0) {
+    recorderIssue = `no recorder heartbeats exist for ${day} or the 7 days before it. This is expected if GATE_LLM_DISPATCH_METRICS was enabled (or this feature deployed) within the last day — but if this message repeats tomorrow, the recorder has never successfully written and should be treated as down.`;
+  } else if (heartbeats < MIN_DAY_COVERAGE) {
+    recorderIssue = `only ${heartbeats} of ~24 hours of ${day} have recorder heartbeats — partial coverage (deploy gap, gate toggle, or a partial outage). Dispatches during the uncovered hours may be missing from these stats, so ${day} cannot be fully trusted.`;
+  }
+
+  // Absence checks need a day covered nearly end to end. On a partial day
+  // (gate toggled, deploy gap) "policy X recorded nothing" is uninformative,
+  // and with zero heartbeats it is meaningless.
+  const exceptions = detectExceptions(
+    yesterdayStats, priorWeekStats, recorderIssue, heartbeats >= MIN_DAY_COVERAGE,
+  );
   let sendError = null;
   if (exceptions.length) {
-    const day = etDateString(addETDays(new Date(), -1));
-    const items = exceptions
-      .map((e) => `<li style="margin:0 0 10px 0;"><strong>${e.policy}</strong> — ${e.detail}</li>`)
-      .join('');
-    const email = require('./email');
-    const sent = await email.send({
-      to: DIGEST_TO,
-      subject: `LLM dispatch exceptions — ${day}`,
-      heading: 'AI provider exceptions',
-      body: `The AI dispatcher hit ${exceptions.length === 1 ? 'an exception' : `${exceptions.length} exceptions`} yesterday (${day}):<ul style="padding-left:20px;margin:12px 0;">${items}</ul>Normal traffic is not reported — this email only sends when something degraded.`,
-    });
+    const sent = await emailExceptions(day, exceptions);
     if (!sent.ok) sendError = sent.error || 'unknown email error';
   }
 
@@ -229,16 +474,19 @@ async function runLlmDispatchDigest() {
     throw new Error(`digest email failed with ${exceptions.length} undelivered exception(s): ${sendError}`);
   }
 
-  logger.info(`[llm-dispatch-metrics] digest: ${exceptions.length} exception(s), emailed=${exceptions.length > 0}, pruned=${pruned}`);
-  return { exceptions, emailed: exceptions.length > 0, pruned };
+  logger.info(`[llm-dispatch-metrics] digest: ${exceptions.length} exception(s), emailed=${exceptions.length > 0}, pruned=${pruned}${pruneError ? ` pruneError=${pruneError}` : ''}`);
+  return { exceptions, emailed: exceptions.length > 0, pruned, ...(pruneError ? { pruneError } : {}) };
 }
 
 module.exports = {
   recordDispatch,
+  recordHeartbeat,
   runLlmDispatchDigest,
+  alertRecorderUnreachable,
   detectExceptions,
   policyLabel,
   runAsReplay,
+  HEARTBEAT_POLICY,
   FALLBACK_RATE_THRESHOLD,
   FALLBACK_MIN_VOLUME,
   SILENT_MIN_WEEKLY,

@@ -556,9 +556,35 @@ function initScheduledJobs() {
   // overlap doesn't double-email the same day.
   cron.schedule('25 6 * * *', async () => {
     try {
-      await runExclusive('llm-dispatch-digest', () => require('./llm-dispatch-metrics').runLlmDispatchDigest());
+      const metrics = require('./llm-dispatch-metrics');
+      const res = await runExclusive('llm-dispatch-digest', () => metrics.runLlmDispatchDigest());
+      // runExclusive returns { skipped, reason } WITHOUT calling the job when
+      // it cannot acquire a DB connection — so on a full database outage the
+      // digest never runs and its own DB-failure alert never fires. Alert from
+      // here instead, over SMTP, touching no database. 'lease_held' is a
+      // normal overlap and is not an outage.
+      if (res && res.skipped && res.reason === 'no_connection') {
+        await metrics.alertRecorderUnreachable(res.reason);
+      }
     } catch (err) {
       logger.error(`[llm-dispatch-metrics] cron failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // HOURLY at :50 — LLM dispatch recorder heartbeat. Writes one row through
+  // the same insert path real recording uses, so the digest can tell a
+  // genuinely quiet day (heartbeats present, no dispatches) from a day the
+  // recorder was dead (no heartbeats at all). A probe at digest time cannot:
+  // a write path broken all day but recovered overnight would pass it while
+  // the whole lost day reported clean. No runExclusive — a duplicate
+  // heartbeat on deploy overlap is harmless, and skipping one is not; the
+  // digest counts DISTINCT HOURS, so replica duplicates cannot inflate
+  // coverage. No-ops while GATE_LLM_DISPATCH_METRICS is unset.
+  cron.schedule('50 * * * *', async () => {
+    try {
+      await require('./llm-dispatch-metrics').recordHeartbeat();
+    } catch (err) {
+      logger.error(`[llm-dispatch-metrics] heartbeat failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
