@@ -4631,19 +4631,33 @@ function BillingTab({ customer }) {
       bg: `${B.red}10`, border: `${B.red}33`, icon: 'warning',
       badge: 'Action needed', titleColor: B.red, subtitleColor: B.grayDark,
       title: 'Payment failed - update your payment method',
-      detail: 'Your last payment could not be processed. Update your card to avoid service interruption.',
+      // No interruption claim: a balance never withholds service (nothing
+      // reads service_paused_at to block a visit). No retry promise either —
+      // billing-cron only retries rows it armed with next_retry_at, which
+      // happens solely in the MONTHLY dues failure path, so a per-visit or
+      // Auto Pay-off customer seeing this banner is never retried. And a
+      // saved card never settles an EXISTING invoice — so this points at Pay
+      // now for the balance, exactly like the Auto Pay-off banner below.
+      // No promise about future charges either: this banner also renders
+      // after the final retry sets service_paused_at, which billing-cron
+      // skips and no card update clears (there is no resume path today), and
+      // it renders with Auto Pay off. Both actions are stated plainly and
+      // nothing is guaranteed about what happens next.
+      detail: primaryOpenInvoice
+        ? `Your last payment could not be processed. Pay your open ${openInvoices.length === 1 ? 'invoice' : 'invoices'} with the Pay now ${openInvoices.length === 1 ? 'button' : 'buttons'} above, and update your saved card below.`
+        : 'Your last payment could not be processed. Update your saved card below.',
     },
     expired: {
       bg: `${B.red}10`, border: `${B.red}33`, icon: 'warning',
       badge: 'Action needed', titleColor: B.red, subtitleColor: B.grayDark,
       title: `Card ending in ${cardExpiringSoon?.last4 || ''} has expired`,
-      detail: 'This card can no longer be charged. Update your payment method to avoid any disruption to service.',
+      detail: 'This card can no longer be charged. Update your saved payment method below.',
     },
     expiring: {
       bg: `${B.orange}10`, border: `${B.orange}33`, icon: 'warning',
       badge: 'Card expiring', titleColor: B.orange, subtitleColor: B.grayDark,
       title: `Card ending in ${cardExpiringSoon?.last4 || ''} expires in ${cardExpiringSoon?.months || 0} month${cardExpiringSoon?.months === 1 ? '' : 's'}`,
-      detail: 'Update your payment method to avoid any disruption to service.',
+      detail: 'Update your saved payment method below before this card expires.',
     },
     active: {
       bg: '#F0FDF4', border: '#BBF7D0', icon: 'check',
