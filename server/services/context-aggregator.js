@@ -198,6 +198,28 @@ const UNPRICED_MEMBERSHIP_COPY = {
   copy: 'MONTHLY MEMBERSHIP BUT UNPRICED — no dues amount is set on this account, so nothing is charged monthly. Never state a monthly amount; give the plan and cadence and let the office confirm their price.',
 };
 
+// "Already paid up front for the year" is a claim about COVERAGE, not about
+// the lane (codex #3141 r4). A customer keeps billing_mode 'annual_prepay'
+// after a term expires naturally — the renewal flow owns collection from
+// there — so the unconditional copy told the assistant an expired or
+// renewal-pending customer was paid up, contradicting the very invoice facts
+// sitting below it in the same block. Coverage is resolved against the same
+// authority the billing cron suppresses on, and anything unconfirmed fails
+// closed to the no-claim wording.
+const ANNUAL_PREPAY_COPY_BY_COVERAGE = {
+  covered: BILLING_LANE_COPY.annual_prepay,
+  not_covered: {
+    monthlyBilled: false,
+    short: 'annual prepay, coverage not current',
+    copy: 'ANNUAL PREPAY, COVERAGE NOT CURRENT — the prepaid year is not active right now (it ended, or a renewal invoice is still open). Never say they are paid up for the year and never state a monthly amount; give the plan and cadence, use the invoice facts for anything owed, and let the office confirm.',
+  },
+  unknown: {
+    monthlyBilled: false,
+    short: 'annual prepay, coverage unconfirmed',
+    copy: 'ANNUAL PREPAY, COVERAGE UNCONFIRMED — this account is on the annual plan, but whether the prepaid year is currently active could not be confirmed. Never say they are paid up for the year and never state a monthly amount; let the office confirm.',
+  },
+};
+
 // The billing lane as a customer-facing FACT (codex #3128 r6, r8).
 //
 // r6 carried only the EXPLICIT lane and reported an inferred one as "not
@@ -208,7 +230,7 @@ const UNPRICED_MEMBERSHIP_COPY = {
 // the fact, since the two are not equally certain.
 //
 // Fail-closed: an unresolvable lane reads as "not stated", never as monthly.
-function resolveBillingLaneFacts(customer) {
+function resolveBillingLaneFacts(customer, annualCoverage = 'unknown') {
   try {
     const { resolveBillingLane } = require('./billing-lane');
     const { mode, source } = resolveBillingLane(customer);
@@ -217,7 +239,13 @@ function resolveBillingLaneFacts(customer) {
     // UNPRICED_MEMBERSHIP_COPY (codex #3141 r1).
     const unpricedMembership = mode === 'monthly_membership'
       && !(Number(customer?.monthly_rate || 0) > 0);
-    const laneCopy = unpricedMembership ? UNPRICED_MEMBERSHIP_COPY : BILLING_LANE_COPY[mode];
+    let laneCopy;
+    if (unpricedMembership) laneCopy = UNPRICED_MEMBERSHIP_COPY;
+    // Annual prepay's paid-up-for-the-year claim depends on live coverage,
+    // which the caller resolves; unsupplied means unconfirmed, never paid up.
+    else if (mode === 'annual_prepay') {
+      laneCopy = ANNUAL_PREPAY_COPY_BY_COVERAGE[annualCoverage] || ANNUAL_PREPAY_COPY_BY_COVERAGE.unknown;
+    } else laneCopy = BILLING_LANE_COPY[mode];
     if (!laneCopy) {
       return {
         resolvedMode: mode || null,
@@ -239,6 +267,7 @@ function resolveBillingLaneFacts(customer) {
       // Customer-safe short form for the managed-agent context snapshot.
       shortLabel: laneCopy.short,
       label: `${laneCopy.copy} (${provenance})`,
+      annualCoverage: mode === 'annual_prepay' ? annualCoverage : null,
       // The AMOUNT is never derived here: what a monthly member is actually
       // charged depends on the payment method the charge will run against
       // (credit-card surcharge), which needs a query. getContextForCustomer
@@ -269,6 +298,21 @@ function resolveBillingLaneFacts(customer) {
 // Every non-'active' answer is a REASON, not a silence: a paused autopay is
 // not the same claim as "the office bills these", and neither is an unknown.
 // Fail-closed — anything we cannot confirm resolves to 'unknown'.
+// Is the prepaid year actually current? Same authority the billing cron
+// suppresses on (codex #3141 r4) — a naturally expired term keeps
+// billing_mode 'annual_prepay' while the renewal flow owns collection, so the
+// lane alone cannot support "already paid for the year". Fail-closed: any
+// error is 'unknown', which does not make the claim either.
+async function resolveAnnualCoverageState(customer) {
+  try {
+    const AnnualPrepayRenewals = require('./annual-prepay-renewals');
+    const covered = await AnnualPrepayRenewals.getActivelyCoveredCustomerIds();
+    return covered?.has(String(customer.id)) ? 'covered' : 'not_covered';
+  } catch {
+    return 'unknown';
+  }
+}
+
 async function resolveDuesCollectionState(customer, autopayState) {
   // Eligibility itself was unreadable — never speak to collection at all.
   if (!autopayState) return 'unknown';
@@ -277,7 +321,12 @@ async function resolveDuesCollectionState(customer, autopayState) {
   // are part of the same WHERE, and getContextForCustomer can resolve a row
   // that fails either one. None of these customers is ever loaded, so none of
   // them is charged.
-  if (customer?.active === false || customer?.deleted_at) return 'account_inactive';
+  //
+  // `active` is NULLABLE and the cron matches `active = true`, so anything
+  // that is not literally true is outside the billed population — a legacy
+  // import with a NULL there is never charged (codex #3141 r4). Testing for
+  // === false let exactly those rows publish a charge.
+  if (customer?.active !== true || customer?.deleted_at) return 'account_inactive';
   if (customer?.service_paused_at) return 'service_paused';
   if (autopayState.paused) return 'autopay_paused';
   if (autopayState.on !== true) return 'autopay_off';
@@ -364,6 +413,14 @@ function resolveMonthlyDuesFact({ monthlyRate, collection, methods }) {
 // serializing "$98.50/mo dues" while dropping the reason no charge is
 // collecting let it answer a current-charge question from a rate alone.
 const DUES_NO_COLLECTION_SHORT = {
+  // The exact surcharge-inclusive total is deliberately NOT in this snapshot
+  // (codex #3141 r4). managed-assistant.js sends the snapshot once, at session
+  // creation, and the session lives ~30 minutes — long enough for the customer
+  // to switch between an ACH/debit and a credit method, at which point a
+  // frozen total is simply the wrong number. The dues (the plan price) are far
+  // more stable and stay; the exact charge belongs to the shadow drafter's
+  // facts block, which is rebuilt for every single message.
+  credit_card_surcharge: 'card fee applies at charge — state dues only',
   autopay_paused: 'autopay paused, not collecting',
   autopay_off: 'autopay off, not auto-collecting',
   service_paused: 'billing paused, not collecting',
@@ -560,7 +617,13 @@ class ContextAggregator {
     // fact, so every genuine monthly member fell into the office-confirmation
     // fallback (codex #3128 r6). Feeds buildSummary (the managed-agent
     // snapshot) and the shadow drafter's BILLING block.
-    const billingLane = resolveBillingLaneFacts(customer);
+    let billingLane = resolveBillingLaneFacts(customer);
+    // The annual lane's paid-up claim needs live coverage, so it is resolved
+    // and the fact rebuilt with it (codex #3141 r4). Only that lane pays for
+    // the lookup.
+    if (billingLane.mode === 'annual_prepay') {
+      billingLane = resolveBillingLaneFacts(customer, await resolveAnnualCoverageState(customer));
+    }
     // Canonical autopay state (Codex r1): the raw autopay_enabled flag lies
     // when the default method is missing/expired/unhealthy, and a stale
     // autopay_paused_until must not read as paused — customerOnAutopay +
@@ -934,16 +997,14 @@ class ContextAggregator {
     // amount in the snapshot at all.
     const dues = lane.monthlyBilled ? lane.monthlyDues : null;
     if (dues) {
-      if (dues.surcharged && dues.total != null) {
-        s += ` ($${dues.base.toFixed(2)}/mo dues; $${dues.total.toFixed(2)} charged to the card on file incl. card fee)`;
-      } else {
-        // The REASON travels with the amount, or this snapshot says "monthly
-        // membership, $98.50" about an account nothing is collecting from
-        // (codex #3141 r3).
-        const why = DUES_NO_COLLECTION_SHORT[dues.basis]
-          || (dues.basis === 'no_surcharge' ? null : 'collection state unconfirmed');
-        s += ` ($${dues.base.toFixed(2)}/mo dues${why ? ` — ${why}` : ''})`;
-      }
+      // The dues amount travels; the exact charge total does NOT (see
+      // DUES_NO_COLLECTION_SHORT — this string outlives the account state it
+      // describes). The REASON travels with the amount, or this snapshot says
+      // "monthly membership, $98.50" about an account nothing is collecting
+      // from (codex #3141 r3).
+      const why = DUES_NO_COLLECTION_SHORT[dues.basis]
+        || (dues.basis === 'no_surcharge' ? null : 'collection state unconfirmed');
+      s += ` ($${dues.base.toFixed(2)}/mo dues${why ? ` — ${why}` : ''})`;
     }
     if (lastSvc) s += ` | Last: ${lastSvc.service_type} ${new Date(lastSvc.service_date).toLocaleDateString('en-US', { timeZone: 'America/New_York' })}`;
     if (upcoming.length) s += ` | Next: ${upcoming[0].service_type} ${new Date(upcoming[0].scheduled_date).toLocaleDateString('en-US', { timeZone: 'America/New_York' })}`;
@@ -970,3 +1031,4 @@ module.exports.resolveBillingLaneFacts = resolveBillingLaneFacts;
 module.exports.resolveMonthlyDuesFact = resolveMonthlyDuesFact;
 module.exports.resolveDuesCollectionState = resolveDuesCollectionState;
 module.exports.authorizedDuesCents = authorizedDuesCents;
+module.exports.resolveAnnualCoverageState = resolveAnnualCoverageState;

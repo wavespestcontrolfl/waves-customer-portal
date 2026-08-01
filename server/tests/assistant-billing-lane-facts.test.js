@@ -122,7 +122,7 @@ describe('active autopay is not proof a dues charge is running', () => {
   const ON = { on: true, paused: false };
 
   test('a service-paused account is never even loaded by the cron', async () => {
-    expect(await resolveDuesCollectionState({ id: 'c1', service_paused_at: new Date() }, ON))
+    expect(await resolveDuesCollectionState({ id: 'c1', active: true, service_paused_at: new Date() }, ON))
       .toBe('service_paused');
   });
 
@@ -130,23 +130,32 @@ describe('active autopay is not proof a dues charge is running', () => {
     // active: true and deleted_at IS NULL are part of the same WHERE as the
     // pause columns, and this context can resolve a row that fails either.
     expect(await resolveDuesCollectionState({ id: 'c1', active: false }, ON)).toBe('account_inactive');
-    expect(await resolveDuesCollectionState({ id: 'c1', deleted_at: new Date() }, ON)).toBe('account_inactive');
+    expect(await resolveDuesCollectionState({ id: 'c1', active: true, deleted_at: new Date() }, ON)).toBe('account_inactive');
+  });
+
+  test('a NULL active column is outside it as well', async () => {
+    // customers.active is nullable and the cron matches `active = true`, so a
+    // legacy import with NULL there is never charged — testing === false let
+    // exactly those rows publish a charge (codex #3141 r4).
+    expect(await resolveDuesCollectionState({ id: 'c1', active: null }, ON)).toBe('account_inactive');
+    expect(await resolveDuesCollectionState({ id: 'c1' }, ON)).toBe('account_inactive');
   });
 
   test('a paused autopay is its own state, not "the office bills it"', async () => {
     // The cron logs skipped_paused and moves on: nothing is invoiced, and
     // collection resumes on its own when the pause lifts.
-    expect(await resolveDuesCollectionState({ id: 'c1' }, { on: false, paused: true }))
+    expect(await resolveDuesCollectionState({ id: 'c1', active: true }, { on: false, paused: true }))
       .toBe('autopay_paused');
   });
 
   test('autopay off is distinct from paused', async () => {
-    expect(await resolveDuesCollectionState({ id: 'c1' }, { on: false, paused: false }))
+    expect(await resolveDuesCollectionState({ id: 'c1', active: true }, { on: false, paused: false }))
       .toBe('autopay_off');
   });
 
   test('an unreadable autopay state never claims a collection', async () => {
-    expect(await resolveDuesCollectionState({ id: 'c1' }, null)).toBe('unknown');
+    // Ahead of every account gate: eligibility itself could not be read.
+    expect(await resolveDuesCollectionState({ id: 'c1', active: true }, null)).toBe('unknown');
   });
 });
 
@@ -172,6 +181,40 @@ describe('an unpriced membership is never described as monthly-billed', () => {
     // run against, which needs a query — a sync caller must fail closed to no
     // amount rather than reaching for the raw rate.
     expect(resolveBillingLaneFacts({ billing_mode: 'monthly_membership', monthly_rate: 98.5 }).monthlyDues).toBeNull();
+  });
+});
+
+describe('"already paid for the year" is a claim about coverage, not the lane', () => {
+  const annualLane = (annualCoverage) =>
+    resolveBillingLaneFacts({ billing_mode: 'annual_prepay', waveguard_tier: 'Gold', monthly_rate: 90 }, annualCoverage);
+
+  test('only live coverage supports the paid-up claim', () => {
+    const lane = annualLane('covered');
+    expect(lane.label).toMatch(/already paid up front for the year/i);
+    expect(lane.annualCoverage).toBe('covered');
+  });
+
+  test('an expired or renewal-pending term never claims the year is paid', () => {
+    // The customer keeps billing_mode 'annual_prepay' after a term ends
+    // naturally — the renewal flow owns collection from there — so the lane
+    // alone cannot support the claim, and an open renewal invoice sits in the
+    // very same facts block.
+    const lane = annualLane('not_covered');
+    expect(lane.label).not.toMatch(/already paid/i);
+    expect(lane.label).toMatch(/COVERAGE NOT CURRENT/);
+    expect(lane.monthlyBilled).toBe(false);
+  });
+
+  test('unconfirmed coverage fails closed to the same no-claim wording', () => {
+    for (const coverage of ['unknown', undefined, 'nonsense']) {
+      const lane = annualLane(coverage);
+      expect(lane.label).not.toMatch(/already paid/i);
+      expect(lane.label).toMatch(/never say they are paid up for the year/i);
+    }
+  });
+
+  test('the coverage marker is only carried on the annual lane', () => {
+    expect(resolveBillingLaneFacts({ billing_mode: 'per_application' }, 'covered').annualCoverage).toBeNull();
   });
 });
 

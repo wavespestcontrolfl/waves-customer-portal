@@ -101,9 +101,9 @@ describe('buildSummary billing-lane fact', () => {
   const { resolveBillingLaneFacts, resolveMonthlyDuesFact } = ContextAggregator;
   // The real production shape: getContextForCustomer resolves the lane, then
   // prices the dues against the method the charge will actually run on.
-  const summaryFor = (customer, { collection = 'autopay_off', methods = null } = {}) => {
+  const summaryFor = (customer, { collection = 'autopay_off', methods = null, annualCoverage } = {}) => {
     const c = { first_name: 'Pat', last_name: 'Tester', pipeline_stage: 'active_customer', ...customer };
-    const lane = resolveBillingLaneFacts(c);
+    const lane = resolveBillingLaneFacts(c, annualCoverage);
     if (lane.monthlyBilled) {
       lane.monthlyDues = resolveMonthlyDuesFact({ monthlyRate: c.monthly_rate, collection, methods });
     }
@@ -126,15 +126,19 @@ describe('buildSummary billing-lane fact', () => {
     expect(s).toContain('$98.50/mo dues');
   });
 
-  test('a member on a credit card carries what the card is actually charged', () => {
-    // stripe.charge adds the credit-card surcharge to the dues, so the base
-    // alone understates the charge on the account (codex #3141 r1).
+  test('the exact surcharged charge stays OUT of the long-lived snapshot', () => {
+    // This string is sent once, at session creation, and the session lives
+    // ~30 minutes — long enough for the customer to switch between a debit
+    // and a credit method, at which point a frozen total is the wrong number
+    // (codex #3141 r4). The dues stay; the exact charge belongs to the
+    // drafter's facts block, which is rebuilt for every message.
     const s = summaryFor(
       { billing_mode: 'monthly_membership', waveguard_tier: 'Gold', monthly_rate: 98.5 },
       { collection: 'active', methods: [{ method_type: 'card', card_funding: 'credit' }] },
     );
     expect(s).toContain('$98.50/mo dues');
-    expect(s).toContain('$101.35 charged to the card on file');
+    expect(s).not.toContain('101.35');
+    expect(s).toMatch(/card fee applies at charge — state dues only/);
   });
 
   test('a suppressed collection carries its reason into the snapshot', () => {
@@ -187,10 +191,25 @@ describe('buildSummary billing-lane fact', () => {
     expect(s).not.toMatch(/dues|117/);
   });
 
-  test('an annual-prepay customer is named as prepaid, not per application', () => {
-    const s = summaryFor({ billing_mode: 'annual_prepay', waveguard_tier: 'Gold', monthly_rate: 90 });
+  test('an annual-prepay customer with live coverage is named as prepaid', () => {
+    const s = summaryFor(
+      { billing_mode: 'annual_prepay', waveguard_tier: 'Gold', monthly_rate: 90 },
+      { annualCoverage: 'covered' },
+    );
     expect(s).toContain('paid for the year');
     expect(s).not.toMatch(/dues/);
+  });
+
+  test('an annual-prepay customer without live coverage is never named as paid up', () => {
+    // A naturally expired term keeps billing_mode 'annual_prepay' while the
+    // renewal flow owns collection (codex #3141 r4).
+    expect(summaryFor(
+      { billing_mode: 'annual_prepay', waveguard_tier: 'Gold', monthly_rate: 90 },
+      { annualCoverage: 'not_covered' },
+    )).toContain('coverage not current');
+    // Unresolved coverage fails closed the same way.
+    expect(summaryFor({ billing_mode: 'annual_prepay', waveguard_tier: 'Gold', monthly_rate: 90 }))
+      .toContain('coverage unconfirmed');
   });
 
   test('a direct caller that resolves no lane fact states no amount', () => {
