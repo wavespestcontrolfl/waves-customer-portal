@@ -46,9 +46,8 @@ const REPLACEMENTS = Object.fromEntries([
   ['—', '-'], // em dash
   ['―', '-'], // horizontal bar
   ['−', '-'], // minus sign
-  // Bullets / ellipsis
+  // Bullets
   ['•', '-'], // bullet (list marker)
-  ['…', '...'], // horizontal ellipsis
   // Invisible characters that add UCS-2 cost with zero visible content.
   // Deliberately NOT stripped: ZWJ (U+200D) and ZWNJ (U+200C) — they are
   // join controls inside emoji sequences and complex scripts, so removing
@@ -64,6 +63,14 @@ const REPLACEMENTS = Object.fromEntries([
 // medium mathematical space, ideographic space) all normalize to a plain
 // space. \u2000-\u200A is a deliberate range; nothing in REPLACEMENTS
 // falls inside it.
+// The ellipsis is the one replacement that GROWS the body (1 char -> 3),
+// so it lives outside REPLACEMENTS: that trade only pays when it flips the
+// whole body to GSM-7. When a preserved non-GSM character (an accented
+// name, an internal-alert emoji) keeps the body UCS-2 regardless, the
+// single-char ellipsis is cheaper — expanding it would add code units and
+// can add a segment at a 67-unit boundary.
+const ELLIPSIS_RE = /\u2026/g;
+
 const SPACE_CLASS = '\\u00A0\\u2000-\\u200A\\u202F\\u205F\\u3000';
 
 // One regex pass over everything this module touches.
@@ -81,7 +88,16 @@ const NORMALIZE_RE = new RegExp(
  */
 function normalizeGsmPunctuation(body) {
   if (typeof body !== 'string' || body === '') return body;
-  return body.replace(NORMALIZE_RE, (ch) => (ch in REPLACEMENTS ? REPLACEMENTS[ch] : ' '));
+  let out = body.replace(NORMALIZE_RE, (ch) => (ch in REPLACEMENTS ? REPLACEMENTS[ch] : ' '));
+  if (ELLIPSIS_RE.test(out)) {
+    ELLIPSIS_RE.lastIndex = 0;
+    const expanded = out.replace(ELLIPSIS_RE, '...');
+    // Lazy require avoids a cycle if segment-counter ever imports this
+    // module; today it imports nothing.
+    const { detectEncoding } = require('./segment-counter');
+    if (detectEncoding(expanded).encoding === 'GSM_7') out = expanded;
+  }
+  return out;
 }
 
 module.exports = {

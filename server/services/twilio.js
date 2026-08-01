@@ -319,16 +319,20 @@ const TwilioService = {
    * options: { customerId, customerLocationId, fromNumber, messageType, adminUserId }
    */
   async sendSMS(to, body, options = {}) {
-    // GSM-7 normalization at the true Twilio boundary: legacy callers reach
-    // sendSMS directly without going through sendCustomerMessage, and one
-    // typographic character (curly quote, em dash) flips the whole body to
-    // UCS-2 — 67 chars/segment instead of 153. Idempotent, so bodies already
-    // normalized upstream pass through unchanged.
-    body = normalizeGsmPunctuation(body);
     let attemptedFrom = options.fromNumber || null;
     try {
       const internalRedirect = await redirectInternalAdminSmsToNotification(to, body, options);
       if (internalRedirect) return internalRedirect;
+
+      // GSM-7 normalization at the true Twilio boundary: legacy callers
+      // reach sendSMS directly without going through sendCustomerMessage,
+      // and one typographic character (curly quote, em dash) flips the
+      // whole body to UCS-2 — 67 chars/segment instead of 153. AFTER the
+      // internal-redirect check on purpose: a bell/push notification is not
+      // an SMS, so redirected internal alerts keep their original bullets
+      // and punctuation. Idempotent, so bodies already normalized upstream
+      // pass through unchanged.
+      body = normalizeGsmPunctuation(body);
 
       // Owner-SMS kill switch: when OWNER_SMS_DISABLED=true, suppress
       // every send addressed to one of the operator's known phones.

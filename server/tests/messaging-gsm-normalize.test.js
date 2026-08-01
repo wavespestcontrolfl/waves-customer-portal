@@ -73,6 +73,17 @@ describe('normalizeGsmPunctuation', () => {
     expect(normalizeGsmPunctuation("plain 'text' - fine...")).toBe("plain 'text' - fine...");
   });
 
+  test('expands the ellipsis only when the body lands on GSM-7', () => {
+    // ASCII body: expansion flips it to GSM-7 — worth 2 extra chars.
+    expect(normalizeGsmPunctuation('soon…')).toBe('soon...');
+    // A preserved non-GSM character keeps the body UCS-2 either way, so the
+    // single-char ellipsis is cheaper (3 code units would eat segment room).
+    expect(normalizeGsmPunctuation('alert \u{1F6A8} soon…')).toBe('alert \u{1F6A8} soon…');
+    expect(normalizeGsmPunctuation('Erdős…')).toBe('Erdős…');
+    // GSM-alphabet accents (é) do NOT force UCS-2 — expansion still applies.
+    expect(normalizeGsmPunctuation('José…')).toBe('José...');
+  });
+
   test('preserves ZWJ/ZWNJ join controls (joined emoji must not split)', () => {
     const joined = '\u{1F469}‍\u{1F4BB}'; // woman + ZWJ + laptop = one glyph
     expect(normalizeGsmPunctuation(joined)).toBe(joined);
