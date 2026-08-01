@@ -5649,8 +5649,19 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           // Sanitation-final copy counts as final too (codex P1 r35): the
           // deterministic pass ran against an authoritative application
           // read, and its result may already be in a customer's hands.
+          // But a LIVE generation lease in _generationRuns means another
+          // run (e.g. admin regeneration) can still overwrite the stored
+          // copy — the shortcut must not release the artifact gates while
+          // that is possible (codex P1 r38).
+          const priorRuns = (prior && typeof prior === 'object' && !Array.isArray(prior)
+            && prior._generationRuns && typeof prior._generationRuns === 'object') ? prior._generationRuns : {};
+          const liveLease = Object.values(priorRuns).some((exp) => {
+            const t = Date.parse(exp);
+            return Number.isFinite(t) && t > Date.now();
+          });
           alreadyGrounded = !!(prior && typeof prior === 'object' && !Array.isArray(prior)
-            && (prior._groundedInApplications || prior._sanitizationFinal));
+            && (prior._groundedInApplications || prior._sanitizationFinal)
+            && !liveLease);
         } catch { alreadyGrounded = false; }
         if (alreadyGrounded) {
           lawnRecRegenGrounded = true;

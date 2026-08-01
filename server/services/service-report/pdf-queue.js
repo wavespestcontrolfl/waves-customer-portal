@@ -204,7 +204,22 @@ async function lawnAssessmentIdForRecord(recordId, knex = db) {
     .orderBy('confirmed_at', 'desc')
     .orderBy('created_at', 'desc')
     .first('id');
-  return row?.id || null;
+  if (row?.id) return row.id;
+  // Legacy assessments are linked only through the scheduled service —
+  // the report builder still renders them via loadLinkedLawnAssessment's
+  // by-service fallback, so the fence must resolve through the SAME path
+  // or it compares two nulls and clears the marker for a row that can
+  // still change (codex P1 r38). Unlike the report builder, errors THROW
+  // here (r33 semantics): unreadable fence state retains the marker.
+  const record = await knex('service_records').where({ id: recordId }).first('id', 'customer_id', 'scheduled_service_id');
+  const scheduledServiceId = record?.scheduled_service_id;
+  if (!record?.customer_id || !scheduledServiceId) return null;
+  const byService = await knex('lawn_assessments')
+    .where({ customer_id: record.customer_id, confirmed_by_tech: true, service_id: scheduledServiceId })
+    .orderBy('confirmed_at', 'desc')
+    .orderBy('created_at', 'desc')
+    .first('id');
+  return byService?.id || null;
 }
 
 // ATOMIC key removal (codex P2 #3093 r31): a read-modify-write of the whole

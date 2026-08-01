@@ -165,7 +165,7 @@ const GENERATION_LEASE_RENEW_MS = 90 * 1000;
 // an array of plain objects whose documented fields are strings/numbers.
 function recommendationPayloadShapeValid(raw) {
   const optionalString = (v) => v === undefined || v === null || typeof v === 'string';
-  if (!optionalString(raw.summary) || !optionalString(raw.customerTip)) return false;
+  if (!optionalString(raw.summary) || !optionalString(raw.customerTip) || !optionalString(raw.nextVisitFocus)) return false;
   if (raw.recommendations !== undefined && raw.recommendations !== null) {
     if (!Array.isArray(raw.recommendations)) return false;
     for (const rec of raw.recommendations) {
@@ -879,10 +879,30 @@ const KnowledgeBridge = {
     // transaction's connection are nested pool acquisition and can exhaust
     // the pool under bursts (codex P1 r11). These reads don't need lock
     // freshness; the assessment + product rows are re-read inside the lock.
+    // Register THIS run in the durable fence BEFORE any context reads
+    // (codex P1 r38): a held-delivery worker checking the fence during the
+    // context-loading window must see the run, or it can send an attachment
+    // the about-to-register generator then overwrites. Registration failure
+    // fails the run — generating outside the fence is never allowed.
+    const runId = `${process.pid}-${Date.now()}-${Math.round(Math.random() * 1e9)}`;
+    const liftFence = () => updateGenerationRuns(assessmentId, (runs) => {
+      const next = { ...runs };
+      delete next[runId];
+      return next;
+    }).catch((clearErr) => logger.warn(`[knowledge-bridge] generation fence clear failed for ${assessmentId}: ${clearErr.message}`));
+    try {
+      await updateGenerationRuns(assessmentId, (runs) => ({
+        ...runs,
+        [runId]: new Date(Date.now() + GENERATION_LEASE_MS).toISOString(),
+      }));
+    } catch (regErr) {
+      logger.warn(`[knowledge-bridge] generation fence registration failed for ${assessmentId} — failing run: ${regErr.message}`);
+      return null;
+    }
     let context;
     try {
       const preAssessment = await db('lawn_assessments').where({ id: assessmentId }).first();
-      if (!preAssessment) return null;
+      if (!preAssessment) { await liftFence(); return null; }
       const customer = await db('customers').where({ id: preAssessment.customer_id }).first();
       // Grass context lives on customer_turf_profiles, not customers.
       // track_key is the protocol track id (e.g. 'st_augustine'); it may be
@@ -926,6 +946,7 @@ const KnowledgeBridge = {
       context = { customer, grassType, grassTrack, protocolEntries, outcomeEntries };
     } catch (ctxErr) {
       logger.error(`[knowledge-bridge] recommendation context load failed: ${ctxErr.message}`);
+      await liftFence();
       return null;
     }
     // Cross-process safety WITHOUT holding a connection across the LLM call
@@ -935,7 +956,6 @@ const KnowledgeBridge = {
     // in the write phase instead of lock order: an ungrounded (confirm-time)
     // result can never overwrite a grounded (completion-time) one, so
     // interleavings across instances are harmless.
-    const runId = `${process.pid}-${Date.now()}-${Math.round(Math.random() * 1e9)}`;
     const phaseA = await db.transaction(async (trx) => {
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`lawn_rec_${assessmentId}`]);
       const assessment = await trx('lawn_assessments').where({ id: assessmentId }).first();
@@ -949,8 +969,8 @@ const KnowledgeBridge = {
       if (applicationsVerified) {
         appliedProducts = await loadAppliedProductsWithCategories(assessment.service_record_id, trx);
       }
-      // Register THIS run in the fence before releasing the lock — other
-      // pods' active runs keep their own entries.
+      // Refresh THIS run's lease under the lock (registered pre-context,
+      // codex P1 r38) — other pods' active runs keep their own entries.
       const stored = parseStoredRecommendations(assessment.recommendations) || {};
       const runs = activeGenerationRuns(stored);
       runs[runId] = new Date(Date.now() + GENERATION_LEASE_MS).toISOString();
@@ -967,7 +987,7 @@ const KnowledgeBridge = {
       logger.warn(`[knowledge-bridge] recommendation read phase failed for ${assessmentId}: ${err.message}`);
       return undefined;
     });
-    if (!phaseA) return null;
+    if (!phaseA) { await liftFence(); return null; }
     // Renew this run's lease while the provider chain runs — the fence must
     // outlast a 10-minute dispatch plus fallback (codex P1 r29).
     const heartbeat = setInterval(() => {
@@ -986,13 +1006,7 @@ const KnowledgeBridge = {
     }
     // Failure after Phase A must LIFT this run's entry (Phase B removes it
     // on success) — concurrent runs' entries are preserved.
-    if (!result) {
-      await updateGenerationRuns(assessmentId, (runs) => {
-        const next = { ...runs };
-        delete next[runId];
-        return next;
-      }).catch((clearErr) => logger.warn(`[knowledge-bridge] generation fence clear failed for ${assessmentId}: ${clearErr.message}`));
-    }
+    if (!result) await liftFence();
     return result;
   },
 
