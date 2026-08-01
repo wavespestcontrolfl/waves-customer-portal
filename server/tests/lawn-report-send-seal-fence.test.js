@@ -200,6 +200,30 @@ describe('#3135 r1/r2 — fence target resolution', () => {
     );
   });
 
+  // The Phase B seal-discard returns null, which the completion flow reads as
+  // "generation failed" and answers by sanitizing. The sanitizer holds the same
+  // advisory lock but a lock is not a seal check, so it now refuses while a
+  // seal is live. From the queue's side that surfaces as an unverified
+  // readiness error, and the delivery must defer rather than mail.
+  test('a sanitize blocked by a live send seal defers the held delivery', async () => {
+    KnowledgeBridge.sanitizeStoredRecommendations.mockResolvedValueOnce({
+      changed: false,
+      dropped: 0,
+      error: 'send seal active — an attachment is being dispatched from the settled copy',
+    });
+    const knex = makeKnex();
+    const delivery = {
+      ...DELIVERY,
+      payload: { awaiting_grounding: true, lawn_assessment_id: 'assess-held' },
+    };
+
+    const out = await processServiceReportDelivery(delivery, knex);
+
+    expect(out.status).not.toBe('sent');
+    expect(out.error).toMatch(/send seal active/);
+    expect(sendServiceReportV1Email).not.toHaveBeenCalled();
+  });
+
   test('r2: a lookup ERROR fails closed — deferred, never dispatched unfenced', async () => {
     loadLinkedLawnAssessment.mockRejectedValue(new Error('connection terminated'));
     const knex = makeKnex();
