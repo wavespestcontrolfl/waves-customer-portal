@@ -120,6 +120,43 @@ describe('llm-dispatch-metrics', () => {
       ]);
     });
 
+    it('tags dispatches inside runAsReplay with a replay lane', async () => {
+      process.env.GATE_LLM_DISPATCH_METRICS = 'true';
+      const { recordDispatch, runAsReplay } = load();
+      await runAsReplay(async () => {
+        recordDispatch(MODELS.TEXT_POLICIES.report, { ok: true, provider: 'openai', model: 'model-x' });
+      });
+      expect(mockInsert.mock.calls[0][0].policy).toBe('report:replay');
+    });
+
+    it('keeps an explicit workload lane instead of double-tagging', async () => {
+      process.env.GATE_LLM_DISPATCH_METRICS = 'true';
+      const { recordDispatch, runAsReplay } = load();
+      const sealed = { name: 'smsShadow:openai:sealed', primary: { provider: 'openai', model: 'model-x' } };
+      await runAsReplay(async () => {
+        recordDispatch(sealed, { ok: true, provider: 'openai', model: 'model-x' });
+      });
+      expect(mockInsert.mock.calls[0][0].policy).toBe('smsShadow:openai:sealed');
+    });
+
+    it('never leaks the replay lane onto concurrent live traffic', async () => {
+      process.env.GATE_LLM_DISPATCH_METRICS = 'true';
+      const { recordDispatch, runAsReplay } = load();
+      const live = { name: 'liveLane', primary: { provider: 'openai', model: 'model-x' } };
+      const replayed = { name: 'replayedLane', primary: { provider: 'openai', model: 'model-x' } };
+      await Promise.all([
+        runAsReplay(async () => {
+          await new Promise((r) => setTimeout(r, 5)); // interleave with the live call
+          recordDispatch(replayed, { ok: true, provider: 'openai', model: 'model-x' });
+        }),
+        (async () => {
+          recordDispatch(live, { ok: true, provider: 'openai', model: 'model-x' });
+        })(),
+      ]);
+      const labels = mockInsert.mock.calls.map((c) => c[0].policy).sort();
+      expect(labels).toEqual(['liveLane', 'replayedLane:replay']);
+    });
+
     it('records failed chains without a provider and never throws on DB errors', () => {
       process.env.GATE_LLM_DISPATCH_METRICS = 'true';
       mockInsert.mockReturnValue(Promise.reject(new Error('db down')));
@@ -169,11 +206,12 @@ describe('llm-dispatch-metrics', () => {
       expect(out[0]).toMatchObject({ policy: 'contentDraft', kind: 'gone_silent' });
     });
 
-    it('never flags episodic lanes (:sealed/:backfill) as gone silent — they burst then quiet by design', () => {
+    it('never flags episodic lanes (:sealed/:backfill/:replay) as gone silent — they burst then quiet by design', () => {
       const { detectExceptions, SILENT_MIN_WEEKLY } = load();
       const out = detectExceptions([], [
         { policy: 'smsShadow:openai:sealed', total: SILENT_MIN_WEEKLY * 2 },
         { policy: 'smsShadow:anthropic:backfill', total: SILENT_MIN_WEEKLY * 2 },
+        { policy: 'callExtraction:replay', total: SILENT_MIN_WEEKLY * 2 },
         { policy: 'smsShadow:openai', total: SILENT_MIN_WEEKLY * 2 },
       ]);
       // Only the LIVE lane fires; episodic twins with identical volume do not.

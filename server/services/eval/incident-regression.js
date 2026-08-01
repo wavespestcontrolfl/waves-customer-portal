@@ -152,7 +152,11 @@ async function attemptInboxCase(c, classify, shouldSkipAutoAction) {
  * transient blip downgrades observed drift to "could not verify" and the
  * regression notification never fires.
  */
-async function runCase(attempt) {
+async function runCase(rawAttempt) {
+  // Fixture cases replay through the LIVE classifier / fact-check gate, so
+  // their dispatches must not land on those policies' live metrics lanes.
+  const { runAsReplay } = require('../llm-dispatch-metrics');
+  const attempt = () => runAsReplay(rawAttempt);
   const first = await attempt();
   if (first.status !== 'fail') return { ...first, flaky: false };
   const second = await attempt();

@@ -28,10 +28,37 @@ const SILENT_MIN_WEEKLY = 10;        // policy had >=10 calls in prior 7 days...
 
 // Episodic one-shot workloads (sealed exams burst >=10 items then
 // intentionally no-op until the prompt/profile changes; backfill drains a
-// finite backlog) — expected inactivity, so they are excluded from
-// gone-silent detection. Their failure/fallback exceptions still report.
-// Convention: episodic lanes tag one of these suffixes on their policy name.
-const EPISODIC_LANE_RE = /:(?:sealed|backfill)$/;
+// finite backlog; eval harnesses replay a fixed fixture weekly) — expected
+// inactivity, so they are excluded from gone-silent detection. Their
+// failure/fallback exceptions still report. Convention: episodic lanes tag
+// one of these suffixes on their policy name.
+const EPISODIC_LANE_RE = /:(?:sealed|backfill|replay)$/;
+
+// Ambient replay context. Eval harnesses replay fixed fixtures through the
+// SAME live service functions real traffic uses (call extraction, email
+// classification, fact-check), often many layers below where the harness can
+// pass an option — so replay traffic would otherwise be recorded under the
+// live policy label, diluting its fallback/failure rates and keeping a dead
+// live lane looking active. AsyncLocalStorage (not a module flag) so a replay
+// running concurrently with live traffic cannot mislabel the live calls.
+const { AsyncLocalStorage } = require('async_hooks');
+const replayContext = new AsyncLocalStorage();
+
+/**
+ * Run `fn` with every LLM dispatch inside it recorded under a replay lane.
+ * Harnesses wrap their whole run; nested live-service calls inherit it.
+ */
+function runAsReplay(fn, lane = 'replay') {
+  return replayContext.run(String(lane), fn);
+}
+
+// Explicit workload names on the policy itself (smsShadow:<p>:sealed) win —
+// they are more specific than the ambient lane.
+function applyReplayLane(label) {
+  const lane = replayContext.getStore();
+  if (!lane || EPISODIC_LANE_RE.test(label)) return label;
+  return `${label}:${lane}`;
+}
 
 // Named TEXT_POLICIES entries carry their registry key as `name` (set in
 // config/models.js). Route-signature matching is NOT safe here: with current
@@ -67,7 +94,7 @@ function recordDispatch(policy, result) {
     const db = require('../models/db');
     const failures = Array.isArray(result?.failures) ? result.failures : [];
     const row = {
-      policy: policyLabel(policy).slice(0, 120),
+      policy: applyReplayLane(policyLabel(policy)).slice(0, 120),
       ok: !!result?.ok,
       provider: result?.ok ? result.provider || null : null,
       model: result?.ok ? result.model || null : null,
@@ -211,6 +238,7 @@ module.exports = {
   runLlmDispatchDigest,
   detectExceptions,
   policyLabel,
+  runAsReplay,
   FALLBACK_RATE_THRESHOLD,
   FALLBACK_MIN_VOLUME,
   SILENT_MIN_WEEKLY,
