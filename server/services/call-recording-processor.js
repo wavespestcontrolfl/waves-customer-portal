@@ -7534,6 +7534,31 @@ const CallRecordingProcessor = {
                 smsSent: false,
                 skippedReason: 'off_hour_start',
               };
+              // File the review card HERE, not just in the enforce-mode audit
+              // (codex round-6 P1): this hold also runs in shadow/legacy mode,
+              // where the approved-but-unbooked audit never executes — without
+              // this insert a clean 09:30 call was held with no appointment
+              // AND no card, and the office would never place the promised
+              // booking on an hour boundary. The payload carries the agreed
+              // date/time so the card is actionable without a re-listen (the
+              // V2 scheduling payload rides along when available; legacy calls
+              // still get the parsed values). onConflict dedups against the
+              // enforce-mode insert for the same reason code.
+              await db('triage_items')
+                .insert(buildTriageItem({
+                  callLogId: call.id,
+                  flag: 'off_hour_start',
+                  extraction: v2ApprovedExtraction || undefined,
+                  extraPayload: {
+                    preferred_date_time: extracted.preferred_date_time || null,
+                    scheduled_date: scheduledDate,
+                    window_start: windowStart,
+                    service_type: serviceType,
+                  },
+                }))
+                .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+                .ignore()
+                .catch((e) => logger.warn(`[call-proc] off-hour triage insert failed for ${maskSid(callSid)}: ${e.message}`));
               scheduledDate = null;
             }
 
